@@ -4,7 +4,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use yawgpu_hal::{HalAdapter, HalBuffer, HalDevice, HalError, HalInstance, HalQueue, HalTexture};
+use yawgpu_hal::{
+    HalAdapter, HalBuffer, HalDevice, HalError, HalInstance, HalQueue, HalSampler, HalTexture,
+};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -315,6 +317,24 @@ impl Device {
         };
 
         Texture::new(descriptor, hal, is_error)
+    }
+
+    #[must_use]
+    pub fn create_sampler(&self, descriptor: SamplerDescriptor) -> Sampler {
+        let resolved = ResolvedSamplerDescriptor::from_descriptor(descriptor);
+        let error = validate_sampler_descriptor(&resolved);
+        let is_error = error.is_some();
+        if let Some(message) = error {
+            self.dispatch_error(ErrorKind::Validation, message);
+        }
+
+        let hal = if is_error {
+            None
+        } else {
+            Some(self.inner.hal.create_sampler())
+        };
+
+        Sampler::new(resolved, hal, is_error)
     }
 }
 
@@ -987,6 +1007,145 @@ impl TextureView {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+pub enum AddressMode {
+    ClampToEdge,
+    Repeat,
+    MirrorRepeat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FilterMode {
+    Nearest,
+    Linear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MipmapFilterMode {
+    Nearest,
+    Linear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CompareFunction {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SamplerDescriptor {
+    pub address_mode_u: Option<AddressMode>,
+    pub address_mode_v: Option<AddressMode>,
+    pub address_mode_w: Option<AddressMode>,
+    pub mag_filter: Option<FilterMode>,
+    pub min_filter: Option<FilterMode>,
+    pub mipmap_filter: Option<MipmapFilterMode>,
+    pub lod_min_clamp: f32,
+    pub lod_max_clamp: f32,
+    pub compare: Option<CompareFunction>,
+    pub max_anisotropy: u16,
+}
+
+impl Default for SamplerDescriptor {
+    fn default() -> Self {
+        Self {
+            address_mode_u: None,
+            address_mode_v: None,
+            address_mode_w: None,
+            mag_filter: None,
+            min_filter: None,
+            mipmap_filter: None,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 32.0,
+            compare: None,
+            max_anisotropy: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResolvedSamplerDescriptor {
+    pub address_mode_u: AddressMode,
+    pub address_mode_v: AddressMode,
+    pub address_mode_w: AddressMode,
+    pub mag_filter: FilterMode,
+    pub min_filter: FilterMode,
+    pub mipmap_filter: MipmapFilterMode,
+    pub lod_min_clamp: f32,
+    pub lod_max_clamp: f32,
+    pub compare: Option<CompareFunction>,
+    pub max_anisotropy: u16,
+}
+
+impl ResolvedSamplerDescriptor {
+    fn from_descriptor(descriptor: SamplerDescriptor) -> Self {
+        Self {
+            address_mode_u: descriptor
+                .address_mode_u
+                .unwrap_or(AddressMode::ClampToEdge),
+            address_mode_v: descriptor
+                .address_mode_v
+                .unwrap_or(AddressMode::ClampToEdge),
+            address_mode_w: descriptor
+                .address_mode_w
+                .unwrap_or(AddressMode::ClampToEdge),
+            mag_filter: descriptor.mag_filter.unwrap_or(FilterMode::Nearest),
+            min_filter: descriptor.min_filter.unwrap_or(FilterMode::Nearest),
+            mipmap_filter: descriptor
+                .mipmap_filter
+                .unwrap_or(MipmapFilterMode::Nearest),
+            lod_min_clamp: descriptor.lod_min_clamp,
+            lod_max_clamp: descriptor.lod_max_clamp,
+            compare: descriptor.compare,
+            max_anisotropy: descriptor.max_anisotropy,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Sampler {
+    inner: Arc<SamplerInner>,
+}
+
+#[derive(Debug)]
+struct SamplerInner {
+    _hal: Option<HalSampler>,
+    descriptor: ResolvedSamplerDescriptor,
+    is_error: bool,
+}
+
+impl Sampler {
+    fn new(descriptor: ResolvedSamplerDescriptor, hal: Option<HalSampler>, is_error: bool) -> Self {
+        Self {
+            inner: Arc::new(SamplerInner {
+                _hal: hal,
+                descriptor,
+                is_error,
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn descriptor(&self) -> ResolvedSamplerDescriptor {
+        self.inner.descriptor
+    }
+
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.inner.is_error
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BufferMapState {
     Unmapped,
     Pending,
@@ -1513,6 +1672,26 @@ fn validate_texture_view_descriptor(
         TextureAspect::DepthOnly | TextureAspect::StencilOnly => {}
     }
 
+    None
+}
+
+fn validate_sampler_descriptor(descriptor: &ResolvedSamplerDescriptor) -> Option<&'static str> {
+    if !descriptor.lod_min_clamp.is_finite() {
+        return Some("sampler lodMinClamp must be finite");
+    }
+    if !descriptor.lod_max_clamp.is_finite() {
+        return Some("sampler lodMaxClamp must be finite");
+    }
+    if descriptor.max_anisotropy == 0 {
+        return Some("sampler maxAnisotropy must be at least one");
+    }
+    if descriptor.max_anisotropy > 1
+        && (descriptor.mag_filter != FilterMode::Linear
+            || descriptor.min_filter != FilterMode::Linear
+            || descriptor.mipmap_filter != MipmapFilterMode::Linear)
+    {
+        return Some("anisotropic samplers require all filters to be Linear");
+    }
     None
 }
 

@@ -121,11 +121,11 @@ phases need.
 
 ### Sampler (P3.3)
 
-- **T34/T35** lodMinClamp/lodMaxClamp finite (no NaN/Inf). :38. ☐
-- **T36** maxAnisotropy ≥ 1. :77. ☐
-- **T37** maxAnisotropy>1 ⇒ mag/min/mipmap filters all Linear. :65. ☐
-- **T38** default descriptor (or null) ⇒ valid sampler. :110. ☐
-- **T39** `wgpuSamplerRelease` valid; error sampler handle on invalid. ☐
+- **T34/T35** lodMinClamp/lodMaxClamp finite (no NaN/Inf). :38. ☑ (P3.3)
+- **T36** maxAnisotropy ≥ 1. :77. ☑ (P3.3)
+- **T37** maxAnisotropy>1 ⇒ mag/min/mipmap filters all Linear. :65. ☑ (P3.3)
+- **T38** default descriptor (or null) ⇒ valid sampler. :110. ☑ (P3.3)
+- **T39** `wgpuSamplerRelease` valid; error sampler handle on invalid. ☑ (P3.3)
 
 ### QueueWriteTexture (P3.4)
 

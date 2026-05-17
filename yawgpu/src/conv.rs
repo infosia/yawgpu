@@ -245,6 +245,76 @@ pub fn map_buffer_descriptor(value: &native::WGPUBufferDescriptor) -> core::Buff
 }
 
 #[must_use]
+pub fn map_address_mode(value: native::WGPUAddressMode) -> Option<core::AddressMode> {
+    match value {
+        native::WGPUAddressMode_Undefined => None,
+        native::WGPUAddressMode_ClampToEdge => Some(core::AddressMode::ClampToEdge),
+        native::WGPUAddressMode_Repeat => Some(core::AddressMode::Repeat),
+        native::WGPUAddressMode_MirrorRepeat => Some(core::AddressMode::MirrorRepeat),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn map_filter_mode(value: native::WGPUFilterMode) -> Option<core::FilterMode> {
+    match value {
+        native::WGPUFilterMode_Undefined => None,
+        native::WGPUFilterMode_Nearest => Some(core::FilterMode::Nearest),
+        native::WGPUFilterMode_Linear => Some(core::FilterMode::Linear),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn map_mipmap_filter_mode(
+    value: native::WGPUMipmapFilterMode,
+) -> Option<core::MipmapFilterMode> {
+    match value {
+        native::WGPUMipmapFilterMode_Undefined => None,
+        native::WGPUMipmapFilterMode_Nearest => Some(core::MipmapFilterMode::Nearest),
+        native::WGPUMipmapFilterMode_Linear => Some(core::MipmapFilterMode::Linear),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn map_compare_function(value: native::WGPUCompareFunction) -> Option<core::CompareFunction> {
+    match value {
+        native::WGPUCompareFunction_Undefined => None,
+        native::WGPUCompareFunction_Never => Some(core::CompareFunction::Never),
+        native::WGPUCompareFunction_Less => Some(core::CompareFunction::Less),
+        native::WGPUCompareFunction_Equal => Some(core::CompareFunction::Equal),
+        native::WGPUCompareFunction_LessEqual => Some(core::CompareFunction::LessEqual),
+        native::WGPUCompareFunction_Greater => Some(core::CompareFunction::Greater),
+        native::WGPUCompareFunction_NotEqual => Some(core::CompareFunction::NotEqual),
+        native::WGPUCompareFunction_GreaterEqual => Some(core::CompareFunction::GreaterEqual),
+        native::WGPUCompareFunction_Always => Some(core::CompareFunction::Always),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn map_sampler_descriptor(
+    value: Option<&native::WGPUSamplerDescriptor>,
+) -> core::SamplerDescriptor {
+    let Some(value) = value else {
+        return core::SamplerDescriptor::default();
+    };
+    core::SamplerDescriptor {
+        address_mode_u: map_address_mode(value.addressModeU),
+        address_mode_v: map_address_mode(value.addressModeV),
+        address_mode_w: map_address_mode(value.addressModeW),
+        mag_filter: map_filter_mode(value.magFilter),
+        min_filter: map_filter_mode(value.minFilter),
+        mipmap_filter: map_mipmap_filter_mode(value.mipmapFilter),
+        lod_min_clamp: value.lodMinClamp,
+        lod_max_clamp: value.lodMaxClamp,
+        compare: map_compare_function(value.compare),
+        max_anisotropy: value.maxAnisotropy,
+    }
+}
+
+#[must_use]
 pub fn map_texture_usage(value: native::WGPUTextureUsage) -> core::TextureUsage {
     core::TextureUsage::from_bits_retain(value)
 }
