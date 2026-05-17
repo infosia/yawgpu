@@ -9,12 +9,13 @@ use yawgpu_core as core;
 use crate::conv::{
     add_ref_handle, arc_to_handle, borrow_handle, clone_handle, free_supported_features,
     label_from_string_view, map_buffer_descriptor, map_buffer_map_state,
-    map_buffer_usage_to_native, map_device_lost_callback_info, map_device_lost_reason, map_feature,
-    map_feature_level, map_features_to_native, map_limits, map_limits_to_native,
-    map_map_async_status, map_map_mode, map_queue_work_done_status, map_sampler_descriptor,
-    map_texture_descriptor, map_texture_dimension_to_native, map_texture_format_to_native,
-    map_texture_usage_to_native, map_texture_view_descriptor, release_handle, string_view,
-    DeviceLostCallbackInfo,
+    map_buffer_usage_to_native, map_device_lost_callback_info, map_device_lost_reason,
+    map_extent_3d, map_feature, map_feature_level, map_features_to_native, map_limits,
+    map_limits_to_native, map_map_async_status, map_map_mode, map_origin_3d,
+    map_queue_work_done_status, map_sampler_descriptor, map_texel_copy_buffer_layout,
+    map_texture_aspect, map_texture_descriptor, map_texture_dimension_to_native,
+    map_texture_format_to_native, map_texture_usage_to_native, map_texture_view_descriptor,
+    release_handle, string_view, DeviceLostCallbackInfo,
 };
 
 pub struct WGPUAdapterImpl {
@@ -1301,6 +1302,72 @@ pub unsafe extern "C" fn wgpuQueueWriteBuffer(
     };
 
     if let Err(message) = buffer.core.validate_queue_write(buffer_offset, size) {
+        queue
+            .device
+            .dispatch_error(core::ErrorKind::Validation, message);
+    }
+}
+
+/// Validates a queue texture write. Noop does not copy bytes.
+///
+/// # Safety
+///
+/// `queue` must be a non-null live yawgpu queue handle. `destination`,
+/// `data_layout`, and `write_size` must be non-null pointers to valid WebGPU
+/// structs. `destination.texture` must be a non-null live yawgpu texture
+/// handle. `data` is not read by the Noop validation implementation.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuQueueWriteTexture(
+    queue: native::WGPUQueue,
+    destination: *const native::WGPUTexelCopyTextureInfo,
+    _data: *const c_void,
+    data_size: usize,
+    data_layout: *const native::WGPUTexelCopyBufferLayout,
+    write_size: *const native::WGPUExtent3D,
+) {
+    let queue = borrow_handle(queue, "WGPUQueue");
+    let Some(destination) = destination.as_ref() else {
+        queue.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "queue write texture destination must not be null",
+        );
+        return;
+    };
+    let Some(data_layout) = data_layout.as_ref() else {
+        queue.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "queue write texture dataLayout must not be null",
+        );
+        return;
+    };
+    let Some(write_size) = write_size.as_ref() else {
+        queue.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "queue write texture writeSize must not be null",
+        );
+        return;
+    };
+    let data_size = match u64::try_from(data_size) {
+        Ok(size) => size,
+        Err(_) => {
+            queue.device.dispatch_error(
+                core::ErrorKind::Validation,
+                "queue write texture dataSize is too large",
+            );
+            return;
+        }
+    };
+    let texture = borrow_handle(destination.texture, "WGPUTexture");
+    let aspect = map_texture_aspect(destination.aspect).unwrap_or(core::TextureAspect::All);
+
+    if let Err(message) = texture.core.validate_queue_write(
+        destination.mipLevel,
+        map_origin_3d(destination.origin),
+        map_extent_3d(*write_size),
+        aspect,
+        map_texel_copy_buffer_layout(*data_layout),
+        data_size,
+    ) {
         queue
             .device
             .dispatch_error(core::ErrorKind::Validation, message);

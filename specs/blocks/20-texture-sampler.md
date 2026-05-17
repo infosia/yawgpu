@@ -133,21 +133,21 @@ phases need.
 
 ### QueueWriteTexture (P3.4)
 
-- **T40** destination usage has CopyDst. :237. ☐
-- **T41** mipLevel < texture.mipLevelCount. :214. ☐
-- **T42** origin+extent ≤ subresource size (overflow-checked). :206. ☐
-- **T43** 2D ⇒ extent.depthOrArrayLayers==1. :226. ☐
+- **T40** destination usage has CopyDst. :237. ☑ (P3.4)
+- **T41** mipLevel < texture.mipLevelCount. :214. ☑ (P3.4)
+- **T42** origin+extent ≤ subresource size (overflow-checked). :206. ☑ (P3.4)
+- **T43** 2D ⇒ extent.depthOrArrayLayers==1. :226. ☑ (P3.4)
 - **T44** dataSize ≥ required bytes (bytesPerRow/rowsPerImage/extent/
-  format). :170. ☐
+  format). :170. ☑ (P3.4)
 - **T45** bytesPerRow ≥ `ceil(width/block_w)·block_size` (bytes in one
   block-row) when copyHeight>1 or copyDepth>1; 0/UNDEFINED only if
-  height≤1 & depth≤1. NOT 256-aligned (queue path). :248. ☐
-- **T46** rowsPerImage ≥ copyHeight when set & depth>1. :296. ☐
-- **T47** destination sampleCount==1. :337. ☐
-- **T48** destination not destroyed. :349. ☐
-- **T49** DepthOnly write ⇒ format has depth aspect. :489. ☐
-- **T50** StencilOnly write ⇒ format has stencil aspect. :520. ☐
-- **T51** data offset overflow-checked. :321. ☐
+  height≤1 & depth≤1. NOT 256-aligned (queue path). :248. ☑ (P3.4)
+- **T46** rowsPerImage ≥ copyHeight when set & depth>1. :296. ☑ (P3.4)
+- **T47** destination sampleCount==1. :337. ☑ (P3.4)
+- **T48** destination not destroyed. :349. ☑ (P3.4)
+- **T49** DepthOnly write ⇒ format has depth aspect. :489. ☑ (P3.4)
+- **T50** StencilOnly write ⇒ format has stencil aspect. :520. ☑ (P3.4)
+- **T51** data offset overflow-checked. :321. ☑ (P3.4)
 
 ### Deferred
 

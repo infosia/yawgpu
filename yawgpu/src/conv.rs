@@ -366,6 +366,34 @@ pub fn map_extent_3d(value: native::WGPUExtent3D) -> core::Extent3d {
 }
 
 #[must_use]
+pub fn map_origin_3d(value: native::WGPUOrigin3D) -> core::Origin3d {
+    core::Origin3d {
+        x: value.x,
+        y: value.y,
+        z: value.z,
+    }
+}
+
+#[must_use]
+pub fn map_texel_copy_buffer_layout(
+    value: native::WGPUTexelCopyBufferLayout,
+) -> core::TexelCopyBufferLayout {
+    core::TexelCopyBufferLayout {
+        offset: value.offset,
+        bytes_per_row: if value.bytesPerRow == native::WGPU_COPY_STRIDE_UNDEFINED {
+            None
+        } else {
+            Some(value.bytesPerRow)
+        },
+        rows_per_image: if value.rowsPerImage == native::WGPU_COPY_STRIDE_UNDEFINED {
+            None
+        } else {
+            Some(value.rowsPerImage)
+        },
+    }
+}
+
+#[must_use]
 /// Converts a texture descriptor to the core representation.
 ///
 /// # Safety
