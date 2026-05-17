@@ -63,6 +63,49 @@ Acceptance criteria:
 Report back: files changed, any Dawn cases intentionally deferred (+why).
 ```
 
+## Phase Review (mandatory — "Clean Review Then Fix")
+
+Every phase ends with a **mandatory Phase Review** before it can be marked
+COMPLETE. Per-slice review (Claude, full session context) catches
+slice-local issues; the Phase Review catches **accumulated / cross-slice**
+issues that a context-primed reviewer rationalizes away.
+
+1. **Clean Review (fresh agent, no session context).** Claude spawns a
+   subagent that has **no conversation history**. It is given only:
+   the phase's cumulative `git diff` (the `phase-N` commit range), the
+   phase's `blocks/<area>.md`, `CLAUDE.md`,
+   `specs/reference/naming-conventions.md`, and the phase exit criteria.
+   It does **not** see this conversation or prior rationale. It produces
+   **severity-tagged findings**, each with `file:line` + rationale:
+   - **CRITICAL** — memory unsafety/UB, soundness, FFI ABI mismatch,
+     a panic reachable from the C ABI on valid input, a spec rule
+     silently wrong, data loss.
+   - **MAJOR** — a ported rule not actually enforced, missing/empty
+     test coverage for a rule, convention breach with real impact,
+     resource/refcount leak.
+   - **MINOR** — naming, dead code, redundant work, doc/comment gaps,
+     non-idiomatic but correct code.
+2. **Triage (Claude).** Drop false positives with a one-line written
+   reason; keep the rest. Anything dropped is recorded in
+   `tracking/phase-N.md`.
+3. **Fix in severity order.** CRITICAL first, then MAJOR, then MINOR.
+   Production-code fixes go to the **coding agent** via a fix handoff
+   (Claude does not write production code); spec fixes are Claude's.
+   Re-run the full gate (`cargo test --workspace` +
+   `cargo clippy --workspace --all-targets -- -D warnings`) after each
+   severity tier.
+4. **Gate.** Phase cannot be marked COMPLETE while any **CRITICAL** or
+   **MAJOR** finding is open. **MINOR** may be deferred only with an
+   explicit written rationale logged in `tracking/phase-N.md` (and a
+   rule/Defer marker if it maps to one).
+5. **Log.** `tracking/phase-N.md` records: the finding list with
+   severities + file:line, triage decisions, the fix commits, and the
+   final gate result. Commit: `phase-N: phase review — <n> findings
+   (<c> CRITICAL / <m> MAJOR / <k> MINOR) fixed`.
+
+The Clean Review reviewer is a throwaway subagent per phase (no memory of
+previous phases beyond what the diff shows); this is deliberate.
+
 ## Version control
 
 The repo is not yet a git repository. Claude runs `git init` during Phase 0

@@ -17,7 +17,10 @@ self-contained task handoffs recorded in `tracking/phase-N.md`.
 Each phase: write `blocks/<area>.md`, emit task handoffs, the coding agent
 ports the Dawn test(s) as failing Rust tests and implements minimally on
 Noop, Claude reviews against acceptance criteria and commits, log in
-`tracking/phase-N.md`.
+`tracking/phase-N.md`. **Each phase then ends with a mandatory Phase
+Review ("Clean Review Then Fix")** — a fresh no-context subagent emits
+`CRITICAL`/`MAJOR`/`MINOR` findings, fixed in severity order; no phase is
+COMPLETE with an open CRITICAL/MAJOR (see `reference/workflow.md`).
 
 | Phase | Area | Dawn test files (port targets) | Exit criteria |
 |---|---|---|---|

@@ -56,6 +56,12 @@ Full detail: `specs/reference/workflow.md`.
 4. Verify on Noop; log in `specs/tracking/phase-N.md`.
 5. Refactor for reuse/clarity before moving on.
 
+**Every phase ends with a mandatory Phase Review ("Clean Review Then
+Fix"):** a fresh no-context subagent reviews the phase's cumulative diff
+and emits `CRITICAL`/`MAJOR`/`MINOR` findings; findings are fixed in
+severity order; a phase cannot be COMPLETE with any open CRITICAL/MAJOR.
+Full process: `specs/reference/workflow.md` → "Phase Review".
+
 ## Out of scope (initially)
 
 - **GL / D3D backends.** Primary platforms are Vulkan and Metal only. Do not
