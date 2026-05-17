@@ -26,14 +26,26 @@ routed through the device error sink (invalid descriptor ⇒ error +
 GetUsage/GetMapState`. `mappedAtCreation` ⇒ Mapped state (no async).
 Port **B1–B6, B32–B36, B38** (B37 callback part → P2.2).
 
-## P2.2 — Buffer map async state machine  *(NEXT)*
+## P2.2 — Buffer map async state machine  *(☑ DONE)*
+
+Done: core `MapMode`/`MapAsyncStatus`/`PendingMap`; `begin_map` (B7–B16
+sync validation), `resolve_pending_map`/`abort_pending_map`;
+`wgpuBufferMapAsync` reusing `PendingCallback::BufferMap` (future
+machinery), `WGPU_WHOLE_MAP_SIZE`, `map_map_mode` (B13/B14), validation ⇒
+device-error + callback `Error`; unmap/destroy/Drop-before-drain ⇒
+`Aborted` (callback holds own `Arc<Buffer>` clone); once-only via
+`callback_fired`. B7–B24,B37 ported in `yawgpu/tests/
+buffer_map_validation.rs` (9), gate green (47 tests). Committed
+`phase-2: P2.2`.
+
+#### (original detail)
 
 `wgpuBufferMapAsync` (+`WGPUBufferMapCallbackInfo`) reusing the Phase-1
 future/`PendingCallback` machinery; Pending/Mapped transitions;
 Unmap/Destroy/drop-before-result ⇒ `Aborted`; validation ⇒ `Error`;
 once-only fire incl. reentrancy. Port **B7–B24, B37**.
 
-## P2.3 — GetMappedRange / GetConstMappedRange  *(after P2.2)*
+## P2.3 — GetMappedRange / GetConstMappedRange  *(NEXT)*
 
 Const vs non-const rules, bounds/offset/whole-map-size, destroyed ⇒ NULL.
 Port **B25–B31**.

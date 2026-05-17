@@ -201,6 +201,29 @@ pub fn map_buffer_map_state(value: core::BufferMapState) -> native::WGPUBufferMa
 }
 
 #[must_use]
+pub fn map_map_async_status(value: core::MapAsyncStatus) -> native::WGPUMapAsyncStatus {
+    match value {
+        core::MapAsyncStatus::Success => native::WGPUMapAsyncStatus_Success,
+        core::MapAsyncStatus::CallbackCancelled => native::WGPUMapAsyncStatus_CallbackCancelled,
+        core::MapAsyncStatus::Error => native::WGPUMapAsyncStatus_Error,
+        core::MapAsyncStatus::Aborted => native::WGPUMapAsyncStatus_Aborted,
+        _ => native::WGPUMapAsyncStatus_Error,
+    }
+}
+
+pub fn map_map_mode(value: native::WGPUMapMode) -> Result<core::MapMode, &'static str> {
+    let allowed = native::WGPUMapMode_Read | native::WGPUMapMode_Write;
+    if value & !allowed != 0 {
+        return Err("map mode has unsupported bits");
+    }
+    match value {
+        native::WGPUMapMode_Read => Ok(core::MapMode::Read),
+        native::WGPUMapMode_Write => Ok(core::MapMode::Write),
+        _ => Err("map mode must be exactly Read or Write"),
+    }
+}
+
+#[must_use]
 pub fn map_buffer_descriptor(value: &native::WGPUBufferDescriptor) -> core::BufferDescriptor {
     core::BufferDescriptor {
         usage: map_buffer_usage(value.usage),
