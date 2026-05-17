@@ -180,6 +180,35 @@ pub fn map_device_lost_reason(reason: core::DeviceLostReason) -> native::WGPUDev
     }
 }
 
+#[must_use]
+pub fn map_buffer_usage(value: native::WGPUBufferUsage) -> core::BufferUsage {
+    core::BufferUsage::from_bits_retain(value)
+}
+
+#[must_use]
+pub fn map_buffer_usage_to_native(value: core::BufferUsage) -> native::WGPUBufferUsage {
+    value.bits()
+}
+
+#[must_use]
+pub fn map_buffer_map_state(value: core::BufferMapState) -> native::WGPUBufferMapState {
+    match value {
+        core::BufferMapState::Unmapped => native::WGPUBufferMapState_Unmapped,
+        core::BufferMapState::Pending => native::WGPUBufferMapState_Pending,
+        core::BufferMapState::Mapped => native::WGPUBufferMapState_Mapped,
+        _ => native::WGPUBufferMapState_Force32,
+    }
+}
+
+#[must_use]
+pub fn map_buffer_descriptor(value: &native::WGPUBufferDescriptor) -> core::BufferDescriptor {
+    core::BufferDescriptor {
+        usage: map_buffer_usage(value.usage),
+        size: value.size,
+        mapped_at_creation: value.mappedAtCreation != 0,
+    }
+}
+
 pub fn map_features_to_native(features: &core::FeatureSet) -> native::WGPUSupportedFeatures {
     let features = features
         .iter()

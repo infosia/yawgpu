@@ -70,6 +70,12 @@ impl NoopDevice {
     pub fn queue(&self) -> &NoopQueue {
         &self.queue
     }
+
+    #[must_use]
+    pub fn create_buffer(&self, size: u64) -> NoopBuffer {
+        self.allocations.fetch_add(1, Ordering::Relaxed);
+        NoopBuffer { size }
+    }
 }
 
 impl Default for NoopDevice {
@@ -91,5 +97,17 @@ impl NoopQueue {
 impl Default for NoopQueue {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NoopBuffer {
+    size: u64,
+}
+
+impl NoopBuffer {
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        self.size
     }
 }

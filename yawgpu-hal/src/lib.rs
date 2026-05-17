@@ -11,6 +11,8 @@ mod metal {
     pub struct MetalDevice;
     #[derive(Debug)]
     pub struct MetalQueue;
+    #[derive(Debug)]
+    pub struct MetalBuffer;
 }
 
 #[cfg(feature = "vulkan")]
@@ -23,6 +25,8 @@ mod vulkan {
     pub struct VulkanDevice;
     #[derive(Debug)]
     pub struct VulkanQueue;
+    #[derive(Debug)]
+    pub struct VulkanBuffer;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -126,6 +130,18 @@ impl HalDevice {
             Self::Metal(_) => HalQueue::Metal(metal::MetalQueue),
         }
     }
+
+    #[must_use]
+    pub fn create_buffer(&self, size: u64) -> HalBuffer {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(device) => HalBuffer::Noop(device.create_buffer(size)),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => HalBuffer::Vulkan(vulkan::VulkanBuffer),
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => HalBuffer::Metal(metal::MetalBuffer),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -137,6 +153,17 @@ pub enum HalQueue {
     Vulkan(vulkan::VulkanQueue),
     #[cfg(feature = "metal")]
     Metal(metal::MetalQueue),
+}
+
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum HalBuffer {
+    #[cfg(feature = "noop")]
+    Noop(noop::NoopBuffer),
+    #[cfg(feature = "vulkan")]
+    Vulkan(vulkan::VulkanBuffer),
+    #[cfg(feature = "metal")]
+    Metal(metal::MetalBuffer),
 }
 
 #[cfg(test)]
