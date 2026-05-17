@@ -85,12 +85,15 @@ resolution, and `featureLevel` handling in `wgpuInstanceRequestAdapter`.
 Port **R6, R7, R10–R13** (R10–R13 via `HasFeature(CoreFeaturesAndLimits)`
 per the recorded Divergence). **R9** → defer to P1.3.
 
-## P1.3 — Device lifecycle & device-lost  *(outline)*
+## P1.3 — Device lifecycle & device-lost  *(ACTIVE)*
 
-`wgpuDeviceDestroy` + device tick no-op after destroy (**R8**); a
-device-lost callback channel distinct from the uncaptured-error sink with
-the request-device→device-lost ordering and per-mode timing (**R5**); GAHB
-feature gate (**R9**) if not done in P1.2.
+Device-lost channel per block 00 "Device-lost channel" design. Implement
+`wgpuDeviceDestroy`, capture `WGPUDeviceDescriptor.deviceLostCallbackInfo`,
+fire device-lost via the future/pending-callback machinery. Port **R5**
+(request-device-Error → device-lost(FailedCreation), ordering + per-mode
+timing) and **R8** reframed (destroy ⇒ device-lost(Destroyed), idempotent,
+last-ref implicit destroy, ProcessEvents-after-destroy safe). **R9** is N/A
+(Dawn-only extension, dropped — recorded divergence).
 
 ## P1.4 — Labels for Device & Queue  *(outline)*
 
