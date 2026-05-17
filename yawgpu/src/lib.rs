@@ -824,6 +824,37 @@ pub unsafe extern "C" fn wgpuBufferMapAsync(
     buffer.instance.register_callback(pending)
 }
 
+/// Returns a mutable pointer to a mapped buffer range, or null on misuse.
+///
+/// # Safety
+///
+/// `buffer` must be a non-null live yawgpu buffer handle. The returned pointer
+/// is valid only while the buffer remains mapped.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuBufferGetMappedRange(
+    buffer: native::WGPUBuffer,
+    offset: usize,
+    size: usize,
+) -> *mut c_void {
+    mapped_range_ptr(buffer, false, offset, size).map_or(std::ptr::null_mut(), |ptr| ptr.cast())
+}
+
+/// Returns a const pointer to a mapped buffer range, or null on misuse.
+///
+/// # Safety
+///
+/// `buffer` must be a non-null live yawgpu buffer handle. The returned pointer
+/// is valid only while the buffer remains mapped.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuBufferGetConstMappedRange(
+    buffer: native::WGPUBuffer,
+    offset: usize,
+    size: usize,
+) -> *const c_void {
+    mapped_range_ptr(buffer, true, offset, size)
+        .map_or(std::ptr::null(), |ptr| ptr.cast_const().cast())
+}
+
 /// Returns the buffer map state.
 ///
 /// # Safety
@@ -1035,6 +1066,22 @@ fn validate_map_async(
         u64::try_from(size).map_err(|_| "map size is too large")?
     };
     Ok((mode, offset, size))
+}
+
+unsafe fn mapped_range_ptr(
+    buffer: native::WGPUBuffer,
+    const_access: bool,
+    offset: usize,
+    size: usize,
+) -> Option<*mut u8> {
+    let buffer = borrow_handle(buffer, "WGPUBuffer");
+    let offset = u64::try_from(offset).ok()?;
+    let size = if size == native::WGPU_WHOLE_MAP_SIZE as usize {
+        None
+    } else {
+        Some(u64::try_from(size).ok()?)
+    };
+    buffer.core.mapped_range(const_access, offset, size)
 }
 
 /// Installs a Rust-side uncaptured-error callback for test harnesses.
