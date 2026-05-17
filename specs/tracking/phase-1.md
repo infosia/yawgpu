@@ -49,14 +49,26 @@ review note.
 
 ---
 
-## P1.2 — Adapter/Device limits & features  *(NEXT; detail when active)*
+## P1.2 — Adapter/Device limits & features
 
-Synthetic Noop adapter gains an explicit supported-limits + feature set and
-a core-vs-compat mode. Implement `wgpuAdapterGetLimits/GetFeatures/
-HasFeature`, `wgpuDeviceGetLimits/GetFeatures/HasFeature`, and RequestDevice
-`requiredLimits`/`requiredFeatures` validation. Port DeviceValidationTests
-**R1–R4, R6, R7, R10–R14** (and **R9** if cheap). May split into P1.2a
-(limits R1–R4,R14) / P1.2b (features + core/compat R6,R7,R10–R13).
+Split into two slices. Limit/feature model = block 00 "Synthetic Noop
+adapter limit/feature model".
+
+### P1.2a — Limits  *(ACTIVE)*
+
+`WGPULimits` (webgpu.h:3917, 33 fields). Noop adapter exposes WebGPU spec
+default limits (Dawn `Limits.cpp` `v1` default column) with Maximum /
+Alignment / always-max(`maxImmediateSize`) classification. Implement
+`wgpuAdapterGetLimits`, `wgpuDeviceGetLimits`, and RequestDevice
+`requiredLimits` validation + effective-limit computation. Port
+DeviceValidationTests **R1, R2, R3, R4, R14**.
+
+### P1.2b — Features + core/compat  *(after P1.2a)*
+
+`WGPUSupportedFeatures` (webgpu.h:2931). Synthetic feature set with the
+Tier dependency families; core-vs-compat Noop adapter constructors.
+Implement `wgpuAdapter/DeviceGetFeatures/HasFeature` + `requiredFeatures`
+resolution. Port **R6, R7, R10–R13** (and **R9** if cheap, else → P1.3).
 
 ## P1.3 — Device lifecycle & device-lost  *(outline)*
 

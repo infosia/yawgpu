@@ -131,11 +131,34 @@ Per-device error sink (Phase 0): uncaptured-error callback + error-scope
 stack; `dispatch_error` → top scope else uncaptured. Phase 1 adds the
 device-lost callback channel (R5) distinct from the uncaptured-error sink.
 
-## Open questions
+## Synthetic Noop adapter limit/feature model (design decision — P1.2)
 
-- Noop adapter: expose one synthetic adapter; needs a configurable
-  core-vs-compat mode + a synthetic limit/feature set so R3/R4/R10–R14 are
-  testable. Define the synthetic adapter's "supported" limits explicitly.
+- The Noop adapter exposes **one** synthetic adapter whose **supported
+  limits = the WebGPU spec default limits** (Dawn's `v1` default column in
+  `dawn/src/dawn/native/Limits.cpp`, e.g. `maxBindGroups=4`,
+  `minUniformBufferOffsetAlignment=256`, `maxImmediateSize` default 64).
+- Limit classification follows Dawn's `Limits.cpp` macro tags:
+  - **Maximum** (higher-is-better): requested must be ≤ supported, else
+    RequestDevice `Error`. Effective device limit = `max(requested,
+    default)` (requesting *worse than default* still yields the default —
+    R3).
+  - **Alignment** (lower-is-better): requested must be ≥ supported, else
+    `Error`; effective = `min(requested, default)` analog (R4).
+  - **`maxImmediateSize`**: always set to the supported max regardless of
+    the requested value (R14, "always max").
+- Core-vs-compat: the Noop adapter has a `compat` flag (default: **core**,
+  i.e. not compat). `CoreFeaturesAndLimits` requested or core-adapter-
+  default ⇒ core limits; compat adapter default ⇒ compat limits
+  (`maxStorageBuffersInVertexStage==0`). Tests need both an explicit
+  core-default and a compat-default Noop adapter; expose a way to construct
+  each (e.g. an internal/testing constructor or instance/adapter option).
+- Features: synthetic supported set must include the dependency families so
+  R6/R7 are testable — `TextureFormatsTier1` ⇒ implies
+  `RG11B10UfloatRenderable`; `TextureFormatsTier2` ⇒ implies
+  `TextureFormatsTier1`. `wgpuAdapter/DeviceHasFeature` reflects the
+  resolved set.
+
+## Open questions
 - `wgpuGetInstanceLimits` / instance `TimedWaitAny` feature: model as an
   instance descriptor feature list.
 - Device-lost timing on `wgpuDeviceRelease` vs explicit `Destroy`.
