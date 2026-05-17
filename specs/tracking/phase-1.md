@@ -63,7 +63,16 @@ computation, `wgpuAdapterGetLimits`/`wgpuDeviceGetLimits`. R1–R4,R14 ported
 in `yawgpu/tests/limits_validation.rs` (5), gate green. Committed
 `phase-1: P1.2a`.
 
-### P1.2b — Features + core/compat  *(ACTIVE)*
+### P1.2b — Features + core/compat  *(☑ DONE)*
+
+Done: `Feature`/`FeatureLevel`/`FeatureSet`, supported set + implication
+closure, core/compat default resolution, `featureLevel` in RequestAdapter,
+`requiredFeatures` validation, `wgpuAdapter/DeviceGetFeatures/HasFeature`,
+`wgpuSupportedFeaturesFreeMembers` (boxed-slice round-trip). R6,R7,R10–R13
+ported in `yawgpu/tests/features_validation.rs` (8), gate green. Committed
+`phase-1: P1.2b`. R9 deferred to P1.3.
+
+#### (original outline)
 
 `WGPUSupportedFeatures` (webgpu.h:2931), `WGPUFeatureLevel` (625),
 `WGPURequestAdapterOptions.featureLevel` (4138). Noop adapter records the
