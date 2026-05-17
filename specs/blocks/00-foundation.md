@@ -71,14 +71,14 @@ from a later phase; tracked here but ported in that phase, not Phase 1.
 ### DeviceValidationTests.cpp — implementable in Phase 1
 
 - **R1** RequestDevice with no `requiredLimits` ⇒ Success, device reports all
-  default limits (`maxBindGroups==4`). `NoRequiredLimits` :62. ☐
+  default limits (`maxBindGroups==4`). `NoRequiredLimits` :62. ☑ (P1.2a)
 - **R2** `requiredLimits` filled with default values ⇒ Success, device
-  reports those defaults. `DefaultLimits` :78. ☐
+  reports those defaults. `DefaultLimits` :78. ☑ (P1.2a)
 - **R3** "Higher is better" limits: requested > supported ⇒ RequestDevice
   `Error`/null; requested worse-than-default ⇒ Success but device still
-  reports the default (not the worse value). `HigherIsBetter` :96. ☐
+  reports the default (not the worse value). `HigherIsBetter` :96. ☑ (P1.2a)
 - **R4** "Lower is better" limits: requested < supported ⇒ `Error`; analogous
-  default-clamping. `LowerIsBetter` :162. ☐
+  default-clamping. `LowerIsBetter` :162. ☑ (P1.2a)
 - **R5** On RequestDevice failure: request-device callback fires with
   `Error`/null first; a registered device-lost callback then fires with
   `FailedCreation` — immediately in `AllowSpontaneous`, only on
@@ -100,7 +100,7 @@ from a later phase; tracked here but ported in that phase, not Phase 1.
 - **R13** Compat-defaulting adapter, explicit `CoreFeaturesAndLimits` ⇒ core
   limits. :400. ☐
 - **R14** `maxImmediateSize`: requested < supported ⇒ device gets the
-  supported max (always-max limit). `AlwaysMax` :450. ☐
+  supported max (always-max limit). `AlwaysMax` :450. ☑ (P1.2a)
 
 ### LabelTests.cpp — Phase 1 subset
 

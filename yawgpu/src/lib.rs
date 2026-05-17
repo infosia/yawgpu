@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use yawgpu_core as core;
 
 use crate::conv::{
-    add_ref_handle, arc_to_handle, borrow_handle, clone_handle, release_handle, string_view,
+    add_ref_handle, arc_to_handle, borrow_handle, clone_handle, map_limits, map_limits_to_native,
+    release_handle, string_view,
 };
 
 pub struct WGPUAdapterImpl {
@@ -336,6 +337,25 @@ pub unsafe extern "C" fn wgpuAdapterAddRef(adapter: native::WGPUAdapter) {
     add_ref_handle(adapter, "WGPUAdapter");
 }
 
+/// Gets the supported limits for an adapter.
+///
+/// # Safety
+///
+/// `adapter` must be a non-null live yawgpu adapter handle. `limits` must
+/// point to writable `WGPULimits` storage.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuAdapterGetLimits(
+    adapter: native::WGPUAdapter,
+    limits: *mut native::WGPULimits,
+) -> native::WGPUStatus {
+    let adapter = borrow_handle(adapter, "WGPUAdapter");
+    let Some(limits) = limits.as_mut() else {
+        return native::WGPUStatus_Error;
+    };
+    *limits = map_limits_to_native(adapter.core.limits());
+    native::WGPUStatus_Success
+}
+
 /// Requests a device from an adapter.
 ///
 /// # Safety
@@ -345,13 +365,17 @@ pub unsafe extern "C" fn wgpuAdapterAddRef(adapter: native::WGPUAdapter) {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuAdapterRequestDevice(
     adapter: native::WGPUAdapter,
-    _descriptor: *const native::WGPUDeviceDescriptor,
+    descriptor: *const native::WGPUDeviceDescriptor,
     callback_info: native::WGPURequestDeviceCallbackInfo,
 ) -> native::WGPUFuture {
     let adapter = borrow_handle(adapter, "WGPUAdapter");
+    let required_limits = descriptor
+        .as_ref()
+        .and_then(|descriptor| descriptor.requiredLimits.as_ref())
+        .map(map_limits);
     let result = adapter
         .core
-        .create_device()
+        .create_device(required_limits.as_ref())
         .map(|device| {
             Arc::new(WGPUDeviceImpl {
                 core: Arc::new(device),
@@ -388,6 +412,25 @@ pub unsafe extern "C" fn wgpuDeviceRelease(device: native::WGPUDevice) {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceAddRef(device: native::WGPUDevice) {
     add_ref_handle(device, "WGPUDevice");
+}
+
+/// Gets the effective limits for a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `limits` must point
+/// to writable `WGPULimits` storage.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceGetLimits(
+    device: native::WGPUDevice,
+    limits: *mut native::WGPULimits,
+) -> native::WGPUStatus {
+    let device = borrow_handle(device, "WGPUDevice");
+    let Some(limits) = limits.as_mut() else {
+        return native::WGPUStatus_Error;
+    };
+    *limits = map_limits_to_native(device.core.limits());
+    native::WGPUStatus_Success
 }
 
 /// Gets the default queue for a device.

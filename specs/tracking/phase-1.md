@@ -54,16 +54,16 @@ review note.
 Split into two slices. Limit/feature model = block 00 "Synthetic Noop
 adapter limit/feature model".
 
-### P1.2a — Limits  *(ACTIVE)*
+### P1.2a — Limits  *(☑ DONE)*
 
-`WGPULimits` (webgpu.h:3917, 33 fields). Noop adapter exposes WebGPU spec
-default limits (Dawn `Limits.cpp` `v1` default column) with Maximum /
-Alignment / always-max(`maxImmediateSize`) classification. Implement
-`wgpuAdapterGetLimits`, `wgpuDeviceGetLimits`, and RequestDevice
-`requiredLimits` validation + effective-limit computation. Port
-DeviceValidationTests **R1, R2, R3, R4, R14**.
+Done: 32-field `Limits` model with Dawn `v1` default constants (verified
+against `Limits.cpp`), Maximum/Alignment/AlwaysMax classification, UNDEFINED
+sentinel→default in conv, `requiredLimits` validation + effective-limit
+computation, `wgpuAdapterGetLimits`/`wgpuDeviceGetLimits`. R1–R4,R14 ported
+in `yawgpu/tests/limits_validation.rs` (5), gate green. Committed
+`phase-1: P1.2a`.
 
-### P1.2b — Features + core/compat  *(after P1.2a)*
+### P1.2b — Features + core/compat  *(NEXT)*
 
 `WGPUSupportedFeatures` (webgpu.h:2931). Synthetic feature set with the
 Tier dependency families; core-vs-compat Noop adapter constructors.
