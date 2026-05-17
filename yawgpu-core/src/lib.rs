@@ -338,6 +338,28 @@ impl Device {
 
         Sampler::new(resolved, hal, is_error)
     }
+
+    #[must_use]
+    pub fn create_shader_module(&self, source: ShaderModuleSource) -> ShaderModule {
+        let (inner, error) = match source {
+            ShaderModuleSource::Wgsl(source) => match ShaderModule::from_wgsl(source) {
+                Ok(inner) => (inner, None),
+                Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
+            },
+            ShaderModuleSource::Spirv(words) => {
+                (ShaderModuleSourceKind::Spirv { _words: words }, None)
+            }
+            ShaderModuleSource::Invalid(message) => {
+                (ShaderModuleSourceKind::Invalid, Some(message))
+            }
+        };
+
+        let diagnostic = error.clone();
+        if let Some(message) = error {
+            self.dispatch_error(ErrorKind::Validation, message);
+        }
+        ShaderModule::new(inner, diagnostic)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1041,6 +1063,94 @@ impl TextureView {
     pub fn aspect(&self) -> TextureAspect {
         self.inner.aspect
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum ShaderModuleSource {
+    Wgsl(String),
+    Spirv(Vec<u32>),
+    Invalid(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct ShaderModule {
+    inner: Arc<ShaderModuleInner>,
+}
+
+#[derive(Debug)]
+struct ShaderModuleInner {
+    _source: ShaderModuleSourceKind,
+    diagnostic: Option<String>,
+    is_error: bool,
+}
+
+#[derive(Debug)]
+enum ShaderModuleSourceKind {
+    Wgsl {
+        _source: String,
+        _module: Box<naga::Module>,
+        _info: Box<naga::valid::ModuleInfo>,
+    },
+    Spirv {
+        _words: Vec<u32>,
+    },
+    Invalid,
+}
+
+impl ShaderModule {
+    fn new(source: ShaderModuleSourceKind, diagnostic: Option<String>) -> Self {
+        Self {
+            inner: Arc::new(ShaderModuleInner {
+                is_error: diagnostic.is_some(),
+                _source: source,
+                diagnostic,
+            }),
+        }
+    }
+
+    fn from_wgsl(source: String) -> Result<ShaderModuleSourceKind, String> {
+        let validated = shader_naga::parse_and_validate_wgsl(&source)?;
+        validate_wgsl_module_limits(&validated.module)?;
+        Ok(ShaderModuleSourceKind::Wgsl {
+            _source: source,
+            _module: Box::new(validated.module),
+            _info: Box::new(validated.info),
+        })
+    }
+
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.inner.is_error
+    }
+
+    #[must_use]
+    pub fn diagnostic(&self) -> Option<&str> {
+        self.inner.diagnostic.as_deref()
+    }
+}
+
+fn validate_wgsl_module_limits(module: &naga::Module) -> Result<(), String> {
+    let mut ids = BTreeSet::new();
+    for (_, override_) in module.overrides.iter() {
+        if let Some(id) = override_.id {
+            if !ids.insert(id) {
+                return Err(format!("duplicate shader override id {id}"));
+            }
+        }
+    }
+
+    for (_, global) in module.global_variables.iter() {
+        if let Some(binding) = global.binding {
+            if binding.binding >= 1000 {
+                return Err(format!(
+                    "shader resource binding {} exceeds the maximum binding number",
+                    binding.binding
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

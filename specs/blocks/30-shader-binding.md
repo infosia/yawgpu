@@ -56,6 +56,11 @@ Phase 4. Rules from Dawn `ShaderModuleValidationTests`,
   clearly-invalid WGSL and *success* for clearly-valid WGSL — they do
   NOT pin exact diagnostic text or borderline cases. Borderline
   divergences recorded as encountered.
+  - **P4.1a confirmed**: the pinned naga **does** enforce S4 (duplicate
+    override `@id` — checked via `module.overrides` reflection), S3
+    `binding≥1000`, and rejects S6/S7/S11 unsafe WGSL during
+    parse/validate. No naga≠Tint divergence arose for the Phase-4
+    shader-create rules; no bespoke unsafe-API gate was needed.
 - `WGPUShaderStage` visibility: unknown bits are not a creation error
   (S20) — only Vertex/Fragment/Compute are meaningful; carry raw bits.
 
@@ -64,20 +69,20 @@ Phase 4. Rules from Dawn `ShaderModuleValidationTests`,
 ### ShaderModule (P4.1)
 
 - **S1** descriptor needs exactly one chained source (WGSL xor SPIRV).
-  `NoChainedDescriptor` :309. ☐
+  `NoChainedDescriptor` :309. ☑ (P4.1a)
 - **S2** WGSL and SPIRV (or WGSL+Dawn SPIRV options) mutually exclusive.
-  `MultipleChainedDescriptor_*` :316. ☐
+  `MultipleChainedDescriptor_*` :316. ☑ (P4.1a)
 - **S3** WGSL parsed+validated by naga; invalid (syntax/semantic/UTF-8/
   missing `@location`/`@group`+`@binding`/binding≥1000) ⇒ error.
-  `MissingDecorations`/`MaxBindingNumber` :101/564/589. ☐
+  `MissingDecorations`/`MaxBindingNumber` :101/564/589. ☑ (P4.1a)
 - **S4** override `@id(n)` numeric ids unique within module.
-  `OverridableConstantsNumericIDConflicts` :545. ☐
+  `OverridableConstantsNumericIDConflicts` :545. ☑ (P4.1a)
 - **S5** SPIR-V source accepted (bytes; best-effort validate).
-  `CreationSuccess` :101. ☐
+  `CreationSuccess` :101. ☑ (P4.1a)
 - **S6** `chromium_disable_uniformity_analysis` ⇒ error (AllowUnsafeAPIs
-  non-canonical → always rejected). UnsafeAPI :52. ☐ (divergence)
+  non-canonical → always rejected). UnsafeAPI :52. ☑ (P4.1a) (divergence)
 - **S7** static `binding_array` in WGSL ⇒ error (same divergence).
-  UnsafeAPI :88. ☐
+  UnsafeAPI :88. ☑ (P4.1a)
 - **S9** `wgpuShaderModuleGetCompilationInfo` async via the future/
   callback-mode machinery; returns `WGPUCompilationInfo` (≥1 Error msg
   for an invalid module, empty/Info for a valid one).
@@ -85,7 +90,7 @@ Phase 4. Rules from Dawn `ShaderModuleValidationTests`,
 - **S10** `DawnShaderModuleSPIRVOptionsDescriptor` — Dawn-only chained
   struct; not in `webgpu.h`. ✗ N/A (recorded).
 - **S11** experimental WGSL extensions requiring AllowUnsafeAPIs ⇒ error
-  (divergence as S6). `ShaderModuleExtensionValidationTest` :973. ☐
+  (divergence as S6). `ShaderModuleExtensionValidationTest` :973. ☑ (P4.1a)
 - **S8** inter-stage variable location limits — validated at **pipeline**
   creation. Defer→P5.
 

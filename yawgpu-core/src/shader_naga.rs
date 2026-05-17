@@ -1,13 +1,18 @@
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<naga::valid::ModuleInfo, String> {
+pub(crate) struct ValidatedWgslModule {
+    pub module: naga::Module,
+    pub info: naga::valid::ModuleInfo,
+}
+
+pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ValidatedWgslModule, String> {
     let module = naga::front::wgsl::parse_str(src).map_err(|error| error.to_string())?;
     let mut validator = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::empty(),
     );
-    validator
+    let info = validator
         .validate(&module)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok(ValidatedWgslModule { module, info })
 }
 
 #[cfg(test)]

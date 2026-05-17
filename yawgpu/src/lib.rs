@@ -12,10 +12,10 @@ use crate::conv::{
     map_buffer_usage_to_native, map_device_lost_callback_info, map_device_lost_reason,
     map_extent_3d, map_feature, map_feature_level, map_features_to_native, map_limits,
     map_limits_to_native, map_map_async_status, map_map_mode, map_origin_3d,
-    map_queue_work_done_status, map_sampler_descriptor, map_texel_copy_buffer_layout,
-    map_texture_aspect, map_texture_descriptor, map_texture_dimension_to_native,
-    map_texture_format_to_native, map_texture_usage_to_native, map_texture_view_descriptor,
-    release_handle, string_view, DeviceLostCallbackInfo,
+    map_queue_work_done_status, map_sampler_descriptor, map_shader_module_descriptor,
+    map_texel_copy_buffer_layout, map_texture_aspect, map_texture_descriptor,
+    map_texture_dimension_to_native, map_texture_format_to_native, map_texture_usage_to_native,
+    map_texture_view_descriptor, release_handle, string_view, DeviceLostCallbackInfo,
 };
 
 pub struct WGPUAdapterImpl {
@@ -67,6 +67,12 @@ pub struct WGPUSamplerImpl {
     _instance: Arc<WGPUInstanceImpl>,
 }
 
+pub struct WGPUShaderModuleImpl {
+    _core: Arc<core::ShaderModule>,
+    _device: Arc<core::Device>,
+    _instance: Arc<WGPUInstanceImpl>,
+}
+
 macro_rules! declare_empty_impl_handles {
     ($($name:ident),* $(,)?) => {
         $(
@@ -88,7 +94,6 @@ declare_empty_impl_handles!(
     WGPURenderBundleEncoderImpl,
     WGPURenderPassEncoderImpl,
     WGPURenderPipelineImpl,
-    WGPUShaderModuleImpl,
     WGPUSurfaceImpl,
 );
 
@@ -790,6 +795,32 @@ pub unsafe extern "C" fn wgpuDeviceCreateSampler(
     }))
 }
 
+/// Creates a shader module on a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `descriptor` must
+/// point to a valid `WGPUShaderModuleDescriptor` and its extension chain must
+/// contain exactly one recognized shader source.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceCreateShaderModule(
+    device: native::WGPUDevice,
+    descriptor: *const native::WGPUShaderModuleDescriptor,
+) -> native::WGPUShaderModule {
+    let device = borrow_handle(device, "WGPUDevice");
+    let descriptor = descriptor
+        .as_ref()
+        .expect("WGPUShaderModuleDescriptor must not be null");
+    let shader_module = device
+        .core
+        .create_shader_module(map_shader_module_descriptor(descriptor));
+    arc_to_handle(Arc::new(WGPUShaderModuleImpl {
+        _core: Arc::new(shader_module),
+        _device: Arc::clone(&device.core),
+        _instance: Arc::clone(&device.instance),
+    }))
+}
+
 /// Gets the effective limits for a device.
 ///
 /// # Safety
@@ -1201,6 +1232,26 @@ pub unsafe extern "C" fn wgpuSamplerRelease(sampler: native::WGPUSampler) {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuSamplerAddRef(sampler: native::WGPUSampler) {
     add_ref_handle(sampler, "WGPUSampler");
+}
+
+/// Releases one owned reference to a shader module handle.
+///
+/// # Safety
+///
+/// `shader_module` must be a non-null live yawgpu shader module handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuShaderModuleRelease(shader_module: native::WGPUShaderModule) {
+    release_handle(shader_module, "WGPUShaderModule");
+}
+
+/// Adds one owned reference to a shader module handle.
+///
+/// # Safety
+///
+/// `shader_module` must be a non-null live yawgpu shader module handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuShaderModuleAddRef(shader_module: native::WGPUShaderModule) {
+    add_ref_handle(shader_module, "WGPUShaderModule");
 }
 
 /// Releases one owned reference to a queue handle.
