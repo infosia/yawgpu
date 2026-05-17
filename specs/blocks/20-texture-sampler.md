@@ -106,18 +106,18 @@ phases need.
 
 ### TextureView (P3.2)
 
-- **T26** arrayLayerCount > 0. :113. ☐
-- **T27** mipLevelCount > 0 (or UNDEFINED ⇒ inferred). :120. ☐
-- **T28** baseMipLevel+mipLevelCount ≤ texture.mipLevelCount. :173. ☐
-- **T29** baseArrayLayer+arrayLayerCount ≤ texture layers. :134. ☐
+- **T26** arrayLayerCount > 0. :113. ☑ (P3.2)
+- **T27** mipLevelCount > 0 (or UNDEFINED ⇒ inferred). :120. ☑ (P3.2)
+- **T28** baseMipLevel+mipLevelCount ≤ texture.mipLevelCount. :173. ☑ (P3.2)
+- **T29** baseArrayLayer+arrayLayerCount ≤ texture layers. :134. ☑ (P3.2)
 - **T30** view dimension compat with texture dim (1D/2D/2DArray/Cube/
-  CubeArray/3D; Cube⇒6 layers, CubeArray⇒6N). :107/192/282/381. ☐
+  CubeArray/3D; Cube⇒6 layers, CubeArray⇒6N). :107/192/282/381. ☑ (P3.2)
 - **T31** view format compat (same category; sRGB pair only; viewFormats).
-  :711. ☐
+  :711. ☑ (P3.2)
 - **T32** aspect compat with format (Depth/StencilOnly rules). :751/885.
-  ☐
+  ☑ (P3.2)
 - **T33** `wgpuTextureViewRelease` valid; default-view inference when
-  descriptor fields UNDEFINED. :876. ☐
+  descriptor fields UNDEFINED. :876. ☑ (P3.2)
 
 ### Sampler (P3.3)
 

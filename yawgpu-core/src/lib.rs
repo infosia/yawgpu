@@ -492,6 +492,8 @@ impl TextureFormat {
     const DEPTH32_FLOAT_STENCIL8: u32 = 0x31;
     const BC1_RGBA_UNORM: u32 = 0x32;
     const BC1_RGBA_UNORM_SRGB: u32 = 0x33;
+    const BGRA8_UNORM: u32 = 0x1B;
+    const BGRA8_UNORM_SRGB: u32 = 0x1C;
     const BC7_RGBA_UNORM: u32 = 0x3E;
     const BC7_RGBA_UNORM_SRGB: u32 = 0x3F;
 
@@ -528,6 +530,9 @@ impl TextureFormat {
             }
             Self::RGBA8_UNORM => FormatCaps::color(4).renderable().multisample().storage(),
             Self::RGBA8_UNORM_SRGB => FormatCaps::color(4).renderable().multisample(),
+            Self::BGRA8_UNORM | Self::BGRA8_UNORM_SRGB => {
+                FormatCaps::color(4).renderable().multisample()
+            }
             Self::RGBA8_SNORM => FormatCaps::color(4).storage(),
             Self::RGBA8_UINT | Self::RGBA8_SINT => {
                 FormatCaps::color(4).renderable().multisample().storage()
@@ -562,6 +567,21 @@ impl TextureFormat {
             _ => FormatCaps::color(4).renderable().multisample(),
         };
         Some(caps)
+    }
+
+    #[must_use]
+    pub fn srgb_pair(self) -> Option<Self> {
+        match self.0 {
+            Self::RGBA8_UNORM => Some(Self(Self::RGBA8_UNORM_SRGB)),
+            Self::RGBA8_UNORM_SRGB => Some(Self(Self::RGBA8_UNORM)),
+            Self::BGRA8_UNORM => Some(Self(Self::BGRA8_UNORM_SRGB)),
+            Self::BGRA8_UNORM_SRGB => Some(Self(Self::BGRA8_UNORM)),
+            Self::BC1_RGBA_UNORM => Some(Self(Self::BC1_RGBA_UNORM_SRGB)),
+            Self::BC1_RGBA_UNORM_SRGB => Some(Self(Self::BC1_RGBA_UNORM)),
+            Self::BC7_RGBA_UNORM => Some(Self(Self::BC7_RGBA_UNORM_SRGB)),
+            Self::BC7_RGBA_UNORM_SRGB => Some(Self(Self::BC7_RGBA_UNORM)),
+            _ => None,
+        }
     }
 }
 
@@ -697,7 +717,7 @@ pub struct Extent3d {
     pub depth_or_array_layers: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextureDescriptor {
     pub usage: TextureUsage,
     pub dimension: TextureDimension,
@@ -705,6 +725,7 @@ pub struct TextureDescriptor {
     pub format: TextureFormat,
     pub mip_level_count: u32,
     pub sample_count: u32,
+    pub view_formats: Vec<TextureFormat>,
 }
 
 #[derive(Debug, Clone)]
@@ -721,6 +742,7 @@ struct TextureInner {
     format: TextureFormat,
     mip_level_count: u32,
     sample_count: u32,
+    view_formats: Vec<TextureFormat>,
     state: Mutex<TextureState>,
 }
 
@@ -741,6 +763,7 @@ impl Texture {
                 format: descriptor.format,
                 mip_level_count: descriptor.mip_level_count,
                 sample_count: descriptor.sample_count,
+                view_formats: descriptor.view_formats,
                 state: Mutex::new(TextureState {
                     is_error,
                     is_destroyed: false,
@@ -780,6 +803,18 @@ impl Texture {
     }
 
     #[must_use]
+    pub fn view_formats(&self) -> &[TextureFormat] {
+        &self.inner.view_formats
+    }
+
+    #[must_use]
+    pub fn is_view_format_compatible(&self, view_format: TextureFormat) -> bool {
+        view_format == self.format()
+            || self.view_formats().contains(&view_format)
+            || self.format().srgb_pair() == Some(view_format)
+    }
+
+    #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.state.lock().is_error
     }
@@ -791,6 +826,162 @@ impl Texture {
 
     pub fn destroy(&self) {
         self.inner.state.lock().is_destroyed = true;
+    }
+
+    #[must_use]
+    pub fn create_view(
+        &self,
+        descriptor: TextureViewDescriptor,
+    ) -> (TextureView, Option<&'static str>) {
+        let resolved = self.resolve_view_descriptor(descriptor);
+        let error = if self.is_error() {
+            Some("cannot create a view from an error texture")
+        } else {
+            validate_texture_view_descriptor(self, &resolved)
+        };
+        let is_error = error.is_some();
+        (TextureView::new(resolved, is_error), error)
+    }
+
+    fn resolve_view_descriptor(&self, descriptor: TextureViewDescriptor) -> TextureViewDescriptor {
+        let base_mip_level = descriptor.base_mip_level;
+        let base_array_layer = descriptor.base_array_layer;
+        let mip_level_count = descriptor
+            .mip_level_count
+            .unwrap_or_else(|| self.mip_level_count().saturating_sub(base_mip_level));
+        let array_layer_count =
+            descriptor
+                .array_layer_count
+                .unwrap_or_else(|| match self.dimension() {
+                    TextureDimension::D1 => 1,
+                    TextureDimension::D2 => self
+                        .size()
+                        .depth_or_array_layers
+                        .saturating_sub(base_array_layer),
+                    TextureDimension::D3 => self.size().depth_or_array_layers,
+                });
+        let dimension = descriptor
+            .dimension
+            .unwrap_or_else(|| match self.dimension() {
+                TextureDimension::D1 => TextureViewDimension::D1,
+                TextureDimension::D3 => TextureViewDimension::D3,
+                TextureDimension::D2 if array_layer_count == 1 => TextureViewDimension::D2,
+                TextureDimension::D2 => TextureViewDimension::D2Array,
+            });
+
+        TextureViewDescriptor {
+            format: Some(descriptor.format.unwrap_or_else(|| self.format())),
+            dimension: Some(dimension),
+            base_mip_level,
+            mip_level_count: Some(mip_level_count),
+            base_array_layer,
+            array_layer_count: Some(array_layer_count),
+            aspect: Some(descriptor.aspect.unwrap_or(TextureAspect::All)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TextureViewDimension {
+    D1,
+    D2,
+    D2Array,
+    Cube,
+    CubeArray,
+    D3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TextureAspect {
+    All,
+    DepthOnly,
+    StencilOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureViewDescriptor {
+    pub format: Option<TextureFormat>,
+    pub dimension: Option<TextureViewDimension>,
+    pub base_mip_level: u32,
+    pub mip_level_count: Option<u32>,
+    pub base_array_layer: u32,
+    pub array_layer_count: Option<u32>,
+    pub aspect: Option<TextureAspect>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TextureView {
+    inner: Arc<TextureViewInner>,
+}
+
+#[derive(Debug)]
+struct TextureViewInner {
+    format: TextureFormat,
+    dimension: TextureViewDimension,
+    base_mip_level: u32,
+    mip_level_count: u32,
+    base_array_layer: u32,
+    array_layer_count: u32,
+    aspect: TextureAspect,
+    is_error: bool,
+}
+
+impl TextureView {
+    fn new(descriptor: TextureViewDescriptor, is_error: bool) -> Self {
+        Self {
+            inner: Arc::new(TextureViewInner {
+                format: descriptor.format.unwrap_or(TextureFormat::from_raw(0)),
+                dimension: descriptor.dimension.unwrap_or(TextureViewDimension::D2),
+                base_mip_level: descriptor.base_mip_level,
+                mip_level_count: descriptor.mip_level_count.unwrap_or(0),
+                base_array_layer: descriptor.base_array_layer,
+                array_layer_count: descriptor.array_layer_count.unwrap_or(0),
+                aspect: descriptor.aspect.unwrap_or(TextureAspect::All),
+                is_error,
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.inner.is_error
+    }
+
+    #[must_use]
+    pub fn format(&self) -> TextureFormat {
+        self.inner.format
+    }
+
+    #[must_use]
+    pub fn dimension(&self) -> TextureViewDimension {
+        self.inner.dimension
+    }
+
+    #[must_use]
+    pub fn base_mip_level(&self) -> u32 {
+        self.inner.base_mip_level
+    }
+
+    #[must_use]
+    pub fn mip_level_count(&self) -> u32 {
+        self.inner.mip_level_count
+    }
+
+    #[must_use]
+    pub fn base_array_layer(&self) -> u32 {
+        self.inner.base_array_layer
+    }
+
+    #[must_use]
+    pub fn array_layer_count(&self) -> u32 {
+        self.inner.array_layer_count
+    }
+
+    #[must_use]
+    pub fn aspect(&self) -> TextureAspect {
+        self.inner.aspect
     }
 }
 
@@ -1240,6 +1431,88 @@ fn validate_texture_descriptor(
     if usage.contains(TextureUsage::STORAGE_BINDING) && !format_caps.storage_capable {
         return Some("StorageBinding texture format must support storage usage");
     }
+    None
+}
+
+fn validate_texture_view_descriptor(
+    texture: &Texture,
+    descriptor: &TextureViewDescriptor,
+) -> Option<&'static str> {
+    let format = descriptor.format.unwrap_or_else(|| texture.format());
+    let dimension = descriptor.dimension.unwrap_or(TextureViewDimension::D2);
+    let mip_level_count = descriptor.mip_level_count.unwrap_or(0);
+    let array_layer_count = descriptor.array_layer_count.unwrap_or(0);
+    let aspect = descriptor.aspect.unwrap_or(TextureAspect::All);
+
+    if mip_level_count == 0 {
+        return Some("texture view mipLevelCount must be greater than zero");
+    }
+    if array_layer_count == 0 {
+        return Some("texture view arrayLayerCount must be greater than zero");
+    }
+    let Some(mip_end) = descriptor.base_mip_level.checked_add(mip_level_count) else {
+        return Some("texture view mip range overflows");
+    };
+    if mip_end > texture.mip_level_count() {
+        return Some("texture view mip range exceeds texture mip levels");
+    }
+
+    let texture_layers = texture.size().depth_or_array_layers;
+    let Some(layer_end) = descriptor.base_array_layer.checked_add(array_layer_count) else {
+        return Some("texture view array layer range overflows");
+    };
+    if texture.dimension() != TextureDimension::D3 && layer_end > texture_layers {
+        return Some("texture view array layer range exceeds texture layers");
+    }
+
+    match texture.dimension() {
+        TextureDimension::D1 if dimension != TextureViewDimension::D1 => {
+            return Some("1D textures require 1D views");
+        }
+        TextureDimension::D3 if dimension != TextureViewDimension::D3 => {
+            return Some("3D textures require 3D views");
+        }
+        TextureDimension::D2 => match dimension {
+            TextureViewDimension::D2 if array_layer_count != 1 => {
+                return Some("2D texture views require exactly one array layer");
+            }
+            TextureViewDimension::D2Array => {}
+            TextureViewDimension::Cube if array_layer_count != 6 => {
+                return Some("cube texture views require exactly six array layers");
+            }
+            TextureViewDimension::CubeArray if !array_layer_count.is_multiple_of(6) => {
+                return Some(
+                    "cube-array texture views require a layer count that is a multiple of six",
+                );
+            }
+            TextureViewDimension::CubeArray => {}
+            TextureViewDimension::D1 | TextureViewDimension::D3 => {
+                return Some("2D textures require 2D-compatible views");
+            }
+            TextureViewDimension::D2 => {}
+            _ => return Some("texture view dimension is unsupported"),
+        },
+        _ => {}
+    }
+
+    if !texture.is_view_format_compatible(format) {
+        return Some("texture view format is not compatible with the texture");
+    }
+
+    let Some(format_caps) = format.caps() else {
+        return Some("texture view format must not be Undefined");
+    };
+    match aspect {
+        TextureAspect::All => {}
+        TextureAspect::DepthOnly if !format_caps.aspects.depth => {
+            return Some("DepthOnly texture views require a depth format");
+        }
+        TextureAspect::StencilOnly if !format_caps.aspects.stencil => {
+            return Some("StencilOnly texture views require a stencil format");
+        }
+        TextureAspect::DepthOnly | TextureAspect::StencilOnly => {}
+    }
+
     None
 }
 

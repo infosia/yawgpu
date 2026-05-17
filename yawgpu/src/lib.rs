@@ -13,7 +13,7 @@ use crate::conv::{
     map_feature_level, map_features_to_native, map_limits, map_limits_to_native,
     map_map_async_status, map_map_mode, map_queue_work_done_status, map_texture_descriptor,
     map_texture_dimension_to_native, map_texture_format_to_native, map_texture_usage_to_native,
-    release_handle, string_view, DeviceLostCallbackInfo,
+    map_texture_view_descriptor, release_handle, string_view, DeviceLostCallbackInfo,
 };
 
 pub struct WGPUAdapterImpl {
@@ -48,7 +48,12 @@ pub struct WGPUQueueImpl {
 
 pub struct WGPUTextureImpl {
     core: Arc<core::Texture>,
-    _device: Arc<core::Device>,
+    device: Arc<core::Device>,
+}
+
+pub struct WGPUTextureViewImpl {
+    _core: Arc<core::TextureView>,
+    _texture: Arc<core::Texture>,
 }
 
 macro_rules! declare_empty_impl_handles {
@@ -75,7 +80,6 @@ declare_empty_impl_handles!(
     WGPUSamplerImpl,
     WGPUShaderModuleImpl,
     WGPUSurfaceImpl,
-    WGPUTextureViewImpl,
 );
 
 impl WGPUInstanceImpl {
@@ -744,10 +748,12 @@ pub unsafe extern "C" fn wgpuDeviceCreateTexture(
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUTextureDescriptor must not be null");
-    let texture = device.core.create_texture(map_texture_descriptor(descriptor));
+    let texture = device
+        .core
+        .create_texture(map_texture_descriptor(descriptor));
     arc_to_handle(Arc::new(WGPUTextureImpl {
         core: Arc::new(texture),
-        _device: Arc::clone(&device.core),
+        device: Arc::clone(&device.core),
     }))
 }
 
@@ -988,6 +994,31 @@ pub unsafe extern "C" fn wgpuTextureDestroy(texture: native::WGPUTexture) {
     borrow_handle(texture, "WGPUTexture").core.destroy();
 }
 
+/// Creates a view over a texture.
+///
+/// # Safety
+///
+/// `texture` must be a non-null live yawgpu texture handle. `descriptor`,
+/// when non-null, must point to a valid `WGPUTextureViewDescriptor`.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureCreateView(
+    texture: native::WGPUTexture,
+    descriptor: *const native::WGPUTextureViewDescriptor,
+) -> native::WGPUTextureView {
+    let texture = borrow_handle(texture, "WGPUTexture");
+    let descriptor = map_texture_view_descriptor(descriptor.as_ref());
+    let (view, error) = texture.core.create_view(descriptor);
+    if let Some(message) = error {
+        texture
+            .device
+            .dispatch_error(core::ErrorKind::Validation, message);
+    }
+    arc_to_handle(Arc::new(WGPUTextureViewImpl {
+        _core: Arc::new(view),
+        _texture: Arc::clone(&texture.core),
+    }))
+}
+
 /// Returns the descriptor format reflected by the texture.
 ///
 /// # Safety
@@ -1038,9 +1069,7 @@ pub unsafe extern "C" fn wgpuTextureGetHeight(texture: native::WGPUTexture) -> u
 ///
 /// `texture` must be a non-null live yawgpu texture handle.
 #[no_mangle]
-pub unsafe extern "C" fn wgpuTextureGetDepthOrArrayLayers(
-    texture: native::WGPUTexture,
-) -> u32 {
+pub unsafe extern "C" fn wgpuTextureGetDepthOrArrayLayers(texture: native::WGPUTexture) -> u32 {
     borrow_handle(texture, "WGPUTexture")
         .core
         .size()
@@ -1097,6 +1126,26 @@ pub unsafe extern "C" fn wgpuTextureRelease(texture: native::WGPUTexture) {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuTextureAddRef(texture: native::WGPUTexture) {
     add_ref_handle(texture, "WGPUTexture");
+}
+
+/// Releases one owned reference to a texture view handle.
+///
+/// # Safety
+///
+/// `texture_view` must be a non-null live yawgpu texture view handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureViewRelease(texture_view: native::WGPUTextureView) {
+    release_handle(texture_view, "WGPUTextureView");
+}
+
+/// Adds one owned reference to a texture view handle.
+///
+/// # Safety
+///
+/// `texture_view` must be a non-null live yawgpu texture view handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureViewAddRef(texture_view: native::WGPUTextureView) {
+    add_ref_handle(texture_view, "WGPUTextureView");
 }
 
 /// Releases one owned reference to a queue handle.
