@@ -47,12 +47,25 @@ recorded in block 20 (refine P4/P5; flag in Phase 3 Review).
 Core `TextureFormat` + capability records from Dawn `Format.cpp` (block 20
 design). Port **T24, T5, T20, T21, T22, T52, T53**.
 
-## P3.2 — TextureView  *(NEXT)*
+## P3.2 — TextureView  *(☑ DONE)*
+
+Done: core `TextureView`/`TextureViewDescriptor`/`TextureViewDimension`/
+`TextureAspect`; `TextureFormat::srgb_pair`; `Texture` captures
+`view_formats` + `is_view_format_compatible`; `create_view` with
+default-view inference + `validate_texture_view_descriptor`
+(T26–T33: zero/undefined, overflow-checked ranges, dimension matrix,
+sRGB-pair/viewFormats compat, aspect via caps); error-view model. FFI
+`WGPUTextureViewImpl` + `wgpuTextureCreateView`/`Release`/`AddRef`; conv
+view descriptor/dimension/aspect + viewFormats capture. T26–T33 ported
+in `yawgpu/tests/texture_view_validation.rs` (6), gate green (83 tests).
+Committed `phase-3: P3.2`.
+
+#### (original detail)
 
 `WGPUTextureView` handle + core view; dimension/format/aspect compat,
 range bounds, default-view inference. Port **T26–T33**.
 
-## P3.3 — Sampler  *(after P3.2; independent — may reorder)*
+## P3.3 — Sampler  *(NEXT)*
 
 `WGPUSampler` handle + core sampler; lod/anisotropy/filter validation,
 default sampler. Port **T34–T39**.

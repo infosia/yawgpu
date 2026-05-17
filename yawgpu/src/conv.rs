@@ -296,7 +296,24 @@ pub fn map_extent_3d(value: native::WGPUExtent3D) -> core::Extent3d {
 }
 
 #[must_use]
-pub fn map_texture_descriptor(value: &native::WGPUTextureDescriptor) -> core::TextureDescriptor {
+/// Converts a texture descriptor to the core representation.
+///
+/// # Safety
+///
+/// `value.viewFormats`, when non-null and `viewFormatCount > 0`, must point
+/// to `viewFormatCount` valid `WGPUTextureFormat` entries.
+pub unsafe fn map_texture_descriptor(
+    value: &native::WGPUTextureDescriptor,
+) -> core::TextureDescriptor {
+    let view_formats = if value.viewFormatCount == 0 || value.viewFormats.is_null() {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(value.viewFormats, value.viewFormatCount)
+            .iter()
+            .copied()
+            .map(map_texture_format)
+            .collect()
+    };
     core::TextureDescriptor {
         usage: map_texture_usage(value.usage),
         dimension: map_texture_dimension(value.dimension),
@@ -304,6 +321,72 @@ pub fn map_texture_descriptor(value: &native::WGPUTextureDescriptor) -> core::Te
         format: map_texture_format(value.format),
         mip_level_count: value.mipLevelCount,
         sample_count: value.sampleCount,
+        view_formats,
+    }
+}
+
+#[must_use]
+pub fn map_texture_view_dimension(
+    value: native::WGPUTextureViewDimension,
+) -> Option<core::TextureViewDimension> {
+    match value {
+        native::WGPUTextureViewDimension_Undefined => None,
+        native::WGPUTextureViewDimension_1D => Some(core::TextureViewDimension::D1),
+        native::WGPUTextureViewDimension_2D => Some(core::TextureViewDimension::D2),
+        native::WGPUTextureViewDimension_2DArray => Some(core::TextureViewDimension::D2Array),
+        native::WGPUTextureViewDimension_Cube => Some(core::TextureViewDimension::Cube),
+        native::WGPUTextureViewDimension_CubeArray => Some(core::TextureViewDimension::CubeArray),
+        native::WGPUTextureViewDimension_3D => Some(core::TextureViewDimension::D3),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn map_texture_aspect(value: native::WGPUTextureAspect) -> Option<core::TextureAspect> {
+    match value {
+        native::WGPUTextureAspect_Undefined => None,
+        native::WGPUTextureAspect_All => Some(core::TextureAspect::All),
+        native::WGPUTextureAspect_DepthOnly => Some(core::TextureAspect::DepthOnly),
+        native::WGPUTextureAspect_StencilOnly => Some(core::TextureAspect::StencilOnly),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn map_texture_view_descriptor(
+    value: Option<&native::WGPUTextureViewDescriptor>,
+) -> core::TextureViewDescriptor {
+    let Some(value) = value else {
+        return core::TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+        };
+    };
+    core::TextureViewDescriptor {
+        format: if value.format == native::WGPUTextureFormat_Undefined {
+            None
+        } else {
+            Some(map_texture_format(value.format))
+        },
+        dimension: map_texture_view_dimension(value.dimension),
+        base_mip_level: value.baseMipLevel,
+        mip_level_count: if value.mipLevelCount == native::WGPU_MIP_LEVEL_COUNT_UNDEFINED {
+            None
+        } else {
+            Some(value.mipLevelCount)
+        },
+        base_array_layer: value.baseArrayLayer,
+        array_layer_count: if value.arrayLayerCount == native::WGPU_ARRAY_LAYER_COUNT_UNDEFINED {
+            None
+        } else {
+            Some(value.arrayLayerCount)
+        },
+        aspect: map_texture_aspect(value.aspect),
     }
 }
 
