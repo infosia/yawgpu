@@ -67,10 +67,10 @@ Phase 5. Rules from Dawn `RenderPipelineValidationTests`,
 ### P5.0 — naga capability + reflection helper
 
 - **P0a** widen naga `Validator` `Capabilities` to cover Phase-5 WGSL
-  (`f16`/`ShaderF16`, …; data-driven). ☐
+  (`f16`/`ShaderF16`, …; data-driven). ☑ (P5.0)
 - **P0b** `shader_naga` reflection helpers: entry points (+stage),
   `@workgroup_size`, `var<workgroup>` total, `@location` IO+types,
-  `@group/@binding`+access, `@builtin` outputs, overrides. ☐ (consumed
+  `@group/@binding`+access, `@builtin` outputs, overrides. ☑ (P5.0) (consumed
   by P5.1+)
 
 ### Compute pipeline (P5.1)

@@ -10,7 +10,18 @@ Largest phase; 7 slices. First widens naga + builds the reflection seam
 (de-risk, mirrors P4.0). Carries Phase-4 deferreds S8/S35(pipeline)/
 S39–S44 + W4.
 
-## P5.0 — naga capability widening + reflection helper  *(ACTIVE)*
+## P5.0 — naga capability widening + reflection helper  *(☑ DONE)*
+
+Done: `Validator` capability widened to `Capabilities::SHADER_FLOAT16`
+only (justified: Dawn Phase-5 `enable f16; override` shaders); 6
+`pub(crate)` reflection helpers on the validated module
+(`entry_points`, `compute_workgroup_size` incl. override keys,
+`entry_point_io`, `resource_bindings` + static-use, `fragment_builtins`,
+`overrides`) returning owned `Reflected*` structs (no naga types
+leaked); 7 smoke tests. P4 shader tests unregressed. Gate green (27
+binaries, yawgpu-core 14 tests). Committed `phase-5: P5.0`.
+
+#### (original detail)
 
 Widen the `shader_naga` `Validator` `Capabilities` to what Phase-5 WGSL
 needs (P0a: `f16`/`ShaderF16`, …; data-driven, justify each). Add
@@ -20,7 +31,7 @@ IO+scalar/vector type class, `@group/@binding`+access kind, `@builtin`
 outputs, overrides (name/`@id`/type/default). `#[cfg(test)]` smoke per
 helper. De-risks the reflection surface before pipelines build on it.
 
-## P5.1 — ComputePipeline  *(after P5.0)*
+## P5.1 — ComputePipeline  *(NEXT)*
 
 `wgpuDeviceCreateComputePipeline`(+release/AddRef); P1–P6. Auto/explicit
 layout (S35 compute part).
