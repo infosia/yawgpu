@@ -87,10 +87,18 @@ from a later phase; tracked here but ported in that phase, not Phase 1.
   `RG11B10UfloatRenderable` (`HasFeature` true). :286. ☑ (P1.2b)
 - **R7** Requiring `TextureFormatsTier2` implicitly enables
   `TextureFormatsTier1`. :302. ☑ (P1.2b)
-- **R8** `Device.Destroy()` then device tick ⇒ no-op, returns false.
-  `DestroyDeviceBeforeAPITick` :320. ☐
-- **R9** `GetAHardwareBufferProperties` without the AHB feature ⇒ validation
-  error. :335. ☐ (low priority / platform-niche — may defer within Phase 1)
+- **R8** (reframed) `wgpuDeviceDestroy` ⇒ device-lost fires with reason
+  `Destroyed`; destroy is idempotent (2nd destroy = no-op, no 2nd
+  callback); `wgpuInstanceProcessEvents` after destroy is a safe no-op;
+  releasing the last device ref also destroys (webgpu.h:228) firing
+  device-lost(`Destroyed`) exactly once. Dawn's `Device.Tick()`
+  (`DestroyDeviceBeforeAPITick` :320) is non-canonical — no
+  `wgpuDeviceTick`/`Poll` in `webgpu.h`; reframed per the Divergence model.
+  ☐
+- **R9** N/A — `wgpuDeviceGetAHardwareBufferProperties` /
+  `SharedTextureMemoryAHardwareBuffer` are **Dawn extensions, absent from
+  canonical `webgpu.h`**. Dropped from yawgpu (no canonical equivalent;
+  recorded divergence, not a deferral). ✗
 - **R10** Core adapter (`featureLevel` Core/Undefined), explicit
   `CoreFeaturesAndLimits` ⇒ device `HasFeature(CoreFeaturesAndLimits)`.
   :356. ☑ (P1.2b)
@@ -129,8 +137,29 @@ from a later phase; tracked here but ported in that phase, not Phase 1.
 ## Error model
 
 Per-device error sink (Phase 0): uncaptured-error callback + error-scope
-stack; `dispatch_error` → top scope else uncaptured. Phase 1 adds the
-device-lost callback channel (R5) distinct from the uncaptured-error sink.
+stack; `dispatch_error` → top scope else uncaptured.
+
+### Device-lost channel (design decision — P1.3)
+
+- Source: `WGPUDeviceDescriptor.deviceLostCallbackInfo`
+  (`WGPUDeviceLostCallbackInfo{nextInChain, mode, callback, userdata1,
+  userdata2}`, webgpu.h:1629; `WGPUDeviceLostReason` Unknown=1,
+  Destroyed=2, CallbackCancelled=3, FailedCreation=4; callback signature
+  takes `WGPUDevice const*`).
+- It is **separate** from the uncaptured-error sink and obeys the same
+  callback-mode rules as futures (A2–A6); implement by reusing the
+  `FutureRegistry`/`PendingCallback` machinery (add a `DeviceLost`
+  pending-callback variant).
+- Reasons fired: `Destroyed` on `wgpuDeviceDestroy` / implicit destroy from
+  last-ref release (exactly once, idempotent); `FailedCreation` when
+  `wgpuAdapterRequestDevice` fails — even though no device object exists,
+  the descriptor's `deviceLostCallbackInfo` is still captured and fired.
+- **R5 ordering**: on RequestDevice failure the request-device callback
+  fires **before** the device-lost callback. Guarantee by registering the
+  request-device future first (lower `FutureId`) and the device-lost
+  second; `process_events` iterates the registry in ascending id order.
+  `AllowSpontaneous` ⇒ both fire eagerly in that order; `AllowProcessEvents`
+  ⇒ device-lost only on `wgpuInstanceProcessEvents`.
 
 ## Synthetic Noop adapter limit/feature model (design decision — P1.2)
 
