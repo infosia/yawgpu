@@ -1,0 +1,13 @@
+[package]
+name = "yawgpu"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+yawgpu-core = { path = "../yawgpu-core" }
+yawgpu-hal = { path = "../yawgpu-hal" }
+yawgpu-test = { path = "../yawgpu-test" }

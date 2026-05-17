@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "yawgpu",
+    "yawgpu-core",
+    "yawgpu-hal",
+    "yawgpu-test",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+thiserror = "2"
+parking_lot = "0.12"
+bitflags = "2"
+smallvec = "1"
+raw-window-handle = "0.6"
