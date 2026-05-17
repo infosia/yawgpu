@@ -59,12 +59,25 @@ CompilationInfo` via the future machinery (S9), release; error-module +
 stored diagnostic. May split P4.1a (create+WGSL/SPIRV S1–S5) / P4.1b
 (S6/S7/S11 + S9). S10 N/A.
 
-## P4.2 — BindGroupLayout  *(NEXT)*
+## P4.2 — BindGroupLayout  *(☑ DONE)*
+
+Done: core `BindGroupLayout`/`BindGroupLayoutEntry`/`BindingLayoutKind`
++ enums; `validate_bind_group_layout_descriptor` (S12 unique/<1000,
+S15 dynamic-buffer limits, S17 ms⇒2D, S18 storage format/dim, S19
+arraySize>1, S20 raw visibility, S21 per-stage counts via
+`visible_stages`, S22 ≤1000); conv `map_bind_group_layout_*`
+(BindingNotUsed sentinels ⇒ S13 present_count≠1, S14/S16 invalid enum
+via `set_first_error`); error-layout model. FFI
+`WGPUBindGroupLayoutImpl` + create/Release/AddRef. S12–S22 ported in
+`yawgpu/tests/bind_group_layout_validation.rs` (7), gate green
+(25 binaries). Committed `phase-4: P4.2`.
+
+#### (original detail)
 
 `wgpuDeviceCreateBindGroupLayout`; S12–S22 (reuse P1.2a Limits, P3.1b
 FormatCaps; S19 rejected-direction).
 
-## P4.3 — BindGroup  *(after P4.2)*
+## P4.3 — BindGroup  *(NEXT)*
 
 `wgpuDeviceCreateBindGroup`; S23–S33, S35(BG part). S34 N/A.
 

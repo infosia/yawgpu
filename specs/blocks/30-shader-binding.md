@@ -97,29 +97,29 @@ Phase 4. Rules from Dawn `ShaderModuleValidationTests`,
 ### BindGroupLayout (P4.2)
 
 - **S12** entry `binding` unique; `0 ≤ binding < 1000`. `BindGroupEntry`
-  :1395. ☐
+  :1395. ☑ (P4.2)
 - **S13** exactly one of buffer/sampler/texture/storageTexture set per
   entry (none/too-many ⇒ error). `BindGroupLayoutEntry{TooManySet,
-  NoneSet}` :1422. ☐
+  NoneSet}` :1422. ☑ (P4.2)
 - **S14** buffer layout: `type∈{Uniform,Storage,ReadOnlyStorage}`,
-  `hasDynamicOffset` bool, `minBindingSize` recorded. :1404. ☐
+  `hasDynamicOffset` bool, `minBindingSize` recorded. :1404. ☑ (P4.2)
 - **S15** dynamic uniform/storage buffer counts ≤
-  `limits.maxDynamic{Uniform,Storage}BuffersPerPipelineLayout`. ☐
+  `limits.maxDynamic{Uniform,Storage}BuffersPerPipelineLayout`. ☑ (P4.2)
   (reuse P1.2a Limits)
-- **S16** sampler layout `type∈{Filtering,NonFiltering,Comparison}`. ☐
+- **S16** sampler layout `type∈{Filtering,NonFiltering,Comparison}`. ☑ (P4.2)
 - **S17** texture layout `sampleType`/`viewDimension`/`multisampled`
-  well-formed. ☐
+  well-formed. ☑ (P4.2)
 - **S18** storageTexture `access∈{WriteOnly,ReadOnly,ReadWrite}`,
   `format` storage-capable (reuse P3.1b `FormatCaps`), `viewDimension`
-  not 1D. ☐
+  not 1D. ☑ (P4.2)
 - **S19** `bindingArraySize>1` ⇒ error (0/1 ok; AllowUnsafeAPIs
-  divergence). UnsafeAPI :67. ☐
-- **S20** visibility unknown bits NOT an error (carry raw). :1449. ☐
+  divergence). UnsafeAPI :67. ☑ (P4.2)
+- **S20** visibility unknown bits NOT an error (carry raw). :1449. ☑ (P4.2)
 - **S21** per-stage binding counts ≤ `limits.max{SampledTextures,
   Samplers,StorageBuffers,StorageTextures,UniformBuffers}PerShaderStage`.
-  :1486. ☐ (reuse Limits)
+  :1486. ☑ (P4.2) (reuse Limits)
 - **S22** total entries per group ≤ 1000. `BindGroupLayoutEntryMax`
-  :1382. ☐
+  :1382. ☑ (P4.2)
 
 ### BindGroup (P4.3)
 

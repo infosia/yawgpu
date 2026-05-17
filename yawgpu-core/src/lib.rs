@@ -360,6 +360,22 @@ impl Device {
         }
         ShaderModule::new(inner, diagnostic)
     }
+
+    #[must_use]
+    pub fn create_bind_group_layout(
+        &self,
+        descriptor: BindGroupLayoutDescriptor,
+    ) -> BindGroupLayout {
+        let error = descriptor
+            .error
+            .clone()
+            .or_else(|| validate_bind_group_layout_descriptor(&descriptor.entries, self.limits()));
+        let is_error = error.is_some();
+        if let Some(message) = error {
+            self.dispatch_error(ErrorKind::Validation, message);
+        }
+        BindGroupLayout::new(descriptor.entries, is_error)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1151,6 +1167,259 @@ fn validate_wgsl_module_limits(module: &naga::Module) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn validate_bind_group_layout_descriptor(
+    entries: &[BindGroupLayoutEntry],
+    limits: Limits,
+) -> Option<String> {
+    if entries.len() > 1000 {
+        return Some("bind group layout entry count exceeds 1000".to_owned());
+    }
+
+    let mut bindings = BTreeSet::new();
+    let mut dynamic_uniform_buffers = 0_u32;
+    let mut dynamic_storage_buffers = 0_u32;
+    let mut stage_counts = [StageResourceCounts::default(); 3];
+
+    for entry in entries {
+        if entry.binding >= 1000 {
+            return Some("bind group layout binding must be less than 1000".to_owned());
+        }
+        if !bindings.insert(entry.binding) {
+            return Some("bind group layout bindings must be unique".to_owned());
+        }
+        if entry.binding_array_size > 1 {
+            return Some(
+                "bind group layout bindingArraySize greater than one is not supported".to_owned(),
+            );
+        }
+
+        let Some(kind) = entry.kind else {
+            return Some("bind group layout entry must set exactly one binding layout".to_owned());
+        };
+
+        match kind {
+            BindingLayoutKind::Buffer {
+                ty,
+                has_dynamic_offset,
+                ..
+            } => {
+                match ty {
+                    BufferBindingType::Uniform if has_dynamic_offset => {
+                        dynamic_uniform_buffers += 1;
+                    }
+                    BufferBindingType::Storage | BufferBindingType::ReadOnlyStorage
+                        if has_dynamic_offset =>
+                    {
+                        dynamic_storage_buffers += 1;
+                    }
+                    _ => {}
+                }
+                if dynamic_uniform_buffers > limits.max_dynamic_uniform_buffers_per_pipeline_layout
+                {
+                    return Some(
+                        "too many dynamic uniform buffers in bind group layout".to_owned(),
+                    );
+                }
+                if dynamic_storage_buffers > limits.max_dynamic_storage_buffers_per_pipeline_layout
+                {
+                    return Some(
+                        "too many dynamic storage buffers in bind group layout".to_owned(),
+                    );
+                }
+            }
+            BindingLayoutKind::Texture {
+                view_dimension,
+                multisampled,
+                ..
+            } => {
+                if multisampled && view_dimension != TextureViewDimension::D2 {
+                    return Some(
+                        "multisampled texture bindings require 2D view dimension".to_owned(),
+                    );
+                }
+            }
+            BindingLayoutKind::StorageTexture {
+                format,
+                view_dimension,
+                ..
+            } => {
+                if view_dimension == TextureViewDimension::D1 {
+                    return Some(
+                        "storage texture bindings must not use 1D view dimension".to_owned(),
+                    );
+                }
+                let Some(caps) = format.caps() else {
+                    return Some("storage texture binding format must not be Undefined".to_owned());
+                };
+                if !caps.storage_capable {
+                    return Some(
+                        "storage texture binding format must support storage usage".to_owned(),
+                    );
+                }
+            }
+            BindingLayoutKind::Sampler { .. } => {}
+        }
+
+        for stage in visible_stages(entry.visibility) {
+            stage_counts[stage].add(kind);
+            if stage_counts[stage].sampled_textures > limits.max_sampled_textures_per_shader_stage {
+                return Some("too many sampled textures for one shader stage".to_owned());
+            }
+            if stage_counts[stage].samplers > limits.max_samplers_per_shader_stage {
+                return Some("too many samplers for one shader stage".to_owned());
+            }
+            if stage_counts[stage].storage_buffers > limits.max_storage_buffers_per_shader_stage {
+                return Some("too many storage buffers for one shader stage".to_owned());
+            }
+            if stage_counts[stage].storage_textures > limits.max_storage_textures_per_shader_stage {
+                return Some("too many storage textures for one shader stage".to_owned());
+            }
+            if stage_counts[stage].uniform_buffers > limits.max_uniform_buffers_per_shader_stage {
+                return Some("too many uniform buffers for one shader stage".to_owned());
+            }
+        }
+    }
+
+    None
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct StageResourceCounts {
+    sampled_textures: u32,
+    samplers: u32,
+    storage_buffers: u32,
+    storage_textures: u32,
+    uniform_buffers: u32,
+}
+
+impl StageResourceCounts {
+    fn add(&mut self, kind: BindingLayoutKind) {
+        match kind {
+            BindingLayoutKind::Buffer {
+                ty: BufferBindingType::Uniform,
+                ..
+            } => self.uniform_buffers += 1,
+            BindingLayoutKind::Buffer {
+                ty: BufferBindingType::Storage | BufferBindingType::ReadOnlyStorage,
+                ..
+            } => self.storage_buffers += 1,
+            BindingLayoutKind::Sampler { .. } => self.samplers += 1,
+            BindingLayoutKind::Texture { .. } => self.sampled_textures += 1,
+            BindingLayoutKind::StorageTexture { .. } => self.storage_textures += 1,
+        }
+    }
+}
+
+fn visible_stages(visibility: u64) -> impl Iterator<Item = usize> {
+    const VERTEX: u64 = 1;
+    const FRAGMENT: u64 = 2;
+    const COMPUTE: u64 = 4;
+    [VERTEX, FRAGMENT, COMPUTE]
+        .into_iter()
+        .enumerate()
+        .filter_map(move |(index, bit)| (visibility & bit != 0).then_some(index))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindGroupLayoutDescriptor {
+    pub entries: Vec<BindGroupLayoutEntry>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BindGroupLayoutEntry {
+    pub binding: u32,
+    pub visibility: u64,
+    pub binding_array_size: u32,
+    pub kind: Option<BindingLayoutKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BindingLayoutKind {
+    Buffer {
+        ty: BufferBindingType,
+        has_dynamic_offset: bool,
+        min_binding_size: u64,
+    },
+    Sampler {
+        ty: SamplerBindingType,
+    },
+    Texture {
+        sample_type: TextureSampleType,
+        view_dimension: TextureViewDimension,
+        multisampled: bool,
+    },
+    StorageTexture {
+        access: StorageTextureAccess,
+        format: TextureFormat,
+        view_dimension: TextureViewDimension,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BufferBindingType {
+    Uniform,
+    Storage,
+    ReadOnlyStorage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SamplerBindingType {
+    Filtering,
+    NonFiltering,
+    Comparison,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TextureSampleType {
+    Float,
+    UnfilterableFloat,
+    Depth,
+    Sint,
+    Uint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StorageTextureAccess {
+    WriteOnly,
+    ReadOnly,
+    ReadWrite,
+}
+
+#[derive(Debug, Clone)]
+pub struct BindGroupLayout {
+    inner: Arc<BindGroupLayoutInner>,
+}
+
+#[derive(Debug)]
+struct BindGroupLayoutInner {
+    entries: Vec<BindGroupLayoutEntry>,
+    is_error: bool,
+}
+
+impl BindGroupLayout {
+    fn new(entries: Vec<BindGroupLayoutEntry>, is_error: bool) -> Self {
+        Self {
+            inner: Arc::new(BindGroupLayoutInner { entries, is_error }),
+        }
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[BindGroupLayoutEntry] {
+        &self.inner.entries
+    }
+
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.inner.is_error
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
