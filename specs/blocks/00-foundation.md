@@ -84,22 +84,22 @@ from a later phase; tracked here but ported in that phase, not Phase 1.
   `FailedCreation` — immediately in `AllowSpontaneous`, only on
   `ProcessEvents` in `AllowProcessEvents`. `ErrorTriggersDeviceLost` :232. ☐
 - **R6** Requiring `TextureFormatsTier1` implicitly enables
-  `RG11B10UfloatRenderable` (`HasFeature` true). :286. ☐
+  `RG11B10UfloatRenderable` (`HasFeature` true). :286. ☑ (P1.2b)
 - **R7** Requiring `TextureFormatsTier2` implicitly enables
-  `TextureFormatsTier1`. :302. ☐
+  `TextureFormatsTier1`. :302. ☑ (P1.2b)
 - **R8** `Device.Destroy()` then device tick ⇒ no-op, returns false.
   `DestroyDeviceBeforeAPITick` :320. ☐
 - **R9** `GetAHardwareBufferProperties` without the AHB feature ⇒ validation
   error. :335. ☐ (low priority / platform-niche — may defer within Phase 1)
 - **R10** Core adapter (`featureLevel` Core/Undefined), explicit
   `CoreFeaturesAndLimits` ⇒ device `HasFeature(CoreFeaturesAndLimits)`.
-  :356. ☐ (reframed; see Divergence)
+  :356. ☑ (P1.2b)
 - **R11** Core adapter, no required features ⇒ device defaults to
-  `HasFeature(CoreFeaturesAndLimits)==true`. :377. ☐
+  `HasFeature(CoreFeaturesAndLimits)==true`. :377. ☑ (P1.2b)
 - **R12** Compat adapter (`featureLevel` Compatibility), no required
-  features ⇒ device `HasFeature(CoreFeaturesAndLimits)==false`. :421. ☐
+  features ⇒ device `HasFeature(CoreFeaturesAndLimits)==false`. :421. ☑ (P1.2b)
 - **R13** Compat adapter, explicit `CoreFeaturesAndLimits` ⇒ device
-  `HasFeature(CoreFeaturesAndLimits)==true`. :400. ☐
+  `HasFeature(CoreFeaturesAndLimits)==true`. :400. ☑ (P1.2b)
 - **R14** `maxImmediateSize`: requested < supported ⇒ device gets the
   supported max (always-max limit). `AlwaysMax` :450. ☑ (P1.2a)
 

@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use yawgpu_core as core;
 
 use crate::conv::{
-    add_ref_handle, arc_to_handle, borrow_handle, clone_handle, map_limits, map_limits_to_native,
+    add_ref_handle, arc_to_handle, borrow_handle, clone_handle, free_supported_features,
+    map_feature, map_feature_level, map_features_to_native, map_limits, map_limits_to_native,
     release_handle, string_view,
 };
 
@@ -293,13 +294,17 @@ pub unsafe extern "C" fn wgpuInstanceAddRef(instance: native::WGPUInstance) {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
     instance_handle: native::WGPUInstance,
-    _options: *const native::WGPURequestAdapterOptions,
+    options: *const native::WGPURequestAdapterOptions,
     callback_info: native::WGPURequestAdapterCallbackInfo,
 ) -> native::WGPUFuture {
     let instance = borrow_handle(instance_handle, "WGPUInstance");
+    let feature_level = options
+        .as_ref()
+        .map(|options| map_feature_level(options.featureLevel))
+        .unwrap_or(core::FeatureLevel::Core);
     let adapter = instance
         .core
-        .enumerate_adapters()
+        .enumerate_adapters_with_feature_level(feature_level)
         .into_iter()
         .next()
         .expect("Noop instance must expose an adapter");
@@ -356,6 +361,41 @@ pub unsafe extern "C" fn wgpuAdapterGetLimits(
     native::WGPUStatus_Success
 }
 
+/// Gets the supported features for an adapter.
+///
+/// The returned `features` array is allocated by yawgpu and must be released
+/// with `wgpuSupportedFeaturesFreeMembers`.
+///
+/// # Safety
+///
+/// `adapter` must be a non-null live yawgpu adapter handle. `features` must
+/// point to writable `WGPUSupportedFeatures` storage.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuAdapterGetFeatures(
+    adapter: native::WGPUAdapter,
+    features: *mut native::WGPUSupportedFeatures,
+) {
+    let adapter = borrow_handle(adapter, "WGPUAdapter");
+    let features = features
+        .as_mut()
+        .expect("WGPUSupportedFeatures must not be null");
+    *features = map_features_to_native(&adapter.core.features());
+}
+
+/// Returns whether the adapter supports `feature`.
+///
+/// # Safety
+///
+/// `adapter` must be a non-null live yawgpu adapter handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuAdapterHasFeature(
+    adapter: native::WGPUAdapter,
+    feature: native::WGPUFeatureName,
+) -> native::WGPUBool {
+    let adapter = borrow_handle(adapter, "WGPUAdapter");
+    native::WGPUBool::from(adapter.core.has_feature(map_feature(feature)))
+}
+
 /// Requests a device from an adapter.
 ///
 /// # Safety
@@ -373,9 +413,13 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
         .as_ref()
         .and_then(|descriptor| descriptor.requiredLimits.as_ref())
         .map(map_limits);
+    let required_features = descriptor
+        .as_ref()
+        .map(|descriptor| required_features_from_descriptor(descriptor))
+        .unwrap_or_default();
     let result = adapter
         .core
-        .create_device(required_limits.as_ref())
+        .create_device(required_limits.as_ref(), &required_features)
         .map(|device| {
             Arc::new(WGPUDeviceImpl {
                 core: Arc::new(device),
@@ -433,6 +477,41 @@ pub unsafe extern "C" fn wgpuDeviceGetLimits(
     native::WGPUStatus_Success
 }
 
+/// Gets the resolved features for a device.
+///
+/// The returned `features` array is allocated by yawgpu and must be released
+/// with `wgpuSupportedFeaturesFreeMembers`.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `features` must
+/// point to writable `WGPUSupportedFeatures` storage.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceGetFeatures(
+    device: native::WGPUDevice,
+    features: *mut native::WGPUSupportedFeatures,
+) {
+    let device = borrow_handle(device, "WGPUDevice");
+    let features = features
+        .as_mut()
+        .expect("WGPUSupportedFeatures must not be null");
+    *features = map_features_to_native(&device.core.features());
+}
+
+/// Returns whether the device has `feature` enabled.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceHasFeature(
+    device: native::WGPUDevice,
+    feature: native::WGPUFeatureName,
+) -> native::WGPUBool {
+    let device = borrow_handle(device, "WGPUDevice");
+    native::WGPUBool::from(device.core.has_feature(map_feature(feature)))
+}
+
 /// Gets the default queue for a device.
 ///
 /// # Safety
@@ -465,6 +544,22 @@ pub unsafe extern "C" fn wgpuQueueRelease(queue: native::WGPUQueue) {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQueueAddRef(queue: native::WGPUQueue) {
     add_ref_handle(queue, "WGPUQueue");
+}
+
+/// Frees a feature array returned by `wgpuAdapterGetFeatures` or
+/// `wgpuDeviceGetFeatures`.
+///
+/// # Safety
+///
+/// `supported_features.features`, when non-null, must be a pointer previously
+/// returned by yawgpu from `wgpuAdapterGetFeatures` or
+/// `wgpuDeviceGetFeatures`, paired with the same `featureCount`, and must not
+/// be freed more than once.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuSupportedFeaturesFreeMembers(
+    supported_features: native::WGPUSupportedFeatures,
+) {
+    free_supported_features(supported_features);
 }
 
 /// Processes callbacks whose mode allows process-events delivery.
@@ -538,6 +633,22 @@ unsafe fn instance_has_timed_wait_any(descriptor: *const native::WGPUInstanceDes
         })
         .expect("WGPUInstanceDescriptor requiredFeatures must not be null");
     features.contains(&native::WGPUInstanceFeatureName_TimedWaitAny)
+}
+
+unsafe fn required_features_from_descriptor(
+    descriptor: &native::WGPUDeviceDescriptor,
+) -> Vec<core::Feature> {
+    if descriptor.requiredFeatureCount == 0 {
+        return Vec::new();
+    }
+    let features = descriptor
+        .requiredFeatures
+        .as_ref()
+        .map(|_| {
+            std::slice::from_raw_parts(descriptor.requiredFeatures, descriptor.requiredFeatureCount)
+        })
+        .expect("WGPUDeviceDescriptor requiredFeatures must not be null");
+    features.iter().copied().map(map_feature).collect()
 }
 
 /// Installs a Rust-side uncaptured-error callback for test harnesses.

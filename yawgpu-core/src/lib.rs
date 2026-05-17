@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -42,11 +42,19 @@ impl Instance {
 
     #[must_use]
     pub fn enumerate_adapters(&self) -> Vec<Adapter> {
+        self.enumerate_adapters_with_feature_level(FeatureLevel::Core)
+    }
+
+    #[must_use]
+    pub fn enumerate_adapters_with_feature_level(
+        &self,
+        feature_level: FeatureLevel,
+    ) -> Vec<Adapter> {
         self.inner
             .hal
             .enumerate_adapters()
             .into_iter()
-            .map(Adapter::from_hal)
+            .map(|hal| Adapter::from_hal_with_feature_level(hal, feature_level))
             .collect()
     }
 
@@ -64,13 +72,19 @@ pub struct Adapter {
 #[derive(Debug)]
 struct AdapterInner {
     hal: HalAdapter,
+    feature_level: FeatureLevel,
 }
 
 impl Adapter {
     #[must_use]
     pub fn from_hal(hal: HalAdapter) -> Self {
+        Self::from_hal_with_feature_level(hal, FeatureLevel::Core)
+    }
+
+    #[must_use]
+    pub fn from_hal_with_feature_level(hal: HalAdapter, feature_level: FeatureLevel) -> Self {
         Self {
-            inner: Arc::new(AdapterInner { hal }),
+            inner: Arc::new(AdapterInner { hal, feature_level }),
         }
     }
 
@@ -79,13 +93,54 @@ impl Adapter {
         Limits::DEFAULT
     }
 
-    pub fn create_device(&self, required_limits: Option<&Limits>) -> Result<Device, Error> {
+    #[must_use]
+    pub fn feature_level(&self) -> FeatureLevel {
+        self.inner.feature_level
+    }
+
+    #[must_use]
+    pub fn features(&self) -> FeatureSet {
+        supported_features()
+    }
+
+    #[must_use]
+    pub fn has_feature(&self, feature: Feature) -> bool {
+        self.features().contains(&feature)
+    }
+
+    pub fn create_device(
+        &self,
+        required_limits: Option<&Limits>,
+        required_features: &[Feature],
+    ) -> Result<Device, Error> {
         let limits = self
             .limits()
             .validate_required_limits(required_limits)
             .map_err(Error::Validation)?;
+        let features = self.resolve_features(required_features)?;
         let hal = self.inner.hal.create_device()?;
-        Ok(Device::from_hal(hal, limits))
+        Ok(Device::from_hal(hal, limits, features))
+    }
+
+    fn resolve_features(&self, required_features: &[Feature]) -> Result<FeatureSet, Error> {
+        let supported = self.features();
+        let mut resolved = FeatureSet::new();
+
+        if self.feature_level() == FeatureLevel::Core {
+            resolved.insert(Feature::CoreFeaturesAndLimits);
+        }
+
+        for feature in required_features {
+            if !supported.contains(feature) {
+                return Err(Error::Validation(format!(
+                    "required feature {feature:?} is not supported"
+                )));
+            }
+            resolved.insert(*feature);
+        }
+
+        apply_feature_implications(&mut resolved);
+        Ok(resolved)
     }
 }
 
@@ -100,11 +155,12 @@ struct DeviceInner {
     queue: Queue,
     error_sink: Mutex<ErrorSink>,
     limits: Limits,
+    features: FeatureSet,
 }
 
 impl Device {
     #[must_use]
-    pub fn from_hal(hal: HalDevice, limits: Limits) -> Self {
+    pub fn from_hal(hal: HalDevice, limits: Limits, features: FeatureSet) -> Self {
         let queue = Queue::from_hal(hal.queue());
         Self {
             inner: Arc::new(DeviceInner {
@@ -112,6 +168,7 @@ impl Device {
                 queue,
                 error_sink: Mutex::new(ErrorSink::default()),
                 limits,
+                features,
             }),
         }
     }
@@ -129,6 +186,16 @@ impl Device {
     #[must_use]
     pub fn limits(&self) -> Limits {
         self.inner.limits
+    }
+
+    #[must_use]
+    pub fn features(&self) -> FeatureSet {
+        self.inner.features.clone()
+    }
+
+    #[must_use]
+    pub fn has_feature(&self, feature: Feature) -> bool {
+        self.inner.features.contains(&feature)
     }
 
     pub fn set_uncaptured_error_callback<F>(&self, callback: Option<F>)
@@ -176,6 +243,46 @@ impl Device {
         if let Some(callback) = callback {
             callback(error);
         }
+    }
+}
+
+pub type FeatureSet = BTreeSet<Feature>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FeatureLevel {
+    Core,
+    Compatibility,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum Feature {
+    CoreFeaturesAndLimits,
+    Rg11b10UfloatRenderable,
+    TextureFormatsTier1,
+    TextureFormatsTier2,
+    Other(u32),
+}
+
+#[must_use]
+pub fn supported_features() -> FeatureSet {
+    [
+        Feature::CoreFeaturesAndLimits,
+        Feature::Rg11b10UfloatRenderable,
+        Feature::TextureFormatsTier1,
+        Feature::TextureFormatsTier2,
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn apply_feature_implications(features: &mut FeatureSet) {
+    if features.contains(&Feature::TextureFormatsTier2) {
+        features.insert(Feature::TextureFormatsTier1);
+    }
+    if features.contains(&Feature::TextureFormatsTier1) {
+        features.insert(Feature::Rg11b10UfloatRenderable);
     }
 }
 
@@ -590,7 +697,7 @@ mod tests {
         assert_eq!(adapters.len(), 1);
 
         let device = adapters[0]
-            .create_device(None)
+            .create_device(None, &[])
             .expect("Noop device should be created");
         assert_eq!(device.allocation_count(), 0);
 
@@ -606,7 +713,7 @@ mod tests {
             .next()
             .expect("Noop adapter should exist");
         let device = adapter
-            .create_device(None)
+            .create_device(None, &[])
             .expect("Noop device should be created");
         let uncaptured_count = Arc::new(AtomicUsize::new(0));
         let callback_count = uncaptured_count.clone();
@@ -634,7 +741,7 @@ mod tests {
             .next()
             .expect("Noop adapter should exist");
         let device = adapter
-            .create_device(None)
+            .create_device(None, &[])
             .expect("Noop device should be created");
         let uncaptured_count = Arc::new(AtomicUsize::new(0));
         let callback_count = uncaptured_count.clone();
