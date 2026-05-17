@@ -28,7 +28,25 @@ Add `naga` as a workspace git+rev dependency (pin in
 trivial invalid one. Cargo.lock records the SHA. **De-risks the
 dependency before P4.1 builds on it.**
 
-## P4.1 — ShaderModule  *(NEXT)*
+## P4.1a — ShaderModule create  *(☑ DONE)*
+
+Done: `shader_naga` returns `{module,info}`; core `ShaderModule`/
+`ShaderModuleSource` + `create_shader_module` (WGSL via naga, SPIR-V
+opaque words, `validate_wgsl_module_limits` = S4 duplicate `@id` +
+S3 binding≥1000), error-module + stored diagnostic. conv chain-walk
+(S1 no-source, S2 duplicate-source, SPIRV null-guard). FFI
+`WGPUShaderModuleImpl` + create/Release/AddRef. S1–S7,S11 ported in
+`yawgpu/tests/shader_module_validation.rs` (6, 0 ignored — pinned naga
+enforces S4/S6/S7/S11). Gate green (24 binaries). Committed
+`phase-4: P4.1a`.
+
+## P4.1b — ShaderModule GetCompilationInfo  *(NEXT)*
+
+`wgpuShaderModuleGetCompilationInfo` (S9) via the future/callback
+machinery, replaying the stored diagnostic (≥1 Error for an error
+module; empty/Info for a valid one).
+
+## P4.1 — ShaderModule  *(superseded by P4.1a/P4.1b)*
 
 `wgpuDeviceCreateShaderModule` (WGSL via naga, SPIR-V accept; S1–S5,
 S6/S7/S11 rejected-direction divergence), `wgpuShaderModuleGet
