@@ -182,6 +182,169 @@ pub unsafe fn map_shader_module_descriptor(
     })
 }
 
+/// Converts a bind group layout descriptor to the core representation.
+///
+/// # Safety
+///
+/// `descriptor.entries`, when non-null and `entryCount > 0`, must point to
+/// `entryCount` valid `WGPUBindGroupLayoutEntry` values.
+#[must_use]
+pub unsafe fn map_bind_group_layout_descriptor(
+    descriptor: &native::WGPUBindGroupLayoutDescriptor,
+) -> core::BindGroupLayoutDescriptor {
+    if descriptor.entryCount > 0 && descriptor.entries.is_null() {
+        return core::BindGroupLayoutDescriptor {
+            entries: Vec::new(),
+            error: Some("bind group layout entries must not be null".to_owned()),
+        };
+    }
+
+    let mut error = None;
+    let entries = if descriptor.entryCount == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(descriptor.entries, descriptor.entryCount)
+            .iter()
+            .map(|entry| map_bind_group_layout_entry(entry, &mut error))
+            .collect()
+    };
+
+    core::BindGroupLayoutDescriptor { entries, error }
+}
+
+fn map_bind_group_layout_entry(
+    entry: &native::WGPUBindGroupLayoutEntry,
+    error: &mut Option<String>,
+) -> core::BindGroupLayoutEntry {
+    let mut present_count = 0;
+    let mut kind = None;
+
+    if entry.buffer.type_ != native::WGPUBufferBindingType_BindingNotUsed {
+        present_count += 1;
+        kind = map_buffer_binding_layout(entry.buffer, error);
+    }
+    if entry.sampler.type_ != native::WGPUSamplerBindingType_BindingNotUsed {
+        present_count += 1;
+        kind = map_sampler_binding_layout(entry.sampler, error);
+    }
+    if entry.texture.sampleType != native::WGPUTextureSampleType_BindingNotUsed {
+        present_count += 1;
+        kind = map_texture_binding_layout(entry.texture, error);
+    }
+    if entry.storageTexture.access != native::WGPUStorageTextureAccess_BindingNotUsed {
+        present_count += 1;
+        kind = map_storage_texture_binding_layout(entry.storageTexture, error);
+    }
+
+    if present_count != 1 && error.is_none() {
+        *error = Some("bind group layout entry must set exactly one binding layout".to_owned());
+        kind = None;
+    }
+
+    core::BindGroupLayoutEntry {
+        binding: entry.binding,
+        visibility: entry.visibility,
+        binding_array_size: entry.bindingArraySize,
+        kind,
+    }
+}
+
+fn map_buffer_binding_layout(
+    layout: native::WGPUBufferBindingLayout,
+    error: &mut Option<String>,
+) -> Option<core::BindingLayoutKind> {
+    let ty = match layout.type_ {
+        native::WGPUBufferBindingType_Undefined | native::WGPUBufferBindingType_Uniform => {
+            core::BufferBindingType::Uniform
+        }
+        native::WGPUBufferBindingType_Storage => core::BufferBindingType::Storage,
+        native::WGPUBufferBindingType_ReadOnlyStorage => core::BufferBindingType::ReadOnlyStorage,
+        _ => {
+            set_first_error(error, "invalid buffer binding type");
+            return None;
+        }
+    };
+    Some(core::BindingLayoutKind::Buffer {
+        ty,
+        has_dynamic_offset: layout.hasDynamicOffset != 0,
+        min_binding_size: layout.minBindingSize,
+    })
+}
+
+fn map_sampler_binding_layout(
+    layout: native::WGPUSamplerBindingLayout,
+    error: &mut Option<String>,
+) -> Option<core::BindingLayoutKind> {
+    let ty = match layout.type_ {
+        native::WGPUSamplerBindingType_Undefined | native::WGPUSamplerBindingType_Filtering => {
+            core::SamplerBindingType::Filtering
+        }
+        native::WGPUSamplerBindingType_NonFiltering => core::SamplerBindingType::NonFiltering,
+        native::WGPUSamplerBindingType_Comparison => core::SamplerBindingType::Comparison,
+        _ => {
+            set_first_error(error, "invalid sampler binding type");
+            return None;
+        }
+    };
+    Some(core::BindingLayoutKind::Sampler { ty })
+}
+
+fn map_texture_binding_layout(
+    layout: native::WGPUTextureBindingLayout,
+    error: &mut Option<String>,
+) -> Option<core::BindingLayoutKind> {
+    let sample_type = match layout.sampleType {
+        native::WGPUTextureSampleType_Undefined | native::WGPUTextureSampleType_Float => {
+            core::TextureSampleType::Float
+        }
+        native::WGPUTextureSampleType_UnfilterableFloat => {
+            core::TextureSampleType::UnfilterableFloat
+        }
+        native::WGPUTextureSampleType_Depth => core::TextureSampleType::Depth,
+        native::WGPUTextureSampleType_Sint => core::TextureSampleType::Sint,
+        native::WGPUTextureSampleType_Uint => core::TextureSampleType::Uint,
+        _ => {
+            set_first_error(error, "invalid texture sample type");
+            return None;
+        }
+    };
+    Some(core::BindingLayoutKind::Texture {
+        sample_type,
+        view_dimension: map_texture_view_dimension(layout.viewDimension)
+            .unwrap_or(core::TextureViewDimension::D2),
+        multisampled: layout.multisampled != 0,
+    })
+}
+
+fn map_storage_texture_binding_layout(
+    layout: native::WGPUStorageTextureBindingLayout,
+    error: &mut Option<String>,
+) -> Option<core::BindingLayoutKind> {
+    let access = match layout.access {
+        native::WGPUStorageTextureAccess_Undefined | native::WGPUStorageTextureAccess_WriteOnly => {
+            core::StorageTextureAccess::WriteOnly
+        }
+        native::WGPUStorageTextureAccess_ReadOnly => core::StorageTextureAccess::ReadOnly,
+        native::WGPUStorageTextureAccess_ReadWrite => core::StorageTextureAccess::ReadWrite,
+        _ => {
+            set_first_error(error, "invalid storage texture access");
+            return None;
+        }
+    };
+    Some(core::BindingLayoutKind::StorageTexture {
+        access,
+        format: map_texture_format(layout.format),
+        view_dimension: map_texture_view_dimension(layout.viewDimension)
+            .unwrap_or(core::TextureViewDimension::D2),
+    })
+}
+
+fn set_first_error(error: &mut Option<String>, message: &str) {
+    if error.is_none() {
+        *error = Some(message.to_owned());
+    }
+}
+
 #[must_use]
 pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
     match value {
