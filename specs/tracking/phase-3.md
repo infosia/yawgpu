@@ -1,6 +1,8 @@
 # Phase 3 — Texture / TextureView / Sampler
 
-Status: **in progress** (P3.1a active). Rules: `../blocks/20-texture-
+Status: **COMPLETE** (P3.1a–P3.4 done; Phase 3 Review CLOSED — see
+`phase-3-review.md`). Commits `phase-3: P3.1a`→`phase-3: phase review`.
+Rules: `../blocks/20-texture-
 sampler.md`. Roles/loop: `../reference/workflow.md`. Gate (permanent):
 `cargo test --workspace` + `cargo clippy --workspace --all-targets --
 -D warnings` green on Noop. **Phase ends with the mandatory Phase Review**

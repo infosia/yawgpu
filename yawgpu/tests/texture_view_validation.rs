@@ -123,16 +123,26 @@ fn view_dimension_matrix_is_validated() {
     }
 }
 
+// Dawn-faithful: a view format is compatible iff it equals the texture's
+// format OR is explicitly listed in the texture's `viewFormats`. There is
+// NO implicit sRGB-counterpart allowance (Dawn `Texture.cpp`
+// `ValidateCanViewTextureAs`).
 #[test]
 fn view_format_compatibility_allows_same_srgb_pair_and_view_formats_only() {
     let test = ValidationTest::new();
     unsafe {
+        // Texture with NO viewFormats: only the identical format is allowed.
         let texture = create_texture(test.device(), texture_descriptor_2d(1, 1));
 
+        // Same format => ok.
         let view = create_view_with_format(texture, native::WGPUTextureFormat_RGBA8Unorm);
         yawgpu::wgpuTextureViewRelease(view);
-        let view = create_view_with_format(texture, native::WGPUTextureFormat_RGBA8UnormSrgb);
-        yawgpu::wgpuTextureViewRelease(view);
+        // sRGB counterpart, NOT listed in viewFormats => device error.
+        assert_view_error(
+            texture,
+            view_descriptor_with_format(native::WGPUTextureFormat_RGBA8UnormSrgb),
+        );
+        // Unrelated / cross-category formats, not listed => device error.
         assert_view_error(
             texture,
             view_descriptor_with_format(native::WGPUTextureFormat_R8Unorm),
@@ -143,6 +153,27 @@ fn view_format_compatibility_allows_same_srgb_pair_and_view_formats_only() {
         );
         yawgpu::wgpuTextureRelease(texture);
 
+        // sRGB counterpart explicitly listed in viewFormats => ok; an
+        // unlisted cross-category format is still rejected.
+        let srgb_view_formats = [native::WGPUTextureFormat_RGBA8UnormSrgb];
+        let texture = create_texture(
+            test.device(),
+            native::WGPUTextureDescriptor {
+                viewFormatCount: srgb_view_formats.len(),
+                viewFormats: srgb_view_formats.as_ptr(),
+                ..texture_descriptor_2d(1, 1)
+            },
+        );
+        let view = create_view_with_format(texture, native::WGPUTextureFormat_RGBA8UnormSrgb);
+        yawgpu::wgpuTextureViewRelease(view);
+        assert_view_error(
+            texture,
+            view_descriptor_with_format(native::WGPUTextureFormat_R8Unorm),
+        );
+        yawgpu::wgpuTextureRelease(texture);
+
+        // Unrelated format listed in viewFormats => that listed format is
+        // allowed; an unlisted one is not.
         let view_formats = [native::WGPUTextureFormat_R8Unorm];
         let texture = create_texture(
             test.device(),
@@ -154,6 +185,10 @@ fn view_format_compatibility_allows_same_srgb_pair_and_view_formats_only() {
         );
         let view = create_view_with_format(texture, native::WGPUTextureFormat_R8Unorm);
         yawgpu::wgpuTextureViewRelease(view);
+        assert_view_error(
+            texture,
+            view_descriptor_with_format(native::WGPUTextureFormat_RG8Unorm),
+        );
         yawgpu::wgpuTextureRelease(texture);
     }
 }

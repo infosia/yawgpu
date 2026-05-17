@@ -51,16 +51,20 @@ pub struct WGPUQueueImpl {
 pub struct WGPUTextureImpl {
     core: Arc<core::Texture>,
     device: Arc<core::Device>,
+    instance: Arc<WGPUInstanceImpl>,
 }
 
 pub struct WGPUTextureViewImpl {
     _core: Arc<core::TextureView>,
     _texture: Arc<core::Texture>,
+    _device: Arc<core::Device>,
+    _instance: Arc<WGPUInstanceImpl>,
 }
 
 pub struct WGPUSamplerImpl {
     _core: Arc<core::Sampler>,
     _device: Arc<core::Device>,
+    _instance: Arc<WGPUInstanceImpl>,
 }
 
 macro_rules! declare_empty_impl_handles {
@@ -760,6 +764,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateTexture(
     arc_to_handle(Arc::new(WGPUTextureImpl {
         core: Arc::new(texture),
         device: Arc::clone(&device.core),
+        instance: Arc::clone(&device.instance),
     }))
 }
 
@@ -781,6 +786,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateSampler(
     arc_to_handle(Arc::new(WGPUSamplerImpl {
         _core: Arc::new(sampler),
         _device: Arc::clone(&device.core),
+        _instance: Arc::clone(&device.instance),
     }))
 }
 
@@ -1043,6 +1049,8 @@ pub unsafe extern "C" fn wgpuTextureCreateView(
     arc_to_handle(Arc::new(WGPUTextureViewImpl {
         _core: Arc::new(view),
         _texture: Arc::clone(&texture.core),
+        _device: Arc::clone(&texture.device),
+        _instance: Arc::clone(&texture.instance),
     }))
 }
 

@@ -29,4 +29,23 @@ fixed in the same pass. Re-run full gate after the fixes.
 
 ## Resolution log
 
-- _filled as fixes land_
+**CLOSED** — all 4 findings resolved by codex, reviewed by Claude, gate
+green (23 test binaries, `clippy --all-targets -D warnings` clean).
+
+- **V1** FIXED: `srgb_pair()` removed; `is_view_format_compatible` =
+  `view==texture.format || view_formats.contains(view)` only.
+  `texture_view_validation` rewritten Dawn-faithful (sRGB w/o
+  `viewFormats` ⇒ error; sRGB listed ⇒ ok; unrelated listed ⇒ ok).
+- **V2** FIXED: `validate_texture_view_descriptor` takes a
+  `ResolvedTextureViewDescriptor` (destructured non-`Option`); dead
+  `unwrap_or` defaults removed.
+- **V3** FIXED: `WGPUTextureImpl` +instance; `WGPUTextureViewImpl`
+  +_device/_instance; `WGPUSamplerImpl` +_instance — owner set
+  consistent with `WGPUBufferImpl`.
+- **V4** FIXED: `RGBA8_SNORM`/`RGBA16_SNORM` `storage_capable=false`
+  (Dawn `Format.cpp`); `populated_format_caps_match_dawn_sanity_checks`
+  now asserts the accurate value. Broader `*16/*32` feature-gated caps
+  refinement remains the tracked note → P4/P5.
+
+Gate: no open CRITICAL/MAJOR. Phase 3 Review **CLOSED**. Commit:
+`phase-3: phase review — 4 findings (1 MAJOR / 3 MINOR) fixed`.

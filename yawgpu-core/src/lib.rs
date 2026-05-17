@@ -553,7 +553,8 @@ impl TextureFormat {
             Self::BGRA8_UNORM | Self::BGRA8_UNORM_SRGB => {
                 FormatCaps::color(4).renderable().multisample()
             }
-            Self::RGBA8_SNORM => FormatCaps::color(4).storage(),
+            // snorm formats are NOT storage-capable (Dawn `Format.cpp`).
+            Self::RGBA8_SNORM => FormatCaps::color(4),
             Self::RGBA8_UINT | Self::RGBA8_SINT => {
                 FormatCaps::color(4).renderable().multisample().storage()
             }
@@ -561,9 +562,11 @@ impl TextureFormat {
             Self::RG32_FLOAT | Self::RG32_UINT | Self::RG32_SINT => {
                 FormatCaps::color(8).renderable().storage()
             }
-            Self::RGBA16_UNORM | Self::RGBA16_SNORM => {
-                FormatCaps::color(8).renderable().multisample().storage()
-            }
+            Self::RGBA16_UNORM => FormatCaps::color(8).renderable().multisample().storage(),
+            // snorm formats are NOT storage-capable (Dawn `Format.cpp`); the
+            // remaining `*16` renderable/multisample approximation stays a
+            // tracked note (block 20 → P4/P5).
+            Self::RGBA16_SNORM => FormatCaps::color(8).renderable().multisample(),
             Self::RGBA16_UINT | Self::RGBA16_SINT | Self::RGBA16_FLOAT => {
                 FormatCaps::color(8).renderable().multisample().storage()
             }
@@ -587,21 +590,6 @@ impl TextureFormat {
             _ => FormatCaps::color(4).renderable().multisample(),
         };
         Some(caps)
-    }
-
-    #[must_use]
-    pub fn srgb_pair(self) -> Option<Self> {
-        match self.0 {
-            Self::RGBA8_UNORM => Some(Self(Self::RGBA8_UNORM_SRGB)),
-            Self::RGBA8_UNORM_SRGB => Some(Self(Self::RGBA8_UNORM)),
-            Self::BGRA8_UNORM => Some(Self(Self::BGRA8_UNORM_SRGB)),
-            Self::BGRA8_UNORM_SRGB => Some(Self(Self::BGRA8_UNORM)),
-            Self::BC1_RGBA_UNORM => Some(Self(Self::BC1_RGBA_UNORM_SRGB)),
-            Self::BC1_RGBA_UNORM_SRGB => Some(Self(Self::BC1_RGBA_UNORM)),
-            Self::BC7_RGBA_UNORM => Some(Self(Self::BC7_RGBA_UNORM_SRGB)),
-            Self::BC7_RGBA_UNORM_SRGB => Some(Self(Self::BC7_RGBA_UNORM)),
-            _ => None,
-        }
     }
 }
 
@@ -841,11 +829,13 @@ impl Texture {
         &self.inner.view_formats
     }
 
+    /// A view format is compatible only when it equals the texture's format
+    /// or is explicitly listed in the texture's `viewFormats`. There is no
+    /// implicit sRGB-counterpart allowance — that mirrors Dawn
+    /// `Texture.cpp` `ValidateCanViewTextureAs`.
     #[must_use]
     pub fn is_view_format_compatible(&self, view_format: TextureFormat) -> bool {
-        view_format == self.format()
-            || self.view_formats().contains(&view_format)
-            || self.format().srgb_pair() == Some(view_format)
+        view_format == self.format() || self.view_formats().contains(&view_format)
     }
 
     #[must_use]
@@ -877,7 +867,10 @@ impl Texture {
         (TextureView::new(resolved, is_error), error)
     }
 
-    fn resolve_view_descriptor(&self, descriptor: TextureViewDescriptor) -> TextureViewDescriptor {
+    fn resolve_view_descriptor(
+        &self,
+        descriptor: TextureViewDescriptor,
+    ) -> ResolvedTextureViewDescriptor {
         let base_mip_level = descriptor.base_mip_level;
         let base_array_layer = descriptor.base_array_layer;
         let mip_level_count = descriptor
@@ -903,14 +896,14 @@ impl Texture {
                 TextureDimension::D2 => TextureViewDimension::D2Array,
             });
 
-        TextureViewDescriptor {
-            format: Some(descriptor.format.unwrap_or_else(|| self.format())),
-            dimension: Some(dimension),
+        ResolvedTextureViewDescriptor {
+            format: descriptor.format.unwrap_or_else(|| self.format()),
+            dimension,
             base_mip_level,
-            mip_level_count: Some(mip_level_count),
+            mip_level_count,
             base_array_layer,
-            array_layer_count: Some(array_layer_count),
-            aspect: Some(descriptor.aspect.unwrap_or(TextureAspect::All)),
+            array_layer_count,
+            aspect: descriptor.aspect.unwrap_or(TextureAspect::All),
         }
     }
 
@@ -959,6 +952,21 @@ pub struct TextureViewDescriptor {
     pub aspect: Option<TextureAspect>,
 }
 
+/// A `TextureViewDescriptor` with every defaulted/inferred field already
+/// filled in by `Texture::resolve_view_descriptor`. Validation and view
+/// construction take this so an unresolved descriptor can't be validated
+/// or stored by mistake.
+#[derive(Debug, Clone, Copy)]
+struct ResolvedTextureViewDescriptor {
+    format: TextureFormat,
+    dimension: TextureViewDimension,
+    base_mip_level: u32,
+    mip_level_count: u32,
+    base_array_layer: u32,
+    array_layer_count: u32,
+    aspect: TextureAspect,
+}
+
 #[derive(Debug, Clone)]
 pub struct TextureView {
     inner: Arc<TextureViewInner>,
@@ -977,16 +985,16 @@ struct TextureViewInner {
 }
 
 impl TextureView {
-    fn new(descriptor: TextureViewDescriptor, is_error: bool) -> Self {
+    fn new(descriptor: ResolvedTextureViewDescriptor, is_error: bool) -> Self {
         Self {
             inner: Arc::new(TextureViewInner {
-                format: descriptor.format.unwrap_or(TextureFormat::from_raw(0)),
-                dimension: descriptor.dimension.unwrap_or(TextureViewDimension::D2),
+                format: descriptor.format,
+                dimension: descriptor.dimension,
                 base_mip_level: descriptor.base_mip_level,
-                mip_level_count: descriptor.mip_level_count.unwrap_or(0),
+                mip_level_count: descriptor.mip_level_count,
                 base_array_layer: descriptor.base_array_layer,
-                array_layer_count: descriptor.array_layer_count.unwrap_or(0),
-                aspect: descriptor.aspect.unwrap_or(TextureAspect::All),
+                array_layer_count: descriptor.array_layer_count,
+                aspect: descriptor.aspect,
                 is_error,
             }),
         }
@@ -1623,13 +1631,16 @@ fn validate_texture_descriptor(
 
 fn validate_texture_view_descriptor(
     texture: &Texture,
-    descriptor: &TextureViewDescriptor,
+    descriptor: &ResolvedTextureViewDescriptor,
 ) -> Option<&'static str> {
-    let format = descriptor.format.unwrap_or_else(|| texture.format());
-    let dimension = descriptor.dimension.unwrap_or(TextureViewDimension::D2);
-    let mip_level_count = descriptor.mip_level_count.unwrap_or(0);
-    let array_layer_count = descriptor.array_layer_count.unwrap_or(0);
-    let aspect = descriptor.aspect.unwrap_or(TextureAspect::All);
+    let ResolvedTextureViewDescriptor {
+        format,
+        dimension,
+        mip_level_count,
+        array_layer_count,
+        aspect,
+        ..
+    } = *descriptor;
 
     if mip_level_count == 0 {
         return Some("texture view mipLevelCount must be greater than zero");

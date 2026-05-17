@@ -20,12 +20,12 @@ Status legend: ☐ not started · ◐ partial · ☑ ported & green
 | `QueueWriteBufferValidationTests` | 2 | `queue_buffer_validation.rs` | ☑ (B42–B49) |
 | `QueueOnSubmittedWorkDoneValidationTests` | 2 | `queue_buffer_validation.rs` | ☑ (B50–B52) |
 | `WriteBufferTests` | 2→6 | `write_buffer_validation.rs` | ☐ Defer→P6 (B53–B57, CommandEncoder.WriteBuffer) |
-| `TextureValidationTests` | 3 | `texture_validation.rs` | ☐ |
-| `TextureViewValidationTests` | 3 | `texture_view_validation.rs` | ☐ |
-| `TextureSubresourceTests` | 3 | `texture_subresource_validation.rs` | ☐ |
-| `SamplerValidationTests` | 3 | `sampler_validation.rs` | ☐ |
-| `QueueWriteTextureValidationTests` | 3 | `queue_write_texture_validation.rs` | ☐ |
-| `StorageTextureValidationTests` | 3 | `storage_texture_validation.rs` | ☐ |
+| `TextureValidationTests` | 3 | `texture_creation_validation.rs` + `texture_format_validation.rs` | ☑ (T1–T25,T57–T65) |
+| `TextureViewValidationTests` | 3 | `texture_view_validation.rs` | ☑ (T26–T33) |
+| `TextureSubresourceTests` | 3→6 | `texture_subresource_validation.rs` | ☐ Defer→P6 (T54–T56, needs CommandEncoder/RenderPass) |
+| `SamplerValidationTests` | 3 | `sampler_validation.rs` | ☑ (T34–T39) |
+| `QueueWriteTextureValidationTests` | 3 | `queue_write_texture_validation.rs` | ☑ (T40–T51) |
+| `StorageTextureValidationTests` | 3→5 | `texture_format_validation.rs` | ◐ (T52/T53 creation rules; shader-driven storage access→P5) |
 | `ShaderModuleValidationTests` | 4 | `shader_module_validation.rs` | ☐ |
 | `WGSLFeatureValidationTests` | 4 | `wgsl_feature_validation.rs` | ☐ |
 | `BindGroupValidationTests` | 4 | `bind_group_validation.rs` | ☐ |
