@@ -1,6 +1,8 @@
 # Phase 0 — Scaffold + FFI + test harness
 
-Status: **planned, not started**
+Status: **COMPLETE** (T0.1–T0.6 done, all exit criteria met). Implemented by
+codex, reviewed & committed by Claude. Commits: baseline `d6b1dd2` →
+`phase-0: T0.6`.
 
 Phase 0 is split into 6 ordered task handoffs (T0.1–T0.6) for the coding
 agent. Each is self-contained; Claude reviews and commits after each.
@@ -177,6 +179,15 @@ Acceptance:
       test).
 
 ---
+
+> Review note (from T0.6): two intentional deviations recorded for Phase 1
+> awareness — (a) `yawgpu` crate-type is now `["cdylib","staticlib","rlib"]`
+> (the `rlib` was needed so `yawgpu-test` and the integration tests can link
+> `yawgpu` as a Rust library; the C artifacts are still produced).
+> (b) `yawgpu` exposes `#[doc(hidden)] testing_set_uncaptured_error_callback`
+> / `testing_dispatch_device_error` as a test seam for the harness. Consider
+> gating these behind a `testing` Cargo feature in a later cleanup so they
+> are not part of the shipped library surface.
 
 ## Phase 0 exit criteria
 

@@ -14,6 +14,12 @@ pub fn arc_to_handle<T>(value: Arc<T>) -> *const T {
     Arc::into_raw(value)
 }
 
+/// Drops one owned C reference for a yawgpu handle.
+///
+/// # Safety
+///
+/// `handle` must be a non-null pointer returned by `Arc::into_raw` for `T`.
+/// It must represent one currently owned C reference.
 pub unsafe fn release_handle<T>(handle: *const T, name: &str) {
     let handle = handle
         .as_ref()
@@ -22,6 +28,12 @@ pub unsafe fn release_handle<T>(handle: *const T, name: &str) {
     drop(Arc::from_raw(handle));
 }
 
+/// Clones one C handle reference without consuming the incoming handle.
+///
+/// # Safety
+///
+/// `handle` must be a non-null live pointer returned by `Arc::into_raw` for
+/// `T`.
 pub unsafe fn add_ref_handle<T>(handle: *const T, name: &str) {
     let handle = handle
         .as_ref()
@@ -31,6 +43,12 @@ pub unsafe fn add_ref_handle<T>(handle: *const T, name: &str) {
 }
 
 #[must_use]
+/// Clones a C handle into a Rust `Arc`.
+///
+/// # Safety
+///
+/// `handle` must be a non-null live pointer returned by `Arc::into_raw` for
+/// `T`.
 pub unsafe fn clone_handle<T>(handle: *const T, name: &str) -> Arc<T> {
     let handle = handle
         .as_ref()
@@ -40,6 +58,12 @@ pub unsafe fn clone_handle<T>(handle: *const T, name: &str) -> Arc<T> {
     Arc::from_raw(handle)
 }
 
+/// Borrows a C handle without changing its reference count.
+///
+/// # Safety
+///
+/// `handle` must be a non-null live pointer returned by `Arc::into_raw` for
+/// `T`, and the returned borrow must not outlive the owned C reference.
 pub unsafe fn borrow_handle<'a, T>(handle: *const T, name: &str) -> &'a T {
     handle
         .as_ref()
@@ -55,6 +79,13 @@ pub fn string_view(data: &[u8]) -> native::WGPUStringView {
 }
 
 #[must_use]
+/// Converts a `WGPUStringView` to UTF-8 text.
+///
+/// # Safety
+///
+/// `value.data`, when non-null, must point to a valid byte buffer for
+/// `value.length` bytes, or to a valid NUL-terminated C string when
+/// `value.length == WGPU_STRLEN`.
 pub unsafe fn string_view_to_str<'a>(value: native::WGPUStringView) -> Option<&'a str> {
     if value.data.is_null() {
         return None;
@@ -70,6 +101,11 @@ pub unsafe fn string_view_to_str<'a>(value: native::WGPUStringView) -> Option<&'
 }
 
 #[must_use]
+/// Converts a label string view to an owned string.
+///
+/// # Safety
+///
+/// Same requirements as [`string_view_to_str`].
 pub unsafe fn label_from_string_view(value: native::WGPUStringView) -> Option<String> {
     string_view_to_str(value).map(ToOwned::to_owned)
 }
