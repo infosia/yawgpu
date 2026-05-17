@@ -54,8 +54,12 @@ phases need.
   Dawn-specific compressed sliced3D) are accepted as opaque bits where
   canonical `webgpu.h` defines them but tests don't exercise them; not
   invented beyond the header.
-- writeTexture `bytesPerRow` 256-alignment is the **queue** copy rule
-  (per webgpu.h); the command-encoder copy variants are Defer→P6.
+- `wgpuQueueWriteTexture` `bytesPerRow` only needs to be **≥ the bytes in
+  one row of blocks** (`ceil(width/block_w)·block_size`) when copyHeight>1
+  or copyDepth>1 — it is **NOT** 256-aligned (the 256-byte alignment is a
+  *buffer*-copy rule → P6). Authoritative source is Dawn
+  `QueueWriteTextureValidationTests` (e.g. "bytesPerRow=11 invalid since a
+  row takes 12 bytes"). T45 reflects this.
 - Like buffers: descriptor validation is **first-match-wins** (one device
   error); error-texture/-view/-sampler still reflect descriptor getters
   and allow `Destroy`/`Release` (mirror block 10 B32/B38).
@@ -135,8 +139,9 @@ phases need.
 - **T43** 2D ⇒ extent.depthOrArrayLayers==1. :226. ☐
 - **T44** dataSize ≥ required bytes (bytesPerRow/rowsPerImage/extent/
   format). :170. ☐
-- **T45** bytesPerRow ≥ ceil(width·texel/256)·256 when height>1 or
-  depth>1; 0/UNDEFINED only if height≤1 & depth≤1. :248. ☐
+- **T45** bytesPerRow ≥ `ceil(width/block_w)·block_size` (bytes in one
+  block-row) when copyHeight>1 or copyDepth>1; 0/UNDEFINED only if
+  height≤1 & depth≤1. NOT 256-aligned (queue path). :248. ☐
 - **T46** rowsPerImage ≥ copyHeight when set & depth>1. :296. ☐
 - **T47** destination sampleCount==1. :337. ☐
 - **T48** destination not destroyed. :349. ☐
