@@ -21,6 +21,7 @@ pub struct WGPUDeviceImpl {
 
 pub struct WGPUInstanceImpl {
     core: Arc<core::Instance>,
+    timed_wait_any_enabled: bool,
     pending_callbacks: Mutex<BTreeMap<u64, PendingCallback>>,
 }
 
@@ -58,15 +59,19 @@ declare_empty_impl_handles!(
 );
 
 impl WGPUInstanceImpl {
-    fn new_noop() -> Arc<Self> {
+    fn new_noop(timed_wait_any_enabled: bool) -> Arc<Self> {
         Arc::new(Self {
             core: Arc::new(core::Instance::new_noop()),
+            timed_wait_any_enabled,
             pending_callbacks: Mutex::new(BTreeMap::new()),
         })
     }
 
     fn register_callback(&self, callback: PendingCallback) -> native::WGPUFuture {
-        let future = self.core.future_registry().register();
+        let future = self
+            .core
+            .future_registry()
+            .register(callback.callback_mode());
         self.core.future_registry().complete(future);
         self.pending_callbacks
             .lock()
@@ -75,22 +80,15 @@ impl WGPUInstanceImpl {
         native::WGPUFuture { id: future.get() }
     }
 
-    fn process_callbacks(&self, include_wait_any_only: bool) -> usize {
-        let _ = self.core.future_registry().poll_all();
+    fn process_callbacks(&self) -> usize {
+        let ready = self.core.future_registry().process_events();
         let mut callbacks = self
             .pending_callbacks
             .lock()
             .expect("pending callback lock is not poisoned");
-        let ready = callbacks
-            .iter()
-            .filter_map(|(id, callback)| {
-                (include_wait_any_only || callback.allows_process_events()).then_some(*id)
-            })
-            .collect::<Vec<_>>();
-
         let callbacks_to_fire = ready
             .into_iter()
-            .filter_map(|id| callbacks.remove(&id))
+            .filter_map(|id| callbacks.remove(&id.get()))
             .collect::<Vec<_>>();
         drop(callbacks);
 
@@ -103,21 +101,17 @@ impl WGPUInstanceImpl {
         count
     }
 
-    fn wait_any(&self, future_ids: &[u64]) -> Vec<u64> {
-        let _ = self.core.future_registry().poll_all();
+    fn wait_any(&self, future_ids: &[core::FutureId]) -> core::WaitAnyResult {
+        let result = self.core.future_registry().wait_any(future_ids, true);
 
         let mut callbacks = self
             .pending_callbacks
             .lock()
             .expect("pending callback lock is not poisoned");
-        let completed = callbacks
-            .keys()
-            .copied()
-            .filter(|id| future_ids.contains(id))
-            .collect::<Vec<_>>();
-        let callbacks_to_fire = completed
+        let callbacks_to_fire = result
+            .callbacks_to_fire
             .iter()
-            .filter_map(|id| callbacks.remove(id))
+            .filter_map(|id| callbacks.remove(&id.get()))
             .collect::<Vec<_>>();
         drop(callbacks);
 
@@ -127,7 +121,7 @@ impl WGPUInstanceImpl {
             }
         }
 
-        completed
+        result
     }
 }
 
@@ -180,12 +174,17 @@ enum PendingCallback {
 }
 
 impl PendingCallback {
-    fn allows_process_events(&self) -> bool {
+    fn callback_mode(&self) -> core::FutureCallbackMode {
         let mode = match self {
             Self::RequestAdapter { mode, .. } | Self::RequestDevice { mode, .. } => *mode,
         };
-        mode == native::WGPUCallbackMode_AllowProcessEvents
-            || mode == native::WGPUCallbackMode_AllowSpontaneous
+        match mode {
+            native::WGPUCallbackMode_AllowProcessEvents => {
+                core::FutureCallbackMode::AllowProcessEvents
+            }
+            native::WGPUCallbackMode_AllowSpontaneous => core::FutureCallbackMode::AllowSpontaneous,
+            _ => core::FutureCallbackMode::WaitAnyOnly,
+        }
     }
 
     unsafe fn fire(self) {
@@ -256,9 +255,11 @@ pub mod native {
 /// `descriptor`, when non-null, must point to a valid `WGPUInstanceDescriptor`.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCreateInstance(
-    _descriptor: *const native::WGPUInstanceDescriptor,
+    descriptor: *const native::WGPUInstanceDescriptor,
 ) -> native::WGPUInstance {
-    arc_to_handle(WGPUInstanceImpl::new_noop())
+    arc_to_handle(WGPUInstanceImpl::new_noop(instance_has_timed_wait_any(
+        descriptor,
+    )))
 }
 
 /// Releases one owned reference to an instance handle.
@@ -351,7 +352,11 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
     let result = adapter
         .core
         .create_device()
-        .map(|device| Arc::new(WGPUDeviceImpl { core: Arc::new(device) }))
+        .map(|device| {
+            Arc::new(WGPUDeviceImpl {
+                core: Arc::new(device),
+            })
+        })
         .map_err(|err| err.to_string());
 
     adapter
@@ -427,7 +432,7 @@ pub unsafe extern "C" fn wgpuQueueAddRef(queue: native::WGPUQueue) {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceProcessEvents(instance: native::WGPUInstance) {
     let instance = borrow_handle(instance, "WGPUInstance");
-    instance.process_callbacks(false);
+    instance.process_callbacks();
 }
 
 /// Waits for any listed future and fires callbacks for completed futures.
@@ -442,7 +447,7 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
     instance: native::WGPUInstance,
     future_count: usize,
     futures: *mut native::WGPUFutureWaitInfo,
-    _timeout_ns: u64,
+    timeout_ns: u64,
 ) -> native::WGPUWaitStatus {
     let instance = borrow_handle(instance, "WGPUInstance");
     if future_count > 0 && futures.is_null() {
@@ -451,23 +456,45 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
     if future_count == 0 {
         return native::WGPUWaitStatus_TimedOut;
     }
+    if timeout_ns > 0 && !instance.timed_wait_any_enabled {
+        return native::WGPUWaitStatus_Error;
+    }
 
     let wait_infos = std::slice::from_raw_parts_mut(futures, future_count);
     let future_ids = wait_infos
         .iter()
-        .map(|info| info.future.id)
+        .map(|info| core::FutureId::from_raw(info.future.id))
         .collect::<Vec<_>>();
-    let completed = instance.wait_any(&future_ids);
+    let result = instance.wait_any(&future_ids);
 
     for info in wait_infos {
-        info.completed = u32::from(completed.contains(&info.future.id));
+        let id = core::FutureId::from_raw(info.future.id);
+        info.completed = u32::from(result.completed.contains(&id));
     }
 
-    if completed.is_empty() {
-        native::WGPUWaitStatus_TimedOut
-    } else {
-        native::WGPUWaitStatus_Success
+    match result.status {
+        core::WaitAnyStatus::Success => native::WGPUWaitStatus_Success,
+        core::WaitAnyStatus::TimedOut => native::WGPUWaitStatus_TimedOut,
+        core::WaitAnyStatus::Error => native::WGPUWaitStatus_Error,
+        _ => native::WGPUWaitStatus_Error,
     }
+}
+
+unsafe fn instance_has_timed_wait_any(descriptor: *const native::WGPUInstanceDescriptor) -> bool {
+    let Some(descriptor) = descriptor.as_ref() else {
+        return true;
+    };
+    if descriptor.requiredFeatureCount == 0 {
+        return false;
+    }
+    let features = descriptor
+        .requiredFeatures
+        .as_ref()
+        .map(|_| {
+            std::slice::from_raw_parts(descriptor.requiredFeatures, descriptor.requiredFeatureCount)
+        })
+        .expect("WGPUInstanceDescriptor requiredFeatures must not be null");
+    features.contains(&native::WGPUInstanceFeatureName_TimedWaitAny)
 }
 
 /// Installs a Rust-side uncaptured-error callback for test harnesses.
@@ -556,11 +583,8 @@ mod tests {
                 userdata1: (&mut adapter as *mut native::WGPUAdapter).cast(),
                 userdata2: std::ptr::null_mut(),
             };
-            let future = wgpuInstanceRequestAdapter(
-                instance,
-                std::ptr::null(),
-                adapter_callback_info,
-            );
+            let future =
+                wgpuInstanceRequestAdapter(instance, std::ptr::null(), adapter_callback_info);
             assert_ne!(future.id, 0);
             assert!(adapter.is_null());
 
@@ -575,11 +599,7 @@ mod tests {
                 userdata1: (&mut device as *mut native::WGPUDevice).cast(),
                 userdata2: std::ptr::null_mut(),
             };
-            let future = wgpuAdapterRequestDevice(
-                adapter,
-                std::ptr::null(),
-                device_callback_info,
-            );
+            let future = wgpuAdapterRequestDevice(adapter, std::ptr::null(), device_callback_info);
             assert_ne!(future.id, 0);
             assert!(device.is_null());
 

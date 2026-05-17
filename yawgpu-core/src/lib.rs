@@ -251,6 +251,11 @@ impl FutureId {
     pub fn get(self) -> u64 {
         self.0
     }
+
+    #[must_use]
+    pub fn from_raw(id: u64) -> Self {
+        Self(id)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -261,7 +266,7 @@ pub struct FutureRegistry {
 #[derive(Debug)]
 struct FutureRegistryInner {
     next_id: u64,
-    futures: BTreeMap<FutureId, FutureState>,
+    futures: BTreeMap<FutureId, FutureEntry>,
 }
 
 impl Default for FutureRegistryInner {
@@ -279,6 +284,37 @@ enum FutureState {
     Complete,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FutureCallbackMode {
+    WaitAnyOnly,
+    AllowProcessEvents,
+    AllowSpontaneous,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WaitAnyStatus {
+    Success,
+    TimedOut,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WaitAnyResult {
+    pub status: WaitAnyStatus,
+    pub completed: Vec<FutureId>,
+    pub callbacks_to_fire: Vec<FutureId>,
+}
+
+#[derive(Debug)]
+struct FutureEntry {
+    mode: FutureCallbackMode,
+    state: FutureState,
+    callback_fired: bool,
+}
+
 impl FutureRegistry {
     #[must_use]
     pub fn new() -> Self {
@@ -286,26 +322,89 @@ impl FutureRegistry {
     }
 
     #[must_use]
-    pub fn register(&self) -> FutureId {
+    pub fn register(&self, mode: FutureCallbackMode) -> FutureId {
         let mut inner = self.inner.lock();
         let id = FutureId(inner.next_id);
         inner.next_id = inner.next_id.saturating_add(1);
-        inner.futures.insert(id, FutureState::Pending);
+        inner.futures.insert(
+            id,
+            FutureEntry {
+                mode,
+                state: FutureState::Pending,
+                callback_fired: false,
+            },
+        );
         id
     }
 
     pub fn complete(&self, id: FutureId) {
-        if let Some(state) = self.inner.lock().futures.get_mut(&id) {
-            *state = FutureState::Complete;
+        if let Some(entry) = self.inner.lock().futures.get_mut(&id) {
+            entry.state = FutureState::Complete;
         }
     }
 
     #[must_use]
-    pub fn poll_all(&self) -> Vec<FutureId> {
+    pub fn process_events(&self) -> Vec<FutureId> {
         let mut inner = self.inner.lock();
-        let completed: Vec<_> = inner.futures.keys().copied().collect();
-        inner.futures.clear();
-        completed
+        inner
+            .futures
+            .iter_mut()
+            .filter_map(|(id, entry)| {
+                let can_fire = entry.state == FutureState::Complete
+                    && !entry.callback_fired
+                    && matches!(
+                        entry.mode,
+                        FutureCallbackMode::AllowProcessEvents
+                            | FutureCallbackMode::AllowSpontaneous
+                    );
+                if can_fire {
+                    entry.callback_fired = true;
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn wait_any(&self, ids: &[FutureId], _poll_only: bool) -> WaitAnyResult {
+        if ids.is_empty() {
+            return WaitAnyResult {
+                status: WaitAnyStatus::TimedOut,
+                completed: Vec::new(),
+                callbacks_to_fire: Vec::new(),
+            };
+        }
+
+        let mut inner = self.inner.lock();
+        let mut completed = Vec::new();
+        let mut callbacks_to_fire = Vec::new();
+
+        for id in ids {
+            let Some(entry) = inner.futures.get_mut(id) else {
+                continue;
+            };
+            if entry.state == FutureState::Complete {
+                completed.push(*id);
+                if !entry.callback_fired {
+                    entry.callback_fired = true;
+                    callbacks_to_fire.push(*id);
+                }
+            }
+        }
+
+        let status = if completed.is_empty() {
+            WaitAnyStatus::TimedOut
+        } else {
+            WaitAnyStatus::Success
+        };
+
+        WaitAnyResult {
+            status,
+            completed,
+            callbacks_to_fire,
+        }
     }
 }
 
@@ -314,7 +413,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    use super::{ErrorKind, FutureRegistry, Instance};
+    use super::{ErrorKind, FutureCallbackMode, FutureRegistry, Instance, WaitAnyStatus};
 
     #[test]
     fn creates_noop_device_and_queue() {
@@ -382,13 +481,24 @@ mod tests {
     }
 
     #[test]
-    fn future_registry_completes_synchronously_on_poll() {
+    fn future_registry_process_events_respects_callback_mode() {
         let registry = FutureRegistry::new();
-        let first = registry.register();
-        let second = registry.register();
+        let first = registry.register(FutureCallbackMode::WaitAnyOnly);
+        let second = registry.register(FutureCallbackMode::AllowProcessEvents);
         registry.complete(first);
+        registry.complete(second);
 
-        assert_eq!(registry.poll_all(), vec![first, second]);
-        assert!(registry.poll_all().is_empty());
+        assert_eq!(registry.process_events(), vec![second]);
+        assert!(registry.process_events().is_empty());
+
+        let result = registry.wait_any(&[first, second], true);
+        assert_eq!(result.status, WaitAnyStatus::Success);
+        assert_eq!(result.completed, vec![first, second]);
+        assert_eq!(result.callbacks_to_fire, vec![first]);
+
+        let result = registry.wait_any(&[first, second], true);
+        assert_eq!(result.status, WaitAnyStatus::Success);
+        assert_eq!(result.completed, vec![first, second]);
+        assert!(result.callbacks_to_fire.is_empty());
     }
 }
