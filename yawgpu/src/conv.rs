@@ -142,6 +142,44 @@ pub fn map_feature_level(value: native::WGPUFeatureLevel) -> core::FeatureLevel 
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceLostCallbackInfo {
+    pub mode: native::WGPUCallbackMode,
+    pub callback: native::WGPUDeviceLostCallback,
+    pub userdata1: usize,
+    pub userdata2: usize,
+}
+
+impl DeviceLostCallbackInfo {
+    #[must_use]
+    pub fn has_callback(self) -> bool {
+        self.callback.is_some()
+    }
+}
+
+#[must_use]
+pub fn map_device_lost_callback_info(
+    value: native::WGPUDeviceLostCallbackInfo,
+) -> DeviceLostCallbackInfo {
+    DeviceLostCallbackInfo {
+        mode: value.mode,
+        callback: value.callback,
+        userdata1: value.userdata1 as usize,
+        userdata2: value.userdata2 as usize,
+    }
+}
+
+#[must_use]
+pub fn map_device_lost_reason(reason: core::DeviceLostReason) -> native::WGPUDeviceLostReason {
+    match reason {
+        core::DeviceLostReason::Unknown => native::WGPUDeviceLostReason_Unknown,
+        core::DeviceLostReason::Destroyed => native::WGPUDeviceLostReason_Destroyed,
+        core::DeviceLostReason::CallbackCancelled => native::WGPUDeviceLostReason_CallbackCancelled,
+        core::DeviceLostReason::FailedCreation => native::WGPUDeviceLostReason_FailedCreation,
+        _ => native::WGPUDeviceLostReason_Unknown,
+    }
+}
+
 pub fn map_features_to_native(features: &core::FeatureSet) -> native::WGPUSupportedFeatures {
     let features = features
         .iter()

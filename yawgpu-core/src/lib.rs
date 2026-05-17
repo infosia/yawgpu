@@ -154,6 +154,7 @@ struct DeviceInner {
     hal: HalDevice,
     queue: Queue,
     error_sink: Mutex<ErrorSink>,
+    lost: Mutex<DeviceLostState>,
     limits: Limits,
     features: FeatureSet,
 }
@@ -167,6 +168,7 @@ impl Device {
                 hal,
                 queue,
                 error_sink: Mutex::new(ErrorSink::default()),
+                lost: Mutex::new(DeviceLostState::default()),
                 limits,
                 features,
             }),
@@ -196,6 +198,19 @@ impl Device {
     #[must_use]
     pub fn has_feature(&self, feature: Feature) -> bool {
         self.inner.features.contains(&feature)
+    }
+
+    pub fn destroy(&self) -> Option<DeviceLostReason> {
+        self.lose(DeviceLostReason::Destroyed)
+    }
+
+    pub fn lose(&self, reason: DeviceLostReason) -> Option<DeviceLostReason> {
+        let mut lost = self.inner.lost.lock();
+        if lost.reason.is_some() {
+            return None;
+        }
+        lost.reason = Some(reason);
+        Some(reason)
     }
 
     pub fn set_uncaptured_error_callback<F>(&self, callback: Option<F>)
@@ -244,6 +259,20 @@ impl Device {
             callback(error);
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct DeviceLostState {
+    reason: Option<DeviceLostReason>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeviceLostReason {
+    Unknown,
+    Destroyed,
+    CallbackCancelled,
+    FailedCreation,
 }
 
 pub type FeatureSet = BTreeSet<Feature>;
