@@ -9,7 +9,8 @@ use yawgpu_core as core;
 use crate::conv::{
     add_ref_handle, arc_to_handle, borrow_handle, clone_handle, free_supported_features,
     label_from_string_view, map_buffer_descriptor, map_buffer_map_state,
-    map_buffer_usage_to_native, map_device_lost_callback_info, map_device_lost_reason,
+    map_buffer_usage_to_native, map_compilation_info_request_status_success,
+    map_compilation_message_type_error, map_device_lost_callback_info, map_device_lost_reason,
     map_extent_3d, map_feature, map_feature_level, map_features_to_native, map_limits,
     map_limits_to_native, map_map_async_status, map_map_mode, map_origin_3d,
     map_queue_work_done_status, map_sampler_descriptor, map_shader_module_descriptor,
@@ -276,6 +277,13 @@ enum PendingCallback {
         userdata1: usize,
         userdata2: usize,
     },
+    CompilationInfo {
+        mode: native::WGPUCallbackMode,
+        callback: native::WGPUCompilationInfoCallback,
+        shader_module: Arc<core::ShaderModule>,
+        userdata1: usize,
+        userdata2: usize,
+    },
 }
 
 impl PendingCallback {
@@ -285,7 +293,8 @@ impl PendingCallback {
             | Self::RequestDevice { mode, .. }
             | Self::DeviceLost { mode, .. }
             | Self::BufferMap { mode, .. }
-            | Self::QueueWorkDone { mode, .. } => *mode,
+            | Self::QueueWorkDone { mode, .. }
+            | Self::CompilationInfo { mode, .. } => *mode,
         };
         match mode {
             native::WGPUCallbackMode_AllowProcessEvents => {
@@ -392,6 +401,38 @@ impl PendingCallback {
                     callback(
                         map_queue_work_done_status(status),
                         string_view(queue_work_done_message(status).as_bytes()),
+                        userdata1 as *mut c_void,
+                        userdata2 as *mut c_void,
+                    );
+                }
+            }
+            Self::CompilationInfo {
+                callback,
+                shader_module,
+                userdata1,
+                userdata2,
+                ..
+            } => {
+                if let Some(callback) = callback {
+                    let diagnostic = shader_module.diagnostic();
+                    let message = diagnostic.map(|message| native::WGPUCompilationMessage {
+                        nextInChain: std::ptr::null_mut(),
+                        message: string_view(message.as_bytes()),
+                        type_: map_compilation_message_type_error(),
+                        lineNum: 0,
+                        linePos: 0,
+                        offset: 0,
+                        length: 0,
+                    });
+                    let messages = message.as_ref().map_or(std::ptr::null(), |message| message);
+                    let info = native::WGPUCompilationInfo {
+                        nextInChain: std::ptr::null_mut(),
+                        messageCount: usize::from(message.is_some()),
+                        messages,
+                    };
+                    callback(
+                        map_compilation_info_request_status_success(),
+                        &info,
                         userdata1 as *mut c_void,
                         userdata2 as *mut c_void,
                     );
@@ -1232,6 +1273,28 @@ pub unsafe extern "C" fn wgpuSamplerRelease(sampler: native::WGPUSampler) {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuSamplerAddRef(sampler: native::WGPUSampler) {
     add_ref_handle(sampler, "WGPUSampler");
+}
+
+/// Requests compilation information for a shader module.
+///
+/// # Safety
+///
+/// `shader_module` must be a non-null live yawgpu shader module handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuShaderModuleGetCompilationInfo(
+    shader_module: native::WGPUShaderModule,
+    callback_info: native::WGPUCompilationInfoCallbackInfo,
+) -> native::WGPUFuture {
+    let shader_module = borrow_handle(shader_module, "WGPUShaderModule");
+    shader_module
+        ._instance
+        .register_callback(PendingCallback::CompilationInfo {
+            mode: callback_info.mode,
+            callback: callback_info.callback,
+            shader_module: Arc::clone(&shader_module._core),
+            userdata1: callback_info.userdata1 as usize,
+            userdata2: callback_info.userdata2 as usize,
+        })
 }
 
 /// Releases one owned reference to a shader module handle.

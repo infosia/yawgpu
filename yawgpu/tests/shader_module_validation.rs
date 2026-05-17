@@ -1,5 +1,15 @@
+use std::os::raw::c_void;
+
 use yawgpu::native;
 use yawgpu_test::{assert_device_error, ValidationTest};
+
+#[derive(Default)]
+struct CompilationInfoState {
+    calls: usize,
+    statuses: Vec<native::WGPUCompilationInfoRequestStatus>,
+    message_counts: Vec<usize>,
+    error_messages: Vec<String>,
+}
 
 #[test]
 fn descriptor_requires_exactly_one_chained_source() {
@@ -137,6 +147,90 @@ fn shader_module_release_is_safe_for_valid_and_error_modules() {
     }
 }
 
+#[test]
+fn invalid_module_compilation_info_reports_error_message() {
+    let test = ValidationTest::new();
+    unsafe {
+        let mut module = std::ptr::null();
+        assert_device_error!({
+            module = create_wgsl_module(&test, "not wgsl @@@");
+        });
+
+        let mut state = CompilationInfoState::default();
+        get_compilation_info(
+            module,
+            native::WGPUCallbackMode_AllowProcessEvents,
+            &mut state,
+        );
+
+        yawgpu::wgpuInstanceProcessEvents(test.instance());
+        assert_eq!(state.calls, 1);
+        assert_eq!(
+            state.statuses,
+            vec![native::WGPUCompilationInfoRequestStatus_Success]
+        );
+        assert_eq!(state.message_counts, vec![1]);
+        assert_eq!(state.error_messages.len(), 1);
+        assert!(!state.error_messages[0].is_empty());
+
+        yawgpu::wgpuInstanceProcessEvents(test.instance());
+        assert_eq!(state.calls, 1);
+        yawgpu::wgpuShaderModuleRelease(module);
+    }
+}
+
+#[test]
+fn valid_module_compilation_info_has_no_messages() {
+    let test = ValidationTest::new();
+    unsafe {
+        let module = create_wgsl_module(&test, "@compute @workgroup_size(1) fn main() {}");
+        let mut state = CompilationInfoState::default();
+        get_compilation_info(
+            module,
+            native::WGPUCallbackMode_AllowProcessEvents,
+            &mut state,
+        );
+
+        yawgpu::wgpuInstanceProcessEvents(test.instance());
+        assert_eq!(state.calls, 1);
+        assert_eq!(
+            state.statuses,
+            vec![native::WGPUCompilationInfoRequestStatus_Success]
+        );
+        assert_eq!(state.message_counts, vec![0]);
+        assert!(state.error_messages.is_empty());
+        yawgpu::wgpuShaderModuleRelease(module);
+    }
+}
+
+#[test]
+fn wait_any_only_compilation_info_waits_for_wait_any() {
+    let test = ValidationTest::new();
+    unsafe {
+        let module = create_wgsl_module(&test, "@compute @workgroup_size(1) fn main() {}");
+        let mut state = CompilationInfoState::default();
+        let future = get_compilation_info(module, native::WGPUCallbackMode_WaitAnyOnly, &mut state);
+
+        yawgpu::wgpuInstanceProcessEvents(test.instance());
+        assert_eq!(state.calls, 0);
+
+        let mut wait_info = native::WGPUFutureWaitInfo {
+            future,
+            completed: 0,
+        };
+        assert_eq!(
+            yawgpu::wgpuInstanceWaitAny(test.instance(), 1, &mut wait_info, 0),
+            native::WGPUWaitStatus_Success
+        );
+        assert_eq!(wait_info.completed, 1);
+        assert_eq!(state.calls, 1);
+
+        yawgpu::wgpuInstanceProcessEvents(test.instance());
+        assert_eq!(state.calls, 1);
+        yawgpu::wgpuShaderModuleRelease(module);
+    }
+}
+
 unsafe fn assert_wgsl_ok(test: &ValidationTest, source: &str) {
     test.clear_errors();
     let module = create_wgsl_module(test, source);
@@ -194,4 +288,49 @@ fn spirv_source(words: &[u32]) -> native::WGPUShaderSourceSPIRV {
         codeSize: words.len() as u32,
         code: words.as_ptr(),
     }
+}
+
+unsafe fn get_compilation_info(
+    module: native::WGPUShaderModule,
+    mode: native::WGPUCallbackMode,
+    state: &mut CompilationInfoState,
+) -> native::WGPUFuture {
+    let callback_info = native::WGPUCompilationInfoCallbackInfo {
+        nextInChain: std::ptr::null_mut(),
+        mode,
+        callback: Some(compilation_info_callback),
+        userdata1: (state as *mut CompilationInfoState).cast(),
+        userdata2: std::ptr::null_mut(),
+    };
+    yawgpu::wgpuShaderModuleGetCompilationInfo(module, callback_info)
+}
+
+unsafe extern "C" fn compilation_info_callback(
+    status: native::WGPUCompilationInfoRequestStatus,
+    info: *const native::WGPUCompilationInfo,
+    userdata1: *mut c_void,
+    _userdata2: *mut c_void,
+) {
+    let state = &mut *(userdata1 as *mut CompilationInfoState);
+    state.calls += 1;
+    state.statuses.push(status);
+
+    let info = info.as_ref().expect("compilation info must not be null");
+    state.message_counts.push(info.messageCount);
+    for index in 0..info.messageCount {
+        let message = &*info.messages.add(index);
+        if message.type_ == native::WGPUCompilationMessageType_Error {
+            state
+                .error_messages
+                .push(string_view_to_string(message.message));
+        }
+    }
+}
+
+unsafe fn string_view_to_string(value: native::WGPUStringView) -> String {
+    if value.data.is_null() {
+        return String::new();
+    }
+    let bytes = std::slice::from_raw_parts(value.data.cast::<u8>(), value.length);
+    String::from_utf8_lossy(bytes).into_owned()
 }
