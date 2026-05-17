@@ -42,6 +42,7 @@ fn queue_label_defaults_from_descriptor_set_label_updates_shared_queue() {
 
         let second_queue = yawgpu::wgpuDeviceGetQueue(device);
         assert_eq!(yawgpu::testing_get_queue_label(second_queue), "q2");
+        assert_eq!(queue, second_queue);
 
         yawgpu::wgpuQueueRelease(second_queue);
         yawgpu::wgpuQueueRelease(queue);

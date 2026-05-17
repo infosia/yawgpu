@@ -40,4 +40,35 @@ commit).
 
 ## Resolution log
 
-- _filled as fixes land_
+**CLOSED** — all 12 findings resolved by codex (severity order), reviewed
+by Claude, gate green (62 workspace tests, `clippy --all-targets
+-D warnings` clean).
+
+- **C1** FIXED: `instance_has_timed_wait_any` /
+  `required_features_from_descriptor` now `is_null()`-guard and return
+  empty/absent instead of `expect`-panic. No ABI panic on non-handle null.
+- **M1** FIXED: `wgpuDeviceRelease` → `Arc::from_raw` + `strong_count==1`
+  ⇒ `implicit_destroy_on_last_release()`, the single shared path also
+  called by `WGPUDeviceImpl::Drop` (idempotent via `core.lose`).
+- **M2** FIXED: `WGPUDeviceImpl.default_queue: Mutex<Option<Arc<..>>>`;
+  `wgpuDeviceGetQueue` returns the cached handle (handle-stable);
+  `WGPUQueueImpl.core: core::Queue` (double-Arc removed).
+  `label_validation` strengthened with `assert_eq!(queue, second_queue)`.
+- **M3** FIXED: block 10 documents first-match-wins;
+  `multi_violation_descriptor_reports_exactly_one_error` test added.
+- **M4** FIXED: `core::MapMode::from_bits` (B13/B14) + core unit test
+  `map_mode_from_bits_rejects_none_both_and_unsupported_bits`;
+  `conv::map_map_mode` delegates.
+- **M5** FIXED (spec): block 10 reworded to "top-level pointer only;
+  element/`CommandBuffer` validation → P6". No code change (deferred
+  stub).
+- **m1** removed dead `wait_any` `_poll_only` param. **m2**
+  `HostBuffer::new` `debug_assert!` + explicit (unreachable). **m3**
+  invariant doc-comments on `unmap`/`destroy`/`abort_pending_map`. **m4**
+  empty `Drop`s for Instance/Adapter/Queue removed. **m5** design comments
+  on `Adapter::limits`/`validate_required_limits`. **m6** exhaustiveness
+  comments on `conv` `_ =>` arms.
+
+Gate: no open CRITICAL/MAJOR. Phase Review **CLOSED**. Commit:
+`phase-0-2: phase review — 12 findings (1 CRITICAL / 5 MAJOR / 6 MINOR)
+fixed`.
