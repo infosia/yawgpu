@@ -138,6 +138,16 @@ Acceptance:
 > Review note (from T0.1): `yawgpu` currently lists `yawgpu-test` under
 > `[dependencies]`. When wiring the harness here, move `yawgpu-test` to
 > `[dev-dependencies]` of `yawgpu` (it is only used by integration tests).
+> — RESOLVED in T0.5 (moved to `[dev-dependencies]`).
+>
+> Review note (from T0.5): `cargo clippy --workspace --all-targets` is
+> error-free but emits warnings to clean up as part of Phase 0 exit:
+> (a) `missing_safety_doc` on the public `unsafe extern "C"` fns and the
+> `conv.rs` helpers — add `# Safety` sections; (b) redundant `#[must_use]`
+> on hal/core fns already returning `#[must_use]` types. Also: `WGPU*Impl`
+> wrap an already-`Arc`-backed `yawgpu_core` type in a second `Arc`
+> (harmless but redundant) — revisit if it complicates Phase 1. Make
+> `cargo clippy --workspace --all-targets -D warnings` part of T0.6.
 
 ## T0.6 — yawgpu-test harness + first TDD slice (Red→Green)
 
