@@ -105,12 +105,14 @@ timing) and **R8** reframed (destroy ⇒ device-lost(Destroyed), idempotent,
 last-ref implicit destroy, ProcessEvents-after-destroy safe). **R9** is N/A
 (Dawn-only extension, dropped — recorded divergence).
 
-## P1.4 — Labels for Device & Queue  *(outline)*
+## P1.4 — Labels for Device & Queue  *(ACTIVE)*
 
-Descriptor `label` + `SetLabel`/`GetLabel` for Device and Queue; a
-`#[doc(hidden)]` testing label getter mirroring Dawn's
-`GetObjectLabelForTesting`. Port **R17a**. (Other objects' labels = R17b,
-ported with their phases.)
+Per block 00 R17a design. `Mutex<String>` label on core `Device`/`Queue`;
+Device label from `WGPUDeviceDescriptor.label`, Queue label from
+`WGPUDeviceDescriptor.defaultQueue.label`; `wgpuDeviceSetLabel`/
+`wgpuQueueSetLabel`; `#[doc(hidden)]` `testing_get_device_label`/
+`testing_get_queue_label` (no canonical GetLabel — recorded divergence).
+Port **R17a**. (R17b = other objects, with their phases.) Closes Phase 1.
 
 ---
 

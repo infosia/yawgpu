@@ -113,9 +113,25 @@ from a later phase; tracked here but ported in that phase, not Phase 1.
 
 ### LabelTests.cpp — Phase 1 subset
 
-- **R17a** Device and Queue: label empty if unset; settable via descriptor
-  `label` and `SetLabel`; `GetLabel` round-trips. (Dawn `LabelTest::Queue`
-  :*, others.) ☐  — only Device/Queue in Phase 1; other objects = Defer.
+- **R17a** Device and Queue labels: empty if unset; settable via the
+  descriptor `label` and via `wgpuDeviceSetLabel`/`wgpuQueueSetLabel`
+  (webgpu.h 6371/6463, `WGPUStringView`, NonNullInputString); the value
+  round-trips. ☐ — only Device/Queue in Phase 1; other objects = Defer.
+
+  Design decision (P1.4):
+  - Device label source = `WGPUDeviceDescriptor.label`. Queue label source
+    = `WGPUDeviceDescriptor.defaultQueue.label` (the default queue obtained
+    via `wgpuDeviceGetQueue`; there is no standalone queue descriptor at
+    creation). Unset/empty `WGPUStringView` ⇒ empty label.
+  - Labels are mutable post-creation (`SetLabel`) ⇒ store as interior-
+    mutable `Mutex<String>` on the core `Device`/`Queue`.
+  - **Divergence:** canonical `webgpu.h` has **no `GetLabel`** (label is
+    write-only in the C ABI; Dawn verifies via the non-canonical
+    `native::GetObjectLabelForTesting`). yawgpu therefore exposes
+    `#[doc(hidden)]` testing getters (e.g. `testing_get_device_label` /
+    `testing_get_queue_label`, same pattern as the existing `testing_*`
+    hooks) for the round-trip tests. Recorded divergence; consider gating
+    all `testing_*` behind a `testing` feature later (Phase-0 carried note).
 
 ### Deferred (need later-phase resources) — tracked, ported later
 
