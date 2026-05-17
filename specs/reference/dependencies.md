@@ -39,11 +39,16 @@ references it, so bindgen output is reproducible:
   byte-identical copy from `webgpu-headers` commit
   `673658bc2bd70ec39fc55ebe6bb0173cf6d0a603` (2026-05-07). Bound via
   `bindgen 0.72` in `yawgpu/build.rs`.
-- `naga`: pinned by `infosia/wgpu` commit SHA. Initial pin candidate
-  `216627076` (`wgpu` HEAD, describes as `v29.0.3-44-g216627076`).
-  Set the concrete `rev` when naga is first wired in (Phase 4).
-  License: MIT OR Apache-2.0 (`wgpu/naga/LICENSE.{MIT,APACHE}`),
-  compatible with this repo.
+- `naga`: pinned to `infosia/wgpu` rev
+  **`216627076a7b22ad09fa566de53d1f0f74b59de3`** (`git describe`:
+  `v29.0.3-44-g216627076`; remote `https://github.com/infosia/wgpu.git`).
+  Wired in Phase 4 (P4.0): `[workspace.dependencies] naga = { git =
+  "https://github.com/infosia/wgpu.git", rev =
+  "216627076a7b22ad09fa566de53d1f0f74b59de3" }`. Cargo.lock records the
+  SHA. Local dev overlay (never committed):
+  `[patch."https://github.com/infosia/wgpu.git"] naga = { path =
+  "wgpu/naga" }`. naga is `edition 2021`; License MIT OR Apache-2.0
+  (`wgpu/naga/LICENSE.{MIT,APACHE}`), compatible with this repo.
 
 ## naga upstream-tracking model (two tiers)
 
