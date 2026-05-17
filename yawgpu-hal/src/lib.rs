@@ -79,6 +79,7 @@ pub enum HalAdapter {
 }
 
 impl HalAdapter {
+    #[must_use]
     pub fn create_device(&self) -> Result<HalDevice, HalError> {
         match self {
             #[cfg(feature = "noop")]
@@ -112,6 +113,18 @@ impl HalDevice {
             Self::Vulkan(_) => 0,
             #[cfg(feature = "metal")]
             Self::Metal(_) => 0,
+        }
+    }
+
+    #[must_use]
+    pub fn queue(&self) -> HalQueue {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(device) => HalQueue::Noop(device.queue().clone()),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => HalQueue::Vulkan(vulkan::VulkanQueue),
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => HalQueue::Metal(metal::MetalQueue),
         }
     }
 }
