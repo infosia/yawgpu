@@ -14,12 +14,12 @@ Status legend: ☐ not started · ◐ partial · ☑ ported & green
 | `UnsafeAPIValidationTests` | 1→4/8 | `unsafe_api_validation.rs` | ☐ Defer (R18–R20→P4, R21→P8) |
 | `MultipleDeviceTests` | 1→5/6 | `multiple_device_validation.rs` | ☐ Defer (R16→P5, R15→P6) |
 | `LabelTests` | 1 | `label_validation.rs` | ◐ (R17a Device/Queue done; R17b→per-object phase) |
-| `BufferValidationTests` | 2 | `buffer_validation.rs` | ☐ |
-| `MinimumBufferSizeValidationTests` | 2 | `minimum_buffer_size_validation.rs` | ☐ |
-| `QueueSubmitValidationTests` | 2 | `queue_submit_validation.rs` | ☐ |
-| `QueueWriteBufferValidationTests` | 2 | `queue_write_buffer_validation.rs` | ☐ |
-| `QueueOnSubmittedWorkDoneValidationTests` | 2 | `queue_on_submitted_work_done_validation.rs` | ☐ |
-| `WriteBufferTests` | 2 | `write_buffer_validation.rs` | ☐ |
+| `BufferValidationTests` | 2 | `buffer_creation_validation.rs` + `buffer_map_validation.rs` + `buffer_mapped_range_validation.rs` | ☑ (B1–B38; B39–B41 submit→P6) |
+| `MinimumBufferSizeValidationTests` | 2→4 | `minimum_buffer_size_validation.rs` | ☐ Defer→P4 (B58, needs BindGroupLayout) |
+| `QueueSubmitValidationTests` | 2→6 | `queue_buffer_validation.rs` | ◐ (arg-only; command validation→P6) |
+| `QueueWriteBufferValidationTests` | 2 | `queue_buffer_validation.rs` | ☑ (B42–B49) |
+| `QueueOnSubmittedWorkDoneValidationTests` | 2 | `queue_buffer_validation.rs` | ☑ (B50–B52) |
+| `WriteBufferTests` | 2→6 | `write_buffer_validation.rs` | ☐ Defer→P6 (B53–B57, CommandEncoder.WriteBuffer) |
 | `TextureValidationTests` | 3 | `texture_validation.rs` | ☐ |
 | `TextureViewValidationTests` | 3 | `texture_view_validation.rs` | ☐ |
 | `TextureSubresourceTests` | 3 | `texture_subresource_validation.rs` | ☐ |

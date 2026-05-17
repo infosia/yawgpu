@@ -126,18 +126,18 @@ re-fire.
 
 ### Queue — Phase 2 (P2.4)
 
-- **B42** `wgpuQueueWriteBuffer` requires `CopyDst`. `WrongUsage` :79. ☐
-- **B43** size 4-byte aligned. `UnalignedSize` :90. ☐
-- **B44** offset 4-byte aligned. `UnalignedOffset` :98. ☐
-- **B45** offset+size within bounds. `OutOfBounds` :58. ☐
-- **B46** overflow detection. `OutOfBoundsOverflow` :66. ☐
+- **B42** `wgpuQueueWriteBuffer` requires `CopyDst`. `WrongUsage` :79. ☑ (P2.4)
+- **B43** size 4-byte aligned. `UnalignedSize` :90. ☑ (P2.4)
+- **B44** offset 4-byte aligned. `UnalignedOffset` :98. ☑ (P2.4)
+- **B45** offset+size within bounds. `OutOfBounds` :58. ☑ (P2.4)
+- **B46** overflow detection. `OutOfBoundsOverflow` :66. ☑ (P2.4)
 - **B47** fails if buffer mapped (mappedAtCreation or MapAsync).
-  `MappedBuffer` :115. ☐
-- **B48** fails if buffer destroyed. `DestroyedBuffer` :106. ☐
-- **B49** success path. `Success` :50. ☐
+  `MappedBuffer` :115. ☑ (P2.4)
+- **B48** fails if buffer destroyed. `DestroyedBuffer` :106. ☑ (P2.4)
+- **B49** success path. `Success` :50. ☑ (P2.4)
 - **B50/B51** `wgpuQueueOnSubmittedWorkDone` callback fires `Success`
-  (even before any submit). `CallBeforeSubmits` :46. ☐
-- **B52** OnSubmittedWorkDone honours `WGPUCallbackMode`. same. ☐
+  (even before any submit). `CallBeforeSubmits` :46. ☑ (P2.4)
+- **B52** OnSubmittedWorkDone honours `WGPUCallbackMode`. same. ☑ (P2.4)
 - `wgpuQueueSubmit` arg validation (count/null) — from
   `QueueSubmitValidationTests`; minimal in P2.4 (full command validation
   Defer→P6).

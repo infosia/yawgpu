@@ -1,6 +1,8 @@
 # Phase 2 — Buffer + Queue
 
-Status: **in progress** (P2.1 active). Rules: `../blocks/10-buffer-queue.md`.
+Status: **COMPLETE** (P2.1–P2.4 done). Implemented by codex, reviewed &
+committed by Claude. Commits `phase-2: P2.1`→`phase-2: P2.4`.
+Rules: `../blocks/10-buffer-queue.md`.
 Roles/loop: `../reference/workflow.md`. Gate (permanent): `cargo test
 --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
 green on Noop.
@@ -68,7 +70,17 @@ no-UB), gate green (55 tests). Committed `phase-2: P2.3`.
 Const vs non-const rules, bounds/offset/whole-map-size, destroyed ⇒ NULL.
 Port **B25–B31**.
 
-## P2.4 — Queue writeBuffer / onSubmittedWorkDone  *(NEXT — closes Phase 2)*
+## P2.4 — Queue writeBuffer / onSubmittedWorkDone  *(☑ DONE — Phase 2 closed)*
+
+Done: `WGPUQueueImpl` wired to device(error sink)+instance;
+`Buffer::validate_queue_write` (B42–B48); `wgpuQueueWriteBuffer` (errors
+via sink, B49 success), `wgpuQueueOnSubmittedWorkDone` via
+`PendingCallback::QueueWorkDone` (B50–B52), minimal `wgpuQueueSubmit`
+arg validation (count/null; commands→P6). B42–B52 ported in
+`yawgpu/tests/queue_buffer_validation.rs` (5), gate green (60 tests).
+Committed `phase-2: P2.4`. **Phase 2 closed.**
+
+#### (original detail)
 
 `wgpuQueueWriteBuffer` arg/usage/state validation; `wgpuQueue
 OnSubmittedWorkDone` via future machinery; minimal `wgpuQueueSubmit` arg

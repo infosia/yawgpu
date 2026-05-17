@@ -11,7 +11,8 @@ use crate::conv::{
     label_from_string_view, map_buffer_descriptor, map_buffer_map_state,
     map_buffer_usage_to_native, map_device_lost_callback_info, map_device_lost_reason, map_feature,
     map_feature_level, map_features_to_native, map_limits, map_limits_to_native,
-    map_map_async_status, map_map_mode, release_handle, string_view, DeviceLostCallbackInfo,
+    map_map_async_status, map_map_mode, map_queue_work_done_status, release_handle, string_view,
+    DeviceLostCallbackInfo,
 };
 
 pub struct WGPUAdapterImpl {
@@ -39,6 +40,8 @@ pub struct WGPUInstanceImpl {
 
 pub struct WGPUQueueImpl {
     core: Arc<core::Queue>,
+    device: Arc<core::Device>,
+    instance: Arc<WGPUInstanceImpl>,
 }
 
 macro_rules! declare_empty_impl_handles {
@@ -229,6 +232,13 @@ enum PendingCallback {
         userdata1: usize,
         userdata2: usize,
     },
+    QueueWorkDone {
+        mode: native::WGPUCallbackMode,
+        callback: native::WGPUQueueWorkDoneCallback,
+        status: core::QueueWorkDoneStatus,
+        userdata1: usize,
+        userdata2: usize,
+    },
 }
 
 impl PendingCallback {
@@ -237,7 +247,8 @@ impl PendingCallback {
             Self::RequestAdapter { mode, .. }
             | Self::RequestDevice { mode, .. }
             | Self::DeviceLost { mode, .. }
-            | Self::BufferMap { mode, .. } => *mode,
+            | Self::BufferMap { mode, .. }
+            | Self::QueueWorkDone { mode, .. } => *mode,
         };
         match mode {
             native::WGPUCallbackMode_AllowProcessEvents => {
@@ -333,7 +344,32 @@ impl PendingCallback {
                     );
                 }
             }
+            Self::QueueWorkDone {
+                callback,
+                status,
+                userdata1,
+                userdata2,
+                ..
+            } => {
+                if let Some(callback) = callback {
+                    callback(
+                        map_queue_work_done_status(status),
+                        string_view(queue_work_done_message(status).as_bytes()),
+                        userdata1 as *mut c_void,
+                        userdata2 as *mut c_void,
+                    );
+                }
+            }
         }
+    }
+}
+
+fn queue_work_done_message(status: core::QueueWorkDoneStatus) -> &'static str {
+    match status {
+        core::QueueWorkDoneStatus::Success => "",
+        core::QueueWorkDoneStatus::CallbackCancelled => "Queue work done callback was cancelled",
+        core::QueueWorkDoneStatus::Error => "Queue work done failed",
+        _ => "Queue work done failed",
     }
 }
 
@@ -741,6 +777,8 @@ pub unsafe extern "C" fn wgpuDeviceGetQueue(device: native::WGPUDevice) -> nativ
     let device = borrow_handle(device, "WGPUDevice");
     let queue = Arc::new(WGPUQueueImpl {
         core: Arc::new(device.core.queue()),
+        device: Arc::clone(&device.core),
+        instance: Arc::clone(&device.instance),
     });
     arc_to_handle(queue)
 }
@@ -941,6 +979,83 @@ pub unsafe extern "C" fn wgpuQueueSetLabel(
     let queue = borrow_handle(queue, "WGPUQueue");
     let label = label_from_string_view(label).unwrap_or_default();
     queue.core.set_label(&label);
+}
+
+/// Schedules a callback once all submitted queue work is done.
+///
+/// # Safety
+///
+/// `queue` must be a non-null live yawgpu queue handle. `callback_info`
+/// userdata pointers must remain valid until the callback fires.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuQueueOnSubmittedWorkDone(
+    queue: native::WGPUQueue,
+    callback_info: native::WGPUQueueWorkDoneCallbackInfo,
+) -> native::WGPUFuture {
+    let queue = borrow_handle(queue, "WGPUQueue");
+    queue
+        .instance
+        .register_callback(PendingCallback::QueueWorkDone {
+            mode: callback_info.mode,
+            callback: callback_info.callback,
+            status: core::QueueWorkDoneStatus::Success,
+            userdata1: callback_info.userdata1 as usize,
+            userdata2: callback_info.userdata2 as usize,
+        })
+}
+
+/// Submits command buffers to a queue. Phase 2 validates only null arguments.
+///
+/// # Safety
+///
+/// `queue` must be a non-null live yawgpu queue handle. If `command_count` is
+/// non-zero, `commands` must be non-null.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuQueueSubmit(
+    queue: native::WGPUQueue,
+    command_count: usize,
+    commands: *const native::WGPUCommandBuffer,
+) {
+    let queue = borrow_handle(queue, "WGPUQueue");
+    if command_count > 0 && commands.is_null() {
+        queue.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "queue submit commands must not be null when commandCount is non-zero",
+        );
+    }
+}
+
+/// Writes CPU data into a buffer through the queue.
+///
+/// # Safety
+///
+/// `queue` and `buffer` must be non-null live yawgpu handles. `data` is not
+/// read by the Noop validation implementation.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuQueueWriteBuffer(
+    queue: native::WGPUQueue,
+    buffer: native::WGPUBuffer,
+    buffer_offset: u64,
+    _data: *const c_void,
+    size: usize,
+) {
+    let queue = borrow_handle(queue, "WGPUQueue");
+    let buffer = borrow_handle(buffer, "WGPUBuffer");
+    let size = match u64::try_from(size) {
+        Ok(size) => size,
+        Err(_) => {
+            queue
+                .device
+                .dispatch_error(core::ErrorKind::Validation, "queue write size is too large");
+            return;
+        }
+    };
+
+    if let Err(message) = buffer.core.validate_queue_write(buffer_offset, size) {
+        queue
+            .device
+            .dispatch_error(core::ErrorKind::Validation, message);
+    }
 }
 
 /// Frees a feature array returned by `wgpuAdapterGetFeatures` or

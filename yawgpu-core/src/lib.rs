@@ -323,6 +323,14 @@ pub enum MapAsyncStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum QueueWorkDoneStatus {
+    Success,
+    CallbackCancelled,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BufferUsage(u64);
 
 impl BufferUsage {
@@ -623,6 +631,35 @@ impl Buffer {
         }
         drop(state);
         self.inner.host.ptr_at(offset)
+    }
+
+    pub fn validate_queue_write(&self, offset: u64, size: u64) -> Result<(), &'static str> {
+        let state = self.inner.state.lock();
+        if state.is_error {
+            return Err("cannot write to an error buffer");
+        }
+        if state.is_destroyed {
+            return Err("cannot write to a destroyed buffer");
+        }
+        if state.map_state != BufferMapState::Unmapped {
+            return Err("cannot write to a mapped buffer");
+        }
+        if !self.inner.usage.contains(BufferUsage::COPY_DST) {
+            return Err("queue write requires CopyDst usage");
+        }
+        if !offset.is_multiple_of(4) {
+            return Err("queue write offset must be 4-byte aligned");
+        }
+        if !size.is_multiple_of(4) {
+            return Err("queue write size must be 4-byte aligned");
+        }
+        let Some(end) = offset.checked_add(size) else {
+            return Err("queue write range overflows");
+        };
+        if end > self.inner.size {
+            return Err("queue write range exceeds buffer size");
+        }
+        Ok(())
     }
 }
 
