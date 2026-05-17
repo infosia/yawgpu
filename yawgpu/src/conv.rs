@@ -211,6 +211,20 @@ pub fn map_map_async_status(value: core::MapAsyncStatus) -> native::WGPUMapAsync
     }
 }
 
+#[must_use]
+pub fn map_queue_work_done_status(
+    value: core::QueueWorkDoneStatus,
+) -> native::WGPUQueueWorkDoneStatus {
+    match value {
+        core::QueueWorkDoneStatus::Success => native::WGPUQueueWorkDoneStatus_Success,
+        core::QueueWorkDoneStatus::CallbackCancelled => {
+            native::WGPUQueueWorkDoneStatus_CallbackCancelled
+        }
+        core::QueueWorkDoneStatus::Error => native::WGPUQueueWorkDoneStatus_Error,
+        _ => native::WGPUQueueWorkDoneStatus_Error,
+    }
+}
+
 pub fn map_map_mode(value: native::WGPUMapMode) -> Result<core::MapMode, &'static str> {
     let allowed = native::WGPUMapMode_Read | native::WGPUMapMode_Write;
     if value & !allowed != 0 {
