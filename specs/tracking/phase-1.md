@@ -63,12 +63,18 @@ computation, `wgpuAdapterGetLimits`/`wgpuDeviceGetLimits`. R1–R4,R14 ported
 in `yawgpu/tests/limits_validation.rs` (5), gate green. Committed
 `phase-1: P1.2a`.
 
-### P1.2b — Features + core/compat  *(NEXT)*
+### P1.2b — Features + core/compat  *(ACTIVE)*
 
-`WGPUSupportedFeatures` (webgpu.h:2931). Synthetic feature set with the
-Tier dependency families; core-vs-compat Noop adapter constructors.
-Implement `wgpuAdapter/DeviceGetFeatures/HasFeature` + `requiredFeatures`
-resolution. Port **R6, R7, R10–R13** (and **R9** if cheap, else → P1.3).
+`WGPUSupportedFeatures` (webgpu.h:2931), `WGPUFeatureLevel` (625),
+`WGPURequestAdapterOptions.featureLevel` (4138). Noop adapter records the
+requested feature level; synthetic supported set = {CoreFeaturesAndLimits,
+RG11B10UfloatRenderable, TextureFormatsTier1, TextureFormatsTier2} with the
+implication closure (Tier2⇒Tier1⇒RG11B10UfloatRenderable). Implement
+`wgpuAdapterGetFeatures/HasFeature`, `wgpuDeviceGetFeatures/HasFeature`,
+`wgpuSupportedFeaturesFreeMembers`, `requiredFeatures` validation +
+resolution, and `featureLevel` handling in `wgpuInstanceRequestAdapter`.
+Port **R6, R7, R10–R13** (R10–R13 via `HasFeature(CoreFeaturesAndLimits)`
+per the recorded Divergence). **R9** → defer to P1.3.
 
 ## P1.3 — Device lifecycle & device-lost  *(outline)*
 
