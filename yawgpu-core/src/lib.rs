@@ -8,6 +8,8 @@ use yawgpu_hal::{
     HalAdapter, HalBuffer, HalDevice, HalError, HalInstance, HalQueue, HalSampler, HalTexture,
 };
 
+pub(crate) mod shader_naga;
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
