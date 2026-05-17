@@ -65,12 +65,24 @@ Committed `phase-3: P3.2`.
 `WGPUTextureView` handle + core view; dimension/format/aspect compat,
 range bounds, default-view inference. Port **T26–T33**.
 
-## P3.3 — Sampler  *(NEXT)*
+## P3.3 — Sampler  *(☑ DONE)*
+
+Done: `NoopSampler`/`HalSampler`; core `AddressMode`/`FilterMode`/
+`MipmapFilterMode`/`CompareFunction`/`SamplerDescriptor`/
+`ResolvedSamplerDescriptor` (webgpu.h defaults: lod 0/32, anisotropy 1,
+Nearest, ClampToEdge); `validate_sampler_descriptor` (T34/T35 finite,
+T36 ≥1, T37 anisotropy>1⇒all-Linear, first-match-wins); error-sampler
+model. FFI `WGPUSamplerImpl` + `wgpuDeviceCreateSampler`(NULL⇒defaults)/
+`Release`/`AddRef`; conv address/filter/mipmap/compare maps. T34–T39
+ported in `yawgpu/tests/sampler_validation.rs` (6, incl. compare-not-an-
+error sanity), gate green. Committed `phase-3: P3.3`.
+
+#### (original detail)
 
 `WGPUSampler` handle + core sampler; lod/anisotropy/filter validation,
 default sampler. Port **T34–T39**.
 
-## P3.4 — QueueWriteTexture  *(after P3.3)*
+## P3.4 — QueueWriteTexture  *(NEXT — closes Phase 3 slices, then Phase Review)*
 
 `wgpuQueueWriteTexture` arg/layout/bounds/aspect validation reusing
 texture + format-texel info. Port **T40–T51**. Closes Phase 3 (then Phase

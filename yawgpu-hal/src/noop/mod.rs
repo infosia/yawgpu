@@ -82,6 +82,12 @@ impl NoopDevice {
         self.allocations.fetch_add(1, Ordering::Relaxed);
         NoopTexture
     }
+
+    #[must_use]
+    pub fn create_sampler(&self) -> NoopSampler {
+        self.allocations.fetch_add(1, Ordering::Relaxed);
+        NoopSampler
+    }
 }
 
 impl Default for NoopDevice {
@@ -120,3 +126,6 @@ impl NoopBuffer {
 
 #[derive(Debug, Clone)]
 pub struct NoopTexture;
+
+#[derive(Debug, Clone)]
+pub struct NoopSampler;

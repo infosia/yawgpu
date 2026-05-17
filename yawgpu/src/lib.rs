@@ -11,9 +11,10 @@ use crate::conv::{
     label_from_string_view, map_buffer_descriptor, map_buffer_map_state,
     map_buffer_usage_to_native, map_device_lost_callback_info, map_device_lost_reason, map_feature,
     map_feature_level, map_features_to_native, map_limits, map_limits_to_native,
-    map_map_async_status, map_map_mode, map_queue_work_done_status, map_texture_descriptor,
-    map_texture_dimension_to_native, map_texture_format_to_native, map_texture_usage_to_native,
-    map_texture_view_descriptor, release_handle, string_view, DeviceLostCallbackInfo,
+    map_map_async_status, map_map_mode, map_queue_work_done_status, map_sampler_descriptor,
+    map_texture_descriptor, map_texture_dimension_to_native, map_texture_format_to_native,
+    map_texture_usage_to_native, map_texture_view_descriptor, release_handle, string_view,
+    DeviceLostCallbackInfo,
 };
 
 pub struct WGPUAdapterImpl {
@@ -56,6 +57,11 @@ pub struct WGPUTextureViewImpl {
     _texture: Arc<core::Texture>,
 }
 
+pub struct WGPUSamplerImpl {
+    _core: Arc<core::Sampler>,
+    _device: Arc<core::Device>,
+}
+
 macro_rules! declare_empty_impl_handles {
     ($($name:ident),* $(,)?) => {
         $(
@@ -77,7 +83,6 @@ declare_empty_impl_handles!(
     WGPURenderBundleEncoderImpl,
     WGPURenderPassEncoderImpl,
     WGPURenderPipelineImpl,
-    WGPUSamplerImpl,
     WGPUShaderModuleImpl,
     WGPUSurfaceImpl,
 );
@@ -757,6 +762,27 @@ pub unsafe extern "C" fn wgpuDeviceCreateTexture(
     }))
 }
 
+/// Creates a sampler on a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `descriptor`, when
+/// non-null, must point to a valid `WGPUSamplerDescriptor`.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceCreateSampler(
+    device: native::WGPUDevice,
+    descriptor: *const native::WGPUSamplerDescriptor,
+) -> native::WGPUSampler {
+    let device = borrow_handle(device, "WGPUDevice");
+    let sampler = device
+        .core
+        .create_sampler(map_sampler_descriptor(descriptor.as_ref()));
+    arc_to_handle(Arc::new(WGPUSamplerImpl {
+        _core: Arc::new(sampler),
+        _device: Arc::clone(&device.core),
+    }))
+}
+
 /// Gets the effective limits for a device.
 ///
 /// # Safety
@@ -1146,6 +1172,26 @@ pub unsafe extern "C" fn wgpuTextureViewRelease(texture_view: native::WGPUTextur
 #[no_mangle]
 pub unsafe extern "C" fn wgpuTextureViewAddRef(texture_view: native::WGPUTextureView) {
     add_ref_handle(texture_view, "WGPUTextureView");
+}
+
+/// Releases one owned reference to a sampler handle.
+///
+/// # Safety
+///
+/// `sampler` must be a non-null live yawgpu sampler handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuSamplerRelease(sampler: native::WGPUSampler) {
+    release_handle(sampler, "WGPUSampler");
+}
+
+/// Adds one owned reference to a sampler handle.
+///
+/// # Safety
+///
+/// `sampler` must be a non-null live yawgpu sampler handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuSamplerAddRef(sampler: native::WGPUSampler) {
+    add_ref_handle(sampler, "WGPUSampler");
 }
 
 /// Releases one owned reference to a queue handle.
