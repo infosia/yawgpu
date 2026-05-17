@@ -8,9 +8,9 @@ use yawgpu_core as core;
 
 use crate::conv::{
     add_ref_handle, arc_to_handle, borrow_handle, clone_handle, free_supported_features,
-    map_device_lost_callback_info, map_device_lost_reason, map_feature, map_feature_level,
-    map_features_to_native, map_limits, map_limits_to_native, release_handle, string_view,
-    DeviceLostCallbackInfo,
+    label_from_string_view, map_device_lost_callback_info, map_device_lost_reason, map_feature,
+    map_feature_level, map_features_to_native, map_limits, map_limits_to_native, release_handle,
+    string_view, DeviceLostCallbackInfo,
 };
 
 pub struct WGPUAdapterImpl {
@@ -31,7 +31,7 @@ pub struct WGPUInstanceImpl {
 }
 
 pub struct WGPUQueueImpl {
-    _core: Arc<core::Queue>,
+    core: Arc<core::Queue>,
 }
 
 macro_rules! declare_empty_impl_handles {
@@ -483,6 +483,14 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
         .as_ref()
         .map(|descriptor| required_features_from_descriptor(descriptor))
         .unwrap_or_default();
+    let label = descriptor
+        .as_ref()
+        .and_then(|descriptor| label_from_string_view(descriptor.label))
+        .unwrap_or_default();
+    let queue_label = descriptor
+        .as_ref()
+        .and_then(|descriptor| label_from_string_view(descriptor.defaultQueue.label))
+        .unwrap_or_default();
     let device_lost_callback = descriptor
         .as_ref()
         .map(|descriptor| map_device_lost_callback_info(descriptor.deviceLostCallbackInfo))
@@ -494,7 +502,12 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
         });
     let result = adapter
         .core
-        .create_device(required_limits.as_ref(), &required_features)
+        .create_device(
+            required_limits.as_ref(),
+            &required_features,
+            label,
+            queue_label,
+        )
         .map(|device| {
             Arc::new(WGPUDeviceImpl {
                 core: Arc::new(device),
@@ -572,6 +585,22 @@ pub unsafe extern "C" fn wgpuDeviceDestroy(device: native::WGPUDevice) {
     device_impl.schedule_device_lost(device, core::DeviceLostReason::Destroyed);
 }
 
+/// Sets the debug label for a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `label` must point
+/// to valid string data according to `WGPUStringView` when non-empty.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceSetLabel(
+    device: native::WGPUDevice,
+    label: native::WGPUStringView,
+) {
+    let device = borrow_handle(device, "WGPUDevice");
+    let label = label_from_string_view(label).unwrap_or_default();
+    device.core.set_label(&label);
+}
+
 /// Gets the effective limits for a device.
 ///
 /// # Safety
@@ -635,7 +664,7 @@ pub unsafe extern "C" fn wgpuDeviceHasFeature(
 pub unsafe extern "C" fn wgpuDeviceGetQueue(device: native::WGPUDevice) -> native::WGPUQueue {
     let device = borrow_handle(device, "WGPUDevice");
     let queue = Arc::new(WGPUQueueImpl {
-        _core: Arc::new(device.core.queue()),
+        core: Arc::new(device.core.queue()),
     });
     arc_to_handle(queue)
 }
@@ -658,6 +687,22 @@ pub unsafe extern "C" fn wgpuQueueRelease(queue: native::WGPUQueue) {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQueueAddRef(queue: native::WGPUQueue) {
     add_ref_handle(queue, "WGPUQueue");
+}
+
+/// Sets the debug label for a queue.
+///
+/// # Safety
+///
+/// `queue` must be a non-null live yawgpu queue handle. `label` must point to
+/// valid string data according to `WGPUStringView` when non-empty.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuQueueSetLabel(
+    queue: native::WGPUQueue,
+    label: native::WGPUStringView,
+) {
+    let queue = borrow_handle(queue, "WGPUQueue");
+    let label = label_from_string_view(label).unwrap_or_default();
+    queue.core.set_label(&label);
 }
 
 /// Frees a feature array returned by `wgpuAdapterGetFeatures` or
@@ -792,6 +837,26 @@ pub unsafe fn testing_dispatch_device_error(
     message: impl Into<String>,
 ) {
     borrow_handle(device, "WGPUDevice").dispatch_error(kind, message);
+}
+
+/// Returns the device label for validation tests.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle.
+#[doc(hidden)]
+pub unsafe fn testing_get_device_label(device: native::WGPUDevice) -> String {
+    borrow_handle(device, "WGPUDevice").core.label()
+}
+
+/// Returns the queue label for validation tests.
+///
+/// # Safety
+///
+/// `queue` must be a non-null live yawgpu queue handle.
+#[doc(hidden)]
+pub unsafe fn testing_get_queue_label(queue: native::WGPUQueue) -> String {
+    borrow_handle(queue, "WGPUQueue").core.label()
 }
 
 #[cfg(test)]

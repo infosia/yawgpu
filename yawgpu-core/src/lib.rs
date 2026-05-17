@@ -112,6 +112,8 @@ impl Adapter {
         &self,
         required_limits: Option<&Limits>,
         required_features: &[Feature],
+        label: impl Into<String>,
+        queue_label: impl Into<String>,
     ) -> Result<Device, Error> {
         let limits = self
             .limits()
@@ -119,7 +121,7 @@ impl Adapter {
             .map_err(Error::Validation)?;
         let features = self.resolve_features(required_features)?;
         let hal = self.inner.hal.create_device()?;
-        Ok(Device::from_hal(hal, limits, features))
+        Ok(Device::from_hal(hal, limits, features, label, queue_label))
     }
 
     fn resolve_features(&self, required_features: &[Feature]) -> Result<FeatureSet, Error> {
@@ -155,20 +157,28 @@ struct DeviceInner {
     queue: Queue,
     error_sink: Mutex<ErrorSink>,
     lost: Mutex<DeviceLostState>,
+    label: Mutex<String>,
     limits: Limits,
     features: FeatureSet,
 }
 
 impl Device {
     #[must_use]
-    pub fn from_hal(hal: HalDevice, limits: Limits, features: FeatureSet) -> Self {
-        let queue = Queue::from_hal(hal.queue());
+    pub fn from_hal(
+        hal: HalDevice,
+        limits: Limits,
+        features: FeatureSet,
+        label: impl Into<String>,
+        queue_label: impl Into<String>,
+    ) -> Self {
+        let queue = Queue::from_hal(hal.queue(), queue_label);
         Self {
             inner: Arc::new(DeviceInner {
                 hal,
                 queue,
                 error_sink: Mutex::new(ErrorSink::default()),
                 lost: Mutex::new(DeviceLostState::default()),
+                label: Mutex::new(label.into()),
                 limits,
                 features,
             }),
@@ -198,6 +208,15 @@ impl Device {
     #[must_use]
     pub fn has_feature(&self, feature: Feature) -> bool {
         self.inner.features.contains(&feature)
+    }
+
+    pub fn set_label(&self, label: &str) {
+        *self.inner.label.lock() = label.to_owned();
+    }
+
+    #[must_use]
+    pub fn label(&self) -> String {
+        self.inner.label.lock().clone()
     }
 
     pub fn destroy(&self) -> Option<DeviceLostReason> {
@@ -473,19 +492,32 @@ pub struct Queue {
 #[derive(Debug)]
 struct QueueInner {
     hal: HalQueue,
+    label: Mutex<String>,
 }
 
 impl Queue {
     #[must_use]
-    pub fn from_hal(hal: HalQueue) -> Self {
+    pub fn from_hal(hal: HalQueue, label: impl Into<String>) -> Self {
         Self {
-            inner: Arc::new(QueueInner { hal }),
+            inner: Arc::new(QueueInner {
+                hal,
+                label: Mutex::new(label.into()),
+            }),
         }
     }
 
     #[must_use]
     pub fn hal(&self) -> &HalQueue {
         &self.inner.hal
+    }
+
+    pub fn set_label(&self, label: &str) {
+        *self.inner.label.lock() = label.to_owned();
+    }
+
+    #[must_use]
+    pub fn label(&self) -> String {
+        self.inner.label.lock().clone()
     }
 }
 
@@ -726,7 +758,7 @@ mod tests {
         assert_eq!(adapters.len(), 1);
 
         let device = adapters[0]
-            .create_device(None, &[])
+            .create_device(None, &[], "", "")
             .expect("Noop device should be created");
         assert_eq!(device.allocation_count(), 0);
 
@@ -742,7 +774,7 @@ mod tests {
             .next()
             .expect("Noop adapter should exist");
         let device = adapter
-            .create_device(None, &[])
+            .create_device(None, &[], "", "")
             .expect("Noop device should be created");
         let uncaptured_count = Arc::new(AtomicUsize::new(0));
         let callback_count = uncaptured_count.clone();
@@ -770,7 +802,7 @@ mod tests {
             .next()
             .expect("Noop adapter should exist");
         let device = adapter
-            .create_device(None, &[])
+            .create_device(None, &[], "", "")
             .expect("Noop device should be created");
         let uncaptured_count = Arc::new(AtomicUsize::new(0));
         let callback_count = uncaptured_count.clone();

@@ -10,10 +10,10 @@ Status legend: ☐ not started · ◐ partial · ☑ ported & green
 | Dawn file | Phase | yawgpu test file | Status |
 |---|---|---|---|
 | `ValidationTest` (base) | 0 | `yawgpu-test` crate | ☑ |
-| `DeviceValidationTests` | 1 | `device_validation.rs` | ☐ |
-| `UnsafeAPIValidationTests` | 1 | `unsafe_api_validation.rs` | ☐ |
-| `MultipleDeviceTests` | 1 | `multiple_device_validation.rs` | ☐ |
-| `LabelTests` | 1 | `label_validation.rs` | ☐ |
+| `DeviceValidationTests` | 1 | `limits_validation.rs` + `features_validation.rs` + `device_lost_validation.rs` | ☑ (R1–R8,R10–R14; R9 N/A; R15/R16 are MultipleDevice) |
+| `UnsafeAPIValidationTests` | 1→4/8 | `unsafe_api_validation.rs` | ☐ Defer (R18–R20→P4, R21→P8) |
+| `MultipleDeviceTests` | 1→5/6 | `multiple_device_validation.rs` | ☐ Defer (R16→P5, R15→P6) |
+| `LabelTests` | 1 | `label_validation.rs` | ◐ (R17a Device/Queue done; R17b→per-object phase) |
 | `BufferValidationTests` | 2 | `buffer_validation.rs` | ☐ |
 | `MinimumBufferSizeValidationTests` | 2 | `minimum_buffer_size_validation.rs` | ☐ |
 | `QueueSubmitValidationTests` | 2 | `queue_submit_validation.rs` | ☐ |
