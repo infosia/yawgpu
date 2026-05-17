@@ -91,14 +91,15 @@ from a later phase; tracked here but ported in that phase, not Phase 1.
   `DestroyDeviceBeforeAPITick` :320. ☐
 - **R9** `GetAHardwareBufferProperties` without the AHB feature ⇒ validation
   error. :335. ☐ (low priority / platform-niche — may defer within Phase 1)
-- **R10** Core-defaulting adapter, explicit `CoreFeaturesAndLimits` ⇒ core
-  limits (`maxStorageBuffersInVertexStage>0`). :356. ☐
-- **R11** Core-defaulting adapter, no features ⇒ defaults to
-  `CoreFeaturesAndLimits`. :377. ☐
-- **R12** Compat-defaulting adapter, no features ⇒ compat limits
-  (`maxStorageBuffersInVertexStage==0`). :421. ☐
-- **R13** Compat-defaulting adapter, explicit `CoreFeaturesAndLimits` ⇒ core
-  limits. :400. ☐
+- **R10** Core adapter (`featureLevel` Core/Undefined), explicit
+  `CoreFeaturesAndLimits` ⇒ device `HasFeature(CoreFeaturesAndLimits)`.
+  :356. ☐ (reframed; see Divergence)
+- **R11** Core adapter, no required features ⇒ device defaults to
+  `HasFeature(CoreFeaturesAndLimits)==true`. :377. ☐
+- **R12** Compat adapter (`featureLevel` Compatibility), no required
+  features ⇒ device `HasFeature(CoreFeaturesAndLimits)==false`. :421. ☐
+- **R13** Compat adapter, explicit `CoreFeaturesAndLimits` ⇒ device
+  `HasFeature(CoreFeaturesAndLimits)==true`. :400. ☐
 - **R14** `maxImmediateSize`: requested < supported ⇒ device gets the
   supported max (always-max limit). `AlwaysMax` :450. ☑ (P1.2a)
 
@@ -146,17 +147,29 @@ device-lost callback channel (R5) distinct from the uncaptured-error sink.
     `Error`; effective = `min(requested, default)` analog (R4).
   - **`maxImmediateSize`**: always set to the supported max regardless of
     the requested value (R14, "always max").
-- Core-vs-compat: the Noop adapter has a `compat` flag (default: **core**,
-  i.e. not compat). `CoreFeaturesAndLimits` requested or core-adapter-
-  default ⇒ core limits; compat adapter default ⇒ compat limits
-  (`maxStorageBuffersInVertexStage==0`). Tests need both an explicit
-  core-default and a compat-default Noop adapter; expose a way to construct
-  each (e.g. an internal/testing constructor or instance/adapter option).
-- Features: synthetic supported set must include the dependency families so
-  R6/R7 are testable — `TextureFormatsTier1` ⇒ implies
-  `RG11B10UfloatRenderable`; `TextureFormatsTier2` ⇒ implies
-  `TextureFormatsTier1`. `wgpuAdapter/DeviceHasFeature` reflects the
-  resolved set.
+- Core-vs-compat is selected by `WGPURequestAdapterOptions.featureLevel`
+  (`WGPUFeatureLevel`: `Undefined=0`→Core, `Compatibility=1`, `Core=2`;
+  webgpu.h:625, options:4138). The Noop adapter records the requested
+  level: **Core/Undefined** ⇒ core adapter (device gets
+  `CoreFeaturesAndLimits` by default); **Compatibility** ⇒ compat adapter
+  (device does NOT get `CoreFeaturesAndLimits` by default, but it may still
+  be requested explicitly via `requiredFeatures`).
+- Synthetic adapter **supported feature set** (requestable on any Noop
+  adapter): `CoreFeaturesAndLimits` (0x1), `RG11B10UfloatRenderable` (0xC),
+  `TextureFormatsTier1` (0x13), `TextureFormatsTier2` (0x14). Keep minimal
+  (only what R6/R7/R10–R13 need). `WGPUSupportedFeatures{featureCount,
+  features}` (webgpu.h:2931); free via `wgpuSupportedFeaturesFreeMembers`.
+- RequestDevice `requiredFeatures`: every requested feature must be in the
+  supported set else `Error`. Implication closure applied to the device's
+  resolved feature set: `TextureFormatsTier2` ⇒ adds `TextureFormatsTier1`;
+  `TextureFormatsTier1` ⇒ adds `RG11B10UfloatRenderable` (transitive).
+  `wgpuAdapter/DeviceGetFeatures`/`HasFeature` reflect the resolved set.
+
+> **Divergence (recorded):** Dawn R10–R13 assert the core/compat split via
+> the Dawn-only limit `maxStorageBuffersInVertexStage` (>0 core, 0 compat),
+> which is **not** in canonical `webgpu.h` `WGPULimits`. yawgpu does not
+> invent non-header limits; R10–R13 are validated via
+> `wgpuDeviceHasFeature(CoreFeaturesAndLimits)` presence/absence instead.
 
 ## Open questions
 - `wgpuGetInstanceLimits` / instance `TimedWaitAny` feature: model as an
