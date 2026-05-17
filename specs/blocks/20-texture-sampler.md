@@ -116,8 +116,11 @@ phases need.
 - **T29** baseArrayLayer+arrayLayerCount ≤ texture layers. :134. ☑ (P3.2)
 - **T30** view dimension compat with texture dim (1D/2D/2DArray/Cube/
   CubeArray/3D; Cube⇒6 layers, CubeArray⇒6N). :107/192/282/381. ☑ (P3.2)
-- **T31** view format compat (same category; sRGB pair only; viewFormats).
-  :711. ☑ (P3.2)
+- **T31** view format compat: allowed **iff** `view.format ==
+  texture.format` **or** `view.format` is in the texture's `viewFormats`
+  list. There is NO implicit sRGB-pair allowance — the sRGB counterpart
+  must itself be listed in `viewFormats` (Dawn `Texture.cpp`
+  `ValidateCanViewTextureAs`). :711. ☑ (P3.2; corrected in P3 Review V1)
 - **T32** aspect compat with format (Depth/StencilOnly rules). :751/885.
   ☑ (P3.2)
 - **T33** `wgpuTextureViewRelease` valid; default-view inference when
