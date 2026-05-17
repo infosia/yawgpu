@@ -2,7 +2,7 @@ use std::ffi::CStr;
 use std::sync::Arc;
 
 use crate::native;
-use crate::{WGPUBufferImpl, WGPUSamplerImpl, WGPUTextureViewImpl};
+use crate::{WGPUBindGroupLayoutImpl, WGPUBufferImpl, WGPUSamplerImpl, WGPUTextureViewImpl};
 use yawgpu_core as core;
 
 pub const WGPU_STRLEN: usize = usize::MAX;
@@ -286,6 +286,52 @@ unsafe fn map_bind_group_entry(entry: &native::WGPUBindGroupEntry) -> core::Bind
     core::BindGroupEntry {
         binding: entry.binding,
         resource,
+    }
+}
+
+/// Converts a pipeline layout descriptor to the core representation.
+///
+/// # Safety
+///
+/// `descriptor.bindGroupLayouts`, when non-null and
+/// `bindGroupLayoutCount > 0`, must point to `bindGroupLayoutCount`
+/// `WGPUBindGroupLayout` slots. Non-null slots must be live yawgpu handles.
+#[must_use]
+pub unsafe fn map_pipeline_layout_descriptor(
+    descriptor: &native::WGPUPipelineLayoutDescriptor,
+) -> core::PipelineLayoutDescriptor {
+    let mut error = None;
+    let bind_group_layouts = if descriptor.bindGroupLayoutCount == 0 {
+        Vec::new()
+    } else if descriptor.bindGroupLayouts.is_null() {
+        set_first_error(
+            &mut error,
+            "pipeline layout bindGroupLayouts must not be null when count is non-zero",
+        );
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(descriptor.bindGroupLayouts, descriptor.bindGroupLayoutCount)
+            .iter()
+            .filter_map(|layout| {
+                if layout.is_null() {
+                    set_first_error(
+                        &mut error,
+                        "pipeline layout bindGroupLayouts elements must not be null",
+                    );
+                    None
+                } else {
+                    let layout =
+                        clone_handle::<WGPUBindGroupLayoutImpl>(*layout, "WGPUBindGroupLayout");
+                    Some(Arc::clone(&layout._core))
+                }
+            })
+            .collect()
+    };
+
+    core::PipelineLayoutDescriptor {
+        bind_group_layouts,
+        immediate_size: descriptor.immediateSize,
+        error,
     }
 }
 

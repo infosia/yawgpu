@@ -13,11 +13,11 @@ use crate::conv::{
     map_compilation_info_request_status_success, map_compilation_message_type_error,
     map_device_lost_callback_info, map_device_lost_reason, map_extent_3d, map_feature,
     map_feature_level, map_features_to_native, map_limits, map_limits_to_native,
-    map_map_async_status, map_map_mode, map_origin_3d, map_queue_work_done_status,
-    map_sampler_descriptor, map_shader_module_descriptor, map_texel_copy_buffer_layout,
-    map_texture_aspect, map_texture_descriptor, map_texture_dimension_to_native,
-    map_texture_format_to_native, map_texture_usage_to_native, map_texture_view_descriptor,
-    release_handle, string_view, DeviceLostCallbackInfo,
+    map_map_async_status, map_map_mode, map_origin_3d, map_pipeline_layout_descriptor,
+    map_queue_work_done_status, map_sampler_descriptor, map_shader_module_descriptor,
+    map_texel_copy_buffer_layout, map_texture_aspect, map_texture_descriptor,
+    map_texture_dimension_to_native, map_texture_format_to_native, map_texture_usage_to_native,
+    map_texture_view_descriptor, release_handle, string_view, DeviceLostCallbackInfo,
 };
 
 pub struct WGPUAdapterImpl {
@@ -88,6 +88,12 @@ pub struct WGPUShaderModuleImpl {
     _instance: Arc<WGPUInstanceImpl>,
 }
 
+pub struct WGPUPipelineLayoutImpl {
+    _core: Arc<core::PipelineLayout>,
+    _device: Arc<core::Device>,
+    _instance: Arc<WGPUInstanceImpl>,
+}
+
 macro_rules! declare_empty_impl_handles {
     ($($name:ident),* $(,)?) => {
         $(
@@ -101,7 +107,6 @@ declare_empty_impl_handles!(
     WGPUCommandEncoderImpl,
     WGPUComputePassEncoderImpl,
     WGPUComputePipelineImpl,
-    WGPUPipelineLayoutImpl,
     WGPUQuerySetImpl,
     WGPURenderBundleImpl,
     WGPURenderBundleEncoderImpl,
@@ -929,6 +934,31 @@ pub unsafe extern "C" fn wgpuDeviceCreateBindGroup(
     }))
 }
 
+/// Creates a pipeline layout on a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `descriptor` must
+/// point to a valid `WGPUPipelineLayoutDescriptor`. Its `bindGroupLayouts`
+/// array may be null only when `bindGroupLayoutCount` is zero.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceCreatePipelineLayout(
+    device: native::WGPUDevice,
+    descriptor: *const native::WGPUPipelineLayoutDescriptor,
+) -> native::WGPUPipelineLayout {
+    let device = borrow_handle(device, "WGPUDevice");
+    let descriptor = descriptor
+        .as_ref()
+        .expect("WGPUPipelineLayoutDescriptor must not be null");
+    let descriptor = map_pipeline_layout_descriptor(descriptor);
+    let pipeline_layout = device.core.create_pipeline_layout(descriptor);
+    arc_to_handle(Arc::new(WGPUPipelineLayoutImpl {
+        _core: Arc::new(pipeline_layout),
+        _device: Arc::clone(&device.core),
+        _instance: Arc::clone(&device.instance),
+    }))
+}
+
 /// Gets the effective limits for a device.
 ///
 /// # Safety
@@ -1196,6 +1226,26 @@ pub unsafe extern "C" fn wgpuBindGroupRelease(bind_group: native::WGPUBindGroup)
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBindGroupAddRef(bind_group: native::WGPUBindGroup) {
     add_ref_handle(bind_group, "WGPUBindGroup");
+}
+
+/// Releases one owned reference to a pipeline layout handle.
+///
+/// # Safety
+///
+/// `pipeline_layout` must be a non-null live yawgpu pipeline layout handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuPipelineLayoutRelease(pipeline_layout: native::WGPUPipelineLayout) {
+    release_handle(pipeline_layout, "WGPUPipelineLayout");
+}
+
+/// Adds one owned reference to a pipeline layout handle.
+///
+/// # Safety
+///
+/// `pipeline_layout` must be a non-null live yawgpu pipeline layout handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuPipelineLayoutAddRef(pipeline_layout: native::WGPUPipelineLayout) {
+    add_ref_handle(pipeline_layout, "WGPUPipelineLayout");
 }
 
 /// Destroys a texture. This operation is idempotent.

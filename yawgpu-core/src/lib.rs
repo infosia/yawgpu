@@ -395,6 +395,26 @@ impl Device {
         }
         BindGroup::new(layout, entries, is_error)
     }
+
+    #[must_use]
+    pub fn create_pipeline_layout(&self, descriptor: PipelineLayoutDescriptor) -> PipelineLayout {
+        let error = descriptor.error.clone().or_else(|| {
+            validate_pipeline_layout_descriptor(
+                &descriptor.bind_group_layouts,
+                descriptor.immediate_size,
+                self.limits(),
+            )
+        });
+        let is_error = error.is_some();
+        if let Some(message) = error {
+            self.dispatch_error(ErrorKind::Validation, message);
+        }
+        PipelineLayout::new(
+            descriptor.bind_group_layouts,
+            descriptor.immediate_size,
+            is_error,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1759,6 +1779,64 @@ fn validate_bind_group_storage_texture(
     }
     if texture_view.array_layer_count() != 1 {
         return Some("storage texture bindings require a single array layer".to_owned());
+    }
+
+    None
+}
+
+#[derive(Debug, Clone)]
+pub struct PipelineLayoutDescriptor {
+    pub bind_group_layouts: Vec<Arc<BindGroupLayout>>,
+    pub immediate_size: u32,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PipelineLayout {
+    inner: Arc<PipelineLayoutInner>,
+}
+
+#[derive(Debug)]
+struct PipelineLayoutInner {
+    _bind_group_layouts: Vec<Arc<BindGroupLayout>>,
+    _immediate_size: u32,
+    is_error: bool,
+}
+
+impl PipelineLayout {
+    fn new(
+        bind_group_layouts: Vec<Arc<BindGroupLayout>>,
+        immediate_size: u32,
+        is_error: bool,
+    ) -> Self {
+        Self {
+            inner: Arc::new(PipelineLayoutInner {
+                _bind_group_layouts: bind_group_layouts,
+                _immediate_size: immediate_size,
+                is_error,
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.inner.is_error
+    }
+}
+
+fn validate_pipeline_layout_descriptor(
+    bind_group_layouts: &[Arc<BindGroupLayout>],
+    immediate_size: u32,
+    limits: Limits,
+) -> Option<String> {
+    if bind_group_layouts.len() > limits.max_bind_groups as usize {
+        return Some("pipeline layout bindGroupLayoutCount exceeds the device limit".to_owned());
+    }
+    if bind_group_layouts.iter().any(|layout| layout.is_error()) {
+        return Some("pipeline layout cannot contain an error bind group layout".to_owned());
+    }
+    if immediate_size > limits.max_immediate_size {
+        return Some("pipeline layout immediateSize exceeds the device limit".to_owned());
     }
 
     None
