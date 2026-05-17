@@ -13,7 +13,11 @@ resources); they stay tracked in the block spec and `dawn-test-mapping.md`.
 
 ---
 
-## P1.1 — Real Future / callback-mode state machine  *(ACTIVE)*
+## P1.1 — Real Future / callback-mode state machine  *(☑ DONE)*
+
+Done: A1–A7 implemented, `poll_all` removed, `TimedWaitAny` gate, tests in
+`yawgpu/tests/future_modes.rs` (5) green; gate clean. Committed
+`phase-1: P1.1`.
 
 Replaces the Phase-0 `FutureRegistry::poll_all` stub with the spec state
 machine A1–A7 (`../blocks/00-foundation.md`).
@@ -45,7 +49,7 @@ review note.
 
 ---
 
-## P1.2 — Adapter/Device limits & features  *(outline; detail when active)*
+## P1.2 — Adapter/Device limits & features  *(NEXT; detail when active)*
 
 Synthetic Noop adapter gains an explicit supported-limits + feature set and
 a core-vs-compat mode. Implement `wgpuAdapterGetLimits/GetFeatures/

@@ -20,7 +20,7 @@ WebGPU async model in `webgpu.h`. Source refs are absolute Dawn paths under
   `wgpuDeviceRelease/AddRef`.
 - Labels: descriptor `label` + `wgpuXxxSetLabel` / `GetLabel`.
 
-## Async / Future state machine (yawgpu-core)
+## Async / Future state machine (yawgpu-core) — ☑ done (P1.1)
 
 `webgpu.h`: `WGPUCallbackMode` 456-480, `WGPUFuture` 2233-2240,
 `WGPUFutureWaitInfo` 3862-3883, `WGPUWaitStatus` 1227-1242,
@@ -53,8 +53,15 @@ WebGPU async model in `webgpu.h`. Source refs are absolute Dawn paths under
 - **A7** Repeated WaitAny on the same completed future keeps returning
   Success (Dawn `FuturesTests::WaitAnySameFuture`).
 
-This replaces the Phase-0 `FutureRegistry::poll_all` stub (carried review
-note, now scheduled as slice **P1.1**).
+Implemented in **P1.1**: `FutureRegistry` now stores per-future mode +
+Pending/Complete + fired flag; `process_events()`/`wait_any()` replace the
+old `poll_all` blanket stub; instance `TimedWaitAny` feature gates
+`timeoutNS>0`. Behaviour A1–A7 covered by `yawgpu/tests/future_modes.rs`.
+
+> Decision recorded: `wgpuCreateInstance(NULL)` ⇒ `TimedWaitAny` enabled
+> (lenient default); an explicit descriptor must list
+> `WGPUInstanceFeatureName_TimedWaitAny` in `requiredFeatures` or
+> `timeoutNS>0` returns `Error`.
 
 ## Validation rules
 
