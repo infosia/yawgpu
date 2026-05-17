@@ -95,7 +95,18 @@ Committed `phase-4: P4.3`. S34 N/A.
 
 `wgpuDeviceCreateBindGroup`; S23–S33, S35(BG part). S34 N/A.
 
-## P4.4 — PipelineLayout  *(NEXT — closes slices, then Phase 4 Review)*
+## P4.4 — PipelineLayout  *(☑ DONE — slices complete; Phase Review next)*
+
+Done: core `PipelineLayout`/`PipelineLayoutDescriptor` +
+`validate_pipeline_layout_descriptor` (S36 count ≤ `max_bind_groups` &
+no error-BGL element, S37 `immediate_size` ≤ `max_immediate_size`);
+error-layout. conv null-array / null-element ⇒ validation error (no
+panic), valid ⇒ `clone_handle` BGL → `Arc<core::BindGroupLayout>`. FFI
+`WGPUPipelineLayoutImpl` + create/Release/AddRef. S36/S37 ported in
+`yawgpu/tests/pipeline_layout_validation.rs` (4), gate green
+(27 binaries). Committed `phase-4: P4.4`.
+
+#### (original detail)
 
 `wgpuDeviceCreatePipelineLayout`; S36–S37. Then Phase Review.
 

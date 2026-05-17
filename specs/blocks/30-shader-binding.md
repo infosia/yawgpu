@@ -154,8 +154,8 @@ Phase 4. Rules from Dawn `ShaderModuleValidationTests`,
 ### PipelineLayout (P4.4)
 
 - **S36** each `bindGroupLayouts[i]` non-null; `bindGroupLayoutCount` ≤
-  `maxBindGroups` (Limits). ☐
-- **S37** `immediateSize` ≤ `limits.maxImmediateSize`. ☐ (reuse Limits)
+  `maxBindGroups` (Limits). ☑ (P4.4)
+- **S37** `immediateSize` ≤ `limits.maxImmediateSize`. ☑ (P4.4) (reuse Limits)
 - **S38** downstream pipeline-compat — Defer→P5.
 
 ### Deferred → P5 (need Pipeline)
