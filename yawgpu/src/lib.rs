@@ -8,7 +8,8 @@ use yawgpu_core as core;
 
 use crate::conv::{
     add_ref_handle, arc_to_handle, borrow_handle, clone_handle, free_supported_features,
-    label_from_string_view, map_device_lost_callback_info, map_device_lost_reason, map_feature,
+    label_from_string_view, map_buffer_descriptor, map_buffer_map_state,
+    map_buffer_usage_to_native, map_device_lost_callback_info, map_device_lost_reason, map_feature,
     map_feature_level, map_features_to_native, map_limits, map_limits_to_native, release_handle,
     string_view, DeviceLostCallbackInfo,
 };
@@ -16,6 +17,10 @@ use crate::conv::{
 pub struct WGPUAdapterImpl {
     core: Arc<core::Adapter>,
     instance: Arc<WGPUInstanceImpl>,
+}
+
+pub struct WGPUBufferImpl {
+    core: Arc<core::Buffer>,
 }
 
 pub struct WGPUDeviceImpl {
@@ -45,7 +50,6 @@ macro_rules! declare_empty_impl_handles {
 declare_empty_impl_handles!(
     WGPUBindGroupImpl,
     WGPUBindGroupLayoutImpl,
-    WGPUBufferImpl,
     WGPUCommandBufferImpl,
     WGPUCommandEncoderImpl,
     WGPUComputePassEncoderImpl,
@@ -136,6 +140,12 @@ impl Drop for WGPUInstanceImpl {
 
 impl Drop for WGPUAdapterImpl {
     fn drop(&mut self) {}
+}
+
+impl Drop for WGPUBufferImpl {
+    fn drop(&mut self) {
+        self.core.destroy();
+    }
 }
 
 impl Drop for WGPUDeviceImpl {
@@ -601,6 +611,27 @@ pub unsafe extern "C" fn wgpuDeviceSetLabel(
     device.core.set_label(&label);
 }
 
+/// Creates a buffer on a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `descriptor` must
+/// point to a valid `WGPUBufferDescriptor`.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceCreateBuffer(
+    device: native::WGPUDevice,
+    descriptor: *const native::WGPUBufferDescriptor,
+) -> native::WGPUBuffer {
+    let device = borrow_handle(device, "WGPUDevice");
+    let descriptor = descriptor
+        .as_ref()
+        .expect("WGPUBufferDescriptor must not be null");
+    let buffer = device.core.create_buffer(map_buffer_descriptor(descriptor));
+    arc_to_handle(Arc::new(WGPUBufferImpl {
+        core: Arc::new(buffer),
+    }))
+}
+
 /// Gets the effective limits for a device.
 ///
 /// # Safety
@@ -667,6 +698,78 @@ pub unsafe extern "C" fn wgpuDeviceGetQueue(device: native::WGPUDevice) -> nativ
         core: Arc::new(device.core.queue()),
     });
     arc_to_handle(queue)
+}
+
+/// Destroys a buffer. This operation is idempotent.
+///
+/// # Safety
+///
+/// `buffer` must be a non-null live yawgpu buffer handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuBufferDestroy(buffer: native::WGPUBuffer) {
+    borrow_handle(buffer, "WGPUBuffer").core.destroy();
+}
+
+/// Unmaps a buffer. This is safe on unmapped, destroyed, and error buffers.
+///
+/// # Safety
+///
+/// `buffer` must be a non-null live yawgpu buffer handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuBufferUnmap(buffer: native::WGPUBuffer) {
+    borrow_handle(buffer, "WGPUBuffer").core.unmap();
+}
+
+/// Returns the buffer map state.
+///
+/// # Safety
+///
+/// `buffer` must be a non-null live yawgpu buffer handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuBufferGetMapState(
+    buffer: native::WGPUBuffer,
+) -> native::WGPUBufferMapState {
+    map_buffer_map_state(borrow_handle(buffer, "WGPUBuffer").core.map_state())
+}
+
+/// Returns the descriptor size reflected by the buffer.
+///
+/// # Safety
+///
+/// `buffer` must be a non-null live yawgpu buffer handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuBufferGetSize(buffer: native::WGPUBuffer) -> u64 {
+    borrow_handle(buffer, "WGPUBuffer").core.size()
+}
+
+/// Returns the descriptor usage reflected by the buffer.
+///
+/// # Safety
+///
+/// `buffer` must be a non-null live yawgpu buffer handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuBufferGetUsage(buffer: native::WGPUBuffer) -> native::WGPUBufferUsage {
+    map_buffer_usage_to_native(borrow_handle(buffer, "WGPUBuffer").core.usage())
+}
+
+/// Releases one owned reference to a buffer handle.
+///
+/// # Safety
+///
+/// `buffer` must be a non-null live yawgpu buffer handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuBufferRelease(buffer: native::WGPUBuffer) {
+    release_handle(buffer, "WGPUBuffer");
+}
+
+/// Adds one owned reference to a buffer handle.
+///
+/// # Safety
+///
+/// `buffer` must be a non-null live yawgpu buffer handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuBufferAddRef(buffer: native::WGPUBuffer) {
+    add_ref_handle(buffer, "WGPUBuffer");
 }
 
 /// Releases one owned reference to a queue handle.

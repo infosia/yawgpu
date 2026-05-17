@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use yawgpu_hal::{HalAdapter, HalDevice, HalError, HalInstance, HalQueue};
+use yawgpu_hal::{HalAdapter, HalBuffer, HalDevice, HalError, HalInstance, HalQueue};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -278,6 +278,179 @@ impl Device {
             callback(error);
         }
     }
+
+    #[must_use]
+    pub fn create_buffer(&self, descriptor: BufferDescriptor) -> Buffer {
+        let error = validate_buffer_descriptor(&descriptor, self.limits());
+        let is_error = error.is_some();
+        if let Some(message) = error {
+            self.dispatch_error(ErrorKind::Validation, message);
+        }
+
+        let hal = if is_error {
+            None
+        } else {
+            Some(self.inner.hal.create_buffer(descriptor.size))
+        };
+
+        Buffer::new(descriptor, hal, is_error)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferDescriptor {
+    pub usage: BufferUsage,
+    pub size: u64,
+    pub mapped_at_creation: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferUsage(u64);
+
+impl BufferUsage {
+    pub const NONE: Self = Self(0);
+    pub const MAP_READ: Self = Self(1);
+    pub const MAP_WRITE: Self = Self(2);
+    pub const COPY_SRC: Self = Self(4);
+    pub const COPY_DST: Self = Self(8);
+    pub const INDEX: Self = Self(16);
+    pub const VERTEX: Self = Self(32);
+    pub const UNIFORM: Self = Self(64);
+    pub const STORAGE: Self = Self(128);
+    pub const INDIRECT: Self = Self(256);
+    pub const QUERY_RESOLVE: Self = Self(512);
+
+    #[must_use]
+    pub fn from_bits_retain(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    #[must_use]
+    pub fn bits(self) -> u64 {
+        self.0
+    }
+
+    #[must_use]
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl std::ops::BitOr for BufferUsage {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BufferMapState {
+    Unmapped,
+    Pending,
+    Mapped,
+}
+
+#[derive(Debug, Clone)]
+pub struct Buffer {
+    inner: Arc<BufferInner>,
+}
+
+#[derive(Debug)]
+struct BufferInner {
+    _hal: Option<HalBuffer>,
+    usage: BufferUsage,
+    size: u64,
+    state: Mutex<BufferState>,
+}
+
+#[derive(Debug)]
+struct BufferState {
+    map_state: BufferMapState,
+    is_error: bool,
+    is_destroyed: bool,
+}
+
+impl Buffer {
+    fn new(descriptor: BufferDescriptor, hal: Option<HalBuffer>, is_error: bool) -> Self {
+        let map_state = if descriptor.mapped_at_creation && !is_error {
+            BufferMapState::Mapped
+        } else {
+            BufferMapState::Unmapped
+        };
+        Self {
+            inner: Arc::new(BufferInner {
+                _hal: hal,
+                usage: descriptor.usage,
+                size: descriptor.size,
+                state: Mutex::new(BufferState {
+                    map_state,
+                    is_error,
+                    is_destroyed: false,
+                }),
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        self.inner.size
+    }
+
+    #[must_use]
+    pub fn usage(&self) -> BufferUsage {
+        self.inner.usage
+    }
+
+    #[must_use]
+    pub fn map_state(&self) -> BufferMapState {
+        self.inner.state.lock().map_state
+    }
+
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.inner.state.lock().is_error
+    }
+
+    pub fn destroy(&self) {
+        let mut state = self.inner.state.lock();
+        state.is_destroyed = true;
+        state.map_state = BufferMapState::Unmapped;
+    }
+
+    pub fn unmap(&self) {
+        self.inner.state.lock().map_state = BufferMapState::Unmapped;
+    }
+}
+
+fn validate_buffer_descriptor(
+    descriptor: &BufferDescriptor,
+    limits: Limits,
+) -> Option<&'static str> {
+    let usage = descriptor.usage;
+    if usage.bits() == 0 {
+        return Some("buffer usage must be non-zero");
+    }
+    if usage.contains(BufferUsage::MAP_READ) {
+        let allowed = (BufferUsage::MAP_READ | BufferUsage::COPY_DST).bits();
+        if usage.bits() & !allowed != 0 {
+            return Some("MapRead buffers may only combine with CopyDst");
+        }
+    }
+    if usage.contains(BufferUsage::MAP_WRITE) {
+        let allowed = (BufferUsage::MAP_WRITE | BufferUsage::COPY_SRC).bits();
+        if usage.bits() & !allowed != 0 {
+            return Some("MapWrite buffers may only combine with CopySrc");
+        }
+    }
+    if descriptor.size > limits.max_buffer_size {
+        return Some("buffer size exceeds device limit");
+    }
+    if descriptor.mapped_at_creation && !descriptor.size.is_multiple_of(4) {
+        return Some("mappedAtCreation buffer size must be 4-byte aligned");
+    }
+    None
 }
 
 #[derive(Debug, Default)]

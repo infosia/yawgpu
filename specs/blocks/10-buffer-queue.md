@@ -52,29 +52,29 @@ re-fire.
 
 ### Buffer creation / reflection / lifetime — Phase 2 (P2.1)
 
-- **B1** usage must be non-zero. `CreationMapUsageNotZero` :115. ☐
+- **B1** usage must be non-zero. `CreationMapUsageNotZero` :115. ☑ (P2.1)
 - **B2** `MapRead` may only combine with `CopyDst`. `CreationMapUsage
-  Restrictions` :127. ☐
-- **B3** `MapWrite` may only combine with `CopySrc`. same :146. ☐
+  Restrictions` :127. ☑ (P2.1)
+- **B3** `MapWrite` may only combine with `CopySrc`. same :146. ☑ (P2.1)
 - **B4** `size > device maxBufferSize` ⇒ error. `CreationMaxBufferSize`
-  :93. ☐ (reuse P1.2a `Limits.max_buffer_size`)
+  :93. ☑ (P2.1) (reuse P1.2a `Limits.max_buffer_size`)
 - **B5** `mappedAtCreation` requires `size` 4-byte aligned.
-  `MappedAtCreationSizeAlignment` :622. ☐
+  `MappedAtCreationSizeAlignment` :622. ☑ (P2.1)
 - **B6** `mappedAtCreation=true` ⇒ buffer starts `Mapped`, any usage ok.
-  `NonMappableMappedAtCreationSuccess` :618. ☐
+  `NonMappableMappedAtCreationSuccess` :618. ☑ (P2.1)
 - **B32** `Destroy` valid on any buffer incl. error buffer.
-  `DestroyErrorBuffer` :663. ☐
-- **B33** `Destroy` idempotent. `DestroyDestroyedBuffer` :680. ☐
+  `DestroyErrorBuffer` :663. ☑ (P2.1)
+- **B33** `Destroy` idempotent. `DestroyDestroyedBuffer` :680. ☑ (P2.1)
 - **B34** `Unmap` on unmapped buffer = safe no-op. `UnmapUnmappedBuffer`
-  :834. ☐
-- **B35** `Unmap` on error buffer = safe. `UnmapErrorBuffer` :687. ☐
+  :834. ☑ (P2.1)
+- **B35** `Unmap` on error buffer = safe. `UnmapErrorBuffer` :687. ☑ (P2.1)
 - **B36** `Unmap` on destroyed buffer = safe. `UnmapDestroyedBuffer` :698.
-  ☐
+  ☑ (P2.1)
 - **B37** `MapAsync` after `Destroy`+`Unmap` ⇒ error + callback `Error`.
   `MapDestroyedBufferAfterUnmap` :706. ☐ (callback part may land in P2.2)
 - **B38** `GetSize`/`GetUsage` reflect descriptor even on error buffer;
   `GetMapState` queryable. `CreationParameterReflectionForErrorBuffer`
-  :1135. ☐
+  :1135. ☑ (P2.1)
 
 ### Buffer map async — Phase 2 (P2.2)
 

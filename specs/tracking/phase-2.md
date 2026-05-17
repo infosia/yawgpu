@@ -7,7 +7,16 @@ green on Noop.
 
 4 slices. Deferred B39–B41/B53–B57 (→P6), B58 (→P4) are out of Phase 2.
 
-## P2.1 — Buffer creation / reflection / lifetime  *(ACTIVE)*
+## P2.1 — Buffer creation / reflection / lifetime  *(☑ DONE)*
+
+Done: `NoopBuffer`/`HalBuffer`, core `Buffer` (Arc, usage bitflags,
+map-state, error/destroyed flags) + `validate_buffer_descriptor`,
+error-buffer model (reflects size/usage), `wgpuDeviceCreateBuffer`/
+`Destroy`/`Unmap`/`GetSize`/`GetUsage`/`GetMapState`/`Release`/`AddRef`.
+B1–B6,B32–B36,B38 ported in `yawgpu/tests/buffer_creation_validation.rs`
+(8), gate green. Committed `phase-2: P2.1`. B37 callback part → P2.2.
+
+#### (original detail)
 
 `WGPUBuffer` handle + core `Buffer` (Arc, host `Vec<u8>` backing for later
 map). `wgpuDeviceCreateBuffer` with usage/size/mappedAtCreation validation
@@ -17,7 +26,7 @@ routed through the device error sink (invalid descriptor ⇒ error +
 GetUsage/GetMapState`. `mappedAtCreation` ⇒ Mapped state (no async).
 Port **B1–B6, B32–B36, B38** (B37 callback part → P2.2).
 
-## P2.2 — Buffer map async state machine  *(after P2.1)*
+## P2.2 — Buffer map async state machine  *(NEXT)*
 
 `wgpuBufferMapAsync` (+`WGPUBufferMapCallbackInfo`) reusing the Phase-1
 future/`PendingCallback` machinery; Pending/Mapped transitions;
