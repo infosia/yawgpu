@@ -30,6 +30,7 @@ pub struct WGPUDeviceImpl {
     core: Arc<core::Device>,
     instance: Arc<WGPUInstanceImpl>,
     device_lost_callback: DeviceLostCallbackInfo,
+    default_queue: Mutex<Option<Arc<WGPUQueueImpl>>>,
 }
 
 pub struct WGPUInstanceImpl {
@@ -39,7 +40,7 @@ pub struct WGPUInstanceImpl {
 }
 
 pub struct WGPUQueueImpl {
-    core: Arc<core::Queue>,
+    core: core::Queue,
     device: Arc<core::Device>,
     instance: Arc<WGPUInstanceImpl>,
 }
@@ -116,7 +117,7 @@ impl WGPUInstanceImpl {
     }
 
     fn wait_any(&self, future_ids: &[core::FutureId]) -> core::WaitAnyResult {
-        let result = self.core.future_registry().wait_any(future_ids, true);
+        let result = self.core.future_registry().wait_any(future_ids);
 
         let mut callbacks = self
             .pending_callbacks
@@ -139,14 +140,6 @@ impl WGPUInstanceImpl {
     }
 }
 
-impl Drop for WGPUInstanceImpl {
-    fn drop(&mut self) {}
-}
-
-impl Drop for WGPUAdapterImpl {
-    fn drop(&mut self) {}
-}
-
 impl Drop for WGPUBufferImpl {
     fn drop(&mut self) {
         self.core.abort_pending_map();
@@ -156,15 +149,15 @@ impl Drop for WGPUBufferImpl {
 
 impl Drop for WGPUDeviceImpl {
     fn drop(&mut self) {
-        self.schedule_device_lost(std::ptr::null(), core::DeviceLostReason::Destroyed);
+        self.implicit_destroy_on_last_release();
     }
 }
 
-impl Drop for WGPUQueueImpl {
-    fn drop(&mut self) {}
-}
-
 impl WGPUDeviceImpl {
+    fn implicit_destroy_on_last_release(&self) {
+        self.schedule_device_lost(std::ptr::null(), core::DeviceLostReason::Destroyed);
+    }
+
     fn schedule_device_lost(
         &self,
         device: native::WGPUDevice,
@@ -198,6 +191,20 @@ impl WGPUDeviceImpl {
     #[doc(hidden)]
     pub fn dispatch_error(&self, kind: core::ErrorKind, message: impl Into<String>) {
         self.core.dispatch_error(kind, message);
+    }
+
+    fn default_queue(&self) -> Arc<WGPUQueueImpl> {
+        let mut queue = self
+            .default_queue
+            .lock()
+            .expect("default queue lock is not poisoned");
+        Arc::clone(queue.get_or_insert_with(|| {
+            Arc::new(WGPUQueueImpl {
+                core: self.core.queue(),
+                device: Arc::clone(&self.core),
+                instance: Arc::clone(&self.instance),
+            })
+        }))
     }
 }
 
@@ -602,6 +609,7 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
                 core: Arc::new(device),
                 instance: Arc::clone(&adapter.instance),
                 device_lost_callback,
+                default_queue: Mutex::new(None),
             })
         })
         .map_err(|err| err.to_string());
@@ -644,13 +652,10 @@ pub unsafe extern "C" fn wgpuDeviceRelease(device: native::WGPUDevice) {
         .as_ref()
         .map(|_| device)
         .unwrap_or_else(|| panic!("WGPUDevice must not be null"));
-    Arc::increment_strong_count(device);
-    let borrowed = Arc::from_raw(device);
-    if Arc::strong_count(&borrowed) == 2 {
-        borrowed.schedule_device_lost(std::ptr::null(), core::DeviceLostReason::Destroyed);
+    let owned = Arc::from_raw(device);
+    if Arc::strong_count(&owned) == 1 {
+        owned.implicit_destroy_on_last_release();
     }
-    drop(borrowed);
-    drop(Arc::from_raw(device));
 }
 
 /// Adds one owned reference to a device handle.
@@ -775,12 +780,7 @@ pub unsafe extern "C" fn wgpuDeviceHasFeature(
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceGetQueue(device: native::WGPUDevice) -> native::WGPUQueue {
     let device = borrow_handle(device, "WGPUDevice");
-    let queue = Arc::new(WGPUQueueImpl {
-        core: Arc::new(device.core.queue()),
-        device: Arc::clone(&device.core),
-        instance: Arc::clone(&device.instance),
-    });
-    arc_to_handle(queue)
+    arc_to_handle(device.default_queue())
 }
 
 /// Destroys a buffer. This operation is idempotent.
@@ -1137,13 +1137,11 @@ unsafe fn instance_has_timed_wait_any(descriptor: *const native::WGPUInstanceDes
     if descriptor.requiredFeatureCount == 0 {
         return false;
     }
-    let features = descriptor
-        .requiredFeatures
-        .as_ref()
-        .map(|_| {
-            std::slice::from_raw_parts(descriptor.requiredFeatures, descriptor.requiredFeatureCount)
-        })
-        .expect("WGPUInstanceDescriptor requiredFeatures must not be null");
+    if descriptor.requiredFeatures.is_null() {
+        return false;
+    }
+    let features =
+        std::slice::from_raw_parts(descriptor.requiredFeatures, descriptor.requiredFeatureCount);
     features.contains(&native::WGPUInstanceFeatureName_TimedWaitAny)
 }
 
@@ -1153,13 +1151,11 @@ unsafe fn required_features_from_descriptor(
     if descriptor.requiredFeatureCount == 0 {
         return Vec::new();
     }
-    let features = descriptor
-        .requiredFeatures
-        .as_ref()
-        .map(|_| {
-            std::slice::from_raw_parts(descriptor.requiredFeatures, descriptor.requiredFeatureCount)
-        })
-        .expect("WGPUDeviceDescriptor requiredFeatures must not be null");
+    if descriptor.requiredFeatures.is_null() {
+        return Vec::new();
+    }
+    let features =
+        std::slice::from_raw_parts(descriptor.requiredFeatures, descriptor.requiredFeatureCount);
     features.iter().copied().map(map_feature).collect()
 }
 

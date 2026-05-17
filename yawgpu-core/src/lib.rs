@@ -92,6 +92,8 @@ impl Adapter {
 
     #[must_use]
     pub fn limits(&self) -> Limits {
+        // Block 00: the synthetic Noop adapter's supported limits are the
+        // WebGPU spec defaults by design.
         Limits::DEFAULT
     }
 
@@ -313,6 +315,23 @@ pub enum MapMode {
     Write,
 }
 
+impl MapMode {
+    pub fn from_bits(bits: u32) -> Result<Self, &'static str> {
+        const READ: u32 = 1;
+        const WRITE: u32 = 2;
+        const ALLOWED: u32 = READ | WRITE;
+
+        if bits & !ALLOWED != 0 {
+            return Err("map mode has unsupported bits");
+        }
+        match bits {
+            READ => Ok(Self::Read),
+            WRITE => Ok(Self::Write),
+            _ => Err("map mode must be exactly Read or Write"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MapAsyncStatus {
@@ -422,7 +441,14 @@ struct HostBuffer {
 
 impl HostBuffer {
     fn new(size: u64) -> Self {
-        let len = usize::try_from(size).unwrap_or(0);
+        debug_assert!(
+            usize::try_from(size).is_ok(),
+            "buffer sizes above usize::MAX must be rejected before allocation"
+        );
+        let len = match usize::try_from(size) {
+            Ok(len) => len,
+            Err(_) => usize::MAX,
+        };
         let bytes = (0..len)
             .map(|_| UnsafeCell::new(0))
             .collect::<Vec<_>>()
@@ -506,6 +532,11 @@ impl Buffer {
         self.inner.state.lock().is_error
     }
 
+    /// Marks any pending map as aborted without draining `pending_map`.
+    ///
+    /// The transient invariant is `map_state == Unmapped` while
+    /// `pending_map.is_some()` until the callback consumes it through
+    /// `resolve_pending_map`.
     pub fn destroy(&self) {
         let mut state = self.inner.state.lock();
         state.is_destroyed = true;
@@ -516,6 +547,11 @@ impl Buffer {
         state.active_map = None;
     }
 
+    /// Marks any pending map as aborted without draining `pending_map`.
+    ///
+    /// The transient invariant is `map_state == Unmapped` while
+    /// `pending_map.is_some()` until the callback consumes it through
+    /// `resolve_pending_map`.
     pub fn unmap(&self) {
         let mut state = self.inner.state.lock();
         if let Some(pending) = state.pending_map.as_mut() {
@@ -596,6 +632,11 @@ impl Buffer {
         outcome
     }
 
+    /// Marks a pending map as aborted without draining `pending_map`.
+    ///
+    /// The transient invariant is `map_state == Unmapped` while
+    /// `pending_map.is_some()` until the callback consumes it through
+    /// `resolve_pending_map`.
     pub fn abort_pending_map(&self) {
         let mut state = self.inner.state.lock();
         if let Some(pending) = state.pending_map.as_mut() {
@@ -820,6 +861,9 @@ impl Limits {
     };
 
     fn validate_required_limits(self, required: Option<&Self>) -> Result<Self, String> {
+        // Block 00: for the synthetic Noop adapter, supported limits equal
+        // the WebGPU spec defaults, so comparisons against `self` collapse to
+        // comparisons against `DEFAULT` intentionally.
         let required = required.copied().unwrap_or(Self::DEFAULT);
         let default = Self::DEFAULT;
         let mut effective = default;
@@ -1116,7 +1160,7 @@ impl FutureRegistry {
     }
 
     #[must_use]
-    pub fn wait_any(&self, ids: &[FutureId], _poll_only: bool) -> WaitAnyResult {
+    pub fn wait_any(&self, ids: &[FutureId]) -> WaitAnyResult {
         if ids.is_empty() {
             return WaitAnyResult {
                 status: WaitAnyStatus::TimedOut,
@@ -1161,7 +1205,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    use super::{ErrorKind, FutureCallbackMode, FutureRegistry, Instance, WaitAnyStatus};
+    use super::{ErrorKind, FutureCallbackMode, FutureRegistry, Instance, MapMode, WaitAnyStatus};
 
     #[test]
     fn creates_noop_device_and_queue() {
@@ -1239,14 +1283,32 @@ mod tests {
         assert_eq!(registry.process_events(), vec![second]);
         assert!(registry.process_events().is_empty());
 
-        let result = registry.wait_any(&[first, second], true);
+        let result = registry.wait_any(&[first, second]);
         assert_eq!(result.status, WaitAnyStatus::Success);
         assert_eq!(result.completed, vec![first, second]);
         assert_eq!(result.callbacks_to_fire, vec![first]);
 
-        let result = registry.wait_any(&[first, second], true);
+        let result = registry.wait_any(&[first, second]);
         assert_eq!(result.status, WaitAnyStatus::Success);
         assert_eq!(result.completed, vec![first, second]);
         assert!(result.callbacks_to_fire.is_empty());
+    }
+
+    #[test]
+    fn map_mode_from_bits_rejects_none_both_and_unsupported_bits() {
+        assert_eq!(MapMode::from_bits(1), Ok(MapMode::Read));
+        assert_eq!(MapMode::from_bits(2), Ok(MapMode::Write));
+        assert_eq!(
+            MapMode::from_bits(0),
+            Err("map mode must be exactly Read or Write")
+        );
+        assert_eq!(
+            MapMode::from_bits(1 | 2),
+            Err("map mode must be exactly Read or Write")
+        );
+        assert_eq!(
+            MapMode::from_bits(4),
+            Err("map mode has unsupported bits")
+        );
     }
 }

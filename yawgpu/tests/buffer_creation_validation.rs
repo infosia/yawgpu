@@ -114,6 +114,26 @@ fn mapped_at_creation_size_must_be_four_byte_aligned() {
 }
 
 #[test]
+fn multi_violation_descriptor_reports_exactly_one_error() {
+    let test = ValidationTest::new();
+    unsafe {
+        let mut limits = std::mem::zeroed();
+        assert_eq!(
+            yawgpu::wgpuDeviceGetLimits(test.device(), &mut limits),
+            native::WGPUStatus_Success
+        );
+
+        let usage = native::WGPUBufferUsage_MapRead | native::WGPUBufferUsage_CopySrc;
+        let mut buffer = std::ptr::null();
+        assert_device_error!({
+            buffer = create_buffer(test.device(), limits.maxBufferSize + 1, usage, true);
+        });
+        assert!(!buffer.is_null());
+        yawgpu::wgpuBufferRelease(buffer);
+    }
+}
+
+#[test]
 fn mapped_at_creation_starts_mapped_for_non_mappable_usage() {
     let test = ValidationTest::new();
     unsafe {

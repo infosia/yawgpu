@@ -130,6 +130,7 @@ pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
         core::Feature::TextureFormatsTier1 => native::WGPUFeatureName_TextureFormatsTier1,
         core::Feature::TextureFormatsTier2 => native::WGPUFeatureName_TextureFormatsTier2,
         core::Feature::Other(value) => value,
+        // exhaustive as of core::Feature @ 2026-05-17
         _ => native::WGPUFeatureName_Force32,
     }
 }
@@ -176,6 +177,7 @@ pub fn map_device_lost_reason(reason: core::DeviceLostReason) -> native::WGPUDev
         core::DeviceLostReason::Destroyed => native::WGPUDeviceLostReason_Destroyed,
         core::DeviceLostReason::CallbackCancelled => native::WGPUDeviceLostReason_CallbackCancelled,
         core::DeviceLostReason::FailedCreation => native::WGPUDeviceLostReason_FailedCreation,
+        // exhaustive as of core::DeviceLostReason @ 2026-05-17
         _ => native::WGPUDeviceLostReason_Unknown,
     }
 }
@@ -196,6 +198,7 @@ pub fn map_buffer_map_state(value: core::BufferMapState) -> native::WGPUBufferMa
         core::BufferMapState::Unmapped => native::WGPUBufferMapState_Unmapped,
         core::BufferMapState::Pending => native::WGPUBufferMapState_Pending,
         core::BufferMapState::Mapped => native::WGPUBufferMapState_Mapped,
+        // exhaustive as of core::BufferMapState @ 2026-05-17
         _ => native::WGPUBufferMapState_Force32,
     }
 }
@@ -207,6 +210,7 @@ pub fn map_map_async_status(value: core::MapAsyncStatus) -> native::WGPUMapAsync
         core::MapAsyncStatus::CallbackCancelled => native::WGPUMapAsyncStatus_CallbackCancelled,
         core::MapAsyncStatus::Error => native::WGPUMapAsyncStatus_Error,
         core::MapAsyncStatus::Aborted => native::WGPUMapAsyncStatus_Aborted,
+        // exhaustive as of core::MapAsyncStatus @ 2026-05-17
         _ => native::WGPUMapAsyncStatus_Error,
     }
 }
@@ -221,20 +225,14 @@ pub fn map_queue_work_done_status(
             native::WGPUQueueWorkDoneStatus_CallbackCancelled
         }
         core::QueueWorkDoneStatus::Error => native::WGPUQueueWorkDoneStatus_Error,
+        // exhaustive as of core::QueueWorkDoneStatus @ 2026-05-17
         _ => native::WGPUQueueWorkDoneStatus_Error,
     }
 }
 
 pub fn map_map_mode(value: native::WGPUMapMode) -> Result<core::MapMode, &'static str> {
-    let allowed = native::WGPUMapMode_Read | native::WGPUMapMode_Write;
-    if value & !allowed != 0 {
-        return Err("map mode has unsupported bits");
-    }
-    match value {
-        native::WGPUMapMode_Read => Ok(core::MapMode::Read),
-        native::WGPUMapMode_Write => Ok(core::MapMode::Write),
-        _ => Err("map mode must be exactly Read or Write"),
-    }
+    let bits = u32::try_from(value).map_err(|_| "map mode has unsupported bits")?;
+    core::MapMode::from_bits(bits)
 }
 
 #[must_use]
