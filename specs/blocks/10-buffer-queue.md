@@ -47,6 +47,12 @@ re-fire.
   matches canonical pointer-returning semantics (Dawn additionally emits a
   device log we do not require).
 - `WGPU_WHOLE_MAP_SIZE` sentinel handled per webgpu.h.
+- **Buffer descriptor validation is first-match-wins** (B1–B6): a
+  multi-rule-violating descriptor dispatches exactly **one** device error
+  (Dawn does too). Tests assert "exactly one error" (not a rule-specific
+  message, per the status-code divergence); a multi-violation vector
+  proves the single-error contract independent of check order. Order is an
+  implementation detail, not a spec guarantee.
 
 ## Rules
 
@@ -138,9 +144,11 @@ re-fire.
 - **B50/B51** `wgpuQueueOnSubmittedWorkDone` callback fires `Success`
   (even before any submit). `CallBeforeSubmits` :46. ☑ (P2.4)
 - **B52** OnSubmittedWorkDone honours `WGPUCallbackMode`. same. ☑ (P2.4)
-- `wgpuQueueSubmit` arg validation (count/null) — from
-  `QueueSubmitValidationTests`; minimal in P2.4 (full command validation
-  Defer→P6).
+- `wgpuQueueSubmit` **top-level pointer** validation only in P2.4
+  (`commandCount>0 && commands==NULL` ⇒ device error; `commandCount==0`
+  ⇒ no-op). Per-element/`CommandBuffer` validation requires the
+  `CommandBuffer` type — Defer→P6 (`QueueSubmitValidationTests` full port
+  is P6).
 
 ### Deferred
 
