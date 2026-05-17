@@ -112,17 +112,17 @@ re-fire.
 ### GetMappedRange — Phase 2 (P2.3)
 
 - **B25** NULL on unmapped (incl. after unmap of mappedAtCreation).
-  `GetMappedRange_OnUnmappedBuffer` :850. ☐
+  `GetMappedRange_OnUnmappedBuffer` :850. ☑ (P2.3)
 - **B26** non-const `GetMappedRange` NULL when mapped read-only;
-  `GetConstMappedRange` ok. `..._NonConstOnMappedForReading` :929. ☐
-- **B27** offset beyond mapped range ⇒ NULL. `..._OffsetSizeOOB` :996. ☐
+  `GetConstMappedRange` ok. `..._NonConstOnMappedForReading` :929. ☑ (P2.3)
+- **B27** offset beyond mapped range ⇒ NULL. `..._OffsetSizeOOB` :996. ☑ (P2.3)
 - **B28** offset+size beyond mapped range (incl. overflow) ⇒ NULL. same
-  :1067. ☐
+  :1067. ☑ (P2.3)
 - **B29** `WGPU_WHOLE_MAP_SIZE` uses mapped size not buffer size. same
-  :1087. ☐
-- **B30** offset before mapped-range start ⇒ NULL. same :1096. ☐
+  :1087. ☑ (P2.3)
+- **B30** offset before mapped-range start ⇒ NULL. same :1096. ☑ (P2.3)
 - **B31** NULL on destroyed buffer. `GetMappedRange_OnDestroyedBuffer`
-  :914. ☐
+  :914. ☑ (P2.3)
 
 ### Queue — Phase 2 (P2.4)
 

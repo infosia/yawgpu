@@ -45,12 +45,30 @@ future/`PendingCallback` machinery; Pending/Mapped transitions;
 Unmap/Destroy/drop-before-result ⇒ `Aborted`; validation ⇒ `Error`;
 once-only fire incl. reentrancy. Port **B7–B24, B37**.
 
-## P2.3 — GetMappedRange / GetConstMappedRange  *(NEXT)*
+## P2.3 — GetMappedRange / GetConstMappedRange  *(☑ DONE)*
+
+Done: stable `HostBuffer` (`Box<[UnsafeCell<u8>]>`, Send+Sync) on core
+`Buffer`; `ActiveMap` range/mode tracked on enter-Mapped (resolve /
+mappedAtCreation=Write) and cleared on unmap/destroy; `mapped_range`
+(B25–B31: not-mapped/destroyed→None, const-vs-Read rule,
+`WGPU_WHOLE_MAP_SIZE`=mapped end, before-start/OOB/overflow→None);
+`wgpuBufferGetMappedRange`/`GetConstMappedRange` → null on misuse (no
+panic/device-error). B25–B31 ported in
+`yawgpu/tests/buffer_mapped_range_validation.rs` (8, incl. write-through
+no-UB), gate green (55 tests). Committed `phase-2: P2.3`.
+
+> Review note (P2.3): codex created an unrequested `AGENTS.md` that
+> duplicated `CLAUDE.md` but misattributed the planner role to "Codex"
+> and had a `.Codex/` gitignore typo, contradicting `workflow.md`.
+> Claude removed it (stray non-task artifact). Roles remain: Claude
+> plans/reviews/commits via `CLAUDE.md`/`workflow.md`.
+
+#### (original detail)
 
 Const vs non-const rules, bounds/offset/whole-map-size, destroyed ⇒ NULL.
 Port **B25–B31**.
 
-## P2.4 — Queue writeBuffer / onSubmittedWorkDone  *(after P2.3)*
+## P2.4 — Queue writeBuffer / onSubmittedWorkDone  *(NEXT — closes Phase 2)*
 
 `wgpuQueueWriteBuffer` arg/usage/state validation; `wgpuQueue
 OnSubmittedWorkDone` via future machinery; minimal `wgpuQueueSubmit` arg

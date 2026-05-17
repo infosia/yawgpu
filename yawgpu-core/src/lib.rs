@@ -1,4 +1,6 @@
+use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -378,6 +380,7 @@ struct BufferInner {
     _hal: Option<HalBuffer>,
     usage: BufferUsage,
     size: u64,
+    host: HostBuffer,
     state: Mutex<BufferState>,
 }
 
@@ -387,15 +390,60 @@ struct BufferState {
     is_error: bool,
     is_destroyed: bool,
     pending_map: Option<PendingMap>,
+    active_map: Option<ActiveMap>,
 }
 
 #[derive(Debug)]
 struct PendingMap {
-    _mode: MapMode,
-    _offset: u64,
-    _size: u64,
+    mode: MapMode,
+    offset: u64,
+    size: u64,
     outcome: MapAsyncStatus,
 }
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveMap {
+    mode: MapMode,
+    offset: u64,
+    size: u64,
+}
+
+struct HostBuffer {
+    bytes: Box<[UnsafeCell<u8>]>,
+}
+
+impl HostBuffer {
+    fn new(size: u64) -> Self {
+        let len = usize::try_from(size).unwrap_or(0);
+        let bytes = (0..len)
+            .map(|_| UnsafeCell::new(0))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self { bytes }
+    }
+
+    fn ptr_at(&self, offset: u64) -> Option<*mut u8> {
+        let offset = usize::try_from(offset).ok()?;
+        if offset > self.bytes.len() {
+            return None;
+        }
+        // One-past-the-end is valid for zero-sized mapped ranges.
+        Some(unsafe { self.bytes.as_ptr().add(offset).cast::<u8>().cast_mut() })
+    }
+}
+
+impl fmt::Debug for HostBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HostBuffer")
+            .field("len", &self.bytes.len())
+            .finish()
+    }
+}
+
+// Mapped ranges expose raw pointers whose synchronization is governed by the
+// WebGPU map/unmap state machine rather than Rust references.
+unsafe impl Send for HostBuffer {}
+unsafe impl Sync for HostBuffer {}
 
 impl Buffer {
     fn new(descriptor: BufferDescriptor, hal: Option<HalBuffer>, is_error: bool) -> Self {
@@ -404,16 +452,27 @@ impl Buffer {
         } else {
             BufferMapState::Unmapped
         };
+        let active_map = if descriptor.mapped_at_creation && !is_error {
+            Some(ActiveMap {
+                mode: MapMode::Write,
+                offset: 0,
+                size: descriptor.size,
+            })
+        } else {
+            None
+        };
         Self {
             inner: Arc::new(BufferInner {
                 _hal: hal,
                 usage: descriptor.usage,
                 size: descriptor.size,
+                host: HostBuffer::new(if is_error { 0 } else { descriptor.size }),
                 state: Mutex::new(BufferState {
                     map_state,
                     is_error,
                     is_destroyed: false,
                     pending_map: None,
+                    active_map,
                 }),
             }),
         }
@@ -446,6 +505,7 @@ impl Buffer {
             pending.outcome = MapAsyncStatus::Aborted;
         }
         state.map_state = BufferMapState::Unmapped;
+        state.active_map = None;
     }
 
     pub fn unmap(&self) {
@@ -454,6 +514,7 @@ impl Buffer {
             pending.outcome = MapAsyncStatus::Aborted;
         }
         state.map_state = BufferMapState::Unmapped;
+        state.active_map = None;
     }
 
     pub fn begin_map(&self, mode: MapMode, offset: u64, size: u64) -> Result<(), &'static str> {
@@ -496,25 +557,32 @@ impl Buffer {
 
         state.map_state = BufferMapState::Pending;
         state.pending_map = Some(PendingMap {
-            _mode: mode,
-            _offset: offset,
-            _size: size,
+            mode,
+            offset,
+            size,
             outcome: MapAsyncStatus::Success,
         });
+        state.active_map = None;
         Ok(())
     }
 
     #[must_use]
     pub fn resolve_pending_map(&self) -> MapAsyncStatus {
         let mut state = self.inner.state.lock();
-        let outcome = state
-            .pending_map
-            .take()
+        let pending = state.pending_map.take();
+        let outcome = pending
+            .as_ref()
             .map(|pending| pending.outcome)
             .unwrap_or(MapAsyncStatus::Aborted);
         state.map_state = if outcome == MapAsyncStatus::Success {
+            state.active_map = pending.map(|pending| ActiveMap {
+                mode: pending.mode,
+                offset: pending.offset,
+                size: pending.size,
+            });
             BufferMapState::Mapped
         } else {
+            state.active_map = None;
             BufferMapState::Unmapped
         };
         outcome
@@ -525,7 +593,36 @@ impl Buffer {
         if let Some(pending) = state.pending_map.as_mut() {
             pending.outcome = MapAsyncStatus::Aborted;
             state.map_state = BufferMapState::Unmapped;
+            state.active_map = None;
         }
+    }
+
+    #[must_use]
+    pub fn mapped_range(
+        &self,
+        const_access: bool,
+        offset: u64,
+        size: Option<u64>,
+    ) -> Option<*mut u8> {
+        let state = self.inner.state.lock();
+        if state.is_destroyed || state.map_state != BufferMapState::Mapped {
+            return None;
+        }
+        let active = state.active_map?;
+        if !const_access && active.mode == MapMode::Read {
+            return None;
+        }
+        let map_end = active.offset.checked_add(active.size)?;
+        let size = size.unwrap_or_else(|| map_end.saturating_sub(offset));
+        if offset < active.offset || offset > map_end {
+            return None;
+        }
+        let end = offset.checked_add(size)?;
+        if end > map_end {
+            return None;
+        }
+        drop(state);
+        self.inner.host.ptr_at(offset)
     }
 }
 
