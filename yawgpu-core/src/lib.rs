@@ -4,9 +4,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use yawgpu_hal::{
-    HalAdapter, HalBuffer, HalDevice, HalError, HalInstance, HalQueue, HalTexture,
-};
+use yawgpu_hal::{HalAdapter, HalBuffer, HalDevice, HalError, HalInstance, HalQueue, HalTexture};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -456,6 +454,47 @@ pub enum TextureDimension {
 pub struct TextureFormat(u32);
 
 impl TextureFormat {
+    const UNDEFINED: u32 = 0x00;
+    const R8_UNORM: u32 = 0x01;
+    const R8_SNORM: u32 = 0x02;
+    const R8_UINT: u32 = 0x03;
+    const R8_SINT: u32 = 0x04;
+    const RG8_UNORM: u32 = 0x0A;
+    const RG8_SNORM: u32 = 0x0B;
+    const RG8_UINT: u32 = 0x0C;
+    const RG8_SINT: u32 = 0x0D;
+    const R32_FLOAT: u32 = 0x0E;
+    const R32_UINT: u32 = 0x0F;
+    const R32_SINT: u32 = 0x10;
+    const RGBA8_UNORM: u32 = 0x16;
+    const RGBA8_UNORM_SRGB: u32 = 0x17;
+    const RGBA8_SNORM: u32 = 0x18;
+    const RGBA8_UINT: u32 = 0x19;
+    const RGBA8_SINT: u32 = 0x1A;
+    const RG11B10_UFLOAT: u32 = 0x1F;
+    const RGB9E5_UFLOAT: u32 = 0x20;
+    const RG32_FLOAT: u32 = 0x21;
+    const RG32_UINT: u32 = 0x22;
+    const RG32_SINT: u32 = 0x23;
+    const RGBA16_UNORM: u32 = 0x24;
+    const RGBA16_SNORM: u32 = 0x25;
+    const RGBA16_UINT: u32 = 0x26;
+    const RGBA16_SINT: u32 = 0x27;
+    const RGBA16_FLOAT: u32 = 0x28;
+    const RGBA32_FLOAT: u32 = 0x29;
+    const RGBA32_UINT: u32 = 0x2A;
+    const RGBA32_SINT: u32 = 0x2B;
+    const STENCIL8: u32 = 0x2C;
+    const DEPTH16_UNORM: u32 = 0x2D;
+    const DEPTH24_PLUS: u32 = 0x2E;
+    const DEPTH24_PLUS_STENCIL8: u32 = 0x2F;
+    const DEPTH32_FLOAT: u32 = 0x30;
+    const DEPTH32_FLOAT_STENCIL8: u32 = 0x31;
+    const BC1_RGBA_UNORM: u32 = 0x32;
+    const BC1_RGBA_UNORM_SRGB: u32 = 0x33;
+    const BC7_RGBA_UNORM: u32 = 0x3E;
+    const BC7_RGBA_UNORM_SRGB: u32 = 0x3F;
+
     #[must_use]
     pub fn from_raw(raw: u32) -> Self {
         Self(raw)
@@ -464,6 +503,190 @@ impl TextureFormat {
     #[must_use]
     pub fn raw(self) -> u32 {
         self.0
+    }
+
+    #[must_use]
+    pub fn is_undefined(self) -> bool {
+        self.0 == Self::UNDEFINED
+    }
+
+    #[must_use]
+    pub fn caps(self) -> Option<FormatCaps> {
+        if self.is_undefined() {
+            return None;
+        }
+
+        let caps = match self.0 {
+            Self::R8_UNORM => FormatCaps::color(1).renderable().multisample(),
+            Self::R8_SNORM => FormatCaps::color(1),
+            Self::R8_UINT | Self::R8_SINT => FormatCaps::color(1).renderable().multisample(),
+            Self::RG8_UNORM => FormatCaps::color(2).renderable().multisample(),
+            Self::RG8_SNORM => FormatCaps::color(2),
+            Self::RG8_UINT | Self::RG8_SINT => FormatCaps::color(2).renderable().multisample(),
+            Self::R32_FLOAT | Self::R32_UINT | Self::R32_SINT => {
+                FormatCaps::color(4).renderable().multisample().storage()
+            }
+            Self::RGBA8_UNORM => FormatCaps::color(4).renderable().multisample().storage(),
+            Self::RGBA8_UNORM_SRGB => FormatCaps::color(4).renderable().multisample(),
+            Self::RGBA8_SNORM => FormatCaps::color(4).storage(),
+            Self::RGBA8_UINT | Self::RGBA8_SINT => {
+                FormatCaps::color(4).renderable().multisample().storage()
+            }
+            Self::RG11B10_UFLOAT | Self::RGB9E5_UFLOAT => FormatCaps::color(4),
+            Self::RG32_FLOAT | Self::RG32_UINT | Self::RG32_SINT => {
+                FormatCaps::color(8).renderable().storage()
+            }
+            Self::RGBA16_UNORM | Self::RGBA16_SNORM => {
+                FormatCaps::color(8).renderable().multisample().storage()
+            }
+            Self::RGBA16_UINT | Self::RGBA16_SINT | Self::RGBA16_FLOAT => {
+                FormatCaps::color(8).renderable().multisample().storage()
+            }
+            Self::RGBA32_FLOAT | Self::RGBA32_UINT | Self::RGBA32_SINT => {
+                FormatCaps::color(16).renderable().storage()
+            }
+            Self::STENCIL8 => FormatCaps::stencil(1).renderable().multisample(),
+            Self::DEPTH16_UNORM => FormatCaps::depth(2).renderable().multisample(),
+            Self::DEPTH24_PLUS => FormatCaps::depth(4).renderable().multisample(),
+            Self::DEPTH24_PLUS_STENCIL8 => FormatCaps::depth_stencil(4).renderable().multisample(),
+            Self::DEPTH32_FLOAT => FormatCaps::depth(4).renderable().multisample(),
+            Self::DEPTH32_FLOAT_STENCIL8 => FormatCaps::depth_stencil(5).renderable().multisample(),
+            Self::BC1_RGBA_UNORM | Self::BC1_RGBA_UNORM_SRGB => {
+                FormatCaps::compressed_color(8, 4, 4)
+            }
+            Self::BC7_RGBA_UNORM | Self::BC7_RGBA_UNORM_SRGB => {
+                FormatCaps::compressed_color(16, 4, 4)
+            }
+            // Unknown WebGPU formats are treated conservatively as plain
+            // renderable color until a later phase needs exact capabilities.
+            _ => FormatCaps::color(4).renderable().multisample(),
+        };
+        Some(caps)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatAspects {
+    pub color: bool,
+    pub depth: bool,
+    pub stencil: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatCaps {
+    pub aspects: FormatAspects,
+    pub renderable: bool,
+    pub multisample_capable: bool,
+    pub storage_capable: bool,
+    pub is_compressed: bool,
+    pub texel_block_size: u32,
+    pub block_w: u32,
+    pub block_h: u32,
+}
+
+impl FormatCaps {
+    const fn color(texel_block_size: u32) -> Self {
+        Self::new(
+            FormatAspects {
+                color: true,
+                depth: false,
+                stencil: false,
+            },
+            texel_block_size,
+            1,
+            1,
+            false,
+        )
+    }
+
+    const fn depth(texel_block_size: u32) -> Self {
+        Self::new(
+            FormatAspects {
+                color: false,
+                depth: true,
+                stencil: false,
+            },
+            texel_block_size,
+            1,
+            1,
+            false,
+        )
+    }
+
+    const fn stencil(texel_block_size: u32) -> Self {
+        Self::new(
+            FormatAspects {
+                color: false,
+                depth: false,
+                stencil: true,
+            },
+            texel_block_size,
+            1,
+            1,
+            false,
+        )
+    }
+
+    const fn depth_stencil(texel_block_size: u32) -> Self {
+        Self::new(
+            FormatAspects {
+                color: false,
+                depth: true,
+                stencil: true,
+            },
+            texel_block_size,
+            1,
+            1,
+            false,
+        )
+    }
+
+    const fn compressed_color(texel_block_size: u32, block_w: u32, block_h: u32) -> Self {
+        Self::new(
+            FormatAspects {
+                color: true,
+                depth: false,
+                stencil: false,
+            },
+            texel_block_size,
+            block_w,
+            block_h,
+            true,
+        )
+    }
+
+    const fn new(
+        aspects: FormatAspects,
+        texel_block_size: u32,
+        block_w: u32,
+        block_h: u32,
+        is_compressed: bool,
+    ) -> Self {
+        Self {
+            aspects,
+            renderable: false,
+            multisample_capable: false,
+            storage_capable: false,
+            is_compressed,
+            texel_block_size,
+            block_w,
+            block_h,
+        }
+    }
+
+    const fn renderable(mut self) -> Self {
+        self.renderable = true;
+        self
+    }
+
+    const fn multisample(mut self) -> Self {
+        self.multisample_capable = true;
+        self
+    }
+
+    const fn storage(mut self) -> Self {
+        self.storage_capable = true;
+        self
     }
 }
 
@@ -995,9 +1218,27 @@ fn validate_texture_descriptor(
             }
         }
     }
-    if usage.contains(TextureUsage::RENDER_ATTACHMENT) && descriptor.dimension != TextureDimension::D2
+    if usage.contains(TextureUsage::RENDER_ATTACHMENT)
+        && descriptor.dimension != TextureDimension::D2
     {
         return Some("RenderAttachment textures must be 2D");
+    }
+    let Some(format_caps) = descriptor.format.caps() else {
+        return Some("texture format must not be Undefined");
+    };
+    if multisampled && !format_caps.multisample_capable {
+        return Some("multisampled texture format must support multisampling");
+    }
+    if (format_caps.aspects.depth || format_caps.aspects.stencil)
+        && descriptor.dimension != TextureDimension::D2
+    {
+        return Some("depth/stencil texture formats must be 2D");
+    }
+    if usage.contains(TextureUsage::RENDER_ATTACHMENT) && !format_caps.renderable {
+        return Some("RenderAttachment texture format must be renderable");
+    }
+    if usage.contains(TextureUsage::STORAGE_BINDING) && !format_caps.storage_capable {
+        return Some("StorageBinding texture format must support storage usage");
     }
     None
 }
@@ -1592,9 +1833,6 @@ mod tests {
             MapMode::from_bits(1 | 2),
             Err("map mode must be exactly Read or Write")
         );
-        assert_eq!(
-            MapMode::from_bits(4),
-            Err("map mode has unsupported bits")
-        );
+        assert_eq!(MapMode::from_bits(4), Err("map mode has unsupported bits"));
     }
 }
