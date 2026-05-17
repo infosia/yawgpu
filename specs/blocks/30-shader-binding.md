@@ -124,32 +124,32 @@ Phase 4. Rules from Dawn `ShaderModuleValidationTests`,
 ### BindGroup (P4.3)
 
 - **S23** `entryCount` == layout entry count. `EntryCountMismatch` :172.
-  ☐
+  ☑ (P4.3)
 - **S24** every layout binding present once; no duplicate binding.
-  `WrongBindings`/`BindingSetTwice` :184. ☐
+  `WrongBindings`/`BindingSetTwice` :184. ☑ (P4.3)
 - **S25** entry resource kind matches layout entry kind (buffer/sampler/
-  textureView; others must be null). :223/277/336. ☐
+  textureView; others must be null). :223/277/336. ☑ (P4.3)
 - **S26** buffer offset aligned to `minUniform/StorageBufferOffsetAlign`
-  per type. `BufferOffsetAlignment` :926. ☐ (reuse Limits)
+  per type. `BufferOffsetAlignment` :926. ☑ (P4.3) (reuse Limits)
 - **S27** effective size (`size==0 ⇒ WHOLE_SIZE = buffer.size-offset`)
   > 0, `offset+size ≤ buffer.size`, `≥ layout.minBindingSize`, ≤
-  `maxUniform/StorageBufferBindingSize`. :986–1225. ☐
+  `maxUniform/StorageBufferBindingSize`. :986–1225. ☑ (P4.3)
 - **S28** buffer usage: Uniform⇒`Uniform`; Storage/ReadOnlyStorage⇒
-  `Storage`. :874. ☐
+  `Storage`. :874. ☑ (P4.3)
 - **S29** sampled-tex view usage `TextureBinding`; storage-tex view
   usage `StorageBinding`; depth format ⇒ not `Float` sampleType. :536.
-  ☐
-- **S30** view dimension == layout `viewDimension`. :793. ☐
-- **S31** layout `multisampled` ⇔ texture.sampleCount>1. :945. ☐
+  ☑ (P4.3)
+- **S30** view dimension == layout `viewDimension`. :793. ☑ (P4.3)
+- **S31** layout `multisampled` ⇔ texture.sampleCount>1. :945. ☑ (P4.3)
 - **S32** storage-texture view: layerCount==1 (no array storage view).
-  :809. ☐
-- **S33** sampler/textureView same device as the bind group. ☐
+  :809. ☑ (P4.3)
+- **S33** sampler/textureView same device as the bind group. ☑ (P4.3)
   (cross-device — see R15-family)
 - **S34** `bindingArraySize>1` requires all elements — N/A (gated off
   by S19 divergence). ✗
 - **S35/B58** BG-creation part: bound buffer effective size ≥ layout
   `minBindingSize`. The shader-declared-vs-layout check is at **pipeline**
-  creation. ☐ (BG part here; pipeline part Defer→P5)
+  creation. ☑ (P4.3) (BG part here; pipeline part Defer→P5)
 
 ### PipelineLayout (P4.4)
 

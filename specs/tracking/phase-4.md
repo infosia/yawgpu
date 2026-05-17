@@ -77,11 +77,25 @@ via `set_first_error`); error-layout model. FFI
 `wgpuDeviceCreateBindGroupLayout`; S12–S22 (reuse P1.2a Limits, P3.1b
 FormatCaps; S19 rejected-direction).
 
-## P4.3 — BindGroup  *(NEXT)*
+## P4.3 — BindGroup  *(☑ DONE)*
+
+Done: core `BindGroup`/`BindGroupEntry`/`BindGroupResource`;
+`Device::same` (Arc::ptr_eq); `TextureView` now keeps its `Texture` +
+`array_layer_count`; `validate_bind_group_descriptor`/`_entry`/`_buffer`/
+`_texture`/`_storage_texture` (S23 count, S24 unique/present/missing,
+S25 kind-match, S26 offset align, S27 effective-size/WHOLE_SIZE/min/max,
+S28 usage, S29 tex usage + depth≠Float, S30 dim, S31 multisampled, S32
+storage layer==1, S33 same-device); error-bind-group. FFI
+`WGPUBindGroupImpl` + create/Release/AddRef; conv derefs handles +
+WHOLE_SIZE. S23–S33,S35(BG) ported in
+`yawgpu/tests/bind_group_validation.rs` (5), gate green (26 binaries).
+Committed `phase-4: P4.3`. S34 N/A.
+
+#### (original detail)
 
 `wgpuDeviceCreateBindGroup`; S23–S33, S35(BG part). S34 N/A.
 
-## P4.4 — PipelineLayout  *(after P4.3; closes slices)*
+## P4.4 — PipelineLayout  *(NEXT — closes slices, then Phase 4 Review)*
 
 `wgpuDeviceCreatePipelineLayout`; S36–S37. Then Phase Review.
 
