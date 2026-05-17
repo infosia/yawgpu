@@ -93,16 +93,16 @@ phases need.
 
 ### Texture creation — format-capability dependent (P3.1b)
 
-- **T24** format != `Undefined`. :671. ☐
+- **T24** format != `Undefined`. :671. ☑ (P3.1b)
 - **T5** sampleCount>1 ⇒ multisample-capable format (non-renderable set
-  forbidden). :156. ☐
+  forbidden). :156. ☑ (P3.1b)
 - **T20** depth/stencil format ⇒ dimension==2D (forbidden 1D/3D). :537.
-  ☐
-- **T21** RenderAttachment ⇒ renderable format. :617. ☐
+  ☑ (P3.1b)
+- **T21** RenderAttachment ⇒ renderable format. :617. ☑ (P3.1b)
 - **T22/T52** StorageBinding ⇒ storage-capable format. :635 /
-  StorageTexture :472. ☐
+  StorageTexture :472. ☑ (P3.1b)
 - **T53** StorageBinding ⇒ sampleCount==1 (dup of T7, format-table file).
-  :792. ☐
+  :792. ☑ (P3.1b)
 
 ### TextureView (P3.2)
 
@@ -151,6 +151,16 @@ phases need.
 - Full shader-driven storage-texture access validation — Defer→P5
   (BindGroupLayout/pipeline). Compressed-format copy block alignment
   beyond creation — Defer→P6.
+
+## Review notes (carried)
+
+- P3.1b `FormatCaps` is an **approximation** of Dawn `Format.cpp` for the
+  populated set; unknown formats default to renderable color. The
+  storage-capable / multisample set for the `*16`/`*32` families is not
+  feature-accurate (some are feature-gated in Dawn, e.g. `RGBA16Unorm`).
+  Acceptable for Phase 3 (only tested formats' caps must be right);
+  refine when StorageTexture/BindGroup lands (P4/P5) and flag in the
+  Phase 3 Review.
 
 ## Open questions
 

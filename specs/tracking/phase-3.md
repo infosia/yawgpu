@@ -31,12 +31,23 @@ flags) + non-format-capability validation. `wgpuDeviceCreateTexture`,
 (T5/T20/T21/T22/T24/T52/T53) are P3.1b — for now accept any non-Undefined
 format opaquely (T24 itself is P3.1b).
 
-## P3.1b — Format capability table  *(NEXT)*
+## P3.1b — Format capability table  *(☑ DONE)*
+
+Done: core `FormatCaps`/`FormatAspects` + builder ctors; `TextureFormat
+::caps()`/`is_undefined()` populated from Dawn `Format.cpp` for the
+Phase-3 set (unknown ⇒ conservative renderable color); format rules
+wired into `validate_texture_descriptor` (T24,T5,T20,T21,T22/T52; T53 via
+T7). T24/T5/T20/T21/T22/T52/T53 ported in
+`yawgpu/tests/texture_format_validation.rs` (7, incl. caps sanity), gate
+green (77 tests). Committed `phase-3: P3.1b`. Caps-table approximation
+recorded in block 20 (refine P4/P5; flag in Phase 3 Review).
+
+#### (original detail)
 
 Core `TextureFormat` + capability records from Dawn `Format.cpp` (block 20
 design). Port **T24, T5, T20, T21, T22, T52, T53**.
 
-## P3.2 — TextureView  *(after P3.1b)*
+## P3.2 — TextureView  *(NEXT)*
 
 `WGPUTextureView` handle + core view; dimension/format/aspect compat,
 range bounds, default-view inference. Port **T26–T33**.
