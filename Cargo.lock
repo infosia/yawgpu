@@ -322,3 +322,7 @@ dependencies = [
 [[package]]
 name = "yawgpu-test"
 version = "0.1.0"
+dependencies = [
+ "yawgpu",
+ "yawgpu-core",
+]

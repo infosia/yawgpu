@@ -79,7 +79,6 @@ pub enum HalAdapter {
 }
 
 impl HalAdapter {
-    #[must_use]
     pub fn create_device(&self) -> Result<HalDevice, HalError> {
         match self {
             #[cfg(feature = "noop")]

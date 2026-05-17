@@ -9,7 +9,7 @@ Status legend: ☐ not started · ◐ partial · ☑ ported & green
 
 | Dawn file | Phase | yawgpu test file | Status |
 |---|---|---|---|
-| `ValidationTest` (base) | 0 | `yawgpu-test` crate | ☐ |
+| `ValidationTest` (base) | 0 | `yawgpu-test` crate | ☑ |
 | `DeviceValidationTests` | 1 | `device_validation.rs` | ☐ |
 | `UnsafeAPIValidationTests` | 1 | `unsafe_api_validation.rs` | ☐ |
 | `MultipleDeviceTests` | 1 | `multiple_device_validation.rs` | ☐ |

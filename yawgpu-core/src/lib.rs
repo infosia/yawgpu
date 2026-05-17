@@ -72,7 +72,6 @@ impl Adapter {
         }
     }
 
-    #[must_use]
     pub fn create_device(&self) -> Result<Device, Error> {
         let hal = self.inner.hal.create_device()?;
         Ok(Device::from_hal(hal))

@@ -147,6 +147,21 @@ impl Drop for WGPUQueueImpl {
     fn drop(&mut self) {}
 }
 
+impl WGPUDeviceImpl {
+    #[doc(hidden)]
+    pub fn set_uncaptured_error_callback<F>(&self, callback: Option<F>)
+    where
+        F: Fn(core::DeviceError) + Send + Sync + 'static,
+    {
+        self.core.set_uncaptured_error_callback(callback);
+    }
+
+    #[doc(hidden)]
+    pub fn dispatch_error(&self, kind: core::ErrorKind, message: impl Into<String>) {
+        self.core.dispatch_error(kind, message);
+    }
+}
+
 enum PendingCallback {
     RequestAdapter {
         mode: native::WGPUCallbackMode,
@@ -234,6 +249,11 @@ pub mod native {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
+/// Creates a new Noop-backed WebGPU instance.
+///
+/// # Safety
+///
+/// `descriptor`, when non-null, must point to a valid `WGPUInstanceDescriptor`.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCreateInstance(
     _descriptor: *const native::WGPUInstanceDescriptor,
@@ -241,16 +261,33 @@ pub unsafe extern "C" fn wgpuCreateInstance(
     arc_to_handle(WGPUInstanceImpl::new_noop())
 }
 
+/// Releases one owned reference to an instance handle.
+///
+/// # Safety
+///
+/// `instance` must be a non-null handle previously returned by yawgpu and not
+/// already fully released.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceRelease(instance: native::WGPUInstance) {
     release_handle(instance, "WGPUInstance");
 }
 
+/// Adds one owned reference to an instance handle.
+///
+/// # Safety
+///
+/// `instance` must be a non-null live yawgpu instance handle.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceAddRef(instance: native::WGPUInstance) {
     add_ref_handle(instance, "WGPUInstance");
 }
 
+/// Requests a Noop adapter from an instance.
+///
+/// # Safety
+///
+/// `instance_handle` must be a non-null live yawgpu instance handle. `options`,
+/// when non-null, must point to a valid `WGPURequestAdapterOptions`.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
     instance_handle: native::WGPUInstance,
@@ -278,16 +315,32 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
     })
 }
 
+/// Releases one owned reference to an adapter handle.
+///
+/// # Safety
+///
+/// `adapter` must be a non-null live yawgpu adapter handle.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuAdapterRelease(adapter: native::WGPUAdapter) {
     release_handle(adapter, "WGPUAdapter");
 }
 
+/// Adds one owned reference to an adapter handle.
+///
+/// # Safety
+///
+/// `adapter` must be a non-null live yawgpu adapter handle.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuAdapterAddRef(adapter: native::WGPUAdapter) {
     add_ref_handle(adapter, "WGPUAdapter");
 }
 
+/// Requests a device from an adapter.
+///
+/// # Safety
+///
+/// `adapter` must be a non-null live yawgpu adapter handle. `descriptor`, when
+/// non-null, must point to a valid `WGPUDeviceDescriptor`.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuAdapterRequestDevice(
     adapter: native::WGPUAdapter,
@@ -312,16 +365,31 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
         })
 }
 
+/// Releases one owned reference to a device handle.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceRelease(device: native::WGPUDevice) {
     release_handle(device, "WGPUDevice");
 }
 
+/// Adds one owned reference to a device handle.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceAddRef(device: native::WGPUDevice) {
     add_ref_handle(device, "WGPUDevice");
 }
 
+/// Gets the default queue for a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceGetQueue(device: native::WGPUDevice) -> native::WGPUQueue {
     let device = borrow_handle(device, "WGPUDevice");
@@ -331,22 +399,44 @@ pub unsafe extern "C" fn wgpuDeviceGetQueue(device: native::WGPUDevice) -> nativ
     arc_to_handle(queue)
 }
 
+/// Releases one owned reference to a queue handle.
+///
+/// # Safety
+///
+/// `queue` must be a non-null live yawgpu queue handle.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQueueRelease(queue: native::WGPUQueue) {
     release_handle(queue, "WGPUQueue");
 }
 
+/// Adds one owned reference to a queue handle.
+///
+/// # Safety
+///
+/// `queue` must be a non-null live yawgpu queue handle.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQueueAddRef(queue: native::WGPUQueue) {
     add_ref_handle(queue, "WGPUQueue");
 }
 
+/// Processes callbacks whose mode allows process-events delivery.
+///
+/// # Safety
+///
+/// `instance` must be a non-null live yawgpu instance handle.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceProcessEvents(instance: native::WGPUInstance) {
     let instance = borrow_handle(instance, "WGPUInstance");
     instance.process_callbacks(false);
 }
 
+/// Waits for any listed future and fires callbacks for completed futures.
+///
+/// # Safety
+///
+/// `instance` must be a non-null live yawgpu instance handle. If
+/// `future_count` is non-zero, `futures` must point to `future_count` valid
+/// `WGPUFutureWaitInfo` entries.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceWaitAny(
     instance: native::WGPUInstance,
@@ -378,6 +468,35 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
     } else {
         native::WGPUWaitStatus_Success
     }
+}
+
+/// Installs a Rust-side uncaptured-error callback for test harnesses.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle.
+#[doc(hidden)]
+pub unsafe fn testing_set_uncaptured_error_callback<F>(
+    device: native::WGPUDevice,
+    callback: Option<F>,
+) where
+    F: Fn(core::DeviceError) + Send + Sync + 'static,
+{
+    borrow_handle(device, "WGPUDevice").set_uncaptured_error_callback(callback);
+}
+
+/// Dispatches a Rust-side device error for test harnesses.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle.
+#[doc(hidden)]
+pub unsafe fn testing_dispatch_device_error(
+    device: native::WGPUDevice,
+    kind: core::ErrorKind,
+    message: impl Into<String>,
+) {
+    borrow_handle(device, "WGPUDevice").dispatch_error(kind, message);
 }
 
 #[cfg(test)]
