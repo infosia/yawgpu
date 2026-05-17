@@ -32,3 +32,11 @@ async machinery used by all later phases.
 
 - Adapter enumeration semantics for Noop (single synthetic adapter?).
 - Device-lost timing on `wgpuDeviceRelease`.
+
+## Review notes (carried into Phase 1)
+
+- T0.4 `FutureRegistry::poll_all` is a stub: it resolves and clears **all**
+  registered futures regardless of `complete()` state. Phase 1 must replace
+  this with real `WGPUCallbackMode` semantics (only completed futures fire;
+  pending ones survive; `WaitAny`/`ProcessEvents` distinction) before the
+  async validation tests are ported.
