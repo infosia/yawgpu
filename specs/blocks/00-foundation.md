@@ -116,7 +116,7 @@ from a later phase; tracked here but ported in that phase, not Phase 1.
 - **R17a** Device and Queue labels: empty if unset; settable via the
   descriptor `label` and via `wgpuDeviceSetLabel`/`wgpuQueueSetLabel`
   (webgpu.h 6371/6463, `WGPUStringView`, NonNullInputString); the value
-  round-trips. ☐ — only Device/Queue in Phase 1; other objects = Defer.
+  round-trips. ☑ (P1.4) — Device/Queue done; other objects = Defer (R17b).
 
   Design decision (P1.4):
   - Device label source = `WGPUDeviceDescriptor.label`. Queue label source

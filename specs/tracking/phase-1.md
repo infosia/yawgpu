@@ -1,7 +1,9 @@
 # Phase 1 — Instance / Adapter / Device + Future
 
-Status: **in progress** (P1.1 active). Rules & async spec: `../blocks/
-00-foundation.md`. Roles/loop: `../reference/workflow.md`.
+Status: **COMPLETE** (P1.1–P1.4 done). Implemented by codex, reviewed &
+committed by Claude. Commits `phase-1: P1.1`→`phase-1: P1.4`. Rules &
+async spec: `../blocks/00-foundation.md`. Roles/loop:
+`../reference/workflow.md`.
 
 Decomposed into 4 slices. Each = one HANDOFF, codex implements, Claude
 reviews + commits. Acceptance for every slice: `cargo test --workspace`
@@ -105,7 +107,17 @@ timing) and **R8** reframed (destroy ⇒ device-lost(Destroyed), idempotent,
 last-ref implicit destroy, ProcessEvents-after-destroy safe). **R9** is N/A
 (Dawn-only extension, dropped — recorded divergence).
 
-## P1.4 — Labels for Device & Queue  *(ACTIVE)*
+## P1.4 — Labels for Device & Queue  *(☑ DONE)*
+
+Done: `Mutex<String>` label on core `Device`/`Queue`; device label from
+`WGPUDeviceDescriptor.label`, queue label from `defaultQueue.label`
+(shared `Arc<QueueInner>` so `wgpuDeviceGetQueue` handles observe
+`wgpuQueueSetLabel`); `#[doc(hidden)]` `testing_get_*_label`; no
+non-canonical `GetLabel` export. R17a ported in
+`yawgpu/tests/label_validation.rs` (2), gate green. Committed
+`phase-1: P1.4`. **Phase 1 closed.**
+
+#### (original detail)
 
 Per block 00 R17a design. `Mutex<String>` label on core `Device`/`Queue`;
 Device label from `WGPUDeviceDescriptor.label`, Queue label from
