@@ -9,7 +9,17 @@ Review** (`reference/workflow.md` → "Phase Review";
 
 5 slices. First wires `naga`. Deferred S8/S35(pipeline)/S39–S44 → P5.
 
-## P4.0 — Wire naga (git+rev) + WGSL parse smoke  *(ACTIVE)*
+## P4.0 — Wire naga (git+rev) + WGSL parse smoke  *(☑ DONE)*
+
+Done: workspace `naga = { git=infosia/wgpu, rev=216627076… }`;
+`yawgpu-core` dep `features=["wgsl-in"]`; `shader_naga::
+parse_and_validate_wgsl` (`naga::front::wgsl::parse_str` +
+`Validator::new(ValidationFlags::all(), Capabilities::empty())`); 2
+smoke tests (valid ok / invalid err). Cargo.lock pins naga 29.0.3 @ the
+git SHA. Build resolves the git dep, gate green (23 binaries). naga API
+shape confirmed for P4.1. Committed `phase-4: P4.0`.
+
+#### (original detail)
 
 Add `naga` as a workspace git+rev dependency (pin in
 `reference/dependencies.md`); `yawgpu-core` depends on it. A throwaway
@@ -18,7 +28,7 @@ Add `naga` as a workspace git+rev dependency (pin in
 trivial invalid one. Cargo.lock records the SHA. **De-risks the
 dependency before P4.1 builds on it.**
 
-## P4.1 — ShaderModule  *(after P4.0)*
+## P4.1 — ShaderModule  *(NEXT)*
 
 `wgpuDeviceCreateShaderModule` (WGSL via naga, SPIR-V accept; S1–S5,
 S6/S7/S11 rejected-direction divergence), `wgpuShaderModuleGet

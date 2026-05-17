@@ -8,3 +8,4 @@ license.workspace = true
 yawgpu-hal = { path = "../yawgpu-hal" }
 parking_lot.workspace = true
 thiserror.workspace = true
+naga = { workspace = true, features = ["wgsl-in"] }
