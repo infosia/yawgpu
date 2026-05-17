@@ -26,13 +26,13 @@ Status legend: ☐ not started · ◐ partial · ☑ ported & green
 | `SamplerValidationTests` | 3 | `sampler_validation.rs` | ☑ (T34–T39) |
 | `QueueWriteTextureValidationTests` | 3 | `queue_write_texture_validation.rs` | ☑ (T40–T51) |
 | `StorageTextureValidationTests` | 3→5 | `texture_format_validation.rs` | ◐ (T52/T53 creation rules; shader-driven storage access→P5) |
-| `ShaderModuleValidationTests` | 4 | `shader_module_validation.rs` | ☐ |
-| `WGSLFeatureValidationTests` | 4 | `wgsl_feature_validation.rs` | ☐ |
-| `BindGroupValidationTests` | 4 | `bind_group_validation.rs` | ☐ |
-| `GetBindGroupLayoutValidationTests` | 4 | `get_bind_group_layout_validation.rs` | ☐ |
-| `MinimumBufferSizeValidationTests` (bind) | 4 | (shared with P2) | ☐ |
-| `OverridableConstantsValidationTests` | 4 | `overridable_constants_validation.rs` | ☐ |
-| `ImmediateDataTests` | 4 | `immediate_data_validation.rs` | ☐ |
+| `ShaderModuleValidationTests` | 4 | `shader_module_validation.rs` | ☑ (S1–S7,S9,S11; S8→P5, S10 N/A) |
+| `WGSLFeatureValidationTests` | 4 | `shader_module_validation.rs` | ◐ (S11 rejected-direction; AllowUnsafeAPIs non-canonical divergence) |
+| `BindGroupValidationTests` | 4 | `bind_group_layout_validation.rs` + `bind_group_validation.rs` | ☑ (S12–S33,S35-BG; S34 N/A) |
+| `GetBindGroupLayoutValidationTests` | 4→5 | `get_bind_group_layout_validation.rs` | ☐ Defer→P5 (S43–S44, needs Pipeline) |
+| `MinimumBufferSizeValidationTests` (bind) | 4→5 | `bind_group_validation.rs` | ◐ (S35 BG-part done; shader-vs-layout→P5) |
+| `OverridableConstantsValidationTests` | 4→5 | `overridable_constants_validation.rs` | ☐ Defer→P5 (S39–S42, pipeline-constant context) |
+| `ImmediateDataTests` | 4 | `pipeline_layout_validation.rs` | ◐ (S37 PipelineLayout immediateSize; pipeline use→P5) |
 | `RenderPipelineValidationTests` | 5 | `render_pipeline_validation.rs` | ☐ |
 | `ComputeValidationTests` | 5 | `compute_validation.rs` | ☐ |
 | `PipelineAndPassCompatibilityTests` | 5 | `pipeline_pass_compat_validation.rs` | ☐ |

@@ -1128,6 +1128,7 @@ impl TextureView {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ShaderModuleSource {
     Wgsl(String),
     Spirv(Vec<u32>),
@@ -1688,7 +1689,7 @@ fn validate_bind_group_buffer(
         return Some("bind group buffer offset is not correctly aligned".to_owned());
     }
 
-    let effective_size = if size == 0 || size == u64::MAX {
+    let effective_size = if size == u64::MAX {
         let Some(remaining) = buffer.size().checked_sub(offset) else {
             return Some("bind group buffer offset exceeds buffer size".to_owned());
         };
