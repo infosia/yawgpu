@@ -131,9 +131,11 @@ Phase 4. Rules from Dawn `ShaderModuleValidationTests`,
   textureView; others must be null). :223/277/336. ☑ (P4.3)
 - **S26** buffer offset aligned to `minUniform/StorageBufferOffsetAlign`
   per type. `BufferOffsetAlignment` :926. ☑ (P4.3) (reuse Limits)
-- **S27** effective size (`size==0 ⇒ WHOLE_SIZE = buffer.size-offset`)
-  > 0, `offset+size ≤ buffer.size`, `≥ layout.minBindingSize`, ≤
-  `maxUniform/StorageBufferBindingSize`. :986–1225. ☑ (P4.3)
+- **S27** effective size: only `size == WGPU_WHOLE_SIZE` (u64::MAX) ⇒
+  `buffer.size - offset`; an explicit `size == 0` is NOT whole-size and
+  is rejected by the `effective size > 0` rule. Then `offset+size ≤
+  buffer.size` (checked), `≥ layout.minBindingSize`, ≤
+  `maxUniform/StorageBufferBindingSize`. :986–1225. ☑ (P4.3; W1 fix)
 - **S28** buffer usage: Uniform⇒`Uniform`; Storage/ReadOnlyStorage⇒
   `Storage`. :874. ☑ (P4.3)
 - **S29** sampled-tex view usage `TextureBinding`; storage-tex view
