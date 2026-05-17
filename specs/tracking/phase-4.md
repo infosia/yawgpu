@@ -1,6 +1,8 @@
 # Phase 4 — ShaderModule / BindGroupLayout / BindGroup / PipelineLayout
 
-Status: **in progress** (P4.0 active). Rules: `../blocks/30-shader-
+Status: **COMPLETE** (P4.0–P4.4 done; Phase 4 Review CLOSED — see
+`phase-4-review.md`). Commits `phase-4: P4.0`→`phase-4: phase review`.
+Rules: `../blocks/30-shader-
 binding.md`. Roles/loop: `../reference/workflow.md`. Gate (permanent):
 `cargo test --workspace` + `cargo clippy --workspace --all-targets --
 -D warnings` green on Noop. **Phase ends with the mandatory Phase

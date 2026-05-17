@@ -32,4 +32,26 @@ Phase 4 may close; W1–W3 fixed in one codex pass for hygiene
 
 ## Resolution log
 
-- _filled as fixes land_
+**CLOSED** — W1–W3 fixed by codex, W4/W5 accepted-as-tracked, reviewed
+by Claude, gate green (27 binaries, `clippy --all-targets -D warnings`
+clean).
+
+- **W1** FIXED: `validate_bind_group_buffer` now treats only
+  `size == u64::MAX` as whole-size; explicit `size == 0` falls through
+  to the `effective_size == 0 ⇒ error` guard. New assertion in
+  `bind_group_validation.rs` (`buffer_binding(0, uniform, 0, 0)` ⇒
+  device error). Block 30 S27 corrected.
+- **W2** FIXED: `conv::map_bind_group_entry` builds
+  `core::BindGroupResource` directly per branch (default
+  `Invalid`, `present_count != 1 ⇒ Invalid`); the non-handle
+  `expect` is gone — no panic on any C input.
+- **W3** FIXED: `#[non_exhaustive]` added to
+  `pub enum ShaderModuleSource`.
+- **W4** ACCEPTED: naga `Capabilities::empty()` intentional; widening
+  tracked in block 30 "Open questions" → P5+.
+- **W5** ACCEPTED: `FormatCaps` catch-all is the pre-existing carried
+  approximation note (block 20/30); no Phase-4 gap; refine P5+.
+
+Gate: no CRITICAL/MAJOR. Phase 4 Review **CLOSED**. Commit:
+`phase-4: phase review — 5 findings (0C/0M/5m; W1–W3 fixed, W4/W5
+accepted)`.

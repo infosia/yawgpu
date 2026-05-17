@@ -94,6 +94,7 @@ fn buffer_offsets_sizes_and_usages_are_validated() {
             uniform_layout,
             &[buffer_binding(0, uniform, 20_000, u64::MAX)],
         );
+        assert_bind_group_error(&test, uniform_layout, &[buffer_binding(0, uniform, 0, 0)]);
         assert_bind_group_error(
             &test,
             uniform_layout,

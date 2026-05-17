@@ -245,43 +245,43 @@ pub unsafe fn map_bind_group_entries(
 
 unsafe fn map_bind_group_entry(entry: &native::WGPUBindGroupEntry) -> core::BindGroupEntry {
     let mut present_count = 0;
-    let mut resource = None;
+    let mut resource = core::BindGroupResource::Invalid(
+        "bind group entry must set exactly one resource".to_owned(),
+    );
 
     if !entry.buffer.is_null() {
         present_count += 1;
         let buffer = clone_handle::<WGPUBufferImpl>(entry.buffer, "WGPUBuffer");
-        resource = Some(core::BindGroupResource::Buffer {
+        resource = core::BindGroupResource::Buffer {
             buffer: Arc::clone(&buffer.core),
             device: Arc::clone(&buffer.device),
             offset: entry.offset,
             size: entry.size,
-        });
+        };
     }
     if !entry.sampler.is_null() {
         present_count += 1;
         let sampler = clone_handle::<WGPUSamplerImpl>(entry.sampler, "WGPUSampler");
-        resource = Some(core::BindGroupResource::Sampler {
+        resource = core::BindGroupResource::Sampler {
             sampler: Arc::clone(&sampler._core),
             device: Arc::clone(&sampler._device),
-        });
+        };
     }
     if !entry.textureView.is_null() {
         present_count += 1;
         let texture_view =
             clone_handle::<WGPUTextureViewImpl>(entry.textureView, "WGPUTextureView");
-        resource = Some(core::BindGroupResource::TextureView {
+        resource = core::BindGroupResource::TextureView {
             texture_view: Arc::clone(&texture_view._core),
             device: Arc::clone(&texture_view._device),
-        });
+        };
     }
 
-    let resource = if present_count == 1 {
-        resource.expect("present bind group resource must be recorded")
-    } else {
-        core::BindGroupResource::Invalid(
+    if present_count != 1 {
+        resource = core::BindGroupResource::Invalid(
             "bind group entry must set exactly one resource".to_owned(),
-        )
-    };
+        );
+    }
 
     core::BindGroupEntry {
         binding: entry.binding,
