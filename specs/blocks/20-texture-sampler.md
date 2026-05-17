@@ -66,30 +66,30 @@ phases need.
 
 ### Texture creation / reflection / lifetime
 
-- **T1** usage non-zero. `UsageNonZero` :88. ☐
-- **T2** sampleCount ∈ {1,4}. `SampleCount` :107. ☐
-- **T3** sampleCount>1 ⇒ mipLevelCount==1. :134. ☐
-- **T4** sampleCount>1 ⇒ dimension==2D. :143. ☐
-- **T6** sampleCount>1 ⇒ depthOrArrayLayers==1. :172. ☐
-- **T7** sampleCount>1 ⇒ no StorageBinding. :181. ☐
-- **T8** sampleCount>1 ⇒ must have RenderAttachment. :190. ☐
-- **T9** mipLevelCount ≥ 1. :216. ☐
-- **T10** mipLevelCount ≤ maxMips(size) (per-dim halving). :226. ☐
-- **T11** dimension==1D ⇒ mipLevelCount==1. :342. ☐
-- **T12** arrayLayers ≤ `maxTextureArrayLayers`. :360. ☐ (reuse P1.2a Limits)
+- **T1** usage non-zero. `UsageNonZero` :88. ☑ (P3.1a)
+- **T2** sampleCount ∈ {1,4}. `SampleCount` :107. ☑ (P3.1a)
+- **T3** sampleCount>1 ⇒ mipLevelCount==1. :134. ☑ (P3.1a)
+- **T4** sampleCount>1 ⇒ dimension==2D. :143. ☑ (P3.1a)
+- **T6** sampleCount>1 ⇒ depthOrArrayLayers==1. :172. ☑ (P3.1a)
+- **T7** sampleCount>1 ⇒ no StorageBinding. :181. ☑ (P3.1a)
+- **T8** sampleCount>1 ⇒ must have RenderAttachment. :190. ☑ (P3.1a)
+- **T9** mipLevelCount ≥ 1. :216. ☑ (P3.1a)
+- **T10** mipLevelCount ≤ maxMips(size) (per-dim halving). :226. ☑ (P3.1a)
+- **T11** dimension==1D ⇒ mipLevelCount==1. :342. ☑ (P3.1a)
+- **T12** arrayLayers ≤ `maxTextureArrayLayers`. :360. ☑ (P3.1a) (reuse P1.2a Limits)
 - **T13–T15** 1D: width∈[1,max1D], height==1, depthOrArrayLayers==1.
-  :388. ☐
+  :388. ☑ (P3.1a)
 - **T16–T18** 2D: width/height∈[1,max2D], depthOrArrayLayers≥1, no
-  zero-size. :433. ☐
-- **T19** 3D: all dims∈[1,max3D]. :481. ☐
-- **T23** RenderAttachment ⇒ dimension==2D. :652. ☐
+  zero-size. :433. ☑ (P3.1a)
+- **T19** 3D: all dims∈[1,max3D]. :481. ☑ (P3.1a)
+- **T23** RenderAttachment ⇒ dimension==2D. :652. ☑ (P3.1a)
 - **T25** `wgpuTextureDestroy` valid (idempotent; error texture ok).
-  :556. ☐
+  :556. ☑ (P3.1a)
 - **T57–T64** getters (Format/Dimension/Width/Height/DepthOrArrayLayers/
   MipLevelCount/SampleCount/Usage) reflect descriptor (incl. error
-  texture). :1125. ☐
+  texture). :1125. ☑ (P3.1a)
 - **T65** invalid descriptor ⇒ device error + error-texture handle.
-  :1172. ☐
+  :1172. ☑ (P3.1a)
 
 ### Texture creation — format-capability dependent (P3.1b)
 

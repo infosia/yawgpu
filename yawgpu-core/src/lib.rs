@@ -4,7 +4,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use yawgpu_hal::{HalAdapter, HalBuffer, HalDevice, HalError, HalInstance, HalQueue};
+use yawgpu_hal::{
+    HalAdapter, HalBuffer, HalDevice, HalError, HalInstance, HalQueue, HalTexture,
+};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -299,6 +301,23 @@ impl Device {
 
         Buffer::new(descriptor, hal, is_error)
     }
+
+    #[must_use]
+    pub fn create_texture(&self, descriptor: TextureDescriptor) -> Texture {
+        let error = validate_texture_descriptor(&descriptor, self.limits());
+        let is_error = error.is_some();
+        if let Some(message) = error {
+            self.dispatch_error(ErrorKind::Validation, message);
+        }
+
+        let hal = if is_error {
+            None
+        } else {
+            Some(self.inner.hal.create_texture())
+        };
+
+        Texture::new(descriptor, hal, is_error)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,6 +405,169 @@ impl std::ops::BitOr for BufferUsage {
 
     fn bitor(self, rhs: Self) -> Self::Output {
         Self(self.0 | rhs.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureUsage(u64);
+
+impl TextureUsage {
+    pub const NONE: Self = Self(0);
+    pub const COPY_SRC: Self = Self(1);
+    pub const COPY_DST: Self = Self(2);
+    pub const TEXTURE_BINDING: Self = Self(4);
+    pub const STORAGE_BINDING: Self = Self(8);
+    pub const RENDER_ATTACHMENT: Self = Self(16);
+    pub const TRANSIENT_ATTACHMENT: Self = Self(32);
+
+    #[must_use]
+    pub fn from_bits_retain(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    #[must_use]
+    pub fn bits(self) -> u64 {
+        self.0
+    }
+
+    #[must_use]
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl std::ops::BitOr for TextureUsage {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TextureDimension {
+    D1,
+    D2,
+    D3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureFormat(u32);
+
+impl TextureFormat {
+    #[must_use]
+    pub fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Extent3d {
+    pub width: u32,
+    pub height: u32,
+    pub depth_or_array_layers: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureDescriptor {
+    pub usage: TextureUsage,
+    pub dimension: TextureDimension,
+    pub size: Extent3d,
+    pub format: TextureFormat,
+    pub mip_level_count: u32,
+    pub sample_count: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct Texture {
+    inner: Arc<TextureInner>,
+}
+
+#[derive(Debug)]
+struct TextureInner {
+    _hal: Option<HalTexture>,
+    usage: TextureUsage,
+    dimension: TextureDimension,
+    size: Extent3d,
+    format: TextureFormat,
+    mip_level_count: u32,
+    sample_count: u32,
+    state: Mutex<TextureState>,
+}
+
+#[derive(Debug)]
+struct TextureState {
+    is_error: bool,
+    is_destroyed: bool,
+}
+
+impl Texture {
+    fn new(descriptor: TextureDescriptor, hal: Option<HalTexture>, is_error: bool) -> Self {
+        Self {
+            inner: Arc::new(TextureInner {
+                _hal: hal,
+                usage: descriptor.usage,
+                dimension: descriptor.dimension,
+                size: descriptor.size,
+                format: descriptor.format,
+                mip_level_count: descriptor.mip_level_count,
+                sample_count: descriptor.sample_count,
+                state: Mutex::new(TextureState {
+                    is_error,
+                    is_destroyed: false,
+                }),
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn usage(&self) -> TextureUsage {
+        self.inner.usage
+    }
+
+    #[must_use]
+    pub fn dimension(&self) -> TextureDimension {
+        self.inner.dimension
+    }
+
+    #[must_use]
+    pub fn size(&self) -> Extent3d {
+        self.inner.size
+    }
+
+    #[must_use]
+    pub fn format(&self) -> TextureFormat {
+        self.inner.format
+    }
+
+    #[must_use]
+    pub fn mip_level_count(&self) -> u32 {
+        self.inner.mip_level_count
+    }
+
+    #[must_use]
+    pub fn sample_count(&self) -> u32 {
+        self.inner.sample_count
+    }
+
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.inner.state.lock().is_error
+    }
+
+    #[must_use]
+    pub fn is_destroyed(&self) -> bool {
+        self.inner.state.lock().is_destroyed
+    }
+
+    pub fn destroy(&self) {
+        self.inner.state.lock().is_destroyed = true;
     }
 }
 
@@ -731,6 +913,110 @@ fn validate_buffer_descriptor(
         return Some("mappedAtCreation buffer size must be 4-byte aligned");
     }
     None
+}
+
+fn validate_texture_descriptor(
+    descriptor: &TextureDescriptor,
+    limits: Limits,
+) -> Option<&'static str> {
+    let usage = descriptor.usage;
+    let size = descriptor.size;
+    let multisampled = descriptor.sample_count > 1;
+
+    if usage.bits() == 0 {
+        return Some("texture usage must be non-zero");
+    }
+    if descriptor.sample_count != 1 && descriptor.sample_count != 4 {
+        return Some("texture sample count must be 1 or 4");
+    }
+    if multisampled && descriptor.mip_level_count != 1 {
+        return Some("multisampled textures must have exactly one mip level");
+    }
+    if multisampled && descriptor.dimension != TextureDimension::D2 {
+        return Some("multisampled textures must be 2D");
+    }
+    if multisampled && size.depth_or_array_layers != 1 {
+        return Some("multisampled textures must have one array layer");
+    }
+    if multisampled && usage.contains(TextureUsage::STORAGE_BINDING) {
+        return Some("multisampled textures cannot use StorageBinding");
+    }
+    if multisampled && !usage.contains(TextureUsage::RENDER_ATTACHMENT) {
+        return Some("multisampled textures must use RenderAttachment");
+    }
+    if descriptor.mip_level_count == 0 {
+        return Some("texture mipLevelCount must be at least 1");
+    }
+    if descriptor.mip_level_count > max_texture_mips(size, descriptor.dimension) {
+        return Some("texture mipLevelCount exceeds the texture size");
+    }
+    if descriptor.dimension == TextureDimension::D1 && descriptor.mip_level_count != 1 {
+        return Some("1D textures must have exactly one mip level");
+    }
+    if descriptor.dimension == TextureDimension::D2
+        && size.depth_or_array_layers > limits.max_texture_array_layers
+    {
+        return Some("texture array layers exceed device limit");
+    }
+    match descriptor.dimension {
+        TextureDimension::D1 => {
+            if size.width == 0 || size.width > limits.max_texture_dimension_1d {
+                return Some("1D texture width is out of range");
+            }
+            if size.height != 1 {
+                return Some("1D texture height must be 1");
+            }
+            if size.depth_or_array_layers != 1 {
+                return Some("1D texture depthOrArrayLayers must be 1");
+            }
+        }
+        TextureDimension::D2 => {
+            if size.width == 0 || size.width > limits.max_texture_dimension_2d {
+                return Some("2D texture width is out of range");
+            }
+            if size.height == 0 || size.height > limits.max_texture_dimension_2d {
+                return Some("2D texture height is out of range");
+            }
+            if size.depth_or_array_layers == 0 {
+                return Some("2D texture depthOrArrayLayers must be at least 1");
+            }
+        }
+        TextureDimension::D3 => {
+            if size.width == 0 || size.width > limits.max_texture_dimension_3d {
+                return Some("3D texture width is out of range");
+            }
+            if size.height == 0 || size.height > limits.max_texture_dimension_3d {
+                return Some("3D texture height is out of range");
+            }
+            if size.depth_or_array_layers == 0
+                || size.depth_or_array_layers > limits.max_texture_dimension_3d
+            {
+                return Some("3D texture depth is out of range");
+            }
+        }
+    }
+    if usage.contains(TextureUsage::RENDER_ATTACHMENT) && descriptor.dimension != TextureDimension::D2
+    {
+        return Some("RenderAttachment textures must be 2D");
+    }
+    None
+}
+
+fn max_texture_mips(size: Extent3d, dimension: TextureDimension) -> u32 {
+    let mut max_extent = size.width;
+    if matches!(dimension, TextureDimension::D2 | TextureDimension::D3) {
+        max_extent = max_extent.max(size.height);
+    }
+    if dimension == TextureDimension::D3 {
+        max_extent = max_extent.max(size.depth_or_array_layers);
+    }
+
+    let mut levels = 0;
+    while max_extent > 0 {
+        levels += 1;
+        max_extent /= 2;
+    }
+    levels
 }
 
 #[derive(Debug, Default)]

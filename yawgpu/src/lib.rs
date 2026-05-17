@@ -11,8 +11,9 @@ use crate::conv::{
     label_from_string_view, map_buffer_descriptor, map_buffer_map_state,
     map_buffer_usage_to_native, map_device_lost_callback_info, map_device_lost_reason, map_feature,
     map_feature_level, map_features_to_native, map_limits, map_limits_to_native,
-    map_map_async_status, map_map_mode, map_queue_work_done_status, release_handle, string_view,
-    DeviceLostCallbackInfo,
+    map_map_async_status, map_map_mode, map_queue_work_done_status, map_texture_descriptor,
+    map_texture_dimension_to_native, map_texture_format_to_native, map_texture_usage_to_native,
+    release_handle, string_view, DeviceLostCallbackInfo,
 };
 
 pub struct WGPUAdapterImpl {
@@ -45,6 +46,11 @@ pub struct WGPUQueueImpl {
     instance: Arc<WGPUInstanceImpl>,
 }
 
+pub struct WGPUTextureImpl {
+    core: Arc<core::Texture>,
+    _device: Arc<core::Device>,
+}
+
 macro_rules! declare_empty_impl_handles {
     ($($name:ident),* $(,)?) => {
         $(
@@ -69,7 +75,6 @@ declare_empty_impl_handles!(
     WGPUSamplerImpl,
     WGPUShaderModuleImpl,
     WGPUSurfaceImpl,
-    WGPUTextureImpl,
     WGPUTextureViewImpl,
 );
 
@@ -143,6 +148,12 @@ impl WGPUInstanceImpl {
 impl Drop for WGPUBufferImpl {
     fn drop(&mut self) {
         self.core.abort_pending_map();
+        self.core.destroy();
+    }
+}
+
+impl Drop for WGPUTextureImpl {
+    fn drop(&mut self) {
         self.core.destroy();
     }
 }
@@ -718,6 +729,28 @@ pub unsafe extern "C" fn wgpuDeviceCreateBuffer(
     }))
 }
 
+/// Creates a texture on a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `descriptor` must
+/// point to a valid `WGPUTextureDescriptor`.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceCreateTexture(
+    device: native::WGPUDevice,
+    descriptor: *const native::WGPUTextureDescriptor,
+) -> native::WGPUTexture {
+    let device = borrow_handle(device, "WGPUDevice");
+    let descriptor = descriptor
+        .as_ref()
+        .expect("WGPUTextureDescriptor must not be null");
+    let texture = device.core.create_texture(map_texture_descriptor(descriptor));
+    arc_to_handle(Arc::new(WGPUTextureImpl {
+        core: Arc::new(texture),
+        _device: Arc::clone(&device.core),
+    }))
+}
+
 /// Gets the effective limits for a device.
 ///
 /// # Safety
@@ -943,6 +976,127 @@ pub unsafe extern "C" fn wgpuBufferRelease(buffer: native::WGPUBuffer) {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBufferAddRef(buffer: native::WGPUBuffer) {
     add_ref_handle(buffer, "WGPUBuffer");
+}
+
+/// Destroys a texture. This operation is idempotent.
+///
+/// # Safety
+///
+/// `texture` must be a non-null live yawgpu texture handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureDestroy(texture: native::WGPUTexture) {
+    borrow_handle(texture, "WGPUTexture").core.destroy();
+}
+
+/// Returns the descriptor format reflected by the texture.
+///
+/// # Safety
+///
+/// `texture` must be a non-null live yawgpu texture handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureGetFormat(
+    texture: native::WGPUTexture,
+) -> native::WGPUTextureFormat {
+    map_texture_format_to_native(borrow_handle(texture, "WGPUTexture").core.format())
+}
+
+/// Returns the descriptor dimension reflected by the texture.
+///
+/// # Safety
+///
+/// `texture` must be a non-null live yawgpu texture handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureGetDimension(
+    texture: native::WGPUTexture,
+) -> native::WGPUTextureDimension {
+    map_texture_dimension_to_native(borrow_handle(texture, "WGPUTexture").core.dimension())
+}
+
+/// Returns the descriptor width reflected by the texture.
+///
+/// # Safety
+///
+/// `texture` must be a non-null live yawgpu texture handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureGetWidth(texture: native::WGPUTexture) -> u32 {
+    borrow_handle(texture, "WGPUTexture").core.size().width
+}
+
+/// Returns the descriptor height reflected by the texture.
+///
+/// # Safety
+///
+/// `texture` must be a non-null live yawgpu texture handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureGetHeight(texture: native::WGPUTexture) -> u32 {
+    borrow_handle(texture, "WGPUTexture").core.size().height
+}
+
+/// Returns the descriptor depth/array-layer count reflected by the texture.
+///
+/// # Safety
+///
+/// `texture` must be a non-null live yawgpu texture handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureGetDepthOrArrayLayers(
+    texture: native::WGPUTexture,
+) -> u32 {
+    borrow_handle(texture, "WGPUTexture")
+        .core
+        .size()
+        .depth_or_array_layers
+}
+
+/// Returns the descriptor mip level count reflected by the texture.
+///
+/// # Safety
+///
+/// `texture` must be a non-null live yawgpu texture handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureGetMipLevelCount(texture: native::WGPUTexture) -> u32 {
+    borrow_handle(texture, "WGPUTexture").core.mip_level_count()
+}
+
+/// Returns the descriptor sample count reflected by the texture.
+///
+/// # Safety
+///
+/// `texture` must be a non-null live yawgpu texture handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureGetSampleCount(texture: native::WGPUTexture) -> u32 {
+    borrow_handle(texture, "WGPUTexture").core.sample_count()
+}
+
+/// Returns the descriptor usage reflected by the texture.
+///
+/// # Safety
+///
+/// `texture` must be a non-null live yawgpu texture handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureGetUsage(
+    texture: native::WGPUTexture,
+) -> native::WGPUTextureUsage {
+    map_texture_usage_to_native(borrow_handle(texture, "WGPUTexture").core.usage())
+}
+
+/// Releases one owned reference to a texture handle.
+///
+/// # Safety
+///
+/// `texture` must be a non-null live yawgpu texture handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureRelease(texture: native::WGPUTexture) {
+    release_handle(texture, "WGPUTexture");
+}
+
+/// Adds one owned reference to a texture handle.
+///
+/// # Safety
+///
+/// `texture` must be a non-null live yawgpu texture handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureAddRef(texture: native::WGPUTexture) {
+    add_ref_handle(texture, "WGPUTexture");
 }
 
 /// Releases one owned reference to a queue handle.

@@ -244,6 +244,69 @@ pub fn map_buffer_descriptor(value: &native::WGPUBufferDescriptor) -> core::Buff
     }
 }
 
+#[must_use]
+pub fn map_texture_usage(value: native::WGPUTextureUsage) -> core::TextureUsage {
+    core::TextureUsage::from_bits_retain(value)
+}
+
+#[must_use]
+pub fn map_texture_usage_to_native(value: core::TextureUsage) -> native::WGPUTextureUsage {
+    value.bits()
+}
+
+#[must_use]
+pub fn map_texture_dimension(value: native::WGPUTextureDimension) -> core::TextureDimension {
+    match value {
+        native::WGPUTextureDimension_1D => core::TextureDimension::D1,
+        native::WGPUTextureDimension_3D => core::TextureDimension::D3,
+        _ => core::TextureDimension::D2,
+    }
+}
+
+#[must_use]
+pub fn map_texture_dimension_to_native(
+    value: core::TextureDimension,
+) -> native::WGPUTextureDimension {
+    match value {
+        core::TextureDimension::D1 => native::WGPUTextureDimension_1D,
+        core::TextureDimension::D2 => native::WGPUTextureDimension_2D,
+        core::TextureDimension::D3 => native::WGPUTextureDimension_3D,
+        // exhaustive as of core::TextureDimension @ 2026-05-17
+        _ => native::WGPUTextureDimension_2D,
+    }
+}
+
+#[must_use]
+pub fn map_texture_format(value: native::WGPUTextureFormat) -> core::TextureFormat {
+    core::TextureFormat::from_raw(value)
+}
+
+#[must_use]
+pub fn map_texture_format_to_native(value: core::TextureFormat) -> native::WGPUTextureFormat {
+    value.raw()
+}
+
+#[must_use]
+pub fn map_extent_3d(value: native::WGPUExtent3D) -> core::Extent3d {
+    core::Extent3d {
+        width: value.width,
+        height: value.height,
+        depth_or_array_layers: value.depthOrArrayLayers,
+    }
+}
+
+#[must_use]
+pub fn map_texture_descriptor(value: &native::WGPUTextureDescriptor) -> core::TextureDescriptor {
+    core::TextureDescriptor {
+        usage: map_texture_usage(value.usage),
+        dimension: map_texture_dimension(value.dimension),
+        size: map_extent_3d(value.size),
+        format: map_texture_format(value.format),
+        mip_level_count: value.mipLevelCount,
+        sample_count: value.sampleCount,
+    }
+}
+
 pub fn map_features_to_native(features: &core::FeatureSet) -> native::WGPUSupportedFeatures {
     let features = features
         .iter()
