@@ -85,7 +85,17 @@ resolution, and `featureLevel` handling in `wgpuInstanceRequestAdapter`.
 Port **R6, R7, R10–R13** (R10–R13 via `HasFeature(CoreFeaturesAndLimits)`
 per the recorded Divergence). **R9** → defer to P1.3.
 
-## P1.3 — Device lifecycle & device-lost  *(ACTIVE)*
+## P1.3 — Device lifecycle & device-lost  *(☑ DONE)*
+
+Done: per-device `DeviceLostState` (idempotent `lose`/`destroy`),
+`DeviceLost` PendingCallback variant reusing the future machinery,
+`wgpuDeviceDestroy`, descriptor `deviceLostCallbackInfo` capture (incl.
+on failed creation → `FailedCreation`), last-ref implicit destroy with
+fire-before-teardown + idempotency guard, R5 ordering via ascending
+`FutureId`. R5/R8 ported in `yawgpu/tests/device_lost_validation.rs` (4),
+gate green. Committed `phase-1: P1.3`. R9 N/A (dropped, recorded).
+
+#### (original detail)
 
 Device-lost channel per block 00 "Device-lost channel" design. Implement
 `wgpuDeviceDestroy`, capture `WGPUDeviceDescriptor.deviceLostCallbackInfo`,

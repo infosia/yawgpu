@@ -82,7 +82,7 @@ from a later phase; tracked here but ported in that phase, not Phase 1.
 - **R5** On RequestDevice failure: request-device callback fires with
   `Error`/null first; a registered device-lost callback then fires with
   `FailedCreation` — immediately in `AllowSpontaneous`, only on
-  `ProcessEvents` in `AllowProcessEvents`. `ErrorTriggersDeviceLost` :232. ☐
+  `ProcessEvents` in `AllowProcessEvents`. `ErrorTriggersDeviceLost` :232. ☑ (P1.3)
 - **R6** Requiring `TextureFormatsTier1` implicitly enables
   `RG11B10UfloatRenderable` (`HasFeature` true). :286. ☑ (P1.2b)
 - **R7** Requiring `TextureFormatsTier2` implicitly enables
@@ -94,7 +94,7 @@ from a later phase; tracked here but ported in that phase, not Phase 1.
   device-lost(`Destroyed`) exactly once. Dawn's `Device.Tick()`
   (`DestroyDeviceBeforeAPITick` :320) is non-canonical — no
   `wgpuDeviceTick`/`Poll` in `webgpu.h`; reframed per the Divergence model.
-  ☐
+  ☑ (P1.3)
 - **R9** N/A — `wgpuDeviceGetAHardwareBufferProperties` /
   `SharedTextureMemoryAHardwareBuffer` are **Dawn extensions, absent from
   canonical `webgpu.h`**. Dropped from yawgpu (no canonical equivalent;

@@ -8,8 +8,9 @@ use yawgpu_core as core;
 
 use crate::conv::{
     add_ref_handle, arc_to_handle, borrow_handle, clone_handle, free_supported_features,
-    map_feature, map_feature_level, map_features_to_native, map_limits, map_limits_to_native,
-    release_handle, string_view,
+    map_device_lost_callback_info, map_device_lost_reason, map_feature, map_feature_level,
+    map_features_to_native, map_limits, map_limits_to_native, release_handle, string_view,
+    DeviceLostCallbackInfo,
 };
 
 pub struct WGPUAdapterImpl {
@@ -19,6 +20,8 @@ pub struct WGPUAdapterImpl {
 
 pub struct WGPUDeviceImpl {
     core: Arc<core::Device>,
+    instance: Arc<WGPUInstanceImpl>,
+    device_lost_callback: DeviceLostCallbackInfo,
 }
 
 pub struct WGPUInstanceImpl {
@@ -136,7 +139,9 @@ impl Drop for WGPUAdapterImpl {
 }
 
 impl Drop for WGPUDeviceImpl {
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        self.schedule_device_lost(std::ptr::null(), core::DeviceLostReason::Destroyed);
+    }
 }
 
 impl Drop for WGPUQueueImpl {
@@ -144,6 +149,28 @@ impl Drop for WGPUQueueImpl {
 }
 
 impl WGPUDeviceImpl {
+    fn schedule_device_lost(
+        &self,
+        device: native::WGPUDevice,
+        reason: core::DeviceLostReason,
+    ) -> Option<native::WGPUFuture> {
+        let reason = self.core.lose(reason)?;
+        if !self.device_lost_callback.has_callback() {
+            return None;
+        }
+        Some(
+            self.instance
+                .register_callback(PendingCallback::DeviceLost {
+                    mode: self.device_lost_callback.mode,
+                    callback: self.device_lost_callback.callback,
+                    device: device as usize,
+                    reason,
+                    userdata1: self.device_lost_callback.userdata1,
+                    userdata2: self.device_lost_callback.userdata2,
+                }),
+        )
+    }
+
     #[doc(hidden)]
     pub fn set_uncaptured_error_callback<F>(&self, callback: Option<F>)
     where
@@ -173,12 +200,22 @@ enum PendingCallback {
         userdata1: usize,
         userdata2: usize,
     },
+    DeviceLost {
+        mode: native::WGPUCallbackMode,
+        callback: native::WGPUDeviceLostCallback,
+        device: usize,
+        reason: core::DeviceLostReason,
+        userdata1: usize,
+        userdata2: usize,
+    },
 }
 
 impl PendingCallback {
     fn callback_mode(&self) -> core::FutureCallbackMode {
         let mode = match self {
-            Self::RequestAdapter { mode, .. } | Self::RequestDevice { mode, .. } => *mode,
+            Self::RequestAdapter { mode, .. }
+            | Self::RequestDevice { mode, .. }
+            | Self::DeviceLost { mode, .. } => *mode,
         };
         match mode {
             native::WGPUCallbackMode_AllowProcessEvents => {
@@ -234,7 +271,36 @@ impl PendingCallback {
                     }
                 }
             }
+            Self::DeviceLost {
+                callback,
+                device,
+                reason,
+                userdata1,
+                userdata2,
+                ..
+            } => {
+                if let Some(callback) = callback {
+                    let device = device as native::WGPUDevice;
+                    callback(
+                        &device,
+                        map_device_lost_reason(reason),
+                        string_view(device_lost_message(reason).as_bytes()),
+                        userdata1 as *mut c_void,
+                        userdata2 as *mut c_void,
+                    );
+                }
+            }
         }
+    }
+}
+
+fn device_lost_message(reason: core::DeviceLostReason) -> &'static str {
+    match reason {
+        core::DeviceLostReason::Destroyed => "Device was destroyed",
+        core::DeviceLostReason::FailedCreation => "Device creation failed",
+        core::DeviceLostReason::CallbackCancelled => "Device lost callback was cancelled",
+        core::DeviceLostReason::Unknown => "Device was lost",
+        _ => "Device was lost",
     }
 }
 
@@ -417,17 +483,29 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
         .as_ref()
         .map(|descriptor| required_features_from_descriptor(descriptor))
         .unwrap_or_default();
+    let device_lost_callback = descriptor
+        .as_ref()
+        .map(|descriptor| map_device_lost_callback_info(descriptor.deviceLostCallbackInfo))
+        .unwrap_or(DeviceLostCallbackInfo {
+            mode: 0,
+            callback: None,
+            userdata1: 0,
+            userdata2: 0,
+        });
     let result = adapter
         .core
         .create_device(required_limits.as_ref(), &required_features)
         .map(|device| {
             Arc::new(WGPUDeviceImpl {
                 core: Arc::new(device),
+                instance: Arc::clone(&adapter.instance),
+                device_lost_callback,
             })
         })
         .map_err(|err| err.to_string());
+    let failed = result.is_err();
 
-    adapter
+    let future = adapter
         .instance
         .register_callback(PendingCallback::RequestDevice {
             mode: callback_info.mode,
@@ -435,7 +513,22 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
             result,
             userdata1: callback_info.userdata1 as usize,
             userdata2: callback_info.userdata2 as usize,
-        })
+        });
+
+    if failed && device_lost_callback.has_callback() {
+        adapter
+            .instance
+            .register_callback(PendingCallback::DeviceLost {
+                mode: device_lost_callback.mode,
+                callback: device_lost_callback.callback,
+                device: 0,
+                reason: core::DeviceLostReason::FailedCreation,
+                userdata1: device_lost_callback.userdata1,
+                userdata2: device_lost_callback.userdata2,
+            });
+    }
+
+    future
 }
 
 /// Releases one owned reference to a device handle.
@@ -445,7 +538,17 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
 /// `device` must be a non-null live yawgpu device handle.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceRelease(device: native::WGPUDevice) {
-    release_handle(device, "WGPUDevice");
+    let device = device
+        .as_ref()
+        .map(|_| device)
+        .unwrap_or_else(|| panic!("WGPUDevice must not be null"));
+    Arc::increment_strong_count(device);
+    let borrowed = Arc::from_raw(device);
+    if Arc::strong_count(&borrowed) == 2 {
+        borrowed.schedule_device_lost(std::ptr::null(), core::DeviceLostReason::Destroyed);
+    }
+    drop(borrowed);
+    drop(Arc::from_raw(device));
 }
 
 /// Adds one owned reference to a device handle.
@@ -456,6 +559,17 @@ pub unsafe extern "C" fn wgpuDeviceRelease(device: native::WGPUDevice) {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceAddRef(device: native::WGPUDevice) {
     add_ref_handle(device, "WGPUDevice");
+}
+
+/// Destroys a device and fires its device-lost callback once.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceDestroy(device: native::WGPUDevice) {
+    let device_impl = borrow_handle(device, "WGPUDevice");
+    device_impl.schedule_device_lost(device, core::DeviceLostReason::Destroyed);
 }
 
 /// Gets the effective limits for a device.
