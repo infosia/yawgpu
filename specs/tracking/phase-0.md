@@ -135,6 +135,10 @@ Acceptance:
 
 ---
 
+> Review note (from T0.1): `yawgpu` currently lists `yawgpu-test` under
+> `[dependencies]`. When wiring the harness here, move `yawgpu-test` to
+> `[dev-dependencies]` of `yawgpu` (it is only used by integration tests).
+
 ## T0.6 — yawgpu-test harness + first TDD slice (Red→Green)
 
 Produce:
