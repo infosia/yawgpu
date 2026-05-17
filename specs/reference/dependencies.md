@@ -27,5 +27,8 @@
 Record the `webgpu.h` upstream commit/version here once Phase 0 vendors or
 references it, so bindgen output is reproducible:
 
-- `webgpu.h` version: _TBD at Phase 0_
-- `naga` revision: _TBD at Phase 0_ (path dep tracks `wgpu` working tree)
+- `webgpu.h`: vendored at `yawgpu/ffi/webgpu-headers/webgpu.h` (6766 lines),
+  byte-identical copy from `webgpu-headers` commit
+  `673658bc2bd70ec39fc55ebe6bb0173cf6d0a603` (2026-05-07). Bound via
+  `bindgen 0.72` in `yawgpu/build.rs`.
+- `naga` revision: _TBD at Phase 4_ (path dep tracks `wgpu` working tree)

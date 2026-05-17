@@ -11,3 +11,6 @@ crate-type = ["cdylib", "staticlib"]
 yawgpu-core = { path = "../yawgpu-core" }
 yawgpu-hal = { path = "../yawgpu-hal" }
 yawgpu-test = { path = "../yawgpu-test" }
+
+[build-dependencies]
+bindgen = "0.72"
