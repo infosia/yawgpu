@@ -8,15 +8,16 @@ use yawgpu_core as core;
 
 use crate::conv::{
     add_ref_handle, arc_to_handle, borrow_handle, clone_handle, free_supported_features,
-    label_from_string_view, map_bind_group_layout_descriptor, map_buffer_descriptor,
-    map_buffer_map_state, map_buffer_usage_to_native, map_compilation_info_request_status_success,
-    map_compilation_message_type_error, map_device_lost_callback_info, map_device_lost_reason,
-    map_extent_3d, map_feature, map_feature_level, map_features_to_native, map_limits,
-    map_limits_to_native, map_map_async_status, map_map_mode, map_origin_3d,
-    map_queue_work_done_status, map_sampler_descriptor, map_shader_module_descriptor,
-    map_texel_copy_buffer_layout, map_texture_aspect, map_texture_descriptor,
-    map_texture_dimension_to_native, map_texture_format_to_native, map_texture_usage_to_native,
-    map_texture_view_descriptor, release_handle, string_view, DeviceLostCallbackInfo,
+    label_from_string_view, map_bind_group_entries, map_bind_group_layout_descriptor,
+    map_buffer_descriptor, map_buffer_map_state, map_buffer_usage_to_native,
+    map_compilation_info_request_status_success, map_compilation_message_type_error,
+    map_device_lost_callback_info, map_device_lost_reason, map_extent_3d, map_feature,
+    map_feature_level, map_features_to_native, map_limits, map_limits_to_native,
+    map_map_async_status, map_map_mode, map_origin_3d, map_queue_work_done_status,
+    map_sampler_descriptor, map_shader_module_descriptor, map_texel_copy_buffer_layout,
+    map_texture_aspect, map_texture_descriptor, map_texture_dimension_to_native,
+    map_texture_format_to_native, map_texture_usage_to_native, map_texture_view_descriptor,
+    release_handle, string_view, DeviceLostCallbackInfo,
 };
 
 pub struct WGPUAdapterImpl {
@@ -32,6 +33,13 @@ pub struct WGPUBufferImpl {
 
 pub struct WGPUBindGroupLayoutImpl {
     _core: Arc<core::BindGroupLayout>,
+    _device: Arc<core::Device>,
+    _instance: Arc<WGPUInstanceImpl>,
+}
+
+pub struct WGPUBindGroupImpl {
+    _core: Arc<core::BindGroup>,
+    _layout: Arc<core::BindGroupLayout>,
     _device: Arc<core::Device>,
     _instance: Arc<WGPUInstanceImpl>,
 }
@@ -89,7 +97,6 @@ macro_rules! declare_empty_impl_handles {
 }
 
 declare_empty_impl_handles!(
-    WGPUBindGroupImpl,
     WGPUCommandBufferImpl,
     WGPUCommandEncoderImpl,
     WGPUComputePassEncoderImpl,
@@ -892,6 +899,36 @@ pub unsafe extern "C" fn wgpuDeviceCreateBindGroupLayout(
     }))
 }
 
+/// Creates a bind group on a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `descriptor` must
+/// point to a valid `WGPUBindGroupDescriptor`. `descriptor.layout` must be a
+/// non-null live yawgpu bind group layout handle. `descriptor.entries`, when
+/// non-null and `entryCount > 0`, must point to valid bind group entries.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceCreateBindGroup(
+    device: native::WGPUDevice,
+    descriptor: *const native::WGPUBindGroupDescriptor,
+) -> native::WGPUBindGroup {
+    let device = borrow_handle(device, "WGPUDevice");
+    let descriptor = descriptor
+        .as_ref()
+        .expect("WGPUBindGroupDescriptor must not be null");
+    let layout = clone_handle(descriptor.layout, "WGPUBindGroupLayout");
+    let bind_group = device.core.create_bind_group(
+        Arc::clone(&layout._core),
+        map_bind_group_entries(descriptor),
+    );
+    arc_to_handle(Arc::new(WGPUBindGroupImpl {
+        _core: Arc::new(bind_group),
+        _layout: Arc::clone(&layout._core),
+        _device: Arc::clone(&device.core),
+        _instance: Arc::clone(&device.instance),
+    }))
+}
+
 /// Gets the effective limits for a device.
 ///
 /// # Safety
@@ -1139,6 +1176,26 @@ pub unsafe extern "C" fn wgpuBindGroupLayoutRelease(
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBindGroupLayoutAddRef(bind_group_layout: native::WGPUBindGroupLayout) {
     add_ref_handle(bind_group_layout, "WGPUBindGroupLayout");
+}
+
+/// Releases one owned reference to a bind group handle.
+///
+/// # Safety
+///
+/// `bind_group` must be a non-null live yawgpu bind group handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuBindGroupRelease(bind_group: native::WGPUBindGroup) {
+    release_handle(bind_group, "WGPUBindGroup");
+}
+
+/// Adds one owned reference to a bind group handle.
+///
+/// # Safety
+///
+/// `bind_group` must be a non-null live yawgpu bind group handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuBindGroupAddRef(bind_group: native::WGPUBindGroup) {
+    add_ref_handle(bind_group, "WGPUBindGroup");
 }
 
 /// Destroys a texture. This operation is idempotent.

@@ -2,6 +2,7 @@ use std::ffi::CStr;
 use std::sync::Arc;
 
 use crate::native;
+use crate::{WGPUBufferImpl, WGPUSamplerImpl, WGPUTextureViewImpl};
 use yawgpu_core as core;
 
 pub const WGPU_STRLEN: usize = usize::MAX;
@@ -210,6 +211,82 @@ pub unsafe fn map_bind_group_layout_descriptor(
     };
 
     core::BindGroupLayoutDescriptor { entries, error }
+}
+
+/// Converts bind group entries to the core representation.
+///
+/// # Safety
+///
+/// `descriptor.entries`, when non-null and `entryCount > 0`, must point to
+/// `entryCount` valid `WGPUBindGroupEntry` values. Any non-null resource
+/// handles must be live yawgpu handles of the matching type.
+#[must_use]
+pub unsafe fn map_bind_group_entries(
+    descriptor: &native::WGPUBindGroupDescriptor,
+) -> Vec<core::BindGroupEntry> {
+    if descriptor.entryCount > 0 && descriptor.entries.is_null() {
+        return vec![core::BindGroupEntry {
+            binding: 0,
+            resource: core::BindGroupResource::Invalid(
+                "bind group entries must not be null".to_owned(),
+            ),
+        }];
+    }
+
+    if descriptor.entryCount == 0 {
+        return Vec::new();
+    }
+
+    std::slice::from_raw_parts(descriptor.entries, descriptor.entryCount)
+        .iter()
+        .map(|entry| map_bind_group_entry(entry))
+        .collect()
+}
+
+unsafe fn map_bind_group_entry(entry: &native::WGPUBindGroupEntry) -> core::BindGroupEntry {
+    let mut present_count = 0;
+    let mut resource = None;
+
+    if !entry.buffer.is_null() {
+        present_count += 1;
+        let buffer = clone_handle::<WGPUBufferImpl>(entry.buffer, "WGPUBuffer");
+        resource = Some(core::BindGroupResource::Buffer {
+            buffer: Arc::clone(&buffer.core),
+            device: Arc::clone(&buffer.device),
+            offset: entry.offset,
+            size: entry.size,
+        });
+    }
+    if !entry.sampler.is_null() {
+        present_count += 1;
+        let sampler = clone_handle::<WGPUSamplerImpl>(entry.sampler, "WGPUSampler");
+        resource = Some(core::BindGroupResource::Sampler {
+            sampler: Arc::clone(&sampler._core),
+            device: Arc::clone(&sampler._device),
+        });
+    }
+    if !entry.textureView.is_null() {
+        present_count += 1;
+        let texture_view =
+            clone_handle::<WGPUTextureViewImpl>(entry.textureView, "WGPUTextureView");
+        resource = Some(core::BindGroupResource::TextureView {
+            texture_view: Arc::clone(&texture_view._core),
+            device: Arc::clone(&texture_view._device),
+        });
+    }
+
+    let resource = if present_count == 1 {
+        resource.expect("present bind group resource must be recorded")
+    } else {
+        core::BindGroupResource::Invalid(
+            "bind group entry must set exactly one resource".to_owned(),
+        )
+    };
+
+    core::BindGroupEntry {
+        binding: entry.binding,
+        resource,
+    }
 }
 
 fn map_bind_group_layout_entry(
