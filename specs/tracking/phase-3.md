@@ -9,7 +9,19 @@ sampler.md`. Roles/loop: `../reference/workflow.md`. Gate (permanent):
 5 slices. Deferred T54–T56 (→P6) and shader/storage (→P5) are out of
 Phase 3.
 
-## P3.1a — Texture creation core + reflection + lifetime  *(ACTIVE)*
+## P3.1a — Texture creation core + reflection + lifetime  *(☑ DONE)*
+
+Done: `NoopTexture`/`HalTexture` (alloc-counted); core `TextureUsage`/
+`TextureDimension`/`TextureFormat`(opaque)/`Extent3d`/`Texture` +
+`validate_texture_descriptor` (T1–T4,T6–T19,T23 first-match-wins) +
+`max_texture_mips`; error-texture model, idempotent `destroy`; FFI
+`wgpuDeviceCreateTexture`/`Destroy`/8 getters/`Release`/`AddRef`; conv
+usage/dimension/format/extent maps. Format capability deliberately opaque
+(P3.1b). T1–T20(non-format),T23,T25,T57–T65 ported in
+`yawgpu/tests/texture_creation_validation.rs` (8), gate green (70 tests).
+Committed `phase-3: P3.1a`.
+
+#### (original detail)
 
 `HalTexture`/`NoopTexture` (alloc-counted), core `Texture` (Arc; usage,
 dimension, size, format-as-opaque-enum, mip, sampleCount; error/destroyed
@@ -19,7 +31,7 @@ flags) + non-format-capability validation. `wgpuDeviceCreateTexture`,
 (T5/T20/T21/T22/T24/T52/T53) are P3.1b — for now accept any non-Undefined
 format opaquely (T24 itself is P3.1b).
 
-## P3.1b — Format capability table  *(after P3.1a)*
+## P3.1b — Format capability table  *(NEXT)*
 
 Core `TextureFormat` + capability records from Dawn `Format.cpp` (block 20
 design). Port **T24, T5, T20, T21, T22, T52, T53**.

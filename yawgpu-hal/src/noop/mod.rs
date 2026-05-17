@@ -76,6 +76,12 @@ impl NoopDevice {
         self.allocations.fetch_add(1, Ordering::Relaxed);
         NoopBuffer { size }
     }
+
+    #[must_use]
+    pub fn create_texture(&self) -> NoopTexture {
+        self.allocations.fetch_add(1, Ordering::Relaxed);
+        NoopTexture
+    }
 }
 
 impl Default for NoopDevice {
@@ -111,3 +117,6 @@ impl NoopBuffer {
         self.size
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct NoopTexture;

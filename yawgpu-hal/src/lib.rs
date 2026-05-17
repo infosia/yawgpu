@@ -13,6 +13,8 @@ mod metal {
     pub struct MetalQueue;
     #[derive(Debug)]
     pub struct MetalBuffer;
+    #[derive(Debug)]
+    pub struct MetalTexture;
 }
 
 #[cfg(feature = "vulkan")]
@@ -27,6 +29,8 @@ mod vulkan {
     pub struct VulkanQueue;
     #[derive(Debug)]
     pub struct VulkanBuffer;
+    #[derive(Debug)]
+    pub struct VulkanTexture;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -142,6 +146,18 @@ impl HalDevice {
             Self::Metal(_) => HalBuffer::Metal(metal::MetalBuffer),
         }
     }
+
+    #[must_use]
+    pub fn create_texture(&self) -> HalTexture {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(device) => HalTexture::Noop(device.create_texture()),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => HalTexture::Vulkan(vulkan::VulkanTexture),
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => HalTexture::Metal(metal::MetalTexture),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -164,6 +180,17 @@ pub enum HalBuffer {
     Vulkan(vulkan::VulkanBuffer),
     #[cfg(feature = "metal")]
     Metal(metal::MetalBuffer),
+}
+
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum HalTexture {
+    #[cfg(feature = "noop")]
+    Noop(noop::NoopTexture),
+    #[cfg(feature = "vulkan")]
+    Vulkan(vulkan::VulkanTexture),
+    #[cfg(feature = "metal")]
+    Metal(metal::MetalTexture),
 }
 
 #[cfg(test)]
