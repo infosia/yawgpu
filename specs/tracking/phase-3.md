@@ -82,7 +82,20 @@ error sanity), gate green. Committed `phase-3: P3.3`.
 `WGPUSampler` handle + core sampler; lod/anisotropy/filter validation,
 default sampler. Port **T34–T39**.
 
-## P3.4 — QueueWriteTexture  *(NEXT — closes Phase 3 slices, then Phase Review)*
+## P3.4 — QueueWriteTexture  *(☑ DONE — slices complete; Phase Review next)*
+
+Done: core `Origin3d`/`TexelCopyBufferLayout`/`validate_queue_write_
+texture` + `subresource_size` (mip-shift, dim-aware) + Dawn-style
+`required_bytes_in_texel_copy` (overflow-checked); T40–T51 (CopyDst/
+live/sampleCount/mip, aspect-vs-caps, origin+extent bounds, 2D one
+layer, bytesPerRow non-256, rowsPerImage, dataSize, offset overflow).
+FFI `wgpuQueueWriteTexture` decodes destination/dataLayout/writeSize
+(null struct ⇒ device error), reuses `FormatCaps`; conv `Origin3d`/
+`TexelCopyBufferLayout` (`WGPU_COPY_STRIDE_UNDEFINED`⇒None). T40–T51
+ported in `yawgpu/tests/queue_write_texture_validation.rs` (7), gate
+green (23 binaries). Committed `phase-3: P3.4`.
+
+#### (original detail)
 
 `wgpuQueueWriteTexture` arg/layout/bounds/aspect validation reusing
 texture + format-texel info. Port **T40–T51**. Closes Phase 3 (then Phase
