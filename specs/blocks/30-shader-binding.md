@@ -86,7 +86,7 @@ Phase 4. Rules from Dawn `ShaderModuleValidationTests`,
 - **S9** `wgpuShaderModuleGetCompilationInfo` async via the future/
   callback-mode machinery; returns `WGPUCompilationInfo` (≥1 Error msg
   for an invalid module, empty/Info for a valid one).
-  `GetCompilationMessages` :364. ☐
+  `GetCompilationMessages` :364. ☑ (P4.1b)
 - **S10** `DawnShaderModuleSPIRVOptionsDescriptor` — Dawn-only chained
   struct; not in `webgpu.h`. ✗ N/A (recorded).
 - **S11** experimental WGSL extensions requiring AllowUnsafeAPIs ⇒ error

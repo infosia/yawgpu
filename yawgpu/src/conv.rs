@@ -301,6 +301,16 @@ pub fn map_queue_work_done_status(
     }
 }
 
+#[must_use]
+pub fn map_compilation_info_request_status_success() -> native::WGPUCompilationInfoRequestStatus {
+    native::WGPUCompilationInfoRequestStatus_Success
+}
+
+#[must_use]
+pub fn map_compilation_message_type_error() -> native::WGPUCompilationMessageType {
+    native::WGPUCompilationMessageType_Error
+}
+
 pub fn map_map_mode(value: native::WGPUMapMode) -> Result<core::MapMode, &'static str> {
     let bits = u32::try_from(value).map_err(|_| "map mode has unsupported bits")?;
     core::MapMode::from_bits(bits)

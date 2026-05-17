@@ -40,11 +40,16 @@ S3 binding≥1000), error-module + stored diagnostic. conv chain-walk
 enforces S4/S6/S7/S11). Gate green (24 binaries). Committed
 `phase-4: P4.1a`.
 
-## P4.1b — ShaderModule GetCompilationInfo  *(NEXT)*
+## P4.1b — ShaderModule GetCompilationInfo  *(☑ DONE)*
 
-`wgpuShaderModuleGetCompilationInfo` (S9) via the future/callback
-machinery, replaying the stored diagnostic (≥1 Error for an error
-module; empty/Info for a valid one).
+Done: `WGPUShaderModuleImpl._instance`; `PendingCallback::Compilation
+Info` (holds `Arc<core::ShaderModule>`); `wgpuShaderModuleGet
+CompilationInfo` via the future machinery — fires once, status Success,
+1 Error message (StringView into the held diagnostic) for an error
+module / `messageCount==0` for a valid one; WaitAnyOnly honored. conv
+status/type helpers. S9 ported in `shader_module_validation.rs` (now 9;
++3), gate green (24 binaries). Committed `phase-4: P4.1b`. **ShaderModule
+section complete** (S1–S7,S9,S11; S8→P5, S10 N/A).
 
 ## P4.1 — ShaderModule  *(superseded by P4.1a/P4.1b)*
 
@@ -54,7 +59,7 @@ CompilationInfo` via the future machinery (S9), release; error-module +
 stored diagnostic. May split P4.1a (create+WGSL/SPIRV S1–S5) / P4.1b
 (S6/S7/S11 + S9). S10 N/A.
 
-## P4.2 — BindGroupLayout  *(after P4.1)*
+## P4.2 — BindGroupLayout  *(NEXT)*
 
 `wgpuDeviceCreateBindGroupLayout`; S12–S22 (reuse P1.2a Limits, P3.1b
 FormatCaps; S19 rejected-direction).
