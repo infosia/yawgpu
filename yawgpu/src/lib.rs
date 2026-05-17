@@ -10,8 +10,8 @@ use crate::conv::{
     add_ref_handle, arc_to_handle, borrow_handle, clone_handle, free_supported_features,
     label_from_string_view, map_buffer_descriptor, map_buffer_map_state,
     map_buffer_usage_to_native, map_device_lost_callback_info, map_device_lost_reason, map_feature,
-    map_feature_level, map_features_to_native, map_limits, map_limits_to_native, release_handle,
-    string_view, DeviceLostCallbackInfo,
+    map_feature_level, map_features_to_native, map_limits, map_limits_to_native,
+    map_map_async_status, map_map_mode, release_handle, string_view, DeviceLostCallbackInfo,
 };
 
 pub struct WGPUAdapterImpl {
@@ -21,6 +21,8 @@ pub struct WGPUAdapterImpl {
 
 pub struct WGPUBufferImpl {
     core: Arc<core::Buffer>,
+    device: Arc<core::Device>,
+    instance: Arc<WGPUInstanceImpl>,
 }
 
 pub struct WGPUDeviceImpl {
@@ -144,6 +146,7 @@ impl Drop for WGPUAdapterImpl {
 
 impl Drop for WGPUBufferImpl {
     fn drop(&mut self) {
+        self.core.abort_pending_map();
         self.core.destroy();
     }
 }
@@ -218,6 +221,14 @@ enum PendingCallback {
         userdata1: usize,
         userdata2: usize,
     },
+    BufferMap {
+        mode: native::WGPUCallbackMode,
+        callback: native::WGPUBufferMapCallback,
+        buffer: Option<core::Buffer>,
+        status: core::MapAsyncStatus,
+        userdata1: usize,
+        userdata2: usize,
+    },
 }
 
 impl PendingCallback {
@@ -225,7 +236,8 @@ impl PendingCallback {
         let mode = match self {
             Self::RequestAdapter { mode, .. }
             | Self::RequestDevice { mode, .. }
-            | Self::DeviceLost { mode, .. } => *mode,
+            | Self::DeviceLost { mode, .. }
+            | Self::BufferMap { mode, .. } => *mode,
         };
         match mode {
             native::WGPUCallbackMode_AllowProcessEvents => {
@@ -300,7 +312,38 @@ impl PendingCallback {
                     );
                 }
             }
+            Self::BufferMap {
+                callback,
+                buffer,
+                status,
+                userdata1,
+                userdata2,
+                ..
+            } => {
+                if let Some(callback) = callback {
+                    let status = buffer
+                        .as_ref()
+                        .map(core::Buffer::resolve_pending_map)
+                        .unwrap_or(status);
+                    callback(
+                        map_map_async_status(status),
+                        string_view(map_async_message(status).as_bytes()),
+                        userdata1 as *mut c_void,
+                        userdata2 as *mut c_void,
+                    );
+                }
+            }
         }
+    }
+}
+
+fn map_async_message(status: core::MapAsyncStatus) -> &'static str {
+    match status {
+        core::MapAsyncStatus::Success => "",
+        core::MapAsyncStatus::Aborted => "Buffer map was aborted",
+        core::MapAsyncStatus::CallbackCancelled => "Buffer map callback was cancelled",
+        core::MapAsyncStatus::Error => "Buffer map failed",
+        _ => "Buffer map failed",
     }
 }
 
@@ -629,6 +672,8 @@ pub unsafe extern "C" fn wgpuDeviceCreateBuffer(
     let buffer = device.core.create_buffer(map_buffer_descriptor(descriptor));
     arc_to_handle(Arc::new(WGPUBufferImpl {
         core: Arc::new(buffer),
+        device: Arc::clone(&device.core),
+        instance: Arc::clone(&device.instance),
     }))
 }
 
@@ -718,6 +763,65 @@ pub unsafe extern "C" fn wgpuBufferDestroy(buffer: native::WGPUBuffer) {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBufferUnmap(buffer: native::WGPUBuffer) {
     borrow_handle(buffer, "WGPUBuffer").core.unmap();
+}
+
+/// Asynchronously maps a buffer range.
+///
+/// # Safety
+///
+/// `buffer` must be a non-null live yawgpu buffer handle. `callback_info`
+/// userdata pointers must remain valid until the callback fires.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuBufferMapAsync(
+    buffer: native::WGPUBuffer,
+    mode: native::WGPUMapMode,
+    offset: usize,
+    size: usize,
+    callback_info: native::WGPUBufferMapCallbackInfo,
+) -> native::WGPUFuture {
+    let buffer = borrow_handle(buffer, "WGPUBuffer");
+    let map_result = validate_map_async(buffer, mode, offset, size);
+
+    let pending = match map_result {
+        Ok((mode, offset, size)) => match buffer.core.begin_map(mode, offset, size) {
+            Ok(()) => PendingCallback::BufferMap {
+                mode: callback_info.mode,
+                callback: callback_info.callback,
+                buffer: Some((*buffer.core).clone()),
+                status: core::MapAsyncStatus::Success,
+                userdata1: callback_info.userdata1 as usize,
+                userdata2: callback_info.userdata2 as usize,
+            },
+            Err(message) => {
+                buffer
+                    .device
+                    .dispatch_error(core::ErrorKind::Validation, message);
+                PendingCallback::BufferMap {
+                    mode: callback_info.mode,
+                    callback: callback_info.callback,
+                    buffer: None,
+                    status: core::MapAsyncStatus::Error,
+                    userdata1: callback_info.userdata1 as usize,
+                    userdata2: callback_info.userdata2 as usize,
+                }
+            }
+        },
+        Err(message) => {
+            buffer
+                .device
+                .dispatch_error(core::ErrorKind::Validation, message);
+            PendingCallback::BufferMap {
+                mode: callback_info.mode,
+                callback: callback_info.callback,
+                buffer: None,
+                status: core::MapAsyncStatus::Error,
+                userdata1: callback_info.userdata1 as usize,
+                userdata2: callback_info.userdata2 as usize,
+            }
+        }
+    };
+
+    buffer.instance.register_callback(pending)
 }
 
 /// Returns the buffer map state.
@@ -911,6 +1015,26 @@ unsafe fn required_features_from_descriptor(
         })
         .expect("WGPUDeviceDescriptor requiredFeatures must not be null");
     features.iter().copied().map(map_feature).collect()
+}
+
+fn validate_map_async(
+    buffer: &WGPUBufferImpl,
+    mode: native::WGPUMapMode,
+    offset: usize,
+    size: usize,
+) -> Result<(core::MapMode, u64, u64), &'static str> {
+    let mode = map_map_mode(mode)?;
+    let offset = u64::try_from(offset).map_err(|_| "map offset is too large")?;
+    let size = if size == native::WGPU_WHOLE_MAP_SIZE as usize {
+        buffer
+            .core
+            .size()
+            .checked_sub(offset)
+            .ok_or("map offset exceeds buffer size")?
+    } else {
+        u64::try_from(size).map_err(|_| "map size is too large")?
+    };
+    Ok((mode, offset, size))
 }
 
 /// Installs a Rust-side uncaptured-error callback for test harnesses.

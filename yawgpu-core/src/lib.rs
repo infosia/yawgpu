@@ -305,6 +305,22 @@ pub struct BufferDescriptor {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MapMode {
+    Read,
+    Write,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MapAsyncStatus {
+    Success,
+    CallbackCancelled,
+    Error,
+    Aborted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BufferUsage(u64);
 
 impl BufferUsage {
@@ -370,6 +386,15 @@ struct BufferState {
     map_state: BufferMapState,
     is_error: bool,
     is_destroyed: bool,
+    pending_map: Option<PendingMap>,
+}
+
+#[derive(Debug)]
+struct PendingMap {
+    _mode: MapMode,
+    _offset: u64,
+    _size: u64,
+    outcome: MapAsyncStatus,
 }
 
 impl Buffer {
@@ -388,6 +413,7 @@ impl Buffer {
                     map_state,
                     is_error,
                     is_destroyed: false,
+                    pending_map: None,
                 }),
             }),
         }
@@ -416,11 +442,90 @@ impl Buffer {
     pub fn destroy(&self) {
         let mut state = self.inner.state.lock();
         state.is_destroyed = true;
+        if let Some(pending) = state.pending_map.as_mut() {
+            pending.outcome = MapAsyncStatus::Aborted;
+        }
         state.map_state = BufferMapState::Unmapped;
     }
 
     pub fn unmap(&self) {
-        self.inner.state.lock().map_state = BufferMapState::Unmapped;
+        let mut state = self.inner.state.lock();
+        if let Some(pending) = state.pending_map.as_mut() {
+            pending.outcome = MapAsyncStatus::Aborted;
+        }
+        state.map_state = BufferMapState::Unmapped;
+    }
+
+    pub fn begin_map(&self, mode: MapMode, offset: u64, size: u64) -> Result<(), &'static str> {
+        let mut state = self.inner.state.lock();
+        if state.is_error {
+            return Err("cannot map an error buffer");
+        }
+        if state.is_destroyed {
+            return Err("cannot map a destroyed buffer");
+        }
+        if state.map_state == BufferMapState::Mapped {
+            return Err("buffer is already mapped");
+        }
+        if state.map_state == BufferMapState::Pending {
+            return Err("buffer already has a pending map");
+        }
+
+        match mode {
+            MapMode::Read if !self.inner.usage.contains(BufferUsage::MAP_READ) => {
+                return Err("read mapping requires MapRead usage");
+            }
+            MapMode::Write if !self.inner.usage.contains(BufferUsage::MAP_WRITE) => {
+                return Err("write mapping requires MapWrite usage");
+            }
+            _ => {}
+        }
+
+        if !offset.is_multiple_of(8) {
+            return Err("map offset must be 8-byte aligned");
+        }
+        if !size.is_multiple_of(4) {
+            return Err("map size must be 4-byte aligned");
+        }
+        let Some(end) = offset.checked_add(size) else {
+            return Err("map range overflows");
+        };
+        if offset > self.inner.size || end > self.inner.size {
+            return Err("map range exceeds buffer size");
+        }
+
+        state.map_state = BufferMapState::Pending;
+        state.pending_map = Some(PendingMap {
+            _mode: mode,
+            _offset: offset,
+            _size: size,
+            outcome: MapAsyncStatus::Success,
+        });
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn resolve_pending_map(&self) -> MapAsyncStatus {
+        let mut state = self.inner.state.lock();
+        let outcome = state
+            .pending_map
+            .take()
+            .map(|pending| pending.outcome)
+            .unwrap_or(MapAsyncStatus::Aborted);
+        state.map_state = if outcome == MapAsyncStatus::Success {
+            BufferMapState::Mapped
+        } else {
+            BufferMapState::Unmapped
+        };
+        outcome
+    }
+
+    pub fn abort_pending_map(&self) {
+        let mut state = self.inner.state.lock();
+        if let Some(pending) = state.pending_map.as_mut() {
+            pending.outcome = MapAsyncStatus::Aborted;
+            state.map_state = BufferMapState::Unmapped;
+        }
     }
 }
 

@@ -71,7 +71,7 @@ re-fire.
 - **B36** `Unmap` on destroyed buffer = safe. `UnmapDestroyedBuffer` :698.
   ☑ (P2.1)
 - **B37** `MapAsync` after `Destroy`+`Unmap` ⇒ error + callback `Error`.
-  `MapDestroyedBufferAfterUnmap` :706. ☐ (callback part may land in P2.2)
+  `MapDestroyedBufferAfterUnmap` :706. ☑ (P2.2) (callback part may land in P2.2)
 - **B38** `GetSize`/`GetUsage` reflect descriptor even on error buffer;
   `GetMapState` queryable. `CreationParameterReflectionForErrorBuffer`
   :1135. ☑ (P2.1)
@@ -79,35 +79,35 @@ re-fire.
 ### Buffer map async — Phase 2 (P2.2)
 
 - **B7/B8** `MapAsync` mode must match usage (Read⇒MapRead, Write⇒
-  MapWrite). `MapAsync_WrongUsage` :339. ☐
-- **B9** offset 8-byte aligned. `MapAsync_OffsetSizeAlignment` :262. ☐
-- **B10** size 4-byte aligned. same :281. ☐
+  MapWrite). `MapAsync_WrongUsage` :339. ☑ (P2.2)
+- **B9** offset 8-byte aligned. `MapAsync_OffsetSizeAlignment` :262. ☑ (P2.2)
+- **B10** size 4-byte aligned. same :281. ☑ (P2.2)
 - **B11** offset(+size) within bounds incl. overflow.
-  `MapAsync_OffsetSizeOOB` :289. ☐
+  `MapAsync_OffsetSizeOOB` :289. ☑ (P2.2)
 - **B12** error if already Mapped (incl. mappedAtCreation).
-  `MapAsync_AlreadyMapped` :368. ☐
+  `MapAsync_AlreadyMapped` :368. ☑ (P2.2)
 - **B13** mode must be exactly Read xor Write (not None, not both).
-  `MapAsync_WrongMode` :356. ☐
+  `MapAsync_WrongMode` :356. ☑ (P2.2)
 - **B14** unsupported mode bits ⇒ error. `MapAsync_UnsupportedMode` :250.
-  ☐
-- **B15** on destroyed buffer ⇒ error. `MapAsync_Destroy` :422. ☐
+  ☑ (P2.2)
+- **B15** on destroyed buffer ⇒ error. `MapAsync_Destroy` :422. ☑ (P2.2)
 - **B16** second `MapAsync` while Pending ⇒ error (overlapping AND
-  non-overlapping). `MapAsync_PendingMap` :387. ☐
+  non-overlapping). `MapAsync_PendingMap` :387. ☑ (P2.2)
 - **B17** valid `MapAsync` ⇒ state Pending, sync call ok. `MapAsync_
-  Success` :228. ☐
-- **B18** completion ⇒ callback `Success`, state Mapped. same. ☐
+  Success` :228. ☑ (P2.2)
+- **B18** completion ⇒ callback `Success`, state Mapped. same. ☑ (P2.2)
 - **B19** `Unmap` before result ⇒ callback `Aborted`.
-  `MapAsync_UnmapBeforeResult` :429. ☐
+  `MapAsync_UnmapBeforeResult` :429. ☑ (P2.2)
 - **B20** `Destroy` before result ⇒ callback `Aborted`.
-  `MapAsync_DestroyBeforeResult` :461. ☐
+  `MapAsync_DestroyBeforeResult` :461. ☑ (P2.2)
 - **B21** last-ref drop before result ⇒ callback `Aborted`.
-  `MapAsync_DroppedBeforeResult` :473. ☐
+  `MapAsync_DroppedBeforeResult` :473. ☑ (P2.2)
 - **B22** validation failure ⇒ callback `Error` (retry from callback ok).
-  `MapAsync_RetryInErrorCallback` :524. ☐
+  `MapAsync_RetryInErrorCallback` :524. ☑ (P2.2)
 - **B23** `Unmap`/`Destroy` inside callback ⇒ no double-fire.
-  `MapAsync_UnmapCalledInCallback` :485. ☐
+  `MapAsync_UnmapCalledInCallback` :485. ☑ (P2.2)
 - **B24** callback honours `WGPUCallbackMode` (A2–A6 machinery). same
-  :234. ☐
+  :234. ☑ (P2.2)
 
 ### GetMappedRange — Phase 2 (P2.3)
 
