@@ -110,12 +110,28 @@ green (30 binaries). Committed `phase-5: P5.3`.
 
 P10–P17 (counts, stride/offset, location, format-vs-shader, coverage).
 
-## P5.4 — GetBindGroupLayout + layout/shader compat  *(NEXT)*
+## P5.4 — GetBindGroupLayout + layout/shader compat  *(☑ DONE)*
+
+Done: `BindGroupLayout` gains `is_default`; `derive_bind_group_layouts`
+aggregates statically-used bindings across stages (visibility OR,
+minBindingSize merge, P42 sample-type Float/UnfilterableFloat from
+Sample/Load), group-count vs `max_bind_groups`, marks derived BGLs
+default; compute+render pipelines store derived `Vec<Arc<BGL>>`.
+`validate_pipeline_layout_descriptor` rejects default BGLs (P40). FFI
+`wgpuRender/ComputePipelineGetBindGroupLayout` via
+`get_pipeline_bind_group_layout` with a per-pipeline cached handle vec
+(P38 OOB⇒error-BGL; P41 same handle per pipeline+index, distinct across
+pipelines). P38–P42 ported in
+`yawgpu/tests/get_bind_group_layout_validation.rs` (6), gate green
+(31 binaries). Committed `phase-5: P5.4`. **P41 draw-time
+cross-pipeline incompatibility → Defer→P6** (recorded).
+
+#### (original detail)
 
 Auto-layout reflection; `wgpuRender/ComputePipelineGetBindGroupLayout`;
 P36, P38–P42, S35 explicit-layout compat.
 
-## P5.5 — Object caching  *(after P5.4)*
+## P5.5 — Object caching  *(NEXT)*
 
 Per-device descriptor-keyed dedup (handle identity); P43–P50.
 
