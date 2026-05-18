@@ -151,10 +151,10 @@ b:fragment/color/depthStencil)
 ### Object caching (P5.5)
 
 - **P43** identical ShaderModule WGSL ⇒ same handle. ObjectCaching
-  :205. ☐
-- **P44** identical PipelineLayout (BGL array) ⇒ same handle. :188. ☐
+  :205. ☑ (P5.5)
+- **P44** identical PipelineLayout (BGL array) ⇒ same handle. :188. ☑ (P5.5)
 - **P45–P50** Compute/Render pipeline dedup on module/layout/constants
-  ⇒ same handle. :224–486. ☐
+  ⇒ same handle. :224–486. ☑ (P5.5)
 
 ### Async (P5.6)
 

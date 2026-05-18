@@ -74,7 +74,7 @@ fn default_bind_group_layout_identity_is_pipeline_bound() {
     let test = ValidationTest::new();
     unsafe {
         let pipeline_a = create_compute_pipeline(&test, compute_uniform(), None);
-        let pipeline_b = create_compute_pipeline(&test, compute_uniform(), None);
+        let pipeline_b = create_compute_pipeline(&test, compute_uniform_different(), None);
 
         let a0 = yawgpu::wgpuComputePipelineGetBindGroupLayout(pipeline_a, 0);
         let a0_again = yawgpu::wgpuComputePipelineGetBindGroupLayout(pipeline_a, 0);
@@ -497,6 +497,12 @@ fn compute_uniform() -> &'static str {
     "struct U { values: array<vec4f, 4> }
      @group(0) @binding(0) var<uniform> u: U;
      @compute @workgroup_size(1) fn main() { _ = u.values[0]; }"
+}
+
+fn compute_uniform_different() -> &'static str {
+    "struct U { values: array<vec4f, 4> }
+     @group(0) @binding(0) var<uniform> u: U;
+     @compute @workgroup_size(2) fn main() { _ = u.values[1]; }"
 }
 
 fn compute_texture_sample() -> &'static str {
