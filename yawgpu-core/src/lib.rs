@@ -379,7 +379,7 @@ impl Device {
         if let Some(message) = error {
             self.dispatch_error(ErrorKind::Validation, message);
         }
-        BindGroupLayout::new(descriptor.entries, is_error)
+        BindGroupLayout::new(descriptor.entries, is_error, false)
     }
 
     #[must_use]
@@ -1602,13 +1602,23 @@ pub struct BindGroupLayout {
 struct BindGroupLayoutInner {
     entries: Vec<BindGroupLayoutEntry>,
     is_error: bool,
+    is_default: bool,
 }
 
 impl BindGroupLayout {
-    fn new(entries: Vec<BindGroupLayoutEntry>, is_error: bool) -> Self {
+    fn new(entries: Vec<BindGroupLayoutEntry>, is_error: bool, is_default: bool) -> Self {
         Self {
-            inner: Arc::new(BindGroupLayoutInner { entries, is_error }),
+            inner: Arc::new(BindGroupLayoutInner {
+                entries,
+                is_error,
+                is_default,
+            }),
         }
+    }
+
+    #[must_use]
+    pub fn error() -> Self {
+        Self::new(Vec::new(), true, false)
     }
 
     #[must_use]
@@ -1619,6 +1629,11 @@ impl BindGroupLayout {
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
+    }
+
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.inner.is_default
     }
 }
 
@@ -1994,6 +2009,9 @@ fn validate_pipeline_layout_descriptor(
     if bind_group_layouts.iter().any(|layout| layout.is_error()) {
         return Some("pipeline layout cannot contain an error bind group layout".to_owned());
     }
+    if bind_group_layouts.iter().any(|layout| layout.is_default()) {
+        return Some("pipeline layout cannot contain a default bind group layout".to_owned());
+    }
     if immediate_size > limits.max_immediate_size {
         return Some("pipeline layout immediateSize exceeds the device limit".to_owned());
     }
@@ -2035,6 +2053,7 @@ struct ComputePipelineInner {
     entry_name: String,
     _bindings: Vec<shader_naga::ReflectedResourceBinding>,
     _workgroup: Option<ResolvedComputeWorkgroup>,
+    bind_group_layouts: Vec<Arc<BindGroupLayout>>,
     is_error: bool,
 }
 
@@ -2051,11 +2070,12 @@ impl ComputePipeline {
         } else {
             resolve_compute_pipeline(&descriptor).ok()
         };
-        let (entry_name, bindings, workgroup) = resolved.unwrap_or_else(|| {
+        let (entry_name, bindings, workgroup, bind_group_layouts) = resolved.unwrap_or_else(|| {
             (
                 descriptor.entry_point.clone().unwrap_or_default(),
                 Vec::new(),
                 None,
+                Vec::new(),
             )
         });
         Self {
@@ -2065,6 +2085,7 @@ impl ComputePipeline {
                 entry_name,
                 _bindings: bindings,
                 _workgroup: workgroup,
+                bind_group_layouts,
                 is_error,
             }),
         }
@@ -2079,12 +2100,18 @@ impl ComputePipeline {
     pub fn entry_name(&self) -> &str {
         &self.inner.entry_name
     }
+
+    #[must_use]
+    pub fn bind_group_layouts(&self) -> &[Arc<BindGroupLayout>] {
+        &self.inner.bind_group_layouts
+    }
 }
 
 type ResolvedPipelineParts = (
     String,
     Vec<shader_naga::ReflectedResourceBinding>,
     Option<ResolvedComputeWorkgroup>,
+    Vec<Arc<BindGroupLayout>>,
 );
 
 fn validate_compute_pipeline_descriptor(
@@ -2116,7 +2143,9 @@ fn resolve_compute_pipeline_descriptor(
     let workgroup = resolve_compute_workgroup(module, &entry_name, &overrides, &constants, limits)?;
     let bindings = module.resource_bindings();
     validate_compute_pipeline_layout(&descriptor.layout, &bindings)?;
-    Ok((entry_name, bindings, Some(workgroup)))
+    let bind_group_layouts =
+        effective_compute_bind_group_layouts(&descriptor.layout, &bindings, limits)?;
+    Ok((entry_name, bindings, Some(workgroup), bind_group_layouts))
 }
 
 fn resolve_compute_entry(
@@ -2341,6 +2370,26 @@ fn validate_compute_pipeline_layout(
     validate_pipeline_layout_stage_bindings(layout, &requirements)
 }
 
+fn effective_compute_bind_group_layouts(
+    layout: &ComputePipelineLayout,
+    bindings: &[shader_naga::ReflectedResourceBinding],
+    limits: Limits,
+) -> Result<Vec<Arc<BindGroupLayout>>, String> {
+    match layout {
+        ComputePipelineLayout::Explicit(layout) => Ok(layout.bind_group_layouts().to_vec()),
+        ComputePipelineLayout::Auto => derive_bind_group_layouts(
+            bindings
+                .iter()
+                .cloned()
+                .map(|binding| StageResourceBinding {
+                    stage: PipelineShaderStage::Compute,
+                    binding,
+                }),
+            limits,
+        ),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct StageResourceBinding {
     stage: PipelineShaderStage,
@@ -2360,6 +2409,9 @@ fn validate_pipeline_layout_stage_bindings(
 ) -> Result<(), String> {
     for requirement in requirements {
         let binding = &requirement.binding;
+        if !binding.statically_used {
+            continue;
+        }
         let group = usize::try_from(binding.group)
             .map_err(|_| "shader binding group index is too large".to_owned())?;
         let Some(group_layout) = layout.bind_group_layouts().get(group) else {
@@ -2384,6 +2436,194 @@ fn validate_pipeline_layout_stage_bindings(
     }
 
     Ok(())
+}
+
+fn derive_bind_group_layouts<I>(
+    requirements: I,
+    limits: Limits,
+) -> Result<Vec<Arc<BindGroupLayout>>, String>
+where
+    I: IntoIterator<Item = StageResourceBinding>,
+{
+    let mut groups = BTreeMap::<u32, BTreeMap<u32, BindGroupLayoutEntry>>::new();
+    for requirement in requirements {
+        let binding = requirement.binding;
+        if !binding.statically_used {
+            continue;
+        }
+        let group = groups.entry(binding.group).or_default();
+        let visibility = pipeline_stage_visibility_bit(requirement.stage);
+        let derived = reflected_bind_group_layout_entry(&binding, visibility)?;
+        match group.get_mut(&binding.binding) {
+            Some(existing) => merge_bind_group_layout_entry(existing, derived)?,
+            None => {
+                group.insert(binding.binding, derived);
+            }
+        }
+    }
+
+    let Some(max_group) = groups.keys().next_back().copied() else {
+        return Ok(Vec::new());
+    };
+    let group_count = usize::try_from(max_group)
+        .ok()
+        .and_then(|group| group.checked_add(1))
+        .ok_or_else(|| "pipeline bind group index is too large".to_owned())?;
+    if group_count > limits.max_bind_groups as usize {
+        return Err("pipeline auto layout bind group count exceeds the device limit".to_owned());
+    }
+
+    let mut layouts = Vec::with_capacity(group_count);
+    for group_index in 0..=max_group {
+        let entries = groups
+            .remove(&group_index)
+            .map(|entries| entries.into_values().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if let Some(message) = validate_bind_group_layout_descriptor(&entries, limits) {
+            return Err(message);
+        }
+        layouts.push(Arc::new(BindGroupLayout::new(entries, false, true)));
+    }
+    Ok(layouts)
+}
+
+fn reflected_bind_group_layout_entry(
+    binding: &shader_naga::ReflectedResourceBinding,
+    visibility: u64,
+) -> Result<BindGroupLayoutEntry, String> {
+    Ok(BindGroupLayoutEntry {
+        binding: binding.binding,
+        visibility,
+        binding_array_size: 0,
+        kind: Some(reflected_binding_layout_kind(binding)?),
+    })
+}
+
+fn reflected_binding_layout_kind(
+    binding: &shader_naga::ReflectedResourceBinding,
+) -> Result<BindingLayoutKind, String> {
+    match &binding.kind {
+        shader_naga::ReflectedResourceBindingKind::Buffer(ty) => Ok(BindingLayoutKind::Buffer {
+            ty: match ty {
+                shader_naga::ReflectedBufferType::Uniform => BufferBindingType::Uniform,
+                shader_naga::ReflectedBufferType::Storage => BufferBindingType::Storage,
+                shader_naga::ReflectedBufferType::ReadOnlyStorage => {
+                    BufferBindingType::ReadOnlyStorage
+                }
+            },
+            has_dynamic_offset: false,
+            min_binding_size: binding.min_binding_size,
+        }),
+        shader_naga::ReflectedResourceBindingKind::Sampler => Ok(BindingLayoutKind::Sampler {
+            ty: SamplerBindingType::Filtering,
+        }),
+        shader_naga::ReflectedResourceBindingKind::Texture {
+            sampled,
+            sample_usage,
+        } => Ok(BindingLayoutKind::Texture {
+            sample_type: if *sampled {
+                match sample_usage {
+                    shader_naga::ReflectedTextureSampleUsage::Sample => TextureSampleType::Float,
+                    shader_naga::ReflectedTextureSampleUsage::Load => {
+                        TextureSampleType::UnfilterableFloat
+                    }
+                }
+            } else {
+                TextureSampleType::Depth
+            },
+            view_dimension: TextureViewDimension::D2,
+            multisampled: false,
+        }),
+        shader_naga::ReflectedResourceBindingKind::StorageTexture { format, access } => {
+            Ok(BindingLayoutKind::StorageTexture {
+                access: reflected_storage_texture_access(access),
+                format: reflected_storage_texture_format(format)?,
+                view_dimension: TextureViewDimension::D2,
+            })
+        }
+    }
+}
+
+fn reflected_storage_texture_access(
+    access: &shader_naga::ReflectedStorageTextureAccess,
+) -> StorageTextureAccess {
+    match (access.read, access.write) {
+        (true, true) => StorageTextureAccess::ReadWrite,
+        (true, false) => StorageTextureAccess::ReadOnly,
+        _ => StorageTextureAccess::WriteOnly,
+    }
+}
+
+fn reflected_storage_texture_format(format: &str) -> Result<TextureFormat, String> {
+    let raw = match format {
+        "Rgba8Unorm" => 0x0000_0016,
+        "Rgba8Snorm" => 0x0000_0018,
+        "Rgba8Uint" => 0x0000_0019,
+        "Rgba8Sint" => 0x0000_001A,
+        "Rgba16Uint" => 0x0000_0026,
+        "Rgba16Sint" => 0x0000_0027,
+        "Rgba16Float" => 0x0000_0028,
+        "R32Uint" => 0x0000_000F,
+        "R32Sint" => 0x0000_0010,
+        "R32Float" => 0x0000_000E,
+        "Rg32Uint" => 0x0000_0022,
+        "Rg32Sint" => 0x0000_0023,
+        "Rg32Float" => 0x0000_0021,
+        "Rgba32Uint" => 0x0000_002A,
+        "Rgba32Sint" => 0x0000_002B,
+        "Rgba32Float" => 0x0000_0029,
+        _ => return Err("pipeline auto layout storage texture format is unsupported".to_owned()),
+    };
+    Ok(TextureFormat::from_raw(raw))
+}
+
+fn merge_bind_group_layout_entry(
+    existing: &mut BindGroupLayoutEntry,
+    incoming: BindGroupLayoutEntry,
+) -> Result<(), String> {
+    existing.visibility |= incoming.visibility;
+    match (&mut existing.kind, incoming.kind) {
+        (
+            Some(BindingLayoutKind::Buffer {
+                ty,
+                min_binding_size,
+                ..
+            }),
+            Some(BindingLayoutKind::Buffer {
+                ty: incoming_ty,
+                min_binding_size: incoming_min_binding_size,
+                ..
+            }),
+        ) if *ty == incoming_ty => {
+            *min_binding_size = (*min_binding_size).max(incoming_min_binding_size);
+            Ok(())
+        }
+        (
+            Some(BindingLayoutKind::Texture { sample_type, .. }),
+            Some(BindingLayoutKind::Texture {
+                sample_type: incoming_sample_type,
+                ..
+            }),
+        ) if *sample_type == incoming_sample_type
+            || matches!(
+                (*sample_type, incoming_sample_type),
+                (
+                    TextureSampleType::Float,
+                    TextureSampleType::UnfilterableFloat
+                ) | (
+                    TextureSampleType::UnfilterableFloat,
+                    TextureSampleType::Float
+                )
+            ) =>
+        {
+            if incoming_sample_type == TextureSampleType::Float {
+                *sample_type = TextureSampleType::Float;
+            }
+            Ok(())
+        }
+        (Some(existing_kind), Some(incoming_kind)) if *existing_kind == incoming_kind => Ok(()),
+        _ => Err("pipeline auto layout has incompatible shader bindings".to_owned()),
+    }
 }
 
 fn pipeline_stage_visibility_bit(stage: PipelineShaderStage) -> u64 {
@@ -2666,6 +2906,7 @@ struct RenderPipelineInner {
     _fragment: Option<RenderPipelineFragmentState>,
     vertex_entry_name: String,
     fragment_entry_name: Option<String>,
+    bind_group_layouts: Vec<Arc<BindGroupLayout>>,
     is_error: bool,
 }
 
@@ -2676,20 +2917,22 @@ impl RenderPipeline {
         } else {
             resolve_render_pipeline_descriptor(&descriptor, Limits::DEFAULT).ok()
         };
-        let (vertex_entry_name, fragment_entry_name) = resolved.unwrap_or_else(|| {
-            (
-                descriptor
-                    .vertex
-                    .shader
-                    .entry_point
-                    .clone()
-                    .unwrap_or_default(),
-                descriptor
-                    .fragment
-                    .as_ref()
-                    .and_then(|fragment| fragment.shader.entry_point.clone()),
-            )
-        });
+        let (vertex_entry_name, fragment_entry_name, bind_group_layouts) =
+            resolved.unwrap_or_else(|| {
+                (
+                    descriptor
+                        .vertex
+                        .shader
+                        .entry_point
+                        .clone()
+                        .unwrap_or_default(),
+                    descriptor
+                        .fragment
+                        .as_ref()
+                        .and_then(|fragment| fragment.shader.entry_point.clone()),
+                    Vec::new(),
+                )
+            });
         Self {
             inner: Arc::new(RenderPipelineInner {
                 _layout: descriptor.layout,
@@ -2700,6 +2943,7 @@ impl RenderPipeline {
                 _fragment: descriptor.fragment,
                 vertex_entry_name,
                 fragment_entry_name,
+                bind_group_layouts,
                 is_error,
             }),
         }
@@ -2719,6 +2963,11 @@ impl RenderPipeline {
     pub fn fragment_entry_name(&self) -> Option<&str> {
         self.inner.fragment_entry_name.as_deref()
     }
+
+    #[must_use]
+    pub fn bind_group_layouts(&self) -> &[Arc<BindGroupLayout>] {
+        &self.inner.bind_group_layouts
+    }
 }
 
 fn validate_render_pipeline_descriptor(
@@ -2728,10 +2977,12 @@ fn validate_render_pipeline_descriptor(
     resolve_render_pipeline_descriptor(descriptor, limits).err()
 }
 
+type ResolvedRenderPipelineParts = (String, Option<String>, Vec<Arc<BindGroupLayout>>);
+
 fn resolve_render_pipeline_descriptor(
     descriptor: &RenderPipelineDescriptor,
     limits: Limits,
-) -> Result<(String, Option<String>), String> {
+) -> Result<ResolvedRenderPipelineParts, String> {
     if let RenderPipelineLayout::Explicit(layout) = &descriptor.layout {
         if layout.is_error() {
             return Err("render pipeline layout must not be an error pipeline layout".to_owned());
@@ -2768,8 +3019,9 @@ fn resolve_render_pipeline_descriptor(
     validate_color_targets(descriptor, fragment_entry.as_deref(), limits)?;
     validate_render_pipeline_layout(descriptor)?;
     validate_multisample_state(descriptor, fragment_entry.as_deref())?;
+    let bind_group_layouts = effective_render_bind_group_layouts(descriptor, limits)?;
 
-    Ok((vertex_entry, fragment_entry))
+    Ok((vertex_entry, fragment_entry, bind_group_layouts))
 }
 
 fn validate_vertex_state(
@@ -3190,6 +3442,26 @@ fn validate_render_pipeline_layout(descriptor: &RenderPipelineDescriptor) -> Res
         )?);
     }
     validate_pipeline_layout_stage_bindings(layout, &requirements)
+}
+
+fn effective_render_bind_group_layouts(
+    descriptor: &RenderPipelineDescriptor,
+    limits: Limits,
+) -> Result<Vec<Arc<BindGroupLayout>>, String> {
+    match &descriptor.layout {
+        RenderPipelineLayout::Explicit(layout) => Ok(layout.bind_group_layouts().to_vec()),
+        RenderPipelineLayout::Auto => {
+            let mut requirements =
+                stage_resource_bindings(&descriptor.vertex.shader, PipelineShaderStage::Vertex)?;
+            if let Some(fragment) = &descriptor.fragment {
+                requirements.extend(stage_resource_bindings(
+                    &fragment.shader,
+                    PipelineShaderStage::Fragment,
+                )?);
+            }
+            derive_bind_group_layouts(requirements, limits)
+        }
+    }
 }
 
 fn stage_resource_bindings(

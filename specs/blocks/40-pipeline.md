@@ -138,15 +138,15 @@ b:fragment/color/depthStencil)
 
 ### GetBindGroupLayout + layout compat (P5.4) — deferred S43/S44/S35
 
-- **P38** group index in range. GetBGL :1272. ☐
+- **P38** group index in range. GetBGL :1272. ☑ (P5.4)
 - **P39** returned BGL aggregates shader bindings across stages
-  (visibility OR, minBindingSize max). :60/266. ☐
+  (visibility OR, minBindingSize max). :60/266. ☑ (P5.4)
 - **P40** default (auto) BGL rejected for `CreatePipelineLayout`. :116.
-  ☐
+  ☑ (P5.4)
 - **P41** default BGLs are pipeline-bound (not interchangeable across
-  pipelines). :174. ☐
+  pipelines). :174. ☑ (P5.4; draw-time cross-pipeline → P6)
 - **P42** texture sample-type default from usage (textureSample⇒Float,
-  textureLoad⇒UnfilterableFloat). :266. ☐
+  textureLoad⇒UnfilterableFloat). :266. ☑ (P5.4)
 
 ### Object caching (P5.5)
 

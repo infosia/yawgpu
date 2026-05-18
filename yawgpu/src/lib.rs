@@ -99,12 +99,14 @@ pub struct WGPUComputePipelineImpl {
     _core: Arc<core::ComputePipeline>,
     _device: Arc<core::Device>,
     _instance: Arc<WGPUInstanceImpl>,
+    bind_group_layout_handles: Mutex<Vec<Option<Arc<WGPUBindGroupLayoutImpl>>>>,
 }
 
 pub struct WGPURenderPipelineImpl {
     _core: Arc<core::RenderPipeline>,
     _device: Arc<core::Device>,
     _instance: Arc<WGPUInstanceImpl>,
+    bind_group_layout_handles: Mutex<Vec<Option<Arc<WGPUBindGroupLayoutImpl>>>>,
 }
 
 macro_rules! declare_empty_impl_handles {
@@ -993,6 +995,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateComputePipeline(
         _core: Arc::new(pipeline),
         _device: Arc::clone(&device.core),
         _instance: Arc::clone(&device.instance),
+        bind_group_layout_handles: Mutex::new(Vec::new()),
     }))
 }
 
@@ -1020,6 +1023,92 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderPipeline(
         _core: Arc::new(pipeline),
         _device: Arc::clone(&device.core),
         _instance: Arc::clone(&device.instance),
+        bind_group_layout_handles: Mutex::new(Vec::new()),
+    }))
+}
+
+/// Gets a compute pipeline bind group layout.
+///
+/// # Safety
+///
+/// `compute_pipeline` must be a non-null live yawgpu compute pipeline handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuComputePipelineGetBindGroupLayout(
+    compute_pipeline: native::WGPUComputePipeline,
+    group_index: u32,
+) -> native::WGPUBindGroupLayout {
+    let pipeline = borrow_handle(compute_pipeline, "WGPUComputePipeline");
+    get_pipeline_bind_group_layout(
+        pipeline._core.bind_group_layouts(),
+        &pipeline._device,
+        &pipeline._instance,
+        &pipeline.bind_group_layout_handles,
+        group_index,
+    )
+}
+
+/// Gets a render pipeline bind group layout.
+///
+/// # Safety
+///
+/// `render_pipeline` must be a non-null live yawgpu render pipeline handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPipelineGetBindGroupLayout(
+    render_pipeline: native::WGPURenderPipeline,
+    group_index: u32,
+) -> native::WGPUBindGroupLayout {
+    let pipeline = borrow_handle(render_pipeline, "WGPURenderPipeline");
+    get_pipeline_bind_group_layout(
+        pipeline._core.bind_group_layouts(),
+        &pipeline._device,
+        &pipeline._instance,
+        &pipeline.bind_group_layout_handles,
+        group_index,
+    )
+}
+
+fn get_pipeline_bind_group_layout(
+    layouts: &[Arc<core::BindGroupLayout>],
+    device: &Arc<core::Device>,
+    instance: &Arc<WGPUInstanceImpl>,
+    handles: &Mutex<Vec<Option<Arc<WGPUBindGroupLayoutImpl>>>>,
+    group_index: u32,
+) -> native::WGPUBindGroupLayout {
+    let Ok(index) = usize::try_from(group_index) else {
+        return error_bind_group_layout_handle(device, instance);
+    };
+    let Some(layout) = layouts.get(index) else {
+        device.dispatch_error(
+            core::ErrorKind::Validation,
+            "pipeline bind group layout index is out of range",
+        );
+        return error_bind_group_layout_handle(device, instance);
+    };
+
+    let mut handles = handles
+        .lock()
+        .expect("pipeline BGL cache lock must not poison");
+    if handles.len() <= index {
+        handles.resize_with(index + 1, || None);
+    }
+    let handle = handles[index].get_or_insert_with(|| {
+        Arc::new(WGPUBindGroupLayoutImpl {
+            _core: Arc::clone(layout),
+            _device: Arc::clone(device),
+            _instance: Arc::clone(instance),
+        })
+    });
+    arc_to_handle(Arc::clone(handle))
+}
+
+fn error_bind_group_layout_handle(
+    device: &Arc<core::Device>,
+    instance: &Arc<WGPUInstanceImpl>,
+) -> native::WGPUBindGroupLayout {
+    arc_to_handle(Arc::new(WGPUBindGroupLayoutImpl {
+        _core: Arc::new(core::BindGroupLayout::error()),
+        _device: Arc::clone(device),
+        _instance: Arc::clone(instance),
     }))
 }
 
