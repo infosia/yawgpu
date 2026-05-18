@@ -1825,6 +1825,89 @@ pub unsafe extern "C" fn wgpuCommandEncoderPopDebugGroup(
     dispatch_optional_error(&encoder.device, encoder.core.pop_debug_group());
 }
 
+/// Records a buffer-to-buffer copy command.
+///
+/// # Safety
+///
+/// `command_encoder`, `source`, and `destination` must be non-null live yawgpu
+/// handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToBuffer(
+    command_encoder: native::WGPUCommandEncoder,
+    source: native::WGPUBuffer,
+    source_offset: u64,
+    destination: native::WGPUBuffer,
+    destination_offset: u64,
+    size: u64,
+) {
+    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let source = borrow_handle(source, "WGPUBuffer");
+    let destination = borrow_handle(destination, "WGPUBuffer");
+    dispatch_optional_error(
+        &encoder.device,
+        encoder.core.copy_buffer_to_buffer(
+            &source.core,
+            source_offset,
+            &destination.core,
+            destination_offset,
+            size,
+        ),
+    );
+}
+
+/// Records a buffer clear command.
+///
+/// # Safety
+///
+/// `command_encoder` and `buffer` must be non-null live yawgpu handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderClearBuffer(
+    command_encoder: native::WGPUCommandEncoder,
+    buffer: native::WGPUBuffer,
+    offset: u64,
+    size: u64,
+) {
+    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let buffer = borrow_handle(buffer, "WGPUBuffer");
+    dispatch_optional_error(
+        &encoder.device,
+        encoder.core.clear_buffer(&buffer.core, offset, size),
+    );
+}
+
+/// Records a host-to-buffer write command. Noop validation does not consume
+/// the `data` bytes.
+///
+/// # Safety
+///
+/// `command_encoder` and `buffer` must be non-null live yawgpu handles. `data`
+/// is not read by this P6.2 validation implementation.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderWriteBuffer(
+    command_encoder: native::WGPUCommandEncoder,
+    buffer: native::WGPUBuffer,
+    buffer_offset: u64,
+    _data: *const c_void,
+    size: usize,
+) {
+    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let buffer = borrow_handle(buffer, "WGPUBuffer");
+    let size = match u64::try_from(size) {
+        Ok(size) => size,
+        Err(_) => {
+            dispatch_optional_error(
+                &encoder.device,
+                Some("command encoder write buffer size is too large".to_owned()),
+            );
+            return;
+        }
+    };
+    dispatch_optional_error(
+        &encoder.device,
+        encoder.core.write_buffer(&buffer.core, buffer_offset, size),
+    );
+}
+
 /// Ends a render pass.
 ///
 /// # Safety

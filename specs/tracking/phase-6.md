@@ -35,10 +35,24 @@ Pass` (skeleton — full descriptor validation is P6.3/P6.4), pass `End`;
 C1–C5, C36, C63, C85/C86; debug-group balance at Finish. **Foundational
 — establishes the deferred-error machinery for all later slices.**
 
-## P6.2 — Buffer copies / clear / encoder WriteBuffer  *(NEXT)*
-C6–C10, ClearBuffer, C83/C84 (B53–B57).
+## P6.2 — Buffer copies / clear / encoder WriteBuffer  *(☑ DONE)*
 
-## P6.3 — Texture copies (B2T/T2B/T2T)  *(after P6.2)*
+Done: `CommandEncoder::{copy_buffer_to_buffer,clear_buffer,write_buffer}`
+via `record_buffer_command` (hooks the P6.1 deferred-error model:
+guard→finished=immediate / pass-open & validation failure→first-error,
+surfaced at `finish()`). `validate_copy_buffer_to_buffer` (C8 usage,
+C10 error/destroyed, C7 4-byte align, C6 checked bounds, **C9
+same-buffer-always-error for size>0** via `Buffer::same` Arc::ptr_eq —
+matches Dawn `CopyWithinSameBuffer`), `validate_clear_buffer`
+(WHOLE_SIZE), `validate_encoder_write_buffer` (C83/C84). FFI 3 encoder
+fns. C6–C10/ClearBuffer/C83/C84 ported in
+`yawgpu/tests/command_buffer_copy_validation.rs` (6), gate green
+(35 binaries). Committed `phase-6: P6.2`. (Submit-time buffer state →
+P6.9.)
+
+#### (original detail)
+
+## P6.3 — Texture copies (B2T/T2B/T2T)  *(NEXT)*
 C11–C22, C79 (256-align bytesPerRow path; FormatCaps block/aspect).
 
 ## P6.4 — RenderPass descriptor  *(after P6.3)*
