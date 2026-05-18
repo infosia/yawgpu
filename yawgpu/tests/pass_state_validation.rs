@@ -260,6 +260,285 @@ fn render_dynamic_state_commands_are_validated() {
     }
 }
 
+#[test]
+fn set_index_and_vertex_buffer_rules_are_validated() {
+    let test = ValidationTest::new();
+    unsafe {
+        let limits = device_limits(test.device());
+        let index = create_buffer(test.device(), native::WGPUBufferUsage_Index, 256);
+        let vertex = create_buffer(test.device(), native::WGPUBufferUsage_Vertex, 256);
+        let copy = create_buffer(test.device(), native::WGPUBufferUsage_CopySrc, 256);
+
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetIndexBuffer(
+                pass,
+                copy,
+                native::WGPUIndexFormat_Uint16,
+                0,
+                256,
+            );
+        });
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetIndexBuffer(
+                pass,
+                index,
+                native::WGPUIndexFormat_Undefined,
+                0,
+                256,
+            );
+        });
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetIndexBuffer(
+                pass,
+                index,
+                native::WGPUIndexFormat_Uint32,
+                2,
+                16,
+            );
+        });
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetIndexBuffer(
+                pass,
+                index,
+                native::WGPUIndexFormat_Uint32,
+                260,
+                0,
+            );
+        });
+        assert_render_pass_ok(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetIndexBuffer(
+                pass,
+                index,
+                native::WGPUIndexFormat_Uint32,
+                4,
+                252,
+            );
+        });
+
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 0, copy, 0, 256);
+        });
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertex, 2, 16);
+        });
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertex, 260, 0);
+        });
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetVertexBuffer(
+                pass,
+                limits.maxVertexBuffers,
+                vertex,
+                0,
+                16,
+            );
+        });
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetVertexBuffer(
+                pass,
+                limits.maxVertexBuffers,
+                std::ptr::null(),
+                0,
+                0,
+            );
+        });
+        assert_render_pass_ok(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertex, 4, 252);
+        });
+
+        yawgpu::wgpuBufferRelease(copy);
+        yawgpu::wgpuBufferRelease(vertex);
+        yawgpu::wgpuBufferRelease(index);
+    }
+}
+
+#[test]
+fn draw_vertex_instance_and_index_oob_are_validated() {
+    let test = ValidationTest::new();
+    unsafe {
+        let vertex = create_buffer(test.device(), native::WGPUBufferUsage_Vertex, 24);
+        let instance = create_buffer(test.device(), native::WGPUBufferUsage_Vertex, 16);
+        let index = create_buffer(test.device(), native::WGPUBufferUsage_Index, 6);
+        let vertex_attr = [vertex_attribute(native::WGPUVertexFormat_Float32x2, 0, 0)];
+        let instance_attr = [vertex_attribute(native::WGPUVertexFormat_Float32x2, 0, 1)];
+        let layouts = [
+            vertex_buffer(8, &vertex_attr),
+            vertex_buffer_with_step(8, native::WGPUVertexStepMode_Instance, &instance_attr),
+        ];
+        let pipeline =
+            create_render_pipeline(&test, render_vertex_instance_input(), None, &layouts);
+
+        assert_render_pass_ok(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+            yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertex, 0, 24);
+            yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 1, instance, 0, 16);
+            yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 2, 0, 0);
+        });
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+            yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertex, 0, 24);
+            yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 1, instance, 0, 16);
+            yawgpu::wgpuRenderPassEncoderDraw(pass, 4, 1, 0, 0);
+        });
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+            yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertex, 0, 24);
+            yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 1, instance, 0, 16);
+            yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 3, 0, 0);
+        });
+        assert_render_pass_ok(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+            yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertex, 0, 24);
+            yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 1, instance, 0, 16);
+            yawgpu::wgpuRenderPassEncoderSetIndexBuffer(
+                pass,
+                index,
+                native::WGPUIndexFormat_Uint16,
+                0,
+                6,
+            );
+            yawgpu::wgpuRenderPassEncoderDrawIndexed(pass, 3, 2, 0, 0, 0);
+        });
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+            yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertex, 0, 24);
+            yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 1, instance, 0, 16);
+            yawgpu::wgpuRenderPassEncoderSetIndexBuffer(
+                pass,
+                index,
+                native::WGPUIndexFormat_Uint16,
+                0,
+                6,
+            );
+            yawgpu::wgpuRenderPassEncoderDrawIndexed(pass, 4, 1, 0, 0, 0);
+        });
+
+        yawgpu::wgpuRenderPipelineRelease(pipeline);
+        yawgpu::wgpuBufferRelease(index);
+        yawgpu::wgpuBufferRelease(instance);
+        yawgpu::wgpuBufferRelease(vertex);
+    }
+}
+
+#[test]
+fn indexed_strip_draw_requires_matching_pipeline_strip_index_format() {
+    let test = ValidationTest::new();
+    unsafe {
+        let index = create_buffer(test.device(), native::WGPUBufferUsage_Index, 256);
+        let no_strip = primitive(
+            native::WGPUPrimitiveTopology_TriangleStrip,
+            native::WGPUIndexFormat_Undefined,
+        );
+        let strip_u32 = primitive(
+            native::WGPUPrimitiveTopology_TriangleStrip,
+            native::WGPUIndexFormat_Uint32,
+        );
+        let strip_u16 = primitive(
+            native::WGPUPrimitiveTopology_TriangleStrip,
+            native::WGPUIndexFormat_Uint16,
+        );
+        let pipeline_no_strip =
+            create_render_pipeline_with_primitive(&test, render_no_input(), None, &[], no_strip);
+        let pipeline_u32 =
+            create_render_pipeline_with_primitive(&test, render_no_input(), None, &[], strip_u32);
+        let pipeline_u16 =
+            create_render_pipeline_with_primitive(&test, render_no_input(), None, &[], strip_u16);
+
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline_no_strip);
+            yawgpu::wgpuRenderPassEncoderSetIndexBuffer(
+                pass,
+                index,
+                native::WGPUIndexFormat_Uint16,
+                0,
+                256,
+            );
+            yawgpu::wgpuRenderPassEncoderDrawIndexed(pass, 3, 1, 0, 0, 0);
+        });
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline_u32);
+            yawgpu::wgpuRenderPassEncoderSetIndexBuffer(
+                pass,
+                index,
+                native::WGPUIndexFormat_Uint16,
+                0,
+                256,
+            );
+            yawgpu::wgpuRenderPassEncoderDrawIndexed(pass, 3, 1, 0, 0, 0);
+        });
+        assert_render_pass_ok(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline_u16);
+            yawgpu::wgpuRenderPassEncoderSetIndexBuffer(
+                pass,
+                index,
+                native::WGPUIndexFormat_Uint16,
+                0,
+                256,
+            );
+            yawgpu::wgpuRenderPassEncoderDrawIndexed(pass, 3, 1, 0, 0, 0);
+        });
+
+        yawgpu::wgpuRenderPipelineRelease(pipeline_u16);
+        yawgpu::wgpuRenderPipelineRelease(pipeline_u32);
+        yawgpu::wgpuRenderPipelineRelease(pipeline_no_strip);
+        yawgpu::wgpuBufferRelease(index);
+    }
+}
+
+#[test]
+fn indirect_draw_and_dispatch_buffers_are_validated() {
+    let test = ValidationTest::new();
+    unsafe {
+        let indirect = create_buffer(test.device(), native::WGPUBufferUsage_Indirect, 64);
+        let non_indirect = create_buffer(test.device(), native::WGPUBufferUsage_Vertex, 64);
+        let index = create_buffer(test.device(), native::WGPUBufferUsage_Index, 64);
+        let render_pipeline = create_render_pipeline(&test, render_no_input(), None, &[]);
+        let compute_pipeline = create_compute_pipeline(&test, compute_empty(), None);
+
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, render_pipeline);
+            yawgpu::wgpuRenderPassEncoderDrawIndirect(pass, non_indirect, 0);
+        });
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, render_pipeline);
+            yawgpu::wgpuRenderPassEncoderDrawIndirect(pass, indirect, 2);
+        });
+        assert_render_pass_error(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, render_pipeline);
+            yawgpu::wgpuRenderPassEncoderDrawIndirect(pass, indirect, 52);
+        });
+        assert_render_pass_ok(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, render_pipeline);
+            yawgpu::wgpuRenderPassEncoderDrawIndirect(pass, indirect, 48);
+        });
+        assert_render_pass_ok(&test, |pass| {
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, render_pipeline);
+            yawgpu::wgpuRenderPassEncoderSetIndexBuffer(
+                pass,
+                index,
+                native::WGPUIndexFormat_Uint16,
+                0,
+                64,
+            );
+            yawgpu::wgpuRenderPassEncoderDrawIndexedIndirect(pass, indirect, 44);
+        });
+        assert_compute_pass_ok(&test, |pass| {
+            yawgpu::wgpuComputePassEncoderSetPipeline(pass, compute_pipeline);
+            yawgpu::wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, indirect, 52);
+        });
+        assert_compute_pass_error(&test, |pass| {
+            yawgpu::wgpuComputePassEncoderSetPipeline(pass, compute_pipeline);
+            yawgpu::wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, indirect, 56);
+        });
+
+        yawgpu::wgpuComputePipelineRelease(compute_pipeline);
+        yawgpu::wgpuRenderPipelineRelease(render_pipeline);
+        yawgpu::wgpuBufferRelease(index);
+        yawgpu::wgpuBufferRelease(non_indirect);
+        yawgpu::wgpuBufferRelease(indirect);
+    }
+}
+
 unsafe fn assert_render_pass_ok<F>(test: &ValidationTest, commands: F)
 where
     F: FnOnce(native::WGPURenderPassEncoder),
@@ -378,6 +657,22 @@ unsafe fn create_render_pipeline(
     layout: Option<native::WGPUPipelineLayout>,
     vertex_buffers: &[native::WGPUVertexBufferLayout],
 ) -> native::WGPURenderPipeline {
+    create_render_pipeline_with_primitive(
+        test,
+        vertex_source,
+        layout,
+        vertex_buffers,
+        default_primitive(),
+    )
+}
+
+unsafe fn create_render_pipeline_with_primitive(
+    test: &ValidationTest,
+    vertex_source: &str,
+    layout: Option<native::WGPUPipelineLayout>,
+    vertex_buffers: &[native::WGPUVertexBufferLayout],
+    primitive: native::WGPUPrimitiveState,
+) -> native::WGPURenderPipeline {
     let vertex_module = create_wgsl_module(test.device(), vertex_source);
     let fragment_module = create_wgsl_module(test.device(), fragment_source());
     let color_target = native::WGPUColorTargetState {
@@ -408,7 +703,7 @@ unsafe fn create_render_pipeline(
             bufferCount: vertex_buffers.len(),
             buffers: vertex_buffers.as_ptr(),
         },
-        primitive: default_primitive(),
+        primitive,
         depthStencil: std::ptr::null(),
         multisample: default_multisample(),
         fragment: &fragment,
@@ -677,9 +972,17 @@ fn vertex_buffer(
     array_stride: u64,
     attributes: &[native::WGPUVertexAttribute],
 ) -> native::WGPUVertexBufferLayout {
+    vertex_buffer_with_step(array_stride, native::WGPUVertexStepMode_Vertex, attributes)
+}
+
+fn vertex_buffer_with_step(
+    array_stride: u64,
+    step_mode: native::WGPUVertexStepMode,
+    attributes: &[native::WGPUVertexAttribute],
+) -> native::WGPUVertexBufferLayout {
     native::WGPUVertexBufferLayout {
         nextInChain: std::ptr::null_mut(),
-        stepMode: native::WGPUVertexStepMode_Vertex,
+        stepMode: step_mode,
         arrayStride: array_stride,
         attributeCount: attributes.len(),
         attributes: attributes.as_ptr(),
@@ -700,10 +1003,20 @@ fn vertex_attribute(
 }
 
 fn default_primitive() -> native::WGPUPrimitiveState {
+    primitive(
+        native::WGPUPrimitiveTopology_TriangleList,
+        native::WGPUIndexFormat_Undefined,
+    )
+}
+
+fn primitive(
+    topology: native::WGPUPrimitiveTopology,
+    strip_index_format: native::WGPUIndexFormat,
+) -> native::WGPUPrimitiveState {
     native::WGPUPrimitiveState {
         nextInChain: std::ptr::null_mut(),
-        topology: native::WGPUPrimitiveTopology_TriangleList,
-        stripIndexFormat: native::WGPUIndexFormat_Undefined,
+        topology,
+        stripIndexFormat: strip_index_format,
         frontFace: native::WGPUFrontFace_Undefined,
         cullMode: native::WGPUCullMode_Undefined,
         unclippedDepth: 0,
@@ -742,6 +1055,19 @@ fn render_uniform_no_input() -> &'static str {
      @vertex fn vs() -> @builtin(position) vec4f { return u.value; }"
 }
 
+fn render_vertex_instance_input() -> &'static str {
+    "@vertex fn vs(
+        @location(0) pos: vec2f,
+        @location(1) inst: vec2f
+     ) -> @builtin(position) vec4f {
+         return vec4f(pos + inst * 0.0, 0.0, 1.0);
+     }"
+}
+
+fn render_no_input() -> &'static str {
+    "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }"
+}
+
 fn render_auto_a() -> &'static str {
     "struct U { value: vec4f }
      @group(0) @binding(0) var<uniform> u: U;
@@ -762,6 +1088,10 @@ fn compute_uniform() -> &'static str {
     "struct U { value: vec4f }
      @group(0) @binding(0) var<uniform> u: U;
      @compute @workgroup_size(1) fn main() { _ = u.value; }"
+}
+
+fn compute_empty() -> &'static str {
+    "@compute @workgroup_size(1) fn main() {}"
 }
 
 fn string_view(value: &str) -> native::WGPUStringView {

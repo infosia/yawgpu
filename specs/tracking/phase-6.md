@@ -123,10 +123,40 @@ P6.9/P7.
 
 C37–C42, C56–C59, compute dispatch limits, P41 draw-time.
 
-## P6.6 — Index/Vertex buffer + draw OOB + indirect  *(NEXT)*
+## P6.6 — Index/Vertex buffer + draw OOB + indirect  *(☑ DONE)*
+
+Done: P6.5 recorded-only buffer state promoted to full deferred
+validation (`BoundVertexBuffer{buffer,offset,size}`,
+`BoundIndexBuffer` fields live). `validate_set_index_buffer` (C43
+format valid via FFI `map_index_format`→Option, C44 INDEX usage +
+error/destroyed, C45 format-size offset align + `resolve_buffer_
+binding_size` WHOLE_SIZE/range), `validate_set_vertex_buffer`
+(C47 VERTEX usage, C48 4-byte align + range) + `validate_vertex_
+buffer_slot` (C49 < `max_vertex_buffers`) + `validate_clear_vertex_
+buffer`. `RenderDrawKind` enum (Direct/IndexedDirect/Indirect/
+IndexedIndirect) threads draw params; `validate_render_draw_state`
+splits into base-state + `validate_strip_index_format` (C46) +
+`validate_vertex_buffer_oob` (C50/C51 per-layout stepMode×stride;
+indexed skips Vertex-step) + `validate_index_buffer_oob` (C52).
+`validate_indirect_buffer` (C53 INDIRECT usage + error/destroyed,
+C54 4-byte offset, C55 offset+args≤size; args 16/20/12) reused by
+`draw_indirect`/`draw_indexed_indirect`/`dispatch_workgroups_
+indirect`. `RenderPipeline::vertex_buffer_layouts/primitive_state`,
+`index_format_size`. FFI: real Draw/DrawIndexed args wired +
+`wgpuRenderPassEncoderDrawIndirect`/`DrawIndexedIndirect`/
+`wgpuComputePassEncoderDispatchWorkgroupsIndirect`;
+`map_index_format`→`Option`. C43–C55 ported in
+`yawgpu/tests/pass_state_validation.rs` (now 9, +4: set-buffer rules,
+vertex/instance/index OOB, strip-format, indirect). Gate green (38
+binaries, clippy clean). Committed `phase-6: P6.6`.
+**Divergence (spec-logged):** `firstInstance` indirect feature gating
+accepted unconditionally — no canonical webgpu.h toggle.
+
+#### (original detail)
+
 C43–C55.
 
-## P6.7 — RenderBundle  *(after P6.6)*
+## P6.7 — RenderBundle  *(NEXT)*
 C65–C74.
 
 ## P6.8 — Debug markers  *(after P6.7)*
