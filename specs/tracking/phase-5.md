@@ -93,11 +93,24 @@ P5.2a entry/presence/primitive/multisample/depth-bias
 (P19,P20,P23,P24,P28,P29–P37). (P28 alpha-to-coverage-vs-target moved to
 P5.2b since it needs the color-target parsing.)
 
-## P5.3 — VertexState  *(NEXT)*
+## P5.3 — VertexState  *(☑ DONE)*
+
+Done: core `VertexFormat`/`VertexFormatInfo` table (byte_size +
+Float/Sint/Uint class over the WGPUVertexFormat enum, unknown
+conservative); `RenderPipelineVertexState` carries decoded buffer
+layouts; `validate_vertex_state` (P10 buffer count, P11 attr count, P12
+stride %4 & ≤limit, P13 offset align min(4,size)+range, P14 location
+unique, P15 location <limit, P16 format-vs-shader scalar class via
+`vertex_inputs` reflection, P17 every shader `@location` input covered;
+extra attributes allowed). conv decodes `WGPUVertexState.buffers[]`.
+P10–P17 ported in `yawgpu/tests/vertex_state_validation.rs` (7), gate
+green (30 binaries). Committed `phase-5: P5.3`.
+
+#### (original detail)
 
 P10–P17 (counts, stride/offset, location, format-vs-shader, coverage).
 
-## P5.4 — GetBindGroupLayout + layout/shader compat  *(after P5.3)*
+## P5.4 — GetBindGroupLayout + layout/shader compat  *(NEXT)*
 
 Auto-layout reflection; `wgpuRender/ComputePipelineGetBindGroupLayout`;
 P36, P38–P42, S35 explicit-layout compat.
