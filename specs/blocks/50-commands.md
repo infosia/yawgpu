@@ -199,7 +199,19 @@ ComputePassEncoder: `SetPipeline`/`SetBindGroup`/`DispatchWorkgroups`/
 ### P6.8 Debug markers
 - **C60/C61/C62/C64** push/pop balance in render/compute pass &
   render bundle; InsertDebugMarker no-op. `DebugMarkerValidationTests`.
-  ☐
+  ☑ (P6.8)
+
+> P6.8 notes: C60/C61 (render/compute pass balance at `End` +
+> pop-underflow) and C63 (encoder, at `Finish`) were already
+> implemented in P6.1 via `PassEncoderState.debug_group_depth`;
+> C64 (`InsertDebugMarker` is a no-op — arbitrary label, any nesting,
+> even outside a group) already held (pass = guard-only; encoder/
+> bundle = no-op). P6.8 adds **C62**: `RenderBundleEncoder`
+> push/pop now track `debug_group_depth` (pop-underflow ⇒ error;
+> unbalanced depth at `finish()` Recording branch ⇒ error) via the
+> P6.7 bundle deferred-error model (surfaced at
+> `wgpuRenderBundleEncoderFinish`). All four scopes ported in
+> `debug_marker_validation.rs`.
 
 ### P6.9 Resource usage tracking + submit-time buffer state
 - **C75/C77** writable buffer/texture binding aliasing in a scope.
