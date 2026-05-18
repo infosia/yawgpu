@@ -83,10 +83,10 @@ ComputePassEncoder: `SetPipeline`/`SetBindGroup`/`DispatchWorkgroups`/
 
 ### P6.2 Buffer copies / clear / encoder WriteBuffer
 - **C6–C10** B2B size/OOB, 4-byte align, CopySrc/CopyDst usage,
-  same-buffer overlap, error buffers. `CopyCommandTest_B2B` :298. ☐
-- **ClearBuffer** offset/size align & bounds + CopyDst. ☐
+  same-buffer overlap, error buffers. `CopyCommandTest_B2B` :298. ☑ (P6.2)
+- **ClearBuffer** offset/size align & bounds + CopyDst. ☑ (P6.2)
 - **C83/C84** encoder `WriteBuffer` 4-byte align + bounds + CopyDst
-  (B53–B57). `WriteBufferTests`. ☐
+  (B53–B57). `WriteBufferTests`. ☑ (P6.2)
 
 ### P6.3 Texture copies (B2T/T2B/T2T)
 - **C11–C17** B2T/T2B bytesPerRow %256, rowsPerImage, bounds, usage,

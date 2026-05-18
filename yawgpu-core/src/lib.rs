@@ -3937,6 +3937,16 @@ impl Buffer {
         self.inner.state.lock().is_error
     }
 
+    #[must_use]
+    pub fn is_destroyed(&self) -> bool {
+        self.inner.state.lock().is_destroyed
+    }
+
+    #[must_use]
+    pub fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Marks any pending map as aborted without draining `pending_map`.
     ///
     /// The transient invariant is `map_state == Unmapped` while
@@ -4887,6 +4897,33 @@ impl CommandEncoder {
         self.record_encoder_command()
     }
 
+    pub fn copy_buffer_to_buffer(
+        &self,
+        source: &Buffer,
+        source_offset: u64,
+        destination: &Buffer,
+        destination_offset: u64,
+        size: u64,
+    ) -> Option<String> {
+        self.record_buffer_command(|| {
+            validate_copy_buffer_to_buffer(
+                source,
+                source_offset,
+                destination,
+                destination_offset,
+                size,
+            )
+        })
+    }
+
+    pub fn clear_buffer(&self, buffer: &Buffer, offset: u64, size: u64) -> Option<String> {
+        self.record_buffer_command(|| validate_clear_buffer(buffer, offset, size))
+    }
+
+    pub fn write_buffer(&self, buffer: &Buffer, offset: u64, size: u64) -> Option<String> {
+        self.record_buffer_command(|| validate_encoder_write_buffer(buffer, offset, size))
+    }
+
     pub fn push_debug_group(&self) -> Option<String> {
         let mut state = self.inner.state.lock();
         if state.lifecycle != CommandEncoderLifecycle::Recording {
@@ -4951,6 +4988,25 @@ impl CommandEncoder {
         }
     }
 
+    fn record_buffer_command<F>(&self, validate: F) -> Option<String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        if let Err(message) = self.record_command_guard() {
+            let mut state = self.inner.state.lock();
+            if state.lifecycle == CommandEncoderLifecycle::Recording {
+                record_first_error_locked(&mut state, message);
+                return None;
+            }
+            return Some(message);
+        }
+
+        if let Err(message) = validate() {
+            self.record_first_error(message);
+        }
+        None
+    }
+
     #[must_use]
     pub fn finish(&self) -> (CommandBuffer, Option<String>) {
         let mut state = self.inner.state.lock();
@@ -4993,6 +5049,113 @@ impl CommandEncoder {
     fn is_finished(&self) -> bool {
         self.inner.state.lock().lifecycle == CommandEncoderLifecycle::Finished
     }
+}
+
+fn validate_copy_buffer_to_buffer(
+    source: &Buffer,
+    source_offset: u64,
+    destination: &Buffer,
+    destination_offset: u64,
+    size: u64,
+) -> Result<(), String> {
+    if source.is_error() || destination.is_error() {
+        return Err("copy buffer command cannot use an error buffer".to_owned());
+    }
+    if source.is_destroyed() || destination.is_destroyed() {
+        return Err("copy buffer command cannot use a destroyed buffer".to_owned());
+    }
+    if !source.usage().contains(BufferUsage::COPY_SRC) {
+        return Err("copy source buffer must have CopySrc usage".to_owned());
+    }
+    if !destination.usage().contains(BufferUsage::COPY_DST) {
+        return Err("copy destination buffer must have CopyDst usage".to_owned());
+    }
+    if !source_offset.is_multiple_of(4) {
+        return Err("copy source offset must be 4-byte aligned".to_owned());
+    }
+    if !destination_offset.is_multiple_of(4) {
+        return Err("copy destination offset must be 4-byte aligned".to_owned());
+    }
+    if !size.is_multiple_of(4) {
+        return Err("copy size must be 4-byte aligned".to_owned());
+    }
+    validate_buffer_range(source_offset, size, source.size(), "copy source range")?;
+    validate_buffer_range(
+        destination_offset,
+        size,
+        destination.size(),
+        "copy destination range",
+    )?;
+    if size > 0 && source.same(destination) {
+        return Err("copy source and destination ranges must not use the same buffer".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_clear_buffer(buffer: &Buffer, offset: u64, size: u64) -> Result<(), String> {
+    if buffer.is_error() {
+        return Err("clear buffer command cannot use an error buffer".to_owned());
+    }
+    if buffer.is_destroyed() {
+        return Err("clear buffer command cannot use a destroyed buffer".to_owned());
+    }
+    if !buffer.usage().contains(BufferUsage::COPY_DST) {
+        return Err("clear buffer requires CopyDst usage".to_owned());
+    }
+    if offset > buffer.size() {
+        return Err("clear buffer offset exceeds buffer size".to_owned());
+    }
+    let resolved_size = if size == u64::MAX {
+        buffer.size() - offset
+    } else {
+        size
+    };
+    if !offset.is_multiple_of(4) {
+        return Err("clear buffer offset must be 4-byte aligned".to_owned());
+    }
+    if !resolved_size.is_multiple_of(4) {
+        return Err("clear buffer size must be 4-byte aligned".to_owned());
+    }
+    validate_buffer_range(offset, resolved_size, buffer.size(), "clear buffer range")
+}
+
+fn validate_encoder_write_buffer(buffer: &Buffer, offset: u64, size: u64) -> Result<(), String> {
+    if buffer.is_error() {
+        return Err("command encoder write buffer cannot use an error buffer".to_owned());
+    }
+    if buffer.is_destroyed() {
+        return Err("command encoder write buffer cannot use a destroyed buffer".to_owned());
+    }
+    if !buffer.usage().contains(BufferUsage::COPY_DST) {
+        return Err("command encoder write buffer requires CopyDst usage".to_owned());
+    }
+    if !offset.is_multiple_of(4) {
+        return Err("command encoder write buffer offset must be 4-byte aligned".to_owned());
+    }
+    if !size.is_multiple_of(4) {
+        return Err("command encoder write buffer size must be 4-byte aligned".to_owned());
+    }
+    validate_buffer_range(
+        offset,
+        size,
+        buffer.size(),
+        "command encoder write buffer range",
+    )
+}
+
+fn validate_buffer_range(
+    offset: u64,
+    size: u64,
+    buffer_size: u64,
+    label: &str,
+) -> Result<(), String> {
+    let Some(end) = offset.checked_add(size) else {
+        return Err(format!("{label} overflows"));
+    };
+    if offset > buffer_size || end > buffer_size {
+        return Err(format!("{label} exceeds buffer size"));
+    }
+    Ok(())
 }
 
 fn record_first_error_locked(state: &mut CommandEncoderState, message: impl Into<String>) {
