@@ -131,11 +131,33 @@ cross-pipeline incompatibility → Defer→P6** (recorded).
 Auto-layout reflection; `wgpuRender/ComputePipelineGetBindGroupLayout`;
 P36, P38–P42, S35 explicit-layout compat.
 
-## P5.5 — Object caching  *(NEXT)*
+## P5.5 — Object caching  *(☑ DONE)*
+
+Done: per-`WGPUDeviceImpl` `Mutex<HashMap<…>>` caches for ShaderModule/
+PipelineLayout/Compute/RenderPipeline; structural cache keys using
+sub-object handle identity + normalized constants (`f64::to_bits`,
+sorted) + full render descriptor; `cache_handle` dedups (AddRef-returns
+the same `Arc` ⇒ identical C pointer); **error objects bypass the
+cache** (fresh each call). P43–P50 ported in
+`yawgpu/tests/object_caching_validation.rs` (6) + error-not-deduped;
+gate green (32 binaries). Committed `phase-5: P5.5`.
+
+> Review note: P5.4's `default_bind_group_layout_identity_is_pipeline_
+> bound` test was correctly adjusted (pipeline_b now uses
+> `compute_uniform_different()`) so the two pipelines no longer dedup
+> under the new cache — keeping the P41 "distinct pipelines ⇒ distinct
+> default BGL handles" assertion meaningful.
+>
+> Divergence (code-commented): yawgpu dedups by descriptor-structural
+> key with sub-object handle identity — satisfies the `webgpu.h`
+> identity ObjectCaching asserts; Dawn's deeper content-equal internal
+> dedup beyond `==` is out of scope.
+
+#### (original detail)
 
 Per-device descriptor-keyed dedup (handle identity); P43–P50.
 
-## P5.6 — Async pipeline creation  *(after P5.5; closes slices)*
+## P5.6 — Async pipeline creation  *(NEXT — closes slices, then Phase Review)*
 
 `wgpuDeviceCreateRender/ComputePipelineAsync` via future machinery; P51.
 Then Phase Review.

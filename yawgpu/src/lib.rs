@@ -1,6 +1,6 @@
 pub mod conv;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::os::raw::c_void;
 use std::sync::{Arc, Mutex};
 
@@ -18,7 +18,7 @@ use crate::conv::{
     map_sampler_descriptor, map_shader_module_descriptor, map_texel_copy_buffer_layout,
     map_texture_aspect, map_texture_descriptor, map_texture_dimension_to_native,
     map_texture_format_to_native, map_texture_usage_to_native, map_texture_view_descriptor,
-    release_handle, string_view, DeviceLostCallbackInfo,
+    release_handle, string_view, string_view_to_str, DeviceLostCallbackInfo,
 };
 
 pub struct WGPUAdapterImpl {
@@ -50,6 +50,10 @@ pub struct WGPUDeviceImpl {
     instance: Arc<WGPUInstanceImpl>,
     device_lost_callback: DeviceLostCallbackInfo,
     default_queue: Mutex<Option<Arc<WGPUQueueImpl>>>,
+    shader_module_cache: Mutex<HashMap<ShaderModuleCacheKey, Arc<WGPUShaderModuleImpl>>>,
+    pipeline_layout_cache: Mutex<HashMap<PipelineLayoutCacheKey, Arc<WGPUPipelineLayoutImpl>>>,
+    compute_pipeline_cache: Mutex<HashMap<ComputePipelineCacheKey, Arc<WGPUComputePipelineImpl>>>,
+    render_pipeline_cache: Mutex<HashMap<RenderPipelineCacheKey, Arc<WGPURenderPipelineImpl>>>,
 }
 
 pub struct WGPUInstanceImpl {
@@ -107,6 +111,135 @@ pub struct WGPURenderPipelineImpl {
     _device: Arc<core::Device>,
     _instance: Arc<WGPUInstanceImpl>,
     bind_group_layout_handles: Mutex<Vec<Option<Arc<WGPUBindGroupLayoutImpl>>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ShaderModuleCacheKey {
+    Wgsl(String),
+    Spirv(Vec<u32>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PipelineLayoutCacheKey {
+    bind_group_layouts: Vec<usize>,
+    immediate_size: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PipelineLayoutIdentity {
+    Auto,
+    Explicit(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PipelineConstantCacheKey {
+    key: String,
+    value_bits: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ComputePipelineCacheKey {
+    module: usize,
+    entry_point: Option<String>,
+    constants: Vec<PipelineConstantCacheKey>,
+    layout: PipelineLayoutIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RenderPipelineCacheKey {
+    layout: PipelineLayoutIdentity,
+    vertex: RenderStageCacheKey,
+    vertex_buffers: Vec<VertexBufferLayoutCacheKey>,
+    primitive: PrimitiveStateCacheKey,
+    depth_stencil: Option<DepthStencilStateCacheKey>,
+    multisample: MultisampleStateCacheKey,
+    fragment: Option<FragmentStateCacheKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RenderStageCacheKey {
+    module: usize,
+    entry_point: Option<String>,
+    constants: Vec<PipelineConstantCacheKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FragmentStateCacheKey {
+    stage: RenderStageCacheKey,
+    target_count: usize,
+    targets: Vec<ColorTargetCacheKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ColorTargetCacheKey {
+    format: native::WGPUTextureFormat,
+    blend: Option<BlendStateCacheKey>,
+    write_mask: native::WGPUColorWriteMask,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct BlendStateCacheKey {
+    color: BlendComponentCacheKey,
+    alpha: BlendComponentCacheKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct BlendComponentCacheKey {
+    operation: native::WGPUBlendOperation,
+    src_factor: native::WGPUBlendFactor,
+    dst_factor: native::WGPUBlendFactor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VertexBufferLayoutCacheKey {
+    step_mode: native::WGPUVertexStepMode,
+    array_stride: u64,
+    attributes: Vec<VertexAttributeCacheKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VertexAttributeCacheKey {
+    format: native::WGPUVertexFormat,
+    offset: u64,
+    shader_location: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PrimitiveStateCacheKey {
+    topology: native::WGPUPrimitiveTopology,
+    strip_index_format: native::WGPUIndexFormat,
+    front_face: native::WGPUFrontFace,
+    cull_mode: native::WGPUCullMode,
+    unclipped_depth: native::WGPUBool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DepthStencilStateCacheKey {
+    format: native::WGPUTextureFormat,
+    depth_write_enabled: native::WGPUOptionalBool,
+    depth_compare: native::WGPUCompareFunction,
+    stencil_front: StencilFaceStateCacheKey,
+    stencil_back: StencilFaceStateCacheKey,
+    stencil_read_mask: u32,
+    stencil_write_mask: u32,
+    depth_bias: i32,
+    depth_bias_slope_scale_bits: u32,
+    depth_bias_clamp_bits: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StencilFaceStateCacheKey {
+    compare: native::WGPUCompareFunction,
+    fail_op: native::WGPUStencilOperation,
+    depth_fail_op: native::WGPUStencilOperation,
+    pass_op: native::WGPUStencilOperation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct MultisampleStateCacheKey {
+    count: u32,
+    mask: u32,
+    alpha_to_coverage_enabled: native::WGPUBool,
 }
 
 macro_rules! declare_empty_impl_handles {
@@ -266,6 +399,300 @@ impl WGPUDeviceImpl {
                 instance: Arc::clone(&self.instance),
             })
         }))
+    }
+}
+
+// yawgpu's FFI cache dedups by a structural descriptor key whose sub-objects
+// are identified by C-handle identity. This matches the webgpu.h-observable
+// pointer equality in Dawn's ObjectCaching tests; deeper engine-internal dedup
+// of content-equal but handle-distinct sub-objects is intentionally out of scope.
+fn cache_handle<T>(
+    cache: &Mutex<HashMap<T, Arc<T::Handle>>>,
+    key: T,
+    handle: Arc<T::Handle>,
+) -> Arc<T::Handle>
+where
+    T: CacheKey,
+{
+    let mut cache = cache
+        .lock()
+        .expect("device object cache lock must not poison");
+    if let Some(cached) = cache.get(&key) {
+        return Arc::clone(cached);
+    }
+    cache.insert(key, Arc::clone(&handle));
+    handle
+}
+
+trait CacheKey: Eq + std::hash::Hash {
+    type Handle;
+}
+
+impl CacheKey for ShaderModuleCacheKey {
+    type Handle = WGPUShaderModuleImpl;
+}
+
+impl CacheKey for PipelineLayoutCacheKey {
+    type Handle = WGPUPipelineLayoutImpl;
+}
+
+impl CacheKey for ComputePipelineCacheKey {
+    type Handle = WGPUComputePipelineImpl;
+}
+
+impl CacheKey for RenderPipelineCacheKey {
+    type Handle = WGPURenderPipelineImpl;
+}
+
+fn shader_module_cache_key(source: &core::ShaderModuleSource) -> Option<ShaderModuleCacheKey> {
+    match source {
+        core::ShaderModuleSource::Wgsl(source) => Some(ShaderModuleCacheKey::Wgsl(source.clone())),
+        core::ShaderModuleSource::Spirv(words) => Some(ShaderModuleCacheKey::Spirv(words.clone())),
+        core::ShaderModuleSource::Invalid(_) => None,
+        _ => None,
+    }
+}
+
+unsafe fn pipeline_layout_cache_key(
+    descriptor: &native::WGPUPipelineLayoutDescriptor,
+) -> Option<PipelineLayoutCacheKey> {
+    let bind_group_layouts = if descriptor.bindGroupLayoutCount == 0 {
+        Vec::new()
+    } else if descriptor.bindGroupLayouts.is_null() {
+        return None;
+    } else {
+        std::slice::from_raw_parts(descriptor.bindGroupLayouts, descriptor.bindGroupLayoutCount)
+            .iter()
+            .copied()
+            .map(|layout| (!layout.is_null()).then_some(layout as usize))
+            .collect::<Option<Vec<_>>>()?
+    };
+    Some(PipelineLayoutCacheKey {
+        bind_group_layouts,
+        immediate_size: descriptor.immediateSize,
+    })
+}
+
+fn layout_identity(layout: native::WGPUPipelineLayout) -> PipelineLayoutIdentity {
+    if layout.is_null() {
+        PipelineLayoutIdentity::Auto
+    } else {
+        PipelineLayoutIdentity::Explicit(layout as usize)
+    }
+}
+
+unsafe fn compute_pipeline_cache_key(
+    descriptor: &native::WGPUComputePipelineDescriptor,
+) -> Option<ComputePipelineCacheKey> {
+    if descriptor.compute.module.is_null() {
+        return None;
+    }
+    Some(ComputePipelineCacheKey {
+        module: descriptor.compute.module as usize,
+        entry_point: cache_string_view(descriptor.compute.entryPoint),
+        constants: pipeline_constant_cache_keys(
+            descriptor.compute.constantCount,
+            descriptor.compute.constants,
+        )?,
+        layout: layout_identity(descriptor.layout),
+    })
+}
+
+unsafe fn render_pipeline_cache_key(
+    descriptor: &native::WGPURenderPipelineDescriptor,
+) -> Option<RenderPipelineCacheKey> {
+    if descriptor.vertex.module.is_null() {
+        return None;
+    }
+    Some(RenderPipelineCacheKey {
+        layout: layout_identity(descriptor.layout),
+        vertex: RenderStageCacheKey {
+            module: descriptor.vertex.module as usize,
+            entry_point: cache_string_view(descriptor.vertex.entryPoint),
+            constants: pipeline_constant_cache_keys(
+                descriptor.vertex.constantCount,
+                descriptor.vertex.constants,
+            )?,
+        },
+        vertex_buffers: vertex_buffer_cache_keys(
+            descriptor.vertex.bufferCount,
+            descriptor.vertex.buffers,
+        )?,
+        primitive: primitive_state_cache_key(descriptor.primitive),
+        depth_stencil: descriptor
+            .depthStencil
+            .as_ref()
+            .map(depth_stencil_state_cache_key),
+        multisample: multisample_state_cache_key(descriptor.multisample),
+        fragment: descriptor
+            .fragment
+            .as_ref()
+            .and_then(|fragment| fragment_state_cache_key(fragment)),
+    })
+}
+
+fn cache_string_view(value: native::WGPUStringView) -> Option<String> {
+    unsafe { string_view_to_str(value).map(ToOwned::to_owned) }
+}
+
+unsafe fn pipeline_constant_cache_keys(
+    count: usize,
+    constants: *const native::WGPUConstantEntry,
+) -> Option<Vec<PipelineConstantCacheKey>> {
+    if count == 0 {
+        return Some(Vec::new());
+    }
+    if constants.is_null() {
+        return None;
+    }
+    let mut keys = std::slice::from_raw_parts(constants, count)
+        .iter()
+        .map(|constant| PipelineConstantCacheKey {
+            key: cache_string_view(constant.key).unwrap_or_default(),
+            value_bits: constant.value.to_bits(),
+        })
+        .collect::<Vec<_>>();
+    keys.sort_by(|a, b| {
+        a.key
+            .cmp(&b.key)
+            .then_with(|| a.value_bits.cmp(&b.value_bits))
+    });
+    Some(keys)
+}
+
+unsafe fn vertex_buffer_cache_keys(
+    count: usize,
+    buffers: *const native::WGPUVertexBufferLayout,
+) -> Option<Vec<VertexBufferLayoutCacheKey>> {
+    if count == 0 {
+        return Some(Vec::new());
+    }
+    if buffers.is_null() {
+        return None;
+    }
+    std::slice::from_raw_parts(buffers, count)
+        .iter()
+        .map(|buffer| vertex_buffer_cache_key(buffer))
+        .collect()
+}
+
+unsafe fn vertex_buffer_cache_key(
+    buffer: &native::WGPUVertexBufferLayout,
+) -> Option<VertexBufferLayoutCacheKey> {
+    let attributes = if buffer.attributeCount == 0 {
+        Vec::new()
+    } else if buffer.attributes.is_null() {
+        return None;
+    } else {
+        std::slice::from_raw_parts(buffer.attributes, buffer.attributeCount)
+            .iter()
+            .map(|attribute| VertexAttributeCacheKey {
+                format: attribute.format,
+                offset: attribute.offset,
+                shader_location: attribute.shaderLocation,
+            })
+            .collect()
+    };
+    Some(VertexBufferLayoutCacheKey {
+        step_mode: buffer.stepMode,
+        array_stride: buffer.arrayStride,
+        attributes,
+    })
+}
+
+unsafe fn fragment_state_cache_key(
+    fragment: &native::WGPUFragmentState,
+) -> Option<FragmentStateCacheKey> {
+    if fragment.module.is_null() {
+        return None;
+    }
+    Some(FragmentStateCacheKey {
+        stage: RenderStageCacheKey {
+            module: fragment.module as usize,
+            entry_point: cache_string_view(fragment.entryPoint),
+            constants: pipeline_constant_cache_keys(fragment.constantCount, fragment.constants)?,
+        },
+        target_count: fragment.targetCount,
+        targets: color_target_cache_keys(fragment.targetCount, fragment.targets)?,
+    })
+}
+
+unsafe fn color_target_cache_keys(
+    count: usize,
+    targets: *const native::WGPUColorTargetState,
+) -> Option<Vec<ColorTargetCacheKey>> {
+    if count == 0 {
+        return Some(Vec::new());
+    }
+    if targets.is_null() {
+        return None;
+    }
+    Some(
+        std::slice::from_raw_parts(targets, count)
+            .iter()
+            .map(|target| ColorTargetCacheKey {
+                format: target.format,
+                blend: target.blend.as_ref().map(|blend| BlendStateCacheKey {
+                    color: blend_component_cache_key(blend.color),
+                    alpha: blend_component_cache_key(blend.alpha),
+                }),
+                write_mask: target.writeMask,
+            })
+            .collect(),
+    )
+}
+
+fn blend_component_cache_key(component: native::WGPUBlendComponent) -> BlendComponentCacheKey {
+    BlendComponentCacheKey {
+        operation: component.operation,
+        src_factor: component.srcFactor,
+        dst_factor: component.dstFactor,
+    }
+}
+
+fn primitive_state_cache_key(primitive: native::WGPUPrimitiveState) -> PrimitiveStateCacheKey {
+    PrimitiveStateCacheKey {
+        topology: primitive.topology,
+        strip_index_format: primitive.stripIndexFormat,
+        front_face: primitive.frontFace,
+        cull_mode: primitive.cullMode,
+        unclipped_depth: primitive.unclippedDepth,
+    }
+}
+
+fn depth_stencil_state_cache_key(
+    depth_stencil: &native::WGPUDepthStencilState,
+) -> DepthStencilStateCacheKey {
+    DepthStencilStateCacheKey {
+        format: depth_stencil.format,
+        depth_write_enabled: depth_stencil.depthWriteEnabled,
+        depth_compare: depth_stencil.depthCompare,
+        stencil_front: stencil_face_state_cache_key(depth_stencil.stencilFront),
+        stencil_back: stencil_face_state_cache_key(depth_stencil.stencilBack),
+        stencil_read_mask: depth_stencil.stencilReadMask,
+        stencil_write_mask: depth_stencil.stencilWriteMask,
+        depth_bias: depth_stencil.depthBias,
+        depth_bias_slope_scale_bits: depth_stencil.depthBiasSlopeScale.to_bits(),
+        depth_bias_clamp_bits: depth_stencil.depthBiasClamp.to_bits(),
+    }
+}
+
+fn stencil_face_state_cache_key(face: native::WGPUStencilFaceState) -> StencilFaceStateCacheKey {
+    StencilFaceStateCacheKey {
+        compare: face.compare,
+        fail_op: face.failOp,
+        depth_fail_op: face.depthFailOp,
+        pass_op: face.passOp,
+    }
+}
+
+fn multisample_state_cache_key(
+    multisample: native::WGPUMultisampleState,
+) -> MultisampleStateCacheKey {
+    MultisampleStateCacheKey {
+        count: multisample.count,
+        mask: multisample.mask,
+        alpha_to_coverage_enabled: multisample.alphaToCoverageEnabled,
     }
 }
 
@@ -711,6 +1138,10 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
                 instance: Arc::clone(&adapter.instance),
                 device_lost_callback,
                 default_queue: Mutex::new(None),
+                shader_module_cache: Mutex::new(HashMap::new()),
+                pipeline_layout_cache: Mutex::new(HashMap::new()),
+                compute_pipeline_cache: Mutex::new(HashMap::new()),
+                render_pipeline_cache: Mutex::new(HashMap::new()),
             })
         })
         .map_err(|err| err.to_string());
@@ -882,14 +1313,24 @@ pub unsafe extern "C" fn wgpuDeviceCreateShaderModule(
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUShaderModuleDescriptor must not be null");
-    let shader_module = device
-        .core
-        .create_shader_module(map_shader_module_descriptor(descriptor));
-    arc_to_handle(Arc::new(WGPUShaderModuleImpl {
+    let source = map_shader_module_descriptor(descriptor);
+    let key = shader_module_cache_key(&source);
+    let shader_module = device.core.create_shader_module(source);
+    let handle = Arc::new(WGPUShaderModuleImpl {
         _core: Arc::new(shader_module),
         _device: Arc::clone(&device.core),
         _instance: Arc::clone(&device.instance),
-    }))
+    });
+    let handle = if !handle._core.is_error() {
+        if let Some(key) = key {
+            cache_handle(&device.shader_module_cache, key, handle)
+        } else {
+            handle
+        }
+    } else {
+        handle
+    };
+    arc_to_handle(handle)
 }
 
 /// Creates a bind group layout on a device.
@@ -963,13 +1404,24 @@ pub unsafe extern "C" fn wgpuDeviceCreatePipelineLayout(
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUPipelineLayoutDescriptor must not be null");
+    let key = pipeline_layout_cache_key(descriptor);
     let descriptor = map_pipeline_layout_descriptor(descriptor);
     let pipeline_layout = device.core.create_pipeline_layout(descriptor);
-    arc_to_handle(Arc::new(WGPUPipelineLayoutImpl {
+    let handle = Arc::new(WGPUPipelineLayoutImpl {
         _core: Arc::new(pipeline_layout),
         _device: Arc::clone(&device.core),
         _instance: Arc::clone(&device.instance),
-    }))
+    });
+    let handle = if !handle._core.is_error() {
+        if let Some(key) = key {
+            cache_handle(&device.pipeline_layout_cache, key, handle)
+        } else {
+            handle
+        }
+    } else {
+        handle
+    };
+    arc_to_handle(handle)
 }
 
 /// Creates a compute pipeline on a device.
@@ -989,14 +1441,25 @@ pub unsafe extern "C" fn wgpuDeviceCreateComputePipeline(
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUComputePipelineDescriptor must not be null");
+    let key = compute_pipeline_cache_key(descriptor);
     let descriptor = map_compute_pipeline_descriptor(descriptor);
     let pipeline = device.core.create_compute_pipeline(descriptor);
-    arc_to_handle(Arc::new(WGPUComputePipelineImpl {
+    let handle = Arc::new(WGPUComputePipelineImpl {
         _core: Arc::new(pipeline),
         _device: Arc::clone(&device.core),
         _instance: Arc::clone(&device.instance),
         bind_group_layout_handles: Mutex::new(Vec::new()),
-    }))
+    });
+    let handle = if !handle._core.is_error() {
+        if let Some(key) = key {
+            cache_handle(&device.compute_pipeline_cache, key, handle)
+        } else {
+            handle
+        }
+    } else {
+        handle
+    };
+    arc_to_handle(handle)
 }
 
 /// Creates a render pipeline on a device.
@@ -1017,14 +1480,25 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderPipeline(
     let descriptor = descriptor
         .as_ref()
         .expect("WGPURenderPipelineDescriptor must not be null");
+    let key = render_pipeline_cache_key(descriptor);
     let descriptor = map_render_pipeline_descriptor(descriptor);
     let pipeline = device.core.create_render_pipeline(descriptor);
-    arc_to_handle(Arc::new(WGPURenderPipelineImpl {
+    let handle = Arc::new(WGPURenderPipelineImpl {
         _core: Arc::new(pipeline),
         _device: Arc::clone(&device.core),
         _instance: Arc::clone(&device.instance),
         bind_group_layout_handles: Mutex::new(Vec::new()),
-    }))
+    });
+    let handle = if !handle._core.is_error() {
+        if let Some(key) = key {
+            cache_handle(&device.render_pipeline_cache, key, handle)
+        } else {
+            handle
+        }
+    } else {
+        handle
+    };
+    arc_to_handle(handle)
 }
 
 /// Gets a compute pipeline bind group layout.
