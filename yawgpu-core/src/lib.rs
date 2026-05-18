@@ -6401,6 +6401,12 @@ impl RenderBundleEncoder {
             RenderBundleEncoderLifecycle::Recording => {}
         }
         state.lifecycle = RenderBundleEncoderLifecycle::Finished;
+        if state.first_error.is_none() && state.pass_state.debug_group_depth != 0 {
+            record_first_error_option(
+                &mut state.first_error,
+                "render bundle debug group stack is unbalanced".to_owned(),
+            );
+        }
         let error = state.first_error.clone();
         (
             RenderBundle::new(
@@ -6416,11 +6422,21 @@ impl RenderBundleEncoder {
     }
 
     pub fn push_debug_group(&self) -> Option<String> {
-        self.record_bundle_command(|_| Ok(()))
+        self.record_bundle_command(|state| {
+            state.debug_group_depth = state.debug_group_depth.saturating_add(1);
+            Ok(())
+        })
     }
 
     pub fn pop_debug_group(&self) -> Option<String> {
-        self.record_bundle_command(|_| Ok(()))
+        self.record_bundle_command(|state| {
+            if state.debug_group_depth == 0 {
+                Err("render bundle debug group stack is empty".to_owned())
+            } else {
+                state.debug_group_depth -= 1;
+                Ok(())
+            }
+        })
     }
 
     pub fn set_pipeline(&self, pipeline: Arc<RenderPipeline>) -> Option<String> {

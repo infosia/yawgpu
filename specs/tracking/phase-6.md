@@ -189,10 +189,26 @@ usage-scope/submit → P6.9.
 
 C65–C74.
 
-## P6.8 — Debug markers  *(NEXT)*
+## P6.8 — Debug markers  *(☑ DONE)*
+
+Done: C60/C61 (render/compute pass balance at `End` + pop-underflow)
+and C63 (encoder at `Finish`) were already implemented in P6.1;
+C64 (`InsertDebugMarker` no-op anywhere) already held. P6.8 adds
+**C62**: `RenderBundleEncoder::{push,pop}_debug_group` now track
+`pass_state.debug_group_depth` (pop-underflow ⇒ `Err`; `finish()`
+Recording branch sets first_error if depth≠0) through the P6.7
+bundle deferred-error model; `insert_debug_marker` stays a no-op.
+All four scopes (encoder/render pass/compute pass/bundle ×
+balanced+Insert / unbalanced-push / unbalanced-pop) ported in
+`yawgpu/tests/debug_marker_validation.rs` (14). Core diff = 18 lines;
+no FFI/conv change. Gate green (40 binaries, clippy clean). Committed
+`phase-6: P6.8`.
+
+#### (original detail)
+
 C60–C64 (across pass/bundle; encoder C63 done in P6.1).
 
-## P6.9 — Resource usage tracking + submit  *(after P6.8; closes slices)*
+## P6.9 — Resource usage tracking + submit  *(NEXT; closes slices)*
 C75–C82 (aliasing, read/write conflict, attachment+sample, submit-time
 mapped/destroyed buffer). Then Phase Review.
 
