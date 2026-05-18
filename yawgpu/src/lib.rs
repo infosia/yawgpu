@@ -251,15 +251,37 @@ macro_rules! declare_empty_impl_handles {
 }
 
 declare_empty_impl_handles!(
-    WGPUCommandBufferImpl,
-    WGPUCommandEncoderImpl,
-    WGPUComputePassEncoderImpl,
     WGPUQuerySetImpl,
     WGPURenderBundleImpl,
     WGPURenderBundleEncoderImpl,
-    WGPURenderPassEncoderImpl,
     WGPUSurfaceImpl,
 );
+
+pub struct WGPUCommandEncoderImpl {
+    core: Arc<core::CommandEncoder>,
+    device: Arc<core::Device>,
+    instance: Arc<WGPUInstanceImpl>,
+}
+
+pub struct WGPUCommandBufferImpl {
+    _core: Arc<core::CommandBuffer>,
+    _device: Arc<core::Device>,
+    _instance: Arc<WGPUInstanceImpl>,
+}
+
+pub struct WGPURenderPassEncoderImpl {
+    core: Arc<core::RenderPassEncoder>,
+    device: Arc<core::Device>,
+    _parent: Arc<core::CommandEncoder>,
+    _instance: Arc<WGPUInstanceImpl>,
+}
+
+pub struct WGPUComputePassEncoderImpl {
+    core: Arc<core::ComputePassEncoder>,
+    device: Arc<core::Device>,
+    _parent: Arc<core::CommandEncoder>,
+    _instance: Arc<WGPUInstanceImpl>,
+}
 
 impl WGPUInstanceImpl {
     fn new_noop(timed_wait_any_enabled: bool) -> Arc<Self> {
@@ -1675,6 +1697,248 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderPipelineAsync(
         })
 }
 
+/// Creates a command encoder on a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `descriptor` may be
+/// null; P6.1 stores no command encoder descriptor fields.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceCreateCommandEncoder(
+    device: native::WGPUDevice,
+    _descriptor: *const native::WGPUCommandEncoderDescriptor,
+) -> native::WGPUCommandEncoder {
+    let device = borrow_handle(device, "WGPUDevice");
+    arc_to_handle(Arc::new(WGPUCommandEncoderImpl {
+        core: Arc::new(device.core.create_command_encoder()),
+        device: Arc::clone(&device.core),
+        instance: Arc::clone(&device.instance),
+    }))
+}
+
+/// Begins a render pass. P6.1 tracks lifecycle only; descriptor contents are
+/// validated in later Phase-6 slices.
+///
+/// # Safety
+///
+/// `command_encoder` and `descriptor` must be non-null live yawgpu pointers.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderBeginRenderPass(
+    command_encoder: native::WGPUCommandEncoder,
+    descriptor: *const native::WGPURenderPassDescriptor,
+) -> native::WGPURenderPassEncoder {
+    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    descriptor
+        .as_ref()
+        .expect("WGPURenderPassDescriptor must not be null");
+    let (pass, error) = encoder.core.begin_render_pass();
+    dispatch_optional_error(&encoder.device, error);
+    arc_to_handle(Arc::new(WGPURenderPassEncoderImpl {
+        core: Arc::new(pass),
+        device: Arc::clone(&encoder.device),
+        _parent: Arc::clone(&encoder.core),
+        _instance: Arc::clone(&encoder.instance),
+    }))
+}
+
+/// Begins a compute pass. The descriptor is nullable by `webgpu.h`; P6.1
+/// tracks lifecycle only.
+///
+/// # Safety
+///
+/// `command_encoder` must be a non-null live yawgpu command encoder handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderBeginComputePass(
+    command_encoder: native::WGPUCommandEncoder,
+    _descriptor: *const native::WGPUComputePassDescriptor,
+) -> native::WGPUComputePassEncoder {
+    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let (pass, error) = encoder.core.begin_compute_pass();
+    dispatch_optional_error(&encoder.device, error);
+    arc_to_handle(Arc::new(WGPUComputePassEncoderImpl {
+        core: Arc::new(pass),
+        device: Arc::clone(&encoder.device),
+        _parent: Arc::clone(&encoder.core),
+        _instance: Arc::clone(&encoder.instance),
+    }))
+}
+
+/// Finishes command encoding into a command buffer.
+///
+/// # Safety
+///
+/// `command_encoder` must be a non-null live yawgpu command encoder handle.
+/// `descriptor` may be null; P6.1 stores no command buffer descriptor fields.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderFinish(
+    command_encoder: native::WGPUCommandEncoder,
+    _descriptor: *const native::WGPUCommandBufferDescriptor,
+) -> native::WGPUCommandBuffer {
+    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let (command_buffer, error) = encoder.core.finish();
+    dispatch_optional_error(&encoder.device, error);
+    arc_to_handle(Arc::new(WGPUCommandBufferImpl {
+        _core: Arc::new(command_buffer),
+        _device: Arc::clone(&encoder.device),
+        _instance: Arc::clone(&encoder.instance),
+    }))
+}
+
+/// Inserts an encoder debug marker.
+///
+/// # Safety
+///
+/// `command_encoder` must be a non-null live yawgpu command encoder handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderInsertDebugMarker(
+    command_encoder: native::WGPUCommandEncoder,
+    _marker_label: native::WGPUStringView,
+) {
+    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    dispatch_optional_error(&encoder.device, encoder.core.insert_debug_marker());
+}
+
+/// Pushes an encoder debug group.
+///
+/// # Safety
+///
+/// `command_encoder` must be a non-null live yawgpu command encoder handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderPushDebugGroup(
+    command_encoder: native::WGPUCommandEncoder,
+    _group_label: native::WGPUStringView,
+) {
+    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    dispatch_optional_error(&encoder.device, encoder.core.push_debug_group());
+}
+
+/// Pops an encoder debug group.
+///
+/// # Safety
+///
+/// `command_encoder` must be a non-null live yawgpu command encoder handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderPopDebugGroup(
+    command_encoder: native::WGPUCommandEncoder,
+) {
+    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    dispatch_optional_error(&encoder.device, encoder.core.pop_debug_group());
+}
+
+/// Ends a render pass.
+///
+/// # Safety
+///
+/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderEnd(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    dispatch_optional_error(&pass.device, pass.core.end());
+}
+
+/// Inserts a render pass debug marker.
+///
+/// # Safety
+///
+/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderInsertDebugMarker(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+    _marker_label: native::WGPUStringView,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    dispatch_optional_error(&pass.device, pass.core.insert_debug_marker());
+}
+
+/// Pushes a render pass debug group.
+///
+/// # Safety
+///
+/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderPushDebugGroup(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+    _group_label: native::WGPUStringView,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    dispatch_optional_error(&pass.device, pass.core.push_debug_group());
+}
+
+/// Pops a render pass debug group.
+///
+/// # Safety
+///
+/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderPopDebugGroup(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    dispatch_optional_error(&pass.device, pass.core.pop_debug_group());
+}
+
+/// Ends a compute pass.
+///
+/// # Safety
+///
+/// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuComputePassEncoderEnd(
+    compute_pass_encoder: native::WGPUComputePassEncoder,
+) {
+    let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
+    dispatch_optional_error(&pass.device, pass.core.end());
+}
+
+/// Inserts a compute pass debug marker.
+///
+/// # Safety
+///
+/// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuComputePassEncoderInsertDebugMarker(
+    compute_pass_encoder: native::WGPUComputePassEncoder,
+    _marker_label: native::WGPUStringView,
+) {
+    let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
+    dispatch_optional_error(&pass.device, pass.core.insert_debug_marker());
+}
+
+/// Pushes a compute pass debug group.
+///
+/// # Safety
+///
+/// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuComputePassEncoderPushDebugGroup(
+    compute_pass_encoder: native::WGPUComputePassEncoder,
+    _group_label: native::WGPUStringView,
+) {
+    let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
+    dispatch_optional_error(&pass.device, pass.core.push_debug_group());
+}
+
+/// Pops a compute pass debug group.
+///
+/// # Safety
+///
+/// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuComputePassEncoderPopDebugGroup(
+    compute_pass_encoder: native::WGPUComputePassEncoder,
+) {
+    let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
+    dispatch_optional_error(&pass.device, pass.core.pop_debug_group());
+}
+
+fn dispatch_optional_error(device: &core::Device, error: Option<String>) {
+    if let Some(message) = error {
+        device.dispatch_error(core::ErrorKind::Validation, message);
+    }
+}
+
 /// Gets a compute pipeline bind group layout.
 ///
 /// # Safety
@@ -2091,6 +2355,94 @@ pub unsafe extern "C" fn wgpuRenderPipelineRelease(render_pipeline: native::WGPU
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPipelineAddRef(render_pipeline: native::WGPURenderPipeline) {
     add_ref_handle(render_pipeline, "WGPURenderPipeline");
+}
+
+/// Releases one owned reference to a command encoder handle.
+///
+/// # Safety
+///
+/// `command_encoder` must be a non-null live yawgpu command encoder handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderRelease(command_encoder: native::WGPUCommandEncoder) {
+    release_handle(command_encoder, "WGPUCommandEncoder");
+}
+
+/// Adds one owned reference to a command encoder handle.
+///
+/// # Safety
+///
+/// `command_encoder` must be a non-null live yawgpu command encoder handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderAddRef(command_encoder: native::WGPUCommandEncoder) {
+    add_ref_handle(command_encoder, "WGPUCommandEncoder");
+}
+
+/// Releases one owned reference to a command buffer handle.
+///
+/// # Safety
+///
+/// `command_buffer` must be a non-null live yawgpu command buffer handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandBufferRelease(command_buffer: native::WGPUCommandBuffer) {
+    release_handle(command_buffer, "WGPUCommandBuffer");
+}
+
+/// Adds one owned reference to a command buffer handle.
+///
+/// # Safety
+///
+/// `command_buffer` must be a non-null live yawgpu command buffer handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandBufferAddRef(command_buffer: native::WGPUCommandBuffer) {
+    add_ref_handle(command_buffer, "WGPUCommandBuffer");
+}
+
+/// Releases one owned reference to a render pass encoder handle.
+///
+/// # Safety
+///
+/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderRelease(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+) {
+    release_handle(render_pass_encoder, "WGPURenderPassEncoder");
+}
+
+/// Adds one owned reference to a render pass encoder handle.
+///
+/// # Safety
+///
+/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderAddRef(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+) {
+    add_ref_handle(render_pass_encoder, "WGPURenderPassEncoder");
+}
+
+/// Releases one owned reference to a compute pass encoder handle.
+///
+/// # Safety
+///
+/// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuComputePassEncoderRelease(
+    compute_pass_encoder: native::WGPUComputePassEncoder,
+) {
+    release_handle(compute_pass_encoder, "WGPUComputePassEncoder");
+}
+
+/// Adds one owned reference to a compute pass encoder handle.
+///
+/// # Safety
+///
+/// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuComputePassEncoderAddRef(
+    compute_pass_encoder: native::WGPUComputePassEncoder,
+) {
+    add_ref_handle(compute_pass_encoder, "WGPUComputePassEncoder");
 }
 
 /// Destroys a texture. This operation is idempotent.
