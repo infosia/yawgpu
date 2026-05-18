@@ -1028,6 +1028,54 @@ pub struct TexelCopyTextureInfo<'a> {
     pub aspect: TextureAspect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadOp {
+    Undefined,
+    Load,
+    Clear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreOp {
+    Undefined,
+    Store,
+    Discard,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Color {
+    pub r: f64,
+    pub g: f64,
+    pub b: f64,
+    pub a: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderPassDescriptor {
+    pub max_color_attachments: u32,
+    pub color_attachments: Vec<Option<RenderPassColorAttachment>>,
+    pub depth_stencil_attachment: Option<RenderPassDepthStencilAttachment>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderPassColorAttachment {
+    pub view: Arc<TextureView>,
+    pub resolve_target: Option<Arc<TextureView>>,
+    pub load_op: LoadOp,
+    pub store_op: StoreOp,
+    pub clear_value: Color,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderPassDepthStencilAttachment {
+    pub view: Arc<TextureView>,
+    pub depth_load_op: LoadOp,
+    pub depth_store_op: StoreOp,
+    pub depth_clear_value: f32,
+    pub stencil_load_op: LoadOp,
+    pub stencil_store_op: StoreOp,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextureDescriptor {
     pub usage: TextureUsage,
@@ -1339,6 +1387,16 @@ impl TextureView {
     #[must_use]
     pub fn aspect(&self) -> TextureAspect {
         self.inner.aspect
+    }
+
+    #[must_use]
+    pub fn render_extent(&self) -> Extent3d {
+        let subresource = self.texture().subresource_size(self.base_mip_level());
+        Extent3d {
+            width: subresource.width,
+            height: subresource.height,
+            depth_or_array_layers: 1,
+        }
     }
 }
 
@@ -4899,8 +4957,16 @@ impl CommandEncoder {
     }
 
     #[must_use]
-    pub fn begin_render_pass(&self) -> (RenderPassEncoder, Option<String>) {
+    pub fn begin_render_pass(
+        &self,
+        descriptor: &RenderPassDescriptor,
+    ) -> (RenderPassEncoder, Option<String>) {
         let (token, immediate_error) = self.begin_pass(PassKind::Render);
+        if immediate_error.is_none() {
+            if let Err(message) = validate_render_pass_descriptor(descriptor) {
+                self.record_first_error(message);
+            }
+        }
         (
             RenderPassEncoder {
                 inner: Arc::new(PassEncoderInner::new(self.clone(), token)),
@@ -5242,6 +5308,189 @@ fn validate_encoder_write_buffer(buffer: &Buffer, offset: u64, size: u64) -> Res
         buffer.size(),
         "command encoder write buffer range",
     )
+}
+
+fn validate_render_pass_descriptor(descriptor: &RenderPassDescriptor) -> Result<(), String> {
+    if descriptor.color_attachments.len() > descriptor.max_color_attachments as usize {
+        return Err("render pass colorAttachmentCount exceeds the device limit".to_owned());
+    }
+
+    let mut has_attachment = false;
+    let mut render_extent = None;
+    let mut sample_count = None;
+
+    for attachment in descriptor.color_attachments.iter().flatten() {
+        has_attachment = true;
+        validate_color_attachment(attachment)?;
+        validate_render_attachment_common(
+            &attachment.view,
+            &mut render_extent,
+            &mut sample_count,
+            "render pass color attachment",
+        )?;
+        if let Some(resolve_target) = &attachment.resolve_target {
+            validate_resolve_target(&attachment.view, resolve_target)?;
+        }
+    }
+
+    if let Some(attachment) = &descriptor.depth_stencil_attachment {
+        has_attachment = true;
+        validate_depth_stencil_attachment(attachment)?;
+        validate_render_attachment_common(
+            &attachment.view,
+            &mut render_extent,
+            &mut sample_count,
+            "render pass depth-stencil attachment",
+        )?;
+    }
+
+    if !has_attachment {
+        return Err("render pass requires at least one attachment".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_color_attachment(attachment: &RenderPassColorAttachment) -> Result<(), String> {
+    let texture = attachment.view.texture();
+    let Some(format_caps) = attachment.view.format().caps() else {
+        return Err("render pass color attachment format must be supported".to_owned());
+    };
+    if !texture.usage().contains(TextureUsage::RENDER_ATTACHMENT) {
+        return Err("render pass color attachment requires RenderAttachment usage".to_owned());
+    }
+    if !format_caps.aspects.color || !format_caps.renderable {
+        return Err("render pass color attachment format must be color-renderable".to_owned());
+    }
+    if attachment.load_op == LoadOp::Undefined {
+        return Err("render pass color attachment loadOp must be set".to_owned());
+    }
+    if attachment.store_op == StoreOp::Undefined {
+        return Err("render pass color attachment storeOp must be set".to_owned());
+    }
+    if attachment.load_op == LoadOp::Clear
+        && ![
+            attachment.clear_value.r,
+            attachment.clear_value.g,
+            attachment.clear_value.b,
+            attachment.clear_value.a,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+    {
+        return Err("render pass color clearValue components must be finite".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_depth_stencil_attachment(
+    attachment: &RenderPassDepthStencilAttachment,
+) -> Result<(), String> {
+    let texture = attachment.view.texture();
+    let Some(format_caps) = attachment.view.format().caps() else {
+        return Err("render pass depth-stencil attachment format must be supported".to_owned());
+    };
+    if !texture.usage().contains(TextureUsage::RENDER_ATTACHMENT) {
+        return Err(
+            "render pass depth-stencil attachment requires RenderAttachment usage".to_owned(),
+        );
+    }
+    if !format_caps.aspects.depth && !format_caps.aspects.stencil {
+        return Err(
+            "render pass depth-stencil attachment format must have depth or stencil aspect"
+                .to_owned(),
+        );
+    }
+    if format_caps.aspects.depth {
+        if attachment.depth_load_op == LoadOp::Undefined {
+            return Err("render pass depth loadOp must be set".to_owned());
+        }
+        if attachment.depth_store_op == StoreOp::Undefined {
+            return Err("render pass depth storeOp must be set".to_owned());
+        }
+        if attachment.depth_load_op == LoadOp::Clear
+            && (!attachment.depth_clear_value.is_finite()
+                || !(0.0..=1.0).contains(&attachment.depth_clear_value))
+        {
+            return Err("render pass depth clear value must be finite and in [0, 1]".to_owned());
+        }
+    }
+    if format_caps.aspects.stencil {
+        if attachment.stencil_load_op == LoadOp::Undefined {
+            return Err("render pass stencil loadOp must be set".to_owned());
+        }
+        if attachment.stencil_store_op == StoreOp::Undefined {
+            return Err("render pass stencil storeOp must be set".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn validate_render_attachment_common(
+    view: &TextureView,
+    render_extent: &mut Option<(u32, u32)>,
+    sample_count: &mut Option<u32>,
+    label: &str,
+) -> Result<(), String> {
+    if view.is_error() {
+        return Err(format!("{label} view must not be an error view"));
+    }
+    if view.array_layer_count() != 1 {
+        return Err(format!("{label} view arrayLayerCount must be one"));
+    }
+    let extent = view.render_extent();
+    let size = (extent.width, extent.height);
+    if let Some(expected) = *render_extent {
+        if expected != size {
+            return Err("render pass attachments must have matching sizes".to_owned());
+        }
+    } else {
+        *render_extent = Some(size);
+    }
+
+    let view_sample_count = view.texture().sample_count();
+    if let Some(expected) = *sample_count {
+        if expected != view_sample_count {
+            return Err("render pass attachments must have matching sample counts".to_owned());
+        }
+    } else {
+        *sample_count = Some(view_sample_count);
+    }
+    Ok(())
+}
+
+fn validate_resolve_target(
+    color_view: &TextureView,
+    resolve_target: &TextureView,
+) -> Result<(), String> {
+    let color_texture = color_view.texture();
+    let resolve_texture = resolve_target.texture();
+    if color_texture.sample_count() <= 1 {
+        return Err(
+            "render pass resolveTarget requires a multisampled color attachment".to_owned(),
+        );
+    }
+    if resolve_target.is_error() {
+        return Err("render pass resolveTarget view must not be an error view".to_owned());
+    }
+    if !resolve_texture
+        .usage()
+        .contains(TextureUsage::RENDER_ATTACHMENT)
+    {
+        return Err("render pass resolveTarget requires RenderAttachment usage".to_owned());
+    }
+    if resolve_texture.sample_count() != 1 {
+        return Err("render pass resolveTarget sampleCount must be one".to_owned());
+    }
+    if color_view.format() != resolve_target.format() {
+        return Err("render pass resolveTarget format must match the color attachment".to_owned());
+    }
+    if resolve_target.array_layer_count() != 1 {
+        return Err("render pass resolveTarget view arrayLayerCount must be one".to_owned());
+    }
+    if color_view.render_extent() != resolve_target.render_extent() {
+        return Err("render pass resolveTarget size must match the color attachment".to_owned());
+    }
+    Ok(())
 }
 
 fn validate_buffer_texture_copy(

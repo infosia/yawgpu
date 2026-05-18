@@ -97,12 +97,12 @@ ComputePassEncoder: `SetPipeline`/`SetBindGroup`/`DispatchWorkgroups`/
 
 ### P6.4 RenderPass descriptor
 - **C23–C27** ≥1 attachment, color count ≤ max & RenderAttachment &
-  renderable, sparse, size match, format aspect. :101. ☐
+  renderable, sparse, size match, format aspect. :101. ☑ (P6.4)
 - **C28/C32/C33** depth/stencil store ops, loadOp/storeOp set, clear
-  value finite (+depth ∈[0,1]). :304/:1369. ☐
-- **C29** attachment view arrayLayerCount==1. :353. ☐
+  value finite (+depth ∈[0,1]). :304/:1369. ☑ (P6.4)
+- **C29** attachment view arrayLayerCount==1. :353. ☑ (P6.4)
 - **C30/C31** multisample resolve target (count1/format/size/usage)
-  & all attachments same sampleCount. :1165/:1276. ☐
+  & all attachments same sampleCount. :1165/:1276. ☑ (P6.4)
 - **C34/C35** occlusion/timestamp query sets. Defer→P8.
 
 ### P6.5 Pass draw/dispatch state + dynamic state
