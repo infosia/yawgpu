@@ -90,23 +90,23 @@ Phase 5. Rules from Dawn `RenderPipelineValidationTests`,
 ### Render pipeline (P5.2 — may split a:vertex/primitive/multisample,
 b:fragment/color/depthStencil)
 
-- **P7/P8** vertex/fragment entry resolution. RenderPipeline :1508. ☐
+- **P7/P8** vertex/fragment entry resolution. RenderPipeline :1508. ☑ (P5.2a)
 - **P9** must have fragment OR depthStencil; fragment⇒≥1 target.
-  :373/1061. ☐
-- **P18** `stripIndexFormat` only with strip topology. :1343. ☐
+  :373/1061. ☑ (P5.2a)
+- **P18** `stripIndexFormat` only with strip topology. :1343. ☑ (P5.2a)
 - **P19** depth test/write ⇒ format has depth aspect (FormatCaps).
   :214. ☐
 - **P20** stencil ops ⇒ format has stencil aspect. :214. ☐
-- **P21** depthBiasSlopeScale/Clamp finite. :90. ☐
-- **P22** non-zero depth bias only with triangle topology. :140. ☐
+- **P21** depthBiasSlopeScale/Clamp finite. :90. ☑ (P5.2a)
+- **P22** non-zero depth bias only with triangle topology. :140. ☑ (P5.2a)
 - **P23** depth-aspect format ⇒ depthCompare & depthWriteEnabled set
   (not Undefined). :1410. ☐
 - **P24** `@builtin(frag_depth)` ⇒ depthStencil w/ depth aspect. :327.
   ☐
-- **P25** multisample count ∈ {1,4}. :817. ☐
-- **P26** alphaToCoverage ⇒ count==4. :1083. ☐
+- **P25** multisample count ∈ {1,4}. :817. ☑ (P5.2a)
+- **P26** alphaToCoverage ⇒ count==4. :1083. ☑ (P5.2a)
 - **P27** alphaToCoverage conflicts with `@builtin(sample_mask)` out.
-  :1107. ☐
+  :1107. ☑ (P5.2a)
 - **P28** alphaToCoverage ⇒ a blendable target with alpha. :1156. ☐
 - **P29** color target format renderable (FormatCaps); Undefined =
   hole. :442. ☐
