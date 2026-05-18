@@ -14,12 +14,12 @@ use crate::conv::{
     map_compute_pipeline_descriptor, map_device_lost_callback_info, map_device_lost_reason,
     map_extent_3d, map_feature, map_feature_level, map_features_to_native, map_limits,
     map_limits_to_native, map_map_async_status, map_map_mode, map_origin_3d,
-    map_pipeline_layout_descriptor, map_queue_work_done_status, map_render_pipeline_descriptor,
-    map_sampler_descriptor, map_shader_module_descriptor, map_texel_copy_buffer_layout,
-    map_texel_copy_texture_info_parts, map_texture_aspect, map_texture_descriptor,
-    map_texture_dimension_to_native, map_texture_format_to_native, map_texture_usage_to_native,
-    map_texture_view_descriptor, release_handle, string_view, string_view_to_str,
-    DeviceLostCallbackInfo,
+    map_pipeline_layout_descriptor, map_queue_work_done_status, map_render_pass_descriptor,
+    map_render_pipeline_descriptor, map_sampler_descriptor, map_shader_module_descriptor,
+    map_texel_copy_buffer_layout, map_texel_copy_texture_info_parts, map_texture_aspect,
+    map_texture_descriptor, map_texture_dimension_to_native, map_texture_format_to_native,
+    map_texture_usage_to_native, map_texture_view_descriptor, release_handle, string_view,
+    string_view_to_str, DeviceLostCallbackInfo,
 };
 
 pub struct WGPUAdapterImpl {
@@ -1717,8 +1717,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateCommandEncoder(
     }))
 }
 
-/// Begins a render pass. P6.1 tracks lifecycle only; descriptor contents are
-/// validated in later Phase-6 slices.
+/// Begins a render pass.
 ///
 /// # Safety
 ///
@@ -1729,10 +1728,12 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginRenderPass(
     descriptor: *const native::WGPURenderPassDescriptor,
 ) -> native::WGPURenderPassEncoder {
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
-    descriptor
+    let descriptor = descriptor
         .as_ref()
         .expect("WGPURenderPassDescriptor must not be null");
-    let (pass, error) = encoder.core.begin_render_pass();
+    let descriptor =
+        map_render_pass_descriptor(descriptor, encoder.device.limits().max_color_attachments);
+    let (pass, error) = encoder.core.begin_render_pass(&descriptor);
     dispatch_optional_error(&encoder.device, error);
     arc_to_handle(Arc::new(WGPURenderPassEncoderImpl {
         core: Arc::new(pass),

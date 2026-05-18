@@ -1095,6 +1095,105 @@ pub fn map_texel_copy_texture_info_parts(
     )
 }
 
+/// Converts a render pass descriptor to core data.
+///
+/// # Safety
+///
+/// Nested non-null texture view handles must be live yawgpu handles. Null
+/// color attachment views are decoded as sparse holes.
+pub unsafe fn map_render_pass_descriptor(
+    value: &native::WGPURenderPassDescriptor,
+    max_color_attachments: u32,
+) -> core::RenderPassDescriptor {
+    let color_attachment_count = value
+        .colorAttachmentCount
+        .min(max_color_attachments as usize + 1);
+    let color_attachments = if color_attachment_count == 0 || value.colorAttachments.is_null() {
+        vec![None; color_attachment_count]
+    } else {
+        std::slice::from_raw_parts(value.colorAttachments, color_attachment_count)
+            .iter()
+            .map(|attachment| map_render_pass_color_attachment(attachment))
+            .collect()
+    };
+    let depth_stencil_attachment = value
+        .depthStencilAttachment
+        .as_ref()
+        .map(|attachment| map_render_pass_depth_stencil_attachment(attachment));
+
+    core::RenderPassDescriptor {
+        max_color_attachments,
+        color_attachments,
+        depth_stencil_attachment,
+    }
+}
+
+unsafe fn map_render_pass_color_attachment(
+    value: &native::WGPURenderPassColorAttachment,
+) -> Option<core::RenderPassColorAttachment> {
+    if value.view.is_null() {
+        return None;
+    }
+    let view = clone_handle::<WGPUTextureViewImpl>(value.view, "WGPUTextureView");
+    let resolve_target = if value.resolveTarget.is_null() {
+        None
+    } else {
+        Some(Arc::clone(
+            &clone_handle::<WGPUTextureViewImpl>(value.resolveTarget, "WGPUTextureView")._core,
+        ))
+    };
+
+    Some(core::RenderPassColorAttachment {
+        view: Arc::clone(&view._core),
+        resolve_target,
+        load_op: map_load_op(value.loadOp),
+        store_op: map_store_op(value.storeOp),
+        clear_value: map_color(value.clearValue),
+    })
+}
+
+unsafe fn map_render_pass_depth_stencil_attachment(
+    value: &native::WGPURenderPassDepthStencilAttachment,
+) -> core::RenderPassDepthStencilAttachment {
+    let view = clone_handle::<WGPUTextureViewImpl>(value.view, "WGPUTextureView");
+    core::RenderPassDepthStencilAttachment {
+        view: Arc::clone(&view._core),
+        depth_load_op: map_load_op(value.depthLoadOp),
+        depth_store_op: map_store_op(value.depthStoreOp),
+        depth_clear_value: value.depthClearValue,
+        stencil_load_op: map_load_op(value.stencilLoadOp),
+        stencil_store_op: map_store_op(value.stencilStoreOp),
+    }
+}
+
+#[must_use]
+pub fn map_load_op(value: native::WGPULoadOp) -> core::LoadOp {
+    match value {
+        native::WGPULoadOp_Load => core::LoadOp::Load,
+        native::WGPULoadOp_Clear => core::LoadOp::Clear,
+        _ => core::LoadOp::Undefined,
+    }
+}
+
+#[must_use]
+pub fn map_store_op(value: native::WGPUStoreOp) -> core::StoreOp {
+    match value {
+        native::WGPUStoreOp_Store => core::StoreOp::Store,
+        native::WGPUStoreOp_Discard => core::StoreOp::Discard,
+        _ => core::StoreOp::Undefined,
+    }
+}
+
+#[must_use]
+pub fn map_color(value: native::WGPUColor) -> core::Color {
+    core::Color {
+        r: value.r,
+        g: value.g,
+        b: value.b,
+        a: value.a,
+    }
+}
+
 #[must_use]
 /// Converts a texture descriptor to the core representation.
 ///

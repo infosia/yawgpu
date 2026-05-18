@@ -211,7 +211,28 @@ fn command_objects_add_ref_release_are_safe() {
         yawgpu::wgpuCommandEncoderRelease(encoder);
 
         let render_encoder = create_encoder(&test);
-        let descriptor = render_pass_descriptor();
+        let render_texture = create_render_texture(test.device());
+        let render_view = yawgpu::wgpuTextureCreateView(render_texture, std::ptr::null());
+        assert!(!render_view.is_null());
+        let color_attachment = native::WGPURenderPassColorAttachment {
+            nextInChain: std::ptr::null_mut(),
+            view: render_view,
+            depthSlice: native::WGPU_DEPTH_SLICE_UNDEFINED,
+            resolveTarget: std::ptr::null(),
+            loadOp: native::WGPULoadOp_Load,
+            storeOp: native::WGPUStoreOp_Store,
+            clearValue: native::WGPUColor {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            },
+        };
+        let descriptor = native::WGPURenderPassDescriptor {
+            colorAttachmentCount: 1,
+            colorAttachments: &color_attachment,
+            ..render_pass_descriptor()
+        };
         let render_pass = yawgpu::wgpuCommandEncoderBeginRenderPass(render_encoder, &descriptor);
         yawgpu::wgpuRenderPassEncoderAddRef(render_pass);
         yawgpu::wgpuRenderPassEncoderRelease(render_pass);
@@ -220,6 +241,8 @@ fn command_objects_add_ref_release_are_safe() {
 
         yawgpu::wgpuCommandBufferRelease(render_buffer);
         yawgpu::wgpuRenderPassEncoderRelease(render_pass);
+        yawgpu::wgpuTextureViewRelease(render_view);
+        yawgpu::wgpuTextureRelease(render_texture);
         yawgpu::wgpuCommandEncoderRelease(render_encoder);
 
         let error_encoder = create_encoder(&test);
@@ -281,6 +304,28 @@ fn render_pass_descriptor() -> native::WGPURenderPassDescriptor {
         occlusionQuerySet: std::ptr::null(),
         timestampWrites: std::ptr::null(),
     }
+}
+
+unsafe fn create_render_texture(device: native::WGPUDevice) -> native::WGPUTexture {
+    let descriptor = native::WGPUTextureDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage: native::WGPUTextureUsage_RenderAttachment,
+        dimension: native::WGPUTextureDimension_2D,
+        size: native::WGPUExtent3D {
+            width: 1,
+            height: 1,
+            depthOrArrayLayers: 1,
+        },
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        mipLevelCount: 1,
+        sampleCount: 1,
+        viewFormatCount: 0,
+        viewFormats: std::ptr::null(),
+    };
+    let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+    assert!(!texture.is_null());
+    texture
 }
 
 fn empty_string_view() -> native::WGPUStringView {

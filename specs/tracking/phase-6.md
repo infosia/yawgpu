@@ -69,10 +69,26 @@ conv `WGPUTexelCopyBufferInfo`/`…TextureInfo`. C11–C22/C79 ported in
 
 #### (original detail)
 
-## P6.4 — RenderPass descriptor  *(NEXT)*
-C23–C33 (C30/C31 multisample resolve); C34/C35 Defer→P8.
+## P6.4 — RenderPass descriptor  *(☑ DONE)*
 
-## P6.5 — Pass draw/dispatch state + dynamic state  *(after P6.4)*
+Done: core `RenderPassDescriptor`/`RenderPassColorAttachment`/
+`…DepthStencilAttachment`; `begin_render_pass(desc)` validates via the
+deferred-error model (record-first-error → `finish()`).
+`validate_render_pass_descriptor` + `validate_color_attachment`
+(C24 RenderAttachment, C27 color-renderable, C32 load/store set, C33
+clearValue finite), `validate_depth_stencil_attachment` (C27 aspect,
+C28/C32 per-aspect ops, C33 depth clear finite∈[0,1]),
+`validate_render_attachment_common` (C26 size via `render_extent`, C29
+layer==1, C31 sample_count), `validate_resolve_target` (C30); C23
+≥1-attachment, C24 count≤max, C25 sparse. C34/C35 accepted opaquely
+(Defer→P8). conv decodes the descriptor + attachments. C23–C33 ported
+in `yawgpu/tests/render_pass_descriptor_validation.rs` (5);
+`command_encoder_lifecycle` strengthened to real descriptors (still 9,
+unregressed). Gate green (37 binaries). Committed `phase-6: P6.4`.
+
+#### (original detail)
+
+## P6.5 — Pass draw/dispatch state + dynamic state  *(NEXT)*
 C37–C42, C56–C59, compute dispatch limits, P41 draw-time.
 
 ## P6.6 — Index/Vertex buffer + draw OOB + indirect  *(after P6.5)*
