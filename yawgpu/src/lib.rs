@@ -741,6 +741,20 @@ enum PendingCallback {
         userdata1: usize,
         userdata2: usize,
     },
+    CreateComputePipelineAsync {
+        mode: native::WGPUCallbackMode,
+        callback: native::WGPUCreateComputePipelineAsyncCallback,
+        pipeline: Arc<WGPUComputePipelineImpl>,
+        userdata1: usize,
+        userdata2: usize,
+    },
+    CreateRenderPipelineAsync {
+        mode: native::WGPUCallbackMode,
+        callback: native::WGPUCreateRenderPipelineAsyncCallback,
+        pipeline: Arc<WGPURenderPipelineImpl>,
+        userdata1: usize,
+        userdata2: usize,
+    },
 }
 
 impl PendingCallback {
@@ -751,7 +765,9 @@ impl PendingCallback {
             | Self::DeviceLost { mode, .. }
             | Self::BufferMap { mode, .. }
             | Self::QueueWorkDone { mode, .. }
-            | Self::CompilationInfo { mode, .. } => *mode,
+            | Self::CompilationInfo { mode, .. }
+            | Self::CreateComputePipelineAsync { mode, .. }
+            | Self::CreateRenderPipelineAsync { mode, .. } => *mode,
         };
         match mode {
             native::WGPUCallbackMode_AllowProcessEvents => {
@@ -893,6 +909,60 @@ impl PendingCallback {
                         userdata1 as *mut c_void,
                         userdata2 as *mut c_void,
                     );
+                }
+            }
+            Self::CreateComputePipelineAsync {
+                callback,
+                pipeline,
+                userdata1,
+                userdata2,
+                ..
+            } => {
+                if let Some(callback) = callback {
+                    if pipeline._core.is_error() {
+                        callback(
+                            native::WGPUCreatePipelineAsyncStatus_ValidationError,
+                            std::ptr::null(),
+                            string_view(b"Pipeline creation failed validation"),
+                            userdata1 as *mut c_void,
+                            userdata2 as *mut c_void,
+                        );
+                    } else {
+                        callback(
+                            native::WGPUCreatePipelineAsyncStatus_Success,
+                            arc_to_handle(pipeline),
+                            string_view(b""),
+                            userdata1 as *mut c_void,
+                            userdata2 as *mut c_void,
+                        );
+                    }
+                }
+            }
+            Self::CreateRenderPipelineAsync {
+                callback,
+                pipeline,
+                userdata1,
+                userdata2,
+                ..
+            } => {
+                if let Some(callback) = callback {
+                    if pipeline._core.is_error() {
+                        callback(
+                            native::WGPUCreatePipelineAsyncStatus_ValidationError,
+                            std::ptr::null(),
+                            string_view(b"Pipeline creation failed validation"),
+                            userdata1 as *mut c_void,
+                            userdata2 as *mut c_void,
+                        );
+                    } else {
+                        callback(
+                            native::WGPUCreatePipelineAsyncStatus_Success,
+                            arc_to_handle(pipeline),
+                            string_view(b""),
+                            userdata1 as *mut c_void,
+                            userdata2 as *mut c_void,
+                        );
+                    }
                 }
             }
         }
@@ -1441,6 +1511,13 @@ pub unsafe extern "C" fn wgpuDeviceCreateComputePipeline(
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUComputePipelineDescriptor must not be null");
+    arc_to_handle(create_compute_pipeline_handle(device, descriptor))
+}
+
+unsafe fn create_compute_pipeline_handle(
+    device: &WGPUDeviceImpl,
+    descriptor: &native::WGPUComputePipelineDescriptor,
+) -> Arc<WGPUComputePipelineImpl> {
     let key = compute_pipeline_cache_key(descriptor);
     let descriptor = map_compute_pipeline_descriptor(descriptor);
     let pipeline = device.core.create_compute_pipeline(descriptor);
@@ -1450,7 +1527,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateComputePipeline(
         _instance: Arc::clone(&device.instance),
         bind_group_layout_handles: Mutex::new(Vec::new()),
     });
-    let handle = if !handle._core.is_error() {
+    if !handle._core.is_error() {
         if let Some(key) = key {
             cache_handle(&device.compute_pipeline_cache, key, handle)
         } else {
@@ -1458,8 +1535,36 @@ pub unsafe extern "C" fn wgpuDeviceCreateComputePipeline(
         }
     } else {
         handle
-    };
-    arc_to_handle(handle)
+    }
+}
+
+/// Creates a compute pipeline asynchronously on a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `descriptor` must
+/// point to a valid `WGPUComputePipelineDescriptor`. The callback info follows
+/// the `webgpu.h` callback contract.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceCreateComputePipelineAsync(
+    device: native::WGPUDevice,
+    descriptor: *const native::WGPUComputePipelineDescriptor,
+    callback_info: native::WGPUCreateComputePipelineAsyncCallbackInfo,
+) -> native::WGPUFuture {
+    let device = borrow_handle(device, "WGPUDevice");
+    let descriptor = descriptor
+        .as_ref()
+        .expect("WGPUComputePipelineDescriptor must not be null");
+    let pipeline = create_compute_pipeline_handle(device, descriptor);
+    device
+        .instance
+        .register_callback(PendingCallback::CreateComputePipelineAsync {
+            mode: callback_info.mode,
+            callback: callback_info.callback,
+            pipeline,
+            userdata1: callback_info.userdata1 as usize,
+            userdata2: callback_info.userdata2 as usize,
+        })
 }
 
 /// Creates a render pipeline on a device.
@@ -1480,6 +1585,13 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderPipeline(
     let descriptor = descriptor
         .as_ref()
         .expect("WGPURenderPipelineDescriptor must not be null");
+    arc_to_handle(create_render_pipeline_handle(device, descriptor))
+}
+
+unsafe fn create_render_pipeline_handle(
+    device: &WGPUDeviceImpl,
+    descriptor: &native::WGPURenderPipelineDescriptor,
+) -> Arc<WGPURenderPipelineImpl> {
     let key = render_pipeline_cache_key(descriptor);
     let descriptor = map_render_pipeline_descriptor(descriptor);
     let pipeline = device.core.create_render_pipeline(descriptor);
@@ -1489,7 +1601,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderPipeline(
         _instance: Arc::clone(&device.instance),
         bind_group_layout_handles: Mutex::new(Vec::new()),
     });
-    let handle = if !handle._core.is_error() {
+    if !handle._core.is_error() {
         if let Some(key) = key {
             cache_handle(&device.render_pipeline_cache, key, handle)
         } else {
@@ -1497,8 +1609,36 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderPipeline(
         }
     } else {
         handle
-    };
-    arc_to_handle(handle)
+    }
+}
+
+/// Creates a render pipeline asynchronously on a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `descriptor` must
+/// point to a valid `WGPURenderPipelineDescriptor`. The callback info follows
+/// the `webgpu.h` callback contract.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceCreateRenderPipelineAsync(
+    device: native::WGPUDevice,
+    descriptor: *const native::WGPURenderPipelineDescriptor,
+    callback_info: native::WGPUCreateRenderPipelineAsyncCallbackInfo,
+) -> native::WGPUFuture {
+    let device = borrow_handle(device, "WGPUDevice");
+    let descriptor = descriptor
+        .as_ref()
+        .expect("WGPURenderPipelineDescriptor must not be null");
+    let pipeline = create_render_pipeline_handle(device, descriptor);
+    device
+        .instance
+        .register_callback(PendingCallback::CreateRenderPipelineAsync {
+            mode: callback_info.mode,
+            callback: callback_info.callback,
+            pipeline,
+            userdata1: callback_info.userdata1 as usize,
+            userdata2: callback_info.userdata2 as usize,
+        })
 }
 
 /// Gets a compute pipeline bind group layout.
