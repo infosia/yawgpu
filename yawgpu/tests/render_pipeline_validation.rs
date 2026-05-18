@@ -436,6 +436,18 @@ fn color_target_formats_outputs_and_blending_are_validated() {
             default_multisample(),
         );
 
+        let bogus = [color_target_format(native::WGPUTextureFormat_Force32)];
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::with_targets(fragment_single(), None, &bogus)),
+            None,
+            None,
+            default_primitive(),
+            default_multisample(),
+        );
+
         let hole = [color_target_with_write_mask(
             native::WGPUTextureFormat_Undefined,
             native::WGPUColorWriteMask_None,
@@ -618,6 +630,63 @@ fn explicit_render_pipeline_layout_is_validated() {
 
         yawgpu::wgpuPipelineLayoutRelease(matching_layout);
         yawgpu::wgpuBindGroupLayoutRelease(matching_bgl);
+
+        let texture_source = "@group(0) @binding(0) var tex: texture_2d<u32>;
+             @fragment fn fs() -> @location(0) vec4f {
+                 _ = textureLoad(tex, vec2i(0), 0);
+                 return vec4f();
+             }";
+        let wrong_texture_bgl = create_bind_group_layout(
+            test.device(),
+            &[texture_layout(
+                0,
+                native::WGPUTextureSampleType_Float,
+                native::WGPUTextureViewDimension_2D,
+            )],
+        );
+        let wrong_texture_layout = create_pipeline_layout(test.device(), &[wrong_texture_bgl]);
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::new(texture_source, None, 1)),
+            Some(wrong_texture_layout),
+            None,
+            default_primitive(),
+            default_multisample(),
+        );
+
+        let storage_source =
+            "@group(0) @binding(0) var image: texture_storage_2d<rgba8unorm, write>;
+             @fragment fn fs() -> @location(0) vec4f {
+                 textureStore(image, vec2i(0), vec4f());
+                 return vec4f();
+             }";
+        let wrong_storage_bgl = create_bind_group_layout(
+            test.device(),
+            &[storage_texture_layout(
+                0,
+                native::WGPUStorageTextureAccess_WriteOnly,
+                native::WGPUTextureFormat_RGBA8Sint,
+                native::WGPUTextureViewDimension_2D,
+            )],
+        );
+        let wrong_storage_layout = create_pipeline_layout(test.device(), &[wrong_storage_bgl]);
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::new(storage_source, None, 1)),
+            Some(wrong_storage_layout),
+            None,
+            default_primitive(),
+            default_multisample(),
+        );
+
+        yawgpu::wgpuPipelineLayoutRelease(wrong_storage_layout);
+        yawgpu::wgpuBindGroupLayoutRelease(wrong_storage_bgl);
+        yawgpu::wgpuPipelineLayoutRelease(wrong_texture_layout);
+        yawgpu::wgpuBindGroupLayoutRelease(wrong_texture_bgl);
         yawgpu::wgpuPipelineLayoutRelease(wrong_visibility_layout);
         yawgpu::wgpuBindGroupLayoutRelease(wrong_visibility_bgl);
         yawgpu::wgpuPipelineLayoutRelease(empty_layout);
@@ -974,6 +1043,30 @@ fn uniform_layout(
     let mut entry = default_layout(binding, visibility);
     entry.buffer.type_ = native::WGPUBufferBindingType_Uniform;
     entry.buffer.minBindingSize = min_binding_size;
+    entry
+}
+
+fn texture_layout(
+    binding: u32,
+    sample_type: native::WGPUTextureSampleType,
+    view_dimension: native::WGPUTextureViewDimension,
+) -> native::WGPUBindGroupLayoutEntry {
+    let mut entry = default_layout(binding, native::WGPUShaderStage_Fragment);
+    entry.texture.sampleType = sample_type;
+    entry.texture.viewDimension = view_dimension;
+    entry
+}
+
+fn storage_texture_layout(
+    binding: u32,
+    access: native::WGPUStorageTextureAccess,
+    format: native::WGPUTextureFormat,
+    view_dimension: native::WGPUTextureViewDimension,
+) -> native::WGPUBindGroupLayoutEntry {
+    let mut entry = default_layout(binding, native::WGPUShaderStage_Fragment);
+    entry.storageTexture.access = access;
+    entry.storageTexture.format = format;
+    entry.storageTexture.viewDimension = view_dimension;
     entry
 }
 

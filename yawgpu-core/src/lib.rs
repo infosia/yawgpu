@@ -429,7 +429,19 @@ impl Device {
         if let Some(message) = error {
             self.dispatch_error(ErrorKind::Validation, message);
         }
-        ComputePipeline::new(descriptor, is_error)
+        ComputePipeline::new(descriptor, is_error, self.limits())
+    }
+
+    #[must_use]
+    pub fn create_compute_pipeline_without_error_dispatch(
+        &self,
+        descriptor: ComputePipelineDescriptor,
+    ) -> ComputePipeline {
+        let error = descriptor
+            .error
+            .clone()
+            .or_else(|| validate_compute_pipeline_descriptor(&descriptor, self.limits()));
+        ComputePipeline::new(descriptor, error.is_some(), self.limits())
     }
 
     #[must_use]
@@ -442,7 +454,19 @@ impl Device {
         if let Some(message) = error {
             self.dispatch_error(ErrorKind::Validation, message);
         }
-        RenderPipeline::new(descriptor, is_error)
+        RenderPipeline::new(descriptor, is_error, self.limits())
+    }
+
+    #[must_use]
+    pub fn create_render_pipeline_without_error_dispatch(
+        &self,
+        descriptor: RenderPipelineDescriptor,
+    ) -> RenderPipeline {
+        let error = descriptor
+            .error
+            .clone()
+            .or_else(|| validate_render_pipeline_descriptor(&descriptor, self.limits()));
+        RenderPipeline::new(descriptor, error.is_some(), self.limits())
     }
 }
 
@@ -753,13 +777,8 @@ impl TextureFormat {
             Self::BC7_RGBA_UNORM | Self::BC7_RGBA_UNORM_SRGB => {
                 FormatCaps::compressed_color(16, 4, 4)
             }
-            // Unknown WebGPU formats stay conservative for the carried W5
-            // approximation: plain renderable float color with alpha.
-            _ => FormatCaps::float_color(4, 4)
-                .alpha()
-                .blendable()
-                .renderable()
-                .multisample(),
+            // Unknown defined formats are unsupported until explicitly modeled.
+            _ => return None,
         };
         Some(caps)
     }
@@ -2060,15 +2079,15 @@ struct ComputePipelineInner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ResolvedComputeWorkgroup {
     size: [u32; 3],
-    storage_size: u32,
+    storage_size: u64,
 }
 
 impl ComputePipeline {
-    fn new(descriptor: ComputePipelineDescriptor, is_error: bool) -> Self {
+    fn new(descriptor: ComputePipelineDescriptor, is_error: bool, limits: Limits) -> Self {
         let resolved = if is_error {
             None
         } else {
-            resolve_compute_pipeline(&descriptor).ok()
+            resolve_compute_pipeline_descriptor(&descriptor, limits).ok()
         };
         let (entry_name, bindings, workgroup, bind_group_layouts) = resolved.unwrap_or_else(|| {
             (
@@ -2121,12 +2140,6 @@ fn validate_compute_pipeline_descriptor(
     resolve_compute_pipeline_descriptor(descriptor, limits).err()
 }
 
-fn resolve_compute_pipeline(
-    descriptor: &ComputePipelineDescriptor,
-) -> Result<ResolvedPipelineParts, String> {
-    resolve_compute_pipeline_descriptor(descriptor, Limits::DEFAULT)
-}
-
 fn resolve_compute_pipeline_descriptor(
     descriptor: &ComputePipelineDescriptor,
     limits: Limits,
@@ -2141,7 +2154,7 @@ fn resolve_compute_pipeline_descriptor(
     let overrides = module.overrides();
     let constants = resolve_pipeline_constants(&overrides, &descriptor.constants)?;
     let workgroup = resolve_compute_workgroup(module, &entry_name, &overrides, &constants, limits)?;
-    let bindings = module.resource_bindings();
+    let bindings = module.resource_bindings_for_entry(&entry_name)?;
     validate_compute_pipeline_layout(&descriptor.layout, &bindings)?;
     let bind_group_layouts =
         effective_compute_bind_group_layouts(&descriptor.layout, &bindings, limits)?;
@@ -2315,7 +2328,7 @@ fn resolve_compute_workgroup(
     if invocations > limits.max_compute_invocations_per_workgroup {
         return Err("compute workgroup invocation count exceeds the device limit".to_owned());
     }
-    if workgroup.workgroup_storage_size > limits.max_compute_workgroup_storage_size {
+    if workgroup.workgroup_storage_size > u64::from(limits.max_compute_workgroup_storage_size) {
         return Err("compute workgroup storage size exceeds the device limit".to_owned());
     }
 
@@ -2514,33 +2527,67 @@ fn reflected_binding_layout_kind(
             has_dynamic_offset: false,
             min_binding_size: binding.min_binding_size,
         }),
-        shader_naga::ReflectedResourceBindingKind::Sampler => Ok(BindingLayoutKind::Sampler {
-            ty: SamplerBindingType::Filtering,
-        }),
-        shader_naga::ReflectedResourceBindingKind::Texture {
-            sampled,
-            sample_usage,
-        } => Ok(BindingLayoutKind::Texture {
-            sample_type: if *sampled {
-                match sample_usage {
-                    shader_naga::ReflectedTextureSampleUsage::Sample => TextureSampleType::Float,
-                    shader_naga::ReflectedTextureSampleUsage::Load => {
-                        TextureSampleType::UnfilterableFloat
-                    }
-                }
-            } else {
-                TextureSampleType::Depth
-            },
-            view_dimension: TextureViewDimension::D2,
-            multisampled: false,
-        }),
-        shader_naga::ReflectedResourceBindingKind::StorageTexture { format, access } => {
-            Ok(BindingLayoutKind::StorageTexture {
-                access: reflected_storage_texture_access(access),
-                format: reflected_storage_texture_format(format)?,
-                view_dimension: TextureViewDimension::D2,
+        shader_naga::ReflectedResourceBindingKind::Sampler { comparison } => {
+            Ok(BindingLayoutKind::Sampler {
+                ty: if *comparison {
+                    SamplerBindingType::Comparison
+                } else {
+                    SamplerBindingType::Filtering
+                },
             })
         }
+        shader_naga::ReflectedResourceBindingKind::Texture {
+            sampled,
+            sample_kind,
+            sample_usage,
+            view_dimension,
+            multisampled,
+        } => Ok(BindingLayoutKind::Texture {
+            sample_type: reflected_texture_sample_type(*sampled, *sample_kind, *sample_usage)?,
+            view_dimension: reflected_texture_view_dimension(*view_dimension),
+            multisampled: *multisampled,
+        }),
+        shader_naga::ReflectedResourceBindingKind::StorageTexture {
+            format,
+            access,
+            view_dimension,
+        } => Ok(BindingLayoutKind::StorageTexture {
+            access: reflected_storage_texture_access(access),
+            format: reflected_storage_texture_format(format)?,
+            view_dimension: reflected_texture_view_dimension(*view_dimension),
+        }),
+    }
+}
+
+fn reflected_texture_sample_type(
+    sampled: bool,
+    sample_kind: Option<shader_naga::ReflectedTypeScalarClass>,
+    sample_usage: shader_naga::ReflectedTextureSampleUsage,
+) -> Result<TextureSampleType, String> {
+    if !sampled {
+        return Ok(TextureSampleType::Depth);
+    }
+    match sample_kind {
+        Some(shader_naga::ReflectedTypeScalarClass::Float) => Ok(match sample_usage {
+            shader_naga::ReflectedTextureSampleUsage::Sample => TextureSampleType::Float,
+            shader_naga::ReflectedTextureSampleUsage::Load => TextureSampleType::UnfilterableFloat,
+        }),
+        Some(shader_naga::ReflectedTypeScalarClass::Sint) => Ok(TextureSampleType::Sint),
+        Some(shader_naga::ReflectedTypeScalarClass::Uint) => Ok(TextureSampleType::Uint),
+        _ => Err("pipeline texture binding sample type is unsupported".to_owned()),
+    }
+}
+
+fn reflected_texture_view_dimension(
+    dimension: shader_naga::ReflectedTextureViewDimension,
+) -> TextureViewDimension {
+    match dimension {
+        shader_naga::ReflectedTextureViewDimension::D1 => TextureViewDimension::D1,
+        shader_naga::ReflectedTextureViewDimension::D2 => TextureViewDimension::D2,
+        shader_naga::ReflectedTextureViewDimension::D2Array => TextureViewDimension::D2Array,
+        shader_naga::ReflectedTextureViewDimension::Cube => TextureViewDimension::Cube,
+        shader_naga::ReflectedTextureViewDimension::CubeArray => TextureViewDimension::CubeArray,
+        shader_naga::ReflectedTextureViewDimension::D3 => TextureViewDimension::D3,
     }
 }
 
@@ -2657,18 +2704,74 @@ fn validate_shader_binding_compat(
             }
             Ok(())
         }
-        (shader_naga::ReflectedResourceBindingKind::Sampler, BindingLayoutKind::Sampler { .. }) => {
-            Ok(())
-        }
         (
+            shader_naga::ReflectedResourceBindingKind::Sampler { .. },
+            BindingLayoutKind::Sampler { .. },
+        )
+        | (
             shader_naga::ReflectedResourceBindingKind::Texture { .. },
             BindingLayoutKind::Texture { .. },
-        ) => Ok(()),
-        (
+        )
+        | (
             shader_naga::ReflectedResourceBindingKind::StorageTexture { .. },
             BindingLayoutKind::StorageTexture { .. },
-        ) => Ok(()),
+        ) => {
+            let expected = reflected_binding_layout_kind(binding)?;
+            if shader_binding_layout_kinds_compatible(expected, layout_kind) {
+                Ok(())
+            } else {
+                Err(
+                    "pipeline layout binding kind is incompatible with the shader binding"
+                        .to_owned(),
+                )
+            }
+        }
         _ => Err("compute pipeline layout binding type is incompatible".to_owned()),
+    }
+}
+
+fn shader_binding_layout_kinds_compatible(
+    expected: BindingLayoutKind,
+    actual: BindingLayoutKind,
+) -> bool {
+    match (expected, actual) {
+        (
+            BindingLayoutKind::Sampler { ty: expected },
+            BindingLayoutKind::Sampler { ty: actual },
+        ) => expected == actual,
+        (
+            BindingLayoutKind::Texture {
+                sample_type,
+                view_dimension,
+                multisampled,
+            },
+            BindingLayoutKind::Texture {
+                sample_type: actual_sample_type,
+                view_dimension: actual_view_dimension,
+                multisampled: actual_multisampled,
+            },
+        ) => {
+            sample_type == actual_sample_type
+                && view_dimension == actual_view_dimension
+                && multisampled == actual_multisampled
+        }
+        (
+            BindingLayoutKind::StorageTexture {
+                access,
+                format,
+                view_dimension,
+            },
+            BindingLayoutKind::StorageTexture {
+                access: actual_access,
+                format: actual_format,
+                view_dimension: actual_view_dimension,
+            },
+        ) => {
+            access == actual_access
+                && format == actual_format
+                && view_dimension == actual_view_dimension
+        }
+        _ => false,
     }
 }
 
@@ -2911,11 +3014,11 @@ struct RenderPipelineInner {
 }
 
 impl RenderPipeline {
-    fn new(descriptor: RenderPipelineDescriptor, is_error: bool) -> Self {
+    fn new(descriptor: RenderPipelineDescriptor, is_error: bool, limits: Limits) -> Self {
         let resolved = if is_error {
             None
         } else {
-            resolve_render_pipeline_descriptor(&descriptor, Limits::DEFAULT).ok()
+            resolve_render_pipeline_descriptor(&descriptor, limits).ok()
         };
         let (vertex_entry_name, fragment_entry_name, bind_group_layouts) =
             resolved.unwrap_or_else(|| {
@@ -3017,9 +3120,14 @@ fn resolve_render_pipeline_descriptor(
     }
     validate_fragment_depth_output(descriptor, fragment_entry.as_deref())?;
     validate_color_targets(descriptor, fragment_entry.as_deref(), limits)?;
-    validate_render_pipeline_layout(descriptor)?;
+    validate_render_pipeline_layout(descriptor, &vertex_entry, fragment_entry.as_deref())?;
     validate_multisample_state(descriptor, fragment_entry.as_deref())?;
-    let bind_group_layouts = effective_render_bind_group_layouts(descriptor, limits)?;
+    let bind_group_layouts = effective_render_bind_group_layouts(
+        descriptor,
+        &vertex_entry,
+        fragment_entry.as_deref(),
+        limits,
+    )?;
 
     Ok((vertex_entry, fragment_entry, bind_group_layouts))
 }
@@ -3425,7 +3533,11 @@ fn validate_fragment_output_compat(
     Ok(())
 }
 
-fn validate_render_pipeline_layout(descriptor: &RenderPipelineDescriptor) -> Result<(), String> {
+fn validate_render_pipeline_layout(
+    descriptor: &RenderPipelineDescriptor,
+    vertex_entry: &str,
+    fragment_entry: Option<&str>,
+) -> Result<(), String> {
     let RenderPipelineLayout::Explicit(layout) = &descriptor.layout else {
         return Ok(());
     };
@@ -3433,31 +3545,45 @@ fn validate_render_pipeline_layout(descriptor: &RenderPipelineDescriptor) -> Res
         return Err("render pipeline layout must not be an error pipeline layout".to_owned());
     }
 
-    let mut requirements =
-        stage_resource_bindings(&descriptor.vertex.shader, PipelineShaderStage::Vertex)?;
+    let mut requirements = stage_resource_bindings(
+        &descriptor.vertex.shader,
+        vertex_entry,
+        PipelineShaderStage::Vertex,
+    )?;
     if let Some(fragment) = &descriptor.fragment {
-        requirements.extend(stage_resource_bindings(
-            &fragment.shader,
-            PipelineShaderStage::Fragment,
-        )?);
+        if let Some(fragment_entry) = fragment_entry {
+            requirements.extend(stage_resource_bindings(
+                &fragment.shader,
+                fragment_entry,
+                PipelineShaderStage::Fragment,
+            )?);
+        }
     }
     validate_pipeline_layout_stage_bindings(layout, &requirements)
 }
 
 fn effective_render_bind_group_layouts(
     descriptor: &RenderPipelineDescriptor,
+    vertex_entry: &str,
+    fragment_entry: Option<&str>,
     limits: Limits,
 ) -> Result<Vec<Arc<BindGroupLayout>>, String> {
     match &descriptor.layout {
         RenderPipelineLayout::Explicit(layout) => Ok(layout.bind_group_layouts().to_vec()),
         RenderPipelineLayout::Auto => {
-            let mut requirements =
-                stage_resource_bindings(&descriptor.vertex.shader, PipelineShaderStage::Vertex)?;
+            let mut requirements = stage_resource_bindings(
+                &descriptor.vertex.shader,
+                vertex_entry,
+                PipelineShaderStage::Vertex,
+            )?;
             if let Some(fragment) = &descriptor.fragment {
-                requirements.extend(stage_resource_bindings(
-                    &fragment.shader,
-                    PipelineShaderStage::Fragment,
-                )?);
+                if let Some(fragment_entry) = fragment_entry {
+                    requirements.extend(stage_resource_bindings(
+                        &fragment.shader,
+                        fragment_entry,
+                        PipelineShaderStage::Fragment,
+                    )?);
+                }
             }
             derive_bind_group_layouts(requirements, limits)
         }
@@ -3466,13 +3592,14 @@ fn effective_render_bind_group_layouts(
 
 fn stage_resource_bindings(
     stage: &RenderPipelineShaderStage,
+    entry_point: &str,
     pipeline_stage: PipelineShaderStage,
 ) -> Result<Vec<StageResourceBinding>, String> {
     let Some(module) = stage.module.validated_wgsl() else {
         return Err("render pipeline stage requires a valid WGSL shader module".to_owned());
     };
     Ok(module
-        .resource_bindings()
+        .resource_bindings_for_entry(entry_point)?
         .into_iter()
         .map(|binding| StageResourceBinding {
             stage: pipeline_stage,

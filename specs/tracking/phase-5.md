@@ -1,6 +1,8 @@
 # Phase 5 — Render / Compute Pipeline
 
-Status: **in progress** (P5.0 active). Rules: `../blocks/40-pipeline.md`.
+Status: **COMPLETE** (P5.0–P5.6 done; Phase 5 Review CLOSED — see
+`phase-5-review.md`). Commits `phase-5: P5.0`→`phase-5: phase review`.
+Rules: `../blocks/40-pipeline.md`.
 Roles/loop: `../reference/workflow.md`. Gate (permanent): `cargo test
 --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
 green on Noop. **Phase ends with the mandatory Phase Review**

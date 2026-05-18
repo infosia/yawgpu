@@ -65,7 +65,7 @@ pub(crate) struct ReflectedWorkgroupSize {
     /// dimension is override-driven, this key lets pipeline validation apply
     /// pipeline constants before enforcing compute limits.
     pub override_keys: [Option<ReflectedOverrideKey>; 3],
-    pub workgroup_storage_size: u32,
+    pub workgroup_storage_size: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,15 +90,31 @@ pub(crate) struct ReflectedStorageTextureAccess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReflectedResourceBindingKind {
     Buffer(ReflectedBufferType),
-    Sampler,
+    Sampler {
+        comparison: bool,
+    },
     Texture {
         sampled: bool,
+        sample_kind: Option<ReflectedTypeScalarClass>,
         sample_usage: ReflectedTextureSampleUsage,
+        view_dimension: ReflectedTextureViewDimension,
+        multisampled: bool,
     },
     StorageTexture {
         format: String,
         access: ReflectedStorageTextureAccess,
+        view_dimension: ReflectedTextureViewDimension,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReflectedTextureViewDimension {
+    D1,
+    D2,
+    D2Array,
+    Cube,
+    CubeArray,
+    D3,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,10 +180,14 @@ impl ValidatedWgslModule {
         &self,
         entry_point: &str,
     ) -> Result<Option<ReflectedWorkgroupSize>, String> {
-        let Some(entry) =
-            self.module.entry_points.iter().find(|entry| {
-                entry.name == entry_point && entry.stage == naga::ShaderStage::Compute
-            })
+        let Some((entry_index, entry)) =
+            self.module
+                .entry_points
+                .iter()
+                .enumerate()
+                .find(|(_, entry)| {
+                    entry.name == entry_point && entry.stage == naga::ShaderStage::Compute
+                })
         else {
             return Ok(None);
         };
@@ -184,7 +204,7 @@ impl ValidatedWgslModule {
             entry_point: entry.name.clone(),
             literal_size: entry.workgroup_size,
             override_keys,
-            workgroup_storage_size: self.workgroup_storage_size()?,
+            workgroup_storage_size: self.workgroup_storage_size_for_entry(entry_index)?,
         }))
     }
 
@@ -211,7 +231,7 @@ impl ValidatedWgslModule {
             .iter()
             .filter_map(|(handle, global)| {
                 let binding = global.binding?;
-                let kind = resource_binding_kind(&self.module, global, handle)?;
+                let kind = resource_binding_kind(&self.module, global, handle, None)?;
                 let min_binding_size = if layout_ready {
                     resource_binding_min_size(&layouter, global)
                 } else {
@@ -231,6 +251,48 @@ impl ValidatedWgslModule {
                 })
             })
             .collect()
+    }
+
+    pub(crate) fn resource_bindings_for_entry(
+        &self,
+        entry_point: &str,
+    ) -> Result<Vec<ReflectedResourceBinding>, String> {
+        let Some((entry_index, _)) = self
+            .module
+            .entry_points
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.name == entry_point)
+        else {
+            return Err("shader entry point was not found for resource reflection".to_owned());
+        };
+
+        let mut layouter = naga::proc::Layouter::default();
+        let layout_ready = layouter.update(self.module.to_ctx()).is_ok();
+        Ok(self
+            .module
+            .global_variables
+            .iter()
+            .filter_map(|(handle, global)| {
+                let binding = global.binding?;
+                if self.info.get_entry_point(entry_index)[handle].is_empty() {
+                    return None;
+                }
+                let kind = resource_binding_kind(&self.module, global, handle, Some(entry_index))?;
+                let min_binding_size = if layout_ready {
+                    resource_binding_min_size(&layouter, global)
+                } else {
+                    0
+                };
+                Some(ReflectedResourceBinding {
+                    group: binding.group,
+                    binding: binding.binding,
+                    kind,
+                    min_binding_size,
+                    statically_used: true,
+                })
+            })
+            .collect())
     }
 
     pub(crate) fn fragment_builtins(&self) -> Vec<ReflectedFragmentBuiltins> {
@@ -268,18 +330,27 @@ impl ValidatedWgslModule {
             .collect()
     }
 
-    fn workgroup_storage_size(&self) -> Result<u32, String> {
+    fn workgroup_storage_size_for_entry(&self, entry_index: usize) -> Result<u64, String> {
         let mut layouter = naga::proc::Layouter::default();
         layouter
             .update(self.module.to_ctx())
             .map_err(|error| error.to_string())?;
-        Ok(self
+        let mut size = 0u64;
+        for (handle, global) in self
             .module
             .global_variables
             .iter()
-            .filter(|(_, global)| global.space == naga::AddressSpace::WorkGroup)
-            .map(|(_, global)| layouter[global.ty].size)
-            .sum())
+            .filter(|(handle, global)| {
+                global.space == naga::AddressSpace::WorkGroup
+                    && !self.info.get_entry_point(entry_index)[*handle].is_empty()
+            })
+        {
+            let global_size = u64::from(layouter[global.ty].size);
+            size = size.checked_add(global_size).ok_or_else(|| {
+                format!("compute workgroup storage size overflows at global {handle:?}")
+            })?;
+        }
+        Ok(size)
     }
 }
 
@@ -456,6 +527,7 @@ fn resource_binding_kind(
     module: &naga::Module,
     global: &naga::GlobalVariable,
     handle: naga::Handle<naga::GlobalVariable>,
+    entry_index: Option<usize>,
 ) -> Option<ReflectedResourceBindingKind> {
     match global.space {
         naga::AddressSpace::Uniform => Some(ReflectedResourceBindingKind::Buffer(
@@ -470,14 +542,32 @@ fn resource_binding_kind(
             Some(ReflectedResourceBindingKind::Buffer(ty))
         }
         naga::AddressSpace::Handle => match &module.types.get_handle(global.ty).ok()?.inner {
-            naga::TypeInner::Sampler { .. } => Some(ReflectedResourceBindingKind::Sampler),
-            naga::TypeInner::Image { class, .. } => match class {
-                naga::ImageClass::Sampled { .. } | naga::ImageClass::Depth { .. } => {
+            naga::TypeInner::Sampler { comparison } => {
+                Some(ReflectedResourceBindingKind::Sampler {
+                    comparison: *comparison,
+                })
+            }
+            naga::TypeInner::Image {
+                dim,
+                arrayed,
+                class,
+            } => match class {
+                naga::ImageClass::Sampled { kind, multi } => {
                     Some(ReflectedResourceBindingKind::Texture {
-                        sampled: matches!(class, naga::ImageClass::Sampled { .. }),
-                        sample_usage: sampled_texture_usage(module, handle),
+                        sampled: true,
+                        sample_kind: scalar_kind_class(*kind),
+                        sample_usage: sampled_texture_usage(module, handle, entry_index),
+                        view_dimension: reflected_texture_view_dimension(*dim, *arrayed),
+                        multisampled: *multi,
                     })
                 }
+                naga::ImageClass::Depth { multi } => Some(ReflectedResourceBindingKind::Texture {
+                    sampled: false,
+                    sample_kind: None,
+                    sample_usage: sampled_texture_usage(module, handle, entry_index),
+                    view_dimension: reflected_texture_view_dimension(*dim, *arrayed),
+                    multisampled: *multi,
+                }),
                 naga::ImageClass::Storage { format, access } => {
                     Some(ReflectedResourceBindingKind::StorageTexture {
                         format: format!("{format:?}"),
@@ -485,12 +575,37 @@ fn resource_binding_kind(
                             read: access.contains(naga::StorageAccess::LOAD),
                             write: access.contains(naga::StorageAccess::STORE),
                         },
+                        view_dimension: reflected_texture_view_dimension(*dim, *arrayed),
                     })
                 }
                 _ => None,
             },
             _ => None,
         },
+        _ => None,
+    }
+}
+
+fn reflected_texture_view_dimension(
+    dim: naga::ImageDimension,
+    arrayed: bool,
+) -> ReflectedTextureViewDimension {
+    match (dim, arrayed) {
+        (naga::ImageDimension::D1, _) => ReflectedTextureViewDimension::D1,
+        (naga::ImageDimension::D2, false) => ReflectedTextureViewDimension::D2,
+        (naga::ImageDimension::D2, true) => ReflectedTextureViewDimension::D2Array,
+        (naga::ImageDimension::Cube, false) => ReflectedTextureViewDimension::Cube,
+        (naga::ImageDimension::Cube, true) => ReflectedTextureViewDimension::CubeArray,
+        (naga::ImageDimension::D3, _) => ReflectedTextureViewDimension::D3,
+    }
+}
+
+fn scalar_kind_class(kind: naga::ScalarKind) -> Option<ReflectedTypeScalarClass> {
+    match kind {
+        naga::ScalarKind::Float => Some(ReflectedTypeScalarClass::Float),
+        naga::ScalarKind::Sint => Some(ReflectedTypeScalarClass::Sint),
+        naga::ScalarKind::Uint => Some(ReflectedTypeScalarClass::Uint),
+        naga::ScalarKind::Bool => Some(ReflectedTypeScalarClass::Bool),
         _ => None,
     }
 }
@@ -540,20 +655,113 @@ fn literal_value(literal: naga::Literal) -> Option<ReflectedOverrideValue> {
 fn sampled_texture_usage(
     module: &naga::Module,
     handle: naga::Handle<naga::GlobalVariable>,
+    entry_index: Option<usize>,
 ) -> ReflectedTextureSampleUsage {
-    if module.entry_points.iter().any(|entry| {
-        entry.function.expressions.iter().any(|(_, expression)| {
-            matches!(
-                expression,
-                naga::Expression::ImageSample { image, .. }
-                    if expression_global(&entry.function, *image) == Some(handle)
-            )
-        })
-    }) {
+    let sampled = if let Some(entry_index) = entry_index {
+        entry_samples_global(module, entry_index, handle)
+    } else {
+        module
+            .entry_points
+            .iter()
+            .enumerate()
+            .any(|(index, _)| entry_samples_global(module, index, handle))
+    };
+    if sampled {
         ReflectedTextureSampleUsage::Sample
     } else {
         ReflectedTextureSampleUsage::Load
     }
+}
+
+fn entry_samples_global(
+    module: &naga::Module,
+    entry_index: usize,
+    handle: naga::Handle<naga::GlobalVariable>,
+) -> bool {
+    let Some(entry) = module.entry_points.get(entry_index) else {
+        return false;
+    };
+    if function_samples_global(&entry.function, handle) {
+        return true;
+    }
+
+    let mut reachable = std::collections::BTreeSet::new();
+    collect_function_calls_from_block(&entry.function.body, &mut reachable);
+    while let Some(function) = reachable.iter().copied().find(|function| {
+        module
+            .functions
+            .try_get(*function)
+            .is_ok_and(|function| !function_calls_collected(function, &reachable))
+    }) {
+        let Ok(function_ref) = module.functions.try_get(function) else {
+            reachable.remove(&function);
+            continue;
+        };
+        let before = reachable.len();
+        collect_function_calls_from_block(&function_ref.body, &mut reachable);
+        if before == reachable.len() {
+            break;
+        }
+    }
+
+    reachable.into_iter().any(|function| {
+        module
+            .functions
+            .try_get(function)
+            .is_ok_and(|function| function_samples_global(function, handle))
+    })
+}
+
+fn function_calls_collected(
+    function: &naga::Function,
+    reachable: &std::collections::BTreeSet<naga::Handle<naga::Function>>,
+) -> bool {
+    let mut calls = std::collections::BTreeSet::new();
+    collect_function_calls_from_block(&function.body, &mut calls);
+    calls.into_iter().all(|call| reachable.contains(&call))
+}
+
+fn collect_function_calls_from_block(
+    block: &naga::Block,
+    calls: &mut std::collections::BTreeSet<naga::Handle<naga::Function>>,
+) {
+    for statement in block {
+        match statement {
+            naga::Statement::Block(block) => collect_function_calls_from_block(block, calls),
+            naga::Statement::If { accept, reject, .. } => {
+                collect_function_calls_from_block(accept, calls);
+                collect_function_calls_from_block(reject, calls);
+            }
+            naga::Statement::Switch { cases, .. } => {
+                for case in cases {
+                    collect_function_calls_from_block(&case.body, calls);
+                }
+            }
+            naga::Statement::Loop {
+                body, continuing, ..
+            } => {
+                collect_function_calls_from_block(body, calls);
+                collect_function_calls_from_block(continuing, calls);
+            }
+            naga::Statement::Call { function, .. } => {
+                calls.insert(*function);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn function_samples_global(
+    function: &naga::Function,
+    handle: naga::Handle<naga::GlobalVariable>,
+) -> bool {
+    function.expressions.iter().any(|(_, expression)| {
+        matches!(
+            expression,
+            naga::Expression::ImageSample { image, .. }
+                if expression_global(function, *image) == Some(handle)
+        )
+    })
 }
 
 fn expression_global(
@@ -573,7 +781,8 @@ fn expression_global(
 mod tests {
     use super::{
         parse_and_validate_wgsl, ReflectedBufferType, ReflectedResourceBindingKind,
-        ReflectedShaderStage, ReflectedTextureSampleUsage, ReflectedTypeScalarClass,
+        ReflectedShaderStage, ReflectedTextureSampleUsage, ReflectedTextureViewDimension,
+        ReflectedTypeScalarClass,
     };
 
     #[test]
@@ -701,7 +910,10 @@ mod tests {
             texture.kind,
             ReflectedResourceBindingKind::Texture {
                 sampled: true,
-                sample_usage: ReflectedTextureSampleUsage::Sample
+                sample_kind: Some(ReflectedTypeScalarClass::Float),
+                sample_usage: ReflectedTextureSampleUsage::Sample,
+                view_dimension: ReflectedTextureViewDimension::D2,
+                multisampled: false
             }
         );
         assert!(texture.statically_used);

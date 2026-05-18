@@ -32,4 +32,31 @@ are Claude spec-side (this commit).
 
 ## Resolution log
 
-- _filled as fixes land_
+**CLOSED** — J1–J6 fixed by codex, m1/m3/m5 fixed, m2/m4
+accepted-as-tracked (spec), reviewed by Claude, gate green (33 binaries,
+`clippy --all-targets -D warnings` clean; phase-5 tests: compute 7,
+render 14, vertex 7, get_bgl 7, caching 5, async 7).
+
+- **J1** FIXED: `shader_naga` per-entry-point binding use via
+  `info.get_entry_point(idx)[handle]`; stage attribution now from the
+  resolved entry; combined vertex+fragment module test added.
+- **J2** FIXED: `validate_shader_binding_compat` checks sampler/texture
+  (sample type, view dim, multisampled) / storage (format, access) vs
+  the layout entry; S35 mismatch tests added.
+- **J3** FIXED: `create_*_pipeline_handle(.., dispatch_errors: bool)` —
+  sync `true` (raises device error), async `false` (callback
+  `ValidationError` only); async tests assert no device error.
+- **J4** FIXED: workgroup storage `u64` + `checked_add` + scoped to the
+  entry point's reachable workgroup vars.
+- **J5** FIXED: sample-vs-load follows the entry's call graph
+  (`module.functions`) for `ImageSample`.
+- **J6** FIXED: unknown defined format ⇒ `caps()=None` (P29/P30/P32
+  reject); resolves the W5 unknown-format hole.
+- **m1** device `Limits` threaded into `*Pipeline::new`. **m3**
+  `0.0/-0.0`/NaN normalized before `to_bits` in cache keys. **m5**
+  consistent `dispatch_error` in the `try_from` branch.
+- **m2/m4** ACCEPTED: BGL-no-dedup + SHADER_FLOAT16 recorded as
+  divergences in block 40 (Claude, prior commit).
+
+Gate: no open CRITICAL/MAJOR. Phase 5 Review **CLOSED**. Commit:
+`phase-5: phase review — 11 findings (0C/6M/5m) resolved`.

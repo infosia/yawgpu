@@ -549,7 +549,7 @@ unsafe fn pipeline_constant_cache_keys(
         .iter()
         .map(|constant| PipelineConstantCacheKey {
             key: cache_string_view(constant.key).unwrap_or_default(),
-            value_bits: constant.value.to_bits(),
+            value_bits: canonical_f64_bits(constant.value),
         })
         .collect::<Vec<_>>();
     keys.sort_by(|a, b| {
@@ -558,6 +558,26 @@ unsafe fn pipeline_constant_cache_keys(
             .then_with(|| a.value_bits.cmp(&b.value_bits))
     });
     Some(keys)
+}
+
+fn canonical_f64_bits(value: f64) -> u64 {
+    if value == 0.0 {
+        0.0f64.to_bits()
+    } else if value.is_nan() {
+        f64::NAN.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+fn canonical_f32_bits(value: f32) -> u32 {
+    if value == 0.0 {
+        0.0f32.to_bits()
+    } else if value.is_nan() {
+        f32::NAN.to_bits()
+    } else {
+        value.to_bits()
+    }
 }
 
 unsafe fn vertex_buffer_cache_keys(
@@ -672,8 +692,8 @@ fn depth_stencil_state_cache_key(
         stencil_read_mask: depth_stencil.stencilReadMask,
         stencil_write_mask: depth_stencil.stencilWriteMask,
         depth_bias: depth_stencil.depthBias,
-        depth_bias_slope_scale_bits: depth_stencil.depthBiasSlopeScale.to_bits(),
-        depth_bias_clamp_bits: depth_stencil.depthBiasClamp.to_bits(),
+        depth_bias_slope_scale_bits: canonical_f32_bits(depth_stencil.depthBiasSlopeScale),
+        depth_bias_clamp_bits: canonical_f32_bits(depth_stencil.depthBiasClamp),
     }
 }
 
@@ -1511,16 +1531,23 @@ pub unsafe extern "C" fn wgpuDeviceCreateComputePipeline(
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUComputePipelineDescriptor must not be null");
-    arc_to_handle(create_compute_pipeline_handle(device, descriptor))
+    arc_to_handle(create_compute_pipeline_handle(device, descriptor, true))
 }
 
 unsafe fn create_compute_pipeline_handle(
     device: &WGPUDeviceImpl,
     descriptor: &native::WGPUComputePipelineDescriptor,
+    dispatch_errors: bool,
 ) -> Arc<WGPUComputePipelineImpl> {
     let key = compute_pipeline_cache_key(descriptor);
     let descriptor = map_compute_pipeline_descriptor(descriptor);
-    let pipeline = device.core.create_compute_pipeline(descriptor);
+    let pipeline = if dispatch_errors {
+        device.core.create_compute_pipeline(descriptor)
+    } else {
+        device
+            .core
+            .create_compute_pipeline_without_error_dispatch(descriptor)
+    };
     let handle = Arc::new(WGPUComputePipelineImpl {
         _core: Arc::new(pipeline),
         _device: Arc::clone(&device.core),
@@ -1555,7 +1582,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateComputePipelineAsync(
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUComputePipelineDescriptor must not be null");
-    let pipeline = create_compute_pipeline_handle(device, descriptor);
+    let pipeline = create_compute_pipeline_handle(device, descriptor, false);
     device
         .instance
         .register_callback(PendingCallback::CreateComputePipelineAsync {
@@ -1585,16 +1612,23 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderPipeline(
     let descriptor = descriptor
         .as_ref()
         .expect("WGPURenderPipelineDescriptor must not be null");
-    arc_to_handle(create_render_pipeline_handle(device, descriptor))
+    arc_to_handle(create_render_pipeline_handle(device, descriptor, true))
 }
 
 unsafe fn create_render_pipeline_handle(
     device: &WGPUDeviceImpl,
     descriptor: &native::WGPURenderPipelineDescriptor,
+    dispatch_errors: bool,
 ) -> Arc<WGPURenderPipelineImpl> {
     let key = render_pipeline_cache_key(descriptor);
     let descriptor = map_render_pipeline_descriptor(descriptor);
-    let pipeline = device.core.create_render_pipeline(descriptor);
+    let pipeline = if dispatch_errors {
+        device.core.create_render_pipeline(descriptor)
+    } else {
+        device
+            .core
+            .create_render_pipeline_without_error_dispatch(descriptor)
+    };
     let handle = Arc::new(WGPURenderPipelineImpl {
         _core: Arc::new(pipeline),
         _device: Arc::clone(&device.core),
@@ -1629,7 +1663,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderPipelineAsync(
     let descriptor = descriptor
         .as_ref()
         .expect("WGPURenderPipelineDescriptor must not be null");
-    let pipeline = create_render_pipeline_handle(device, descriptor);
+    let pipeline = create_render_pipeline_handle(device, descriptor, false);
     device
         .instance
         .register_callback(PendingCallback::CreateRenderPipelineAsync {
@@ -1689,6 +1723,10 @@ fn get_pipeline_bind_group_layout(
     group_index: u32,
 ) -> native::WGPUBindGroupLayout {
     let Ok(index) = usize::try_from(group_index) else {
+        device.dispatch_error(
+            core::ErrorKind::Validation,
+            "pipeline bind group layout index is out of range",
+        );
         return error_bind_group_layout_handle(device, instance);
     };
     let Some(layout) = layouts.get(index) else {
@@ -2626,6 +2664,24 @@ pub unsafe fn testing_dispatch_device_error(
     message: impl Into<String>,
 ) {
     borrow_handle(device, "WGPUDevice").dispatch_error(kind, message);
+}
+
+/// Returns a bind group layout entry's visibility for validation tests.
+///
+/// # Safety
+///
+/// `layout` must be a non-null live yawgpu bind group layout handle.
+#[doc(hidden)]
+pub unsafe fn testing_bind_group_layout_entry_visibility(
+    layout: native::WGPUBindGroupLayout,
+    binding: u32,
+) -> Option<u64> {
+    borrow_handle(layout, "WGPUBindGroupLayout")
+        ._core
+        .entries()
+        .iter()
+        .find(|entry| entry.binding == binding)
+        .map(|entry| entry.visibility)
 }
 
 /// Returns the device label for validation tests.
