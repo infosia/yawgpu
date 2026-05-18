@@ -1761,6 +1761,11 @@ impl BindGroupLayout {
     pub fn is_default(&self) -> bool {
         self.inner.is_default
     }
+
+    #[must_use]
+    pub fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1815,6 +1820,16 @@ impl BindGroup {
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
+    }
+
+    #[must_use]
+    pub fn layout(&self) -> &Arc<BindGroupLayout> {
+        &self.inner._layout
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[BindGroupEntry] {
+        &self.inner._entries
     }
 }
 
@@ -3177,6 +3192,11 @@ impl RenderPipeline {
     #[must_use]
     pub fn bind_group_layouts(&self) -> &[Arc<BindGroupLayout>] {
         &self.inner.bind_group_layouts
+    }
+
+    #[must_use]
+    pub fn required_vertex_buffer_count(&self) -> usize {
+        self.inner._vertex.buffer_count
     }
 }
 
@@ -4933,6 +4953,25 @@ struct PassEncoderInner {
 struct PassEncoderState {
     ended: bool,
     debug_group_depth: u32,
+    render_pipeline: Option<Arc<RenderPipeline>>,
+    compute_pipeline: Option<Arc<ComputePipeline>>,
+    bind_groups: BTreeMap<u32, BoundBindGroup>,
+    vertex_buffers: BTreeSet<u32>,
+    index_buffer: Option<BoundIndexBuffer>,
+}
+
+#[derive(Debug, Clone)]
+struct BoundBindGroup {
+    group: Arc<BindGroup>,
+    dynamic_offsets: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct BoundIndexBuffer {
+    _buffer: Arc<Buffer>,
+    _format: IndexFormat,
+    _offset: u64,
+    _size: u64,
 }
 
 impl CommandEncoder {
@@ -5832,6 +5871,20 @@ impl PassEncoderInner {
         }
     }
 
+    fn record_pass_command<F>(&self, command: F) -> Option<String>
+    where
+        F: FnOnce(&mut PassEncoderState) -> Result<(), String>,
+    {
+        if let Err(message) = self.pass_command_guard() {
+            return Some(message);
+        }
+        let mut state = self.state.lock();
+        if let Err(message) = command(&mut state) {
+            self.parent.record_first_error(message);
+        }
+        None
+    }
+
     fn pass_command_guard(&self) -> Result<(), String> {
         if self.parent.is_finished() {
             let message = "pass encoder cannot be used after parent encoder finish".to_owned();
@@ -5863,6 +5916,120 @@ impl RenderPassEncoder {
     pub fn pop_debug_group(&self) -> Option<String> {
         self.inner.pop_debug_group()
     }
+
+    pub fn set_pipeline(&self, pipeline: Arc<RenderPipeline>) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            state.render_pipeline = Some(pipeline);
+            Ok(())
+        })
+    }
+
+    pub fn set_bind_group(
+        &self,
+        index: u32,
+        group: Option<Arc<BindGroup>>,
+        dynamic_offsets: Vec<u32>,
+    ) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            if let Some(group) = group {
+                state.bind_groups.insert(
+                    index,
+                    BoundBindGroup {
+                        group,
+                        dynamic_offsets,
+                    },
+                );
+            } else {
+                state.bind_groups.remove(&index);
+            }
+            Ok(())
+        })
+    }
+
+    pub fn set_vertex_buffer(
+        &self,
+        slot: u32,
+        buffer: Option<Arc<Buffer>>,
+        _offset: u64,
+        _size: u64,
+    ) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            if buffer.is_some() {
+                state.vertex_buffers.insert(slot);
+            } else {
+                state.vertex_buffers.remove(&slot);
+            }
+            Ok(())
+        })
+    }
+
+    pub fn set_index_buffer(
+        &self,
+        buffer: Arc<Buffer>,
+        format: IndexFormat,
+        offset: u64,
+        size: u64,
+    ) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            state.index_buffer = Some(BoundIndexBuffer {
+                _buffer: buffer,
+                _format: format,
+                _offset: offset,
+                _size: size,
+            });
+            Ok(())
+        })
+    }
+
+    pub fn draw(&self, limits: Limits) -> Option<String> {
+        self.inner
+            .record_pass_command(|state| validate_render_draw_state(state, limits, false))
+    }
+
+    pub fn draw_indexed(&self, limits: Limits) -> Option<String> {
+        self.inner
+            .record_pass_command(|state| validate_render_draw_state(state, limits, true))
+    }
+
+    pub fn set_viewport(
+        &self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        min_depth: f32,
+        max_depth: f32,
+    ) -> Option<String> {
+        self.inner
+            .record_pass_command(|_| validate_viewport(x, y, width, height, min_depth, max_depth))
+    }
+
+    pub fn set_scissor_rect(&self, x: u32, y: u32, width: u32, height: u32) -> Option<String> {
+        self.inner.record_pass_command(|_| {
+            x.checked_add(width)
+                .ok_or_else(|| "render pass scissor rectangle width overflows".to_owned())?;
+            y.checked_add(height)
+                .ok_or_else(|| "render pass scissor rectangle height overflows".to_owned())?;
+            Ok(())
+        })
+    }
+
+    pub fn set_blend_constant(&self, color: Color) -> Option<String> {
+        self.inner.record_pass_command(|_| {
+            if [color.r, color.g, color.b, color.a]
+                .into_iter()
+                .all(f64::is_finite)
+            {
+                Ok(())
+            } else {
+                Err("render pass blend constant components must be finite".to_owned())
+            }
+        })
+    }
+
+    pub fn set_stencil_reference(&self, _reference: u32) -> Option<String> {
+        self.inner.record_pass_command(|_| Ok(()))
+    }
 }
 
 impl ComputePassEncoder {
@@ -5881,6 +6048,215 @@ impl ComputePassEncoder {
     pub fn pop_debug_group(&self) -> Option<String> {
         self.inner.pop_debug_group()
     }
+
+    pub fn set_pipeline(&self, pipeline: Arc<ComputePipeline>) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            state.compute_pipeline = Some(pipeline);
+            Ok(())
+        })
+    }
+
+    pub fn set_bind_group(
+        &self,
+        index: u32,
+        group: Option<Arc<BindGroup>>,
+        dynamic_offsets: Vec<u32>,
+    ) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            if let Some(group) = group {
+                state.bind_groups.insert(
+                    index,
+                    BoundBindGroup {
+                        group,
+                        dynamic_offsets,
+                    },
+                );
+            } else {
+                state.bind_groups.remove(&index);
+            }
+            Ok(())
+        })
+    }
+
+    pub fn dispatch_workgroups(&self, x: u32, y: u32, z: u32, limits: Limits) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            validate_compute_dispatch_state(state, limits)?;
+            if x > limits.max_compute_workgroups_per_dimension
+                || y > limits.max_compute_workgroups_per_dimension
+                || z > limits.max_compute_workgroups_per_dimension
+            {
+                return Err("compute dispatch workgroup count exceeds the device limit".to_owned());
+            }
+            Ok(())
+        })
+    }
+}
+
+fn validate_render_draw_state(
+    state: &PassEncoderState,
+    limits: Limits,
+    indexed: bool,
+) -> Result<(), String> {
+    let Some(pipeline) = &state.render_pipeline else {
+        return Err("render pass draw requires a render pipeline".to_owned());
+    };
+    if pipeline.is_error() {
+        return Err("render pass draw requires a valid render pipeline".to_owned());
+    }
+    validate_pipeline_bind_groups(pipeline.bind_group_layouts(), &state.bind_groups, limits)?;
+    for slot in 0..pipeline.required_vertex_buffer_count() {
+        let slot = u32::try_from(slot)
+            .map_err(|_| "render pipeline vertex buffer slot is too large".to_owned())?;
+        if !state.vertex_buffers.contains(&slot) {
+            return Err(
+                "render pass draw requires all declared vertex buffers to be set".to_owned(),
+            );
+        }
+    }
+    if indexed && state.index_buffer.is_none() {
+        return Err("render pass indexed draw requires an index buffer".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_compute_dispatch_state(state: &PassEncoderState, limits: Limits) -> Result<(), String> {
+    let Some(pipeline) = &state.compute_pipeline else {
+        return Err("compute dispatch requires a compute pipeline".to_owned());
+    };
+    if pipeline.is_error() {
+        return Err("compute dispatch requires a valid compute pipeline".to_owned());
+    }
+    validate_pipeline_bind_groups(pipeline.bind_group_layouts(), &state.bind_groups, limits)
+}
+
+fn validate_pipeline_bind_groups(
+    required_layouts: &[Arc<BindGroupLayout>],
+    bound_groups: &BTreeMap<u32, BoundBindGroup>,
+    limits: Limits,
+) -> Result<(), String> {
+    for (index, required_layout) in required_layouts.iter().enumerate() {
+        let index = u32::try_from(index)
+            .map_err(|_| "pipeline bind group index is too large".to_owned())?;
+        let Some(bound) = bound_groups.get(&index) else {
+            return Err("pipeline requires a missing bind group".to_owned());
+        };
+        if bound.group.is_error() {
+            return Err("pipeline cannot use an error bind group".to_owned());
+        }
+        if !bind_group_layouts_compatible(required_layout, bound.group.layout()) {
+            return Err("pipeline bind group layout is incompatible".to_owned());
+        }
+        validate_dynamic_offsets(
+            required_layout,
+            &bound.group,
+            &bound.dynamic_offsets,
+            limits,
+        )?;
+    }
+    Ok(())
+}
+
+fn bind_group_layouts_compatible(
+    required: &Arc<BindGroupLayout>,
+    actual: &Arc<BindGroupLayout>,
+) -> bool {
+    if required.is_default() || actual.is_default() {
+        return required.same(actual);
+    }
+    required.entries() == actual.entries()
+}
+
+fn validate_dynamic_offsets(
+    layout: &BindGroupLayout,
+    group: &BindGroup,
+    dynamic_offsets: &[u32],
+    limits: Limits,
+) -> Result<(), String> {
+    let dynamic_entries = layout
+        .entries()
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.kind,
+                Some(BindingLayoutKind::Buffer {
+                    has_dynamic_offset: true,
+                    ..
+                })
+            )
+        })
+        .collect::<Vec<_>>();
+    if dynamic_offsets.len() != dynamic_entries.len() {
+        return Err("bind group dynamic offset count is invalid".to_owned());
+    }
+
+    for (layout_entry, dynamic_offset) in dynamic_entries.into_iter().zip(dynamic_offsets.iter()) {
+        let Some(group_entry) = group
+            .entries()
+            .iter()
+            .find(|entry| entry.binding == layout_entry.binding)
+        else {
+            return Err("bind group dynamic offset binding is missing".to_owned());
+        };
+        let Some(BindingLayoutKind::Buffer { ty, .. }) = layout_entry.kind else {
+            continue;
+        };
+        let alignment = match ty {
+            BufferBindingType::Uniform => limits.min_uniform_buffer_offset_alignment,
+            BufferBindingType::Storage | BufferBindingType::ReadOnlyStorage => {
+                limits.min_storage_buffer_offset_alignment
+            }
+        };
+        if *dynamic_offset % alignment != 0 {
+            return Err("bind group dynamic offset is not aligned".to_owned());
+        }
+        let BindGroupResource::Buffer {
+            buffer,
+            offset,
+            size,
+            ..
+        } = &group_entry.resource
+        else {
+            return Err("bind group dynamic offset requires a buffer binding".to_owned());
+        };
+        let dynamic_offset = u64::from(*dynamic_offset);
+        let base = offset
+            .checked_add(dynamic_offset)
+            .ok_or_else(|| "bind group dynamic offset range overflows".to_owned())?;
+        if base > buffer.size() {
+            return Err("bind group dynamic offset exceeds buffer size".to_owned());
+        }
+        if *size != u64::MAX && dynamic_offset > *size {
+            return Err("bind group dynamic offset exceeds binding size".to_owned());
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_viewport(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    min_depth: f32,
+    max_depth: f32,
+) -> Result<(), String> {
+    if ![x, y, width, height, min_depth, max_depth]
+        .into_iter()
+        .all(f32::is_finite)
+    {
+        return Err("render pass viewport values must be finite".to_owned());
+    }
+    if width < 0.0 || height < 0.0 {
+        return Err("render pass viewport width and height must be non-negative".to_owned());
+    }
+    if !(0.0..=1.0).contains(&min_depth)
+        || !(0.0..=1.0).contains(&max_depth)
+        || min_depth > max_depth
+    {
+        return Err("render pass viewport depth range is invalid".to_owned());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
