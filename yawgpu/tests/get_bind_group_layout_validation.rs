@@ -52,6 +52,41 @@ fn render_auto_layout_aggregates_bindings_across_stages() {
 }
 
 #[test]
+fn render_combined_module_auto_layout_uses_entry_point_stage_visibility() {
+    let test = ValidationTest::new();
+    unsafe {
+        let source = "struct U { value: vec4f }
+             @group(0) @binding(0) var<uniform> u: U;
+             @vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }
+             @fragment fn fs() -> @location(0) vec4f { return u.value; }";
+        let pipeline = create_render_pipeline_from_combined_module(&test, source, None);
+        let layout = yawgpu::wgpuRenderPipelineGetBindGroupLayout(pipeline, 0);
+
+        assert_eq!(
+            yawgpu::testing_bind_group_layout_entry_visibility(layout, 0),
+            Some(native::WGPUShaderStage_Fragment)
+        );
+
+        yawgpu::wgpuBindGroupLayoutRelease(layout);
+        yawgpu::wgpuRenderPipelineRelease(pipeline);
+
+        let bgl = create_bind_group_layout(
+            test.device(),
+            &[uniform_layout(0, native::WGPUShaderStage_Fragment, 16)],
+        );
+        let pipeline_layout = create_pipeline_layout(test.device(), &[bgl]);
+        test.clear_errors();
+        let explicit_pipeline =
+            create_render_pipeline_from_combined_module(&test, source, Some(pipeline_layout));
+        assert!(test.errors().is_empty());
+
+        yawgpu::wgpuRenderPipelineRelease(explicit_pipeline);
+        yawgpu::wgpuPipelineLayoutRelease(pipeline_layout);
+        yawgpu::wgpuBindGroupLayoutRelease(bgl);
+    }
+}
+
+#[test]
 fn default_bind_group_layouts_are_rejected_by_create_pipeline_layout() {
     let test = ValidationTest::new();
     unsafe {
@@ -99,6 +134,8 @@ fn texture_sample_type_is_derived_from_usage() {
         let sampled_layout = yawgpu::wgpuComputePipelineGetBindGroupLayout(sampled_pipeline, 0);
         let load_pipeline = create_compute_pipeline(&test, compute_texture_load(), None);
         let load_layout = yawgpu::wgpuComputePipelineGetBindGroupLayout(load_pipeline, 0);
+        let helper_pipeline = create_compute_pipeline(&test, compute_texture_helper_sample(), None);
+        let helper_layout = yawgpu::wgpuComputePipelineGetBindGroupLayout(helper_pipeline, 0);
 
         let sampler = create_sampler(test.device());
         let depth_texture = create_texture(
@@ -113,6 +150,11 @@ fn texture_sample_type_is_derived_from_usage() {
             sampled_layout,
             &[sampler_binding(0, sampler), texture_binding(1, depth_view)],
         );
+        assert_bind_group_error(
+            &test,
+            helper_layout,
+            &[sampler_binding(0, sampler), texture_binding(1, depth_view)],
+        );
         assert_bind_group_ok(&test, load_layout, &[texture_binding(0, depth_view)]);
 
         yawgpu::wgpuTextureViewRelease(depth_view);
@@ -120,6 +162,8 @@ fn texture_sample_type_is_derived_from_usage() {
         yawgpu::wgpuSamplerRelease(sampler);
         yawgpu::wgpuBindGroupLayoutRelease(load_layout);
         yawgpu::wgpuComputePipelineRelease(load_pipeline);
+        yawgpu::wgpuBindGroupLayoutRelease(helper_layout);
+        yawgpu::wgpuComputePipelineRelease(helper_pipeline);
         yawgpu::wgpuBindGroupLayoutRelease(sampled_layout);
         yawgpu::wgpuComputePipelineRelease(sampled_pipeline);
     }
@@ -287,6 +331,62 @@ unsafe fn create_render_pipeline(
     let pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(test.device(), &descriptor);
     yawgpu::wgpuShaderModuleRelease(fragment_module);
     yawgpu::wgpuShaderModuleRelease(vertex_module);
+    pipeline
+}
+
+unsafe fn create_render_pipeline_from_combined_module(
+    test: &ValidationTest,
+    source: &str,
+    layout: Option<native::WGPUPipelineLayout>,
+) -> native::WGPURenderPipeline {
+    let module = create_wgsl_module(test.device(), source);
+    let color_target = native::WGPUColorTargetState {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        blend: std::ptr::null(),
+        writeMask: native::WGPUColorWriteMask_All,
+    };
+    let fragment = native::WGPUFragmentState {
+        nextInChain: std::ptr::null_mut(),
+        module,
+        entryPoint: string_view("fs"),
+        constantCount: 0,
+        constants: std::ptr::null(),
+        targetCount: 1,
+        targets: &color_target,
+    };
+    let descriptor = native::WGPURenderPipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout: layout.unwrap_or(std::ptr::null()),
+        vertex: native::WGPUVertexState {
+            nextInChain: std::ptr::null_mut(),
+            module,
+            entryPoint: string_view("vs"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            bufferCount: 0,
+            buffers: std::ptr::null(),
+        },
+        primitive: native::WGPUPrimitiveState {
+            nextInChain: std::ptr::null_mut(),
+            topology: native::WGPUPrimitiveTopology_TriangleList,
+            stripIndexFormat: native::WGPUIndexFormat_Undefined,
+            frontFace: native::WGPUFrontFace_Undefined,
+            cullMode: native::WGPUCullMode_Undefined,
+            unclippedDepth: 0,
+        },
+        depthStencil: std::ptr::null(),
+        multisample: native::WGPUMultisampleState {
+            nextInChain: std::ptr::null_mut(),
+            count: 1,
+            mask: 0xFFFF_FFFF,
+            alphaToCoverageEnabled: 0,
+        },
+        fragment: &fragment,
+    };
+    let pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(test.device(), &descriptor);
+    yawgpu::wgpuShaderModuleRelease(module);
     pipeline
 }
 
@@ -517,6 +617,17 @@ fn compute_texture_load() -> &'static str {
     "@group(0) @binding(0) var tex: texture_2d<f32>;
      @compute @workgroup_size(1) fn main() {
          _ = textureLoad(tex, vec2i(0), 0);
+     }"
+}
+
+fn compute_texture_helper_sample() -> &'static str {
+    "@group(0) @binding(0) var samp: sampler;
+     @group(0) @binding(1) var tex: texture_2d<f32>;
+     fn sample_helper() -> vec4f {
+         return textureSampleLevel(tex, samp, vec2f(0.5), 0.0);
+     }
+     @compute @workgroup_size(1) fn main() {
+         _ = sample_helper();
      }"
 }
 

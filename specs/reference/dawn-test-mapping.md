@@ -29,15 +29,15 @@ Status legend: ☐ not started · ◐ partial · ☑ ported & green
 | `ShaderModuleValidationTests` | 4 | `shader_module_validation.rs` | ☑ (S1–S7,S9,S11; S8→P5, S10 N/A) |
 | `WGSLFeatureValidationTests` | 4 | `shader_module_validation.rs` | ◐ (S11 rejected-direction; AllowUnsafeAPIs non-canonical divergence) |
 | `BindGroupValidationTests` | 4 | `bind_group_layout_validation.rs` + `bind_group_validation.rs` | ☑ (S12–S33,S35-BG; S34 N/A) |
-| `GetBindGroupLayoutValidationTests` | 4→5 | `get_bind_group_layout_validation.rs` | ☐ Defer→P5 (S43–S44, needs Pipeline) |
-| `MinimumBufferSizeValidationTests` (bind) | 4→5 | `bind_group_validation.rs` | ◐ (S35 BG-part done; shader-vs-layout→P5) |
-| `OverridableConstantsValidationTests` | 4→5 | `overridable_constants_validation.rs` | ☐ Defer→P5 (S39–S42, pipeline-constant context) |
+| `GetBindGroupLayoutValidationTests` | 4→5 | `get_bind_group_layout_validation.rs` | ☑ (P38–P42; draw-time P41 cross-pipeline→P6) |
+| `MinimumBufferSizeValidationTests` (bind) | 4→5 | `bind_group_validation.rs` + pipeline S35 | ☑ (S35 BG-part + pipeline layout/shader compat done) |
+| `OverridableConstantsValidationTests` | 4→5 | `compute_pipeline_validation.rs` + render | ☑ (P5/P6/P37 via pipeline constants) |
 | `ImmediateDataTests` | 4 | `pipeline_layout_validation.rs` | ◐ (S37 PipelineLayout immediateSize; pipeline use→P5) |
-| `RenderPipelineValidationTests` | 5 | `render_pipeline_validation.rs` | ☐ |
-| `ComputeValidationTests` | 5 | `compute_validation.rs` | ☐ |
-| `PipelineAndPassCompatibilityTests` | 5 | `pipeline_pass_compat_validation.rs` | ☐ |
-| `VertexStateValidationTests` | 5 | `vertex_state_validation.rs` | ☐ |
-| `ObjectCachingTests` | 5 | `object_caching_validation.rs` | ☐ |
+| `RenderPipelineValidationTests` | 5 | `render_pipeline_validation.rs` | ☑ (P7–P37) |
+| `ComputeValidationTests` | 5 | `compute_pipeline_validation.rs` | ☑ (P1–P6) |
+| `PipelineAndPassCompatibilityTests` | 5→6 | `pipeline_pass_compat_validation.rs` | ◐ (pipeline-create part; render-pass compat→P6) |
+| `VertexStateValidationTests` | 5 | `vertex_state_validation.rs` | ☑ (P10–P17) |
+| `ObjectCachingTests` | 5 | `object_caching_validation.rs` | ☑ (P43–P50) |
 | `CommandBufferValidationTests` | 6 | `command_buffer_validation.rs` | ☐ |
 | `CopyCommandsValidationTests` | 6 | `copy_commands_validation.rs` | ☐ |
 | `RenderPassDescriptorValidationTests` | 6 | `render_pass_descriptor_validation.rs` | ☐ |

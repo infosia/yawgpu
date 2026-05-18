@@ -299,6 +299,43 @@ fn explicit_and_auto_layouts_are_validated() {
         yawgpu::wgpuBindGroupLayoutRelease(empty_bgl);
         yawgpu::wgpuPipelineLayoutRelease(matching_layout);
         yawgpu::wgpuBindGroupLayoutRelease(matching_bgl);
+
+        let texture_source = "@group(0) @binding(0) var tex: texture_2d<u32>;
+             @compute @workgroup_size(1) fn main() {
+                 _ = textureLoad(tex, vec2i(0), 0);
+             }";
+        let wrong_texture_bgl = create_bind_group_layout(
+            test.device(),
+            &[texture_layout(
+                0,
+                native::WGPUTextureSampleType_Float,
+                native::WGPUTextureViewDimension_2D,
+            )],
+        );
+        let wrong_texture_layout = create_pipeline_layout(test.device(), &[wrong_texture_bgl]);
+        assert_pipeline_error(&test, texture_source, None, &[], Some(wrong_texture_layout));
+
+        let storage_source =
+            "@group(0) @binding(0) var image: texture_storage_2d<rgba8unorm, write>;
+             @compute @workgroup_size(1) fn main() {
+                 textureStore(image, vec2i(0), vec4f());
+             }";
+        let wrong_storage_bgl = create_bind_group_layout(
+            test.device(),
+            &[storage_texture_layout(
+                0,
+                native::WGPUStorageTextureAccess_WriteOnly,
+                native::WGPUTextureFormat_RGBA8Sint,
+                native::WGPUTextureViewDimension_2D,
+            )],
+        );
+        let wrong_storage_layout = create_pipeline_layout(test.device(), &[wrong_storage_bgl]);
+        assert_pipeline_error(&test, storage_source, None, &[], Some(wrong_storage_layout));
+
+        yawgpu::wgpuPipelineLayoutRelease(wrong_storage_layout);
+        yawgpu::wgpuBindGroupLayoutRelease(wrong_storage_bgl);
+        yawgpu::wgpuPipelineLayoutRelease(wrong_texture_layout);
+        yawgpu::wgpuBindGroupLayoutRelease(wrong_texture_bgl);
     }
 }
 
@@ -465,6 +502,30 @@ fn uniform_layout(
 fn sampler_layout(binding: u32) -> native::WGPUBindGroupLayoutEntry {
     let mut entry = default_layout(binding, native::WGPUShaderStage_Compute);
     entry.sampler.type_ = native::WGPUSamplerBindingType_Filtering;
+    entry
+}
+
+fn texture_layout(
+    binding: u32,
+    sample_type: native::WGPUTextureSampleType,
+    view_dimension: native::WGPUTextureViewDimension,
+) -> native::WGPUBindGroupLayoutEntry {
+    let mut entry = default_layout(binding, native::WGPUShaderStage_Compute);
+    entry.texture.sampleType = sample_type;
+    entry.texture.viewDimension = view_dimension;
+    entry
+}
+
+fn storage_texture_layout(
+    binding: u32,
+    access: native::WGPUStorageTextureAccess,
+    format: native::WGPUTextureFormat,
+    view_dimension: native::WGPUTextureViewDimension,
+) -> native::WGPUBindGroupLayoutEntry {
+    let mut entry = default_layout(binding, native::WGPUShaderStage_Compute);
+    entry.storageTexture.access = access;
+    entry.storageTexture.format = format;
+    entry.storageTexture.viewDimension = view_dimension;
     entry
 }
 

@@ -55,18 +55,16 @@ fn invalid_compute_pipeline_async_reports_validation_error() {
         let descriptor = compute_pipeline_descriptor(module);
         let mut state = PipelineAsyncState::<native::WGPUComputePipeline>::default();
 
-        test.assert_device_error_after(
-            || {
-                create_compute_pipeline_async(
-                    test.device(),
-                    &descriptor,
-                    native::WGPUCallbackMode_AllowProcessEvents,
-                    &mut state,
-                );
-            },
-            None,
+        test.clear_errors();
+        create_compute_pipeline_async(
+            test.device(),
+            &descriptor,
+            native::WGPUCallbackMode_AllowProcessEvents,
+            &mut state,
         );
+        assert!(test.errors().is_empty());
         yawgpu::wgpuInstanceProcessEvents(test.instance());
+        assert!(test.errors().is_empty());
 
         assert_eq!(state.calls, 1);
         assert_eq!(
@@ -125,18 +123,16 @@ fn invalid_render_pipeline_async_reports_validation_error() {
         let descriptor = render_pipeline_descriptor(vertex, fragment);
         let mut state = PipelineAsyncState::<native::WGPURenderPipeline>::default();
 
-        test.assert_device_error_after(
-            || {
-                create_render_pipeline_async(
-                    test.device(),
-                    &descriptor,
-                    native::WGPUCallbackMode_AllowProcessEvents,
-                    &mut state,
-                );
-            },
-            None,
+        test.clear_errors();
+        create_render_pipeline_async(
+            test.device(),
+            &descriptor,
+            native::WGPUCallbackMode_AllowProcessEvents,
+            &mut state,
         );
+        assert!(test.errors().is_empty());
         yawgpu::wgpuInstanceProcessEvents(test.instance());
+        assert!(test.errors().is_empty());
 
         assert_eq!(state.calls, 1);
         assert_eq!(
