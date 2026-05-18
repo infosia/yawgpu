@@ -1128,6 +1128,42 @@ pub unsafe fn map_render_pass_descriptor(
     }
 }
 
+/// Maps a render bundle encoder descriptor.
+///
+/// # Safety
+///
+/// `colorFormats` must point to `colorFormatCount` elements when the count is
+/// non-zero.
+pub unsafe fn map_render_bundle_encoder_descriptor(
+    value: &native::WGPURenderBundleEncoderDescriptor,
+    max_color_attachments: u32,
+) -> core::RenderBundleEncoderDescriptor {
+    let color_format_count = value
+        .colorFormatCount
+        .min(max_color_attachments as usize + 1);
+    let color_formats = if color_format_count == 0 || value.colorFormats.is_null() {
+        vec![None; color_format_count]
+    } else {
+        std::slice::from_raw_parts(value.colorFormats, color_format_count)
+            .iter()
+            .copied()
+            .map(|format| {
+                (format != native::WGPUTextureFormat_Undefined)
+                    .then_some(map_texture_format(format))
+            })
+            .collect()
+    };
+    core::RenderBundleEncoderDescriptor {
+        max_color_attachments,
+        color_formats,
+        depth_stencil_format: (value.depthStencilFormat != native::WGPUTextureFormat_Undefined)
+            .then_some(map_texture_format(value.depthStencilFormat)),
+        sample_count: value.sampleCount,
+        depth_read_only: value.depthReadOnly != 0,
+        stencil_read_only: value.stencilReadOnly != 0,
+    }
+}
+
 unsafe fn map_render_pass_color_attachment(
     value: &native::WGPURenderPassColorAttachment,
 ) -> Option<core::RenderPassColorAttachment> {

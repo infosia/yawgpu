@@ -14,7 +14,8 @@ use crate::conv::{
     map_compute_pipeline_descriptor, map_device_lost_callback_info, map_device_lost_reason,
     map_extent_3d, map_feature, map_feature_level, map_features_to_native, map_limits,
     map_limits_to_native, map_map_async_status, map_map_mode, map_origin_3d,
-    map_pipeline_layout_descriptor, map_queue_work_done_status, map_render_pass_descriptor,
+    map_pipeline_layout_descriptor, map_queue_work_done_status,
+    map_render_bundle_encoder_descriptor, map_render_pass_descriptor,
     map_render_pipeline_descriptor, map_sampler_descriptor, map_shader_module_descriptor,
     map_texel_copy_buffer_layout, map_texel_copy_texture_info_parts, map_texture_aspect,
     map_texture_descriptor, map_texture_dimension_to_native, map_texture_format_to_native,
@@ -251,12 +252,7 @@ macro_rules! declare_empty_impl_handles {
     };
 }
 
-declare_empty_impl_handles!(
-    WGPUQuerySetImpl,
-    WGPURenderBundleImpl,
-    WGPURenderBundleEncoderImpl,
-    WGPUSurfaceImpl,
-);
+declare_empty_impl_handles!(WGPUQuerySetImpl, WGPUSurfaceImpl,);
 
 pub struct WGPUCommandEncoderImpl {
     core: Arc<core::CommandEncoder>,
@@ -281,6 +277,18 @@ pub struct WGPUComputePassEncoderImpl {
     core: Arc<core::ComputePassEncoder>,
     device: Arc<core::Device>,
     _parent: Arc<core::CommandEncoder>,
+    _instance: Arc<WGPUInstanceImpl>,
+}
+
+pub struct WGPURenderBundleEncoderImpl {
+    core: Arc<core::RenderBundleEncoder>,
+    device: Arc<core::Device>,
+    _instance: Arc<WGPUInstanceImpl>,
+}
+
+pub struct WGPURenderBundleImpl {
+    core: Arc<core::RenderBundle>,
+    _device: Arc<core::Device>,
     _instance: Arc<WGPUInstanceImpl>,
 }
 
@@ -1717,6 +1725,33 @@ pub unsafe extern "C" fn wgpuDeviceCreateCommandEncoder(
     }))
 }
 
+/// Creates a render bundle encoder on a device.
+///
+/// # Safety
+///
+/// `device` and `descriptor` must be non-null live yawgpu pointers.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceCreateRenderBundleEncoder(
+    device: native::WGPUDevice,
+    descriptor: *const native::WGPURenderBundleEncoderDescriptor,
+) -> native::WGPURenderBundleEncoder {
+    let device = borrow_handle(device, "WGPUDevice");
+    let descriptor = descriptor
+        .as_ref()
+        .expect("WGPURenderBundleEncoderDescriptor must not be null");
+    let descriptor = map_render_bundle_encoder_descriptor(
+        descriptor,
+        device.core.limits().max_color_attachments,
+    );
+    let (encoder, error) = core::RenderBundleEncoder::new(descriptor, device.core.limits());
+    dispatch_optional_error(&device.core, error);
+    arc_to_handle(Arc::new(WGPURenderBundleEncoderImpl {
+        core: Arc::new(encoder),
+        device: Arc::clone(&device.core),
+        _instance: Arc::clone(&device.instance),
+    }))
+}
+
 /// Begins a render pass.
 ///
 /// # Safety
@@ -2386,6 +2421,286 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetStencilReference(
     dispatch_optional_error(&pass.device, pass.core.set_stencil_reference(reference));
 }
 
+/// Executes render bundles in a render pass.
+///
+/// # Safety
+///
+/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+/// `bundles` must point to `bundle_count` live render bundle handles when the
+/// count is non-zero.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderExecuteBundles(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+    bundle_count: usize,
+    bundles: *const native::WGPURenderBundle,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    let bundles = render_bundle_slice(bundle_count, bundles);
+    dispatch_optional_error(&pass.device, pass.core.execute_bundles(&bundles));
+}
+
+/// Sets the render pipeline for a render bundle encoder.
+///
+/// # Safety
+///
+/// `render_bundle_encoder` and `pipeline` must be non-null live yawgpu handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleEncoderSetPipeline(
+    render_bundle_encoder: native::WGPURenderBundleEncoder,
+    pipeline: native::WGPURenderPipeline,
+) {
+    let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+    let pipeline = clone_handle(pipeline, "WGPURenderPipeline");
+    dispatch_optional_error(
+        &encoder.device,
+        encoder.core.set_pipeline(Arc::clone(&pipeline._core)),
+    );
+}
+
+/// Sets or clears a render bundle bind group.
+///
+/// # Safety
+///
+/// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+/// `group` may be null. `dynamic_offsets` must point to `dynamic_offset_count`
+/// elements when the count is non-zero.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleEncoderSetBindGroup(
+    render_bundle_encoder: native::WGPURenderBundleEncoder,
+    group_index: u32,
+    group: native::WGPUBindGroup,
+    dynamic_offset_count: usize,
+    dynamic_offsets: *const u32,
+) {
+    let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+    let group =
+        (!group.is_null()).then(|| clone_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
+    let offsets = dynamic_offsets_slice(dynamic_offset_count, dynamic_offsets);
+    dispatch_optional_error(
+        &encoder.device,
+        encoder.core.set_bind_group(
+            group_index,
+            group.map(|group| Arc::clone(&group._core)),
+            offsets,
+        ),
+    );
+}
+
+/// Sets or clears a render bundle vertex buffer.
+///
+/// # Safety
+///
+/// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+/// `buffer` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleEncoderSetVertexBuffer(
+    render_bundle_encoder: native::WGPURenderBundleEncoder,
+    slot: u32,
+    buffer: native::WGPUBuffer,
+    offset: u64,
+    size: u64,
+) {
+    let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+    let buffer = (!buffer.is_null()).then(|| clone_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer"));
+    dispatch_optional_error(
+        &encoder.device,
+        encoder.core.set_vertex_buffer(
+            slot,
+            buffer.map(|buffer| Arc::clone(&buffer.core)),
+            offset,
+            size,
+            encoder.device.limits(),
+        ),
+    );
+}
+
+/// Sets a render bundle index buffer.
+///
+/// # Safety
+///
+/// `render_bundle_encoder` and `buffer` must be non-null live yawgpu handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleEncoderSetIndexBuffer(
+    render_bundle_encoder: native::WGPURenderBundleEncoder,
+    buffer: native::WGPUBuffer,
+    format: native::WGPUIndexFormat,
+    offset: u64,
+    size: u64,
+) {
+    let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+    let buffer = clone_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer");
+    dispatch_optional_error(
+        &encoder.device,
+        encoder.core.set_index_buffer(
+            Arc::clone(&buffer.core),
+            map_index_format(format),
+            offset,
+            size,
+        ),
+    );
+}
+
+/// Records a non-indexed draw in a render bundle.
+///
+/// # Safety
+///
+/// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleEncoderDraw(
+    render_bundle_encoder: native::WGPURenderBundleEncoder,
+    vertex_count: u32,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32,
+) {
+    let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+    dispatch_optional_error(
+        &encoder.device,
+        encoder.core.draw(
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
+            encoder.device.limits(),
+        ),
+    );
+}
+
+/// Records an indexed draw in a render bundle.
+///
+/// # Safety
+///
+/// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndexed(
+    render_bundle_encoder: native::WGPURenderBundleEncoder,
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    base_vertex: i32,
+    first_instance: u32,
+) {
+    let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+    dispatch_optional_error(
+        &encoder.device,
+        encoder.core.draw_indexed(
+            index_count,
+            instance_count,
+            first_index,
+            base_vertex,
+            first_instance,
+            encoder.device.limits(),
+        ),
+    );
+}
+
+/// Records an indirect non-indexed draw in a render bundle.
+///
+/// # Safety
+///
+/// `render_bundle_encoder` and `indirect_buffer` must be non-null live yawgpu handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndirect(
+    render_bundle_encoder: native::WGPURenderBundleEncoder,
+    indirect_buffer: native::WGPUBuffer,
+    indirect_offset: u64,
+) {
+    let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+    let indirect_buffer = clone_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
+    dispatch_optional_error(
+        &encoder.device,
+        encoder.core.draw_indirect(
+            Arc::clone(&indirect_buffer.core),
+            indirect_offset,
+            encoder.device.limits(),
+        ),
+    );
+}
+
+/// Records an indirect indexed draw in a render bundle.
+///
+/// # Safety
+///
+/// `render_bundle_encoder` and `indirect_buffer` must be non-null live yawgpu handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndexedIndirect(
+    render_bundle_encoder: native::WGPURenderBundleEncoder,
+    indirect_buffer: native::WGPUBuffer,
+    indirect_offset: u64,
+) {
+    let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+    let indirect_buffer = clone_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
+    dispatch_optional_error(
+        &encoder.device,
+        encoder.core.draw_indexed_indirect(
+            Arc::clone(&indirect_buffer.core),
+            indirect_offset,
+            encoder.device.limits(),
+        ),
+    );
+}
+
+/// Inserts a render bundle debug marker.
+///
+/// # Safety
+///
+/// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleEncoderInsertDebugMarker(
+    render_bundle_encoder: native::WGPURenderBundleEncoder,
+    _marker_label: native::WGPUStringView,
+) {
+    let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+    dispatch_optional_error(&encoder.device, encoder.core.insert_debug_marker());
+}
+
+/// Pushes a render bundle debug group.
+///
+/// # Safety
+///
+/// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleEncoderPushDebugGroup(
+    render_bundle_encoder: native::WGPURenderBundleEncoder,
+    _group_label: native::WGPUStringView,
+) {
+    let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+    dispatch_optional_error(&encoder.device, encoder.core.push_debug_group());
+}
+
+/// Pops a render bundle debug group.
+///
+/// # Safety
+///
+/// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleEncoderPopDebugGroup(
+    render_bundle_encoder: native::WGPURenderBundleEncoder,
+) {
+    let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+    dispatch_optional_error(&encoder.device, encoder.core.pop_debug_group());
+}
+
+/// Finishes a render bundle encoder.
+///
+/// # Safety
+///
+/// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleEncoderFinish(
+    render_bundle_encoder: native::WGPURenderBundleEncoder,
+    _descriptor: *const native::WGPURenderBundleDescriptor,
+) -> native::WGPURenderBundle {
+    let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+    let (bundle, error) = encoder.core.finish();
+    dispatch_optional_error(&encoder.device, error);
+    arc_to_handle(Arc::new(WGPURenderBundleImpl {
+        core: Arc::new(bundle),
+        _device: Arc::clone(&encoder.device),
+        _instance: Arc::clone(&encoder._instance),
+    }))
+}
+
 /// Ends a compute pass.
 ///
 /// # Safety
@@ -2549,6 +2864,25 @@ unsafe fn dynamic_offsets_slice(count: usize, offsets: *const u32) -> Vec<u32> {
         "dynamicOffsets must not be null when count is non-zero"
     );
     std::slice::from_raw_parts(offsets, count).to_vec()
+}
+
+unsafe fn render_bundle_slice(
+    count: usize,
+    bundles: *const native::WGPURenderBundle,
+) -> Vec<Arc<core::RenderBundle>> {
+    if count == 0 {
+        return Vec::new();
+    }
+    assert!(
+        !bundles.is_null(),
+        "bundles must not be null when count is non-zero"
+    );
+    std::slice::from_raw_parts(bundles, count)
+        .iter()
+        .map(|bundle| {
+            Arc::clone(&clone_handle::<WGPURenderBundleImpl>(*bundle, "WGPURenderBundle").core)
+        })
+        .collect()
 }
 
 fn map_index_format(format: native::WGPUIndexFormat) -> Option<core::IndexFormat> {
@@ -3063,6 +3397,50 @@ pub unsafe extern "C" fn wgpuComputePassEncoderAddRef(
     compute_pass_encoder: native::WGPUComputePassEncoder,
 ) {
     add_ref_handle(compute_pass_encoder, "WGPUComputePassEncoder");
+}
+
+/// Releases one owned reference to a render bundle encoder handle.
+///
+/// # Safety
+///
+/// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleEncoderRelease(
+    render_bundle_encoder: native::WGPURenderBundleEncoder,
+) {
+    release_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+}
+
+/// Adds one owned reference to a render bundle encoder handle.
+///
+/// # Safety
+///
+/// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleEncoderAddRef(
+    render_bundle_encoder: native::WGPURenderBundleEncoder,
+) {
+    add_ref_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+}
+
+/// Releases one owned reference to a render bundle handle.
+///
+/// # Safety
+///
+/// `render_bundle` must be a non-null live yawgpu render bundle handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleRelease(render_bundle: native::WGPURenderBundle) {
+    release_handle(render_bundle, "WGPURenderBundle");
+}
+
+/// Adds one owned reference to a render bundle handle.
+///
+/// # Safety
+///
+/// `render_bundle` must be a non-null live yawgpu render bundle handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleAddRef(render_bundle: native::WGPURenderBundle) {
+    add_ref_handle(render_bundle, "WGPURenderBundle");
 }
 
 /// Destroys a texture. This operation is idempotent.
