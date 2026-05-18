@@ -90,10 +90,10 @@ ComputePassEncoder: `SetPipeline`/`SetBindGroup`/`DispatchWorkgroups`/
 
 ### P6.3 Texture copies (B2T/T2B/T2T)
 - **C11–C17** B2T/T2B bytesPerRow %256, rowsPerImage, bounds, usage,
-  depth/stencil 2D-only, no-multisample. :492. ☐
+  depth/stencil 2D-only, no-multisample. :492. ☑ (P6.3)
 - **C18–C22** T2T format-compat (sRGB), usage/OOB, depth/stencil,
-  sample-count match, same-texture subresource. :1747. ☐
-- **C79** texture aspect consistency with format. ☐
+  sample-count match, same-texture subresource. :1747. ☑ (P6.3)
+- **C79** texture aspect consistency with format. ☑ (P6.3)
 
 ### P6.4 RenderPass descriptor
 - **C23–C27** ≥1 attachment, color count ≤ max & RenderAttachment &
