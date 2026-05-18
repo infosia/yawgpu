@@ -124,17 +124,17 @@ b:fragment/color/depthStencil)
 
 ### Vertex state (P5.3)
 
-- **P10** bufferCount ≤ `maxVertexBuffers`. VertexState :181. ☐
-- **P11** Σ attributeCount ≤ `maxVertexAttributes`. :205. ☐
+- **P10** bufferCount ≤ `maxVertexBuffers`. VertexState :181. ☑ (P5.3)
+- **P11** Σ attributeCount ≤ `maxVertexAttributes`. :205. ☑ (P5.3)
 - **P12** arrayStride %4==0 (or 0) and ≤ `maxVertexBufferArrayStride`.
-  :226/240. ☐
+  :226/240. ☑ (P5.3)
 - **P13** attribute offset aligned to min(4,formatSize); offset+size ≤
-  stride (stride≠0). :312/327. ☐
-- **P14** `shaderLocation` unique across all attributes. :253. ☐
-- **P15** `shaderLocation` < `maxVertexAttributes`. :294. ☐
-- **P16** vertex format class matches shader input type. :385. ☐
+  stride (stride≠0). :312/327. ☑ (P5.3)
+- **P14** `shaderLocation` unique across all attributes. :253. ☑ (P5.3)
+- **P15** `shaderLocation` < `maxVertexAttributes`. :294. ☑ (P5.3)
+- **P16** vertex format class matches shader input type. :385. ☑ (P5.3)
 - **P17** every shader vertex input `@location` covered by a buffer
-  attribute (subset of buffers ok). :106. ☐
+  attribute (subset of buffers ok). :106. ☑ (P5.3)
 
 ### GetBindGroupLayout + layout compat (P5.4) — deferred S43/S44/S35
 

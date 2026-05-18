@@ -2473,6 +2473,96 @@ pub enum RenderPipelineLayout {
 pub struct RenderPipelineVertexState {
     pub shader: RenderPipelineShaderStage,
     pub buffer_count: usize,
+    pub buffers: Vec<VertexBufferLayout>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VertexBufferLayout {
+    pub array_stride: u64,
+    pub step_mode: VertexStepMode,
+    pub attributes: Vec<VertexAttribute>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VertexStepMode {
+    Vertex,
+    Instance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VertexAttribute {
+    pub format: VertexFormat,
+    pub offset: u64,
+    pub shader_location: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VertexFormat(u32);
+
+impl VertexFormat {
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    fn info(self) -> VertexFormatInfo {
+        match self.0 {
+            0x0000_0001 => VertexFormatInfo::new(1, FormatOutputClass::Uint),
+            0x0000_0002 => VertexFormatInfo::new(2, FormatOutputClass::Uint),
+            0x0000_0003 => VertexFormatInfo::new(4, FormatOutputClass::Uint),
+            0x0000_0004 => VertexFormatInfo::new(1, FormatOutputClass::Sint),
+            0x0000_0005 => VertexFormatInfo::new(2, FormatOutputClass::Sint),
+            0x0000_0006 => VertexFormatInfo::new(4, FormatOutputClass::Sint),
+            0x0000_0007 | 0x0000_000A => VertexFormatInfo::new(1, FormatOutputClass::Float),
+            0x0000_0008 | 0x0000_000B => VertexFormatInfo::new(2, FormatOutputClass::Float),
+            0x0000_0009 | 0x0000_000C => VertexFormatInfo::new(4, FormatOutputClass::Float),
+            0x0000_000D => VertexFormatInfo::new(2, FormatOutputClass::Uint),
+            0x0000_000E => VertexFormatInfo::new(4, FormatOutputClass::Uint),
+            0x0000_000F => VertexFormatInfo::new(8, FormatOutputClass::Uint),
+            0x0000_0010 => VertexFormatInfo::new(2, FormatOutputClass::Sint),
+            0x0000_0011 => VertexFormatInfo::new(4, FormatOutputClass::Sint),
+            0x0000_0012 => VertexFormatInfo::new(8, FormatOutputClass::Sint),
+            0x0000_0013 | 0x0000_0016 | 0x0000_0019 => {
+                VertexFormatInfo::new(2, FormatOutputClass::Float)
+            }
+            0x0000_0014 | 0x0000_0017 | 0x0000_001A => {
+                VertexFormatInfo::new(4, FormatOutputClass::Float)
+            }
+            0x0000_0015 | 0x0000_0018 | 0x0000_001B => {
+                VertexFormatInfo::new(8, FormatOutputClass::Float)
+            }
+            0x0000_001C => VertexFormatInfo::new(4, FormatOutputClass::Float),
+            0x0000_001D => VertexFormatInfo::new(8, FormatOutputClass::Float),
+            0x0000_001E => VertexFormatInfo::new(12, FormatOutputClass::Float),
+            0x0000_001F => VertexFormatInfo::new(16, FormatOutputClass::Float),
+            0x0000_0020 => VertexFormatInfo::new(4, FormatOutputClass::Uint),
+            0x0000_0021 => VertexFormatInfo::new(8, FormatOutputClass::Uint),
+            0x0000_0022 => VertexFormatInfo::new(12, FormatOutputClass::Uint),
+            0x0000_0023 => VertexFormatInfo::new(16, FormatOutputClass::Uint),
+            0x0000_0024 => VertexFormatInfo::new(4, FormatOutputClass::Sint),
+            0x0000_0025 => VertexFormatInfo::new(8, FormatOutputClass::Sint),
+            0x0000_0026 => VertexFormatInfo::new(12, FormatOutputClass::Sint),
+            0x0000_0027 => VertexFormatInfo::new(16, FormatOutputClass::Sint),
+            0x0000_0028 | 0x0000_0029 => VertexFormatInfo::new(4, FormatOutputClass::Float),
+            // Keep unknown future values conservative instead of guessing a smaller footprint.
+            _ => VertexFormatInfo::new(16, FormatOutputClass::Float),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VertexFormatInfo {
+    byte_size: u64,
+    output_class: FormatOutputClass,
+}
+
+impl VertexFormatInfo {
+    const fn new(byte_size: u64, output_class: FormatOutputClass) -> Self {
+        Self {
+            byte_size,
+            output_class,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2667,6 +2757,7 @@ fn resolve_render_pipeline_descriptor(
     if let Some(fragment) = &descriptor.fragment {
         validate_render_constants(&fragment.shader)?;
     }
+    validate_vertex_state(&descriptor.vertex, &vertex_entry, limits)?;
     validate_render_presence(descriptor)?;
     validate_primitive_state(descriptor.primitive)?;
     if let Some(depth_stencil) = descriptor.depth_stencil {
@@ -2679,6 +2770,127 @@ fn resolve_render_pipeline_descriptor(
     validate_multisample_state(descriptor, fragment_entry.as_deref())?;
 
     Ok((vertex_entry, fragment_entry))
+}
+
+fn validate_vertex_state(
+    vertex: &RenderPipelineVertexState,
+    vertex_entry: &str,
+    limits: Limits,
+) -> Result<(), String> {
+    if vertex.buffer_count > limits.max_vertex_buffers as usize {
+        return Err("render pipeline vertex buffer count exceeds the device limit".to_owned());
+    }
+    if vertex.buffers.len() != vertex.buffer_count {
+        return Err("render pipeline vertex buffer count does not match buffers".to_owned());
+    }
+
+    let attribute_count = vertex
+        .buffers
+        .iter()
+        .map(|buffer| buffer.attributes.len())
+        .try_fold(0usize, |sum, count| {
+            sum.checked_add(count)
+                .ok_or_else(|| "render pipeline vertex attribute count overflows".to_owned())
+        })?;
+    if attribute_count > limits.max_vertex_attributes as usize {
+        return Err("render pipeline vertex attribute count exceeds the device limit".to_owned());
+    }
+
+    let mut locations = BTreeSet::new();
+    let mut attribute_classes = BTreeMap::new();
+    for buffer in &vertex.buffers {
+        if buffer.array_stride != 0 && buffer.array_stride % 4 != 0 {
+            return Err(
+                "render pipeline vertex buffer arrayStride must be a multiple of 4".to_owned(),
+            );
+        }
+        if buffer.array_stride > u64::from(limits.max_vertex_buffer_array_stride) {
+            return Err(
+                "render pipeline vertex buffer arrayStride exceeds the device limit".to_owned(),
+            );
+        }
+
+        for attribute in &buffer.attributes {
+            let info = attribute.format.info();
+            let alignment = info.byte_size.min(4);
+            if attribute.offset % alignment != 0 {
+                return Err(
+                    "render pipeline vertex attribute offset is not properly aligned".to_owned(),
+                );
+            }
+            let end = attribute
+                .offset
+                .checked_add(info.byte_size)
+                .ok_or_else(|| {
+                    "render pipeline vertex attribute byte range overflows".to_owned()
+                })?;
+            let upper_bound = if buffer.array_stride == 0 {
+                u64::from(limits.max_vertex_buffer_array_stride)
+            } else {
+                buffer.array_stride
+            };
+            if end > upper_bound {
+                return Err(
+                    "render pipeline vertex attribute byte range exceeds the buffer arrayStride"
+                        .to_owned(),
+                );
+            }
+            if !locations.insert(attribute.shader_location) {
+                return Err(
+                    "render pipeline vertex attributes must not duplicate shaderLocation"
+                        .to_owned(),
+                );
+            }
+            if attribute.shader_location >= limits.max_vertex_attributes {
+                return Err(
+                    "render pipeline vertex attribute shaderLocation exceeds the device limit"
+                        .to_owned(),
+                );
+            }
+            attribute_classes.insert(attribute.shader_location, info.output_class);
+        }
+    }
+
+    for (location, input) in vertex_inputs(vertex, vertex_entry)? {
+        let Some(attribute_class) = attribute_classes.get(&location) else {
+            return Err(
+                "render pipeline vertex shader input has no matching vertex attribute".to_owned(),
+            );
+        };
+        let input_class = match input.scalar {
+            shader_naga::ReflectedTypeScalarClass::Float => FormatOutputClass::Float,
+            shader_naga::ReflectedTypeScalarClass::Sint => FormatOutputClass::Sint,
+            shader_naga::ReflectedTypeScalarClass::Uint => FormatOutputClass::Uint,
+            shader_naga::ReflectedTypeScalarClass::Bool => {
+                return Err("render pipeline vertex shader input type is incompatible".to_owned());
+            }
+        };
+        if *attribute_class != input_class {
+            return Err("render pipeline vertex shader input type is incompatible".to_owned());
+        }
+    }
+
+    Ok(())
+}
+
+fn vertex_inputs(
+    vertex: &RenderPipelineVertexState,
+    vertex_entry: &str,
+) -> Result<BTreeMap<u32, shader_naga::ReflectedTypeClass>, String> {
+    let Some(module) = vertex.shader.module.validated_wgsl() else {
+        return Err("vertex module reflection failed".to_owned());
+    };
+    Ok(module
+        .entry_point_io()
+        .into_iter()
+        .find(|io| io.entry_point == vertex_entry)
+        .map(|io| {
+            io.inputs
+                .into_iter()
+                .map(|input| (input.location, input.ty))
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 fn resolve_render_entry(

@@ -400,13 +400,6 @@ pub unsafe fn map_render_pipeline_descriptor(
         core::RenderPipelineLayout::Explicit(Arc::clone(&layout._core))
     };
 
-    if descriptor.vertex.bufferCount > 0 && descriptor.vertex.buffers.is_null() {
-        set_first_error(
-            &mut error,
-            "render pipeline vertex buffers must not be null when count is non-zero",
-        );
-    }
-
     let vertex = core::RenderPipelineVertexState {
         shader: core::RenderPipelineShaderStage {
             module: Arc::clone(&vertex_module._core),
@@ -419,6 +412,7 @@ pub unsafe fn map_render_pipeline_descriptor(
             ),
         },
         buffer_count: descriptor.vertex.bufferCount,
+        buffers: map_vertex_buffers(&descriptor.vertex, &mut error),
     };
 
     let fragment = if let Some(fragment) = descriptor.fragment.as_ref() {
@@ -459,6 +453,75 @@ pub unsafe fn map_render_pipeline_descriptor(
         multisample: map_multisample_state(descriptor.multisample),
         fragment,
         error,
+    }
+}
+
+unsafe fn map_vertex_buffers(
+    vertex: &native::WGPUVertexState,
+    error: &mut Option<String>,
+) -> Vec<core::VertexBufferLayout> {
+    if vertex.bufferCount == 0 {
+        return Vec::new();
+    }
+    if vertex.buffers.is_null() {
+        set_first_error(
+            error,
+            "render pipeline vertex buffers must not be null when count is non-zero",
+        );
+        return Vec::new();
+    }
+
+    std::slice::from_raw_parts(vertex.buffers, vertex.bufferCount)
+        .iter()
+        .map(|buffer| {
+            let attributes = map_vertex_attributes(buffer, error);
+            core::VertexBufferLayout {
+                array_stride: buffer.arrayStride,
+                step_mode: map_vertex_step_mode(buffer.stepMode, error),
+                attributes,
+            }
+        })
+        .collect()
+}
+
+unsafe fn map_vertex_attributes(
+    buffer: &native::WGPUVertexBufferLayout,
+    error: &mut Option<String>,
+) -> Vec<core::VertexAttribute> {
+    if buffer.attributeCount == 0 {
+        return Vec::new();
+    }
+    if buffer.attributes.is_null() {
+        set_first_error(
+            error,
+            "render pipeline vertex attributes must not be null when count is non-zero",
+        );
+        return Vec::new();
+    }
+
+    std::slice::from_raw_parts(buffer.attributes, buffer.attributeCount)
+        .iter()
+        .map(|attribute| core::VertexAttribute {
+            format: core::VertexFormat::from_raw(attribute.format),
+            offset: attribute.offset,
+            shader_location: attribute.shaderLocation,
+        })
+        .collect()
+}
+
+fn map_vertex_step_mode(
+    value: native::WGPUVertexStepMode,
+    error: &mut Option<String>,
+) -> core::VertexStepMode {
+    match value {
+        native::WGPUVertexStepMode_Undefined | native::WGPUVertexStepMode_Vertex => {
+            core::VertexStepMode::Vertex
+        }
+        native::WGPUVertexStepMode_Instance => core::VertexStepMode::Instance,
+        _ => {
+            set_first_error(error, "render pipeline vertex stepMode is invalid");
+            core::VertexStepMode::Vertex
+        }
     }
 }
 
