@@ -88,10 +88,42 @@ unregressed). Gate green (37 binaries). Committed `phase-6: P6.4`.
 
 #### (original detail)
 
-## P6.5 — Pass draw/dispatch state + dynamic state  *(NEXT)*
+## P6.5 — Pass draw/dispatch state + dynamic state  *(☑ DONE)*
+
+Done: `PassEncoderState` extended (bound render/compute pipeline,
+`BTreeMap<u32,BoundBindGroup>` incl. dynamic offsets, vertex-buffer
+slot set, index buffer) + `record_pass_command` seam (reuses P6.1
+`pass_command_guard` → parent `record_first_error`, surfaced at
+`finish()`). Render `set_pipeline/set_bind_group/set_vertex_buffer/
+set_index_buffer/draw/draw_indexed/set_viewport/set_scissor_rect/
+set_blend_constant/set_stencil_reference`; compute `set_pipeline/
+set_bind_group/dispatch_workgroups`. `validate_render_draw_state`
+(C37 pipeline set + not-error, C41 declared vertex buffers set, C42
+index buffer set), `validate_compute_dispatch_state`,
+`validate_pipeline_bind_groups` (C38 missing group, C39
+`bind_group_layouts_compatible` = Arc-identity for default/auto BGLs
+**(P41)** / entry-list eq for explicit, error-BG reject),
+`validate_dynamic_offsets` (C40 count == dynamic BGL entries, uniform/
+storage alignment, buffer+binding bounds), `validate_viewport` (C56
+finite + w/h≥0 + 0≤min≤max≤1), C57 scissor add-overflow, C58 blend
+finite, C59 stencil no-op; compute DispatchWorkgroups each axis ≤
+`max_compute_workgroups_per_dimension`. Helpers: `BindGroupLayout::
+same`, `BindGroup::layout/entries`, `RenderPipeline::
+required_vertex_buffer_count`. FFI: 10 `wgpuRenderPassEncoder*` + 3
+`wgpuComputePassEncoder*` fns + `dynamic_offsets_slice`/
+`map_index_format`/`map_color`. C37–C42/C56–C59/dispatch/P41 ported in
+`yawgpu/tests/pass_state_validation.rs` (5; P41 uses distinct WGSL so
+the two auto pipelines don't dedup ⇒ meaningful). Gate green (38
+binaries, clippy clean). Committed `phase-6: P6.5`.
+**Deferred → P6.6:** C43–C55 (index/vertex buffer usage/OOB/format/
+align, draw count/OOB, indirect). Scissor attachment-size clamp →
+P6.9/P7.
+
+#### (original detail)
+
 C37–C42, C56–C59, compute dispatch limits, P41 draw-time.
 
-## P6.6 — Index/Vertex buffer + draw OOB + indirect  *(after P6.5)*
+## P6.6 — Index/Vertex buffer + draw OOB + indirect  *(NEXT)*
 C43–C55.
 
 ## P6.7 — RenderBundle  *(after P6.6)*

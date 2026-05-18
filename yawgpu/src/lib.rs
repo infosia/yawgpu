@@ -9,7 +9,7 @@ use yawgpu_core as core;
 use crate::conv::{
     add_ref_handle, arc_to_handle, borrow_handle, clone_handle, free_supported_features,
     label_from_string_view, map_bind_group_entries, map_bind_group_layout_descriptor,
-    map_buffer_descriptor, map_buffer_map_state, map_buffer_usage_to_native,
+    map_buffer_descriptor, map_buffer_map_state, map_buffer_usage_to_native, map_color,
     map_compilation_info_request_status_success, map_compilation_message_type_error,
     map_compute_pipeline_descriptor, map_device_lost_callback_info, map_device_lost_reason,
     map_extent_3d, map_feature, map_feature_level, map_features_to_native, map_limits,
@@ -2108,6 +2108,218 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderPopDebugGroup(
     dispatch_optional_error(&pass.device, pass.core.pop_debug_group());
 }
 
+/// Sets the render pipeline for a render pass.
+///
+/// # Safety
+///
+/// `render_pass_encoder` and `pipeline` must be non-null live yawgpu handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderSetPipeline(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+    pipeline: native::WGPURenderPipeline,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    let pipeline = clone_handle(pipeline, "WGPURenderPipeline");
+    dispatch_optional_error(
+        &pass.device,
+        pass.core.set_pipeline(Arc::clone(&pipeline._core)),
+    );
+}
+
+/// Sets or clears a render pass bind group.
+///
+/// # Safety
+///
+/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+/// `group` may be null to clear the slot. `dynamic_offsets` must point to
+/// `dynamic_offset_count` elements when the count is non-zero.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderSetBindGroup(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+    group_index: u32,
+    group: native::WGPUBindGroup,
+    dynamic_offset_count: usize,
+    dynamic_offsets: *const u32,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    let group =
+        (!group.is_null()).then(|| clone_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
+    let offsets = dynamic_offsets_slice(dynamic_offset_count, dynamic_offsets);
+    dispatch_optional_error(
+        &pass.device,
+        pass.core.set_bind_group(
+            group_index,
+            group.map(|group| Arc::clone(&group._core)),
+            offsets,
+        ),
+    );
+}
+
+/// Sets or clears a render pass vertex buffer.
+///
+/// # Safety
+///
+/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+/// `buffer` may be null to clear the slot.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderSetVertexBuffer(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+    slot: u32,
+    buffer: native::WGPUBuffer,
+    offset: u64,
+    size: u64,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    let buffer = (!buffer.is_null()).then(|| clone_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer"));
+    dispatch_optional_error(
+        &pass.device,
+        pass.core.set_vertex_buffer(
+            slot,
+            buffer.map(|buffer| Arc::clone(&buffer.core)),
+            offset,
+            size,
+        ),
+    );
+}
+
+/// Sets the render pass index buffer.
+///
+/// # Safety
+///
+/// `render_pass_encoder` and `buffer` must be non-null live yawgpu handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderSetIndexBuffer(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+    buffer: native::WGPUBuffer,
+    format: native::WGPUIndexFormat,
+    offset: u64,
+    size: u64,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    let buffer = clone_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer");
+    dispatch_optional_error(
+        &pass.device,
+        pass.core.set_index_buffer(
+            Arc::clone(&buffer.core),
+            map_index_format(format),
+            offset,
+            size,
+        ),
+    );
+}
+
+/// Records a non-indexed draw in a render pass.
+///
+/// # Safety
+///
+/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderDraw(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+    _vertex_count: u32,
+    _instance_count: u32,
+    _first_vertex: u32,
+    _first_instance: u32,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    dispatch_optional_error(&pass.device, pass.core.draw(pass.device.limits()));
+}
+
+/// Records an indexed draw in a render pass.
+///
+/// # Safety
+///
+/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndexed(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+    _index_count: u32,
+    _instance_count: u32,
+    _first_index: u32,
+    _base_vertex: i32,
+    _first_instance: u32,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    dispatch_optional_error(&pass.device, pass.core.draw_indexed(pass.device.limits()));
+}
+
+/// Sets the render pass viewport.
+///
+/// # Safety
+///
+/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderSetViewport(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    min_depth: f32,
+    max_depth: f32,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    dispatch_optional_error(
+        &pass.device,
+        pass.core
+            .set_viewport(x, y, width, height, min_depth, max_depth),
+    );
+}
+
+/// Sets the render pass scissor rectangle.
+///
+/// # Safety
+///
+/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderSetScissorRect(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    dispatch_optional_error(
+        &pass.device,
+        pass.core.set_scissor_rect(x, y, width, height),
+    );
+}
+
+/// Sets the render pass blend constant.
+///
+/// # Safety
+///
+/// `render_pass_encoder` and `color` must be non-null live pointers.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderSetBlendConstant(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+    color: *const native::WGPUColor,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    let color = color
+        .as_ref()
+        .expect("WGPUColor for SetBlendConstant must not be null");
+    dispatch_optional_error(
+        &pass.device,
+        pass.core.set_blend_constant(map_color(*color)),
+    );
+}
+
+/// Sets the render pass stencil reference.
+///
+/// # Safety
+///
+/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderSetStencilReference(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+    reference: u32,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    dispatch_optional_error(&pass.device, pass.core.set_stencil_reference(reference));
+}
+
 /// Ends a compute pass.
 ///
 /// # Safety
@@ -2162,9 +2374,99 @@ pub unsafe extern "C" fn wgpuComputePassEncoderPopDebugGroup(
     dispatch_optional_error(&pass.device, pass.core.pop_debug_group());
 }
 
+/// Sets the compute pipeline for a compute pass.
+///
+/// # Safety
+///
+/// `compute_pass_encoder` and `pipeline` must be non-null live yawgpu handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuComputePassEncoderSetPipeline(
+    compute_pass_encoder: native::WGPUComputePassEncoder,
+    pipeline: native::WGPUComputePipeline,
+) {
+    let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
+    let pipeline = clone_handle(pipeline, "WGPUComputePipeline");
+    dispatch_optional_error(
+        &pass.device,
+        pass.core.set_pipeline(Arc::clone(&pipeline._core)),
+    );
+}
+
+/// Sets or clears a compute pass bind group.
+///
+/// # Safety
+///
+/// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
+/// `group` may be null to clear the slot. `dynamic_offsets` must point to
+/// `dynamic_offset_count` elements when the count is non-zero.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuComputePassEncoderSetBindGroup(
+    compute_pass_encoder: native::WGPUComputePassEncoder,
+    group_index: u32,
+    group: native::WGPUBindGroup,
+    dynamic_offset_count: usize,
+    dynamic_offsets: *const u32,
+) {
+    let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
+    let group =
+        (!group.is_null()).then(|| clone_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
+    let offsets = dynamic_offsets_slice(dynamic_offset_count, dynamic_offsets);
+    dispatch_optional_error(
+        &pass.device,
+        pass.core.set_bind_group(
+            group_index,
+            group.map(|group| Arc::clone(&group._core)),
+            offsets,
+        ),
+    );
+}
+
+/// Records a compute dispatch.
+///
+/// # Safety
+///
+/// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuComputePassEncoderDispatchWorkgroups(
+    compute_pass_encoder: native::WGPUComputePassEncoder,
+    workgroup_count_x: u32,
+    workgroup_count_y: u32,
+    workgroup_count_z: u32,
+) {
+    let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
+    dispatch_optional_error(
+        &pass.device,
+        pass.core.dispatch_workgroups(
+            workgroup_count_x,
+            workgroup_count_y,
+            workgroup_count_z,
+            pass.device.limits(),
+        ),
+    );
+}
+
 fn dispatch_optional_error(device: &core::Device, error: Option<String>) {
     if let Some(message) = error {
         device.dispatch_error(core::ErrorKind::Validation, message);
+    }
+}
+
+unsafe fn dynamic_offsets_slice(count: usize, offsets: *const u32) -> Vec<u32> {
+    if count == 0 {
+        return Vec::new();
+    }
+    assert!(
+        !offsets.is_null(),
+        "dynamicOffsets must not be null when count is non-zero"
+    );
+    std::slice::from_raw_parts(offsets, count).to_vec()
+}
+
+fn map_index_format(format: native::WGPUIndexFormat) -> core::IndexFormat {
+    match format {
+        native::WGPUIndexFormat_Uint16 => core::IndexFormat::Uint16,
+        native::WGPUIndexFormat_Uint32 => core::IndexFormat::Uint32,
+        _ => core::IndexFormat::Uint32,
     }
 }
 

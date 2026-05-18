@@ -107,13 +107,28 @@ ComputePassEncoder: `SetPipeline`/`SetBindGroup`/`DispatchWorkgroups`/
 
 ### P6.5 Pass draw/dispatch state + dynamic state
 - **C37–C42** SetPipeline-before-draw, bind-group count/compat,
-  dynamic-offset count/align/bounds, vertex/index buffer set. ☐
+  dynamic-offset count/align/bounds, vertex/index buffer set. ☑ (P6.5)
 - **C56–C59** SetViewport/ScissorRect finite+bounds,
-  SetBlendConstant finite, SetStencilReference. ☐
+  SetBlendConstant finite, SetStencilReference. ☑ (P6.5)
 - compute: SetPipeline-before-dispatch, bind-group compat,
-  DispatchWorkgroups size ≤ `maxComputeWorkgroupsPerDimension`. ☐
+  DispatchWorkgroups size ≤ `maxComputeWorkgroupsPerDimension`. ☑ (P6.5)
 - P41 draw-time: a BindGroup from pipeline A's default BGL rejected
-  with pipeline B (carried Phase-5 deferral). ☐
+  with pipeline B (carried Phase-5 deferral). ☑ (P6.5)
+
+> P6.5 notes / divergences (deferred-error model; surface at
+> `wgpuCommandEncoderFinish`):
+> - SetVertexBuffer/SetIndexBuffer only **record slot/buffer state**
+>   here; full index/vertex buffer rules (usage/OOB/format/align,
+>   draw count/OOB, indirect) are **C43–C55 → P6.6**.
+> - BGL compatibility: default/auto BGLs use Arc identity
+>   (`BindGroupLayout::same`, i.e. the P5.4 pipeline-bound default-BGL
+>   identity ⇒ P41); explicit BGLs compare by entry list.
+> - SetScissorRect: minimal per-Dawn check = integer add overflow of
+>   `x+width`/`y+height`; attachment-size clamping needs the render
+>   target extent → **Defer→P6.9/P7** with usage-scope/real-GPU work.
+> - C40 dynamic-offset bounds use `Limits.min_uniform/storage_buffer_
+>   offset_alignment`; offsets zipped with dynamic BGL entries in BGL
+>   entry order (sufficient for the ported cases).
 
 ### P6.6 Index/Vertex buffer + draw OOB + indirect
 - **C43–C46** index format valid, Index usage, OOB, offset align,
