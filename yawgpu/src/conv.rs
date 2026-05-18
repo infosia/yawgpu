@@ -361,26 +361,12 @@ pub unsafe fn map_compute_pipeline_descriptor(
         core::ComputePipelineLayout::Explicit(Arc::clone(&layout._core))
     };
     let entry_point = string_view_to_str(compute.entryPoint).map(ToOwned::to_owned);
-    let constants = if compute.constantCount == 0 {
-        Vec::new()
-    } else if compute.constants.is_null() {
-        set_first_error(
-            &mut error,
-            "compute pipeline constants must not be null when count is non-zero",
-        );
-        Vec::new()
-    } else {
-        std::slice::from_raw_parts(compute.constants, compute.constantCount)
-            .iter()
-            .map(|entry| {
-                let key = string_view_to_str(entry.key).unwrap_or_default().to_owned();
-                core::PipelineConstant {
-                    key,
-                    value: entry.value,
-                }
-            })
-            .collect()
-    };
+    let constants = map_pipeline_constants(
+        compute.constantCount,
+        compute.constants,
+        "compute pipeline",
+        &mut error,
+    );
 
     core::ComputePipelineDescriptor {
         layout,
@@ -388,6 +374,164 @@ pub unsafe fn map_compute_pipeline_descriptor(
         entry_point,
         constants,
         error,
+    }
+}
+
+/// Converts a render pipeline descriptor to the core representation.
+///
+/// # Safety
+///
+/// `descriptor.vertex.module` and optional `fragment.module` must be non-null
+/// live yawgpu shader modules. `descriptor.layout`, when non-null, must be a
+/// live yawgpu pipeline layout. Optional pointer arrays must be valid for their
+/// declared counts.
+#[must_use]
+pub unsafe fn map_render_pipeline_descriptor(
+    descriptor: &native::WGPURenderPipelineDescriptor,
+) -> core::RenderPipelineDescriptor {
+    let mut error = None;
+    let vertex_module =
+        clone_handle::<WGPUShaderModuleImpl>(descriptor.vertex.module, "WGPUShaderModule");
+    let layout = if descriptor.layout.is_null() {
+        core::RenderPipelineLayout::Auto
+    } else {
+        let layout =
+            clone_handle::<WGPUPipelineLayoutImpl>(descriptor.layout, "WGPUPipelineLayout");
+        core::RenderPipelineLayout::Explicit(Arc::clone(&layout._core))
+    };
+
+    if descriptor.vertex.bufferCount > 0 && descriptor.vertex.buffers.is_null() {
+        set_first_error(
+            &mut error,
+            "render pipeline vertex buffers must not be null when count is non-zero",
+        );
+    }
+
+    let vertex = core::RenderPipelineVertexState {
+        shader: core::RenderPipelineShaderStage {
+            module: Arc::clone(&vertex_module._core),
+            entry_point: string_view_to_str(descriptor.vertex.entryPoint).map(ToOwned::to_owned),
+            constants: map_pipeline_constants(
+                descriptor.vertex.constantCount,
+                descriptor.vertex.constants,
+                "render pipeline vertex",
+                &mut error,
+            ),
+        },
+        buffer_count: descriptor.vertex.bufferCount,
+    };
+
+    let fragment = if let Some(fragment) = descriptor.fragment.as_ref() {
+        let fragment_module =
+            clone_handle::<WGPUShaderModuleImpl>(fragment.module, "WGPUShaderModule");
+        if fragment.targetCount > 0 && fragment.targets.is_null() {
+            set_first_error(
+                &mut error,
+                "render pipeline fragment targets must not be null when count is non-zero",
+            );
+        }
+        Some(core::RenderPipelineFragmentState {
+            shader: core::RenderPipelineShaderStage {
+                module: Arc::clone(&fragment_module._core),
+                entry_point: string_view_to_str(fragment.entryPoint).map(ToOwned::to_owned),
+                constants: map_pipeline_constants(
+                    fragment.constantCount,
+                    fragment.constants,
+                    "render pipeline fragment",
+                    &mut error,
+                ),
+            },
+            target_count: fragment.targetCount,
+        })
+    } else {
+        None
+    };
+
+    core::RenderPipelineDescriptor {
+        layout,
+        vertex,
+        primitive: map_primitive_state(descriptor.primitive, &mut error),
+        depth_stencil: descriptor
+            .depthStencil
+            .as_ref()
+            .map(map_depth_stencil_state),
+        multisample: map_multisample_state(descriptor.multisample),
+        fragment,
+        error,
+    }
+}
+
+unsafe fn map_pipeline_constants(
+    count: usize,
+    entries: *const native::WGPUConstantEntry,
+    label: &str,
+    error: &mut Option<String>,
+) -> Vec<core::PipelineConstant> {
+    if count == 0 {
+        return Vec::new();
+    }
+    if entries.is_null() {
+        set_first_error(
+            error,
+            &format!("{label} constants must not be null when count is non-zero"),
+        );
+        return Vec::new();
+    }
+    std::slice::from_raw_parts(entries, count)
+        .iter()
+        .map(|entry| {
+            let key = string_view_to_str(entry.key).unwrap_or_default().to_owned();
+            core::PipelineConstant {
+                key,
+                value: entry.value,
+            }
+        })
+        .collect()
+}
+
+fn map_primitive_state(
+    state: native::WGPUPrimitiveState,
+    error: &mut Option<String>,
+) -> core::PrimitiveState {
+    core::PrimitiveState {
+        topology: match state.topology {
+            native::WGPUPrimitiveTopology_Undefined
+            | native::WGPUPrimitiveTopology_TriangleList => core::PrimitiveTopology::TriangleList,
+            native::WGPUPrimitiveTopology_PointList => core::PrimitiveTopology::PointList,
+            native::WGPUPrimitiveTopology_LineList => core::PrimitiveTopology::LineList,
+            native::WGPUPrimitiveTopology_LineStrip => core::PrimitiveTopology::LineStrip,
+            native::WGPUPrimitiveTopology_TriangleStrip => core::PrimitiveTopology::TriangleStrip,
+            _ => {
+                set_first_error(error, "invalid primitive topology");
+                core::PrimitiveTopology::TriangleList
+            }
+        },
+        strip_index_format: match state.stripIndexFormat {
+            native::WGPUIndexFormat_Undefined => None,
+            native::WGPUIndexFormat_Uint16 => Some(core::IndexFormat::Uint16),
+            native::WGPUIndexFormat_Uint32 => Some(core::IndexFormat::Uint32),
+            _ => {
+                set_first_error(error, "invalid strip index format");
+                None
+            }
+        },
+    }
+}
+
+fn map_depth_stencil_state(state: &native::WGPUDepthStencilState) -> core::DepthStencilState {
+    core::DepthStencilState {
+        format: map_texture_format(state.format),
+        depth_bias: state.depthBias,
+        depth_bias_slope_scale: state.depthBiasSlopeScale,
+        depth_bias_clamp: state.depthBiasClamp,
+    }
+}
+
+fn map_multisample_state(state: native::WGPUMultisampleState) -> core::MultisampleState {
+    core::MultisampleState {
+        count: state.count,
+        mask: state.mask,
+        alpha_to_coverage_enabled: state.alphaToCoverageEnabled != 0,
     }
 }
 

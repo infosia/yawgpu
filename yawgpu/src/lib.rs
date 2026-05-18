@@ -14,11 +14,11 @@ use crate::conv::{
     map_compute_pipeline_descriptor, map_device_lost_callback_info, map_device_lost_reason,
     map_extent_3d, map_feature, map_feature_level, map_features_to_native, map_limits,
     map_limits_to_native, map_map_async_status, map_map_mode, map_origin_3d,
-    map_pipeline_layout_descriptor, map_queue_work_done_status, map_sampler_descriptor,
-    map_shader_module_descriptor, map_texel_copy_buffer_layout, map_texture_aspect,
-    map_texture_descriptor, map_texture_dimension_to_native, map_texture_format_to_native,
-    map_texture_usage_to_native, map_texture_view_descriptor, release_handle, string_view,
-    DeviceLostCallbackInfo,
+    map_pipeline_layout_descriptor, map_queue_work_done_status, map_render_pipeline_descriptor,
+    map_sampler_descriptor, map_shader_module_descriptor, map_texel_copy_buffer_layout,
+    map_texture_aspect, map_texture_descriptor, map_texture_dimension_to_native,
+    map_texture_format_to_native, map_texture_usage_to_native, map_texture_view_descriptor,
+    release_handle, string_view, DeviceLostCallbackInfo,
 };
 
 pub struct WGPUAdapterImpl {
@@ -101,6 +101,12 @@ pub struct WGPUComputePipelineImpl {
     _instance: Arc<WGPUInstanceImpl>,
 }
 
+pub struct WGPURenderPipelineImpl {
+    _core: Arc<core::RenderPipeline>,
+    _device: Arc<core::Device>,
+    _instance: Arc<WGPUInstanceImpl>,
+}
+
 macro_rules! declare_empty_impl_handles {
     ($($name:ident),* $(,)?) => {
         $(
@@ -117,7 +123,6 @@ declare_empty_impl_handles!(
     WGPURenderBundleImpl,
     WGPURenderBundleEncoderImpl,
     WGPURenderPassEncoderImpl,
-    WGPURenderPipelineImpl,
     WGPUSurfaceImpl,
 );
 
@@ -991,6 +996,33 @@ pub unsafe extern "C" fn wgpuDeviceCreateComputePipeline(
     }))
 }
 
+/// Creates a render pipeline on a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `descriptor` must
+/// point to a valid `WGPURenderPipelineDescriptor`. `descriptor.vertex.module`
+/// and optional `descriptor.fragment.module` must be non-null live yawgpu
+/// shader module handles. `descriptor.layout`, `depthStencil`, and `fragment`
+/// may be null where allowed by WebGPU.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceCreateRenderPipeline(
+    device: native::WGPUDevice,
+    descriptor: *const native::WGPURenderPipelineDescriptor,
+) -> native::WGPURenderPipeline {
+    let device = borrow_handle(device, "WGPUDevice");
+    let descriptor = descriptor
+        .as_ref()
+        .expect("WGPURenderPipelineDescriptor must not be null");
+    let descriptor = map_render_pipeline_descriptor(descriptor);
+    let pipeline = device.core.create_render_pipeline(descriptor);
+    arc_to_handle(Arc::new(WGPURenderPipelineImpl {
+        _core: Arc::new(pipeline),
+        _device: Arc::clone(&device.core),
+        _instance: Arc::clone(&device.instance),
+    }))
+}
+
 /// Gets the effective limits for a device.
 ///
 /// # Safety
@@ -1298,6 +1330,26 @@ pub unsafe extern "C" fn wgpuComputePipelineRelease(compute_pipeline: native::WG
 #[no_mangle]
 pub unsafe extern "C" fn wgpuComputePipelineAddRef(compute_pipeline: native::WGPUComputePipeline) {
     add_ref_handle(compute_pipeline, "WGPUComputePipeline");
+}
+
+/// Releases one owned reference to a render pipeline handle.
+///
+/// # Safety
+///
+/// `render_pipeline` must be a non-null live yawgpu render pipeline handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPipelineRelease(render_pipeline: native::WGPURenderPipeline) {
+    release_handle(render_pipeline, "WGPURenderPipeline");
+}
+
+/// Adds one owned reference to a render pipeline handle.
+///
+/// # Safety
+///
+/// `render_pipeline` must be a non-null live yawgpu render pipeline handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPipelineAddRef(render_pipeline: native::WGPURenderPipeline) {
+    add_ref_handle(render_pipeline, "WGPURenderPipeline");
 }
 
 /// Destroys a texture. This operation is idempotent.

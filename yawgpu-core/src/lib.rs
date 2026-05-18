@@ -431,6 +431,19 @@ impl Device {
         }
         ComputePipeline::new(descriptor, is_error)
     }
+
+    #[must_use]
+    pub fn create_render_pipeline(&self, descriptor: RenderPipelineDescriptor) -> RenderPipeline {
+        let error = descriptor
+            .error
+            .clone()
+            .or_else(|| validate_render_pipeline_descriptor(&descriptor));
+        let is_error = error.is_some();
+        if let Some(message) = error {
+            self.dispatch_error(ErrorKind::Validation, message);
+        }
+        RenderPipeline::new(descriptor, is_error)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2283,6 +2296,315 @@ fn buffer_binding_types_compatible(
             BufferBindingType::ReadOnlyStorage
         )
     )
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderPipelineDescriptor {
+    pub layout: RenderPipelineLayout,
+    pub vertex: RenderPipelineVertexState,
+    pub primitive: PrimitiveState,
+    pub depth_stencil: Option<DepthStencilState>,
+    pub multisample: MultisampleState,
+    pub fragment: Option<RenderPipelineFragmentState>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum RenderPipelineLayout {
+    Auto,
+    Explicit(Arc<PipelineLayout>),
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderPipelineVertexState {
+    pub shader: RenderPipelineShaderStage,
+    pub buffer_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderPipelineFragmentState {
+    pub shader: RenderPipelineShaderStage,
+    pub target_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderPipelineShaderStage {
+    pub module: Arc<ShaderModule>,
+    pub entry_point: Option<String>,
+    pub constants: Vec<PipelineConstant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrimitiveState {
+    pub topology: PrimitiveTopology,
+    pub strip_index_format: Option<IndexFormat>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PrimitiveTopology {
+    PointList,
+    LineList,
+    LineStrip,
+    TriangleList,
+    TriangleStrip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IndexFormat {
+    Uint16,
+    Uint32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DepthStencilState {
+    pub format: TextureFormat,
+    pub depth_bias: i32,
+    pub depth_bias_slope_scale: f32,
+    pub depth_bias_clamp: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MultisampleState {
+    pub count: u32,
+    pub mask: u32,
+    pub alpha_to_coverage_enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderPipeline {
+    inner: Arc<RenderPipelineInner>,
+}
+
+#[derive(Debug)]
+struct RenderPipelineInner {
+    _layout: RenderPipelineLayout,
+    _vertex: RenderPipelineVertexState,
+    _primitive: PrimitiveState,
+    _depth_stencil: Option<DepthStencilState>,
+    _multisample: MultisampleState,
+    _fragment: Option<RenderPipelineFragmentState>,
+    vertex_entry_name: String,
+    fragment_entry_name: Option<String>,
+    is_error: bool,
+}
+
+impl RenderPipeline {
+    fn new(descriptor: RenderPipelineDescriptor, is_error: bool) -> Self {
+        let resolved = if is_error {
+            None
+        } else {
+            resolve_render_pipeline_descriptor(&descriptor).ok()
+        };
+        let (vertex_entry_name, fragment_entry_name) = resolved.unwrap_or_else(|| {
+            (
+                descriptor
+                    .vertex
+                    .shader
+                    .entry_point
+                    .clone()
+                    .unwrap_or_default(),
+                descriptor
+                    .fragment
+                    .as_ref()
+                    .and_then(|fragment| fragment.shader.entry_point.clone()),
+            )
+        });
+        Self {
+            inner: Arc::new(RenderPipelineInner {
+                _layout: descriptor.layout,
+                _vertex: descriptor.vertex,
+                _primitive: descriptor.primitive,
+                _depth_stencil: descriptor.depth_stencil,
+                _multisample: descriptor.multisample,
+                _fragment: descriptor.fragment,
+                vertex_entry_name,
+                fragment_entry_name,
+                is_error,
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.inner.is_error
+    }
+
+    #[must_use]
+    pub fn vertex_entry_name(&self) -> &str {
+        &self.inner.vertex_entry_name
+    }
+
+    #[must_use]
+    pub fn fragment_entry_name(&self) -> Option<&str> {
+        self.inner.fragment_entry_name.as_deref()
+    }
+}
+
+fn validate_render_pipeline_descriptor(descriptor: &RenderPipelineDescriptor) -> Option<String> {
+    resolve_render_pipeline_descriptor(descriptor).err()
+}
+
+fn resolve_render_pipeline_descriptor(
+    descriptor: &RenderPipelineDescriptor,
+) -> Result<(String, Option<String>), String> {
+    if let RenderPipelineLayout::Explicit(layout) = &descriptor.layout {
+        if layout.is_error() {
+            return Err("render pipeline layout must not be an error pipeline layout".to_owned());
+        }
+    }
+
+    let vertex_entry = resolve_render_entry(
+        &descriptor.vertex.shader,
+        shader_naga::ReflectedShaderStage::Vertex,
+        "vertex",
+    )?;
+    let fragment_entry = if let Some(fragment) = &descriptor.fragment {
+        Some(resolve_render_entry(
+            &fragment.shader,
+            shader_naga::ReflectedShaderStage::Fragment,
+            "fragment",
+        )?)
+    } else {
+        None
+    };
+
+    validate_render_presence(descriptor)?;
+    validate_primitive_state(descriptor.primitive)?;
+    if let Some(depth_stencil) = descriptor.depth_stencil {
+        validate_depth_bias_state(descriptor.primitive.topology, depth_stencil)?;
+    }
+    validate_multisample_state(descriptor, fragment_entry.as_deref())?;
+
+    Ok((vertex_entry, fragment_entry))
+}
+
+fn resolve_render_entry(
+    stage: &RenderPipelineShaderStage,
+    expected_stage: shader_naga::ReflectedShaderStage,
+    label: &str,
+) -> Result<String, String> {
+    if stage.module.is_error() {
+        return Err(format!(
+            "render pipeline {label} shader module must not be an error module"
+        ));
+    }
+    let Some(module) = stage.module.validated_wgsl() else {
+        return Err(format!(
+            "render pipeline {label} stage requires a valid WGSL shader module"
+        ));
+    };
+    let entries = module.entry_points();
+    let matching_entries = entries
+        .iter()
+        .filter(|entry| entry.stage == expected_stage)
+        .collect::<Vec<_>>();
+
+    match stage.entry_point.as_deref() {
+        None => match matching_entries.as_slice() {
+            [entry] => Ok(entry.name.clone()),
+            [] => Err(format!(
+                "render pipeline {label} shader module has no matching entry point"
+            )),
+            _ => Err(format!(
+                "render pipeline {label} entryPoint is required when multiple matching entries exist"
+            )),
+        },
+        Some(name) => matching_entries
+            .iter()
+            .any(|entry| entry.name == name)
+            .then(|| name.to_owned())
+            .ok_or_else(|| {
+                format!("render pipeline {label} entryPoint must name a matching entry point")
+            }),
+    }
+}
+
+fn validate_render_presence(descriptor: &RenderPipelineDescriptor) -> Result<(), String> {
+    if descriptor.fragment.is_none() && descriptor.depth_stencil.is_none() {
+        return Err("render pipeline requires a fragment state or depthStencil state".to_owned());
+    }
+    if descriptor
+        .fragment
+        .as_ref()
+        .is_some_and(|fragment| fragment.target_count == 0)
+    {
+        return Err("render pipeline fragment targetCount must be at least one".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_primitive_state(primitive: PrimitiveState) -> Result<(), String> {
+    if primitive.strip_index_format.is_some()
+        && !matches!(
+            primitive.topology,
+            PrimitiveTopology::LineStrip | PrimitiveTopology::TriangleStrip
+        )
+    {
+        return Err(
+            "render pipeline stripIndexFormat requires a strip primitive topology".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_depth_bias_state(
+    topology: PrimitiveTopology,
+    depth_stencil: DepthStencilState,
+) -> Result<(), String> {
+    if !depth_stencil.depth_bias_slope_scale.is_finite()
+        || !depth_stencil.depth_bias_clamp.is_finite()
+    {
+        return Err("render pipeline depth bias values must be finite".to_owned());
+    }
+
+    let has_non_zero_bias = depth_stencil.depth_bias != 0
+        || depth_stencil.depth_bias_slope_scale != 0.0
+        || depth_stencil.depth_bias_clamp != 0.0;
+    if has_non_zero_bias
+        && !matches!(
+            topology,
+            PrimitiveTopology::TriangleList | PrimitiveTopology::TriangleStrip
+        )
+    {
+        return Err("render pipeline non-zero depth bias requires triangle topology".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_multisample_state(
+    descriptor: &RenderPipelineDescriptor,
+    fragment_entry: Option<&str>,
+) -> Result<(), String> {
+    let multisample = descriptor.multisample;
+    if !matches!(multisample.count, 1 | 4) {
+        return Err("render pipeline multisample count must be 1 or 4".to_owned());
+    }
+    if multisample.alpha_to_coverage_enabled && multisample.count != 4 {
+        return Err("render pipeline alphaToCoverage requires multisample count 4".to_owned());
+    }
+    if multisample.alpha_to_coverage_enabled {
+        if let (Some(fragment), Some(entry_name)) = (&descriptor.fragment, fragment_entry) {
+            let module = fragment
+                .shader
+                .module
+                .validated_wgsl()
+                .ok_or_else(|| "fragment module reflection failed".to_owned())?;
+            if module
+                .fragment_builtins()
+                .into_iter()
+                .any(|builtins| builtins.entry_point == entry_name && builtins.sample_mask)
+            {
+                return Err(
+                    "render pipeline alphaToCoverage conflicts with fragment sample_mask output"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

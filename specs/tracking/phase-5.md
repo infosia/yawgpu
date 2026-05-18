@@ -52,11 +52,33 @@ create/Release/AddRef; conv null-layout⇒Auto. P1–P6 ported in
 `wgpuDeviceCreateComputePipeline`(+release/AddRef); P1–P6. Auto/explicit
 layout (S35 compute part).
 
-## P5.2 — RenderPipeline  *(NEXT; split a/b if large)*
+## P5.2a — RenderPipeline (entry/presence/primitive/MS/bias)  *(☑ DONE)*
+
+Done: core `RenderPipeline`/`RenderPipelineDescriptor`/
+`RenderPipelineLayout{Auto,Explicit}` + vertex/fragment/primitive/
+multisample/depthStencil snapshots; `resolve_render_pipeline_descriptor`
+(P7/P8 entry resolution, P9 presence+targetCount, P18 strip topology,
+P21 finite bias, P22 non-zero-bias triangle-only, P25 count∈{1,4}, P26
+a2c⇒count4, P27 a2c vs `@builtin(sample_mask)` via reflection);
+error-pipeline; deferred rules (vertex attrs/color/depth-aspect) NOT
+implemented. FFI `WGPURenderPipelineImpl` + create/Release/AddRef; conv
+render descriptor + null layout/depthStencil/fragment. P7–P27(subset)
+ported in `yawgpu/tests/render_pipeline_validation.rs` (8), gate green
+(29 binaries). Committed `phase-5: P5.2a`.
+
+## P5.2b — RenderPipeline (fragment/color/depthStencil-aspect)  *(NEXT)*
+
+P19,P20,P23,P24,P28,P29–P37 (depth/stencil aspect & depthCompare/Write,
+frag_depth, color target renderable/blendable/writeMask/output-type/
+bytesPerSample, a2c-vs-target, render overridable constants).
+
+## P5.2 — RenderPipeline  *(split a/b)*
 
 `wgpuDeviceCreateRenderPipeline`(+release/AddRef); P7–P9, P18–P37.
-P5.2a vertex/primitive/multisample (P7–P9,P18,P21,P22,P25–P28);
-P5.2b fragment/color/depthStencil (P19,P20,P23,P24,P29–P37).
+P5.2a entry/presence/primitive/multisample/depth-bias
+(P7,P8,P9,P18,P21,P22,P25,P26,P27); P5.2b fragment/color/depthStencil
+(P19,P20,P23,P24,P28,P29–P37). (P28 alpha-to-coverage-vs-target moved to
+P5.2b since it needs the color-target parsing.)
 
 ## P5.3 — VertexState  *(after P5.2)*
 
