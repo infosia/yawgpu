@@ -1076,6 +1076,23 @@ pub struct RenderPassDepthStencilAttachment {
     pub stencil_store_op: StoreOp,
 }
 
+#[derive(Debug, Clone)]
+pub struct RenderBundleEncoderDescriptor {
+    pub max_color_attachments: u32,
+    pub color_formats: Vec<Option<TextureFormat>>,
+    pub depth_stencil_format: Option<TextureFormat>,
+    pub sample_count: u32,
+    pub depth_read_only: bool,
+    pub stencil_read_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AttachmentSignature {
+    color_formats: Vec<Option<TextureFormat>>,
+    depth_stencil_format: Option<TextureFormat>,
+    sample_count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextureDescriptor {
     pub usage: TextureUsage,
@@ -3208,6 +3225,26 @@ impl RenderPipeline {
     fn primitive_state(&self) -> PrimitiveState {
         self.inner._primitive
     }
+
+    #[must_use]
+    fn attachment_signature(&self) -> AttachmentSignature {
+        AttachmentSignature {
+            color_formats: self
+                .inner
+                ._fragment
+                .as_ref()
+                .map(|fragment| {
+                    fragment
+                        .targets
+                        .iter()
+                        .map(|target| (!target.format.is_undefined()).then_some(target.format))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            depth_stencil_format: self.inner._depth_stencil.map(|depth| depth.format),
+            sample_count: self.inner._multisample.count,
+        }
+    }
 }
 
 fn validate_render_pipeline_descriptor(
@@ -4952,6 +4989,16 @@ pub struct ComputePassEncoder {
     inner: Arc<PassEncoderInner>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RenderBundleEncoder {
+    inner: Arc<RenderBundleEncoderInner>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderBundle {
+    inner: Arc<RenderBundleInner>,
+}
+
 #[derive(Debug)]
 struct PassEncoderInner {
     parent: CommandEncoder,
@@ -4959,7 +5006,7 @@ struct PassEncoderInner {
     state: Mutex<PassEncoderState>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct PassEncoderState {
     ended: bool,
     debug_group_depth: u32,
@@ -4968,6 +5015,55 @@ struct PassEncoderState {
     bind_groups: BTreeMap<u32, BoundBindGroup>,
     vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
     index_buffer: Option<BoundIndexBuffer>,
+    attachment_signature: Option<AttachmentSignature>,
+}
+
+impl PassEncoderState {
+    fn new(attachment_signature: Option<AttachmentSignature>) -> Self {
+        Self {
+            ended: false,
+            debug_group_depth: 0,
+            render_pipeline: None,
+            compute_pipeline: None,
+            bind_groups: BTreeMap::new(),
+            vertex_buffers: BTreeMap::new(),
+            index_buffer: None,
+            attachment_signature,
+        }
+    }
+
+    fn clear_render_state(&mut self) {
+        self.render_pipeline = None;
+        self.bind_groups.clear();
+        self.vertex_buffers.clear();
+        self.index_buffer = None;
+    }
+}
+
+#[derive(Debug)]
+struct RenderBundleEncoderInner {
+    descriptor: RenderBundleEncoderDescriptor,
+    state: Mutex<RenderBundleEncoderState>,
+}
+
+#[derive(Debug)]
+struct RenderBundleEncoderState {
+    lifecycle: RenderBundleEncoderLifecycle,
+    first_error: Option<String>,
+    pass_state: PassEncoderState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderBundleEncoderLifecycle {
+    Recording,
+    Errored,
+    Finished,
+}
+
+#[derive(Debug)]
+struct RenderBundleInner {
+    is_error: bool,
+    attachment_signature: AttachmentSignature,
 }
 
 #[derive(Debug, Clone)]
@@ -5018,6 +5114,7 @@ impl CommandEncoder {
         descriptor: &RenderPassDescriptor,
     ) -> (RenderPassEncoder, Option<String>) {
         let (token, immediate_error) = self.begin_pass(PassKind::Render);
+        let attachment_signature = render_pass_attachment_signature(descriptor).ok();
         if immediate_error.is_none() {
             if let Err(message) = validate_render_pass_descriptor(descriptor) {
                 self.record_first_error(message);
@@ -5025,7 +5122,11 @@ impl CommandEncoder {
         }
         (
             RenderPassEncoder {
-                inner: Arc::new(PassEncoderInner::new(self.clone(), token)),
+                inner: Arc::new(PassEncoderInner::new(
+                    self.clone(),
+                    token,
+                    attachment_signature,
+                )),
             },
             immediate_error,
         )
@@ -5036,7 +5137,7 @@ impl CommandEncoder {
         let (token, immediate_error) = self.begin_pass(PassKind::Compute);
         (
             ComputePassEncoder {
-                inner: Arc::new(PassEncoderInner::new(self.clone(), token)),
+                inner: Arc::new(PassEncoderInner::new(self.clone(), token, None)),
             },
             immediate_error,
         )
@@ -5367,6 +5468,13 @@ fn validate_encoder_write_buffer(buffer: &Buffer, offset: u64, size: u64) -> Res
 }
 
 fn validate_render_pass_descriptor(descriptor: &RenderPassDescriptor) -> Result<(), String> {
+    render_pass_attachment_signature(descriptor)?;
+    Ok(())
+}
+
+fn render_pass_attachment_signature(
+    descriptor: &RenderPassDescriptor,
+) -> Result<AttachmentSignature, String> {
     if descriptor.color_attachments.len() > descriptor.max_color_attachments as usize {
         return Err("render pass colorAttachmentCount exceeds the device limit".to_owned());
     }
@@ -5374,24 +5482,32 @@ fn validate_render_pass_descriptor(descriptor: &RenderPassDescriptor) -> Result<
     let mut has_attachment = false;
     let mut render_extent = None;
     let mut sample_count = None;
+    let mut color_formats = Vec::with_capacity(descriptor.color_attachments.len());
 
-    for attachment in descriptor.color_attachments.iter().flatten() {
-        has_attachment = true;
-        validate_color_attachment(attachment)?;
-        validate_render_attachment_common(
-            &attachment.view,
-            &mut render_extent,
-            &mut sample_count,
-            "render pass color attachment",
-        )?;
-        if let Some(resolve_target) = &attachment.resolve_target {
-            validate_resolve_target(&attachment.view, resolve_target)?;
+    for attachment in &descriptor.color_attachments {
+        if let Some(attachment) = attachment {
+            has_attachment = true;
+            validate_color_attachment(attachment)?;
+            validate_render_attachment_common(
+                &attachment.view,
+                &mut render_extent,
+                &mut sample_count,
+                "render pass color attachment",
+            )?;
+            if let Some(resolve_target) = &attachment.resolve_target {
+                validate_resolve_target(&attachment.view, resolve_target)?;
+            }
+            color_formats.push(Some(attachment.view.format()));
+        } else {
+            color_formats.push(None);
         }
     }
 
+    let mut depth_stencil_format = None;
     if let Some(attachment) = &descriptor.depth_stencil_attachment {
         has_attachment = true;
         validate_depth_stencil_attachment(attachment)?;
+        depth_stencil_format = Some(attachment.view.format());
         validate_render_attachment_common(
             &attachment.view,
             &mut render_extent,
@@ -5403,7 +5519,11 @@ fn validate_render_pass_descriptor(descriptor: &RenderPassDescriptor) -> Result<
     if !has_attachment {
         return Err("render pass requires at least one attachment".to_owned());
     }
-    Ok(())
+    Ok(AttachmentSignature {
+        color_formats,
+        depth_stencil_format,
+        sample_count: sample_count.unwrap_or(1),
+    })
 }
 
 fn validate_color_attachment(attachment: &RenderPassColorAttachment) -> Result<(), String> {
@@ -5812,6 +5932,12 @@ fn record_first_error_locked(state: &mut CommandEncoderState, message: impl Into
     }
 }
 
+fn record_first_error_option(first_error: &mut Option<String>, message: impl Into<String>) {
+    if first_error.is_none() {
+        *first_error = Some(message.into());
+    }
+}
+
 impl CommandBuffer {
     fn new(is_error: bool) -> Self {
         Self {
@@ -5826,11 +5952,15 @@ impl CommandBuffer {
 }
 
 impl PassEncoderInner {
-    fn new(parent: CommandEncoder, token: PassToken) -> Self {
+    fn new(
+        parent: CommandEncoder,
+        token: PassToken,
+        attachment_signature: Option<AttachmentSignature>,
+    ) -> Self {
         Self {
             parent,
             token,
-            state: Mutex::new(PassEncoderState::default()),
+            state: Mutex::new(PassEncoderState::new(attachment_signature)),
         }
     }
 
@@ -6124,6 +6254,28 @@ impl RenderPassEncoder {
     pub fn set_stencil_reference(&self, _reference: u32) -> Option<String> {
         self.inner.record_pass_command(|_| Ok(()))
     }
+
+    pub fn execute_bundles(&self, bundles: &[Arc<RenderBundle>]) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            let pass_signature = state
+                .attachment_signature
+                .as_ref()
+                .ok_or_else(|| "render pass has no attachment signature".to_owned())?;
+            for bundle in bundles {
+                if bundle.is_error() {
+                    return Err("render pass cannot execute an error render bundle".to_owned());
+                }
+                if bundle.attachment_signature() != pass_signature {
+                    return Err(
+                        "render bundle attachment signature is incompatible with the render pass"
+                            .to_owned(),
+                    );
+                }
+            }
+            state.clear_render_state();
+            Ok(())
+        })
+    }
 }
 
 impl ComputePassEncoder {
@@ -6203,6 +6355,266 @@ impl ComputePassEncoder {
     }
 }
 
+impl RenderBundleEncoder {
+    #[must_use]
+    pub fn new(
+        descriptor: RenderBundleEncoderDescriptor,
+        limits: Limits,
+    ) -> (Self, Option<String>) {
+        let descriptor_error = validate_render_bundle_encoder_descriptor(&descriptor, limits).err();
+        let attachment_signature = descriptor.attachment_signature();
+        (
+            Self {
+                inner: Arc::new(RenderBundleEncoderInner {
+                    descriptor,
+                    state: Mutex::new(RenderBundleEncoderState {
+                        lifecycle: if descriptor_error.is_some() {
+                            RenderBundleEncoderLifecycle::Errored
+                        } else {
+                            RenderBundleEncoderLifecycle::Recording
+                        },
+                        first_error: None,
+                        pass_state: PassEncoderState::new(Some(attachment_signature)),
+                    }),
+                }),
+            },
+            descriptor_error,
+        )
+    }
+
+    pub fn finish(&self) -> (RenderBundle, Option<String>) {
+        let mut state = self.inner.state.lock();
+        match state.lifecycle {
+            RenderBundleEncoderLifecycle::Errored => {
+                state.lifecycle = RenderBundleEncoderLifecycle::Finished;
+                return (
+                    RenderBundle::new(self.inner.descriptor.attachment_signature(), true),
+                    None,
+                );
+            }
+            RenderBundleEncoderLifecycle::Finished => {
+                return (
+                    RenderBundle::new(self.inner.descriptor.attachment_signature(), true),
+                    Some("render bundle encoder cannot be finished more than once".to_owned()),
+                );
+            }
+            RenderBundleEncoderLifecycle::Recording => {}
+        }
+        state.lifecycle = RenderBundleEncoderLifecycle::Finished;
+        let error = state.first_error.clone();
+        (
+            RenderBundle::new(
+                self.inner.descriptor.attachment_signature(),
+                error.is_some(),
+            ),
+            error,
+        )
+    }
+
+    pub fn insert_debug_marker(&self) -> Option<String> {
+        self.record_bundle_command(|_| Ok(()))
+    }
+
+    pub fn push_debug_group(&self) -> Option<String> {
+        self.record_bundle_command(|_| Ok(()))
+    }
+
+    pub fn pop_debug_group(&self) -> Option<String> {
+        self.record_bundle_command(|_| Ok(()))
+    }
+
+    pub fn set_pipeline(&self, pipeline: Arc<RenderPipeline>) -> Option<String> {
+        self.record_bundle_command(|state| {
+            validate_render_bundle_pipeline(&self.inner.descriptor, &pipeline)?;
+            state.render_pipeline = Some(pipeline);
+            Ok(())
+        })
+    }
+
+    pub fn set_bind_group(
+        &self,
+        index: u32,
+        group: Option<Arc<BindGroup>>,
+        dynamic_offsets: Vec<u32>,
+    ) -> Option<String> {
+        self.record_bundle_command(|state| {
+            if let Some(group) = group {
+                state.bind_groups.insert(
+                    index,
+                    BoundBindGroup {
+                        group,
+                        dynamic_offsets,
+                    },
+                );
+            } else {
+                state.bind_groups.remove(&index);
+            }
+            Ok(())
+        })
+    }
+
+    pub fn set_vertex_buffer(
+        &self,
+        slot: u32,
+        buffer: Option<Arc<Buffer>>,
+        offset: u64,
+        size: u64,
+        limits: Limits,
+    ) -> Option<String> {
+        self.record_bundle_command(|state| {
+            validate_vertex_buffer_slot(slot, limits)?;
+            if let Some(buffer) = buffer {
+                let size = validate_set_vertex_buffer(&buffer, offset, size)?;
+                state.vertex_buffers.insert(
+                    slot,
+                    BoundVertexBuffer {
+                        buffer,
+                        offset,
+                        size,
+                    },
+                );
+            } else {
+                validate_clear_vertex_buffer(offset, size)?;
+                state.vertex_buffers.remove(&slot);
+            }
+            Ok(())
+        })
+    }
+
+    pub fn set_index_buffer(
+        &self,
+        buffer: Arc<Buffer>,
+        format: Option<IndexFormat>,
+        offset: u64,
+        size: u64,
+    ) -> Option<String> {
+        self.record_bundle_command(|state| {
+            let format = format.ok_or_else(|| "render pass index format is invalid".to_owned())?;
+            let size = validate_set_index_buffer(&buffer, format, offset, size)?;
+            state.index_buffer = Some(BoundIndexBuffer {
+                buffer,
+                format,
+                offset,
+                size,
+            });
+            Ok(())
+        })
+    }
+
+    pub fn draw(
+        &self,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+        limits: Limits,
+    ) -> Option<String> {
+        self.record_bundle_command(|state| {
+            validate_render_draw_state(
+                state,
+                RenderDrawKind::Direct {
+                    vertex_count,
+                    instance_count,
+                    first_vertex,
+                    first_instance,
+                },
+                limits,
+            )
+        })
+    }
+
+    pub fn draw_indexed(
+        &self,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        _base_vertex: i32,
+        first_instance: u32,
+        limits: Limits,
+    ) -> Option<String> {
+        self.record_bundle_command(|state| {
+            validate_render_draw_state(
+                state,
+                RenderDrawKind::IndexedDirect {
+                    index_count,
+                    instance_count,
+                    first_index,
+                    first_instance,
+                },
+                limits,
+            )
+        })
+    }
+
+    pub fn draw_indirect(
+        &self,
+        indirect_buffer: Arc<Buffer>,
+        indirect_offset: u64,
+        limits: Limits,
+    ) -> Option<String> {
+        self.record_bundle_command(|state| {
+            validate_render_draw_state(state, RenderDrawKind::Indirect, limits)?;
+            validate_indirect_buffer(&indirect_buffer, indirect_offset, 16, "draw indirect")
+        })
+    }
+
+    pub fn draw_indexed_indirect(
+        &self,
+        indirect_buffer: Arc<Buffer>,
+        indirect_offset: u64,
+        limits: Limits,
+    ) -> Option<String> {
+        self.record_bundle_command(|state| {
+            validate_render_draw_state(state, RenderDrawKind::IndexedIndirect, limits)?;
+            validate_indirect_buffer(
+                &indirect_buffer,
+                indirect_offset,
+                20,
+                "draw indexed indirect",
+            )
+        })
+    }
+
+    fn record_bundle_command<F>(&self, command: F) -> Option<String>
+    where
+        F: FnOnce(&mut PassEncoderState) -> Result<(), String>,
+    {
+        let mut state = self.inner.state.lock();
+        match state.lifecycle {
+            RenderBundleEncoderLifecycle::Recording => {}
+            RenderBundleEncoderLifecycle::Errored => return None,
+            RenderBundleEncoderLifecycle::Finished => {
+                return Some("render bundle encoder cannot record after finish".to_owned());
+            }
+        }
+        if let Err(message) = command(&mut state.pass_state) {
+            record_first_error_option(&mut state.first_error, message);
+        }
+        None
+    }
+}
+
+impl RenderBundle {
+    fn new(attachment_signature: AttachmentSignature, is_error: bool) -> Self {
+        Self {
+            inner: Arc::new(RenderBundleInner {
+                is_error,
+                attachment_signature,
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.inner.is_error
+    }
+
+    #[must_use]
+    fn attachment_signature(&self) -> &AttachmentSignature {
+        &self.inner.attachment_signature
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum RenderDrawKind {
     Direct {
@@ -6261,6 +6673,66 @@ impl RenderDrawKind {
             RenderDrawKind::IndexedDirect { .. } | RenderDrawKind::IndexedIndirect
         )
     }
+}
+
+impl RenderBundleEncoderDescriptor {
+    fn attachment_signature(&self) -> AttachmentSignature {
+        AttachmentSignature {
+            color_formats: self.color_formats.clone(),
+            depth_stencil_format: self.depth_stencil_format,
+            sample_count: self.sample_count,
+        }
+    }
+}
+
+fn validate_render_bundle_encoder_descriptor(
+    descriptor: &RenderBundleEncoderDescriptor,
+    _limits: Limits,
+) -> Result<(), String> {
+    if descriptor.color_formats.len() > descriptor.max_color_attachments as usize {
+        return Err("render bundle colorFormatCount exceeds the device limit".to_owned());
+    }
+    if descriptor.sample_count != 1 && descriptor.sample_count != 4 {
+        return Err("render bundle sampleCount must be 1 or 4".to_owned());
+    }
+
+    let mut has_attachment = descriptor.depth_stencil_format.is_some();
+    for color_format in descriptor.color_formats.iter().flatten().copied() {
+        has_attachment = true;
+        let Some(caps) = color_format.caps() else {
+            return Err("render bundle color format must be defined".to_owned());
+        };
+        if !caps.aspects.color || !caps.renderable {
+            return Err("render bundle color format must be color-renderable".to_owned());
+        }
+    }
+    if let Some(depth_format) = descriptor.depth_stencil_format {
+        let Some(caps) = depth_format.caps() else {
+            return Err("render bundle depthStencilFormat must be defined".to_owned());
+        };
+        if !caps.aspects.depth && !caps.aspects.stencil {
+            return Err(
+                "render bundle depthStencilFormat must have depth or stencil aspect".to_owned(),
+            );
+        }
+    }
+    if !has_attachment {
+        return Err("render bundle requires at least one attachment format".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_render_bundle_pipeline(
+    descriptor: &RenderBundleEncoderDescriptor,
+    pipeline: &RenderPipeline,
+) -> Result<(), String> {
+    if pipeline.is_error() {
+        return Err("render bundle requires a valid render pipeline".to_owned());
+    }
+    if pipeline.attachment_signature() != descriptor.attachment_signature() {
+        return Err("render bundle pipeline attachment signature is incompatible".to_owned());
+    }
+    Ok(())
 }
 
 fn validate_render_draw_base_state(

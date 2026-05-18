@@ -156,10 +156,40 @@ accepted unconditionally — no canonical webgpu.h toggle.
 
 C43–C55.
 
-## P6.7 — RenderBundle  *(NEXT)*
+## P6.7 — RenderBundle  *(☑ DONE)*
+
+Done: core `RenderBundleEncoder`/`RenderBundle` + own deferred-error
+root (lifecycle Recording/Errored/Finished; `record_bundle_command`
+seam → `first_error` → `finish()` ⇒ device error + error
+`RenderBundle`). `validate_render_bundle_encoder_descriptor` (C65 ≥1
+attachment, C66 colorFormatCount ≤ max, C67 color-renderable /
+depthStencil aspect / sampleCount∈{1,4}), `validate_render_bundle_
+pipeline` (C68 pipeline `AttachmentSignature` == bundle descriptor).
+Bundle set/draw/indirect **reuse the P6.5/P6.6 validators**.
+`AttachmentSignature` {ordered color formats, depthStencil format,
+sampleCount} derived from render-pass descriptor / bundle descriptor /
+`RenderPipeline`; `RenderPassEncoder::execute_bundles` (C72/C73
+signature match + error-bundle reject, C69 clears render state, C74
+same/multiple bundles). FFI: `WGPURenderBundleEncoderImpl`/
+`WGPURenderBundleImpl` (+Release/AddRef), `wgpuDeviceCreateRender
+BundleEncoder`, 13 `wgpuRenderBundleEncoder*` fns,
+`wgpuRenderPassEncoderExecuteBundles`; conv
+`map_render_bundle_encoder_descriptor`. C65–C74 ported in
+`yawgpu/tests/render_bundle_validation.rs` (5). Gate green (39
+binaries, clippy clean).
+**Phase-review fix (MAJOR, fixed before commit):** invalid-descriptor
+encoder now reports its error exactly once at creation (`Errored`
+lifecycle; `Finish` returns an error bundle with no second device
+error; later commands silently dropped) — regression-tested.
+Committed `phase-6: P6.7`.
+**Deferred:** bundle debug-group *balance* (C62) → P6.8;
+usage-scope/submit → P6.9.
+
+#### (original detail)
+
 C65–C74.
 
-## P6.8 — Debug markers  *(after P6.7)*
+## P6.8 — Debug markers  *(NEXT)*
 C60–C64 (across pass/bundle; encoder C63 done in P6.1).
 
 ## P6.9 — Resource usage tracking + submit  *(after P6.8; closes slices)*

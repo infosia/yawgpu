@@ -168,10 +168,33 @@ ComputePassEncoder: `SetPipeline`/`SetBindGroup`/`DispatchWorkgroups`/
 
 ### P6.7 RenderBundle
 - **C65–C68** bundle encoder descriptor (≥1 format, count, renderable;
-  pipeline color/depth/sample format match). :602/:797. ☐
+  pipeline color/depth/sample format match). :602/:797. ☑ (P6.7)
 - **C69–C74** bundle state independence, ExecuteBundles state-clear,
   Finish-twice, ExecuteBundles format/sample match, multi-execute.
-  :272/:592/:942. ☐
+  :272/:592/:942. ☑ (P6.7)
+
+> P6.7 notes / divergences:
+> - `RenderBundleEncoder` is its own deferred-error root (mirrors the
+>   P6.1 model but not a child of `CommandEncoder`); recorded-command
+>   errors surface at `wgpuRenderBundleEncoderFinish` as one device
+>   error + an error `RenderBundle`. Bundle draw/set commands **reuse
+>   the P6.5/P6.6 core validators** (`validate_render_draw_state`,
+>   `validate_set_index/vertex_buffer`, `validate_indirect_buffer`).
+> - C72/C73 via an `AttachmentSignature` {ordered color formats,
+>   depthStencil format, sampleCount}: derived from the render-pass
+>   descriptor (`render_pass_attachment_signature`), the bundle
+>   encoder descriptor, and `RenderPipeline` (fragment targets / depth
+>   / multisample) — `ExecuteBundles` requires bundle == pass; C68
+>   requires bundle SetPipeline == bundle encoder descriptor.
+> - C69 `ExecuteBundles` clears the render pass's pipeline/bind-group/
+>   vertex/index state; C74 same/multiple bundles allowed.
+> - **Invalid-descriptor encoder error reported exactly once** (at
+>   creation), per core principle 3: a bad descriptor sets an
+>   `Errored` lifecycle; `Finish` then returns an error
+>   `RenderBundle` **without** re-emitting a device error, and further
+>   recorded commands are silently dropped (Phase-review fix).
+> - Debug-group **balance** in bundles (C62) → Defer→P6.8 (Insert/
+>   Push/Pop are recording no-ops here). Usage-scope/submit → P6.9.
 
 ### P6.8 Debug markers
 - **C60/C61/C62/C64** push/pop balance in render/compute pass &
