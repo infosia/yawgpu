@@ -442,6 +442,7 @@ pub unsafe fn map_render_pipeline_descriptor(
                 ),
             },
             target_count: fragment.targetCount,
+            targets: map_color_targets(fragment, &mut error),
         })
     } else {
         None
@@ -521,6 +522,12 @@ fn map_primitive_state(
 fn map_depth_stencil_state(state: &native::WGPUDepthStencilState) -> core::DepthStencilState {
     core::DepthStencilState {
         format: map_texture_format(state.format),
+        depth_write_enabled: map_optional_bool(state.depthWriteEnabled),
+        depth_compare: map_compare_function(state.depthCompare),
+        stencil_front: map_stencil_face_state(state.stencilFront),
+        stencil_back: map_stencil_face_state(state.stencilBack),
+        stencil_read_mask: state.stencilReadMask,
+        stencil_write_mask: state.stencilWriteMask,
         depth_bias: state.depthBias,
         depth_bias_slope_scale: state.depthBiasSlopeScale,
         depth_bias_clamp: state.depthBiasClamp,
@@ -532,6 +539,60 @@ fn map_multisample_state(state: native::WGPUMultisampleState) -> core::Multisamp
         count: state.count,
         mask: state.mask,
         alpha_to_coverage_enabled: state.alphaToCoverageEnabled != 0,
+    }
+}
+
+fn map_color_targets(
+    fragment: &native::WGPUFragmentState,
+    error: &mut Option<String>,
+) -> Vec<core::ColorTargetState> {
+    if fragment.targetCount == 0 {
+        return Vec::new();
+    }
+    if fragment.targets.is_null() {
+        set_first_error(
+            error,
+            "render pipeline fragment targets must not be null when count is non-zero",
+        );
+        return Vec::new();
+    }
+    unsafe { std::slice::from_raw_parts(fragment.targets, fragment.targetCount) }
+        .iter()
+        .map(|target| core::ColorTargetState {
+            format: map_texture_format(target.format),
+            blend: !target.blend.is_null(),
+            write_mask: target.writeMask,
+        })
+        .collect()
+}
+
+fn map_optional_bool(value: native::WGPUOptionalBool) -> Option<bool> {
+    match value {
+        native::WGPUOptionalBool_False => Some(false),
+        native::WGPUOptionalBool_True => Some(true),
+        _ => None,
+    }
+}
+
+fn map_stencil_face_state(value: native::WGPUStencilFaceState) -> core::StencilFaceState {
+    core::StencilFaceState {
+        compare: map_compare_function(value.compare).unwrap_or(core::CompareFunction::Always),
+        fail_op: map_stencil_operation(value.failOp),
+        depth_fail_op: map_stencil_operation(value.depthFailOp),
+        pass_op: map_stencil_operation(value.passOp),
+    }
+}
+
+fn map_stencil_operation(value: native::WGPUStencilOperation) -> core::StencilOperation {
+    match value {
+        native::WGPUStencilOperation_Zero => core::StencilOperation::Zero,
+        native::WGPUStencilOperation_Replace => core::StencilOperation::Replace,
+        native::WGPUStencilOperation_Invert => core::StencilOperation::Invert,
+        native::WGPUStencilOperation_IncrementClamp => core::StencilOperation::IncrementClamp,
+        native::WGPUStencilOperation_DecrementClamp => core::StencilOperation::DecrementClamp,
+        native::WGPUStencilOperation_IncrementWrap => core::StencilOperation::IncrementWrap,
+        native::WGPUStencilOperation_DecrementWrap => core::StencilOperation::DecrementWrap,
+        _ => core::StencilOperation::Keep,
     }
 }
 

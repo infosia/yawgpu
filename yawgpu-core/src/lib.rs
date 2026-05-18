@@ -437,7 +437,7 @@ impl Device {
         let error = descriptor
             .error
             .clone()
-            .or_else(|| validate_render_pipeline_descriptor(&descriptor));
+            .or_else(|| validate_render_pipeline_descriptor(&descriptor, self.limits()));
         let is_error = error.is_some();
         if let Some(message) = error {
             self.dispatch_error(ErrorKind::Validation, message);
@@ -647,40 +647,100 @@ impl TextureFormat {
         }
 
         let caps = match self.0 {
-            Self::R8_UNORM => FormatCaps::color(1).renderable().multisample(),
-            Self::R8_SNORM => FormatCaps::color(1),
-            Self::R8_UINT | Self::R8_SINT => FormatCaps::color(1).renderable().multisample(),
-            Self::RG8_UNORM => FormatCaps::color(2).renderable().multisample(),
-            Self::RG8_SNORM => FormatCaps::color(2),
-            Self::RG8_UINT | Self::RG8_SINT => FormatCaps::color(2).renderable().multisample(),
-            Self::R32_FLOAT | Self::R32_UINT | Self::R32_SINT => {
-                FormatCaps::color(4).renderable().multisample().storage()
-            }
-            Self::RGBA8_UNORM => FormatCaps::color(4).renderable().multisample().storage(),
-            Self::RGBA8_UNORM_SRGB => FormatCaps::color(4).renderable().multisample(),
-            Self::BGRA8_UNORM | Self::BGRA8_UNORM_SRGB => {
-                FormatCaps::color(4).renderable().multisample()
-            }
+            Self::R8_UNORM => FormatCaps::float_color(1, 1)
+                .blendable()
+                .renderable()
+                .multisample(),
+            Self::R8_SNORM => FormatCaps::float_color(1, 1).blendable(),
+            Self::R8_UINT => FormatCaps::uint_color(1, 1).renderable().multisample(),
+            Self::R8_SINT => FormatCaps::sint_color(1, 1).renderable().multisample(),
+            Self::RG8_UNORM => FormatCaps::float_color(2, 2)
+                .blendable()
+                .renderable()
+                .multisample(),
+            Self::RG8_SNORM => FormatCaps::float_color(2, 2).blendable(),
+            Self::RG8_UINT => FormatCaps::uint_color(2, 2).renderable().multisample(),
+            Self::RG8_SINT => FormatCaps::sint_color(2, 2).renderable().multisample(),
+            Self::R32_FLOAT => FormatCaps::float_color(4, 1)
+                .renderable()
+                .multisample()
+                .storage(),
+            Self::R32_UINT => FormatCaps::uint_color(4, 1)
+                .renderable()
+                .multisample()
+                .storage(),
+            Self::R32_SINT => FormatCaps::sint_color(4, 1)
+                .renderable()
+                .multisample()
+                .storage(),
+            Self::RGBA8_UNORM => FormatCaps::float_color(4, 4)
+                .alpha()
+                .blendable()
+                .renderable()
+                .multisample()
+                .storage(),
+            Self::RGBA8_UNORM_SRGB => FormatCaps::float_color(4, 4)
+                .alpha()
+                .blendable()
+                .renderable()
+                .multisample(),
+            Self::BGRA8_UNORM | Self::BGRA8_UNORM_SRGB => FormatCaps::float_color(4, 4)
+                .alpha()
+                .blendable()
+                .renderable()
+                .multisample(),
             // snorm formats are NOT storage-capable (Dawn `Format.cpp`).
-            Self::RGBA8_SNORM => FormatCaps::color(4),
-            Self::RGBA8_UINT | Self::RGBA8_SINT => {
-                FormatCaps::color(4).renderable().multisample().storage()
-            }
-            Self::RG11B10_UFLOAT | Self::RGB9E5_UFLOAT => FormatCaps::color(4),
-            Self::RG32_FLOAT | Self::RG32_UINT | Self::RG32_SINT => {
-                FormatCaps::color(8).renderable().storage()
-            }
-            Self::RGBA16_UNORM => FormatCaps::color(8).renderable().multisample().storage(),
+            Self::RGBA8_SNORM => FormatCaps::float_color(4, 4).alpha().blendable(),
+            Self::RGBA8_UINT => FormatCaps::uint_color(4, 4)
+                .alpha()
+                .renderable()
+                .multisample()
+                .storage(),
+            Self::RGBA8_SINT => FormatCaps::sint_color(4, 4)
+                .alpha()
+                .renderable()
+                .multisample()
+                .storage(),
+            Self::RG11B10_UFLOAT | Self::RGB9E5_UFLOAT => FormatCaps::float_color(4, 3).blendable(),
+            Self::RG32_FLOAT => FormatCaps::float_color(8, 2).renderable().storage(),
+            Self::RG32_UINT => FormatCaps::uint_color(8, 2).renderable().storage(),
+            Self::RG32_SINT => FormatCaps::sint_color(8, 2).renderable().storage(),
+            Self::RGBA16_UNORM => FormatCaps::float_color(8, 4)
+                .alpha()
+                .blendable()
+                .renderable()
+                .multisample()
+                .storage(),
             // snorm formats are NOT storage-capable (Dawn `Format.cpp`); the
             // remaining `*16` renderable/multisample approximation stays a
             // tracked note (block 20 → P4/P5).
-            Self::RGBA16_SNORM => FormatCaps::color(8).renderable().multisample(),
-            Self::RGBA16_UINT | Self::RGBA16_SINT | Self::RGBA16_FLOAT => {
-                FormatCaps::color(8).renderable().multisample().storage()
-            }
-            Self::RGBA32_FLOAT | Self::RGBA32_UINT | Self::RGBA32_SINT => {
-                FormatCaps::color(16).renderable().storage()
-            }
+            Self::RGBA16_SNORM => FormatCaps::float_color(8, 4)
+                .alpha()
+                .blendable()
+                .renderable()
+                .multisample(),
+            Self::RGBA16_UINT => FormatCaps::uint_color(8, 4)
+                .alpha()
+                .renderable()
+                .multisample()
+                .storage(),
+            Self::RGBA16_SINT => FormatCaps::sint_color(8, 4)
+                .alpha()
+                .renderable()
+                .multisample()
+                .storage(),
+            Self::RGBA16_FLOAT => FormatCaps::float_color(8, 4)
+                .alpha()
+                .blendable()
+                .renderable()
+                .multisample()
+                .storage(),
+            Self::RGBA32_FLOAT => FormatCaps::float_color(16, 4)
+                .alpha()
+                .renderable()
+                .storage(),
+            Self::RGBA32_UINT => FormatCaps::uint_color(16, 4).alpha().renderable().storage(),
+            Self::RGBA32_SINT => FormatCaps::sint_color(16, 4).alpha().renderable().storage(),
             Self::STENCIL8 => FormatCaps::stencil(1).renderable().multisample(),
             Self::DEPTH16_UNORM => FormatCaps::depth(2).renderable().multisample(),
             Self::DEPTH24_PLUS => FormatCaps::depth(4).renderable().multisample(),
@@ -693,9 +753,13 @@ impl TextureFormat {
             Self::BC7_RGBA_UNORM | Self::BC7_RGBA_UNORM_SRGB => {
                 FormatCaps::compressed_color(16, 4, 4)
             }
-            // Unknown WebGPU formats are treated conservatively as plain
-            // renderable color until a later phase needs exact capabilities.
-            _ => FormatCaps::color(4).renderable().multisample(),
+            // Unknown WebGPU formats stay conservative for the carried W5
+            // approximation: plain renderable float color with alpha.
+            _ => FormatCaps::float_color(4, 4)
+                .alpha()
+                .blendable()
+                .renderable()
+                .multisample(),
         };
         Some(caps)
     }
@@ -714,14 +778,42 @@ pub struct FormatCaps {
     pub renderable: bool,
     pub multisample_capable: bool,
     pub storage_capable: bool,
+    pub output_class: Option<FormatOutputClass>,
+    pub color_components: u8,
+    pub is_blendable: bool,
+    pub has_alpha: bool,
     pub is_compressed: bool,
     pub texel_block_size: u32,
     pub block_w: u32,
     pub block_h: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FormatOutputClass {
+    Float,
+    Sint,
+    Uint,
+}
+
 impl FormatCaps {
-    const fn color(texel_block_size: u32) -> Self {
+    const fn float_color(texel_block_size: u32, color_components: u8) -> Self {
+        Self::color(texel_block_size, color_components, FormatOutputClass::Float)
+    }
+
+    const fn sint_color(texel_block_size: u32, color_components: u8) -> Self {
+        Self::color(texel_block_size, color_components, FormatOutputClass::Sint)
+    }
+
+    const fn uint_color(texel_block_size: u32, color_components: u8) -> Self {
+        Self::color(texel_block_size, color_components, FormatOutputClass::Uint)
+    }
+
+    const fn color(
+        texel_block_size: u32,
+        color_components: u8,
+        output_class: FormatOutputClass,
+    ) -> Self {
         Self::new(
             FormatAspects {
                 color: true,
@@ -732,6 +824,8 @@ impl FormatCaps {
             1,
             1,
             false,
+            Some(output_class),
+            color_components,
         )
     }
 
@@ -746,6 +840,8 @@ impl FormatCaps {
             1,
             1,
             false,
+            None,
+            0,
         )
     }
 
@@ -760,6 +856,8 @@ impl FormatCaps {
             1,
             1,
             false,
+            None,
+            0,
         )
     }
 
@@ -774,6 +872,8 @@ impl FormatCaps {
             1,
             1,
             false,
+            None,
+            0,
         )
     }
 
@@ -788,6 +888,8 @@ impl FormatCaps {
             block_w,
             block_h,
             true,
+            Some(FormatOutputClass::Float),
+            4,
         )
     }
 
@@ -797,12 +899,18 @@ impl FormatCaps {
         block_w: u32,
         block_h: u32,
         is_compressed: bool,
+        output_class: Option<FormatOutputClass>,
+        color_components: u8,
     ) -> Self {
         Self {
             aspects,
             renderable: false,
             multisample_capable: false,
             storage_capable: false,
+            output_class,
+            color_components,
+            is_blendable: false,
+            has_alpha: false,
             is_compressed,
             texel_block_size,
             block_w,
@@ -822,6 +930,16 @@ impl FormatCaps {
 
     const fn storage(mut self) -> Self {
         self.storage_capable = true;
+        self
+    }
+
+    const fn blendable(mut self) -> Self {
+        self.is_blendable = true;
+        self
+    }
+
+    const fn alpha(mut self) -> Self {
+        self.has_alpha = true;
         self
     }
 }
@@ -2212,33 +2330,68 @@ fn validate_compute_pipeline_layout(
     if layout.is_error() {
         return Err("compute pipeline layout must not be an error pipeline layout".to_owned());
     }
+    let requirements = bindings
+        .iter()
+        .cloned()
+        .map(|binding| StageResourceBinding {
+            stage: PipelineShaderStage::Compute,
+            binding,
+        })
+        .collect::<Vec<_>>();
+    validate_pipeline_layout_stage_bindings(layout, &requirements)
+}
 
-    for binding in bindings {
+#[derive(Debug, Clone)]
+struct StageResourceBinding {
+    stage: PipelineShaderStage,
+    binding: shader_naga::ReflectedResourceBinding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipelineShaderStage {
+    Vertex,
+    Fragment,
+    Compute,
+}
+
+fn validate_pipeline_layout_stage_bindings(
+    layout: &PipelineLayout,
+    requirements: &[StageResourceBinding],
+) -> Result<(), String> {
+    for requirement in requirements {
+        let binding = &requirement.binding;
         let group = usize::try_from(binding.group)
             .map_err(|_| "shader binding group index is too large".to_owned())?;
         let Some(group_layout) = layout.bind_group_layouts().get(group) else {
-            return Err("compute pipeline layout is missing a shader bind group".to_owned());
+            return Err("pipeline layout is missing a shader bind group".to_owned());
         };
         let Some(layout_entry) = group_layout
             .entries()
             .iter()
             .find(|entry| entry.binding == binding.binding)
         else {
-            return Err("compute pipeline layout is missing a shader binding".to_owned());
+            return Err("pipeline layout is missing a shader binding".to_owned());
         };
-        const COMPUTE_VISIBILITY: u64 = 4;
-        if layout_entry.visibility & COMPUTE_VISIBILITY == 0 {
+        if layout_entry.visibility & pipeline_stage_visibility_bit(requirement.stage) == 0 {
             return Err(
-                "compute pipeline layout binding visibility must include Compute".to_owned(),
+                "pipeline layout binding visibility does not include the shader stage".to_owned(),
             );
         }
         let Some(kind) = layout_entry.kind else {
-            return Err("compute pipeline layout binding must be valid".to_owned());
+            return Err("pipeline layout binding must be valid".to_owned());
         };
         validate_shader_binding_compat(binding, kind)?;
     }
 
     Ok(())
+}
+
+fn pipeline_stage_visibility_bit(stage: PipelineShaderStage) -> u64 {
+    match stage {
+        PipelineShaderStage::Vertex => 1,
+        PipelineShaderStage::Fragment => 2,
+        PipelineShaderStage::Compute => 4,
+    }
 }
 
 fn validate_shader_binding_compat(
@@ -2326,6 +2479,7 @@ pub struct RenderPipelineVertexState {
 pub struct RenderPipelineFragmentState {
     pub shader: RenderPipelineShaderStage,
     pub target_count: usize,
+    pub targets: Vec<ColorTargetState>,
 }
 
 #[derive(Debug, Clone)]
@@ -2333,6 +2487,13 @@ pub struct RenderPipelineShaderStage {
     pub module: Arc<ShaderModule>,
     pub entry_point: Option<String>,
     pub constants: Vec<PipelineConstant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColorTargetState {
+    pub format: TextureFormat,
+    pub blend: bool,
+    pub write_mask: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2361,9 +2522,36 @@ pub enum IndexFormat {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DepthStencilState {
     pub format: TextureFormat,
+    pub depth_write_enabled: Option<bool>,
+    pub depth_compare: Option<CompareFunction>,
+    pub stencil_front: StencilFaceState,
+    pub stencil_back: StencilFaceState,
+    pub stencil_read_mask: u32,
+    pub stencil_write_mask: u32,
     pub depth_bias: i32,
     pub depth_bias_slope_scale: f32,
     pub depth_bias_clamp: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StencilFaceState {
+    pub compare: CompareFunction,
+    pub fail_op: StencilOperation,
+    pub depth_fail_op: StencilOperation,
+    pub pass_op: StencilOperation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StencilOperation {
+    Keep,
+    Zero,
+    Replace,
+    Invert,
+    IncrementClamp,
+    DecrementClamp,
+    IncrementWrap,
+    DecrementWrap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2396,7 +2584,7 @@ impl RenderPipeline {
         let resolved = if is_error {
             None
         } else {
-            resolve_render_pipeline_descriptor(&descriptor).ok()
+            resolve_render_pipeline_descriptor(&descriptor, Limits::DEFAULT).ok()
         };
         let (vertex_entry_name, fragment_entry_name) = resolved.unwrap_or_else(|| {
             (
@@ -2443,12 +2631,16 @@ impl RenderPipeline {
     }
 }
 
-fn validate_render_pipeline_descriptor(descriptor: &RenderPipelineDescriptor) -> Option<String> {
-    resolve_render_pipeline_descriptor(descriptor).err()
+fn validate_render_pipeline_descriptor(
+    descriptor: &RenderPipelineDescriptor,
+    limits: Limits,
+) -> Option<String> {
+    resolve_render_pipeline_descriptor(descriptor, limits).err()
 }
 
 fn resolve_render_pipeline_descriptor(
     descriptor: &RenderPipelineDescriptor,
+    limits: Limits,
 ) -> Result<(String, Option<String>), String> {
     if let RenderPipelineLayout::Explicit(layout) = &descriptor.layout {
         if layout.is_error() {
@@ -2471,11 +2663,19 @@ fn resolve_render_pipeline_descriptor(
         None
     };
 
+    validate_render_constants(&descriptor.vertex.shader)?;
+    if let Some(fragment) = &descriptor.fragment {
+        validate_render_constants(&fragment.shader)?;
+    }
     validate_render_presence(descriptor)?;
     validate_primitive_state(descriptor.primitive)?;
     if let Some(depth_stencil) = descriptor.depth_stencil {
         validate_depth_bias_state(descriptor.primitive.topology, depth_stencil)?;
+        validate_depth_stencil_aspects(depth_stencil)?;
     }
+    validate_fragment_depth_output(descriptor, fragment_entry.as_deref())?;
+    validate_color_targets(descriptor, fragment_entry.as_deref(), limits)?;
+    validate_render_pipeline_layout(descriptor)?;
     validate_multisample_state(descriptor, fragment_entry.as_deref())?;
 
     Ok((vertex_entry, fragment_entry))
@@ -2536,6 +2736,14 @@ fn validate_render_presence(descriptor: &RenderPipelineDescriptor) -> Result<(),
     Ok(())
 }
 
+fn validate_render_constants(stage: &RenderPipelineShaderStage) -> Result<(), String> {
+    let Some(module) = stage.module.validated_wgsl() else {
+        return Err("render pipeline stage requires a valid WGSL shader module".to_owned());
+    };
+    resolve_pipeline_constants(&module.overrides(), &stage.constants)?;
+    Ok(())
+}
+
 fn validate_primitive_state(primitive: PrimitiveState) -> Result<(), String> {
     if primitive.strip_index_format.is_some()
         && !matches!(
@@ -2572,6 +2780,221 @@ fn validate_depth_bias_state(
         return Err("render pipeline non-zero depth bias requires triangle topology".to_owned());
     }
     Ok(())
+}
+
+fn validate_depth_stencil_aspects(depth_stencil: DepthStencilState) -> Result<(), String> {
+    let caps = depth_stencil.format.caps();
+    let has_depth = caps.is_some_and(|caps| caps.aspects.depth);
+    let has_stencil = caps.is_some_and(|caps| caps.aspects.stencil);
+
+    if (depth_stencil.depth_compare.is_some() || depth_stencil.depth_write_enabled == Some(true))
+        && !has_depth
+    {
+        return Err("render pipeline depth test or write requires a depth format".to_owned());
+    }
+
+    if has_depth
+        && (depth_stencil.depth_compare.is_none() || depth_stencil.depth_write_enabled.is_none())
+    {
+        return Err(
+            "render pipeline depth format requires depthCompare and depthWriteEnabled".to_owned(),
+        );
+    }
+
+    if depth_stencil_uses_stencil(depth_stencil) && !has_stencil {
+        return Err("render pipeline stencil state requires a stencil format".to_owned());
+    }
+
+    Ok(())
+}
+
+fn depth_stencil_uses_stencil(depth_stencil: DepthStencilState) -> bool {
+    stencil_face_uses_stencil(depth_stencil.stencil_front)
+        || stencil_face_uses_stencil(depth_stencil.stencil_back)
+        || depth_stencil.stencil_read_mask != u32::MAX
+        || depth_stencil.stencil_write_mask != u32::MAX
+}
+
+fn stencil_face_uses_stencil(face: StencilFaceState) -> bool {
+    face.compare != CompareFunction::Always
+        || face.fail_op != StencilOperation::Keep
+        || face.depth_fail_op != StencilOperation::Keep
+        || face.pass_op != StencilOperation::Keep
+}
+
+fn validate_fragment_depth_output(
+    descriptor: &RenderPipelineDescriptor,
+    fragment_entry: Option<&str>,
+) -> Result<(), String> {
+    let Some(fragment) = &descriptor.fragment else {
+        return Ok(());
+    };
+    let Some(entry_name) = fragment_entry else {
+        return Ok(());
+    };
+    let Some(module) = fragment.shader.module.validated_wgsl() else {
+        return Err("fragment module reflection failed".to_owned());
+    };
+    let outputs_frag_depth = module
+        .fragment_builtins()
+        .into_iter()
+        .any(|builtins| builtins.entry_point == entry_name && builtins.frag_depth);
+    if outputs_frag_depth
+        && !descriptor
+            .depth_stencil
+            .and_then(|state| state.format.caps())
+            .is_some_and(|caps| caps.aspects.depth)
+    {
+        return Err("render pipeline frag_depth output requires a depth attachment".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_color_targets(
+    descriptor: &RenderPipelineDescriptor,
+    fragment_entry: Option<&str>,
+    limits: Limits,
+) -> Result<(), String> {
+    let Some(fragment) = &descriptor.fragment else {
+        return Ok(());
+    };
+    if fragment.targets.len() != fragment.target_count {
+        return Err("render pipeline fragment target array must match targetCount".to_owned());
+    }
+
+    let outputs = fragment_outputs(fragment, fragment_entry)?;
+    let mut color_bytes = 0_u32;
+    let mut has_alpha_to_coverage_target = false;
+    for (index, target) in fragment.targets.iter().enumerate() {
+        if target.format.is_undefined() {
+            if target.blend {
+                return Err("render pipeline undefined color target must not have blend".to_owned());
+            }
+            continue;
+        }
+
+        let caps = target
+            .format
+            .caps()
+            .ok_or_else(|| "render pipeline color target format must be defined".to_owned())?;
+        if !caps.renderable {
+            return Err("render pipeline color target format must be renderable".to_owned());
+        }
+        if target.blend && !caps.is_blendable {
+            return Err("render pipeline color target format must be blendable".to_owned());
+        }
+        if descriptor.multisample.alpha_to_coverage_enabled && caps.is_blendable && caps.has_alpha {
+            has_alpha_to_coverage_target = true;
+        }
+
+        match outputs.get(&(index as u32)) {
+            Some(output) => validate_fragment_output_compat(*output, caps)?,
+            None if target.write_mask != 0 => {
+                return Err(
+                    "render pipeline color target without shader output must use writeMask 0"
+                        .to_owned(),
+                );
+            }
+            None => {}
+        }
+
+        color_bytes = color_bytes
+            .checked_add(caps.texel_block_size)
+            .ok_or_else(|| "render pipeline color target byte count overflows".to_owned())?;
+    }
+
+    if descriptor.multisample.alpha_to_coverage_enabled && !has_alpha_to_coverage_target {
+        return Err(
+            "render pipeline alphaToCoverage requires an alpha blendable color target".to_owned(),
+        );
+    }
+    if color_bytes > limits.max_color_attachment_bytes_per_sample {
+        return Err(
+            "render pipeline color target bytes per sample exceed the device limit".to_owned(),
+        );
+    }
+
+    Ok(())
+}
+
+fn fragment_outputs(
+    fragment: &RenderPipelineFragmentState,
+    fragment_entry: Option<&str>,
+) -> Result<BTreeMap<u32, shader_naga::ReflectedTypeClass>, String> {
+    let Some(entry_name) = fragment_entry else {
+        return Ok(BTreeMap::new());
+    };
+    let Some(module) = fragment.shader.module.validated_wgsl() else {
+        return Err("fragment module reflection failed".to_owned());
+    };
+    Ok(module
+        .entry_point_io()
+        .into_iter()
+        .find(|io| io.entry_point == entry_name)
+        .map(|io| {
+            io.outputs
+                .into_iter()
+                .map(|output| (output.location, output.ty))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn validate_fragment_output_compat(
+    output: shader_naga::ReflectedTypeClass,
+    caps: FormatCaps,
+) -> Result<(), String> {
+    let Some(format_class) = caps.output_class else {
+        return Err("render pipeline color target format has no output class".to_owned());
+    };
+    let output_class = match output.scalar {
+        shader_naga::ReflectedTypeScalarClass::Float => FormatOutputClass::Float,
+        shader_naga::ReflectedTypeScalarClass::Sint => FormatOutputClass::Sint,
+        shader_naga::ReflectedTypeScalarClass::Uint => FormatOutputClass::Uint,
+        shader_naga::ReflectedTypeScalarClass::Bool => {
+            return Err("render pipeline fragment output type is incompatible".to_owned());
+        }
+    };
+    if output_class != format_class || output.components < caps.color_components {
+        return Err("render pipeline fragment output type is incompatible".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_render_pipeline_layout(descriptor: &RenderPipelineDescriptor) -> Result<(), String> {
+    let RenderPipelineLayout::Explicit(layout) = &descriptor.layout else {
+        return Ok(());
+    };
+    if layout.is_error() {
+        return Err("render pipeline layout must not be an error pipeline layout".to_owned());
+    }
+
+    let mut requirements =
+        stage_resource_bindings(&descriptor.vertex.shader, PipelineShaderStage::Vertex)?;
+    if let Some(fragment) = &descriptor.fragment {
+        requirements.extend(stage_resource_bindings(
+            &fragment.shader,
+            PipelineShaderStage::Fragment,
+        )?);
+    }
+    validate_pipeline_layout_stage_bindings(layout, &requirements)
+}
+
+fn stage_resource_bindings(
+    stage: &RenderPipelineShaderStage,
+    pipeline_stage: PipelineShaderStage,
+) -> Result<Vec<StageResourceBinding>, String> {
+    let Some(module) = stage.module.validated_wgsl() else {
+        return Err("render pipeline stage requires a valid WGSL shader module".to_owned());
+    };
+    Ok(module
+        .resource_bindings()
+        .into_iter()
+        .map(|binding| StageResourceBinding {
+            stage: pipeline_stage,
+            binding,
+        })
+        .collect())
 }
 
 fn validate_multisample_state(

@@ -95,32 +95,32 @@ b:fragment/color/depthStencil)
   :373/1061. ☑ (P5.2a)
 - **P18** `stripIndexFormat` only with strip topology. :1343. ☑ (P5.2a)
 - **P19** depth test/write ⇒ format has depth aspect (FormatCaps).
-  :214. ☐
-- **P20** stencil ops ⇒ format has stencil aspect. :214. ☐
+  :214. ☑ (P5.2b)
+- **P20** stencil ops ⇒ format has stencil aspect. :214. ☑ (P5.2b)
 - **P21** depthBiasSlopeScale/Clamp finite. :90. ☑ (P5.2a)
 - **P22** non-zero depth bias only with triangle topology. :140. ☑ (P5.2a)
 - **P23** depth-aspect format ⇒ depthCompare & depthWriteEnabled set
-  (not Undefined). :1410. ☐
+  (not Undefined). :1410. ☑ (P5.2b)
 - **P24** `@builtin(frag_depth)` ⇒ depthStencil w/ depth aspect. :327.
-  ☐
+  ☑ (P5.2b)
 - **P25** multisample count ∈ {1,4}. :817. ☑ (P5.2a)
 - **P26** alphaToCoverage ⇒ count==4. :1083. ☑ (P5.2a)
 - **P27** alphaToCoverage conflicts with `@builtin(sample_mask)` out.
   :1107. ☑ (P5.2a)
-- **P28** alphaToCoverage ⇒ a blendable target with alpha. :1156. ☐
+- **P28** alphaToCoverage ⇒ a blendable target with alpha. :1156. ☑ (P5.2b)
 - **P29** color target format renderable (FormatCaps); Undefined =
-  hole. :442. ☐
-- **P30** blend ⇒ blendable format. :467. ☐
+  hole. :442. ☑ (P5.2b)
+- **P30** blend ⇒ blendable format. :467. ☑ (P5.2b)
 - **P31** target format set but no shader `@location(i)` out ⇒
-  writeMask must be 0. :424. ☐
+  writeMask must be 0. :424. ☑ (P5.2b)
 - **P32** fragment output type matches target format class
-  (float/uint/sint, component count). :553. ☐
-- **P33** Undefined target format ⇒ blend must be null. :395. ☐
-- **P34** fragment present ⇒ targetCount ≥ 1. :373. ☐
+  (float/uint/sint, component count). :553. ☑ (P5.2b)
+- **P33** Undefined target format ⇒ blend must be null. :395. ☑ (P5.2b)
+- **P34** fragment present ⇒ targetCount ≥ 1. :373. ☑ (P5.2b)
 - **P35** Σ color-target bytesPerSample ≤
-  `maxColorAttachmentBytesPerSample`. ☐
-- **P36** render auto/explicit layout (as P4). GetBGL :60. ☐
-- **P37** render overridable constants (vertex+fragment) — as P5/P6. ☐
+  `maxColorAttachmentBytesPerSample`. ☑ (P5.2b)
+- **P36** render auto/explicit layout (as P4). GetBGL :60. ☑ (P5.2b)
+- **P37** render overridable constants (vertex+fragment) — as P5/P6. ☑ (P5.2b)
 
 ### Vertex state (P5.3)
 

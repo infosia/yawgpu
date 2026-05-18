@@ -66,7 +66,20 @@ render descriptor + null layout/depthStencil/fragment. P7–P27(subset)
 ported in `yawgpu/tests/render_pipeline_validation.rs` (8), gate green
 (29 binaries). Committed `phase-5: P5.2a`.
 
-## P5.2b — RenderPipeline (fragment/color/depthStencil-aspect)  *(NEXT)*
+## P5.2b — RenderPipeline (fragment/color/depthStencil-aspect)  *(☑ DONE)*
+
+Done: `FormatCaps` extended (`is_blendable`/`has_alpha`/`output_class`/
+`color_components` + `.blendable()`/`.alpha()` ctors — refines the
+carried W5 area for the tested formats);
+`validate_depth_stencil_aspects` (P19/P20/P23),
+`validate_fragment_depth_output` (P24), `validate_color_targets`
+(P28/P29/P30/P31/P33/P35), `validate_fragment_output_compat` (P32),
+`validate_render_pipeline_layout` (P36 vertex+fragment stage binding
+compat), `validate_render_constants` (P37 per-stage). P19–P37 ported in
+`render_pipeline_validation.rs` (now 14), gate green (29 binaries).
+Committed `phase-5: P5.2b`. **Render pipeline section complete.**
+
+#### (original detail)
 
 P19,P20,P23,P24,P28,P29–P37 (depth/stencil aspect & depthCompare/Write,
 frag_depth, color target renderable/blendable/writeMask/output-type/
@@ -80,7 +93,7 @@ P5.2a entry/presence/primitive/multisample/depth-bias
 (P19,P20,P23,P24,P28,P29–P37). (P28 alpha-to-coverage-vs-target moved to
 P5.2b since it needs the color-target parsing.)
 
-## P5.3 — VertexState  *(after P5.2)*
+## P5.3 — VertexState  *(NEXT)*
 
 P10–P17 (counts, stride/offset, location, format-vs-shader, coverage).
 

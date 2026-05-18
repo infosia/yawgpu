@@ -332,6 +332,323 @@ fn alpha_to_coverage_rejects_fragment_sample_mask_output() {
 }
 
 #[test]
+fn depth_stencil_aspects_are_validated() {
+    let test = ValidationTest::new();
+    unsafe {
+        let mut color_depth = depth_state();
+        color_depth.format = native::WGPUTextureFormat_RGBA8Unorm;
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            None,
+            None,
+            Some(color_depth),
+            default_primitive(),
+            default_multisample(),
+        );
+
+        let mut stencil_on_depth = depth_state();
+        stencil_on_depth.stencilFront.failOp = native::WGPUStencilOperation_Replace;
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            None,
+            None,
+            Some(stencil_on_depth),
+            default_primitive(),
+            default_multisample(),
+        );
+
+        let mut missing_depth_settings = depth_state();
+        missing_depth_settings.depthCompare = native::WGPUCompareFunction_Undefined;
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            None,
+            None,
+            Some(missing_depth_settings),
+            default_primitive(),
+            default_multisample(),
+        );
+    }
+}
+
+#[test]
+fn fragment_depth_output_requires_depth_attachment() {
+    let test = ValidationTest::new();
+    unsafe {
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::new(
+                "@fragment fn fs() -> @builtin(frag_depth) f32 { return 0.5; }",
+                None,
+                1,
+            )),
+            None,
+            None,
+            default_primitive(),
+            default_multisample(),
+        );
+    }
+}
+
+#[test]
+fn color_target_formats_outputs_and_blending_are_validated() {
+    let test = ValidationTest::new();
+    unsafe {
+        let no_alpha = [color_target_format(native::WGPUTextureFormat_R8Unorm)];
+        let mut multisample = default_multisample();
+        multisample.count = 4;
+        multisample.alphaToCoverageEnabled = 1;
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::with_targets(
+                fragment_single(),
+                None,
+                &no_alpha,
+            )),
+            None,
+            None,
+            default_primitive(),
+            multisample,
+        );
+
+        let non_renderable = [color_target_format(native::WGPUTextureFormat_RGBA8Snorm)];
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::with_targets(
+                fragment_single(),
+                None,
+                &non_renderable,
+            )),
+            None,
+            None,
+            default_primitive(),
+            default_multisample(),
+        );
+
+        let hole = [color_target_with_write_mask(
+            native::WGPUTextureFormat_Undefined,
+            native::WGPUColorWriteMask_None,
+        )];
+        assert_pipeline_ok(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::with_targets(
+                "@fragment fn fs() {}",
+                None,
+                &hole,
+            )),
+            None,
+            None,
+            default_primitive(),
+            default_multisample(),
+        );
+
+        let blend = blend_state();
+        let non_blendable = [color_target_with_blend(
+            native::WGPUTextureFormat_RGBA8Uint,
+            &blend,
+        )];
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::with_targets(
+                "@fragment fn fs() -> @location(0) vec4u { return vec4u(); }",
+                None,
+                &non_blendable,
+            )),
+            None,
+            None,
+            default_primitive(),
+            default_multisample(),
+        );
+
+        let no_output = [color_target()];
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::with_targets(
+                "@fragment fn fs() {}",
+                None,
+                &no_output,
+            )),
+            None,
+            None,
+            default_primitive(),
+            default_multisample(),
+        );
+
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::new(
+                "@fragment fn fs() -> @location(0) vec4u { return vec4u(); }",
+                None,
+                1,
+            )),
+            None,
+            None,
+            default_primitive(),
+            default_multisample(),
+        );
+
+        let undefined_with_blend = [color_target_with_blend(
+            native::WGPUTextureFormat_Undefined,
+            &blend,
+        )];
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::with_targets(
+                "@fragment fn fs() {}",
+                None,
+                &undefined_with_blend,
+            )),
+            None,
+            None,
+            default_primitive(),
+            default_multisample(),
+        );
+    }
+}
+
+#[test]
+fn color_target_bytes_per_sample_limit_is_validated() {
+    let test = ValidationTest::new();
+    unsafe {
+        let targets = [
+            color_target_with_write_mask(
+                native::WGPUTextureFormat_RGBA32Float,
+                native::WGPUColorWriteMask_None,
+            ),
+            color_target_with_write_mask(
+                native::WGPUTextureFormat_RGBA32Float,
+                native::WGPUColorWriteMask_None,
+            ),
+            color_target_with_write_mask(
+                native::WGPUTextureFormat_RGBA32Float,
+                native::WGPUColorWriteMask_None,
+            ),
+        ];
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::with_targets(
+                "@fragment fn fs() {}",
+                None,
+                &targets,
+            )),
+            None,
+            None,
+            default_primitive(),
+            default_multisample(),
+        );
+    }
+}
+
+#[test]
+fn explicit_render_pipeline_layout_is_validated() {
+    let test = ValidationTest::new();
+    unsafe {
+        let source = "struct U { value: vec4<f32> }
+             @group(0) @binding(0) var<uniform> u: U;
+             @fragment fn fs() -> @location(0) vec4f { return u.value; }";
+
+        let empty_bgl = create_bind_group_layout(test.device(), &[]);
+        let empty_layout = create_pipeline_layout(test.device(), &[empty_bgl]);
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::new(source, None, 1)),
+            Some(empty_layout),
+            None,
+            default_primitive(),
+            default_multisample(),
+        );
+
+        let wrong_visibility_bgl = create_bind_group_layout(
+            test.device(),
+            &[uniform_layout(0, native::WGPUShaderStage_Vertex, 16)],
+        );
+        let wrong_visibility_layout =
+            create_pipeline_layout(test.device(), &[wrong_visibility_bgl]);
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::new(source, None, 1)),
+            Some(wrong_visibility_layout),
+            None,
+            default_primitive(),
+            default_multisample(),
+        );
+
+        let matching_bgl = create_bind_group_layout(
+            test.device(),
+            &[uniform_layout(0, native::WGPUShaderStage_Fragment, 16)],
+        );
+        let matching_layout = create_pipeline_layout(test.device(), &[matching_bgl]);
+        assert_pipeline_ok(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::new(source, None, 1)),
+            Some(matching_layout),
+            None,
+            default_primitive(),
+            default_multisample(),
+        );
+
+        yawgpu::wgpuPipelineLayoutRelease(matching_layout);
+        yawgpu::wgpuBindGroupLayoutRelease(matching_bgl);
+        yawgpu::wgpuPipelineLayoutRelease(wrong_visibility_layout);
+        yawgpu::wgpuBindGroupLayoutRelease(wrong_visibility_bgl);
+        yawgpu::wgpuPipelineLayoutRelease(empty_layout);
+        yawgpu::wgpuBindGroupLayoutRelease(empty_bgl);
+    }
+}
+
+#[test]
+fn render_pipeline_fragment_constants_are_validated() {
+    let test = ValidationTest::new();
+    unsafe {
+        let constants = [constant("value", f64::NAN)];
+        assert_pipeline_error(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::with_constants(
+                "override value: f32; @fragment fn fs() -> @location(0) vec4f { return vec4f(value); }",
+                None,
+                1,
+                &constants,
+            )),
+            None,
+            None,
+            default_primitive(),
+            default_multisample(),
+        );
+    }
+}
+
+#[test]
 fn render_pipeline_release_is_safe_for_valid_and_error_pipelines() {
     let test = ValidationTest::new();
     unsafe {
@@ -440,18 +757,33 @@ unsafe fn create_pipeline(
     let vertex_module = create_wgsl_module(test.device(), vertex_source);
     let fragment_module =
         fragment.map(|fragment| create_wgsl_module(test.device(), fragment.source));
-    let color_targets = [color_target()];
+    let default_color_targets = [color_target()];
+    let fragment_constants = fragment
+        .map(|fragment| {
+            fragment
+                .constants
+                .iter()
+                .map(|constant| native::WGPUConstantEntry {
+                    nextInChain: std::ptr::null_mut(),
+                    key: string_view(constant.key),
+                    value: constant.value,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let fragment_state = fragment.map(|fragment| native::WGPUFragmentState {
         nextInChain: std::ptr::null_mut(),
         module: fragment_module.expect("fragment module exists"),
         entryPoint: fragment.entry.map_or(empty_string_view(), string_view),
-        constantCount: 0,
-        constants: std::ptr::null(),
+        constantCount: fragment_constants.len(),
+        constants: fragment_constants.as_ptr(),
         targetCount: fragment.target_count,
         targets: if fragment.target_count == 0 {
             std::ptr::null()
+        } else if let Some(targets) = fragment.targets {
+            targets.as_ptr()
         } else {
-            color_targets.as_ptr()
+            default_color_targets.as_ptr()
         },
     });
     let fragment_ptr = fragment_state
@@ -534,8 +866,8 @@ fn depth_state() -> native::WGPUDepthStencilState {
     native::WGPUDepthStencilState {
         nextInChain: std::ptr::null_mut(),
         format: native::WGPUTextureFormat_Depth24Plus,
-        depthWriteEnabled: native::WGPUOptionalBool_Undefined,
-        depthCompare: native::WGPUCompareFunction_Undefined,
+        depthWriteEnabled: native::WGPUOptionalBool_False,
+        depthCompare: native::WGPUCompareFunction_Less,
         stencilFront: stencil_face(),
         stencilBack: stencil_face(),
         stencilReadMask: 0xFFFF_FFFF,
@@ -556,11 +888,126 @@ fn stencil_face() -> native::WGPUStencilFaceState {
 }
 
 fn color_target() -> native::WGPUColorTargetState {
+    color_target_format(native::WGPUTextureFormat_RGBA8Unorm)
+}
+
+fn color_target_format(format: native::WGPUTextureFormat) -> native::WGPUColorTargetState {
     native::WGPUColorTargetState {
         nextInChain: std::ptr::null_mut(),
-        format: native::WGPUTextureFormat_RGBA8Unorm,
+        format,
         blend: std::ptr::null(),
         writeMask: native::WGPUColorWriteMask_All,
+    }
+}
+
+fn color_target_with_write_mask(
+    format: native::WGPUTextureFormat,
+    write_mask: native::WGPUColorWriteMask,
+) -> native::WGPUColorTargetState {
+    native::WGPUColorTargetState {
+        nextInChain: std::ptr::null_mut(),
+        format,
+        blend: std::ptr::null(),
+        writeMask: write_mask,
+    }
+}
+
+fn color_target_with_blend(
+    format: native::WGPUTextureFormat,
+    blend: &native::WGPUBlendState,
+) -> native::WGPUColorTargetState {
+    native::WGPUColorTargetState {
+        nextInChain: std::ptr::null_mut(),
+        format,
+        blend,
+        writeMask: native::WGPUColorWriteMask_All,
+    }
+}
+
+fn blend_state() -> native::WGPUBlendState {
+    native::WGPUBlendState {
+        color: blend_component(),
+        alpha: blend_component(),
+    }
+}
+
+fn blend_component() -> native::WGPUBlendComponent {
+    native::WGPUBlendComponent {
+        operation: native::WGPUBlendOperation_Add,
+        srcFactor: native::WGPUBlendFactor_One,
+        dstFactor: native::WGPUBlendFactor_Zero,
+    }
+}
+
+unsafe fn create_bind_group_layout(
+    device: native::WGPUDevice,
+    entries: &[native::WGPUBindGroupLayoutEntry],
+) -> native::WGPUBindGroupLayout {
+    let descriptor = native::WGPUBindGroupLayoutDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        entryCount: entries.len(),
+        entries: entries.as_ptr(),
+    };
+    yawgpu::wgpuDeviceCreateBindGroupLayout(device, &descriptor)
+}
+
+unsafe fn create_pipeline_layout(
+    device: native::WGPUDevice,
+    layouts: &[native::WGPUBindGroupLayout],
+) -> native::WGPUPipelineLayout {
+    let descriptor = native::WGPUPipelineLayoutDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        bindGroupLayoutCount: layouts.len(),
+        bindGroupLayouts: layouts.as_ptr(),
+        immediateSize: 0,
+    };
+    yawgpu::wgpuDeviceCreatePipelineLayout(device, &descriptor)
+}
+
+fn uniform_layout(
+    binding: u32,
+    visibility: native::WGPUShaderStage,
+    min_binding_size: u64,
+) -> native::WGPUBindGroupLayoutEntry {
+    let mut entry = default_layout(binding, visibility);
+    entry.buffer.type_ = native::WGPUBufferBindingType_Uniform;
+    entry.buffer.minBindingSize = min_binding_size;
+    entry
+}
+
+fn default_layout(
+    binding: u32,
+    visibility: native::WGPUShaderStage,
+) -> native::WGPUBindGroupLayoutEntry {
+    native::WGPUBindGroupLayoutEntry {
+        nextInChain: std::ptr::null_mut(),
+        binding,
+        visibility,
+        bindingArraySize: 0,
+        buffer: native::WGPUBufferBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            type_: native::WGPUBufferBindingType_BindingNotUsed,
+            hasDynamicOffset: 0,
+            minBindingSize: 0,
+        },
+        sampler: native::WGPUSamplerBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            type_: native::WGPUSamplerBindingType_BindingNotUsed,
+        },
+        texture: native::WGPUTextureBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            sampleType: native::WGPUTextureSampleType_BindingNotUsed,
+            viewDimension: native::WGPUTextureViewDimension_Undefined,
+            multisampled: 0,
+        },
+        storageTexture: native::WGPUStorageTextureBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            access: native::WGPUStorageTextureAccess_BindingNotUsed,
+            format: native::WGPUTextureFormat_Undefined,
+            viewDimension: native::WGPUTextureViewDimension_Undefined,
+        },
     }
 }
 
@@ -569,6 +1016,8 @@ struct FragmentInput<'a> {
     source: &'a str,
     entry: Option<&'a str>,
     target_count: usize,
+    targets: Option<&'a [native::WGPUColorTargetState]>,
+    constants: &'a [PipelineConstantInput<'a>],
 }
 
 impl<'a> FragmentInput<'a> {
@@ -577,8 +1026,49 @@ impl<'a> FragmentInput<'a> {
             source,
             entry,
             target_count,
+            targets: None,
+            constants: &[],
         }
     }
+
+    fn with_targets(
+        source: &'a str,
+        entry: Option<&'a str>,
+        targets: &'a [native::WGPUColorTargetState],
+    ) -> Self {
+        Self {
+            source,
+            entry,
+            target_count: targets.len(),
+            targets: Some(targets),
+            constants: &[],
+        }
+    }
+
+    fn with_constants(
+        source: &'a str,
+        entry: Option<&'a str>,
+        target_count: usize,
+        constants: &'a [PipelineConstantInput<'a>],
+    ) -> Self {
+        Self {
+            source,
+            entry,
+            target_count,
+            targets: None,
+            constants,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PipelineConstantInput<'a> {
+    key: &'a str,
+    value: f64,
+}
+
+fn constant(key: &str, value: f64) -> PipelineConstantInput<'_> {
+    PipelineConstantInput { key, value }
 }
 
 fn string_view(value: &str) -> native::WGPUStringView {
