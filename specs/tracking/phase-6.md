@@ -10,7 +10,22 @@ Largest phase; 9 slices. First builds the encoder/pass state machine +
 deferred-error model everything else hangs off. Carries P2/P3/P5
 deferrals.
 
-## P6.1 — Encoder/pass lifecycle + deferred-error model  *(ACTIVE)*
+## P6.1 — Encoder/pass lifecycle + deferred-error model  *(☑ DONE)*
+
+Done: core `CommandEncoder`(state machine Recording/Finished + open-pass
+token + first-error + debug-group depth)/`CommandBuffer`/`RenderPass
+Encoder`/`ComputePassEncoder`; deferred-error model (record-first-error,
+`finish()` ⇒ open-pass/imbalance/first-error → error CommandBuffer,
+first-match-wins; pass errors forwarded to parent;
+`record_command_guard` seam for P6.2+). C1–C5,C36,C63,C85,C86 with
+Dawn-matching timing (C2/C5/C63 at Finish; C1/C85 immediate; C3/C4 at
+pass call). FFI 4 handles + create/finish/begin*/end/debug-group/
+Release/AddRef. C1–C5/C36/C63/C85/C86 ported in
+`yawgpu/tests/command_encoder_lifecycle_validation.rs` (9), gate green
+(34 binaries). Committed `phase-6: P6.1`. **Deferred-error seam ready
+for P6.2+.**
+
+#### (original detail)
 
 `WGPUCommandEncoder`/`WGPUCommandBuffer`/`WGPURenderPassEncoder`/
 `WGPUComputePassEncoder` handle types; core encoder state machine
@@ -20,7 +35,7 @@ Pass` (skeleton — full descriptor validation is P6.3/P6.4), pass `End`;
 C1–C5, C36, C63, C85/C86; debug-group balance at Finish. **Foundational
 — establishes the deferred-error machinery for all later slices.**
 
-## P6.2 — Buffer copies / clear / encoder WriteBuffer  *(after P6.1)*
+## P6.2 — Buffer copies / clear / encoder WriteBuffer  *(NEXT)*
 C6–C10, ClearBuffer, C83/C84 (B53–B57).
 
 ## P6.3 — Texture copies (B2T/T2B/T2T)  *(after P6.2)*

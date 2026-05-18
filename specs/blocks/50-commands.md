@@ -67,19 +67,19 @@ ComputePassEncoder: `SetPipeline`/`SetBindGroup`/`DispatchWorkgroups`/
 
 ### P6.1 Encoder/pass lifecycle
 - **C1** commands after `Finish` ⇒ error; double `Finish` semantics.
-  `CallsAfterASuccessfulFinish` :238. ☐
+  `CallsAfterASuccessfulFinish` :238. ☑ (P6.1)
 - **C2** open pass not `End`ed before `Finish` ⇒ error.
-  `EndedMidRenderPass` :47. ☐
-- **C3** pass `End` twice ⇒ error. `RenderPassEndedTwice` :115. ☐
+  `EndedMidRenderPass` :47. ☑ (P6.1)
+- **C3** pass `End` twice ⇒ error. `RenderPassEndedTwice` :115. ☑ (P6.1)
 - **C4** command on a pass after its `End` ⇒ error.
-  `EncodeAfterEndingPass` :446. ☐
+  `EncodeAfterEndingPass` :446. ☑ (P6.1)
 - **C5** two open passes at once ⇒ error. `BeginRenderPassBeforeEnd
-  PreviousPass` :213. ☐
-- **C36** ComputePass descriptor optional/minimal. :82. ☐
+  PreviousPass` :213. ☑ (P6.1)
+- **C36** ComputePass descriptor optional/minimal. :82. ☑ (P6.1)
 - **C63** unbalanced debug groups on the encoder at `Finish` ⇒ error.
-  ☐
+  ☑ (P6.1)
 - **C85/C86** pass after parent `Finish` ⇒ error; encoder from
-  destroyed device safe. ☐
+  destroyed device safe. ☑ (P6.1)
 
 ### P6.2 Buffer copies / clear / encoder WriteBuffer
 - **C6–C10** B2B size/OOB, 4-byte align, CopySrc/CopyDst usage,

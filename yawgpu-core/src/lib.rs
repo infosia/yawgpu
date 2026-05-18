@@ -245,6 +245,11 @@ impl Device {
         Some(reason)
     }
 
+    #[must_use]
+    pub fn is_lost(&self) -> bool {
+        self.inner.lost.lock().reason.is_some()
+    }
+
     pub fn set_uncaptured_error_callback<F>(&self, callback: Option<F>)
     where
         F: Fn(DeviceError) + Send + Sync + 'static,
@@ -414,6 +419,15 @@ impl Device {
             descriptor.immediate_size,
             is_error,
         )
+    }
+
+    #[must_use]
+    pub fn create_command_encoder(&self) -> CommandEncoder {
+        if self.is_lost() {
+            CommandEncoder::new_error("command encoder device is lost")
+        } else {
+            CommandEncoder::new()
+        }
     }
 
     #[must_use]
@@ -4726,6 +4740,391 @@ impl Limits {
         effective.max_immediate_size = self.max_immediate_size;
 
         Ok(effective)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandEncoder {
+    inner: Arc<CommandEncoderInner>,
+}
+
+#[derive(Debug)]
+struct CommandEncoderInner {
+    state: Mutex<CommandEncoderState>,
+}
+
+#[derive(Debug)]
+struct CommandEncoderState {
+    lifecycle: CommandEncoderLifecycle,
+    open_pass: Option<PassToken>,
+    next_pass_id: u64,
+    first_error: Option<String>,
+    debug_group_depth: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandEncoderLifecycle {
+    Recording,
+    Finished,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PassKind {
+    Render,
+    Compute,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PassToken {
+    kind: PassKind,
+    id: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandBuffer {
+    inner: Arc<CommandBufferInner>,
+}
+
+#[derive(Debug)]
+struct CommandBufferInner {
+    is_error: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderPassEncoder {
+    inner: Arc<PassEncoderInner>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ComputePassEncoder {
+    inner: Arc<PassEncoderInner>,
+}
+
+#[derive(Debug)]
+struct PassEncoderInner {
+    parent: CommandEncoder,
+    token: PassToken,
+    state: Mutex<PassEncoderState>,
+}
+
+#[derive(Debug, Default)]
+struct PassEncoderState {
+    ended: bool,
+    debug_group_depth: u32,
+}
+
+impl CommandEncoder {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(CommandEncoderInner {
+                state: Mutex::new(CommandEncoderState {
+                    lifecycle: CommandEncoderLifecycle::Recording,
+                    open_pass: None,
+                    next_pass_id: 0,
+                    first_error: None,
+                    debug_group_depth: 0,
+                }),
+            }),
+        }
+    }
+
+    fn new_error(message: impl Into<String>) -> Self {
+        let encoder = Self::new();
+        encoder.record_first_error(message);
+        encoder
+    }
+
+    #[must_use]
+    pub fn begin_render_pass(&self) -> (RenderPassEncoder, Option<String>) {
+        let (token, immediate_error) = self.begin_pass(PassKind::Render);
+        (
+            RenderPassEncoder {
+                inner: Arc::new(PassEncoderInner::new(self.clone(), token)),
+            },
+            immediate_error,
+        )
+    }
+
+    #[must_use]
+    pub fn begin_compute_pass(&self) -> (ComputePassEncoder, Option<String>) {
+        let (token, immediate_error) = self.begin_pass(PassKind::Compute);
+        (
+            ComputePassEncoder {
+                inner: Arc::new(PassEncoderInner::new(self.clone(), token)),
+            },
+            immediate_error,
+        )
+    }
+
+    fn begin_pass(&self, kind: PassKind) -> (PassToken, Option<String>) {
+        let mut state = self.inner.state.lock();
+        let token = PassToken {
+            kind,
+            id: state.next_pass_id,
+        };
+        state.next_pass_id = state.next_pass_id.saturating_add(1);
+
+        if state.lifecycle != CommandEncoderLifecycle::Recording {
+            return (
+                token,
+                Some("command encoder cannot record after finish".to_owned()),
+            );
+        }
+
+        if state.open_pass.is_some() {
+            record_first_error_locked(
+                &mut state,
+                "command encoder cannot begin a pass while another pass is open",
+            );
+            return (token, None);
+        }
+
+        state.open_pass = Some(token);
+        (token, None)
+    }
+
+    pub fn insert_debug_marker(&self) -> Option<String> {
+        self.record_encoder_command()
+    }
+
+    pub fn push_debug_group(&self) -> Option<String> {
+        let mut state = self.inner.state.lock();
+        if state.lifecycle != CommandEncoderLifecycle::Recording {
+            return Some("command encoder cannot record after finish".to_owned());
+        }
+        if state.open_pass.is_some() {
+            record_first_error_locked(
+                &mut state,
+                "command encoder command cannot be recorded while a pass is open",
+            );
+            return None;
+        }
+        state.debug_group_depth = state.debug_group_depth.saturating_add(1);
+        None
+    }
+
+    pub fn pop_debug_group(&self) -> Option<String> {
+        let mut state = self.inner.state.lock();
+        if state.lifecycle != CommandEncoderLifecycle::Recording {
+            return Some("command encoder cannot record after finish".to_owned());
+        }
+        if state.open_pass.is_some() {
+            record_first_error_locked(
+                &mut state,
+                "command encoder command cannot be recorded while a pass is open",
+            );
+            return None;
+        }
+        if state.debug_group_depth == 0 {
+            record_first_error_locked(&mut state, "command encoder debug group stack is empty");
+        } else {
+            state.debug_group_depth -= 1;
+        }
+        None
+    }
+
+    pub fn record_command_guard(&self) -> Result<(), String> {
+        let state = self.inner.state.lock();
+        if state.lifecycle != CommandEncoderLifecycle::Recording {
+            return Err("command encoder cannot record after finish".to_owned());
+        }
+        if state.open_pass.is_some() {
+            return Err(
+                "command encoder command cannot be recorded while a pass is open".to_owned(),
+            );
+        }
+        Ok(())
+    }
+
+    fn record_encoder_command(&self) -> Option<String> {
+        match self.record_command_guard() {
+            Ok(()) => None,
+            Err(message) => {
+                let mut state = self.inner.state.lock();
+                if state.lifecycle == CommandEncoderLifecycle::Recording {
+                    record_first_error_locked(&mut state, message);
+                    None
+                } else {
+                    Some(message)
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn finish(&self) -> (CommandBuffer, Option<String>) {
+        let mut state = self.inner.state.lock();
+        if state.lifecycle != CommandEncoderLifecycle::Recording {
+            return (
+                CommandBuffer::new(true),
+                Some("command encoder cannot be finished more than once".to_owned()),
+            );
+        }
+        state.lifecycle = CommandEncoderLifecycle::Finished;
+
+        let finish_error = state
+            .first_error
+            .clone()
+            .or_else(|| {
+                state
+                    .open_pass
+                    .is_some()
+                    .then(|| "command encoder cannot finish while a pass is open".to_owned())
+            })
+            .or_else(|| {
+                (state.debug_group_depth != 0)
+                    .then(|| "command encoder debug group stack is unbalanced".to_owned())
+            });
+        (CommandBuffer::new(finish_error.is_some()), finish_error)
+    }
+
+    fn end_pass(&self, token: PassToken) {
+        let mut state = self.inner.state.lock();
+        if state.open_pass == Some(token) {
+            state.open_pass = None;
+        }
+    }
+
+    fn record_first_error(&self, message: impl Into<String>) {
+        let mut state = self.inner.state.lock();
+        record_first_error_locked(&mut state, message);
+    }
+
+    fn is_finished(&self) -> bool {
+        self.inner.state.lock().lifecycle == CommandEncoderLifecycle::Finished
+    }
+}
+
+fn record_first_error_locked(state: &mut CommandEncoderState, message: impl Into<String>) {
+    if state.first_error.is_none() {
+        state.first_error = Some(message.into());
+    }
+}
+
+impl CommandBuffer {
+    fn new(is_error: bool) -> Self {
+        Self {
+            inner: Arc::new(CommandBufferInner { is_error }),
+        }
+    }
+
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.inner.is_error
+    }
+}
+
+impl PassEncoderInner {
+    fn new(parent: CommandEncoder, token: PassToken) -> Self {
+        Self {
+            parent,
+            token,
+            state: Mutex::new(PassEncoderState::default()),
+        }
+    }
+
+    fn end(&self) -> Option<String> {
+        let mut state = self.state.lock();
+        if state.ended {
+            let message = "pass encoder cannot be ended more than once".to_owned();
+            self.parent.record_first_error(message.clone());
+            return Some(message);
+        }
+        if self.parent.is_finished() {
+            let message = "pass encoder cannot be used after parent encoder finish".to_owned();
+            self.parent.record_first_error(message.clone());
+            return Some(message);
+        }
+        state.ended = true;
+        let unbalanced_debug_groups = state.debug_group_depth != 0;
+        drop(state);
+
+        self.parent.end_pass(self.token);
+        if unbalanced_debug_groups {
+            let message = "pass encoder debug group stack is unbalanced".to_owned();
+            self.parent.record_first_error(message.clone());
+            Some(message)
+        } else {
+            None
+        }
+    }
+
+    fn insert_debug_marker(&self) -> Option<String> {
+        self.pass_command_guard().err()
+    }
+
+    fn push_debug_group(&self) -> Option<String> {
+        if let Err(message) = self.pass_command_guard() {
+            return Some(message);
+        }
+        let mut state = self.state.lock();
+        state.debug_group_depth = state.debug_group_depth.saturating_add(1);
+        None
+    }
+
+    fn pop_debug_group(&self) -> Option<String> {
+        if let Err(message) = self.pass_command_guard() {
+            return Some(message);
+        }
+        let mut state = self.state.lock();
+        if state.debug_group_depth == 0 {
+            let message = "pass encoder debug group stack is empty".to_owned();
+            self.parent.record_first_error(message.clone());
+            Some(message)
+        } else {
+            state.debug_group_depth -= 1;
+            None
+        }
+    }
+
+    fn pass_command_guard(&self) -> Result<(), String> {
+        if self.parent.is_finished() {
+            let message = "pass encoder cannot be used after parent encoder finish".to_owned();
+            self.parent.record_first_error(message.clone());
+            return Err(message);
+        }
+        if self.state.lock().ended {
+            let message = "pass encoder cannot be used after end".to_owned();
+            self.parent.record_first_error(message.clone());
+            return Err(message);
+        }
+        Ok(())
+    }
+}
+
+impl RenderPassEncoder {
+    pub fn end(&self) -> Option<String> {
+        self.inner.end()
+    }
+
+    pub fn insert_debug_marker(&self) -> Option<String> {
+        self.inner.insert_debug_marker()
+    }
+
+    pub fn push_debug_group(&self) -> Option<String> {
+        self.inner.push_debug_group()
+    }
+
+    pub fn pop_debug_group(&self) -> Option<String> {
+        self.inner.pop_debug_group()
+    }
+}
+
+impl ComputePassEncoder {
+    pub fn end(&self) -> Option<String> {
+        self.inner.end()
+    }
+
+    pub fn insert_debug_marker(&self) -> Option<String> {
+        self.inner.insert_debug_marker()
+    }
+
+    pub fn push_debug_group(&self) -> Option<String> {
+        self.inner.push_debug_group()
+    }
+
+    pub fn pop_debug_group(&self) -> Option<String> {
+        self.inner.pop_debug_group()
     }
 }
 
