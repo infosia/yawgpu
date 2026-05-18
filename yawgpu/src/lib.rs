@@ -2178,6 +2178,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetVertexBuffer(
             buffer.map(|buffer| Arc::clone(&buffer.core)),
             offset,
             size,
+            pass.device.limits(),
         ),
     );
 }
@@ -2216,13 +2217,22 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetIndexBuffer(
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderDraw(
     render_pass_encoder: native::WGPURenderPassEncoder,
-    _vertex_count: u32,
-    _instance_count: u32,
-    _first_vertex: u32,
-    _first_instance: u32,
+    vertex_count: u32,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    dispatch_optional_error(&pass.device, pass.core.draw(pass.device.limits()));
+    dispatch_optional_error(
+        &pass.device,
+        pass.core.draw(
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
+            pass.device.limits(),
+        ),
+    );
 }
 
 /// Records an indexed draw in a render pass.
@@ -2233,14 +2243,70 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderDraw(
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndexed(
     render_pass_encoder: native::WGPURenderPassEncoder,
-    _index_count: u32,
-    _instance_count: u32,
-    _first_index: u32,
-    _base_vertex: i32,
-    _first_instance: u32,
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    base_vertex: i32,
+    first_instance: u32,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    dispatch_optional_error(&pass.device, pass.core.draw_indexed(pass.device.limits()));
+    dispatch_optional_error(
+        &pass.device,
+        pass.core.draw_indexed(
+            index_count,
+            instance_count,
+            first_index,
+            base_vertex,
+            first_instance,
+            pass.device.limits(),
+        ),
+    );
+}
+
+/// Records an indirect non-indexed draw in a render pass.
+///
+/// # Safety
+///
+/// `render_pass_encoder` and `indirect_buffer` must be non-null live yawgpu handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndirect(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+    indirect_buffer: native::WGPUBuffer,
+    indirect_offset: u64,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    let indirect_buffer = clone_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
+    dispatch_optional_error(
+        &pass.device,
+        pass.core.draw_indirect(
+            Arc::clone(&indirect_buffer.core),
+            indirect_offset,
+            pass.device.limits(),
+        ),
+    );
+}
+
+/// Records an indirect indexed draw in a render pass.
+///
+/// # Safety
+///
+/// `render_pass_encoder` and `indirect_buffer` must be non-null live yawgpu handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndexedIndirect(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+    indirect_buffer: native::WGPUBuffer,
+    indirect_offset: u64,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    let indirect_buffer = clone_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
+    dispatch_optional_error(
+        &pass.device,
+        pass.core.draw_indexed_indirect(
+            Arc::clone(&indirect_buffer.core),
+            indirect_offset,
+            pass.device.limits(),
+        ),
+    );
 }
 
 /// Sets the render pass viewport.
@@ -2445,6 +2511,29 @@ pub unsafe extern "C" fn wgpuComputePassEncoderDispatchWorkgroups(
     );
 }
 
+/// Records an indirect compute dispatch.
+///
+/// # Safety
+///
+/// `compute_pass_encoder` and `indirect_buffer` must be non-null live yawgpu handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuComputePassEncoderDispatchWorkgroupsIndirect(
+    compute_pass_encoder: native::WGPUComputePassEncoder,
+    indirect_buffer: native::WGPUBuffer,
+    indirect_offset: u64,
+) {
+    let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
+    let indirect_buffer = clone_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
+    dispatch_optional_error(
+        &pass.device,
+        pass.core.dispatch_workgroups_indirect(
+            Arc::clone(&indirect_buffer.core),
+            indirect_offset,
+            pass.device.limits(),
+        ),
+    );
+}
+
 fn dispatch_optional_error(device: &core::Device, error: Option<String>) {
     if let Some(message) = error {
         device.dispatch_error(core::ErrorKind::Validation, message);
@@ -2462,11 +2551,11 @@ unsafe fn dynamic_offsets_slice(count: usize, offsets: *const u32) -> Vec<u32> {
     std::slice::from_raw_parts(offsets, count).to_vec()
 }
 
-fn map_index_format(format: native::WGPUIndexFormat) -> core::IndexFormat {
+fn map_index_format(format: native::WGPUIndexFormat) -> Option<core::IndexFormat> {
     match format {
-        native::WGPUIndexFormat_Uint16 => core::IndexFormat::Uint16,
-        native::WGPUIndexFormat_Uint32 => core::IndexFormat::Uint32,
-        _ => core::IndexFormat::Uint32,
+        native::WGPUIndexFormat_Uint16 => Some(core::IndexFormat::Uint16),
+        native::WGPUIndexFormat_Uint32 => Some(core::IndexFormat::Uint32),
+        _ => None,
     }
 }
 

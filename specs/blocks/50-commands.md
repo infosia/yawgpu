@@ -132,13 +132,39 @@ ComputePassEncoder: `SetPipeline`/`SetBindGroup`/`DispatchWorkgroups`/
 
 ### P6.6 Index/Vertex buffer + draw OOB + indirect
 - **C43–C46** index format valid, Index usage, OOB, offset align,
-  matches pipeline strip format. :62. ☐
-- **C47–C49** vertex buffer Vertex usage, offset OOB, format. ☐
+  matches pipeline strip format. :62. ☑ (P6.6)
+- **C47–C49** vertex buffer Vertex usage, offset OOB, format. ☑ (P6.6)
 - **C50–C52** Draw/DrawIndexed vertex/index count vs bound buffer
-  size; instanceCount. `DrawVertexAndIndexBufferOOB`. ☐
+  size; instanceCount. `DrawVertexAndIndexBufferOOB`. ☑ (P6.6)
 - **C53–C55** Draw/DrawIndexedIndirect + ComputeIndirect: Indirect
   usage, 4-byte offset align, indirect-args size bounds; firstInstance
-  feature gating. ☐
+  feature gating. ☑ (P6.6)
+
+> P6.6 notes / divergences (deferred-error model; surface at
+> `wgpuCommandEncoderFinish`):
+> - SetIndexBuffer/SetVertexBuffer validate at the Set call (C43–C45/
+>   C47–C49): error/destroyed buffer, INDEX/VERTEX usage, offset
+>   alignment (index-format size / 4), `WHOLE_SIZE` resolved via
+>   `validate_buffer_range`, vertex slot < `max_vertex_buffers`; null
+>   vertex buffer requires zero offset+size.
+> - Draw OOB (C50–C52) per the pipeline's vertex-buffer layouts:
+>   `stepMode==Vertex` bounded by `firstVertex+vertexCount`,
+>   `stepMode==Instance` by `firstInstance+instanceCount`,
+>   `arrayStride==0` skipped. **Indexed draws skip Vertex-step OOB**
+>   (indices are GPU-side) and instead bound the index buffer by
+>   `firstIndex+indexCount` + Instance-step buffers — matches Dawn.
+>   `baseVertex` not used for bounds (GPU-side).
+> - C46 strip format checked at draw only for strip topologies.
+> - C53–C55 indirect: run the C37–C42 pre-draw state checks, then
+>   INDIRECT usage / 4-byte offset / `offset+args ≤ size`
+>   (args = 16 Draw / 20 DrawIndexed / 12 Dispatch). No vertex/index
+>   count OOB on indirect (counts are GPU-side).
+> - **`firstInstance` feature gating: accepted unconditionally
+>   (divergence).** webgpu.h exposes no stable
+>   indirect-first-instance toggle in our header; Dawn's
+>   `IndirectFirstInstance`-feature path has no canonical webgpu.h
+>   analog. Revisit if/when the feature is added (cf. AllowUnsafeAPIs
+>   divergence pattern).
 
 ### P6.7 RenderBundle
 - **C65–C68** bundle encoder descriptor (≥1 format, count, renderable;

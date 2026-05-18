@@ -3198,6 +3198,16 @@ impl RenderPipeline {
     pub fn required_vertex_buffer_count(&self) -> usize {
         self.inner._vertex.buffer_count
     }
+
+    #[must_use]
+    fn vertex_buffer_layouts(&self) -> &[VertexBufferLayout] {
+        &self.inner._vertex.buffers
+    }
+
+    #[must_use]
+    fn primitive_state(&self) -> PrimitiveState {
+        self.inner._primitive
+    }
 }
 
 fn validate_render_pipeline_descriptor(
@@ -4956,7 +4966,7 @@ struct PassEncoderState {
     render_pipeline: Option<Arc<RenderPipeline>>,
     compute_pipeline: Option<Arc<ComputePipeline>>,
     bind_groups: BTreeMap<u32, BoundBindGroup>,
-    vertex_buffers: BTreeSet<u32>,
+    vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
     index_buffer: Option<BoundIndexBuffer>,
 }
 
@@ -4967,11 +4977,18 @@ struct BoundBindGroup {
 }
 
 #[derive(Debug, Clone)]
+struct BoundVertexBuffer {
+    buffer: Arc<Buffer>,
+    offset: u64,
+    size: u64,
+}
+
+#[derive(Debug, Clone)]
 struct BoundIndexBuffer {
-    _buffer: Arc<Buffer>,
-    _format: IndexFormat,
-    _offset: u64,
-    _size: u64,
+    buffer: Arc<Buffer>,
+    format: IndexFormat,
+    offset: u64,
+    size: u64,
 }
 
 impl CommandEncoder {
@@ -5950,13 +5967,24 @@ impl RenderPassEncoder {
         &self,
         slot: u32,
         buffer: Option<Arc<Buffer>>,
-        _offset: u64,
-        _size: u64,
+        offset: u64,
+        size: u64,
+        limits: Limits,
     ) -> Option<String> {
         self.inner.record_pass_command(|state| {
-            if buffer.is_some() {
-                state.vertex_buffers.insert(slot);
+            validate_vertex_buffer_slot(slot, limits)?;
+            if let Some(buffer) = buffer {
+                let size = validate_set_vertex_buffer(&buffer, offset, size)?;
+                state.vertex_buffers.insert(
+                    slot,
+                    BoundVertexBuffer {
+                        buffer,
+                        offset,
+                        size,
+                    },
+                );
             } else {
+                validate_clear_vertex_buffer(offset, size)?;
                 state.vertex_buffers.remove(&slot);
             }
             Ok(())
@@ -5966,29 +5994,95 @@ impl RenderPassEncoder {
     pub fn set_index_buffer(
         &self,
         buffer: Arc<Buffer>,
-        format: IndexFormat,
+        format: Option<IndexFormat>,
         offset: u64,
         size: u64,
     ) -> Option<String> {
         self.inner.record_pass_command(|state| {
+            let format = format.ok_or_else(|| "render pass index format is invalid".to_owned())?;
+            let size = validate_set_index_buffer(&buffer, format, offset, size)?;
             state.index_buffer = Some(BoundIndexBuffer {
-                _buffer: buffer,
-                _format: format,
-                _offset: offset,
-                _size: size,
+                buffer,
+                format,
+                offset,
+                size,
             });
             Ok(())
         })
     }
 
-    pub fn draw(&self, limits: Limits) -> Option<String> {
-        self.inner
-            .record_pass_command(|state| validate_render_draw_state(state, limits, false))
+    pub fn draw(
+        &self,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+        limits: Limits,
+    ) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            validate_render_draw_state(
+                state,
+                RenderDrawKind::Direct {
+                    vertex_count,
+                    instance_count,
+                    first_vertex,
+                    first_instance,
+                },
+                limits,
+            )
+        })
     }
 
-    pub fn draw_indexed(&self, limits: Limits) -> Option<String> {
-        self.inner
-            .record_pass_command(|state| validate_render_draw_state(state, limits, true))
+    pub fn draw_indexed(
+        &self,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        _base_vertex: i32,
+        first_instance: u32,
+        limits: Limits,
+    ) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            validate_render_draw_state(
+                state,
+                RenderDrawKind::IndexedDirect {
+                    index_count,
+                    instance_count,
+                    first_index,
+                    first_instance,
+                },
+                limits,
+            )
+        })
+    }
+
+    pub fn draw_indirect(
+        &self,
+        indirect_buffer: Arc<Buffer>,
+        indirect_offset: u64,
+        limits: Limits,
+    ) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            validate_render_draw_state(state, RenderDrawKind::Indirect, limits)?;
+            validate_indirect_buffer(&indirect_buffer, indirect_offset, 16, "draw indirect")
+        })
+    }
+
+    pub fn draw_indexed_indirect(
+        &self,
+        indirect_buffer: Arc<Buffer>,
+        indirect_offset: u64,
+        limits: Limits,
+    ) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            validate_render_draw_state(state, RenderDrawKind::IndexedIndirect, limits)?;
+            validate_indirect_buffer(
+                &indirect_buffer,
+                indirect_offset,
+                20,
+                "draw indexed indirect",
+            )
+        })
     }
 
     pub fn set_viewport(
@@ -6090,13 +6184,90 @@ impl ComputePassEncoder {
             Ok(())
         })
     }
+
+    pub fn dispatch_workgroups_indirect(
+        &self,
+        indirect_buffer: Arc<Buffer>,
+        indirect_offset: u64,
+        limits: Limits,
+    ) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            validate_compute_dispatch_state(state, limits)?;
+            validate_indirect_buffer(
+                &indirect_buffer,
+                indirect_offset,
+                12,
+                "dispatch workgroups indirect",
+            )
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RenderDrawKind {
+    Direct {
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    },
+    IndexedDirect {
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        first_instance: u32,
+    },
+    Indirect,
+    IndexedIndirect,
 }
 
 fn validate_render_draw_state(
     state: &PassEncoderState,
+    kind: RenderDrawKind,
+    limits: Limits,
+) -> Result<(), String> {
+    let pipeline = validate_render_draw_base_state(state, limits, kind.is_indexed())?;
+    validate_strip_index_format(pipeline, state, kind.is_indexed())?;
+    match kind {
+        RenderDrawKind::Direct {
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
+        } => validate_vertex_buffer_oob(
+            pipeline,
+            state,
+            Some((first_vertex, vertex_count)),
+            first_instance,
+            instance_count,
+        ),
+        RenderDrawKind::IndexedDirect {
+            index_count,
+            instance_count,
+            first_index,
+            first_instance,
+        } => {
+            validate_index_buffer_oob(state, first_index, index_count)?;
+            validate_vertex_buffer_oob(pipeline, state, None, first_instance, instance_count)
+        }
+        RenderDrawKind::Indirect | RenderDrawKind::IndexedIndirect => Ok(()),
+    }
+}
+
+impl RenderDrawKind {
+    fn is_indexed(self) -> bool {
+        matches!(
+            self,
+            RenderDrawKind::IndexedDirect { .. } | RenderDrawKind::IndexedIndirect
+        )
+    }
+}
+
+fn validate_render_draw_base_state(
+    state: &PassEncoderState,
     limits: Limits,
     indexed: bool,
-) -> Result<(), String> {
+) -> Result<&Arc<RenderPipeline>, String> {
     let Some(pipeline) = &state.render_pipeline else {
         return Err("render pass draw requires a render pipeline".to_owned());
     };
@@ -6107,7 +6278,7 @@ fn validate_render_draw_state(
     for slot in 0..pipeline.required_vertex_buffer_count() {
         let slot = u32::try_from(slot)
             .map_err(|_| "render pipeline vertex buffer slot is too large".to_owned())?;
-        if !state.vertex_buffers.contains(&slot) {
+        if !state.vertex_buffers.contains_key(&slot) {
             return Err(
                 "render pass draw requires all declared vertex buffers to be set".to_owned(),
             );
@@ -6116,7 +6287,224 @@ fn validate_render_draw_state(
     if indexed && state.index_buffer.is_none() {
         return Err("render pass indexed draw requires an index buffer".to_owned());
     }
+    Ok(pipeline)
+}
+
+fn validate_set_index_buffer(
+    buffer: &Buffer,
+    format: IndexFormat,
+    offset: u64,
+    size: u64,
+) -> Result<u64, String> {
+    if buffer.is_error() {
+        return Err("render pass index buffer must not be an error buffer".to_owned());
+    }
+    if buffer.is_destroyed() {
+        return Err("render pass index buffer must not be destroyed".to_owned());
+    }
+    if !buffer.usage().contains(BufferUsage::INDEX) {
+        return Err("render pass index buffer requires Index usage".to_owned());
+    }
+    let format_size = index_format_size(format);
+    if !offset.is_multiple_of(format_size) {
+        return Err("render pass index buffer offset is not aligned".to_owned());
+    }
+    resolve_buffer_binding_size(
+        offset,
+        size,
+        buffer.size(),
+        "render pass index buffer range",
+    )
+}
+
+fn validate_set_vertex_buffer(buffer: &Buffer, offset: u64, size: u64) -> Result<u64, String> {
+    if buffer.is_error() {
+        return Err("render pass vertex buffer must not be an error buffer".to_owned());
+    }
+    if buffer.is_destroyed() {
+        return Err("render pass vertex buffer must not be destroyed".to_owned());
+    }
+    if !buffer.usage().contains(BufferUsage::VERTEX) {
+        return Err("render pass vertex buffer requires Vertex usage".to_owned());
+    }
+    if !offset.is_multiple_of(4) {
+        return Err("render pass vertex buffer offset must be 4-byte aligned".to_owned());
+    }
+    resolve_buffer_binding_size(
+        offset,
+        size,
+        buffer.size(),
+        "render pass vertex buffer range",
+    )
+}
+
+fn validate_vertex_buffer_slot(slot: u32, limits: Limits) -> Result<(), String> {
+    if slot >= limits.max_vertex_buffers {
+        return Err("render pass vertex buffer slot exceeds the device limit".to_owned());
+    }
     Ok(())
+}
+
+fn validate_clear_vertex_buffer(offset: u64, size: u64) -> Result<(), String> {
+    if offset != 0 || size != 0 {
+        return Err("render pass null vertex buffer requires zero offset and size".to_owned());
+    }
+    Ok(())
+}
+
+fn resolve_buffer_binding_size(
+    offset: u64,
+    size: u64,
+    buffer_size: u64,
+    label: &str,
+) -> Result<u64, String> {
+    if offset > buffer_size {
+        return Err(format!("{label} exceeds buffer size"));
+    }
+    let resolved_size = if size == u64::MAX {
+        buffer_size - offset
+    } else {
+        size
+    };
+    validate_buffer_range(offset, resolved_size, buffer_size, label)?;
+    Ok(resolved_size)
+}
+
+fn validate_strip_index_format(
+    pipeline: &RenderPipeline,
+    state: &PassEncoderState,
+    indexed: bool,
+) -> Result<(), String> {
+    if !indexed {
+        return Ok(());
+    }
+    let primitive = pipeline.primitive_state();
+    if !matches!(
+        primitive.topology,
+        PrimitiveTopology::LineStrip | PrimitiveTopology::TriangleStrip
+    ) {
+        return Ok(());
+    }
+    let Some(strip_format) = primitive.strip_index_format else {
+        return Err("render pass strip indexed draw requires pipeline stripIndexFormat".to_owned());
+    };
+    let index_buffer = state
+        .index_buffer
+        .as_ref()
+        .ok_or_else(|| "render pass indexed draw requires an index buffer".to_owned())?;
+    if index_buffer.format != strip_format {
+        return Err(
+            "render pass index buffer format must match pipeline stripIndexFormat".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_vertex_buffer_oob(
+    pipeline: &RenderPipeline,
+    state: &PassEncoderState,
+    vertex_draw: Option<(u32, u32)>,
+    first_instance: u32,
+    instance_count: u32,
+) -> Result<(), String> {
+    for (slot, layout) in pipeline.vertex_buffer_layouts().iter().enumerate() {
+        if layout.array_stride == 0 {
+            continue;
+        }
+        let stride_count = match layout.step_mode {
+            VertexStepMode::Vertex => {
+                let Some((first_vertex, vertex_count)) = vertex_draw else {
+                    continue;
+                };
+                first_vertex
+                    .checked_add(vertex_count)
+                    .ok_or_else(|| "render pass draw vertex count overflows".to_owned())?
+            }
+            VertexStepMode::Instance => first_instance
+                .checked_add(instance_count)
+                .ok_or_else(|| "render pass draw instance count overflows".to_owned())?,
+        };
+        let required_size = layout
+            .array_stride
+            .checked_mul(u64::from(stride_count))
+            .ok_or_else(|| "render pass vertex buffer required size overflows".to_owned())?;
+        let slot = u32::try_from(slot)
+            .map_err(|_| "render pipeline vertex buffer slot is too large".to_owned())?;
+        let bound = state.vertex_buffers.get(&slot).ok_or_else(|| {
+            "render pass draw requires all declared vertex buffers to be set".to_owned()
+        })?;
+        let required_end = bound
+            .offset
+            .checked_add(required_size)
+            .ok_or_else(|| "render pass vertex buffer required range overflows".to_owned())?;
+        let bound_end = bound
+            .offset
+            .checked_add(bound.size)
+            .ok_or_else(|| "render pass vertex buffer bound range overflows".to_owned())?;
+        if required_end > bound_end || required_end > bound.buffer.size() {
+            return Err("render pass draw vertex buffer range exceeds the bound buffer".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn validate_index_buffer_oob(
+    state: &PassEncoderState,
+    first_index: u32,
+    index_count: u32,
+) -> Result<(), String> {
+    let index_buffer = state
+        .index_buffer
+        .as_ref()
+        .ok_or_else(|| "render pass indexed draw requires an index buffer".to_owned())?;
+    let required_indices = first_index
+        .checked_add(index_count)
+        .ok_or_else(|| "render pass indexed draw index count overflows".to_owned())?;
+    let required_size = u64::from(required_indices)
+        .checked_mul(index_format_size(index_buffer.format))
+        .ok_or_else(|| "render pass indexed draw index buffer size overflows".to_owned())?;
+    let required_end = index_buffer
+        .offset
+        .checked_add(required_size)
+        .ok_or_else(|| "render pass indexed draw index buffer range overflows".to_owned())?;
+    let bound_end = index_buffer
+        .offset
+        .checked_add(index_buffer.size)
+        .ok_or_else(|| "render pass indexed draw index buffer bound range overflows".to_owned())?;
+    if required_end > bound_end || required_end > index_buffer.buffer.size() {
+        return Err(
+            "render pass indexed draw index buffer range exceeds the bound buffer".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_indirect_buffer(
+    buffer: &Buffer,
+    indirect_offset: u64,
+    args_size: u64,
+    label: &str,
+) -> Result<(), String> {
+    if buffer.is_error() {
+        return Err(format!("{label} buffer must not be an error buffer"));
+    }
+    if buffer.is_destroyed() {
+        return Err(format!("{label} buffer must not be destroyed"));
+    }
+    if !buffer.usage().contains(BufferUsage::INDIRECT) {
+        return Err(format!("{label} buffer requires Indirect usage"));
+    }
+    if !indirect_offset.is_multiple_of(4) {
+        return Err(format!("{label} offset must be 4-byte aligned"));
+    }
+    validate_buffer_range(indirect_offset, args_size, buffer.size(), label)
+}
+
+const fn index_format_size(format: IndexFormat) -> u64 {
+    match format {
+        IndexFormat::Uint16 => 2,
+        IndexFormat::Uint32 => 4,
+    }
 }
 
 fn validate_compute_dispatch_state(state: &PassEncoderState, limits: Limits) -> Result<(), String> {
