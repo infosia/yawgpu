@@ -157,7 +157,18 @@ gate green (32 binaries). Committed `phase-5: P5.5`.
 
 Per-device descriptor-keyed dedup (handle identity); P43–P50.
 
-## P5.6 — Async pipeline creation  *(NEXT — closes slices, then Phase Review)*
+## P5.6 — Async pipeline creation  *(☑ DONE — slices complete; Phase Review next)*
+
+Done: `PendingCallback::Create{Compute,Render}PipelineAsync` (holds the
+`Arc<WGPU*PipelineImpl>`); `wgpuDeviceCreate{Compute,Render}Pipeline
+Async` reuse the shared sync `create_*_pipeline_handle` (validation +
+P5.5 cache identical) + the future machinery; fire once ⇒ error ⇒
+`ValidationError`+null, else `Success`+pipeline. P51 ported in
+`yawgpu/tests/pipeline_async_validation.rs` (7, incl. WaitAnyOnly,
+fires-once, async-reuses-sync-cache), gate green (33 binaries).
+Committed `phase-5: P5.6`.
+
+#### (original detail)
 
 `wgpuDeviceCreateRender/ComputePipelineAsync` via future machinery; P51.
 Then Phase Review.

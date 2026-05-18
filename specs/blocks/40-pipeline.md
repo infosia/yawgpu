@@ -160,7 +160,7 @@ b:fragment/color/depthStencil)
 
 - **P51** `wgpuDeviceCreateRender/ComputePipelineAsync` via the future
   machinery; `WGPUCreatePipelineAsyncStatus`; same validation as sync.
-  ☐
+  ☑ (P5.6)
 
 ### Deferred
 
