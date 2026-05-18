@@ -76,16 +76,16 @@ Phase 5. Rules from Dawn `RenderPipelineValidationTests`,
 ### Compute pipeline (P5.1)
 
 - **P1** compute entry resolution (null⇒unique `@compute`; mismatch/
-  none/ambiguous⇒error). ComputeValidationTests :63/159. ☐
+  none/ambiguous⇒error). ComputeValidationTests :63/159. ☑ (P5.1)
 - **P2** `@workgroup_size` ≤ `maxComputeWorkgroupSizeX/Y/Z`; product ≤
-  `maxComputeInvocationsPerWorkgroup`. :42. ☐
-- **P3** `var<workgroup>` total ≤ `maxComputeWorkgroupStorageSize`. ☐
+  `maxComputeInvocationsPerWorkgroup`. :42. ☑ (P5.1)
+- **P3** `var<workgroup>` total ≤ `maxComputeWorkgroupStorageSize`. ☑ (P5.1)
 - **P4** explicit-or-auto layout accepted; explicit ⇒ shader/layout
-  binding compat (S35 pipeline part). GetBGL :390. ☐
+  binding compat (S35 pipeline part). GetBGL :390. ☑ (P5.1)
 - **P5** overridable-constant key lookup (name/`@id`; mixed/duplicate/
-  uninitialized-without-default ⇒ error). Overridable :146/199. ☐
+  uninitialized-without-default ⇒ error). Overridable :146/199. ☑ (P5.1)
 - **P6** override value finite & representable in WGSL type. Overridable
-  :280. ☐
+  :280. ☑ (P5.1)
 
 ### Render pipeline (P5.2 — may split a:vertex/primitive/multisample,
 b:fragment/color/depthStencil)

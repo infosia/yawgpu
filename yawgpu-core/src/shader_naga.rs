@@ -2,6 +2,7 @@
 // P5.0 intentionally lands reflection helpers before pipeline creation uses
 // them. Later Phase-5 slices consume these crate-private APIs.
 
+#[derive(Debug)]
 pub(crate) struct ValidatedWgslModule {
     pub module: naga::Module,
     pub info: naga::valid::ModuleInfo,
@@ -25,12 +26,14 @@ pub(crate) enum ReflectedTypeScalarClass {
     Float,
     Sint,
     Uint,
+    Bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReflectedTypeClass {
     pub scalar: ReflectedTypeScalarClass,
     pub components: u8,
+    pub width: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +106,7 @@ pub(crate) struct ReflectedResourceBinding {
     pub group: u32,
     pub binding: u32,
     pub kind: ReflectedResourceBindingKind,
+    pub min_binding_size: u64,
     pub statically_used: bool,
 }
 
@@ -113,12 +117,19 @@ pub(crate) struct ReflectedFragmentBuiltins {
     pub sample_mask: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ReflectedOverride {
     pub name: Option<String>,
     pub id: Option<u16>,
     pub ty: ReflectedTypeClass,
     pub has_default: bool,
+    pub default_value: Option<ReflectedOverrideValue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ReflectedOverrideValue {
+    Number(f64),
+    Bool(bool),
 }
 
 pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ValidatedWgslModule, String> {
@@ -193,16 +204,24 @@ impl ValidatedWgslModule {
     }
 
     pub(crate) fn resource_bindings(&self) -> Vec<ReflectedResourceBinding> {
+        let mut layouter = naga::proc::Layouter::default();
+        let layout_ready = layouter.update(self.module.to_ctx()).is_ok();
         self.module
             .global_variables
             .iter()
             .filter_map(|(handle, global)| {
                 let binding = global.binding?;
                 let kind = resource_binding_kind(&self.module, global, handle)?;
+                let min_binding_size = if layout_ready {
+                    resource_binding_min_size(&layouter, global)
+                } else {
+                    0
+                };
                 Some(ReflectedResourceBinding {
                     group: binding.group,
                     binding: binding.binding,
                     kind,
+                    min_binding_size,
                     statically_used: self
                         .module
                         .entry_points
@@ -241,6 +260,9 @@ impl ValidatedWgslModule {
                     id: override_.id,
                     ty: type_class(&self.module, override_.ty)?,
                     has_default: override_.init.is_some(),
+                    default_value: override_
+                        .init
+                        .and_then(|init| override_default_value(&self.module, init)),
                 })
             })
             .collect()
@@ -397,24 +419,27 @@ fn mark_fragment_builtin(builtin: naga::BuiltIn, builtins: &mut ReflectedFragmen
 fn type_class(module: &naga::Module, ty: naga::Handle<naga::Type>) -> Option<ReflectedTypeClass> {
     match &module.types.get_handle(ty).ok()?.inner {
         naga::TypeInner::Scalar(scalar) => scalar_class(*scalar).map(|scalar| ReflectedTypeClass {
-            scalar,
+            scalar: scalar.0,
             components: 1,
+            width: scalar.1,
         }),
         naga::TypeInner::Vector { size, scalar } => {
             scalar_class(*scalar).map(|scalar| ReflectedTypeClass {
-                scalar,
+                scalar: scalar.0,
                 components: vector_components(*size),
+                width: scalar.1,
             })
         }
         _ => None,
     }
 }
 
-fn scalar_class(scalar: naga::Scalar) -> Option<ReflectedTypeScalarClass> {
+fn scalar_class(scalar: naga::Scalar) -> Option<(ReflectedTypeScalarClass, u8)> {
     match scalar.kind {
-        naga::ScalarKind::Float => Some(ReflectedTypeScalarClass::Float),
-        naga::ScalarKind::Sint => Some(ReflectedTypeScalarClass::Sint),
-        naga::ScalarKind::Uint => Some(ReflectedTypeScalarClass::Uint),
+        naga::ScalarKind::Float => Some((ReflectedTypeScalarClass::Float, scalar.width)),
+        naga::ScalarKind::Sint => Some((ReflectedTypeScalarClass::Sint, scalar.width)),
+        naga::ScalarKind::Uint => Some((ReflectedTypeScalarClass::Uint, scalar.width)),
+        naga::ScalarKind::Bool => Some((ReflectedTypeScalarClass::Bool, scalar.width)),
         _ => None,
     }
 }
@@ -466,6 +491,48 @@ fn resource_binding_kind(
             },
             _ => None,
         },
+        _ => None,
+    }
+}
+
+fn resource_binding_min_size(
+    layouter: &naga::proc::Layouter,
+    global: &naga::GlobalVariable,
+) -> u64 {
+    match global.space {
+        naga::AddressSpace::Uniform | naga::AddressSpace::Storage { .. } => {
+            u64::from(layouter[global.ty].size)
+        }
+        _ => 0,
+    }
+}
+
+fn override_default_value(
+    module: &naga::Module,
+    expression: naga::Handle<naga::Expression>,
+) -> Option<ReflectedOverrideValue> {
+    match module.global_expressions.try_get(expression).ok()? {
+        naga::Expression::Literal(literal) => literal_value(*literal),
+        naga::Expression::Constant(handle) => {
+            let constant = module.constants.try_get(*handle).ok()?;
+            override_default_value(module, constant.init)
+        }
+        _ => None,
+    }
+}
+
+fn literal_value(literal: naga::Literal) -> Option<ReflectedOverrideValue> {
+    match literal {
+        naga::Literal::F64(value) => Some(ReflectedOverrideValue::Number(value)),
+        naga::Literal::F32(value) => Some(ReflectedOverrideValue::Number(f64::from(value))),
+        naga::Literal::F16(value) => {
+            Some(ReflectedOverrideValue::Number(f64::from(value.to_f32())))
+        }
+        naga::Literal::I64(value) => Some(ReflectedOverrideValue::Number(value as f64)),
+        naga::Literal::I32(value) => Some(ReflectedOverrideValue::Number(f64::from(value))),
+        naga::Literal::U64(value) => Some(ReflectedOverrideValue::Number(value as f64)),
+        naga::Literal::U32(value) => Some(ReflectedOverrideValue::Number(f64::from(value))),
+        naga::Literal::Bool(value) => Some(ReflectedOverrideValue::Bool(value)),
         _ => None,
     }
 }

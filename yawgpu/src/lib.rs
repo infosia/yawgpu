@@ -11,13 +11,14 @@ use crate::conv::{
     label_from_string_view, map_bind_group_entries, map_bind_group_layout_descriptor,
     map_buffer_descriptor, map_buffer_map_state, map_buffer_usage_to_native,
     map_compilation_info_request_status_success, map_compilation_message_type_error,
-    map_device_lost_callback_info, map_device_lost_reason, map_extent_3d, map_feature,
-    map_feature_level, map_features_to_native, map_limits, map_limits_to_native,
-    map_map_async_status, map_map_mode, map_origin_3d, map_pipeline_layout_descriptor,
-    map_queue_work_done_status, map_sampler_descriptor, map_shader_module_descriptor,
-    map_texel_copy_buffer_layout, map_texture_aspect, map_texture_descriptor,
-    map_texture_dimension_to_native, map_texture_format_to_native, map_texture_usage_to_native,
-    map_texture_view_descriptor, release_handle, string_view, DeviceLostCallbackInfo,
+    map_compute_pipeline_descriptor, map_device_lost_callback_info, map_device_lost_reason,
+    map_extent_3d, map_feature, map_feature_level, map_features_to_native, map_limits,
+    map_limits_to_native, map_map_async_status, map_map_mode, map_origin_3d,
+    map_pipeline_layout_descriptor, map_queue_work_done_status, map_sampler_descriptor,
+    map_shader_module_descriptor, map_texel_copy_buffer_layout, map_texture_aspect,
+    map_texture_descriptor, map_texture_dimension_to_native, map_texture_format_to_native,
+    map_texture_usage_to_native, map_texture_view_descriptor, release_handle, string_view,
+    DeviceLostCallbackInfo,
 };
 
 pub struct WGPUAdapterImpl {
@@ -94,6 +95,12 @@ pub struct WGPUPipelineLayoutImpl {
     _instance: Arc<WGPUInstanceImpl>,
 }
 
+pub struct WGPUComputePipelineImpl {
+    _core: Arc<core::ComputePipeline>,
+    _device: Arc<core::Device>,
+    _instance: Arc<WGPUInstanceImpl>,
+}
+
 macro_rules! declare_empty_impl_handles {
     ($($name:ident),* $(,)?) => {
         $(
@@ -106,7 +113,6 @@ declare_empty_impl_handles!(
     WGPUCommandBufferImpl,
     WGPUCommandEncoderImpl,
     WGPUComputePassEncoderImpl,
-    WGPUComputePipelineImpl,
     WGPUQuerySetImpl,
     WGPURenderBundleImpl,
     WGPURenderBundleEncoderImpl,
@@ -959,6 +965,32 @@ pub unsafe extern "C" fn wgpuDeviceCreatePipelineLayout(
     }))
 }
 
+/// Creates a compute pipeline on a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `descriptor` must
+/// point to a valid `WGPUComputePipelineDescriptor`. `descriptor.compute.module`
+/// must be a non-null live yawgpu shader module handle. `descriptor.layout`
+/// may be null to request automatic layout.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceCreateComputePipeline(
+    device: native::WGPUDevice,
+    descriptor: *const native::WGPUComputePipelineDescriptor,
+) -> native::WGPUComputePipeline {
+    let device = borrow_handle(device, "WGPUDevice");
+    let descriptor = descriptor
+        .as_ref()
+        .expect("WGPUComputePipelineDescriptor must not be null");
+    let descriptor = map_compute_pipeline_descriptor(descriptor);
+    let pipeline = device.core.create_compute_pipeline(descriptor);
+    arc_to_handle(Arc::new(WGPUComputePipelineImpl {
+        _core: Arc::new(pipeline),
+        _device: Arc::clone(&device.core),
+        _instance: Arc::clone(&device.instance),
+    }))
+}
+
 /// Gets the effective limits for a device.
 ///
 /// # Safety
@@ -1246,6 +1278,26 @@ pub unsafe extern "C" fn wgpuPipelineLayoutRelease(pipeline_layout: native::WGPU
 #[no_mangle]
 pub unsafe extern "C" fn wgpuPipelineLayoutAddRef(pipeline_layout: native::WGPUPipelineLayout) {
     add_ref_handle(pipeline_layout, "WGPUPipelineLayout");
+}
+
+/// Releases one owned reference to a compute pipeline handle.
+///
+/// # Safety
+///
+/// `compute_pipeline` must be a non-null live yawgpu compute pipeline handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuComputePipelineRelease(compute_pipeline: native::WGPUComputePipeline) {
+    release_handle(compute_pipeline, "WGPUComputePipeline");
+}
+
+/// Adds one owned reference to a compute pipeline handle.
+///
+/// # Safety
+///
+/// `compute_pipeline` must be a non-null live yawgpu compute pipeline handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuComputePipelineAddRef(compute_pipeline: native::WGPUComputePipeline) {
+    add_ref_handle(compute_pipeline, "WGPUComputePipeline");
 }
 
 /// Destroys a texture. This operation is idempotent.

@@ -31,12 +31,28 @@ IO+scalar/vector type class, `@group/@binding`+access kind, `@builtin`
 outputs, overrides (name/`@id`/type/default). `#[cfg(test)]` smoke per
 helper. De-risks the reflection surface before pipelines build on it.
 
-## P5.1 — ComputePipeline  *(NEXT)*
+## P5.1 — ComputePipeline  *(☑ DONE)*
+
+Done: core `ComputePipeline`/`ComputePipelineDescriptor`/
+`ComputePipelineLayout{Auto,Explicit}`/`PipelineConstant`;
+`validate_compute_pipeline_descriptor` → `resolve_*` (P1
+`resolve_compute_entry`, P5 `resolve_pipeline_constants` unique/by-id-or-
+name/uninitialized, P6 finite+type-range, P2 `resolve_compute_workgroup`
+override-applied + per-axis/product limits, P3 storage limit, P4
+`validate_compute_pipeline_layout` Auto-ok / explicit S35 compat:
+group/binding present + Compute visibility + type/minBindingSize);
+error-pipeline. `ShaderModule` keeps `ValidatedWgslModule`;
+`PipelineLayout::bind_group_layouts()`. FFI `WGPUComputePipelineImpl` +
+create/Release/AddRef; conv null-layout⇒Auto. P1–P6 ported in
+`yawgpu/tests/compute_pipeline_validation.rs` (7), gate green
+(28 binaries). Committed `phase-5: P5.1`.
+
+#### (original detail)
 
 `wgpuDeviceCreateComputePipeline`(+release/AddRef); P1–P6. Auto/explicit
 layout (S35 compute part).
 
-## P5.2 — RenderPipeline  *(after P5.1; split a/b if large)*
+## P5.2 — RenderPipeline  *(NEXT; split a/b if large)*
 
 `wgpuDeviceCreateRenderPipeline`(+release/AddRef); P7–P9, P18–P37.
 P5.2a vertex/primitive/multisample (P7–P9,P18,P21,P22,P25–P28);
