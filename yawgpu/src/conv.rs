@@ -2,7 +2,10 @@ use std::ffi::CStr;
 use std::sync::Arc;
 
 use crate::native;
-use crate::{WGPUBindGroupLayoutImpl, WGPUBufferImpl, WGPUSamplerImpl, WGPUTextureViewImpl};
+use crate::{
+    WGPUBindGroupLayoutImpl, WGPUBufferImpl, WGPUPipelineLayoutImpl, WGPUSamplerImpl,
+    WGPUShaderModuleImpl, WGPUTextureViewImpl,
+};
 use yawgpu_core as core;
 
 pub const WGPU_STRLEN: usize = usize::MAX;
@@ -331,6 +334,59 @@ pub unsafe fn map_pipeline_layout_descriptor(
     core::PipelineLayoutDescriptor {
         bind_group_layouts,
         immediate_size: descriptor.immediateSize,
+        error,
+    }
+}
+
+/// Converts a compute pipeline descriptor to the core representation.
+///
+/// # Safety
+///
+/// `descriptor.compute.module` must be a non-null live yawgpu shader module.
+/// `descriptor.layout`, when non-null, must be a live yawgpu pipeline layout.
+/// `compute.constants`, when non-null and `constantCount > 0`, must point to
+/// `constantCount` valid `WGPUConstantEntry` values.
+#[must_use]
+pub unsafe fn map_compute_pipeline_descriptor(
+    descriptor: &native::WGPUComputePipelineDescriptor,
+) -> core::ComputePipelineDescriptor {
+    let mut error = None;
+    let compute = &descriptor.compute;
+    let shader_module = clone_handle::<WGPUShaderModuleImpl>(compute.module, "WGPUShaderModule");
+    let layout = if descriptor.layout.is_null() {
+        core::ComputePipelineLayout::Auto
+    } else {
+        let layout =
+            clone_handle::<WGPUPipelineLayoutImpl>(descriptor.layout, "WGPUPipelineLayout");
+        core::ComputePipelineLayout::Explicit(Arc::clone(&layout._core))
+    };
+    let entry_point = string_view_to_str(compute.entryPoint).map(ToOwned::to_owned);
+    let constants = if compute.constantCount == 0 {
+        Vec::new()
+    } else if compute.constants.is_null() {
+        set_first_error(
+            &mut error,
+            "compute pipeline constants must not be null when count is non-zero",
+        );
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(compute.constants, compute.constantCount)
+            .iter()
+            .map(|entry| {
+                let key = string_view_to_str(entry.key).unwrap_or_default().to_owned();
+                core::PipelineConstant {
+                    key,
+                    value: entry.value,
+                }
+            })
+            .collect()
+    };
+
+    core::ComputePipelineDescriptor {
+        layout,
+        shader_module: Arc::clone(&shader_module._core),
+        entry_point,
+        constants,
         error,
     }
 }
