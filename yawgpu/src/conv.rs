@@ -1085,6 +1085,17 @@ pub fn map_texel_copy_buffer_layout(
 }
 
 #[must_use]
+pub fn map_texel_copy_texture_info_parts(
+    value: &native::WGPUTexelCopyTextureInfo,
+) -> (u32, core::Origin3d, core::TextureAspect) {
+    (
+        value.mipLevel,
+        map_origin_3d(value.origin),
+        map_texture_aspect(value.aspect).unwrap_or(core::TextureAspect::All),
+    )
+}
+
+#[must_use]
 /// Converts a texture descriptor to the core representation.
 ///
 /// # Safety

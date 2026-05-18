@@ -16,9 +16,10 @@ use crate::conv::{
     map_limits_to_native, map_map_async_status, map_map_mode, map_origin_3d,
     map_pipeline_layout_descriptor, map_queue_work_done_status, map_render_pipeline_descriptor,
     map_sampler_descriptor, map_shader_module_descriptor, map_texel_copy_buffer_layout,
-    map_texture_aspect, map_texture_descriptor, map_texture_dimension_to_native,
-    map_texture_format_to_native, map_texture_usage_to_native, map_texture_view_descriptor,
-    release_handle, string_view, string_view_to_str, DeviceLostCallbackInfo,
+    map_texel_copy_texture_info_parts, map_texture_aspect, map_texture_descriptor,
+    map_texture_dimension_to_native, map_texture_format_to_native, map_texture_usage_to_native,
+    map_texture_view_descriptor, release_handle, string_view, string_view_to_str,
+    DeviceLostCallbackInfo,
 };
 
 pub struct WGPUAdapterImpl {
@@ -1905,6 +1906,150 @@ pub unsafe extern "C" fn wgpuCommandEncoderWriteBuffer(
     dispatch_optional_error(
         &encoder.device,
         encoder.core.write_buffer(&buffer.core, buffer_offset, size),
+    );
+}
+
+/// Records a buffer-to-texture copy command.
+///
+/// # Safety
+///
+/// `command_encoder`, `source`, `destination`, and `copy_size` must be
+/// non-null. Nested buffer and texture handles must be non-null live yawgpu
+/// handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToTexture(
+    command_encoder: native::WGPUCommandEncoder,
+    source: *const native::WGPUTexelCopyBufferInfo,
+    destination: *const native::WGPUTexelCopyTextureInfo,
+    copy_size: *const native::WGPUExtent3D,
+) {
+    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let source = source
+        .as_ref()
+        .expect("wgpuCommandEncoderCopyBufferToTexture source must not be null");
+    let destination = destination
+        .as_ref()
+        .expect("wgpuCommandEncoderCopyBufferToTexture destination must not be null");
+    let copy_size = copy_size
+        .as_ref()
+        .expect("wgpuCommandEncoderCopyBufferToTexture copySize must not be null");
+    let source_buffer = borrow_handle(source.buffer, "WGPUBuffer");
+    let destination_texture = borrow_handle(destination.texture, "WGPUTexture");
+    let (destination_mip_level, destination_origin, destination_aspect) =
+        map_texel_copy_texture_info_parts(destination);
+
+    dispatch_optional_error(
+        &encoder.device,
+        encoder.core.copy_buffer_to_texture(
+            core::TexelCopyBufferInfo {
+                buffer: &source_buffer.core,
+                layout: map_texel_copy_buffer_layout(source.layout),
+            },
+            core::TexelCopyTextureInfo {
+                texture: &destination_texture.core,
+                mip_level: destination_mip_level,
+                origin: destination_origin,
+                aspect: destination_aspect,
+            },
+            map_extent_3d(*copy_size),
+        ),
+    );
+}
+
+/// Records a texture-to-buffer copy command.
+///
+/// # Safety
+///
+/// `command_encoder`, `source`, `destination`, and `copy_size` must be
+/// non-null. Nested texture and buffer handles must be non-null live yawgpu
+/// handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToBuffer(
+    command_encoder: native::WGPUCommandEncoder,
+    source: *const native::WGPUTexelCopyTextureInfo,
+    destination: *const native::WGPUTexelCopyBufferInfo,
+    copy_size: *const native::WGPUExtent3D,
+) {
+    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let source = source
+        .as_ref()
+        .expect("wgpuCommandEncoderCopyTextureToBuffer source must not be null");
+    let destination = destination
+        .as_ref()
+        .expect("wgpuCommandEncoderCopyTextureToBuffer destination must not be null");
+    let copy_size = copy_size
+        .as_ref()
+        .expect("wgpuCommandEncoderCopyTextureToBuffer copySize must not be null");
+    let source_texture = borrow_handle(source.texture, "WGPUTexture");
+    let destination_buffer = borrow_handle(destination.buffer, "WGPUBuffer");
+    let (source_mip_level, source_origin, source_aspect) =
+        map_texel_copy_texture_info_parts(source);
+
+    dispatch_optional_error(
+        &encoder.device,
+        encoder.core.copy_texture_to_buffer(
+            core::TexelCopyTextureInfo {
+                texture: &source_texture.core,
+                mip_level: source_mip_level,
+                origin: source_origin,
+                aspect: source_aspect,
+            },
+            core::TexelCopyBufferInfo {
+                buffer: &destination_buffer.core,
+                layout: map_texel_copy_buffer_layout(destination.layout),
+            },
+            map_extent_3d(*copy_size),
+        ),
+    );
+}
+
+/// Records a texture-to-texture copy command.
+///
+/// # Safety
+///
+/// `command_encoder`, `source`, `destination`, and `copy_size` must be
+/// non-null. Nested texture handles must be non-null live yawgpu handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToTexture(
+    command_encoder: native::WGPUCommandEncoder,
+    source: *const native::WGPUTexelCopyTextureInfo,
+    destination: *const native::WGPUTexelCopyTextureInfo,
+    copy_size: *const native::WGPUExtent3D,
+) {
+    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let source = source
+        .as_ref()
+        .expect("wgpuCommandEncoderCopyTextureToTexture source must not be null");
+    let destination = destination
+        .as_ref()
+        .expect("wgpuCommandEncoderCopyTextureToTexture destination must not be null");
+    let copy_size = copy_size
+        .as_ref()
+        .expect("wgpuCommandEncoderCopyTextureToTexture copySize must not be null");
+    let source_texture = borrow_handle(source.texture, "WGPUTexture");
+    let destination_texture = borrow_handle(destination.texture, "WGPUTexture");
+    let (source_mip_level, source_origin, source_aspect) =
+        map_texel_copy_texture_info_parts(source);
+    let (destination_mip_level, destination_origin, destination_aspect) =
+        map_texel_copy_texture_info_parts(destination);
+
+    dispatch_optional_error(
+        &encoder.device,
+        encoder.core.copy_texture_to_texture(
+            core::TexelCopyTextureInfo {
+                texture: &source_texture.core,
+                mip_level: source_mip_level,
+                origin: source_origin,
+                aspect: source_aspect,
+            },
+            core::TexelCopyTextureInfo {
+                texture: &destination_texture.core,
+                mip_level: destination_mip_level,
+                origin: destination_origin,
+                aspect: destination_aspect,
+            },
+            map_extent_3d(*copy_size),
+        ),
     );
 }
 

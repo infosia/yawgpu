@@ -52,10 +52,24 @@ P6.9.)
 
 #### (original detail)
 
-## P6.3 — Texture copies (B2T/T2B/T2T)  *(NEXT)*
-C11–C22, C79 (256-align bytesPerRow path; FormatCaps block/aspect).
+## P6.3 — Texture copies (B2T/T2B/T2T)  *(☑ DONE)*
 
-## P6.4 — RenderPass descriptor  *(after P6.3)*
+Done: `validate_texel_copy_layout` generalized with
+`require_bytes_per_row_alignment` (P3.4 queue=false, P6.3 buffer-copy=
+true) + `label` — **shared, not duplicated**; P3.4
+`queue_write_texture_validation` unregressed. `CommandEncoder::
+{copy_buffer_to_texture,copy_texture_to_buffer,copy_texture_to_texture}`
+via the deferred-error helper; `Texture::same`;
+`texture_formats_copy_compatible` (equal | sRGB pair, C18); C11 256-
+align, C12–C17 usage/sample/depth-stencil/bounds, C19–C22 T2T
+usage/OOB/aspect/sample-count/same-texture, C79 aspect. FFI 3 fns +
+conv `WGPUTexelCopyBufferInfo`/`…TextureInfo`. C11–C22/C79 ported in
+`yawgpu/tests/command_texture_copy_validation.rs` (4), gate green
+(36 binaries). Committed `phase-6: P6.3`.
+
+#### (original detail)
+
+## P6.4 — RenderPass descriptor  *(NEXT)*
 C23–C33 (C30/C31 multisample resolve); C34/C35 Defer→P8.
 
 ## P6.5 — Pass draw/dispatch state + dynamic state  *(after P6.4)*

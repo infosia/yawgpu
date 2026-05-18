@@ -796,6 +796,22 @@ impl TextureFormat {
         };
         Some(caps)
     }
+
+    #[must_use]
+    pub fn srgb_pair(self) -> Option<Self> {
+        let pair = match self.0 {
+            Self::RGBA8_UNORM => Self::RGBA8_UNORM_SRGB,
+            Self::RGBA8_UNORM_SRGB => Self::RGBA8_UNORM,
+            Self::BGRA8_UNORM => Self::BGRA8_UNORM_SRGB,
+            Self::BGRA8_UNORM_SRGB => Self::BGRA8_UNORM,
+            Self::BC1_RGBA_UNORM => Self::BC1_RGBA_UNORM_SRGB,
+            Self::BC1_RGBA_UNORM_SRGB => Self::BC1_RGBA_UNORM,
+            Self::BC7_RGBA_UNORM => Self::BC7_RGBA_UNORM_SRGB,
+            Self::BC7_RGBA_UNORM_SRGB => Self::BC7_RGBA_UNORM,
+            _ => return None,
+        };
+        Some(Self(pair))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -998,6 +1014,20 @@ pub struct TexelCopyBufferLayout {
     pub rows_per_image: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct TexelCopyBufferInfo<'a> {
+    pub buffer: &'a Buffer,
+    pub layout: TexelCopyBufferLayout,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TexelCopyTextureInfo<'a> {
+    pub texture: &'a Texture,
+    pub mip_level: u32,
+    pub origin: Origin3d,
+    pub aspect: TextureAspect,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextureDescriptor {
     pub usage: TextureUsage,
@@ -1107,6 +1137,11 @@ impl Texture {
         self.inner.state.lock().is_destroyed
     }
 
+    #[must_use]
+    pub fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     pub fn destroy(&self) {
         self.inner.state.lock().is_destroyed = true;
     }
@@ -1174,7 +1209,7 @@ impl Texture {
         aspect: TextureAspect,
         layout: TexelCopyBufferLayout,
         data_size: u64,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), String> {
         validate_queue_write_texture(
             self, mip_level, origin, write_size, aspect, layout, data_size,
         )
@@ -4346,30 +4381,30 @@ fn validate_queue_write_texture(
     aspect: TextureAspect,
     layout: TexelCopyBufferLayout,
     data_size: u64,
-) -> Result<(), &'static str> {
+) -> Result<(), String> {
     if !texture.usage().contains(TextureUsage::COPY_DST) {
-        return Err("queue texture write destination usage must include CopyDst");
+        return Err("queue texture write destination usage must include CopyDst".to_owned());
     }
     if texture.is_error() || texture.is_destroyed() {
-        return Err("queue texture write destination must be a valid live texture");
+        return Err("queue texture write destination must be a valid live texture".to_owned());
     }
     if texture.sample_count() != 1 {
-        return Err("queue texture write destination sampleCount must be one");
+        return Err("queue texture write destination sampleCount must be one".to_owned());
     }
     if mip_level >= texture.mip_level_count() {
-        return Err("queue texture write mipLevel is out of range");
+        return Err("queue texture write mipLevel is out of range".to_owned());
     }
 
     let Some(format_caps) = texture.format().caps() else {
-        return Err("queue texture write format must not be Undefined");
+        return Err("queue texture write format must not be Undefined".to_owned());
     };
     match aspect {
         TextureAspect::All => {}
         TextureAspect::DepthOnly if !format_caps.aspects.depth => {
-            return Err("DepthOnly texture writes require a depth format");
+            return Err("DepthOnly texture writes require a depth format".to_owned());
         }
         TextureAspect::StencilOnly if !format_caps.aspects.stencil => {
-            return Err("StencilOnly texture writes require a stencil format");
+            return Err("StencilOnly texture writes require a stencil format".to_owned());
         }
         TextureAspect::DepthOnly | TextureAspect::StencilOnly => {}
     }
@@ -4388,13 +4423,31 @@ fn validate_queue_write_texture(
             .checked_add(write_size.depth_or_array_layers)
             .is_none_or(|end| end > subresource.depth_or_array_layers)
     {
-        return Err("queue texture write range exceeds the texture subresource");
+        return Err("queue texture write range exceeds the texture subresource".to_owned());
     }
     if texture.dimension() == TextureDimension::D2 && write_size.depth_or_array_layers != 1 {
-        return Err("queue texture writes to 2D textures require depthOrArrayLayers to be one");
+        return Err(
+            "queue texture writes to 2D textures require depthOrArrayLayers to be one".to_owned(),
+        );
     }
 
-    validate_texel_copy_layout(format_caps, aspect, write_size, layout, data_size)
+    let required_bytes = validate_texel_copy_layout(
+        format_caps,
+        aspect,
+        write_size,
+        layout,
+        "queue texture write",
+        false,
+    )?;
+    let required_end = layout
+        .offset
+        .checked_add(required_bytes)
+        .ok_or("queue texture write data range overflows")?;
+    if required_end > data_size {
+        return Err("queue texture write dataSize is too small".to_owned());
+    }
+
+    Ok(())
 }
 
 impl Texture {
@@ -4421,48 +4474,48 @@ fn validate_texel_copy_layout(
     aspect: TextureAspect,
     write_size: Extent3d,
     layout: TexelCopyBufferLayout,
-    data_size: u64,
-) -> Result<(), &'static str> {
+    label: &str,
+    require_bytes_per_row_alignment: bool,
+) -> Result<u64, String> {
     let width_blocks = div_ceil_u32(write_size.width, format_caps.block_w);
     let height_blocks = div_ceil_u32(write_size.height, format_caps.block_h);
     let depth = write_size.depth_or_array_layers;
     let block_size = texel_copy_block_size(format_caps, aspect);
     let last_row_bytes = u64::from(width_blocks)
         .checked_mul(u64::from(block_size))
-        .ok_or("queue texture write row byte size overflows")?;
+        .ok_or_else(|| format!("{label} row byte size overflows"))?;
 
     if let Some(bytes_per_row) = layout.bytes_per_row {
+        if require_bytes_per_row_alignment && !bytes_per_row.is_multiple_of(256) {
+            return Err(format!("{label} bytesPerRow must be 256-byte aligned"));
+        }
         if u64::from(bytes_per_row) < last_row_bytes {
-            return Err("queue texture write bytesPerRow is too small");
+            return Err(format!("{label} bytesPerRow is too small"));
         }
     } else if height_blocks > 1 || depth > 1 {
-        return Err("queue texture write bytesPerRow is required for multi-row copies");
+        return Err(format!(
+            "{label} bytesPerRow is required for multi-row copies"
+        ));
     }
 
     if let Some(rows_per_image) = layout.rows_per_image {
         if rows_per_image < height_blocks {
-            return Err("queue texture write rowsPerImage is too small");
+            return Err(format!("{label} rowsPerImage is too small"));
         }
     } else if depth > 1 {
-        return Err("queue texture write rowsPerImage is required for multi-image copies");
+        return Err(format!(
+            "{label} rowsPerImage is required for multi-image copies"
+        ));
     }
 
-    let required_bytes = required_bytes_in_texel_copy(
+    required_bytes_in_texel_copy(
         layout.bytes_per_row,
         layout.rows_per_image,
         height_blocks,
         depth,
         last_row_bytes,
-    )?;
-    let required_end = layout
-        .offset
-        .checked_add(required_bytes)
-        .ok_or("queue texture write data range overflows")?;
-    if required_end > data_size {
-        return Err("queue texture write dataSize is too small");
-    }
-
-    Ok(())
+        label,
+    )
 }
 
 fn required_bytes_in_texel_copy(
@@ -4471,7 +4524,8 @@ fn required_bytes_in_texel_copy(
     height_blocks: u32,
     depth: u32,
     last_row_bytes: u64,
-) -> Result<u64, &'static str> {
+    label: &str,
+) -> Result<u64, String> {
     if last_row_bytes == 0 || height_blocks == 0 || depth == 0 {
         return Ok(0);
     }
@@ -4480,17 +4534,17 @@ fn required_bytes_in_texel_copy(
     let rows_per_image = u64::from(rows_per_image.unwrap_or(height_blocks));
     let image_offset_rows = rows_per_image
         .checked_mul(u64::from(depth.saturating_sub(1)))
-        .ok_or("queue texture write required byte size overflows")?;
+        .ok_or_else(|| format!("{label} required byte size overflows"))?;
     let row_offset_rows = u64::from(height_blocks.saturating_sub(1));
     let offset_rows = image_offset_rows
         .checked_add(row_offset_rows)
-        .ok_or("queue texture write required byte size overflows")?;
+        .ok_or_else(|| format!("{label} required byte size overflows"))?;
     let offset_bytes = bytes_per_row
         .checked_mul(offset_rows)
-        .ok_or("queue texture write required byte size overflows")?;
+        .ok_or_else(|| format!("{label} required byte size overflows"))?;
     offset_bytes
         .checked_add(last_row_bytes)
-        .ok_or("queue texture write required byte size overflows")
+        .ok_or_else(|| format!("{label} required byte size overflows"))
 }
 
 fn texel_copy_block_size(format_caps: FormatCaps, aspect: TextureAspect) -> u32 {
@@ -4924,6 +4978,53 @@ impl CommandEncoder {
         self.record_buffer_command(|| validate_encoder_write_buffer(buffer, offset, size))
     }
 
+    pub fn copy_buffer_to_texture(
+        &self,
+        source: TexelCopyBufferInfo<'_>,
+        destination: TexelCopyTextureInfo<'_>,
+        copy_size: Extent3d,
+    ) -> Option<String> {
+        self.record_buffer_command(|| {
+            validate_buffer_texture_copy(
+                source,
+                BufferUsage::COPY_SRC,
+                destination,
+                TextureUsage::COPY_DST,
+                copy_size,
+                "copy buffer to texture",
+            )
+        })
+    }
+
+    pub fn copy_texture_to_buffer(
+        &self,
+        source: TexelCopyTextureInfo<'_>,
+        destination: TexelCopyBufferInfo<'_>,
+        copy_size: Extent3d,
+    ) -> Option<String> {
+        self.record_buffer_command(|| {
+            validate_buffer_texture_copy(
+                destination,
+                BufferUsage::COPY_DST,
+                source,
+                TextureUsage::COPY_SRC,
+                copy_size,
+                "copy texture to buffer",
+            )
+        })
+    }
+
+    pub fn copy_texture_to_texture(
+        &self,
+        source: TexelCopyTextureInfo<'_>,
+        destination: TexelCopyTextureInfo<'_>,
+        copy_size: Extent3d,
+    ) -> Option<String> {
+        self.record_buffer_command(|| {
+            validate_texture_to_texture_copy(source, destination, copy_size)
+        })
+    }
+
     pub fn push_debug_group(&self) -> Option<String> {
         let mut state = self.inner.state.lock();
         if state.lifecycle != CommandEncoderLifecycle::Recording {
@@ -5141,6 +5242,248 @@ fn validate_encoder_write_buffer(buffer: &Buffer, offset: u64, size: u64) -> Res
         buffer.size(),
         "command encoder write buffer range",
     )
+}
+
+fn validate_buffer_texture_copy(
+    buffer_copy: TexelCopyBufferInfo<'_>,
+    required_buffer_usage: BufferUsage,
+    texture_copy: TexelCopyTextureInfo<'_>,
+    required_texture_usage: TextureUsage,
+    copy_size: Extent3d,
+    label: &str,
+) -> Result<(), String> {
+    let buffer = buffer_copy.buffer;
+    let texture = texture_copy.texture;
+    if buffer.is_error() || texture.is_error() {
+        return Err(format!("{label} cannot use an error resource"));
+    }
+    if buffer.is_destroyed() || texture.is_destroyed() {
+        return Err(format!("{label} cannot use a destroyed resource"));
+    }
+    if !buffer.usage().contains(required_buffer_usage) {
+        return Err(format!("{label} buffer has invalid usage"));
+    }
+    if !texture.usage().contains(required_texture_usage) {
+        return Err(format!("{label} texture has invalid usage"));
+    }
+    if texture.sample_count() != 1 {
+        return Err(format!("{label} texture sampleCount must be one"));
+    }
+
+    let format_caps = validate_texture_copy_subresource(
+        texture,
+        texture_copy.mip_level,
+        texture_copy.origin,
+        copy_size,
+        texture_copy.aspect,
+        label,
+        true,
+    )?;
+    if !buffer_copy.layout.offset.is_multiple_of(4) {
+        return Err(format!("{label} buffer offset must be 4-byte aligned"));
+    }
+    let required_bytes = validate_texel_copy_layout(
+        format_caps,
+        texture_copy.aspect,
+        copy_size,
+        buffer_copy.layout,
+        label,
+        true,
+    )?;
+    validate_buffer_range(
+        buffer_copy.layout.offset,
+        required_bytes,
+        buffer.size(),
+        label,
+    )
+}
+
+fn validate_texture_to_texture_copy(
+    source_copy: TexelCopyTextureInfo<'_>,
+    destination_copy: TexelCopyTextureInfo<'_>,
+    copy_size: Extent3d,
+) -> Result<(), String> {
+    let source = source_copy.texture;
+    let destination = destination_copy.texture;
+    if source.is_error() || destination.is_error() {
+        return Err("copy texture to texture cannot use an error texture".to_owned());
+    }
+    if source.is_destroyed() || destination.is_destroyed() {
+        return Err("copy texture to texture cannot use a destroyed texture".to_owned());
+    }
+    if !source.usage().contains(TextureUsage::COPY_SRC) {
+        return Err("copy texture source must have CopySrc usage".to_owned());
+    }
+    if !destination.usage().contains(TextureUsage::COPY_DST) {
+        return Err("copy texture destination must have CopyDst usage".to_owned());
+    }
+    if source_copy.aspect != destination_copy.aspect {
+        return Err("copy texture aspects must match".to_owned());
+    }
+    if !texture_formats_copy_compatible(source.format(), destination.format()) {
+        return Err("copy texture formats are not copy-compatible".to_owned());
+    }
+    if source.sample_count() != destination.sample_count() {
+        return Err("copy texture sample counts must match".to_owned());
+    }
+
+    let source_caps = validate_texture_copy_subresource(
+        source,
+        source_copy.mip_level,
+        source_copy.origin,
+        copy_size,
+        source_copy.aspect,
+        "copy texture source",
+        false,
+    )?;
+    validate_texture_copy_subresource(
+        destination,
+        destination_copy.mip_level,
+        destination_copy.origin,
+        copy_size,
+        destination_copy.aspect,
+        "copy texture destination",
+        false,
+    )?;
+
+    if (source_caps.aspects.depth || source_caps.aspects.stencil)
+        && source_copy.aspect != TextureAspect::All
+    {
+        return Err("copy texture to texture depth/stencil copies require All aspect".to_owned());
+    }
+    if source.sample_count() > 1
+        && (!origin_is_zero(source_copy.origin)
+            || !origin_is_zero(destination_copy.origin)
+            || copy_size != source.subresource_size(source_copy.mip_level)
+            || copy_size != destination.subresource_size(destination_copy.mip_level))
+    {
+        return Err("copy texture multisampled copies must cover the full subresource".to_owned());
+    }
+    if source.same(destination) {
+        validate_same_texture_copy(
+            source,
+            source_copy.mip_level,
+            source_copy.origin,
+            destination_copy.mip_level,
+            destination_copy.origin,
+            copy_size,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_texture_copy_subresource(
+    texture: &Texture,
+    mip_level: u32,
+    origin: Origin3d,
+    copy_size: Extent3d,
+    aspect: TextureAspect,
+    label: &str,
+    require_2d_single_layer: bool,
+) -> Result<FormatCaps, String> {
+    if mip_level >= texture.mip_level_count() {
+        return Err(format!("{label} mipLevel is out of range"));
+    }
+
+    let Some(format_caps) = texture.format().caps() else {
+        return Err(format!("{label} format must not be Undefined"));
+    };
+    validate_copy_aspect(format_caps, aspect, label)?;
+
+    let subresource = texture.subresource_size(mip_level);
+    if origin
+        .x
+        .checked_add(copy_size.width)
+        .is_none_or(|end| end > subresource.width)
+        || origin
+            .y
+            .checked_add(copy_size.height)
+            .is_none_or(|end| end > subresource.height)
+        || origin
+            .z
+            .checked_add(copy_size.depth_or_array_layers)
+            .is_none_or(|end| end > subresource.depth_or_array_layers)
+    {
+        return Err(format!("{label} range exceeds the texture subresource"));
+    }
+    if require_2d_single_layer
+        && texture.dimension() == TextureDimension::D2
+        && copy_size.depth_or_array_layers != 1
+    {
+        return Err(format!(
+            "{label} 2D copies require depthOrArrayLayers to be one"
+        ));
+    }
+    if (format_caps.aspects.depth || format_caps.aspects.stencil)
+        && (texture.dimension() != TextureDimension::D2 || copy_size.depth_or_array_layers != 1)
+    {
+        return Err(format!(
+            "{label} depth/stencil copies require a single 2D layer"
+        ));
+    }
+
+    Ok(format_caps)
+}
+
+fn validate_copy_aspect(
+    format_caps: FormatCaps,
+    aspect: TextureAspect,
+    label: &str,
+) -> Result<(), String> {
+    match aspect {
+        TextureAspect::All => Ok(()),
+        TextureAspect::DepthOnly if format_caps.aspects.depth => Ok(()),
+        TextureAspect::StencilOnly if format_caps.aspects.stencil => Ok(()),
+        TextureAspect::DepthOnly => {
+            Err(format!("{label} DepthOnly aspect requires a depth format"))
+        }
+        TextureAspect::StencilOnly => Err(format!(
+            "{label} StencilOnly aspect requires a stencil format"
+        )),
+    }
+}
+
+fn texture_formats_copy_compatible(source: TextureFormat, destination: TextureFormat) -> bool {
+    source == destination || source.srgb_pair() == Some(destination)
+}
+
+fn origin_is_zero(origin: Origin3d) -> bool {
+    origin.x == 0 && origin.y == 0 && origin.z == 0
+}
+
+fn validate_same_texture_copy(
+    texture: &Texture,
+    source_mip_level: u32,
+    source_origin: Origin3d,
+    destination_mip_level: u32,
+    destination_origin: Origin3d,
+    copy_size: Extent3d,
+) -> Result<(), String> {
+    if copy_size.width == 0 || copy_size.height == 0 || copy_size.depth_or_array_layers == 0 {
+        return Ok(());
+    }
+    if source_mip_level != destination_mip_level {
+        return Ok(());
+    }
+    if texture.dimension() == TextureDimension::D3 {
+        return Err(
+            "copy texture to texture cannot copy within the same 3D texture mip".to_owned(),
+        );
+    }
+
+    let source_end = source_origin
+        .z
+        .saturating_add(copy_size.depth_or_array_layers);
+    let destination_end = destination_origin
+        .z
+        .saturating_add(copy_size.depth_or_array_layers);
+    if source_origin.z < destination_end && destination_origin.z < source_end {
+        return Err(
+            "copy texture to texture same-texture array layers must not overlap".to_owned(),
+        );
+    }
+    Ok(())
 }
 
 fn validate_buffer_range(
