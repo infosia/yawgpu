@@ -169,6 +169,12 @@ phases need.
   Acceptable for Phase 3 (only tested formats' caps must be right);
   refine when StorageTexture/BindGroup lands (P4/P5) and flag in the
   Phase 3 Review.
+  - **Update (Phase 5 Review J6):** the *unknown-defined-format* hole is
+    resolved — `TextureFormat::caps()` now returns `None` for
+    unrecognized format codes (they are rejected, not treated as
+    renderable color). The remaining `*16`/`*32` feature-gating
+    accuracy for the *populated* set stays a low-priority refinement
+    (no current rule depends on it).
 
 ## Open questions
 

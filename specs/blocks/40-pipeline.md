@@ -48,9 +48,13 @@ Phase 5. Rules from Dawn `RenderPipelineValidationTests`,
   type/visibility match).
 - **Object identity / caching.** Dawn dedups; externally observable as
   C-handle identity. yawgpu keeps a per-device descriptor-keyed cache so
-  identical `CreateShaderModule`/`PipelineLayout`/`BindGroupLayout`/
+  identical `CreateShaderModule`/`PipelineLayout`/
   `Render/ComputePipeline` calls return the **same** handle pointer
-  (testable via `==`). Auto-layout default BGLs are pipeline-bound
+  (testable via `==`). **`BindGroupLayout` dedup is intentionally NOT
+  implemented** (m2): no P-rule requires it; identical BGL descriptors
+  yield distinct handles (a recorded divergence — `PipelineLayout`
+  dedup keys on BGL handle identity, so callers reusing one BGL handle
+  still dedup). Auto-layout default BGLs are pipeline-bound
   (P40/P41): a default BGL is rejected for `CreatePipelineLayout` and is
   not interchangeable across pipelines. Where exact Dawn identity is an
   internal optimization not observable through `webgpu.h`, record as a
@@ -58,7 +62,16 @@ Phase 5. Rules from Dawn `RenderPipelineValidationTests`,
 - Error-object model + first-match-wins (mirror blocks 10/20/30):
   invalid create ⇒ device error + error pipeline handle, `Release`-safe.
 - Async create reuses the Phase-1 future/`PendingCallback` machinery
-  (`WGPUCreatePipelineAsyncStatus`); validation identical to sync.
+  (`WGPUCreatePipelineAsyncStatus`); validation identical to sync **but
+  a validation failure is reported ONLY via the callback
+  `ValidationError` status — it does NOT raise a device/uncaptured
+  error** (canonical Dawn behavior; J3 fix). The sync path still
+  raises the device error as before.
+- **W4/SHADER_FLOAT16 divergence (m4):** the naga `Validator` enables
+  `SHADER_FLOAT16` unconditionally, so `enable f16;` WGSL validates
+  even without a device `shader-f16` feature. yawgpu exposes no
+  canonical ShaderF16 feature-gating path; recorded divergence (refine
+  if a later phase models WGSL feature gating).
 - naga≠Tint divergence (as block 30): assert error-vs-success, not exact
   diagnostics; record borderline cases.
 
