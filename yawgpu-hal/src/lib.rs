@@ -20,6 +20,8 @@ mod vulkan {
     pub struct VulkanTexture;
     #[derive(Debug, Clone)]
     pub struct VulkanSampler;
+    #[derive(Debug, Clone)]
+    pub struct VulkanComputePipeline;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +37,11 @@ pub enum HalError {
     BufferOperationFailed {
         backend: &'static str,
         message: &'static str,
+    },
+    #[error("HAL shader compilation failed: {backend}: {message}")]
+    ShaderCompilationFailed {
+        backend: &'static str,
+        message: String,
     },
 }
 
@@ -146,6 +153,18 @@ pub enum HalDevice {
 
 impl HalDevice {
     #[must_use]
+    pub fn backend(&self) -> HalBackend {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => HalBackend::Noop,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => HalBackend::Vulkan,
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => HalBackend::Metal,
+        }
+    }
+
+    #[must_use]
     pub fn allocation_count(&self) -> u64 {
         match self {
             #[cfg(feature = "noop")]
@@ -206,6 +225,26 @@ impl HalDevice {
             Self::Vulkan(_) => HalSampler::Vulkan(vulkan::VulkanSampler),
             #[cfg(feature = "metal")]
             Self::Metal(device) => HalSampler::Metal(device.create_sampler(descriptor)),
+        }
+    }
+
+    pub fn create_compute_pipeline(
+        &self,
+        msl_source: &str,
+        entry_point: &str,
+        workgroup_size: (u32, u32, u32),
+    ) -> Result<HalComputePipeline, HalError> {
+        #[cfg(not(feature = "metal"))]
+        let _ = (msl_source, entry_point, workgroup_size);
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => Ok(HalComputePipeline::Noop),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => Ok(HalComputePipeline::Vulkan(vulkan::VulkanComputePipeline)),
+            #[cfg(feature = "metal")]
+            Self::Metal(device) => device
+                .create_compute_pipeline(msl_source, entry_point, workgroup_size)
+                .map(HalComputePipeline::Metal),
         }
     }
 }
@@ -329,6 +368,21 @@ pub enum HalCopy {
     BufferToTexture(HalBufferTextureCopy),
     TextureToBuffer(HalBufferTextureCopy),
     TextureToTexture(HalTextureCopy),
+    ComputePass(HalComputePass),
+}
+
+#[derive(Debug, Clone)]
+pub struct HalComputePass {
+    pub pipeline: HalComputePipeline,
+    pub bind_buffers: Vec<HalBoundBuffer>,
+    pub workgroups: (u32, u32, u32),
+}
+
+#[derive(Debug, Clone)]
+pub struct HalBoundBuffer {
+    pub metal_index: u32,
+    pub buffer: HalBuffer,
+    pub offset: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -466,6 +520,17 @@ pub enum HalSampler {
     Vulkan(vulkan::VulkanSampler),
     #[cfg(feature = "metal")]
     Metal(metal::MetalSampler),
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum HalComputePipeline {
+    #[cfg(feature = "noop")]
+    Noop,
+    #[cfg(feature = "vulkan")]
+    Vulkan(vulkan::VulkanComputePipeline),
+    #[cfg(feature = "metal")]
+    Metal(metal::MetalComputePipeline),
 }
 
 #[cfg(test)]
