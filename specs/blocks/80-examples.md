@@ -16,13 +16,17 @@ window + surface/swapchain path on the Phase-7 Metal/Vulkan backends
   Dawn `webgpu.h`; the only yawgpu-specific bit is the
   `WGPUYawgpuInstanceBackendSelect` chained struct to pick
   Metal/Vulkan, Noop default).
-- **No hard cmake/glfw dependency.** `cmake`/`glfw` are not installed
-  on the dev machine. Build via a plain driver (a `Makefile` or
-  `examples/build.sh` using `cc`), not CMake. **Headless** examples
-  need only `cc` + `libyawgpu.a`. **Windowed** examples need GLFW —
-  gate them: build/run only when `glfw3` is found (`pkg-config` /
-  `brew --prefix glfw`); skip with a clear message otherwise. Do not
-  vendor GLFW.
+- **Build: CMake + GLFW** (user installs `brew install cmake glfw`).
+  Mirror wgpu-native's `examples/` CMake layout (a top-level
+  `examples/CMakeLists.txt` + per-example dirs + a shared
+  `framework`); the wgpu-native `CMakeLists.txt`/`main.c` port nearly
+  1:1 — point the import at yawgpu's built lib
+  (`libyawgpu.{a,dylib}` from `cargo build -p yawgpu [--features
+  metal|vulkan]`) + the vendored `yawgpu/ffi/webgpu-headers/
+  webgpu.h`. CMake `find_package(glfw3)` for windowed examples;
+  headless ones don't link GLFW. Do not vendor GLFW. The Rust
+  workspace build is unaffected (examples are a separate CMake tree,
+  not cargo workspace members).
 - **Gating / verification** (mirrors Phase 7): the Noop CI gate
   (`cargo test --workspace` + clippy) is unchanged and must stay
   green — examples are **not** part of `cargo test`. Headless
