@@ -343,7 +343,32 @@ matching e2e on the host via MoltenVK and logs it.
   `e2e_vulkan_buffer`/`basic` 3/3 + Metal `e2e_metal_texture` 4/4 /
   `render` 3/3 (no regression). Committed `phase-7: P7.6c`.
 - **P7.6d** naga→SPIR-V compute pipeline + descriptor sets + dispatch
-  + storage readback. Mirrors P7.4.
+  + storage readback. Mirrors P7.4. **☑ DONE — MoltenVK-
+  verified.** `shader_naga::generate_spirv` via `naga::back::spv`
+  (native `@group`→set / `@binding`→binding, no remap; Result, no
+  leak/panic). **Additive HAL generalization:** `HalShaderSource
+  {Msl,SpirV}` + `HalDescriptorBinding{group,binding,kind}`;
+  `create_compute_pipeline(shader,entry,wg,bindings)` — Metal arm
+  destructures `Msl`/ignores `bindings`/calls the identical internal
+  fn (**byte-for-byte unchanged**, non-Msl→`HalError`), Vulkan arm
+  `SpirV`→`VkShaderModule`+`VkDescriptorSetLayout`(s)+`VkPipeline
+  Layout`+`VkComputePipeline`. `HalBoundBuffer` extended additively
+  (`group`/`binding`/`size`, kept `metal_index`). core
+  `create_hal_compute_pipeline` branches on `hal_device.backend()`
+  (Metal `generate_msl` unchanged / Vulkan `generate_spirv`+
+  descriptor bindings / Noop None); compute-pass translation
+  populates the new fields. Vulkan `submit_copies::ComputePass`:
+  transient `VkDescriptorPool`+sets, `vkUpdateDescriptorSets`
+  (buffer infos by `(group,binding)`), bind pipeline/sets,
+  `vkCmdDispatch`, submit+wait. Bounded compute/uniform+storage
+  (=P7.4); P5/P6 + Noop + Metal unchanged. Tests
+  `e2e_vulkan_compute.rs` (3, `#[ignore]`/cfg). Gate: Noop 52
+  binaries green + clippy clean; `--features vulkan` + `--features
+  metal` build/clippy clean. M2 (MoltenVK, 2026-05-19):
+  `e2e_vulkan_compute` **3/3** (storage fill + in/out + Noop) +
+  vulkan basic/buffer/texture 3/3/3/4 + **Metal compute 3/3 /
+  render 3/3 / texture 4/4 (no regression from the HAL API change)**.
+  Committed `phase-7: P7.6d`.
 - **P7.6e** SPIR-V graphics pipeline + render pass/framebuffer + draw
   + color readback. Mirrors P7.5.
 
