@@ -237,6 +237,9 @@ impl Device {
 
     #[must_use]
     pub fn create_query_set(&self, descriptor: QuerySetDescriptor) -> (QuerySet, Option<String>) {
+        if self.is_lost() {
+            return (QuerySet::new(descriptor, true), None);
+        }
         let error = validate_query_set_descriptor(&descriptor, &self.inner.features);
         let is_error = error.is_some();
         (
@@ -275,6 +278,11 @@ impl Device {
     #[must_use]
     pub fn is_lost(&self) -> bool {
         self.inner.lost.lock().reason.is_some()
+    }
+
+    #[must_use]
+    pub fn lost_reason(&self) -> Option<DeviceLostReason> {
+        self.inner.lost.lock().reason
     }
 
     pub fn set_uncaptured_error_callback<F>(&self, callback: Option<F>)
@@ -327,6 +335,9 @@ impl Device {
 
     #[must_use]
     pub fn create_buffer(&self, descriptor: BufferDescriptor) -> Buffer {
+        if self.is_lost() {
+            return Buffer::new(descriptor, None, true);
+        }
         let error = validate_buffer_descriptor(&descriptor, self.limits());
         let is_error = error.is_some();
         if let Some(message) = error {
@@ -344,6 +355,9 @@ impl Device {
 
     #[must_use]
     pub fn create_texture(&self, descriptor: TextureDescriptor) -> Texture {
+        if self.is_lost() {
+            return Texture::new(descriptor, None, true);
+        }
         let error = validate_texture_descriptor(&descriptor, self.limits());
         let is_error = error.is_some();
         if let Some(message) = error {
@@ -366,6 +380,9 @@ impl Device {
     #[must_use]
     pub fn create_sampler(&self, descriptor: SamplerDescriptor) -> Sampler {
         let resolved = ResolvedSamplerDescriptor::from_descriptor(descriptor);
+        if self.is_lost() {
+            return Sampler::new(resolved, None, true);
+        }
         let error = validate_sampler_descriptor(&resolved);
         let is_error = error.is_some();
         if let Some(message) = error {
@@ -387,6 +404,12 @@ impl Device {
 
     #[must_use]
     pub fn create_shader_module(&self, source: ShaderModuleSource) -> ShaderModule {
+        if self.is_lost() {
+            return ShaderModule::new(
+                ShaderModuleSourceKind::Invalid,
+                Some("device is lost".to_owned()),
+            );
+        }
         let (inner, error) = match source {
             ShaderModuleSource::Wgsl(source) => match ShaderModule::from_wgsl(source) {
                 Ok(inner) => (inner, None),
@@ -412,6 +435,9 @@ impl Device {
         &self,
         descriptor: BindGroupLayoutDescriptor,
     ) -> BindGroupLayout {
+        if self.is_lost() {
+            return BindGroupLayout::new(descriptor.entries, true, false);
+        }
         let error = descriptor
             .error
             .clone()
@@ -429,6 +455,9 @@ impl Device {
         layout: Arc<BindGroupLayout>,
         entries: Vec<BindGroupEntry>,
     ) -> BindGroup {
+        if self.is_lost() {
+            return BindGroup::new(layout, entries, true);
+        }
         let error = validate_bind_group_descriptor(self, &layout, &entries, self.limits());
         let is_error = error.is_some();
         if let Some(message) = error {
@@ -439,6 +468,13 @@ impl Device {
 
     #[must_use]
     pub fn create_pipeline_layout(&self, descriptor: PipelineLayoutDescriptor) -> PipelineLayout {
+        if self.is_lost() {
+            return PipelineLayout::new(
+                descriptor.bind_group_layouts,
+                descriptor.immediate_size,
+                true,
+            );
+        }
         let error = descriptor.error.clone().or_else(|| {
             validate_pipeline_layout_descriptor(
                 &descriptor.bind_group_layouts,
@@ -471,6 +507,9 @@ impl Device {
         &self,
         descriptor: ComputePipelineDescriptor,
     ) -> ComputePipeline {
+        if self.is_lost() {
+            return ComputePipeline::new(descriptor, true, self.limits(), None).0;
+        }
         let error = descriptor
             .error
             .clone()
@@ -492,6 +531,9 @@ impl Device {
         &self,
         descriptor: ComputePipelineDescriptor,
     ) -> ComputePipeline {
+        if self.is_lost() {
+            return ComputePipeline::new(descriptor, true, self.limits(), None).0;
+        }
         let error = descriptor
             .error
             .clone()
@@ -507,6 +549,9 @@ impl Device {
 
     #[must_use]
     pub fn create_render_pipeline(&self, descriptor: RenderPipelineDescriptor) -> RenderPipeline {
+        if self.is_lost() {
+            return RenderPipeline::new(descriptor, true, self.limits(), None).0;
+        }
         let error = descriptor
             .error
             .clone()
@@ -528,6 +573,9 @@ impl Device {
         &self,
         descriptor: RenderPipelineDescriptor,
     ) -> RenderPipeline {
+        if self.is_lost() {
+            return RenderPipeline::new(descriptor, true, self.limits(), None).0;
+        }
         let error = descriptor
             .error
             .clone()
