@@ -269,15 +269,22 @@ struct MultisampleStateCacheKey {
     alpha_to_coverage_enabled: native::WGPUBool,
 }
 
-macro_rules! declare_empty_impl_handles {
-    ($($name:ident),* $(,)?) => {
-        $(
-            pub struct $name;
-        )*
-    };
+pub struct WGPUSurfaceImpl {
+    label: Mutex<String>,
+    configured: Mutex<Option<SurfaceConfigurationState>>,
+    is_error: bool,
+    _instance: Arc<WGPUInstanceImpl>,
 }
 
-declare_empty_impl_handles!(WGPUSurfaceImpl,);
+#[derive(Debug, Clone, Copy)]
+struct SurfaceConfigurationState {
+    _format: native::WGPUTextureFormat,
+    _usage: native::WGPUTextureUsage,
+    _width: u32,
+    _height: u32,
+    _present_mode: native::WGPUPresentMode,
+    _alpha_mode: native::WGPUCompositeAlphaMode,
+}
 
 pub struct WGPUQuerySetImpl {
     core: Arc<core::QuerySet>,
@@ -738,6 +745,62 @@ unsafe fn validate_render_pipeline_devices(
         if !layout._device.same(&device.core) {
             return Some("render pipeline layout must belong to the same device".into());
         }
+    }
+    None
+}
+
+const SURFACE_FORMATS: [native::WGPUTextureFormat; 2] = [
+    native::WGPUTextureFormat_BGRA8Unorm,
+    native::WGPUTextureFormat_RGBA8Unorm,
+];
+const SURFACE_PRESENT_MODES: [native::WGPUPresentMode; 1] = [native::WGPUPresentMode_Fifo];
+const SURFACE_ALPHA_MODES: [native::WGPUCompositeAlphaMode; 1] =
+    [native::WGPUCompositeAlphaMode_Opaque];
+const SURFACE_USAGES: native::WGPUTextureUsage = native::WGPUTextureUsage_RenderAttachment;
+
+fn is_supported_surface_source(s_type: native::WGPUSType) -> bool {
+    matches!(
+        s_type,
+        native::WGPUSType_SurfaceSourceMetalLayer
+            | native::WGPUSType_SurfaceSourceWindowsHWND
+            | native::WGPUSType_SurfaceSourceXlibWindow
+            | native::WGPUSType_SurfaceSourceWaylandSurface
+            | native::WGPUSType_SurfaceSourceXCBWindow
+            | native::WGPUSType_SurfaceSourceAndroidNativeWindow
+    )
+}
+
+unsafe fn has_supported_surface_source(mut chain: *const native::WGPUChainedStruct) -> bool {
+    while let Some(link) = chain.as_ref() {
+        if is_supported_surface_source(link.sType) {
+            return true;
+        }
+        chain = link.next;
+    }
+    false
+}
+
+fn surface_configuration_error(
+    device: &WGPUDeviceImpl,
+    config: &native::WGPUSurfaceConfiguration,
+) -> Option<&'static str> {
+    if device.core.is_lost() {
+        return Some("surface configuration device is lost");
+    }
+    if !SURFACE_FORMATS.contains(&config.format) {
+        return Some("surface configuration format is not supported");
+    }
+    if config.usage == native::WGPUTextureUsage_None || config.usage & !SURFACE_USAGES != 0 {
+        return Some("surface configuration usage is not supported");
+    }
+    if config.width == 0 || config.height == 0 {
+        return Some("surface configuration size must be non-zero");
+    }
+    if !SURFACE_PRESENT_MODES.contains(&config.presentMode) {
+        return Some("surface configuration present mode is not supported");
+    }
+    if !SURFACE_ALPHA_MODES.contains(&config.alphaMode) {
+        return Some("surface configuration alpha mode is not supported");
     }
     None
 }
@@ -1365,6 +1428,34 @@ pub unsafe extern "C" fn wgpuInstanceRelease(instance: native::WGPUInstance) {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceAddRef(instance: native::WGPUInstance) {
     add_ref_handle(instance, "WGPUInstance");
+}
+
+/// Creates a synthetic Noop surface from a recognized surface-source chain.
+///
+/// # Safety
+///
+/// `instance` must be a non-null live yawgpu instance handle. `descriptor`,
+/// when non-null, must point to a valid `WGPUSurfaceDescriptor`.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuInstanceCreateSurface(
+    instance: native::WGPUInstance,
+    descriptor: *const native::WGPUSurfaceDescriptor,
+) -> native::WGPUSurface {
+    let instance = clone_handle(instance, "WGPUInstance");
+    let (label, is_error) = if let Some(descriptor) = descriptor.as_ref() {
+        (
+            label_from_string_view(descriptor.label).unwrap_or_default(),
+            !has_supported_surface_source(descriptor.nextInChain),
+        )
+    } else {
+        (String::new(), true)
+    };
+    arc_to_handle(Arc::new(WGPUSurfaceImpl {
+        label: Mutex::new(label),
+        configured: Mutex::new(None),
+        is_error,
+        _instance: instance,
+    }))
 }
 
 /// Requests a Noop adapter from an instance.
@@ -4145,6 +4236,201 @@ pub unsafe extern "C" fn wgpuQuerySetRelease(query_set: native::WGPUQuerySet) {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQuerySetAddRef(query_set: native::WGPUQuerySet) {
     add_ref_handle(query_set, "WGPUQuerySet");
+}
+
+/// Returns deterministic Noop surface capabilities.
+///
+/// # Safety
+///
+/// `surface` and `adapter` must be non-null live yawgpu handles.
+/// `capabilities`, when non-null, must point to writable memory.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuSurfaceGetCapabilities(
+    surface: native::WGPUSurface,
+    adapter: native::WGPUAdapter,
+    capabilities: *mut native::WGPUSurfaceCapabilities,
+) -> native::WGPUStatus {
+    let surface = borrow_handle(surface, "WGPUSurface");
+    let _adapter = borrow_handle(adapter, "WGPUAdapter");
+    let Some(capabilities) = capabilities.as_mut() else {
+        return native::WGPUStatus_Error;
+    };
+    if surface.is_error {
+        return native::WGPUStatus_Error;
+    }
+    capabilities.nextInChain = std::ptr::null_mut();
+    capabilities.usages = SURFACE_USAGES;
+    capabilities.formatCount = SURFACE_FORMATS.len();
+    capabilities.formats = Box::leak(Box::new(SURFACE_FORMATS)).as_ptr();
+    capabilities.presentModeCount = SURFACE_PRESENT_MODES.len();
+    capabilities.presentModes = Box::leak(Box::new(SURFACE_PRESENT_MODES)).as_ptr();
+    capabilities.alphaModeCount = SURFACE_ALPHA_MODES.len();
+    capabilities.alphaModes = Box::leak(Box::new(SURFACE_ALPHA_MODES)).as_ptr();
+    native::WGPUStatus_Success
+}
+
+/// Frees arrays allocated by `wgpuSurfaceGetCapabilities`.
+///
+/// # Safety
+///
+/// Any non-null array member must have been returned by yawgpu.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuSurfaceCapabilitiesFreeMembers(
+    capabilities: native::WGPUSurfaceCapabilities,
+) {
+    if !capabilities.formats.is_null() {
+        drop(Box::from_raw(
+            capabilities.formats as *mut [native::WGPUTextureFormat; SURFACE_FORMATS.len()],
+        ));
+    }
+    if !capabilities.presentModes.is_null() {
+        drop(Box::from_raw(
+            capabilities.presentModes
+                as *mut [native::WGPUPresentMode; SURFACE_PRESENT_MODES.len()],
+        ));
+    }
+    if !capabilities.alphaModes.is_null() {
+        drop(Box::from_raw(
+            capabilities.alphaModes
+                as *mut [native::WGPUCompositeAlphaMode; SURFACE_ALPHA_MODES.len()],
+        ));
+    }
+}
+
+/// Configures a surface after validating it against Noop capabilities.
+///
+/// # Safety
+///
+/// `surface` must be a non-null live yawgpu surface handle. `config`, when
+/// non-null, must point to a valid `WGPUSurfaceConfiguration`.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuSurfaceConfigure(
+    surface: native::WGPUSurface,
+    config: *const native::WGPUSurfaceConfiguration,
+) {
+    let surface = borrow_handle(surface, "WGPUSurface");
+    let Some(config) = config.as_ref() else {
+        return;
+    };
+    if config.device.is_null() {
+        return;
+    }
+    let device = borrow_handle(config.device, "WGPUDevice");
+    if surface.is_error {
+        device.dispatch_error(core::ErrorKind::Validation, "surface is invalid");
+        return;
+    }
+    if let Some(message) = surface_configuration_error(device, config) {
+        device.dispatch_error(core::ErrorKind::Validation, message);
+        return;
+    }
+    *surface
+        .configured
+        .lock()
+        .expect("surface configuration lock is not poisoned") = Some(SurfaceConfigurationState {
+        _format: config.format,
+        _usage: config.usage,
+        _width: config.width,
+        _height: config.height,
+        _present_mode: config.presentMode,
+        _alpha_mode: config.alphaMode,
+    });
+}
+
+/// Clears any stored surface configuration.
+///
+/// # Safety
+///
+/// `surface` must be a non-null live yawgpu surface handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuSurfaceUnconfigure(surface: native::WGPUSurface) {
+    let surface = borrow_handle(surface, "WGPUSurface");
+    *surface
+        .configured
+        .lock()
+        .expect("surface configuration lock is not poisoned") = None;
+}
+
+/// Gets the current surface texture.
+///
+/// # Safety
+///
+/// `surface` must be a non-null live yawgpu surface handle. `surface_texture`,
+/// when non-null, must point to writable memory.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
+    surface: native::WGPUSurface,
+    surface_texture: *mut native::WGPUSurfaceTexture,
+) {
+    let surface = borrow_handle(surface, "WGPUSurface");
+    let Some(surface_texture) = surface_texture.as_mut() else {
+        return;
+    };
+    surface_texture.nextInChain = std::ptr::null_mut();
+    surface_texture.texture = std::ptr::null();
+    if surface.is_error
+        || surface
+            .configured
+            .lock()
+            .expect("surface configuration lock is not poisoned")
+            .is_none()
+    {
+        surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_Error;
+        return;
+    }
+    // Noop has no native window/backbuffer, so a valid configuration still
+    // cannot produce a swapchain image. This is the recorded SF3 N/A boundary.
+    surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_Lost;
+}
+
+/// Presents the current surface texture. Noop has no presentation backend.
+///
+/// # Safety
+///
+/// `surface` must be a non-null live yawgpu surface handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuSurfacePresent(surface: native::WGPUSurface) -> native::WGPUStatus {
+    let _surface = borrow_handle(surface, "WGPUSurface");
+    native::WGPUStatus_Success
+}
+
+/// Sets the debug label for a surface.
+///
+/// # Safety
+///
+/// `surface` must be a non-null live yawgpu surface handle. `label` must point
+/// to valid string data according to `WGPUStringView` when non-empty.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuSurfaceSetLabel(
+    surface: native::WGPUSurface,
+    label: native::WGPUStringView,
+) {
+    let surface = borrow_handle(surface, "WGPUSurface");
+    *surface
+        .label
+        .lock()
+        .expect("surface label lock is not poisoned") =
+        label_from_string_view(label).unwrap_or_default();
+}
+
+/// Releases one owned reference to a surface handle.
+///
+/// # Safety
+///
+/// `surface` must be a non-null live yawgpu surface handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuSurfaceRelease(surface: native::WGPUSurface) {
+    release_handle(surface, "WGPUSurface");
+}
+
+/// Adds one owned reference to a surface handle.
+///
+/// # Safety
+///
+/// `surface` must be a non-null live yawgpu surface handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuSurfaceAddRef(surface: native::WGPUSurface) {
+    add_ref_handle(surface, "WGPUSurface");
 }
 
 /// Destroys a texture. This operation is idempotent.
