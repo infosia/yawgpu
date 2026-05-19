@@ -75,6 +75,7 @@ pub struct WGPUDeviceImpl {
     core: Arc<core::Device>,
     instance: Arc<WGPUInstanceImpl>,
     device_lost_callback: DeviceLostCallbackInfo,
+    device_lost_futures: Mutex<Vec<u64>>,
     default_queue: Mutex<Option<Arc<WGPUQueueImpl>>>,
     shader_module_cache: Mutex<HashMap<ShaderModuleCacheKey, Arc<WGPUShaderModuleImpl>>>,
     pipeline_layout_cache: Mutex<HashMap<PipelineLayoutCacheKey, Arc<WGPUPipelineLayoutImpl>>>,
@@ -336,16 +337,57 @@ impl WGPUInstanceImpl {
     }
 
     fn register_callback(&self, callback: PendingCallback) -> native::WGPUFuture {
+        let future = self.register_pending_callback(callback);
+        self.complete_future(future);
+        future
+    }
+
+    fn register_pending_callback(&self, callback: PendingCallback) -> native::WGPUFuture {
         let future = self
             .core
             .future_registry()
             .register(callback.callback_mode());
-        self.core.future_registry().complete(future);
         self.pending_callbacks
             .lock()
             .expect("pending callback lock is not poisoned")
             .insert(future.get(), callback);
         native::WGPUFuture { id: future.get() }
+    }
+
+    fn complete_future(&self, future: native::WGPUFuture) {
+        self.core
+            .future_registry()
+            .complete(core::FutureId::from_raw(future.id));
+    }
+
+    fn abort_pending_device_callbacks(&self, device: &core::Device) {
+        let mut callbacks = self
+            .pending_callbacks
+            .lock()
+            .expect("pending callback lock is not poisoned");
+        for callback in callbacks.values_mut() {
+            match callback {
+                PendingCallback::BufferMap {
+                    device: callback_device,
+                    buffer,
+                    status,
+                    ..
+                } if callback_device.same(device) => {
+                    if let Some(buffer) = buffer.take() {
+                        buffer.abort_pending_map();
+                    }
+                    *status = core::MapAsyncStatus::Aborted;
+                }
+                PendingCallback::QueueWorkDone {
+                    device: callback_device,
+                    status,
+                    ..
+                } if callback_device.same(device) => {
+                    *status = core::QueueWorkDoneStatus::Error;
+                }
+                _ => {}
+            }
+        }
     }
 
     fn process_callbacks(&self) -> usize {
@@ -423,6 +465,16 @@ impl WGPUDeviceImpl {
         reason: core::DeviceLostReason,
     ) -> Option<native::WGPUFuture> {
         let reason = self.core.lose(reason)?;
+        self.instance.abort_pending_device_callbacks(&self.core);
+        for future_id in self
+            .device_lost_futures
+            .lock()
+            .expect("device lost future lock is not poisoned")
+            .drain(..)
+        {
+            self.instance
+                .complete_future(native::WGPUFuture { id: future_id });
+        }
         if !self.device_lost_callback.has_callback() {
             return None;
         }
@@ -437,6 +489,32 @@ impl WGPUDeviceImpl {
                     userdata2: self.device_lost_callback.userdata2,
                 }),
         )
+    }
+
+    fn get_lost_future(&self, device: native::WGPUDevice) -> native::WGPUFuture {
+        let reason = self
+            .core
+            .lost_reason()
+            .unwrap_or(core::DeviceLostReason::Unknown);
+        let future = self
+            .instance
+            .register_pending_callback(PendingCallback::DeviceLost {
+                mode: 0,
+                callback: None,
+                device: device as usize,
+                reason,
+                userdata1: 0,
+                userdata2: 0,
+            });
+        if self.core.is_lost() {
+            self.instance.complete_future(future);
+        } else {
+            self.device_lost_futures
+                .lock()
+                .expect("device lost future lock is not poisoned")
+                .push(future.id);
+        }
+        future
     }
 
     #[doc(hidden)]
@@ -807,6 +885,7 @@ enum PendingCallback {
     BufferMap {
         mode: native::WGPUCallbackMode,
         callback: native::WGPUBufferMapCallback,
+        device: Arc<core::Device>,
         buffer: Option<core::Buffer>,
         status: core::MapAsyncStatus,
         userdata1: usize,
@@ -815,6 +894,7 @@ enum PendingCallback {
     QueueWorkDone {
         mode: native::WGPUCallbackMode,
         callback: native::WGPUQueueWorkDoneCallback,
+        device: Arc<core::Device>,
         status: core::QueueWorkDoneStatus,
         userdata1: usize,
         userdata2: usize,
@@ -1414,6 +1494,7 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
                 core: Arc::new(device),
                 instance: Arc::clone(&adapter.instance),
                 device_lost_callback,
+                device_lost_futures: Mutex::new(Vec::new()),
                 default_queue: Mutex::new(None),
                 shader_module_cache: Mutex::new(HashMap::new()),
                 pipeline_layout_cache: Mutex::new(HashMap::new()),
@@ -1486,6 +1567,17 @@ pub unsafe extern "C" fn wgpuDeviceAddRef(device: native::WGPUDevice) {
 pub unsafe extern "C" fn wgpuDeviceDestroy(device: native::WGPUDevice) {
     let device_impl = borrow_handle(device, "WGPUDevice");
     device_impl.schedule_device_lost(device, core::DeviceLostReason::Destroyed);
+}
+
+/// Returns a future that completes when the device is lost.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceGetLostFuture(device: native::WGPUDevice) -> native::WGPUFuture {
+    let device_impl = borrow_handle(device, "WGPUDevice");
+    device_impl.get_lost_future(device)
 }
 
 /// Pushes a device error scope for matching errors.
@@ -3474,6 +3566,7 @@ pub unsafe extern "C" fn wgpuBufferMapAsync(
             Ok(()) => PendingCallback::BufferMap {
                 mode: callback_info.mode,
                 callback: callback_info.callback,
+                device: Arc::clone(&buffer.device),
                 buffer: Some((*buffer.core).clone()),
                 status: core::MapAsyncStatus::Success,
                 userdata1: callback_info.userdata1 as usize,
@@ -3486,6 +3579,7 @@ pub unsafe extern "C" fn wgpuBufferMapAsync(
                 PendingCallback::BufferMap {
                     mode: callback_info.mode,
                     callback: callback_info.callback,
+                    device: Arc::clone(&buffer.device),
                     buffer: None,
                     status: core::MapAsyncStatus::Error,
                     userdata1: callback_info.userdata1 as usize,
@@ -3500,6 +3594,7 @@ pub unsafe extern "C" fn wgpuBufferMapAsync(
             PendingCallback::BufferMap {
                 mode: callback_info.mode,
                 callback: callback_info.callback,
+                device: Arc::clone(&buffer.device),
                 buffer: None,
                 status: core::MapAsyncStatus::Error,
                 userdata1: callback_info.userdata1 as usize,
@@ -4177,6 +4272,7 @@ pub unsafe extern "C" fn wgpuQueueOnSubmittedWorkDone(
         .register_callback(PendingCallback::QueueWorkDone {
             mode: callback_info.mode,
             callback: callback_info.callback,
+            device: Arc::clone(&queue.device),
             status: core::QueueWorkDoneStatus::Success,
             userdata1: callback_info.userdata1 as usize,
             userdata2: callback_info.userdata2 as usize,

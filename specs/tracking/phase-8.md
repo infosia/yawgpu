@@ -57,11 +57,15 @@ QuerySet). Tests query_validation.rs (12). Gate green (Noop 55
 binaries + clippy; P6 command/pass unregressed). Committed
 `phase-8: P8.2`.
 
-## P8.3 — DeviceLost  *(after P8.2)*
-DL1–DL4: DeviceDestroy → lost + GetLostFuture; post-lost ops return
-errors (no panic); pending callbacks resolve lost/aborted; completes
-the Phase-1 `device_lost_validation.rs` (no regression).
-`DeviceLostValidationTests`.
+## P8.3 — DeviceLost  *(☑ DONE)*
+DL1–DL4 done: wgpuDeviceGetLostFuture (reuses PendingCallback::
+DeviceLost, single loss event, idempotent Destroyed); Device::
+is_lost() short-circuit prepended to all create paths (error object,
+no device error, non-lost unchanged); BufferMap/QueueWorkDone +device
+ref resolve Aborted on loss; PopErrorScope P8.0 unchanged. Extended
+device_lost_validation.rs to 7 (4 Phase-1 kept). Gate green (Noop 55
+binaries + clippy; non-lost paths unregressed). Committed
+`phase-8: P8.3`.
 
 ## P8.4 — Toggle / UnsafeAPI (R21)  *(after P8.3)*
 TG1/TG2: map only stable-webgpu.h-analog toggle/feature rules; the

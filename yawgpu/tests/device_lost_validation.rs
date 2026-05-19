@@ -1,7 +1,8 @@
 use std::os::raw::c_void;
+use std::sync::{Arc, Mutex};
 
 use yawgpu::native;
-use yawgpu_test::wait;
+use yawgpu_test::{wait, ValidationTest};
 
 #[derive(Default)]
 struct Recorder {
@@ -12,6 +13,9 @@ struct Recorder {
 enum Event {
     RequestDevice(native::WGPURequestDeviceStatus),
     DeviceLost(native::WGPUDeviceLostReason, bool),
+    MapAsync(native::WGPUMapAsyncStatus),
+    QueueWorkDone(native::WGPUQueueWorkDoneStatus),
+    PopErrorScope(native::WGPUPopErrorScopeStatus, native::WGPUErrorType),
 }
 
 #[test]
@@ -126,6 +130,103 @@ fn final_device_release_implicitly_destroys_and_fires_device_lost_once() {
                 true
             )]
         );
+    }
+}
+
+#[test]
+fn get_lost_future_completes_once_on_destroy_and_after_already_lost() {
+    unsafe {
+        let fixture = Fixture::new();
+        let mut recorder = Recorder::default();
+        let device = request_device_with_lost_callback(
+            fixture.instance,
+            fixture.adapter,
+            native::WGPUCallbackMode_AllowProcessEvents,
+            &mut recorder,
+        );
+
+        let future = yawgpu::wgpuDeviceGetLostFuture(device);
+        assert_wait_pending(fixture.instance, future);
+
+        yawgpu::wgpuDeviceDestroy(device);
+        wait_one(fixture.instance, future);
+        wait_one(fixture.instance, future);
+        assert!(recorder.events.is_empty());
+
+        yawgpu::wgpuInstanceProcessEvents(fixture.instance);
+        yawgpu::wgpuInstanceProcessEvents(fixture.instance);
+        assert_eq!(
+            recorder.events,
+            vec![Event::DeviceLost(
+                native::WGPUDeviceLostReason_Destroyed,
+                false
+            )]
+        );
+
+        let already_lost = yawgpu::wgpuDeviceGetLostFuture(device);
+        wait_one(fixture.instance, already_lost);
+        yawgpu::wgpuDeviceRelease(device);
+    }
+}
+
+#[test]
+fn create_paths_after_device_loss_return_handles_without_new_device_errors() {
+    let test = ValidationTest::new();
+    unsafe {
+        yawgpu::wgpuDeviceDestroy(test.device());
+        test.clear_errors();
+
+        let buffer = create_buffer(test.device(), 16, native::WGPUBufferUsage_CopyDst);
+        let sampler = yawgpu::wgpuDeviceCreateSampler(test.device(), std::ptr::null());
+        let query_set = create_query_set(test.device(), native::WGPUQueryType_Occlusion, 1);
+
+        assert!(!buffer.is_null());
+        assert!(!sampler.is_null());
+        assert!(!query_set.is_null());
+        assert!(test.errors().is_empty());
+
+        yawgpu::wgpuBufferRelease(buffer);
+        yawgpu::wgpuSamplerRelease(sampler);
+        yawgpu::wgpuQuerySetRelease(query_set);
+    }
+}
+
+#[test]
+fn pending_map_queue_and_pop_error_scope_callbacks_resolve_on_device_loss() {
+    let test = ValidationTest::new();
+    unsafe {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let buffer = create_buffer(test.device(), 16, native::WGPUBufferUsage_MapRead);
+        let queue = yawgpu::wgpuDeviceGetQueue(test.device());
+
+        let map_events = Arc::clone(&events);
+        let map_info = map_callback_info(&map_events);
+        yawgpu::wgpuBufferMapAsync(buffer, native::WGPUMapMode_Read, 0, 16, map_info);
+
+        let queue_events = Arc::clone(&events);
+        let queue_info = queue_work_done_callback_info(&queue_events);
+        yawgpu::wgpuQueueOnSubmittedWorkDone(queue, queue_info);
+
+        yawgpu::wgpuDevicePushErrorScope(test.device(), native::WGPUErrorFilter_Validation);
+
+        yawgpu::wgpuDeviceDestroy(test.device());
+        yawgpu::wgpuInstanceProcessEvents(test.instance());
+
+        let pop_events = Arc::clone(&events);
+        let pop_info = pop_error_scope_callback_info(&pop_events);
+        let pop_future = yawgpu::wgpuDevicePopErrorScope(test.device(), pop_info);
+        wait(test.instance(), pop_future);
+
+        let events = events.lock().expect("events lock").clone();
+        assert!(events.contains(&Event::MapAsync(native::WGPUMapAsyncStatus_Aborted)));
+        assert!(events.contains(&Event::QueueWorkDone(native::WGPUQueueWorkDoneStatus_Error)));
+        assert!(events.contains(&Event::PopErrorScope(
+            native::WGPUPopErrorScopeStatus_Success,
+            native::WGPUErrorType_NoError
+        )));
+
+        yawgpu::wgpuBufferRelease(buffer);
+        yawgpu::wgpuQueueRelease(queue);
     }
 }
 
@@ -244,6 +345,83 @@ unsafe fn wait_one(instance: native::WGPUInstance, future: native::WGPUFuture) {
     assert_eq!(wait_info.completed, 1);
 }
 
+unsafe fn assert_wait_pending(instance: native::WGPUInstance, future: native::WGPUFuture) {
+    let mut wait_info = native::WGPUFutureWaitInfo {
+        future,
+        completed: 0,
+    };
+    let status = yawgpu::wgpuInstanceWaitAny(instance, 1, &mut wait_info, 0);
+    assert_eq!(status, native::WGPUWaitStatus_TimedOut);
+    assert_eq!(wait_info.completed, 0);
+}
+
+unsafe fn create_buffer(
+    device: native::WGPUDevice,
+    size: u64,
+    usage: native::WGPUBufferUsage,
+) -> native::WGPUBuffer {
+    let descriptor = native::WGPUBufferDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: string_view_init(),
+        usage,
+        size,
+        mappedAtCreation: 0,
+    };
+    let buffer = yawgpu::wgpuDeviceCreateBuffer(device, &descriptor);
+    assert!(!buffer.is_null());
+    buffer
+}
+
+unsafe fn create_query_set(
+    device: native::WGPUDevice,
+    query_type: native::WGPUQueryType,
+    count: u32,
+) -> native::WGPUQuerySet {
+    let descriptor = native::WGPUQuerySetDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: string_view_init(),
+        type_: query_type,
+        count,
+    };
+    let query_set = yawgpu::wgpuDeviceCreateQuerySet(device, &descriptor);
+    assert!(!query_set.is_null());
+    query_set
+}
+
+fn map_callback_info(events: &Arc<Mutex<Vec<Event>>>) -> native::WGPUBufferMapCallbackInfo {
+    native::WGPUBufferMapCallbackInfo {
+        nextInChain: std::ptr::null_mut(),
+        mode: native::WGPUCallbackMode_AllowProcessEvents,
+        callback: Some(map_callback),
+        userdata1: (events as *const Arc<Mutex<Vec<Event>>>).cast_mut().cast(),
+        userdata2: std::ptr::null_mut(),
+    }
+}
+
+fn queue_work_done_callback_info(
+    events: &Arc<Mutex<Vec<Event>>>,
+) -> native::WGPUQueueWorkDoneCallbackInfo {
+    native::WGPUQueueWorkDoneCallbackInfo {
+        nextInChain: std::ptr::null_mut(),
+        mode: native::WGPUCallbackMode_AllowProcessEvents,
+        callback: Some(queue_work_done_callback),
+        userdata1: (events as *const Arc<Mutex<Vec<Event>>>).cast_mut().cast(),
+        userdata2: std::ptr::null_mut(),
+    }
+}
+
+fn pop_error_scope_callback_info(
+    events: &Arc<Mutex<Vec<Event>>>,
+) -> native::WGPUPopErrorScopeCallbackInfo {
+    native::WGPUPopErrorScopeCallbackInfo {
+        nextInChain: std::ptr::null_mut(),
+        mode: native::WGPUCallbackMode_AllowProcessEvents,
+        callback: Some(pop_error_scope_callback),
+        userdata1: (events as *const Arc<Mutex<Vec<Event>>>).cast_mut().cast(),
+        userdata2: std::ptr::null_mut(),
+    }
+}
+
 fn string_view_init() -> native::WGPUStringView {
     native::WGPUStringView {
         data: std::ptr::null(),
@@ -345,6 +523,46 @@ unsafe extern "C" fn device_lost_callback(
     (*(userdata1 as *mut Recorder))
         .events
         .push(Event::DeviceLost(reason, (*device).is_null()));
+}
+
+unsafe extern "C" fn map_callback(
+    status: native::WGPUMapAsyncStatus,
+    _message: native::WGPUStringView,
+    userdata1: *mut c_void,
+    _userdata2: *mut c_void,
+) {
+    let events = &*(userdata1 as *const Arc<Mutex<Vec<Event>>>);
+    events
+        .lock()
+        .expect("events lock")
+        .push(Event::MapAsync(status));
+}
+
+unsafe extern "C" fn queue_work_done_callback(
+    status: native::WGPUQueueWorkDoneStatus,
+    _message: native::WGPUStringView,
+    userdata1: *mut c_void,
+    _userdata2: *mut c_void,
+) {
+    let events = &*(userdata1 as *const Arc<Mutex<Vec<Event>>>);
+    events
+        .lock()
+        .expect("events lock")
+        .push(Event::QueueWorkDone(status));
+}
+
+unsafe extern "C" fn pop_error_scope_callback(
+    status: native::WGPUPopErrorScopeStatus,
+    error_type: native::WGPUErrorType,
+    _message: native::WGPUStringView,
+    userdata1: *mut c_void,
+    _userdata2: *mut c_void,
+) {
+    let events = &*(userdata1 as *const Arc<Mutex<Vec<Event>>>);
+    events
+        .lock()
+        .expect("events lock")
+        .push(Event::PopErrorScope(status, error_type));
 }
 
 unsafe fn string_view_to_string(value: native::WGPUStringView) -> String {

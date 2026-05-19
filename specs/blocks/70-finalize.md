@@ -153,13 +153,29 @@ Status: ☐ ◐ ☑ ✗(N/A).
 
 ### P8.3 DeviceLost (`DeviceLostValidationTests`)
 - **DL1** `DeviceDestroy` ⇒ device lost; `GetLostFuture` resolves
-  once with reason=Destroyed. ☐
+  once with reason=Destroyed. ☑ (P8.3)
 - **DL2** operations after lost: creation returns error objects /
-  device errors, no panic; idempotent destroy. ☐
+  device errors, no panic; idempotent destroy. ☑ (P8.3)
 - **DL3** pending callbacks (map, work-done, pop-error-scope)
-  resolve with the appropriate lost/aborted status. ☐
+  resolve with the appropriate lost/aborted status. ☑ (P8.3)
 - **DL4** completes/ô supersedes the Phase-1
-  `device_lost_validation.rs` stub (no regression). ☐
+  `device_lost_validation.rs` stub (no regression). ☑ (P8.3)
+
+> P8.3: `wgpuDeviceGetLostFuture` implemented — registers a
+> `PendingCallback::DeviceLost`, completed immediately if already
+> lost else queued in `device_lost_futures` (same single loss event
+> as the creation-time device-lost callback; `DeviceDestroy` ⇒
+> `Destroyed`, idempotent). DL2: `Device::is_lost()` short-circuit
+> **prepended** to every create path (buffer/texture/sampler/shader/
+> BGL/BG/pipeline-layout/compute+render pipeline/query-set) ⇒ returns
+> the `is_error` handle WITHOUT validating or dispatching a device
+> error; non-lost path byte-for-byte unchanged; `lost_reason()`
+> accessor added. DL3: `PendingCallback::{BufferMap,QueueWorkDone}`
+> gained a `device` ref; on loss the matching pending callbacks
+> resolve `Aborted`; `PopErrorScope` keeps the P8.0 lost behavior.
+> Extended `device_lost_validation.rs` to 7 (4 Phase-1 kept + DL1–DL3).
+> Gate green (55 binaries, clippy clean; non-lost create/map/submit
+> unregressed).
 
 ### P8.4 Toggle / UnsafeAPI R21 (`ToggleValidationTests`,
 `UnsafeAPIValidationTests`)
