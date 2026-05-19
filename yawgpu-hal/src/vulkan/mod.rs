@@ -1,4 +1,4 @@
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
@@ -7,8 +7,9 @@ use std::sync::Arc;
 use ash::vk;
 
 use crate::{
-    HalAddressMode, HalBufferCopy, HalBufferTextureCopy, HalCompareFunction, HalCopy, HalError,
-    HalExtent3d, HalFilterMode, HalMipmapFilterMode, HalSamplerDescriptor, HalTextureCopy,
+    HalAddressMode, HalBoundBuffer, HalBufferBindingKind, HalBufferCopy, HalBufferTextureCopy,
+    HalCompareFunction, HalComputePass, HalCopy, HalDescriptorBinding, HalError, HalExtent3d,
+    HalFilterMode, HalMipmapFilterMode, HalSamplerDescriptor, HalShaderSource, HalTextureCopy,
     HalTextureDescriptor, HalTextureFormat, HalTextureUsage,
 };
 
@@ -267,6 +268,16 @@ impl VulkanDevice {
                 .map(Arc::new),
         }
     }
+
+    pub fn create_compute_pipeline(
+        &self,
+        shader: HalShaderSource,
+        entry_point: &str,
+        _workgroup_size: (u32, u32, u32),
+        bindings: &[HalDescriptorBinding],
+    ) -> Result<VulkanComputePipeline, HalError> {
+        create_compute_pipeline(Arc::clone(&self.inner), shader, entry_point, bindings)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -474,7 +485,38 @@ impl Drop for VulkanSamplerInner {
 }
 
 #[derive(Debug, Clone)]
-pub struct VulkanComputePipeline;
+pub struct VulkanComputePipeline {
+    inner: Arc<VulkanComputePipelineInner>,
+}
+
+#[derive(Debug)]
+struct VulkanComputePipelineInner {
+    device: Arc<VulkanDeviceInner>,
+    pipeline: vk::Pipeline,
+    pipeline_layout: vk::PipelineLayout,
+    descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
+    descriptor_bindings: Vec<HalDescriptorBinding>,
+    shader_module: vk::ShaderModule,
+}
+
+impl Drop for VulkanComputePipelineInner {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.device.destroy_pipeline(self.pipeline, None);
+            self.device
+                .device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+            for layout in &self.descriptor_set_layouts {
+                self.device
+                    .device
+                    .destroy_descriptor_set_layout(*layout, None);
+            }
+            self.device
+                .device
+                .destroy_shader_module(self.shader_module, None);
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct VulkanRenderPipeline;
@@ -669,6 +711,146 @@ fn create_sampler(
     Ok(VulkanSamplerInner { device, sampler })
 }
 
+fn create_compute_pipeline(
+    device: Arc<VulkanDeviceInner>,
+    shader: HalShaderSource,
+    entry_point: &str,
+    bindings: &[HalDescriptorBinding],
+) -> Result<VulkanComputePipeline, HalError> {
+    let HalShaderSource::SpirV(code) = shader else {
+        return Err(shader_error("Vulkan compute pipeline requires SPIR-V"));
+    };
+    let entry_point =
+        CString::new(entry_point).map_err(|_| shader_error("compute entry point contains NUL"))?;
+    let shader_info = vk::ShaderModuleCreateInfo::default().code(&code);
+    let shader_module = unsafe { device.device.create_shader_module(&shader_info, None) }
+        .map_err(|_| shader_error("shader module creation failed"))?;
+    let descriptor_set_layouts = match create_descriptor_set_layouts(&device, bindings) {
+        Ok(layouts) => layouts,
+        Err(error) => {
+            unsafe {
+                device.device.destroy_shader_module(shader_module, None);
+            }
+            return Err(error);
+        }
+    };
+    let pipeline_layout_info =
+        vk::PipelineLayoutCreateInfo::default().set_layouts(&descriptor_set_layouts);
+    let pipeline_layout = match unsafe {
+        device
+            .device
+            .create_pipeline_layout(&pipeline_layout_info, None)
+    } {
+        Ok(layout) => layout,
+        Err(_) => {
+            unsafe {
+                destroy_descriptor_set_layouts(&device.device, &descriptor_set_layouts);
+                device.device.destroy_shader_module(shader_module, None);
+            }
+            return Err(shader_error("pipeline layout creation failed"));
+        }
+    };
+    let stage = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::COMPUTE)
+        .module(shader_module)
+        .name(&entry_point);
+    let pipeline_info = vk::ComputePipelineCreateInfo::default()
+        .stage(stage)
+        .layout(pipeline_layout);
+    let pipelines = match unsafe {
+        device
+            .device
+            .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+    } {
+        Ok(pipelines) => pipelines,
+        Err((pipelines, _)) => {
+            unsafe {
+                for pipeline in pipelines {
+                    device.device.destroy_pipeline(pipeline, None);
+                }
+                device.device.destroy_pipeline_layout(pipeline_layout, None);
+                destroy_descriptor_set_layouts(&device.device, &descriptor_set_layouts);
+                device.device.destroy_shader_module(shader_module, None);
+            }
+            return Err(shader_error("compute pipeline creation failed"));
+        }
+    };
+    let Some(&pipeline) = pipelines.first() else {
+        unsafe {
+            device.device.destroy_pipeline_layout(pipeline_layout, None);
+            destroy_descriptor_set_layouts(&device.device, &descriptor_set_layouts);
+            device.device.destroy_shader_module(shader_module, None);
+        }
+        return Err(shader_error(
+            "compute pipeline creation returned no pipeline",
+        ));
+    };
+    Ok(VulkanComputePipeline {
+        inner: Arc::new(VulkanComputePipelineInner {
+            device,
+            pipeline,
+            pipeline_layout,
+            descriptor_set_layouts,
+            descriptor_bindings: bindings.to_vec(),
+            shader_module,
+        }),
+    })
+}
+
+fn create_descriptor_set_layouts(
+    device: &VulkanDeviceInner,
+    bindings: &[HalDescriptorBinding],
+) -> Result<Vec<vk::DescriptorSetLayout>, HalError> {
+    let Some(max_group) = bindings.iter().map(|binding| binding.group).max() else {
+        return Ok(Vec::new());
+    };
+    let mut layouts = Vec::new();
+    for group in 0..=max_group {
+        let layout_bindings = bindings
+            .iter()
+            .filter(|binding| binding.group == group)
+            .map(|binding| {
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(binding.binding)
+                    .descriptor_type(descriptor_type(binding.kind))
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            })
+            .collect::<Vec<_>>();
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&layout_bindings);
+        match unsafe {
+            device
+                .device
+                .create_descriptor_set_layout(&layout_info, None)
+        } {
+            Ok(layout) => layouts.push(layout),
+            Err(_) => {
+                unsafe {
+                    destroy_descriptor_set_layouts(&device.device, &layouts);
+                }
+                return Err(shader_error("descriptor set layout creation failed"));
+            }
+        }
+    }
+    Ok(layouts)
+}
+
+unsafe fn destroy_descriptor_set_layouts(
+    device: &ash::Device,
+    layouts: &[vk::DescriptorSetLayout],
+) {
+    for layout in layouts {
+        device.destroy_descriptor_set_layout(*layout, None);
+    }
+}
+
+fn descriptor_type(kind: HalBufferBindingKind) -> vk::DescriptorType {
+    match kind {
+        HalBufferBindingKind::Uniform => vk::DescriptorType::UNIFORM_BUFFER,
+        HalBufferBindingKind::Storage => vk::DescriptorType::STORAGE_BUFFER,
+    }
+}
+
 fn submit_copies(queue: &VulkanQueueInner, copies: &[HalCopy]) -> Result<(), HalError> {
     let command_pool_info = vk::CommandPoolCreateInfo::default()
         .flags(vk::CommandPoolCreateFlags::TRANSIENT)
@@ -692,63 +874,80 @@ fn record_and_submit_copies(
     command_pool: vk::CommandPool,
     copies: &[HalCopy],
 ) -> Result<(), HalError> {
-    let allocate_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
-    let command_buffers = unsafe { queue.device.device.allocate_command_buffers(&allocate_info) }
-        .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
-    let Some(&command_buffer) = command_buffers.first() else {
-        return Err(HalError::QueueSubmissionFailed { backend: BACKEND });
-    };
-    let begin_info =
-        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-    unsafe {
-        queue
-            .device
-            .device
-            .begin_command_buffer(command_buffer, &begin_info)
-            .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
-    }
-    for copy in copies {
-        match copy {
-            HalCopy::Buffer(copy) => {
-                encode_buffer_copy(&queue.device.device, command_buffer, copy)?;
-            }
-            HalCopy::BufferToTexture(copy) => {
-                encode_buffer_to_texture(&queue.device.device, command_buffer, copy)?;
-            }
-            HalCopy::TextureToBuffer(copy) => {
-                encode_texture_to_buffer(&queue.device.device, command_buffer, copy)?;
-            }
-            HalCopy::TextureToTexture(copy) => {
-                encode_texture_to_texture(&queue.device.device, command_buffer, copy)?;
-            }
-            HalCopy::ComputePass(_) | HalCopy::RenderPass(_) => {
-                return Err(HalError::BackendUnavailable { backend: BACKEND });
+    let mut descriptor_pools = Vec::new();
+    let result = (|| {
+        let allocate_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let command_buffers =
+            unsafe { queue.device.device.allocate_command_buffers(&allocate_info) }
+                .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+        let Some(&command_buffer) = command_buffers.first() else {
+            return Err(HalError::QueueSubmissionFailed { backend: BACKEND });
+        };
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe {
+            queue
+                .device
+                .device
+                .begin_command_buffer(command_buffer, &begin_info)
+                .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+        }
+        for copy in copies {
+            match copy {
+                HalCopy::Buffer(copy) => {
+                    encode_buffer_copy(&queue.device.device, command_buffer, copy)?;
+                }
+                HalCopy::BufferToTexture(copy) => {
+                    encode_buffer_to_texture(&queue.device.device, command_buffer, copy)?;
+                }
+                HalCopy::TextureToBuffer(copy) => {
+                    encode_texture_to_buffer(&queue.device.device, command_buffer, copy)?;
+                }
+                HalCopy::TextureToTexture(copy) => {
+                    encode_texture_to_texture(&queue.device.device, command_buffer, copy)?;
+                }
+                HalCopy::ComputePass(pass) => {
+                    if let Some(pool) =
+                        encode_compute_pass(&queue.device.device, command_buffer, pass)?
+                    {
+                        descriptor_pools.push(pool);
+                    }
+                }
+                HalCopy::RenderPass(_) => {
+                    return Err(HalError::BackendUnavailable { backend: BACKEND });
+                }
             }
         }
-    }
+        unsafe {
+            queue
+                .device
+                .device
+                .end_command_buffer(command_buffer)
+                .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+            let command_buffers = [command_buffer];
+            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+            queue
+                .device
+                .device
+                .queue_submit(queue.queue, &[submit_info], vk::Fence::null())
+                .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+            queue
+                .device
+                .device
+                .queue_wait_idle(queue.queue)
+                .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+        }
+        Ok(())
+    })();
     unsafe {
-        queue
-            .device
-            .device
-            .end_command_buffer(command_buffer)
-            .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
-        let command_buffers = [command_buffer];
-        let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
-        queue
-            .device
-            .device
-            .queue_submit(queue.queue, &[submit_info], vk::Fence::null())
-            .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
-        queue
-            .device
-            .device
-            .queue_wait_idle(queue.queue)
-            .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+        for pool in descriptor_pools {
+            queue.device.device.destroy_descriptor_pool(pool, None);
+        }
     }
-    Ok(())
+    result
 }
 
 fn encode_buffer_copy(
@@ -776,6 +975,7 @@ fn encode_buffer_copy(
     unsafe {
         device.cmd_copy_buffer(command_buffer, source.buffer, destination.buffer, &[region]);
     }
+    transfer_to_compute_barrier(device, command_buffer);
     Ok(())
 }
 
@@ -909,6 +1109,203 @@ fn encode_texture_to_texture(
     Ok(())
 }
 
+fn encode_compute_pass(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    pass: &HalComputePass,
+) -> Result<Option<vk::DescriptorPool>, HalError> {
+    let crate::HalComputePipeline::Vulkan(pipeline) = &pass.pipeline else {
+        return Err(shader_error("compute pipeline is not Vulkan-backed"));
+    };
+    let descriptor_pool = create_compute_descriptor_pool(device, pipeline)?;
+    let descriptor_sets = if let Some(pool) = descriptor_pool {
+        match allocate_compute_descriptor_sets(device, pool, pipeline) {
+            Ok(sets) => sets,
+            Err(error) => {
+                unsafe {
+                    device.destroy_descriptor_pool(pool, None);
+                }
+                return Err(error);
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    if let Err(error) = update_compute_descriptor_sets(device, pipeline, pass, &descriptor_sets) {
+        if let Some(pool) = descriptor_pool {
+            unsafe {
+                device.destroy_descriptor_pool(pool, None);
+            }
+        }
+        return Err(error);
+    }
+    unsafe {
+        device.cmd_bind_pipeline(
+            command_buffer,
+            vk::PipelineBindPoint::COMPUTE,
+            pipeline.inner.pipeline,
+        );
+        if !descriptor_sets.is_empty() {
+            device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline.inner.pipeline_layout,
+                0,
+                &descriptor_sets,
+                &[],
+            );
+        }
+        device.cmd_dispatch(
+            command_buffer,
+            pass.workgroups.0,
+            pass.workgroups.1,
+            pass.workgroups.2,
+        );
+    }
+    compute_to_transfer_barrier(device, command_buffer);
+    Ok(descriptor_pool)
+}
+
+fn create_compute_descriptor_pool(
+    device: &ash::Device,
+    pipeline: &VulkanComputePipeline,
+) -> Result<Option<vk::DescriptorPool>, HalError> {
+    if pipeline.inner.descriptor_set_layouts.is_empty() {
+        return Ok(None);
+    }
+    let uniform_count = pipeline
+        .inner
+        .descriptor_bindings
+        .iter()
+        .filter(|binding| matches!(binding.kind, HalBufferBindingKind::Uniform))
+        .count();
+    let storage_count = pipeline
+        .inner
+        .descriptor_bindings
+        .iter()
+        .filter(|binding| matches!(binding.kind, HalBufferBindingKind::Storage))
+        .count();
+    let mut pool_sizes = Vec::new();
+    if uniform_count > 0 {
+        pool_sizes.push(
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(
+                    u32::try_from(uniform_count)
+                        .map_err(|_| shader_error("uniform descriptor count is too large"))?,
+                ),
+        );
+    }
+    if storage_count > 0 {
+        pool_sizes.push(
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(
+                    u32::try_from(storage_count)
+                        .map_err(|_| shader_error("storage descriptor count is too large"))?,
+                ),
+        );
+    }
+    let pool_info = vk::DescriptorPoolCreateInfo::default()
+        .max_sets(
+            u32::try_from(pipeline.inner.descriptor_set_layouts.len())
+                .map_err(|_| shader_error("descriptor set count is too large"))?,
+        )
+        .pool_sizes(&pool_sizes);
+    let pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
+        .map_err(|_| shader_error("descriptor pool creation failed"))?;
+    Ok(Some(pool))
+}
+
+fn allocate_compute_descriptor_sets(
+    device: &ash::Device,
+    pool: vk::DescriptorPool,
+    pipeline: &VulkanComputePipeline,
+) -> Result<Vec<vk::DescriptorSet>, HalError> {
+    let allocate_info = vk::DescriptorSetAllocateInfo::default()
+        .descriptor_pool(pool)
+        .set_layouts(&pipeline.inner.descriptor_set_layouts);
+    unsafe { device.allocate_descriptor_sets(&allocate_info) }
+        .map_err(|_| shader_error("descriptor set allocation failed"))
+}
+
+fn update_compute_descriptor_sets(
+    device: &ash::Device,
+    pipeline: &VulkanComputePipeline,
+    pass: &HalComputePass,
+    descriptor_sets: &[vk::DescriptorSet],
+) -> Result<(), HalError> {
+    if pipeline.inner.descriptor_bindings.is_empty() {
+        return Ok(());
+    }
+    let mut buffer_infos = Vec::new();
+    let mut write_specs = Vec::new();
+    for descriptor in &pipeline.inner.descriptor_bindings {
+        let bound = pass
+            .bind_buffers
+            .iter()
+            .find(|bound| bound.group == descriptor.group && bound.binding == descriptor.binding)
+            .ok_or_else(|| shader_error("compute descriptor binding is missing"))?;
+        let buffer_info = descriptor_buffer_info(bound)?;
+        buffer_infos.push(buffer_info);
+        write_specs.push((
+            buffer_infos.len() - 1,
+            descriptor.group,
+            descriptor.binding,
+            descriptor_type(descriptor.kind),
+        ));
+    }
+    let writes = write_specs
+        .iter()
+        .map(|(info_index, group, binding, descriptor_type)| {
+            let group = usize::try_from(*group)
+                .map_err(|_| shader_error("descriptor group index is too large"))?;
+            let descriptor_set = descriptor_sets
+                .get(group)
+                .copied()
+                .ok_or_else(|| shader_error("descriptor set is missing"))?;
+            Ok(vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(*binding)
+                .descriptor_type(*descriptor_type)
+                .buffer_info(std::slice::from_ref(&buffer_infos[*info_index])))
+        })
+        .collect::<Result<Vec<_>, HalError>>()?;
+    unsafe {
+        device.update_descriptor_sets(&writes, &[]);
+    }
+    Ok(())
+}
+
+fn descriptor_buffer_info(bound: &HalBoundBuffer) -> Result<vk::DescriptorBufferInfo, HalError> {
+    let crate::HalBuffer::Vulkan(buffer) = &bound.buffer else {
+        return Err(buffer_error("compute buffer is not Vulkan-backed"));
+    };
+    let inner = buffer.inner()?;
+    if bound.offset > buffer.size() {
+        return Err(buffer_error("compute buffer offset exceeds buffer size"));
+    }
+    let range = if bound.size == u64::MAX {
+        buffer
+            .size()
+            .checked_sub(bound.offset)
+            .ok_or_else(|| buffer_error("compute buffer range exceeds buffer size"))?
+    } else {
+        bound.size
+    };
+    let end = bound
+        .offset
+        .checked_add(range)
+        .ok_or_else(|| buffer_error("compute buffer range overflows"))?;
+    if end > buffer.size() {
+        return Err(buffer_error("compute buffer range exceeds buffer size"));
+    }
+    Ok(vk::DescriptorBufferInfo::default()
+        .buffer(inner.buffer)
+        .offset(bound.offset)
+        .range(range))
+}
+
 fn transition_image(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
@@ -939,6 +1336,45 @@ fn transition_image(
             &[],
             &[],
             &[barrier],
+        );
+    }
+}
+
+fn transfer_to_compute_barrier(device: &ash::Device, command_buffer: vk::CommandBuffer) {
+    let barrier = vk::MemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+        .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+    unsafe {
+        device.cmd_pipeline_barrier(
+            command_buffer,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[barrier],
+            &[],
+            &[],
+        );
+    }
+}
+
+fn compute_to_transfer_barrier(device: &ash::Device, command_buffer: vk::CommandBuffer) {
+    let barrier = vk::MemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+        .dst_access_mask(
+            vk::AccessFlags::TRANSFER_READ
+                | vk::AccessFlags::TRANSFER_WRITE
+                | vk::AccessFlags::SHADER_READ
+                | vk::AccessFlags::SHADER_WRITE,
+        );
+    unsafe {
+        device.cmd_pipeline_barrier(
+            command_buffer,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[barrier],
+            &[],
+            &[],
         );
     }
 }
@@ -1140,4 +1576,11 @@ fn texture_error(message: &'static str) -> HalError {
 
 fn map_texture_error(_error: vk::Result, message: &'static str) -> HalError {
     texture_error(message)
+}
+
+fn shader_error(message: &'static str) -> HalError {
+    HalError::ShaderCompilationFailed {
+        backend: BACKEND,
+        message: message.to_owned(),
+    }
 }

@@ -220,6 +220,23 @@ pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ValidatedWgslModule, 
 }
 
 impl ValidatedWgslModule {
+    pub(crate) fn generate_spirv(
+        &self,
+        entry_name: &str,
+        stage: naga::ShaderStage,
+    ) -> Result<Vec<u32>, String> {
+        let options = naga::back::spv::Options {
+            fake_missing_bindings: true,
+            ..Default::default()
+        };
+        let pipeline_options = naga::back::spv::PipelineOptions {
+            shader_stage: stage,
+            entry_point: entry_name.to_owned(),
+        };
+        naga::back::spv::write_vec(&self.module, &self.info, &options, Some(&pipeline_options))
+            .map_err(|error| error.to_string())
+    }
+
     pub(crate) fn generate_msl(
         &self,
         entry_name: &str,

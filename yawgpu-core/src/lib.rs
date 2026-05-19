@@ -5,14 +5,14 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use yawgpu_hal::{
-    HalAdapter, HalAddressMode, HalBackend, HalBoundBuffer, HalBuffer, HalBufferCopy,
-    HalBufferTextureCopy, HalBufferTextureLayout, HalCompareFunction, HalComputePass,
-    HalComputePipeline, HalCopy, HalDevice, HalDraw, HalError, HalExtent3d, HalFilterMode,
-    HalInstance, HalMipmapFilterMode, HalOrigin3d, HalPrimitiveTopology, HalQueue,
-    HalRenderColorTarget, HalRenderLoadOp, HalRenderPass, HalRenderPipeline,
-    HalRenderPipelineDescriptor, HalSampler, HalSamplerDescriptor, HalTexture, HalTextureCopy,
-    HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexAttribute,
-    HalVertexBufferLayout, HalVertexFormat, HalVertexStepMode,
+    HalAdapter, HalAddressMode, HalBackend, HalBoundBuffer, HalBuffer, HalBufferBindingKind,
+    HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout, HalCompareFunction,
+    HalComputePass, HalComputePipeline, HalCopy, HalDescriptorBinding, HalDevice, HalDraw,
+    HalError, HalExtent3d, HalFilterMode, HalInstance, HalMipmapFilterMode, HalOrigin3d,
+    HalPrimitiveTopology, HalQueue, HalRenderColorTarget, HalRenderLoadOp, HalRenderPass,
+    HalRenderPipeline, HalRenderPipelineDescriptor, HalSampler, HalSamplerDescriptor,
+    HalShaderSource, HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
+    HalTextureUsage, HalVertexAttribute, HalVertexBufferLayout, HalVertexFormat, HalVertexStepMode,
 };
 
 pub(crate) mod shader_naga;
@@ -2278,6 +2278,7 @@ struct MetalBufferBinding {
     group: u32,
     binding: u32,
     metal_index: u32,
+    ty: BufferBindingType,
 }
 
 impl ComputePipeline {
@@ -2371,9 +2372,6 @@ fn create_hal_compute_pipeline(
     let Some(hal_device) = hal_device else {
         return (None, None);
     };
-    if hal_device.backend() != HalBackend::Metal {
-        return (None, None);
-    }
     let Some(module) = shader_module.validated_wgsl() else {
         return (
             None,
@@ -2386,28 +2384,67 @@ fn create_hal_compute_pipeline(
             Some("compute pipeline workgroup size reflection failed".to_owned()),
         );
     };
-    let msl_binding_map = shader_naga::MslBindingMap {
-        buffers: metal_bindings
-            .iter()
-            .map(|binding| shader_naga::MslBufferBinding {
-                group: binding.group,
-                binding: binding.binding,
-                metal_index: binding.metal_index,
-            })
-            .collect(),
-    };
-    let generated = match module.generate_msl(entry_name, &msl_binding_map) {
-        Ok(generated) => generated,
-        Err(message) => return (None, Some(message)),
+    let (shader, entry_point, descriptor_bindings) = match hal_device.backend() {
+        HalBackend::Metal => {
+            let msl_binding_map = shader_naga::MslBindingMap {
+                buffers: metal_bindings
+                    .iter()
+                    .map(|binding| shader_naga::MslBufferBinding {
+                        group: binding.group,
+                        binding: binding.binding,
+                        metal_index: binding.metal_index,
+                    })
+                    .collect(),
+            };
+            let generated = match module.generate_msl(entry_name, &msl_binding_map) {
+                Ok(generated) => generated,
+                Err(message) => return (None, Some(message)),
+            };
+            (
+                HalShaderSource::Msl(generated.source),
+                generated.entry_point,
+                Vec::new(),
+            )
+        }
+        HalBackend::Vulkan => {
+            let spirv = match module.generate_spirv(entry_name, naga::ShaderStage::Compute) {
+                Ok(spirv) => spirv,
+                Err(message) => return (None, Some(message)),
+            };
+            (
+                HalShaderSource::SpirV(spirv),
+                entry_name.to_owned(),
+                hal_descriptor_bindings(metal_bindings),
+            )
+        }
+        HalBackend::Noop => return (None, None),
+        _ => return (None, None),
     };
     match hal_device.create_compute_pipeline(
-        &generated.source,
-        &generated.entry_point,
+        shader,
+        &entry_point,
         (workgroup.size[0], workgroup.size[1], workgroup.size[2]),
+        &descriptor_bindings,
     ) {
         Ok(pipeline) => (Some(pipeline), None),
         Err(error) => (None, Some(error.to_string())),
     }
+}
+
+fn hal_descriptor_bindings(bindings: &[MetalBufferBinding]) -> Vec<HalDescriptorBinding> {
+    bindings
+        .iter()
+        .map(|binding| HalDescriptorBinding {
+            group: binding.group,
+            binding: binding.binding,
+            kind: match binding.ty {
+                BufferBindingType::Uniform => HalBufferBindingKind::Uniform,
+                BufferBindingType::Storage | BufferBindingType::ReadOnlyStorage => {
+                    HalBufferBindingKind::Storage
+                }
+            },
+        })
+        .collect()
 }
 
 fn metal_buffer_binding_map(layouts: &[Arc<BindGroupLayout>]) -> Vec<MetalBufferBinding> {
@@ -2418,11 +2455,12 @@ fn metal_buffer_binding_map(layouts: &[Arc<BindGroupLayout>]) -> Vec<MetalBuffer
             break;
         };
         for entry in layout.entries() {
-            if matches!(entry.kind, Some(BindingLayoutKind::Buffer { .. })) {
+            if let Some(BindingLayoutKind::Buffer { ty, .. }) = entry.kind {
                 bindings.push(MetalBufferBinding {
                     group,
                     binding: entry.binding,
                     metal_index,
+                    ty,
                 });
                 metal_index = metal_index.saturating_add(1);
             }
@@ -5370,7 +5408,13 @@ fn hal_compute_pass_execution(pass: &ComputePassCommand) -> Option<HalCopy> {
             .entries()
             .iter()
             .find(|entry| entry.binding == binding.binding)?;
-        let BindGroupResource::Buffer { buffer, offset, .. } = &entry.resource else {
+        let BindGroupResource::Buffer {
+            buffer,
+            offset,
+            size,
+            ..
+        } = &entry.resource
+        else {
             return None;
         };
         let dynamic_offset = dynamic_offset_for_binding(
@@ -5381,9 +5425,12 @@ fn hal_compute_pass_execution(pass: &ComputePassCommand) -> Option<HalCopy> {
         )?;
         let offset = offset.checked_add(dynamic_offset)?;
         bind_buffers.push(HalBoundBuffer {
+            group: binding.group,
+            binding: binding.binding,
             metal_index: binding.metal_index,
             buffer: buffer.hal()?,
             offset,
+            size: *size,
         });
     }
     Some(HalCopy::ComputePass(HalComputePass {
@@ -5404,9 +5451,12 @@ fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalCopy> {
     for binding in pass.pipeline.vertex_buffer_bindings() {
         let bound = pass.vertex_buffers.get(&binding.slot)?;
         vertex_buffers.push(HalBoundBuffer {
+            group: 0,
+            binding: binding.slot,
             metal_index: binding.metal_index,
             buffer: bound.buffer.hal()?,
             offset: bound.offset,
+            size: bound.size,
         });
     }
     Some(HalCopy::RenderPass(HalRenderPass {
@@ -5449,7 +5499,13 @@ fn hal_bind_buffers(
             .entries()
             .iter()
             .find(|entry| entry.binding == binding.binding)?;
-        let BindGroupResource::Buffer { buffer, offset, .. } = &entry.resource else {
+        let BindGroupResource::Buffer {
+            buffer,
+            offset,
+            size,
+            ..
+        } = &entry.resource
+        else {
             return None;
         };
         let dynamic_offset = dynamic_offset_for_binding(
@@ -5460,9 +5516,12 @@ fn hal_bind_buffers(
         )?;
         let offset = offset.checked_add(dynamic_offset)?;
         bind_buffers.push(HalBoundBuffer {
+            group: binding.group,
+            binding: binding.binding,
             metal_index: binding.metal_index,
             buffer: buffer.hal()?,
             offset,
+            size: *size,
         });
     }
     Some(bind_buffers)

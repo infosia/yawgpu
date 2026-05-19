@@ -217,20 +217,23 @@ impl HalDevice {
 
     pub fn create_compute_pipeline(
         &self,
-        msl_source: &str,
+        shader: HalShaderSource,
         entry_point: &str,
         workgroup_size: (u32, u32, u32),
+        bindings: &[HalDescriptorBinding],
     ) -> Result<HalComputePipeline, HalError> {
-        #[cfg(not(feature = "metal"))]
-        let _ = (msl_source, entry_point, workgroup_size);
+        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+        let _ = (shader, entry_point, workgroup_size, bindings);
         match self {
             #[cfg(feature = "noop")]
             Self::Noop(_) => Ok(HalComputePipeline::Noop),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => Ok(HalComputePipeline::Vulkan(vulkan::VulkanComputePipeline)),
+            Self::Vulkan(device) => device
+                .create_compute_pipeline(shader, entry_point, workgroup_size, bindings)
+                .map(HalComputePipeline::Vulkan),
             #[cfg(feature = "metal")]
             Self::Metal(device) => device
-                .create_compute_pipeline(msl_source, entry_point, workgroup_size)
+                .create_compute_pipeline(shader, entry_point, workgroup_size, bindings)
                 .map(HalComputePipeline::Metal),
         }
     }
@@ -390,10 +393,32 @@ pub struct HalComputePass {
 }
 
 #[derive(Debug, Clone)]
+pub enum HalShaderSource {
+    Msl(String),
+    SpirV(Vec<u32>),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HalDescriptorBinding {
+    pub group: u32,
+    pub binding: u32,
+    pub kind: HalBufferBindingKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HalBufferBindingKind {
+    Uniform,
+    Storage,
+}
+
+#[derive(Debug, Clone)]
 pub struct HalBoundBuffer {
+    pub group: u32,
+    pub binding: u32,
     pub metal_index: u32,
     pub buffer: HalBuffer,
     pub offset: u64,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone)]

@@ -2,10 +2,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
     HalAddressMode, HalBoundBuffer, HalBuffer, HalBufferTextureCopy, HalCompareFunction,
-    HalComputePass, HalCopy, HalDraw, HalError, HalExtent3d, HalFilterMode, HalMipmapFilterMode,
-    HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor,
-    HalSamplerDescriptor, HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
-    HalTextureUsage, HalVertexFormat, HalVertexStepMode,
+    HalComputePass, HalCopy, HalDescriptorBinding, HalDraw, HalError, HalExtent3d, HalFilterMode,
+    HalMipmapFilterMode, HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass,
+    HalRenderPipelineDescriptor, HalSamplerDescriptor, HalShaderSource, HalTexture, HalTextureCopy,
+    HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
 
 const BACKEND: &str = "metal";
@@ -122,11 +122,17 @@ impl MetalDevice {
 
     pub fn create_compute_pipeline(
         &self,
-        msl_source: &str,
+        shader: HalShaderSource,
         entry_point: &str,
         workgroup_size: (u32, u32, u32),
+        _bindings: &[HalDescriptorBinding],
     ) -> Result<MetalComputePipeline, HalError> {
-        create_compute_pipeline(&self._device, msl_source, entry_point, workgroup_size)
+        let HalShaderSource::Msl(msl_source) = shader else {
+            return Err(shader_error(
+                "Metal compute pipeline requires MSL".to_owned(),
+            ));
+        };
+        create_compute_pipeline(&self._device, &msl_source, entry_point, workgroup_size)
     }
 
     pub fn create_render_pipeline(
