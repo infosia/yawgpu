@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use yawgpu_hal::{
-    HalAdapter, HalBackend, HalBuffer, HalDevice, HalError, HalInstance, HalQueue, HalSampler,
-    HalTexture,
+    HalAdapter, HalBackend, HalBuffer, HalBufferCopy, HalDevice, HalError, HalInstance, HalQueue,
+    HalSampler, HalTexture,
 };
 
 pub(crate) mod shader_naga;
@@ -3980,7 +3980,7 @@ pub struct Buffer {
 
 #[derive(Debug)]
 struct BufferInner {
-    _hal: Option<HalBuffer>,
+    hal: Option<HalBuffer>,
     usage: BufferUsage,
     size: u64,
     host: HostBuffer,
@@ -4040,6 +4040,22 @@ impl HostBuffer {
         // One-past-the-end is valid for zero-sized mapped ranges.
         Some(unsafe { self.bytes.as_ptr().add(offset).cast::<u8>().cast_mut() })
     }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), String> {
+        let offset = usize::try_from(offset).map_err(|_| "host buffer offset is too large")?;
+        let end = offset
+            .checked_add(data.len())
+            .ok_or("host buffer write range overflows")?;
+        if end > self.bytes.len() {
+            return Err("host buffer write range exceeds buffer size".to_owned());
+        }
+        for (cell, byte) in self.bytes[offset..end].iter().zip(data) {
+            unsafe {
+                *cell.get() = *byte;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Debug for HostBuffer {
@@ -4073,7 +4089,7 @@ impl Buffer {
         };
         Self {
             inner: Arc::new(BufferInner {
-                _hal: hal,
+                hal,
                 usage: descriptor.usage,
                 size: descriptor.size,
                 host: HostBuffer::new(if is_error { 0 } else { descriptor.size }),
@@ -4200,10 +4216,24 @@ impl Buffer {
     pub fn resolve_pending_map(&self) -> MapAsyncStatus {
         let mut state = self.inner.state.lock();
         let pending = state.pending_map.take();
-        let outcome = pending
+        let mut outcome = pending
             .as_ref()
             .map(|pending| pending.outcome)
             .unwrap_or(MapAsyncStatus::Aborted);
+        if outcome == MapAsyncStatus::Success {
+            if let Some(pending) = pending.as_ref() {
+                if pending.mode == MapMode::Read {
+                    if let Some(hal) = &self.inner.hal {
+                        outcome = match hal.read(pending.offset, pending.size) {
+                            Ok(bytes) if self.inner.host.write(pending.offset, &bytes).is_ok() => {
+                                MapAsyncStatus::Success
+                            }
+                            _ => MapAsyncStatus::Error,
+                        };
+                    }
+                }
+            }
+        }
         state.map_state = if outcome == MapAsyncStatus::Success {
             state.active_map = pending.map(|pending| ActiveMap {
                 mode: pending.mode,
@@ -4258,6 +4288,28 @@ impl Buffer {
         }
         drop(state);
         self.inner.host.ptr_at(offset)
+    }
+
+    pub fn write_from_queue(&self, offset: u64, data: &[u8]) -> Option<DeviceError> {
+        let size = match u64::try_from(data.len()) {
+            Ok(size) => size,
+            Err(_) => {
+                return Some(DeviceError::validation("queue write size is too large"));
+            }
+        };
+        if let Err(message) = self.validate_queue_write(offset, size) {
+            return Some(DeviceError::validation(message));
+        }
+        if let Some(hal) = &self.inner.hal {
+            if let Err(error) = hal.write(offset, data) {
+                return Some(DeviceError::internal(error.to_string()));
+            }
+        }
+        None
+    }
+
+    pub fn hal(&self) -> Option<HalBuffer> {
+        self.inner.hal.clone()
     }
 
     pub fn validate_queue_write(&self, offset: u64, size: u64) -> Result<(), &'static str> {
@@ -4961,6 +5013,7 @@ struct CommandEncoderState {
     first_error: Option<String>,
     debug_group_depth: u32,
     referenced_buffers: Vec<Arc<Buffer>>,
+    buffer_copies: Vec<BufferCopyCommand>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4990,7 +5043,17 @@ pub struct CommandBuffer {
 struct CommandBufferInner {
     is_error: bool,
     referenced_buffers: Vec<Arc<Buffer>>,
+    buffer_copies: Vec<BufferCopyCommand>,
     submitted: Mutex<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct BufferCopyCommand {
+    source: Arc<Buffer>,
+    source_offset: u64,
+    destination: Arc<Buffer>,
+    destination_offset: u64,
+    size: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -5117,6 +5180,7 @@ impl CommandEncoder {
                     first_error: None,
                     debug_group_depth: 0,
                     referenced_buffers: Vec::new(),
+                    buffer_copies: Vec::new(),
                 }),
             }),
         }
@@ -5203,25 +5267,36 @@ impl CommandEncoder {
         destination_offset: u64,
         size: u64,
     ) -> Option<String> {
-        self.record_buffer_command(vec![Arc::clone(&source), Arc::clone(&destination)], || {
-            validate_copy_buffer_to_buffer(
-                &source,
-                source_offset,
-                &destination,
-                destination_offset,
-                size,
-            )
-        })
+        let copy = BufferCopyCommand {
+            source: Arc::clone(&source),
+            source_offset,
+            destination: Arc::clone(&destination),
+            destination_offset,
+            size,
+        };
+        self.record_buffer_command(
+            vec![Arc::clone(&source), Arc::clone(&destination)],
+            Some(copy),
+            || {
+                validate_copy_buffer_to_buffer(
+                    &source,
+                    source_offset,
+                    &destination,
+                    destination_offset,
+                    size,
+                )
+            },
+        )
     }
 
     pub fn clear_buffer(&self, buffer: Arc<Buffer>, offset: u64, size: u64) -> Option<String> {
-        self.record_buffer_command(vec![Arc::clone(&buffer)], || {
+        self.record_buffer_command(vec![Arc::clone(&buffer)], None, || {
             validate_clear_buffer(&buffer, offset, size)
         })
     }
 
     pub fn write_buffer(&self, buffer: Arc<Buffer>, offset: u64, size: u64) -> Option<String> {
-        self.record_buffer_command(vec![Arc::clone(&buffer)], || {
+        self.record_buffer_command(vec![Arc::clone(&buffer)], None, || {
             validate_encoder_write_buffer(&buffer, offset, size)
         })
     }
@@ -5232,7 +5307,7 @@ impl CommandEncoder {
         destination: TexelCopyTextureInfo,
         copy_size: Extent3d,
     ) -> Option<String> {
-        self.record_buffer_command(vec![Arc::clone(&source.buffer)], || {
+        self.record_buffer_command(vec![Arc::clone(&source.buffer)], None, || {
             validate_buffer_texture_copy(
                 source,
                 BufferUsage::COPY_SRC,
@@ -5250,7 +5325,7 @@ impl CommandEncoder {
         destination: TexelCopyBufferInfo,
         copy_size: Extent3d,
     ) -> Option<String> {
-        self.record_buffer_command(vec![Arc::clone(&destination.buffer)], || {
+        self.record_buffer_command(vec![Arc::clone(&destination.buffer)], None, || {
             validate_buffer_texture_copy(
                 destination,
                 BufferUsage::COPY_DST,
@@ -5268,7 +5343,7 @@ impl CommandEncoder {
         destination: TexelCopyTextureInfo,
         copy_size: Extent3d,
     ) -> Option<String> {
-        self.record_buffer_command(Vec::new(), || {
+        self.record_buffer_command(Vec::new(), None, || {
             validate_texture_to_texture_copy(source, destination, copy_size)
         })
     }
@@ -5340,6 +5415,7 @@ impl CommandEncoder {
     fn record_buffer_command<F>(
         &self,
         referenced_buffers: Vec<Arc<Buffer>>,
+        buffer_copy: Option<BufferCopyCommand>,
         validate: F,
     ) -> Option<String>
     where
@@ -5357,7 +5433,11 @@ impl CommandEncoder {
         if let Err(message) = validate() {
             self.record_first_error(message);
         } else {
-            self.record_referenced_buffers(referenced_buffers);
+            let mut state = self.inner.state.lock();
+            state.referenced_buffers.extend(referenced_buffers);
+            if let Some(copy) = buffer_copy {
+                state.buffer_copies.push(copy);
+            }
         }
         None
     }
@@ -5367,7 +5447,7 @@ impl CommandEncoder {
         let mut state = self.inner.state.lock();
         if state.lifecycle != CommandEncoderLifecycle::Recording {
             return (
-                CommandBuffer::new(true, Vec::new()),
+                CommandBuffer::new(true, Vec::new(), Vec::new()),
                 Some("command encoder cannot be finished more than once".to_owned()),
             );
         }
@@ -5391,8 +5471,13 @@ impl CommandEncoder {
         } else {
             std::mem::take(&mut state.referenced_buffers)
         };
+        let buffer_copies = if finish_error.is_some() {
+            Vec::new()
+        } else {
+            std::mem::take(&mut state.buffer_copies)
+        };
         (
-            CommandBuffer::new(finish_error.is_some(), referenced_buffers),
+            CommandBuffer::new(finish_error.is_some(), referenced_buffers, buffer_copies),
             finish_error,
         )
     }
@@ -6000,11 +6085,16 @@ fn record_first_error_option(first_error: &mut Option<String>, message: impl Int
 }
 
 impl CommandBuffer {
-    fn new(is_error: bool, referenced_buffers: Vec<Arc<Buffer>>) -> Self {
+    fn new(
+        is_error: bool,
+        referenced_buffers: Vec<Arc<Buffer>>,
+        buffer_copies: Vec<BufferCopyCommand>,
+    ) -> Self {
         Self {
             inner: Arc::new(CommandBufferInner {
                 is_error,
                 referenced_buffers,
+                buffer_copies,
                 submitted: Mutex::new(false),
             }),
         }
@@ -6017,6 +6107,10 @@ impl CommandBuffer {
 
     fn referenced_buffers(&self) -> &[Arc<Buffer>] {
         &self.inner.referenced_buffers
+    }
+
+    fn buffer_copies(&self) -> &[BufferCopyCommand] {
+        &self.inner.buffer_copies
     }
 
     fn mark_submitted(&self) -> Result<(), String> {
@@ -7491,6 +7585,10 @@ impl Queue {
         self.inner.label.lock().clone()
     }
 
+    pub fn write_buffer(&self, buffer: &Buffer, offset: u64, data: &[u8]) -> Option<DeviceError> {
+        buffer.write_from_queue(offset, data)
+    }
+
     pub fn submit(&self, command_buffers: &[Arc<CommandBuffer>]) -> Option<DeviceError> {
         for (index, command_buffer) in command_buffers.iter().enumerate() {
             if command_buffer.is_error() {
@@ -7533,6 +7631,28 @@ impl Queue {
             if let Err(error) = self.inner.hal.submit_empty() {
                 return Some(DeviceError::internal(error.to_string()));
             }
+            return None;
+        }
+        let mut copies = Vec::new();
+        for command_buffer in command_buffers {
+            for copy in command_buffer.buffer_copies() {
+                let Some(source) = copy.source.hal() else {
+                    continue;
+                };
+                let Some(destination) = copy.destination.hal() else {
+                    continue;
+                };
+                copies.push(HalBufferCopy {
+                    source,
+                    source_offset: copy.source_offset,
+                    destination,
+                    destination_offset: copy.destination_offset,
+                    size: copy.size,
+                });
+            }
+        }
+        if let Err(error) = self.inner.hal.submit_buffer_copies(&copies) {
+            return Some(DeviceError::internal(error.to_string()));
         }
         None
     }

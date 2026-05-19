@@ -14,7 +14,7 @@ mod vulkan {
     pub struct VulkanDevice;
     #[derive(Debug)]
     pub struct VulkanQueue;
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct VulkanBuffer;
     #[derive(Debug)]
     pub struct VulkanTexture;
@@ -31,6 +31,11 @@ pub enum HalError {
     DeviceCreationFailed { backend: &'static str },
     #[error("HAL queue submission failed: {backend}")]
     QueueSubmissionFailed { backend: &'static str },
+    #[error("HAL buffer operation failed: {backend}: {message}")]
+    BufferOperationFailed {
+        backend: &'static str,
+        message: &'static str,
+    },
 }
 
 #[derive(Debug)]
@@ -223,9 +228,22 @@ impl HalQueue {
             Self::Metal(queue) => queue.submit_empty(),
         }
     }
+
+    pub fn submit_buffer_copies(&self, copies: &[HalBufferCopy]) -> Result<(), HalError> {
+        #[cfg(not(feature = "metal"))]
+        let _ = copies;
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => Ok(()),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => Ok(()),
+            #[cfg(feature = "metal")]
+            Self::Metal(queue) => queue.submit_buffer_copies(copies),
+        }
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum HalBuffer {
     #[cfg(feature = "noop")]
@@ -234,6 +252,71 @@ pub enum HalBuffer {
     Vulkan(vulkan::VulkanBuffer),
     #[cfg(feature = "metal")]
     Metal(metal::MetalBuffer),
+}
+
+impl HalBuffer {
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(buffer) => buffer.size(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => 0,
+            #[cfg(feature = "metal")]
+            Self::Metal(buffer) => buffer.size(),
+        }
+    }
+
+    pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), HalError> {
+        #[cfg(not(feature = "metal"))]
+        let _ = (offset, data);
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => Ok(()),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => Ok(()),
+            #[cfg(feature = "metal")]
+            Self::Metal(buffer) => buffer.write(offset, data),
+        }
+    }
+
+    pub fn read(&self, offset: u64, len: u64) -> Result<Vec<u8>, HalError> {
+        #[cfg(not(feature = "metal"))]
+        let _ = offset;
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => usize::try_from(len).map_or_else(
+                |_| {
+                    Err(HalError::BufferOperationFailed {
+                        backend: "noop",
+                        message: "read length is too large",
+                    })
+                },
+                |len| Ok(vec![0; len]),
+            ),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => usize::try_from(len).map_or_else(
+                |_| {
+                    Err(HalError::BufferOperationFailed {
+                        backend: "vulkan",
+                        message: "read length is too large",
+                    })
+                },
+                |len| Ok(vec![0; len]),
+            ),
+            #[cfg(feature = "metal")]
+            Self::Metal(buffer) => buffer.read(offset, len),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HalBufferCopy {
+    pub source: HalBuffer,
+    pub source_offset: u64,
+    pub destination: HalBuffer,
+    pub destination_offset: u64,
+    pub size: u64,
 }
 
 #[derive(Debug)]
