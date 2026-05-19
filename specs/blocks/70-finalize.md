@@ -95,13 +95,27 @@ Status: ☐ ◐ ☑ ✗(N/A).
 
 ### P8.1 QuerySet creation (`QuerySetValidationTests`/`QueryValidationTests`)
 - **QS1** `CreateQuerySet` type ∈ {Occlusion, Timestamp}; count > 0
-  and ≤ max (4096 per Dawn). ☐
+  and ≤ max (4096 per Dawn). ☑ (P8.1)
 - **QS2** Timestamp type requires the `timestamp-query` feature
-  (HasFeature); absent ⇒ error + error QuerySet. ☐
+  (HasFeature); absent ⇒ error + error QuerySet. ☑ (P8.1)
 - **QS3** `GetType`/`GetCount` reflect the descriptor; `Destroy`
-  idempotent; double/destroyed-use rules. ☐
+  idempotent; double/destroyed-use rules. ☑ (P8.1)
 - **QS4** invalid descriptor ⇒ device error + error QuerySet
-  (never panic). ☐
+  (never panic). ☑ (P8.1)
+
+> P8.1: added real `Feature::TimestampQuery` (in `supported_features`
+> ⇒ requestable; conv both-way map, no `Other` fallthrough) so QS2 is
+> a non-vacuous gate. core `QuerySet` Arc handle
+> {kind:QueryType(Occlusion|Timestamp|Unknown),count,is_error,
+> is_destroyed,label} + `Device::create_query_set` →
+> `validate_query_set_descriptor` (count>0 & ≤4096 MAX_QUERY_COUNT,
+> Timestamp⇒feature, Unknown⇒error; QS4 device error + error
+> QuerySet). FFI `WGPUQuerySetImpl` promoted to a real
+> `Arc<core::QuerySet>` handle + CreateQuerySet/GetType/GetCount/
+> Destroy(idempotent)/SetLabel/Release/AddRef; conv
+> `WGPUQuerySetDescriptor`/`WGPUQueryType` maps. Ported in
+> `query_validation.rs` (8). Gate green (55 binaries, clippy clean;
+> features/limits unregressed).
 
 ### P8.2 Query in commands (deferred C34/C35 + encoder query ops)
 - **QC1/C34** RenderPass `occlusionQuerySet` must be a valid

@@ -35,10 +35,15 @@ ES1–ES5: push/pop, filter match, nested stack, scope-vs-uncaptured-
 callback routing, async pop (future) + device-lost interaction.
 `ErrorScopeValidationTests`.
 
-## P8.1 — QuerySet creation  *(after P8.0)*
-QS1–QS4: `CreateQuerySet` type/count, timestamp-feature gating,
-GetType/GetCount/Destroy, error QuerySet. `QuerySetValidationTests`/
-`QueryValidationTests`.
+## P8.1 — QuerySet creation  *(☑ DONE)*
+QS1–QS4 done: `Feature::TimestampQuery` added (requestable; conv
+both-way); core `QuerySet` Arc handle + `Device::create_query_set`
+(type/count≤4096, Timestamp⇒feature gate, QS4 error QuerySet, QS3
+destroy idempotent); FFI `WGPUQuerySetImpl` real handle +
+CreateQuerySet/GetType/GetCount/Destroy/SetLabel/Release/AddRef +
+conv maps. Tests `query_validation.rs` (8). Gate green (Noop 55
+binaries + clippy clean; features/limits unregressed). Committed
+`phase-8: P8.1`.
 
 ## P8.2 — Query in commands  *(after P8.1)*
 QC1–QC5: C34/C35 (RenderPass occlusion/timestamp — deferred from

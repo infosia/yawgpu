@@ -15,8 +15,8 @@ use crate::conv::{
     map_error_filter, map_error_type, map_extent_3d, map_feature, map_feature_level,
     map_features_to_native, map_limits, map_limits_to_native, map_map_async_status, map_map_mode,
     map_origin_3d, map_pipeline_layout_descriptor, map_pop_error_scope_status_error,
-    map_pop_error_scope_status_success, map_queue_work_done_status,
-    map_render_bundle_encoder_descriptor, map_render_pass_descriptor,
+    map_pop_error_scope_status_success, map_query_set_descriptor, map_query_type_to_native,
+    map_queue_work_done_status, map_render_bundle_encoder_descriptor, map_render_pass_descriptor,
     map_render_pipeline_descriptor, map_sampler_descriptor, map_shader_module_descriptor,
     map_texel_copy_buffer_layout, map_texel_copy_texture_info_parts, map_texture_aspect,
     map_texture_descriptor, map_texture_dimension_to_native, map_texture_format_to_native,
@@ -276,7 +276,13 @@ macro_rules! declare_empty_impl_handles {
     };
 }
 
-declare_empty_impl_handles!(WGPUQuerySetImpl, WGPUSurfaceImpl,);
+declare_empty_impl_handles!(WGPUSurfaceImpl,);
+
+pub struct WGPUQuerySetImpl {
+    core: Arc<core::QuerySet>,
+    _device: Arc<core::Device>,
+    _instance: Arc<WGPUInstanceImpl>,
+}
 
 pub struct WGPUCommandEncoderImpl {
     core: Arc<core::CommandEncoder>,
@@ -1623,6 +1629,34 @@ pub unsafe extern "C" fn wgpuDeviceCreateSampler(
         .create_sampler(map_sampler_descriptor(descriptor.as_ref()));
     arc_to_handle(Arc::new(WGPUSamplerImpl {
         _core: Arc::new(sampler),
+        _device: Arc::clone(&device.core),
+        _instance: Arc::clone(&device.instance),
+    }))
+}
+
+/// Creates a query set on a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `descriptor` must
+/// point to a valid `WGPUQuerySetDescriptor`.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceCreateQuerySet(
+    device: native::WGPUDevice,
+    descriptor: *const native::WGPUQuerySetDescriptor,
+) -> native::WGPUQuerySet {
+    let device = borrow_handle(device, "WGPUDevice");
+    let descriptor = descriptor
+        .as_ref()
+        .expect("WGPUQuerySetDescriptor must not be null");
+    let (query_set, error) = device
+        .core
+        .create_query_set(map_query_set_descriptor(descriptor));
+    if let Some(message) = error {
+        device.dispatch_error(core::ErrorKind::Validation, message);
+    }
+    arc_to_handle(Arc::new(WGPUQuerySetImpl {
+        core: Arc::new(query_set),
         _device: Arc::clone(&device.core),
         _instance: Arc::clone(&device.instance),
     }))
@@ -3714,6 +3748,74 @@ pub unsafe extern "C" fn wgpuRenderBundleRelease(render_bundle: native::WGPURend
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleAddRef(render_bundle: native::WGPURenderBundle) {
     add_ref_handle(render_bundle, "WGPURenderBundle");
+}
+
+/// Destroys a query set. This operation is idempotent.
+///
+/// # Safety
+///
+/// `query_set` must be a non-null live yawgpu query set handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuQuerySetDestroy(query_set: native::WGPUQuerySet) {
+    borrow_handle(query_set, "WGPUQuerySet").core.destroy();
+}
+
+/// Returns the descriptor query type reflected by the query set.
+///
+/// # Safety
+///
+/// `query_set` must be a non-null live yawgpu query set handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuQuerySetGetType(
+    query_set: native::WGPUQuerySet,
+) -> native::WGPUQueryType {
+    map_query_type_to_native(borrow_handle(query_set, "WGPUQuerySet").core.kind())
+}
+
+/// Returns the descriptor count reflected by the query set.
+///
+/// # Safety
+///
+/// `query_set` must be a non-null live yawgpu query set handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuQuerySetGetCount(query_set: native::WGPUQuerySet) -> u32 {
+    borrow_handle(query_set, "WGPUQuerySet").core.count()
+}
+
+/// Sets the debug label for a query set.
+///
+/// # Safety
+///
+/// `query_set` must be a non-null live yawgpu query set handle. `label` must
+/// point to valid string data according to `WGPUStringView` when non-empty.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuQuerySetSetLabel(
+    query_set: native::WGPUQuerySet,
+    label: native::WGPUStringView,
+) {
+    let query_set = borrow_handle(query_set, "WGPUQuerySet");
+    let label = label_from_string_view(label).unwrap_or_default();
+    query_set.core.set_label(&label);
+}
+
+/// Releases one owned reference to a query set handle.
+///
+/// # Safety
+///
+/// `query_set` must be a non-null live yawgpu query set handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuQuerySetRelease(query_set: native::WGPUQuerySet) {
+    release_handle(query_set, "WGPUQuerySet");
+}
+
+/// Adds one owned reference to a query set handle.
+///
+/// # Safety
+///
+/// `query_set` must be a non-null live yawgpu query set handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuQuerySetAddRef(query_set: native::WGPUQuerySet) {
+    add_ref_handle(query_set, "WGPUQuerySet");
 }
 
 /// Destroys a texture. This operation is idempotent.

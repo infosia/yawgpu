@@ -797,6 +797,7 @@ pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
     match value {
         native::WGPUFeatureName_CoreFeaturesAndLimits => core::Feature::CoreFeaturesAndLimits,
         native::WGPUFeatureName_RG11B10UfloatRenderable => core::Feature::Rg11b10UfloatRenderable,
+        native::WGPUFeatureName_TimestampQuery => core::Feature::TimestampQuery,
         native::WGPUFeatureName_TextureFormatsTier1 => core::Feature::TextureFormatsTier1,
         native::WGPUFeatureName_TextureFormatsTier2 => core::Feature::TextureFormatsTier2,
         other => core::Feature::Other(other),
@@ -808,11 +809,48 @@ pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
     match value {
         core::Feature::CoreFeaturesAndLimits => native::WGPUFeatureName_CoreFeaturesAndLimits,
         core::Feature::Rg11b10UfloatRenderable => native::WGPUFeatureName_RG11B10UfloatRenderable,
+        core::Feature::TimestampQuery => native::WGPUFeatureName_TimestampQuery,
         core::Feature::TextureFormatsTier1 => native::WGPUFeatureName_TextureFormatsTier1,
         core::Feature::TextureFormatsTier2 => native::WGPUFeatureName_TextureFormatsTier2,
         core::Feature::Other(value) => value,
         // exhaustive as of core::Feature @ 2026-05-17
         _ => native::WGPUFeatureName_Force32,
+    }
+}
+
+#[must_use]
+/// Converts a query set descriptor to the core representation.
+///
+/// # Safety
+///
+/// `descriptor.label`, when non-null, must point to a valid WebGPU string view.
+pub unsafe fn map_query_set_descriptor(
+    descriptor: &native::WGPUQuerySetDescriptor,
+) -> core::QuerySetDescriptor {
+    core::QuerySetDescriptor {
+        label: label_from_string_view(descriptor.label).unwrap_or_default(),
+        kind: map_query_type(descriptor.type_),
+        count: descriptor.count,
+    }
+}
+
+#[must_use]
+pub fn map_query_type(value: native::WGPUQueryType) -> core::QueryType {
+    match value {
+        native::WGPUQueryType_Occlusion => core::QueryType::Occlusion,
+        native::WGPUQueryType_Timestamp => core::QueryType::Timestamp,
+        other => core::QueryType::Unknown(other),
+    }
+}
+
+#[must_use]
+pub fn map_query_type_to_native(value: core::QueryType) -> native::WGPUQueryType {
+    match value {
+        core::QueryType::Occlusion => native::WGPUQueryType_Occlusion,
+        core::QueryType::Timestamp => native::WGPUQueryType_Timestamp,
+        core::QueryType::Unknown(value) => value,
+        // exhaustive as of core::QueryType @ 2026-05-19
+        _ => native::WGPUQueryType_Force32,
     }
 }
 

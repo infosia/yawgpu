@@ -236,6 +236,16 @@ impl Device {
     }
 
     #[must_use]
+    pub fn create_query_set(&self, descriptor: QuerySetDescriptor) -> (QuerySet, Option<String>) {
+        let error = validate_query_set_descriptor(&descriptor, &self.inner.features);
+        let is_error = error.is_some();
+        (
+            QuerySet::new(descriptor, is_error),
+            error.map(str::to_owned),
+        )
+    }
+
+    #[must_use]
     pub fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
@@ -5673,6 +5683,7 @@ pub enum FeatureLevel {
 pub enum Feature {
     CoreFeaturesAndLimits,
     Rg11b10UfloatRenderable,
+    TimestampQuery,
     TextureFormatsTier1,
     TextureFormatsTier2,
     Other(u32),
@@ -5683,6 +5694,7 @@ pub fn supported_features() -> FeatureSet {
     [
         Feature::CoreFeaturesAndLimits,
         Feature::Rg11b10UfloatRenderable,
+        Feature::TimestampQuery,
         Feature::TextureFormatsTier1,
         Feature::TextureFormatsTier2,
     ]
@@ -5696,6 +5708,109 @@ fn apply_feature_implications(features: &mut FeatureSet) {
     }
     if features.contains(&Feature::TextureFormatsTier1) {
         features.insert(Feature::Rg11b10UfloatRenderable);
+    }
+}
+
+const MAX_QUERY_COUNT: u32 = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum QueryType {
+    Occlusion,
+    Timestamp,
+    Unknown(u32),
+}
+
+#[derive(Debug, Clone)]
+pub struct QuerySetDescriptor {
+    pub label: String,
+    pub kind: QueryType,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct QuerySet {
+    inner: Arc<QuerySetInner>,
+}
+
+#[derive(Debug)]
+struct QuerySetInner {
+    label: Mutex<String>,
+    kind: QueryType,
+    count: u32,
+    state: Mutex<QuerySetState>,
+}
+
+#[derive(Debug)]
+struct QuerySetState {
+    is_error: bool,
+    is_destroyed: bool,
+}
+
+impl QuerySet {
+    fn new(descriptor: QuerySetDescriptor, is_error: bool) -> Self {
+        Self {
+            inner: Arc::new(QuerySetInner {
+                label: Mutex::new(descriptor.label),
+                kind: descriptor.kind,
+                count: descriptor.count,
+                state: Mutex::new(QuerySetState {
+                    is_error,
+                    is_destroyed: false,
+                }),
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> QueryType {
+        self.inner.kind
+    }
+
+    #[must_use]
+    pub fn count(&self) -> u32 {
+        self.inner.count
+    }
+
+    pub fn set_label(&self, label: &str) {
+        *self.inner.label.lock() = label.to_owned();
+    }
+
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.inner.state.lock().is_error
+    }
+
+    #[must_use]
+    pub fn is_destroyed(&self) -> bool {
+        self.inner.state.lock().is_destroyed
+    }
+
+    #[must_use]
+    pub fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    pub fn destroy(&self) {
+        self.inner.state.lock().is_destroyed = true;
+    }
+}
+
+fn validate_query_set_descriptor(
+    descriptor: &QuerySetDescriptor,
+    features: &FeatureSet,
+) -> Option<&'static str> {
+    if descriptor.count == 0 {
+        return Some("query set count must be greater than zero");
+    }
+    if descriptor.count > MAX_QUERY_COUNT {
+        return Some("query set count exceeds the maximum query count");
+    }
+    match descriptor.kind {
+        QueryType::Occlusion => None,
+        QueryType::Timestamp => (!features.contains(&Feature::TimestampQuery))
+            .then_some("timestamp query set requires the timestamp-query feature"),
+        QueryType::Unknown(_) => Some("query set type is invalid"),
     }
 }
 
