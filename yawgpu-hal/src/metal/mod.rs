@@ -2,9 +2,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
     HalAddressMode, HalBoundBuffer, HalBuffer, HalBufferTextureCopy, HalCompareFunction,
-    HalComputePass, HalCopy, HalError, HalExtent3d, HalFilterMode, HalMipmapFilterMode,
+    HalComputePass, HalCopy, HalDraw, HalError, HalExtent3d, HalFilterMode, HalMipmapFilterMode,
+    HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor,
     HalSamplerDescriptor, HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
-    HalTextureUsage,
+    HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
 
 const BACKEND: &str = "metal";
@@ -127,6 +128,22 @@ impl MetalDevice {
     ) -> Result<MetalComputePipeline, HalError> {
         create_compute_pipeline(&self._device, msl_source, entry_point, workgroup_size)
     }
+
+    pub fn create_render_pipeline(
+        &self,
+        msl_source: &str,
+        vertex_entry_point: &str,
+        fragment_entry_point: &str,
+        descriptor: &HalRenderPipelineDescriptor,
+    ) -> Result<MetalRenderPipeline, HalError> {
+        create_render_pipeline(
+            &self._device,
+            msl_source,
+            vertex_entry_point,
+            fragment_entry_point,
+            descriptor,
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +197,12 @@ impl MetalQueue {
                 HalCopy::ComputePass(pass) => {
                     let encoder = command_buffer.new_compute_command_encoder();
                     encode_compute_pass(encoder, pass)?;
+                    encoder.end_encoding();
+                }
+                HalCopy::RenderPass(pass) => {
+                    let descriptor = render_pass_descriptor(pass)?;
+                    let encoder = command_buffer.new_render_command_encoder(descriptor);
+                    encode_render_pass(encoder, pass)?;
                     encoder.end_encoding();
                 }
             }
@@ -330,6 +353,12 @@ pub struct MetalComputePipeline {
     workgroup_size: (u32, u32, u32),
 }
 
+#[derive(Debug, Clone)]
+pub struct MetalRenderPipeline {
+    inner: metal::RenderPipelineState,
+    primitive_topology: HalPrimitiveTopology,
+}
+
 fn create_compute_pipeline(
     device: &metal::DeviceRef,
     msl_source: &str,
@@ -349,6 +378,76 @@ fn create_compute_pipeline(
     Ok(MetalComputePipeline {
         inner,
         workgroup_size,
+    })
+}
+
+fn create_render_pipeline(
+    device: &metal::DeviceRef,
+    msl_source: &str,
+    vertex_entry_point: &str,
+    fragment_entry_point: &str,
+    descriptor: &HalRenderPipelineDescriptor,
+) -> Result<MetalRenderPipeline, HalError> {
+    let color_format = descriptor
+        .color_formats
+        .first()
+        .copied()
+        .ok_or_else(|| shader_error("render pipeline requires a color target".to_owned()))?;
+    let options = metal::CompileOptions::new();
+    let library = device
+        .new_library_with_source(msl_source, &options)
+        .map_err(shader_error)?;
+    let vertex_function = library
+        .get_function(vertex_entry_point, None)
+        .map_err(shader_error)?;
+    let fragment_function = library
+        .get_function(fragment_entry_point, None)
+        .map_err(shader_error)?;
+    let pipeline_descriptor = metal::RenderPipelineDescriptor::new();
+    pipeline_descriptor.set_vertex_function(Some(&vertex_function));
+    pipeline_descriptor.set_fragment_function(Some(&fragment_function));
+    let (pixel_format, _) = map_texture_format(color_format)?;
+    let color = pipeline_descriptor
+        .color_attachments()
+        .object_at(0)
+        .ok_or_else(|| shader_error("render color attachment slot 0 is unavailable".to_owned()))?;
+    color.set_pixel_format(pixel_format);
+    let vertex_descriptor = metal::VertexDescriptor::new();
+    for buffer in &descriptor.vertex_buffers {
+        let metal_index = buffer
+            .attributes
+            .first()
+            .map(|attribute| attribute.metal_buffer_index)
+            .unwrap_or(0);
+        let layout = vertex_descriptor
+            .layouts()
+            .object_at(to_ns(u64::from(metal_index))?)
+            .ok_or_else(|| shader_error("vertex buffer layout slot is unavailable".to_owned()))?;
+        layout.set_stride(to_ns(buffer.array_stride)?);
+        layout.set_step_function(match buffer.step_mode {
+            HalVertexStepMode::Vertex => metal::MTLVertexStepFunction::PerVertex,
+            HalVertexStepMode::Instance => metal::MTLVertexStepFunction::PerInstance,
+        });
+        layout.set_step_rate(1);
+        for attribute in &buffer.attributes {
+            let attr = vertex_descriptor
+                .attributes()
+                .object_at(to_ns(u64::from(attribute.shader_location))?)
+                .ok_or_else(|| {
+                    shader_error("vertex attribute descriptor slot is unavailable".to_owned())
+                })?;
+            attr.set_format(map_vertex_format(attribute.format)?);
+            attr.set_offset(to_ns(attribute.offset)?);
+            attr.set_buffer_index(to_ns(u64::from(attribute.metal_buffer_index))?);
+        }
+    }
+    pipeline_descriptor.set_vertex_descriptor(Some(vertex_descriptor));
+    let inner = device
+        .new_render_pipeline_state(&pipeline_descriptor)
+        .map_err(shader_error)?;
+    Ok(MetalRenderPipeline {
+        inner,
+        primitive_topology: descriptor.primitive_topology,
     })
 }
 
@@ -537,6 +636,106 @@ fn encode_compute_buffer(
     Ok(())
 }
 
+fn render_pass_descriptor(
+    pass: &HalRenderPass,
+) -> Result<&metal::RenderPassDescriptorRef, HalError> {
+    let HalTexture::Metal(texture) = &pass.color_target.texture else {
+        return Err(texture_error("render target is not Metal-backed"));
+    };
+    let descriptor = metal::RenderPassDescriptor::new();
+    let color = descriptor
+        .color_attachments()
+        .object_at(0)
+        .ok_or_else(|| texture_error("render color attachment slot 0 is unavailable"))?;
+    color.set_texture(Some(texture.inner()?));
+    color.set_load_action(match pass.color_target.load_op {
+        HalRenderLoadOp::Load => metal::MTLLoadAction::Load,
+        HalRenderLoadOp::Clear => metal::MTLLoadAction::Clear,
+    });
+    color.set_store_action(if pass.color_target.store {
+        metal::MTLStoreAction::Store
+    } else {
+        metal::MTLStoreAction::DontCare
+    });
+    let [r, g, b, a] = pass.color_target.clear_color;
+    color.set_clear_color(metal::MTLClearColor::new(r, g, b, a));
+    Ok(descriptor)
+}
+
+fn encode_render_pass(
+    encoder: &metal::RenderCommandEncoderRef,
+    pass: &HalRenderPass,
+) -> Result<(), HalError> {
+    let crate::HalRenderPipeline::Metal(pipeline) = &pass.pipeline else {
+        return Err(shader_error(
+            "render pipeline is not Metal-backed".to_owned(),
+        ));
+    };
+    encoder.set_render_pipeline_state(&pipeline.inner);
+    for binding in &pass.bind_buffers {
+        encode_render_bind_buffer(encoder, binding)?;
+    }
+    for binding in &pass.vertex_buffers {
+        encode_render_vertex_buffer(encoder, binding)?;
+    }
+    draw_primitives(encoder, pipeline.primitive_topology, pass.draw)?;
+    Ok(())
+}
+
+fn encode_render_bind_buffer(
+    encoder: &metal::RenderCommandEncoderRef,
+    binding: &HalBoundBuffer,
+) -> Result<(), HalError> {
+    let HalBuffer::Metal(buffer) = &binding.buffer else {
+        return Err(buffer_error("render bind buffer is not Metal-backed"));
+    };
+    if binding.offset > buffer.size() {
+        return Err(buffer_error(
+            "render bind buffer offset exceeds buffer size",
+        ));
+    }
+    let index = to_ns(u64::from(binding.metal_index))?;
+    let offset = to_ns(binding.offset)?;
+    encoder.set_vertex_buffer(index, Some(buffer.inner()?), offset);
+    encoder.set_fragment_buffer(index, Some(buffer.inner()?), offset);
+    Ok(())
+}
+
+fn encode_render_vertex_buffer(
+    encoder: &metal::RenderCommandEncoderRef,
+    binding: &HalBoundBuffer,
+) -> Result<(), HalError> {
+    let HalBuffer::Metal(buffer) = &binding.buffer else {
+        return Err(buffer_error("render vertex buffer is not Metal-backed"));
+    };
+    if binding.offset > buffer.size() {
+        return Err(buffer_error(
+            "render vertex buffer offset exceeds buffer size",
+        ));
+    }
+    encoder.set_vertex_buffer(
+        to_ns(u64::from(binding.metal_index))?,
+        Some(buffer.inner()?),
+        to_ns(binding.offset)?,
+    );
+    Ok(())
+}
+
+fn draw_primitives(
+    encoder: &metal::RenderCommandEncoderRef,
+    topology: HalPrimitiveTopology,
+    draw: HalDraw,
+) -> Result<(), HalError> {
+    encoder.draw_primitives_instanced_base_instance(
+        map_primitive_topology(topology),
+        to_ns(u64::from(draw.first_vertex))?,
+        to_ns(u64::from(draw.vertex_count))?,
+        to_ns(u64::from(draw.instance_count))?,
+        to_ns(u64::from(draw.first_instance))?,
+    );
+    Ok(())
+}
+
 fn validate_buffer_texture_range(
     buffer: &MetalBuffer,
     copy: &HalBufferTextureCopy,
@@ -662,6 +861,28 @@ fn map_compare_function(compare: HalCompareFunction) -> metal::MTLCompareFunctio
         HalCompareFunction::NotEqual => metal::MTLCompareFunction::NotEqual,
         HalCompareFunction::GreaterEqual => metal::MTLCompareFunction::GreaterEqual,
         HalCompareFunction::Always => metal::MTLCompareFunction::Always,
+    }
+}
+
+fn map_vertex_format(format: HalVertexFormat) -> Result<metal::MTLVertexFormat, HalError> {
+    match format {
+        HalVertexFormat::Float32 => Ok(metal::MTLVertexFormat::Float),
+        HalVertexFormat::Float32x2 => Ok(metal::MTLVertexFormat::Float2),
+        HalVertexFormat::Float32x3 => Ok(metal::MTLVertexFormat::Float3),
+        HalVertexFormat::Float32x4 => Ok(metal::MTLVertexFormat::Float4),
+        HalVertexFormat::Unsupported => Err(shader_error(
+            "unsupported vertex format for Metal".to_owned(),
+        )),
+    }
+}
+
+fn map_primitive_topology(topology: HalPrimitiveTopology) -> metal::MTLPrimitiveType {
+    match topology {
+        HalPrimitiveTopology::PointList => metal::MTLPrimitiveType::Point,
+        HalPrimitiveTopology::LineList => metal::MTLPrimitiveType::Line,
+        HalPrimitiveTopology::LineStrip => metal::MTLPrimitiveType::LineStrip,
+        HalPrimitiveTopology::TriangleList => metal::MTLPrimitiveType::Triangle,
+        HalPrimitiveTopology::TriangleStrip => metal::MTLPrimitiveType::TriangleStrip,
     }
 }
 

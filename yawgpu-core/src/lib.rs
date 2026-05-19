@@ -7,9 +7,12 @@ use parking_lot::Mutex;
 use yawgpu_hal::{
     HalAdapter, HalAddressMode, HalBackend, HalBoundBuffer, HalBuffer, HalBufferCopy,
     HalBufferTextureCopy, HalBufferTextureLayout, HalCompareFunction, HalComputePass,
-    HalComputePipeline, HalCopy, HalDevice, HalError, HalExtent3d, HalFilterMode, HalInstance,
-    HalMipmapFilterMode, HalOrigin3d, HalQueue, HalSampler, HalSamplerDescriptor, HalTexture,
-    HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage,
+    HalComputePipeline, HalCopy, HalDevice, HalDraw, HalError, HalExtent3d, HalFilterMode,
+    HalInstance, HalMipmapFilterMode, HalOrigin3d, HalPrimitiveTopology, HalQueue,
+    HalRenderColorTarget, HalRenderLoadOp, HalRenderPass, HalRenderPipeline,
+    HalRenderPipelineDescriptor, HalSampler, HalSamplerDescriptor, HalTexture, HalTextureCopy,
+    HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexAttribute,
+    HalVertexBufferLayout, HalVertexFormat, HalVertexStepMode,
 };
 
 pub(crate) mod shader_naga;
@@ -501,7 +504,12 @@ impl Device {
         if let Some(message) = error {
             self.dispatch_error(ErrorKind::Validation, message);
         }
-        RenderPipeline::new(descriptor, is_error, self.limits())
+        let (pipeline, backend_error) =
+            RenderPipeline::new(descriptor, is_error, self.limits(), Some(&self.inner.hal));
+        if let Some(message) = backend_error {
+            self.dispatch_error(ErrorKind::Internal, message);
+        }
+        pipeline
     }
 
     #[must_use]
@@ -513,7 +521,13 @@ impl Device {
             .error
             .clone()
             .or_else(|| validate_render_pipeline_descriptor(&descriptor, self.limits()));
-        RenderPipeline::new(descriptor, error.is_some(), self.limits())
+        RenderPipeline::new(
+            descriptor,
+            error.is_some(),
+            self.limits(),
+            Some(&self.inner.hal),
+        )
+        .0
     }
 }
 
@@ -3297,12 +3311,26 @@ struct RenderPipelineInner {
     _fragment: Option<RenderPipelineFragmentState>,
     vertex_entry_name: String,
     fragment_entry_name: Option<String>,
+    metal_bindings: Vec<MetalBufferBinding>,
+    vertex_buffer_bindings: Vec<MetalVertexBufferBinding>,
+    hal: Option<HalRenderPipeline>,
     bind_group_layouts: Vec<Arc<BindGroupLayout>>,
     is_error: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MetalVertexBufferBinding {
+    slot: u32,
+    metal_index: u32,
+}
+
 impl RenderPipeline {
-    fn new(descriptor: RenderPipelineDescriptor, is_error: bool, limits: Limits) -> Self {
+    fn new(
+        descriptor: RenderPipelineDescriptor,
+        is_error: bool,
+        limits: Limits,
+        hal_device: Option<&HalDevice>,
+    ) -> (Self, Option<String>) {
         let resolved = if is_error {
             None
         } else {
@@ -3324,20 +3352,42 @@ impl RenderPipeline {
                     Vec::new(),
                 )
             });
-        Self {
-            inner: Arc::new(RenderPipelineInner {
-                _layout: descriptor.layout,
-                _vertex: descriptor.vertex,
-                _primitive: descriptor.primitive,
-                _depth_stencil: descriptor.depth_stencil,
-                _multisample: descriptor.multisample,
-                _fragment: descriptor.fragment,
-                vertex_entry_name,
-                fragment_entry_name,
-                bind_group_layouts,
-                is_error,
-            }),
-        }
+        let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
+        let vertex_buffer_bindings =
+            metal_vertex_buffer_binding_map(descriptor.vertex.buffer_count, &metal_bindings);
+        let (hal, backend_error) = if is_error {
+            (None, None)
+        } else {
+            create_hal_render_pipeline(
+                hal_device,
+                &descriptor,
+                &vertex_entry_name,
+                fragment_entry_name.as_deref(),
+                &metal_bindings,
+                &vertex_buffer_bindings,
+            )
+        };
+        let is_error = is_error || backend_error.is_some();
+        (
+            Self {
+                inner: Arc::new(RenderPipelineInner {
+                    _layout: descriptor.layout,
+                    _vertex: descriptor.vertex,
+                    _primitive: descriptor.primitive,
+                    _depth_stencil: descriptor.depth_stencil,
+                    _multisample: descriptor.multisample,
+                    _fragment: descriptor.fragment,
+                    vertex_entry_name,
+                    fragment_entry_name,
+                    metal_bindings,
+                    vertex_buffer_bindings,
+                    hal,
+                    bind_group_layouts,
+                    is_error,
+                }),
+            },
+            backend_error,
+        )
     }
 
     #[must_use]
@@ -3358,6 +3408,18 @@ impl RenderPipeline {
     #[must_use]
     pub fn bind_group_layouts(&self) -> &[Arc<BindGroupLayout>] {
         &self.inner.bind_group_layouts
+    }
+
+    fn hal(&self) -> Option<HalRenderPipeline> {
+        self.inner.hal.clone()
+    }
+
+    fn metal_bindings(&self) -> &[MetalBufferBinding] {
+        &self.inner.metal_bindings
+    }
+
+    fn vertex_buffer_bindings(&self) -> &[MetalVertexBufferBinding] {
+        &self.inner.vertex_buffer_bindings
     }
 
     #[must_use]
@@ -3404,6 +3466,225 @@ fn validate_render_pipeline_descriptor(
 }
 
 type ResolvedRenderPipelineParts = (String, Option<String>, Vec<Arc<BindGroupLayout>>);
+
+fn create_hal_render_pipeline(
+    hal_device: Option<&HalDevice>,
+    descriptor: &RenderPipelineDescriptor,
+    vertex_entry_name: &str,
+    fragment_entry_name: Option<&str>,
+    metal_bindings: &[MetalBufferBinding],
+    vertex_buffer_bindings: &[MetalVertexBufferBinding],
+) -> (Option<HalRenderPipeline>, Option<String>) {
+    let Some(hal_device) = hal_device else {
+        return (None, None);
+    };
+    if hal_device.backend() != HalBackend::Metal {
+        return (None, None);
+    }
+    if descriptor.depth_stencil.is_some()
+        || descriptor.multisample.count != 1
+        || descriptor
+            .fragment
+            .as_ref()
+            .map_or(0, |fragment| fragment.target_count)
+            != 1
+    {
+        return (
+            None,
+            Some(
+                "Metal render pipeline currently supports one single-sampled color target only"
+                    .to_owned(),
+            ),
+        );
+    }
+    let Some(fragment) = &descriptor.fragment else {
+        return (
+            None,
+            Some("Metal render pipeline requires a fragment stage".to_owned()),
+        );
+    };
+    let Some(fragment_entry_name) = fragment_entry_name else {
+        return (
+            None,
+            Some("Metal render pipeline requires a fragment entry point".to_owned()),
+        );
+    };
+    if !Arc::ptr_eq(&descriptor.vertex.shader.module, &fragment.shader.module) {
+        return (
+            None,
+            Some("Metal render pipeline requires vertex and fragment entries in the same WGSL module".to_owned()),
+        );
+    }
+    let Some(module) = descriptor.vertex.shader.module.validated_wgsl() else {
+        return (
+            None,
+            Some("render pipeline requires a valid WGSL shader module".to_owned()),
+        );
+    };
+    let msl_binding_map = shader_naga::MslBindingMap {
+        buffers: metal_bindings
+            .iter()
+            .map(|binding| shader_naga::MslBufferBinding {
+                group: binding.group,
+                binding: binding.binding,
+                metal_index: binding.metal_index,
+            })
+            .collect(),
+    };
+    let msl_vertex_buffers =
+        match msl_vertex_buffer_bindings(&descriptor.vertex.buffers, vertex_buffer_bindings) {
+            Ok(bindings) => bindings,
+            Err(message) => return (None, Some(message)),
+        };
+    let generated = match module.generate_render_msl(
+        vertex_entry_name,
+        fragment_entry_name,
+        &msl_binding_map,
+        &msl_vertex_buffers,
+    ) {
+        Ok(generated) => generated,
+        Err(message) => return (None, Some(message)),
+    };
+    let hal_descriptor = match hal_render_pipeline_descriptor(descriptor, vertex_buffer_bindings) {
+        Ok(descriptor) => descriptor,
+        Err(message) => return (None, Some(message)),
+    };
+    match hal_device.create_render_pipeline(
+        &generated.source,
+        &generated.vertex_entry_point,
+        &generated.fragment_entry_point,
+        &hal_descriptor,
+    ) {
+        Ok(pipeline) => (Some(pipeline), None),
+        Err(error) => (None, Some(error.to_string())),
+    }
+}
+
+fn metal_vertex_buffer_binding_map(
+    vertex_buffer_count: usize,
+    metal_bindings: &[MetalBufferBinding],
+) -> Vec<MetalVertexBufferBinding> {
+    let start = metal_bindings.len();
+    (0..vertex_buffer_count)
+        .filter_map(|slot| {
+            Some(MetalVertexBufferBinding {
+                slot: u32::try_from(slot).ok()?,
+                metal_index: u32::try_from(start.checked_add(slot)?).ok()?,
+            })
+        })
+        .collect()
+}
+
+fn msl_vertex_buffer_bindings(
+    layouts: &[VertexBufferLayout],
+    bindings: &[MetalVertexBufferBinding],
+) -> Result<Vec<shader_naga::MslVertexBufferBinding>, String> {
+    layouts
+        .iter()
+        .zip(bindings)
+        .map(|(layout, binding)| {
+            Ok(shader_naga::MslVertexBufferBinding {
+                slot: binding.slot,
+                metal_index: binding.metal_index,
+                array_stride: layout.array_stride,
+                step_mode: match layout.step_mode {
+                    VertexStepMode::Vertex => shader_naga::MslVertexStepMode::Vertex,
+                    VertexStepMode::Instance => shader_naga::MslVertexStepMode::Instance,
+                },
+                attributes: layout
+                    .attributes
+                    .iter()
+                    .map(|attribute| {
+                        Ok(shader_naga::MslVertexAttribute {
+                            shader_location: attribute.shader_location,
+                            offset: attribute.offset,
+                            format: msl_vertex_format(attribute.format)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
+            })
+        })
+        .collect()
+}
+
+fn hal_render_pipeline_descriptor(
+    descriptor: &RenderPipelineDescriptor,
+    bindings: &[MetalVertexBufferBinding],
+) -> Result<HalRenderPipelineDescriptor, String> {
+    let color_formats = descriptor
+        .fragment
+        .as_ref()
+        .map(|fragment| {
+            fragment
+                .targets
+                .iter()
+                .map(|target| hal_texture_format(target.format))
+                .collect()
+        })
+        .unwrap_or_default();
+    let vertex_buffers = descriptor
+        .vertex
+        .buffers
+        .iter()
+        .zip(bindings)
+        .map(|(layout, binding)| {
+            Ok(HalVertexBufferLayout {
+                array_stride: layout.array_stride,
+                step_mode: match layout.step_mode {
+                    VertexStepMode::Vertex => HalVertexStepMode::Vertex,
+                    VertexStepMode::Instance => HalVertexStepMode::Instance,
+                },
+                attributes: layout
+                    .attributes
+                    .iter()
+                    .map(|attribute| {
+                        Ok(HalVertexAttribute {
+                            format: hal_vertex_format(attribute.format),
+                            offset: attribute.offset,
+                            shader_location: attribute.shader_location,
+                            metal_buffer_index: binding.metal_index,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(HalRenderPipelineDescriptor {
+        color_formats,
+        vertex_buffers,
+        primitive_topology: hal_primitive_topology(descriptor.primitive.topology),
+    })
+}
+
+fn msl_vertex_format(format: VertexFormat) -> Result<shader_naga::MslVertexFormat, String> {
+    match format.0 {
+        0x0000_001C => Ok(shader_naga::MslVertexFormat::Float32),
+        0x0000_001D => Ok(shader_naga::MslVertexFormat::Float32x2),
+        0x0000_001E => Ok(shader_naga::MslVertexFormat::Float32x3),
+        0x0000_001F => Ok(shader_naga::MslVertexFormat::Float32x4),
+        _ => Err("Metal render pipeline currently supports Float32 vertex formats only".to_owned()),
+    }
+}
+
+fn hal_vertex_format(format: VertexFormat) -> HalVertexFormat {
+    match format.0 {
+        0x0000_001C => HalVertexFormat::Float32,
+        0x0000_001D => HalVertexFormat::Float32x2,
+        0x0000_001E => HalVertexFormat::Float32x3,
+        0x0000_001F => HalVertexFormat::Float32x4,
+        _ => HalVertexFormat::Unsupported,
+    }
+}
+
+fn hal_primitive_topology(topology: PrimitiveTopology) -> HalPrimitiveTopology {
+    match topology {
+        PrimitiveTopology::PointList => HalPrimitiveTopology::PointList,
+        PrimitiveTopology::LineList => HalPrimitiveTopology::LineList,
+        PrimitiveTopology::LineStrip => HalPrimitiveTopology::LineStrip,
+        PrimitiveTopology::TriangleList => HalPrimitiveTopology::TriangleList,
+        PrimitiveTopology::TriangleStrip => HalPrimitiveTopology::TriangleStrip,
+    }
+}
 
 fn resolve_render_pipeline_descriptor(
     descriptor: &RenderPipelineDescriptor,
@@ -5017,6 +5298,7 @@ fn hal_command_execution(op: &CommandExecution) -> Option<HalCopy> {
         }
         CommandExecution::TextureCopy(copy) => hal_texture_copy_execution(copy),
         CommandExecution::ComputePass(pass) => hal_compute_pass_execution(pass),
+        CommandExecution::RenderPass(pass) => hal_render_pass_execution(pass),
     }
 }
 
@@ -5109,6 +5391,81 @@ fn hal_compute_pass_execution(pass: &ComputePassCommand) -> Option<HalCopy> {
         bind_buffers,
         workgroups: pass.workgroups,
     }))
+}
+
+fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalCopy> {
+    let pipeline = pass.pipeline.hal()?;
+    let bind_buffers = hal_bind_buffers(
+        pass.pipeline.bind_group_layouts(),
+        pass.pipeline.metal_bindings(),
+        &pass.bind_groups,
+    )?;
+    let mut vertex_buffers = Vec::new();
+    for binding in pass.pipeline.vertex_buffer_bindings() {
+        let bound = pass.vertex_buffers.get(&binding.slot)?;
+        vertex_buffers.push(HalBoundBuffer {
+            metal_index: binding.metal_index,
+            buffer: bound.buffer.hal()?,
+            offset: bound.offset,
+        });
+    }
+    Some(HalCopy::RenderPass(HalRenderPass {
+        pipeline,
+        color_target: HalRenderColorTarget {
+            texture: pass.color_attachment.texture.hal()?,
+            load_op: match pass.color_attachment.load_op {
+                LoadOp::Load => HalRenderLoadOp::Load,
+                LoadOp::Clear | LoadOp::Undefined => HalRenderLoadOp::Clear,
+            },
+            store: matches!(pass.color_attachment.store_op, StoreOp::Store),
+            clear_color: [
+                pass.color_attachment.clear_value.r,
+                pass.color_attachment.clear_value.g,
+                pass.color_attachment.clear_value.b,
+                pass.color_attachment.clear_value.a,
+            ],
+        },
+        bind_buffers,
+        vertex_buffers,
+        draw: HalDraw {
+            vertex_count: pass.draw.vertex_count,
+            instance_count: pass.draw.instance_count,
+            first_vertex: pass.draw.first_vertex,
+            first_instance: pass.draw.first_instance,
+        },
+    }))
+}
+
+fn hal_bind_buffers(
+    layouts: &[Arc<BindGroupLayout>],
+    metal_bindings: &[MetalBufferBinding],
+    bind_groups: &BTreeMap<u32, BoundBindGroup>,
+) -> Option<Vec<HalBoundBuffer>> {
+    let mut bind_buffers = Vec::new();
+    for binding in metal_bindings {
+        let bound = bind_groups.get(&binding.group)?;
+        let entry = bound
+            .group
+            .entries()
+            .iter()
+            .find(|entry| entry.binding == binding.binding)?;
+        let BindGroupResource::Buffer { buffer, offset, .. } = &entry.resource else {
+            return None;
+        };
+        let dynamic_offset = dynamic_offset_for_binding(
+            layouts,
+            binding.group,
+            binding.binding,
+            &bound.dynamic_offsets,
+        )?;
+        let offset = offset.checked_add(dynamic_offset)?;
+        bind_buffers.push(HalBoundBuffer {
+            metal_index: binding.metal_index,
+            buffer: buffer.hal()?,
+            offset,
+        });
+    }
+    Some(bind_buffers)
 }
 
 fn dynamic_offset_for_binding(
@@ -5470,6 +5827,7 @@ enum CommandExecution {
     BufferCopy(BufferCopyCommand),
     TextureCopy(TextureCopyCommand),
     ComputePass(ComputePassCommand),
+    RenderPass(RenderPassCommand),
 }
 
 #[derive(Debug, Clone)]
@@ -5477,6 +5835,31 @@ struct ComputePassCommand {
     pipeline: Arc<ComputePipeline>,
     bind_groups: BTreeMap<u32, BoundBindGroup>,
     workgroups: (u32, u32, u32),
+}
+
+#[derive(Debug, Clone)]
+struct RenderPassCommand {
+    pipeline: Arc<RenderPipeline>,
+    color_attachment: RenderPassColorExecution,
+    bind_groups: BTreeMap<u32, BoundBindGroup>,
+    vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
+    draw: RenderDrawExecution,
+}
+
+#[derive(Debug, Clone)]
+struct RenderPassColorExecution {
+    texture: Texture,
+    load_op: LoadOp,
+    store_op: StoreOp,
+    clear_value: Color,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RenderDrawExecution {
+    vertex_count: u32,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -5517,12 +5900,14 @@ struct PassEncoderState {
     index_buffer: Option<BoundIndexBuffer>,
     attachment_signature: Option<AttachmentSignature>,
     attachment_textures: Vec<Texture>,
+    render_color_attachment: Option<RenderPassColorExecution>,
 }
 
 impl PassEncoderState {
     fn new(
         attachment_signature: Option<AttachmentSignature>,
         attachment_textures: Vec<Texture>,
+        render_color_attachment: Option<RenderPassColorExecution>,
     ) -> Self {
         Self {
             ended: false,
@@ -5534,6 +5919,7 @@ impl PassEncoderState {
             index_buffer: None,
             attachment_signature,
             attachment_textures,
+            render_color_attachment,
         }
     }
 
@@ -5634,6 +6020,7 @@ impl CommandEncoder {
                     token,
                     attachment_signature,
                     render_pass_attachment_textures(descriptor),
+                    render_pass_color_execution(descriptor),
                 )),
             },
             immediate_error,
@@ -5645,7 +6032,13 @@ impl CommandEncoder {
         let (token, immediate_error) = self.begin_pass(PassKind::Compute);
         (
             ComputePassEncoder {
-                inner: Arc::new(PassEncoderInner::new(self.clone(), token, None, Vec::new())),
+                inner: Arc::new(PassEncoderInner::new(
+                    self.clone(),
+                    token,
+                    None,
+                    Vec::new(),
+                    None,
+                )),
             },
             immediate_error,
         )
@@ -5962,6 +6355,14 @@ impl CommandEncoder {
             .push(CommandExecution::ComputePass(command));
     }
 
+    fn record_render_pass(&self, command: RenderPassCommand) {
+        self.inner
+            .state
+            .lock()
+            .command_ops
+            .push(CommandExecution::RenderPass(command));
+    }
+
     fn is_finished(&self) -> bool {
         self.inner.state.lock().lifecycle == CommandEncoderLifecycle::Finished
     }
@@ -6130,6 +6531,22 @@ fn render_pass_attachment_textures(descriptor: &RenderPassDescriptor) -> Vec<Tex
         textures.push(attachment.view.texture());
     }
     textures
+}
+
+fn render_pass_color_execution(
+    descriptor: &RenderPassDescriptor,
+) -> Option<RenderPassColorExecution> {
+    descriptor
+        .color_attachments
+        .iter()
+        .flatten()
+        .next()
+        .map(|attachment| RenderPassColorExecution {
+            texture: attachment.view.texture(),
+            load_op: attachment.load_op,
+            store_op: attachment.store_op,
+            clear_value: attachment.clear_value,
+        })
 }
 
 fn validate_color_attachment(attachment: &RenderPassColorAttachment) -> Result<(), String> {
@@ -6598,6 +7015,7 @@ impl PassEncoderInner {
         token: PassToken,
         attachment_signature: Option<AttachmentSignature>,
         attachment_textures: Vec<Texture>,
+        render_color_attachment: Option<RenderPassColorExecution>,
     ) -> Self {
         Self {
             parent,
@@ -6605,6 +7023,7 @@ impl PassEncoderInner {
             state: Mutex::new(PassEncoderState::new(
                 attachment_signature,
                 attachment_textures,
+                render_color_attachment,
             )),
         }
     }
@@ -6813,7 +7232,28 @@ impl RenderPassEncoder {
                     first_instance,
                 },
                 limits,
-            )
+            )?;
+            let pipeline = state
+                .render_pipeline
+                .as_ref()
+                .ok_or_else(|| "render pass requires a render pipeline".to_owned())?;
+            let color_attachment = state
+                .render_color_attachment
+                .clone()
+                .ok_or_else(|| "render pass requires a color attachment".to_owned())?;
+            self.inner.parent.record_render_pass(RenderPassCommand {
+                pipeline: Arc::clone(pipeline),
+                color_attachment,
+                bind_groups: state.bind_groups.clone(),
+                vertex_buffers: state.vertex_buffers.clone(),
+                draw: RenderDrawExecution {
+                    vertex_count,
+                    instance_count,
+                    first_vertex,
+                    first_instance,
+                },
+            });
+            Ok(())
         })
     }
 
@@ -7046,7 +7486,11 @@ impl RenderBundleEncoder {
                             RenderBundleEncoderLifecycle::Recording
                         },
                         first_error: None,
-                        pass_state: PassEncoderState::new(Some(attachment_signature), Vec::new()),
+                        pass_state: PassEncoderState::new(
+                            Some(attachment_signature),
+                            Vec::new(),
+                            None,
+                        ),
                     }),
                 }),
             },
