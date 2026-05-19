@@ -320,7 +320,28 @@ matching e2e on the host via MoltenVK and logs it.
   partial range + Noop) + `e2e_vulkan_basic` 3/3 + Metal
   `e2e_metal_buffer`/`render` 3/3 each (no regression). Committed
   `phase-7: P7.6b`.
-- **P7.6c** VkImage/VkImageView/VkSampler + B2T/T2B/T2T. Mirrors P7.3.
+- **P7.6c** VkImage/VkImageView/VkSampler + B2T/T2B/T2T. Mirrors
+  P7.3. **☑ DONE — MoltenVK-verified.** `VulkanDevice::
+  create_texture` (`HalTextureFormat`→`vk::Format` R8/RGBA8/BGRA8
+  Unorm; `vkCreateImage` 2D/mip1/layer1/sample1
+  TRANSFER_SRC|DST OPTIMAL, DEVICE_LOCAL memory, bind, `vkCreate
+  ImageView`; rejects layers/mip/sample≠1; `inner: Option`
+  poisoned-on-fail, no panic) + `create_sampler` (`vkCreateSampler`,
+  poisoned-on-fail). `VulkanTextureInner` (device Arc + image + view
+  + memory + `layout: AtomicU8`; `Drop` view→image→memory).
+  `submit_copies` B2T/T2B/T2T: explicit `transition_image`
+  (`vkCmdPipelineBarrier`, tracked layout UNDEFINED→TRANSFER_DST/SRC)
+  before `vkCmdCopyBufferToImage`/`CopyImageToBuffer`/`CopyImage`;
+  `bytes_per_row`→`buffer_row_length` via format block size;
+  range-checked → `HalError`. `lib.rs` `HalDevice::{create_texture,
+  create_sampler}` Vulkan arms wired (Noop/Metal unchanged).
+  **No `yawgpu-core`/FFI change.** Tests `e2e_vulkan_texture.rs`
+  (4, `#[ignore]`/cfg). Gate: Noop 51 binaries green + clippy clean;
+  `--features vulkan` build/clippy clean; `--features metal` still
+  clean. M2 (MoltenVK, 2026-05-19): `e2e_vulkan_texture` **4/4**
+  (B2T→T2B + T2T pixel round-trip + sampler + Noop) +
+  `e2e_vulkan_buffer`/`basic` 3/3 + Metal `e2e_metal_texture` 4/4 /
+  `render` 3/3 (no regression). Committed `phase-7: P7.6c`.
 - **P7.6d** naga→SPIR-V compute pipeline + descriptor sets + dispatch
   + storage readback. Mirrors P7.4.
 - **P7.6e** SPIR-V graphics pipeline + render pass/framebuffer + draw
