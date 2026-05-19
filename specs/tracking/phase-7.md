@@ -96,11 +96,48 @@ manual user step needed for Metal slices).
   submit, default-instance-Noop) + **e2e_metal_smoke 1/1 pass**.
   P7.1 hardware-confirmed.
 
-## P7.2 — Metal Buffer + writeBuffer/submit + B2B  *(NEXT — gated on P7.1 M2 verify)*
-`MTLBuffer` alloc + map/staging + readback; B2B copy. Port
-`BufferTests`/`CopyTests` buffer subset.
+## P7.2 — Metal Buffer + writeBuffer/submit + B2B  *(☑ DONE — real-GPU-verified)*
 
-## P7.3 — Metal Texture/Sampler + B2T/T2B/T2T  *(after P7.2)*
+Done: `metal` module — real `metal::Buffer`
+(`MTLResourceStorageModeShared`, `inner: Option` so alloc-fail errors
+instead of panicking); bounds-checked `write`/`read`/`validate_range`
+(`checked_add`, `contents().is_null()` guarded, no panic);
+`MetalQueue::submit_buffer_copies` = blit encoder
+`copy_from_buffer` per copy → `commit`+`wait` (range-validated,
+non-Metal source/dest → `HalError`). HAL: `HalBuffer` is `Clone` +
+`size/write/read` dispatch (Noop/Vulkan = no-op / zero-fill),
+`HalBufferCopy`, `HalQueue::submit_buffer_copies`,
+`HalError::BufferOperationFailed`. core: `BufferCopyCommand` recorded
+on successful `copy_buffer_to_buffer`, carried in `CommandBuffer`
+(empty on error/`finish`-fail); `Queue::submit` translates each CB's
+copies via `Buffer::hal()` (skips buffers with no real HAL ⇒ Noop
+stays a no-op) → `hal.submit_buffer_copies` (`HalError`→
+`DeviceError::internal`); `Queue::write_buffer` → `Buffer::
+write_from_queue` (validate then `HalBuffer::write`; Noop no-op);
+read-map readback wired in `resolve_pending_map` (Read map ⇒
+`hal.read` → fill `HostBuffer`, so the standard
+`wgpuBufferMapAsync`+`GetMappedRange` path returns real Metal bytes;
+Noop fills zeros — validation-only, no ported test depends on Noop
+content, gate confirms). FFI: `wgpuQueueWriteBuffer` threads real
+`data` (null-guarded) to `core.write_buffer`. Tests
+`e2e_metal_buffer.rs` (3, `#[ignore]`/cfg-gated): write→B2B→map-read
+round-trip, partial-range (non-zero offsets), Noop path no-error.
+
+Gate: Noop `cargo test --workspace` 45 binaries green (buffer_map
+9/9, buffer_mapped_range 9/9, buffer_creation 8/8 — unchanged) +
+`clippy --workspace --all-targets -D warnings` clean; `cargo build/
+clippy -p yawgpu --features metal` clean. Committed `phase-7: P7.2`.
+
+### P7.2 real-GPU run log
+- 2026-05-19, Apple Silicon, `cargo test -p yawgpu --features metal --test
+  e2e_metal_buffer -- --ignored`: **3/3 pass**
+  (`metal_write_copy_readback_round_trip`,
+  `metal_partial_buffer_copy_round_trip`,
+  `default_noop_write_copy_readback_path_has_no_device_error`). P7.1
+  e2e re-run: e2e_metal_basic 3/3 + e2e_metal_smoke 1/1 (no
+  regression). **Real CPU→MTLBuffer→blit-B2B→map-readback confirmed.**
+
+## P7.3 — Metal Texture/Sampler + B2T/T2B/T2T  *(NEXT)*
 `MTLTexture`/view/sampler; blit copies. Port `CopyTests` texture
 subset.
 

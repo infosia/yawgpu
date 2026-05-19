@@ -3918,33 +3918,30 @@ pub unsafe extern "C" fn wgpuQueueSubmit(
 ///
 /// # Safety
 ///
-/// `queue` and `buffer` must be non-null live yawgpu handles. `data` is not
-/// read by the Noop validation implementation.
+/// `queue` and `buffer` must be non-null live yawgpu handles. `data` must
+/// point to `size` bytes when `size` is non-zero.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQueueWriteBuffer(
     queue: native::WGPUQueue,
     buffer: native::WGPUBuffer,
     buffer_offset: u64,
-    _data: *const c_void,
+    data: *const c_void,
     size: usize,
 ) {
     let queue = borrow_handle(queue, "WGPUQueue");
     let buffer = borrow_handle(buffer, "WGPUBuffer");
-    let size = match u64::try_from(size) {
-        Ok(size) => size,
-        Err(_) => {
-            queue
-                .device
-                .dispatch_error(core::ErrorKind::Validation, "queue write size is too large");
-            return;
-        }
-    };
-
-    if let Err(message) = buffer.core.validate_queue_write(buffer_offset, size) {
-        queue
-            .device
-            .dispatch_error(core::ErrorKind::Validation, message);
+    if size > 0 && data.is_null() {
+        queue.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "queue write data must not be null when size is non-zero",
+        );
+        return;
     }
+    let data = std::slice::from_raw_parts(data.cast::<u8>(), size);
+    dispatch_optional_device_error(
+        &queue.device,
+        queue.core.write_buffer(&buffer.core, buffer_offset, data),
+    );
 }
 
 /// Validates a queue texture write. Noop does not copy bytes.
