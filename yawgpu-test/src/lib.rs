@@ -63,9 +63,8 @@ fn vulkan_backend_available() -> bool {
     let Ok(instance) = instance else {
         return false;
     };
-    let available = unsafe { instance.enumerate_physical_devices() }.is_ok_and(|devices| {
-        !devices.is_empty()
-    });
+    let available =
+        unsafe { instance.enumerate_physical_devices() }.is_ok_and(|devices| !devices.is_empty());
     unsafe {
         instance.destroy_instance(None);
     }

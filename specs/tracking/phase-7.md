@@ -370,7 +370,42 @@ matching e2e on the host via MoltenVK and logs it.
   render 3/3 / texture 4/4 (no regression from the HAL API change)**.
   Committed `phase-7: P7.6d`.
 - **P7.6e** SPIR-V graphics pipeline + render pass/framebuffer + draw
-  + color readback. Mirrors P7.5.
+  + color readback. Mirrors P7.5. **☑ DONE — MoltenVK-verified.**
+  Reuses `generate_spirv` for Vertex+Fragment (2 blobs). Additive
+  HAL: `HalShaderSource::SpirVStages{vertex,fragment}`;
+  `create_render_pipeline(shader,vtx,frag,desc,bindings)` — Metal arm
+  destructures `Msl`/ignores `bindings`/identical internal fn
+  (**byte-for-byte unchanged**, non-Msl→`HalError`), Vulkan arm
+  `SpirVStages`→2 `VkShaderModule`. Vulkan `create_render_pipeline`:
+  `VkRenderPass` (1 color, `initial COLOR_ATTACHMENT_OPTIMAL` →
+  `final TRANSFER_SRC_OPTIMAL`) + `VkPipelineLayout` (descriptor set
+  layouts from `bindings`) + `VkGraphicsPipeline` (vertex input from
+  `desc.vertex_buffers` binding=slot, topology, dynamic viewport/
+  scissor, 1 color blend). `submit_copies::RenderPass`:
+  `transition_image`→COLOR_ATTACHMENT_OPTIMAL, `VkFramebuffer`,
+  begin (clear), bind pipeline/vertex(slot)/descriptor sets,
+  set viewport/scissor, `vkCmdDraw`, end; render pass leaves the
+  image `TRANSFER_SRC_OPTIMAL` and the tracked `AtomicU8` is stored
+  accordingly so the in-submit `TextureToBuffer` readback reads it
+  correctly; temps (framebuffer/pool) freed; submit+wait. core
+  `create_hal_render_pipeline` Vulkan branch (`generate_spirv`
+  vtx+frag + descriptor bindings; Metal unchanged); vertex-buffer
+  slot populated for Vulkan bind. Bounded 1 `Rgba8Unorm`/non-indexed
+  `draw`/vtx+uniform (=P7.5); P5/P6 + Noop + **Metal** unchanged.
+  Tests `e2e_vulkan_render.rs` (2: constant + uniform color;
+  `#[ignore]`/cfg — Noop render path covered by the shared
+  backend-agnostic path + `e2e_metal_render`'s Noop test, minor
+  coverage note). Gate: Noop 53 binaries green + clippy clean;
+  `--features vulkan` + `--features metal` build/clippy clean. M2
+  (MoltenVK, 2026-05-19): `e2e_vulkan_render` **2/2** + full Vulkan
+  regression (basic/buffer/compute/texture 3/3/3/4) + **full Metal
+  regression (render/compute/texture/buffer/basic/smoke all green —
+  no regression from the HAL API generalization)**. Committed
+  `phase-7: P7.6e`. *(Process note: codex ran workspace `cargo fmt`,
+  cosmetically reformatting `build.rs` + 3 unrelated test files —
+  semantically null, no behavior/assertion change; flagged for the
+  Phase Review, not reverted.)* **Vulkan backend bring-up complete
+  (P7.6a–e); P7.6 DONE.**
 
 Reuse the `e2e_metal_*` test scenarios as `e2e_vulkan_*` (same C-API
 flow, backend-select = Vulkan), `#[ignore]`/`cfg(feature="vulkan")`
