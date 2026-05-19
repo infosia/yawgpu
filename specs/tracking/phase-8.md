@@ -67,10 +67,15 @@ device_lost_validation.rs to 7 (4 Phase-1 kept). Gate green (Noop 55
 binaries + clippy; non-lost paths unregressed). Committed
 `phase-8: P8.3`.
 
-## P8.4 — Toggle / UnsafeAPI (R21)  *(after P8.3)*
-TG1/TG2: map only stable-webgpu.h-analog toggle/feature rules; the
-`AllowUnsafeAPIs`-class ✗ N/A (recorded divergence, rejected-
-direction only). `ToggleValidationTests`, `UnsafeAPIValidationTests`.
+## P8.4 — Toggle / UnsafeAPI (R21)  *(☑ DONE)*
+TG1 ✗ N/A (Dawn toggle APIs absent from webgpu-headers; no toggle/
+AllowUnsafeAPIs subsystem — recorded divergence). TG2: rejected-
+direction of UnsafeAPIValidationTests pinned by new
+unsafe_api_validation.rs (5: R18 chromium ext / R19 bindingArraySize>1
+/ R20 static binding_array / R21 WriteTimestamp+TimestampQuery) —
+all rejections pre-existing (P4 shader/BGL + P8.2 QC3), zero
+production code. Gate green (Noop 56 binaries + clippy clean).
+Committed `phase-8: P8.4`.
 
 ## P8.5 — MultipleDevice (R15/R16)  *(after P8.4)*
 MD1/MD2: cross-device object use ⇒ validation error (owning-device

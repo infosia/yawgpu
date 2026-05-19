@@ -180,9 +180,24 @@ Status: ☐ ◐ ☑ ✗(N/A).
 ### P8.4 Toggle / UnsafeAPI R21 (`ToggleValidationTests`,
 `UnsafeAPIValidationTests`)
 - **TG1** map only the toggle/feature-gated rules that have a stable
-  webgpu.h feature/limit analog. ☐
+  webgpu.h feature/limit analog. ✗ N/A (P8.4)
 - **TG2** the `AllowUnsafeAPIs`-class rules: ✗ N/A (non-canonical;
-  record the divergence, rejected-direction only). ☐
+  record the divergence, rejected-direction only). ☑ (P8.4, rejected-dir)
+
+> P8.4 (verify-and-record, zero production code): `ToggleValidation
+> Tests` (`QueryToggleInfo`/`OverrideToggleUsage`/`TurnOffVsyncWith
+> Toggle`) use Dawn-internal toggle APIs absent from webgpu-headers
+> ⇒ **TG1 ✗ N/A** (no toggle/`AllowUnsafeAPIs` subsystem built —
+> non-canonical divergence, already recorded in block 00/30). TG2:
+> the canonical *rejected-direction* of `UnsafeAPIValidationTests`
+> is enforced and now pinned by `unsafe_api_validation.rs` (5) —
+> R18 `chromium_disable_uniformity_analysis` ext, R20 static WGSL
+> `binding_array`, R19 `bindingArraySize > 1` (0/1 ok) all already
+> rejected by Phase-4 shader/BGL validation; R21
+> `CommandEncoderWriteTimestamp` already gated on
+> `Feature::TimestampQuery` (P8.2 QC3, ok with the feature). No code
+> change needed (all rejections pre-existing). Gate green (56
+> binaries, clippy clean).
 
 ### P8.5 MultipleDevice (`MultipleDeviceTests`, R15/R16)
 - **MD1** an object created by device A used with device B ⇒
