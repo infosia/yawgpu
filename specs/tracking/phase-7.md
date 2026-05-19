@@ -25,19 +25,31 @@ ports. Validation stays in `yawgpu-core`; backends only execute
 already-validated work; driver failure → `HalError` → device error,
 never panic.
 
-## P7.0 — Bring-up scaffolding + gating harness  *(active)*
+## P7.0 — Bring-up scaffolding + gating harness  *(☑ DONE)*
 
-De-risk the real-backend surface before any GPU code (mirrors
-P4.0/P5.0). `metal` crate dependency wired (cfg-gated, not in
-default); `yawgpu-test` gpu-gated helper (real-adapter probe →
-`#[ignore]`/skip); `wgpuCreateInstance` backend selection (Noop
-default, opt-in real backend); the empty `metal` HAL module reshaped
-to the real contract signatures (still returning `BackendUnavailable`
-until P7.1). Acceptance: `cargo build -p yawgpu --features metal` +
-clippy clean; `cargo test --workspace` Noop gate unchanged (real
-tests skip/ignore cleanly with no adapter).
+Done: `metal` crate (0.33.0, recorded in `dependencies.md`) wired as
+an **optional** `yawgpu-hal` dep behind `metal = ["dep:metal"]`
+(`default = ["noop"]` unchanged); `yawgpu` gained a `metal` feature
+forwarding to `yawgpu-hal/metal`. Inline `metal` HAL placeholder
+moved to `yawgpu-hal/src/metal/mod.rs` mirroring the Noop contract
+(`MetalInstance/Adapter/Device/Queue/Buffer/Texture/Sampler`): every
+fallible entry (`*::new`, `MetalAdapter::create_device`) returns
+`HalError::BackendUnavailable`, `enumerate_adapters()` is empty (so
+the `HalInstance::Metal` arm is unreachable), infallible creators are
+allocation-counting no-ops; `use metal as _;` proves link with **zero
+Objective-C/MTL calls**. `yawgpu-test` gained `RealBackend` +
+`real_backend_available` (→ false in P7.0) + `real_backend_skip_
+reason`; one `#[ignore]` `yawgpu/tests/e2e_metal_smoke.rs` asserting
+unavailability (proves the harness shape). `wgpuCreateInstance`
+backend *selection* intentionally deferred to P7.1 (nothing real to
+select yet; Noop remains the only reachable backend). Gate: Noop
+`cargo test --workspace` 43 binaries green + `clippy --workspace
+--all-targets -D warnings` clean (smoke ignored, not run); `cargo
+build -p yawgpu --features metal` + `clippy -p yawgpu --features
+metal --all-targets -D warnings` clean; smoke passes on `--features
+metal -- --ignored`. Committed `phase-7: P7.0`.
 
-## P7.1 — Metal Instance/Adapter/Device/Queue  *(after P7.0)*
+## P7.1 — Metal Instance/Adapter/Device/Queue  *(NEXT)*
 Real `MTLDevice`/command queue; adapter enumerate; empty submit.
 Port `BasicTests` (creation/empty-submit subset).
 
