@@ -16,9 +16,9 @@ mod vulkan {
     pub struct VulkanQueue;
     #[derive(Debug, Clone)]
     pub struct VulkanBuffer;
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct VulkanTexture;
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct VulkanSampler;
 }
 
@@ -182,26 +182,30 @@ impl HalDevice {
     }
 
     #[must_use]
-    pub fn create_texture(&self) -> HalTexture {
+    pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> HalTexture {
+        #[cfg(not(feature = "metal"))]
+        let _ = descriptor;
         match self {
             #[cfg(feature = "noop")]
             Self::Noop(device) => HalTexture::Noop(device.create_texture()),
             #[cfg(feature = "vulkan")]
             Self::Vulkan(_) => HalTexture::Vulkan(vulkan::VulkanTexture),
             #[cfg(feature = "metal")]
-            Self::Metal(device) => HalTexture::Metal(device.create_texture()),
+            Self::Metal(device) => HalTexture::Metal(device.create_texture(descriptor)),
         }
     }
 
     #[must_use]
-    pub fn create_sampler(&self) -> HalSampler {
+    pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> HalSampler {
+        #[cfg(not(feature = "metal"))]
+        let _ = descriptor;
         match self {
             #[cfg(feature = "noop")]
             Self::Noop(device) => HalSampler::Noop(device.create_sampler()),
             #[cfg(feature = "vulkan")]
             Self::Vulkan(_) => HalSampler::Vulkan(vulkan::VulkanSampler),
             #[cfg(feature = "metal")]
-            Self::Metal(device) => HalSampler::Metal(device.create_sampler()),
+            Self::Metal(device) => HalSampler::Metal(device.create_sampler(descriptor)),
         }
     }
 }
@@ -229,7 +233,7 @@ impl HalQueue {
         }
     }
 
-    pub fn submit_buffer_copies(&self, copies: &[HalBufferCopy]) -> Result<(), HalError> {
+    pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
         #[cfg(not(feature = "metal"))]
         let _ = copies;
         match self {
@@ -238,7 +242,7 @@ impl HalQueue {
             #[cfg(feature = "vulkan")]
             Self::Vulkan(_) => Ok(()),
             #[cfg(feature = "metal")]
-            Self::Metal(queue) => queue.submit_buffer_copies(copies),
+            Self::Metal(queue) => queue.submit_copies(copies),
         }
     }
 }
@@ -319,7 +323,130 @@ pub struct HalBufferCopy {
     pub size: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+pub enum HalCopy {
+    Buffer(HalBufferCopy),
+    BufferToTexture(HalBufferTextureCopy),
+    TextureToBuffer(HalBufferTextureCopy),
+    TextureToTexture(HalTextureCopy),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HalBufferTextureLayout {
+    pub offset: u64,
+    pub bytes_per_row: u32,
+    pub rows_per_image: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct HalBufferTextureCopy {
+    pub buffer: HalBuffer,
+    pub buffer_layout: HalBufferTextureLayout,
+    pub texture: HalTexture,
+    pub mip_level: u32,
+    pub origin: HalOrigin3d,
+    pub extent: HalExtent3d,
+}
+
+#[derive(Debug, Clone)]
+pub struct HalTextureCopy {
+    pub source: HalTexture,
+    pub source_mip_level: u32,
+    pub source_origin: HalOrigin3d,
+    pub destination: HalTexture,
+    pub destination_mip_level: u32,
+    pub destination_origin: HalOrigin3d,
+    pub extent: HalExtent3d,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HalOrigin3d {
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HalExtent3d {
+    pub width: u32,
+    pub height: u32,
+    pub depth_or_array_layers: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HalTextureDescriptor {
+    pub format: HalTextureFormat,
+    pub width: u32,
+    pub height: u32,
+    pub depth_or_array_layers: u32,
+    pub mip_level_count: u32,
+    pub sample_count: u32,
+    pub usage: HalTextureUsage,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HalTextureFormat {
+    R8Unorm,
+    Rgba8Unorm,
+    Bgra8Unorm,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HalTextureUsage {
+    pub copy_src: bool,
+    pub copy_dst: bool,
+    pub texture_binding: bool,
+    pub storage_binding: bool,
+    pub render_attachment: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HalSamplerDescriptor {
+    pub address_mode_u: HalAddressMode,
+    pub address_mode_v: HalAddressMode,
+    pub address_mode_w: HalAddressMode,
+    pub mag_filter: HalFilterMode,
+    pub min_filter: HalFilterMode,
+    pub mipmap_filter: HalMipmapFilterMode,
+    pub lod_min_clamp: f32,
+    pub lod_max_clamp: f32,
+    pub compare: Option<HalCompareFunction>,
+    pub max_anisotropy: u16,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HalAddressMode {
+    ClampToEdge,
+    Repeat,
+    MirrorRepeat,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HalFilterMode {
+    Nearest,
+    Linear,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HalMipmapFilterMode {
+    Nearest,
+    Linear,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HalCompareFunction {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always,
+}
+
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum HalTexture {
     #[cfg(feature = "noop")]
@@ -330,7 +457,7 @@ pub enum HalTexture {
     Metal(metal::MetalTexture),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum HalSampler {
     #[cfg(feature = "noop")]

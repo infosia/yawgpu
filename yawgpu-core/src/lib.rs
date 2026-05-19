@@ -5,8 +5,11 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use yawgpu_hal::{
-    HalAdapter, HalBackend, HalBuffer, HalBufferCopy, HalDevice, HalError, HalInstance, HalQueue,
-    HalSampler, HalTexture,
+    HalAdapter, HalAddressMode, HalBackend, HalBuffer, HalBufferCopy, HalBufferTextureCopy,
+    HalBufferTextureLayout, HalCompareFunction, HalCopy, HalDevice, HalError, HalExtent3d,
+    HalFilterMode, HalInstance, HalMipmapFilterMode, HalOrigin3d, HalQueue, HalSampler,
+    HalSamplerDescriptor, HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
+    HalTextureUsage,
 };
 
 pub(crate) mod shader_naga;
@@ -336,7 +339,11 @@ impl Device {
         let hal = if is_error {
             None
         } else {
-            Some(self.inner.hal.create_texture())
+            Some(
+                self.inner
+                    .hal
+                    .create_texture(&hal_texture_descriptor(&descriptor)),
+            )
         };
 
         Texture::new(descriptor, hal, is_error)
@@ -354,7 +361,11 @@ impl Device {
         let hal = if is_error {
             None
         } else {
-            Some(self.inner.hal.create_sampler())
+            Some(
+                self.inner
+                    .hal
+                    .create_sampler(&hal_sampler_descriptor(&resolved)),
+            )
         };
 
         Sampler::new(resolved, hal, is_error)
@@ -1122,7 +1133,7 @@ pub struct Texture {
 
 #[derive(Debug)]
 struct TextureInner {
-    _hal: Option<HalTexture>,
+    hal: Option<HalTexture>,
     usage: TextureUsage,
     dimension: TextureDimension,
     size: Extent3d,
@@ -1143,7 +1154,7 @@ impl Texture {
     fn new(descriptor: TextureDescriptor, hal: Option<HalTexture>, is_error: bool) -> Self {
         Self {
             inner: Arc::new(TextureInner {
-                _hal: hal,
+                hal,
                 usage: descriptor.usage,
                 dimension: descriptor.dimension,
                 size: descriptor.size,
@@ -1216,6 +1227,10 @@ impl Texture {
     #[must_use]
     pub fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    fn hal(&self) -> Option<HalTexture> {
+        self.inner.hal.clone()
     }
 
     pub fn destroy(&self) {
@@ -4751,6 +4766,119 @@ fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
     }
 }
 
+fn hal_texture_descriptor(descriptor: &TextureDescriptor) -> HalTextureDescriptor {
+    HalTextureDescriptor {
+        format: hal_texture_format(descriptor.format),
+        width: descriptor.size.width,
+        height: descriptor.size.height,
+        depth_or_array_layers: descriptor.size.depth_or_array_layers,
+        mip_level_count: descriptor.mip_level_count,
+        sample_count: descriptor.sample_count,
+        usage: hal_texture_usage(descriptor.usage),
+    }
+}
+
+fn hal_texture_format(format: TextureFormat) -> HalTextureFormat {
+    match format.raw() {
+        TextureFormat::R8_UNORM => HalTextureFormat::R8Unorm,
+        TextureFormat::RGBA8_UNORM => HalTextureFormat::Rgba8Unorm,
+        TextureFormat::BGRA8_UNORM => HalTextureFormat::Bgra8Unorm,
+        _ => HalTextureFormat::Unsupported,
+    }
+}
+
+fn hal_texture_usage(usage: TextureUsage) -> HalTextureUsage {
+    HalTextureUsage {
+        copy_src: usage.contains(TextureUsage::COPY_SRC),
+        copy_dst: usage.contains(TextureUsage::COPY_DST),
+        texture_binding: usage.contains(TextureUsage::TEXTURE_BINDING),
+        storage_binding: usage.contains(TextureUsage::STORAGE_BINDING),
+        render_attachment: usage.contains(TextureUsage::RENDER_ATTACHMENT),
+    }
+}
+
+fn hal_sampler_descriptor(descriptor: &ResolvedSamplerDescriptor) -> HalSamplerDescriptor {
+    HalSamplerDescriptor {
+        address_mode_u: hal_address_mode(descriptor.address_mode_u),
+        address_mode_v: hal_address_mode(descriptor.address_mode_v),
+        address_mode_w: hal_address_mode(descriptor.address_mode_w),
+        mag_filter: hal_filter_mode(descriptor.mag_filter),
+        min_filter: hal_filter_mode(descriptor.min_filter),
+        mipmap_filter: hal_mipmap_filter_mode(descriptor.mipmap_filter),
+        lod_min_clamp: descriptor.lod_min_clamp,
+        lod_max_clamp: descriptor.lod_max_clamp,
+        compare: descriptor.compare.map(hal_compare_function),
+        max_anisotropy: descriptor.max_anisotropy,
+    }
+}
+
+fn hal_address_mode(mode: AddressMode) -> HalAddressMode {
+    match mode {
+        AddressMode::ClampToEdge => HalAddressMode::ClampToEdge,
+        AddressMode::Repeat => HalAddressMode::Repeat,
+        AddressMode::MirrorRepeat => HalAddressMode::MirrorRepeat,
+    }
+}
+
+fn hal_filter_mode(mode: FilterMode) -> HalFilterMode {
+    match mode {
+        FilterMode::Nearest => HalFilterMode::Nearest,
+        FilterMode::Linear => HalFilterMode::Linear,
+    }
+}
+
+fn hal_mipmap_filter_mode(mode: MipmapFilterMode) -> HalMipmapFilterMode {
+    match mode {
+        MipmapFilterMode::Nearest => HalMipmapFilterMode::Nearest,
+        MipmapFilterMode::Linear => HalMipmapFilterMode::Linear,
+    }
+}
+
+fn hal_compare_function(compare: CompareFunction) -> HalCompareFunction {
+    match compare {
+        CompareFunction::Never => HalCompareFunction::Never,
+        CompareFunction::Less => HalCompareFunction::Less,
+        CompareFunction::Equal => HalCompareFunction::Equal,
+        CompareFunction::LessEqual => HalCompareFunction::LessEqual,
+        CompareFunction::Greater => HalCompareFunction::Greater,
+        CompareFunction::NotEqual => HalCompareFunction::NotEqual,
+        CompareFunction::GreaterEqual => HalCompareFunction::GreaterEqual,
+        CompareFunction::Always => HalCompareFunction::Always,
+    }
+}
+
+fn hal_origin(origin: Origin3d) -> HalOrigin3d {
+    HalOrigin3d {
+        x: origin.x,
+        y: origin.y,
+        z: origin.z,
+    }
+}
+
+fn hal_extent(extent: Extent3d) -> HalExtent3d {
+    HalExtent3d {
+        width: extent.width,
+        height: extent.height,
+        depth_or_array_layers: extent.depth_or_array_layers,
+    }
+}
+
+fn hal_buffer_texture_layout(
+    layout: TexelCopyBufferLayout,
+    texture: &Texture,
+    copy_size: Extent3d,
+) -> Option<HalBufferTextureLayout> {
+    let format_caps = texture.format().caps()?;
+    let width_blocks = div_ceil_u32(copy_size.width, format_caps.block_w);
+    let height_blocks = div_ceil_u32(copy_size.height, format_caps.block_h);
+    let row_bytes = width_blocks.checked_mul(format_caps.texel_block_size)?;
+    Some(HalBufferTextureLayout {
+        offset: layout.offset,
+        bytes_per_row: layout.bytes_per_row.unwrap_or(row_bytes),
+        rows_per_image: layout.rows_per_image.unwrap_or(height_blocks),
+    })
+}
+
 fn validate_sampler_descriptor(descriptor: &ResolvedSamplerDescriptor) -> Option<&'static str> {
     if !descriptor.lod_min_clamp.is_finite() {
         return Some("sampler lodMinClamp must be finite");
@@ -5014,6 +5142,7 @@ struct CommandEncoderState {
     debug_group_depth: u32,
     referenced_buffers: Vec<Arc<Buffer>>,
     buffer_copies: Vec<BufferCopyCommand>,
+    texture_copies: Vec<TextureCopyCommand>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5044,6 +5173,7 @@ struct CommandBufferInner {
     is_error: bool,
     referenced_buffers: Vec<Arc<Buffer>>,
     buffer_copies: Vec<BufferCopyCommand>,
+    texture_copies: Vec<TextureCopyCommand>,
     submitted: Mutex<bool>,
 }
 
@@ -5054,6 +5184,25 @@ struct BufferCopyCommand {
     destination: Arc<Buffer>,
     destination_offset: u64,
     size: u64,
+}
+
+#[derive(Debug, Clone)]
+enum TextureCopyCommand {
+    BufferToTexture {
+        source: TexelCopyBufferInfo,
+        destination: TexelCopyTextureInfo,
+        copy_size: Extent3d,
+    },
+    TextureToBuffer {
+        source: TexelCopyTextureInfo,
+        destination: TexelCopyBufferInfo,
+        copy_size: Extent3d,
+    },
+    TextureToTexture {
+        source: TexelCopyTextureInfo,
+        destination: TexelCopyTextureInfo,
+        copy_size: Extent3d,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -5181,6 +5330,7 @@ impl CommandEncoder {
                     debug_group_depth: 0,
                     referenced_buffers: Vec::new(),
                     buffer_copies: Vec::new(),
+                    texture_copies: Vec::new(),
                 }),
             }),
         }
@@ -5277,6 +5427,7 @@ impl CommandEncoder {
         self.record_buffer_command(
             vec![Arc::clone(&source), Arc::clone(&destination)],
             Some(copy),
+            None,
             || {
                 validate_copy_buffer_to_buffer(
                     &source,
@@ -5290,13 +5441,13 @@ impl CommandEncoder {
     }
 
     pub fn clear_buffer(&self, buffer: Arc<Buffer>, offset: u64, size: u64) -> Option<String> {
-        self.record_buffer_command(vec![Arc::clone(&buffer)], None, || {
+        self.record_buffer_command(vec![Arc::clone(&buffer)], None, None, || {
             validate_clear_buffer(&buffer, offset, size)
         })
     }
 
     pub fn write_buffer(&self, buffer: Arc<Buffer>, offset: u64, size: u64) -> Option<String> {
-        self.record_buffer_command(vec![Arc::clone(&buffer)], None, || {
+        self.record_buffer_command(vec![Arc::clone(&buffer)], None, None, || {
             validate_encoder_write_buffer(&buffer, offset, size)
         })
     }
@@ -5307,7 +5458,12 @@ impl CommandEncoder {
         destination: TexelCopyTextureInfo,
         copy_size: Extent3d,
     ) -> Option<String> {
-        self.record_buffer_command(vec![Arc::clone(&source.buffer)], None, || {
+        let copy = TextureCopyCommand::BufferToTexture {
+            source: source.clone(),
+            destination: destination.clone(),
+            copy_size,
+        };
+        self.record_buffer_command(vec![Arc::clone(&source.buffer)], None, Some(copy), || {
             validate_buffer_texture_copy(
                 source,
                 BufferUsage::COPY_SRC,
@@ -5325,16 +5481,26 @@ impl CommandEncoder {
         destination: TexelCopyBufferInfo,
         copy_size: Extent3d,
     ) -> Option<String> {
-        self.record_buffer_command(vec![Arc::clone(&destination.buffer)], None, || {
-            validate_buffer_texture_copy(
-                destination,
-                BufferUsage::COPY_DST,
-                source,
-                TextureUsage::COPY_SRC,
-                copy_size,
-                "copy texture to buffer",
-            )
-        })
+        let copy = TextureCopyCommand::TextureToBuffer {
+            source: source.clone(),
+            destination: destination.clone(),
+            copy_size,
+        };
+        self.record_buffer_command(
+            vec![Arc::clone(&destination.buffer)],
+            None,
+            Some(copy),
+            || {
+                validate_buffer_texture_copy(
+                    destination,
+                    BufferUsage::COPY_DST,
+                    source,
+                    TextureUsage::COPY_SRC,
+                    copy_size,
+                    "copy texture to buffer",
+                )
+            },
+        )
     }
 
     pub fn copy_texture_to_texture(
@@ -5343,7 +5509,12 @@ impl CommandEncoder {
         destination: TexelCopyTextureInfo,
         copy_size: Extent3d,
     ) -> Option<String> {
-        self.record_buffer_command(Vec::new(), None, || {
+        let copy = TextureCopyCommand::TextureToTexture {
+            source: source.clone(),
+            destination: destination.clone(),
+            copy_size,
+        };
+        self.record_buffer_command(Vec::new(), None, Some(copy), || {
             validate_texture_to_texture_copy(source, destination, copy_size)
         })
     }
@@ -5416,6 +5587,7 @@ impl CommandEncoder {
         &self,
         referenced_buffers: Vec<Arc<Buffer>>,
         buffer_copy: Option<BufferCopyCommand>,
+        texture_copy: Option<TextureCopyCommand>,
         validate: F,
     ) -> Option<String>
     where
@@ -5438,6 +5610,9 @@ impl CommandEncoder {
             if let Some(copy) = buffer_copy {
                 state.buffer_copies.push(copy);
             }
+            if let Some(copy) = texture_copy {
+                state.texture_copies.push(copy);
+            }
         }
         None
     }
@@ -5447,7 +5622,7 @@ impl CommandEncoder {
         let mut state = self.inner.state.lock();
         if state.lifecycle != CommandEncoderLifecycle::Recording {
             return (
-                CommandBuffer::new(true, Vec::new(), Vec::new()),
+                CommandBuffer::new(true, Vec::new(), Vec::new(), Vec::new()),
                 Some("command encoder cannot be finished more than once".to_owned()),
             );
         }
@@ -5476,8 +5651,18 @@ impl CommandEncoder {
         } else {
             std::mem::take(&mut state.buffer_copies)
         };
+        let texture_copies = if finish_error.is_some() {
+            Vec::new()
+        } else {
+            std::mem::take(&mut state.texture_copies)
+        };
         (
-            CommandBuffer::new(finish_error.is_some(), referenced_buffers, buffer_copies),
+            CommandBuffer::new(
+                finish_error.is_some(),
+                referenced_buffers,
+                buffer_copies,
+                texture_copies,
+            ),
             finish_error,
         )
     }
@@ -6089,12 +6274,14 @@ impl CommandBuffer {
         is_error: bool,
         referenced_buffers: Vec<Arc<Buffer>>,
         buffer_copies: Vec<BufferCopyCommand>,
+        texture_copies: Vec<TextureCopyCommand>,
     ) -> Self {
         Self {
             inner: Arc::new(CommandBufferInner {
                 is_error,
                 referenced_buffers,
                 buffer_copies,
+                texture_copies,
                 submitted: Mutex::new(false),
             }),
         }
@@ -6111,6 +6298,10 @@ impl CommandBuffer {
 
     fn buffer_copies(&self) -> &[BufferCopyCommand] {
         &self.inner.buffer_copies
+    }
+
+    fn texture_copies(&self) -> &[TextureCopyCommand] {
+        &self.inner.texture_copies
     }
 
     fn mark_submitted(&self) -> Result<(), String> {
@@ -7642,16 +7833,95 @@ impl Queue {
                 let Some(destination) = copy.destination.hal() else {
                     continue;
                 };
-                copies.push(HalBufferCopy {
+                copies.push(HalCopy::Buffer(HalBufferCopy {
                     source,
                     source_offset: copy.source_offset,
                     destination,
                     destination_offset: copy.destination_offset,
                     size: copy.size,
-                });
+                }));
+            }
+            for copy in command_buffer.texture_copies() {
+                match copy {
+                    TextureCopyCommand::BufferToTexture {
+                        source,
+                        destination,
+                        copy_size,
+                    } => {
+                        let Some(buffer) = source.buffer.hal() else {
+                            continue;
+                        };
+                        let Some(texture) = destination.texture.hal() else {
+                            continue;
+                        };
+                        let Some(buffer_layout) = hal_buffer_texture_layout(
+                            source.layout,
+                            &destination.texture,
+                            *copy_size,
+                        ) else {
+                            continue;
+                        };
+                        copies.push(HalCopy::BufferToTexture(HalBufferTextureCopy {
+                            buffer,
+                            buffer_layout,
+                            texture,
+                            mip_level: destination.mip_level,
+                            origin: hal_origin(destination.origin),
+                            extent: hal_extent(*copy_size),
+                        }));
+                    }
+                    TextureCopyCommand::TextureToBuffer {
+                        source,
+                        destination,
+                        copy_size,
+                    } => {
+                        let Some(buffer) = destination.buffer.hal() else {
+                            continue;
+                        };
+                        let Some(texture) = source.texture.hal() else {
+                            continue;
+                        };
+                        let Some(buffer_layout) = hal_buffer_texture_layout(
+                            destination.layout,
+                            &source.texture,
+                            *copy_size,
+                        ) else {
+                            continue;
+                        };
+                        copies.push(HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                            buffer,
+                            buffer_layout,
+                            texture,
+                            mip_level: source.mip_level,
+                            origin: hal_origin(source.origin),
+                            extent: hal_extent(*copy_size),
+                        }));
+                    }
+                    TextureCopyCommand::TextureToTexture {
+                        source,
+                        destination,
+                        copy_size,
+                    } => {
+                        let Some(source_texture) = source.texture.hal() else {
+                            continue;
+                        };
+                        let Some(destination_texture) = destination.texture.hal() else {
+                            continue;
+                        };
+                        copies.push(HalCopy::TextureToTexture(HalTextureCopy {
+                            source: source_texture,
+                            source_mip_level: source.mip_level,
+                            source_origin: hal_origin(source.origin),
+                            destination: destination_texture,
+                            destination_mip_level: destination.mip_level,
+                            destination_origin: hal_origin(destination.origin),
+                            extent: hal_extent(*copy_size),
+                        }));
+                    }
+                }
             }
         }
-        if let Err(error) = self.inner.hal.submit_buffer_copies(&copies) {
+        if let Err(error) = self.inner.hal.submit_copies(&copies) {
             return Some(DeviceError::internal(error.to_string()));
         }
         None

@@ -1,6 +1,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{HalBuffer, HalBufferCopy, HalError};
+use crate::{
+    HalAddressMode, HalBuffer, HalBufferTextureCopy, HalCompareFunction, HalCopy, HalError,
+    HalExtent3d, HalFilterMode, HalMipmapFilterMode, HalSamplerDescriptor, HalTexture,
+    HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage,
+};
 
 const BACKEND: &str = "metal";
 
@@ -86,17 +90,32 @@ impl MetalDevice {
     }
 
     #[must_use]
-    pub fn create_texture(&self) -> MetalTexture {
-        // P7.3: allocate a real MTLTexture.
+    pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> MetalTexture {
         self.allocations.fetch_add(1, Ordering::Relaxed);
-        MetalTexture
+        match create_texture(&self._device, descriptor) {
+            Ok((inner, bytes_per_pixel)) => MetalTexture {
+                inner: Some(inner),
+                width: descriptor.width,
+                height: descriptor.height,
+                depth_or_array_layers: descriptor.depth_or_array_layers,
+                bytes_per_pixel,
+            },
+            Err(_) => MetalTexture {
+                inner: None,
+                width: descriptor.width,
+                height: descriptor.height,
+                depth_or_array_layers: descriptor.depth_or_array_layers,
+                bytes_per_pixel: 0,
+            },
+        }
     }
 
     #[must_use]
-    pub fn create_sampler(&self) -> MetalSampler {
-        // P7.3: allocate a real MTLSamplerState.
+    pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> MetalSampler {
         self.allocations.fetch_add(1, Ordering::Relaxed);
-        MetalSampler
+        MetalSampler {
+            _inner: create_sampler(&self._device, descriptor).ok(),
+        }
     }
 }
 
@@ -120,7 +139,7 @@ impl MetalQueue {
         Ok(())
     }
 
-    pub fn submit_buffer_copies(&self, copies: &[HalBufferCopy]) -> Result<(), HalError> {
+    pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
         if copies.is_empty() {
             return Ok(());
         }
@@ -128,23 +147,12 @@ impl MetalQueue {
         let command_buffer = self.inner.new_command_buffer();
         let blit = command_buffer.new_blit_command_encoder();
         for copy in copies {
-            let HalBuffer::Metal(source) = &copy.source else {
-                return Err(buffer_error("source buffer is not Metal-backed"));
-            };
-            let HalBuffer::Metal(destination) = &copy.destination else {
-                return Err(buffer_error("destination buffer is not Metal-backed"));
-            };
-            source.validate_range(copy.source_offset, copy.size)?;
-            destination.validate_range(copy.destination_offset, copy.size)?;
-            let source_buffer = source.inner()?;
-            let destination_buffer = destination.inner()?;
-            blit.copy_from_buffer(
-                source_buffer,
-                to_ns(copy.source_offset)?,
-                destination_buffer,
-                to_ns(copy.destination_offset)?,
-                to_ns(copy.size)?,
-            );
+            match copy {
+                HalCopy::Buffer(copy) => encode_buffer_copy(blit, copy)?,
+                HalCopy::BufferToTexture(copy) => encode_buffer_to_texture(blit, copy)?,
+                HalCopy::TextureToBuffer(copy) => encode_texture_to_buffer(blit, copy)?,
+                HalCopy::TextureToTexture(copy) => encode_texture_to_texture(blit, copy)?,
+            }
         }
         blit.end_encoding();
         command_buffer.commit();
@@ -243,7 +251,316 @@ fn buffer_error(message: &'static str) -> HalError {
 }
 
 #[derive(Debug, Clone)]
-pub struct MetalTexture;
+pub struct MetalTexture {
+    inner: Option<metal::Texture>,
+    width: u32,
+    height: u32,
+    depth_or_array_layers: u32,
+    bytes_per_pixel: u32,
+}
+
+impl MetalTexture {
+    fn inner(&self) -> Result<&metal::TextureRef, HalError> {
+        self.inner
+            .as_deref()
+            .ok_or_else(|| texture_error("texture allocation failed or unsupported descriptor"))
+    }
+
+    fn validate_origin_extent(
+        &self,
+        origin: crate::HalOrigin3d,
+        extent: HalExtent3d,
+    ) -> Result<(), HalError> {
+        let x_end = origin
+            .x
+            .checked_add(extent.width)
+            .ok_or_else(|| texture_error("texture x range overflows"))?;
+        let y_end = origin
+            .y
+            .checked_add(extent.height)
+            .ok_or_else(|| texture_error("texture y range overflows"))?;
+        let z_end = origin
+            .z
+            .checked_add(extent.depth_or_array_layers)
+            .ok_or_else(|| texture_error("texture z range overflows"))?;
+        if x_end > self.width || y_end > self.height || z_end > self.depth_or_array_layers {
+            return Err(texture_error("texture range exceeds texture size"));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone)]
-pub struct MetalSampler;
+pub struct MetalSampler {
+    _inner: Option<metal::SamplerState>,
+}
+
+fn create_texture(
+    device: &metal::DeviceRef,
+    descriptor: &HalTextureDescriptor,
+) -> Result<(metal::Texture, u32), HalError> {
+    if descriptor.depth_or_array_layers != 1
+        || descriptor.mip_level_count != 1
+        || descriptor.sample_count != 1
+    {
+        return Err(texture_error("unsupported texture descriptor"));
+    }
+    let (pixel_format, bytes_per_pixel) = map_texture_format(descriptor.format)?;
+    let texture_descriptor = metal::TextureDescriptor::new();
+    texture_descriptor.set_texture_type(metal::MTLTextureType::D2);
+    texture_descriptor.set_pixel_format(pixel_format);
+    texture_descriptor.set_width(to_ns(u64::from(descriptor.width))?);
+    texture_descriptor.set_height(to_ns(u64::from(descriptor.height))?);
+    texture_descriptor.set_depth(1);
+    texture_descriptor.set_array_length(1);
+    texture_descriptor.set_mipmap_level_count(1);
+    texture_descriptor.set_sample_count(1);
+    texture_descriptor.set_storage_mode(metal::MTLStorageMode::Shared);
+    texture_descriptor.set_usage(map_texture_usage(descriptor.usage));
+    Ok((device.new_texture(&texture_descriptor), bytes_per_pixel))
+}
+
+fn create_sampler(
+    device: &metal::DeviceRef,
+    descriptor: &HalSamplerDescriptor,
+) -> Result<metal::SamplerState, HalError> {
+    let sampler_descriptor = metal::SamplerDescriptor::new();
+    sampler_descriptor.set_address_mode_s(map_address_mode(descriptor.address_mode_u));
+    sampler_descriptor.set_address_mode_t(map_address_mode(descriptor.address_mode_v));
+    sampler_descriptor.set_address_mode_r(map_address_mode(descriptor.address_mode_w));
+    sampler_descriptor.set_mag_filter(map_filter_mode(descriptor.mag_filter));
+    sampler_descriptor.set_min_filter(map_filter_mode(descriptor.min_filter));
+    sampler_descriptor.set_mip_filter(map_mipmap_filter_mode(descriptor.mipmap_filter));
+    sampler_descriptor.set_lod_min_clamp(descriptor.lod_min_clamp);
+    sampler_descriptor.set_lod_max_clamp(descriptor.lod_max_clamp);
+    sampler_descriptor.set_max_anisotropy(to_ns(u64::from(descriptor.max_anisotropy))?);
+    if let Some(compare) = descriptor.compare {
+        sampler_descriptor.set_compare_function(map_compare_function(compare));
+    }
+    Ok(device.new_sampler(&sampler_descriptor))
+}
+
+fn encode_buffer_copy(
+    blit: &metal::BlitCommandEncoderRef,
+    copy: &crate::HalBufferCopy,
+) -> Result<(), HalError> {
+    let HalBuffer::Metal(source) = &copy.source else {
+        return Err(buffer_error("source buffer is not Metal-backed"));
+    };
+    let HalBuffer::Metal(destination) = &copy.destination else {
+        return Err(buffer_error("destination buffer is not Metal-backed"));
+    };
+    source.validate_range(copy.source_offset, copy.size)?;
+    destination.validate_range(copy.destination_offset, copy.size)?;
+    blit.copy_from_buffer(
+        source.inner()?,
+        to_ns(copy.source_offset)?,
+        destination.inner()?,
+        to_ns(copy.destination_offset)?,
+        to_ns(copy.size)?,
+    );
+    Ok(())
+}
+
+fn encode_buffer_to_texture(
+    blit: &metal::BlitCommandEncoderRef,
+    copy: &HalBufferTextureCopy,
+) -> Result<(), HalError> {
+    let HalBuffer::Metal(buffer) = &copy.buffer else {
+        return Err(buffer_error("buffer is not Metal-backed"));
+    };
+    let HalTexture::Metal(texture) = &copy.texture else {
+        return Err(texture_error("texture is not Metal-backed"));
+    };
+    texture.validate_origin_extent(copy.origin, copy.extent)?;
+    validate_buffer_texture_range(buffer, copy)?;
+    blit.copy_from_buffer_to_texture(
+        buffer.inner()?,
+        to_ns(copy.buffer_layout.offset)?,
+        to_ns(u64::from(copy.buffer_layout.bytes_per_row))?,
+        buffer_texture_bytes_per_image(copy)?,
+        to_mtl_size(copy.extent)?,
+        texture.inner()?,
+        to_ns(u64::from(copy.origin.z))?,
+        to_ns(u64::from(copy.mip_level))?,
+        to_mtl_origin(copy.origin.x, copy.origin.y, 0)?,
+        metal::MTLBlitOption::None,
+    );
+    Ok(())
+}
+
+fn encode_texture_to_buffer(
+    blit: &metal::BlitCommandEncoderRef,
+    copy: &HalBufferTextureCopy,
+) -> Result<(), HalError> {
+    let HalBuffer::Metal(buffer) = &copy.buffer else {
+        return Err(buffer_error("buffer is not Metal-backed"));
+    };
+    let HalTexture::Metal(texture) = &copy.texture else {
+        return Err(texture_error("texture is not Metal-backed"));
+    };
+    texture.validate_origin_extent(copy.origin, copy.extent)?;
+    validate_buffer_texture_range(buffer, copy)?;
+    blit.copy_from_texture_to_buffer(
+        texture.inner()?,
+        to_ns(u64::from(copy.origin.z))?,
+        to_ns(u64::from(copy.mip_level))?,
+        to_mtl_origin(copy.origin.x, copy.origin.y, 0)?,
+        to_mtl_size(copy.extent)?,
+        buffer.inner()?,
+        to_ns(copy.buffer_layout.offset)?,
+        to_ns(u64::from(copy.buffer_layout.bytes_per_row))?,
+        buffer_texture_bytes_per_image(copy)?,
+        metal::MTLBlitOption::None,
+    );
+    Ok(())
+}
+
+fn encode_texture_to_texture(
+    blit: &metal::BlitCommandEncoderRef,
+    copy: &HalTextureCopy,
+) -> Result<(), HalError> {
+    let HalTexture::Metal(source) = &copy.source else {
+        return Err(texture_error("source texture is not Metal-backed"));
+    };
+    let HalTexture::Metal(destination) = &copy.destination else {
+        return Err(texture_error("destination texture is not Metal-backed"));
+    };
+    source.validate_origin_extent(copy.source_origin, copy.extent)?;
+    destination.validate_origin_extent(copy.destination_origin, copy.extent)?;
+    blit.copy_from_texture(
+        source.inner()?,
+        to_ns(u64::from(copy.source_origin.z))?,
+        to_ns(u64::from(copy.source_mip_level))?,
+        to_mtl_origin(copy.source_origin.x, copy.source_origin.y, 0)?,
+        to_mtl_size(copy.extent)?,
+        destination.inner()?,
+        to_ns(u64::from(copy.destination_origin.z))?,
+        to_ns(u64::from(copy.destination_mip_level))?,
+        to_mtl_origin(copy.destination_origin.x, copy.destination_origin.y, 0)?,
+    );
+    Ok(())
+}
+
+fn validate_buffer_texture_range(
+    buffer: &MetalBuffer,
+    copy: &HalBufferTextureCopy,
+) -> Result<(), HalError> {
+    let rows = u64::from(copy.extent.height.saturating_sub(1));
+    let last_row = rows
+        .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
+        .ok_or_else(|| buffer_error("buffer texture row range overflows"))?;
+    let row_bytes = u64::from(copy.extent.width)
+        .checked_mul(u64::from(texture_bytes_per_pixel(copy)?))
+        .ok_or_else(|| buffer_error("buffer texture row bytes overflow"))?;
+    let required = copy
+        .buffer_layout
+        .offset
+        .checked_add(last_row)
+        .and_then(|offset| offset.checked_add(row_bytes))
+        .ok_or_else(|| buffer_error("buffer texture range overflows"))?;
+    if required > buffer.size() {
+        return Err(buffer_error("buffer texture range exceeds buffer size"));
+    }
+    Ok(())
+}
+
+fn texture_bytes_per_pixel(copy: &HalBufferTextureCopy) -> Result<u32, HalError> {
+    let HalTexture::Metal(texture) = &copy.texture else {
+        return Err(texture_error("texture is not Metal-backed"));
+    };
+    if texture.bytes_per_pixel == 0 {
+        return Err(texture_error("unsupported texture format"));
+    }
+    Ok(texture.bytes_per_pixel)
+}
+
+fn buffer_texture_bytes_per_image(
+    copy: &HalBufferTextureCopy,
+) -> Result<metal::NSUInteger, HalError> {
+    let bytes = u64::from(copy.buffer_layout.bytes_per_row)
+        .checked_mul(u64::from(copy.buffer_layout.rows_per_image))
+        .ok_or_else(|| buffer_error("buffer texture bytes per image overflows"))?;
+    to_ns(bytes)
+}
+
+fn to_mtl_origin(x: u32, y: u32, z: u32) -> Result<metal::MTLOrigin, HalError> {
+    Ok(metal::MTLOrigin {
+        x: to_ns(u64::from(x))?,
+        y: to_ns(u64::from(y))?,
+        z: to_ns(u64::from(z))?,
+    })
+}
+
+fn to_mtl_size(extent: HalExtent3d) -> Result<metal::MTLSize, HalError> {
+    Ok(metal::MTLSize::new(
+        to_ns(u64::from(extent.width))?,
+        to_ns(u64::from(extent.height))?,
+        to_ns(u64::from(extent.depth_or_array_layers))?,
+    ))
+}
+
+fn map_texture_format(format: HalTextureFormat) -> Result<(metal::MTLPixelFormat, u32), HalError> {
+    match format {
+        HalTextureFormat::R8Unorm => Ok((metal::MTLPixelFormat::R8Unorm, 1)),
+        HalTextureFormat::Rgba8Unorm => Ok((metal::MTLPixelFormat::RGBA8Unorm, 4)),
+        HalTextureFormat::Bgra8Unorm => Ok((metal::MTLPixelFormat::BGRA8Unorm, 4)),
+        HalTextureFormat::Unsupported => Err(texture_error("unsupported texture format")),
+    }
+}
+
+fn map_texture_usage(usage: HalTextureUsage) -> metal::MTLTextureUsage {
+    let mut metal_usage = metal::MTLTextureUsage::Unknown;
+    if usage.copy_src || usage.texture_binding {
+        metal_usage |= metal::MTLTextureUsage::ShaderRead;
+    }
+    if usage.copy_dst || usage.storage_binding {
+        metal_usage |= metal::MTLTextureUsage::ShaderWrite;
+    }
+    if usage.render_attachment {
+        metal_usage |= metal::MTLTextureUsage::RenderTarget;
+    }
+    metal_usage
+}
+
+fn map_address_mode(mode: HalAddressMode) -> metal::MTLSamplerAddressMode {
+    match mode {
+        HalAddressMode::ClampToEdge => metal::MTLSamplerAddressMode::ClampToEdge,
+        HalAddressMode::Repeat => metal::MTLSamplerAddressMode::Repeat,
+        HalAddressMode::MirrorRepeat => metal::MTLSamplerAddressMode::MirrorRepeat,
+    }
+}
+
+fn map_filter_mode(mode: HalFilterMode) -> metal::MTLSamplerMinMagFilter {
+    match mode {
+        HalFilterMode::Nearest => metal::MTLSamplerMinMagFilter::Nearest,
+        HalFilterMode::Linear => metal::MTLSamplerMinMagFilter::Linear,
+    }
+}
+
+fn map_mipmap_filter_mode(mode: HalMipmapFilterMode) -> metal::MTLSamplerMipFilter {
+    match mode {
+        HalMipmapFilterMode::Nearest => metal::MTLSamplerMipFilter::Nearest,
+        HalMipmapFilterMode::Linear => metal::MTLSamplerMipFilter::Linear,
+    }
+}
+
+fn map_compare_function(compare: HalCompareFunction) -> metal::MTLCompareFunction {
+    match compare {
+        HalCompareFunction::Never => metal::MTLCompareFunction::Never,
+        HalCompareFunction::Less => metal::MTLCompareFunction::Less,
+        HalCompareFunction::Equal => metal::MTLCompareFunction::Equal,
+        HalCompareFunction::LessEqual => metal::MTLCompareFunction::LessEqual,
+        HalCompareFunction::Greater => metal::MTLCompareFunction::Greater,
+        HalCompareFunction::NotEqual => metal::MTLCompareFunction::NotEqual,
+        HalCompareFunction::GreaterEqual => metal::MTLCompareFunction::GreaterEqual,
+        HalCompareFunction::Always => metal::MTLCompareFunction::Always,
+    }
+}
+
+fn texture_error(message: &'static str) -> HalError {
+    HalError::BufferOperationFailed {
+        backend: BACKEND,
+        message,
+    }
+}
