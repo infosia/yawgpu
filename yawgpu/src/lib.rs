@@ -261,7 +261,7 @@ pub struct WGPUCommandEncoderImpl {
 }
 
 pub struct WGPUCommandBufferImpl {
-    _core: Arc<core::CommandBuffer>,
+    core: Arc<core::CommandBuffer>,
     _device: Arc<core::Device>,
     _instance: Arc<WGPUInstanceImpl>,
 }
@@ -1815,7 +1815,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderFinish(
     let (command_buffer, error) = encoder.core.finish();
     dispatch_optional_error(&encoder.device, error);
     arc_to_handle(Arc::new(WGPUCommandBufferImpl {
-        _core: Arc::new(command_buffer),
+        core: Arc::new(command_buffer),
         _device: Arc::clone(&encoder.device),
         _instance: Arc::clone(&encoder.instance),
     }))
@@ -1878,14 +1878,14 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToBuffer(
     size: u64,
 ) {
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
-    let source = borrow_handle(source, "WGPUBuffer");
-    let destination = borrow_handle(destination, "WGPUBuffer");
+    let source = clone_handle(source, "WGPUBuffer");
+    let destination = clone_handle(destination, "WGPUBuffer");
     dispatch_optional_error(
         &encoder.device,
         encoder.core.copy_buffer_to_buffer(
-            &source.core,
+            Arc::clone(&source.core),
             source_offset,
-            &destination.core,
+            Arc::clone(&destination.core),
             destination_offset,
             size,
         ),
@@ -1905,10 +1905,12 @@ pub unsafe extern "C" fn wgpuCommandEncoderClearBuffer(
     size: u64,
 ) {
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
-    let buffer = borrow_handle(buffer, "WGPUBuffer");
+    let buffer = clone_handle(buffer, "WGPUBuffer");
     dispatch_optional_error(
         &encoder.device,
-        encoder.core.clear_buffer(&buffer.core, offset, size),
+        encoder
+            .core
+            .clear_buffer(Arc::clone(&buffer.core), offset, size),
     );
 }
 
@@ -1928,7 +1930,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderWriteBuffer(
     size: usize,
 ) {
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
-    let buffer = borrow_handle(buffer, "WGPUBuffer");
+    let buffer = clone_handle(buffer, "WGPUBuffer");
     let size = match u64::try_from(size) {
         Ok(size) => size,
         Err(_) => {
@@ -1941,7 +1943,9 @@ pub unsafe extern "C" fn wgpuCommandEncoderWriteBuffer(
     };
     dispatch_optional_error(
         &encoder.device,
-        encoder.core.write_buffer(&buffer.core, buffer_offset, size),
+        encoder
+            .core
+            .write_buffer(Arc::clone(&buffer.core), buffer_offset, size),
     );
 }
 
@@ -1969,8 +1973,8 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToTexture(
     let copy_size = copy_size
         .as_ref()
         .expect("wgpuCommandEncoderCopyBufferToTexture copySize must not be null");
-    let source_buffer = borrow_handle(source.buffer, "WGPUBuffer");
-    let destination_texture = borrow_handle(destination.texture, "WGPUTexture");
+    let source_buffer = clone_handle(source.buffer, "WGPUBuffer");
+    let destination_texture = clone_handle(destination.texture, "WGPUTexture");
     let (destination_mip_level, destination_origin, destination_aspect) =
         map_texel_copy_texture_info_parts(destination);
 
@@ -1978,11 +1982,11 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToTexture(
         &encoder.device,
         encoder.core.copy_buffer_to_texture(
             core::TexelCopyBufferInfo {
-                buffer: &source_buffer.core,
+                buffer: Arc::clone(&source_buffer.core),
                 layout: map_texel_copy_buffer_layout(source.layout),
             },
             core::TexelCopyTextureInfo {
-                texture: &destination_texture.core,
+                texture: Arc::clone(&destination_texture.core),
                 mip_level: destination_mip_level,
                 origin: destination_origin,
                 aspect: destination_aspect,
@@ -2016,8 +2020,8 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToBuffer(
     let copy_size = copy_size
         .as_ref()
         .expect("wgpuCommandEncoderCopyTextureToBuffer copySize must not be null");
-    let source_texture = borrow_handle(source.texture, "WGPUTexture");
-    let destination_buffer = borrow_handle(destination.buffer, "WGPUBuffer");
+    let source_texture = clone_handle(source.texture, "WGPUTexture");
+    let destination_buffer = clone_handle(destination.buffer, "WGPUBuffer");
     let (source_mip_level, source_origin, source_aspect) =
         map_texel_copy_texture_info_parts(source);
 
@@ -2025,13 +2029,13 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToBuffer(
         &encoder.device,
         encoder.core.copy_texture_to_buffer(
             core::TexelCopyTextureInfo {
-                texture: &source_texture.core,
+                texture: Arc::clone(&source_texture.core),
                 mip_level: source_mip_level,
                 origin: source_origin,
                 aspect: source_aspect,
             },
             core::TexelCopyBufferInfo {
-                buffer: &destination_buffer.core,
+                buffer: Arc::clone(&destination_buffer.core),
                 layout: map_texel_copy_buffer_layout(destination.layout),
             },
             map_extent_3d(*copy_size),
@@ -2062,8 +2066,8 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToTexture(
     let copy_size = copy_size
         .as_ref()
         .expect("wgpuCommandEncoderCopyTextureToTexture copySize must not be null");
-    let source_texture = borrow_handle(source.texture, "WGPUTexture");
-    let destination_texture = borrow_handle(destination.texture, "WGPUTexture");
+    let source_texture = clone_handle(source.texture, "WGPUTexture");
+    let destination_texture = clone_handle(destination.texture, "WGPUTexture");
     let (source_mip_level, source_origin, source_aspect) =
         map_texel_copy_texture_info_parts(source);
     let (destination_mip_level, destination_origin, destination_aspect) =
@@ -2073,13 +2077,13 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToTexture(
         &encoder.device,
         encoder.core.copy_texture_to_texture(
             core::TexelCopyTextureInfo {
-                texture: &source_texture.core,
+                texture: Arc::clone(&source_texture.core),
                 mip_level: source_mip_level,
                 origin: source_origin,
                 aspect: source_aspect,
             },
             core::TexelCopyTextureInfo {
-                texture: &destination_texture.core,
+                texture: Arc::clone(&destination_texture.core),
                 mip_level: destination_mip_level,
                 origin: destination_origin,
                 aspect: destination_aspect,
@@ -3748,7 +3752,21 @@ pub unsafe extern "C" fn wgpuQueueSubmit(
             core::ErrorKind::Validation,
             "queue submit commands must not be null when commandCount is non-zero",
         );
+        return;
     }
+    let commands = if command_count == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(commands, command_count)
+            .iter()
+            .map(|command| {
+                Arc::clone(
+                    &clone_handle::<WGPUCommandBufferImpl>(*command, "WGPUCommandBuffer").core,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    dispatch_optional_error(&queue.device, queue.core.submit(&commands));
 }
 
 /// Writes CPU data into a buffer through the queue.

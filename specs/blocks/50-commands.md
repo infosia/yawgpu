@@ -215,11 +215,45 @@ ComputePassEncoder: `SetPipeline`/`SetBindGroup`/`DispatchWorkgroups`/
 
 ### P6.9 Resource usage tracking + submit-time buffer state
 - **C75/C77** writable buffer/texture binding aliasing in a scope.
-  :308. ☐
-- **C76** read+write same resource conflict in a pass. ☐
-- **C78** attachment + sampled-in-pass conflict (T54–T56). ☐
+  :308. ☑ (P6.9)
+- **C76** read+write same resource conflict in a pass. ☑ (P6.9)
+- **C78** attachment + sampled-in-pass conflict (T54–T56). ☑ (P6.9)
 - **C80–C82** submit: command buffer finished/valid; referenced buffer
-  not mapped (B39) / not destroyed (B40/B41). ☐
+  not mapped (B39) / not destroyed (B40/B41). ☑ (P6.9)
+
+> P6.9 notes / divergences:
+> - **Usage scope** validated at each draw/dispatch (deferred-error →
+>   `finish()`). Per bound bind-group entry the BGL `kind` classifies
+>   access: write = `Buffer{Storage}` / `StorageTexture{WriteOnly|
+>   ReadWrite}`; read = `Buffer{Uniform|ReadOnlyStorage}` /
+>   `Texture` (sampled) / `StorageTexture{ReadOnly}`; `Sampler`
+>   ignored. Buffers keyed by `Buffer::same` + overlapping
+>   `[offset,offset+size)` (dynamic offset applied); textures by
+>   `Texture::same` via `TextureView::texture()`. write+write
+>   (C75/C77) or write+read (C76) ⇒ error; read+read allowed. **C78**
+>   render-pass color/depth/resolve attachment textures stashed at
+>   `begin_render_pass`; a bound texture equal to an attachment ⇒
+>   error.
+> - **Deferred:** ExecuteBundles-contributed resource usage is NOT
+>   merged into the render pass's usage scope (the bundle still
+>   validates its own pipeline/format/state; its internal resource
+>   conflicts are out of scope). Documented gap; the ported
+>   aliasing/usage/subresource tests bind resources directly in the
+>   pass. Revisit alongside real-GPU work.
+> - **Submit (C80–C82):** the `CommandEncoder` accumulates the
+>   `Arc<Buffer>`s referenced by copies/clear/encoder-WriteBuffer/
+>   buffer↔texture copies and every bind-group/vertex/index/indirect
+>   buffer recorded in its passes (only on successfully-recorded
+>   commands); `finish()` (success path) moves them into the
+>   `CommandBuffer` (+ one-shot `submitted` flag). `Queue::submit`
+>   first-match-wins: C80 error CB / double-submit (per-CB flag and
+>   in-batch duplicate via `Arc::ptr_eq`); C81 referenced buffer
+>   `map_state != Unmapped` (B39); C82 referenced buffer
+>   `is_destroyed()` (B40/B41). One device error; clean submit
+>   dispatches nothing. (Real GPU execution still Defer→P7.)
+> - `TexelCopyBufferInfo`/`TexelCopyTextureInfo` changed `&Buffer`/
+>   `&Texture` → `Arc<Buffer>`/`Arc<Texture>` so the encoder can
+>   retain references for submit tracking (FFI updated accordingly).
 
 ## Open questions
 
