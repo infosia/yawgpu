@@ -42,7 +42,7 @@ pub fn real_backend_skip_reason(backend: RealBackend) -> Option<String> {
 
 #[cfg(feature = "metal")]
 fn metal_backend_available() -> bool {
-    metal::Device::system_default().is_some()
+    !objc2_metal::MTLCopyAllDevices().is_empty()
 }
 
 #[cfg(not(feature = "metal"))]

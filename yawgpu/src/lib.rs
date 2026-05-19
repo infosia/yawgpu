@@ -3788,7 +3788,8 @@ pub unsafe extern "C" fn wgpuBufferDestroy(buffer: native::WGPUBuffer) {
 /// `buffer` must be a non-null live yawgpu buffer handle.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBufferUnmap(buffer: native::WGPUBuffer) {
-    borrow_handle(buffer, "WGPUBuffer").core.unmap();
+    let buffer = borrow_handle(buffer, "WGPUBuffer");
+    dispatch_optional_device_error(&buffer.device, buffer.core.unmap());
 }
 
 /// Asynchronously maps a buffer range.

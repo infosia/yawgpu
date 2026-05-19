@@ -4631,6 +4631,22 @@ impl HostBuffer {
         }
         Ok(())
     }
+
+    fn read(&self, offset: u64, size: u64) -> Result<Vec<u8>, String> {
+        let offset = usize::try_from(offset).map_err(|_| "host buffer offset is too large")?;
+        let size = usize::try_from(size).map_err(|_| "host buffer read size is too large")?;
+        let end = offset
+            .checked_add(size)
+            .ok_or("host buffer read range overflows")?;
+        if end > self.bytes.len() {
+            return Err("host buffer read range exceeds buffer size".to_owned());
+        }
+        let mut data = Vec::with_capacity(size);
+        for cell in &self.bytes[offset..end] {
+            data.push(unsafe { *cell.get() });
+        }
+        Ok(data)
+    }
 }
 
 impl fmt::Debug for HostBuffer {
@@ -4729,13 +4745,30 @@ impl Buffer {
     /// The transient invariant is `map_state == Unmapped` while
     /// `pending_map.is_some()` until the callback consumes it through
     /// `resolve_pending_map`.
-    pub fn unmap(&self) {
+    pub fn unmap(&self) -> Option<DeviceError> {
         let mut state = self.inner.state.lock();
+        let active_map = state.active_map;
         if let Some(pending) = state.pending_map.as_mut() {
             pending.outcome = MapAsyncStatus::Aborted;
         }
         state.map_state = BufferMapState::Unmapped;
         state.active_map = None;
+        drop(state);
+
+        let active_map = active_map?;
+        if active_map.mode != MapMode::Write {
+            return None;
+        }
+        let Some(hal) = &self.inner.hal else {
+            return None;
+        };
+        let data = match self.inner.host.read(active_map.offset, active_map.size) {
+            Ok(data) => data,
+            Err(message) => return Some(DeviceError::internal(message)),
+        };
+        hal.write(active_map.offset, &data)
+            .err()
+            .map(|error| DeviceError::internal(error.to_string()))
     }
 
     pub fn begin_map(&self, mode: MapMode, offset: u64, size: u64) -> Result<(), &'static str> {

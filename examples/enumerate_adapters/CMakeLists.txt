@@ -1,0 +1,2 @@
+add_executable(enumerate_adapters main.c)
+yawgpu_add_example(enumerate_adapters)
