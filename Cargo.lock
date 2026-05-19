@@ -585,6 +585,7 @@ dependencies = [
 name = "yawgpu-test"
 version = "0.1.0"
 dependencies = [
+ "metal",
  "yawgpu",
  "yawgpu-core",
 ]

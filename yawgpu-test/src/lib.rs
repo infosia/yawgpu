@@ -23,18 +23,31 @@ impl RealBackend {
 }
 
 #[must_use]
-pub fn real_backend_available(_backend: RealBackend) -> bool {
-    false
+pub fn real_backend_available(backend: RealBackend) -> bool {
+    match backend {
+        RealBackend::Metal => metal_backend_available(),
+        RealBackend::Vulkan => false,
+    }
 }
 
 #[must_use]
 pub fn real_backend_skip_reason(backend: RealBackend) -> Option<String> {
     (!real_backend_available(backend)).then(|| {
         format!(
-            "{} backend is unavailable in the P7.0 gated harness",
+            "{} backend is unavailable in the real-backend gated harness",
             backend.name()
         )
     })
+}
+
+#[cfg(feature = "metal")]
+fn metal_backend_available() -> bool {
+    metal::Device::system_default().is_some()
+}
+
+#[cfg(not(feature = "metal"))]
+fn metal_backend_available() -> bool {
+    false
 }
 
 thread_local! {

@@ -49,11 +49,47 @@ build -p yawgpu --features metal` + `clippy -p yawgpu --features
 metal --all-targets -D warnings` clean; smoke passes on `--features
 metal -- --ignored`. Committed `phase-7: P7.0`.
 
-## P7.1 — Metal Instance/Adapter/Device/Queue  *(NEXT)*
-Real `MTLDevice`/command queue; adapter enumerate; empty submit.
-Port `BasicTests` (creation/empty-submit subset).
+## P7.1 — Metal Instance/Adapter/Device/Queue  *(☑ codex+gate; ⏳ M2 verify)*
 
-## P7.2 — Metal Buffer + writeBuffer/submit + B2B  *(after P7.1)*
+Done (codex + Noop/feature gate): `metal` module real for objects —
+`MetalInstance::new` ok; `enumerate_adapters` via `metal::Device::
+all()` (name from `device.name()`); `MetalAdapter::create_device`
+builds a `metal::CommandQueue`; `MetalDevice` retains device+queue;
+`MetalQueue::submit_empty` = new command buffer → `commit()` →
+`wait_until_completed()`; buffer/texture/sampler stay P7.0 counter-
+only stubs (`// P7.2/P7.3`). No panics (`system_default`/`all` →
+`Option`→`HalError`). `HalError` gained `DeviceCreationFailed`/
+`QueueSubmissionFailed`; `HalAdapter::{name,backend}` + `HalBackend`;
+`HalQueue::submit_empty` (Noop/Vulkan = `Ok(())` no-op — Noop
+byte-for-byte unchanged; Metal real). `core::Queue::submit` returns
+`Option<DeviceError>`; **only zero-CB submits** call
+`hal.submit_empty()` (`HalError`→`DeviceError::internal`); validation
+path unchanged. `DeviceError::{validation,internal}` ctors. FFI:
+yawgpu vendor `WGPUYawgpuInstanceBackendSelect` chained struct
+(SType `0x7000_0001`, backend Noop=0/Metal=1/Vulkan=2);
+`wgpuCreateInstance` selects Metal only when the struct requests it
+**and** `cfg(feature="metal")` **and** ≥1 adapter — else exact
+`new_noop()` fallback; `WGPUInstanceImpl::from_core`;
+`wgpuAdapterGetInfo`/`wgpuAdapterInfoFreeMembers` (for the name
+assertion); `dispatch_optional_device_error`. `yawgpu-test` gained an
+optional `metal` feature; `real_backend_available(Metal)` probes
+`metal::Device::system_default()`. Tests: `e2e_metal_basic.rs` (3:
+adapter name, device+queue+empty-submit, default-instance-is-Noop) +
+`e2e_metal_smoke.rs` updated to match the probe — all `#[ignore]` +
+`cfg(feature="metal")` self-skip. Gate: Noop `cargo test --workspace`
+44 binaries green + `clippy --workspace --all-targets -D warnings`
+clean; `cargo build -p yawgpu --features metal` + `clippy -p yawgpu
+--features metal --all-targets -D warnings` clean; e2e tests ignored
+(not run — no GPU in codex/CI). Committed `phase-7: P7.1`.
+**⏳ Real-GPU verification pending: user runs on the Apple Silicon**
+`cargo test -p yawgpu --features metal --test e2e_metal_basic --
+--ignored` (+ `e2e_metal_smoke`); result logged below before P7.2
+codex starts.
+
+### P7.1 real-GPU run log
+- _(pending user report)_
+
+## P7.2 — Metal Buffer + writeBuffer/submit + B2B  *(NEXT — gated on P7.1 M2 verify)*
 `MTLBuffer` alloc + map/staging + readback; B2B copy. Port
 `BufferTests`/`CopyTests` buffer subset.
 
