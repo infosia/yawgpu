@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use yawgpu_hal::{
-    HalAdapter, HalBuffer, HalDevice, HalError, HalInstance, HalQueue, HalSampler, HalTexture,
+    HalAdapter, HalBackend, HalBuffer, HalDevice, HalError, HalInstance, HalQueue, HalSampler,
+    HalTexture,
 };
 
 pub(crate) mod shader_naga;
@@ -92,6 +93,16 @@ impl Adapter {
         Self {
             inner: Arc::new(AdapterInner { hal, feature_level }),
         }
+    }
+
+    #[must_use]
+    pub fn name(&self) -> String {
+        self.inner.hal.name()
+    }
+
+    #[must_use]
+    pub fn backend(&self) -> HalBackend {
+        self.inner.hal.backend()
     }
 
     #[must_use]
@@ -7480,32 +7491,47 @@ impl Queue {
         self.inner.label.lock().clone()
     }
 
-    pub fn submit(&self, command_buffers: &[Arc<CommandBuffer>]) -> Option<String> {
+    pub fn submit(&self, command_buffers: &[Arc<CommandBuffer>]) -> Option<DeviceError> {
         for (index, command_buffer) in command_buffers.iter().enumerate() {
             if command_buffer.is_error() {
-                return Some("queue submit cannot use an error command buffer".to_owned());
+                return Some(DeviceError::validation(
+                    "queue submit cannot use an error command buffer",
+                ));
             }
             if command_buffer.is_submitted() {
-                return Some("command buffer cannot be submitted more than once".to_owned());
+                return Some(DeviceError::validation(
+                    "command buffer cannot be submitted more than once",
+                ));
             }
             if command_buffers[..index]
                 .iter()
                 .any(|previous| previous.same(command_buffer))
             {
-                return Some("command buffer cannot be submitted more than once".to_owned());
+                return Some(DeviceError::validation(
+                    "command buffer cannot be submitted more than once",
+                ));
             }
             for buffer in command_buffer.referenced_buffers() {
                 if buffer.map_state() != BufferMapState::Unmapped {
-                    return Some("queue submit cannot use a mapped buffer".to_owned());
+                    return Some(DeviceError::validation(
+                        "queue submit cannot use a mapped buffer",
+                    ));
                 }
                 if buffer.is_destroyed() {
-                    return Some("queue submit cannot use a destroyed buffer".to_owned());
+                    return Some(DeviceError::validation(
+                        "queue submit cannot use a destroyed buffer",
+                    ));
                 }
             }
         }
         for command_buffer in command_buffers {
             if let Err(message) = command_buffer.mark_submitted() {
-                return Some(message);
+                return Some(DeviceError::validation(message));
+            }
+        }
+        if command_buffers.is_empty() {
+            if let Err(error) = self.inner.hal.submit_empty() {
+                return Some(DeviceError::internal(error.to_string()));
             }
         }
         None
@@ -7525,6 +7551,24 @@ pub enum ErrorKind {
 pub struct DeviceError {
     pub kind: ErrorKind,
     pub message: String,
+}
+
+impl DeviceError {
+    #[must_use]
+    pub fn validation(message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::Validation,
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::Internal,
+            message: message.into(),
+        }
+    }
 }
 
 impl DeviceError {

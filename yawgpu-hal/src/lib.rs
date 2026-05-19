@@ -27,6 +27,10 @@ mod vulkan {
 pub enum HalError {
     #[error("HAL backend is unavailable: {backend}")]
     BackendUnavailable { backend: &'static str },
+    #[error("HAL device creation failed: {backend}")]
+    DeviceCreationFailed { backend: &'static str },
+    #[error("HAL queue submission failed: {backend}")]
+    QueueSubmissionFailed { backend: &'static str },
 }
 
 #[derive(Debug)]
@@ -80,6 +84,30 @@ pub enum HalAdapter {
 }
 
 impl HalAdapter {
+    #[must_use]
+    pub fn name(&self) -> String {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.name().to_owned(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => "yawgpu Vulkan Adapter".to_owned(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.name().to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn backend(&self) -> HalBackend {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => HalBackend::Noop,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => HalBackend::Vulkan,
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => HalBackend::Metal,
+        }
+    }
+
     pub fn create_device(&self) -> Result<HalDevice, HalError> {
         match self {
             #[cfg(feature = "noop")]
@@ -90,6 +118,14 @@ impl HalAdapter {
             Self::Metal(adapter) => adapter.create_device().map(HalDevice::Metal),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HalBackend {
+    Noop,
+    Vulkan,
+    Metal,
 }
 
 #[derive(Debug)]
@@ -174,6 +210,19 @@ pub enum HalQueue {
     Vulkan(vulkan::VulkanQueue),
     #[cfg(feature = "metal")]
     Metal(metal::MetalQueue),
+}
+
+impl HalQueue {
+    pub fn submit_empty(&self) -> Result<(), HalError> {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => Ok(()),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => Ok(()),
+            #[cfg(feature = "metal")]
+            Self::Metal(queue) => queue.submit_empty(),
+        }
+    }
 }
 
 #[derive(Debug)]

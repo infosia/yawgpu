@@ -9,7 +9,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
 default = []
-metal = ["yawgpu-hal/metal"]
+metal = ["yawgpu-hal/metal", "yawgpu-test/metal"]
 
 [dependencies]
 yawgpu-core = { path = "../yawgpu-core" }

@@ -23,6 +23,29 @@ use crate::conv::{
     string_view_to_str, DeviceLostCallbackInfo,
 };
 
+pub const WGPU_YAWGPU_INSTANCE_BACKEND_NOOP: u32 = 0;
+pub const WGPU_YAWGPU_INSTANCE_BACKEND_METAL: u32 = 1;
+pub const WGPU_YAWGPU_INSTANCE_BACKEND_VULKAN: u32 = 2;
+pub const WGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT: native::WGPUSType = 0x7000_0001;
+
+/// yawgpu vendor extension for selecting a backend at instance creation.
+///
+/// Chain this from `WGPUInstanceDescriptor::nextInChain` with
+/// `WGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT`. This is intentionally outside
+/// webgpu.h and mirrors native-only backend selection extensions.
+#[repr(C)]
+pub struct WGPUYawgpuInstanceBackendSelect {
+    pub chain: native::WGPUChainedStruct,
+    pub backend: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstanceBackendSelection {
+    Noop,
+    Metal,
+    Vulkan,
+}
+
 pub struct WGPUAdapterImpl {
     core: Arc<core::Adapter>,
     instance: Arc<WGPUInstanceImpl>,
@@ -294,8 +317,12 @@ pub struct WGPURenderBundleImpl {
 
 impl WGPUInstanceImpl {
     fn new_noop(timed_wait_any_enabled: bool) -> Arc<Self> {
+        Self::from_core(core::Instance::new_noop(), timed_wait_any_enabled)
+    }
+
+    fn from_core(core: core::Instance, timed_wait_any_enabled: bool) -> Arc<Self> {
         Arc::new(Self {
-            core: Arc::new(core::Instance::new_noop()),
+            core: Arc::new(core),
             timed_wait_any_enabled,
             pending_callbacks: Mutex::new(BTreeMap::new()),
         })
@@ -1061,7 +1088,7 @@ pub mod native {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
-/// Creates a new Noop-backed WebGPU instance.
+/// Creates a new WebGPU instance.
 ///
 /// # Safety
 ///
@@ -1070,9 +1097,35 @@ pub mod native {
 pub unsafe extern "C" fn wgpuCreateInstance(
     descriptor: *const native::WGPUInstanceDescriptor,
 ) -> native::WGPUInstance {
-    arc_to_handle(WGPUInstanceImpl::new_noop(instance_has_timed_wait_any(
-        descriptor,
-    )))
+    let timed_wait_any_enabled = instance_has_timed_wait_any(descriptor);
+    let instance = match instance_backend_selection(descriptor) {
+        InstanceBackendSelection::Noop => WGPUInstanceImpl::new_noop(timed_wait_any_enabled),
+        InstanceBackendSelection::Metal => {
+            #[cfg(feature = "metal")]
+            {
+                match yawgpu_hal::metal::MetalInstance::new() {
+                    Ok(instance) => {
+                        let hal_instance = yawgpu_hal::HalInstance::Metal(instance);
+                        if hal_instance.enumerate_adapters().is_empty() {
+                            WGPUInstanceImpl::new_noop(timed_wait_any_enabled)
+                        } else {
+                            WGPUInstanceImpl::from_core(
+                                core::Instance::from_hal(hal_instance),
+                                timed_wait_any_enabled,
+                            )
+                        }
+                    }
+                    Err(_) => WGPUInstanceImpl::new_noop(timed_wait_any_enabled),
+                }
+            }
+            #[cfg(not(feature = "metal"))]
+            {
+                WGPUInstanceImpl::new_noop(timed_wait_any_enabled)
+            }
+        }
+        InstanceBackendSelection::Vulkan => WGPUInstanceImpl::new_noop(timed_wait_any_enabled),
+    };
+    arc_to_handle(instance)
 }
 
 /// Releases one owned reference to an instance handle.
@@ -1205,6 +1258,39 @@ pub unsafe extern "C" fn wgpuAdapterHasFeature(
 ) -> native::WGPUBool {
     let adapter = borrow_handle(adapter, "WGPUAdapter");
     native::WGPUBool::from(adapter.core.has_feature(map_feature(feature)))
+}
+
+/// Gets identifying information for an adapter.
+///
+/// # Safety
+///
+/// `adapter` must be a non-null live yawgpu adapter handle. `info` must point
+/// to writable `WGPUAdapterInfo` storage. String members must be released with
+/// `wgpuAdapterInfoFreeMembers`.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuAdapterGetInfo(
+    adapter: native::WGPUAdapter,
+    info: *mut native::WGPUAdapterInfo,
+) -> native::WGPUStatus {
+    let adapter = borrow_handle(adapter, "WGPUAdapter");
+    let Some(info) = info.as_mut() else {
+        return native::WGPUStatus_Error;
+    };
+    *info = adapter_info_from_core(&adapter.core);
+    native::WGPUStatus_Success
+}
+
+/// Frees string members allocated by `wgpuAdapterGetInfo`.
+///
+/// # Safety
+///
+/// Any non-null string member must have been returned by yawgpu.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuAdapterInfoFreeMembers(info: native::WGPUAdapterInfo) {
+    free_owned_string_view(info.vendor);
+    free_owned_string_view(info.architecture);
+    free_owned_string_view(info.device);
+    free_owned_string_view(info.description);
 }
 
 /// Requests a device from an adapter.
@@ -2859,6 +2945,65 @@ fn dispatch_optional_error(device: &core::Device, error: Option<String>) {
     }
 }
 
+fn dispatch_optional_device_error(device: &core::Device, error: Option<core::DeviceError>) {
+    if let Some(error) = error {
+        device.dispatch_error(error.kind, error.message);
+    }
+}
+
+fn adapter_info_from_core(adapter: &core::Adapter) -> native::WGPUAdapterInfo {
+    let (backend_type, adapter_type) = match adapter.backend() {
+        yawgpu_hal::HalBackend::Noop => (native::WGPUBackendType_Null, native::WGPUAdapterType_CPU),
+        yawgpu_hal::HalBackend::Vulkan => (
+            native::WGPUBackendType_Vulkan,
+            native::WGPUAdapterType_Unknown,
+        ),
+        yawgpu_hal::HalBackend::Metal => (
+            native::WGPUBackendType_Metal,
+            native::WGPUAdapterType_Unknown,
+        ),
+        _ => (
+            native::WGPUBackendType_Undefined,
+            native::WGPUAdapterType_Unknown,
+        ),
+    };
+    native::WGPUAdapterInfo {
+        nextInChain: std::ptr::null_mut(),
+        vendor: owned_string_view("yawgpu"),
+        architecture: owned_string_view(""),
+        device: owned_string_view(&adapter.name()),
+        description: owned_string_view(""),
+        backendType: backend_type,
+        adapterType: adapter_type,
+        vendorID: 0,
+        deviceID: 0,
+        subgroupMinSize: 0,
+        subgroupMaxSize: 0,
+    }
+}
+
+fn owned_string_view(value: &str) -> native::WGPUStringView {
+    if value.is_empty() {
+        return native::WGPUStringView {
+            data: std::ptr::null(),
+            length: 0,
+        };
+    }
+    let bytes = value.as_bytes().to_vec().into_boxed_slice();
+    let length = bytes.len();
+    let data = Box::into_raw(bytes).cast::<std::os::raw::c_char>();
+    native::WGPUStringView { data, length }
+}
+
+unsafe fn free_owned_string_view(value: native::WGPUStringView) {
+    if value.data.is_null() {
+        return;
+    }
+    let slice =
+        std::ptr::slice_from_raw_parts_mut(value.data.cast_mut().cast::<u8>(), value.length);
+    drop(Box::from_raw(slice));
+}
+
 unsafe fn dynamic_offsets_slice(count: usize, offsets: *const u32) -> Vec<u32> {
     if count == 0 {
         return Vec::new();
@@ -3766,7 +3911,7 @@ pub unsafe extern "C" fn wgpuQueueSubmit(
             })
             .collect::<Vec<_>>()
     };
-    dispatch_optional_error(&queue.device, queue.core.submit(&commands));
+    dispatch_optional_device_error(&queue.device, queue.core.submit(&commands));
 }
 
 /// Writes CPU data into a buffer through the queue.
@@ -3953,6 +4098,28 @@ unsafe fn instance_has_timed_wait_any(descriptor: *const native::WGPUInstanceDes
     let features =
         std::slice::from_raw_parts(descriptor.requiredFeatures, descriptor.requiredFeatureCount);
     features.contains(&native::WGPUInstanceFeatureName_TimedWaitAny)
+}
+
+unsafe fn instance_backend_selection(
+    descriptor: *const native::WGPUInstanceDescriptor,
+) -> InstanceBackendSelection {
+    let Some(descriptor) = descriptor.as_ref() else {
+        return InstanceBackendSelection::Noop;
+    };
+    let mut chain = descriptor.nextInChain;
+    while let Some(node) = chain.as_ref() {
+        if node.sType == WGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT {
+            let selection = &*(node as *const native::WGPUChainedStruct
+                as *const WGPUYawgpuInstanceBackendSelect);
+            return match selection.backend {
+                WGPU_YAWGPU_INSTANCE_BACKEND_METAL => InstanceBackendSelection::Metal,
+                WGPU_YAWGPU_INSTANCE_BACKEND_VULKAN => InstanceBackendSelection::Vulkan,
+                _ => InstanceBackendSelection::Noop,
+            };
+        }
+        chain = node.next;
+    }
+    InstanceBackendSelection::Noop
 }
 
 unsafe fn required_features_from_descriptor(
