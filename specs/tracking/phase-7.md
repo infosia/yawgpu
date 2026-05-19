@@ -263,9 +263,51 @@ Committed `phase-7: P7.5`. **Metal backend bring-up complete
   MTLRenderPipelineState → render-pass draw → texture → T2B →
   pixel readback confirmed.**
 
-## P7.6 — Vulkan bring-up (mirror P7.1–P7.5)  *(NEXT)*
-`ash` + MoltenVK on macOS; naga→SPIR-V; same HAL contract; reuse the
-ported end2end tests parametrized by backend feature.
+## P7.6 — Vulkan bring-up (mirror P7.1–P7.5)  *(in progress)*
+
+`ash` + MoltenVK on macOS (`$VULKAN_SDK` = `~/VulkanSDK/(sdk-version)/
+macOS`, Apple Silicon enumerates via `DRIVER_ID_MOLTENVK`); naga→SPIR-V
+(`spv-out`); fills the **same HAL enum arms** the Metal backend proved
+(no `dyn`); Noop unchanged. **Sub-sliced** (Vulkan is ~5 Metal slices
+of explicit code — keep reviews tractable & isolate failures, mirroring
+the Metal progression). Each sub-slice: Noop gate unchanged + `cargo
+build/clippy -p yawgpu --features vulkan` clean + Claude runs the
+matching e2e on the host via MoltenVK and logs it.
+
+- **P7.6a** Instance/PhysicalDevice/Device/Queue + empty submit;
+  `ash` dep (optional, `vulkan` feature; not default); SPIR-V dep
+  wiring (`naga` `spv-out`); backend-select struct extended to
+  Vulkan. Mirrors P7.1. **☑ DONE — MoltenVK-verified.** `ash`
+  0.38.0 optional/`vulkan`-gated; `naga` `spv-out` added (P7.6d
+  prep); inline `mod vulkan` → `yawgpu-hal/src/vulkan/mod.rs`:
+  `VulkanInstance::new` (`ash::Entry::load` + `VK_KHR_portability_
+  enumeration` ext + `ENUMERATE_PORTABILITY_KHR` flag), physical-
+  device enumerate + name, `create_device` (GRAPHICS|COMPUTE queue
+  family, enables `VK_KHR_portability_subset` when present),
+  `VulkanQueue::submit_empty` (`queue_submit []` + `queue_wait_idle`);
+  Arc-inner + `Drop` order (device holds instance Arc ⇒ destroy
+  device before instance); buffer/texture/sampler/pipelines stubs;
+  no `unwrap`/`expect`/panic (`vk::Result`→`HalError`). FFI
+  backend-select Vulkan arm real (feature+struct+≥1 adapter else
+  Noop fallback, mirrors Metal). `yawgpu-test`
+  `real_backend_available(Vulkan)` ash probe. Tests
+  `e2e_vulkan_basic.rs` (3, `#[ignore]`/cfg). Gate: Noop 49 binaries
+  green + clippy clean; `cargo build/clippy -p yawgpu --features
+  vulkan` clean; `--features metal` still clean. M2 (MoltenVK,
+  2026-05-19): `e2e_vulkan_basic` **3/3** (adapter name, device+
+  queue+empty submit, default-Noop) + Metal `e2e_metal_basic`/
+  `render` 3/3 each (no regression). Committed `phase-7: P7.6a`.
+- **P7.6b** VkBuffer (+ device memory, host-visible/coherent for
+  readback) + queue writeBuffer + B2B + map-readback. Mirrors P7.2.
+- **P7.6c** VkImage/VkImageView/VkSampler + B2T/T2B/T2T. Mirrors P7.3.
+- **P7.6d** naga→SPIR-V compute pipeline + descriptor sets + dispatch
+  + storage readback. Mirrors P7.4.
+- **P7.6e** SPIR-V graphics pipeline + render pass/framebuffer + draw
+  + color readback. Mirrors P7.5.
+
+Reuse the `e2e_metal_*` test scenarios as `e2e_vulkan_*` (same C-API
+flow, backend-select = Vulkan), `#[ignore]`/`cfg(feature="vulkan")`
+self-skip.
 
 ## Phase 7 exit criteria
 

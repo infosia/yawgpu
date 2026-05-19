@@ -5,26 +5,7 @@ pub mod noop;
 pub mod metal;
 
 #[cfg(feature = "vulkan")]
-mod vulkan {
-    #[derive(Debug)]
-    pub struct VulkanInstance;
-    #[derive(Debug)]
-    pub struct VulkanAdapter;
-    #[derive(Debug)]
-    pub struct VulkanDevice;
-    #[derive(Debug)]
-    pub struct VulkanQueue;
-    #[derive(Debug, Clone)]
-    pub struct VulkanBuffer;
-    #[derive(Debug, Clone)]
-    pub struct VulkanTexture;
-    #[derive(Debug, Clone)]
-    pub struct VulkanSampler;
-    #[derive(Debug, Clone)]
-    pub struct VulkanComputePipeline;
-    #[derive(Debug, Clone)]
-    pub struct VulkanRenderPipeline;
-}
+pub mod vulkan;
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -75,7 +56,11 @@ impl HalInstance {
                 .map(HalAdapter::Noop)
                 .collect(),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => Vec::new(),
+            Self::Vulkan(instance) => instance
+                .enumerate_adapters()
+                .into_iter()
+                .map(HalAdapter::Vulkan)
+                .collect(),
             #[cfg(feature = "metal")]
             Self::Metal(instance) => instance
                 .enumerate_adapters()
@@ -104,7 +89,7 @@ impl HalAdapter {
             #[cfg(feature = "noop")]
             Self::Noop(adapter) => adapter.name().to_owned(),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => "yawgpu Vulkan Adapter".to_owned(),
+            Self::Vulkan(adapter) => adapter.name().to_owned(),
             #[cfg(feature = "metal")]
             Self::Metal(adapter) => adapter.name().to_owned(),
         }
@@ -127,7 +112,7 @@ impl HalAdapter {
             #[cfg(feature = "noop")]
             Self::Noop(adapter) => adapter.create_device().map(HalDevice::Noop),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => Err(HalError::BackendUnavailable { backend: "vulkan" }),
+            Self::Vulkan(adapter) => adapter.create_device().map(HalDevice::Vulkan),
             #[cfg(feature = "metal")]
             Self::Metal(adapter) => adapter.create_device().map(HalDevice::Metal),
         }
@@ -172,7 +157,7 @@ impl HalDevice {
             #[cfg(feature = "noop")]
             Self::Noop(device) => device.allocation_count(),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => 0,
+            Self::Vulkan(device) => device.allocation_count(),
             #[cfg(feature = "metal")]
             Self::Metal(device) => device.allocation_count(),
         }
@@ -184,7 +169,7 @@ impl HalDevice {
             #[cfg(feature = "noop")]
             Self::Noop(device) => HalQueue::Noop(device.queue().clone()),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => HalQueue::Vulkan(vulkan::VulkanQueue),
+            Self::Vulkan(device) => HalQueue::Vulkan(device.queue().clone()),
             #[cfg(feature = "metal")]
             Self::Metal(device) => HalQueue::Metal(device.queue().clone()),
         }
@@ -299,7 +284,7 @@ impl HalQueue {
             #[cfg(feature = "noop")]
             Self::Noop(_) => Ok(()),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => Ok(()),
+            Self::Vulkan(queue) => queue.submit_empty(),
             #[cfg(feature = "metal")]
             Self::Metal(queue) => queue.submit_empty(),
         }
@@ -312,7 +297,7 @@ impl HalQueue {
             #[cfg(feature = "noop")]
             Self::Noop(_) => Ok(()),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => Ok(()),
+            Self::Vulkan(queue) => queue.submit_copies(copies),
             #[cfg(feature = "metal")]
             Self::Metal(queue) => queue.submit_copies(copies),
         }
