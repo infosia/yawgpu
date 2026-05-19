@@ -270,6 +270,11 @@ where
         test.errors()
     );
     yawgpu::wgpuRenderPassEncoderEnd(pass);
+    assert!(
+        test.errors().is_empty(),
+        "unexpected errors: {:?}",
+        test.errors()
+    );
     let command_buffer = finish_ok(test, encoder);
     yawgpu::wgpuCommandBufferRelease(command_buffer);
     yawgpu::wgpuRenderPassEncoderRelease(pass);
@@ -289,9 +294,17 @@ where
     let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
     assert!(!pass.is_null());
     commands(pass);
-    test.clear_errors();
+    assert!(
+        test.errors().is_empty(),
+        "unexpected errors: {:?}",
+        test.errors()
+    );
     yawgpu::wgpuRenderPassEncoderEnd(pass);
-    test.clear_errors();
+    assert!(
+        test.errors().is_empty(),
+        "unexpected errors: {:?}",
+        test.errors()
+    );
     let command_buffer = finish_error(test, encoder);
     yawgpu::wgpuCommandBufferRelease(command_buffer);
     yawgpu::wgpuRenderPassEncoderRelease(pass);
@@ -314,6 +327,11 @@ where
         test.errors()
     );
     yawgpu::wgpuComputePassEncoderEnd(pass);
+    assert!(
+        test.errors().is_empty(),
+        "unexpected errors: {:?}",
+        test.errors()
+    );
     let command_buffer = finish_ok(test, encoder);
     yawgpu::wgpuCommandBufferRelease(command_buffer);
     yawgpu::wgpuComputePassEncoderRelease(pass);
@@ -329,9 +347,17 @@ where
     let pass = yawgpu::wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
     assert!(!pass.is_null());
     commands(pass);
-    test.clear_errors();
+    assert!(
+        test.errors().is_empty(),
+        "unexpected errors: {:?}",
+        test.errors()
+    );
     yawgpu::wgpuComputePassEncoderEnd(pass);
-    test.clear_errors();
+    assert!(
+        test.errors().is_empty(),
+        "unexpected errors: {:?}",
+        test.errors()
+    );
     let command_buffer = finish_error(test, encoder);
     yawgpu::wgpuCommandBufferRelease(command_buffer);
     yawgpu::wgpuComputePassEncoderRelease(pass);
