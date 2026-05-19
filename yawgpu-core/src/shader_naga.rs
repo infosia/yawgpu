@@ -28,6 +28,43 @@ pub(crate) struct GeneratedMsl {
     pub entry_point: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GeneratedRenderMsl {
+    pub source: String,
+    pub vertex_entry_point: String,
+    pub fragment_entry_point: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MslVertexBufferBinding {
+    pub slot: u32,
+    pub metal_index: u32,
+    pub array_stride: u64,
+    pub step_mode: MslVertexStepMode,
+    pub attributes: Vec<MslVertexAttribute>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MslVertexStepMode {
+    Vertex,
+    Instance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MslVertexAttribute {
+    pub shader_location: u32,
+    pub offset: u64,
+    pub format: MslVertexFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MslVertexFormat {
+    Float32,
+    Float32x2,
+    Float32x3,
+    Float32x4,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReflectedShaderStage {
     Vertex,
@@ -188,25 +225,7 @@ impl ValidatedWgslModule {
         entry_name: &str,
         binding_map: &MslBindingMap,
     ) -> Result<GeneratedMsl, String> {
-        let resources = binding_map
-            .buffers
-            .iter()
-            .map(|binding| {
-                let slot = u8::try_from(binding.metal_index)
-                    .map_err(|_| "MSL buffer index exceeds the supported slot range")?;
-                Ok((
-                    naga::ResourceBinding {
-                        group: binding.group,
-                        binding: binding.binding,
-                    },
-                    naga::back::msl::BindTarget {
-                        buffer: Some(slot),
-                        ..Default::default()
-                    },
-                ))
-            })
-            .collect::<Result<naga::back::msl::BindingMap, &str>>()
-            .map_err(str::to_owned)?;
+        let resources = msl_resources(binding_map)?;
         let mut per_entry_point_map = BTreeMap::new();
         per_entry_point_map.insert(
             entry_name.to_owned(),
@@ -228,22 +247,67 @@ impl ValidatedWgslModule {
         let (source, info) =
             naga::back::msl::write_string(&self.module, &self.info, &options, &pipeline_options)
                 .map_err(|error| error.to_string())?;
-        let entry_index = self
-            .module
-            .entry_points
-            .iter()
-            .position(|entry| entry.name == entry_name && entry.stage == naga::ShaderStage::Compute)
-            .ok_or_else(|| "MSL entry point was not found".to_owned())?;
-        let entry_point = info
-            .entry_point_names
-            .get(entry_index)
-            .ok_or_else(|| "MSL entry point name was not emitted".to_owned())?
-            .as_ref()
-            .map_err(|error| error.to_string())?
-            .clone();
+        let entry_point =
+            emitted_entry_point_name(&self.module, &info, naga::ShaderStage::Compute, entry_name)?;
         Ok(GeneratedMsl {
             source,
             entry_point,
+        })
+    }
+
+    pub(crate) fn generate_render_msl(
+        &self,
+        vertex_entry_name: &str,
+        fragment_entry_name: &str,
+        binding_map: &MslBindingMap,
+        vertex_buffers: &[MslVertexBufferBinding],
+    ) -> Result<GeneratedRenderMsl, String> {
+        let resources = msl_resources(binding_map)?;
+        let mut per_entry_point_map = BTreeMap::new();
+        per_entry_point_map.insert(
+            vertex_entry_name.to_owned(),
+            naga::back::msl::EntryPointResources {
+                resources: resources.clone(),
+                ..Default::default()
+            },
+        );
+        per_entry_point_map.insert(
+            fragment_entry_name.to_owned(),
+            naga::back::msl::EntryPointResources {
+                resources,
+                ..Default::default()
+            },
+        );
+        let options = naga::back::msl::Options {
+            lang_version: (2, 4),
+            per_entry_point_map,
+            fake_missing_bindings: false,
+            ..Default::default()
+        };
+        let pipeline_options = naga::back::msl::PipelineOptions {
+            entry_point: None,
+            vertex_buffer_mappings: msl_vertex_buffer_mappings(vertex_buffers)?,
+            ..Default::default()
+        };
+        let (source, info) =
+            naga::back::msl::write_string(&self.module, &self.info, &options, &pipeline_options)
+                .map_err(|error| error.to_string())?;
+        let vertex_entry_point = emitted_entry_point_name(
+            &self.module,
+            &info,
+            naga::ShaderStage::Vertex,
+            vertex_entry_name,
+        )?;
+        let fragment_entry_point = emitted_entry_point_name(
+            &self.module,
+            &info,
+            naga::ShaderStage::Fragment,
+            fragment_entry_name,
+        )?;
+        Ok(GeneratedRenderMsl {
+            source,
+            vertex_entry_point,
+            fragment_entry_point,
         })
     }
 
@@ -436,6 +500,89 @@ impl ValidatedWgslModule {
         }
         Ok(size)
     }
+}
+
+fn msl_resources(binding_map: &MslBindingMap) -> Result<naga::back::msl::BindingMap, String> {
+    binding_map
+        .buffers
+        .iter()
+        .map(|binding| {
+            let slot = u8::try_from(binding.metal_index)
+                .map_err(|_| "MSL buffer index exceeds the supported slot range".to_owned())?;
+            Ok((
+                naga::ResourceBinding {
+                    group: binding.group,
+                    binding: binding.binding,
+                },
+                naga::back::msl::BindTarget {
+                    buffer: Some(slot),
+                    ..Default::default()
+                },
+            ))
+        })
+        .collect()
+}
+
+fn msl_vertex_buffer_mappings(
+    vertex_buffers: &[MslVertexBufferBinding],
+) -> Result<Vec<naga::back::msl::VertexBufferMapping>, String> {
+    vertex_buffers
+        .iter()
+        .map(|buffer| {
+            Ok(naga::back::msl::VertexBufferMapping {
+                id: buffer.metal_index,
+                stride: u32::try_from(buffer.array_stride)
+                    .map_err(|_| "MSL vertex stride exceeds the supported range".to_owned())?,
+                step_mode: match buffer.step_mode {
+                    MslVertexStepMode::Vertex => naga::back::msl::VertexBufferStepMode::ByVertex,
+                    MslVertexStepMode::Instance => {
+                        naga::back::msl::VertexBufferStepMode::ByInstance
+                    }
+                },
+                attributes: buffer
+                    .attributes
+                    .iter()
+                    .map(|attribute| {
+                        Ok(naga::back::msl::AttributeMapping {
+                            shader_location: attribute.shader_location,
+                            offset: u32::try_from(attribute.offset).map_err(|_| {
+                                "MSL vertex attribute offset exceeds the supported range".to_owned()
+                            })?,
+                            format: msl_vertex_format(attribute.format),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
+            })
+        })
+        .collect()
+}
+
+fn msl_vertex_format(format: MslVertexFormat) -> naga::back::msl::VertexFormat {
+    match format {
+        MslVertexFormat::Float32 => naga::back::msl::VertexFormat::Float32,
+        MslVertexFormat::Float32x2 => naga::back::msl::VertexFormat::Float32x2,
+        MslVertexFormat::Float32x3 => naga::back::msl::VertexFormat::Float32x3,
+        MslVertexFormat::Float32x4 => naga::back::msl::VertexFormat::Float32x4,
+    }
+}
+
+fn emitted_entry_point_name(
+    module: &naga::Module,
+    info: &naga::back::msl::TranslationInfo,
+    stage: naga::ShaderStage,
+    entry_name: &str,
+) -> Result<String, String> {
+    let entry_index = module
+        .entry_points
+        .iter()
+        .position(|entry| entry.name == entry_name && entry.stage == stage)
+        .ok_or_else(|| "MSL entry point was not found".to_owned())?;
+    info.entry_point_names
+        .get(entry_index)
+        .ok_or_else(|| "MSL entry point name was not emitted".to_owned())?
+        .as_ref()
+        .map_err(|error| error.to_string())
+        .cloned()
 }
 
 fn map_shader_stage(stage: naga::ShaderStage) -> Option<ReflectedShaderStage> {

@@ -22,6 +22,8 @@ mod vulkan {
     pub struct VulkanSampler;
     #[derive(Debug, Clone)]
     pub struct VulkanComputePipeline;
+    #[derive(Debug, Clone)]
+    pub struct VulkanRenderPipeline;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -247,6 +249,37 @@ impl HalDevice {
                 .map(HalComputePipeline::Metal),
         }
     }
+
+    pub fn create_render_pipeline(
+        &self,
+        msl_source: &str,
+        vertex_entry_point: &str,
+        fragment_entry_point: &str,
+        descriptor: &HalRenderPipelineDescriptor,
+    ) -> Result<HalRenderPipeline, HalError> {
+        #[cfg(not(feature = "metal"))]
+        let _ = (
+            msl_source,
+            vertex_entry_point,
+            fragment_entry_point,
+            descriptor,
+        );
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => Ok(HalRenderPipeline::Noop),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => Ok(HalRenderPipeline::Vulkan(vulkan::VulkanRenderPipeline)),
+            #[cfg(feature = "metal")]
+            Self::Metal(device) => device
+                .create_render_pipeline(
+                    msl_source,
+                    vertex_entry_point,
+                    fragment_entry_point,
+                    descriptor,
+                )
+                .map(HalRenderPipeline::Metal),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -369,6 +402,7 @@ pub enum HalCopy {
     TextureToBuffer(HalBufferTextureCopy),
     TextureToTexture(HalTextureCopy),
     ComputePass(HalComputePass),
+    RenderPass(HalRenderPass),
 }
 
 #[derive(Debug, Clone)]
@@ -383,6 +417,83 @@ pub struct HalBoundBuffer {
     pub metal_index: u32,
     pub buffer: HalBuffer,
     pub offset: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct HalRenderPass {
+    pub pipeline: HalRenderPipeline,
+    pub color_target: HalRenderColorTarget,
+    pub bind_buffers: Vec<HalBoundBuffer>,
+    pub vertex_buffers: Vec<HalBoundBuffer>,
+    pub draw: HalDraw,
+}
+
+#[derive(Debug, Clone)]
+pub struct HalRenderColorTarget {
+    pub texture: HalTexture,
+    pub load_op: HalRenderLoadOp,
+    pub store: bool,
+    pub clear_color: [f64; 4],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HalRenderLoadOp {
+    Load,
+    Clear,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HalDraw {
+    pub vertex_count: u32,
+    pub instance_count: u32,
+    pub first_vertex: u32,
+    pub first_instance: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct HalRenderPipelineDescriptor {
+    pub color_formats: Vec<HalTextureFormat>,
+    pub vertex_buffers: Vec<HalVertexBufferLayout>,
+    pub primitive_topology: HalPrimitiveTopology,
+}
+
+#[derive(Debug, Clone)]
+pub struct HalVertexBufferLayout {
+    pub array_stride: u64,
+    pub step_mode: HalVertexStepMode,
+    pub attributes: Vec<HalVertexAttribute>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HalVertexAttribute {
+    pub format: HalVertexFormat,
+    pub offset: u64,
+    pub shader_location: u32,
+    pub metal_buffer_index: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HalVertexFormat {
+    Float32,
+    Float32x2,
+    Float32x3,
+    Float32x4,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HalVertexStepMode {
+    Vertex,
+    Instance,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HalPrimitiveTopology {
+    PointList,
+    LineList,
+    LineStrip,
+    TriangleList,
+    TriangleStrip,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -531,6 +642,17 @@ pub enum HalComputePipeline {
     Vulkan(vulkan::VulkanComputePipeline),
     #[cfg(feature = "metal")]
     Metal(metal::MetalComputePipeline),
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum HalRenderPipeline {
+    #[cfg(feature = "noop")]
+    Noop,
+    #[cfg(feature = "vulkan")]
+    Vulkan(vulkan::VulkanRenderPipeline),
+    #[cfg(feature = "metal")]
+    Metal(metal::MetalRenderPipeline),
 }
 
 #[cfg(test)]

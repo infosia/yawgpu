@@ -217,11 +217,53 @@ green (`compute_pipeline_validation` 7/7, `pass_state_validation`
   **Real WGSL→MSL→MTLComputePipelineState→dispatch→storage-buffer
   readback confirmed.**
 
-## P7.5 — Metal render pipeline + render pass draw  *(NEXT)*
-Render pipeline; render pass load/store + draw; color readback.
-Port `BasicTests` render / minimal draw.
+## P7.5 — Metal render pipeline + render pass draw  *(☑ DONE — real-GPU-verified)*
 
-## P7.6 — Vulkan bring-up (mirror P7.1–P7.5)  *(after P7.5)*
+Done: `shader_naga::generate_render_msl` emits one MSL module covering
+vertex+fragment entry points (per-entry-point resource map; naga
+`vertex_buffer_mappings`; emitted names via shared
+`emitted_entry_point_name`; `Result`, no panic/leak). Vertex-buffer
+index contract (extends P7.4): `metal_vertex_buffer_binding_map`
+assigns vertex-buffer `metal_index = bind_group_buffer_count + slot`
+— **collision-free** (strictly above all bind-group buffer indices),
+single `vertex_buffer_bindings` source feeding both MSL codegen and
+runtime `set_vertex_buffer`. HAL: `HalRenderPipeline` +
+`HalDevice::create_render_pipeline(msl,vtx,frag,
+&HalRenderPipelineDescriptor)` (HAL-local color-format/vertex-layout/
+topology types; Metal library→vtx+frag function→
+`MTLRenderPipelineDescriptor`+`MTLVertexDescriptor`→
+`new_render_pipeline_state`, failure→`HalError`, no panic);
+`HalCopy::RenderPass(HalRenderPass{pipeline,color_target(tex,load/
+clear/store),vertex_buffers,bind_buffers,draw})` executed in recorded
+order; metal `MTLRenderPassDescriptor`→`new_render_command_encoder`→
+`set_render_pipeline_state`→`set_vertex_buffer`(+bind buffers in the
+collision-free index space)→`draw_primitives`. core: `RenderPipeline`
+holds `Option<HalRenderPipeline>`+maps (naga/Metal fail ⇒ existing
+error-pipeline path, not panic); `RenderPassEncoder` records
+`RenderPassCommand` after P6.4/P6.5 validation; `Queue::submit`
+translates → `HalCopy::RenderPass`, skips no-HAL (Noop pure no-op).
+Bounded: 1 `RGBA8Unorm` color target, non-indexed `draw`, vertex
+buffer + uniform, no depth/MSAA/index/indirect/shader-tex; P5/P6
+validation unchanged. Tests `e2e_metal_render.rs` (3,
+`#[ignore]`/cfg). Gate: Noop `cargo test --workspace` 48 binaries
+green (`render_pipeline_validation` 14, `render_pass_descriptor_
+validation` 5, `pass_state_validation` 9 — all unchanged) + clippy
+clean; `cargo build/clippy -p yawgpu --features metal` clean.
+Committed `phase-7: P7.5`. **Metal backend bring-up complete
+(P7.1–P7.5).**
+
+### P7.5 real-GPU run log
+- 2026-05-19, Apple Silicon, `cargo test -p yawgpu --features metal --test
+  e2e_metal_render -- --ignored`: **3/3 pass**
+  (`metal_render_constant_color_triangle_readback`,
+  `metal_render_uniform_color_triangle_readback`,
+  `default_noop_render_path_has_no_device_error`). Full regression
+  re-run: basic 3/3 + buffer 3/3 + compute 3/3 + texture 4/4 +
+  smoke 1/1 (no regression). **Real WGSL vtx+frag → MSL →
+  MTLRenderPipelineState → render-pass draw → texture → T2B →
+  pixel readback confirmed.**
+
+## P7.6 — Vulkan bring-up (mirror P7.1–P7.5)  *(NEXT)*
 `ash` + MoltenVK on macOS; naga→SPIR-V; same HAL contract; reuse the
 ported end2end tests parametrized by backend feature.
 
