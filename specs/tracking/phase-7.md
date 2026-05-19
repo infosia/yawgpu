@@ -15,8 +15,12 @@ HAL contract. SPEC.md Phase-7 row annotated accordingly.
 (real-backend code is build-only in CI). Per slice **also**: `cargo
 build -p yawgpu --features metal` (later `--features vulkan`) +
 clippy with the feature. **Real-GPU end2end** (`cargo test --features
-metal -- --ignored`) is run **manually by the user**, reported, and
-logged here per slice. **Phase ends with the mandatory Phase Review**
+metal -- --ignored`) is run **by Claude directly** — the Bash tool
+executes on this Apple Silicon and the sandbox permits Metal device access
+(confirmed P7.1) — and logged here per slice (no manual user step for
+Metal). Vulkan (P7.6) via MoltenVK is also machine-runnable
+(`$VULKAN_SDK` = `$VULKAN_SDK`; Apple Silicon enumerates).
+**Phase ends with the mandatory Phase Review**
 (`tracking/phase-7-review.md`).
 
 Methodology shift vs Phases 0–6: not validation-rule porting —
@@ -49,7 +53,7 @@ build -p yawgpu --features metal` + `clippy -p yawgpu --features
 metal --all-targets -D warnings` clean; smoke passes on `--features
 metal -- --ignored`. Committed `phase-7: P7.0`.
 
-## P7.1 — Metal Instance/Adapter/Device/Queue  *(☑ codex+gate; ⏳ M2 verify)*
+## P7.1 — Metal Instance/Adapter/Device/Queue  *(☑ DONE — real-GPU-verified)*
 
 Done (codex + Noop/feature gate): `metal` module real for objects —
 `MetalInstance::new` ok; `enumerate_adapters` via `metal::Device::
@@ -81,13 +85,16 @@ adapter name, device+queue+empty-submit, default-instance-is-Noop) +
 clean; `cargo build -p yawgpu --features metal` + `clippy -p yawgpu
 --features metal --all-targets -D warnings` clean; e2e tests ignored
 (not run — no GPU in codex/CI). Committed `phase-7: P7.1`.
-**⏳ Real-GPU verification pending: user runs on the Apple Silicon**
-`cargo test -p yawgpu --features metal --test e2e_metal_basic --
---ignored` (+ `e2e_metal_smoke`); result logged below before P7.2
-codex starts.
+Real-GPU verified by Claude directly (the Bash tool runs on this
+Apple Silicon; the seatbelt sandbox permits Metal device access — no
+manual user step needed for Metal slices).
 
 ### P7.1 real-GPU run log
-- _(pending user report)_
+- 2026-05-19, Apple Silicon, `cargo test -p yawgpu --features metal --test
+  e2e_metal_basic --test e2e_metal_smoke -- --ignored`:
+  **e2e_metal_basic 3/3 pass** (adapter name, device+queue+empty
+  submit, default-instance-Noop) + **e2e_metal_smoke 1/1 pass**.
+  P7.1 hardware-confirmed.
 
 ## P7.2 — Metal Buffer + writeBuffer/submit + B2B  *(NEXT — gated on P7.1 M2 verify)*
 `MTLBuffer` alloc + map/staging + readback; B2B copy. Port
