@@ -26,7 +26,7 @@ impl RealBackend {
 pub fn real_backend_available(backend: RealBackend) -> bool {
     match backend {
         RealBackend::Metal => metal_backend_available(),
-        RealBackend::Vulkan => false,
+        RealBackend::Vulkan => vulkan_backend_available(),
     }
 }
 
@@ -47,6 +47,33 @@ fn metal_backend_available() -> bool {
 
 #[cfg(not(feature = "metal"))]
 fn metal_backend_available() -> bool {
+    false
+}
+
+#[cfg(feature = "vulkan")]
+fn vulkan_backend_available() -> bool {
+    let Ok(entry) = (unsafe { ash::Entry::load() }) else {
+        return false;
+    };
+    let extension_names = [ash::vk::KHR_PORTABILITY_ENUMERATION_NAME.as_ptr()];
+    let create_info = ash::vk::InstanceCreateInfo::default()
+        .flags(ash::vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR)
+        .enabled_extension_names(&extension_names);
+    let instance = unsafe { entry.create_instance(&create_info, None) };
+    let Ok(instance) = instance else {
+        return false;
+    };
+    let available = unsafe { instance.enumerate_physical_devices() }.is_ok_and(|devices| {
+        !devices.is_empty()
+    });
+    unsafe {
+        instance.destroy_instance(None);
+    }
+    available
+}
+
+#[cfg(not(feature = "vulkan"))]
+fn vulkan_backend_available() -> bool {
     false
 }
 

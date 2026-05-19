@@ -91,3 +91,10 @@ slice; not done during active development.
   is deprecated, this slice intentionally follows the Phase-7 plan's
   `metal`-crate choice for de-risk scaffolding before P7.1 decides the
   first real device calls.
+- **ash 0.38.0+1.3.281**: selected in P7.6a as the latest stable
+  `ash` crate release visible on docs.rs/crates.io at implementation
+  time (2026-05-19). It is wired as optional `yawgpu-hal` and
+  `yawgpu-test` dependencies and enabled only by the `vulkan` cargo
+  feature. P7.6a also adds naga's `spv-out` feature to `yawgpu-core`
+  so the Vulkan SPIR-V shader path can be implemented in P7.6d without
+  another dependency-graph change.

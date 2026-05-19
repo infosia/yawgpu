@@ -1123,7 +1123,29 @@ pub unsafe extern "C" fn wgpuCreateInstance(
                 WGPUInstanceImpl::new_noop(timed_wait_any_enabled)
             }
         }
-        InstanceBackendSelection::Vulkan => WGPUInstanceImpl::new_noop(timed_wait_any_enabled),
+        InstanceBackendSelection::Vulkan => {
+            #[cfg(feature = "vulkan")]
+            {
+                match yawgpu_hal::vulkan::VulkanInstance::new() {
+                    Ok(instance) => {
+                        let hal_instance = yawgpu_hal::HalInstance::Vulkan(instance);
+                        if hal_instance.enumerate_adapters().is_empty() {
+                            WGPUInstanceImpl::new_noop(timed_wait_any_enabled)
+                        } else {
+                            WGPUInstanceImpl::from_core(
+                                core::Instance::from_hal(hal_instance),
+                                timed_wait_any_enabled,
+                            )
+                        }
+                    }
+                    Err(_) => WGPUInstanceImpl::new_noop(timed_wait_any_enabled),
+                }
+            }
+            #[cfg(not(feature = "vulkan"))]
+            {
+                WGPUInstanceImpl::new_noop(timed_wait_any_enabled)
+            }
+        }
     };
     arc_to_handle(instance)
 }
