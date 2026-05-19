@@ -202,9 +202,26 @@ Status: ☐ ◐ ☑ ✗(N/A).
 ### P8.5 MultipleDevice (`MultipleDeviceTests`, R15/R16)
 - **MD1** an object created by device A used with device B ⇒
   validation error (bind group/pipeline/buffer/etc. via owning-
-  device `Arc::ptr_eq`). ☐
+  device `Arc::ptr_eq`). ☑ (P8.5)
 - **MD2** the existing per-object device-identity checks are
-  consistent and complete for the ported cases. ☐
+  consistent and complete for the ported cases. ☑ (P8.5)
+
+> P8.5 (audit-and-fill): cross-device bind-group resources were
+> already rejected (Phase-4 `device.same` checks). P8.5 adds the
+> remaining owning-`Device` identity checks at the FFI boundary
+> (`_device.same`/`device.same`) for the operations the Dawn
+> `MultipleDeviceTests` cases exercise — pipeline-layout BGL,
+> compute/render pipeline shader+layout (sync **and** async),
+> encoder buffer copies, render/compute pass set-pipeline/-bind-
+> group/-vertex/-index, queueSubmit CB, queueWriteBuffer — routed
+> through the operation's existing error path: **immediate** device
+> error for pipeline create, **deferred** via new
+> `CommandEncoder/RenderPassEncoder/ComputePassEncoder::
+> record_validation_error` (reuses `record_buffer_command`/
+> `record_pass_command`, surfaces at Finish — correct Dawn timing).
+> Same-device paths are prepended early-returns ⇒ byte-for-byte
+> unchanged. Ported in `multiple_device_validation.rs` (6). Gate
+> green (57 binaries, clippy clean; same-device suites unregressed).
 
 ### P8.6 Surface (descriptor/arg validation only — Noop)
 - **SF1** `CreateSurface` decodes the chained window descriptor;

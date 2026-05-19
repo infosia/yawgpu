@@ -12,7 +12,7 @@ Status legend: ☐ not started · ◐ partial · ☑ ported & green
 | `ValidationTest` (base) | 0 | `yawgpu-test` crate | ☑ |
 | `DeviceValidationTests` | 1 | `limits_validation.rs` + `features_validation.rs` + `device_lost_validation.rs` | ☑ (R1–R8,R10–R14; R9 N/A; R15/R16 are MultipleDevice) |
 | `UnsafeAPIValidationTests` | 1→4/8 | `unsafe_api_validation.rs` | ☑ (R18–R21 rejected-direction P8.4; AllowUnsafeAPIs non-canonical N/A) |
-| `MultipleDeviceTests` | 1→5/6 | `multiple_device_validation.rs` | ☐ Defer (R16→P5, R15→P6) |
+| `MultipleDeviceTests` | 1→8 | `multiple_device_validation.rs` | ☑ (MD1/MD2 R15/R16 P8.5) |
 | `LabelTests` | 1 | `label_validation.rs` | ◐ (R17a Device/Queue done; R17b→per-object phase) |
 | `BufferValidationTests` | 2 | `buffer_creation_validation.rs` + `buffer_map_validation.rs` + `buffer_mapped_range_validation.rs` | ☑ (B1–B38; B39–B41 submit→P6) |
 | `MinimumBufferSizeValidationTests` | 2→4 | `minimum_buffer_size_validation.rs` | ☐ Defer→P4 (B58, needs BindGroupLayout) |

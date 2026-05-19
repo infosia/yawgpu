@@ -674,6 +674,74 @@ unsafe fn render_pipeline_cache_key(
     })
 }
 
+unsafe fn validate_pipeline_layout_devices(
+    device: &WGPUDeviceImpl,
+    descriptor: &native::WGPUPipelineLayoutDescriptor,
+) -> Option<String> {
+    if descriptor.bindGroupLayoutCount == 0 || descriptor.bindGroupLayouts.is_null() {
+        return None;
+    }
+    for layout in
+        std::slice::from_raw_parts(descriptor.bindGroupLayouts, descriptor.bindGroupLayoutCount)
+    {
+        if layout.is_null() {
+            continue;
+        }
+        let layout = clone_handle::<WGPUBindGroupLayoutImpl>(*layout, "WGPUBindGroupLayout");
+        if !layout._device.same(&device.core) {
+            return Some("pipeline layout bind group layout must belong to the same device".into());
+        }
+    }
+    None
+}
+
+unsafe fn validate_compute_pipeline_devices(
+    device: &WGPUDeviceImpl,
+    descriptor: &native::WGPUComputePipelineDescriptor,
+) -> Option<String> {
+    let module =
+        clone_handle::<WGPUShaderModuleImpl>(descriptor.compute.module, "WGPUShaderModule");
+    if !module._device.same(&device.core) {
+        return Some("compute pipeline shader module must belong to the same device".into());
+    }
+    if !descriptor.layout.is_null() {
+        let layout =
+            clone_handle::<WGPUPipelineLayoutImpl>(descriptor.layout, "WGPUPipelineLayout");
+        if !layout._device.same(&device.core) {
+            return Some("compute pipeline layout must belong to the same device".into());
+        }
+    }
+    None
+}
+
+unsafe fn validate_render_pipeline_devices(
+    device: &WGPUDeviceImpl,
+    descriptor: &native::WGPURenderPipelineDescriptor,
+) -> Option<String> {
+    let vertex_module =
+        clone_handle::<WGPUShaderModuleImpl>(descriptor.vertex.module, "WGPUShaderModule");
+    if !vertex_module._device.same(&device.core) {
+        return Some("render pipeline vertex shader module must belong to the same device".into());
+    }
+    if let Some(fragment) = descriptor.fragment.as_ref() {
+        let fragment_module =
+            clone_handle::<WGPUShaderModuleImpl>(fragment.module, "WGPUShaderModule");
+        if !fragment_module._device.same(&device.core) {
+            return Some(
+                "render pipeline fragment shader module must belong to the same device".into(),
+            );
+        }
+    }
+    if !descriptor.layout.is_null() {
+        let layout =
+            clone_handle::<WGPUPipelineLayoutImpl>(descriptor.layout, "WGPUPipelineLayout");
+        if !layout._device.same(&device.core) {
+            return Some("render pipeline layout must belong to the same device".into());
+        }
+    }
+    None
+}
+
 fn cache_string_view(value: native::WGPUStringView) -> Option<String> {
     unsafe { string_view_to_str(value).map(ToOwned::to_owned) }
 }
@@ -1862,7 +1930,11 @@ pub unsafe extern "C" fn wgpuDeviceCreatePipelineLayout(
         .as_ref()
         .expect("WGPUPipelineLayoutDescriptor must not be null");
     let key = pipeline_layout_cache_key(descriptor);
-    let descriptor = map_pipeline_layout_descriptor(descriptor);
+    let device_error = validate_pipeline_layout_devices(device, descriptor);
+    let mut descriptor = map_pipeline_layout_descriptor(descriptor);
+    if descriptor.error.is_none() {
+        descriptor.error = device_error;
+    }
     let pipeline_layout = device.core.create_pipeline_layout(descriptor);
     let handle = Arc::new(WGPUPipelineLayoutImpl {
         _core: Arc::new(pipeline_layout),
@@ -1907,7 +1979,11 @@ unsafe fn create_compute_pipeline_handle(
     dispatch_errors: bool,
 ) -> Arc<WGPUComputePipelineImpl> {
     let key = compute_pipeline_cache_key(descriptor);
-    let descriptor = map_compute_pipeline_descriptor(descriptor);
+    let device_error = validate_compute_pipeline_devices(device, descriptor);
+    let mut descriptor = map_compute_pipeline_descriptor(descriptor);
+    if descriptor.error.is_none() {
+        descriptor.error = device_error;
+    }
     let pipeline = if dispatch_errors {
         device.core.create_compute_pipeline(descriptor)
     } else {
@@ -1988,7 +2064,11 @@ unsafe fn create_render_pipeline_handle(
     dispatch_errors: bool,
 ) -> Arc<WGPURenderPipelineImpl> {
     let key = render_pipeline_cache_key(descriptor);
-    let descriptor = map_render_pipeline_descriptor(descriptor);
+    let device_error = validate_render_pipeline_devices(device, descriptor);
+    let mut descriptor = map_render_pipeline_descriptor(descriptor);
+    if descriptor.error.is_none() {
+        descriptor.error = device_error;
+    }
     let pipeline = if dispatch_errors {
         device.core.create_render_pipeline(descriptor)
     } else {
@@ -2216,6 +2296,15 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToBuffer(
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
     let source = clone_handle(source, "WGPUBuffer");
     let destination = clone_handle(destination, "WGPUBuffer");
+    if !source.device.same(&encoder.device) || !destination.device.same(&encoder.device) {
+        dispatch_optional_error(
+            &encoder.device,
+            encoder
+                .core
+                .record_validation_error("copy buffers must belong to the command encoder device"),
+        );
+        return;
+    }
     dispatch_optional_error(
         &encoder.device,
         encoder.core.copy_buffer_to_buffer(
@@ -2573,6 +2662,14 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetPipeline(
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
     let pipeline = clone_handle(pipeline, "WGPURenderPipeline");
+    if !pipeline._device.same(&pass.device) {
+        dispatch_optional_error(
+            &pass.device,
+            pass.core
+                .record_validation_error("render pipeline must belong to the render pass device"),
+        );
+        return;
+    }
     dispatch_optional_error(
         &pass.device,
         pass.core.set_pipeline(Arc::clone(&pipeline._core)),
@@ -2597,6 +2694,16 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetBindGroup(
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
     let group =
         (!group.is_null()).then(|| clone_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
+    if let Some(group) = group.as_ref() {
+        if !group._device.same(&pass.device) {
+            dispatch_optional_error(
+                &pass.device,
+                pass.core
+                    .record_validation_error("bind group must belong to the render pass device"),
+            );
+            return;
+        }
+    }
     let offsets = dynamic_offsets_slice(dynamic_offset_count, dynamic_offsets);
     dispatch_optional_error(
         &pass.device,
@@ -2624,6 +2731,16 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetVertexBuffer(
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
     let buffer = (!buffer.is_null()).then(|| clone_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer"));
+    if let Some(buffer) = buffer.as_ref() {
+        if !buffer.device.same(&pass.device) {
+            dispatch_optional_error(
+                &pass.device,
+                pass.core
+                    .record_validation_error("vertex buffer must belong to the render pass device"),
+            );
+            return;
+        }
+    }
     dispatch_optional_error(
         &pass.device,
         pass.core.set_vertex_buffer(
@@ -2651,6 +2768,14 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetIndexBuffer(
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
     let buffer = clone_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer");
+    if !buffer.device.same(&pass.device) {
+        dispatch_optional_error(
+            &pass.device,
+            pass.core
+                .record_validation_error("index buffer must belong to the render pass device"),
+        );
+        return;
+    }
     dispatch_optional_error(
         &pass.device,
         pass.core.set_index_buffer(
@@ -2853,7 +2978,22 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderExecuteBundles(
     bundles: *const native::WGPURenderBundle,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    let bundles = render_bundle_slice(bundle_count, bundles);
+    let bundle_handles = render_bundle_slice(bundle_count, bundles);
+    if bundle_handles
+        .iter()
+        .any(|bundle| !bundle._device.same(&pass.device))
+    {
+        dispatch_optional_error(
+            &pass.device,
+            pass.core
+                .record_validation_error("render bundle must belong to the render pass device"),
+        );
+        return;
+    }
+    let bundles = bundle_handles
+        .iter()
+        .map(|bundle| Arc::clone(&bundle.core))
+        .collect::<Vec<_>>();
     dispatch_optional_error(&pass.device, pass.core.execute_bundles(&bundles));
 }
 
@@ -3185,6 +3325,14 @@ pub unsafe extern "C" fn wgpuComputePassEncoderSetPipeline(
 ) {
     let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
     let pipeline = clone_handle(pipeline, "WGPUComputePipeline");
+    if !pipeline._device.same(&pass.device) {
+        dispatch_optional_error(
+            &pass.device,
+            pass.core
+                .record_validation_error("compute pipeline must belong to the compute pass device"),
+        );
+        return;
+    }
     dispatch_optional_error(
         &pass.device,
         pass.core.set_pipeline(Arc::clone(&pipeline._core)),
@@ -3209,6 +3357,16 @@ pub unsafe extern "C" fn wgpuComputePassEncoderSetBindGroup(
     let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
     let group =
         (!group.is_null()).then(|| clone_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
+    if let Some(group) = group.as_ref() {
+        if !group._device.same(&pass.device) {
+            dispatch_optional_error(
+                &pass.device,
+                pass.core
+                    .record_validation_error("bind group must belong to the compute pass device"),
+            );
+            return;
+        }
+    }
     let offsets = dynamic_offsets_slice(dynamic_offset_count, dynamic_offsets);
     dispatch_optional_error(
         &pass.device,
@@ -3346,7 +3504,7 @@ unsafe fn dynamic_offsets_slice(count: usize, offsets: *const u32) -> Vec<u32> {
 unsafe fn render_bundle_slice(
     count: usize,
     bundles: *const native::WGPURenderBundle,
-) -> Vec<Arc<core::RenderBundle>> {
+) -> Vec<Arc<WGPURenderBundleImpl>> {
     if count == 0 {
         return Vec::new();
     }
@@ -3356,9 +3514,7 @@ unsafe fn render_bundle_slice(
     );
     std::slice::from_raw_parts(bundles, count)
         .iter()
-        .map(|bundle| {
-            Arc::clone(&clone_handle::<WGPURenderBundleImpl>(*bundle, "WGPURenderBundle").core)
-        })
+        .map(|bundle| clone_handle::<WGPURenderBundleImpl>(*bundle, "WGPURenderBundle"))
         .collect()
 }
 
@@ -4300,16 +4456,26 @@ pub unsafe extern "C" fn wgpuQueueSubmit(
         return;
     }
     let commands = if command_count == 0 {
-        Vec::new()
+        Some(Vec::new())
     } else {
         std::slice::from_raw_parts(commands, command_count)
             .iter()
             .map(|command| {
-                Arc::clone(
-                    &clone_handle::<WGPUCommandBufferImpl>(*command, "WGPUCommandBuffer").core,
-                )
+                let command = clone_handle::<WGPUCommandBufferImpl>(*command, "WGPUCommandBuffer");
+                if !command._device.same(&queue.device) {
+                    queue.device.dispatch_error(
+                        core::ErrorKind::Validation,
+                        "command buffer must belong to the queue device",
+                    );
+                    None
+                } else {
+                    Some(Arc::clone(&command.core))
+                }
             })
-            .collect::<Vec<_>>()
+            .collect::<Option<Vec<_>>>()
+    };
+    let Some(commands) = commands else {
+        return;
     };
     dispatch_optional_device_error(&queue.device, queue.core.submit(&commands));
 }
@@ -4330,6 +4496,13 @@ pub unsafe extern "C" fn wgpuQueueWriteBuffer(
 ) {
     let queue = borrow_handle(queue, "WGPUQueue");
     let buffer = borrow_handle(buffer, "WGPUBuffer");
+    if !buffer.device.same(&queue.device) {
+        queue.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "queue write buffer target must belong to the queue device",
+        );
+        return;
+    }
     if size > 0 && data.is_null() {
         queue.device.dispatch_error(
             core::ErrorKind::Validation,

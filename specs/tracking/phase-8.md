@@ -77,10 +77,16 @@ all rejections pre-existing (P4 shader/BGL + P8.2 QC3), zero
 production code. Gate green (Noop 56 binaries + clippy clean).
 Committed `phase-8: P8.4`.
 
-## P8.5 — MultipleDevice (R15/R16)  *(after P8.4)*
-MD1/MD2: cross-device object use ⇒ validation error (owning-device
-`Arc::ptr_eq`); audit per-object device-identity checks.
-`MultipleDeviceTests`.
+## P8.5 — MultipleDevice (R15/R16)  *(☑ DONE)*
+MD1/MD2 done: bind-group resources already rejected (P4); P8.5 adds
+owning-Device same() checks at the FFI for the Dawn-exercised ops
+(pipeline-layout BGL, compute/render pipeline shader+layout sync+
+async, encoder copies, pass set-pipeline/bindgroup/vertex/index,
+queueSubmit, queueWriteBuffer) routed via existing path (immediate
+for pipeline create; deferred via new record_validation_error for
+encoder/pass). Same-device byte-for-byte unchanged. Tests
+multiple_device_validation.rs (6). Gate green (Noop 57 binaries +
+clippy; same-device suites unregressed). Committed `phase-8: P8.5`.
 
 ## P8.6 — Surface (descriptor/arg validation, Noop)  *(after P8.5)*
 SF1–SF3: CreateSurface descriptor decode, Configure/GetCurrentTexture
