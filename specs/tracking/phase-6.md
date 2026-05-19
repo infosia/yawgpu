@@ -208,7 +208,28 @@ no FFI/conv change. Gate green (40 binaries, clippy clean). Committed
 
 C60–C64 (across pass/bundle; encoder C63 done in P6.1).
 
-## P6.9 — Resource usage tracking + submit  *(NEXT; closes slices)*
+## P6.9 — Resource usage tracking + submit  *(☑ DONE — slices complete; Phase Review next)*
+
+Done: (A) `validate_usage_scope` at each draw/dispatch (deferred-error
+→ `finish()`): BGL-`kind` access classification, buffers keyed by
+`Buffer::same`+overlap (dynamic offset applied), textures by
+`Texture::same`; C75/C77 write+write aliasing, C76 write+read
+conflict, C78 attachment-vs-bound-texture (attachment textures stashed
+at `begin_render_pass`). (B) `CommandEncoder` accumulates referenced
+`Arc<Buffer>`s (copies/clear/write + bind-group/vertex/index/indirect,
+success-only); `finish()` moves them into `CommandBuffer` + one-shot
+`submitted` flag; `Queue::submit` C80 (error CB / double-submit incl.
+in-batch dup) / C81 mapped (B39) / C82 destroyed (B40/B41),
+first-match-wins; `wgpuQueueSubmit` wired. `TexelCopy*Info`
+`&Buffer/&Texture`→`Arc` (FFI updated). C75–C82 ported in
+`yawgpu/tests/resource_usage_tracking_validation.rs` (8) +
+`queue_submit_validation.rs` (5). Gate green (42 binaries, clippy
+clean). Committed `phase-6: P6.9`.
+**Deferred (documented):** ExecuteBundles-contributed usage NOT merged
+into the pass scope; real-GPU exec Defer→P7.
+
+#### (original detail)
+
 C75–C82 (aliasing, read/write conflict, attachment+sample, submit-time
 mapped/destroyed buffer). Then Phase Review.
 

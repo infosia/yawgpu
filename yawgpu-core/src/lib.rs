@@ -1014,15 +1014,15 @@ pub struct TexelCopyBufferLayout {
     pub rows_per_image: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct TexelCopyBufferInfo<'a> {
-    pub buffer: &'a Buffer,
+#[derive(Debug, Clone)]
+pub struct TexelCopyBufferInfo {
+    pub buffer: Arc<Buffer>,
     pub layout: TexelCopyBufferLayout,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct TexelCopyTextureInfo<'a> {
-    pub texture: &'a Texture,
+#[derive(Debug, Clone)]
+pub struct TexelCopyTextureInfo {
+    pub texture: Arc<Texture>,
     pub mip_level: u32,
     pub origin: Origin3d,
     pub aspect: TextureAspect,
@@ -4949,6 +4949,7 @@ struct CommandEncoderState {
     next_pass_id: u64,
     first_error: Option<String>,
     debug_group_depth: u32,
+    referenced_buffers: Vec<Arc<Buffer>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4977,6 +4978,8 @@ pub struct CommandBuffer {
 #[derive(Debug)]
 struct CommandBufferInner {
     is_error: bool,
+    referenced_buffers: Vec<Arc<Buffer>>,
+    submitted: Mutex<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -5016,10 +5019,14 @@ struct PassEncoderState {
     vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
     index_buffer: Option<BoundIndexBuffer>,
     attachment_signature: Option<AttachmentSignature>,
+    attachment_textures: Vec<Texture>,
 }
 
 impl PassEncoderState {
-    fn new(attachment_signature: Option<AttachmentSignature>) -> Self {
+    fn new(
+        attachment_signature: Option<AttachmentSignature>,
+        attachment_textures: Vec<Texture>,
+    ) -> Self {
         Self {
             ended: false,
             debug_group_depth: 0,
@@ -5029,6 +5036,7 @@ impl PassEncoderState {
             vertex_buffers: BTreeMap::new(),
             index_buffer: None,
             attachment_signature,
+            attachment_textures,
         }
     }
 
@@ -5097,6 +5105,7 @@ impl CommandEncoder {
                     next_pass_id: 0,
                     first_error: None,
                     debug_group_depth: 0,
+                    referenced_buffers: Vec::new(),
                 }),
             }),
         }
@@ -5126,6 +5135,7 @@ impl CommandEncoder {
                     self.clone(),
                     token,
                     attachment_signature,
+                    render_pass_attachment_textures(descriptor),
                 )),
             },
             immediate_error,
@@ -5137,7 +5147,7 @@ impl CommandEncoder {
         let (token, immediate_error) = self.begin_pass(PassKind::Compute);
         (
             ComputePassEncoder {
-                inner: Arc::new(PassEncoderInner::new(self.clone(), token, None)),
+                inner: Arc::new(PassEncoderInner::new(self.clone(), token, None, Vec::new())),
             },
             immediate_error,
         )
@@ -5176,38 +5186,42 @@ impl CommandEncoder {
 
     pub fn copy_buffer_to_buffer(
         &self,
-        source: &Buffer,
+        source: Arc<Buffer>,
         source_offset: u64,
-        destination: &Buffer,
+        destination: Arc<Buffer>,
         destination_offset: u64,
         size: u64,
     ) -> Option<String> {
-        self.record_buffer_command(|| {
+        self.record_buffer_command(vec![Arc::clone(&source), Arc::clone(&destination)], || {
             validate_copy_buffer_to_buffer(
-                source,
+                &source,
                 source_offset,
-                destination,
+                &destination,
                 destination_offset,
                 size,
             )
         })
     }
 
-    pub fn clear_buffer(&self, buffer: &Buffer, offset: u64, size: u64) -> Option<String> {
-        self.record_buffer_command(|| validate_clear_buffer(buffer, offset, size))
+    pub fn clear_buffer(&self, buffer: Arc<Buffer>, offset: u64, size: u64) -> Option<String> {
+        self.record_buffer_command(vec![Arc::clone(&buffer)], || {
+            validate_clear_buffer(&buffer, offset, size)
+        })
     }
 
-    pub fn write_buffer(&self, buffer: &Buffer, offset: u64, size: u64) -> Option<String> {
-        self.record_buffer_command(|| validate_encoder_write_buffer(buffer, offset, size))
+    pub fn write_buffer(&self, buffer: Arc<Buffer>, offset: u64, size: u64) -> Option<String> {
+        self.record_buffer_command(vec![Arc::clone(&buffer)], || {
+            validate_encoder_write_buffer(&buffer, offset, size)
+        })
     }
 
     pub fn copy_buffer_to_texture(
         &self,
-        source: TexelCopyBufferInfo<'_>,
-        destination: TexelCopyTextureInfo<'_>,
+        source: TexelCopyBufferInfo,
+        destination: TexelCopyTextureInfo,
         copy_size: Extent3d,
     ) -> Option<String> {
-        self.record_buffer_command(|| {
+        self.record_buffer_command(vec![Arc::clone(&source.buffer)], || {
             validate_buffer_texture_copy(
                 source,
                 BufferUsage::COPY_SRC,
@@ -5221,11 +5235,11 @@ impl CommandEncoder {
 
     pub fn copy_texture_to_buffer(
         &self,
-        source: TexelCopyTextureInfo<'_>,
-        destination: TexelCopyBufferInfo<'_>,
+        source: TexelCopyTextureInfo,
+        destination: TexelCopyBufferInfo,
         copy_size: Extent3d,
     ) -> Option<String> {
-        self.record_buffer_command(|| {
+        self.record_buffer_command(vec![Arc::clone(&destination.buffer)], || {
             validate_buffer_texture_copy(
                 destination,
                 BufferUsage::COPY_DST,
@@ -5239,11 +5253,11 @@ impl CommandEncoder {
 
     pub fn copy_texture_to_texture(
         &self,
-        source: TexelCopyTextureInfo<'_>,
-        destination: TexelCopyTextureInfo<'_>,
+        source: TexelCopyTextureInfo,
+        destination: TexelCopyTextureInfo,
         copy_size: Extent3d,
     ) -> Option<String> {
-        self.record_buffer_command(|| {
+        self.record_buffer_command(Vec::new(), || {
             validate_texture_to_texture_copy(source, destination, copy_size)
         })
     }
@@ -5312,7 +5326,11 @@ impl CommandEncoder {
         }
     }
 
-    fn record_buffer_command<F>(&self, validate: F) -> Option<String>
+    fn record_buffer_command<F>(
+        &self,
+        referenced_buffers: Vec<Arc<Buffer>>,
+        validate: F,
+    ) -> Option<String>
     where
         F: FnOnce() -> Result<(), String>,
     {
@@ -5327,6 +5345,8 @@ impl CommandEncoder {
 
         if let Err(message) = validate() {
             self.record_first_error(message);
+        } else {
+            self.record_referenced_buffers(referenced_buffers);
         }
         None
     }
@@ -5336,7 +5356,7 @@ impl CommandEncoder {
         let mut state = self.inner.state.lock();
         if state.lifecycle != CommandEncoderLifecycle::Recording {
             return (
-                CommandBuffer::new(true),
+                CommandBuffer::new(true, Vec::new()),
                 Some("command encoder cannot be finished more than once".to_owned()),
             );
         }
@@ -5355,7 +5375,15 @@ impl CommandEncoder {
                 (state.debug_group_depth != 0)
                     .then(|| "command encoder debug group stack is unbalanced".to_owned())
             });
-        (CommandBuffer::new(finish_error.is_some()), finish_error)
+        let referenced_buffers = if finish_error.is_some() {
+            Vec::new()
+        } else {
+            std::mem::take(&mut state.referenced_buffers)
+        };
+        (
+            CommandBuffer::new(finish_error.is_some(), referenced_buffers),
+            finish_error,
+        )
     }
 
     fn end_pass(&self, token: PassToken) {
@@ -5368,6 +5396,14 @@ impl CommandEncoder {
     fn record_first_error(&self, message: impl Into<String>) {
         let mut state = self.inner.state.lock();
         record_first_error_locked(&mut state, message);
+    }
+
+    fn record_referenced_buffer(&self, buffer: Arc<Buffer>) {
+        self.inner.state.lock().referenced_buffers.push(buffer);
+    }
+
+    fn record_referenced_buffers(&self, buffers: Vec<Arc<Buffer>>) {
+        self.inner.state.lock().referenced_buffers.extend(buffers);
     }
 
     fn is_finished(&self) -> bool {
@@ -5526,6 +5562,20 @@ fn render_pass_attachment_signature(
     })
 }
 
+fn render_pass_attachment_textures(descriptor: &RenderPassDescriptor) -> Vec<Texture> {
+    let mut textures = Vec::new();
+    for attachment in descriptor.color_attachments.iter().flatten() {
+        textures.push(attachment.view.texture());
+        if let Some(resolve_target) = &attachment.resolve_target {
+            textures.push(resolve_target.texture());
+        }
+    }
+    if let Some(attachment) = &descriptor.depth_stencil_attachment {
+        textures.push(attachment.view.texture());
+    }
+    textures
+}
+
 fn validate_color_attachment(attachment: &RenderPassColorAttachment) -> Result<(), String> {
     let texture = attachment.view.texture();
     let Some(format_caps) = attachment.view.format().caps() else {
@@ -5670,9 +5720,9 @@ fn validate_resolve_target(
 }
 
 fn validate_buffer_texture_copy(
-    buffer_copy: TexelCopyBufferInfo<'_>,
+    buffer_copy: TexelCopyBufferInfo,
     required_buffer_usage: BufferUsage,
-    texture_copy: TexelCopyTextureInfo<'_>,
+    texture_copy: TexelCopyTextureInfo,
     required_texture_usage: TextureUsage,
     copy_size: Extent3d,
     label: &str,
@@ -5696,7 +5746,7 @@ fn validate_buffer_texture_copy(
     }
 
     let format_caps = validate_texture_copy_subresource(
-        texture,
+        &texture,
         texture_copy.mip_level,
         texture_copy.origin,
         copy_size,
@@ -5724,8 +5774,8 @@ fn validate_buffer_texture_copy(
 }
 
 fn validate_texture_to_texture_copy(
-    source_copy: TexelCopyTextureInfo<'_>,
-    destination_copy: TexelCopyTextureInfo<'_>,
+    source_copy: TexelCopyTextureInfo,
+    destination_copy: TexelCopyTextureInfo,
     copy_size: Extent3d,
 ) -> Result<(), String> {
     let source = source_copy.texture;
@@ -5753,7 +5803,7 @@ fn validate_texture_to_texture_copy(
     }
 
     let source_caps = validate_texture_copy_subresource(
-        source,
+        &source,
         source_copy.mip_level,
         source_copy.origin,
         copy_size,
@@ -5762,7 +5812,7 @@ fn validate_texture_to_texture_copy(
         false,
     )?;
     validate_texture_copy_subresource(
-        destination,
+        &destination,
         destination_copy.mip_level,
         destination_copy.origin,
         copy_size,
@@ -5784,9 +5834,9 @@ fn validate_texture_to_texture_copy(
     {
         return Err("copy texture multisampled copies must cover the full subresource".to_owned());
     }
-    if source.same(destination) {
+    if source.same(&destination) {
         validate_same_texture_copy(
-            source,
+            &source,
             source_copy.mip_level,
             source_copy.origin,
             destination_copy.mip_level,
@@ -5939,15 +5989,41 @@ fn record_first_error_option(first_error: &mut Option<String>, message: impl Int
 }
 
 impl CommandBuffer {
-    fn new(is_error: bool) -> Self {
+    fn new(is_error: bool, referenced_buffers: Vec<Arc<Buffer>>) -> Self {
         Self {
-            inner: Arc::new(CommandBufferInner { is_error }),
+            inner: Arc::new(CommandBufferInner {
+                is_error,
+                referenced_buffers,
+                submitted: Mutex::new(false),
+            }),
         }
     }
 
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
+    }
+
+    fn referenced_buffers(&self) -> &[Arc<Buffer>] {
+        &self.inner.referenced_buffers
+    }
+
+    fn mark_submitted(&self) -> Result<(), String> {
+        let mut submitted = self.inner.submitted.lock();
+        if *submitted {
+            Err("command buffer cannot be submitted more than once".to_owned())
+        } else {
+            *submitted = true;
+            Ok(())
+        }
+    }
+
+    fn is_submitted(&self) -> bool {
+        *self.inner.submitted.lock()
+    }
+
+    fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 }
 
@@ -5956,11 +6032,15 @@ impl PassEncoderInner {
         parent: CommandEncoder,
         token: PassToken,
         attachment_signature: Option<AttachmentSignature>,
+        attachment_textures: Vec<Texture>,
     ) -> Self {
         Self {
             parent,
             token,
-            state: Mutex::new(PassEncoderState::new(attachment_signature)),
+            state: Mutex::new(PassEncoderState::new(
+                attachment_signature,
+                attachment_textures,
+            )),
         }
     }
 
@@ -6079,6 +6159,9 @@ impl RenderPassEncoder {
     ) -> Option<String> {
         self.inner.record_pass_command(|state| {
             if let Some(group) = group {
+                self.inner
+                    .parent
+                    .record_referenced_buffers(bind_group_buffer_resources(&group));
                 state.bind_groups.insert(
                     index,
                     BoundBindGroup {
@@ -6105,6 +6188,9 @@ impl RenderPassEncoder {
             validate_vertex_buffer_slot(slot, limits)?;
             if let Some(buffer) = buffer {
                 let size = validate_set_vertex_buffer(&buffer, offset, size)?;
+                self.inner
+                    .parent
+                    .record_referenced_buffer(Arc::clone(&buffer));
                 state.vertex_buffers.insert(
                     slot,
                     BoundVertexBuffer {
@@ -6131,6 +6217,9 @@ impl RenderPassEncoder {
         self.inner.record_pass_command(|state| {
             let format = format.ok_or_else(|| "render pass index format is invalid".to_owned())?;
             let size = validate_set_index_buffer(&buffer, format, offset, size)?;
+            self.inner
+                .parent
+                .record_referenced_buffer(Arc::clone(&buffer));
             state.index_buffer = Some(BoundIndexBuffer {
                 buffer,
                 format,
@@ -6194,7 +6283,9 @@ impl RenderPassEncoder {
     ) -> Option<String> {
         self.inner.record_pass_command(|state| {
             validate_render_draw_state(state, RenderDrawKind::Indirect, limits)?;
-            validate_indirect_buffer(&indirect_buffer, indirect_offset, 16, "draw indirect")
+            validate_indirect_buffer(&indirect_buffer, indirect_offset, 16, "draw indirect")?;
+            self.inner.parent.record_referenced_buffer(indirect_buffer);
+            Ok(())
         })
     }
 
@@ -6211,7 +6302,9 @@ impl RenderPassEncoder {
                 indirect_offset,
                 20,
                 "draw indexed indirect",
-            )
+            )?;
+            self.inner.parent.record_referenced_buffer(indirect_buffer);
+            Ok(())
         })
     }
 
@@ -6310,6 +6403,9 @@ impl ComputePassEncoder {
     ) -> Option<String> {
         self.inner.record_pass_command(|state| {
             if let Some(group) = group {
+                self.inner
+                    .parent
+                    .record_referenced_buffers(bind_group_buffer_resources(&group));
                 state.bind_groups.insert(
                     index,
                     BoundBindGroup {
@@ -6350,7 +6446,9 @@ impl ComputePassEncoder {
                 indirect_offset,
                 12,
                 "dispatch workgroups indirect",
-            )
+            )?;
+            self.inner.parent.record_referenced_buffer(indirect_buffer);
+            Ok(())
         })
     }
 }
@@ -6374,7 +6472,7 @@ impl RenderBundleEncoder {
                             RenderBundleEncoderLifecycle::Recording
                         },
                         first_error: None,
-                        pass_state: PassEncoderState::new(Some(attachment_signature)),
+                        pass_state: PassEncoderState::new(Some(attachment_signature), Vec::new()),
                     }),
                 }),
             },
@@ -6655,6 +6753,11 @@ fn validate_render_draw_state(
     limits: Limits,
 ) -> Result<(), String> {
     let pipeline = validate_render_draw_base_state(state, limits, kind.is_indexed())?;
+    validate_usage_scope(
+        pipeline.bind_group_layouts(),
+        &state.bind_groups,
+        Some(&state.attachment_textures),
+    )?;
     validate_strip_index_format(pipeline, state, kind.is_indexed())?;
     match kind {
         RenderDrawKind::Direct {
@@ -7002,7 +7105,213 @@ fn validate_compute_dispatch_state(state: &PassEncoderState, limits: Limits) -> 
     if pipeline.is_error() {
         return Err("compute dispatch requires a valid compute pipeline".to_owned());
     }
-    validate_pipeline_bind_groups(pipeline.bind_group_layouts(), &state.bind_groups, limits)
+    validate_pipeline_bind_groups(pipeline.bind_group_layouts(), &state.bind_groups, limits)?;
+    validate_usage_scope(pipeline.bind_group_layouts(), &state.bind_groups, None)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResourceAccess {
+    Read,
+    Write,
+}
+
+#[derive(Debug)]
+struct BufferScopeUse {
+    buffer: Arc<Buffer>,
+    offset: u64,
+    size: u64,
+    access: ResourceAccess,
+}
+
+#[derive(Debug)]
+struct TextureScopeUse {
+    texture: Texture,
+    access: ResourceAccess,
+}
+
+fn validate_usage_scope(
+    required_layouts: &[Arc<BindGroupLayout>],
+    bound_groups: &BTreeMap<u32, BoundBindGroup>,
+    attachment_textures: Option<&[Texture]>,
+) -> Result<(), String> {
+    let mut buffer_uses = Vec::new();
+    let mut texture_uses = Vec::new();
+
+    for (index, layout) in required_layouts.iter().enumerate() {
+        let index = u32::try_from(index)
+            .map_err(|_| "pipeline bind group index is too large".to_owned())?;
+        let Some(bound) = bound_groups.get(&index) else {
+            continue;
+        };
+        collect_bind_group_usage(layout, bound, &mut buffer_uses, &mut texture_uses)?;
+    }
+
+    validate_buffer_usage_scope(&buffer_uses)?;
+    validate_texture_usage_scope(&texture_uses)?;
+    if let Some(attachment_textures) = attachment_textures {
+        for texture_use in &texture_uses {
+            if attachment_textures
+                .iter()
+                .any(|attachment| attachment.same(&texture_use.texture))
+            {
+                return Err(
+                    "render pass attachment texture cannot be used through a bind group".to_owned(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_bind_group_usage(
+    layout: &BindGroupLayout,
+    bound: &BoundBindGroup,
+    buffer_uses: &mut Vec<BufferScopeUse>,
+    texture_uses: &mut Vec<TextureScopeUse>,
+) -> Result<(), String> {
+    let layout_entries = layout
+        .entries()
+        .iter()
+        .map(|entry| (entry.binding, entry))
+        .collect::<BTreeMap<_, _>>();
+    let dynamic_entries = layout
+        .entries()
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.kind,
+                Some(BindingLayoutKind::Buffer {
+                    has_dynamic_offset: true,
+                    ..
+                })
+            )
+        })
+        .map(|entry| entry.binding)
+        .collect::<Vec<_>>();
+
+    for entry in bound.group.entries() {
+        let Some(layout_entry) = layout_entries.get(&entry.binding).copied() else {
+            continue;
+        };
+        let Some(kind) = layout_entry.kind else {
+            continue;
+        };
+        let access = match kind {
+            BindingLayoutKind::Buffer {
+                ty: BufferBindingType::Uniform | BufferBindingType::ReadOnlyStorage,
+                ..
+            }
+            | BindingLayoutKind::Texture { .. }
+            | BindingLayoutKind::StorageTexture {
+                access: StorageTextureAccess::ReadOnly,
+                ..
+            } => Some(ResourceAccess::Read),
+            BindingLayoutKind::Buffer {
+                ty: BufferBindingType::Storage,
+                ..
+            }
+            | BindingLayoutKind::StorageTexture {
+                access: StorageTextureAccess::WriteOnly | StorageTextureAccess::ReadWrite,
+                ..
+            } => Some(ResourceAccess::Write),
+            BindingLayoutKind::Sampler { .. } => None,
+        };
+        let Some(access) = access else {
+            continue;
+        };
+
+        match (&entry.resource, kind) {
+            (
+                BindGroupResource::Buffer {
+                    buffer,
+                    offset,
+                    size,
+                    ..
+                },
+                BindingLayoutKind::Buffer { .. },
+            ) => {
+                let dynamic_offset = dynamic_entries
+                    .iter()
+                    .position(|binding| *binding == entry.binding)
+                    .and_then(|dynamic_index| bound.dynamic_offsets.get(dynamic_index))
+                    .copied()
+                    .unwrap_or(0);
+                let offset = offset
+                    .checked_add(u64::from(dynamic_offset))
+                    .ok_or_else(|| "usage scope buffer offset overflows".to_owned())?;
+                let size = if *size == u64::MAX {
+                    buffer.size().saturating_sub(offset)
+                } else {
+                    size.saturating_sub(u64::from(dynamic_offset))
+                };
+                buffer_uses.push(BufferScopeUse {
+                    buffer: Arc::clone(buffer),
+                    offset,
+                    size,
+                    access,
+                });
+            }
+            (
+                BindGroupResource::TextureView { texture_view, .. },
+                BindingLayoutKind::Texture { .. } | BindingLayoutKind::StorageTexture { .. },
+            ) => texture_uses.push(TextureScopeUse {
+                texture: texture_view.texture(),
+                access,
+            }),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_buffer_usage_scope(buffer_uses: &[BufferScopeUse]) -> Result<(), String> {
+    for (index, current) in buffer_uses.iter().enumerate() {
+        for previous in &buffer_uses[..index] {
+            if !current.buffer.same(&previous.buffer) || !buffer_ranges_overlap(current, previous) {
+                continue;
+            }
+            if current.access == ResourceAccess::Write || previous.access == ResourceAccess::Write {
+                return Err(
+                    "usage scope cannot read and write or write the same buffer range twice"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_texture_usage_scope(texture_uses: &[TextureScopeUse]) -> Result<(), String> {
+    for (index, current) in texture_uses.iter().enumerate() {
+        for previous in &texture_uses[..index] {
+            if !current.texture.same(&previous.texture) {
+                continue;
+            }
+            if current.access == ResourceAccess::Write || previous.access == ResourceAccess::Write {
+                return Err(
+                    "usage scope cannot read and write or write the same texture twice".to_owned(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn buffer_ranges_overlap(a: &BufferScopeUse, b: &BufferScopeUse) -> bool {
+    let a_end = a.offset.saturating_add(a.size);
+    let b_end = b.offset.saturating_add(b.size);
+    a.offset < b_end && b.offset < a_end
+}
+
+fn bind_group_buffer_resources(group: &BindGroup) -> Vec<Arc<Buffer>> {
+    group
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.resource {
+            BindGroupResource::Buffer { buffer, .. } => Some(Arc::clone(buffer)),
+            _ => None,
+        })
+        .collect()
 }
 
 fn validate_pipeline_bind_groups(
@@ -7169,6 +7478,37 @@ impl Queue {
     #[must_use]
     pub fn label(&self) -> String {
         self.inner.label.lock().clone()
+    }
+
+    pub fn submit(&self, command_buffers: &[Arc<CommandBuffer>]) -> Option<String> {
+        for (index, command_buffer) in command_buffers.iter().enumerate() {
+            if command_buffer.is_error() {
+                return Some("queue submit cannot use an error command buffer".to_owned());
+            }
+            if command_buffer.is_submitted() {
+                return Some("command buffer cannot be submitted more than once".to_owned());
+            }
+            if command_buffers[..index]
+                .iter()
+                .any(|previous| previous.same(command_buffer))
+            {
+                return Some("command buffer cannot be submitted more than once".to_owned());
+            }
+            for buffer in command_buffer.referenced_buffers() {
+                if buffer.map_state() != BufferMapState::Unmapped {
+                    return Some("queue submit cannot use a mapped buffer".to_owned());
+                }
+                if buffer.is_destroyed() {
+                    return Some("queue submit cannot use a destroyed buffer".to_owned());
+                }
+            }
+        }
+        for command_buffer in command_buffers {
+            if let Err(message) = command_buffer.mark_submitted() {
+                return Some(message);
+            }
+        }
+        None
     }
 }
 
