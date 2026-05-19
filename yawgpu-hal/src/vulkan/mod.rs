@@ -1,13 +1,21 @@
 use std::ffi::CStr;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use ash::vk;
 
-use crate::{HalBufferCopy, HalCopy, HalError};
+use crate::{
+    HalAddressMode, HalBufferCopy, HalBufferTextureCopy, HalCompareFunction, HalCopy, HalError,
+    HalExtent3d, HalFilterMode, HalMipmapFilterMode, HalSamplerDescriptor, HalTextureCopy,
+    HalTextureDescriptor, HalTextureFormat, HalTextureUsage,
+};
 
 const BACKEND: &str = "vulkan";
+const IMAGE_LAYOUT_UNDEFINED: u8 = 0;
+const IMAGE_LAYOUT_TRANSFER_DST: u8 = 1;
+const IMAGE_LAYOUT_TRANSFER_SRC: u8 = 2;
 
 #[derive(Debug, Clone)]
 pub struct VulkanInstance {
@@ -228,6 +236,37 @@ impl VulkanDevice {
             Err(_) => VulkanBuffer { inner: None, size },
         }
     }
+
+    #[must_use]
+    pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> VulkanTexture {
+        self.inner.allocations.fetch_add(1, Ordering::Relaxed);
+        match create_texture(Arc::clone(&self.inner), descriptor) {
+            Ok((inner, bytes_per_pixel)) => VulkanTexture {
+                inner: Some(Arc::new(inner)),
+                width: descriptor.width,
+                height: descriptor.height,
+                depth_or_array_layers: descriptor.depth_or_array_layers,
+                bytes_per_pixel,
+            },
+            Err(_) => VulkanTexture {
+                inner: None,
+                width: descriptor.width,
+                height: descriptor.height,
+                depth_or_array_layers: descriptor.depth_or_array_layers,
+                bytes_per_pixel: 0,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> VulkanSampler {
+        self.inner.allocations.fetch_add(1, Ordering::Relaxed);
+        VulkanSampler {
+            _inner: create_sampler(Arc::clone(&self.inner), descriptor)
+                .ok()
+                .map(Arc::new),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -262,7 +301,7 @@ impl VulkanQueue {
         if copies.is_empty() {
             return self.submit_empty();
         }
-        submit_buffer_copies(&self.inner, copies)
+        submit_copies(&self.inner, copies)
     }
 }
 
@@ -357,10 +396,82 @@ impl Drop for VulkanBufferInner {
 }
 
 #[derive(Debug, Clone)]
-pub struct VulkanTexture;
+pub struct VulkanTexture {
+    inner: Option<Arc<VulkanTextureInner>>,
+    width: u32,
+    height: u32,
+    depth_or_array_layers: u32,
+    bytes_per_pixel: u32,
+}
+
+impl VulkanTexture {
+    fn inner(&self) -> Result<&VulkanTextureInner, HalError> {
+        self.inner
+            .as_deref()
+            .ok_or_else(|| texture_error("texture allocation failed or unsupported descriptor"))
+    }
+
+    fn validate_origin_extent(
+        &self,
+        origin: crate::HalOrigin3d,
+        extent: HalExtent3d,
+    ) -> Result<(), HalError> {
+        let x_end = origin
+            .x
+            .checked_add(extent.width)
+            .ok_or_else(|| texture_error("texture x range overflows"))?;
+        let y_end = origin
+            .y
+            .checked_add(extent.height)
+            .ok_or_else(|| texture_error("texture y range overflows"))?;
+        let z_end = origin
+            .z
+            .checked_add(extent.depth_or_array_layers)
+            .ok_or_else(|| texture_error("texture z range overflows"))?;
+        if x_end > self.width || y_end > self.height || z_end > self.depth_or_array_layers {
+            return Err(texture_error("texture range exceeds texture size"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct VulkanTextureInner {
+    device: Arc<VulkanDeviceInner>,
+    image: vk::Image,
+    view: vk::ImageView,
+    memory: vk::DeviceMemory,
+    layout: AtomicU8,
+}
+
+impl Drop for VulkanTextureInner {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.device.destroy_image_view(self.view, None);
+            self.device.device.destroy_image(self.image, None);
+            self.device.device.free_memory(self.memory, None);
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
-pub struct VulkanSampler;
+pub struct VulkanSampler {
+    _inner: Option<Arc<VulkanSamplerInner>>,
+}
+
+#[derive(Debug)]
+struct VulkanSamplerInner {
+    device: Arc<VulkanDeviceInner>,
+    sampler: vk::Sampler,
+}
+
+impl Drop for VulkanSamplerInner {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.device.destroy_sampler(self.sampler, None);
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct VulkanComputePipeline;
@@ -449,14 +560,116 @@ fn find_memory_type_index(
         })
 }
 
-fn submit_buffer_copies(queue: &VulkanQueueInner, copies: &[HalCopy]) -> Result<(), HalError> {
-    let buffer_copies = copies
-        .iter()
-        .map(|copy| match copy {
-            HalCopy::Buffer(copy) => Ok(copy),
-            _ => Err(HalError::BackendUnavailable { backend: BACKEND }),
+fn create_texture(
+    device: Arc<VulkanDeviceInner>,
+    descriptor: &HalTextureDescriptor,
+) -> Result<(VulkanTextureInner, u32), HalError> {
+    if descriptor.depth_or_array_layers != 1
+        || descriptor.mip_level_count != 1
+        || descriptor.sample_count != 1
+    {
+        return Err(texture_error("unsupported texture descriptor"));
+    }
+    let (format, bytes_per_pixel) = map_texture_format(descriptor.format)?;
+    let image_info = vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(format)
+        .extent(vk::Extent3D {
+            width: descriptor.width,
+            height: descriptor.height,
+            depth: 1,
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .mip_levels(1)
+        .array_layers(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .usage(map_texture_usage(descriptor.usage))
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .initial_layout(vk::ImageLayout::UNDEFINED);
+    let image = unsafe { device.device.create_image(&image_info, None) }
+        .map_err(|_| texture_error("image creation failed"))?;
+    let requirements = unsafe { device.device.get_image_memory_requirements(image) };
+    let memory_type_index = find_memory_type_index(
+        &device.memory_properties,
+        requirements.memory_type_bits,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )
+    .ok_or_else(|| {
+        unsafe {
+            device.device.destroy_image(image, None);
+        }
+        texture_error("compatible image memory type not found")
+    })?;
+    let allocate_info = vk::MemoryAllocateInfo::default()
+        .allocation_size(requirements.size)
+        .memory_type_index(memory_type_index);
+    let memory = unsafe { device.device.allocate_memory(&allocate_info, None) }.map_err(|_| {
+        unsafe {
+            device.device.destroy_image(image, None);
+        }
+        texture_error("image memory allocation failed")
+    })?;
+    if let Err(error) = unsafe { device.device.bind_image_memory(image, memory, 0) } {
+        unsafe {
+            device.device.destroy_image(image, None);
+            device.device.free_memory(memory, None);
+        }
+        return Err(map_texture_error(error, "image memory bind failed"));
+    }
+    let view_info = vk::ImageViewCreateInfo::default()
+        .image(image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(format)
+        .subresource_range(color_subresource_range());
+    let view = unsafe { device.device.create_image_view(&view_info, None) }.map_err(|_| {
+        unsafe {
+            device.device.destroy_image(image, None);
+            device.device.free_memory(memory, None);
+        }
+        texture_error("image view creation failed")
+    })?;
+    Ok((
+        VulkanTextureInner {
+            device,
+            image,
+            view,
+            memory,
+            layout: AtomicU8::new(IMAGE_LAYOUT_UNDEFINED),
+        },
+        bytes_per_pixel,
+    ))
+}
+
+fn create_sampler(
+    device: Arc<VulkanDeviceInner>,
+    descriptor: &HalSamplerDescriptor,
+) -> Result<VulkanSamplerInner, HalError> {
+    let sampler_info = vk::SamplerCreateInfo::default()
+        .mag_filter(map_filter_mode(descriptor.mag_filter))
+        .min_filter(map_filter_mode(descriptor.min_filter))
+        .mipmap_mode(map_mipmap_filter_mode(descriptor.mipmap_filter))
+        .address_mode_u(map_address_mode(descriptor.address_mode_u))
+        .address_mode_v(map_address_mode(descriptor.address_mode_v))
+        .address_mode_w(map_address_mode(descriptor.address_mode_w))
+        .mip_lod_bias(0.0)
+        .anisotropy_enable(descriptor.max_anisotropy > 1)
+        .max_anisotropy(f32::from(descriptor.max_anisotropy))
+        .compare_enable(descriptor.compare.is_some())
+        .compare_op(
+            descriptor
+                .compare
+                .map_or(vk::CompareOp::ALWAYS, map_compare_function),
+        )
+        .min_lod(descriptor.lod_min_clamp)
+        .max_lod(descriptor.lod_max_clamp)
+        .border_color(vk::BorderColor::FLOAT_TRANSPARENT_BLACK)
+        .unnormalized_coordinates(false);
+    let sampler = unsafe { device.device.create_sampler(&sampler_info, None) }
+        .map_err(|_| texture_error("sampler creation failed"))?;
+    Ok(VulkanSamplerInner { device, sampler })
+}
+
+fn submit_copies(queue: &VulkanQueueInner, copies: &[HalCopy]) -> Result<(), HalError> {
     let command_pool_info = vk::CommandPoolCreateInfo::default()
         .flags(vk::CommandPoolCreateFlags::TRANSIENT)
         .queue_family_index(queue.device.queue_family_index);
@@ -467,17 +680,17 @@ fn submit_buffer_copies(queue: &VulkanQueueInner, copies: &[HalCopy]) -> Result<
             .create_command_pool(&command_pool_info, None)
     }
     .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
-    let result = record_and_submit_buffer_copies(queue, command_pool, &buffer_copies);
+    let result = record_and_submit_copies(queue, command_pool, copies);
     unsafe {
         queue.device.device.destroy_command_pool(command_pool, None);
     }
     result
 }
 
-fn record_and_submit_buffer_copies(
+fn record_and_submit_copies(
     queue: &VulkanQueueInner,
     command_pool: vk::CommandPool,
-    copies: &[&HalBufferCopy],
+    copies: &[HalCopy],
 ) -> Result<(), HalError> {
     let allocate_info = vk::CommandBufferAllocateInfo::default()
         .command_pool(command_pool)
@@ -498,7 +711,23 @@ fn record_and_submit_buffer_copies(
             .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
     }
     for copy in copies {
-        encode_buffer_copy(&queue.device.device, command_buffer, copy)?;
+        match copy {
+            HalCopy::Buffer(copy) => {
+                encode_buffer_copy(&queue.device.device, command_buffer, copy)?;
+            }
+            HalCopy::BufferToTexture(copy) => {
+                encode_buffer_to_texture(&queue.device.device, command_buffer, copy)?;
+            }
+            HalCopy::TextureToBuffer(copy) => {
+                encode_texture_to_buffer(&queue.device.device, command_buffer, copy)?;
+            }
+            HalCopy::TextureToTexture(copy) => {
+                encode_texture_to_texture(&queue.device.device, command_buffer, copy)?;
+            }
+            HalCopy::ComputePass(_) | HalCopy::RenderPass(_) => {
+                return Err(HalError::BackendUnavailable { backend: BACKEND });
+            }
+        }
     }
     unsafe {
         queue
@@ -550,6 +779,347 @@ fn encode_buffer_copy(
     Ok(())
 }
 
+fn encode_buffer_to_texture(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    copy: &HalBufferTextureCopy,
+) -> Result<(), HalError> {
+    let crate::HalBuffer::Vulkan(buffer) = &copy.buffer else {
+        return Err(buffer_error("buffer is not Vulkan-backed"));
+    };
+    let crate::HalTexture::Vulkan(texture) = &copy.texture else {
+        return Err(texture_error("texture is not Vulkan-backed"));
+    };
+    validate_mip_level(copy.mip_level)?;
+    texture.validate_origin_extent(copy.origin, copy.extent)?;
+    validate_buffer_texture_range(buffer, copy)?;
+    let buffer = buffer.inner()?;
+    let texture_inner = texture.inner()?;
+    transition_image(
+        device,
+        command_buffer,
+        texture_inner,
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        IMAGE_LAYOUT_TRANSFER_DST,
+    );
+    let region = buffer_image_copy(copy, texture.bytes_per_pixel)?;
+    unsafe {
+        device.cmd_copy_buffer_to_image(
+            command_buffer,
+            buffer.buffer,
+            texture_inner.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &[region],
+        );
+    }
+    Ok(())
+}
+
+fn encode_texture_to_buffer(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    copy: &HalBufferTextureCopy,
+) -> Result<(), HalError> {
+    let crate::HalBuffer::Vulkan(buffer) = &copy.buffer else {
+        return Err(buffer_error("buffer is not Vulkan-backed"));
+    };
+    let crate::HalTexture::Vulkan(texture) = &copy.texture else {
+        return Err(texture_error("texture is not Vulkan-backed"));
+    };
+    validate_mip_level(copy.mip_level)?;
+    texture.validate_origin_extent(copy.origin, copy.extent)?;
+    validate_buffer_texture_range(buffer, copy)?;
+    let buffer = buffer.inner()?;
+    let texture_inner = texture.inner()?;
+    transition_image(
+        device,
+        command_buffer,
+        texture_inner,
+        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+        IMAGE_LAYOUT_TRANSFER_SRC,
+    );
+    let region = buffer_image_copy(copy, texture.bytes_per_pixel)?;
+    unsafe {
+        device.cmd_copy_image_to_buffer(
+            command_buffer,
+            texture_inner.image,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            buffer.buffer,
+            &[region],
+        );
+    }
+    Ok(())
+}
+
+fn encode_texture_to_texture(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    copy: &HalTextureCopy,
+) -> Result<(), HalError> {
+    let crate::HalTexture::Vulkan(source) = &copy.source else {
+        return Err(texture_error("source texture is not Vulkan-backed"));
+    };
+    let crate::HalTexture::Vulkan(destination) = &copy.destination else {
+        return Err(texture_error("destination texture is not Vulkan-backed"));
+    };
+    validate_mip_level(copy.source_mip_level)?;
+    validate_mip_level(copy.destination_mip_level)?;
+    source.validate_origin_extent(copy.source_origin, copy.extent)?;
+    destination.validate_origin_extent(copy.destination_origin, copy.extent)?;
+    let source_inner = source.inner()?;
+    let destination_inner = destination.inner()?;
+    transition_image(
+        device,
+        command_buffer,
+        source_inner,
+        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+        IMAGE_LAYOUT_TRANSFER_SRC,
+    );
+    transition_image(
+        device,
+        command_buffer,
+        destination_inner,
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        IMAGE_LAYOUT_TRANSFER_DST,
+    );
+    let region = vk::ImageCopy::default()
+        .src_subresource(image_subresource_layers())
+        .src_offset(to_image_offset(
+            copy.source_origin.x,
+            copy.source_origin.y,
+            copy.source_origin.z,
+        )?)
+        .dst_subresource(image_subresource_layers())
+        .dst_offset(to_image_offset(
+            copy.destination_origin.x,
+            copy.destination_origin.y,
+            copy.destination_origin.z,
+        )?)
+        .extent(to_image_extent(copy.extent));
+    unsafe {
+        device.cmd_copy_image(
+            command_buffer,
+            source_inner.image,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            destination_inner.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &[region],
+        );
+    }
+    Ok(())
+}
+
+fn transition_image(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    texture: &VulkanTextureInner,
+    new_layout: vk::ImageLayout,
+    new_state: u8,
+) {
+    let old_state = texture.layout.swap(new_state, AtomicOrdering::Relaxed);
+    let old_layout = image_layout(old_state);
+    if old_layout == new_layout {
+        return;
+    }
+    let barrier = vk::ImageMemoryBarrier::default()
+        .old_layout(old_layout)
+        .new_layout(new_layout)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(texture.image)
+        .subresource_range(color_subresource_range())
+        .src_access_mask(access_mask_for_layout(old_layout))
+        .dst_access_mask(access_mask_for_layout(new_layout));
+    unsafe {
+        device.cmd_pipeline_barrier(
+            command_buffer,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[barrier],
+        );
+    }
+}
+
+fn image_layout(state: u8) -> vk::ImageLayout {
+    match state {
+        IMAGE_LAYOUT_TRANSFER_DST => vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        IMAGE_LAYOUT_TRANSFER_SRC => vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+        _ => vk::ImageLayout::UNDEFINED,
+    }
+}
+
+fn access_mask_for_layout(layout: vk::ImageLayout) -> vk::AccessFlags {
+    match layout {
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL => vk::AccessFlags::TRANSFER_WRITE,
+        vk::ImageLayout::TRANSFER_SRC_OPTIMAL => vk::AccessFlags::TRANSFER_READ,
+        _ => vk::AccessFlags::empty(),
+    }
+}
+
+fn validate_buffer_texture_range(
+    buffer: &VulkanBuffer,
+    copy: &HalBufferTextureCopy,
+) -> Result<(), HalError> {
+    let rows = u64::from(copy.extent.height.saturating_sub(1));
+    let last_row = rows
+        .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
+        .ok_or_else(|| buffer_error("buffer texture row range overflows"))?;
+    let row_bytes = u64::from(copy.extent.width)
+        .checked_mul(u64::from(texture_bytes_per_pixel(copy)?))
+        .ok_or_else(|| buffer_error("buffer texture row bytes overflow"))?;
+    let required = copy
+        .buffer_layout
+        .offset
+        .checked_add(last_row)
+        .and_then(|offset| offset.checked_add(row_bytes))
+        .ok_or_else(|| buffer_error("buffer texture range overflows"))?;
+    if required > buffer.size() {
+        return Err(buffer_error("buffer texture range exceeds buffer size"));
+    }
+    Ok(())
+}
+
+fn texture_bytes_per_pixel(copy: &HalBufferTextureCopy) -> Result<u32, HalError> {
+    let crate::HalTexture::Vulkan(texture) = &copy.texture else {
+        return Err(texture_error("texture is not Vulkan-backed"));
+    };
+    if texture.bytes_per_pixel == 0 {
+        return Err(texture_error("unsupported texture format"));
+    }
+    Ok(texture.bytes_per_pixel)
+}
+
+fn buffer_image_copy(
+    copy: &HalBufferTextureCopy,
+    bytes_per_pixel: u32,
+) -> Result<vk::BufferImageCopy, HalError> {
+    let buffer_row_length = buffer_row_length(copy.buffer_layout.bytes_per_row, bytes_per_pixel)?;
+    Ok(vk::BufferImageCopy::default()
+        .buffer_offset(copy.buffer_layout.offset)
+        .buffer_row_length(buffer_row_length)
+        .buffer_image_height(copy.buffer_layout.rows_per_image)
+        .image_subresource(image_subresource_layers())
+        .image_offset(to_image_offset(
+            copy.origin.x,
+            copy.origin.y,
+            copy.origin.z,
+        )?)
+        .image_extent(to_image_extent(copy.extent)))
+}
+
+fn validate_mip_level(mip_level: u32) -> Result<(), HalError> {
+    if mip_level != 0 {
+        return Err(texture_error("unsupported texture mip level"));
+    }
+    Ok(())
+}
+
+fn buffer_row_length(bytes_per_row: u32, bytes_per_pixel: u32) -> Result<u32, HalError> {
+    if bytes_per_row == 0 {
+        return Ok(0);
+    }
+    if bytes_per_pixel == 0 || !bytes_per_row.is_multiple_of(bytes_per_pixel) {
+        return Err(buffer_error(
+            "buffer texture bytes per row is not texel-aligned",
+        ));
+    }
+    Ok(bytes_per_row / bytes_per_pixel)
+}
+
+fn image_subresource_layers() -> vk::ImageSubresourceLayers {
+    vk::ImageSubresourceLayers::default()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .mip_level(0)
+        .base_array_layer(0)
+        .layer_count(1)
+}
+
+fn color_subresource_range() -> vk::ImageSubresourceRange {
+    vk::ImageSubresourceRange::default()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .base_mip_level(0)
+        .level_count(1)
+        .base_array_layer(0)
+        .layer_count(1)
+}
+
+fn to_image_offset(x: u32, y: u32, z: u32) -> Result<vk::Offset3D, HalError> {
+    Ok(vk::Offset3D {
+        x: i32::try_from(x).map_err(|_| texture_error("texture x offset is too large"))?,
+        y: i32::try_from(y).map_err(|_| texture_error("texture y offset is too large"))?,
+        z: i32::try_from(z).map_err(|_| texture_error("texture z offset is too large"))?,
+    })
+}
+
+fn to_image_extent(extent: HalExtent3d) -> vk::Extent3D {
+    vk::Extent3D {
+        width: extent.width,
+        height: extent.height,
+        depth: extent.depth_or_array_layers,
+    }
+}
+
+fn map_texture_format(format: HalTextureFormat) -> Result<(vk::Format, u32), HalError> {
+    match format {
+        HalTextureFormat::R8Unorm => Ok((vk::Format::R8_UNORM, 1)),
+        HalTextureFormat::Rgba8Unorm => Ok((vk::Format::R8G8B8A8_UNORM, 4)),
+        HalTextureFormat::Bgra8Unorm => Ok((vk::Format::B8G8R8A8_UNORM, 4)),
+        HalTextureFormat::Unsupported => Err(texture_error("unsupported texture format")),
+    }
+}
+
+fn map_texture_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
+    let mut flags = vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST;
+    if usage.texture_binding {
+        flags |= vk::ImageUsageFlags::SAMPLED;
+    }
+    if usage.storage_binding {
+        flags |= vk::ImageUsageFlags::STORAGE;
+    }
+    if usage.render_attachment {
+        flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
+    }
+    flags
+}
+
+fn map_address_mode(mode: HalAddressMode) -> vk::SamplerAddressMode {
+    match mode {
+        HalAddressMode::ClampToEdge => vk::SamplerAddressMode::CLAMP_TO_EDGE,
+        HalAddressMode::Repeat => vk::SamplerAddressMode::REPEAT,
+        HalAddressMode::MirrorRepeat => vk::SamplerAddressMode::MIRRORED_REPEAT,
+    }
+}
+
+fn map_filter_mode(mode: HalFilterMode) -> vk::Filter {
+    match mode {
+        HalFilterMode::Nearest => vk::Filter::NEAREST,
+        HalFilterMode::Linear => vk::Filter::LINEAR,
+    }
+}
+
+fn map_mipmap_filter_mode(mode: HalMipmapFilterMode) -> vk::SamplerMipmapMode {
+    match mode {
+        HalMipmapFilterMode::Nearest => vk::SamplerMipmapMode::NEAREST,
+        HalMipmapFilterMode::Linear => vk::SamplerMipmapMode::LINEAR,
+    }
+}
+
+fn map_compare_function(compare: HalCompareFunction) -> vk::CompareOp {
+    match compare {
+        HalCompareFunction::Never => vk::CompareOp::NEVER,
+        HalCompareFunction::Less => vk::CompareOp::LESS,
+        HalCompareFunction::Equal => vk::CompareOp::EQUAL,
+        HalCompareFunction::LessEqual => vk::CompareOp::LESS_OR_EQUAL,
+        HalCompareFunction::Greater => vk::CompareOp::GREATER,
+        HalCompareFunction::NotEqual => vk::CompareOp::NOT_EQUAL,
+        HalCompareFunction::GreaterEqual => vk::CompareOp::GREATER_OR_EQUAL,
+        HalCompareFunction::Always => vk::CompareOp::ALWAYS,
+    }
+}
+
 fn buffer_error(message: &'static str) -> HalError {
     HalError::BufferOperationFailed {
         backend: BACKEND,
@@ -559,4 +1129,15 @@ fn buffer_error(message: &'static str) -> HalError {
 
 fn map_buffer_error(_error: vk::Result, message: &'static str) -> HalError {
     buffer_error(message)
+}
+
+fn texture_error(message: &'static str) -> HalError {
+    HalError::BufferOperationFailed {
+        backend: BACKEND,
+        message,
+    }
+}
+
+fn map_texture_error(_error: vk::Result, message: &'static str) -> HalError {
+    texture_error(message)
 }

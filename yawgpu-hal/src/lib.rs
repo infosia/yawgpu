@@ -189,13 +189,13 @@ impl HalDevice {
 
     #[must_use]
     pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> HalTexture {
-        #[cfg(not(feature = "metal"))]
+        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
         let _ = descriptor;
         match self {
             #[cfg(feature = "noop")]
             Self::Noop(device) => HalTexture::Noop(device.create_texture()),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => HalTexture::Vulkan(vulkan::VulkanTexture),
+            Self::Vulkan(device) => HalTexture::Vulkan(device.create_texture(descriptor)),
             #[cfg(feature = "metal")]
             Self::Metal(device) => HalTexture::Metal(device.create_texture(descriptor)),
         }
@@ -203,13 +203,13 @@ impl HalDevice {
 
     #[must_use]
     pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> HalSampler {
-        #[cfg(not(feature = "metal"))]
+        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
         let _ = descriptor;
         match self {
             #[cfg(feature = "noop")]
             Self::Noop(device) => HalSampler::Noop(device.create_sampler()),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => HalSampler::Vulkan(vulkan::VulkanSampler),
+            Self::Vulkan(device) => HalSampler::Vulkan(device.create_sampler(descriptor)),
             #[cfg(feature = "metal")]
             Self::Metal(device) => HalSampler::Metal(device.create_sampler(descriptor)),
         }
