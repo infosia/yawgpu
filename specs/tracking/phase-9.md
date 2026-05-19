@@ -17,7 +17,8 @@ unchanged: `cargo test --workspace` + `cargo clippy --workspace
 (`tracking/phase-9-review.md`).
 
 ## P9.0 — C example build scaffold + headless  *(active)*
-`examples/` dir + a `cc`-based build driver (no CMake/GLFW); port
+`examples/` CMake tree (mirrors wgpu-native layout) + shared
+framework; port
 `enumerate_adapters`, `compute` (shader.wgsl + storage readback),
 `device_info` (Dawn `DawnInfo` as C). Headless. Proves the C ↔
 `libyawgpu.a` link + the `WGPUYawgpuInstanceBackendSelect` struct
