@@ -13,10 +13,26 @@ deferrals (C34/C35, encoder WriteTimestamp/ResolveQuerySet, R15/R16,
 R21). Reuses the Phase-1 `PendingCallback` future plumbing and the
 error-object/deferred-error model.
 
-## P8.0 — ErrorScope  *(active)*
+## P8.0 — ErrorScope  *(☑ DONE)*
+ES1–ES5 done: core `ErrorScope` filter + captured error;
+`push_error_scope(filter)`; `pop_error_scope() ->
+Result<…,EmptyStack>`; `dispatch_error` innermost→outer first-
+match-wins routing (ES2) that `return`s before the uncaptured
+callback (ES4), unmatched ⇒ unchanged uncaptured path. FFI
+`wgpuDevicePushErrorScope` + async `wgpuDevicePopErrorScope`
+(`PendingCallback::PopErrorScope`, reuses the Phase-1 future
+machinery; EmptyStack=ES3 error status; lost-device resolves
+Success/NoError) + `conv` enum maps. Ported
+`error_scope_validation.rs` (10: ES1 catch, ES2 nested matching/
+non-matching bubble, ES3 empty-stack, ES4 caught-vs-uncaptured, ES5
+async WaitAny + destroyed-device pop, first-error-kept, all-filters-
+map, success-no-error). Gate green (Noop 54 binaries + clippy clean;
+`instance_smoke`/`device_lost_validation` unregressed). Committed
+`phase-8: P8.0`.
+
+#### (original)
 ES1–ES5: push/pop, filter match, nested stack, scope-vs-uncaptured-
 callback routing, async pop (future) + device-lost interaction.
-Foundational (other slices' errors interact with scopes).
 `ErrorScopeValidationTests`.
 
 ## P8.1 — QuerySet creation  *(after P8.0)*

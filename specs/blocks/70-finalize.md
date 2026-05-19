@@ -68,15 +68,30 @@ Status: ☐ ◐ ☑ ✗(N/A).
 ### P8.0 ErrorScope (`ErrorScopeValidationTests`)
 - **ES1** `PushErrorScope(filter)` then `PopErrorScope` returns the
   captured error matching `filter` (Validation/OutOfMemory/Internal)
-  or none. ☐
+  or none. ☑ (P8.0)
 - **ES2** scopes nest as a stack; an error goes to the innermost
-  matching open scope; non-matching scopes pass it outward. ☐
+  matching open scope; non-matching scopes pass it outward. ☑ (P8.0)
 - **ES3** `PopErrorScope` with no open scope ⇒ error (callback
-  status). ☐
+  status). ☑ (P8.0)
 - **ES4** an error captured by a scope does NOT reach the device
-  uncaptured-error callback; unmatched errors do. ☐
+  uncaptured-error callback; unmatched errors do. ☑ (P8.0)
 - **ES5** pop is async (future/callback) — reuses Phase-1 plumbing;
-  device-lost interaction. ☐
+  device-lost interaction. ☑ (P8.0)
+
+> P8.0: core `ErrorScope` gained `filter: ErrorFilter` + captured
+> error; `push_error_scope(filter)`; `pop_error_scope() ->
+> Result<Option<DeviceError>, PopErrorScopeError::EmptyStack>`;
+> `dispatch_error` walks `scopes.iter_mut().rev()` (innermost→outer),
+> delivers to the first filter-matching scope (first-match-wins,
+> `return`s so it bypasses the uncaptured callback — ES4), unmatched
+> ⇒ existing uncaptured path unchanged. FFI
+> `wgpuDevicePushErrorScope(filter)` (invalid filter ⇒ validation
+> error) + async `wgpuDevicePopErrorScope` via
+> `PendingCallback::PopErrorScope` (reuses register_callback/poll/
+> WaitAny; EmptyStack ⇒ error status; lost device ⇒ Success/NoError
+> like other pending callbacks); `conv` enum maps. Ported in
+> `error_scope_validation.rs` (10). Gate green (54 binaries, clippy
+> clean; uncaptured/`assert_device_error!` path unregressed).
 
 ### P8.1 QuerySet creation (`QuerySetValidationTests`/`QueryValidationTests`)
 - **QS1** `CreateQuerySet` type ∈ {Occlusion, Timestamp}; count > 0
