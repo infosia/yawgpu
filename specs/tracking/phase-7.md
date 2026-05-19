@@ -137,11 +137,45 @@ clippy -p yawgpu --features metal` clean. Committed `phase-7: P7.2`.
   e2e re-run: e2e_metal_basic 3/3 + e2e_metal_smoke 1/1 (no
   regression). **Real CPU→MTLBuffer→blit-B2B→map-readback confirmed.**
 
-## P7.3 — Metal Texture/Sampler + B2T/T2B/T2T  *(NEXT)*
-`MTLTexture`/view/sampler; blit copies. Port `CopyTests` texture
-subset.
+## P7.3 — Metal Texture/Sampler + B2T/T2B/T2T  *(☑ DONE — real-GPU-verified)*
 
-## P7.4 — Metal Shader (naga→MSL) + compute dispatch  *(after P7.3)*
+Done: P7.2 copy seam generalized to `HalQueue::submit_copies(&[HalCopy])`
+with `HalCopy::{Buffer,BufferToTexture,TextureToBuffer,
+TextureToTexture}` + HAL-local descriptor/format/usage/sampler types
+(`HalTextureDescriptor/Format/Usage`, `HalSamplerDescriptor`, origin/
+extent/layout) — buffer-copy path behaviorally identical.
+`HalDevice::create_texture/create_sampler` now take the descriptor
+(Noop/Vulkan ignore ⇒ unchanged; `HalTexture`/`HalSampler` made
+`Clone`). metal: real `metal::Texture` (2D, mapped `MTLPixelFormat`,
+`StorageModeShared`, usage flags; `inner: Option` so unsupported/
+failed → error not panic; rejects depth/array/mip/sample ≠ 1) +
+real `metal::SamplerState`; per-variant blit encoders
+(`encode_buffer/buffer_to_texture/texture_to_buffer/texture_to_
+texture`) with `checked_add` origin/extent validation; no
+`unwrap`/`expect`/panic. core: `TextureCopyCommand{B2T,T2B,T2T}`
+recorded on *successfully validated* copies (P6.3 validation
+unchanged), carried in `CommandBuffer.texture_copies`; `Texture::
+hal()` + `hal_texture_descriptor()`; `Queue::submit` translates
+buffer+texture copies to `HalCopy`, skipping any with no real HAL
+object (Noop stays a pure no-op) → `submit_copies`. Bounded subset:
+2D / 1 layer / mip0 / color formats (R8/RGBA8/BGRA8 Unorm). Tests
+`e2e_metal_texture.rs` (4, `#[ignore]`/cfg-gated). Gate: Noop `cargo
+test --workspace` 46 binaries green (`command_texture_copy_
+validation` 4/4 unchanged) + clippy clean; `cargo build/clippy
+-p yawgpu --features metal` clean. Committed `phase-7: P7.3`.
+
+### P7.3 real-GPU run log
+- 2026-05-19, Apple Silicon, `cargo test -p yawgpu --features metal --test
+  e2e_metal_texture -- --ignored`: **4/4 pass**
+  (`metal_buffer_texture_buffer_round_trip`,
+  `metal_texture_texture_round_trip`,
+  `metal_sampler_creation_has_no_device_error`,
+  `default_noop_texture_and_sampler_path_has_no_device_error`).
+  Regression re-run: e2e_metal_basic 3/3 + e2e_metal_buffer 3/3 +
+  e2e_metal_smoke 1/1 (the `submit_copies` rename did not regress
+  P7.1/P7.2). **Real B2T→T2B & T2T pixel round-trip confirmed.**
+
+## P7.4 — Metal Shader (naga→MSL) + compute dispatch  *(NEXT)*
 WGSL→MSL via naga MSL backend; compute pipeline + dispatch +
 storage-buffer readback. Port `ComputeDispatchTests` (basic).
 
