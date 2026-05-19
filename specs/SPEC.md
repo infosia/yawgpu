@@ -31,7 +31,7 @@ COMPLETE with an open CRITICAL/MAJOR (see `reference/workflow.md`).
 | **4** | Shader + BindGroup(Layout) + PipelineLayout | `ShaderModuleValidationTests`, `BindGroupValidationTests`, `BindGroupLayout*`, `PipelineLayout*` | naga (`wgpu/naga`) WGSL parse/validate; binding validation |
 | **5** | Render/Compute pipeline | `RenderPipelineValidationTests`, `ComputeValidationTests`, `PipelineAndPassCompatibilityTests` | pipeline + layout/format compat |
 | **6** | Command encoding / passes | `CommandBufferValidationTests`, `CopyCommandsValidationTests`, `RenderPassDescriptorValidationTests`, `ComputeDispatch*` | encoder/pass state machine |
-| **7** | Real backends | Dawn `end2end` Basic/Compute/Copy (GPU-gated) | Noop→Vulkan→Metal bring-up; real draw/dispatch |
+| **7** | Real backends | Dawn `end2end` Basic/Compute/Copy (GPU-gated) | Noop→**Metal→Vulkan** bring-up; real draw/dispatch. *(Order reversed from Vulkan→Metal: dev platform is macOS — Metal native, no MoltenVK; see `blocks/60-real-backends.md` / `tracking/phase-7.md`.)* |
 | **8** | Surface/Query/ErrorScope/DeviceLost | `QuerySetValidationTests`, `ErrorScopeValidationTests`, `DeviceLostValidationTests`, surface config | remaining API surface |
 
 ## Out of scope
