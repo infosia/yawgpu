@@ -78,10 +78,10 @@ Dawn (`C/dawn/src/dawn/samples/`, C++ + SampleUtils/GLFW):
 
 ## Slices
 
-- **P9.0** C example build scaffold (no cmake/glfw) + **headless**:
-  `enumerate_adapters`, `compute`, `device_info` (DawnInfo). Proves
-  the `cc` + `libyawgpu.a` + `webgpu.h` link and the backend-select
-  struct from C. De-risk.
+- **P9.0** C example CMake scaffold (wgpu-native layout) +
+  **headless**: `enumerate_adapters`, `compute`, `device_info`
+  (DawnInfo). Proves the CMake → `libyawgpu` + `webgpu.h` link and
+  the backend-select struct from C. De-risk.
 - **P9.1** `capture` — offscreen render→readback→image file (real
   Metal/Vulkan; no window).
 - **P9.2** Real window→surface→swapchain (GLFW-gated): Metal
