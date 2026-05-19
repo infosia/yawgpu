@@ -58,6 +58,8 @@ Status legend: ☐ not started · ◐ partial · ☑ ported & green
 | `DeviceLostValidationTests` (in Device) | 8 | `device_lost_validation.rs` | ☑ (DL1–DL4 P8.3; Phase-1 stub completed) |
 | `ToggleValidationTests` | 8 | — | ✗ N/A (Dawn toggle API absent from webgpu-headers; P8.4) |
 
+| (no Dawn validation file) | 8 | `surface_validation.rs` | ☑ (SF1/SF2 P8.6; SF3 real presentation ✗ N/A on Noop) |
+
 ## Deferred / extension surface (revisit after Phase 8)
 
 `CompatValidationTests`, `ExternalTextureTests`, `PixelLocalStorageTests`,

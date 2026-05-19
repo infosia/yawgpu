@@ -88,10 +88,16 @@ encoder/pass). Same-device byte-for-byte unchanged. Tests
 multiple_device_validation.rs (6). Gate green (Noop 57 binaries +
 clippy; same-device suites unregressed). Committed `phase-8: P8.5`.
 
-## P8.6 — Surface (descriptor/arg validation, Noop)  *(after P8.5)*
-SF1–SF3: CreateSurface descriptor decode, Configure/GetCurrentTexture
-validation vs capabilities; real presentation ✗ N/A on Noop
-(recorded). Then Phase 8 Review.
+## P8.6 — Surface (descriptor/arg validation, Noop)  *(☑ DONE)*
+SF1–SF3 done: WGPUSurfaceImpl real handle (declare_empty macro
+removed); SF1 CreateSurface chained SurfaceSource* decode (null/
+unknown=error surface); SF2 GetCapabilities synthetic + FreeMembers,
+Configure validates device/format/usage/size/mode (fail=device
+error, unconfigured), Unconfigure; SF3 GetCurrentTexture
+Error(unconfigured)/Lost(configured Noop N/A boundary, no fake
+image), Present no-op. Tests surface_validation.rs (4). Gate green
+(Noop 58 binaries + clippy clean). Committed `phase-8: P8.6`.
+**All Phase-8 implementation slices done → Phase 8 Review next.**
 
 ## Phase 8 exit criteria
 
