@@ -181,7 +181,7 @@ impl HalDevice {
             #[cfg(feature = "noop")]
             Self::Noop(device) => HalBuffer::Noop(device.create_buffer(size)),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => HalBuffer::Vulkan(vulkan::VulkanBuffer),
+            Self::Vulkan(device) => HalBuffer::Vulkan(device.create_buffer(size)),
             #[cfg(feature = "metal")]
             Self::Metal(device) => HalBuffer::Metal(device.create_buffer(size)),
         }
@@ -291,7 +291,7 @@ impl HalQueue {
     }
 
     pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
-        #[cfg(not(feature = "metal"))]
+        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
         let _ = copies;
         match self {
             #[cfg(feature = "noop")]
@@ -322,27 +322,27 @@ impl HalBuffer {
             #[cfg(feature = "noop")]
             Self::Noop(buffer) => buffer.size(),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => 0,
+            Self::Vulkan(buffer) => buffer.size(),
             #[cfg(feature = "metal")]
             Self::Metal(buffer) => buffer.size(),
         }
     }
 
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), HalError> {
-        #[cfg(not(feature = "metal"))]
+        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
         let _ = (offset, data);
         match self {
             #[cfg(feature = "noop")]
             Self::Noop(_) => Ok(()),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => Ok(()),
+            Self::Vulkan(buffer) => buffer.write(offset, data),
             #[cfg(feature = "metal")]
             Self::Metal(buffer) => buffer.write(offset, data),
         }
     }
 
     pub fn read(&self, offset: u64, len: u64) -> Result<Vec<u8>, HalError> {
-        #[cfg(not(feature = "metal"))]
+        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
         let _ = offset;
         match self {
             #[cfg(feature = "noop")]
@@ -356,15 +356,7 @@ impl HalBuffer {
                 |len| Ok(vec![0; len]),
             ),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => usize::try_from(len).map_or_else(
-                |_| {
-                    Err(HalError::BufferOperationFailed {
-                        backend: "vulkan",
-                        message: "read length is too large",
-                    })
-                },
-                |len| Ok(vec![0; len]),
-            ),
+            Self::Vulkan(buffer) => buffer.read(offset, len),
             #[cfg(feature = "metal")]
             Self::Metal(buffer) => buffer.read(offset, len),
         }

@@ -299,6 +299,27 @@ matching e2e on the host via MoltenVK and logs it.
   `render` 3/3 each (no regression). Committed `phase-7: P7.6a`.
 - **P7.6b** VkBuffer (+ device memory, host-visible/coherent for
   readback) + queue writeBuffer + B2B + map-readback. Mirrors P7.2.
+  **☑ DONE — MoltenVK-verified.** `VulkanDevice::create_buffer`
+  (`vkCreateBuffer` TRANSFER_SRC|DST, `find_memory_type_index`
+  HOST_VISIBLE|HOST_COHERENT, allocate/bind, persistent
+  `map_memory`; `inner: Option` poisoned-on-fail like Metal, no
+  panic); `VulkanBufferInner` (device Arc + buffer + memory + mapped
+  ptr; `Drop` unmap→destroy_buffer→free_memory; `unsafe impl Send/
+  Sync` justified by single-threaded HAL + coherent map);
+  bounds-checked `write`/`read`/`validate_range`. `VulkanQueue::
+  submit_copies` `HalCopy::Buffer` → transient command pool/buffer +
+  `vkCmdCopyBuffer` + submit + `queue_wait_idle` (other variants
+  `BackendUnavailable` → P7.6c–e). `lib.rs` `HalBuffer::{size,write,
+  read}` + `HalQueue::submit_copies` Vulkan arms wired (Noop/Metal
+  unchanged; `cfg` guards updated). **No `yawgpu-core`/FFI change** —
+  the backend-agnostic execution path proved by Metal P7.2 was
+  reused verbatim. Tests `e2e_vulkan_buffer.rs` (3, `#[ignore]`/cfg).
+  Gate: Noop 50 binaries green + clippy clean; `--features vulkan`
+  build/clippy clean; `--features metal` still clean. M2 (MoltenVK,
+  2026-05-19): `e2e_vulkan_buffer` **3/3** (write→B2B→map-readback +
+  partial range + Noop) + `e2e_vulkan_basic` 3/3 + Metal
+  `e2e_metal_buffer`/`render` 3/3 each (no regression). Committed
+  `phase-7: P7.6b`.
 - **P7.6c** VkImage/VkImageView/VkSampler + B2T/T2B/T2T. Mirrors P7.3.
 - **P7.6d** naga→SPIR-V compute pipeline + descriptor sets + dispatch
   + storage readback. Mirrors P7.4.
