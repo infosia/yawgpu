@@ -240,30 +240,41 @@ impl HalDevice {
 
     pub fn create_render_pipeline(
         &self,
-        msl_source: &str,
+        shader: HalShaderSource,
         vertex_entry_point: &str,
         fragment_entry_point: &str,
         descriptor: &HalRenderPipelineDescriptor,
+        bindings: &[HalDescriptorBinding],
     ) -> Result<HalRenderPipeline, HalError> {
-        #[cfg(not(feature = "metal"))]
+        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
         let _ = (
-            msl_source,
+            shader,
             vertex_entry_point,
             fragment_entry_point,
             descriptor,
+            bindings,
         );
         match self {
             #[cfg(feature = "noop")]
             Self::Noop(_) => Ok(HalRenderPipeline::Noop),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => Ok(HalRenderPipeline::Vulkan(vulkan::VulkanRenderPipeline)),
-            #[cfg(feature = "metal")]
-            Self::Metal(device) => device
+            Self::Vulkan(device) => device
                 .create_render_pipeline(
-                    msl_source,
+                    shader,
                     vertex_entry_point,
                     fragment_entry_point,
                     descriptor,
+                    bindings,
+                )
+                .map(HalRenderPipeline::Vulkan),
+            #[cfg(feature = "metal")]
+            Self::Metal(device) => device
+                .create_render_pipeline(
+                    shader,
+                    vertex_entry_point,
+                    fragment_entry_point,
+                    descriptor,
+                    bindings,
                 )
                 .map(HalRenderPipeline::Metal),
         }
@@ -396,6 +407,10 @@ pub struct HalComputePass {
 pub enum HalShaderSource {
     Msl(String),
     SpirV(Vec<u32>),
+    SpirVStages {
+        vertex: Vec<u32>,
+        fragment: Vec<u32>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -330,7 +330,10 @@ unsafe fn assert_texture_reflects(
         descriptor.dimension
     );
     assert_eq!(yawgpu::wgpuTextureGetWidth(texture), descriptor.size.width);
-    assert_eq!(yawgpu::wgpuTextureGetHeight(texture), descriptor.size.height);
+    assert_eq!(
+        yawgpu::wgpuTextureGetHeight(texture),
+        descriptor.size.height
+    );
     assert_eq!(
         yawgpu::wgpuTextureGetDepthOrArrayLayers(texture),
         descriptor.size.depthOrArrayLayers

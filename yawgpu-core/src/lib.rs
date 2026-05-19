@@ -3516,7 +3516,7 @@ fn create_hal_render_pipeline(
     let Some(hal_device) = hal_device else {
         return (None, None);
     };
-    if hal_device.backend() != HalBackend::Metal {
+    if matches!(hal_device.backend(), HalBackend::Noop) {
         return (None, None);
     }
     if descriptor.depth_stencil.is_some()
@@ -3530,7 +3530,7 @@ fn create_hal_render_pipeline(
         return (
             None,
             Some(
-                "Metal render pipeline currently supports one single-sampled color target only"
+                "real render pipeline currently supports one single-sampled color target only"
                     .to_owned(),
             ),
         );
@@ -3544,54 +3544,104 @@ fn create_hal_render_pipeline(
     let Some(fragment_entry_name) = fragment_entry_name else {
         return (
             None,
-            Some("Metal render pipeline requires a fragment entry point".to_owned()),
+            Some("real render pipeline requires a fragment entry point".to_owned()),
         );
     };
-    if !Arc::ptr_eq(&descriptor.vertex.shader.module, &fragment.shader.module) {
-        return (
-            None,
-            Some("Metal render pipeline requires vertex and fragment entries in the same WGSL module".to_owned()),
-        );
-    }
-    let Some(module) = descriptor.vertex.shader.module.validated_wgsl() else {
-        return (
-            None,
-            Some("render pipeline requires a valid WGSL shader module".to_owned()),
-        );
-    };
-    let msl_binding_map = shader_naga::MslBindingMap {
-        buffers: metal_bindings
-            .iter()
-            .map(|binding| shader_naga::MslBufferBinding {
-                group: binding.group,
-                binding: binding.binding,
-                metal_index: binding.metal_index,
-            })
-            .collect(),
-    };
-    let msl_vertex_buffers =
-        match msl_vertex_buffer_bindings(&descriptor.vertex.buffers, vertex_buffer_bindings) {
-            Ok(bindings) => bindings,
-            Err(message) => return (None, Some(message)),
-        };
-    let generated = match module.generate_render_msl(
-        vertex_entry_name,
-        fragment_entry_name,
-        &msl_binding_map,
-        &msl_vertex_buffers,
-    ) {
-        Ok(generated) => generated,
-        Err(message) => return (None, Some(message)),
+    let (shader, vertex_entry_point, fragment_entry_point, descriptor_bindings) = match hal_device
+        .backend()
+    {
+        HalBackend::Metal => {
+            if !Arc::ptr_eq(&descriptor.vertex.shader.module, &fragment.shader.module) {
+                return (
+                    None,
+                    Some(
+                        "Metal render pipeline requires vertex and fragment entries in the same WGSL module"
+                            .to_owned(),
+                    ),
+                );
+            }
+            let Some(module) = descriptor.vertex.shader.module.validated_wgsl() else {
+                return (
+                    None,
+                    Some("render pipeline requires a valid WGSL shader module".to_owned()),
+                );
+            };
+            let msl_binding_map = shader_naga::MslBindingMap {
+                buffers: metal_bindings
+                    .iter()
+                    .map(|binding| shader_naga::MslBufferBinding {
+                        group: binding.group,
+                        binding: binding.binding,
+                        metal_index: binding.metal_index,
+                    })
+                    .collect(),
+            };
+            let msl_vertex_buffers = match msl_vertex_buffer_bindings(
+                &descriptor.vertex.buffers,
+                vertex_buffer_bindings,
+            ) {
+                Ok(bindings) => bindings,
+                Err(message) => return (None, Some(message)),
+            };
+            let generated = match module.generate_render_msl(
+                vertex_entry_name,
+                fragment_entry_name,
+                &msl_binding_map,
+                &msl_vertex_buffers,
+            ) {
+                Ok(generated) => generated,
+                Err(message) => return (None, Some(message)),
+            };
+            (
+                HalShaderSource::Msl(generated.source),
+                generated.vertex_entry_point,
+                generated.fragment_entry_point,
+                Vec::new(),
+            )
+        }
+        HalBackend::Vulkan => {
+            let Some(vertex_module) = descriptor.vertex.shader.module.validated_wgsl() else {
+                return (
+                    None,
+                    Some("render pipeline requires a valid WGSL vertex shader module".to_owned()),
+                );
+            };
+            let Some(fragment_module) = fragment.shader.module.validated_wgsl() else {
+                return (
+                    None,
+                    Some("render pipeline requires a valid WGSL fragment shader module".to_owned()),
+                );
+            };
+            let vertex =
+                match vertex_module.generate_spirv(vertex_entry_name, naga::ShaderStage::Vertex) {
+                    Ok(spirv) => spirv,
+                    Err(message) => return (None, Some(message)),
+                };
+            let fragment = match fragment_module
+                .generate_spirv(fragment_entry_name, naga::ShaderStage::Fragment)
+            {
+                Ok(spirv) => spirv,
+                Err(message) => return (None, Some(message)),
+            };
+            (
+                HalShaderSource::SpirVStages { vertex, fragment },
+                vertex_entry_name.to_owned(),
+                fragment_entry_name.to_owned(),
+                hal_descriptor_bindings(metal_bindings),
+            )
+        }
+        _ => return (None, None),
     };
     let hal_descriptor = match hal_render_pipeline_descriptor(descriptor, vertex_buffer_bindings) {
         Ok(descriptor) => descriptor,
         Err(message) => return (None, Some(message)),
     };
     match hal_device.create_render_pipeline(
-        &generated.source,
-        &generated.vertex_entry_point,
-        &generated.fragment_entry_point,
+        shader,
+        &vertex_entry_point,
+        &fragment_entry_point,
         &hal_descriptor,
+        &descriptor_bindings,
     ) {
         Ok(pipeline) => (Some(pipeline), None),
         Err(error) => (None, Some(error.to_string())),

@@ -61,7 +61,8 @@ fn noop_adapter_device_queue_round_trip() {
             userdata1: (&mut device as *mut native::WGPUDevice).cast(),
             userdata2: std::ptr::null_mut(),
         };
-        let future = yawgpu::wgpuAdapterRequestDevice(adapter, std::ptr::null(), device_callback_info);
+        let future =
+            yawgpu::wgpuAdapterRequestDevice(adapter, std::ptr::null(), device_callback_info);
         wait(instance, future);
         assert!(!device.is_null());
 
@@ -78,7 +79,10 @@ fn noop_adapter_device_queue_round_trip() {
 #[test]
 fn assert_device_error_catches_injected_error() {
     let test = ValidationTest::new();
-    assert_device_error!(test.inject_device_error("injected validation error"), "injected");
+    assert_device_error!(
+        test.inject_device_error("injected validation error"),
+        "injected"
+    );
 }
 
 #[test]

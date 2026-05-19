@@ -40,9 +40,9 @@ fn main() {
 
     for handle in OBJECT_HANDLES {
         let wgpu_name = format!("WGPU{handle}");
-        builder = builder
-            .blocklist_type(&wgpu_name)
-            .raw_line(format!("pub type {wgpu_name} = *const crate::{wgpu_name}Impl;"));
+        builder = builder.blocklist_type(&wgpu_name).raw_line(format!(
+            "pub type {wgpu_name} = *const crate::{wgpu_name}Impl;"
+        ));
     }
 
     let out_path = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by Cargo"));
