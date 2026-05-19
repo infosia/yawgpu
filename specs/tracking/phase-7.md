@@ -1,8 +1,19 @@
 # Phase 7 — Real backends
 
-Status: **in progress** (P7.0 active). Rules/plan:
-`../blocks/60-real-backends.md`. Roles/loop:
+Status: **COMPLETE** (P7.0 + Metal P7.1–P7.5 + Vulkan P7.6a–e done;
+Phase 7 Review CLOSED — see `phase-7-review.md`, 0C/0M/5m, all
+deferred). Commits `phase-7: P7.0` → `phase-7: phase review`.
+Rules/plan: `../blocks/60-real-backends.md`. Roles/loop:
 `../reference/workflow.md`.
+
+> Tracked Phase-7 follow-ups (review MINORs, non-blocking, no open
+> CRITICAL/MAJOR): q1 add `HalError::TextureOperationFailed` (texture
+> failures currently surface under the buffer-op message — diagnostics
+> only); q2/q3 add a Vulkan `default_noop_render_path` e2e and/or
+> de-`#[ignore]` the pure-Noop e2e variants (Noop path already covered
+> by the CI Noop binaries + Metal Noop test); q5 narrow
+> `shader_naga.rs`'s blanket `#![allow(dead_code)]`. Future real-
+> backend handoffs: do not run workspace `cargo fmt` (q4 churn).
 
 **Roadmap divergence (approved):** SPEC roadmap lists Phase 7 as
 "Vulkan→Metal"; we bring up **Metal first, then Vulkan** because the
