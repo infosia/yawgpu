@@ -1,12 +1,20 @@
 # Phase 8 — Finalize (Query / ErrorScope / DeviceLost / Toggle / Surface / MultipleDevice)
 
-Status: **in progress** (P8.0 active). Rules: `../blocks/70-finalize.md`.
-Roles/loop: `../reference/workflow.md`. **Final phase.** Back to the
-Noop validation TDD loop (codex-driven, CI-green); no GPU needed (real
-Metal/Vulkan execution was proven in Phase 7). Gate (permanent):
-`cargo test --workspace` + `cargo clippy --workspace --all-targets --
--D warnings` green on Noop. **Phase ends with the mandatory Phase
-Review** (`tracking/phase-8-review.md`).
+Status: **COMPLETE** (P8.0–P8.6 done; Phase 8 Review CLOSED — see
+`phase-8-review.md`, 0C/0M/4m, all deferred/closed). **Final phase —
+project COMPLETE.** Commits `phase-8: P8.0` → `phase-8: phase
+review`. Rules: `../blocks/70-finalize.md`. Roles/loop:
+`../reference/workflow.md`. Gate (permanent): `cargo test
+--workspace` + `cargo clippy --workspace --all-targets -- -D
+warnings` green on Noop.
+
+> Tracked Phase-8 follow-ups (review MINORs, non-blocking, no open
+> CRITICAL/MAJOR): r1 rename `FeatureDeviceFixture::errors()` (test-
+> only inverted name) to `has_no_errors()`; r2 add a one-line
+> precedence comment to `PassEncoderInner::end()` (debug-group vs
+> open-occlusion-query end-of-pass error order). r3 (Surface SF3
+> `Status_Lost`) and r4 (defensive `map_query_type_to_native` arm)
+> closed as correct-as-is.
 
 Closes the remaining WebGPU validation surface + the Phase-1/6
 deferrals (C34/C35, encoder WriteTimestamp/ResolveQuerySet, R15/R16,
