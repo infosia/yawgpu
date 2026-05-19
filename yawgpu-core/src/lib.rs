@@ -6366,6 +6366,10 @@ impl CommandEncoder {
         self.record_encoder_command()
     }
 
+    pub fn record_validation_error(&self, message: impl Into<String>) -> Option<String> {
+        self.record_buffer_command(Vec::new(), None, None, || Err(message.into()))
+    }
+
     pub fn copy_buffer_to_buffer(
         &self,
         source: Arc<Buffer>,
@@ -7568,6 +7572,10 @@ impl RenderPassEncoder {
         })
     }
 
+    pub fn record_validation_error(&self, message: impl Into<String>) -> Option<String> {
+        self.inner.record_pass_command(|_| Err(message.into()))
+    }
+
     pub fn set_bind_group(
         &self,
         index: u32,
@@ -7859,6 +7867,10 @@ impl ComputePassEncoder {
             state.compute_pipeline = Some(pipeline);
             Ok(())
         })
+    }
+
+    pub fn record_validation_error(&self, message: impl Into<String>) -> Option<String> {
+        self.inner.record_pass_command(|_| Err(message.into()))
     }
 
     pub fn set_bind_group(
