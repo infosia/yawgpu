@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use yawgpu_hal::{
-    HalAdapter, HalAddressMode, HalBackend, HalBuffer, HalBufferCopy, HalBufferTextureCopy,
-    HalBufferTextureLayout, HalCompareFunction, HalCopy, HalDevice, HalError, HalExtent3d,
-    HalFilterMode, HalInstance, HalMipmapFilterMode, HalOrigin3d, HalQueue, HalSampler,
-    HalSamplerDescriptor, HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
-    HalTextureUsage,
+    HalAdapter, HalAddressMode, HalBackend, HalBoundBuffer, HalBuffer, HalBufferCopy,
+    HalBufferTextureCopy, HalBufferTextureLayout, HalCompareFunction, HalComputePass,
+    HalComputePipeline, HalCopy, HalDevice, HalError, HalExtent3d, HalFilterMode, HalInstance,
+    HalMipmapFilterMode, HalOrigin3d, HalQueue, HalSampler, HalSamplerDescriptor, HalTexture,
+    HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage,
 };
 
 pub(crate) mod shader_naga;
@@ -465,7 +465,12 @@ impl Device {
         if let Some(message) = error {
             self.dispatch_error(ErrorKind::Validation, message);
         }
-        ComputePipeline::new(descriptor, is_error, self.limits())
+        let (pipeline, backend_error) =
+            ComputePipeline::new(descriptor, is_error, self.limits(), Some(&self.inner.hal));
+        if let Some(message) = backend_error {
+            self.dispatch_error(ErrorKind::Internal, message);
+        }
+        pipeline
     }
 
     #[must_use]
@@ -477,7 +482,13 @@ impl Device {
             .error
             .clone()
             .or_else(|| validate_compute_pipeline_descriptor(&descriptor, self.limits()));
-        ComputePipeline::new(descriptor, error.is_some(), self.limits())
+        ComputePipeline::new(
+            descriptor,
+            error.is_some(),
+            self.limits(),
+            Some(&self.inner.hal),
+        )
+        .0
     }
 
     #[must_use]
@@ -2236,7 +2247,8 @@ struct ComputePipelineInner {
     _shader_module: Arc<ShaderModule>,
     entry_name: String,
     _bindings: Vec<shader_naga::ReflectedResourceBinding>,
-    _workgroup: Option<ResolvedComputeWorkgroup>,
+    metal_bindings: Vec<MetalBufferBinding>,
+    hal: Option<HalComputePipeline>,
     bind_group_layouts: Vec<Arc<BindGroupLayout>>,
     is_error: bool,
 }
@@ -2247,8 +2259,20 @@ struct ResolvedComputeWorkgroup {
     storage_size: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MetalBufferBinding {
+    group: u32,
+    binding: u32,
+    metal_index: u32,
+}
+
 impl ComputePipeline {
-    fn new(descriptor: ComputePipelineDescriptor, is_error: bool, limits: Limits) -> Self {
+    fn new(
+        descriptor: ComputePipelineDescriptor,
+        is_error: bool,
+        limits: Limits,
+        hal_device: Option<&HalDevice>,
+    ) -> (Self, Option<String>) {
         let resolved = if is_error {
             None
         } else {
@@ -2262,17 +2286,34 @@ impl ComputePipeline {
                 Vec::new(),
             )
         });
-        Self {
-            inner: Arc::new(ComputePipelineInner {
-                _layout: descriptor.layout,
-                _shader_module: descriptor.shader_module,
-                entry_name,
-                _bindings: bindings,
-                _workgroup: workgroup,
-                bind_group_layouts,
-                is_error,
-            }),
-        }
+        let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
+        let (hal, backend_error) = if is_error {
+            (None, None)
+        } else {
+            create_hal_compute_pipeline(
+                hal_device,
+                &descriptor.shader_module,
+                &entry_name,
+                workgroup,
+                &metal_bindings,
+            )
+        };
+        let is_error = is_error || backend_error.is_some();
+        (
+            Self {
+                inner: Arc::new(ComputePipelineInner {
+                    _layout: descriptor.layout,
+                    _shader_module: descriptor.shader_module,
+                    entry_name,
+                    _bindings: bindings,
+                    metal_bindings,
+                    hal,
+                    bind_group_layouts,
+                    is_error,
+                }),
+            },
+            backend_error,
+        )
     }
 
     #[must_use]
@@ -2289,6 +2330,14 @@ impl ComputePipeline {
     pub fn bind_group_layouts(&self) -> &[Arc<BindGroupLayout>] {
         &self.inner.bind_group_layouts
     }
+
+    fn hal(&self) -> Option<HalComputePipeline> {
+        self.inner.hal.clone()
+    }
+
+    fn metal_bindings(&self) -> &[MetalBufferBinding] {
+        &self.inner.metal_bindings
+    }
 }
 
 type ResolvedPipelineParts = (
@@ -2297,6 +2346,80 @@ type ResolvedPipelineParts = (
     Option<ResolvedComputeWorkgroup>,
     Vec<Arc<BindGroupLayout>>,
 );
+
+fn create_hal_compute_pipeline(
+    hal_device: Option<&HalDevice>,
+    shader_module: &ShaderModule,
+    entry_name: &str,
+    workgroup: Option<ResolvedComputeWorkgroup>,
+    metal_bindings: &[MetalBufferBinding],
+) -> (Option<HalComputePipeline>, Option<String>) {
+    let Some(hal_device) = hal_device else {
+        return (None, None);
+    };
+    if hal_device.backend() != HalBackend::Metal {
+        return (None, None);
+    }
+    let Some(module) = shader_module.validated_wgsl() else {
+        return (
+            None,
+            Some("compute pipeline requires a valid WGSL shader module".to_owned()),
+        );
+    };
+    let Some(workgroup) = workgroup else {
+        return (
+            None,
+            Some("compute pipeline workgroup size reflection failed".to_owned()),
+        );
+    };
+    let msl_binding_map = shader_naga::MslBindingMap {
+        buffers: metal_bindings
+            .iter()
+            .map(|binding| shader_naga::MslBufferBinding {
+                group: binding.group,
+                binding: binding.binding,
+                metal_index: binding.metal_index,
+            })
+            .collect(),
+    };
+    let generated = match module.generate_msl(entry_name, &msl_binding_map) {
+        Ok(generated) => generated,
+        Err(message) => return (None, Some(message)),
+    };
+    match hal_device.create_compute_pipeline(
+        &generated.source,
+        &generated.entry_point,
+        (workgroup.size[0], workgroup.size[1], workgroup.size[2]),
+    ) {
+        Ok(pipeline) => (Some(pipeline), None),
+        Err(error) => (None, Some(error.to_string())),
+    }
+}
+
+fn metal_buffer_binding_map(layouts: &[Arc<BindGroupLayout>]) -> Vec<MetalBufferBinding> {
+    let mut bindings = Vec::new();
+    let mut metal_index = 0u32;
+    for (group_index, layout) in layouts.iter().enumerate() {
+        let Ok(group) = u32::try_from(group_index) else {
+            break;
+        };
+        for entry in layout.entries() {
+            if matches!(entry.kind, Some(BindingLayoutKind::Buffer { .. })) {
+                bindings.push(MetalBufferBinding {
+                    group,
+                    binding: entry.binding,
+                    metal_index,
+                });
+                metal_index = metal_index.saturating_add(1);
+            }
+        }
+    }
+    bindings.sort_by_key(|binding| (binding.group, binding.binding));
+    for (index, binding) in bindings.iter_mut().enumerate() {
+        binding.metal_index = u32::try_from(index).unwrap_or(u32::MAX);
+    }
+    bindings
+}
 
 fn validate_compute_pipeline_descriptor(
     descriptor: &ComputePipelineDescriptor,
@@ -4879,6 +5002,145 @@ fn hal_buffer_texture_layout(
     })
 }
 
+fn hal_command_execution(op: &CommandExecution) -> Option<HalCopy> {
+    match op {
+        CommandExecution::BufferCopy(copy) => {
+            let source = copy.source.hal()?;
+            let destination = copy.destination.hal()?;
+            Some(HalCopy::Buffer(HalBufferCopy {
+                source,
+                source_offset: copy.source_offset,
+                destination,
+                destination_offset: copy.destination_offset,
+                size: copy.size,
+            }))
+        }
+        CommandExecution::TextureCopy(copy) => hal_texture_copy_execution(copy),
+        CommandExecution::ComputePass(pass) => hal_compute_pass_execution(pass),
+    }
+}
+
+fn hal_texture_copy_execution(copy: &TextureCopyCommand) -> Option<HalCopy> {
+    match copy {
+        TextureCopyCommand::BufferToTexture {
+            source,
+            destination,
+            copy_size,
+        } => {
+            let buffer = source.buffer.hal()?;
+            let texture = destination.texture.hal()?;
+            let buffer_layout =
+                hal_buffer_texture_layout(source.layout, &destination.texture, *copy_size)?;
+            Some(HalCopy::BufferToTexture(HalBufferTextureCopy {
+                buffer,
+                buffer_layout,
+                texture,
+                mip_level: destination.mip_level,
+                origin: hal_origin(destination.origin),
+                extent: hal_extent(*copy_size),
+            }))
+        }
+        TextureCopyCommand::TextureToBuffer {
+            source,
+            destination,
+            copy_size,
+        } => {
+            let buffer = destination.buffer.hal()?;
+            let texture = source.texture.hal()?;
+            let buffer_layout =
+                hal_buffer_texture_layout(destination.layout, &source.texture, *copy_size)?;
+            Some(HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                buffer,
+                buffer_layout,
+                texture,
+                mip_level: source.mip_level,
+                origin: hal_origin(source.origin),
+                extent: hal_extent(*copy_size),
+            }))
+        }
+        TextureCopyCommand::TextureToTexture {
+            source,
+            destination,
+            copy_size,
+        } => {
+            let source_texture = source.texture.hal()?;
+            let destination_texture = destination.texture.hal()?;
+            Some(HalCopy::TextureToTexture(HalTextureCopy {
+                source: source_texture,
+                source_mip_level: source.mip_level,
+                source_origin: hal_origin(source.origin),
+                destination: destination_texture,
+                destination_mip_level: destination.mip_level,
+                destination_origin: hal_origin(destination.origin),
+                extent: hal_extent(*copy_size),
+            }))
+        }
+    }
+}
+
+fn hal_compute_pass_execution(pass: &ComputePassCommand) -> Option<HalCopy> {
+    let pipeline = pass.pipeline.hal()?;
+    let mut bind_buffers = Vec::new();
+    for binding in pass.pipeline.metal_bindings() {
+        let bound = pass.bind_groups.get(&binding.group)?;
+        let entry = bound
+            .group
+            .entries()
+            .iter()
+            .find(|entry| entry.binding == binding.binding)?;
+        let BindGroupResource::Buffer { buffer, offset, .. } = &entry.resource else {
+            return None;
+        };
+        let dynamic_offset = dynamic_offset_for_binding(
+            pass.pipeline.bind_group_layouts(),
+            binding.group,
+            binding.binding,
+            &bound.dynamic_offsets,
+        )?;
+        let offset = offset.checked_add(dynamic_offset)?;
+        bind_buffers.push(HalBoundBuffer {
+            metal_index: binding.metal_index,
+            buffer: buffer.hal()?,
+            offset,
+        });
+    }
+    Some(HalCopy::ComputePass(HalComputePass {
+        pipeline,
+        bind_buffers,
+        workgroups: pass.workgroups,
+    }))
+}
+
+fn dynamic_offset_for_binding(
+    layouts: &[Arc<BindGroupLayout>],
+    group: u32,
+    binding: u32,
+    dynamic_offsets: &[u32],
+) -> Option<u64> {
+    let layout = layouts.get(usize::try_from(group).ok()?)?;
+    let mut dynamic_index = 0usize;
+    for entry in layout.entries() {
+        let is_dynamic = matches!(
+            entry.kind,
+            Some(BindingLayoutKind::Buffer {
+                has_dynamic_offset: true,
+                ..
+            })
+        );
+        if entry.binding == binding {
+            return if is_dynamic {
+                dynamic_offsets.get(dynamic_index).copied().map(u64::from)
+            } else {
+                Some(0)
+            };
+        }
+        if is_dynamic {
+            dynamic_index = dynamic_index.checked_add(1)?;
+        }
+    }
+    None
+}
+
 fn validate_sampler_descriptor(descriptor: &ResolvedSamplerDescriptor) -> Option<&'static str> {
     if !descriptor.lod_min_clamp.is_finite() {
         return Some("sampler lodMinClamp must be finite");
@@ -5141,8 +5403,7 @@ struct CommandEncoderState {
     first_error: Option<String>,
     debug_group_depth: u32,
     referenced_buffers: Vec<Arc<Buffer>>,
-    buffer_copies: Vec<BufferCopyCommand>,
-    texture_copies: Vec<TextureCopyCommand>,
+    command_ops: Vec<CommandExecution>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5172,8 +5433,7 @@ pub struct CommandBuffer {
 struct CommandBufferInner {
     is_error: bool,
     referenced_buffers: Vec<Arc<Buffer>>,
-    buffer_copies: Vec<BufferCopyCommand>,
-    texture_copies: Vec<TextureCopyCommand>,
+    command_ops: Vec<CommandExecution>,
     submitted: Mutex<bool>,
 }
 
@@ -5203,6 +5463,20 @@ enum TextureCopyCommand {
         destination: TexelCopyTextureInfo,
         copy_size: Extent3d,
     },
+}
+
+#[derive(Debug, Clone)]
+enum CommandExecution {
+    BufferCopy(BufferCopyCommand),
+    TextureCopy(TextureCopyCommand),
+    ComputePass(ComputePassCommand),
+}
+
+#[derive(Debug, Clone)]
+struct ComputePassCommand {
+    pipeline: Arc<ComputePipeline>,
+    bind_groups: BTreeMap<u32, BoundBindGroup>,
+    workgroups: (u32, u32, u32),
 }
 
 #[derive(Debug, Clone)]
@@ -5329,8 +5603,7 @@ impl CommandEncoder {
                     first_error: None,
                     debug_group_depth: 0,
                     referenced_buffers: Vec::new(),
-                    buffer_copies: Vec::new(),
-                    texture_copies: Vec::new(),
+                    command_ops: Vec::new(),
                 }),
             }),
         }
@@ -5608,10 +5881,14 @@ impl CommandEncoder {
             let mut state = self.inner.state.lock();
             state.referenced_buffers.extend(referenced_buffers);
             if let Some(copy) = buffer_copy {
-                state.buffer_copies.push(copy);
+                state
+                    .command_ops
+                    .push(CommandExecution::BufferCopy(copy.clone()));
             }
             if let Some(copy) = texture_copy {
-                state.texture_copies.push(copy);
+                state
+                    .command_ops
+                    .push(CommandExecution::TextureCopy(copy.clone()));
             }
         }
         None
@@ -5622,7 +5899,7 @@ impl CommandEncoder {
         let mut state = self.inner.state.lock();
         if state.lifecycle != CommandEncoderLifecycle::Recording {
             return (
-                CommandBuffer::new(true, Vec::new(), Vec::new(), Vec::new()),
+                CommandBuffer::new(true, Vec::new(), Vec::new()),
                 Some("command encoder cannot be finished more than once".to_owned()),
             );
         }
@@ -5646,23 +5923,13 @@ impl CommandEncoder {
         } else {
             std::mem::take(&mut state.referenced_buffers)
         };
-        let buffer_copies = if finish_error.is_some() {
+        let command_ops = if finish_error.is_some() {
             Vec::new()
         } else {
-            std::mem::take(&mut state.buffer_copies)
-        };
-        let texture_copies = if finish_error.is_some() {
-            Vec::new()
-        } else {
-            std::mem::take(&mut state.texture_copies)
+            std::mem::take(&mut state.command_ops)
         };
         (
-            CommandBuffer::new(
-                finish_error.is_some(),
-                referenced_buffers,
-                buffer_copies,
-                texture_copies,
-            ),
+            CommandBuffer::new(finish_error.is_some(), referenced_buffers, command_ops),
             finish_error,
         )
     }
@@ -5685,6 +5952,14 @@ impl CommandEncoder {
 
     fn record_referenced_buffers(&self, buffers: Vec<Arc<Buffer>>) {
         self.inner.state.lock().referenced_buffers.extend(buffers);
+    }
+
+    fn record_compute_pass(&self, command: ComputePassCommand) {
+        self.inner
+            .state
+            .lock()
+            .command_ops
+            .push(CommandExecution::ComputePass(command));
     }
 
     fn is_finished(&self) -> bool {
@@ -6273,15 +6548,13 @@ impl CommandBuffer {
     fn new(
         is_error: bool,
         referenced_buffers: Vec<Arc<Buffer>>,
-        buffer_copies: Vec<BufferCopyCommand>,
-        texture_copies: Vec<TextureCopyCommand>,
+        command_ops: Vec<CommandExecution>,
     ) -> Self {
         Self {
             inner: Arc::new(CommandBufferInner {
                 is_error,
                 referenced_buffers,
-                buffer_copies,
-                texture_copies,
+                command_ops,
                 submitted: Mutex::new(false),
             }),
         }
@@ -6296,12 +6569,8 @@ impl CommandBuffer {
         &self.inner.referenced_buffers
     }
 
-    fn buffer_copies(&self) -> &[BufferCopyCommand] {
-        &self.inner.buffer_copies
-    }
-
-    fn texture_copies(&self) -> &[TextureCopyCommand] {
-        &self.inner.texture_copies
+    fn command_ops(&self) -> &[CommandExecution] {
+        &self.inner.command_ops
     }
 
     fn mark_submitted(&self) -> Result<(), String> {
@@ -6725,6 +6994,15 @@ impl ComputePassEncoder {
             {
                 return Err("compute dispatch workgroup count exceeds the device limit".to_owned());
             }
+            let pipeline = state
+                .compute_pipeline
+                .as_ref()
+                .ok_or_else(|| "compute dispatch requires a compute pipeline".to_owned())?;
+            self.inner.parent.record_compute_pass(ComputePassCommand {
+                pipeline: Arc::clone(pipeline),
+                bind_groups: state.bind_groups.clone(),
+                workgroups: (x, y, z),
+            });
             Ok(())
         })
     }
@@ -7826,98 +8104,9 @@ impl Queue {
         }
         let mut copies = Vec::new();
         for command_buffer in command_buffers {
-            for copy in command_buffer.buffer_copies() {
-                let Some(source) = copy.source.hal() else {
-                    continue;
-                };
-                let Some(destination) = copy.destination.hal() else {
-                    continue;
-                };
-                copies.push(HalCopy::Buffer(HalBufferCopy {
-                    source,
-                    source_offset: copy.source_offset,
-                    destination,
-                    destination_offset: copy.destination_offset,
-                    size: copy.size,
-                }));
-            }
-            for copy in command_buffer.texture_copies() {
-                match copy {
-                    TextureCopyCommand::BufferToTexture {
-                        source,
-                        destination,
-                        copy_size,
-                    } => {
-                        let Some(buffer) = source.buffer.hal() else {
-                            continue;
-                        };
-                        let Some(texture) = destination.texture.hal() else {
-                            continue;
-                        };
-                        let Some(buffer_layout) = hal_buffer_texture_layout(
-                            source.layout,
-                            &destination.texture,
-                            *copy_size,
-                        ) else {
-                            continue;
-                        };
-                        copies.push(HalCopy::BufferToTexture(HalBufferTextureCopy {
-                            buffer,
-                            buffer_layout,
-                            texture,
-                            mip_level: destination.mip_level,
-                            origin: hal_origin(destination.origin),
-                            extent: hal_extent(*copy_size),
-                        }));
-                    }
-                    TextureCopyCommand::TextureToBuffer {
-                        source,
-                        destination,
-                        copy_size,
-                    } => {
-                        let Some(buffer) = destination.buffer.hal() else {
-                            continue;
-                        };
-                        let Some(texture) = source.texture.hal() else {
-                            continue;
-                        };
-                        let Some(buffer_layout) = hal_buffer_texture_layout(
-                            destination.layout,
-                            &source.texture,
-                            *copy_size,
-                        ) else {
-                            continue;
-                        };
-                        copies.push(HalCopy::TextureToBuffer(HalBufferTextureCopy {
-                            buffer,
-                            buffer_layout,
-                            texture,
-                            mip_level: source.mip_level,
-                            origin: hal_origin(source.origin),
-                            extent: hal_extent(*copy_size),
-                        }));
-                    }
-                    TextureCopyCommand::TextureToTexture {
-                        source,
-                        destination,
-                        copy_size,
-                    } => {
-                        let Some(source_texture) = source.texture.hal() else {
-                            continue;
-                        };
-                        let Some(destination_texture) = destination.texture.hal() else {
-                            continue;
-                        };
-                        copies.push(HalCopy::TextureToTexture(HalTextureCopy {
-                            source: source_texture,
-                            source_mip_level: source.mip_level,
-                            source_origin: hal_origin(source.origin),
-                            destination: destination_texture,
-                            destination_mip_level: destination.mip_level,
-                            destination_origin: hal_origin(destination.origin),
-                            extent: hal_extent(*copy_size),
-                        }));
-                    }
+            for op in command_buffer.command_ops() {
+                if let Some(copy) = hal_command_execution(op) {
+                    copies.push(copy);
                 }
             }
         }

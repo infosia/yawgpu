@@ -1,9 +1,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
-    HalAddressMode, HalBuffer, HalBufferTextureCopy, HalCompareFunction, HalCopy, HalError,
-    HalExtent3d, HalFilterMode, HalMipmapFilterMode, HalSamplerDescriptor, HalTexture,
-    HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage,
+    HalAddressMode, HalBoundBuffer, HalBuffer, HalBufferTextureCopy, HalCompareFunction,
+    HalComputePass, HalCopy, HalError, HalExtent3d, HalFilterMode, HalMipmapFilterMode,
+    HalSamplerDescriptor, HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
+    HalTextureUsage,
 };
 
 const BACKEND: &str = "metal";
@@ -117,6 +118,15 @@ impl MetalDevice {
             _inner: create_sampler(&self._device, descriptor).ok(),
         }
     }
+
+    pub fn create_compute_pipeline(
+        &self,
+        msl_source: &str,
+        entry_point: &str,
+        workgroup_size: (u32, u32, u32),
+    ) -> Result<MetalComputePipeline, HalError> {
+        create_compute_pipeline(&self._device, msl_source, entry_point, workgroup_size)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -145,16 +155,35 @@ impl MetalQueue {
         }
 
         let command_buffer = self.inner.new_command_buffer();
-        let blit = command_buffer.new_blit_command_encoder();
         for copy in copies {
             match copy {
-                HalCopy::Buffer(copy) => encode_buffer_copy(blit, copy)?,
-                HalCopy::BufferToTexture(copy) => encode_buffer_to_texture(blit, copy)?,
-                HalCopy::TextureToBuffer(copy) => encode_texture_to_buffer(blit, copy)?,
-                HalCopy::TextureToTexture(copy) => encode_texture_to_texture(blit, copy)?,
+                HalCopy::Buffer(copy) => {
+                    let blit = command_buffer.new_blit_command_encoder();
+                    encode_buffer_copy(blit, copy)?;
+                    blit.end_encoding();
+                }
+                HalCopy::BufferToTexture(copy) => {
+                    let blit = command_buffer.new_blit_command_encoder();
+                    encode_buffer_to_texture(blit, copy)?;
+                    blit.end_encoding();
+                }
+                HalCopy::TextureToBuffer(copy) => {
+                    let blit = command_buffer.new_blit_command_encoder();
+                    encode_texture_to_buffer(blit, copy)?;
+                    blit.end_encoding();
+                }
+                HalCopy::TextureToTexture(copy) => {
+                    let blit = command_buffer.new_blit_command_encoder();
+                    encode_texture_to_texture(blit, copy)?;
+                    blit.end_encoding();
+                }
+                HalCopy::ComputePass(pass) => {
+                    let encoder = command_buffer.new_compute_command_encoder();
+                    encode_compute_pass(encoder, pass)?;
+                    encoder.end_encoding();
+                }
             }
         }
-        blit.end_encoding();
         command_buffer.commit();
         command_buffer.wait_until_completed();
         Ok(())
@@ -293,6 +322,34 @@ impl MetalTexture {
 #[derive(Debug, Clone)]
 pub struct MetalSampler {
     _inner: Option<metal::SamplerState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MetalComputePipeline {
+    inner: metal::ComputePipelineState,
+    workgroup_size: (u32, u32, u32),
+}
+
+fn create_compute_pipeline(
+    device: &metal::DeviceRef,
+    msl_source: &str,
+    entry_point: &str,
+    workgroup_size: (u32, u32, u32),
+) -> Result<MetalComputePipeline, HalError> {
+    let options = metal::CompileOptions::new();
+    let library = device
+        .new_library_with_source(msl_source, &options)
+        .map_err(shader_error)?;
+    let function = library
+        .get_function(entry_point, None)
+        .map_err(shader_error)?;
+    let inner = device
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(shader_error)?;
+    Ok(MetalComputePipeline {
+        inner,
+        workgroup_size,
+    })
 }
 
 fn create_texture(
@@ -442,6 +499,44 @@ fn encode_texture_to_texture(
     Ok(())
 }
 
+fn encode_compute_pass(
+    encoder: &metal::ComputeCommandEncoderRef,
+    pass: &HalComputePass,
+) -> Result<(), HalError> {
+    let crate::HalComputePipeline::Metal(pipeline) = &pass.pipeline else {
+        return Err(shader_error(
+            "compute pipeline is not Metal-backed".to_owned(),
+        ));
+    };
+    encoder.set_compute_pipeline_state(&pipeline.inner);
+    for binding in &pass.bind_buffers {
+        encode_compute_buffer(encoder, binding)?;
+    }
+    encoder.dispatch_thread_groups(
+        to_mtl_dispatch_size(pass.workgroups)?,
+        to_mtl_workgroup_size(pipeline.workgroup_size)?,
+    );
+    Ok(())
+}
+
+fn encode_compute_buffer(
+    encoder: &metal::ComputeCommandEncoderRef,
+    binding: &HalBoundBuffer,
+) -> Result<(), HalError> {
+    let HalBuffer::Metal(buffer) = &binding.buffer else {
+        return Err(buffer_error("compute buffer is not Metal-backed"));
+    };
+    if binding.offset > buffer.size() {
+        return Err(buffer_error("compute buffer offset exceeds buffer size"));
+    }
+    encoder.set_buffer(
+        to_ns(u64::from(binding.metal_index))?,
+        Some(buffer.inner()?),
+        to_ns(binding.offset)?,
+    );
+    Ok(())
+}
+
 fn validate_buffer_texture_range(
     buffer: &MetalBuffer,
     copy: &HalBufferTextureCopy,
@@ -498,6 +593,18 @@ fn to_mtl_size(extent: HalExtent3d) -> Result<metal::MTLSize, HalError> {
         to_ns(u64::from(extent.height))?,
         to_ns(u64::from(extent.depth_or_array_layers))?,
     ))
+}
+
+fn to_mtl_dispatch_size(size: (u32, u32, u32)) -> Result<metal::MTLSize, HalError> {
+    Ok(metal::MTLSize::new(
+        to_ns(u64::from(size.0))?,
+        to_ns(u64::from(size.1))?,
+        to_ns(u64::from(size.2))?,
+    ))
+}
+
+fn to_mtl_workgroup_size(size: (u32, u32, u32)) -> Result<metal::MTLSize, HalError> {
+    to_mtl_dispatch_size(size)
 }
 
 fn map_texture_format(format: HalTextureFormat) -> Result<(metal::MTLPixelFormat, u32), HalError> {
@@ -560,6 +667,13 @@ fn map_compare_function(compare: HalCompareFunction) -> metal::MTLCompareFunctio
 
 fn texture_error(message: &'static str) -> HalError {
     HalError::BufferOperationFailed {
+        backend: BACKEND,
+        message,
+    }
+}
+
+fn shader_error(message: String) -> HalError {
+    HalError::ShaderCompilationFailed {
         backend: BACKEND,
         message,
     }

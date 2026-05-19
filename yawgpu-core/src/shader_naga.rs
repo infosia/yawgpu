@@ -2,10 +2,30 @@
 // P5.0 intentionally lands reflection helpers before pipeline creation uses
 // them. Later Phase-5 slices consume these crate-private APIs.
 
+use std::collections::BTreeMap;
+
 #[derive(Debug)]
 pub(crate) struct ValidatedWgslModule {
     pub module: naga::Module,
     pub info: naga::valid::ModuleInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MslBindingMap {
+    pub buffers: Vec<MslBufferBinding>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MslBufferBinding {
+    pub group: u32,
+    pub binding: u32,
+    pub metal_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GeneratedMsl {
+    pub source: String,
+    pub entry_point: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +183,70 @@ pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ValidatedWgslModule, 
 }
 
 impl ValidatedWgslModule {
+    pub(crate) fn generate_msl(
+        &self,
+        entry_name: &str,
+        binding_map: &MslBindingMap,
+    ) -> Result<GeneratedMsl, String> {
+        let resources = binding_map
+            .buffers
+            .iter()
+            .map(|binding| {
+                let slot = u8::try_from(binding.metal_index)
+                    .map_err(|_| "MSL buffer index exceeds the supported slot range")?;
+                Ok((
+                    naga::ResourceBinding {
+                        group: binding.group,
+                        binding: binding.binding,
+                    },
+                    naga::back::msl::BindTarget {
+                        buffer: Some(slot),
+                        ..Default::default()
+                    },
+                ))
+            })
+            .collect::<Result<naga::back::msl::BindingMap, &str>>()
+            .map_err(str::to_owned)?;
+        let mut per_entry_point_map = BTreeMap::new();
+        per_entry_point_map.insert(
+            entry_name.to_owned(),
+            naga::back::msl::EntryPointResources {
+                resources,
+                ..Default::default()
+            },
+        );
+        let options = naga::back::msl::Options {
+            lang_version: (2, 4),
+            per_entry_point_map,
+            fake_missing_bindings: false,
+            ..Default::default()
+        };
+        let pipeline_options = naga::back::msl::PipelineOptions {
+            entry_point: Some((naga::ShaderStage::Compute, entry_name.to_owned())),
+            ..Default::default()
+        };
+        let (source, info) =
+            naga::back::msl::write_string(&self.module, &self.info, &options, &pipeline_options)
+                .map_err(|error| error.to_string())?;
+        let entry_index = self
+            .module
+            .entry_points
+            .iter()
+            .position(|entry| entry.name == entry_name && entry.stage == naga::ShaderStage::Compute)
+            .ok_or_else(|| "MSL entry point was not found".to_owned())?;
+        let entry_point = info
+            .entry_point_names
+            .get(entry_index)
+            .ok_or_else(|| "MSL entry point name was not emitted".to_owned())?
+            .as_ref()
+            .map_err(|error| error.to_string())?
+            .clone();
+        Ok(GeneratedMsl {
+            source,
+            entry_point,
+        })
+    }
+
     pub(crate) fn entry_points(&self) -> Vec<ReflectedEntryPoint> {
         self.module
             .entry_points

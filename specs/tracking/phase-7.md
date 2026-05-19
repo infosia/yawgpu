@@ -175,11 +175,49 @@ validation` 4/4 unchanged) + clippy clean; `cargo build/clippy
   e2e_metal_smoke 1/1 (the `submit_copies` rename did not regress
   P7.1/P7.2). **Real B2T→T2B & T2T pixel round-trip confirmed.**
 
-## P7.4 — Metal Shader (naga→MSL) + compute dispatch  *(NEXT)*
-WGSL→MSL via naga MSL backend; compute pipeline + dispatch +
-storage-buffer readback. Port `ComputeDispatchTests` (basic).
+## P7.4 — Metal Shader (naga→MSL) + compute dispatch  *(☑ DONE — real-GPU-verified)*
 
-## P7.5 — Metal render pipeline + render pass draw  *(after P7.4)*
+Done: `naga` gains `msl-out`. `shader_naga::generate_msl(entry,
+&MslBindingMap) -> GeneratedMsl{source, entry_point}` via
+`naga::back::msl` (per-entry-point resource map; resolves the emitted
+Metal fn name via `info.entry_point_names`; all errors `Result`, no
+naga leak/panic). Deterministic binding map: core sorts pipeline
+bind-group buffer bindings by `(group,binding)` → `metal_index =
+sorted position`, the *single* source feeding both MSL codegen and
+runtime `set_buffer` (contract holds). HAL: `HalComputePipeline`
+enum + `HalDevice::create_compute_pipeline(msl,entry,wg)` (Noop/
+Vulkan stub; Metal `new_library_with_source`→`get_function`→
+`new_compute_pipeline_state_with_function`, failure →
+`HalError::ShaderCompilationFailed`); `HalCopy::ComputePass(HalCompute
+Pass{pipeline,bind_buffers,workgroups})` executed in recorded order
+with copies; metal `new_compute_command_encoder`→
+`set_compute_pipeline_state`→`set_buffer` per binding→
+`dispatch_thread_groups`. Each copy/pass now gets its own
+encoder (blit-vs-compute correctness fix; no panic, offset/Metal-
+backing checked). core: `ComputePipeline` holds `Option<HalCompute
+Pipeline>` + binding map (naga/Metal fail ⇒ existing error-pipeline
+path, not panic); `ComputePassEncoder` records exec ops after P6.5
+validation; `Queue::submit` translates → `HalCopy::ComputePass`,
+skips no-HAL (Noop pure no-op). Bounded: compute only, uniform/
+storage buffers, no textures/samplers/indirect/render; P5/P6
+validation unchanged. Tests `e2e_metal_compute.rs` (3,
+`#[ignore]`/cfg). Gate: Noop `cargo test --workspace` 47 binaries
+green (`compute_pipeline_validation` 7/7, `pass_state_validation`
+9/9 unchanged) + clippy clean; `cargo build/clippy -p yawgpu
+--features metal` clean. Committed `phase-7: P7.4`.
+
+### P7.4 real-GPU run log
+- 2026-05-19, Apple Silicon, `cargo test -p yawgpu --features metal --test
+  e2e_metal_compute -- --ignored`: **3/3 pass**
+  (`metal_compute_fills_storage_buffer`,
+  `metal_compute_reads_input_and_writes_output_storage_buffers`,
+  `default_noop_compute_path_has_no_device_error`). Regression
+  re-run: basic 3/3 + buffer 3/3 + texture 4/4 + smoke 1/1 (no
+  regression from the per-op-encoder refactor / `HalCopy::ComputePass`).
+  **Real WGSL→MSL→MTLComputePipelineState→dispatch→storage-buffer
+  readback confirmed.**
+
+## P7.5 — Metal render pipeline + render pass draw  *(NEXT)*
 Render pipeline; render pass load/store + draw; color readback.
 Port `BasicTests` render / minimal draw.
 
