@@ -1,0 +1,11 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/cmake_install.cmake",
+		"/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/framework/cmake_install.cmake",
+		"/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/enumerate_adapters/cmake_install.cmake",
+		"/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/compute/cmake_install.cmake",
+		"/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/device_info/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -80,17 +80,31 @@ slice; not done during active development.
 
 ## Phase 7 / real backends
 
-- **metal 0.33.0**: selected in P7.0 as the latest stable `metal`
-  crate release visible on crates.io/docs.rs at implementation time
-  (2026-05-19). It is wired as an optional `yawgpu-hal` dependency and
-  enabled only by the `metal` cargo feature, so the default Noop build
-  does not compile or link the crate. P7.0 only proves dependency and
-  HAL-surface compilation; all Metal methods remain
-  `BackendUnavailable` stubs and make no Objective-C/Metal driver
-  calls. Although the crate documents that its older `objc` ecosystem
-  is deprecated, this slice intentionally follows the Phase-7 plan's
-  `metal`-crate choice for de-risk scaffolding before P7.1 decides the
-  first real device calls.
+- **objc2 0.6 / objc2-foundation 0.3 / objc2-metal 0.3**: the Metal
+  backend was migrated from the deprecated `metal 0.33.0` crate during
+  the P9.0 review fixes (2026-05-20), matching the working `mgpu`
+  Metal backend's objc2 family. This resolves the Phase-7 Review MINOR
+  about the deprecated `objc` ecosystem and keeps yawgpu on a
+  maintained binding set. The Phase-7 Metal HAL surface is preserved
+  unchanged — all `e2e_metal_*` tests pass on the host after migration
+  (basic/buffer/texture/compute/render/smoke). Dependencies remain
+  optional and are enabled only by the `metal` cargo feature, so
+  default Noop builds do not compile or link Objective-C/Metal crates.
+  *Known issue (tracked as Phase-9 follow-up; does not affect
+  Phase-7 e2e):* the C `examples/compute` reads `[0,0,0,0]` on the
+  Metal backend regardless of input-seeding path (mappedAtCreation
+  → unmap write-through *or* queueWriteBuffer), while Vulkan/
+  MoltenVK reads the expected Collatz `[0,1,7,2]` on the **same**
+  core code, and the Rust `e2e_metal_compute` (which uses
+  queueWriteBuffer) passes 3/3 on the host. The objc2-metal migration
+  did not resolve this; the bug is specifically in the
+  C-cdylib-via-FFI Metal compute path (likely sequencing /
+  autoreleasepool / FFI marshalling of the storage buffer between
+  yawgpu's example framework and the Metal command-buffer encode).
+  The `examples/framework` helper currently prefers
+  `queueWriteBuffer` for `CopyDst` buffers as a partial workaround;
+  enumerate_adapters and device_info both work on Metal. The bug
+  needs deeper investigation as a Phase-9 follow-up.
 - **ash 0.38.0+1.3.281**: selected in P7.6a as the latest stable
   `ash` crate release visible on docs.rs/crates.io at implementation
   time (2026-05-19). It is wired as optional `yawgpu-hal` and

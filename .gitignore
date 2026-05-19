@@ -1,4 +1,5 @@
 /target
+/examples/build
 .claude/
 *.transcript
 /HANDOFF.md

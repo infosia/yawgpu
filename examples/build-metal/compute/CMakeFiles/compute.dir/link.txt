@@ -1,0 +1,1 @@
+/usr/bin/cc  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/compute.dir/main.c.o -o compute  -Wl,-rpath,/Users/kiguchi/Documents/workspace/Rust/yawgpu/target/debug ../framework/libframework.a /Users/kiguchi/Documents/workspace/Rust/yawgpu/target/debug/libyawgpu.dylib -framework CoreFoundation -framework QuartzCore -framework Metal

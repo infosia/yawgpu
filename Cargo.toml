@@ -18,3 +18,6 @@ bitflags = "2"
 smallvec = "1"
 raw-window-handle = "0.6"
 naga = { git = "https://github.com/infosia/wgpu.git", rev = "216627076a7b22ad09fa566de53d1f0f74b59de3" }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-metal = "0.3"

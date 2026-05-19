@@ -1,0 +1,15 @@
+/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/CMakeFiles/yawgpu_cargo_build.dir
+/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/CMakeFiles/edit_cache.dir
+/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/CMakeFiles/rebuild_cache.dir
+/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/framework/CMakeFiles/framework.dir
+/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/framework/CMakeFiles/edit_cache.dir
+/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/framework/CMakeFiles/rebuild_cache.dir
+/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/enumerate_adapters/CMakeFiles/enumerate_adapters.dir
+/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/enumerate_adapters/CMakeFiles/edit_cache.dir
+/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/enumerate_adapters/CMakeFiles/rebuild_cache.dir
+/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/compute/CMakeFiles/compute.dir
+/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/compute/CMakeFiles/edit_cache.dir
+/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/compute/CMakeFiles/rebuild_cache.dir
+/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/device_info/CMakeFiles/device_info.dir
+/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/device_info/CMakeFiles/edit_cache.dir
+/Users/kiguchi/Documents/workspace/Rust/yawgpu/examples/build-vulkan/device_info/CMakeFiles/rebuild_cache.dir
