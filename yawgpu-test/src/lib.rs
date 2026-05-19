@@ -5,6 +5,38 @@ use std::sync::{Arc, Mutex};
 use yawgpu::native;
 use yawgpu_core::{DeviceError, ErrorKind};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RealBackend {
+    Metal,
+    Vulkan,
+}
+
+impl RealBackend {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Metal => "metal",
+            Self::Vulkan => "vulkan",
+        }
+    }
+}
+
+#[must_use]
+pub fn real_backend_available(_backend: RealBackend) -> bool {
+    false
+}
+
+#[must_use]
+pub fn real_backend_skip_reason(backend: RealBackend) -> Option<String> {
+    (!real_backend_available(backend)).then(|| {
+        format!(
+            "{} backend is unavailable in the P7.0 gated harness",
+            backend.name()
+        )
+    })
+}
+
 thread_local! {
     static CURRENT_ERRORS: RefCell<Option<Arc<Mutex<Vec<DeviceError>>>>> = const { RefCell::new(None) };
 }
@@ -31,8 +63,11 @@ impl ValidationTest {
                 userdata1: (&mut adapter as *mut native::WGPUAdapter).cast(),
                 userdata2: std::ptr::null_mut(),
             };
-            let future =
-                yawgpu::wgpuInstanceRequestAdapter(instance, std::ptr::null(), adapter_callback_info);
+            let future = yawgpu::wgpuInstanceRequestAdapter(
+                instance,
+                std::ptr::null(),
+                adapter_callback_info,
+            );
             wait(instance, future);
             assert!(!adapter.is_null());
 

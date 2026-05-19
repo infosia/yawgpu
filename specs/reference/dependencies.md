@@ -77,3 +77,17 @@ After the yawgpu development phases complete: cut a stable tag on
 `infosia/wgpu` (e.g. `yawgpu-base-v29.0.3`) and migrate the Tier 2 pin
 from `rev = "<SHA>"` to `tag = "<tag>"`. Track as a one-off migration
 slice; not done during active development.
+
+## Phase 7 / real backends
+
+- **metal 0.33.0**: selected in P7.0 as the latest stable `metal`
+  crate release visible on crates.io/docs.rs at implementation time
+  (2026-05-19). It is wired as an optional `yawgpu-hal` dependency and
+  enabled only by the `metal` cargo feature, so the default Noop build
+  does not compile or link the crate. P7.0 only proves dependency and
+  HAL-surface compilation; all Metal methods remain
+  `BackendUnavailable` stubs and make no Objective-C/Metal driver
+  calls. Although the crate documents that its older `objc` ecosystem
+  is deprecated, this slice intentionally follows the Phase-7 plan's
+  `metal`-crate choice for de-risk scaffolding before P7.1 decides the
+  first real device calls.

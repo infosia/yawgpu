@@ -2,22 +2,7 @@
 pub mod noop;
 
 #[cfg(feature = "metal")]
-mod metal {
-    #[derive(Debug)]
-    pub struct MetalInstance;
-    #[derive(Debug)]
-    pub struct MetalAdapter;
-    #[derive(Debug)]
-    pub struct MetalDevice;
-    #[derive(Debug)]
-    pub struct MetalQueue;
-    #[derive(Debug)]
-    pub struct MetalBuffer;
-    #[derive(Debug)]
-    pub struct MetalTexture;
-    #[derive(Debug)]
-    pub struct MetalSampler;
-}
+pub mod metal;
 
 #[cfg(feature = "vulkan")]
 mod vulkan {
@@ -74,7 +59,11 @@ impl HalInstance {
             #[cfg(feature = "vulkan")]
             Self::Vulkan(_) => Vec::new(),
             #[cfg(feature = "metal")]
-            Self::Metal(_) => Vec::new(),
+            Self::Metal(instance) => instance
+                .enumerate_adapters()
+                .into_iter()
+                .map(HalAdapter::Metal)
+                .collect(),
         }
     }
 }
@@ -98,7 +87,7 @@ impl HalAdapter {
             #[cfg(feature = "vulkan")]
             Self::Vulkan(_) => Err(HalError::BackendUnavailable { backend: "vulkan" }),
             #[cfg(feature = "metal")]
-            Self::Metal(_) => Err(HalError::BackendUnavailable { backend: "metal" }),
+            Self::Metal(adapter) => adapter.create_device().map(HalDevice::Metal),
         }
     }
 }
@@ -123,7 +112,7 @@ impl HalDevice {
             #[cfg(feature = "vulkan")]
             Self::Vulkan(_) => 0,
             #[cfg(feature = "metal")]
-            Self::Metal(_) => 0,
+            Self::Metal(device) => device.allocation_count(),
         }
     }
 
@@ -135,7 +124,7 @@ impl HalDevice {
             #[cfg(feature = "vulkan")]
             Self::Vulkan(_) => HalQueue::Vulkan(vulkan::VulkanQueue),
             #[cfg(feature = "metal")]
-            Self::Metal(_) => HalQueue::Metal(metal::MetalQueue),
+            Self::Metal(device) => HalQueue::Metal(device.queue().clone()),
         }
     }
 
@@ -147,7 +136,7 @@ impl HalDevice {
             #[cfg(feature = "vulkan")]
             Self::Vulkan(_) => HalBuffer::Vulkan(vulkan::VulkanBuffer),
             #[cfg(feature = "metal")]
-            Self::Metal(_) => HalBuffer::Metal(metal::MetalBuffer),
+            Self::Metal(device) => HalBuffer::Metal(device.create_buffer(size)),
         }
     }
 
@@ -159,7 +148,7 @@ impl HalDevice {
             #[cfg(feature = "vulkan")]
             Self::Vulkan(_) => HalTexture::Vulkan(vulkan::VulkanTexture),
             #[cfg(feature = "metal")]
-            Self::Metal(_) => HalTexture::Metal(metal::MetalTexture),
+            Self::Metal(device) => HalTexture::Metal(device.create_texture()),
         }
     }
 
@@ -171,7 +160,7 @@ impl HalDevice {
             #[cfg(feature = "vulkan")]
             Self::Vulkan(_) => HalSampler::Vulkan(vulkan::VulkanSampler),
             #[cfg(feature = "metal")]
-            Self::Metal(_) => HalSampler::Metal(metal::MetalSampler),
+            Self::Metal(device) => HalSampler::Metal(device.create_sampler()),
         }
     }
 }
