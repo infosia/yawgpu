@@ -1113,6 +1113,15 @@ pub struct RenderPassDescriptor {
     pub max_color_attachments: u32,
     pub color_attachments: Vec<Option<RenderPassColorAttachment>>,
     pub depth_stencil_attachment: Option<RenderPassDepthStencilAttachment>,
+    pub occlusion_query_set: Option<QuerySet>,
+    pub timestamp_writes: Option<RenderPassTimestampWrites>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderPassTimestampWrites {
+    pub query_set: QuerySet,
+    pub beginning_index: Option<u32>,
+    pub end_index: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -6126,6 +6135,9 @@ struct PassEncoderState {
     attachment_signature: Option<AttachmentSignature>,
     attachment_textures: Vec<Texture>,
     render_color_attachment: Option<RenderPassColorExecution>,
+    occlusion_query_set: Option<QuerySet>,
+    open_occlusion_query: Option<u32>,
+    used_occlusion_queries: BTreeSet<u32>,
 }
 
 impl PassEncoderState {
@@ -6133,6 +6145,7 @@ impl PassEncoderState {
         attachment_signature: Option<AttachmentSignature>,
         attachment_textures: Vec<Texture>,
         render_color_attachment: Option<RenderPassColorExecution>,
+        occlusion_query_set: Option<QuerySet>,
     ) -> Self {
         Self {
             ended: false,
@@ -6145,6 +6158,9 @@ impl PassEncoderState {
             attachment_signature,
             attachment_textures,
             render_color_attachment,
+            occlusion_query_set,
+            open_occlusion_query: None,
+            used_occlusion_queries: BTreeSet::new(),
         }
     }
 
@@ -6246,6 +6262,7 @@ impl CommandEncoder {
                     attachment_signature,
                     render_pass_attachment_textures(descriptor),
                     render_pass_color_execution(descriptor),
+                    descriptor.occlusion_query_set.clone(),
                 )),
             },
             immediate_error,
@@ -6262,6 +6279,7 @@ impl CommandEncoder {
                     token,
                     None,
                     Vec::new(),
+                    None,
                     None,
                 )),
             },
@@ -6340,6 +6358,32 @@ impl CommandEncoder {
     pub fn write_buffer(&self, buffer: Arc<Buffer>, offset: u64, size: u64) -> Option<String> {
         self.record_buffer_command(vec![Arc::clone(&buffer)], None, None, || {
             validate_encoder_write_buffer(&buffer, offset, size)
+        })
+    }
+
+    pub fn write_timestamp(&self, query_set: Arc<QuerySet>, query_index: u32) -> Option<String> {
+        self.record_buffer_command(Vec::new(), None, None, || {
+            validate_timestamp_query_set(&query_set, "write timestamp")?;
+            validate_query_index(&query_set, query_index, "write timestamp query index")
+        })
+    }
+
+    pub fn resolve_query_set(
+        &self,
+        query_set: Arc<QuerySet>,
+        first_query: u32,
+        query_count: u32,
+        destination: Arc<Buffer>,
+        destination_offset: u64,
+    ) -> Option<String> {
+        self.record_buffer_command(vec![Arc::clone(&destination)], None, None, || {
+            validate_resolve_query_set(
+                &query_set,
+                first_query,
+                query_count,
+                &destination,
+                destination_offset,
+            )
         })
     }
 
@@ -6687,7 +6731,116 @@ fn validate_encoder_write_buffer(buffer: &Buffer, offset: u64, size: u64) -> Res
 
 fn validate_render_pass_descriptor(descriptor: &RenderPassDescriptor) -> Result<(), String> {
     render_pass_attachment_signature(descriptor)?;
+    if let Some(query_set) = &descriptor.occlusion_query_set {
+        validate_occlusion_query_set(query_set, "render pass occlusion query set")?;
+    }
+    if let Some(timestamp_writes) = &descriptor.timestamp_writes {
+        validate_render_pass_timestamp_writes(timestamp_writes)?;
+    }
     Ok(())
+}
+
+fn validate_render_pass_timestamp_writes(
+    timestamp_writes: &RenderPassTimestampWrites,
+) -> Result<(), String> {
+    validate_timestamp_query_set(
+        &timestamp_writes.query_set,
+        "render pass timestamp writes query set",
+    )?;
+    if timestamp_writes.beginning_index.is_none() && timestamp_writes.end_index.is_none() {
+        return Err("render pass timestamp writes requires at least one query index".to_owned());
+    }
+    if let Some(index) = timestamp_writes.beginning_index {
+        validate_query_index(
+            &timestamp_writes.query_set,
+            index,
+            "render pass beginning timestamp query index",
+        )?;
+    }
+    if let Some(index) = timestamp_writes.end_index {
+        validate_query_index(
+            &timestamp_writes.query_set,
+            index,
+            "render pass end timestamp query index",
+        )?;
+    }
+    if timestamp_writes.beginning_index == timestamp_writes.end_index {
+        return Err("render pass timestamp write indices must be distinct".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_occlusion_query_set(query_set: &QuerySet, usage: &str) -> Result<(), String> {
+    validate_query_set_alive(query_set, usage)?;
+    if query_set.kind() != QueryType::Occlusion {
+        return Err(format!("{usage} requires an occlusion query set"));
+    }
+    Ok(())
+}
+
+fn validate_timestamp_query_set(query_set: &QuerySet, usage: &str) -> Result<(), String> {
+    validate_query_set_alive(query_set, usage)?;
+    if query_set.kind() != QueryType::Timestamp {
+        return Err(format!("{usage} requires a timestamp query set"));
+    }
+    Ok(())
+}
+
+fn validate_query_set_alive(query_set: &QuerySet, usage: &str) -> Result<(), String> {
+    if query_set.is_error() {
+        return Err(format!("{usage} cannot use an error query set"));
+    }
+    if query_set.is_destroyed() {
+        return Err(format!("{usage} cannot use a destroyed query set"));
+    }
+    Ok(())
+}
+
+fn validate_query_index(query_set: &QuerySet, index: u32, name: &str) -> Result<(), String> {
+    if index >= query_set.count() {
+        return Err(format!("{name} exceeds query set count"));
+    }
+    Ok(())
+}
+
+fn validate_resolve_query_set(
+    query_set: &QuerySet,
+    first_query: u32,
+    query_count: u32,
+    destination: &Buffer,
+    destination_offset: u64,
+) -> Result<(), String> {
+    validate_query_set_alive(query_set, "resolve query set")?;
+    if query_count == 0 {
+        return Err("resolve query count must be greater than zero".to_owned());
+    }
+    let end_query = first_query
+        .checked_add(query_count)
+        .ok_or_else(|| "resolve query range overflows".to_owned())?;
+    if end_query > query_set.count() {
+        return Err("resolve query range exceeds query set count".to_owned());
+    }
+    if destination.is_error() {
+        return Err("resolve query set cannot use an error destination buffer".to_owned());
+    }
+    if destination.is_destroyed() {
+        return Err("resolve query set cannot use a destroyed destination buffer".to_owned());
+    }
+    if !destination.usage().contains(BufferUsage::QUERY_RESOLVE) {
+        return Err("resolve query set destination requires QueryResolve usage".to_owned());
+    }
+    if !destination_offset.is_multiple_of(256) {
+        return Err("resolve query set destination offset must be 256-byte aligned".to_owned());
+    }
+    let byte_count = u64::from(query_count)
+        .checked_mul(8)
+        .ok_or_else(|| "resolve query byte count overflows".to_owned())?;
+    validate_buffer_range(
+        destination_offset,
+        byte_count,
+        destination.size(),
+        "resolve query destination range",
+    )
 }
 
 fn render_pass_attachment_signature(
@@ -7241,6 +7394,7 @@ impl PassEncoderInner {
         attachment_signature: Option<AttachmentSignature>,
         attachment_textures: Vec<Texture>,
         render_color_attachment: Option<RenderPassColorExecution>,
+        occlusion_query_set: Option<QuerySet>,
     ) -> Self {
         Self {
             parent,
@@ -7249,6 +7403,7 @@ impl PassEncoderInner {
                 attachment_signature,
                 attachment_textures,
                 render_color_attachment,
+                occlusion_query_set,
             )),
         }
     }
@@ -7267,12 +7422,17 @@ impl PassEncoderInner {
         }
         state.ended = true;
         let unbalanced_debug_groups = state.debug_group_depth != 0;
+        let open_occlusion_query = state.open_occlusion_query.is_some();
         drop(state);
 
         self.parent.end_pass(self.token);
         if unbalanced_debug_groups {
             let message = "pass encoder debug group stack is unbalanced".to_owned();
             self.parent.record_first_error(message);
+            None
+        } else if open_occlusion_query {
+            self.parent
+                .record_first_error("render pass occlusion query is still open");
             None
         } else {
             None
@@ -7599,6 +7759,34 @@ impl RenderPassEncoder {
             Ok(())
         })
     }
+
+    pub fn begin_occlusion_query(&self, query_index: u32) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            let query_set = state
+                .occlusion_query_set
+                .as_ref()
+                .ok_or_else(|| "render pass has no occlusion query set".to_owned())?;
+            validate_occlusion_query_set(query_set, "render pass occlusion query")?;
+            validate_query_index(query_set, query_index, "occlusion query index")?;
+            if state.open_occlusion_query.is_some() {
+                return Err("render pass occlusion query is already open".to_owned());
+            }
+            if !state.used_occlusion_queries.insert(query_index) {
+                return Err("render pass occlusion query index was already used".to_owned());
+            }
+            state.open_occlusion_query = Some(query_index);
+            Ok(())
+        })
+    }
+
+    pub fn end_occlusion_query(&self) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            if state.open_occlusion_query.take().is_none() {
+                return Err("render pass has no open occlusion query".to_owned());
+            }
+            Ok(())
+        })
+    }
 }
 
 impl ComputePassEncoder {
@@ -7714,6 +7902,7 @@ impl RenderBundleEncoder {
                         pass_state: PassEncoderState::new(
                             Some(attachment_signature),
                             Vec::new(),
+                            None,
                             None,
                         ),
                     }),

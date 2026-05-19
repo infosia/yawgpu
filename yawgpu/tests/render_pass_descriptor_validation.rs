@@ -2,7 +2,7 @@ use yawgpu::native;
 use yawgpu_test::ValidationTest;
 
 #[test]
-fn empty_depth_only_color_only_and_opaque_query_fields_are_validated() {
+fn empty_depth_only_color_only_and_occlusion_query_fields_are_validated() {
     let test = ValidationTest::new();
     unsafe {
         let color = create_view(
@@ -34,17 +34,19 @@ fn empty_depth_only_color_only_and_opaque_query_fields_are_validated() {
         let depth_attachment = make_depth_attachment(depth.view);
         assert_render_pass_ok(&test, &render_pass_descriptor(&[], Some(&depth_attachment)));
 
-        let timestamp_writes = native::WGPUPassTimestampWrites {
+        let query_set_descriptor = native::WGPUQuerySetDescriptor {
             nextInChain: std::ptr::null_mut(),
-            querySet: std::ptr::dangling(),
-            beginningOfPassWriteIndex: 0,
-            endOfPassWriteIndex: 1,
+            label: empty_string_view(),
+            type_: native::WGPUQueryType_Occlusion,
+            count: 1,
         };
+        let query_set = yawgpu::wgpuDeviceCreateQuerySet(test.device(), &query_set_descriptor);
+        assert!(!query_set.is_null());
         let mut descriptor = render_pass_descriptor(&[make_color_attachment(color.view)], None);
-        descriptor.occlusionQuerySet = std::ptr::dangling();
-        descriptor.timestampWrites = &timestamp_writes;
+        descriptor.occlusionQuerySet = query_set;
         assert_render_pass_ok(&test, &descriptor);
 
+        yawgpu::wgpuQuerySetRelease(query_set);
         release_view(color);
         release_view(depth);
     }

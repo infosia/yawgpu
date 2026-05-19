@@ -2193,6 +2193,57 @@ pub unsafe extern "C" fn wgpuCommandEncoderWriteBuffer(
     );
 }
 
+/// Records a timestamp write command.
+///
+/// # Safety
+///
+/// `command_encoder` and `query_set` must be non-null live yawgpu handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderWriteTimestamp(
+    command_encoder: native::WGPUCommandEncoder,
+    query_set: native::WGPUQuerySet,
+    query_index: u32,
+) {
+    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let query_set = clone_handle(query_set, "WGPUQuerySet");
+    dispatch_optional_error(
+        &encoder.device,
+        encoder
+            .core
+            .write_timestamp(Arc::clone(&query_set.core), query_index),
+    );
+}
+
+/// Records a query set resolve command.
+///
+/// # Safety
+///
+/// `command_encoder`, `query_set`, and `destination` must be non-null live
+/// yawgpu handles.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderResolveQuerySet(
+    command_encoder: native::WGPUCommandEncoder,
+    query_set: native::WGPUQuerySet,
+    first_query: u32,
+    query_count: u32,
+    destination: native::WGPUBuffer,
+    destination_offset: u64,
+) {
+    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let query_set = clone_handle(query_set, "WGPUQuerySet");
+    let destination = clone_handle(destination, "WGPUBuffer");
+    dispatch_optional_error(
+        &encoder.device,
+        encoder.core.resolve_query_set(
+            Arc::clone(&query_set.core),
+            first_query,
+            query_count,
+            Arc::clone(&destination.core),
+            destination_offset,
+        ),
+    );
+}
+
 /// Records a buffer-to-texture copy command.
 ///
 /// # Safety
@@ -2348,6 +2399,33 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderEnd(
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
     dispatch_optional_error(&pass.device, pass.core.end());
+}
+
+/// Begins an occlusion query in a render pass.
+///
+/// # Safety
+///
+/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderBeginOcclusionQuery(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+    query_index: u32,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    dispatch_optional_error(&pass.device, pass.core.begin_occlusion_query(query_index));
+}
+
+/// Ends the current occlusion query in a render pass.
+///
+/// # Safety
+///
+/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPassEncoderEndOcclusionQuery(
+    render_pass_encoder: native::WGPURenderPassEncoder,
+) {
+    let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
+    dispatch_optional_error(&pass.device, pass.core.end_occlusion_query());
 }
 
 /// Inserts a render pass debug marker.
