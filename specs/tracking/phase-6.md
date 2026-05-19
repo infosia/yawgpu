@@ -1,10 +1,17 @@
 # Phase 6 — Command encoding & passes
 
-Status: **in progress** (P6.1 active). Rules: `../blocks/50-commands.md`.
+Status: **COMPLETE** (P6.1–P6.9 done; Phase 6 Review CLOSED — see
+`phase-6-review.md`, 0C/1M/5m, K1 fixed). Commits `phase-6: P6.1` →
+`phase-6: phase review`. Rules: `../blocks/50-commands.md`.
 Roles/loop: `../reference/workflow.md`. Gate (permanent): `cargo test
 --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
-green on Noop. **Phase ends with the mandatory Phase Review**
-(`tracking/phase-6-review.md`).
+green on Noop.
+
+> Tracked follow-up (review m2, non-blocking): the pass debug-group /
+> `record_pass_command` paths take the pass-state lock then the
+> encoder-state lock via `parent.record_first_error`; ordering is
+> consistent (no cycle) but implicit — add a lock-ordering comment
+> near `PassEncoderInner` in a future cleanup.
 
 Largest phase; 9 slices. First builds the encoder/pass state machine +
 deferred-error model everything else hangs off. Carries P2/P3/P5

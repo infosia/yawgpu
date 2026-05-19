@@ -6063,8 +6063,8 @@ impl PassEncoderInner {
         self.parent.end_pass(self.token);
         if unbalanced_debug_groups {
             let message = "pass encoder debug group stack is unbalanced".to_owned();
-            self.parent.record_first_error(message.clone());
-            Some(message)
+            self.parent.record_first_error(message);
+            None
         } else {
             None
         }
@@ -6090,8 +6090,8 @@ impl PassEncoderInner {
         let mut state = self.state.lock();
         if state.debug_group_depth == 0 {
             let message = "pass encoder debug group stack is empty".to_owned();
-            self.parent.record_first_error(message.clone());
-            Some(message)
+            self.parent.record_first_error(message);
+            None
         } else {
             state.debug_group_depth -= 1;
             None
