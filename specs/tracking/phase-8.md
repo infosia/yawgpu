@@ -45,10 +45,17 @@ conv maps. Tests `query_validation.rs` (8). Gate green (Noop 55
 binaries + clippy clean; features/limits unregressed). Committed
 `phase-8: P8.1`.
 
-## P8.2 — Query in commands  *(after P8.1)*
-QC1–QC5: C34/C35 (RenderPass occlusion/timestamp — deferred from
-P6.4), encoder WriteTimestamp / ResolveQuerySet (deferred from P6),
-occlusion begin/end pairing. Deferred-error model.
+## P8.2 — Query in commands  *(☑ DONE)*
+QC1–QC5 done: RenderPassDescriptor +occlusion/timestamp fields +
+conv decode; validate_render_pass_descriptor C34 (occlusionQuerySet
+Occlusion) + C35 (timestampWrites Timestamp/indices); CommandEncoder
+write_timestamp/resolve_query_set (QC3/QC4, record_buffer_command
+deferred, QUERY_RESOLVE+256-align+OOB); RenderPassEncoder occlusion
+begin/end pairing (QC5 via pass state). FFI 4 fns + conv.
+render_pass_descriptor test strengthened (dangling→real Occlusion
+QuerySet). Tests query_validation.rs (12). Gate green (Noop 55
+binaries + clippy; P6 command/pass unregressed). Committed
+`phase-8: P8.2`.
 
 ## P8.3 — DeviceLost  *(after P8.2)*
 DL1–DL4: DeviceDestroy → lost + GetLostFuture; post-lost ops return

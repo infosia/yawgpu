@@ -40,7 +40,7 @@ Status legend: ☐ not started · ◐ partial · ☑ ported & green
 | `ObjectCachingTests` | 5 | `object_caching_validation.rs` | ☑ (P43–P50) |
 | `CommandBufferValidationTests` | 6 | `command_encoder_lifecycle_validation.rs` | ☑ (C1–C5,C36,C63,C85,C86 P6.1) |
 | `CopyCommandsValidationTests` | 6 | `command_buffer_copy_validation.rs` + `command_texture_copy_validation.rs` | ☑ (C6–C22,C79,C83,C84 P6.2/P6.3) |
-| `RenderPassDescriptorValidationTests` | 6 | `render_pass_descriptor_validation.rs` | ☑ (C23–C33 P6.4; C34/C35 Defer→P8) |
+| `RenderPassDescriptorValidationTests` | 6 | `render_pass_descriptor_validation.rs` | ☑ (C23–C33 P6.4; C34/C35 P8.2) |
 | `RenderBundleValidationTests` | 6 | `render_bundle_validation.rs` | ☑ (C65–C74 P6.7) |
 | `DynamicStateCommandValidationTests` | 6 | `pass_state_validation.rs` | ☑ (C56–C59 P6.5; consolidated) |
 | `IndexBufferValidationTests` | 6 | `pass_state_validation.rs` | ☑ (C43–C46 P6.6; consolidated) |
@@ -53,7 +53,7 @@ Status legend: ☐ not started · ◐ partial · ☑ ported & green
 | `ResourceUsageTrackingTests` | 6 | `resource_usage_tracking_validation.rs` | ☑ (C76/C78 P6.9; bundle-usage Defer) |
 | `WritableBufferBindingAliasingValidationTests` | 6 | `resource_usage_tracking_validation.rs` | ☑ (C75 P6.9; consolidated) |
 | `WritableTextureBindingAliasingValidationTests` | 6 | `resource_usage_tracking_validation.rs` | ☑ (C77 P6.9; consolidated) |
-| `QuerySetValidationTests` / `QueryValidationTests` | 8 | `query_validation.rs` | ☑ (QS1–QS4 P8.1; query-in-commands→P8.2) |
+| `QuerySetValidationTests` / `QueryValidationTests` | 8 | `query_validation.rs` | ☑ (QS1–QS4 P8.1; QC1–QC5 query-in-commands P8.2) |
 | `ErrorScopeValidationTests` | 8 | `error_scope_validation.rs` | ☑ (ES1–ES5 P8.0) |
 | `DeviceLostValidationTests` (in Device) | 8 | `device_lost_validation.rs` | ☐ |
 | `ToggleValidationTests` | 8 | `toggle_validation.rs` | ☐ |

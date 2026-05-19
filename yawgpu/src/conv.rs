@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use crate::native;
 use crate::{
-    WGPUBindGroupLayoutImpl, WGPUBufferImpl, WGPUPipelineLayoutImpl, WGPUSamplerImpl,
-    WGPUShaderModuleImpl, WGPUTextureViewImpl,
+    WGPUBindGroupLayoutImpl, WGPUBufferImpl, WGPUPipelineLayoutImpl, WGPUQuerySetImpl,
+    WGPUSamplerImpl, WGPUShaderModuleImpl, WGPUTextureViewImpl,
 };
 use yawgpu_core as core;
 
@@ -1188,11 +1188,25 @@ pub unsafe fn map_render_pass_descriptor(
         .depthStencilAttachment
         .as_ref()
         .map(|attachment| map_render_pass_depth_stencil_attachment(attachment));
+    let occlusion_query_set = if value.occlusionQuerySet.is_null() {
+        None
+    } else {
+        Some(
+            (*clone_handle::<WGPUQuerySetImpl>(value.occlusionQuerySet, "WGPUQuerySet").core)
+                .clone(),
+        )
+    };
+    let timestamp_writes = value
+        .timestampWrites
+        .as_ref()
+        .map(|timestamp_writes| map_render_pass_timestamp_writes(timestamp_writes));
 
     core::RenderPassDescriptor {
         max_color_attachments,
         color_attachments,
         depth_stencil_attachment,
+        occlusion_query_set,
+        timestamp_writes,
     }
 }
 
@@ -1268,6 +1282,22 @@ unsafe fn map_render_pass_depth_stencil_attachment(
         stencil_load_op: map_load_op(value.stencilLoadOp),
         stencil_store_op: map_store_op(value.stencilStoreOp),
     }
+}
+
+unsafe fn map_render_pass_timestamp_writes(
+    value: &native::WGPUPassTimestampWrites,
+) -> core::RenderPassTimestampWrites {
+    let query_set = clone_handle::<WGPUQuerySetImpl>(value.querySet, "WGPUQuerySet");
+    core::RenderPassTimestampWrites {
+        query_set: (*query_set.core).clone(),
+        beginning_index: map_query_index(value.beginningOfPassWriteIndex),
+        end_index: map_query_index(value.endOfPassWriteIndex),
+    }
+}
+
+#[must_use]
+pub fn map_query_index(value: u32) -> Option<u32> {
+    (value != native::WGPU_QUERY_SET_INDEX_UNDEFINED).then_some(value)
 }
 
 #[must_use]

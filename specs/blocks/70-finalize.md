@@ -119,15 +119,37 @@ Status: ☐ ◐ ☑ ✗(N/A).
 
 ### P8.2 Query in commands (deferred C34/C35 + encoder query ops)
 - **QC1/C34** RenderPass `occlusionQuerySet` must be a valid
-  Occlusion query set. ☐
+  Occlusion query set. ☑ (P8.2)
 - **QC2/C35** RenderPass `timestampWrites` set must be Timestamp;
-  begin/end indices in range, distinct. ☐
+  begin/end indices in range, distinct. ☑ (P8.2)
 - **QC3** `CommandEncoderWriteTimestamp` query set Timestamp +
-  index in range (deferred-error model). ☐
+  index in range (deferred-error model). ☑ (P8.2)
 - **QC4** `CommandEncoderResolveQuerySet` range in set; destination
-  buffer `QueryResolve` usage + offset 256-aligned + size bounds. ☐
+  buffer `QueryResolve` usage + offset 256-aligned + size bounds. ☑ (P8.2)
 - **QC5** occlusion query begin/end pairing within a render pass
-  (Dawn pairing rules). ☐
+  (Dawn pairing rules). ☑ (P8.2)
+
+> P8.2: core `RenderPassDescriptor` +`occlusion_query_set` +
+> `timestamp_writes(RenderPassTimestampWrites{query_set,beginning_
+> index,end_index})`; `conv::map_render_pass_descriptor` decodes
+> them (UNDEFINED/null⇒None). `validate_render_pass_descriptor`
+> (P6.4 deferred path) ⇒ C34 occlusionQuerySet non-error/destroyed +
+> kind Occlusion; C35 timestamp set + ≥1 index + indices<count
+> (begin≠end). `CommandEncoder::{write_timestamp,resolve_query_set}`
+> via `record_buffer_command` (QC3 Timestamp+index<count; QC4
+> first+count≤count & count>0, dest QUERY_RESOLVE usage +
+> offset%256 + offset+count*8≤size, all checked). `RenderPass
+> EncoderState` tracks `occlusion_query_set`/`open_occlusion_query`/
+> `used_occlusion_queries` ⇒ QC5 begin needs the set + index<count +
+> no nesting + no dup + must be closed by pass End; end requires an
+> open query. FFI `wgpuCommandEncoderWriteTimestamp`/
+> `ResolveQuerySet` + `wgpuRenderPassEncoderBegin/EndOcclusionQuery`
+> + conv. `render_pass_descriptor_validation` adjusted: the former
+> opaque-`dangling()` occlusion/timestamp case → a real Occlusion
+> `wgpuDeviceCreateQuerySet` (strengthened, still `_ok`; the
+> now-invalid dangling-timestampWrites sub-case dropped). Ported in
+> `query_validation.rs` (12). Gate green (55 binaries, clippy clean;
+> P6 command/pass suites unregressed).
 
 ### P8.3 DeviceLost (`DeviceLostValidationTests`)
 - **DL1** `DeviceDestroy` ⇒ device lost; `GetLostFuture` resolves
