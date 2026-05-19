@@ -54,7 +54,7 @@ Status legend: ☐ not started · ◐ partial · ☑ ported & green
 | `WritableBufferBindingAliasingValidationTests` | 6 | `resource_usage_tracking_validation.rs` | ☑ (C75 P6.9; consolidated) |
 | `WritableTextureBindingAliasingValidationTests` | 6 | `resource_usage_tracking_validation.rs` | ☑ (C77 P6.9; consolidated) |
 | `QuerySetValidationTests` / `QueryValidationTests` | 8 | `query_validation.rs` | ☐ |
-| `ErrorScopeValidationTests` | 8 | `error_scope_validation.rs` | ☐ |
+| `ErrorScopeValidationTests` | 8 | `error_scope_validation.rs` | ☑ (ES1–ES5 P8.0) |
 | `DeviceLostValidationTests` (in Device) | 8 | `device_lost_validation.rs` | ☐ |
 | `ToggleValidationTests` | 8 | `toggle_validation.rs` | ☐ |
 

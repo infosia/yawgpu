@@ -12,9 +12,10 @@ use crate::conv::{
     map_buffer_descriptor, map_buffer_map_state, map_buffer_usage_to_native, map_color,
     map_compilation_info_request_status_success, map_compilation_message_type_error,
     map_compute_pipeline_descriptor, map_device_lost_callback_info, map_device_lost_reason,
-    map_extent_3d, map_feature, map_feature_level, map_features_to_native, map_limits,
-    map_limits_to_native, map_map_async_status, map_map_mode, map_origin_3d,
-    map_pipeline_layout_descriptor, map_queue_work_done_status,
+    map_error_filter, map_error_type, map_extent_3d, map_feature, map_feature_level,
+    map_features_to_native, map_limits, map_limits_to_native, map_map_async_status, map_map_mode,
+    map_origin_3d, map_pipeline_layout_descriptor, map_pop_error_scope_status_error,
+    map_pop_error_scope_status_success, map_queue_work_done_status,
     map_render_bundle_encoder_descriptor, map_render_pass_descriptor,
     map_render_pipeline_descriptor, map_sampler_descriptor, map_shader_module_descriptor,
     map_texel_copy_buffer_layout, map_texel_copy_texture_info_parts, map_texture_aspect,
@@ -833,6 +834,15 @@ enum PendingCallback {
         userdata1: usize,
         userdata2: usize,
     },
+    PopErrorScope {
+        mode: native::WGPUCallbackMode,
+        callback: native::WGPUPopErrorScopeCallback,
+        status: native::WGPUPopErrorScopeStatus,
+        error: Option<core::DeviceError>,
+        message: String,
+        userdata1: usize,
+        userdata2: usize,
+    },
 }
 
 impl PendingCallback {
@@ -845,7 +855,8 @@ impl PendingCallback {
             | Self::QueueWorkDone { mode, .. }
             | Self::CompilationInfo { mode, .. }
             | Self::CreateComputePipelineAsync { mode, .. }
-            | Self::CreateRenderPipelineAsync { mode, .. } => *mode,
+            | Self::CreateRenderPipelineAsync { mode, .. }
+            | Self::PopErrorScope { mode, .. } => *mode,
         };
         match mode {
             native::WGPUCallbackMode_AllowProcessEvents => {
@@ -1041,6 +1052,37 @@ impl PendingCallback {
                             userdata2 as *mut c_void,
                         );
                     }
+                }
+            }
+            Self::PopErrorScope {
+                callback,
+                status,
+                error,
+                message,
+                userdata1,
+                userdata2,
+                ..
+            } => {
+                if let Some(callback) = callback {
+                    let error_type = if status == native::WGPUPopErrorScopeStatus_Success {
+                        error
+                            .as_ref()
+                            .map_or(native::WGPUErrorType_NoError, |error| {
+                                map_error_type(error.kind)
+                            })
+                    } else {
+                        native::WGPUErrorType_NoError
+                    };
+                    let message = error
+                        .as_ref()
+                        .map_or(message.as_bytes(), |error| error.message.as_bytes());
+                    callback(
+                        status,
+                        error_type,
+                        string_view(message),
+                        userdata1 as *mut c_void,
+                        userdata2 as *mut c_void,
+                    );
                 }
             }
         }
@@ -1438,6 +1480,66 @@ pub unsafe extern "C" fn wgpuDeviceAddRef(device: native::WGPUDevice) {
 pub unsafe extern "C" fn wgpuDeviceDestroy(device: native::WGPUDevice) {
     let device_impl = borrow_handle(device, "WGPUDevice");
     device_impl.schedule_device_lost(device, core::DeviceLostReason::Destroyed);
+}
+
+/// Pushes a device error scope for matching errors.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDevicePushErrorScope(
+    device: native::WGPUDevice,
+    filter: native::WGPUErrorFilter,
+) {
+    let device = borrow_handle(device, "WGPUDevice");
+    let Some(filter) = map_error_filter(filter) else {
+        device.dispatch_error(core::ErrorKind::Validation, "error scope filter is invalid");
+        return;
+    };
+    device.core.push_error_scope(filter);
+}
+
+/// Pops the innermost device error scope and resolves through the callback future.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `callback_info`
+/// userdata pointers must remain valid until the callback fires.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDevicePopErrorScope(
+    device: native::WGPUDevice,
+    callback_info: native::WGPUPopErrorScopeCallbackInfo,
+) -> native::WGPUFuture {
+    let device = borrow_handle(device, "WGPUDevice");
+    let (status, error, message) = if device.core.is_lost() {
+        (map_pop_error_scope_status_success(), None, String::new())
+    } else {
+        match device.core.pop_error_scope() {
+            Ok(error) => (map_pop_error_scope_status_success(), error, String::new()),
+            Err(core::PopErrorScopeError::EmptyStack) => (
+                map_pop_error_scope_status_error(),
+                None,
+                "No error scopes are open".to_owned(),
+            ),
+            Err(_) => (
+                map_pop_error_scope_status_error(),
+                None,
+                "Pop error scope failed".to_owned(),
+            ),
+        }
+    };
+    device
+        .instance
+        .register_callback(PendingCallback::PopErrorScope {
+            mode: callback_info.mode,
+            callback: callback_info.callback,
+            status,
+            error,
+            message,
+            userdata1: callback_info.userdata1 as usize,
+            userdata2: callback_info.userdata2 as usize,
+        })
 }
 
 /// Sets the debug label for a device.

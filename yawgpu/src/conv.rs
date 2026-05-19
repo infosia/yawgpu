@@ -864,6 +864,36 @@ pub fn map_device_lost_reason(reason: core::DeviceLostReason) -> native::WGPUDev
 }
 
 #[must_use]
+pub fn map_error_filter(value: native::WGPUErrorFilter) -> Option<core::ErrorFilter> {
+    match value {
+        native::WGPUErrorFilter_Validation => Some(core::ErrorFilter::Validation),
+        native::WGPUErrorFilter_OutOfMemory => Some(core::ErrorFilter::OutOfMemory),
+        native::WGPUErrorFilter_Internal => Some(core::ErrorFilter::Internal),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn map_error_type(kind: core::ErrorKind) -> native::WGPUErrorType {
+    match kind {
+        core::ErrorKind::Validation => native::WGPUErrorType_Validation,
+        core::ErrorKind::OutOfMemory => native::WGPUErrorType_OutOfMemory,
+        core::ErrorKind::Internal => native::WGPUErrorType_Internal,
+        _ => native::WGPUErrorType_Unknown,
+    }
+}
+
+#[must_use]
+pub fn map_pop_error_scope_status_error() -> native::WGPUPopErrorScopeStatus {
+    native::WGPUPopErrorScopeStatus_Error
+}
+
+#[must_use]
+pub fn map_pop_error_scope_status_success() -> native::WGPUPopErrorScopeStatus {
+    native::WGPUPopErrorScopeStatus_Success
+}
+
+#[must_use]
 pub fn map_buffer_usage(value: native::WGPUBufferUsage) -> core::BufferUsage {
     core::BufferUsage::from_bits_retain(value)
 }

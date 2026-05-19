@@ -278,33 +278,34 @@ impl Device {
         self.inner.error_sink.lock().uncaptured_error_callback = None;
     }
 
-    pub fn push_error_scope(&self) {
-        self.inner
-            .error_sink
-            .lock()
-            .scopes
-            .push(ErrorScope::default());
+    pub fn push_error_scope(&self, filter: ErrorFilter) {
+        self.inner.error_sink.lock().scopes.push(ErrorScope {
+            filter,
+            error: None,
+        });
     }
 
-    #[must_use]
-    pub fn pop_error_scope(&self) -> Option<DeviceError> {
+    pub fn pop_error_scope(&self) -> Result<Option<DeviceError>, PopErrorScopeError> {
         self.inner
             .error_sink
             .lock()
             .scopes
             .pop()
-            .and_then(|scope| scope.error)
+            .map(|scope| scope.error)
+            .ok_or(PopErrorScopeError::EmptyStack)
     }
 
     pub fn dispatch_error(&self, kind: ErrorKind, msg: impl Into<String>) {
         let error = DeviceError::new(kind, msg);
         let callback = {
             let mut sink = self.inner.error_sink.lock();
-            if let Some(scope) = sink.scopes.last_mut() {
-                if scope.error.is_none() {
-                    scope.error = Some(error);
+            for scope in sink.scopes.iter_mut().rev() {
+                if scope.filter.matches(error.kind) {
+                    if scope.error.is_none() {
+                        scope.error = Some(error);
+                    }
+                    return;
                 }
-                return;
             }
             sink.uncaptured_error_callback.clone()
         };
@@ -8678,6 +8679,32 @@ pub enum ErrorKind {
     Internal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ErrorFilter {
+    Validation,
+    OutOfMemory,
+    Internal,
+}
+
+impl ErrorFilter {
+    #[must_use]
+    pub fn matches(self, kind: ErrorKind) -> bool {
+        matches!(
+            (self, kind),
+            (Self::Validation, ErrorKind::Validation)
+                | (Self::OutOfMemory, ErrorKind::OutOfMemory)
+                | (Self::Internal, ErrorKind::Internal)
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PopErrorScopeError {
+    EmptyStack,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DeviceError {
@@ -8721,8 +8748,8 @@ struct ErrorSink {
     scopes: Vec<ErrorScope>,
 }
 
-#[derive(Default)]
 struct ErrorScope {
+    filter: ErrorFilter,
     error: Option<DeviceError>,
 }
 
@@ -8741,6 +8768,7 @@ impl std::fmt::Debug for ErrorSink {
 impl std::fmt::Debug for ErrorScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ErrorScope")
+            .field("filter", &self.filter)
             .field("error", &self.error)
             .finish()
     }
@@ -8949,11 +8977,12 @@ mod tests {
         device.set_uncaptured_error_callback(Some(move |_| {
             callback_count.fetch_add(1, Ordering::Relaxed);
         }));
-        device.push_error_scope();
+        device.push_error_scope(super::ErrorFilter::Validation);
         device.dispatch_error(ErrorKind::Validation, "scoped validation error");
 
         let error = device
             .pop_error_scope()
+            .expect("scope should exist")
             .expect("scope should contain an error");
         assert_eq!(error.kind, ErrorKind::Validation);
         assert_eq!(error.message, "scoped validation error");
