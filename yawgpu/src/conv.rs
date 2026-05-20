@@ -1846,6 +1846,22 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "WGPUInstance must not be null")]
+    fn release_handle_null_panics_with_contract_message() {
+        unsafe {
+            release_handle::<core::Instance>(std::ptr::null(), "WGPUInstance");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "WGPUInstance must not be null")]
+    fn add_ref_handle_null_panics_with_contract_message() {
+        unsafe {
+            add_ref_handle::<core::Instance>(std::ptr::null(), "WGPUInstance");
+        }
+    }
+
+    #[test]
     fn clone_handle_leaves_original_handle_valid() {
         let value = Arc::new(13_u32);
         let handle = arc_to_handle(Arc::clone(&value));
