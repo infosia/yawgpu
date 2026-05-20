@@ -1,7 +1,9 @@
 # Phase 9 — Examples + real surface/presentation
 
-Status: **in progress** (P9.0 active). Rules/plan:
-`../blocks/80-examples.md`. Roles/loop: `../reference/workflow.md`.
+Status: **COMPLETE** (2026-05-20 — P9.0/P9.1/P9.2/P9.3/P9.4
+real-GPU-verified; Phase 9 Review fix-log + residuals recorded in
+`phase-9-review.md`). Rules/plan: `../blocks/80-examples.md`.
+Roles/loop: `../reference/workflow.md`.
 
 Post-core phase (user-requested): port Dawn + wgpu-native **C
 samples** into `examples/`, and lift the SF3 "real presentation N/A"

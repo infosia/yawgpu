@@ -77,14 +77,24 @@ impl Instance {
         &self.inner.futures
     }
 
-    pub fn create_surface_from_metal_layer(
+    #[must_use]
+    pub fn hal(&self) -> &HalInstance {
+        &self.inner.hal
+    }
+
+    /// # Safety
+    ///
+    /// `layer` must be a valid, non-dangling `CAMetalLayer` instance pointer.
+    pub unsafe fn create_surface_from_metal_layer(
         &self,
         layer: *mut std::ffi::c_void,
     ) -> Result<HalSurface, Error> {
-        self.inner
-            .hal
-            .create_surface_from_metal_layer(layer)
-            .map_err(Error::Hal)
+        unsafe {
+            self.inner
+                .hal
+                .create_surface_from_metal_layer(layer)
+                .map_err(Error::Hal)
+        }
     }
 }
 

@@ -24,7 +24,8 @@ use crate::conv::{
     string_view, string_view_to_str, DeviceLostCallbackInfo,
 };
 use yawgpu_hal::{
-    HalPresentMode, HalSurface, HalSurfaceConfiguration, HalTextureFormat, HalTextureUsage,
+    HalInstance, HalPresentMode, HalSurface, HalSurfaceConfiguration, HalTextureFormat,
+    HalTextureUsage,
 };
 
 pub const WGPU_YAWGPU_INSTANCE_BACKEND_NOOP: u32 = 0;
@@ -807,6 +808,17 @@ fn real_hal_surface(surface: HalSurface) -> Option<HalSurface> {
     }
 }
 
+fn is_real_hal_instance(instance: &HalInstance) -> bool {
+    #[allow(unreachable_patterns)]
+    match instance {
+        #[cfg(feature = "vulkan")]
+        HalInstance::Vulkan(_) => true,
+        #[cfg(feature = "metal")]
+        HalInstance::Metal(_) => true,
+        _ => false,
+    }
+}
+
 fn hal_surface_format(format: native::WGPUTextureFormat) -> HalTextureFormat {
     match format {
         native::WGPUTextureFormat_RGBA8Unorm => HalTextureFormat::Rgba8Unorm,
@@ -1497,12 +1509,17 @@ pub unsafe extern "C" fn wgpuInstanceCreateSurface(
     let instance = clone_handle(instance, "WGPUInstance");
     let (label, is_error, hal) = if let Some(descriptor) = descriptor.as_ref() {
         let layer = find_metal_layer_source(descriptor.nextInChain);
-        let hal = layer
-            .and_then(|layer| instance.core.create_surface_from_metal_layer(layer).ok())
-            .and_then(real_hal_surface);
+        let hal = layer.and_then(|layer| {
+            unsafe { instance.core.create_surface_from_metal_layer(layer) }
+                .ok()
+                .and_then(real_hal_surface)
+        });
+        let surface_source_is_unsupported = !has_supported_surface_source(descriptor.nextInChain);
+        let real_surface_creation_failed =
+            layer.is_some() && is_real_hal_instance(instance.core.hal()) && hal.is_none();
         (
             label_from_string_view(descriptor.label).unwrap_or_default(),
-            !has_supported_surface_source(descriptor.nextInChain),
+            surface_source_is_unsupported || real_surface_creation_failed,
             hal,
         )
     } else {
@@ -4401,13 +4418,13 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
         .expect("surface HAL lock is not poisoned")
         .as_mut()
     {
-        let hal_config = HalSurfaceConfiguration {
-            format: hal_surface_format(config.format),
-            usage: hal_surface_usage(config.usage),
-            width: config.width,
-            height: config.height,
-            present_mode: hal_present_mode(config.presentMode),
-        };
+        let hal_config = HalSurfaceConfiguration::new(
+            hal_surface_format(config.format),
+            hal_surface_usage(config.usage),
+            config.width,
+            config.height,
+            hal_present_mode(config.presentMode),
+        );
         if let Err(error) = hal.configure(device.core.hal(), hal_config) {
             device.dispatch_error(core::ErrorKind::Internal, error.to_string());
             return;
