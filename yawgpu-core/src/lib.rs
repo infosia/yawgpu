@@ -4762,6 +4762,9 @@ impl Buffer {
         let Some(hal) = &self.inner.hal else {
             return None;
         };
+        if hal.mapped_ptr().is_some() {
+            return None;
+        }
         let data = match self.inner.host.read(active_map.offset, active_map.size) {
             Ok(data) => data,
             Err(message) => return Some(DeviceError::internal(message)),
@@ -4832,12 +4835,16 @@ impl Buffer {
             if let Some(pending) = pending.as_ref() {
                 if pending.mode == MapMode::Read {
                     if let Some(hal) = &self.inner.hal {
-                        outcome = match hal.read(pending.offset, pending.size) {
-                            Ok(bytes) if self.inner.host.write(pending.offset, &bytes).is_ok() => {
-                                MapAsyncStatus::Success
-                            }
-                            _ => MapAsyncStatus::Error,
-                        };
+                        if hal.mapped_ptr().is_none() {
+                            outcome = match hal.read(pending.offset, pending.size) {
+                                Ok(bytes)
+                                    if self.inner.host.write(pending.offset, &bytes).is_ok() =>
+                                {
+                                    MapAsyncStatus::Success
+                                }
+                                _ => MapAsyncStatus::Error,
+                            };
+                        }
                     }
                 }
             }
@@ -4895,6 +4902,10 @@ impl Buffer {
             return None;
         }
         drop(state);
+        if let Some(mapped_ptr) = self.inner.hal.as_ref().and_then(HalBuffer::mapped_ptr) {
+            let offset = usize::try_from(offset).ok()?;
+            return Some(unsafe { mapped_ptr.as_ptr().add(offset) });
+        }
         self.inner.host.ptr_at(offset)
     }
 

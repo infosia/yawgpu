@@ -257,44 +257,24 @@ WGPUShaderModule yawgpu_load_wgsl_shader(WGPUDevice device, const char *path) {
 
 WGPUBuffer yawgpu_create_buffer_init(WGPUDevice device,
                                      const YawgpuBufferInitDescriptor *descriptor) {
-    /* yawgpu Phase-9 known issue: on the Metal backend the
-     * `mappedAtCreation` write-through to the real MTLBuffer does
-     * not land before the first encode (compute on Metal reads
-     * zero); Vulkan works on the same core path. As a portable
-     * workaround we seed buffers that carry `CopyDst` usage via
-     * `wgpuQueueWriteBuffer` (the P7.2-proven path on both
-     * backends), and fall back to the canonical
-     * `mappedAtCreation` path for buffers without `CopyDst`.
-     */
     if (!descriptor) {
         return NULL;
     }
     size_t size = descriptor->size == 0 ? 4 : descriptor->size;
-    bool has_copy_dst = (descriptor->usage & WGPUBufferUsage_CopyDst) != 0;
-    bool seed_via_queue =
-        has_copy_dst && descriptor->contents != NULL && descriptor->size > 0;
     WGPUBuffer buffer = wgpuDeviceCreateBuffer(device, &(WGPUBufferDescriptor){
         .nextInChain = NULL,
         .label = yawgpu_string_view(descriptor->label),
         .usage = descriptor->usage,
         .size = size,
-        .mappedAtCreation = !seed_via_queue && descriptor->size > 0,
+        .mappedAtCreation = descriptor->size > 0,
     });
-    if (!buffer || !descriptor->contents || descriptor->size == 0) {
-        return buffer;
+    if (buffer && descriptor->contents && descriptor->size > 0) {
+        void *mapped = wgpuBufferGetMappedRange(buffer, 0, descriptor->size);
+        if (mapped) {
+            memcpy(mapped, descriptor->contents, descriptor->size);
+        }
+        wgpuBufferUnmap(buffer);
     }
-    if (seed_via_queue) {
-        WGPUQueue queue = wgpuDeviceGetQueue(device);
-        wgpuQueueWriteBuffer(queue, buffer, 0, descriptor->contents,
-                             descriptor->size);
-        wgpuQueueRelease(queue);
-        return buffer;
-    }
-    void *mapped = wgpuBufferGetMappedRange(buffer, 0, descriptor->size);
-    if (mapped) {
-        memcpy(mapped, descriptor->contents, descriptor->size);
-    }
-    wgpuBufferUnmap(buffer);
     return buffer;
 }
 

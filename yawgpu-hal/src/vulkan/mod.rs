@@ -1,5 +1,6 @@
 use std::ffi::{CStr, CString};
 use std::fmt;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 use std::sync::Arc;
@@ -384,6 +385,13 @@ impl VulkanBuffer {
             std::ptr::copy_nonoverlapping(inner.mapped.add(offset), data.as_mut_ptr(), len);
         }
         Ok(data)
+    }
+
+    #[must_use]
+    pub fn mapped_ptr(&self) -> Option<NonNull<u8>> {
+        self.inner
+            .as_ref()
+            .and_then(|inner| NonNull::new(inner.mapped))
     }
 
     fn inner(&self) -> Result<&VulkanBufferInner, HalError> {

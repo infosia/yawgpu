@@ -90,21 +90,30 @@ slice; not done during active development.
   (basic/buffer/texture/compute/render/smoke). Dependencies remain
   optional and are enabled only by the `metal` cargo feature, so
   default Noop builds do not compile or link Objective-C/Metal crates.
-  *Known issue (tracked as Phase-9 follow-up; does not affect
-  Phase-7 e2e):* the C `examples/compute` reads `[0,0,0,0]` on the
-  Metal backend regardless of input-seeding path (mappedAtCreation
-  → unmap write-through *or* queueWriteBuffer), while Vulkan/
-  MoltenVK reads the expected Collatz `[0,1,7,2]` on the **same**
-  core code, and the Rust `e2e_metal_compute` (which uses
-  queueWriteBuffer) passes 3/3 on the host. The objc2-metal migration
-  did not resolve this; the bug is specifically in the
-  C-cdylib-via-FFI Metal compute path (likely sequencing /
-  autoreleasepool / FFI marshalling of the storage buffer between
-  yawgpu's example framework and the Metal command-buffer encode).
-  The `examples/framework` helper currently prefers
-  `queueWriteBuffer` for `CopyDst` buffers as a partial workaround;
-  enumerate_adapters and device_info both work on Metal. The bug
-  needs deeper investigation as a Phase-9 follow-up.
+  **Architectural follow-up (resolved 2026-05-20):** `wgpuBuffer
+  GetMappedRange` was switched to return the real backend's
+  persistently-mapped pointer (Metal `MTLBuffer.contents()` on
+  Shared storage; Vulkan persistent `vkMapMemory` HOST_VISIBLE|
+  COHERENT) via a new `HalBuffer::mapped_ptr()` accessor, with
+  `Buffer::unmap` write-through and `resolve_pending_map` read-copy
+  skipped when `mapped_ptr.is_some()` — mirroring `mgpu`'s
+  direct-mapping model. Noop falls back to the core `HostBuffer`
+  unchanged. After this fix the C `examples/compute` reads the real
+  Collatz `[0,1,7,2]` on Metal AND Vulkan/MoltenVK; full Phase-7
+  e2e regression remains green on the host.
+  *New known issue (separate, tracked as Phase-9 follow-up):*
+  yawgpu's naga MSL backend does not emit the "sizes buffer" slot
+  required for storage buffers declared as **runtime-sized arrays**
+  (`var<storage> values: array<u32>;`). Such shaders fail compute-
+  pipeline creation on Metal with `mapping for sizes buffer is
+  missing`. Fixed-size arrays (`array<u32, N>`) compile cleanly on
+  Metal (and Vulkan/Noop). `examples/compute/shader.wgsl`
+  consequently uses `array<u32, 4>` matching the input length; the
+  same restriction applies to `mgpu`'s `hello_compute` shader
+  (`array<u32, 256>`). Supporting runtime-sized storage arrays on
+  Metal requires extending the binding map with a sizes-buffer
+  argument and wiring it from compute-pipeline reflection through
+  to dispatch.
 - **ash 0.38.0+1.3.281**: selected in P7.6a as the latest stable
   `ash` crate release visible on docs.rs/crates.io at implementation
   time (2026-05-19). It is wired as optional `yawgpu-hal` and
