@@ -542,6 +542,57 @@ as a Phase-10 follow-up.
 | `wgpuComputePassEncoderRelease` | `wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers`, `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
 | `wgpuComputePassEncoderAddRef` | `wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers` |
 
+## yawgpu/src/lib.rs - Bundle + Pipeline + Shader + BindGroup + Query + Surface (46 pub fn)
+
+| pub fn | test name(s) |
+|---|---|
+| `wgpuRenderBundleEncoderSetPipeline` | `wgpuRenderBundleEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderBundleEncoderSetBindGroup` | `wgpuRenderBundleEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderBundleEncoderSetVertexBuffer` | `wgpuRenderBundleEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderBundleEncoderSetIndexBuffer` | `wgpuRenderBundleEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderBundleEncoderDraw` | `wgpuRenderBundleEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderBundleEncoderDrawIndexed` | `wgpuRenderBundleEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderBundleEncoderDrawIndirect` | `wgpuRenderBundleEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderBundleEncoderDrawIndexedIndirect` | `wgpuRenderBundleEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderBundleEncoderInsertDebugMarker` | `wgpuRenderBundleEncoder_lifecycle_finish_and_debug_markers_and_release_addref` |
+| `wgpuRenderBundleEncoderPushDebugGroup` | `wgpuRenderBundleEncoder_lifecycle_finish_and_debug_markers_and_release_addref` |
+| `wgpuRenderBundleEncoderPopDebugGroup` | `wgpuRenderBundleEncoder_lifecycle_finish_and_debug_markers_and_release_addref` |
+| `wgpuRenderBundleEncoderFinish` | `wgpuRenderBundleEncoder_lifecycle_finish_and_debug_markers_and_release_addref`, `wgpuRenderBundleEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderBundleEncoderRelease` | `wgpuRenderBundleEncoder_lifecycle_finish_and_debug_markers_and_release_addref`, `wgpuRenderBundleEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderBundleEncoderAddRef` | `wgpuRenderBundleEncoder_lifecycle_finish_and_debug_markers_and_release_addref` |
+| `wgpuRenderBundleRelease` | `wgpuRenderBundleEncoder_lifecycle_finish_and_debug_markers_and_release_addref`, `wgpuRenderBundleEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderBundleAddRef` | `wgpuRenderBundleEncoder_lifecycle_finish_and_debug_markers_and_release_addref` |
+| `wgpuComputePipelineGetBindGroupLayout` | `wgpuComputePipeline_get_bind_group_layout_release_addref` |
+| `wgpuComputePipelineRelease` | `wgpuComputePipeline_get_bind_group_layout_release_addref`, `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
+| `wgpuComputePipelineAddRef` | `wgpuComputePipeline_get_bind_group_layout_release_addref` |
+| `wgpuRenderPipelineGetBindGroupLayout` | `wgpuRenderPipeline_get_bind_group_layout_release_addref` |
+| `wgpuRenderPipelineRelease` | `wgpuRenderPipeline_get_bind_group_layout_release_addref`, `wgpuRenderBundleEncoder_set_pipeline_bind_group_buffers_and_draws`, `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderPipelineAddRef` | `wgpuRenderPipeline_get_bind_group_layout_release_addref` |
+| `wgpuBindGroupLayoutRelease` | `wgpuComputePipeline_get_bind_group_layout_release_addref`, `wgpuRenderPipeline_get_bind_group_layout_release_addref`, `wgpuBindGroupLayout_and_BindGroup_and_PipelineLayout_release_addref`, `wgpuRenderBundleEncoder_set_pipeline_bind_group_buffers_and_draws`, `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws`, `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
+| `wgpuBindGroupLayoutAddRef` | `wgpuBindGroupLayout_and_BindGroup_and_PipelineLayout_release_addref` |
+| `wgpuBindGroupRelease` | `wgpuBindGroupLayout_and_BindGroup_and_PipelineLayout_release_addref`, `wgpuRenderBundleEncoder_set_pipeline_bind_group_buffers_and_draws`, `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws`, `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
+| `wgpuBindGroupAddRef` | `wgpuBindGroupLayout_and_BindGroup_and_PipelineLayout_release_addref` |
+| `wgpuPipelineLayoutRelease` | `wgpuComputePipeline_get_bind_group_layout_release_addref`, `wgpuRenderPipeline_get_bind_group_layout_release_addref`, `wgpuBindGroupLayout_and_BindGroup_and_PipelineLayout_release_addref` |
+| `wgpuPipelineLayoutAddRef` | `wgpuBindGroupLayout_and_BindGroup_and_PipelineLayout_release_addref` |
+| `wgpuShaderModuleGetCompilationInfo` | `wgpuShaderModule_get_compilation_info_and_release_addref` |
+| `wgpuShaderModuleRelease` | `wgpuShaderModule_get_compilation_info_and_release_addref` |
+| `wgpuShaderModuleAddRef` | `wgpuShaderModule_get_compilation_info_and_release_addref` |
+| `wgpuQuerySetDestroy` | `wgpuQuerySet_accessors_lifecycle_pin_type_count_label_destroy_release_addref` |
+| `wgpuQuerySetGetType` | `wgpuQuerySet_accessors_lifecycle_pin_type_count_label_destroy_release_addref` |
+| `wgpuQuerySetGetCount` | `wgpuQuerySet_accessors_lifecycle_pin_type_count_label_destroy_release_addref` |
+| `wgpuQuerySetSetLabel` | `wgpuQuerySet_accessors_lifecycle_pin_type_count_label_destroy_release_addref` |
+| `wgpuQuerySetRelease` | `wgpuQuerySet_accessors_lifecycle_pin_type_count_label_destroy_release_addref`, `wgpuCommandEncoder_query_and_timestamps`, `wgpuRenderPassEncoder_state_setters_occlusion_and_execute_bundles` |
+| `wgpuQuerySetAddRef` | `wgpuQuerySet_accessors_lifecycle_pin_type_count_label_destroy_release_addref` |
+| `wgpuSurfaceGetCapabilities` | `wgpuSurface_get_capabilities_capabilities_free_members_and_lifecycle` |
+| `wgpuSurfaceCapabilitiesFreeMembers` | `wgpuSurface_get_capabilities_capabilities_free_members_and_lifecycle` |
+| `wgpuSurfaceConfigure` | `wgpuSurface_configure_unconfigure_get_current_texture_present_noop_contract` |
+| `wgpuSurfaceUnconfigure` | `wgpuSurface_configure_unconfigure_get_current_texture_present_noop_contract` |
+| `wgpuSurfaceGetCurrentTexture` | `wgpuSurface_configure_unconfigure_get_current_texture_present_noop_contract` |
+| `wgpuSurfacePresent` | `wgpuSurface_configure_unconfigure_get_current_texture_present_noop_contract` |
+| `wgpuSurfaceSetLabel` | `wgpuSurface_get_capabilities_capabilities_free_members_and_lifecycle` |
+| `wgpuSurfaceRelease` | `wgpuSurface_get_capabilities_capabilities_free_members_and_lifecycle`, `wgpuSurface_configure_unconfigure_get_current_texture_present_noop_contract` |
+| `wgpuSurfaceAddRef` | `wgpuSurface_get_capabilities_capabilities_free_members_and_lifecycle` |
+
 ## Phase 10 yawgpu-core coverage summary
 
 Total kept pub fn (post-P10.3a audit): 183
@@ -554,3 +605,16 @@ Total kept pub fn (post-P10.3a audit): 183
 
 P10.3 complete: all 183 yawgpu-core kept-pub fn have at least one direct
 inline `#[cfg(test)]` unit test.
+
+## Phase 10 yawgpu (C FFI) coverage summary
+
+Total pub unsafe extern "C" fn: 169
+- Instance + Adapter (16):                         ☑ P10.4a
+- Device + Queue (32):                             ☑ P10.4b
+- Buffer / Texture / TextureView / Sampler (26):   ☑ P10.4c
+- Encoder + Pass (48):                             ☑ P10.4d
+- Bundle + Pipeline + Shader + BindGroup +
+  Query + Surface (46):                            ☑ P10.4e
+
+P10.4 complete: all 169 yawgpu C FFI fns have at least one
+direct inline #[cfg(test)] unit test.
