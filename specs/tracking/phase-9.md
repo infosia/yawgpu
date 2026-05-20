@@ -98,10 +98,43 @@ argument and wiring it from compute-pipeline reflection through
 dispatch. Does NOT block P9.1+ (capture/triangle/etc. use
 fixed-size buffers).
 
-## P9.1 — `capture` (offscreen render → image file)  *(after P9.0)*
-wgpu-native `capture` port: offscreen render pipeline → texture →
-T2B → PPM/PNG. Real Metal/Vulkan (reuses P7.5/P7.6e + P7.3/P7.6c).
-No window.
+## P9.1 — `capture` (offscreen render → image file)  *(☑ DONE — real-GPU-verified)*
+
+Done: `examples/capture/` (CMakeLists.txt + main.c + vendored
+`stb_image_write.h` MIT/PublicDomain). 100×200 RGBA8Unorm
+`RenderAttachment|CopySrc` texture, clear-only render pass (clear
+to red `(1,0,0,1)`, no pipeline/no draw — matches wgpu-native's
+baseline), `CopyTextureToBuffer` with `padded_bytes_per_row`
+256-aligned, `MapAsync(Read)` + `GetConstMappedRange` + `stbi_write_png`
+with stride arg = padded_bytes_per_row → `red.png`. `examples/
+CMakeLists.txt` adds `add_subdirectory(capture)`; README updated.
+
+**Phase-7 execution gap surfaced and fixed in the same slice:**
+yawgpu's `hal_render_pass_execution` required a pipeline (`pass
+.pipeline.hal()?`); WebGPU-spec-valid **clear-only** render passes
+(no SetPipeline / no Draw, used by wgpu-native's capture) were
+silently skipped → undefined/uninitialized texture → wrong PNG
+output. Fix: made `RenderPassCommand.pipeline`/`draw` and
+`HalRenderPass.pipeline`/`draw` `Option`s; core
+`hal_render_pass_execution` emits `pipeline: None` / `draw: None`
+when absent (no error). Metal & Vulkan `encode_render_pass`
+conditionally bind pipeline + set buffers + draw only when
+`pipeline.is_some()`; the begin / load+clear / store / end path
+runs unconditionally, so clear-only passes now execute the clear.
+The `Some(pipeline)` branch is byte-for-byte unchanged (Phase-7
+`e2e_metal_render` 3/3 + `e2e_vulkan_render` 2/2 remain green on
+the host). P6 validation unchanged (C37 only trips on draw).
+
+**Verification (real-GPU, 2026-05-20):**
+- Noop `cargo test --workspace` **58 binaries green** + clippy
+  clean.
+- `--features metal/vulkan` build+clippy clean.
+- Phase-7 e2e regression: Metal `e2e_metal_render` 3/3 + Vulkan
+  `e2e_vulkan_render` 2/2 green (no regression).
+- real-GPU `capture`: writes 100×200 PNG. PNG pixel decode (corner +
+  center): **`(255, 0, 0, 255)` solid red on both Metal AND
+  Vulkan** ✅. Noop writes a 100×200 PNG (uninitialized memory
+  contents — expected; Noop does not actually render).
 
 ## P9.2 — Real window→surface→swapchain (GLFW-gated)  *(after P9.1)*
 Metal CAMetalLayer+drawable, Vulkan MoltenVK metal-surface+

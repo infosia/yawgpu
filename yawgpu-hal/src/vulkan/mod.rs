@@ -251,6 +251,7 @@ impl VulkanDevice {
                 height: descriptor.height,
                 depth_or_array_layers: descriptor.depth_or_array_layers,
                 bytes_per_pixel,
+                format: descriptor.format,
             },
             Err(_) => VulkanTexture {
                 inner: None,
@@ -258,6 +259,7 @@ impl VulkanDevice {
                 height: descriptor.height,
                 depth_or_array_layers: descriptor.depth_or_array_layers,
                 bytes_per_pixel: 0,
+                format: descriptor.format,
             },
         }
     }
@@ -441,6 +443,7 @@ pub struct VulkanTexture {
     height: u32,
     depth_or_array_layers: u32,
     bytes_per_pixel: u32,
+    format: HalTextureFormat,
 }
 
 impl VulkanTexture {
@@ -1007,6 +1010,13 @@ fn create_render_pass(
         .first()
         .copied()
         .ok_or_else(|| shader_error("render pipeline requires a color target"))?;
+    create_render_pass_for_format(&device.device, color_format)
+}
+
+fn create_render_pass_for_format(
+    device: &ash::Device,
+    color_format: HalTextureFormat,
+) -> Result<vk::RenderPass, HalError> {
     let (format, _) = map_texture_format(color_format)?;
     let attachment = vk::AttachmentDescription::default()
         .format(format)
@@ -1045,7 +1055,7 @@ fn create_render_pass(
         .attachments(&attachments)
         .subpasses(&subpasses)
         .dependencies(&dependencies);
-    unsafe { device.device.create_render_pass(&render_pass_info, None) }
+    unsafe { device.create_render_pass(&render_pass_info, None) }
         .map_err(|_| shader_error("render pass creation failed"))
 }
 
@@ -1254,6 +1264,7 @@ fn record_and_submit_copies(
 ) -> Result<(), HalError> {
     let mut descriptor_pools = Vec::new();
     let mut framebuffers = Vec::new();
+    let mut render_passes = Vec::new();
     let result = (|| {
         let allocate_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
@@ -1301,6 +1312,9 @@ fn record_and_submit_copies(
                         descriptor_pools.push(pool);
                     }
                     framebuffers.push(temps.framebuffer);
+                    if let Some(render_pass) = temps.render_pass {
+                        render_passes.push(render_pass);
+                    }
                 }
             }
         }
@@ -1328,6 +1342,9 @@ fn record_and_submit_copies(
     unsafe {
         for framebuffer in framebuffers {
             queue.device.device.destroy_framebuffer(framebuffer, None);
+        }
+        for render_pass in render_passes {
+            queue.device.device.destroy_render_pass(render_pass, None);
         }
         for pool in descriptor_pools {
             queue.device.device.destroy_descriptor_pool(pool, None);
@@ -1555,6 +1572,7 @@ fn encode_compute_pass(
 struct RenderPassTemps {
     descriptor_pool: Option<vk::DescriptorPool>,
     framebuffer: vk::Framebuffer,
+    render_pass: Option<vk::RenderPass>,
 }
 
 fn encode_render_pass(
@@ -1562,9 +1580,6 @@ fn encode_render_pass(
     command_buffer: vk::CommandBuffer,
     pass: &HalRenderPass,
 ) -> Result<RenderPassTemps, HalError> {
-    let crate::HalRenderPipeline::Vulkan(pipeline) = &pass.pipeline else {
-        return Err(shader_error("render pipeline is not Vulkan-backed"));
-    };
     let crate::HalTexture::Vulkan(texture) = &pass.color_target.texture else {
         return Err(texture_error("render target is not Vulkan-backed"));
     };
@@ -1584,30 +1599,47 @@ fn encode_render_pass(
         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         IMAGE_LAYOUT_COLOR_ATTACHMENT,
     );
-    let framebuffer = create_framebuffer(device, pipeline, texture)?;
-    let descriptor_pool = create_render_descriptor_pool(device, pipeline)?;
-    let descriptor_sets = if let Some(pool) = descriptor_pool {
-        match allocate_render_descriptor_sets(device, pool, pipeline) {
-            Ok(sets) => sets,
-            Err(error) => {
-                unsafe {
-                    device.destroy_descriptor_pool(pool, None);
-                    device.destroy_framebuffer(framebuffer, None);
-                }
-                return Err(error);
-            }
-        }
-    } else {
-        Vec::new()
+    let render_pass = match &pass.pipeline {
+        Some(crate::HalRenderPipeline::Vulkan(pipeline)) => pipeline.inner.render_pass,
+        Some(_) => return Err(shader_error("render pipeline is not Vulkan-backed")),
+        None => create_render_pass_for_format(device, texture.format)?,
     };
-    if let Err(error) = update_render_descriptor_sets(device, pipeline, pass, &descriptor_sets) {
-        unsafe {
-            if let Some(pool) = descriptor_pool {
-                device.destroy_descriptor_pool(pool, None);
+    let temporary_render_pass = pass.pipeline.is_none().then_some(render_pass);
+    let framebuffer = create_framebuffer(device, render_pass, texture)?;
+    let mut descriptor_pool = None;
+    let mut descriptor_sets = Vec::new();
+    if let Some(crate::HalRenderPipeline::Vulkan(pipeline)) = &pass.pipeline {
+        descriptor_pool = create_render_descriptor_pool(device, pipeline)?;
+        descriptor_sets = if let Some(pool) = descriptor_pool {
+            match allocate_render_descriptor_sets(device, pool, pipeline) {
+                Ok(sets) => sets,
+                Err(error) => {
+                    unsafe {
+                        device.destroy_descriptor_pool(pool, None);
+                        device.destroy_framebuffer(framebuffer, None);
+                        if let Some(render_pass) = temporary_render_pass {
+                            device.destroy_render_pass(render_pass, None);
+                        }
+                    }
+                    return Err(error);
+                }
             }
-            device.destroy_framebuffer(framebuffer, None);
+        } else {
+            Vec::new()
+        };
+        if let Err(error) = update_render_descriptor_sets(device, pipeline, pass, &descriptor_sets)
+        {
+            unsafe {
+                if let Some(pool) = descriptor_pool {
+                    device.destroy_descriptor_pool(pool, None);
+                }
+                device.destroy_framebuffer(framebuffer, None);
+                if let Some(render_pass) = temporary_render_pass {
+                    device.destroy_render_pass(render_pass, None);
+                }
+            }
+            return Err(error);
         }
-        return Err(error);
     }
     let clear_values = [vk::ClearValue {
         color: vk::ClearColorValue {
@@ -1627,38 +1659,46 @@ fn encode_render_pass(
         },
     };
     let begin_info = vk::RenderPassBeginInfo::default()
-        .render_pass(pipeline.inner.render_pass)
+        .render_pass(render_pass)
         .framebuffer(framebuffer)
         .render_area(render_area)
         .clear_values(&clear_values);
     unsafe {
         device.cmd_begin_render_pass(command_buffer, &begin_info, vk::SubpassContents::INLINE);
-        device.cmd_bind_pipeline(
-            command_buffer,
-            vk::PipelineBindPoint::GRAPHICS,
-            pipeline.inner.pipeline,
-        );
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: texture.width as f32,
-            height: texture.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-        device.cmd_set_viewport(command_buffer, 0, &[viewport]);
-        device.cmd_set_scissor(command_buffer, 0, &[render_area]);
-        bind_render_descriptor_sets(device, command_buffer, pipeline, &descriptor_sets);
     }
-    bind_vertex_buffers(device, command_buffer, pass)?;
+    if let (Some(crate::HalRenderPipeline::Vulkan(pipeline)), Some(draw)) =
+        (&pass.pipeline, pass.draw)
+    {
+        unsafe {
+            device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline.inner.pipeline,
+            );
+            let viewport = vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: texture.width as f32,
+                height: texture.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            };
+            device.cmd_set_viewport(command_buffer, 0, &[viewport]);
+            device.cmd_set_scissor(command_buffer, 0, &[render_area]);
+            bind_render_descriptor_sets(device, command_buffer, pipeline, &descriptor_sets);
+        }
+        bind_vertex_buffers(device, command_buffer, pass)?;
+        unsafe {
+            device.cmd_draw(
+                command_buffer,
+                draw.vertex_count,
+                draw.instance_count,
+                draw.first_vertex,
+                draw.first_instance,
+            );
+        }
+    }
     unsafe {
-        device.cmd_draw(
-            command_buffer,
-            pass.draw.vertex_count,
-            pass.draw.instance_count,
-            pass.draw.first_vertex,
-            pass.draw.first_instance,
-        );
         device.cmd_end_render_pass(command_buffer);
     }
     texture_inner
@@ -1667,18 +1707,19 @@ fn encode_render_pass(
     Ok(RenderPassTemps {
         descriptor_pool,
         framebuffer,
+        render_pass: temporary_render_pass,
     })
 }
 
 fn create_framebuffer(
     device: &ash::Device,
-    pipeline: &VulkanRenderPipeline,
+    render_pass: vk::RenderPass,
     texture: &VulkanTexture,
 ) -> Result<vk::Framebuffer, HalError> {
     let inner = texture.inner()?;
     let attachments = [inner.view];
     let framebuffer_info = vk::FramebufferCreateInfo::default()
-        .render_pass(pipeline.inner.render_pass)
+        .render_pass(render_pass)
         .attachments(&attachments)
         .width(texture.width)
         .height(texture.height)

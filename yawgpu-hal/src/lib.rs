@@ -452,11 +452,11 @@ pub struct HalBoundBuffer {
 
 #[derive(Debug, Clone)]
 pub struct HalRenderPass {
-    pub pipeline: HalRenderPipeline,
+    pub pipeline: Option<HalRenderPipeline>,
     pub color_target: HalRenderColorTarget,
     pub bind_buffers: Vec<HalBoundBuffer>,
     pub vertex_buffers: Vec<HalBoundBuffer>,
-    pub draw: HalDraw,
+    pub draw: Option<HalDraw>,
 }
 
 #[derive(Debug, Clone)]
