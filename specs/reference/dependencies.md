@@ -39,6 +39,16 @@ references it, so bindgen output is reproducible:
   byte-identical copy from `webgpu-headers` commit
   `673658bc2bd70ec39fc55ebe6bb0173cf6d0a603` (2026-05-07). Bound via
   `bindgen 0.72` in `yawgpu/build.rs`.
+  bindgen workaround for Windows MSVC builds (added 2026-05-21):
+  `.clang_macro_fallback()` plus blocklist+raw_line overrides for the four
+  `(SIZE_MAX)`/`(UINT64_MAX)`-derived constants (`WGPU_WHOLE_MAP_SIZE`,
+  `WGPU_WHOLE_SIZE`, `WGPU_LIMIT_U64_UNDEFINED`, `WGPU_STRLEN`). Without the
+  overrides bindgen emits them as `i32 = -1` regardless of the C-side type,
+  which silently works on macOS but breaks Windows MSVC with `cannot find
+  value`. The `native::WGPU*` conversion paths in `yawgpu/src/conv.rs` use the
+  primitive `From<u32>`/`From<i32>` impls in `yawgpu-core` to handle the
+  separate enum underlying-type platform difference (MSVC `c_int`, macOS clang
+  `c_uint`) by bit-preserving `as` casts at the FFI↔core boundary.
 - `naga`: pinned to `infosia/wgpu` rev
   **`216627076a7b22ad09fa566de53d1f0f74b59de3`** (`git describe`:
   `v29.0.3-44-g216627076`; remote `https://github.com/infosia/wgpu.git`).

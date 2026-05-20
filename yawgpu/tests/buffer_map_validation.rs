@@ -257,7 +257,7 @@ fn valid_map_transitions_pending_then_mapped_success() {
             buffer,
             native::WGPUMapMode_Read,
             0,
-            native::WGPU_WHOLE_MAP_SIZE as usize,
+            native::WGPU_WHOLE_MAP_SIZE,
             native::WGPUCallbackMode_AllowProcessEvents,
             &mut state,
         );

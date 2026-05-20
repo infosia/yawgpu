@@ -90,17 +90,17 @@ fn whole_map_size_uses_active_mapped_range() {
         assert!(!yawgpu::wgpuBufferGetMappedRange(
             buffer,
             16,
-            native::WGPU_WHOLE_MAP_SIZE as usize,
+            native::WGPU_WHOLE_MAP_SIZE,
         )
         .is_null());
         assert!(!yawgpu::wgpuBufferGetMappedRange(
             buffer,
             20,
-            native::WGPU_WHOLE_MAP_SIZE as usize,
+            native::WGPU_WHOLE_MAP_SIZE,
         )
         .is_null());
         assert!(
-            yawgpu::wgpuBufferGetMappedRange(buffer, 8, native::WGPU_WHOLE_MAP_SIZE as usize)
+            yawgpu::wgpuBufferGetMappedRange(buffer, 8, native::WGPU_WHOLE_MAP_SIZE)
                 .is_null()
         );
         yawgpu::wgpuBufferRelease(buffer);
@@ -116,7 +116,7 @@ fn offset_before_mapped_start_returns_null() {
         let buffer = create_buffer(test.device(), 64, native::WGPUBufferUsage_MapWrite, false);
         map_and_wait(test.instance(), buffer, native::WGPUMapMode_Write, 16, 16);
 
-        for size in [0, 4, native::WGPU_WHOLE_MAP_SIZE as usize] {
+        for size in [0, 4, native::WGPU_WHOLE_MAP_SIZE] {
             assert!(yawgpu::wgpuBufferGetMappedRange(buffer, 8, size).is_null());
         }
         yawgpu::wgpuBufferRelease(buffer);
