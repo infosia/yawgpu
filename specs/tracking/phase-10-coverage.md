@@ -118,3 +118,73 @@ as a Phase-10 follow-up.
 | `VulkanBuffer::write` | `vulkan_buffer_write_updates_mapped_memory` |
 | `VulkanBuffer::read` | `vulkan_buffer_read_returns_written_bytes` |
 | `VulkanBuffer::mapped_ptr` | `vulkan_buffer_mapped_ptr_returns_non_null_pointer` |
+
+## yawgpu/src/conv.rs (66 pub fn)
+
+| pub fn | test name(s) |
+|---|---|
+| `arc_to_handle` | `arc_to_handle_round_trips_with_clone_handle_refcount_math` |
+| `release_handle` | `release_handle_drops_owned_reference_once` |
+| `add_ref_handle` | `add_ref_handle_increments_refcount_for_later_release` |
+| `clone_handle` | `arc_to_handle_round_trips_with_clone_handle_refcount_math`, `clone_handle_leaves_original_handle_valid`, `clone_handle_null_panics_with_contract_message` |
+| `borrow_handle` | `borrow_handle_returns_reference_without_consuming_arc`, `borrow_handle_null_panics_with_contract_message` |
+| `string_view` | `string_view_round_trips_data_and_empty_slice` |
+| `string_view_to_str` | `string_view_round_trips_data_and_empty_slice`, `string_view_to_str_handles_explicit_strlen_and_null_data` |
+| `label_from_string_view` | `label_from_string_view_returns_owned_label_or_none` |
+| `map_shader_module_descriptor` | `map_shader_module_descriptor_decodes_wgsl_source_and_missing_source_error` |
+| `map_bind_group_layout_descriptor` | `map_bind_group_layout_descriptor_decodes_buffer_entry_and_null_entries_error` |
+| `map_bind_group_entries` | `map_bind_group_entries_decodes_buffer_entry_and_null_entries_error` |
+| `map_pipeline_layout_descriptor` | `map_pipeline_layout_descriptor_decodes_layouts_and_null_array_error` |
+| `map_compute_pipeline_descriptor` | `map_compute_pipeline_descriptor_decodes_module_entry_layout_and_constants`, `map_compute_pipeline_descriptor_null_module_panics` |
+| `map_render_pipeline_descriptor` | `map_render_pipeline_descriptor_decodes_vertex_fragment_and_error_path` |
+| `map_feature` | `map_feature_round_trips_defined_and_other_variants` |
+| `map_feature_to_native` | `map_feature_round_trips_defined_and_other_variants` |
+| `map_query_set_descriptor` | `map_query_set_descriptor_decodes_type_count_label` |
+| `map_query_type` | `map_query_type_round_trips_defined_and_unknown_variants` |
+| `map_query_type_to_native` | `map_query_type_round_trips_defined_and_unknown_variants` |
+| `map_feature_level` | `map_feature_level_maps_compatibility_and_default_core` |
+| `DeviceLostCallbackInfo::has_callback` | `has_callback_detects_present_and_absent_device_lost_callbacks` |
+| `map_device_lost_callback_info` | `map_device_lost_callback_info_round_trips_present_and_absent_callback` |
+| `map_device_lost_reason` | `map_device_lost_reason_maps_every_core_variant` |
+| `map_error_filter` | `map_error_filter_maps_known_values_and_rejects_unknown` |
+| `map_error_type` | `map_error_type_maps_every_core_variant` |
+| `map_pop_error_scope_status_error` | `map_pop_error_scope_status_error_returns_error` |
+| `map_pop_error_scope_status_success` | `map_pop_error_scope_status_success_returns_success` |
+| `map_buffer_usage` | `map_buffer_usage_round_trips_bitmask` |
+| `map_buffer_usage_to_native` | `map_buffer_usage_round_trips_bitmask` |
+| `map_buffer_map_state` | `map_buffer_map_state_maps_every_core_variant` |
+| `map_map_async_status` | `map_map_async_status_maps_every_core_variant` |
+| `map_queue_work_done_status` | `map_queue_work_done_status_maps_every_core_variant` |
+| `map_compilation_info_request_status_success` | `map_compilation_info_request_status_success_returns_success` |
+| `map_compilation_message_type_error` | `map_compilation_message_type_error_returns_error` |
+| `map_map_mode` | `map_map_mode_accepts_single_modes_and_rejects_invalid_combinations` |
+| `map_buffer_descriptor` | `map_buffer_descriptor_round_trips_fields` |
+| `map_address_mode` | `map_address_mode_maps_known_values_and_rejects_unknown` |
+| `map_filter_mode` | `map_filter_mode_maps_known_values_and_rejects_unknown` |
+| `map_mipmap_filter_mode` | `map_mipmap_filter_mode_maps_known_values_and_rejects_unknown` |
+| `map_compare_function` | `map_compare_function_maps_known_values_and_rejects_undefined` |
+| `map_sampler_descriptor` | `map_sampler_descriptor_round_trips_fields_with_undefined_compare` |
+| `map_texture_usage` | `map_texture_usage_round_trips_bitmask` |
+| `map_texture_usage_to_native` | `map_texture_usage_round_trips_bitmask` |
+| `map_texture_dimension` | `map_texture_dimension_round_trips_defined_variants` |
+| `map_texture_dimension_to_native` | `map_texture_dimension_round_trips_defined_variants` |
+| `map_texture_format` | `map_texture_format_round_trips_defined_and_unknown_raw_values` |
+| `map_texture_format_to_native` | `map_texture_format_round_trips_defined_and_unknown_raw_values` |
+| `map_extent_3d` | `map_extent_3d_round_trips_fields` |
+| `map_origin_3d` | `map_origin_3d_round_trips_fields` |
+| `map_texel_copy_buffer_layout` | `map_texel_copy_buffer_layout_round_trips_fields_and_undefined_strides` |
+| `map_texel_copy_texture_info_parts` | `map_texel_copy_texture_info_parts_round_trips_fields` |
+| `map_render_pass_descriptor` | `map_render_pass_descriptor_decodes_color_attachment_and_sparse_null_view` |
+| `map_render_bundle_encoder_descriptor` | `map_render_bundle_encoder_descriptor_decodes_formats_and_null_format_array` |
+| `map_query_index` | `map_query_index_maps_defined_values_and_undefined_to_none` |
+| `map_load_op` | `map_load_op_maps_defined_values_and_undefined_fallback` |
+| `map_store_op` | `map_store_op_maps_defined_values_and_undefined_fallback` |
+| `map_color` | `map_color_round_trips_float_bits_including_nan` |
+| `map_texture_descriptor` | `map_texture_descriptor_decodes_usage_format_dimension_size_and_view_formats` |
+| `map_texture_view_dimension` | `map_texture_view_dimension_maps_known_values_and_rejects_unknown` |
+| `map_texture_aspect` | `map_texture_aspect_maps_known_values_and_rejects_undefined` |
+| `map_texture_view_descriptor` | `map_texture_view_descriptor_decodes_fields_and_none_defaults` |
+| `map_features_to_native` | `map_features_to_native_allocates_feature_array_and_free_supported_features_releases_it` |
+| `free_supported_features` | `map_features_to_native_allocates_feature_array_and_free_supported_features_releases_it`, `free_supported_features_accepts_null_feature_array` |
+| `map_limits_to_native` | `map_limits_to_native_round_trips_through_map_limits` |
+| `map_limits` | `map_limits_round_trips_every_field_from_native`, `map_limits_to_native_round_trips_through_map_limits` |
