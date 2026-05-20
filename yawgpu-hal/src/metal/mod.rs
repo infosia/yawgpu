@@ -815,7 +815,10 @@ fn encode_render_pass(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     pass: &HalRenderPass,
 ) -> Result<(), HalError> {
-    let crate::HalRenderPipeline::Metal(pipeline) = &pass.pipeline else {
+    let (Some(pipeline), Some(draw)) = (&pass.pipeline, pass.draw) else {
+        return Ok(());
+    };
+    let crate::HalRenderPipeline::Metal(pipeline) = pipeline else {
         return Err(shader_error(
             "render pipeline is not Metal-backed".to_owned(),
         ));
@@ -827,7 +830,7 @@ fn encode_render_pass(
     for binding in &pass.vertex_buffers {
         encode_render_vertex_buffer(encoder, binding)?;
     }
-    draw_primitives(encoder, pipeline.primitive_topology, pass.draw)?;
+    draw_primitives(encoder, pipeline.primitive_topology, draw)?;
     Ok(())
 }
 

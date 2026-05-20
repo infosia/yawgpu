@@ -5603,24 +5603,39 @@ fn hal_compute_pass_execution(pass: &ComputePassCommand) -> Option<HalCopy> {
 }
 
 fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalCopy> {
-    let pipeline = pass.pipeline.hal()?;
-    let bind_buffers = hal_bind_buffers(
-        pass.pipeline.bind_group_layouts(),
-        pass.pipeline.metal_bindings(),
-        &pass.bind_groups,
-    )?;
-    let mut vertex_buffers = Vec::new();
-    for binding in pass.pipeline.vertex_buffer_bindings() {
-        let bound = pass.vertex_buffers.get(&binding.slot)?;
-        vertex_buffers.push(HalBoundBuffer {
-            group: 0,
-            binding: binding.slot,
-            metal_index: binding.metal_index,
-            buffer: bound.buffer.hal()?,
-            offset: bound.offset,
-            size: bound.size,
-        });
-    }
+    let (pipeline, bind_buffers, vertex_buffers, draw) =
+        if let (Some(pipeline), Some(draw)) = (&pass.pipeline, pass.draw) {
+            let bind_buffers = hal_bind_buffers(
+                pipeline.bind_group_layouts(),
+                pipeline.metal_bindings(),
+                &pass.bind_groups,
+            )?;
+            let mut vertex_buffers = Vec::new();
+            for binding in pipeline.vertex_buffer_bindings() {
+                let bound = pass.vertex_buffers.get(&binding.slot)?;
+                vertex_buffers.push(HalBoundBuffer {
+                    group: 0,
+                    binding: binding.slot,
+                    metal_index: binding.metal_index,
+                    buffer: bound.buffer.hal()?,
+                    offset: bound.offset,
+                    size: bound.size,
+                });
+            }
+            (
+                Some(pipeline.hal()?),
+                bind_buffers,
+                vertex_buffers,
+                Some(HalDraw {
+                    vertex_count: draw.vertex_count,
+                    instance_count: draw.instance_count,
+                    first_vertex: draw.first_vertex,
+                    first_instance: draw.first_instance,
+                }),
+            )
+        } else {
+            (None, Vec::new(), Vec::new(), None)
+        };
     Some(HalCopy::RenderPass(HalRenderPass {
         pipeline,
         color_target: HalRenderColorTarget {
@@ -5639,12 +5654,7 @@ fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalCopy> {
         },
         bind_buffers,
         vertex_buffers,
-        draw: HalDraw {
-            vertex_count: pass.draw.vertex_count,
-            instance_count: pass.draw.instance_count,
-            first_vertex: pass.draw.first_vertex,
-            first_instance: pass.draw.first_instance,
-        },
+        draw,
     }))
 }
 
@@ -6165,11 +6175,11 @@ struct ComputePassCommand {
 
 #[derive(Debug, Clone)]
 struct RenderPassCommand {
-    pipeline: Arc<RenderPipeline>,
+    pipeline: Option<Arc<RenderPipeline>>,
     color_attachment: RenderPassColorExecution,
     bind_groups: BTreeMap<u32, BoundBindGroup>,
     vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
-    draw: RenderDrawExecution,
+    draw: Option<RenderDrawExecution>,
 }
 
 #[derive(Debug, Clone)]
@@ -6227,6 +6237,7 @@ struct PassEncoderState {
     attachment_signature: Option<AttachmentSignature>,
     attachment_textures: Vec<Texture>,
     render_color_attachment: Option<RenderPassColorExecution>,
+    render_pass_recorded: bool,
     occlusion_query_set: Option<QuerySet>,
     open_occlusion_query: Option<u32>,
     used_occlusion_queries: BTreeSet<u32>,
@@ -6250,6 +6261,7 @@ impl PassEncoderState {
             attachment_signature,
             attachment_textures,
             render_color_attachment,
+            render_pass_recorded: false,
             occlusion_query_set,
             open_occlusion_query: None,
             used_occlusion_queries: BTreeSet::new(),
@@ -7519,8 +7531,28 @@ impl PassEncoderInner {
         state.ended = true;
         let unbalanced_debug_groups = state.debug_group_depth != 0;
         let open_occlusion_query = state.open_occlusion_query.is_some();
+        let render_pass_command = if !state.render_pass_recorded {
+            state
+                .render_color_attachment
+                .clone()
+                .map(|color_attachment| {
+                    state.render_pass_recorded = true;
+                    RenderPassCommand {
+                        pipeline: state.render_pipeline.clone(),
+                        color_attachment,
+                        bind_groups: state.bind_groups.clone(),
+                        vertex_buffers: state.vertex_buffers.clone(),
+                        draw: None,
+                    }
+                })
+        } else {
+            None
+        };
         drop(state);
 
+        if let Some(command) = render_pass_command {
+            self.parent.record_render_pass(command);
+        }
         self.parent.end_pass(self.token);
         if unbalanced_debug_groups {
             let message = "pass encoder debug group stack is unbalanced".to_owned();
@@ -7727,17 +7759,18 @@ impl RenderPassEncoder {
                 .clone()
                 .ok_or_else(|| "render pass requires a color attachment".to_owned())?;
             self.inner.parent.record_render_pass(RenderPassCommand {
-                pipeline: Arc::clone(pipeline),
+                pipeline: Some(Arc::clone(pipeline)),
                 color_attachment,
                 bind_groups: state.bind_groups.clone(),
                 vertex_buffers: state.vertex_buffers.clone(),
-                draw: RenderDrawExecution {
+                draw: Some(RenderDrawExecution {
                     vertex_count,
                     instance_count,
                     first_vertex,
                     first_instance,
-                },
+                }),
             });
+            state.render_pass_recorded = true;
             Ok(())
         })
     }

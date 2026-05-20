@@ -1,0 +1,3 @@
+add_executable(capture main.c)
+target_compile_definitions(capture PRIVATE STB_IMAGE_WRITE_IMPLEMENTATION)
+yawgpu_add_example(capture)
