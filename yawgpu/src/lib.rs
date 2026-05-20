@@ -5290,6 +5290,37 @@ mod tests {
         device: native::WGPUDevice,
     }
 
+    #[derive(Default)]
+    struct PopErrorScopeState {
+        fired: u32,
+        status: native::WGPUPopErrorScopeStatus,
+        error_type: native::WGPUErrorType,
+        message: String,
+    }
+
+    #[derive(Default)]
+    struct QueueWorkDoneState {
+        fired: u32,
+        status: native::WGPUQueueWorkDoneStatus,
+        message: String,
+    }
+
+    #[derive(Default)]
+    struct ComputePipelineAsyncState {
+        fired: u32,
+        status: native::WGPUCreatePipelineAsyncStatus,
+        pipeline: native::WGPUComputePipeline,
+        message: String,
+    }
+
+    #[derive(Default)]
+    struct RenderPipelineAsyncState {
+        fired: u32,
+        status: native::WGPUCreatePipelineAsyncStatus,
+        pipeline: native::WGPURenderPipeline,
+        message: String,
+    }
+
     unsafe extern "C" fn request_adapter_callback(
         status: native::WGPURequestAdapterStatus,
         adapter: native::WGPUAdapter,
@@ -5314,6 +5345,60 @@ mod tests {
         state.fired += 1;
         state.status = status;
         state.device = device;
+    }
+
+    unsafe extern "C" fn pop_error_scope_callback(
+        status: native::WGPUPopErrorScopeStatus,
+        error_type: native::WGPUErrorType,
+        message: native::WGPUStringView,
+        userdata1: *mut c_void,
+        _userdata2: *mut c_void,
+    ) {
+        let state = &mut *(userdata1 as *mut PopErrorScopeState);
+        state.fired += 1;
+        state.status = status;
+        state.error_type = error_type;
+        state.message = string_view_to_string(message);
+    }
+
+    unsafe extern "C" fn queue_work_done_callback(
+        status: native::WGPUQueueWorkDoneStatus,
+        message: native::WGPUStringView,
+        userdata1: *mut c_void,
+        _userdata2: *mut c_void,
+    ) {
+        let state = &mut *(userdata1 as *mut QueueWorkDoneState);
+        state.fired += 1;
+        state.status = status;
+        state.message = string_view_to_string(message);
+    }
+
+    unsafe extern "C" fn compute_pipeline_async_callback(
+        status: native::WGPUCreatePipelineAsyncStatus,
+        pipeline: native::WGPUComputePipeline,
+        message: native::WGPUStringView,
+        userdata1: *mut c_void,
+        _userdata2: *mut c_void,
+    ) {
+        let state = &mut *(userdata1 as *mut ComputePipelineAsyncState);
+        state.fired += 1;
+        state.status = status;
+        state.pipeline = pipeline;
+        state.message = string_view_to_string(message);
+    }
+
+    unsafe extern "C" fn render_pipeline_async_callback(
+        status: native::WGPUCreatePipelineAsyncStatus,
+        pipeline: native::WGPURenderPipeline,
+        message: native::WGPUStringView,
+        userdata1: *mut c_void,
+        _userdata2: *mut c_void,
+    ) {
+        let state = &mut *(userdata1 as *mut RenderPipelineAsyncState);
+        state.fired += 1;
+        state.status = status;
+        state.pipeline = pipeline;
+        state.message = string_view_to_string(message);
     }
 
     unsafe fn make_noop_instance() -> native::WGPUInstance {
@@ -5402,6 +5487,17 @@ mod tests {
         }
     }
 
+    unsafe fn noop_chain() -> (
+        native::WGPUInstance,
+        native::WGPUAdapter,
+        native::WGPUDevice,
+    ) {
+        let instance = make_noop_instance();
+        let adapter = request_noop_adapter(instance);
+        let device = request_noop_device(instance, adapter);
+        (instance, adapter, device)
+    }
+
     fn empty_string_view() -> native::WGPUStringView {
         native::WGPUStringView {
             data: std::ptr::null(),
@@ -5465,6 +5561,249 @@ mod tests {
 
     unsafe fn string_view_to_string(value: native::WGPUStringView) -> String {
         string_view_to_str(value).unwrap_or_default().to_owned()
+    }
+
+    fn label_view(value: &str) -> native::WGPUStringView {
+        native::WGPUStringView {
+            data: value.as_ptr().cast(),
+            length: value.len(),
+        }
+    }
+
+    fn buffer_descriptor(
+        usage: native::WGPUBufferUsage,
+        size: u64,
+    ) -> native::WGPUBufferDescriptor {
+        native::WGPUBufferDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            usage,
+            size,
+            mappedAtCreation: 0,
+        }
+    }
+
+    fn extent(width: u32, height: u32, depth_or_array_layers: u32) -> native::WGPUExtent3D {
+        native::WGPUExtent3D {
+            width,
+            height,
+            depthOrArrayLayers: depth_or_array_layers,
+        }
+    }
+
+    fn origin(x: u32, y: u32, z: u32) -> native::WGPUOrigin3D {
+        native::WGPUOrigin3D { x, y, z }
+    }
+
+    fn texture_descriptor(
+        usage: native::WGPUTextureUsage,
+        width: u32,
+    ) -> native::WGPUTextureDescriptor {
+        native::WGPUTextureDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            usage,
+            dimension: native::WGPUTextureDimension_2D,
+            size: extent(width, 1, 1),
+            format: native::WGPUTextureFormat_RGBA8Unorm,
+            mipLevelCount: 1,
+            sampleCount: 1,
+            viewFormatCount: 0,
+            viewFormats: std::ptr::null(),
+        }
+    }
+
+    fn default_sampler_descriptor() -> native::WGPUSamplerDescriptor {
+        native::WGPUSamplerDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            addressModeU: native::WGPUAddressMode_Undefined,
+            addressModeV: native::WGPUAddressMode_Undefined,
+            addressModeW: native::WGPUAddressMode_Undefined,
+            magFilter: native::WGPUFilterMode_Undefined,
+            minFilter: native::WGPUFilterMode_Undefined,
+            mipmapFilter: native::WGPUMipmapFilterMode_Undefined,
+            lodMinClamp: 0.0,
+            lodMaxClamp: 32.0,
+            compare: native::WGPUCompareFunction_Undefined,
+            maxAnisotropy: 1,
+        }
+    }
+
+    fn query_set_descriptor(count: u32) -> native::WGPUQuerySetDescriptor {
+        native::WGPUQuerySetDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            type_: native::WGPUQueryType_Occlusion,
+            count,
+        }
+    }
+
+    unsafe fn create_wgsl_module(
+        device: native::WGPUDevice,
+        source: &str,
+    ) -> native::WGPUShaderModule {
+        let mut wgsl = native::WGPUShaderSourceWGSL {
+            chain: native::WGPUChainedStruct {
+                next: std::ptr::null_mut(),
+                sType: native::WGPUSType_ShaderSourceWGSL,
+            },
+            code: label_view(source),
+        };
+        let descriptor = native::WGPUShaderModuleDescriptor {
+            nextInChain: (&mut wgsl.chain) as *mut _,
+            label: empty_string_view(),
+        };
+        wgpuDeviceCreateShaderModule(device, &descriptor)
+    }
+
+    fn bind_group_layout_descriptor() -> native::WGPUBindGroupLayoutDescriptor {
+        native::WGPUBindGroupLayoutDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            entryCount: 0,
+            entries: std::ptr::null(),
+        }
+    }
+
+    fn bind_group_descriptor(
+        layout: native::WGPUBindGroupLayout,
+    ) -> native::WGPUBindGroupDescriptor {
+        native::WGPUBindGroupDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            layout,
+            entryCount: 0,
+            entries: std::ptr::null(),
+        }
+    }
+
+    fn pipeline_layout_descriptor(
+        layouts: &[native::WGPUBindGroupLayout],
+    ) -> native::WGPUPipelineLayoutDescriptor {
+        native::WGPUPipelineLayoutDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            bindGroupLayoutCount: layouts.len(),
+            bindGroupLayouts: layouts.as_ptr(),
+            immediateSize: 0,
+        }
+    }
+
+    fn compute_pipeline_descriptor(
+        module: native::WGPUShaderModule,
+        layout: native::WGPUPipelineLayout,
+    ) -> native::WGPUComputePipelineDescriptor {
+        native::WGPUComputePipelineDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            layout,
+            compute: native::WGPUComputeState {
+                nextInChain: std::ptr::null_mut(),
+                module,
+                entryPoint: label_view("cs"),
+                constantCount: 0,
+                constants: std::ptr::null(),
+            },
+        }
+    }
+
+    fn render_pipeline_descriptor(
+        vertex_module: native::WGPUShaderModule,
+        fragment_module: native::WGPUShaderModule,
+        layout: native::WGPUPipelineLayout,
+    ) -> native::WGPURenderPipelineDescriptor {
+        let color_target = Box::leak(Box::new(native::WGPUColorTargetState {
+            nextInChain: std::ptr::null_mut(),
+            format: native::WGPUTextureFormat_RGBA8Unorm,
+            blend: std::ptr::null(),
+            writeMask: native::WGPUColorWriteMask_All,
+        }));
+        let fragment = Box::leak(Box::new(native::WGPUFragmentState {
+            nextInChain: std::ptr::null_mut(),
+            module: fragment_module,
+            entryPoint: label_view("fs"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            targetCount: 1,
+            targets: color_target,
+        }));
+        native::WGPURenderPipelineDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            layout,
+            vertex: native::WGPUVertexState {
+                nextInChain: std::ptr::null_mut(),
+                module: vertex_module,
+                entryPoint: label_view("vs"),
+                constantCount: 0,
+                constants: std::ptr::null(),
+                bufferCount: 0,
+                buffers: std::ptr::null(),
+            },
+            primitive: native::WGPUPrimitiveState {
+                nextInChain: std::ptr::null_mut(),
+                topology: native::WGPUPrimitiveTopology_TriangleList,
+                stripIndexFormat: native::WGPUIndexFormat_Undefined,
+                frontFace: native::WGPUFrontFace_Undefined,
+                cullMode: native::WGPUCullMode_Undefined,
+                unclippedDepth: 0,
+            },
+            depthStencil: std::ptr::null(),
+            multisample: native::WGPUMultisampleState {
+                nextInChain: std::ptr::null_mut(),
+                count: 1,
+                mask: 0xFFFF_FFFF,
+                alphaToCoverageEnabled: 0,
+            },
+            fragment,
+        }
+    }
+
+    fn render_bundle_encoder_descriptor(
+        formats: &[native::WGPUTextureFormat],
+    ) -> native::WGPURenderBundleEncoderDescriptor {
+        native::WGPURenderBundleEncoderDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            colorFormatCount: formats.len(),
+            colorFormats: formats.as_ptr(),
+            depthStencilFormat: native::WGPUTextureFormat_Undefined,
+            sampleCount: 1,
+            depthReadOnly: 0,
+            stencilReadOnly: 0,
+        }
+    }
+
+    unsafe fn pop_error_scope(
+        instance: native::WGPUInstance,
+        device: native::WGPUDevice,
+        state: &mut PopErrorScopeState,
+    ) -> native::WGPUFuture {
+        let callback_info = native::WGPUPopErrorScopeCallbackInfo {
+            nextInChain: std::ptr::null_mut(),
+            mode: native::WGPUCallbackMode_AllowProcessEvents,
+            callback: Some(pop_error_scope_callback),
+            userdata1: (state as *mut PopErrorScopeState).cast(),
+            userdata2: std::ptr::null_mut(),
+        };
+        let future = wgpuDevicePopErrorScope(device, callback_info);
+        wgpuInstanceProcessEvents(instance);
+        future
+    }
+
+    unsafe fn assert_validation_error_contains(
+        instance: native::WGPUInstance,
+        device: native::WGPUDevice,
+        expected: &str,
+    ) {
+        let mut state = PopErrorScopeState::default();
+        let future = pop_error_scope(instance, device, &mut state);
+        assert_ne!(future.id, 0);
+        assert_eq!(state.fired, 1);
+        assert_eq!(state.status, native::WGPUPopErrorScopeStatus_Success);
+        assert_eq!(state.error_type, native::WGPUErrorType_Validation);
+        assert!(state.message.contains(expected), "{}", state.message);
     }
 
     #[test]
@@ -5791,6 +6130,397 @@ mod tests {
 
             assert!(!device.is_null());
 
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuDeviceAddRef_and_wgpuDeviceRelease_balance_owned_refs() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let borrowed_arc = clone_handle(device, "WGPUDevice");
+            assert_eq!(Arc::strong_count(&borrowed_arc), 2);
+
+            wgpuDeviceAddRef(device);
+            assert_eq!(Arc::strong_count(&borrowed_arc), 3);
+
+            wgpuDeviceRelease(device);
+            assert_eq!(Arc::strong_count(&borrowed_arc), 2);
+            let queue = wgpuDeviceGetQueue(device);
+            assert!(!queue.is_null());
+            wgpuQueueRelease(queue);
+
+            drop(borrowed_arc);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuDeviceDestroy_and_wgpuDeviceGetLostFuture_complete_loss() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let lost = wgpuDeviceGetLostFuture(device);
+            assert_ne!(lost.id, 0);
+            let mut wait_info = native::WGPUFutureWaitInfo {
+                future: lost,
+                completed: 0,
+            };
+
+            assert_eq!(
+                wgpuInstanceWaitAny(instance, 1, &mut wait_info, 0),
+                native::WGPUWaitStatus_TimedOut
+            );
+            wgpuDeviceDestroy(device);
+            wgpuDeviceDestroy(device);
+            assert_eq!(
+                wgpuInstanceWaitAny(instance, 1, &mut wait_info, 0),
+                native::WGPUWaitStatus_Success
+            );
+            assert_eq!(wait_info.completed, 1);
+
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuDevicePushErrorScope_and_wgpuDevicePopErrorScope_capture_and_empty_stack() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let bad_query_descriptor = query_set_descriptor(0);
+            let bad_query = wgpuDeviceCreateQuerySet(device, &bad_query_descriptor);
+            assert!(!bad_query.is_null());
+
+            assert_validation_error_contains(instance, device, "query set count");
+            wgpuQuerySetRelease(bad_query);
+
+            let mut empty_state = PopErrorScopeState::default();
+            let future = pop_error_scope(instance, device, &mut empty_state);
+            assert_ne!(future.id, 0);
+            assert_eq!(empty_state.fired, 1);
+            assert_eq!(empty_state.status, native::WGPUPopErrorScopeStatus_Error);
+            assert_eq!(empty_state.error_type, native::WGPUErrorType_NoError);
+            assert_eq!(empty_state.message, "No error scopes are open");
+
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuDeviceSetLabel_limits_features_and_has_feature_pin_noop_device() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            wgpuDeviceSetLabel(device, label_view("device label"));
+            assert_eq!(testing_get_device_label(device), "device label");
+
+            let mut limits = zeroed_limits();
+            assert_eq!(
+                wgpuDeviceGetLimits(device, &mut limits),
+                native::WGPUStatus_Success
+            );
+            assert_eq!(limits.maxBindGroups, core::Limits::DEFAULT.max_bind_groups);
+            assert_eq!(limits.maxBufferSize, core::Limits::DEFAULT.max_buffer_size);
+            assert_eq!(
+                wgpuDeviceGetLimits(device, std::ptr::null_mut()),
+                native::WGPUStatus_Error
+            );
+
+            let mut features = native::WGPUSupportedFeatures {
+                featureCount: 0,
+                features: std::ptr::null(),
+            };
+            wgpuDeviceGetFeatures(device, &mut features);
+            assert_eq!(features.featureCount, 1);
+            let values = std::slice::from_raw_parts(features.features, features.featureCount);
+            assert_eq!(values, &[native::WGPUFeatureName_CoreFeaturesAndLimits]);
+            assert_eq!(
+                wgpuDeviceHasFeature(device, native::WGPUFeatureName_CoreFeaturesAndLimits),
+                1
+            );
+            assert_eq!(
+                wgpuDeviceHasFeature(device, native::WGPUFeatureName_TimestampQuery),
+                0
+            );
+            wgpuSupportedFeaturesFreeMembers(features);
+
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+
+            let buffer_desc = buffer_descriptor(native::WGPUBufferUsage_CopyDst, 4);
+            let buffer = wgpuDeviceCreateBuffer(device, &buffer_desc);
+            assert!(!buffer.is_null());
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let bad_buffer_desc = buffer_descriptor(native::WGPUBufferUsage_None, 4);
+            let bad_buffer = wgpuDeviceCreateBuffer(device, &bad_buffer_desc);
+            assert_validation_error_contains(instance, device, "buffer usage");
+
+            let texture_desc = texture_descriptor(
+                native::WGPUTextureUsage_CopyDst | native::WGPUTextureUsage_CopySrc,
+                1,
+            );
+            let texture = wgpuDeviceCreateTexture(device, &texture_desc);
+            assert!(!texture.is_null());
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let bad_texture_desc = texture_descriptor(native::WGPUTextureUsage_CopyDst, 0);
+            let bad_texture = wgpuDeviceCreateTexture(device, &bad_texture_desc);
+            assert_validation_error_contains(instance, device, "width is out of range");
+
+            let sampler_desc = default_sampler_descriptor();
+            let sampler = wgpuDeviceCreateSampler(device, &sampler_desc);
+            assert!(!sampler.is_null());
+
+            let query_desc = query_set_descriptor(4);
+            let query_set = wgpuDeviceCreateQuerySet(device, &query_desc);
+            assert!(!query_set.is_null());
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let bad_query_desc = query_set_descriptor(0);
+            let bad_query = wgpuDeviceCreateQuerySet(device, &bad_query_desc);
+            assert_validation_error_contains(instance, device, "query set count");
+
+            let compute_module =
+                create_wgsl_module(device, "@compute @workgroup_size(1) fn cs() {}");
+            assert!(!compute_module.is_null());
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let bad_shader = create_wgsl_module(device, "not wgsl");
+            assert_validation_error_contains(instance, device, "expected global item");
+
+            let bgl_desc = bind_group_layout_descriptor();
+            let bind_group_layout = wgpuDeviceCreateBindGroupLayout(device, &bgl_desc);
+            assert!(!bind_group_layout.is_null());
+            let bg_desc = bind_group_descriptor(bind_group_layout);
+            let bind_group = wgpuDeviceCreateBindGroup(device, &bg_desc);
+            assert!(!bind_group.is_null());
+            let layouts = [bind_group_layout];
+            let pipeline_layout_desc = pipeline_layout_descriptor(&layouts);
+            let pipeline_layout = wgpuDeviceCreatePipelineLayout(device, &pipeline_layout_desc);
+            assert!(!pipeline_layout.is_null());
+
+            let compute_desc = compute_pipeline_descriptor(compute_module, pipeline_layout);
+            let compute_pipeline = wgpuDeviceCreateComputePipeline(device, &compute_desc);
+            assert!(!compute_pipeline.is_null());
+
+            let render_module = create_wgsl_module(
+                device,
+                "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }
+                 @fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
+            );
+            let render_desc =
+                render_pipeline_descriptor(render_module, render_module, pipeline_layout);
+            let render_pipeline = wgpuDeviceCreateRenderPipeline(device, &render_desc);
+            assert!(!render_pipeline.is_null());
+
+            let command_encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            assert!(!command_encoder.is_null());
+            let formats = [native::WGPUTextureFormat_RGBA8Unorm];
+            let bundle_desc = render_bundle_encoder_descriptor(&formats);
+            let bundle_encoder = wgpuDeviceCreateRenderBundleEncoder(device, &bundle_desc);
+            assert!(!bundle_encoder.is_null());
+
+            wgpuRenderBundleEncoderRelease(bundle_encoder);
+            wgpuCommandEncoderRelease(command_encoder);
+            wgpuRenderPipelineRelease(render_pipeline);
+            wgpuShaderModuleRelease(render_module);
+            wgpuComputePipelineRelease(compute_pipeline);
+            wgpuPipelineLayoutRelease(pipeline_layout);
+            wgpuBindGroupRelease(bind_group);
+            wgpuBindGroupLayoutRelease(bind_group_layout);
+            wgpuShaderModuleRelease(bad_shader);
+            wgpuShaderModuleRelease(compute_module);
+            wgpuQuerySetRelease(bad_query);
+            wgpuQuerySetRelease(query_set);
+            wgpuSamplerRelease(sampler);
+            wgpuTextureRelease(bad_texture);
+            wgpuTextureRelease(texture);
+            wgpuBufferRelease(bad_buffer);
+            wgpuBufferRelease(buffer);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuDeviceCreateComputePipelineAsync_and_render_async_fire_success_callbacks() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let layout_desc = pipeline_layout_descriptor(&[]);
+            let pipeline_layout = wgpuDeviceCreatePipelineLayout(device, &layout_desc);
+            let compute_module =
+                create_wgsl_module(device, "@compute @workgroup_size(1) fn cs() {}");
+            let compute_desc = compute_pipeline_descriptor(compute_module, pipeline_layout);
+            let mut compute_state = ComputePipelineAsyncState::default();
+            let compute_info = native::WGPUCreateComputePipelineAsyncCallbackInfo {
+                nextInChain: std::ptr::null_mut(),
+                mode: native::WGPUCallbackMode_AllowProcessEvents,
+                callback: Some(compute_pipeline_async_callback),
+                userdata1: (&mut compute_state as *mut ComputePipelineAsyncState).cast(),
+                userdata2: std::ptr::null_mut(),
+            };
+            let compute_future =
+                wgpuDeviceCreateComputePipelineAsync(device, &compute_desc, compute_info);
+            assert_ne!(compute_future.id, 0);
+
+            let render_module = create_wgsl_module(
+                device,
+                "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }
+                 @fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
+            );
+            let render_desc =
+                render_pipeline_descriptor(render_module, render_module, pipeline_layout);
+            let mut render_state = RenderPipelineAsyncState::default();
+            let render_info = native::WGPUCreateRenderPipelineAsyncCallbackInfo {
+                nextInChain: std::ptr::null_mut(),
+                mode: native::WGPUCallbackMode_AllowProcessEvents,
+                callback: Some(render_pipeline_async_callback),
+                userdata1: (&mut render_state as *mut RenderPipelineAsyncState).cast(),
+                userdata2: std::ptr::null_mut(),
+            };
+            let render_future =
+                wgpuDeviceCreateRenderPipelineAsync(device, &render_desc, render_info);
+            assert_ne!(render_future.id, 0);
+
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(compute_state.fired, 1);
+            assert_eq!(
+                compute_state.status,
+                native::WGPUCreatePipelineAsyncStatus_Success
+            );
+            assert!(compute_state.message.is_empty());
+            assert!(!compute_state.pipeline.is_null());
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(render_state.fired, 1);
+            assert_eq!(
+                render_state.status,
+                native::WGPUCreatePipelineAsyncStatus_Success
+            );
+            assert!(render_state.message.is_empty());
+            assert!(!render_state.pipeline.is_null());
+
+            wgpuRenderPipelineRelease(render_state.pipeline);
+            wgpuComputePipelineRelease(compute_state.pipeline);
+            wgpuShaderModuleRelease(render_module);
+            wgpuShaderModuleRelease(compute_module);
+            wgpuPipelineLayoutRelease(pipeline_layout);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuDeviceGetQueue_queue_add_ref_release_and_set_label_pin_identity() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let queue = wgpuDeviceGetQueue(device);
+            let second = wgpuDeviceGetQueue(device);
+            assert!(!queue.is_null());
+            assert_eq!(queue, second);
+
+            let borrowed_arc = clone_handle(queue, "WGPUQueue");
+            assert_eq!(Arc::strong_count(&borrowed_arc), 4);
+            wgpuQueueAddRef(queue);
+            assert_eq!(Arc::strong_count(&borrowed_arc), 5);
+            wgpuQueueRelease(queue);
+            assert_eq!(Arc::strong_count(&borrowed_arc), 4);
+            wgpuQueueSetLabel(queue, label_view("queue label"));
+            assert_eq!(testing_get_queue_label(queue), "queue label");
+
+            drop(borrowed_arc);
+            wgpuQueueRelease(second);
+            wgpuQueueRelease(queue);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuQueueOnSubmittedWorkDone_and_wgpuQueueSubmit_cover_empty_and_command_buffer() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let queue = wgpuDeviceGetQueue(device);
+            let mut state = QueueWorkDoneState::default();
+            let callback_info = native::WGPUQueueWorkDoneCallbackInfo {
+                nextInChain: std::ptr::null_mut(),
+                mode: native::WGPUCallbackMode_AllowProcessEvents,
+                callback: Some(queue_work_done_callback),
+                userdata1: (&mut state as *mut QueueWorkDoneState).cast(),
+                userdata2: std::ptr::null_mut(),
+            };
+            let future = wgpuQueueOnSubmittedWorkDone(queue, callback_info);
+            assert_ne!(future.id, 0);
+
+            wgpuQueueSubmit(queue, 0, std::ptr::null());
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(state.fired, 1);
+            assert_eq!(state.status, native::WGPUQueueWorkDoneStatus_Success);
+            assert!(state.message.is_empty());
+
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            wgpuQueueSubmit(queue, 1, &command_buffer);
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuCommandEncoderRelease(encoder);
+            wgpuQueueRelease(queue);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuQueueWriteBuffer_and_wgpuQueueWriteTexture_validate_happy_and_error_paths() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let queue = wgpuDeviceGetQueue(device);
+            let buffer_desc = buffer_descriptor(native::WGPUBufferUsage_CopyDst, 4);
+            let buffer = wgpuDeviceCreateBuffer(device, &buffer_desc);
+            let bytes = [1_u8, 2, 3, 4];
+            wgpuQueueWriteBuffer(queue, buffer, 0, bytes.as_ptr().cast(), bytes.len());
+
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            wgpuQueueWriteBuffer(queue, buffer, 4, bytes.as_ptr().cast(), bytes.len());
+            assert_validation_error_contains(
+                instance,
+                device,
+                "queue write range exceeds buffer size",
+            );
+
+            let texture_desc = texture_descriptor(native::WGPUTextureUsage_CopyDst, 1);
+            let texture = wgpuDeviceCreateTexture(device, &texture_desc);
+            let destination = native::WGPUTexelCopyTextureInfo {
+                texture,
+                mipLevel: 0,
+                origin: origin(0, 0, 0),
+                aspect: native::WGPUTextureAspect_Undefined,
+            };
+            let layout = native::WGPUTexelCopyBufferLayout {
+                offset: 0,
+                bytesPerRow: native::WGPU_COPY_STRIDE_UNDEFINED,
+                rowsPerImage: native::WGPU_COPY_STRIDE_UNDEFINED,
+            };
+            let write_size = extent(1, 1, 1);
+            wgpuQueueWriteTexture(
+                queue,
+                &destination,
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                &layout,
+                &write_size,
+            );
+
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            wgpuQueueWriteTexture(
+                queue,
+                &destination,
+                bytes.as_ptr().cast(),
+                0,
+                &layout,
+                &write_size,
+            );
+            assert_validation_error_contains(instance, device, "dataSize is too small");
+
+            wgpuTextureRelease(texture);
+            wgpuBufferRelease(buffer);
+            wgpuQueueRelease(queue);
             release_handles(instance, adapter, device);
         }
     }

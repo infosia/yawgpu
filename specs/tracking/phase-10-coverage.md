@@ -420,6 +420,43 @@ as a Phase-10 follow-up.
 | `wgpuAdapterRequestDevice` | `wgpuAdapterRequestDevice_process_events_returns_success_device`, `request_noop_device_helper_returns_live_device` |
 | `wgpuSupportedFeaturesFreeMembers` | `wgpuAdapterGetFeatures_populates_supported_features_and_free_members`, `wgpuSupportedFeaturesFreeMembers_accepts_empty_features` |
 
+## yawgpu/src/lib.rs - Device + Queue (32 pub fn)
+
+| pub fn | test name(s) |
+|---|---|
+| `wgpuDeviceRelease` | `wgpuDeviceAddRef_and_wgpuDeviceRelease_balance_owned_refs`, `wgpuDeviceDestroy_and_wgpuDeviceGetLostFuture_complete_loss` |
+| `wgpuDeviceAddRef` | `wgpuDeviceAddRef_and_wgpuDeviceRelease_balance_owned_refs` |
+| `wgpuDeviceDestroy` | `wgpuDeviceDestroy_and_wgpuDeviceGetLostFuture_complete_loss` |
+| `wgpuDeviceGetLostFuture` | `wgpuDeviceDestroy_and_wgpuDeviceGetLostFuture_complete_loss` |
+| `wgpuDevicePushErrorScope` | `wgpuDevicePushErrorScope_and_wgpuDevicePopErrorScope_capture_and_empty_stack`, `wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors`, `wgpuQueueWriteBuffer_and_wgpuQueueWriteTexture_validate_happy_and_error_paths` |
+| `wgpuDevicePopErrorScope` | `wgpuDevicePushErrorScope_and_wgpuDevicePopErrorScope_capture_and_empty_stack`, `wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors`, `wgpuQueueWriteBuffer_and_wgpuQueueWriteTexture_validate_happy_and_error_paths` |
+| `wgpuDeviceSetLabel` | `wgpuDeviceSetLabel_limits_features_and_has_feature_pin_noop_device` |
+| `wgpuDeviceGetLimits` | `wgpuDeviceSetLabel_limits_features_and_has_feature_pin_noop_device` |
+| `wgpuDeviceGetFeatures` | `wgpuDeviceSetLabel_limits_features_and_has_feature_pin_noop_device` |
+| `wgpuDeviceHasFeature` | `wgpuDeviceSetLabel_limits_features_and_has_feature_pin_noop_device` |
+| `wgpuDeviceCreateBuffer` | `wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors`, `wgpuQueueWriteBuffer_and_wgpuQueueWriteTexture_validate_happy_and_error_paths` |
+| `wgpuDeviceCreateTexture` | `wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors`, `wgpuQueueWriteBuffer_and_wgpuQueueWriteTexture_validate_happy_and_error_paths` |
+| `wgpuDeviceCreateSampler` | `wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors` |
+| `wgpuDeviceCreateQuerySet` | `wgpuDevicePushErrorScope_and_wgpuDevicePopErrorScope_capture_and_empty_stack`, `wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors` |
+| `wgpuDeviceCreateShaderModule` | `wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors`, `wgpuDeviceCreateComputePipelineAsync_and_render_async_fire_success_callbacks` |
+| `wgpuDeviceCreateBindGroupLayout` | `wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors` |
+| `wgpuDeviceCreateBindGroup` | `wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors` |
+| `wgpuDeviceCreatePipelineLayout` | `wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors`, `wgpuDeviceCreateComputePipelineAsync_and_render_async_fire_success_callbacks` |
+| `wgpuDeviceCreateComputePipeline` | `wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors` |
+| `wgpuDeviceCreateRenderPipeline` | `wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors` |
+| `wgpuDeviceCreateCommandEncoder` | `wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors`, `wgpuQueueOnSubmittedWorkDone_and_wgpuQueueSubmit_cover_empty_and_command_buffer` |
+| `wgpuDeviceCreateRenderBundleEncoder` | `wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors` |
+| `wgpuDeviceCreateComputePipelineAsync` | `wgpuDeviceCreateComputePipelineAsync_and_render_async_fire_success_callbacks` |
+| `wgpuDeviceCreateRenderPipelineAsync` | `wgpuDeviceCreateComputePipelineAsync_and_render_async_fire_success_callbacks` |
+| `wgpuDeviceGetQueue` | `wgpuDeviceAddRef_and_wgpuDeviceRelease_balance_owned_refs`, `wgpuAdapterRequestDevice_process_events_returns_success_device`, `wgpuDeviceGetQueue_queue_add_ref_release_and_set_label_pin_identity`, `wgpuQueueOnSubmittedWorkDone_and_wgpuQueueSubmit_cover_empty_and_command_buffer`, `wgpuQueueWriteBuffer_and_wgpuQueueWriteTexture_validate_happy_and_error_paths` |
+| `wgpuQueueRelease` | `wgpuDeviceGetQueue_queue_add_ref_release_and_set_label_pin_identity`, `wgpuQueueOnSubmittedWorkDone_and_wgpuQueueSubmit_cover_empty_and_command_buffer`, `wgpuQueueWriteBuffer_and_wgpuQueueWriteTexture_validate_happy_and_error_paths` |
+| `wgpuQueueAddRef` | `wgpuDeviceGetQueue_queue_add_ref_release_and_set_label_pin_identity` |
+| `wgpuQueueSetLabel` | `wgpuDeviceGetQueue_queue_add_ref_release_and_set_label_pin_identity` |
+| `wgpuQueueOnSubmittedWorkDone` | `wgpuQueueOnSubmittedWorkDone_and_wgpuQueueSubmit_cover_empty_and_command_buffer` |
+| `wgpuQueueSubmit` | `wgpuQueueOnSubmittedWorkDone_and_wgpuQueueSubmit_cover_empty_and_command_buffer` |
+| `wgpuQueueWriteBuffer` | `wgpuQueueWriteBuffer_and_wgpuQueueWriteTexture_validate_happy_and_error_paths` |
+| `wgpuQueueWriteTexture` | `wgpuQueueWriteBuffer_and_wgpuQueueWriteTexture_validate_happy_and_error_paths` |
+
 ## Phase 10 yawgpu-core coverage summary
 
 Total kept pub fn (post-P10.3a audit): 183
