@@ -58,6 +58,52 @@ P10.3a audit: see `specs/tracking/phase-10-audit.md`.
 | `Queue::write_buffer` | `queue_write_buffer_and_submit_empty_succeed` |
 | `Queue::submit` | `queue_write_buffer_and_submit_empty_succeed` |
 
+## yawgpu-core/src/lib.rs - Buffer / Texture / Sampler (40 pub fn)
+
+| pub fn | test name(s) |
+|---|---|
+| `MapMode::from_bits` | `map_mode_from_bits_rejects_none_both_and_unsupported_bits` (existing) |
+| `BufferUsage::from_bits_retain` | `buffer_usage_from_bits_retain_round_trips_known_and_unknown_bits` |
+| `BufferUsage::bits` | `buffer_usage_from_bits_retain_round_trips_known_and_unknown_bits` |
+| `TextureUsage::from_bits_retain` | `texture_usage_from_bits_retain_round_trips_known_and_unknown_bits` |
+| `TextureUsage::bits` | `texture_usage_from_bits_retain_round_trips_known_and_unknown_bits` |
+| `TextureFormat::from_raw` | `texture_format_from_raw_raw_and_caps_pin_rgba8_unorm_and_undefined` |
+| `TextureFormat::raw` | `texture_format_from_raw_raw_and_caps_pin_rgba8_unorm_and_undefined` |
+| `TextureFormat::caps` | `texture_format_from_raw_raw_and_caps_pin_rgba8_unorm_and_undefined` |
+| `Texture::from_hal` | `texture_from_hal_and_descriptor_accessors_round_trip` |
+| `Texture::usage` | `texture_from_hal_and_descriptor_accessors_round_trip` |
+| `Texture::dimension` | `texture_from_hal_and_descriptor_accessors_round_trip` |
+| `Texture::size` | `texture_from_hal_and_descriptor_accessors_round_trip`, `device_create_texture_happy_path_and_invalid_size_scope_error` |
+| `Texture::format` | `texture_from_hal_and_descriptor_accessors_round_trip`, `texture_is_error_same_destroy_create_view_and_validate_queue_write` |
+| `Texture::mip_level_count` | `texture_from_hal_and_descriptor_accessors_round_trip` |
+| `Texture::sample_count` | `texture_from_hal_and_descriptor_accessors_round_trip` |
+| `Texture::is_error` | `texture_from_hal_and_descriptor_accessors_round_trip`, `texture_error_texture_reports_is_error_and_error_view` |
+| `Texture::same` | `texture_is_error_same_destroy_create_view_and_validate_queue_write` |
+| `Texture::destroy` | `texture_is_error_same_destroy_create_view_and_validate_queue_write` |
+| `Texture::create_view` | `texture_is_error_same_destroy_create_view_and_validate_queue_write`, `texture_error_texture_reports_is_error_and_error_view`, `texture_view_descriptor_fields_round_trip` |
+| `Texture::validate_queue_write` | `texture_is_error_same_destroy_create_view_and_validate_queue_write` |
+| `TextureView::is_error` | `texture_is_error_same_destroy_create_view_and_validate_queue_write`, `texture_error_texture_reports_is_error_and_error_view`, `texture_view_descriptor_fields_round_trip` |
+| `TextureView::format` | `texture_is_error_same_destroy_create_view_and_validate_queue_write`, `texture_view_descriptor_fields_round_trip` |
+| `TextureView::dimension` | `texture_view_descriptor_fields_round_trip` |
+| `TextureView::mip_level_count` | `texture_view_descriptor_fields_round_trip` |
+| `TextureView::base_array_layer` | `texture_view_descriptor_fields_round_trip` |
+| `TextureView::aspect` | `texture_view_descriptor_fields_round_trip` |
+| `Sampler::descriptor` | `device_create_sampler_uses_default_descriptor`, `sampler_descriptor_and_is_error_pin_valid_and_invalid_descriptors` |
+| `Sampler::is_error` | `device_create_sampler_uses_default_descriptor`, `sampler_descriptor_and_is_error_pin_valid_and_invalid_descriptors` |
+| `Buffer::size` | `device_create_buffer_increments_allocation_count`, `buffer_accessors_error_same_destroy_hal_and_validate_queue_write` |
+| `Buffer::usage` | `device_create_buffer_increments_allocation_count`, `buffer_accessors_error_same_destroy_hal_and_validate_queue_write` |
+| `Buffer::map_state` | `buffer_accessors_error_same_destroy_hal_and_validate_queue_write`, `buffer_map_state_machine_transitions_and_mapped_range_bounds`, `buffer_abort_pending_map_returns_unmapped_and_resolve_reports_aborted` |
+| `Buffer::is_error` | `device_create_buffer_increments_allocation_count`, `buffer_accessors_error_same_destroy_hal_and_validate_queue_write` |
+| `Buffer::same` | `buffer_accessors_error_same_destroy_hal_and_validate_queue_write` |
+| `Buffer::destroy` | `buffer_accessors_error_same_destroy_hal_and_validate_queue_write` |
+| `Buffer::unmap` | `buffer_map_state_machine_transitions_and_mapped_range_bounds` |
+| `Buffer::begin_map` | `buffer_map_state_machine_transitions_and_mapped_range_bounds`, `buffer_abort_pending_map_returns_unmapped_and_resolve_reports_aborted` |
+| `Buffer::resolve_pending_map` | `buffer_map_state_machine_transitions_and_mapped_range_bounds`, `buffer_abort_pending_map_returns_unmapped_and_resolve_reports_aborted` |
+| `Buffer::abort_pending_map` | `buffer_abort_pending_map_returns_unmapped_and_resolve_reports_aborted` |
+| `Buffer::mapped_range` | `buffer_map_state_machine_transitions_and_mapped_range_bounds` |
+| `Buffer::hal` | `buffer_accessors_error_same_destroy_hal_and_validate_queue_write` |
+| `Buffer::validate_queue_write` | `buffer_accessors_error_same_destroy_hal_and_validate_queue_write` |
+
 ## yawgpu-hal/src/noop/mod.rs (14 pub fn)
 
 | pub fn | test name(s) |

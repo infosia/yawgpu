@@ -9475,6 +9475,50 @@ mod tests {
         }
     }
 
+    fn texture_descriptor_4x4() -> TextureDescriptor {
+        TextureDescriptor {
+            usage: TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }
+    }
+
+    fn layered_mipped_texture_descriptor() -> TextureDescriptor {
+        TextureDescriptor {
+            usage: TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 3,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 3,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }
+    }
+
+    fn noop_texture() -> Texture {
+        noop_device().create_texture(texture_descriptor_4x4())
+    }
+
+    fn noop_buffer(size: u64, usage: BufferUsage) -> Buffer {
+        noop_device().create_buffer(BufferDescriptor {
+            usage,
+            size,
+            mapped_at_creation: false,
+        })
+    }
+
     fn compute_shader_module(device: &Device) -> Arc<ShaderModule> {
         Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
             "@compute @workgroup_size(1) fn cs() {}".to_owned(),
@@ -9942,6 +9986,338 @@ fn fs() -> @location(0) vec4<f32> {
 
         assert_eq!(queue.write_buffer(&buffer, 0, &[1, 2, 3, 4]), None);
         assert_eq!(queue.submit(&[]), None);
+    }
+
+    #[test]
+    fn buffer_usage_from_bits_retain_round_trips_known_and_unknown_bits() {
+        let raw = (BufferUsage::MAP_READ | BufferUsage::COPY_DST).bits() | (1_u64 << 40);
+        let usage = BufferUsage::from_bits_retain(raw);
+
+        assert_eq!(usage.bits(), raw);
+    }
+
+    #[test]
+    fn texture_usage_from_bits_retain_round_trips_known_and_unknown_bits() {
+        let raw = (TextureUsage::COPY_SRC | TextureUsage::RENDER_ATTACHMENT).bits() | (1_u64 << 40);
+        let usage = TextureUsage::from_bits_retain(raw);
+
+        assert_eq!(usage.bits(), raw);
+    }
+
+    #[test]
+    fn texture_format_from_raw_raw_and_caps_pin_rgba8_unorm_and_undefined() {
+        let format = TextureFormat::from_raw(0x0000_0016);
+
+        assert_eq!(format.raw(), 0x0000_0016);
+
+        let caps = format.caps().expect("RGBA8Unorm caps");
+        assert_eq!(
+            caps.aspects,
+            FormatAspects {
+                color: true,
+                depth: false,
+                stencil: false,
+            }
+        );
+        assert_eq!(caps.texel_block_size, 4);
+        assert_eq!(caps.block_w, 1);
+        assert_eq!(caps.block_h, 1);
+        assert_eq!(caps.output_class, Some(FormatOutputClass::Float));
+        assert_eq!(caps.color_components, 4);
+        assert!(caps.renderable);
+        assert!(caps.multisample_capable);
+        assert!(caps.storage_capable);
+        assert!(caps.is_blendable);
+        assert!(caps.has_alpha);
+        assert!(!caps.is_compressed);
+
+        assert_eq!(TextureFormat::from_raw(0).caps(), None);
+    }
+
+    #[test]
+    fn texture_from_hal_and_descriptor_accessors_round_trip() {
+        let descriptor = texture_descriptor_4x4();
+        let texture = Texture::from_hal(
+            descriptor.clone(),
+            yawgpu_hal::HalTexture::Noop(yawgpu_hal::noop::NoopTexture),
+        );
+
+        assert_eq!(texture.usage(), descriptor.usage);
+        assert_eq!(texture.dimension(), descriptor.dimension);
+        assert_eq!(texture.size(), descriptor.size);
+        assert_eq!(texture.format(), descriptor.format);
+        assert_eq!(texture.mip_level_count(), descriptor.mip_level_count);
+        assert_eq!(texture.sample_count(), descriptor.sample_count);
+        assert!(!texture.is_error());
+    }
+
+    #[test]
+    fn texture_is_error_same_destroy_create_view_and_validate_queue_write() {
+        let texture = noop_texture();
+        let other = noop_texture();
+        let clone = texture.clone();
+
+        assert!(texture.same(&clone));
+        assert!(!texture.same(&other));
+
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+        });
+        assert_eq!(error, None);
+        assert!(!view.is_error());
+        assert_eq!(view.format(), texture.format());
+
+        assert_eq!(
+            texture.validate_queue_write(
+                0,
+                Origin3d { x: 0, y: 0, z: 0 },
+                Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                TextureAspect::All,
+                TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: None,
+                    rows_per_image: None,
+                },
+                4,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            texture.validate_queue_write(
+                0,
+                Origin3d { x: 4, y: 0, z: 0 },
+                Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                TextureAspect::All,
+                TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: None,
+                    rows_per_image: None,
+                },
+                4,
+            ),
+            Err("queue texture write range exceeds the texture subresource".to_owned())
+        );
+
+        texture.destroy();
+        texture.destroy();
+        assert_eq!(
+            texture.validate_queue_write(
+                0,
+                Origin3d { x: 0, y: 0, z: 0 },
+                Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                TextureAspect::All,
+                TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: None,
+                    rows_per_image: None,
+                },
+                4,
+            ),
+            Err("queue texture write destination must be a valid live texture".to_owned())
+        );
+    }
+
+    #[test]
+    fn texture_error_texture_reports_is_error_and_error_view() {
+        let device = noop_device();
+        let mut invalid = texture_descriptor_4x4();
+        invalid.size.width = 0;
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let texture = device.create_texture(invalid);
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid texture should be scoped");
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+        });
+
+        assert_eq!(scoped.kind, ErrorKind::Validation);
+        assert_eq!(scoped.message, "2D texture width is out of range");
+        assert!(texture.is_error());
+        assert!(view.is_error());
+        assert_eq!(error, Some("cannot create a view from an error texture"));
+    }
+
+    #[test]
+    fn texture_view_descriptor_fields_round_trip() {
+        let texture = noop_device().create_texture(layered_mipped_texture_descriptor());
+
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: Some(rgba8_unorm()),
+            dimension: Some(TextureViewDimension::D2Array),
+            base_mip_level: 1,
+            mip_level_count: Some(1),
+            base_array_layer: 1,
+            array_layer_count: Some(2),
+            aspect: Some(TextureAspect::All),
+        });
+
+        assert_eq!(error, None);
+        assert!(!view.is_error());
+        assert_eq!(view.format(), rgba8_unorm());
+        assert_eq!(view.dimension(), TextureViewDimension::D2Array);
+        assert_eq!(view.mip_level_count(), 1);
+        assert_eq!(view.base_array_layer(), 1);
+        assert_eq!(view.aspect(), TextureAspect::All);
+    }
+
+    #[test]
+    fn sampler_descriptor_and_is_error_pin_valid_and_invalid_descriptors() {
+        let device = noop_device();
+        let descriptor = SamplerDescriptor {
+            address_mode_u: Some(AddressMode::Repeat),
+            address_mode_v: Some(AddressMode::MirrorRepeat),
+            address_mode_w: Some(AddressMode::ClampToEdge),
+            mag_filter: Some(FilterMode::Linear),
+            min_filter: Some(FilterMode::Linear),
+            mipmap_filter: Some(MipmapFilterMode::Linear),
+            lod_min_clamp: 0.5,
+            lod_max_clamp: 12.0,
+            compare: Some(CompareFunction::LessEqual),
+            max_anisotropy: 2,
+        };
+
+        let sampler = device.create_sampler(descriptor);
+        assert!(!sampler.is_error());
+        assert_eq!(sampler.descriptor().address_mode_u, AddressMode::Repeat);
+        assert_eq!(
+            sampler.descriptor().address_mode_v,
+            AddressMode::MirrorRepeat
+        );
+        assert_eq!(sampler.descriptor().mipmap_filter, MipmapFilterMode::Linear);
+        assert_eq!(
+            sampler.descriptor().compare,
+            Some(CompareFunction::LessEqual)
+        );
+        assert_eq!(sampler.descriptor().max_anisotropy, 2);
+
+        let invalid = SamplerDescriptor {
+            max_anisotropy: 2,
+            ..SamplerDescriptor::default()
+        };
+        device.push_error_scope(ErrorFilter::Validation);
+        let error_sampler = device.create_sampler(invalid);
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid sampler should be scoped");
+        assert!(error_sampler.is_error());
+        assert_eq!(
+            error.message,
+            "anisotropic samplers require all filters to be Linear"
+        );
+    }
+
+    #[test]
+    fn buffer_accessors_error_same_destroy_hal_and_validate_queue_write() {
+        let device = noop_device();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 16,
+            mapped_at_creation: false,
+        });
+        let clone = buffer.clone();
+        let other = noop_buffer(16, BufferUsage::COPY_DST);
+
+        assert_eq!(buffer.size(), 16);
+        assert_eq!(buffer.usage(), BufferUsage::COPY_DST);
+        assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
+        assert!(!buffer.is_error());
+        assert!(buffer.same(&clone));
+        assert!(!buffer.same(&other));
+        assert!(matches!(buffer.hal(), Some(yawgpu_hal::HalBuffer::Noop(_))));
+        assert_eq!(buffer.validate_queue_write(0, 4), Ok(()));
+        assert_eq!(
+            buffer.validate_queue_write(12, 8),
+            Err("queue write range exceeds buffer size")
+        );
+
+        buffer.destroy();
+        buffer.destroy();
+        assert_eq!(
+            buffer.validate_queue_write(0, 4),
+            Err("cannot write to a destroyed buffer")
+        );
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let error_buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::NONE,
+            size: 16,
+            mapped_at_creation: false,
+        });
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid buffer should be scoped");
+
+        assert!(error_buffer.is_error());
+        assert_eq!(error.message, "buffer usage must be non-zero");
+    }
+
+    #[test]
+    fn buffer_map_state_machine_transitions_and_mapped_range_bounds() {
+        let mapped = noop_device().create_buffer(BufferDescriptor {
+            usage: BufferUsage::MAP_WRITE | BufferUsage::COPY_SRC,
+            size: 16,
+            mapped_at_creation: true,
+        });
+        assert_eq!(mapped.map_state(), BufferMapState::Mapped);
+        assert_eq!(
+            mapped.begin_map(MapMode::Write, 0, 4),
+            Err("buffer is already mapped")
+        );
+        assert_eq!(mapped.unmap(), None);
+        assert_eq!(mapped.map_state(), BufferMapState::Unmapped);
+        assert_eq!(mapped.unmap(), None);
+
+        let buffer = noop_buffer(16, BufferUsage::MAP_READ | BufferUsage::COPY_DST);
+        assert_eq!(buffer.begin_map(MapMode::Read, 0, 8), Ok(()));
+        assert_eq!(buffer.map_state(), BufferMapState::Pending);
+        assert_eq!(buffer.resolve_pending_map(), MapAsyncStatus::Success);
+        assert_eq!(buffer.map_state(), BufferMapState::Mapped);
+        assert!(buffer.mapped_range(true, 0, Some(8)).is_some());
+        assert_eq!(buffer.mapped_range(false, 0, Some(8)), None);
+        assert_eq!(buffer.mapped_range(true, 12, Some(8)), None);
+        assert_eq!(buffer.unmap(), None);
+        assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
+    }
+
+    #[test]
+    fn buffer_abort_pending_map_returns_unmapped_and_resolve_reports_aborted() {
+        let buffer = noop_buffer(16, BufferUsage::MAP_READ | BufferUsage::COPY_DST);
+
+        assert_eq!(buffer.begin_map(MapMode::Read, 0, 8), Ok(()));
+        assert_eq!(buffer.map_state(), BufferMapState::Pending);
+        buffer.abort_pending_map();
+        assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
+        assert_eq!(buffer.resolve_pending_map(), MapAsyncStatus::Aborted);
+        assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
     }
 
     #[test]
