@@ -488,6 +488,60 @@ as a Phase-10 follow-up.
 | `wgpuSamplerRelease` | `wgpuSampler_release_and_addref_lifecycle` |
 | `wgpuSamplerAddRef` | `wgpuSampler_release_and_addref_lifecycle` |
 
+## yawgpu/src/lib.rs - Encoder + Pass (48 pub fn)
+
+| pub fn | test name(s) |
+|---|---|
+| `wgpuCommandEncoderBeginRenderPass` | `wgpuRenderPassEncoder_lifecycle_release_addref_end_with_debug_markers`, `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws`, `wgpuRenderPassEncoder_state_setters_occlusion_and_execute_bundles` |
+| `wgpuCommandEncoderBeginComputePass` | `wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers`, `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
+| `wgpuCommandEncoderFinish` | `wgpuCommandEncoder_lifecycle_release_addref_finish`, `wgpuCommandEncoder_debug_markers_insert_push_pop`, `wgpuCommandEncoder_buffer_copies_and_clear_and_write`, `wgpuCommandEncoder_texture_copies_walk`, `wgpuCommandEncoder_query_and_timestamps`, `wgpuRenderPassEncoder_lifecycle_release_addref_end_with_debug_markers`, `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws`, `wgpuRenderPassEncoder_state_setters_occlusion_and_execute_bundles`, `wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers`, `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
+| `wgpuCommandEncoderInsertDebugMarker` | `wgpuCommandEncoder_debug_markers_insert_push_pop` |
+| `wgpuCommandEncoderPushDebugGroup` | `wgpuCommandEncoder_debug_markers_insert_push_pop` |
+| `wgpuCommandEncoderPopDebugGroup` | `wgpuCommandEncoder_debug_markers_insert_push_pop` |
+| `wgpuCommandEncoderCopyBufferToBuffer` | `wgpuCommandEncoder_buffer_copies_and_clear_and_write` |
+| `wgpuCommandEncoderClearBuffer` | `wgpuCommandEncoder_buffer_copies_and_clear_and_write` |
+| `wgpuCommandEncoderWriteBuffer` | `wgpuCommandEncoder_buffer_copies_and_clear_and_write` |
+| `wgpuCommandEncoderWriteTimestamp` | `wgpuCommandEncoder_query_and_timestamps` |
+| `wgpuCommandEncoderResolveQuerySet` | `wgpuCommandEncoder_query_and_timestamps` |
+| `wgpuCommandEncoderCopyBufferToTexture` | `wgpuCommandEncoder_texture_copies_walk` |
+| `wgpuCommandEncoderCopyTextureToBuffer` | `wgpuCommandEncoder_texture_copies_walk` |
+| `wgpuCommandEncoderCopyTextureToTexture` | `wgpuCommandEncoder_texture_copies_walk` |
+| `wgpuCommandEncoderRelease` | `wgpuCommandEncoder_lifecycle_release_addref_finish`, `wgpuCommandEncoder_debug_markers_insert_push_pop`, `wgpuCommandEncoder_buffer_copies_and_clear_and_write`, `wgpuCommandEncoder_texture_copies_walk`, `wgpuCommandEncoder_query_and_timestamps`, `wgpuRenderPassEncoder_lifecycle_release_addref_end_with_debug_markers`, `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws`, `wgpuRenderPassEncoder_state_setters_occlusion_and_execute_bundles`, `wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers`, `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
+| `wgpuCommandEncoderAddRef` | `wgpuCommandEncoder_lifecycle_release_addref_finish` |
+| `wgpuCommandBufferRelease` | `wgpuCommandEncoder_lifecycle_release_addref_finish`, `wgpuCommandEncoder_debug_markers_insert_push_pop`, `wgpuCommandEncoder_buffer_copies_and_clear_and_write`, `wgpuCommandEncoder_texture_copies_walk`, `wgpuCommandEncoder_query_and_timestamps`, `wgpuRenderPassEncoder_lifecycle_release_addref_end_with_debug_markers`, `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws`, `wgpuRenderPassEncoder_state_setters_occlusion_and_execute_bundles`, `wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers`, `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
+| `wgpuCommandBufferAddRef` | `wgpuCommandEncoder_lifecycle_release_addref_finish` |
+| `wgpuRenderPassEncoderEnd` | `wgpuRenderPassEncoder_lifecycle_release_addref_end_with_debug_markers`, `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws`, `wgpuRenderPassEncoder_state_setters_occlusion_and_execute_bundles` |
+| `wgpuRenderPassEncoderBeginOcclusionQuery` | `wgpuRenderPassEncoder_state_setters_occlusion_and_execute_bundles` |
+| `wgpuRenderPassEncoderEndOcclusionQuery` | `wgpuRenderPassEncoder_state_setters_occlusion_and_execute_bundles` |
+| `wgpuRenderPassEncoderInsertDebugMarker` | `wgpuRenderPassEncoder_lifecycle_release_addref_end_with_debug_markers` |
+| `wgpuRenderPassEncoderPushDebugGroup` | `wgpuRenderPassEncoder_lifecycle_release_addref_end_with_debug_markers` |
+| `wgpuRenderPassEncoderPopDebugGroup` | `wgpuRenderPassEncoder_lifecycle_release_addref_end_with_debug_markers` |
+| `wgpuRenderPassEncoderSetPipeline` | `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderPassEncoderSetBindGroup` | `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderPassEncoderSetVertexBuffer` | `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderPassEncoderSetIndexBuffer` | `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderPassEncoderDraw` | `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderPassEncoderDrawIndexed` | `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderPassEncoderDrawIndirect` | `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderPassEncoderDrawIndexedIndirect` | `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws` |
+| `wgpuRenderPassEncoderSetViewport` | `wgpuRenderPassEncoder_state_setters_occlusion_and_execute_bundles` |
+| `wgpuRenderPassEncoderSetScissorRect` | `wgpuRenderPassEncoder_state_setters_occlusion_and_execute_bundles` |
+| `wgpuRenderPassEncoderSetBlendConstant` | `wgpuRenderPassEncoder_state_setters_occlusion_and_execute_bundles` |
+| `wgpuRenderPassEncoderSetStencilReference` | `wgpuRenderPassEncoder_state_setters_occlusion_and_execute_bundles` |
+| `wgpuRenderPassEncoderExecuteBundles` | `wgpuRenderPassEncoder_state_setters_occlusion_and_execute_bundles` |
+| `wgpuRenderPassEncoderRelease` | `wgpuRenderPassEncoder_lifecycle_release_addref_end_with_debug_markers`, `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws`, `wgpuRenderPassEncoder_state_setters_occlusion_and_execute_bundles` |
+| `wgpuRenderPassEncoderAddRef` | `wgpuRenderPassEncoder_lifecycle_release_addref_end_with_debug_markers` |
+| `wgpuComputePassEncoderEnd` | `wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers`, `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
+| `wgpuComputePassEncoderInsertDebugMarker` | `wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers` |
+| `wgpuComputePassEncoderPushDebugGroup` | `wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers` |
+| `wgpuComputePassEncoderPopDebugGroup` | `wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers` |
+| `wgpuComputePassEncoderSetPipeline` | `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
+| `wgpuComputePassEncoderSetBindGroup` | `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
+| `wgpuComputePassEncoderDispatchWorkgroups` | `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
+| `wgpuComputePassEncoderDispatchWorkgroupsIndirect` | `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
+| `wgpuComputePassEncoderRelease` | `wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers`, `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
+| `wgpuComputePassEncoderAddRef` | `wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers` |
+
 ## Phase 10 yawgpu-core coverage summary
 
 Total kept pub fn (post-P10.3a audit): 183

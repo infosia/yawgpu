@@ -5900,6 +5900,96 @@ mod tests {
         }
     }
 
+    fn render_pass_color_attachment(
+        view: native::WGPUTextureView,
+    ) -> native::WGPURenderPassColorAttachment {
+        native::WGPURenderPassColorAttachment {
+            nextInChain: std::ptr::null_mut(),
+            view,
+            depthSlice: native::WGPU_DEPTH_SLICE_UNDEFINED,
+            resolveTarget: std::ptr::null(),
+            loadOp: native::WGPULoadOp_Clear,
+            storeOp: native::WGPUStoreOp_Store,
+            clearValue: native::WGPUColor {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        }
+    }
+
+    fn noop_render_pass_descriptor(
+        attachments: &[native::WGPURenderPassColorAttachment],
+        occlusion_query_set: native::WGPUQuerySet,
+    ) -> native::WGPURenderPassDescriptor {
+        native::WGPURenderPassDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            colorAttachmentCount: attachments.len(),
+            colorAttachments: attachments.as_ptr(),
+            depthStencilAttachment: std::ptr::null(),
+            occlusionQuerySet: occlusion_query_set,
+            timestampWrites: std::ptr::null(),
+        }
+    }
+
+    unsafe fn noop_render_attachment(
+        device: native::WGPUDevice,
+    ) -> (native::WGPUTexture, native::WGPUTextureView) {
+        let texture_desc = texture_descriptor(
+            native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+            4,
+        );
+        let texture = wgpuDeviceCreateTexture(device, &texture_desc);
+        let view = wgpuTextureCreateView(texture, std::ptr::null());
+        (texture, view)
+    }
+
+    unsafe fn noop_compute_pipeline(device: native::WGPUDevice) -> native::WGPUComputePipeline {
+        let module = create_wgsl_module(device, "@compute @workgroup_size(1) fn cs() {}");
+        let layout_desc = pipeline_layout_descriptor(&[]);
+        let layout = wgpuDeviceCreatePipelineLayout(device, &layout_desc);
+        let pipeline_desc = compute_pipeline_descriptor(module, layout);
+        let pipeline = wgpuDeviceCreateComputePipeline(device, &pipeline_desc);
+        wgpuPipelineLayoutRelease(layout);
+        wgpuShaderModuleRelease(module);
+        pipeline
+    }
+
+    unsafe fn noop_render_pipeline(device: native::WGPUDevice) -> native::WGPURenderPipeline {
+        let module = create_wgsl_module(
+            device,
+            "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }
+             @fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
+        );
+        let layout_desc = pipeline_layout_descriptor(&[]);
+        let layout = wgpuDeviceCreatePipelineLayout(device, &layout_desc);
+        let pipeline_desc = render_pipeline_descriptor(module, module, layout);
+        let pipeline = wgpuDeviceCreateRenderPipeline(device, &pipeline_desc);
+        wgpuPipelineLayoutRelease(layout);
+        wgpuShaderModuleRelease(module);
+        pipeline
+    }
+
+    unsafe fn noop_bind_group(
+        device: native::WGPUDevice,
+    ) -> (native::WGPUBindGroupLayout, native::WGPUBindGroup) {
+        let layout_desc = bind_group_layout_descriptor();
+        let layout = wgpuDeviceCreateBindGroupLayout(device, &layout_desc);
+        let bind_group_desc = bind_group_descriptor(layout);
+        let bind_group = wgpuDeviceCreateBindGroup(device, &bind_group_desc);
+        (layout, bind_group)
+    }
+
+    unsafe fn noop_indirect_buffer(device: native::WGPUDevice) -> native::WGPUBuffer {
+        let desc = buffer_descriptor(
+            native::WGPUBufferUsage_Indirect | native::WGPUBufferUsage_CopyDst,
+            20,
+        );
+        wgpuDeviceCreateBuffer(device, &desc)
+    }
+
     #[test]
     fn wgpuCreateInstance_noop_backend_and_null_descriptor_return_instances() {
         unsafe {
@@ -6843,6 +6933,392 @@ mod tests {
 
             drop(sampler_arc);
             wgpuSamplerRelease(sampler);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuCommandEncoder_lifecycle_release_addref_finish() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let encoder_arc = clone_handle(encoder, "WGPUCommandEncoder");
+            assert_eq!(Arc::strong_count(&encoder_arc), 2);
+            wgpuCommandEncoderAddRef(encoder);
+            assert_eq!(Arc::strong_count(&encoder_arc), 3);
+            wgpuCommandEncoderRelease(encoder);
+            assert_eq!(Arc::strong_count(&encoder_arc), 2);
+
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!command_buffer.is_null());
+            let command_buffer_arc = clone_handle(command_buffer, "WGPUCommandBuffer");
+            assert_eq!(Arc::strong_count(&command_buffer_arc), 2);
+            wgpuCommandBufferAddRef(command_buffer);
+            assert_eq!(Arc::strong_count(&command_buffer_arc), 3);
+            wgpuCommandBufferRelease(command_buffer);
+            assert_eq!(Arc::strong_count(&command_buffer_arc), 2);
+
+            drop(command_buffer_arc);
+            drop(encoder_arc);
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuCommandEncoderRelease(encoder);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuCommandEncoder_debug_markers_insert_push_pop() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+
+            wgpuCommandEncoderPushDebugGroup(encoder, label_view("encoder group"));
+            wgpuCommandEncoderInsertDebugMarker(encoder, label_view("encoder marker"));
+            wgpuCommandEncoderPopDebugGroup(encoder);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!command_buffer.is_null());
+
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuCommandEncoderRelease(encoder);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuCommandEncoder_buffer_copies_and_clear_and_write() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let source_desc = buffer_descriptor(native::WGPUBufferUsage_CopySrc, 32);
+            let source = wgpuDeviceCreateBuffer(device, &source_desc);
+            let destination_desc = buffer_descriptor(native::WGPUBufferUsage_CopyDst, 32);
+            let destination = wgpuDeviceCreateBuffer(device, &destination_desc);
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let bytes = [0_u8; 16];
+
+            wgpuCommandEncoderCopyBufferToBuffer(encoder, source, 0, destination, 0, 16);
+            wgpuCommandEncoderClearBuffer(encoder, destination, 0, 16);
+            wgpuCommandEncoderWriteBuffer(
+                encoder,
+                destination,
+                0,
+                bytes.as_ptr().cast(),
+                bytes.len(),
+            );
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!command_buffer.is_null());
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuCommandEncoderRelease(encoder);
+
+            let invalid_copy = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            wgpuCommandEncoderCopyBufferToBuffer(invalid_copy, source, 2, destination, 0, 4);
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let bad_copy_buffer = wgpuCommandEncoderFinish(invalid_copy, std::ptr::null());
+            assert_validation_error_contains(instance, device, "copy source offset");
+            wgpuCommandBufferRelease(bad_copy_buffer);
+            wgpuCommandEncoderRelease(invalid_copy);
+
+            let invalid_write = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            wgpuCommandEncoderWriteBuffer(
+                invalid_write,
+                destination,
+                32,
+                bytes.as_ptr().cast(),
+                bytes.len(),
+            );
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let bad_write_buffer = wgpuCommandEncoderFinish(invalid_write, std::ptr::null());
+            assert_validation_error_contains(instance, device, "write buffer range");
+            wgpuCommandBufferRelease(bad_write_buffer);
+            wgpuCommandEncoderRelease(invalid_write);
+
+            wgpuBufferRelease(destination);
+            wgpuBufferRelease(source);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuCommandEncoder_texture_copies_walk() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let texture_desc = texture_descriptor(
+                native::WGPUTextureUsage_CopySrc | native::WGPUTextureUsage_CopyDst,
+                4,
+            );
+            let texture_a = wgpuDeviceCreateTexture(device, &texture_desc);
+            let texture_b = wgpuDeviceCreateTexture(device, &texture_desc);
+            let buffer_desc = buffer_descriptor(
+                native::WGPUBufferUsage_CopySrc | native::WGPUBufferUsage_CopyDst,
+                1024,
+            );
+            let buffer = wgpuDeviceCreateBuffer(device, &buffer_desc);
+            let layout = native::WGPUTexelCopyBufferLayout {
+                offset: 0,
+                bytesPerRow: 256,
+                rowsPerImage: native::WGPU_COPY_STRIDE_UNDEFINED,
+            };
+            let buffer_info = native::WGPUTexelCopyBufferInfo { buffer, layout };
+            let texture_info_a = native::WGPUTexelCopyTextureInfo {
+                texture: texture_a,
+                mipLevel: 0,
+                origin: origin(0, 0, 0),
+                aspect: native::WGPUTextureAspect_Undefined,
+            };
+            let texture_info_b = native::WGPUTexelCopyTextureInfo {
+                texture: texture_b,
+                mipLevel: 0,
+                origin: origin(0, 0, 0),
+                aspect: native::WGPUTextureAspect_Undefined,
+            };
+            let copy_size = extent(4, 4, 1);
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+
+            wgpuCommandEncoderCopyBufferToTexture(
+                encoder,
+                &buffer_info,
+                &texture_info_a,
+                &copy_size,
+            );
+            wgpuCommandEncoderCopyTextureToBuffer(
+                encoder,
+                &texture_info_a,
+                &buffer_info,
+                &copy_size,
+            );
+            wgpuCommandEncoderCopyTextureToTexture(
+                encoder,
+                &texture_info_a,
+                &texture_info_b,
+                &copy_size,
+            );
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!command_buffer.is_null());
+
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuCommandEncoderRelease(encoder);
+            wgpuBufferRelease(buffer);
+            wgpuTextureRelease(texture_b);
+            wgpuTextureRelease(texture_a);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuCommandEncoder_query_and_timestamps() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let timestamp_desc = native::WGPUQuerySetDescriptor {
+                type_: native::WGPUQueryType_Timestamp,
+                count: 2,
+                ..query_set_descriptor(2)
+            };
+            let timestamp_query = wgpuDeviceCreateQuerySet(device, &timestamp_desc);
+            let timestamp_encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            wgpuCommandEncoderWriteTimestamp(timestamp_encoder, timestamp_query, 0);
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let timestamp_buffer = wgpuCommandEncoderFinish(timestamp_encoder, std::ptr::null());
+            assert_validation_error_contains(instance, device, "timestamp");
+            wgpuCommandBufferRelease(timestamp_buffer);
+            wgpuCommandEncoderRelease(timestamp_encoder);
+
+            let query_desc = query_set_descriptor(2);
+            let query_set = wgpuDeviceCreateQuerySet(device, &query_desc);
+            let destination_desc = buffer_descriptor(native::WGPUBufferUsage_QueryResolve, 256);
+            let destination = wgpuDeviceCreateBuffer(device, &destination_desc);
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            wgpuCommandEncoderResolveQuerySet(encoder, query_set, 0, 2, destination, 0);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!command_buffer.is_null());
+
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuCommandEncoderRelease(encoder);
+            wgpuBufferRelease(destination);
+            wgpuQuerySetRelease(query_set);
+            wgpuQuerySetRelease(timestamp_query);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuRenderPassEncoder_lifecycle_release_addref_end_with_debug_markers() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let (texture, view) = noop_render_attachment(device);
+            let attachment = render_pass_color_attachment(view);
+            let attachments = [attachment];
+            let descriptor = noop_render_pass_descriptor(&attachments, std::ptr::null());
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass = wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+            assert!(!pass.is_null());
+
+            let pass_arc = clone_handle(pass, "WGPURenderPassEncoder");
+            assert_eq!(Arc::strong_count(&pass_arc), 2);
+            wgpuRenderPassEncoderAddRef(pass);
+            assert_eq!(Arc::strong_count(&pass_arc), 3);
+            wgpuRenderPassEncoderRelease(pass);
+            assert_eq!(Arc::strong_count(&pass_arc), 2);
+            wgpuRenderPassEncoderPushDebugGroup(pass, label_view("render group"));
+            wgpuRenderPassEncoderInsertDebugMarker(pass, label_view("render marker"));
+            wgpuRenderPassEncoderPopDebugGroup(pass);
+            wgpuRenderPassEncoderEnd(pass);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!command_buffer.is_null());
+
+            drop(pass_arc);
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuRenderPassEncoderRelease(pass);
+            wgpuCommandEncoderRelease(encoder);
+            wgpuTextureViewRelease(view);
+            wgpuTextureRelease(texture);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let pipeline = noop_render_pipeline(device);
+            let (bind_group_layout, bind_group) = noop_bind_group(device);
+            let vertex_desc = buffer_descriptor(native::WGPUBufferUsage_Vertex, 16);
+            let vertex = wgpuDeviceCreateBuffer(device, &vertex_desc);
+            let index_desc = buffer_descriptor(native::WGPUBufferUsage_Index, 16);
+            let index = wgpuDeviceCreateBuffer(device, &index_desc);
+            let indirect = noop_indirect_buffer(device);
+            let (texture, view) = noop_render_attachment(device);
+            let attachment = render_pass_color_attachment(view);
+            let attachments = [attachment];
+            let descriptor = noop_render_pass_descriptor(&attachments, std::ptr::null());
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass = wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+
+            wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+            wgpuRenderPassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+            wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertex, 0, 16);
+            wgpuRenderPassEncoderSetIndexBuffer(pass, index, native::WGPUIndexFormat_Uint16, 0, 16);
+            wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+            wgpuRenderPassEncoderDrawIndexed(pass, 3, 1, 0, 0, 0);
+            wgpuRenderPassEncoderDrawIndirect(pass, indirect, 0);
+            wgpuRenderPassEncoderDrawIndexedIndirect(pass, indirect, 0);
+            wgpuRenderPassEncoderEnd(pass);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!command_buffer.is_null());
+
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuRenderPassEncoderRelease(pass);
+            wgpuCommandEncoderRelease(encoder);
+            wgpuTextureViewRelease(view);
+            wgpuTextureRelease(texture);
+            wgpuBufferRelease(indirect);
+            wgpuBufferRelease(index);
+            wgpuBufferRelease(vertex);
+            wgpuBindGroupRelease(bind_group);
+            wgpuBindGroupLayoutRelease(bind_group_layout);
+            wgpuRenderPipelineRelease(pipeline);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuRenderPassEncoder_state_setters_occlusion_and_execute_bundles() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let (texture, view) = noop_render_attachment(device);
+            let query_desc = query_set_descriptor(2);
+            let query_set = wgpuDeviceCreateQuerySet(device, &query_desc);
+            let formats = [native::WGPUTextureFormat_RGBA8Unorm];
+            let bundle_desc = render_bundle_encoder_descriptor(&formats);
+            let bundle_encoder = wgpuDeviceCreateRenderBundleEncoder(device, &bundle_desc);
+            let bundle = wgpuRenderBundleEncoderFinish(bundle_encoder, std::ptr::null());
+            let attachment = render_pass_color_attachment(view);
+            let attachments = [attachment];
+            let descriptor = noop_render_pass_descriptor(&attachments, query_set);
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass = wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+
+            wgpuRenderPassEncoderSetViewport(pass, 0.0, 0.0, 4.0, 4.0, 0.0, 1.0);
+            wgpuRenderPassEncoderSetScissorRect(pass, 0, 0, 4, 4);
+            let blend = native::WGPUColor {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            };
+            wgpuRenderPassEncoderSetBlendConstant(pass, &blend);
+            wgpuRenderPassEncoderSetStencilReference(pass, 1);
+            wgpuRenderPassEncoderBeginOcclusionQuery(pass, 0);
+            wgpuRenderPassEncoderEndOcclusionQuery(pass);
+            wgpuRenderPassEncoderExecuteBundles(pass, 1, &bundle);
+            wgpuRenderPassEncoderEnd(pass);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!command_buffer.is_null());
+
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuRenderPassEncoderRelease(pass);
+            wgpuCommandEncoderRelease(encoder);
+            wgpuRenderBundleRelease(bundle);
+            wgpuRenderBundleEncoderRelease(bundle_encoder);
+            wgpuQuerySetRelease(query_set);
+            wgpuTextureViewRelease(view);
+            wgpuTextureRelease(texture);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass = wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+            assert!(!pass.is_null());
+
+            let pass_arc = clone_handle(pass, "WGPUComputePassEncoder");
+            assert_eq!(Arc::strong_count(&pass_arc), 2);
+            wgpuComputePassEncoderAddRef(pass);
+            assert_eq!(Arc::strong_count(&pass_arc), 3);
+            wgpuComputePassEncoderRelease(pass);
+            assert_eq!(Arc::strong_count(&pass_arc), 2);
+            wgpuComputePassEncoderPushDebugGroup(pass, label_view("compute group"));
+            wgpuComputePassEncoderInsertDebugMarker(pass, label_view("compute marker"));
+            wgpuComputePassEncoderPopDebugGroup(pass);
+            wgpuComputePassEncoderEnd(pass);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!command_buffer.is_null());
+
+            drop(pass_arc);
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuComputePassEncoderRelease(pass);
+            wgpuCommandEncoderRelease(encoder);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let pipeline = noop_compute_pipeline(device);
+            let (bind_group_layout, bind_group) = noop_bind_group(device);
+            let indirect = noop_indirect_buffer(device);
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass = wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+
+            wgpuComputePassEncoderSetPipeline(pass, pipeline);
+            wgpuComputePassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+            wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
+            wgpuComputePassEncoderDispatchWorkgroupsIndirect(pass, indirect, 0);
+            wgpuComputePassEncoderEnd(pass);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!command_buffer.is_null());
+
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuComputePassEncoderRelease(pass);
+            wgpuCommandEncoderRelease(encoder);
+            wgpuBufferRelease(indirect);
+            wgpuBindGroupRelease(bind_group);
+            wgpuBindGroupLayoutRelease(bind_group_layout);
+            wgpuComputePipelineRelease(pipeline);
             release_handles(instance, adapter, device);
         }
     }
