@@ -1,36 +1,80 @@
 #include "framework.h"
 
-int main(void) {
-    int exit_code = EXIT_FAILURE;
-    YawgpuWindow *window = NULL;
-    WGPUSurface surface = NULL;
-    WGPUQueue queue = NULL;
-    WGPUTextureView view = NULL;
-    WGPUCommandEncoder encoder = NULL;
-    WGPURenderPassEncoder pass = NULL;
-    WGPUCommandBuffer commands = NULL;
-    WGPUTexture surface_texture = NULL;
+typedef struct SurfaceSmokeApp {
+    YawgpuContext context;
+    WGPUQueue queue;
+    YawgpuWindow *window;
+    WGPUSurface surface;
+} SurfaceSmokeApp;
 
-    YawgpuContext context = yawgpu_context_create();
-    if (!context.instance || !context.adapter || !context.device) {
+static bool choose_surface_format(WGPUSurface surface,
+                                  WGPUAdapter adapter,
+                                  WGPUTextureFormat *format) {
+    WGPUSurfaceCapabilities capabilities = {0};
+    if (wgpuSurfaceGetCapabilities(surface, adapter, &capabilities) != WGPUStatus_Success) {
+        fprintf(stderr, "failed to get surface capabilities\n");
+        return false;
+    }
+
+    bool found_format = false;
+    *format = WGPUTextureFormat_BGRA8Unorm;
+    for (size_t i = 0; i < capabilities.formatCount; ++i) {
+        if (capabilities.formats[i] == WGPUTextureFormat_BGRA8Unorm) {
+            *format = WGPUTextureFormat_BGRA8Unorm;
+            found_format = true;
+            break;
+        }
+        if (capabilities.formats[i] == WGPUTextureFormat_RGBA8Unorm) {
+            *format = WGPUTextureFormat_RGBA8Unorm;
+            found_format = true;
+        }
+    }
+    wgpuSurfaceCapabilitiesFreeMembers(capabilities);
+    if (!found_format) {
+        fprintf(stderr, "no supported surface format found\n");
+        return false;
+    }
+    return true;
+}
+
+static void surface_smoke_app_destroy(SurfaceSmokeApp *app) {
+    if (app->surface) {
+        wgpuSurfaceUnconfigure(app->surface);
+        wgpuSurfaceRelease(app->surface);
+    }
+    if (app->window) {
+        yawgpu_window_destroy(app->window);
+    }
+    if (app->queue) {
+        wgpuQueueRelease(app->queue);
+    }
+    yawgpu_context_release(&app->context);
+    *app = (SurfaceSmokeApp){0};
+}
+
+static bool surface_smoke_app_init(SurfaceSmokeApp *app) {
+    *app = (SurfaceSmokeApp){0};
+    app->context = yawgpu_context_create();
+    if (!app->context.instance || !app->context.adapter || !app->context.device) {
         fprintf(stderr, "failed to create yawgpu context\n");
-        goto cleanup;
-    }
-    queue = wgpuDeviceGetQueue(context.device);
-    if (!queue) {
-        fprintf(stderr, "failed to get queue\n");
-        goto cleanup;
+        return false;
     }
 
-    window = yawgpu_window_create(800, 600, "yawgpu surface_smoke");
-    if (!window) {
-        fprintf(stderr, "failed to create window\n");
-        goto cleanup;
+    app->queue = wgpuDeviceGetQueue(app->context.device);
+    if (!app->queue) {
+        fprintf(stderr, "failed to get queue\n");
+        return false;
     }
-    void *layer = yawgpu_window_metal_layer(window);
+
+    app->window = yawgpu_window_create(800, 600, "yawgpu surface_smoke");
+    if (!app->window) {
+        fprintf(stderr, "failed to create window\n");
+        return false;
+    }
+    void *layer = yawgpu_window_metal_layer(app->window);
     if (!layer) {
         fprintf(stderr, "failed to get CAMetalLayer\n");
-        goto cleanup;
+        return false;
     }
 
     WGPUSurfaceSourceMetalLayer metal_layer = {
@@ -40,53 +84,34 @@ int main(void) {
         },
         .layer = layer,
     };
-    surface = wgpuInstanceCreateSurface(
-        context.instance,
+    app->surface = wgpuInstanceCreateSurface(
+        app->context.instance,
         &(WGPUSurfaceDescriptor){
             .nextInChain = &metal_layer.chain,
             .label = yawgpu_string_view("surface_smoke surface"),
         });
-    if (!surface) {
+    if (!app->surface) {
         fprintf(stderr, "failed to create surface\n");
-        goto cleanup;
+        return false;
     }
 
-    WGPUSurfaceCapabilities capabilities = {0};
-    if (wgpuSurfaceGetCapabilities(surface, context.adapter, &capabilities) != WGPUStatus_Success) {
-        fprintf(stderr, "failed to get surface capabilities\n");
-        goto cleanup;
-    }
-    WGPUTextureFormat format = WGPUTextureFormat_BGRA8Unorm;
-    bool found_format = false;
-    for (size_t i = 0; i < capabilities.formatCount; ++i) {
-        if (capabilities.formats[i] == WGPUTextureFormat_BGRA8Unorm) {
-            format = WGPUTextureFormat_BGRA8Unorm;
-            found_format = true;
-            break;
-        }
-        if (capabilities.formats[i] == WGPUTextureFormat_RGBA8Unorm) {
-            format = WGPUTextureFormat_RGBA8Unorm;
-            found_format = true;
-        }
-    }
-    wgpuSurfaceCapabilitiesFreeMembers(capabilities);
-    if (!found_format) {
-        fprintf(stderr, "no supported surface format found\n");
-        goto cleanup;
+    WGPUTextureFormat format = WGPUTextureFormat_Undefined;
+    if (!choose_surface_format(app->surface, app->context.adapter, &format)) {
+        return false;
     }
 
     int width = 0;
     int height = 0;
-    yawgpu_window_framebuffer_size(window, &width, &height);
+    yawgpu_window_framebuffer_size(app->window, &width, &height);
     if (width <= 0 || height <= 0) {
         fprintf(stderr, "invalid framebuffer size\n");
-        goto cleanup;
+        return false;
     }
     wgpuSurfaceConfigure(
-        surface,
+        app->surface,
         &(WGPUSurfaceConfiguration){
             .nextInChain = NULL,
-            .device = context.device,
+            .device = app->context.device,
             .format = format,
             .usage = WGPUTextureUsage_RenderAttachment,
             .width = (uint32_t)width,
@@ -96,101 +121,116 @@ int main(void) {
             .alphaMode = WGPUCompositeAlphaMode_Opaque,
             .presentMode = WGPUPresentMode_Fifo,
         });
+    return true;
+}
 
-    for (uint32_t frame = 0; frame < 60 && !yawgpu_window_should_close(window); ++frame) {
-        WGPUSurfaceTexture current = {0};
-        wgpuSurfaceGetCurrentTexture(surface, &current);
-        if (current.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal ||
-            !current.texture) {
-            fprintf(stderr, "failed to acquire surface texture, status=%u\n", current.status);
-            goto cleanup;
-        }
-        surface_texture = current.texture;
-        view = wgpuTextureCreateView(surface_texture, NULL);
-        encoder = wgpuDeviceCreateCommandEncoder(
-            context.device,
-            &(WGPUCommandEncoderDescriptor){
-                .nextInChain = NULL,
-                .label = yawgpu_string_view("surface_smoke encoder"),
-            });
-        pass = wgpuCommandEncoderBeginRenderPass(
-            encoder,
-            &(WGPURenderPassDescriptor){
-                .nextInChain = NULL,
-                .label = yawgpu_string_view("surface_smoke clear pass"),
-                .colorAttachmentCount = 1,
-                .colorAttachments = (WGPURenderPassColorAttachment[]){
-                    {
-                        .nextInChain = NULL,
-                        .view = view,
-                        .depthSlice = WGPU_DEPTH_SLICE_UNDEFINED,
-                        .resolveTarget = NULL,
-                        .loadOp = WGPULoadOp_Clear,
-                        .storeOp = WGPUStoreOp_Store,
-                        .clearValue = {
-                            .r = 0.1,
-                            .g = 0.2,
-                            .b = 0.3,
-                            .a = 1.0,
-                        },
+static bool surface_smoke_render_frame(const SurfaceSmokeApp *app) {
+    WGPUSurfaceTexture current = {0};
+    wgpuSurfaceGetCurrentTexture(app->surface, &current);
+    if (current.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal ||
+        !current.texture) {
+        fprintf(stderr, "failed to acquire surface texture, status=%u\n", current.status);
+        return false;
+    }
+
+    WGPUTextureView view = wgpuTextureCreateView(current.texture, NULL);
+    if (!view) {
+        fprintf(stderr, "failed to create texture view\n");
+        wgpuTextureRelease(current.texture);
+        return false;
+    }
+
+    WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(
+        app->context.device,
+        &(WGPUCommandEncoderDescriptor){
+            .nextInChain = NULL,
+            .label = yawgpu_string_view("surface_smoke encoder"),
+        });
+    if (!encoder) {
+        fprintf(stderr, "failed to create command encoder\n");
+        wgpuTextureViewRelease(view);
+        wgpuTextureRelease(current.texture);
+        return false;
+    }
+
+    WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(
+        encoder,
+        &(WGPURenderPassDescriptor){
+            .nextInChain = NULL,
+            .label = yawgpu_string_view("surface_smoke clear pass"),
+            .colorAttachmentCount = 1,
+            .colorAttachments = (WGPURenderPassColorAttachment[]){
+                {
+                    .nextInChain = NULL,
+                    .view = view,
+                    .depthSlice = WGPU_DEPTH_SLICE_UNDEFINED,
+                    .resolveTarget = NULL,
+                    .loadOp = WGPULoadOp_Clear,
+                    .storeOp = WGPUStoreOp_Store,
+                    .clearValue = {
+                        .r = 0.1,
+                        .g = 0.2,
+                        .b = 0.3,
+                        .a = 1.0,
                     },
                 },
-                .depthStencilAttachment = NULL,
-                .occlusionQuerySet = NULL,
-                .timestampWrites = NULL,
-            });
-        wgpuRenderPassEncoderEnd(pass);
-        wgpuRenderPassEncoderRelease(pass);
-        pass = NULL;
-        commands = wgpuCommandEncoderFinish(
-            encoder,
-            &(WGPUCommandBufferDescriptor){
-                .nextInChain = NULL,
-                .label = yawgpu_string_view("surface_smoke commands"),
-            });
-        wgpuQueueSubmit(queue, 1, &commands);
-        if (wgpuSurfacePresent(surface) != WGPUStatus_Success) {
-            fprintf(stderr, "surface present failed\n");
-            goto cleanup;
-        }
-        wgpuCommandBufferRelease(commands);
-        commands = NULL;
+            },
+            .depthStencilAttachment = NULL,
+            .occlusionQuerySet = NULL,
+            .timestampWrites = NULL,
+        });
+    if (!pass) {
+        fprintf(stderr, "failed to begin render pass\n");
         wgpuCommandEncoderRelease(encoder);
-        encoder = NULL;
         wgpuTextureViewRelease(view);
-        view = NULL;
-        wgpuTextureRelease(surface_texture);
-        surface_texture = NULL;
+        wgpuTextureRelease(current.texture);
+        return false;
+    }
+    wgpuRenderPassEncoderEnd(pass);
+    wgpuRenderPassEncoderRelease(pass);
+
+    WGPUCommandBuffer commands = wgpuCommandEncoderFinish(
+        encoder,
+        &(WGPUCommandBufferDescriptor){
+            .nextInChain = NULL,
+            .label = yawgpu_string_view("surface_smoke commands"),
+        });
+    if (!commands) {
+        fprintf(stderr, "failed to finish command encoder\n");
+        wgpuCommandEncoderRelease(encoder);
+        wgpuTextureViewRelease(view);
+        wgpuTextureRelease(current.texture);
+        return false;
+    }
+    wgpuQueueSubmit(app->queue, 1, &commands);
+    wgpuCommandBufferRelease(commands);
+    wgpuCommandEncoderRelease(encoder);
+
+    WGPUStatus present_status = wgpuSurfacePresent(app->surface);
+    wgpuTextureViewRelease(view);
+    wgpuTextureRelease(current.texture);
+    if (present_status != WGPUStatus_Success) {
+        fprintf(stderr, "surface present failed\n");
+        return false;
+    }
+    return true;
+}
+
+int main(void) {
+    SurfaceSmokeApp app = {0};
+    if (!surface_smoke_app_init(&app)) {
+        surface_smoke_app_destroy(&app);
+        return EXIT_FAILURE;
+    }
+
+    for (uint32_t frame = 0; frame < 60 && !yawgpu_window_should_close(app.window); ++frame) {
+        if (!surface_smoke_render_frame(&app)) {
+            surface_smoke_app_destroy(&app);
+            return EXIT_FAILURE;
+        }
         yawgpu_window_poll_events();
     }
-    exit_code = EXIT_SUCCESS;
 
-cleanup:
-    if (commands) {
-        wgpuCommandBufferRelease(commands);
-    }
-    if (pass) {
-        wgpuRenderPassEncoderRelease(pass);
-    }
-    if (encoder) {
-        wgpuCommandEncoderRelease(encoder);
-    }
-    if (view) {
-        wgpuTextureViewRelease(view);
-    }
-    if (surface_texture) {
-        wgpuTextureRelease(surface_texture);
-    }
-    if (surface) {
-        wgpuSurfaceUnconfigure(surface);
-        wgpuSurfaceRelease(surface);
-    }
-    if (window) {
-        yawgpu_window_destroy(window);
-    }
-    if (queue) {
-        wgpuQueueRelease(queue);
-    }
-    yawgpu_context_release(&context);
-    return exit_code;
+    surface_smoke_app_destroy(&app);
+    return EXIT_SUCCESS;
 }

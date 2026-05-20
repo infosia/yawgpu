@@ -1,46 +1,84 @@
 #include "framework.h"
 
-int main(void) {
-    static const float vertices[12] = {
-        0.0f, 0.5f, 0.0f, 1.0f,
-        -0.5f, -0.5f, 0.0f, 1.0f,
-        0.5f, -0.5f, 0.0f, 1.0f,
-    };
+typedef struct HelloTriangleApp {
+    YawgpuContext context;
+    WGPUQueue queue;
+    YawgpuWindow *window;
+    WGPUSurface surface;
+    WGPUShaderModule shader;
+    WGPUBuffer vertex_buffer;
+    WGPUPipelineLayout pipeline_layout;
+    WGPURenderPipeline pipeline;
+} HelloTriangleApp;
 
-    int exit_code = EXIT_FAILURE;
-    YawgpuWindow *window = NULL;
-    WGPUSurface surface = NULL;
-    WGPUQueue queue = NULL;
-    WGPUShaderModule shader = NULL;
-    WGPUBuffer vertex_buffer = NULL;
-    WGPUPipelineLayout pipeline_layout = NULL;
-    WGPURenderPipeline pipeline = NULL;
-    WGPUTextureView view = NULL;
-    WGPUCommandEncoder encoder = NULL;
-    WGPURenderPassEncoder pass = NULL;
-    WGPUCommandBuffer commands = NULL;
-    WGPUTexture surface_texture = NULL;
+static const float vertices[12] = {
+    0.0f, 0.5f, 0.0f, 1.0f,
+    -0.5f, -0.5f, 0.0f, 1.0f,
+    0.5f, -0.5f, 0.0f, 1.0f,
+};
 
-    YawgpuContext context = yawgpu_context_create();
-    if (!context.instance || !context.adapter || !context.device) {
-        fprintf(stderr, "failed to create yawgpu context\n");
-        goto cleanup;
-    }
-    queue = wgpuDeviceGetQueue(context.device);
-    if (!queue) {
-        fprintf(stderr, "failed to get queue\n");
-        goto cleanup;
+static bool hello_triangle_choose_surface_format(WGPUSurface surface,
+                                                 WGPUAdapter adapter,
+                                                 WGPUTextureFormat *format) {
+    WGPUSurfaceCapabilities capabilities = {0};
+    if (wgpuSurfaceGetCapabilities(surface, adapter, &capabilities) != WGPUStatus_Success) {
+        fprintf(stderr, "failed to get surface capabilities\n");
+        return false;
     }
 
-    window = yawgpu_window_create(800, 600, "yawgpu hello_triangle");
-    if (!window) {
-        fprintf(stderr, "failed to create window\n");
-        goto cleanup;
+    bool found_format = false;
+    *format = WGPUTextureFormat_BGRA8Unorm;
+    for (size_t i = 0; i < capabilities.formatCount; ++i) {
+        if (capabilities.formats[i] == WGPUTextureFormat_BGRA8Unorm) {
+            *format = WGPUTextureFormat_BGRA8Unorm;
+            found_format = true;
+            break;
+        }
+        if (capabilities.formats[i] == WGPUTextureFormat_RGBA8Unorm) {
+            *format = WGPUTextureFormat_RGBA8Unorm;
+            found_format = true;
+        }
     }
-    void *layer = yawgpu_window_metal_layer(window);
+    wgpuSurfaceCapabilitiesFreeMembers(capabilities);
+    if (!found_format) {
+        fprintf(stderr, "no supported surface format found\n");
+        return false;
+    }
+    return true;
+}
+
+static void hello_triangle_app_destroy(HelloTriangleApp *app) {
+    if (app->pipeline) {
+        wgpuRenderPipelineRelease(app->pipeline);
+    }
+    if (app->pipeline_layout) {
+        wgpuPipelineLayoutRelease(app->pipeline_layout);
+    }
+    if (app->vertex_buffer) {
+        wgpuBufferRelease(app->vertex_buffer);
+    }
+    if (app->shader) {
+        wgpuShaderModuleRelease(app->shader);
+    }
+    if (app->surface) {
+        wgpuSurfaceUnconfigure(app->surface);
+        wgpuSurfaceRelease(app->surface);
+    }
+    if (app->window) {
+        yawgpu_window_destroy(app->window);
+    }
+    if (app->queue) {
+        wgpuQueueRelease(app->queue);
+    }
+    yawgpu_context_release(&app->context);
+    *app = (HelloTriangleApp){0};
+}
+
+static bool hello_triangle_create_surface(HelloTriangleApp *app) {
+    void *layer = yawgpu_window_metal_layer(app->window);
     if (!layer) {
         fprintf(stderr, "failed to get CAMetalLayer\n");
-        goto cleanup;
+        return false;
     }
 
     WGPUSurfaceSourceMetalLayer metal_layer = {
@@ -50,66 +88,45 @@ int main(void) {
         },
         .layer = layer,
     };
-    surface = wgpuInstanceCreateSurface(
-        context.instance,
+    app->surface = wgpuInstanceCreateSurface(
+        app->context.instance,
         &(WGPUSurfaceDescriptor){
             .nextInChain = &metal_layer.chain,
             .label = yawgpu_string_view("hello_triangle surface"),
         });
-    if (!surface) {
+    if (!app->surface) {
         fprintf(stderr, "failed to create surface\n");
-        goto cleanup;
+        return false;
     }
+    return true;
+}
 
-    WGPUSurfaceCapabilities capabilities = {0};
-    if (wgpuSurfaceGetCapabilities(surface, context.adapter, &capabilities) != WGPUStatus_Success) {
-        fprintf(stderr, "failed to get surface capabilities\n");
-        goto cleanup;
-    }
-    WGPUTextureFormat format = WGPUTextureFormat_BGRA8Unorm;
-    bool found_format = false;
-    for (size_t i = 0; i < capabilities.formatCount; ++i) {
-        if (capabilities.formats[i] == WGPUTextureFormat_BGRA8Unorm) {
-            format = WGPUTextureFormat_BGRA8Unorm;
-            found_format = true;
-            break;
-        }
-        if (capabilities.formats[i] == WGPUTextureFormat_RGBA8Unorm) {
-            format = WGPUTextureFormat_RGBA8Unorm;
-            found_format = true;
-        }
-    }
-    wgpuSurfaceCapabilitiesFreeMembers(capabilities);
-    if (!found_format) {
-        fprintf(stderr, "no supported surface format found\n");
-        goto cleanup;
-    }
-
-    shader = yawgpu_load_wgsl_shader(context.device, "shader.wgsl");
-    vertex_buffer = yawgpu_create_buffer_init(
-        context.device,
+static bool hello_triangle_create_pipeline(HelloTriangleApp *app, WGPUTextureFormat format) {
+    app->shader = yawgpu_load_wgsl_shader(app->context.device, "shader.wgsl");
+    app->vertex_buffer = yawgpu_create_buffer_init(
+        app->context.device,
         &(YawgpuBufferInitDescriptor){
             .label = "hello_triangle vertices",
             .usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst,
             .contents = vertices,
             .size = sizeof(vertices),
         });
-    if (!shader || !vertex_buffer) {
+    if (!app->shader || !app->vertex_buffer) {
         fprintf(stderr, "failed to create shader or vertex buffer\n");
-        goto cleanup;
+        return false;
     }
 
-    pipeline_layout = wgpuDeviceCreatePipelineLayout(
-        context.device,
+    app->pipeline_layout = wgpuDeviceCreatePipelineLayout(
+        app->context.device,
         &(WGPUPipelineLayoutDescriptor){
             .nextInChain = NULL,
             .label = yawgpu_string_view("hello_triangle pipeline layout"),
             .bindGroupLayoutCount = 0,
             .bindGroupLayouts = NULL,
         });
-    if (!pipeline_layout) {
+    if (!app->pipeline_layout) {
         fprintf(stderr, "failed to create pipeline layout\n");
-        goto cleanup;
+        return false;
     }
 
     WGPUVertexAttribute vertex_attribute = {
@@ -123,15 +140,15 @@ int main(void) {
         .attributeCount = 1,
         .attributes = &vertex_attribute,
     };
-    pipeline = wgpuDeviceCreateRenderPipeline(
-        context.device,
+    app->pipeline = wgpuDeviceCreateRenderPipeline(
+        app->context.device,
         &(WGPURenderPipelineDescriptor){
             .nextInChain = NULL,
             .label = yawgpu_string_view("hello_triangle pipeline"),
-            .layout = pipeline_layout,
+            .layout = app->pipeline_layout,
             .vertex = {
                 .nextInChain = NULL,
-                .module = shader,
+                .module = app->shader,
                 .entryPoint = yawgpu_string_view("vs_main"),
                 .constantCount = 0,
                 .constants = NULL,
@@ -154,7 +171,7 @@ int main(void) {
             },
             .fragment = &(WGPUFragmentState){
                 .nextInChain = NULL,
-                .module = shader,
+                .module = app->shader,
                 .entryPoint = yawgpu_string_view("fs_main"),
                 .constantCount = 0,
                 .constants = NULL,
@@ -169,23 +186,56 @@ int main(void) {
                 },
             },
         });
-    if (!pipeline) {
+    if (!app->pipeline) {
         fprintf(stderr, "failed to create render pipeline\n");
-        goto cleanup;
+        return false;
+    }
+    return true;
+}
+
+static bool hello_triangle_app_init(HelloTriangleApp *app) {
+    *app = (HelloTriangleApp){0};
+    app->context = yawgpu_context_create();
+    if (!app->context.instance || !app->context.adapter || !app->context.device) {
+        fprintf(stderr, "failed to create yawgpu context\n");
+        return false;
+    }
+
+    app->queue = wgpuDeviceGetQueue(app->context.device);
+    if (!app->queue) {
+        fprintf(stderr, "failed to get queue\n");
+        return false;
+    }
+
+    app->window = yawgpu_window_create(800, 600, "yawgpu hello_triangle");
+    if (!app->window) {
+        fprintf(stderr, "failed to create window\n");
+        return false;
+    }
+    if (!hello_triangle_create_surface(app)) {
+        return false;
+    }
+
+    WGPUTextureFormat format = WGPUTextureFormat_Undefined;
+    if (!hello_triangle_choose_surface_format(app->surface, app->context.adapter, &format)) {
+        return false;
+    }
+    if (!hello_triangle_create_pipeline(app, format)) {
+        return false;
     }
 
     int width = 0;
     int height = 0;
-    yawgpu_window_framebuffer_size(window, &width, &height);
+    yawgpu_window_framebuffer_size(app->window, &width, &height);
     if (width <= 0 || height <= 0) {
         fprintf(stderr, "invalid framebuffer size\n");
-        goto cleanup;
+        return false;
     }
     wgpuSurfaceConfigure(
-        surface,
+        app->surface,
         &(WGPUSurfaceConfiguration){
             .nextInChain = NULL,
-            .device = context.device,
+            .device = app->context.device,
             .format = format,
             .usage = WGPUTextureUsage_RenderAttachment,
             .width = (uint32_t)width,
@@ -195,130 +245,118 @@ int main(void) {
             .alphaMode = WGPUCompositeAlphaMode_Opaque,
             .presentMode = WGPUPresentMode_Fifo,
         });
+    return true;
+}
 
-    for (uint32_t frame = 0; frame < 60 && !yawgpu_window_should_close(window); ++frame) {
-        WGPUSurfaceTexture current = {0};
-        wgpuSurfaceGetCurrentTexture(surface, &current);
-        if (current.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal ||
-            !current.texture) {
-            fprintf(stderr, "failed to acquire surface texture, status=%u\n", current.status);
-            goto cleanup;
-        }
-        surface_texture = current.texture;
-        view = wgpuTextureCreateView(surface_texture, NULL);
-        encoder = wgpuDeviceCreateCommandEncoder(
-            context.device,
-            &(WGPUCommandEncoderDescriptor){
-                .nextInChain = NULL,
-                .label = yawgpu_string_view("hello_triangle encoder"),
-            });
-        if (!view || !encoder) {
-            fprintf(stderr, "failed to create frame resources\n");
-            goto cleanup;
-        }
+static bool hello_triangle_render_frame(const HelloTriangleApp *app) {
+    WGPUSurfaceTexture current = {0};
+    wgpuSurfaceGetCurrentTexture(app->surface, &current);
+    if (current.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal ||
+        !current.texture) {
+        fprintf(stderr, "failed to acquire surface texture, status=%u\n", current.status);
+        return false;
+    }
 
-        pass = wgpuCommandEncoderBeginRenderPass(
-            encoder,
-            &(WGPURenderPassDescriptor){
-                .nextInChain = NULL,
-                .label = yawgpu_string_view("hello_triangle render pass"),
-                .colorAttachmentCount = 1,
-                .colorAttachments = (WGPURenderPassColorAttachment[]){
-                    {
-                        .nextInChain = NULL,
-                        .view = view,
-                        .depthSlice = WGPU_DEPTH_SLICE_UNDEFINED,
-                        .resolveTarget = NULL,
-                        .loadOp = WGPULoadOp_Clear,
-                        .storeOp = WGPUStoreOp_Store,
-                        .clearValue = {
-                            .r = 0.0,
-                            .g = 0.0,
-                            .b = 0.0,
-                            .a = 1.0,
-                        },
+    WGPUTextureView view = wgpuTextureCreateView(current.texture, NULL);
+    WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(
+        app->context.device,
+        &(WGPUCommandEncoderDescriptor){
+            .nextInChain = NULL,
+            .label = yawgpu_string_view("hello_triangle encoder"),
+        });
+    if (!view || !encoder) {
+        fprintf(stderr, "failed to create frame resources\n");
+        if (encoder) {
+            wgpuCommandEncoderRelease(encoder);
+        }
+        if (view) {
+            wgpuTextureViewRelease(view);
+        }
+        wgpuTextureRelease(current.texture);
+        return false;
+    }
+
+    WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(
+        encoder,
+        &(WGPURenderPassDescriptor){
+            .nextInChain = NULL,
+            .label = yawgpu_string_view("hello_triangle render pass"),
+            .colorAttachmentCount = 1,
+            .colorAttachments = (WGPURenderPassColorAttachment[]){
+                {
+                    .nextInChain = NULL,
+                    .view = view,
+                    .depthSlice = WGPU_DEPTH_SLICE_UNDEFINED,
+                    .resolveTarget = NULL,
+                    .loadOp = WGPULoadOp_Clear,
+                    .storeOp = WGPUStoreOp_Store,
+                    .clearValue = {
+                        .r = 0.0,
+                        .g = 0.0,
+                        .b = 0.0,
+                        .a = 1.0,
                     },
                 },
-                .depthStencilAttachment = NULL,
-                .occlusionQuerySet = NULL,
-                .timestampWrites = NULL,
-            });
-        if (!pass) {
-            fprintf(stderr, "failed to begin render pass\n");
-            goto cleanup;
-        }
-        wgpuRenderPassEncoderSetPipeline(pass, pipeline);
-        wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertex_buffer, 0, WGPU_WHOLE_SIZE);
-        wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
-        wgpuRenderPassEncoderEnd(pass);
-        wgpuRenderPassEncoderRelease(pass);
-        pass = NULL;
-
-        commands = wgpuCommandEncoderFinish(
-            encoder,
-            &(WGPUCommandBufferDescriptor){
-                .nextInChain = NULL,
-                .label = yawgpu_string_view("hello_triangle commands"),
-            });
-        if (!commands) {
-            fprintf(stderr, "failed to finish command encoder\n");
-            goto cleanup;
-        }
-        wgpuQueueSubmit(queue, 1, &commands);
-        if (wgpuSurfacePresent(surface) != WGPUStatus_Success) {
-            fprintf(stderr, "surface present failed\n");
-            goto cleanup;
-        }
-        wgpuCommandBufferRelease(commands);
-        commands = NULL;
+            },
+            .depthStencilAttachment = NULL,
+            .occlusionQuerySet = NULL,
+            .timestampWrites = NULL,
+        });
+    if (!pass) {
+        fprintf(stderr, "failed to begin render pass\n");
         wgpuCommandEncoderRelease(encoder);
-        encoder = NULL;
         wgpuTextureViewRelease(view);
-        view = NULL;
-        wgpuTextureRelease(surface_texture);
-        surface_texture = NULL;
+        wgpuTextureRelease(current.texture);
+        return false;
+    }
+    wgpuRenderPassEncoderSetPipeline(pass, app->pipeline);
+    wgpuRenderPassEncoderSetVertexBuffer(pass, 0, app->vertex_buffer, 0, WGPU_WHOLE_SIZE);
+    wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+    wgpuRenderPassEncoderEnd(pass);
+    wgpuRenderPassEncoderRelease(pass);
+
+    WGPUCommandBuffer commands = wgpuCommandEncoderFinish(
+        encoder,
+        &(WGPUCommandBufferDescriptor){
+            .nextInChain = NULL,
+            .label = yawgpu_string_view("hello_triangle commands"),
+        });
+    if (!commands) {
+        fprintf(stderr, "failed to finish command encoder\n");
+        wgpuCommandEncoderRelease(encoder);
+        wgpuTextureViewRelease(view);
+        wgpuTextureRelease(current.texture);
+        return false;
+    }
+    wgpuQueueSubmit(app->queue, 1, &commands);
+    wgpuCommandBufferRelease(commands);
+    wgpuCommandEncoderRelease(encoder);
+
+    WGPUStatus present_status = wgpuSurfacePresent(app->surface);
+    wgpuTextureViewRelease(view);
+    wgpuTextureRelease(current.texture);
+    if (present_status != WGPUStatus_Success) {
+        fprintf(stderr, "surface present failed\n");
+        return false;
+    }
+    return true;
+}
+
+int main(void) {
+    HelloTriangleApp app = {0};
+    if (!hello_triangle_app_init(&app)) {
+        hello_triangle_app_destroy(&app);
+        return EXIT_FAILURE;
+    }
+
+    for (uint32_t frame = 0; frame < 60 && !yawgpu_window_should_close(app.window); ++frame) {
+        if (!hello_triangle_render_frame(&app)) {
+            hello_triangle_app_destroy(&app);
+            return EXIT_FAILURE;
+        }
         yawgpu_window_poll_events();
     }
-    exit_code = EXIT_SUCCESS;
 
-cleanup:
-    if (commands) {
-        wgpuCommandBufferRelease(commands);
-    }
-    if (pass) {
-        wgpuRenderPassEncoderRelease(pass);
-    }
-    if (encoder) {
-        wgpuCommandEncoderRelease(encoder);
-    }
-    if (view) {
-        wgpuTextureViewRelease(view);
-    }
-    if (surface_texture) {
-        wgpuTextureRelease(surface_texture);
-    }
-    if (pipeline) {
-        wgpuRenderPipelineRelease(pipeline);
-    }
-    if (pipeline_layout) {
-        wgpuPipelineLayoutRelease(pipeline_layout);
-    }
-    if (vertex_buffer) {
-        wgpuBufferRelease(vertex_buffer);
-    }
-    if (shader) {
-        wgpuShaderModuleRelease(shader);
-    }
-    if (surface) {
-        wgpuSurfaceUnconfigure(surface);
-        wgpuSurfaceRelease(surface);
-    }
-    if (window) {
-        yawgpu_window_destroy(window);
-    }
-    if (queue) {
-        wgpuQueueRelease(queue);
-    }
-    yawgpu_context_release(&context);
-    return exit_code;
+    hello_triangle_app_destroy(&app);
+    return EXIT_SUCCESS;
 }
