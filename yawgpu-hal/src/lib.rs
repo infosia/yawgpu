@@ -1,6 +1,30 @@
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
+mod command;
+mod descriptors;
+mod error;
+mod format;
+mod present;
+mod shader;
+
+pub use command::{
+    HalBoundBuffer, HalBufferBindingKind, HalBufferCopy, HalBufferTextureCopy,
+    HalBufferTextureLayout, HalComputePass, HalCopy, HalDescriptorBinding, HalDraw,
+    HalRenderColorTarget, HalRenderLoadOp, HalRenderPass, HalTextureCopy,
+};
+pub use descriptors::{
+    HalExtent3d, HalOrigin3d, HalRenderPipelineDescriptor, HalSamplerDescriptor,
+    HalTextureDescriptor, HalVertexAttribute, HalVertexBufferLayout,
+};
+pub use error::HalError;
+pub use format::{
+    HalAddressMode, HalCompareFunction, HalFilterMode, HalMipmapFilterMode, HalPrimitiveTopology,
+    HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
+};
+pub use present::{HalPresentMode, HalSurfaceConfiguration};
+pub use shader::HalShaderSource;
+
 #[cfg(feature = "noop")]
 pub mod noop;
 
@@ -9,42 +33,6 @@ pub mod metal;
 
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
-
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum HalError {
-    #[error("HAL backend is unavailable: {backend}")]
-    BackendUnavailable { backend: &'static str },
-    #[error("HAL device creation failed: {backend}")]
-    DeviceCreationFailed { backend: &'static str },
-    #[error("HAL queue submission failed: {backend}")]
-    QueueSubmissionFailed { backend: &'static str },
-    #[error("HAL buffer operation failed: {backend}: {message}")]
-    BufferOperationFailed {
-        backend: &'static str,
-        message: &'static str,
-    },
-    #[error("HAL shader compilation failed: {backend}: {message}")]
-    ShaderCompilationFailed {
-        backend: &'static str,
-        message: String,
-    },
-    #[error("HAL swapchain creation failed: {backend}: {message}")]
-    SwapchainCreationFailed {
-        backend: &'static str,
-        message: &'static str,
-    },
-    #[error("HAL surface acquire failed: {backend}: {message}")]
-    AcquireFailed {
-        backend: &'static str,
-        message: &'static str,
-    },
-    #[error("HAL surface present failed: {backend}: {message}")]
-    PresentFailed {
-        backend: &'static str,
-        message: &'static str,
-    },
-}
 
 #[derive(Debug)]
 #[non_exhaustive]
@@ -324,43 +312,6 @@ impl HalDevice {
     }
 }
 
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy)]
-pub struct HalSurfaceConfiguration {
-    pub format: HalTextureFormat,
-    pub usage: HalTextureUsage,
-    pub width: u32,
-    pub height: u32,
-    pub present_mode: HalPresentMode,
-}
-
-impl HalSurfaceConfiguration {
-    #[must_use]
-    pub fn new(
-        format: HalTextureFormat,
-        usage: HalTextureUsage,
-        width: u32,
-        height: u32,
-        present_mode: HalPresentMode,
-    ) -> Self {
-        Self {
-            format,
-            usage,
-            width,
-            height,
-            present_mode,
-        }
-    }
-}
-
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy)]
-pub enum HalPresentMode {
-    Fifo,
-    Immediate,
-    Mailbox,
-}
-
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum HalSurface {
@@ -543,257 +494,6 @@ impl HalBuffer {
             Self::Metal(buffer) => buffer.mapped_ptr(),
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct HalBufferCopy {
-    pub source: HalBuffer,
-    pub source_offset: u64,
-    pub destination: HalBuffer,
-    pub destination_offset: u64,
-    pub size: u64,
-}
-
-#[derive(Debug, Clone)]
-pub enum HalCopy {
-    Buffer(HalBufferCopy),
-    BufferToTexture(HalBufferTextureCopy),
-    TextureToBuffer(HalBufferTextureCopy),
-    TextureToTexture(HalTextureCopy),
-    ComputePass(HalComputePass),
-    RenderPass(HalRenderPass),
-}
-
-#[derive(Debug, Clone)]
-pub struct HalComputePass {
-    pub pipeline: HalComputePipeline,
-    pub bind_buffers: Vec<HalBoundBuffer>,
-    pub workgroups: (u32, u32, u32),
-}
-
-#[derive(Debug, Clone)]
-pub enum HalShaderSource {
-    Msl(String),
-    SpirV(Vec<u32>),
-    SpirVStages {
-        vertex: Vec<u32>,
-        fragment: Vec<u32>,
-    },
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct HalDescriptorBinding {
-    pub group: u32,
-    pub binding: u32,
-    pub kind: HalBufferBindingKind,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum HalBufferBindingKind {
-    Uniform,
-    Storage,
-}
-
-#[derive(Debug, Clone)]
-pub struct HalBoundBuffer {
-    pub group: u32,
-    pub binding: u32,
-    pub metal_index: u32,
-    pub buffer: HalBuffer,
-    pub offset: u64,
-    pub size: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct HalRenderPass {
-    pub pipeline: Option<HalRenderPipeline>,
-    pub color_target: HalRenderColorTarget,
-    pub bind_buffers: Vec<HalBoundBuffer>,
-    pub vertex_buffers: Vec<HalBoundBuffer>,
-    pub draw: Option<HalDraw>,
-}
-
-#[derive(Debug, Clone)]
-pub struct HalRenderColorTarget {
-    pub texture: HalTexture,
-    pub load_op: HalRenderLoadOp,
-    pub store: bool,
-    pub clear_color: [f64; 4],
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum HalRenderLoadOp {
-    Load,
-    Clear,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct HalDraw {
-    pub vertex_count: u32,
-    pub instance_count: u32,
-    pub first_vertex: u32,
-    pub first_instance: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct HalRenderPipelineDescriptor {
-    pub color_formats: Vec<HalTextureFormat>,
-    pub vertex_buffers: Vec<HalVertexBufferLayout>,
-    pub primitive_topology: HalPrimitiveTopology,
-}
-
-#[derive(Debug, Clone)]
-pub struct HalVertexBufferLayout {
-    pub array_stride: u64,
-    pub step_mode: HalVertexStepMode,
-    pub attributes: Vec<HalVertexAttribute>,
-}
-
-#[derive(Debug, Clone)]
-pub struct HalVertexAttribute {
-    pub format: HalVertexFormat,
-    pub offset: u64,
-    pub shader_location: u32,
-    pub metal_buffer_index: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum HalVertexFormat {
-    Float32,
-    Float32x2,
-    Float32x3,
-    Float32x4,
-    Unsupported,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum HalVertexStepMode {
-    Vertex,
-    Instance,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum HalPrimitiveTopology {
-    PointList,
-    LineList,
-    LineStrip,
-    TriangleList,
-    TriangleStrip,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct HalBufferTextureLayout {
-    pub offset: u64,
-    pub bytes_per_row: u32,
-    pub rows_per_image: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct HalBufferTextureCopy {
-    pub buffer: HalBuffer,
-    pub buffer_layout: HalBufferTextureLayout,
-    pub texture: HalTexture,
-    pub mip_level: u32,
-    pub origin: HalOrigin3d,
-    pub extent: HalExtent3d,
-}
-
-#[derive(Debug, Clone)]
-pub struct HalTextureCopy {
-    pub source: HalTexture,
-    pub source_mip_level: u32,
-    pub source_origin: HalOrigin3d,
-    pub destination: HalTexture,
-    pub destination_mip_level: u32,
-    pub destination_origin: HalOrigin3d,
-    pub extent: HalExtent3d,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct HalOrigin3d {
-    pub x: u32,
-    pub y: u32,
-    pub z: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct HalExtent3d {
-    pub width: u32,
-    pub height: u32,
-    pub depth_or_array_layers: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct HalTextureDescriptor {
-    pub format: HalTextureFormat,
-    pub width: u32,
-    pub height: u32,
-    pub depth_or_array_layers: u32,
-    pub mip_level_count: u32,
-    pub sample_count: u32,
-    pub usage: HalTextureUsage,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum HalTextureFormat {
-    R8Unorm,
-    Rgba8Unorm,
-    Bgra8Unorm,
-    Unsupported,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct HalTextureUsage {
-    pub copy_src: bool,
-    pub copy_dst: bool,
-    pub texture_binding: bool,
-    pub storage_binding: bool,
-    pub render_attachment: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct HalSamplerDescriptor {
-    pub address_mode_u: HalAddressMode,
-    pub address_mode_v: HalAddressMode,
-    pub address_mode_w: HalAddressMode,
-    pub mag_filter: HalFilterMode,
-    pub min_filter: HalFilterMode,
-    pub mipmap_filter: HalMipmapFilterMode,
-    pub lod_min_clamp: f32,
-    pub lod_max_clamp: f32,
-    pub compare: Option<HalCompareFunction>,
-    pub max_anisotropy: u16,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum HalAddressMode {
-    ClampToEdge,
-    Repeat,
-    MirrorRepeat,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum HalFilterMode {
-    Nearest,
-    Linear,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum HalMipmapFilterMode {
-    Nearest,
-    Linear,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum HalCompareFunction {
-    Never,
-    Less,
-    Equal,
-    LessEqual,
-    Greater,
-    NotEqual,
-    GreaterEqual,
-    Always,
 }
 
 #[derive(Debug, Clone)]
@@ -1033,34 +733,6 @@ mod tests {
 
         assert!(matches!(pipeline, HalRenderPipeline::Noop));
         Ok(())
-    }
-
-    #[test]
-    fn hal_surface_configuration_new_round_trips_fields() {
-        let usage = HalTextureUsage {
-            copy_src: true,
-            copy_dst: false,
-            texture_binding: true,
-            storage_binding: false,
-            render_attachment: true,
-        };
-        let config = HalSurfaceConfiguration::new(
-            HalTextureFormat::Rgba8Unorm,
-            usage,
-            320,
-            240,
-            HalPresentMode::Mailbox,
-        );
-
-        assert!(matches!(config.format, HalTextureFormat::Rgba8Unorm));
-        assert_eq!(config.usage.copy_src, usage.copy_src);
-        assert_eq!(config.usage.copy_dst, usage.copy_dst);
-        assert_eq!(config.usage.texture_binding, usage.texture_binding);
-        assert_eq!(config.usage.storage_binding, usage.storage_binding);
-        assert_eq!(config.usage.render_attachment, usage.render_attachment);
-        assert_eq!(config.width, 320);
-        assert_eq!(config.height, 240);
-        assert!(matches!(config.present_mode, HalPresentMode::Mailbox));
     }
 
     #[test]

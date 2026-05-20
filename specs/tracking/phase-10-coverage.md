@@ -244,6 +244,9 @@ P10.3a audit: see `specs/tracking/phase-10-audit.md`.
 
 ## yawgpu-hal/src/lib.rs (25 pub fn)
 
+Public API re-exported from `lib.rs` (paths unchanged); definitions live
+in sibling modules -- see file map in HANDOFF P11.1 commit.
+
 | pub fn | test name(s) |
 |---|---|
 | `HalInstance::new_noop` | `noop_creates_device_with_zero_allocations` (existing) |
@@ -273,6 +276,9 @@ P10.3a audit: see `specs/tracking/phase-10-audit.md`.
 | `HalBuffer::mapped_ptr` | `hal_buffer_mapped_ptr_noop_returns_none` |
 
 ## yawgpu-hal/src/metal/mod.rs (25 pub fn)
+
+Public API re-exported from `metal/mod.rs` (paths unchanged); definitions
+live in sibling modules -- see file map in HANDOFF P11.1 commit.
 
 All tests are ignored real-backend tests gated by `#[cfg(feature = "metal")]`.
 
@@ -305,6 +311,9 @@ All tests are ignored real-backend tests gated by `#[cfg(feature = "metal")]`.
 | `MetalBuffer::mapped_ptr` | `metal_buffer_mapped_ptr_returns_non_null_pointer` |
 
 ## yawgpu-hal/src/vulkan/mod.rs (22 pub fn)
+
+Public API re-exported from `vulkan/mod.rs` (paths unchanged); definitions
+live in sibling modules -- see file map in HANDOFF P11.1 commit.
 
 All tests are ignored real-backend tests gated by `#[cfg(feature = "vulkan")]`.
 Surface tests use null-surface/error-path coverage rather than adding a
