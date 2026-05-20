@@ -191,6 +191,25 @@ P10.3a audit: see `specs/tracking/phase-10-audit.md`.
 | `RenderPipeline::fragment_entry_name` | `compute_pipeline_accessors_and_render_pipeline_accessors`, `device_create_render_pipeline_happy_path_and_error_scope` |
 | `RenderPipeline::bind_group_layouts` | `compute_pipeline_accessors_and_render_pipeline_accessors` |
 
+## yawgpu-core/src/lib.rs - Query / Error / Future (14 pub fn)
+
+| pub fn | test name(s) |
+|---|---|
+| `QuerySet::kind` | `query_set_accessors_pin_kind_count_label_is_error_same_destroy` |
+| `QuerySet::count` | `query_set_accessors_pin_kind_count_label_is_error_same_destroy`, `device_create_query_set_validates_count_and_creates_happy_path` |
+| `QuerySet::set_label` | `query_set_accessors_pin_kind_count_label_is_error_same_destroy` |
+| `QuerySet::is_error` | `query_set_accessors_pin_kind_count_label_is_error_same_destroy`, `device_create_query_set_validates_count_and_creates_happy_path` |
+| `QuerySet::same` | `query_set_accessors_pin_kind_count_label_is_error_same_destroy` |
+| `QuerySet::destroy` | `query_set_accessors_pin_kind_count_label_is_error_same_destroy` |
+| `DeviceError::new` | `device_error_new_constructs_with_kind_and_message` |
+| `FutureId::get` | `future_id_get_and_from_raw_round_trip`, `future_registry_process_events_respects_callback_mode` |
+| `FutureId::from_raw` | `future_id_get_and_from_raw_round_trip` |
+| `FutureRegistry::new` | `future_registry_process_events_respects_callback_mode` |
+| `FutureRegistry::register` | `future_registry_process_events_respects_callback_mode` |
+| `FutureRegistry::complete` | `future_registry_process_events_respects_callback_mode` |
+| `FutureRegistry::process_events` | `future_registry_process_events_respects_callback_mode` |
+| `FutureRegistry::wait_any` | `future_registry_process_events_respects_callback_mode` |
+
 ## yawgpu-hal/src/noop/mod.rs (14 pub fn)
 
 | pub fn | test name(s) |
@@ -379,3 +398,16 @@ as a Phase-10 follow-up.
 | `free_supported_features` | `map_features_to_native_allocates_feature_array_and_free_supported_features_releases_it`, `free_supported_features_accepts_null_feature_array` |
 | `map_limits_to_native` | `map_limits_to_native_round_trips_through_map_limits` |
 | `map_limits` | `map_limits_round_trips_every_field_from_native`, `map_limits_to_native_round_trips_through_map_limits` |
+
+## Phase 10 yawgpu-core coverage summary
+
+Total kept pub fn (post-P10.3a audit): 183
+- Instance / Adapter / Device / Queue (51): ☑ P10.3b
+- Buffer / Texture / Sampler (40):           ☑ P10.3c
+- Encoder / Pass / Bundle (59):              ☑ P10.3d
+- Pipeline / Shader (18):                    ☑ P10.3e
+- Query / Error / Future (14):               ☑ P10.3f
+- Surface / utilities (0 — absorbed):        ☑ via P10.3b
+
+P10.3 complete: all 183 yawgpu-core kept-pub fn have at least one direct
+inline `#[cfg(test)]` unit test.

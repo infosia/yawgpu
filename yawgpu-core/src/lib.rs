@@ -9839,6 +9839,67 @@ fn fs() -> @location(0) vec4<f32> {
     }
 
     #[test]
+    fn query_set_accessors_pin_kind_count_label_is_error_same_destroy() {
+        let device = noop_device();
+        let (query_set, error) = device.create_query_set(QuerySetDescriptor {
+            label: "queries".to_owned(),
+            kind: QueryType::Occlusion,
+            count: 4,
+        });
+        let clone = query_set.clone();
+        let (other, other_error) = device.create_query_set(QuerySetDescriptor {
+            label: "other".to_owned(),
+            kind: QueryType::Occlusion,
+            count: 2,
+        });
+
+        assert_eq!(error, None);
+        assert_eq!(other_error, None);
+        assert_eq!(query_set.kind(), QueryType::Occlusion);
+        assert_eq!(query_set.count(), 4);
+        assert!(!query_set.is_error());
+        assert!(query_set.same(&clone));
+        assert!(!query_set.same(&other));
+        assert_eq!(query_set.inner.label.lock().as_str(), "queries");
+
+        query_set.set_label("renamed queries");
+        assert_eq!(query_set.inner.label.lock().as_str(), "renamed queries");
+        assert!(!query_set.is_destroyed());
+        query_set.destroy();
+        query_set.destroy();
+        assert!(query_set.is_destroyed());
+
+        let (error_query_set, error) = device.create_query_set(QuerySetDescriptor {
+            label: "bad".to_owned(),
+            kind: QueryType::Occlusion,
+            count: 0,
+        });
+        assert!(error_query_set.is_error());
+        assert_eq!(
+            error,
+            Some("query set count must be greater than zero".to_owned())
+        );
+    }
+
+    #[test]
+    fn device_error_new_constructs_with_kind_and_message() {
+        let validation = DeviceError::new(ErrorKind::Validation, "validation message");
+        assert_eq!(validation.kind, ErrorKind::Validation);
+        assert_eq!(validation.message, "validation message");
+
+        let internal = DeviceError::new(ErrorKind::Internal, String::from("internal message"));
+        assert_eq!(internal.kind, ErrorKind::Internal);
+        assert_eq!(internal.message, "internal message");
+    }
+
+    #[test]
+    fn future_id_get_and_from_raw_round_trip() {
+        assert_eq!(FutureId::from_raw(42).get(), 42);
+        assert_eq!(FutureId::from_raw(0).get(), 0);
+        assert_eq!(FutureId::from_raw(u64::MAX).get(), u64::MAX);
+    }
+
+    #[test]
     fn device_same_distinguishes_clone_from_distinct_device() {
         let device = noop_device();
         let clone = device.clone();
