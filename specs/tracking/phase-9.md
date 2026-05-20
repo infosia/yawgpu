@@ -261,10 +261,78 @@ clear/store/end path; P9.3 just exercises the `Some(pipeline)`/
   existing `e2e_*_render` tests pixel-verify the same pipeline+
   draw machinery against an offscreen target).
 
-## P9.4 — Dawn samples (HelloTriangle / ComputeBoids …)  *(after P9.3)*
-C rewrites of the C-ABI-expressible Dawn samples; record C++-wrapper-
-bound / windowed-infeasible ones as deferred/N-A. Then Phase 9
-Review.
+## P9.4 — Dawn samples (HelloTriangle, C rewrite)  *(☑ DONE — real-GPU-verified)*
+
+Done: `examples/hello_triangle/` — C rewrite of Dawn's
+`src/dawn/samples/HelloTriangle.cpp`. Distinct from P9.3
+`triangle` in that the three positions come from a
+**vertex buffer** instead of `@builtin(vertex_index)`,
+closing the windowed × VB gap in the example coverage:
+
+- `shader.wgsl`: `@vertex fn vs_main(@location(0) pos: vec4<f32>)`
+  + solid-red `fs_main` (exact translation of Dawn's inline
+  shader).
+- `main.c`: window + surface + capabilities + format pick
+  (BGRA8/RGBA8 Unorm via `wgpuSurfaceGetCapabilities`) +
+  60-frame auto-exit, mirroring P9.3. Adds the 12-float
+  `vertices[12]` array (3 × vec4 — exactly Dawn's data),
+  creates the VB via `yawgpu_create_buffer_init` with usage
+  `Vertex | CopyDst`, declares a `WGPUVertexBufferLayout`
+  (`arrayStride = 4 * sizeof(float)`, `stepMode = Vertex`,
+  one `Float32x4` attribute at `shaderLocation = 0`), and per
+  frame `SetVertexBuffer(0, vb, 0, WGPU_WHOLE_SIZE)` before
+  `Draw(3, 1, 0, 0)`. Cleanup releases the VB alongside the
+  pipeline / pipeline-layout / shader.
+- `CMakeLists.txt` mirrors `examples/triangle` (POST_BUILD
+  `copy_if_different` of `shader.wgsl` next to the binary).
+- `examples/CMakeLists.txt` adds `add_subdirectory(hello_
+  triangle)` inside `if(YAWGPU_GLFW_FOUND)`; README documents.
+
+No yawgpu Rust changes — Phase-7 `e2e_metal/vulkan_render`
+already pixel-verified the VB + render-pipeline path against
+offscreen textures, P9.2 proved the swapchain texture as a
+color attachment (clear-only), P9.3 proved pipeline+draw on it.
+P9.4 just composes pipeline + VB + draw on a swapchain texture
+via the C example.
+
+**Verification (real-GPU, 2026-05-20):**
+- Noop `cargo test --workspace` **58/58 binaries** unchanged.
+  `cargo clippy --workspace --all-targets -- -D warnings`
+  clean. `cargo build/clippy -p yawgpu --features metal/vulkan`
+  clean.
+- Phase-7 e2e regression: `e2e_metal_render` 3/3 +
+  `e2e_vulkan_render` 2/2 (no regression). Prior P9.2
+  `surface_smoke` and P9.3 `triangle` both backends still
+  exit 0.
+- real-GPU `hello_triangle` (Claude's Bash, foreground from the
+  binary's dir so `shader.wgsl` resolves):
+  `YAWGPU_BACKEND=metal` and (with `$VULKAN_SDK` env sourced)
+  `YAWGPU_BACKEND=vulkan` both open the window, draw the red
+  triangle on black for 60 frames, exit 0.
+
+### Deferred Dawn samples (recorded for Phase 9 Review)
+- **ComputeBoids** — `dawn/src/dawn/samples/
+  ComputeBoids.cpp` (327 lines C++). Scope exceeds a single
+  samples-port slice: ping-pong storage buffer (`Storage |
+  Vertex | CopyDst` × 2 + `queueWriteBuffer` initial fill),
+  uniform-buffer-backed `SimParams`, compute pipeline updating
+  particles, render with **instanced** draw (1024 particles ×
+  3 vertices each), and a real-time compute→render frame
+  loop on the swapchain. Tracked as a post-Phase-9 follow-up
+  slice rather than rolled into P9.4. Phase-7
+  `e2e_*_compute` + `e2e_*_render` already cover the
+  individual pipelines; the gap is the windowed compute+
+  render integration and instanced draw.
+- **Animometer** (204 lines) / **ManualSurfaceTest**
+  (509 lines) — block-80 already records these as
+  stress/manual; deferred. Animometer would re-use existing
+  windowed-triangle infrastructure for a many-uniform-buffer
+  performance stress; ManualSurfaceTest is interactive surface
+  reconfig testing that doesn't fit the auto-exit smoke model.
+- **DawnInfo** (300 lines) — already covered by P9.0
+  `examples/device_info` (C rewrite of the same adapter /
+  device / limits / features dump). Not re-ported.
+- **HelloTriangle** — done in this slice (above).
 
 ## Exit criteria
 

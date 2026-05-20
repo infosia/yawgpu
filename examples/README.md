@@ -7,3 +7,5 @@ These examples are a separate CMake tree and are not Cargo workspace members. In
 `surface_smoke` is built when GLFW is available (`brew install glfw`); it opens a window, clears the swapchain to a slate color for about 60 frames or until the window is closed, and then exits.
 
 `triangle` is built when GLFW is available (`brew install glfw`). Select `YAWGPU_BACKEND=metal` or `YAWGPU_BACKEND=vulkan` at runtime; for Vulkan, source `$VULKAN_SDK/setup-env.sh` first. It opens a window, draws a red triangle on a black background for about 60 frames or until the window is closed, and then exits with status 0.
+
+`hello_triangle` is the Dawn HelloTriangle port and has the same prerequisites as `triangle`. It draws the same red-on-black triangle for about 60 frames, but feeds positions from a vertex buffer instead of P9.3's `@builtin(vertex_index)` shader.
