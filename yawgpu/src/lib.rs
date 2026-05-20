@@ -5274,6 +5274,8 @@ pub unsafe fn testing_get_queue_label(queue: native::WGPUQueue) -> String {
 mod tests {
     #![allow(non_snake_case)]
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     #[derive(Default)]
@@ -5544,6 +5546,140 @@ mod tests {
         let adapter = request_noop_adapter(instance);
         let device = request_noop_device(instance, adapter);
         (instance, adapter, device)
+    }
+
+    #[test]
+    fn WGPUDeviceImpl_set_uncaptured_error_callback_records_callback_for_dispatch() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let device_impl = clone_handle(device, "WGPUDevice");
+            let counter = Arc::new(AtomicUsize::new(0));
+            let callback_counter = Arc::clone(&counter);
+            device_impl.set_uncaptured_error_callback(Some(move |_error| {
+                callback_counter.fetch_add(1, Ordering::Relaxed);
+            }));
+
+            device_impl.dispatch_error(core::ErrorKind::Internal, "direct dispatch");
+
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
+            drop(device_impl);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn WGPUDeviceImpl_dispatch_error_routes_to_uncaptured_callback() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let device_impl = clone_handle(device, "WGPUDevice");
+            let counter = Arc::new(AtomicUsize::new(0));
+            let callback_counter = Arc::clone(&counter);
+            device_impl.set_uncaptured_error_callback(Some(move |error: core::DeviceError| {
+                assert!(matches!(error.kind, core::ErrorKind::Validation));
+                assert_eq!(error.message, "validation dispatch");
+                callback_counter.fetch_add(1, Ordering::Relaxed);
+            }));
+
+            device_impl.dispatch_error(core::ErrorKind::Validation, "validation dispatch");
+
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
+            drop(device_impl);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn testing_set_uncaptured_error_callback_installs_callback_for_dispatch() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let counter = Arc::new(AtomicUsize::new(0));
+            let callback_counter = Arc::clone(&counter);
+            testing_set_uncaptured_error_callback(
+                device,
+                Some(move |_error| {
+                    callback_counter.fetch_add(1, Ordering::Relaxed);
+                }),
+            );
+
+            testing_dispatch_device_error(device, core::ErrorKind::Internal, "helper dispatch");
+
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn testing_dispatch_device_error_routes_to_uncaptured_callback() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let counter = Arc::new(AtomicUsize::new(0));
+            let callback_counter = Arc::clone(&counter);
+            testing_set_uncaptured_error_callback(
+                device,
+                Some(move |error: core::DeviceError| {
+                    assert!(matches!(error.kind, core::ErrorKind::Validation));
+                    assert_eq!(error.message, "helper validation");
+                    callback_counter.fetch_add(1, Ordering::Relaxed);
+                }),
+            );
+
+            testing_dispatch_device_error(device, core::ErrorKind::Validation, "helper validation");
+
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn testing_bind_group_layout_entry_visibility_returns_entry_visibility_and_none() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let visibility = native::WGPUShaderStage_Vertex | native::WGPUShaderStage_Fragment;
+            let entry = native::WGPUBindGroupLayoutEntry {
+                nextInChain: std::ptr::null_mut(),
+                binding: 7,
+                visibility,
+                bindingArraySize: 0,
+                buffer: native::WGPUBufferBindingLayout {
+                    nextInChain: std::ptr::null_mut(),
+                    type_: native::WGPUBufferBindingType_Uniform,
+                    hasDynamicOffset: 0,
+                    minBindingSize: 16,
+                },
+                sampler: native::WGPUSamplerBindingLayout {
+                    nextInChain: std::ptr::null_mut(),
+                    type_: native::WGPUSamplerBindingType_BindingNotUsed,
+                },
+                texture: native::WGPUTextureBindingLayout {
+                    nextInChain: std::ptr::null_mut(),
+                    sampleType: native::WGPUTextureSampleType_BindingNotUsed,
+                    viewDimension: native::WGPUTextureViewDimension_Undefined,
+                    multisampled: 0,
+                },
+                storageTexture: native::WGPUStorageTextureBindingLayout {
+                    nextInChain: std::ptr::null_mut(),
+                    access: native::WGPUStorageTextureAccess_BindingNotUsed,
+                    format: native::WGPUTextureFormat_Undefined,
+                    viewDimension: native::WGPUTextureViewDimension_Undefined,
+                },
+            };
+            let descriptor = native::WGPUBindGroupLayoutDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                entryCount: 1,
+                entries: &entry,
+            };
+            let layout = wgpuDeviceCreateBindGroupLayout(device, &descriptor);
+
+            assert_eq!(
+                testing_bind_group_layout_entry_visibility(layout, 7),
+                Some(visibility)
+            );
+            assert_eq!(testing_bind_group_layout_entry_visibility(layout, 9), None);
+
+            wgpuBindGroupLayoutRelease(layout);
+            release_handles(instance, adapter, device);
+        }
     }
 
     fn empty_string_view() -> native::WGPUStringView {

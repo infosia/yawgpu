@@ -294,15 +294,10 @@ All tests are ignored real-backend tests gated by `#[cfg(feature = "metal")]`.
 ## yawgpu-hal/src/vulkan/mod.rs (22 pub fn)
 
 All tests are ignored real-backend tests gated by `#[cfg(feature = "vulkan")]`.
-Surface tests use null-surface/error-path coverage rather than adding a CAMetalLayer
-dev-dependency. **Follow-up:** `VulkanSurface::configure`'s happy path requires a
-valid `vk::SurfaceKHR`; a null-surface unit test crashed in
-`vkGetPhysicalDeviceSurfaceCapabilitiesKHR` (MoltenVK does not gracefully reject
-`VK_NULL_HANDLE`), so direct unit coverage is deferred — the happy path is
-covered by Phase-9 e2e (`examples/surface_smoke`, `examples/triangle`,
-`examples/hello_triangle` run with `YAWGPU_BACKEND=vulkan`). A defensive
-null-handle pre-check in `VulkanSurface::configure` would close this gap; tracked
-as a Phase-10 follow-up.
+Surface tests use null-surface/error-path coverage rather than adding a
+CAMetalLayer dev-dependency; the valid-surface happy path remains covered by
+Phase-9 e2e (`examples/surface_smoke`, `examples/triangle`,
+`examples/hello_triangle` run with `YAWGPU_BACKEND=vulkan`).
 
 | pub fn | test name(s) |
 |---|---|
@@ -318,7 +313,7 @@ as a Phase-10 follow-up.
 | `VulkanDevice::create_sampler` | `vulkan_device_create_sampler_returns_sampler` |
 | `VulkanDevice::create_compute_pipeline` | `vulkan_device_create_compute_pipeline_accepts_spirv` |
 | `VulkanDevice::create_render_pipeline` | `vulkan_device_create_render_pipeline_accepts_spirv_stages` |
-| `VulkanSurface::configure` | (deferred — e2e-covered; see follow-up note above) |
+| `VulkanSurface::configure` | `vulkan_surface_configure_errors_for_null_surface` |
 | `VulkanSurface::unconfigure` | `vulkan_surface_unconfigure_is_idempotent` |
 | `VulkanSurface::acquire_next_texture` | `vulkan_surface_acquire_next_texture_errors_when_unconfigured` |
 | `VulkanSurface::present` | `vulkan_surface_present_errors_without_acquired_image` |
@@ -329,13 +324,13 @@ as a Phase-10 follow-up.
 | `VulkanBuffer::read` | `vulkan_buffer_read_returns_written_bytes` |
 | `VulkanBuffer::mapped_ptr` | `vulkan_buffer_mapped_ptr_returns_non_null_pointer` |
 
-## yawgpu/src/conv.rs (66 pub fn)
+## yawgpu/src/conv.rs (65 pub fn)
 
 | pub fn | test name(s) |
 |---|---|
 | `arc_to_handle` | `arc_to_handle_round_trips_with_clone_handle_refcount_math` |
-| `release_handle` | `release_handle_drops_owned_reference_once` |
-| `add_ref_handle` | `add_ref_handle_increments_refcount_for_later_release` |
+| `release_handle` | `release_handle_drops_owned_reference_once`, `release_handle_null_panics_with_contract_message` |
+| `add_ref_handle` | `add_ref_handle_increments_refcount_for_later_release`, `add_ref_handle_null_panics_with_contract_message` |
 | `clone_handle` | `arc_to_handle_round_trips_with_clone_handle_refcount_math`, `clone_handle_leaves_original_handle_valid`, `clone_handle_null_panics_with_contract_message` |
 | `borrow_handle` | `borrow_handle_returns_reference_without_consuming_arc`, `borrow_handle_null_panics_with_contract_message` |
 | `string_view` | `string_view_round_trips_data_and_empty_slice` |
@@ -420,7 +415,7 @@ as a Phase-10 follow-up.
 | `wgpuAdapterRequestDevice` | `wgpuAdapterRequestDevice_process_events_returns_success_device`, `request_noop_device_helper_returns_live_device` |
 | `wgpuSupportedFeaturesFreeMembers` | `wgpuAdapterGetFeatures_populates_supported_features_and_free_members`, `wgpuSupportedFeaturesFreeMembers_accepts_empty_features` |
 
-## yawgpu/src/lib.rs - Device + Queue (32 pub fn)
+## yawgpu/src/lib.rs - Device + Queue (32 C FFI fn + 4 public helper fn)
 
 | pub fn | test name(s) |
 |---|---|
@@ -428,6 +423,10 @@ as a Phase-10 follow-up.
 | `wgpuDeviceAddRef` | `wgpuDeviceAddRef_and_wgpuDeviceRelease_balance_owned_refs` |
 | `wgpuDeviceDestroy` | `wgpuDeviceDestroy_and_wgpuDeviceGetLostFuture_complete_loss` |
 | `wgpuDeviceGetLostFuture` | `wgpuDeviceDestroy_and_wgpuDeviceGetLostFuture_complete_loss` |
+| `WGPUDeviceImpl::set_uncaptured_error_callback` | `WGPUDeviceImpl_set_uncaptured_error_callback_records_callback_for_dispatch` |
+| `WGPUDeviceImpl::dispatch_error` | `WGPUDeviceImpl_dispatch_error_routes_to_uncaptured_callback` |
+| `testing_set_uncaptured_error_callback` | `testing_set_uncaptured_error_callback_installs_callback_for_dispatch` |
+| `testing_dispatch_device_error` | `testing_dispatch_device_error_routes_to_uncaptured_callback` |
 | `wgpuDevicePushErrorScope` | `wgpuDevicePushErrorScope_and_wgpuDevicePopErrorScope_capture_and_empty_stack`, `wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors`, `wgpuQueueWriteBuffer_and_wgpuQueueWriteTexture_validate_happy_and_error_paths` |
 | `wgpuDevicePopErrorScope` | `wgpuDevicePushErrorScope_and_wgpuDevicePopErrorScope_capture_and_empty_stack`, `wgpuDeviceCreate_resources_and_invalid_descriptors_report_errors`, `wgpuQueueWriteBuffer_and_wgpuQueueWriteTexture_validate_happy_and_error_paths` |
 | `wgpuDeviceSetLabel` | `wgpuDeviceSetLabel_limits_features_and_has_feature_pin_noop_device` |
@@ -488,7 +487,7 @@ as a Phase-10 follow-up.
 | `wgpuSamplerRelease` | `wgpuSampler_release_and_addref_lifecycle` |
 | `wgpuSamplerAddRef` | `wgpuSampler_release_and_addref_lifecycle` |
 
-## yawgpu/src/lib.rs - Encoder + Pass (48 pub fn)
+## yawgpu/src/lib.rs - Encoder + Pass (49 pub fn)
 
 | pub fn | test name(s) |
 |---|---|
@@ -542,7 +541,7 @@ as a Phase-10 follow-up.
 | `wgpuComputePassEncoderRelease` | `wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers`, `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
 | `wgpuComputePassEncoderAddRef` | `wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers` |
 
-## yawgpu/src/lib.rs - Bundle + Pipeline + Shader + BindGroup + Query + Surface (46 pub fn)
+## yawgpu/src/lib.rs - Bundle + Pipeline + Shader + BindGroup + Query + Surface (46 C FFI fn + 1 public helper fn)
 
 | pub fn | test name(s) |
 |---|---|
@@ -570,6 +569,7 @@ as a Phase-10 follow-up.
 | `wgpuRenderPipelineAddRef` | `wgpuRenderPipeline_get_bind_group_layout_release_addref` |
 | `wgpuBindGroupLayoutRelease` | `wgpuComputePipeline_get_bind_group_layout_release_addref`, `wgpuRenderPipeline_get_bind_group_layout_release_addref`, `wgpuBindGroupLayout_and_BindGroup_and_PipelineLayout_release_addref`, `wgpuRenderBundleEncoder_set_pipeline_bind_group_buffers_and_draws`, `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws`, `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
 | `wgpuBindGroupLayoutAddRef` | `wgpuBindGroupLayout_and_BindGroup_and_PipelineLayout_release_addref` |
+| `testing_bind_group_layout_entry_visibility` | `testing_bind_group_layout_entry_visibility_returns_entry_visibility_and_none` |
 | `wgpuBindGroupRelease` | `wgpuBindGroupLayout_and_BindGroup_and_PipelineLayout_release_addref`, `wgpuRenderBundleEncoder_set_pipeline_bind_group_buffers_and_draws`, `wgpuRenderPassEncoder_set_pipeline_bind_group_buffers_and_draws`, `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
 | `wgpuBindGroupAddRef` | `wgpuBindGroupLayout_and_BindGroup_and_PipelineLayout_release_addref` |
 | `wgpuPipelineLayoutRelease` | `wgpuComputePipeline_get_bind_group_layout_release_addref`, `wgpuRenderPipeline_get_bind_group_layout_release_addref`, `wgpuBindGroupLayout_and_BindGroup_and_PipelineLayout_release_addref` |
@@ -606,13 +606,25 @@ Total kept pub fn (post-P10.3a audit): 183
 P10.3 complete: all 183 yawgpu-core kept-pub fn have at least one direct
 inline `#[cfg(test)]` unit test.
 
+## yawgpu (C FFI) - public constants
+
+Literal-value public constants are covered by their consuming tests and helpers:
+
+| pub const | consuming test / helper |
+|---|---|
+| `conv::WGPU_STRLEN` | `string_view_to_str_handles_explicit_strlen_and_null_data` |
+| `WGPU_YAWGPU_INSTANCE_BACKEND_NOOP` | `make_noop_instance` helper used by Noop C FFI unit tests |
+| `WGPU_YAWGPU_INSTANCE_BACKEND_METAL` | `e2e_metal_basic` backend-selection descriptor |
+| `WGPU_YAWGPU_INSTANCE_BACKEND_VULKAN` | `e2e_vulkan_basic` backend-selection descriptor |
+| `WGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT` | `make_noop_instance` helper used by Noop C FFI unit tests |
+
 ## Phase 10 yawgpu (C FFI) coverage summary
 
 Total pub unsafe extern "C" fn: 169
 - Instance + Adapter (16):                         ☑ P10.4a
 - Device + Queue (32):                             ☑ P10.4b
 - Buffer / Texture / TextureView / Sampler (26):   ☑ P10.4c
-- Encoder + Pass (48):                             ☑ P10.4d
+- Encoder + Pass (49):                             ☑ P10.4d
 - Bundle + Pipeline + Shader + BindGroup +
   Query + Surface (46):                            ☑ P10.4e
 

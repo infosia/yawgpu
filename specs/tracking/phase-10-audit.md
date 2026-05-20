@@ -14,10 +14,10 @@ Inventory source: `git show HEAD:yawgpu-core/src/lib.rs` before P10.3a narrowing
 
 - Instance / Adapter / Device: 51
 - Buffer / Texture / Sampler: 40
-- Pipeline / Shader: 17
+- Pipeline / Shader: 18
 - Encoder / Pass / Bundle: 59
 - Query / Error / Future: 14
-- Surface / utilities: 2
+- Surface / utilities: 1
 
 ## Inventory
 

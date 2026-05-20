@@ -385,6 +385,12 @@ impl VulkanSurface {
         device: &VulkanDevice,
         config: HalSurfaceConfiguration,
     ) -> Result<(), HalError> {
+        if self.surface == vk::SurfaceKHR::null() {
+            return Err(HalError::SwapchainCreationFailed {
+                backend: BACKEND,
+                message: "surface is null",
+            });
+        }
         self.swapchain = None;
         let swapchain = create_swapchain(Arc::clone(&device.inner), self.surface, config)?;
         self.config = Some(config);
@@ -2821,8 +2827,8 @@ fn shader_error(message: &'static str) -> HalError {
 mod tests {
     use super::*;
     use crate::{
-        HalBuffer, HalBufferCopy, HalRenderPipelineDescriptor, HalSamplerDescriptor,
-        HalTextureUsage,
+        HalBuffer, HalBufferCopy, HalPresentMode, HalRenderPipelineDescriptor,
+        HalSamplerDescriptor, HalTextureUsage,
     };
 
     fn vulkan_device() -> VulkanDevice {
@@ -2878,6 +2884,16 @@ mod tests {
             vertex_buffers: Vec::new(),
             primitive_topology: HalPrimitiveTopology::TriangleList,
         }
+    }
+
+    fn surface_config() -> HalSurfaceConfiguration {
+        HalSurfaceConfiguration::new(
+            HalTextureFormat::Bgra8Unorm,
+            texture_usage(),
+            4,
+            4,
+            HalPresentMode::Fifo,
+        )
     }
 
     fn dummy_surface(instance: &VulkanInstance) -> VulkanSurface {
@@ -3078,19 +3094,24 @@ mod tests {
         assert_ne!(pipeline.inner.pipeline, vk::Pipeline::null());
     }
 
-    // `VulkanSurface::configure` cannot be unit-tested with a
-    // synthesized null `vk::SurfaceKHR`: the configure path calls
-    // `vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device,
-    // VK_NULL_HANDLE)` which is undefined behaviour (SIGSEGV in
-    // practice on MoltenVK). Constructing a real
-    // `VulkanSurface` requires a valid `CAMetalLayer` pointer,
-    // which would pull `objc2-quartz-core` into yawgpu-hal as a
-    // dev-dependency — deliberately out of scope for P10.1b. The
-    // happy path is exhaustively covered by Phase-9 e2e
-    // (`examples/surface_smoke`, `examples/triangle`,
-    // `examples/hello_triangle` with `YAWGPU_BACKEND=vulkan`).
-    // The null-surface validation gap is logged as a Phase 10
-    // follow-up in `specs/tracking/phase-10-coverage.md`.
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_surface_configure_errors_for_null_surface() {
+        let instance = VulkanInstance::new().expect("create Vulkan instance");
+        let device = vulkan_device();
+        let mut surface = dummy_surface(&instance);
+        let error = surface
+            .configure(&device, surface_config())
+            .expect_err("null surface must fail");
+        assert!(matches!(
+            error,
+            HalError::SwapchainCreationFailed {
+                backend: "vulkan",
+                message: "surface is null"
+            }
+        ));
+    }
 
     #[test]
     #[ignore = "manual real Vulkan backend test"]

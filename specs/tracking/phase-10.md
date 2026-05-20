@@ -1,7 +1,11 @@
 # Phase 10 — Public-API unit-test catch-up
 
-Status: **in progress** (P10.0 active). Rules/plan:
-`../blocks/90-unit-tests.md`. Roles/loop:
+Status: **COMPLETE** (2026-05-21 — P10.0 docs + P10.1a/b
+yawgpu-hal (86 fn) + P10.2 yawgpu/conv.rs (65 fn) + P10.3a
+audit + P10.3b–f yawgpu-core (183 fn) + P10.4a–e yawgpu C FFI
+(169 fn + 7 inherent / 5 const) + Phase 10 Review fixes;
+`tracking/phase-10-review.md` records findings + fix log).
+Rules/plan: `../blocks/90-unit-tests.md`. Roles/loop:
 `../reference/workflow.md`.
 
 Phase 10 closes the unit-test gap left by the Phase 0–9 "TDD
