@@ -22,6 +22,17 @@ typedef struct MapState {
     bool called;
 } MapState;
 
+typedef struct CaptureApp {
+    YawgpuContext context;
+    WGPUQueue queue;
+    WGPUBuffer output_buffer;
+    WGPUTexture texture;
+    WGPUTextureView texture_view;
+    BufferDimensions dimensions;
+    uint64_t buffer_size;
+    bool output_buffer_mapped;
+} CaptureApp;
+
 static uint32_t align_up_u32(uint32_t value, uint32_t alignment) {
     uint32_t remainder = value % alignment;
     if (remainder == 0) {
@@ -56,48 +67,59 @@ static void map_callback(WGPUMapAsyncStatus status,
     }
 }
 
-int main(void) {
-    int exit_code = EXIT_FAILURE;
-    YawgpuContext context = {0};
-    WGPUQueue queue = NULL;
-    WGPUBuffer output_buffer = NULL;
-    WGPUTexture texture = NULL;
-    WGPUTextureView texture_view = NULL;
-    WGPUCommandEncoder encoder = NULL;
-    WGPUCommandBuffer commands = NULL;
-    bool output_buffer_mapped = false;
+static void capture_app_destroy(CaptureApp *app) {
+    if (app->output_buffer_mapped) {
+        wgpuBufferUnmap(app->output_buffer);
+    }
+    if (app->texture_view) {
+        wgpuTextureViewRelease(app->texture_view);
+    }
+    if (app->texture) {
+        wgpuTextureRelease(app->texture);
+    }
+    if (app->output_buffer) {
+        wgpuBufferRelease(app->output_buffer);
+    }
+    if (app->queue) {
+        wgpuQueueRelease(app->queue);
+    }
+    yawgpu_context_release(&app->context);
+    *app = (CaptureApp){0};
+}
 
-    context = yawgpu_context_create();
-    if (!context.instance || !context.adapter || !context.device) {
+static bool capture_app_init(CaptureApp *app) {
+    *app = (CaptureApp){0};
+    app->context = yawgpu_context_create();
+    if (!app->context.instance || !app->context.adapter || !app->context.device) {
         fprintf(stderr, "failed to create yawgpu context\n");
-        goto cleanup;
+        return false;
     }
 
-    queue = wgpuDeviceGetQueue(context.device);
-    if (!queue) {
+    app->queue = wgpuDeviceGetQueue(app->context.device);
+    if (!app->queue) {
         fprintf(stderr, "failed to get device queue\n");
-        goto cleanup;
+        return false;
     }
 
-    BufferDimensions dimensions = buffer_dimensions_create(IMAGE_WIDTH, IMAGE_HEIGHT);
-    uint64_t buffer_size = (uint64_t)dimensions.padded_bytes_per_row * dimensions.height;
+    app->dimensions = buffer_dimensions_create(IMAGE_WIDTH, IMAGE_HEIGHT);
+    app->buffer_size = (uint64_t)app->dimensions.padded_bytes_per_row * app->dimensions.height;
     WGPUExtent3D texture_size = {
-        .width = dimensions.width,
-        .height = dimensions.height,
+        .width = app->dimensions.width,
+        .height = app->dimensions.height,
         .depthOrArrayLayers = 1,
     };
 
-    output_buffer = wgpuDeviceCreateBuffer(
-        context.device,
+    app->output_buffer = wgpuDeviceCreateBuffer(
+        app->context.device,
         &(WGPUBufferDescriptor){
             .nextInChain = NULL,
             .label = yawgpu_string_view("capture output buffer"),
             .usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst,
-            .size = buffer_size,
+            .size = app->buffer_size,
             .mappedAtCreation = false,
         });
-    texture = wgpuDeviceCreateTexture(
-        context.device,
+    app->texture = wgpuDeviceCreateTexture(
+        app->context.device,
         &(WGPUTextureDescriptor){
             .nextInChain = NULL,
             .label = yawgpu_string_view("capture texture"),
@@ -110,21 +132,35 @@ int main(void) {
             .viewFormatCount = 0,
             .viewFormats = NULL,
         });
-    if (!output_buffer || !texture) {
+    if (!app->output_buffer || !app->texture) {
         fprintf(stderr, "failed to create capture resources\n");
-        goto cleanup;
+        return false;
     }
 
-    texture_view = wgpuTextureCreateView(texture, NULL);
-    encoder = wgpuDeviceCreateCommandEncoder(
-        context.device,
+    app->texture_view = wgpuTextureCreateView(app->texture, NULL);
+    if (!app->texture_view) {
+        fprintf(stderr, "failed to create texture view\n");
+        return false;
+    }
+
+    return true;
+}
+
+static bool capture_app_run(CaptureApp *app) {
+    WGPUExtent3D texture_size = {
+        .width = app->dimensions.width,
+        .height = app->dimensions.height,
+        .depthOrArrayLayers = 1,
+    };
+    WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(
+        app->context.device,
         &(WGPUCommandEncoderDescriptor){
             .nextInChain = NULL,
             .label = yawgpu_string_view("capture encoder"),
         });
-    if (!texture_view || !encoder) {
-        fprintf(stderr, "failed to create texture view or command encoder\n");
-        goto cleanup;
+    if (!encoder) {
+        fprintf(stderr, "failed to create command encoder\n");
+        return false;
     }
 
     WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(
@@ -136,7 +172,7 @@ int main(void) {
             .colorAttachments = (WGPURenderPassColorAttachment[]){
                 {
                     .nextInChain = NULL,
-                    .view = texture_view,
+                    .view = app->texture_view,
                     .depthSlice = WGPU_DEPTH_SLICE_UNDEFINED,
                     .resolveTarget = NULL,
                     .loadOp = WGPULoadOp_Clear,
@@ -155,7 +191,8 @@ int main(void) {
         });
     if (!pass) {
         fprintf(stderr, "failed to begin render pass\n");
-        goto cleanup;
+        wgpuCommandEncoderRelease(encoder);
+        return false;
     }
     wgpuRenderPassEncoderEnd(pass);
     wgpuRenderPassEncoderRelease(pass);
@@ -163,7 +200,7 @@ int main(void) {
     wgpuCommandEncoderCopyTextureToBuffer(
         encoder,
         &(WGPUTexelCopyTextureInfo){
-            .texture = texture,
+            .texture = app->texture,
             .mipLevel = 0,
             .origin = {
                 .x = 0,
@@ -173,16 +210,16 @@ int main(void) {
             .aspect = WGPUTextureAspect_All,
         },
         &(WGPUTexelCopyBufferInfo){
-            .buffer = output_buffer,
+            .buffer = app->output_buffer,
             .layout = {
                 .offset = 0,
-                .bytesPerRow = dimensions.padded_bytes_per_row,
+                .bytesPerRow = app->dimensions.padded_bytes_per_row,
                 .rowsPerImage = WGPU_COPY_STRIDE_UNDEFINED,
             },
         },
         &texture_size);
 
-    commands = wgpuCommandEncoderFinish(
+    WGPUCommandBuffer commands = wgpuCommandEncoderFinish(
         encoder,
         &(WGPUCommandBufferDescriptor){
             .nextInChain = NULL,
@@ -190,16 +227,19 @@ int main(void) {
         });
     if (!commands) {
         fprintf(stderr, "failed to finish command encoder\n");
-        goto cleanup;
+        wgpuCommandEncoderRelease(encoder);
+        return false;
     }
-    wgpuQueueSubmit(queue, 1, &commands);
+    wgpuQueueSubmit(app->queue, 1, &commands);
+    wgpuCommandBufferRelease(commands);
+    wgpuCommandEncoderRelease(encoder);
 
     MapState map_state = {0};
     WGPUFuture map_future = wgpuBufferMapAsync(
-        output_buffer,
+        app->output_buffer,
         WGPUMapMode_Read,
         0,
-        buffer_size,
+        app->buffer_size,
         (WGPUBufferMapCallbackInfo){
             .nextInChain = NULL,
             .mode = WGPUCallbackMode_AllowProcessEvents,
@@ -207,59 +247,49 @@ int main(void) {
             .userdata1 = &map_state,
             .userdata2 = NULL,
         });
-    yawgpu_wait_for_future(context.instance, map_future);
+    yawgpu_wait_for_future(app->context.instance, map_future);
     if (!map_state.called || map_state.status != WGPUMapAsyncStatus_Success) {
         fprintf(stderr, "readback map did not complete successfully\n");
-        goto cleanup;
+        return false;
     }
-    output_buffer_mapped = true;
+    app->output_buffer_mapped = true;
 
     const uint8_t *pixels =
-        (const uint8_t *)wgpuBufferGetConstMappedRange(output_buffer, 0, buffer_size);
+        (const uint8_t *)wgpuBufferGetConstMappedRange(app->output_buffer, 0, app->buffer_size);
     if (!pixels) {
         fprintf(stderr, "readback mapped range is null\n");
-        goto cleanup;
+        return false;
     }
 
     if (!stbi_write_png("red.png",
-                        (int)dimensions.width,
-                        (int)dimensions.height,
+                        (int)app->dimensions.width,
+                        (int)app->dimensions.height,
                         BYTES_PER_PIXEL,
                         pixels,
-                        (int)dimensions.padded_bytes_per_row)) {
+                        (int)app->dimensions.padded_bytes_per_row)) {
         fprintf(stderr, "failed to write red.png\n");
-        goto cleanup;
+        return false;
     }
 
     printf("wrote red.png (%ux%u, bytesPerRow=%u padded to %u)\n",
-           dimensions.width,
-           dimensions.height,
-           dimensions.unpadded_bytes_per_row,
-           dimensions.padded_bytes_per_row);
-    exit_code = EXIT_SUCCESS;
+           app->dimensions.width,
+           app->dimensions.height,
+           app->dimensions.unpadded_bytes_per_row,
+           app->dimensions.padded_bytes_per_row);
+    return true;
+}
 
-cleanup:
-    if (output_buffer_mapped) {
-        wgpuBufferUnmap(output_buffer);
+int main(void) {
+    CaptureApp app = {0};
+    if (!capture_app_init(&app)) {
+        capture_app_destroy(&app);
+        return EXIT_FAILURE;
     }
-    if (commands) {
-        wgpuCommandBufferRelease(commands);
+    if (!capture_app_run(&app)) {
+        capture_app_destroy(&app);
+        return EXIT_FAILURE;
     }
-    if (encoder) {
-        wgpuCommandEncoderRelease(encoder);
-    }
-    if (texture_view) {
-        wgpuTextureViewRelease(texture_view);
-    }
-    if (texture) {
-        wgpuTextureRelease(texture);
-    }
-    if (output_buffer) {
-        wgpuBufferRelease(output_buffer);
-    }
-    if (queue) {
-        wgpuQueueRelease(queue);
-    }
-    yawgpu_context_release(&context);
-    return exit_code;
+
+    capture_app_destroy(&app);
+    return EXIT_SUCCESS;
 }
