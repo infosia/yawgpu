@@ -802,7 +802,13 @@ fn set_first_error(error: &mut Option<String>, message: &str) {
     }
 }
 
+// `as u32` / `as native::WGPUFeatureName` are required on Windows MSVC where
+// `native::WGPUFeatureName` resolves to `c_int = i32`. On macOS clang it is
+// `c_uint = u32`, so the cast becomes a no-op that clippy flags as
+// `unnecessary_cast`; the lint is silenced here because the cast is the
+// cross-platform-correct expression.
 #[must_use]
+#[allow(clippy::unnecessary_cast)]
 pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
     match value {
         native::WGPUFeatureName_CoreFeaturesAndLimits => core::Feature::CoreFeaturesAndLimits,
@@ -815,6 +821,7 @@ pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
 }
 
 #[must_use]
+#[allow(clippy::unnecessary_cast)]
 pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
     match value {
         core::Feature::CoreFeaturesAndLimits => native::WGPUFeatureName_CoreFeaturesAndLimits,
