@@ -11,8 +11,9 @@ use yawgpu_hal::{
     HalError, HalExtent3d, HalFilterMode, HalInstance, HalMipmapFilterMode, HalOrigin3d,
     HalPrimitiveTopology, HalQueue, HalRenderColorTarget, HalRenderLoadOp, HalRenderPass,
     HalRenderPipeline, HalRenderPipelineDescriptor, HalSampler, HalSamplerDescriptor,
-    HalShaderSource, HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
-    HalTextureUsage, HalVertexAttribute, HalVertexBufferLayout, HalVertexFormat, HalVertexStepMode,
+    HalShaderSource, HalSurface, HalTexture, HalTextureCopy, HalTextureDescriptor,
+    HalTextureFormat, HalTextureUsage, HalVertexAttribute, HalVertexBufferLayout, HalVertexFormat,
+    HalVertexStepMode,
 };
 
 pub(crate) mod shader_naga;
@@ -74,6 +75,16 @@ impl Instance {
     #[must_use]
     pub fn future_registry(&self) -> &FutureRegistry {
         &self.inner.futures
+    }
+
+    pub fn create_surface_from_metal_layer(
+        &self,
+        layer: *mut std::ffi::c_void,
+    ) -> Result<HalSurface, Error> {
+        self.inner
+            .hal
+            .create_surface_from_metal_layer(layer)
+            .map_err(Error::Hal)
     }
 }
 
@@ -218,6 +229,11 @@ impl Device {
     #[must_use]
     pub fn allocation_count(&self) -> u64 {
         self.inner.hal.allocation_count()
+    }
+
+    #[must_use]
+    pub fn hal(&self) -> &HalDevice {
+        &self.inner.hal
     }
 
     #[must_use]
@@ -1261,6 +1277,11 @@ impl Texture {
                 }),
             }),
         }
+    }
+
+    #[must_use]
+    pub fn from_hal(descriptor: TextureDescriptor, hal: HalTexture) -> Self {
+        Self::new(descriptor, Some(hal), false)
     }
 
     #[must_use]

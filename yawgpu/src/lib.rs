@@ -20,8 +20,11 @@ use crate::conv::{
     map_render_pipeline_descriptor, map_sampler_descriptor, map_shader_module_descriptor,
     map_texel_copy_buffer_layout, map_texel_copy_texture_info_parts, map_texture_aspect,
     map_texture_descriptor, map_texture_dimension_to_native, map_texture_format_to_native,
-    map_texture_usage_to_native, map_texture_view_descriptor, release_handle, string_view,
-    string_view_to_str, DeviceLostCallbackInfo,
+    map_texture_usage, map_texture_usage_to_native, map_texture_view_descriptor, release_handle,
+    string_view, string_view_to_str, DeviceLostCallbackInfo,
+};
+use yawgpu_hal::{
+    HalPresentMode, HalSurface, HalSurfaceConfiguration, HalTextureFormat, HalTextureUsage,
 };
 
 pub const WGPU_YAWGPU_INSTANCE_BACKEND_NOOP: u32 = 0;
@@ -272,16 +275,19 @@ struct MultisampleStateCacheKey {
 pub struct WGPUSurfaceImpl {
     label: Mutex<String>,
     configured: Mutex<Option<SurfaceConfigurationState>>,
+    hal: Mutex<Option<HalSurface>>,
     is_error: bool,
     _instance: Arc<WGPUInstanceImpl>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SurfaceConfigurationState {
-    _format: native::WGPUTextureFormat,
-    _usage: native::WGPUTextureUsage,
-    _width: u32,
-    _height: u32,
+    device: Arc<core::Device>,
+    format: native::WGPUTextureFormat,
+    usage: native::WGPUTextureUsage,
+    width: u32,
+    height: u32,
+    view_formats: Vec<native::WGPUTextureFormat>,
     _present_mode: native::WGPUPresentMode,
     _alpha_mode: native::WGPUCompositeAlphaMode,
 }
@@ -778,6 +784,53 @@ unsafe fn has_supported_surface_source(mut chain: *const native::WGPUChainedStru
         chain = link.next;
     }
     false
+}
+
+unsafe fn find_metal_layer_source(
+    mut chain: *const native::WGPUChainedStruct,
+) -> Option<*mut c_void> {
+    while let Some(link) = chain.as_ref() {
+        if link.sType == native::WGPUSType_SurfaceSourceMetalLayer {
+            let source = (link as *const native::WGPUChainedStruct)
+                .cast::<native::WGPUSurfaceSourceMetalLayer>();
+            return source.as_ref().map(|source| source.layer);
+        }
+        chain = link.next;
+    }
+    None
+}
+
+fn real_hal_surface(surface: HalSurface) -> Option<HalSurface> {
+    match surface {
+        HalSurface::Noop => None,
+        other => Some(other),
+    }
+}
+
+fn hal_surface_format(format: native::WGPUTextureFormat) -> HalTextureFormat {
+    match format {
+        native::WGPUTextureFormat_RGBA8Unorm => HalTextureFormat::Rgba8Unorm,
+        native::WGPUTextureFormat_BGRA8Unorm => HalTextureFormat::Bgra8Unorm,
+        _ => HalTextureFormat::Unsupported,
+    }
+}
+
+fn hal_surface_usage(usage: native::WGPUTextureUsage) -> HalTextureUsage {
+    HalTextureUsage {
+        copy_src: usage & native::WGPUTextureUsage_CopySrc != 0,
+        copy_dst: usage & native::WGPUTextureUsage_CopyDst != 0,
+        texture_binding: usage & native::WGPUTextureUsage_TextureBinding != 0,
+        storage_binding: usage & native::WGPUTextureUsage_StorageBinding != 0,
+        render_attachment: usage & native::WGPUTextureUsage_RenderAttachment != 0,
+    }
+}
+
+fn hal_present_mode(mode: native::WGPUPresentMode) -> HalPresentMode {
+    match mode {
+        native::WGPUPresentMode_Immediate => HalPresentMode::Immediate,
+        native::WGPUPresentMode_Mailbox => HalPresentMode::Mailbox,
+        _ => HalPresentMode::Fifo,
+    }
 }
 
 fn surface_configuration_error(
@@ -1442,17 +1495,23 @@ pub unsafe extern "C" fn wgpuInstanceCreateSurface(
     descriptor: *const native::WGPUSurfaceDescriptor,
 ) -> native::WGPUSurface {
     let instance = clone_handle(instance, "WGPUInstance");
-    let (label, is_error) = if let Some(descriptor) = descriptor.as_ref() {
+    let (label, is_error, hal) = if let Some(descriptor) = descriptor.as_ref() {
+        let layer = find_metal_layer_source(descriptor.nextInChain);
+        let hal = layer
+            .and_then(|layer| instance.core.create_surface_from_metal_layer(layer).ok())
+            .and_then(real_hal_surface);
         (
             label_from_string_view(descriptor.label).unwrap_or_default(),
             !has_supported_surface_source(descriptor.nextInChain),
+            hal,
         )
     } else {
-        (String::new(), true)
+        (String::new(), true, None)
     };
     arc_to_handle(Arc::new(WGPUSurfaceImpl {
         label: Mutex::new(label),
         configured: Mutex::new(None),
+        hal: Mutex::new(hal),
         is_error,
         _instance: instance,
     }))
@@ -4325,14 +4384,45 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
         device.dispatch_error(core::ErrorKind::Validation, message);
         return;
     }
+    let view_formats = if config.viewFormatCount == 0 {
+        Vec::new()
+    } else if config.viewFormats.is_null() {
+        device.dispatch_error(
+            core::ErrorKind::Validation,
+            "surface configuration viewFormats pointer is null",
+        );
+        return;
+    } else {
+        std::slice::from_raw_parts(config.viewFormats, config.viewFormatCount).to_vec()
+    };
+    if let Some(hal) = surface
+        .hal
+        .lock()
+        .expect("surface HAL lock is not poisoned")
+        .as_mut()
+    {
+        let hal_config = HalSurfaceConfiguration {
+            format: hal_surface_format(config.format),
+            usage: hal_surface_usage(config.usage),
+            width: config.width,
+            height: config.height,
+            present_mode: hal_present_mode(config.presentMode),
+        };
+        if let Err(error) = hal.configure(device.core.hal(), hal_config) {
+            device.dispatch_error(core::ErrorKind::Internal, error.to_string());
+            return;
+        }
+    }
     *surface
         .configured
         .lock()
         .expect("surface configuration lock is not poisoned") = Some(SurfaceConfigurationState {
-        _format: config.format,
-        _usage: config.usage,
-        _width: config.width,
-        _height: config.height,
+        device: Arc::clone(&device.core),
+        format: config.format,
+        usage: config.usage,
+        width: config.width,
+        height: config.height,
+        view_formats,
         _present_mode: config.presentMode,
         _alpha_mode: config.alphaMode,
     });
@@ -4350,6 +4440,14 @@ pub unsafe extern "C" fn wgpuSurfaceUnconfigure(surface: native::WGPUSurface) {
         .configured
         .lock()
         .expect("surface configuration lock is not poisoned") = None;
+    if let Some(hal) = surface
+        .hal
+        .lock()
+        .expect("surface HAL lock is not poisoned")
+        .as_mut()
+    {
+        hal.unconfigure();
+    }
 }
 
 /// Gets the current surface texture.
@@ -4369,15 +4467,56 @@ pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
     };
     surface_texture.nextInChain = std::ptr::null_mut();
     surface_texture.texture = std::ptr::null();
-    if surface.is_error
-        || surface
-            .configured
-            .lock()
-            .expect("surface configuration lock is not poisoned")
-            .is_none()
-    {
+    let config = surface
+        .configured
+        .lock()
+        .expect("surface configuration lock is not poisoned")
+        .clone();
+    if surface.is_error || config.is_none() {
         surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_Error;
         return;
+    }
+    let config = config.expect("surface configuration was checked");
+    if let Some(hal) = surface
+        .hal
+        .lock()
+        .expect("surface HAL lock is not poisoned")
+        .as_mut()
+    {
+        match hal.acquire_next_texture() {
+            Ok(hal_texture) => {
+                let descriptor = core::TextureDescriptor {
+                    usage: map_texture_usage(config.usage),
+                    dimension: core::TextureDimension::D2,
+                    size: core::Extent3d {
+                        width: config.width,
+                        height: config.height,
+                        depth_or_array_layers: 1,
+                    },
+                    format: crate::conv::map_texture_format(config.format),
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    view_formats: config
+                        .view_formats
+                        .iter()
+                        .copied()
+                        .map(crate::conv::map_texture_format)
+                        .collect(),
+                };
+                let texture = Arc::new(WGPUTextureImpl {
+                    core: Arc::new(core::Texture::from_hal(descriptor, hal_texture)),
+                    device: Arc::clone(&config.device),
+                    instance: Arc::clone(&surface._instance),
+                });
+                surface_texture.texture = arc_to_handle(texture);
+                surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal;
+                return;
+            }
+            Err(_) => {
+                surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_Error;
+                return;
+            }
+        }
     }
     // Noop has no native window/backbuffer, so a valid configuration still
     // cannot produce a swapchain image. This is the recorded SF3 N/A boundary.
@@ -4391,7 +4530,25 @@ pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
 /// `surface` must be a non-null live yawgpu surface handle.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuSurfacePresent(surface: native::WGPUSurface) -> native::WGPUStatus {
-    let _surface = borrow_handle(surface, "WGPUSurface");
+    let surface = borrow_handle(surface, "WGPUSurface");
+    if let Some(hal) = surface
+        .hal
+        .lock()
+        .expect("surface HAL lock is not poisoned")
+        .as_mut()
+    {
+        let config = surface
+            .configured
+            .lock()
+            .expect("surface configuration lock is not poisoned")
+            .clone();
+        let Some(config) = config else {
+            return native::WGPUStatus_Error;
+        };
+        if hal.present(config.device.queue().hal()).is_err() {
+            return native::WGPUStatus_Error;
+        }
+    }
     native::WGPUStatus_Success
 }
 

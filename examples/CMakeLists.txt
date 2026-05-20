@@ -4,6 +4,15 @@ project(yawgpu_examples LANGUAGES C)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+find_package(glfw3 QUIET)
+if(glfw3_FOUND AND APPLE)
+    set(YAWGPU_GLFW_FOUND ON)
+    enable_language(OBJC)
+else()
+    set(YAWGPU_GLFW_FOUND OFF)
+    message(STATUS "glfw3 or Apple CAMetalLayer support not found; skipping windowed examples")
+endif()
+
 cmake_path(GET CMAKE_SOURCE_DIR PARENT_PATH YAWGPU_ROOT)
 
 set(YAWGPU_PROFILE "debug" CACHE STRING "Cargo profile used for libyawgpu")
@@ -24,10 +33,21 @@ else()
     set(YAWGPU_CARGO_FEATURE_ARGS --features ${YAWGPU_FEATURE})
 endif()
 
-if(DEFINED ENV{CARGO_BUILD_TARGET})
-    set(YAWGPU_TARGET_DIR "${YAWGPU_ROOT}/target/$ENV{CARGO_BUILD_TARGET}/${YAWGPU_TARGET_PROFILE}")
+# Use a feature-specific cargo target directory so that --features metal and
+# --features vulkan dylibs do not overwrite each other in target/${profile}.
+# Without this, the surface_smoke binary in build-metal would dlopen whichever
+# dylib was built last and silently fall back to the Noop arm in
+# `#[cfg(not(feature = "metal"))]`.
+if(YAWGPU_FEATURE STREQUAL "")
+    set(YAWGPU_TARGET_ROOT "${YAWGPU_ROOT}/target")
 else()
-    set(YAWGPU_TARGET_DIR "${YAWGPU_ROOT}/target/${YAWGPU_TARGET_PROFILE}")
+    set(YAWGPU_TARGET_ROOT "${YAWGPU_ROOT}/target-${YAWGPU_FEATURE}")
+endif()
+
+if(DEFINED ENV{CARGO_BUILD_TARGET})
+    set(YAWGPU_TARGET_DIR "${YAWGPU_TARGET_ROOT}/$ENV{CARGO_BUILD_TARGET}/${YAWGPU_TARGET_PROFILE}")
+else()
+    set(YAWGPU_TARGET_DIR "${YAWGPU_TARGET_ROOT}/${YAWGPU_TARGET_PROFILE}")
 endif()
 
 if(WIN32)
@@ -39,10 +59,11 @@ else()
 endif()
 
 add_custom_target(yawgpu_cargo_build
-    COMMAND cargo build -p yawgpu ${YAWGPU_CARGO_PROFILE_ARG} ${YAWGPU_CARGO_FEATURE_ARGS}
+    COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${YAWGPU_TARGET_ROOT}
+            cargo build -p yawgpu ${YAWGPU_CARGO_PROFILE_ARG} ${YAWGPU_CARGO_FEATURE_ARGS}
     WORKING_DIRECTORY "${YAWGPU_ROOT}"
     BYPRODUCTS "${YAWGPU_SHARED_LIB}"
-    COMMENT "Building libyawgpu with Cargo"
+    COMMENT "Building libyawgpu with Cargo (target dir: ${YAWGPU_TARGET_ROOT})"
     VERBATIM
 )
 
@@ -54,7 +75,7 @@ set_target_properties(yawgpu_c_api PROPERTIES
 add_dependencies(yawgpu_c_api yawgpu_cargo_build)
 
 if(APPLE)
-    set(YAWGPU_PLATFORM_LIBS "-framework CoreFoundation" "-framework QuartzCore" "-framework Metal")
+    set(YAWGPU_PLATFORM_LIBS "-framework Cocoa" "-framework CoreFoundation" "-framework QuartzCore" "-framework Metal")
 elseif(UNIX)
     set(YAWGPU_PLATFORM_LIBS m dl)
 else()
@@ -89,3 +110,6 @@ add_subdirectory(enumerate_adapters)
 add_subdirectory(compute)
 add_subdirectory(device_info)
 add_subdirectory(capture)
+if(YAWGPU_GLFW_FOUND)
+    add_subdirectory(surface_smoke)
+endif()

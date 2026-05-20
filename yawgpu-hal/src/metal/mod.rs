@@ -1,26 +1,30 @@
+use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::ProtocolObject;
+use objc2_core_foundation::CGSize;
 use objc2_foundation::{NSArray, NSString};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer as MTLBufferTrait, MTLClearColor, MTLCommandBuffer,
     MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction, MTLComputeCommandEncoder,
-    MTLComputePipelineState, MTLCopyAllDevices, MTLDevice, MTLLibrary, MTLLoadAction, MTLOrigin,
-    MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+    MTLComputePipelineState, MTLCopyAllDevices, MTLDevice, MTLDrawable, MTLLibrary, MTLLoadAction,
+    MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
     MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerAddressMode,
     MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerMipFilter, MTLSamplerState, MTLSize,
     MTLStorageMode, MTLStoreAction, MTLTexture as MTLTextureTrait, MTLTextureDescriptor,
     MTLTextureType, MTLTextureUsage, MTLVertexDescriptor, MTLVertexFormat, MTLVertexStepFunction,
 };
+use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use crate::{
     HalAddressMode, HalBoundBuffer, HalBuffer, HalBufferTextureCopy, HalCompareFunction,
     HalComputePass, HalCopy, HalDescriptorBinding, HalDraw, HalError, HalExtent3d, HalFilterMode,
     HalMipmapFilterMode, HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass,
-    HalRenderPipelineDescriptor, HalSamplerDescriptor, HalShaderSource, HalTexture, HalTextureCopy,
-    HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
+    HalRenderPipelineDescriptor, HalSamplerDescriptor, HalShaderSource, HalSurfaceConfiguration,
+    HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage,
+    HalVertexFormat, HalVertexStepMode,
 };
 
 const BACKEND: &str = "metal";
@@ -79,7 +83,7 @@ impl MetalAdapter {
             .newCommandQueue()
             .ok_or(HalError::DeviceCreationFailed { backend: BACKEND })?;
         Ok(MetalDevice {
-            _device: self.device.clone(),
+            device: self.device.clone(),
             allocations: AtomicU64::new(0),
             queue: MetalQueue { inner: queue },
         })
@@ -87,7 +91,7 @@ impl MetalAdapter {
 }
 
 pub struct MetalDevice {
-    _device: Retained<ProtocolObject<dyn MTLDevice>>,
+    device: Retained<ProtocolObject<dyn MTLDevice>>,
     allocations: AtomicU64,
     queue: MetalQueue,
 }
@@ -123,7 +127,7 @@ impl MetalDevice {
     #[must_use]
     pub fn create_buffer(&self, size: u64) -> MetalBuffer {
         self.allocations.fetch_add(1, Ordering::Relaxed);
-        let buffer = self._device.newBufferWithLength_options(
+        let buffer = self.device.newBufferWithLength_options(
             usize::try_from(size).unwrap_or(usize::MAX),
             MTLResourceOptions::StorageModeShared,
         );
@@ -138,7 +142,7 @@ impl MetalDevice {
     #[must_use]
     pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> MetalTexture {
         self.allocations.fetch_add(1, Ordering::Relaxed);
-        match create_texture(&self._device, descriptor) {
+        match create_texture(&self.device, descriptor) {
             Ok((inner, bytes_per_pixel)) => MetalTexture {
                 inner: Some(inner),
                 width: descriptor.width,
@@ -160,7 +164,7 @@ impl MetalDevice {
     pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> MetalSampler {
         self.allocations.fetch_add(1, Ordering::Relaxed);
         MetalSampler {
-            _inner: create_sampler(&self._device, descriptor).ok(),
+            _inner: create_sampler(&self.device, descriptor).ok(),
         }
     }
 
@@ -176,7 +180,7 @@ impl MetalDevice {
                 "Metal compute pipeline requires MSL".to_owned(),
             ));
         };
-        create_compute_pipeline(&self._device, &msl_source, entry_point, workgroup_size)
+        create_compute_pipeline(&self.device, &msl_source, entry_point, workgroup_size)
     }
 
     pub fn create_render_pipeline(
@@ -193,12 +197,97 @@ impl MetalDevice {
             ));
         };
         create_render_pipeline(
-            &self._device,
+            &self.device,
             &msl_source,
             vertex_entry_point,
             fragment_entry_point,
             descriptor,
         )
+    }
+}
+
+#[derive(Debug)]
+pub struct MetalSurface {
+    layer: Retained<CAMetalLayer>,
+    current_drawable: Option<Retained<ProtocolObject<dyn CAMetalDrawable>>>,
+    config: Option<HalSurfaceConfiguration>,
+}
+
+unsafe impl Send for MetalSurface {}
+unsafe impl Sync for MetalSurface {}
+
+impl MetalSurface {
+    pub fn from_layer(layer: *mut c_void) -> Result<Self, HalError> {
+        let layer = unsafe { Retained::retain(layer.cast::<CAMetalLayer>()) }.ok_or(
+            HalError::SwapchainCreationFailed {
+                backend: BACKEND,
+                message: "surface layer is null",
+            },
+        )?;
+        Ok(Self {
+            layer,
+            current_drawable: None,
+            config: None,
+        })
+    }
+
+    pub fn configure(
+        &mut self,
+        device: &MetalDevice,
+        config: HalSurfaceConfiguration,
+    ) -> Result<(), HalError> {
+        let (pixel_format, _) = map_texture_format(config.format)?;
+        self.layer.setDevice(Some(&device.device));
+        self.layer.setPixelFormat(pixel_format);
+        self.layer.setFramebufferOnly(false);
+        self.layer.setDrawableSize(CGSize {
+            width: f64::from(config.width),
+            height: f64::from(config.height),
+        });
+        let _ = config.usage;
+        let _ = config.present_mode;
+        self.current_drawable = None;
+        self.config = Some(config);
+        Ok(())
+    }
+
+    pub fn unconfigure(&mut self) {
+        self.current_drawable = None;
+        self.config = None;
+    }
+
+    pub fn acquire_next_texture(&mut self) -> Result<MetalTexture, HalError> {
+        let config = self.config.ok_or(HalError::AcquireFailed {
+            backend: BACKEND,
+            message: "surface is not configured",
+        })?;
+        let drawable = self.layer.nextDrawable().ok_or(HalError::AcquireFailed {
+            backend: BACKEND,
+            message: "nextDrawable returned null",
+        })?;
+        let texture = drawable.texture();
+        self.current_drawable = Some(drawable);
+        let (_, bytes_per_pixel) = map_texture_format(config.format)?;
+        Ok(MetalTexture {
+            inner: Some(texture),
+            width: config.width,
+            height: config.height,
+            depth_or_array_layers: 1,
+            bytes_per_pixel,
+        })
+    }
+
+    pub fn present(&mut self, queue: &MetalQueue) -> Result<(), HalError> {
+        let drawable = self
+            .current_drawable
+            .take()
+            .ok_or(HalError::PresentFailed {
+                backend: BACKEND,
+                message: "no acquired drawable to present",
+            })?;
+        let _ = queue;
+        drawable.present();
+        Ok(())
     }
 }
 
