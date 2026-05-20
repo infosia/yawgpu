@@ -184,7 +184,7 @@ fn populated_format_caps_match_dawn_sanity_checks() {
 }
 
 fn caps(format: native::WGPUTextureFormat) -> yawgpu_core::FormatCaps {
-    yawgpu_core::TextureFormat::from_raw(format)
+    yawgpu_core::TextureFormat::from(format)
         .caps()
         .expect("format is populated")
 }
