@@ -88,7 +88,10 @@ impl HalInstance {
         }
     }
 
-    pub fn create_surface_from_metal_layer(
+    /// # Safety
+    ///
+    /// `layer` must be a valid, non-dangling `CAMetalLayer` instance pointer.
+    pub unsafe fn create_surface_from_metal_layer(
         &self,
         layer: *mut c_void,
     ) -> Result<HalSurface, HalError> {
@@ -98,11 +101,15 @@ impl HalInstance {
             #[cfg(feature = "noop")]
             Self::Noop(_) => Ok(HalSurface::Noop),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(instance) => instance
-                .create_surface_from_metal_layer(layer)
-                .map(HalSurface::Vulkan),
+            Self::Vulkan(instance) => unsafe {
+                instance
+                    .create_surface_from_metal_layer(layer)
+                    .map(HalSurface::Vulkan)
+            },
             #[cfg(feature = "metal")]
-            Self::Metal(_) => metal::MetalSurface::from_layer(layer).map(HalSurface::Metal),
+            Self::Metal(_) => unsafe {
+                metal::MetalSurface::from_layer(layer).map(HalSurface::Metal)
+            },
         }
     }
 }
@@ -317,6 +324,7 @@ impl HalDevice {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub struct HalSurfaceConfiguration {
     pub format: HalTextureFormat,
@@ -326,6 +334,26 @@ pub struct HalSurfaceConfiguration {
     pub present_mode: HalPresentMode,
 }
 
+impl HalSurfaceConfiguration {
+    #[must_use]
+    pub fn new(
+        format: HalTextureFormat,
+        usage: HalTextureUsage,
+        width: u32,
+        height: u32,
+        present_mode: HalPresentMode,
+    ) -> Self {
+        Self {
+            format,
+            usage,
+            width,
+            height,
+            present_mode,
+        }
+    }
+}
+
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub enum HalPresentMode {
     Fifo,

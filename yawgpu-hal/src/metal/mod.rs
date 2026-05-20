@@ -217,7 +217,10 @@ unsafe impl Send for MetalSurface {}
 unsafe impl Sync for MetalSurface {}
 
 impl MetalSurface {
-    pub fn from_layer(layer: *mut c_void) -> Result<Self, HalError> {
+    /// # Safety
+    ///
+    /// `layer` must be a valid, non-dangling `CAMetalLayer` instance pointer.
+    pub unsafe fn from_layer(layer: *mut c_void) -> Result<Self, HalError> {
         let layer = unsafe { Retained::retain(layer.cast::<CAMetalLayer>()) }.ok_or(
             HalError::SwapchainCreationFailed {
                 backend: BACKEND,

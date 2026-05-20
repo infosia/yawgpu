@@ -64,7 +64,10 @@ impl VulkanInstance {
             .collect()
     }
 
-    pub fn create_surface_from_metal_layer(
+    /// # Safety
+    ///
+    /// `layer` must be a valid, non-dangling `CAMetalLayer` instance pointer.
+    pub unsafe fn create_surface_from_metal_layer(
         &self,
         layer: *mut c_void,
     ) -> Result<VulkanSurface, HalError> {
@@ -286,6 +289,7 @@ impl VulkanDevice {
         match create_texture(Arc::clone(&self.inner), descriptor) {
             Ok((inner, bytes_per_pixel)) => VulkanTexture {
                 inner: Some(Arc::new(inner)),
+                swapchain: None,
                 width: descriptor.width,
                 height: descriptor.height,
                 depth_or_array_layers: descriptor.depth_or_array_layers,
@@ -294,6 +298,7 @@ impl VulkanDevice {
             },
             Err(_) => VulkanTexture {
                 inner: None,
+                swapchain: None,
                 width: descriptor.width,
                 height: descriptor.height,
                 depth_or_array_layers: descriptor.depth_or_array_layers,
@@ -345,7 +350,7 @@ impl VulkanDevice {
 pub struct VulkanSurface {
     instance: Arc<VulkanInstanceInner>,
     surface: vk::SurfaceKHR,
-    swapchain: Option<VulkanSwapchain>,
+    swapchain: Option<Arc<VulkanSwapchainInner>>,
     config: Option<HalSurfaceConfiguration>,
     current_image_index: Option<u32>,
 }
@@ -441,14 +446,16 @@ impl VulkanSurface {
             message: "waiting for acquired image failed",
         })?;
         self.current_image_index = Some(image_index);
-        swapchain
+        let mut texture = swapchain
             .images
             .get(usize::try_from(image_index).unwrap_or(usize::MAX))
             .cloned()
             .ok_or(HalError::AcquireFailed {
                 backend: BACKEND,
                 message: "acquired image index is out of range",
-            })
+            })?;
+        texture.swapchain = Some(Arc::clone(swapchain));
+        Ok(texture)
     }
 
     pub fn present(&mut self, queue: &VulkanQueue) -> Result<(), HalError> {
@@ -495,24 +502,24 @@ impl VulkanSurface {
     }
 }
 
-struct VulkanSwapchain {
+struct VulkanSwapchainInner {
     device: Arc<VulkanDeviceInner>,
     loader: ash::khr::swapchain::Device,
     swapchain: vk::SwapchainKHR,
     images: Vec<VulkanTexture>,
 }
 
-impl fmt::Debug for VulkanSwapchain {
+impl fmt::Debug for VulkanSwapchainInner {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("VulkanSwapchain")
+            .debug_struct("VulkanSwapchainInner")
             .field("swapchain", &self.swapchain)
             .field("image_count", &self.images.len())
             .finish()
     }
 }
 
-impl Drop for VulkanSwapchain {
+impl Drop for VulkanSwapchainInner {
     fn drop(&mut self) {
         self.images.clear();
         unsafe {
@@ -657,6 +664,7 @@ impl Drop for VulkanBufferInner {
 #[derive(Debug, Clone)]
 pub struct VulkanTexture {
     inner: Option<Arc<VulkanTextureInner>>,
+    swapchain: Option<Arc<VulkanSwapchainInner>>,
     width: u32,
     height: u32,
     depth_or_array_layers: u32,
@@ -980,7 +988,7 @@ fn create_swapchain(
     device: Arc<VulkanDeviceInner>,
     surface: vk::SurfaceKHR,
     config: HalSurfaceConfiguration,
-) -> Result<VulkanSwapchain, HalError> {
+) -> Result<Arc<VulkanSwapchainInner>, HalError> {
     let (format, bytes_per_pixel) = map_texture_format(config.format)?;
     let surface_loader =
         ash::khr::surface::Instance::new(&device._instance._entry, &device._instance.instance);
@@ -1054,12 +1062,12 @@ fn create_swapchain(
         .inspect_err(|_| unsafe {
             loader.destroy_swapchain(swapchain, None);
         })?;
-    Ok(VulkanSwapchain {
+    Ok(Arc::new(VulkanSwapchainInner {
         device,
         loader,
         swapchain,
         images: textures,
-    })
+    }))
 }
 
 fn create_swapchain_texture(
@@ -1090,6 +1098,7 @@ fn create_swapchain_texture(
             owns_image: false,
             layout: AtomicU8::new(IMAGE_LAYOUT_UNDEFINED),
         })),
+        swapchain: None,
         width: extent.width,
         height: extent.height,
         depth_or_array_layers: 1,
