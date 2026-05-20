@@ -457,6 +457,37 @@ as a Phase-10 follow-up.
 | `wgpuQueueWriteBuffer` | `wgpuQueueWriteBuffer_and_wgpuQueueWriteTexture_validate_happy_and_error_paths` |
 | `wgpuQueueWriteTexture` | `wgpuQueueWriteBuffer_and_wgpuQueueWriteTexture_validate_happy_and_error_paths` |
 
+## yawgpu/src/lib.rs - Buffer / Texture / TextureView / Sampler (26 pub fn)
+
+| pub fn | test name(s) |
+|---|---|
+| `wgpuBufferDestroy` | `wgpuBuffer_destroy_unmap_release_addref_lifecycle` |
+| `wgpuBufferUnmap` | `wgpuBuffer_destroy_unmap_release_addref_lifecycle`, `wgpuBuffer_map_async_and_mapped_range_walk_state_machine` |
+| `wgpuBufferMapAsync` | `wgpuBuffer_map_async_and_mapped_range_walk_state_machine` |
+| `wgpuBufferGetMappedRange` | `wgpuBuffer_map_async_and_mapped_range_walk_state_machine` |
+| `wgpuBufferGetConstMappedRange` | `wgpuBuffer_map_async_and_mapped_range_walk_state_machine` |
+| `wgpuBufferGetMapState` | `wgpuBuffer_destroy_unmap_release_addref_lifecycle`, `wgpuBuffer_map_async_and_mapped_range_walk_state_machine` |
+| `wgpuBufferGetSize` | `wgpuBuffer_size_and_usage_accessors_match_descriptor` |
+| `wgpuBufferGetUsage` | `wgpuBuffer_size_and_usage_accessors_match_descriptor` |
+| `wgpuBufferRelease` | `wgpuBuffer_destroy_unmap_release_addref_lifecycle`, `wgpuBuffer_map_async_and_mapped_range_walk_state_machine`, `wgpuBuffer_size_and_usage_accessors_match_descriptor` |
+| `wgpuBufferAddRef` | `wgpuBuffer_destroy_unmap_release_addref_lifecycle` |
+| `wgpuTextureDestroy` | `wgpuTexture_create_view_and_destroy_release_addref` |
+| `wgpuTextureCreateView` | `wgpuTexture_create_view_and_destroy_release_addref` |
+| `wgpuTextureGetFormat` | `wgpuTexture_accessors_match_descriptor` |
+| `wgpuTextureGetDimension` | `wgpuTexture_accessors_match_descriptor` |
+| `wgpuTextureGetWidth` | `wgpuTexture_accessors_match_descriptor` |
+| `wgpuTextureGetHeight` | `wgpuTexture_accessors_match_descriptor` |
+| `wgpuTextureGetDepthOrArrayLayers` | `wgpuTexture_accessors_match_descriptor` |
+| `wgpuTextureGetMipLevelCount` | `wgpuTexture_accessors_match_descriptor` |
+| `wgpuTextureGetSampleCount` | `wgpuTexture_accessors_match_descriptor` |
+| `wgpuTextureGetUsage` | `wgpuTexture_accessors_match_descriptor` |
+| `wgpuTextureRelease` | `wgpuTexture_accessors_match_descriptor`, `wgpuTexture_create_view_and_destroy_release_addref` |
+| `wgpuTextureAddRef` | `wgpuTexture_create_view_and_destroy_release_addref` |
+| `wgpuTextureViewRelease` | `wgpuTexture_create_view_and_destroy_release_addref` |
+| `wgpuTextureViewAddRef` | `wgpuTexture_create_view_and_destroy_release_addref` |
+| `wgpuSamplerRelease` | `wgpuSampler_release_and_addref_lifecycle` |
+| `wgpuSamplerAddRef` | `wgpuSampler_release_and_addref_lifecycle` |
+
 ## Phase 10 yawgpu-core coverage summary
 
 Total kept pub fn (post-P10.3a audit): 183
