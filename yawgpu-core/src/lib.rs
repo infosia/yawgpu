@@ -9415,7 +9415,534 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    use super::{ErrorKind, FutureCallbackMode, FutureRegistry, Instance, MapMode, WaitAnyStatus};
+    use super::*;
+
+    fn noop_adapter() -> Adapter {
+        Instance::new_noop()
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter must exist")
+    }
+
+    fn noop_device() -> Device {
+        let instance = Instance::new_noop();
+        let adapter = instance
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter must exist");
+        adapter
+            .create_device(None, &[], "", "")
+            .expect("Noop device creation")
+    }
+
+    fn hal_noop_adapter() -> yawgpu_hal::HalAdapter {
+        yawgpu_hal::HalInstance::new_noop()
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop HAL adapter must exist")
+    }
+
+    fn hal_noop_device() -> yawgpu_hal::HalDevice {
+        hal_noop_adapter()
+            .create_device()
+            .expect("Noop HAL device creation")
+    }
+
+    fn hal_noop_queue() -> yawgpu_hal::HalQueue {
+        hal_noop_device().queue()
+    }
+
+    fn rgba8_unorm() -> TextureFormat {
+        TextureFormat::from_raw(0x0000_0016)
+    }
+
+    fn valid_texture_descriptor() -> TextureDescriptor {
+        TextureDescriptor {
+            usage: TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }
+    }
+
+    fn compute_shader_module(device: &Device) -> Arc<ShaderModule> {
+        Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@compute @workgroup_size(1) fn cs() {}".to_owned(),
+        )))
+    }
+
+    fn compute_pipeline_descriptor(module: Arc<ShaderModule>) -> ComputePipelineDescriptor {
+        ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Auto,
+            shader_module: module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        }
+    }
+
+    fn render_shader_module(device: &Device) -> Arc<ShaderModule> {
+        Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r"
+@vertex
+fn vs() -> @builtin(position) vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+}
+"
+                .to_owned(),
+            )),
+        )
+    }
+
+    fn render_pipeline_descriptor(module: Arc<ShaderModule>) -> RenderPipelineDescriptor {
+        RenderPipelineDescriptor {
+            layout: RenderPipelineLayout::Auto,
+            vertex: RenderPipelineVertexState {
+                shader: RenderPipelineShaderStage {
+                    module: module.clone(),
+                    entry_point: Some("vs".to_owned()),
+                    constants: Vec::new(),
+                },
+                buffer_count: 0,
+                buffers: Vec::new(),
+            },
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+            },
+            depth_stencil: None,
+            multisample: MultisampleState {
+                count: 1,
+                mask: u32::MAX,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(RenderPipelineFragmentState {
+                shader: RenderPipelineShaderStage {
+                    module,
+                    entry_point: Some("fs".to_owned()),
+                    constants: Vec::new(),
+                },
+                target_count: 1,
+                targets: vec![ColorTargetState {
+                    format: rgba8_unorm(),
+                    blend: false,
+                    write_mask: 0xF,
+                }],
+            }),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn instance_from_hal_wraps_noop_hal() {
+        let instance = Instance::from_hal(yawgpu_hal::HalInstance::new_noop());
+
+        assert_eq!(instance.enumerate_adapters().len(), 1);
+    }
+
+    #[test]
+    fn instance_enumerate_adapters_with_feature_level_sets_adapter_feature_level() {
+        let instance = Instance::new_noop();
+        let core = instance.enumerate_adapters_with_feature_level(FeatureLevel::Core);
+        let compatibility =
+            instance.enumerate_adapters_with_feature_level(FeatureLevel::Compatibility);
+
+        assert_eq!(core.len(), 1);
+        assert_eq!(core[0].feature_level(), FeatureLevel::Core);
+        assert_eq!(compatibility.len(), 1);
+        assert_eq!(
+            compatibility[0].feature_level(),
+            FeatureLevel::Compatibility
+        );
+    }
+
+    #[test]
+    fn instance_future_registry_process_events_is_empty_without_futures() {
+        let instance = Instance::new_noop();
+
+        assert!(instance.future_registry().process_events().is_empty());
+    }
+
+    #[test]
+    fn instance_hal_returns_noop_hal_instance() {
+        let instance = Instance::new_noop();
+
+        assert!(matches!(instance.hal(), yawgpu_hal::HalInstance::Noop(_)));
+    }
+
+    #[test]
+    fn instance_create_surface_from_metal_layer_noop_returns_noop_surface() {
+        let instance = Instance::new_noop();
+
+        let surface = unsafe { instance.create_surface_from_metal_layer(std::ptr::null_mut()) }
+            .expect("Noop surface creation should ignore the layer pointer");
+
+        assert!(matches!(surface, yawgpu_hal::HalSurface::Noop));
+    }
+
+    #[test]
+    fn adapter_from_hal_wraps_noop_hal_adapter() {
+        let adapter = Adapter::from_hal(hal_noop_adapter());
+
+        assert!(!adapter.name().is_empty());
+    }
+
+    #[test]
+    fn adapter_name_backend_limits_and_features_match_noop_contract() {
+        let adapter = noop_adapter();
+
+        assert!(adapter.name().contains("Noop"));
+        assert_eq!(adapter.backend(), yawgpu_hal::HalBackend::Noop);
+        assert_eq!(
+            adapter.limits().max_bind_groups,
+            Limits::DEFAULT.max_bind_groups
+        );
+        assert_eq!(
+            adapter.limits().max_texture_dimension_2d,
+            Limits::DEFAULT.max_texture_dimension_2d
+        );
+        assert!(adapter.features().contains(&Feature::CoreFeaturesAndLimits));
+        assert!(adapter.has_feature(Feature::TimestampQuery));
+        assert!(!adapter.has_feature(Feature::Other(7)));
+    }
+
+    #[test]
+    fn adapter_create_device_rejects_unsupported_required_feature() {
+        let adapter = noop_adapter();
+
+        let error = adapter
+            .create_device(None, &[Feature::Other(7)], "", "")
+            .expect_err("unsupported features must reject device creation");
+
+        assert!(matches!(error, Error::Validation(message) if message.contains("not supported")));
+    }
+
+    #[test]
+    fn adapter_create_device_applies_labels_and_core_feature() {
+        let adapter = noop_adapter();
+
+        let device = adapter
+            .create_device(None, &[], "device label", "queue label")
+            .expect("Noop device creation should succeed");
+
+        assert_eq!(device.label(), "device label");
+        assert!(device.has_feature(Feature::CoreFeaturesAndLimits));
+        assert_eq!(device.queue().label(), "queue label");
+    }
+
+    #[test]
+    fn device_from_hal_wraps_noop_hal_device() {
+        let device = Device::from_hal(
+            hal_noop_device(),
+            Limits::DEFAULT,
+            FeatureSet::new(),
+            "",
+            "",
+        );
+
+        assert!(matches!(device.hal(), yawgpu_hal::HalDevice::Noop(_)));
+    }
+
+    #[test]
+    fn device_hal_limits_and_features_match_noop_contract() {
+        let device = noop_device();
+
+        assert!(matches!(device.hal(), yawgpu_hal::HalDevice::Noop(_)));
+        assert_eq!(
+            device.limits().max_bind_groups,
+            Limits::DEFAULT.max_bind_groups
+        );
+        assert_eq!(
+            device.limits().max_buffer_size,
+            Limits::DEFAULT.max_buffer_size
+        );
+        assert!(device.features().contains(&Feature::CoreFeaturesAndLimits));
+        assert!(device.has_feature(Feature::CoreFeaturesAndLimits));
+        assert!(!device.has_feature(Feature::Other(99)));
+    }
+
+    #[test]
+    fn device_create_query_set_validates_count_and_creates_happy_path() {
+        let device = noop_device();
+
+        let (error_query_set, error) = device.create_query_set(QuerySetDescriptor {
+            label: "bad".to_owned(),
+            kind: QueryType::Occlusion,
+            count: 0,
+        });
+        assert!(error_query_set.is_error());
+        assert_eq!(
+            error,
+            Some("query set count must be greater than zero".to_owned())
+        );
+
+        let (query_set, error) = device.create_query_set(QuerySetDescriptor {
+            label: "good".to_owned(),
+            kind: QueryType::Occlusion,
+            count: 4,
+        });
+        assert!(error.is_none());
+        assert!(!query_set.is_error());
+        assert_eq!(query_set.count(), 4);
+    }
+
+    #[test]
+    fn device_same_distinguishes_clone_from_distinct_device() {
+        let device = noop_device();
+        let clone = device.clone();
+        let other = noop_device();
+
+        assert!(device.same(&clone));
+        assert!(!device.same(&other));
+    }
+
+    #[test]
+    fn device_label_defaults_empty_and_set_label_updates_it() {
+        let device = noop_device();
+
+        assert_eq!(device.label(), "");
+        device.set_label("renamed");
+        assert_eq!(device.label(), "renamed");
+    }
+
+    #[test]
+    fn device_destroy_lose_is_lost_and_lost_reason_are_idempotent() {
+        let device = noop_device();
+
+        assert!(!device.is_lost());
+        assert_eq!(device.lost_reason(), None);
+        assert_eq!(
+            device.lose(DeviceLostReason::Unknown),
+            Some(DeviceLostReason::Unknown)
+        );
+        assert!(device.is_lost());
+        assert_eq!(device.lost_reason(), Some(DeviceLostReason::Unknown));
+        assert_eq!(device.destroy(), None);
+
+        let destroyed = noop_device();
+        assert_eq!(destroyed.destroy(), Some(DeviceLostReason::Destroyed));
+        assert_eq!(destroyed.destroy(), None);
+        assert_eq!(destroyed.lost_reason(), Some(DeviceLostReason::Destroyed));
+    }
+
+    #[test]
+    fn device_create_buffer_increments_allocation_count() {
+        let device = noop_device();
+        let before = device.allocation_count();
+
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+
+        assert!(!buffer.is_error());
+        assert_eq!(buffer.size(), 4);
+        assert_eq!(buffer.usage(), BufferUsage::COPY_DST);
+        assert_eq!(device.allocation_count(), before + 1);
+    }
+
+    #[test]
+    fn device_create_texture_happy_path_and_invalid_size_scope_error() {
+        let device = noop_device();
+        let before = device.allocation_count();
+
+        let texture = device.create_texture(valid_texture_descriptor());
+
+        assert!(!texture.is_error());
+        assert_eq!(texture.size().width, 1);
+        assert_eq!(device.allocation_count(), before + 1);
+
+        let mut invalid = valid_texture_descriptor();
+        invalid.size.width = 0;
+        device.push_error_scope(ErrorFilter::Validation);
+        let error_texture = device.create_texture(invalid);
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid texture should be scoped");
+
+        assert!(error_texture.is_error());
+        assert_eq!(error.kind, ErrorKind::Validation);
+        assert_eq!(error.message, "2D texture width is out of range");
+    }
+
+    #[test]
+    fn device_create_sampler_uses_default_descriptor() {
+        let device = noop_device();
+
+        let sampler = device.create_sampler(SamplerDescriptor::default());
+
+        assert!(!sampler.is_error());
+        assert_eq!(
+            sampler.descriptor().address_mode_u,
+            AddressMode::ClampToEdge
+        );
+        assert_eq!(sampler.descriptor().mag_filter, FilterMode::Nearest);
+    }
+
+    #[test]
+    fn device_create_shader_module_accepts_minimal_compute_wgsl() {
+        let device = noop_device();
+
+        let shader = device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@compute @workgroup_size(1) fn cs() {}".to_owned(),
+        ));
+
+        assert!(!shader.is_error());
+        assert_eq!(shader.diagnostic(), None);
+    }
+
+    #[test]
+    fn device_create_bind_group_layout_bind_group_and_pipeline_layout_empty() {
+        let device = noop_device();
+
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: Vec::new(),
+            error: None,
+        }));
+        let bind_group = device.create_bind_group(layout.clone(), Vec::new());
+        let pipeline_layout = device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![layout.clone()],
+            immediate_size: 0,
+            error: None,
+        });
+
+        assert!(!layout.is_error());
+        assert!(layout.entries().is_empty());
+        assert!(!bind_group.is_error());
+        assert!(bind_group.entries().is_empty());
+        assert!(!pipeline_layout.is_error());
+        assert_eq!(pipeline_layout.bind_group_layouts().len(), 1);
+    }
+
+    #[test]
+    fn device_create_command_encoder_finishes_empty_encoder() {
+        let device = noop_device();
+
+        let encoder = device.create_command_encoder();
+        let (command_buffer, error) = encoder.finish();
+
+        assert!(error.is_none());
+        assert!(!command_buffer.is_error());
+    }
+
+    #[test]
+    fn device_create_compute_pipeline_happy_path_and_error_scope() {
+        let device = noop_device();
+        let module = compute_shader_module(&device);
+
+        let pipeline = device.create_compute_pipeline(compute_pipeline_descriptor(module.clone()));
+        assert!(!pipeline.is_error());
+        assert_eq!(pipeline.entry_name(), "cs");
+
+        let mut invalid = compute_pipeline_descriptor(module);
+        invalid.error = Some("forced compute pipeline error".to_owned());
+        device.push_error_scope(ErrorFilter::Validation);
+        let error_pipeline = device.create_compute_pipeline(invalid);
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid compute pipeline should be scoped");
+
+        assert!(error_pipeline.is_error());
+        assert_eq!(error.kind, ErrorKind::Validation);
+        assert_eq!(error.message, "forced compute pipeline error");
+    }
+
+    #[test]
+    fn device_create_compute_pipeline_without_error_dispatch_keeps_scope_empty() {
+        let device = noop_device();
+        let module = compute_shader_module(&device);
+        let mut descriptor = compute_pipeline_descriptor(module);
+        descriptor.error = Some("forced compute pipeline error".to_owned());
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_compute_pipeline_without_error_dispatch(descriptor);
+        let scoped = device.pop_error_scope().expect("scope should exist");
+
+        assert!(pipeline.is_error());
+        assert!(scoped.is_none());
+    }
+
+    #[test]
+    fn device_create_render_pipeline_happy_path_and_error_scope() {
+        let device = noop_device();
+        let module = render_shader_module(&device);
+
+        let pipeline = device.create_render_pipeline(render_pipeline_descriptor(module.clone()));
+        assert!(!pipeline.is_error());
+        assert_eq!(pipeline.vertex_entry_name(), "vs");
+        assert_eq!(pipeline.fragment_entry_name(), Some("fs"));
+
+        let mut invalid = render_pipeline_descriptor(module);
+        invalid.error = Some("forced render pipeline error".to_owned());
+        device.push_error_scope(ErrorFilter::Validation);
+        let error_pipeline = device.create_render_pipeline(invalid);
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid render pipeline should be scoped");
+
+        assert!(error_pipeline.is_error());
+        assert_eq!(error.kind, ErrorKind::Validation);
+        assert_eq!(error.message, "forced render pipeline error");
+    }
+
+    #[test]
+    fn device_create_render_pipeline_without_error_dispatch_keeps_scope_empty() {
+        let device = noop_device();
+        let module = render_shader_module(&device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.error = Some("forced render pipeline error".to_owned());
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_render_pipeline_without_error_dispatch(descriptor);
+        let scoped = device.pop_error_scope().expect("scope should exist");
+
+        assert!(pipeline.is_error());
+        assert!(scoped.is_none());
+    }
+
+    #[test]
+    fn queue_from_hal_hal_label_and_set_label_round_trip() {
+        let queue = Queue::from_hal(hal_noop_queue(), "initial");
+
+        assert!(matches!(queue.hal(), yawgpu_hal::HalQueue::Noop(_)));
+        assert_eq!(queue.label(), "initial");
+        queue.set_label("renamed");
+        assert_eq!(queue.label(), "renamed");
+    }
+
+    #[test]
+    fn queue_write_buffer_and_submit_empty_succeed() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+
+        assert_eq!(queue.write_buffer(&buffer, 0, &[1, 2, 3, 4]), None);
+        assert_eq!(queue.submit(&[]), None);
+    }
 
     #[test]
     fn creates_noop_device_and_queue() {

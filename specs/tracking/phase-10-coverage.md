@@ -2,6 +2,62 @@
 
 P10.3a audit: see `specs/tracking/phase-10-audit.md`.
 
+## yawgpu-core/src/lib.rs - Instance / Adapter / Device / Queue (51 pub fn)
+
+| pub fn | test name(s) |
+|---|---|
+| `Instance::new_noop` | `creates_noop_device_and_queue` (existing), `noop_device` helper users |
+| `Instance::from_hal` | `instance_from_hal_wraps_noop_hal` |
+| `Instance::enumerate_adapters` | `creates_noop_device_and_queue` (existing), `noop_adapter` / `noop_device` helper users |
+| `Instance::enumerate_adapters_with_feature_level` | `instance_enumerate_adapters_with_feature_level_sets_adapter_feature_level` |
+| `Instance::future_registry` | `instance_future_registry_process_events_is_empty_without_futures` |
+| `Instance::hal` | `instance_hal_returns_noop_hal_instance` |
+| `Instance::create_surface_from_metal_layer` | `instance_create_surface_from_metal_layer_noop_returns_noop_surface` |
+| `Adapter::from_hal` | `adapter_from_hal_wraps_noop_hal_adapter` |
+| `Adapter::name` | `adapter_from_hal_wraps_noop_hal_adapter`, `adapter_name_backend_limits_and_features_match_noop_contract` |
+| `Adapter::backend` | `adapter_name_backend_limits_and_features_match_noop_contract` |
+| `Adapter::limits` | `adapter_name_backend_limits_and_features_match_noop_contract` |
+| `Adapter::features` | `adapter_name_backend_limits_and_features_match_noop_contract` |
+| `Adapter::has_feature` | `adapter_name_backend_limits_and_features_match_noop_contract` |
+| `Adapter::create_device` | `creates_noop_device_and_queue` (existing), `adapter_create_device_rejects_unsupported_required_feature`, `adapter_create_device_applies_labels_and_core_feature` |
+| `Device::from_hal` | `device_from_hal_wraps_noop_hal_device` |
+| `Device::queue` | `creates_noop_device_and_queue` (existing), `adapter_create_device_applies_labels_and_core_feature`, `queue_write_buffer_and_submit_empty_succeed` |
+| `Device::allocation_count` | `creates_noop_device_and_queue` (existing), `device_create_buffer_increments_allocation_count`, `device_create_texture_happy_path_and_invalid_size_scope_error` |
+| `Device::hal` | `device_from_hal_wraps_noop_hal_device`, `device_hal_limits_and_features_match_noop_contract` |
+| `Device::limits` | `device_hal_limits_and_features_match_noop_contract` |
+| `Device::features` | `device_hal_limits_and_features_match_noop_contract` |
+| `Device::has_feature` | `adapter_create_device_applies_labels_and_core_feature`, `device_hal_limits_and_features_match_noop_contract` |
+| `Device::create_query_set` | `device_create_query_set_validates_count_and_creates_happy_path` |
+| `Device::same` | `device_same_distinguishes_clone_from_distinct_device` |
+| `Device::set_label` | `device_label_defaults_empty_and_set_label_updates_it` |
+| `Device::label` | `adapter_create_device_applies_labels_and_core_feature`, `device_label_defaults_empty_and_set_label_updates_it` |
+| `Device::destroy` | `device_destroy_lose_is_lost_and_lost_reason_are_idempotent` |
+| `Device::lose` | `device_destroy_lose_is_lost_and_lost_reason_are_idempotent` |
+| `Device::is_lost` | `device_destroy_lose_is_lost_and_lost_reason_are_idempotent` |
+| `Device::lost_reason` | `device_destroy_lose_is_lost_and_lost_reason_are_idempotent` |
+| `Device::set_uncaptured_error_callback` | `scoped_error_captures_without_uncaptured_callback` (existing), `uncaptured_error_routes_to_callback_without_scope` (existing) |
+| `Device::push_error_scope` | `scoped_error_captures_without_uncaptured_callback` (existing), `device_create_texture_happy_path_and_invalid_size_scope_error`, `device_create_compute_pipeline_happy_path_and_error_scope`, `device_create_render_pipeline_happy_path_and_error_scope` |
+| `Device::pop_error_scope` | `scoped_error_captures_without_uncaptured_callback` (existing), `device_create_texture_happy_path_and_invalid_size_scope_error`, `device_create_compute_pipeline_happy_path_and_error_scope`, `device_create_render_pipeline_happy_path_and_error_scope` |
+| `Device::dispatch_error` | `scoped_error_captures_without_uncaptured_callback` (existing), `uncaptured_error_routes_to_callback_without_scope` (existing) |
+| `Device::create_buffer` | `device_create_buffer_increments_allocation_count`, `queue_write_buffer_and_submit_empty_succeed` |
+| `Device::create_texture` | `device_create_texture_happy_path_and_invalid_size_scope_error` |
+| `Device::create_sampler` | `device_create_sampler_uses_default_descriptor` |
+| `Device::create_shader_module` | `device_create_shader_module_accepts_minimal_compute_wgsl`, `device_create_compute_pipeline_happy_path_and_error_scope`, `device_create_render_pipeline_happy_path_and_error_scope` |
+| `Device::create_bind_group_layout` | `device_create_bind_group_layout_bind_group_and_pipeline_layout_empty` |
+| `Device::create_bind_group` | `device_create_bind_group_layout_bind_group_and_pipeline_layout_empty` |
+| `Device::create_pipeline_layout` | `device_create_bind_group_layout_bind_group_and_pipeline_layout_empty` |
+| `Device::create_command_encoder` | `device_create_command_encoder_finishes_empty_encoder` |
+| `Device::create_compute_pipeline` | `device_create_compute_pipeline_happy_path_and_error_scope` |
+| `Device::create_compute_pipeline_without_error_dispatch` | `device_create_compute_pipeline_without_error_dispatch_keeps_scope_empty` |
+| `Device::create_render_pipeline` | `device_create_render_pipeline_happy_path_and_error_scope` |
+| `Device::create_render_pipeline_without_error_dispatch` | `device_create_render_pipeline_without_error_dispatch_keeps_scope_empty` |
+| `Queue::from_hal` | `queue_from_hal_hal_label_and_set_label_round_trip` |
+| `Queue::hal` | `queue_from_hal_hal_label_and_set_label_round_trip` |
+| `Queue::set_label` | `queue_from_hal_hal_label_and_set_label_round_trip` |
+| `Queue::label` | `adapter_create_device_applies_labels_and_core_feature`, `queue_from_hal_hal_label_and_set_label_round_trip` |
+| `Queue::write_buffer` | `queue_write_buffer_and_submit_empty_succeed` |
+| `Queue::submit` | `queue_write_buffer_and_submit_empty_succeed` |
+
 ## yawgpu-hal/src/noop/mod.rs (14 pub fn)
 
 | pub fn | test name(s) |
