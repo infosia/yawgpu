@@ -19,21 +19,43 @@ Full detail: `specs/reference/workflow.md`.
 
 ## Core principles
 
-1. **TDD against Dawn.** Dawn's `dawn/src/dawn/tests/unittests/validation`
-   is the executable spec. The cycle for every API area is:
-   Red (port the Dawn test, it fails) → Green (minimal impl) → refactor.
-   Never implement an API surface that has no ported test covering it.
-2. **Noop-first.** Every validation test must pass on the Noop HAL backend
-   with no GPU. Real-backend (Vulkan/Metal) work is gated and never required
-   for CI.
-3. **No panics in library code.** `yawgpu-core` and `yawgpu-hal` return
-   `Result`; use `?`. The single exception is the **FFI boundary** in the
-   `yawgpu` crate: invalid C handles/null where the spec forbids null may
-   `expect(...)` (mirrors wgpu-native), but spec-level validation failures
-   must route to the device error sink, not panic.
-4. **Arc-based handles.** Every WebGPU object is `Arc<XxxImpl>`. C handles are
-   `Arc::into_raw` / reconstructed; `wgpuXxxRelease` drops one ref,
-   `wgpuXxxAddRef` clones. `Drop` releases backend resources.
+1. **Every public API has a direct unit test.** Any `pub fn` in
+   `yawgpu` (the C FFI), `yawgpu-core`, or `yawgpu-hal` must have an
+   inline `#[cfg(test)] mod tests` test that exercises it directly
+   (happy path + error / edge cases as relevant). New public API
+   ships in the same commit as its unit test; renaming or changing
+   a public signature updates the test. Scope and definitions are
+   in `specs/blocks/90-unit-tests.md`. Integration tests
+   (`yawgpu/tests/*.rs`) and real-GPU e2e tests
+   (`yawgpu/tests/e2e_*.rs`) remain as regression / spec-conformance
+   layers on top — they don't replace the unit test for the
+   underlying public fn.
+2. **Noop-first.** Every validation/integration test must pass on
+   the Noop HAL backend with no GPU. Real-backend (Vulkan/Metal)
+   work is gated and never required for CI.
+3. **No panics in library code.** `yawgpu-core` and `yawgpu-hal`
+   return `Result`; use `?`. The single exception is the **FFI
+   boundary** in the `yawgpu` crate: invalid C handles/null where
+   the spec forbids null may `expect(...)` (mirrors wgpu-native),
+   but spec-level validation failures must route to the device
+   error sink, not panic.
+4. **Arc-based handles.** Every WebGPU object is `Arc<XxxImpl>`. C
+   handles are `Arc::into_raw` / reconstructed; `wgpuXxxRelease`
+   drops one ref, `wgpuXxxAddRef` clones. `Drop` releases backend
+   resources.
+
+### Historical note — Dawn TDD (Phases 0–9)
+
+The project was bootstrapped Phases 0–9 by porting Dawn's
+`dawn/src/dawn/tests/unittests/validation` tests as
+integration tests against the C FFI (`yawgpu/tests/*.rs`), with
+that suite as the executable spec for each API area. **That was
+the bootstrap methodology, not a permanent principle.** The
+ported tests remain in the tree as a spec-conformance regression
+layer and continue to run on every Noop gate, but new public API
+work follows principle 1 above (direct unit tests) — porting a
+Dawn test is optional, useful when it materially closes a
+spec-coverage gap.
 
 ## Code conventions
 
@@ -50,11 +72,16 @@ Full detail: `specs/reference/workflow.md`.
 
 ## Workflow per API area
 
-1. Write/extend `specs/blocks/<area>.md` — extract rules from the Dawn test.
-2. Port the Dawn test file to `yawgpu/tests/<area>_validation.rs` (Red).
-3. Implement minimally in `yawgpu-core` + `yawgpu` (Green).
-4. Verify on Noop; log in `specs/tracking/phase-N.md`.
-5. Refactor for reuse/clarity before moving on.
+1. Write/extend `specs/blocks/<area>.md` — describe the new
+   public API + its behaviour contract.
+2. Write the **inline unit test** for the new public fn (Red).
+3. Implement the public fn (Green).
+4. Optionally add an integration test in `yawgpu/tests/<area>.rs`
+   when the API spans multiple objects and the unit test cannot
+   reach the cross-object interaction (or port the Dawn test if
+   it materially closes a spec-conformance gap).
+5. Verify on Noop; log in `specs/tracking/phase-N.md`.
+6. Refactor for reuse/clarity before moving on.
 
 **Every phase ends with a mandatory Phase Review ("Clean Review Then
 Fix"):** a fresh no-context subagent reviews the phase's cumulative diff
