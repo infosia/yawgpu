@@ -116,7 +116,10 @@ impl Adapter {
     }
 
     #[must_use]
-    pub fn from_hal_with_feature_level(hal: HalAdapter, feature_level: FeatureLevel) -> Self {
+    pub(crate) fn from_hal_with_feature_level(
+        hal: HalAdapter,
+        feature_level: FeatureLevel,
+    ) -> Self {
         Self {
             inner: Arc::new(AdapterInner { hal, feature_level }),
         }
@@ -140,7 +143,7 @@ impl Adapter {
     }
 
     #[must_use]
-    pub fn feature_level(&self) -> FeatureLevel {
+    pub(crate) fn feature_level(&self) -> FeatureLevel {
         self.inner.feature_level
     }
 
@@ -316,10 +319,6 @@ impl Device {
         F: Fn(DeviceError) + Send + Sync + 'static,
     {
         self.inner.error_sink.lock().uncaptured_error_callback = callback.map(|f| Arc::new(f) as _);
-    }
-
-    pub fn clear_uncaptured_error_callback(&self) {
-        self.inner.error_sink.lock().uncaptured_error_callback = None;
     }
 
     pub fn push_error_scope(&self, filter: ErrorFilter) {
@@ -691,7 +690,7 @@ impl BufferUsage {
     }
 
     #[must_use]
-    pub fn contains(self, other: Self) -> bool {
+    pub(crate) fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 }
@@ -727,7 +726,7 @@ impl TextureUsage {
     }
 
     #[must_use]
-    pub fn contains(self, other: Self) -> bool {
+    pub(crate) fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 }
@@ -806,7 +805,7 @@ impl TextureFormat {
     }
 
     #[must_use]
-    pub fn is_undefined(self) -> bool {
+    pub(crate) fn is_undefined(self) -> bool {
         self.0 == Self::UNDEFINED
     }
 
@@ -930,7 +929,7 @@ impl TextureFormat {
     }
 
     #[must_use]
-    pub fn srgb_pair(self) -> Option<Self> {
+    pub(crate) fn srgb_pair(self) -> Option<Self> {
         let pair = match self.0 {
             Self::RGBA8_UNORM => Self::RGBA8_UNORM_SRGB,
             Self::RGBA8_UNORM_SRGB => Self::RGBA8_UNORM,
@@ -1325,7 +1324,7 @@ impl Texture {
     }
 
     #[must_use]
-    pub fn view_formats(&self) -> &[TextureFormat] {
+    pub(crate) fn view_formats(&self) -> &[TextureFormat] {
         &self.inner.view_formats
     }
 
@@ -1334,7 +1333,7 @@ impl Texture {
     /// implicit sRGB-counterpart allowance — that mirrors Dawn
     /// `Texture.cpp` `ValidateCanViewTextureAs`.
     #[must_use]
-    pub fn is_view_format_compatible(&self, view_format: TextureFormat) -> bool {
+    pub(crate) fn is_view_format_compatible(&self, view_format: TextureFormat) -> bool {
         view_format == self.format() || self.view_formats().contains(&view_format)
     }
 
@@ -1344,7 +1343,7 @@ impl Texture {
     }
 
     #[must_use]
-    pub fn is_destroyed(&self) -> bool {
+    pub(crate) fn is_destroyed(&self) -> bool {
         self.inner.state.lock().is_destroyed
     }
 
@@ -1517,7 +1516,7 @@ impl TextureView {
     }
 
     #[must_use]
-    pub fn texture(&self) -> Texture {
+    pub(crate) fn texture(&self) -> Texture {
         self.inner.texture.clone()
     }
 
@@ -1532,7 +1531,7 @@ impl TextureView {
     }
 
     #[must_use]
-    pub fn base_mip_level(&self) -> u32 {
+    pub(crate) fn base_mip_level(&self) -> u32 {
         self.inner.base_mip_level
     }
 
@@ -1547,7 +1546,7 @@ impl TextureView {
     }
 
     #[must_use]
-    pub fn array_layer_count(&self) -> u32 {
+    pub(crate) fn array_layer_count(&self) -> u32 {
         self.inner.array_layer_count
     }
 
@@ -1557,7 +1556,7 @@ impl TextureView {
     }
 
     #[must_use]
-    pub fn render_extent(&self) -> Extent3d {
+    pub(crate) fn render_extent(&self) -> Extent3d {
         let subresource = self.texture().subresource_size(self.base_mip_level());
         Extent3d {
             width: subresource.width,
@@ -1925,7 +1924,7 @@ impl BindGroupLayout {
     }
 
     #[must_use]
-    pub fn is_default(&self) -> bool {
+    pub(crate) fn is_default(&self) -> bool {
         self.inner.is_default
     }
 
@@ -1990,7 +1989,7 @@ impl BindGroup {
     }
 
     #[must_use]
-    pub fn layout(&self) -> &Arc<BindGroupLayout> {
+    pub(crate) fn layout(&self) -> &Arc<BindGroupLayout> {
         &self.inner._layout
     }
 
@@ -3560,7 +3559,7 @@ impl RenderPipeline {
     }
 
     #[must_use]
-    pub fn required_vertex_buffer_count(&self) -> usize {
+    pub(crate) fn required_vertex_buffer_count(&self) -> usize {
         self.inner._vertex.buffer_count
     }
 
@@ -4747,7 +4746,7 @@ impl Buffer {
     }
 
     #[must_use]
-    pub fn is_destroyed(&self) -> bool {
+    pub(crate) fn is_destroyed(&self) -> bool {
         self.inner.state.lock().is_destroyed
     }
 
@@ -4940,7 +4939,7 @@ impl Buffer {
         self.inner.host.ptr_at(offset)
     }
 
-    pub fn write_from_queue(&self, offset: u64, data: &[u8]) -> Option<DeviceError> {
+    pub(crate) fn write_from_queue(&self, offset: u64, data: &[u8]) -> Option<DeviceError> {
         let size = match u64::try_from(data.len()) {
             Ok(size) => size,
             Err(_) => {
@@ -5832,7 +5831,7 @@ pub enum Feature {
 }
 
 #[must_use]
-pub fn supported_features() -> FeatureSet {
+pub(crate) fn supported_features() -> FeatureSet {
     [
         Feature::CoreFeaturesAndLimits,
         Feature::Rg11b10UfloatRenderable,
@@ -5924,7 +5923,7 @@ impl QuerySet {
     }
 
     #[must_use]
-    pub fn is_destroyed(&self) -> bool {
+    pub(crate) fn is_destroyed(&self) -> bool {
         self.inner.state.lock().is_destroyed
     }
 
@@ -6629,7 +6628,7 @@ impl CommandEncoder {
         None
     }
 
-    pub fn record_command_guard(&self) -> Result<(), String> {
+    pub(crate) fn record_command_guard(&self) -> Result<(), String> {
         let state = self.inner.state.lock();
         if state.lifecycle != CommandEncoderLifecycle::Recording {
             return Err("command encoder cannot record after finish".to_owned());
@@ -9161,7 +9160,7 @@ pub enum ErrorFilter {
 
 impl ErrorFilter {
     #[must_use]
-    pub fn matches(self, kind: ErrorKind) -> bool {
+    pub(crate) fn matches(self, kind: ErrorKind) -> bool {
         matches!(
             (self, kind),
             (Self::Validation, ErrorKind::Validation)
@@ -9186,7 +9185,7 @@ pub struct DeviceError {
 
 impl DeviceError {
     #[must_use]
-    pub fn validation(message: impl Into<String>) -> Self {
+    pub(crate) fn validation(message: impl Into<String>) -> Self {
         Self {
             kind: ErrorKind::Validation,
             message: message.into(),
@@ -9194,7 +9193,7 @@ impl DeviceError {
     }
 
     #[must_use]
-    pub fn internal(message: impl Into<String>) -> Self {
+    pub(crate) fn internal(message: impl Into<String>) -> Self {
         Self {
             kind: ErrorKind::Internal,
             message: message.into(),

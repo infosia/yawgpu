@@ -1,5 +1,7 @@
 # Phase 10 — Public API Unit Test Coverage
 
+P10.3a audit: see `specs/tracking/phase-10-audit.md`.
+
 ## yawgpu-hal/src/noop/mod.rs (14 pub fn)
 
 | pub fn | test name(s) |
