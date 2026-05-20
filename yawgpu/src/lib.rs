@@ -5272,7 +5272,23 @@ pub unsafe fn testing_get_queue_label(queue: native::WGPUQueue) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(non_snake_case)]
+
     use super::*;
+
+    #[derive(Default)]
+    struct RequestAdapterState {
+        fired: u32,
+        status: native::WGPURequestAdapterStatus,
+        adapter: native::WGPUAdapter,
+    }
+
+    #[derive(Default)]
+    struct RequestDeviceState {
+        fired: u32,
+        status: native::WGPURequestDeviceStatus,
+        device: native::WGPUDevice,
+    }
 
     unsafe extern "C" fn request_adapter_callback(
         status: native::WGPURequestAdapterStatus,
@@ -5281,8 +5297,10 @@ mod tests {
         userdata1: *mut c_void,
         _userdata2: *mut c_void,
     ) {
-        assert_eq!(status, native::WGPURequestAdapterStatus_Success);
-        *(userdata1 as *mut native::WGPUAdapter) = adapter;
+        let state = &mut *(userdata1 as *mut RequestAdapterState);
+        state.fired += 1;
+        state.status = status;
+        state.adapter = adapter;
     }
 
     unsafe extern "C" fn request_device_callback(
@@ -5292,71 +5310,488 @@ mod tests {
         userdata1: *mut c_void,
         _userdata2: *mut c_void,
     ) {
-        assert_eq!(status, native::WGPURequestDeviceStatus_Success);
-        *(userdata1 as *mut native::WGPUDevice) = device;
+        let state = &mut *(userdata1 as *mut RequestDeviceState);
+        state.fired += 1;
+        state.status = status;
+        state.device = device;
+    }
+
+    unsafe fn make_noop_instance() -> native::WGPUInstance {
+        let mut chain = WGPUYawgpuInstanceBackendSelect {
+            chain: native::WGPUChainedStruct {
+                next: std::ptr::null_mut(),
+                sType: WGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT,
+            },
+            backend: WGPU_YAWGPU_INSTANCE_BACKEND_NOOP,
+        };
+        let descriptor = native::WGPUInstanceDescriptor {
+            nextInChain: (&mut chain.chain) as *mut native::WGPUChainedStruct,
+            requiredFeatureCount: 0,
+            requiredFeatures: std::ptr::null(),
+            requiredLimits: std::ptr::null(),
+        };
+        wgpuCreateInstance(&descriptor)
+    }
+
+    unsafe fn request_noop_adapter(instance: native::WGPUInstance) -> native::WGPUAdapter {
+        let mut state = RequestAdapterState::default();
+        let callback_info = native::WGPURequestAdapterCallbackInfo {
+            nextInChain: std::ptr::null_mut(),
+            mode: native::WGPUCallbackMode_AllowProcessEvents,
+            callback: Some(request_adapter_callback),
+            userdata1: (&mut state as *mut RequestAdapterState).cast(),
+            userdata2: std::ptr::null_mut(),
+        };
+        let future = wgpuInstanceRequestAdapter(instance, std::ptr::null(), callback_info);
+        assert_ne!(future.id, 0);
+
+        for _ in 0..8 {
+            if state.fired != 0 {
+                break;
+            }
+            wgpuInstanceProcessEvents(instance);
+        }
+
+        assert_eq!(state.fired, 1);
+        assert_eq!(state.status, native::WGPURequestAdapterStatus_Success);
+        assert!(!state.adapter.is_null());
+        state.adapter
+    }
+
+    unsafe fn request_noop_device(
+        instance: native::WGPUInstance,
+        adapter: native::WGPUAdapter,
+    ) -> native::WGPUDevice {
+        let mut state = RequestDeviceState::default();
+        let callback_info = native::WGPURequestDeviceCallbackInfo {
+            nextInChain: std::ptr::null_mut(),
+            mode: native::WGPUCallbackMode_AllowProcessEvents,
+            callback: Some(request_device_callback),
+            userdata1: (&mut state as *mut RequestDeviceState).cast(),
+            userdata2: std::ptr::null_mut(),
+        };
+        let future = wgpuAdapterRequestDevice(adapter, std::ptr::null(), callback_info);
+        assert_ne!(future.id, 0);
+
+        for _ in 0..8 {
+            if state.fired != 0 {
+                break;
+            }
+            wgpuInstanceProcessEvents(instance);
+        }
+
+        assert_eq!(state.fired, 1);
+        assert_eq!(state.status, native::WGPURequestDeviceStatus_Success);
+        assert!(!state.device.is_null());
+        state.device
+    }
+
+    unsafe fn release_handles(
+        instance: native::WGPUInstance,
+        adapter: native::WGPUAdapter,
+        device: native::WGPUDevice,
+    ) {
+        if !device.is_null() {
+            wgpuDeviceRelease(device);
+        }
+        if !adapter.is_null() {
+            wgpuAdapterRelease(adapter);
+        }
+        if !instance.is_null() {
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    fn empty_string_view() -> native::WGPUStringView {
+        native::WGPUStringView {
+            data: std::ptr::null(),
+            length: 0,
+        }
+    }
+
+    fn zeroed_adapter_info() -> native::WGPUAdapterInfo {
+        native::WGPUAdapterInfo {
+            nextInChain: std::ptr::null_mut(),
+            vendor: empty_string_view(),
+            architecture: empty_string_view(),
+            device: empty_string_view(),
+            description: empty_string_view(),
+            backendType: native::WGPUBackendType_Undefined,
+            adapterType: native::WGPUAdapterType_Unknown,
+            vendorID: 0,
+            deviceID: 0,
+            subgroupMinSize: 0,
+            subgroupMaxSize: 0,
+        }
+    }
+
+    fn zeroed_limits() -> native::WGPULimits {
+        native::WGPULimits {
+            nextInChain: std::ptr::null_mut(),
+            maxTextureDimension1D: 0,
+            maxTextureDimension2D: 0,
+            maxTextureDimension3D: 0,
+            maxTextureArrayLayers: 0,
+            maxBindGroups: 0,
+            maxBindGroupsPlusVertexBuffers: 0,
+            maxBindingsPerBindGroup: 0,
+            maxDynamicUniformBuffersPerPipelineLayout: 0,
+            maxDynamicStorageBuffersPerPipelineLayout: 0,
+            maxSampledTexturesPerShaderStage: 0,
+            maxSamplersPerShaderStage: 0,
+            maxStorageBuffersPerShaderStage: 0,
+            maxStorageTexturesPerShaderStage: 0,
+            maxUniformBuffersPerShaderStage: 0,
+            maxUniformBufferBindingSize: 0,
+            maxStorageBufferBindingSize: 0,
+            minUniformBufferOffsetAlignment: 0,
+            minStorageBufferOffsetAlignment: 0,
+            maxVertexBuffers: 0,
+            maxBufferSize: 0,
+            maxVertexAttributes: 0,
+            maxVertexBufferArrayStride: 0,
+            maxInterStageShaderVariables: 0,
+            maxColorAttachments: 0,
+            maxColorAttachmentBytesPerSample: 0,
+            maxComputeWorkgroupStorageSize: 0,
+            maxComputeInvocationsPerWorkgroup: 0,
+            maxComputeWorkgroupSizeX: 0,
+            maxComputeWorkgroupSizeY: 0,
+            maxComputeWorkgroupSizeZ: 0,
+            maxComputeWorkgroupsPerDimension: 0,
+            maxImmediateSize: 0,
+        }
+    }
+
+    unsafe fn string_view_to_string(value: native::WGPUStringView) -> String {
+        string_view_to_str(value).unwrap_or_default().to_owned()
     }
 
     #[test]
-    fn instance_add_ref_release_balances_core_arc() {
+    fn wgpuCreateInstance_noop_backend_and_null_descriptor_return_instances() {
         unsafe {
-            let instance = wgpuCreateInstance(std::ptr::null());
-            let core = Arc::clone(&borrow_handle(instance, "WGPUInstance").core);
-            assert_eq!(Arc::strong_count(&core), 2);
+            let noop_instance = make_noop_instance();
+            assert!(!noop_instance.is_null());
+            assert!(matches!(
+                borrow_handle(noop_instance, "WGPUInstance").core.hal(),
+                HalInstance::Noop(_)
+            ));
 
-            wgpuInstanceAddRef(instance);
-            assert_eq!(Arc::strong_count(&core), 2);
+            let default_instance = wgpuCreateInstance(std::ptr::null());
+            assert!(!default_instance.is_null());
+            assert!(matches!(
+                borrow_handle(default_instance, "WGPUInstance").core.hal(),
+                HalInstance::Noop(_)
+            ));
 
-            wgpuInstanceRelease(instance);
-            assert_eq!(Arc::strong_count(&core), 2);
-
-            wgpuInstanceRelease(instance);
-            assert_eq!(Arc::strong_count(&core), 1);
+            wgpuInstanceRelease(default_instance);
+            wgpuInstanceRelease(noop_instance);
         }
     }
 
     #[test]
-    fn noop_request_adapter_request_device_process_events_round_trip() {
+    fn wgpuInstanceAddRef_and_wgpuInstanceRelease_balance_owned_refs() {
         unsafe {
-            let instance = wgpuCreateInstance(std::ptr::null());
-            let mut adapter: native::WGPUAdapter = std::ptr::null();
+            let instance = make_noop_instance();
+            let borrowed_arc = clone_handle(instance, "WGPUInstance");
+            assert_eq!(Arc::strong_count(&borrowed_arc), 2);
 
+            wgpuInstanceAddRef(instance);
+            assert_eq!(Arc::strong_count(&borrowed_arc), 3);
+
+            wgpuInstanceRelease(instance);
+            assert_eq!(Arc::strong_count(&borrowed_arc), 2);
+
+            drop(borrowed_arc);
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn wgpuInstanceCreateSurface_accepts_noop_metal_layer_source() {
+        unsafe {
+            let instance = make_noop_instance();
+            let mut source = native::WGPUSurfaceSourceMetalLayer {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_SurfaceSourceMetalLayer,
+                },
+                layer: std::ptr::dangling_mut(),
+            };
+            let descriptor = native::WGPUSurfaceDescriptor {
+                nextInChain: (&mut source.chain) as *mut native::WGPUChainedStruct,
+                label: empty_string_view(),
+            };
+
+            let surface = wgpuInstanceCreateSurface(instance, &descriptor);
+            assert!(!surface.is_null());
+
+            wgpuSurfaceRelease(surface);
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn wgpuInstanceRequestAdapter_process_events_returns_success_adapter() {
+        unsafe {
+            let instance = make_noop_instance();
+            let mut state = RequestAdapterState::default();
             let adapter_callback_info = native::WGPURequestAdapterCallbackInfo {
                 nextInChain: std::ptr::null_mut(),
                 mode: native::WGPUCallbackMode_AllowProcessEvents,
                 callback: Some(request_adapter_callback),
-                userdata1: (&mut adapter as *mut native::WGPUAdapter).cast(),
+                userdata1: (&mut state as *mut RequestAdapterState).cast(),
                 userdata2: std::ptr::null_mut(),
             };
             let future =
                 wgpuInstanceRequestAdapter(instance, std::ptr::null(), adapter_callback_info);
             assert_ne!(future.id, 0);
-            assert!(adapter.is_null());
+            assert_eq!(state.fired, 0);
 
             wgpuInstanceProcessEvents(instance);
-            assert!(!adapter.is_null());
+            assert_eq!(state.fired, 1);
+            assert_eq!(state.status, native::WGPURequestAdapterStatus_Success);
+            assert!(!state.adapter.is_null());
 
-            let mut device: native::WGPUDevice = std::ptr::null();
+            wgpuAdapterRelease(state.adapter);
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn wgpuInstanceProcessEvents_without_registered_futures_is_noop() {
+        unsafe {
+            let instance = make_noop_instance();
+            wgpuInstanceProcessEvents(instance);
+            wgpuInstanceProcessEvents(instance);
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn wgpuInstanceWaitAny_empty_list_returns_timed_out_and_null_list_errors() {
+        unsafe {
+            let instance = make_noop_instance();
+
+            assert_eq!(
+                wgpuInstanceWaitAny(instance, 0, std::ptr::null_mut(), 0),
+                native::WGPUWaitStatus_TimedOut
+            );
+            assert_eq!(
+                wgpuInstanceWaitAny(instance, 1, std::ptr::null_mut(), 0),
+                native::WGPUWaitStatus_Error
+            );
+
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn wgpuInstanceWaitAny_wait_any_only_request_adapter_fires_callback() {
+        unsafe {
+            let instance = make_noop_instance();
+            let mut state = RequestAdapterState::default();
+            let callback_info = native::WGPURequestAdapterCallbackInfo {
+                nextInChain: std::ptr::null_mut(),
+                mode: native::WGPUCallbackMode_WaitAnyOnly,
+                callback: Some(request_adapter_callback),
+                userdata1: (&mut state as *mut RequestAdapterState).cast(),
+                userdata2: std::ptr::null_mut(),
+            };
+            let future = wgpuInstanceRequestAdapter(instance, std::ptr::null(), callback_info);
+            let mut wait_info = native::WGPUFutureWaitInfo {
+                future,
+                completed: 0,
+            };
+
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(state.fired, 0);
+
+            assert_eq!(
+                wgpuInstanceWaitAny(instance, 1, &mut wait_info, 0),
+                native::WGPUWaitStatus_Success
+            );
+            assert_eq!(wait_info.completed, 1);
+            assert_eq!(state.fired, 1);
+            assert_eq!(state.status, native::WGPURequestAdapterStatus_Success);
+            assert!(!state.adapter.is_null());
+
+            wgpuAdapterRelease(state.adapter);
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn wgpuAdapterAddRef_and_wgpuAdapterRelease_balance_owned_refs() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let borrowed_arc = clone_handle(adapter, "WGPUAdapter");
+            assert_eq!(Arc::strong_count(&borrowed_arc), 2);
+
+            wgpuAdapterAddRef(adapter);
+            assert_eq!(Arc::strong_count(&borrowed_arc), 3);
+
+            wgpuAdapterRelease(adapter);
+            assert_eq!(Arc::strong_count(&borrowed_arc), 2);
+
+            drop(borrowed_arc);
+            release_handles(instance, adapter, std::ptr::null());
+        }
+    }
+
+    #[test]
+    fn wgpuAdapterGetLimits_populates_noop_defaults_and_rejects_null_out() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let mut limits = zeroed_limits();
+
+            assert_eq!(
+                wgpuAdapterGetLimits(adapter, &mut limits),
+                native::WGPUStatus_Success
+            );
+            assert_eq!(
+                limits.maxTextureDimension2D,
+                core::Limits::DEFAULT.max_texture_dimension_2d
+            );
+            assert_eq!(limits.maxBindGroups, core::Limits::DEFAULT.max_bind_groups);
+            assert_eq!(limits.maxBufferSize, core::Limits::DEFAULT.max_buffer_size);
+            assert_eq!(
+                wgpuAdapterGetLimits(adapter, std::ptr::null_mut()),
+                native::WGPUStatus_Error
+            );
+
+            release_handles(instance, adapter, std::ptr::null());
+        }
+    }
+
+    #[test]
+    fn wgpuAdapterGetFeatures_populates_supported_features_and_free_members() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let mut features = native::WGPUSupportedFeatures {
+                featureCount: 0,
+                features: std::ptr::null(),
+            };
+
+            wgpuAdapterGetFeatures(adapter, &mut features);
+            assert_eq!(features.featureCount, 5);
+            let values = std::slice::from_raw_parts(features.features, features.featureCount);
+            assert!(values.contains(&native::WGPUFeatureName_CoreFeaturesAndLimits));
+            assert!(values.contains(&native::WGPUFeatureName_RG11B10UfloatRenderable));
+            assert!(values.contains(&native::WGPUFeatureName_TimestampQuery));
+            assert!(values.contains(&native::WGPUFeatureName_TextureFormatsTier1));
+            assert!(values.contains(&native::WGPUFeatureName_TextureFormatsTier2));
+
+            wgpuSupportedFeaturesFreeMembers(features);
+            release_handles(instance, adapter, std::ptr::null());
+        }
+    }
+
+    #[test]
+    fn wgpuSupportedFeaturesFreeMembers_accepts_empty_features() {
+        unsafe {
+            wgpuSupportedFeaturesFreeMembers(native::WGPUSupportedFeatures {
+                featureCount: 0,
+                features: std::ptr::null(),
+            });
+        }
+    }
+
+    #[test]
+    fn wgpuAdapterHasFeature_reports_supported_and_unknown_features() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+
+            assert_eq!(
+                wgpuAdapterHasFeature(adapter, native::WGPUFeatureName_TimestampQuery),
+                1
+            );
+            assert_eq!(wgpuAdapterHasFeature(adapter, 0xFFFF_FFFF), 0);
+
+            release_handles(instance, adapter, std::ptr::null());
+        }
+    }
+
+    #[test]
+    fn wgpuAdapterGetInfo_populates_noop_info_and_free_members() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let mut info = zeroed_adapter_info();
+
+            assert_eq!(
+                wgpuAdapterGetInfo(adapter, &mut info),
+                native::WGPUStatus_Success
+            );
+            assert_eq!(string_view_to_string(info.vendor), "yawgpu");
+            assert_eq!(string_view_to_string(info.architecture), "");
+            assert_eq!(string_view_to_string(info.device), "yawgpu Noop Adapter");
+            assert_eq!(string_view_to_string(info.description), "");
+            assert_eq!(info.backendType, native::WGPUBackendType_Null);
+            assert_eq!(info.adapterType, native::WGPUAdapterType_CPU);
+            assert_eq!(info.vendorID, 0);
+            assert_eq!(info.deviceID, 0);
+            assert_eq!(
+                wgpuAdapterGetInfo(adapter, std::ptr::null_mut()),
+                native::WGPUStatus_Error
+            );
+
+            wgpuAdapterInfoFreeMembers(info);
+            release_handles(instance, adapter, std::ptr::null());
+        }
+    }
+
+    #[test]
+    fn wgpuAdapterInfoFreeMembers_accepts_empty_members() {
+        unsafe {
+            wgpuAdapterInfoFreeMembers(zeroed_adapter_info());
+        }
+    }
+
+    #[test]
+    fn wgpuAdapterRequestDevice_process_events_returns_success_device() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let mut state = RequestDeviceState::default();
             let device_callback_info = native::WGPURequestDeviceCallbackInfo {
                 nextInChain: std::ptr::null_mut(),
                 mode: native::WGPUCallbackMode_AllowProcessEvents,
                 callback: Some(request_device_callback),
-                userdata1: (&mut device as *mut native::WGPUDevice).cast(),
+                userdata1: (&mut state as *mut RequestDeviceState).cast(),
                 userdata2: std::ptr::null_mut(),
             };
             let future = wgpuAdapterRequestDevice(adapter, std::ptr::null(), device_callback_info);
             assert_ne!(future.id, 0);
-            assert!(device.is_null());
+            assert_eq!(state.fired, 0);
 
             wgpuInstanceProcessEvents(instance);
-            assert!(!device.is_null());
+            assert_eq!(state.fired, 1);
+            assert_eq!(state.status, native::WGPURequestDeviceStatus_Success);
+            assert!(!state.device.is_null());
 
-            let queue = wgpuDeviceGetQueue(device);
+            let queue = wgpuDeviceGetQueue(state.device);
             assert!(!queue.is_null());
 
             wgpuQueueRelease(queue);
-            wgpuDeviceRelease(device);
-            wgpuAdapterRelease(adapter);
-            wgpuInstanceRelease(instance);
+            release_handles(instance, adapter, state.device);
+        }
+    }
+
+    #[test]
+    fn request_noop_device_helper_returns_live_device() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let device = request_noop_device(instance, adapter);
+
+            assert!(!device.is_null());
+
+            release_handles(instance, adapter, device);
         }
     }
 }
