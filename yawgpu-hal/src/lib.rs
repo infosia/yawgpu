@@ -1,3 +1,4 @@
+use std::ffi::c_void;
 use std::ptr::NonNull;
 
 #[cfg(feature = "noop")]
@@ -27,6 +28,21 @@ pub enum HalError {
     ShaderCompilationFailed {
         backend: &'static str,
         message: String,
+    },
+    #[error("HAL swapchain creation failed: {backend}: {message}")]
+    SwapchainCreationFailed {
+        backend: &'static str,
+        message: &'static str,
+    },
+    #[error("HAL surface acquire failed: {backend}: {message}")]
+    AcquireFailed {
+        backend: &'static str,
+        message: &'static str,
+    },
+    #[error("HAL surface present failed: {backend}: {message}")]
+    PresentFailed {
+        backend: &'static str,
+        message: &'static str,
     },
 }
 
@@ -69,6 +85,24 @@ impl HalInstance {
                 .into_iter()
                 .map(HalAdapter::Metal)
                 .collect(),
+        }
+    }
+
+    pub fn create_surface_from_metal_layer(
+        &self,
+        layer: *mut c_void,
+    ) -> Result<HalSurface, HalError> {
+        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+        let _ = layer;
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => Ok(HalSurface::Noop),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(instance) => instance
+                .create_surface_from_metal_layer(layer)
+                .map(HalSurface::Vulkan),
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => metal::MetalSurface::from_layer(layer).map(HalSurface::Metal),
         }
     }
 }
@@ -279,6 +313,98 @@ impl HalDevice {
                     bindings,
                 )
                 .map(HalRenderPipeline::Metal),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HalSurfaceConfiguration {
+    pub format: HalTextureFormat,
+    pub usage: HalTextureUsage,
+    pub width: u32,
+    pub height: u32,
+    pub present_mode: HalPresentMode,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HalPresentMode {
+    Fifo,
+    Immediate,
+    Mailbox,
+}
+
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum HalSurface {
+    #[cfg(feature = "noop")]
+    Noop,
+    #[cfg(feature = "vulkan")]
+    Vulkan(vulkan::VulkanSurface),
+    #[cfg(feature = "metal")]
+    Metal(metal::MetalSurface),
+}
+
+impl HalSurface {
+    pub fn configure(
+        &mut self,
+        device: &HalDevice,
+        config: HalSurfaceConfiguration,
+    ) -> Result<(), HalError> {
+        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+        let _ = config;
+        #[allow(unreachable_patterns)]
+        match (self, device) {
+            #[cfg(feature = "noop")]
+            (Self::Noop, _) => Ok(()),
+            #[cfg(feature = "vulkan")]
+            (Self::Vulkan(surface), HalDevice::Vulkan(device)) => surface.configure(device, config),
+            #[cfg(feature = "metal")]
+            (Self::Metal(surface), HalDevice::Metal(device)) => surface.configure(device, config),
+            _ => Err(HalError::SwapchainCreationFailed {
+                backend: "surface",
+                message: "surface and device backends do not match",
+            }),
+        }
+    }
+
+    pub fn unconfigure(&mut self) {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop => {}
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(surface) => surface.unconfigure(),
+            #[cfg(feature = "metal")]
+            Self::Metal(surface) => surface.unconfigure(),
+        }
+    }
+
+    pub fn acquire_next_texture(&mut self) -> Result<HalTexture, HalError> {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop => Err(HalError::AcquireFailed {
+                backend: "noop",
+                message: "Noop surfaces do not provide swapchain textures",
+            }),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(surface) => surface.acquire_next_texture().map(HalTexture::Vulkan),
+            #[cfg(feature = "metal")]
+            Self::Metal(surface) => surface.acquire_next_texture().map(HalTexture::Metal),
+        }
+    }
+
+    pub fn present(&mut self, queue: &HalQueue) -> Result<(), HalError> {
+        #[allow(unreachable_patterns)]
+        match (self, queue) {
+            #[cfg(feature = "noop")]
+            (Self::Noop, _) => Ok(()),
+            #[cfg(feature = "vulkan")]
+            (Self::Vulkan(surface), HalQueue::Vulkan(queue)) => surface.present(queue),
+            #[cfg(feature = "metal")]
+            (Self::Metal(surface), HalQueue::Metal(queue)) => surface.present(queue),
+            _ => Err(HalError::PresentFailed {
+                backend: "surface",
+                message: "surface and queue backends do not match",
+            }),
         }
     }
 }

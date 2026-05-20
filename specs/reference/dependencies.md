@@ -80,7 +80,8 @@ slice; not done during active development.
 
 ## Phase 7 / real backends
 
-- **objc2 0.6 / objc2-foundation 0.3 / objc2-metal 0.3**: the Metal
+- **objc2 0.6 / objc2-core-foundation 0.3 / objc2-foundation 0.3 /
+  objc2-metal 0.3 / objc2-quartz-core 0.3**: the Metal
   backend was migrated from the deprecated `metal 0.33.0` crate during
   the P9.0 review fixes (2026-05-20), matching the working `mgpu`
   Metal backend's objc2 family. This resolves the Phase-7 Review MINOR
@@ -90,6 +91,9 @@ slice; not done during active development.
   (basic/buffer/texture/compute/render/smoke). Dependencies remain
   optional and are enabled only by the `metal` cargo feature, so
   default Noop builds do not compile or link Objective-C/Metal crates.
+  P9.2 adds `objc2-core-foundation` + `objc2-quartz-core` for the
+  real CAMetalLayer swapchain path (`WGPUSurfaceSourceMetalLayer`);
+  they are also `metal`-feature-only.
   **Architectural follow-up (resolved 2026-05-20):** `wgpuBuffer
   GetMappedRange` was switched to return the real backend's
   persistently-mapped pointer (Metal `MTLBuffer.contents()` on

@@ -1,4 +1,4 @@
-use std::ffi::{CStr, CString};
+use std::ffi::{c_void, CStr, CString};
 use std::fmt;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,8 +11,9 @@ use crate::{
     HalAddressMode, HalBoundBuffer, HalBufferBindingKind, HalBufferCopy, HalBufferTextureCopy,
     HalCompareFunction, HalComputePass, HalCopy, HalDescriptorBinding, HalError, HalExtent3d,
     HalFilterMode, HalMipmapFilterMode, HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass,
-    HalRenderPipelineDescriptor, HalSamplerDescriptor, HalShaderSource, HalTextureCopy,
-    HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
+    HalRenderPipelineDescriptor, HalSamplerDescriptor, HalShaderSource, HalSurfaceConfiguration,
+    HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat,
+    HalVertexStepMode,
 };
 
 const BACKEND: &str = "vulkan";
@@ -20,6 +21,7 @@ const IMAGE_LAYOUT_UNDEFINED: u8 = 0;
 const IMAGE_LAYOUT_TRANSFER_DST: u8 = 1;
 const IMAGE_LAYOUT_TRANSFER_SRC: u8 = 2;
 const IMAGE_LAYOUT_COLOR_ATTACHMENT: u8 = 3;
+const IMAGE_LAYOUT_PRESENT: u8 = 4;
 
 #[derive(Debug, Clone)]
 pub struct VulkanInstance {
@@ -30,7 +32,11 @@ impl VulkanInstance {
     pub fn new() -> Result<Self, HalError> {
         let entry = unsafe { ash::Entry::load() }
             .map_err(|_| HalError::BackendUnavailable { backend: BACKEND })?;
-        let extension_names = [vk::KHR_PORTABILITY_ENUMERATION_NAME.as_ptr()];
+        let extension_names = [
+            vk::KHR_PORTABILITY_ENUMERATION_NAME.as_ptr(),
+            vk::KHR_SURFACE_NAME.as_ptr(),
+            vk::EXT_METAL_SURFACE_NAME.as_ptr(),
+        ];
         let create_info = vk::InstanceCreateInfo::default()
             .flags(vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR)
             .enabled_extension_names(&extension_names);
@@ -56,6 +62,34 @@ impl VulkanInstance {
                 VulkanAdapter::new(Arc::clone(&self.inner), physical_device)
             })
             .collect()
+    }
+
+    pub fn create_surface_from_metal_layer(
+        &self,
+        layer: *mut c_void,
+    ) -> Result<VulkanSurface, HalError> {
+        if layer.is_null() {
+            return Err(HalError::SwapchainCreationFailed {
+                backend: BACKEND,
+                message: "surface layer is null",
+            });
+        }
+        let loader =
+            ash::ext::metal_surface::Instance::new(&self.inner._entry, &self.inner.instance);
+        let create_info = vk::MetalSurfaceCreateInfoEXT::default().layer(layer);
+        let surface = unsafe { loader.create_metal_surface(&create_info, None) }.map_err(|_| {
+            HalError::SwapchainCreationFailed {
+                backend: BACKEND,
+                message: "vkCreateMetalSurfaceEXT failed",
+            }
+        })?;
+        Ok(VulkanSurface {
+            instance: Arc::clone(&self.inner),
+            surface,
+            swapchain: None,
+            config: None,
+            current_image_index: None,
+        })
     }
 }
 
@@ -122,6 +156,9 @@ impl VulkanAdapter {
         if self.has_device_extension(vk::KHR_PORTABILITY_SUBSET_NAME) {
             extension_names.push(vk::KHR_PORTABILITY_SUBSET_NAME.as_ptr());
         }
+        if self.has_device_extension(vk::KHR_SWAPCHAIN_NAME) {
+            extension_names.push(vk::KHR_SWAPCHAIN_NAME.as_ptr());
+        }
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&extension_names);
@@ -140,6 +177,7 @@ impl VulkanAdapter {
         let inner = Arc::new(VulkanDeviceInner {
             _instance: Arc::clone(&self.instance),
             device,
+            physical_device: self.physical_device,
             memory_properties,
             queue_family_index,
             allocations: AtomicU64::new(0),
@@ -191,6 +229,7 @@ impl VulkanAdapter {
 struct VulkanDeviceInner {
     _instance: Arc<VulkanInstanceInner>,
     device: ash::Device,
+    physical_device: vk::PhysicalDevice,
     memory_properties: vk::PhysicalDeviceMemoryProperties,
     queue_family_index: u32,
     allocations: AtomicU64,
@@ -300,6 +339,185 @@ impl VulkanDevice {
             descriptor,
             bindings,
         )
+    }
+}
+
+pub struct VulkanSurface {
+    instance: Arc<VulkanInstanceInner>,
+    surface: vk::SurfaceKHR,
+    swapchain: Option<VulkanSwapchain>,
+    config: Option<HalSurfaceConfiguration>,
+    current_image_index: Option<u32>,
+}
+
+impl fmt::Debug for VulkanSurface {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VulkanSurface")
+            .field("surface", &self.surface)
+            .field("configured", &self.config.is_some())
+            .finish()
+    }
+}
+
+unsafe impl Send for VulkanSurface {}
+unsafe impl Sync for VulkanSurface {}
+
+impl Drop for VulkanSurface {
+    fn drop(&mut self) {
+        self.swapchain = None;
+        let loader =
+            ash::khr::surface::Instance::new(&self.instance._entry, &self.instance.instance);
+        unsafe {
+            loader.destroy_surface(self.surface, None);
+        }
+    }
+}
+
+impl VulkanSurface {
+    pub fn configure(
+        &mut self,
+        device: &VulkanDevice,
+        config: HalSurfaceConfiguration,
+    ) -> Result<(), HalError> {
+        self.swapchain = None;
+        let swapchain = create_swapchain(Arc::clone(&device.inner), self.surface, config)?;
+        self.config = Some(config);
+        self.current_image_index = None;
+        self.swapchain = Some(swapchain);
+        Ok(())
+    }
+
+    pub fn unconfigure(&mut self) {
+        self.swapchain = None;
+        self.config = None;
+        self.current_image_index = None;
+    }
+
+    pub fn acquire_next_texture(&mut self) -> Result<VulkanTexture, HalError> {
+        let swapchain = self.swapchain.as_ref().ok_or(HalError::AcquireFailed {
+            backend: BACKEND,
+            message: "surface is not configured",
+        })?;
+        let fence_info = vk::FenceCreateInfo::default();
+        let fence =
+            unsafe { swapchain.device.device.create_fence(&fence_info, None) }.map_err(|_| {
+                HalError::AcquireFailed {
+                    backend: BACKEND,
+                    message: "fence creation failed",
+                }
+            })?;
+        let acquire = unsafe {
+            swapchain.loader.acquire_next_image(
+                swapchain.swapchain,
+                u64::MAX,
+                vk::Semaphore::null(),
+                fence,
+            )
+        };
+        let image_index = match acquire {
+            Ok((image_index, _suboptimal)) => image_index,
+            Err(_) => {
+                unsafe {
+                    swapchain.device.device.destroy_fence(fence, None);
+                }
+                return Err(HalError::AcquireFailed {
+                    backend: BACKEND,
+                    message: "vkAcquireNextImageKHR failed",
+                });
+            }
+        };
+        let wait = unsafe {
+            swapchain
+                .device
+                .device
+                .wait_for_fences(&[fence], true, u64::MAX)
+        };
+        unsafe {
+            swapchain.device.device.destroy_fence(fence, None);
+        }
+        wait.map_err(|_| HalError::AcquireFailed {
+            backend: BACKEND,
+            message: "waiting for acquired image failed",
+        })?;
+        self.current_image_index = Some(image_index);
+        swapchain
+            .images
+            .get(usize::try_from(image_index).unwrap_or(usize::MAX))
+            .cloned()
+            .ok_or(HalError::AcquireFailed {
+                backend: BACKEND,
+                message: "acquired image index is out of range",
+            })
+    }
+
+    pub fn present(&mut self, queue: &VulkanQueue) -> Result<(), HalError> {
+        let image_index = self
+            .current_image_index
+            .take()
+            .ok_or(HalError::PresentFailed {
+                backend: BACKEND,
+                message: "no acquired image to present",
+            })?;
+        let swapchain = self.swapchain.as_ref().ok_or(HalError::PresentFailed {
+            backend: BACKEND,
+            message: "surface is not configured",
+        })?;
+        let texture = swapchain
+            .images
+            .get(usize::try_from(image_index).unwrap_or(usize::MAX))
+            .ok_or(HalError::PresentFailed {
+                backend: BACKEND,
+                message: "acquired image index is out of range",
+            })?;
+        transition_swapchain_image_to_present(queue, texture)?;
+        let swapchains = [swapchain.swapchain];
+        let image_indices = [image_index];
+        let present_info = vk::PresentInfoKHR::default()
+            .swapchains(&swapchains)
+            .image_indices(&image_indices);
+        unsafe {
+            swapchain
+                .loader
+                .queue_present(queue.inner.queue, &present_info)
+        }
+        .map_err(|_| HalError::PresentFailed {
+            backend: BACKEND,
+            message: "vkQueuePresentKHR failed",
+        })?;
+        unsafe { queue.inner.device.device.queue_wait_idle(queue.inner.queue) }.map_err(|_| {
+            HalError::PresentFailed {
+                backend: BACKEND,
+                message: "queue wait after present failed",
+            }
+        })?;
+        Ok(())
+    }
+}
+
+struct VulkanSwapchain {
+    device: Arc<VulkanDeviceInner>,
+    loader: ash::khr::swapchain::Device,
+    swapchain: vk::SwapchainKHR,
+    images: Vec<VulkanTexture>,
+}
+
+impl fmt::Debug for VulkanSwapchain {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VulkanSwapchain")
+            .field("swapchain", &self.swapchain)
+            .field("image_count", &self.images.len())
+            .finish()
+    }
+}
+
+impl Drop for VulkanSwapchain {
+    fn drop(&mut self) {
+        self.images.clear();
+        unsafe {
+            self.loader.destroy_swapchain(self.swapchain, None);
+        }
     }
 }
 
@@ -482,7 +700,8 @@ struct VulkanTextureInner {
     device: Arc<VulkanDeviceInner>,
     image: vk::Image,
     view: vk::ImageView,
-    memory: vk::DeviceMemory,
+    memory: Option<vk::DeviceMemory>,
+    owns_image: bool,
     layout: AtomicU8,
 }
 
@@ -490,8 +709,12 @@ impl Drop for VulkanTextureInner {
     fn drop(&mut self) {
         unsafe {
             self.device.device.destroy_image_view(self.view, None);
-            self.device.device.destroy_image(self.image, None);
-            self.device.device.free_memory(self.memory, None);
+            if self.owns_image {
+                self.device.device.destroy_image(self.image, None);
+            }
+            if let Some(memory) = self.memory {
+                self.device.device.free_memory(memory, None);
+            }
         }
     }
 }
@@ -745,11 +968,134 @@ fn create_texture(
             device,
             image,
             view,
-            memory,
+            memory: Some(memory),
+            owns_image: true,
             layout: AtomicU8::new(IMAGE_LAYOUT_UNDEFINED),
         },
         bytes_per_pixel,
     ))
+}
+
+fn create_swapchain(
+    device: Arc<VulkanDeviceInner>,
+    surface: vk::SurfaceKHR,
+    config: HalSurfaceConfiguration,
+) -> Result<VulkanSwapchain, HalError> {
+    let (format, bytes_per_pixel) = map_texture_format(config.format)?;
+    let surface_loader =
+        ash::khr::surface::Instance::new(&device._instance._entry, &device._instance.instance);
+    let capabilities = unsafe {
+        surface_loader.get_physical_device_surface_capabilities(device.physical_device, surface)
+    }
+    .map_err(|_| HalError::SwapchainCreationFailed {
+        backend: BACKEND,
+        message: "surface capabilities query failed",
+    })?;
+    let mut image_count = capabilities.min_image_count.saturating_add(1).max(2);
+    if capabilities.max_image_count > 0 {
+        image_count = image_count.min(capabilities.max_image_count);
+    }
+    let extent = if capabilities.current_extent.width == u32::MAX {
+        vk::Extent2D {
+            width: config.width,
+            height: config.height,
+        }
+    } else {
+        capabilities.current_extent
+    };
+    let present_mode = match config.present_mode {
+        crate::HalPresentMode::Immediate => vk::PresentModeKHR::IMMEDIATE,
+        crate::HalPresentMode::Mailbox => vk::PresentModeKHR::MAILBOX,
+        crate::HalPresentMode::Fifo => vk::PresentModeKHR::FIFO,
+    };
+    let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC;
+    let create_info = vk::SwapchainCreateInfoKHR::default()
+        .surface(surface)
+        .min_image_count(image_count)
+        .image_format(format)
+        .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
+        .image_extent(extent)
+        .image_array_layers(1)
+        .image_usage(usage)
+        .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .pre_transform(capabilities.current_transform)
+        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        .present_mode(present_mode)
+        .clipped(true);
+    let loader = ash::khr::swapchain::Device::new(&device._instance.instance, &device.device);
+    let swapchain = unsafe { loader.create_swapchain(&create_info, None) }.map_err(|_| {
+        HalError::SwapchainCreationFailed {
+            backend: BACKEND,
+            message: "vkCreateSwapchainKHR failed",
+        }
+    })?;
+    let images = unsafe { loader.get_swapchain_images(swapchain) }.map_err(|_| {
+        unsafe {
+            loader.destroy_swapchain(swapchain, None);
+        }
+        HalError::SwapchainCreationFailed {
+            backend: BACKEND,
+            message: "vkGetSwapchainImagesKHR failed",
+        }
+    })?;
+    let textures = images
+        .into_iter()
+        .map(|image| {
+            create_swapchain_texture(
+                Arc::clone(&device),
+                image,
+                format,
+                config.format,
+                extent,
+                bytes_per_pixel,
+            )
+        })
+        .collect::<Result<Vec<_>, HalError>>()
+        .inspect_err(|_| unsafe {
+            loader.destroy_swapchain(swapchain, None);
+        })?;
+    Ok(VulkanSwapchain {
+        device,
+        loader,
+        swapchain,
+        images: textures,
+    })
+}
+
+fn create_swapchain_texture(
+    device: Arc<VulkanDeviceInner>,
+    image: vk::Image,
+    vk_format: vk::Format,
+    format: HalTextureFormat,
+    extent: vk::Extent2D,
+    bytes_per_pixel: u32,
+) -> Result<VulkanTexture, HalError> {
+    let view_info = vk::ImageViewCreateInfo::default()
+        .image(image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(vk_format)
+        .subresource_range(color_subresource_range());
+    let view = unsafe { device.device.create_image_view(&view_info, None) }.map_err(|_| {
+        HalError::SwapchainCreationFailed {
+            backend: BACKEND,
+            message: "swapchain image view creation failed",
+        }
+    })?;
+    Ok(VulkanTexture {
+        inner: Some(Arc::new(VulkanTextureInner {
+            device,
+            image,
+            view,
+            memory: None,
+            owns_image: false,
+            layout: AtomicU8::new(IMAGE_LAYOUT_UNDEFINED),
+        })),
+        width: extent.width,
+        height: extent.height,
+        depth_or_array_layers: 1,
+        bytes_per_pixel,
+        format,
+    })
 }
 
 fn create_sampler(
@@ -1349,6 +1695,110 @@ fn record_and_submit_copies(
         for pool in descriptor_pools {
             queue.device.device.destroy_descriptor_pool(pool, None);
         }
+    }
+    result
+}
+
+fn transition_swapchain_image_to_present(
+    queue: &VulkanQueue,
+    texture: &VulkanTexture,
+) -> Result<(), HalError> {
+    let inner = texture.inner()?;
+    let command_pool_info = vk::CommandPoolCreateInfo::default()
+        .queue_family_index(queue.inner.device.queue_family_index)
+        .flags(vk::CommandPoolCreateFlags::TRANSIENT);
+    let command_pool = unsafe {
+        queue
+            .inner
+            .device
+            .device
+            .create_command_pool(&command_pool_info, None)
+    }
+    .map_err(|_| HalError::PresentFailed {
+        backend: BACKEND,
+        message: "command pool creation failed",
+    })?;
+    let result = (|| {
+        let allocate_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let command_buffers = unsafe {
+            queue
+                .inner
+                .device
+                .device
+                .allocate_command_buffers(&allocate_info)
+        }
+        .map_err(|_| HalError::PresentFailed {
+            backend: BACKEND,
+            message: "command buffer allocation failed",
+        })?;
+        let Some(&command_buffer) = command_buffers.first() else {
+            return Err(HalError::PresentFailed {
+                backend: BACKEND,
+                message: "command buffer allocation failed",
+            });
+        };
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe {
+            queue
+                .inner
+                .device
+                .device
+                .begin_command_buffer(command_buffer, &begin_info)
+                .map_err(|_| HalError::PresentFailed {
+                    backend: BACKEND,
+                    message: "command buffer begin failed",
+                })?;
+        }
+        transition_image(
+            &queue.inner.device.device,
+            command_buffer,
+            inner,
+            vk::ImageLayout::PRESENT_SRC_KHR,
+            IMAGE_LAYOUT_PRESENT,
+        );
+        unsafe {
+            queue
+                .inner
+                .device
+                .device
+                .end_command_buffer(command_buffer)
+                .map_err(|_| HalError::PresentFailed {
+                    backend: BACKEND,
+                    message: "command buffer end failed",
+                })?;
+            let command_buffers = [command_buffer];
+            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+            queue
+                .inner
+                .device
+                .device
+                .queue_submit(queue.inner.queue, &[submit_info], vk::Fence::null())
+                .map_err(|_| HalError::PresentFailed {
+                    backend: BACKEND,
+                    message: "queue submit failed",
+                })?;
+            queue
+                .inner
+                .device
+                .device
+                .queue_wait_idle(queue.inner.queue)
+                .map_err(|_| HalError::PresentFailed {
+                    backend: BACKEND,
+                    message: "queue wait failed",
+                })?;
+        }
+        Ok(())
+    })();
+    unsafe {
+        queue
+            .inner
+            .device
+            .device
+            .destroy_command_pool(command_pool, None);
     }
     result
 }
@@ -2120,6 +2570,7 @@ fn image_layout(state: u8) -> vk::ImageLayout {
         IMAGE_LAYOUT_TRANSFER_DST => vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_SRC => vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
         IMAGE_LAYOUT_COLOR_ATTACHMENT => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        IMAGE_LAYOUT_PRESENT => vk::ImageLayout::PRESENT_SRC_KHR,
         _ => vk::ImageLayout::UNDEFINED,
     }
 }
@@ -2129,6 +2580,7 @@ fn access_mask_for_layout(layout: vk::ImageLayout) -> vk::AccessFlags {
         vk::ImageLayout::TRANSFER_DST_OPTIMAL => vk::AccessFlags::TRANSFER_WRITE,
         vk::ImageLayout::TRANSFER_SRC_OPTIMAL => vk::AccessFlags::TRANSFER_READ,
         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+        vk::ImageLayout::PRESENT_SRC_KHR => vk::AccessFlags::empty(),
         _ => vk::AccessFlags::empty(),
     }
 }
@@ -2141,6 +2593,7 @@ fn stage_mask_for_layout(layout: vk::ImageLayout) -> vk::PipelineStageFlags {
         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => {
             vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
         }
+        vk::ImageLayout::PRESENT_SRC_KHR => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
         _ => vk::PipelineStageFlags::TOP_OF_PIPE,
     }
 }

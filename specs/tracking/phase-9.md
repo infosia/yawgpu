@@ -136,12 +136,83 @@ the host). P6 validation unchanged (C37 only trips on draw).
   Vulkan** ✅. Noop writes a 100×200 PNG (uninitialized memory
   contents — expected; Noop does not actually render).
 
-## P9.2 — Real window→surface→swapchain (GLFW-gated)  *(after P9.1)*
-Metal CAMetalLayer+drawable, Vulkan MoltenVK metal-surface+
-VkSwapchainKHR; wire wgpuInstanceCreateSurface(SurfaceSourceMetalLayer
-from GLFW NSWindow)/Configure/GetCurrentTexture(real backbuffer)/
-Present. Noop surface unchanged (P8.6). Updates block-70 SF3 note
-(real on Metal/Vulkan w/ window; still N/A on Noop).
+## P9.2 — Real window→surface→swapchain (GLFW-gated)  *(☑ DONE — real-GPU-verified)*
+
+Done: real `HalSurface` enum (Noop/Metal/Vulkan) + configure /
+acquire_next_texture / present API in `yawgpu-hal`; FFI wiring in
+`wgpuInstanceCreateSurface` decodes `WGPUSurfaceSourceMetalLayer`
+chained source and creates the real HAL surface,
+`wgpuSurfaceConfigure` / `Unconfigure` drive HAL state,
+`wgpuSurfaceGetCurrentTexture` acquires a drawable / swapchain
+image as a `core::Texture::from_hal` handle, `wgpuSurfacePresent`
+calls HAL present. Noop surface stays P8.6 descriptor-only (SF3
+N/A boundary preserved — `surface_validation` 4/4 unchanged).
+
+- **Metal arm:** `MetalSurface { layer, current_drawable, config }`
+  retains a `CAMetalLayer` (from `objc2-quartz-core`), sets
+  pixelFormat/drawableSize/framebufferOnly=false on configure,
+  `layer.nextDrawable()` → `MTLTexture` wrapped as `MetalTexture`
+  for the swapchain image, `drawable.present()` on present (Metal
+  tracks command-buffer usage of the drawable and presents after
+  those buffers finish — no explicit `presentDrawable:`/commit
+  required for the simple smoke case).
+- **Vulkan arm:** `VulkanSurface { surface, swapchain, … }` —
+  `vkCreateMetalSurfaceEXT` (MoltenVK on Apple Silicon),
+  `VkSwapchainKHR` over `KHR_swapchain` (instance gains
+  `KHR_SURFACE` + `EXT_METAL_SURFACE` extensions; device gains
+  `KHR_SWAPCHAIN` when present). Swapchain `VkImage` wrapped as
+  `VulkanTexture` with `owns_image=false, memory=None` (image
+  lifetime owned by swapchain). Acquire uses a transient fence;
+  present transitions `COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR`
+  via a one-shot command buffer + `vkQueuePresentKHR`. P7.6
+  render-pass execution unchanged for the
+  `UNDEFINED→COLOR_ATTACHMENT_OPTIMAL` direction.
+- **GLFW + Cocoa shim:** new `examples/framework/framework_macos.m`
+  (Objective-C, Apple-only) — opens a GLFW window via
+  `GLFW_CLIENT_API=GLFW_NO_API`, extracts NSWindow via
+  `glfwGetCocoaWindow`, sets `wantsLayer=YES` and attaches a
+  `[CAMetalLayer layer]` (framebufferOnly=NO) to the contentView,
+  returns the layer pointer for the
+  `WGPUSurfaceSourceMetalLayer` chained source. CMake gates the
+  `.m` and the `surface_smoke` subdir on `find_package(glfw3)` +
+  APPLE; non-Apple builds (or systems without glfw3) skip the
+  windowed subdir cleanly without affecting headless examples.
+- **`examples/surface_smoke/`** opens an 800×600 window, picks a
+  supported surface format (BGRA8/RGBA8 Unorm) via
+  `wgpuSurfaceGetCapabilities`, configures with present_mode Fifo,
+  runs up to 60 frames each acquiring the surface texture,
+  beginning a clear-only render pass (reuses P9.1's Optional
+  pipeline/draw path — clears to slate `(0.1, 0.2, 0.3, 1)`),
+  submitting, presenting, polling events. Exits 0 cleanly on
+  loop end or window close.
+- **CMake `CARGO_TARGET_DIR` per feature:** discovered during M2
+  verification — the cmake `cargo build` invocation now sets
+  `CARGO_TARGET_DIR=target/target-${YAWGPU_FEATURE}` (so
+  `target-metal/debug` and `target-vulkan/debug` hold distinct
+  dylibs). Without this, the metal and vulkan dylibs would
+  collide at `target/debug/libyawgpu.dylib`, the
+  `#[cfg(not(feature = "metal"))]` /
+  `#[cfg(not(feature = "vulkan"))]` arms of `wgpuCreateInstance`
+  would silently fall back to Noop for whichever backend was
+  not the most-recent cargo build, and the surface would dispatch
+  through the Noop arm returning `GetCurrentTextureStatus_Lost`.
+
+**Verification (real-GPU, 2026-05-20):**
+- Noop `cargo test --workspace` **58/58 binaries** + clippy clean
+  (`surface_validation` 4/4 unchanged — SF3 Noop boundary
+  preserved).
+- `cargo build/clippy -p yawgpu --features metal/vulkan` clean.
+- Phase-7 e2e regression: Metal basic 3 / buffer 3 / texture 4 /
+  compute 3 / render 3 / smoke 1 = **17/17**; Vulkan basic 3 /
+  buffer 3 / texture 4 / compute 3 / render 2 = **15/15**. No
+  regression from the swapchain-image VulkanTexture refactor
+  (`owns_image` + optional `memory`) nor from the surface FFI
+  rewire.
+- real-GPU `surface_smoke` (Claude's Bash, foreground): both
+  `YAWGPU_BACKEND=metal` and (with `$VULKAN_SDK` env sourced)
+  `YAWGPU_BACKEND=vulkan` open the window, render 60 cleared
+  frames, exit 0. Logged that Claude can run windowed examples
+  in-session (memory: `claude-runs-windowed-examples`).
 
 ## P9.3 — `triangle` (windowed)  *(after P9.2)*
 wgpu-native `triangle` on the real surface (GLFW-gated).

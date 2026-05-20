@@ -30,6 +30,8 @@ typedef struct YawgpuContext {
     WGPUDevice device;
 } YawgpuContext;
 
+typedef struct YawgpuWindow YawgpuWindow;
+
 typedef struct YawgpuBufferInitDescriptor {
     const char *label;
     WGPUBufferUsage usage;
@@ -51,5 +53,12 @@ WGPUBuffer yawgpu_create_buffer_init(WGPUDevice device,
                                      const YawgpuBufferInitDescriptor *descriptor);
 void yawgpu_wait_for_future(WGPUInstance instance, WGPUFuture future);
 void yawgpu_print_adapter_info(WGPUAdapter adapter);
+
+YawgpuWindow *yawgpu_window_create(int width, int height, const char *title);
+void yawgpu_window_destroy(YawgpuWindow *window);
+bool yawgpu_window_should_close(YawgpuWindow *window);
+void yawgpu_window_poll_events(void);
+void *yawgpu_window_metal_layer(YawgpuWindow *window);
+void yawgpu_window_framebuffer_size(YawgpuWindow *window, int *width, int *height);
 
 #endif
