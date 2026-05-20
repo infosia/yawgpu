@@ -945,6 +945,30 @@ impl TextureFormat {
     }
 }
 
+impl From<u32> for TextureFormat {
+    fn from(value: u32) -> Self {
+        Self::from_raw(value)
+    }
+}
+
+impl From<i32> for TextureFormat {
+    fn from(value: i32) -> Self {
+        Self::from_raw(value as u32)
+    }
+}
+
+impl From<TextureFormat> for u32 {
+    fn from(value: TextureFormat) -> Self {
+        value.raw()
+    }
+}
+
+impl From<TextureFormat> for i32 {
+    fn from(value: TextureFormat) -> Self {
+        value.raw() as i32
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FormatAspects {
     pub color: bool,
@@ -3286,6 +3310,11 @@ impl VertexFormat {
         Self(raw)
     }
 
+    #[must_use]
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+
     fn info(self) -> VertexFormatInfo {
         match self.0 {
             0x0000_0001 => VertexFormatInfo::new(1, FormatOutputClass::Uint),
@@ -3328,6 +3357,30 @@ impl VertexFormat {
             // Keep unknown future values conservative instead of guessing a smaller footprint.
             _ => VertexFormatInfo::new(16, FormatOutputClass::Float),
         }
+    }
+}
+
+impl From<u32> for VertexFormat {
+    fn from(value: u32) -> Self {
+        Self::from_raw(value)
+    }
+}
+
+impl From<i32> for VertexFormat {
+    fn from(value: i32) -> Self {
+        Self::from_raw(value as u32)
+    }
+}
+
+impl From<VertexFormat> for u32 {
+    fn from(value: VertexFormat) -> Self {
+        value.raw()
+    }
+}
+
+impl From<VertexFormat> for i32 {
+    fn from(value: VertexFormat) -> Self {
+        value.raw() as i32
     }
 }
 
@@ -5860,6 +5913,38 @@ pub enum QueryType {
     Occlusion,
     Timestamp,
     Unknown(u32),
+}
+
+impl From<u32> for QueryType {
+    fn from(value: u32) -> Self {
+        match value {
+            1 => Self::Occlusion,
+            2 => Self::Timestamp,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+impl From<i32> for QueryType {
+    fn from(value: i32) -> Self {
+        Self::from(value as u32)
+    }
+}
+
+impl From<QueryType> for u32 {
+    fn from(value: QueryType) -> Self {
+        match value {
+            QueryType::Occlusion => 1,
+            QueryType::Timestamp => 2,
+            QueryType::Unknown(raw) => raw,
+        }
+    }
+}
+
+impl From<QueryType> for i32 {
+    fn from(value: QueryType) -> Self {
+        u32::from(value) as i32
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -9840,6 +9925,13 @@ fn fs() -> @location(0) vec4<f32> {
 
     #[test]
     fn query_set_accessors_pin_kind_count_label_is_error_same_destroy() {
+        assert_eq!(QueryType::from(1_u32), QueryType::Occlusion);
+        assert_eq!(QueryType::from(2_i32), QueryType::Timestamp);
+        assert_eq!(QueryType::from(0xFFFF_u32), QueryType::Unknown(0xFFFF));
+        assert_eq!(u32::from(QueryType::Occlusion), 1);
+        assert_eq!(i32::from(QueryType::Timestamp), 2);
+        assert_eq!(u32::from(QueryType::Unknown(0xFFFF)), 0xFFFF);
+
         let device = noop_device();
         let (query_set, error) = device.create_query_set(QuerySetDescriptor {
             label: "queries".to_owned(),
@@ -10162,6 +10254,10 @@ fn fs() -> @location(0) vec4<f32> {
         let format = TextureFormat::from_raw(0x0000_0016);
 
         assert_eq!(format.raw(), 0x0000_0016);
+        assert_eq!(TextureFormat::from(0x0000_0016_u32), format);
+        assert_eq!(TextureFormat::from(0x0000_0016_i32), format);
+        assert_eq!(u32::from(format), 0x0000_0016);
+        assert_eq!(i32::from(format), 0x0000_0016);
 
         let caps = format.caps().expect("RGBA8Unorm caps");
         assert_eq!(
@@ -10678,10 +10774,17 @@ fn fs() -> @location(0) vec4<f32> {
         for raw in known_values {
             let format = VertexFormat::from_raw(raw);
             assert_eq!(format, VertexFormat::from_raw(raw));
+            assert_eq!(format.raw(), raw);
+            assert_eq!(VertexFormat::from(raw), format);
+            assert_eq!(u32::from(format), raw);
         }
 
         let zero = VertexFormat::from_raw(0);
         let unknown = VertexFormat::from_raw(0xFFFF);
+        assert_eq!(VertexFormat::from(0_i32), zero);
+        assert_eq!(i32::from(unknown), 0xFFFF);
+        assert_eq!(zero.raw(), 0);
+        assert_eq!(unknown.raw(), 0xFFFF);
         assert_eq!(zero.info().byte_size, 16);
         assert_eq!(unknown.info().byte_size, 16);
         assert_eq!(zero.info().output_class, FormatOutputClass::Float);

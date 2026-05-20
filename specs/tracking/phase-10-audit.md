@@ -5,7 +5,8 @@ Inventory source: `git show HEAD:yawgpu-core/src/lib.rs` before P10.3a narrowing
 ## Summary
 
 - Total `pub fn` before audit: 208
-- Kept `pub`: 183
+- Kept `pub`: 184 (183 at audit time + `VertexFormat::raw` added by the
+  Windows bindgen fix)
 - Narrowed to `pub(crate)`: 24
 - Deleted as dead code: 1
 - Remaining function rows after audit: 207
@@ -14,7 +15,7 @@ Inventory source: `git show HEAD:yawgpu-core/src/lib.rs` before P10.3a narrowing
 
 - Instance / Adapter / Device: 51
 - Buffer / Texture / Sampler: 40
-- Pipeline / Shader: 18
+- Pipeline / Shader: 19
 - Encoder / Pass / Bundle: 59
 - Query / Error / Future: 14
 - Surface / utilities: 1

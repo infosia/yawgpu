@@ -36,7 +36,20 @@ fn main() {
         .allowlist_item("wgpu.*")
         .prepend_enum_name(false)
         .size_t_is_usize(true)
-        .ignore_functions();
+        .ignore_functions()
+        // Fall back to clang's preprocessor when bindgen cannot statically
+        // evaluate a #define. This keeps macro handling consistent on MSVC.
+        .clang_macro_fallback()
+        // bindgen evaluates these SIZE_MAX/UINT64_MAX macros as `i32 = -1`
+        // or drops them on some targets. Pin the Rust-side types explicitly.
+        .blocklist_item("WGPU_WHOLE_MAP_SIZE")
+        .blocklist_item("WGPU_WHOLE_SIZE")
+        .blocklist_item("WGPU_LIMIT_U64_UNDEFINED")
+        .blocklist_item("WGPU_STRLEN")
+        .raw_line("pub const WGPU_WHOLE_MAP_SIZE: usize = usize::MAX;")
+        .raw_line("pub const WGPU_WHOLE_SIZE: u64 = u64::MAX;")
+        .raw_line("pub const WGPU_LIMIT_U64_UNDEFINED: u64 = u64::MAX;")
+        .raw_line("pub const WGPU_STRLEN: usize = usize::MAX;");
 
     for handle in OBJECT_HANDLES {
         let wgpu_name = format!("WGPU{handle}");

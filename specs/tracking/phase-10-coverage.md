@@ -69,6 +69,10 @@ P10.3a audit: see `specs/tracking/phase-10-audit.md`.
 | `TextureUsage::bits` | `texture_usage_from_bits_retain_round_trips_known_and_unknown_bits` |
 | `TextureFormat::from_raw` | `texture_format_from_raw_raw_and_caps_pin_rgba8_unorm_and_undefined` |
 | `TextureFormat::raw` | `texture_format_from_raw_raw_and_caps_pin_rgba8_unorm_and_undefined` |
+| `From<u32> for TextureFormat` | `texture_format_from_raw_raw_and_caps_pin_rgba8_unorm_and_undefined` |
+| `From<i32> for TextureFormat` | `texture_format_from_raw_raw_and_caps_pin_rgba8_unorm_and_undefined` |
+| `From<TextureFormat> for u32` | `texture_format_from_raw_raw_and_caps_pin_rgba8_unorm_and_undefined` |
+| `From<TextureFormat> for i32` | `texture_format_from_raw_raw_and_caps_pin_rgba8_unorm_and_undefined` |
 | `TextureFormat::caps` | `texture_format_from_raw_raw_and_caps_pin_rgba8_unorm_and_undefined` |
 | `Texture::from_hal` | `texture_from_hal_and_descriptor_accessors_round_trip` |
 | `Texture::usage` | `texture_from_hal_and_descriptor_accessors_round_trip` |
@@ -168,7 +172,7 @@ P10.3a audit: see `specs/tracking/phase-10-audit.md`.
 | `RenderBundleEncoder::draw_indexed_indirect` | `render_bundle_encoder_indirect_draws` |
 | `RenderBundle::is_error` | `render_pass_encoder_state_setters_occlusion_query_and_execute_bundles`, `render_bundle_encoder_lifecycle_set_pipeline_buffers_and_draws`, `render_bundle_encoder_indirect_draws` |
 
-## yawgpu-core/src/lib.rs - Pipeline / Shader (18 pub fn)
+## yawgpu-core/src/lib.rs - Pipeline / Shader (19 pub fn)
 
 | pub fn | test name(s) |
 |---|---|
@@ -186,6 +190,11 @@ P10.3a audit: see `specs/tracking/phase-10-audit.md`.
 | `ComputePipeline::entry_name` | `compute_pipeline_accessors_and_render_pipeline_accessors`, `device_create_compute_pipeline_happy_path_and_error_scope` |
 | `ComputePipeline::bind_group_layouts` | `compute_pipeline_accessors_and_render_pipeline_accessors` |
 | `VertexFormat::from_raw` | `vertex_format_from_raw_pins_known_zero_and_unknown_values` |
+| `VertexFormat::raw` | `vertex_format_from_raw_pins_known_zero_and_unknown_values` |
+| `From<u32> for VertexFormat` | `vertex_format_from_raw_pins_known_zero_and_unknown_values` |
+| `From<i32> for VertexFormat` | `vertex_format_from_raw_pins_known_zero_and_unknown_values` |
+| `From<VertexFormat> for u32` | `vertex_format_from_raw_pins_known_zero_and_unknown_values` |
+| `From<VertexFormat> for i32` | `vertex_format_from_raw_pins_known_zero_and_unknown_values` |
 | `RenderPipeline::is_error` | `compute_pipeline_accessors_and_render_pipeline_accessors`, `device_create_render_pipeline_happy_path_and_error_scope`, `device_create_render_pipeline_without_error_dispatch_keeps_scope_empty` |
 | `RenderPipeline::vertex_entry_name` | `compute_pipeline_accessors_and_render_pipeline_accessors`, `device_create_render_pipeline_happy_path_and_error_scope` |
 | `RenderPipeline::fragment_entry_name` | `compute_pipeline_accessors_and_render_pipeline_accessors`, `device_create_render_pipeline_happy_path_and_error_scope` |
@@ -201,6 +210,10 @@ P10.3a audit: see `specs/tracking/phase-10-audit.md`.
 | `QuerySet::is_error` | `query_set_accessors_pin_kind_count_label_is_error_same_destroy`, `device_create_query_set_validates_count_and_creates_happy_path` |
 | `QuerySet::same` | `query_set_accessors_pin_kind_count_label_is_error_same_destroy` |
 | `QuerySet::destroy` | `query_set_accessors_pin_kind_count_label_is_error_same_destroy` |
+| `From<u32> for QueryType` | `query_set_accessors_pin_kind_count_label_is_error_same_destroy` |
+| `From<i32> for QueryType` | `query_set_accessors_pin_kind_count_label_is_error_same_destroy` |
+| `From<QueryType> for u32` | `query_set_accessors_pin_kind_count_label_is_error_same_destroy` |
+| `From<QueryType> for i32` | `query_set_accessors_pin_kind_count_label_is_error_same_destroy` |
 | `DeviceError::new` | `device_error_new_constructs_with_kind_and_message` |
 | `FutureId::get` | `future_id_get_and_from_raw_round_trip`, `future_registry_process_events_respects_callback_mode` |
 | `FutureId::from_raw` | `future_id_get_and_from_raw_round_trip` |
@@ -324,7 +337,7 @@ Phase-9 e2e (`examples/surface_smoke`, `examples/triangle`,
 | `VulkanBuffer::read` | `vulkan_buffer_read_returns_written_bytes` |
 | `VulkanBuffer::mapped_ptr` | `vulkan_buffer_mapped_ptr_returns_non_null_pointer` |
 
-## yawgpu/src/conv.rs (65 pub fn)
+## yawgpu/src/conv.rs (67 pub fn + 6 conversion impls)
 
 | pub fn | test name(s) |
 |---|---|
@@ -345,6 +358,8 @@ Phase-9 e2e (`examples/surface_smoke`, `examples/triangle`,
 | `map_feature` | `map_feature_round_trips_defined_and_other_variants` |
 | `map_feature_to_native` | `map_feature_round_trips_defined_and_other_variants` |
 | `map_query_set_descriptor` | `map_query_set_descriptor_decodes_type_count_label` |
+| `native::WGPUQueryType -> core::QueryType` | `from_native_query_type_round_trips_known_and_unknown_variants` |
+| `core::QueryType -> native::WGPUQueryType` | `from_native_query_type_round_trips_known_and_unknown_variants` |
 | `map_query_type` | `map_query_type_round_trips_defined_and_unknown_variants` |
 | `map_query_type_to_native` | `map_query_type_round_trips_defined_and_unknown_variants` |
 | `map_feature_level` | `map_feature_level_maps_compatibility_and_default_core` |
@@ -373,8 +388,14 @@ Phase-9 e2e (`examples/surface_smoke`, `examples/triangle`,
 | `map_texture_usage_to_native` | `map_texture_usage_round_trips_bitmask` |
 | `map_texture_dimension` | `map_texture_dimension_round_trips_defined_variants` |
 | `map_texture_dimension_to_native` | `map_texture_dimension_round_trips_defined_variants` |
+| `native::WGPUTextureFormat -> core::TextureFormat` | `from_native_texture_format_round_trips_known_and_unknown_variants` |
+| `core::TextureFormat -> native::WGPUTextureFormat` | `from_native_texture_format_round_trips_known_and_unknown_variants` |
 | `map_texture_format` | `map_texture_format_round_trips_defined_and_unknown_raw_values` |
 | `map_texture_format_to_native` | `map_texture_format_round_trips_defined_and_unknown_raw_values` |
+| `native::WGPUVertexFormat -> core::VertexFormat` | `from_native_vertex_format_round_trips_known_and_unknown_variants` |
+| `core::VertexFormat -> native::WGPUVertexFormat` | `from_native_vertex_format_round_trips_known_and_unknown_variants` |
+| `map_vertex_format` | `from_native_vertex_format_round_trips_known_and_unknown_variants` |
+| `map_vertex_format_to_native` | `from_native_vertex_format_round_trips_known_and_unknown_variants` |
 | `map_extent_3d` | `map_extent_3d_round_trips_fields` |
 | `map_origin_3d` | `map_origin_3d_round_trips_fields` |
 | `map_texel_copy_buffer_layout` | `map_texel_copy_buffer_layout_round_trips_fields_and_undefined_strides` |
@@ -595,15 +616,15 @@ Phase-9 e2e (`examples/surface_smoke`, `examples/triangle`,
 
 ## Phase 10 yawgpu-core coverage summary
 
-Total kept pub fn (post-P10.3a audit): 183
+Total kept pub fn (post-P10.3a audit plus Windows bindgen fix): 184
 - Instance / Adapter / Device / Queue (51): ☑ P10.3b
 - Buffer / Texture / Sampler (40):           ☑ P10.3c
 - Encoder / Pass / Bundle (59):              ☑ P10.3d
-- Pipeline / Shader (18):                    ☑ P10.3e
+- Pipeline / Shader (19):                    ☑ P10.3e + Windows bindgen fix
 - Query / Error / Future (14):               ☑ P10.3f
 - Surface / utilities (0 — absorbed):        ☑ via P10.3b
 
-P10.3 complete: all 183 yawgpu-core kept-pub fn have at least one direct
+P10.3 complete: all 184 yawgpu-core kept-pub fn have at least one direct
 inline `#[cfg(test)]` unit test.
 
 ## yawgpu (C FFI) - public constants

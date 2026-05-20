@@ -502,11 +502,21 @@ unsafe fn map_vertex_attributes(
     std::slice::from_raw_parts(buffer.attributes, buffer.attributeCount)
         .iter()
         .map(|attribute| core::VertexAttribute {
-            format: core::VertexFormat::from_raw(attribute.format),
+            format: map_vertex_format(attribute.format),
             offset: attribute.offset,
             shader_location: attribute.shaderLocation,
         })
         .collect()
+}
+
+#[must_use]
+pub fn map_vertex_format(value: native::WGPUVertexFormat) -> core::VertexFormat {
+    value.into()
+}
+
+#[must_use]
+pub fn map_vertex_format_to_native(value: core::VertexFormat) -> native::WGPUVertexFormat {
+    value.into()
 }
 
 fn map_vertex_step_mode(
@@ -836,22 +846,12 @@ pub unsafe fn map_query_set_descriptor(
 
 #[must_use]
 pub fn map_query_type(value: native::WGPUQueryType) -> core::QueryType {
-    match value {
-        native::WGPUQueryType_Occlusion => core::QueryType::Occlusion,
-        native::WGPUQueryType_Timestamp => core::QueryType::Timestamp,
-        other => core::QueryType::Unknown(other),
-    }
+    value.into()
 }
 
 #[must_use]
 pub fn map_query_type_to_native(value: core::QueryType) -> native::WGPUQueryType {
-    match value {
-        core::QueryType::Occlusion => native::WGPUQueryType_Occlusion,
-        core::QueryType::Timestamp => native::WGPUQueryType_Timestamp,
-        core::QueryType::Unknown(value) => value,
-        // exhaustive as of core::QueryType @ 2026-05-19
-        _ => native::WGPUQueryType_Force32,
-    }
+    value.into()
 }
 
 #[must_use]
@@ -1107,12 +1107,12 @@ pub fn map_texture_dimension_to_native(
 
 #[must_use]
 pub fn map_texture_format(value: native::WGPUTextureFormat) -> core::TextureFormat {
-    core::TextureFormat::from_raw(value)
+    value.into()
 }
 
 #[must_use]
 pub fn map_texture_format_to_native(value: core::TextureFormat) -> native::WGPUTextureFormat {
-    value.raw()
+    value.into()
 }
 
 #[must_use]
@@ -1625,7 +1625,7 @@ fn limit_u32(value: u32, default: u32) -> u32 {
 
 #[must_use]
 fn limit_u64(value: u64, default: u64) -> u64 {
-    if value == native::WGPU_LIMIT_U64_UNDEFINED as u64 {
+    if value == native::WGPU_LIMIT_U64_UNDEFINED {
         default
     } else {
         value
@@ -1759,7 +1759,7 @@ mod tests {
                 height: 4,
                 depth_or_array_layers: 1,
             },
-            format: core::TextureFormat::from_raw(native::WGPUTextureFormat_RGBA8Unorm),
+            format: native::WGPUTextureFormat_RGBA8Unorm.into(),
             mip_level_count: 1,
             sample_count: 1,
             view_formats: Vec::new(),
@@ -1780,7 +1780,7 @@ mod tests {
                 height: 4,
                 depth_or_array_layers: 1,
             },
-            format: core::TextureFormat::from_raw(native::WGPUTextureFormat_RGBA8Unorm),
+            format: native::WGPUTextureFormat_RGBA8Unorm.into(),
             mip_level_count: 1,
             sample_count: 1,
             view_formats: Vec::new(),
@@ -1951,6 +1951,21 @@ mod tests {
     }
 
     #[test]
+    fn from_native_query_type_round_trips_known_and_unknown_variants() {
+        let known = core::QueryType::from(native::WGPUQueryType_Occlusion);
+        assert_eq!(known, core::QueryType::Occlusion);
+        assert_eq!(
+            Into::<native::WGPUQueryType>::into(known),
+            native::WGPUQueryType_Occlusion
+        );
+
+        let unknown_native = 0xFFFF_u32 as native::WGPUQueryType;
+        let unknown = core::QueryType::from(unknown_native);
+        assert_eq!(unknown, core::QueryType::Unknown(0xFFFF));
+        assert_eq!(Into::<native::WGPUQueryType>::into(unknown), unknown_native);
+    }
+
+    #[test]
     fn map_buffer_usage_round_trips_bitmask() {
         let usage = native::WGPUBufferUsage_MapRead
             | native::WGPUBufferUsage_CopyDst
@@ -1998,6 +2013,47 @@ mod tests {
                 value
             );
         }
+    }
+
+    #[test]
+    fn from_native_texture_format_round_trips_known_and_unknown_variants() {
+        let known = core::TextureFormat::from(native::WGPUTextureFormat_RGBA8Unorm);
+        assert_eq!(known, core::TextureFormat::from_raw(0x16));
+        assert_eq!(
+            Into::<native::WGPUTextureFormat>::into(known),
+            native::WGPUTextureFormat_RGBA8Unorm
+        );
+
+        let unknown_native = 0xFFFF_u32 as native::WGPUTextureFormat;
+        let unknown = core::TextureFormat::from(unknown_native);
+        assert_eq!(unknown.raw(), 0xFFFF);
+        assert_eq!(
+            Into::<native::WGPUTextureFormat>::into(unknown),
+            unknown_native
+        );
+    }
+
+    #[test]
+    fn from_native_vertex_format_round_trips_known_and_unknown_variants() {
+        let known = core::VertexFormat::from(native::WGPUVertexFormat_Float32x2);
+        assert_eq!(known, core::VertexFormat::from_raw(0x1D));
+        assert_eq!(map_vertex_format(native::WGPUVertexFormat_Float32x2), known);
+        assert_eq!(
+            Into::<native::WGPUVertexFormat>::into(known),
+            native::WGPUVertexFormat_Float32x2
+        );
+        assert_eq!(
+            map_vertex_format_to_native(known),
+            native::WGPUVertexFormat_Float32x2
+        );
+
+        let unknown_native = 0xFFFF_u32 as native::WGPUVertexFormat;
+        let unknown = core::VertexFormat::from(unknown_native);
+        assert_eq!(unknown.raw(), 0xFFFF);
+        assert_eq!(
+            Into::<native::WGPUVertexFormat>::into(unknown),
+            unknown_native
+        );
     }
 
     #[test]
@@ -3001,16 +3057,12 @@ mod tests {
         assert_eq!(mapped.color_formats.len(), 2);
         assert_eq!(
             mapped.color_formats[0],
-            Some(core::TextureFormat::from_raw(
-                native::WGPUTextureFormat_RGBA8Unorm
-            ))
+            Some(native::WGPUTextureFormat_RGBA8Unorm.into())
         );
         assert_eq!(mapped.color_formats[1], None);
         assert_eq!(
             mapped.depth_stencil_format,
-            Some(core::TextureFormat::from_raw(
-                native::WGPUTextureFormat_Depth24Plus
-            ))
+            Some(native::WGPUTextureFormat_Depth24Plus.into())
         );
         assert_eq!(mapped.sample_count, 4);
         assert!(mapped.depth_read_only);
@@ -3049,10 +3101,7 @@ mod tests {
         assert_eq!(mapped.usage.bits(), descriptor.usage);
         assert_eq!(mapped.dimension, core::TextureDimension::D3);
         assert_eq!(mapped.size.width, 8);
-        assert_eq!(
-            mapped.format,
-            core::TextureFormat::from_raw(native::WGPUTextureFormat_RGBA8Unorm)
-        );
+        assert_eq!(mapped.format, native::WGPUTextureFormat_RGBA8Unorm.into());
         assert_eq!(mapped.view_formats.len(), 1);
 
         let null_view_formats = native::WGPUTextureDescriptor {
@@ -3081,9 +3130,7 @@ mod tests {
         let mapped = map_texture_view_descriptor(Some(&descriptor));
         assert_eq!(
             mapped.format,
-            Some(core::TextureFormat::from_raw(
-                native::WGPUTextureFormat_RGBA8Unorm
-            ))
+            Some(native::WGPUTextureFormat_RGBA8Unorm.into())
         );
         assert_eq!(mapped.dimension, Some(core::TextureViewDimension::D2Array));
         assert_eq!(mapped.base_mip_level, 2);

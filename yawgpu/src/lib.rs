@@ -5175,7 +5175,7 @@ fn validate_map_async(
 ) -> Result<(core::MapMode, u64, u64), &'static str> {
     let mode = map_map_mode(mode)?;
     let offset = u64::try_from(offset).map_err(|_| "map offset is too large")?;
-    let size = if size == native::WGPU_WHOLE_MAP_SIZE as usize {
+    let size = if size == native::WGPU_WHOLE_MAP_SIZE {
         buffer
             .core
             .size()
@@ -5195,7 +5195,7 @@ unsafe fn mapped_range_ptr(
 ) -> Option<*mut u8> {
     let buffer = borrow_handle(buffer, "WGPUBuffer");
     let offset = u64::try_from(offset).ok()?;
-    let size = if size == native::WGPU_WHOLE_MAP_SIZE as usize {
+    let size = if size == native::WGPU_WHOLE_MAP_SIZE {
         None
     } else {
         Some(u64::try_from(size).ok()?)
