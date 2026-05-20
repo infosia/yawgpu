@@ -9519,6 +9519,98 @@ mod tests {
         })
     }
 
+    fn noop_render_attachment(device: &Device) -> Arc<TextureView> {
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+        });
+        assert_eq!(error, None);
+        Arc::new(view)
+    }
+
+    fn noop_render_pass_descriptor(
+        view: Arc<TextureView>,
+        occlusion_query_set: Option<QuerySet>,
+    ) -> RenderPassDescriptor {
+        RenderPassDescriptor {
+            max_color_attachments: Limits::DEFAULT.max_color_attachments,
+            color_attachments: vec![Some(RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                load_op: LoadOp::Clear,
+                store_op: StoreOp::Store,
+                clear_value: Color {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set,
+            timestamp_writes: None,
+        }
+    }
+
+    fn noop_compute_pipeline(device: &Device) -> Arc<ComputePipeline> {
+        Arc::new(
+            device.create_compute_pipeline(compute_pipeline_descriptor(compute_shader_module(
+                device,
+            ))),
+        )
+    }
+
+    fn noop_render_pipeline(device: &Device) -> Arc<RenderPipeline> {
+        Arc::new(
+            device.create_render_pipeline(render_pipeline_descriptor(render_shader_module(device))),
+        )
+    }
+
+    fn empty_bind_group(device: &Device) -> Arc<BindGroup> {
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: Vec::new(),
+            error: None,
+        }));
+        Arc::new(device.create_bind_group(layout, Vec::new()))
+    }
+
+    fn noop_indirect_buffer(device: &Device) -> Arc<Buffer> {
+        Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::INDIRECT | BufferUsage::COPY_DST,
+            size: 20,
+            mapped_at_creation: false,
+        }))
+    }
+
+    fn render_bundle_encoder_descriptor() -> RenderBundleEncoderDescriptor {
+        RenderBundleEncoderDescriptor {
+            max_color_attachments: Limits::DEFAULT.max_color_attachments,
+            color_formats: vec![Some(rgba8_unorm())],
+            depth_stencil_format: None,
+            sample_count: 1,
+            depth_read_only: false,
+            stencil_read_only: false,
+        }
+    }
+
     fn compute_shader_module(device: &Device) -> Arc<ShaderModule> {
         Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
             "@compute @workgroup_size(1) fn cs() {}".to_owned(),
@@ -10318,6 +10410,441 @@ fn fs() -> @location(0) vec4<f32> {
         assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
         assert_eq!(buffer.resolve_pending_map(), MapAsyncStatus::Aborted);
         assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
+    }
+
+    #[test]
+    fn command_encoder_create_finish_idempotent_and_command_buffer_is_error_false() {
+        let encoder = noop_device().create_command_encoder();
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert!(command_buffer.command_ops().is_empty());
+
+        let (second, error) = encoder.finish();
+        assert!(second.is_error());
+        assert_eq!(
+            error,
+            Some("command encoder cannot be finished more than once".to_owned())
+        );
+    }
+
+    #[test]
+    fn command_encoder_debug_markers_and_validation_error() {
+        let encoder = noop_device().create_command_encoder();
+
+        assert_eq!(encoder.push_debug_group(), None);
+        assert_eq!(encoder.insert_debug_marker(), None);
+        assert_eq!(encoder.pop_debug_group(), None);
+        assert_eq!(
+            encoder.record_validation_error("forced encoder validation"),
+            None
+        );
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(error, Some("forced encoder validation".to_owned()));
+    }
+
+    #[test]
+    fn command_encoder_buffer_copies_clear_and_write_validate_offsets() {
+        let device = noop_device();
+        let source = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+
+        assert_eq!(
+            encoder.copy_buffer_to_buffer(source.clone(), 0, destination.clone(), 0, 16),
+            None
+        );
+        assert_eq!(encoder.clear_buffer(destination.clone(), 0, 16), None);
+        assert_eq!(encoder.write_buffer(destination.clone(), 0, 16), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 1);
+
+        let invalid = device.create_command_encoder();
+        assert_eq!(
+            invalid.copy_buffer_to_buffer(source, 2, destination, 0, 4),
+            None
+        );
+        let (command_buffer, error) = invalid.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("copy source offset must be 4-byte aligned".to_owned())
+        );
+    }
+
+    #[test]
+    fn command_encoder_texture_copies_record_copy_commands() {
+        let device = noop_device();
+        let texture_a = Arc::new(device.create_texture(texture_descriptor_4x4()));
+        let texture_b = Arc::new(device.create_texture(texture_descriptor_4x4()));
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
+            size: 1024,
+            mapped_at_creation: false,
+        }));
+        let layout = TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(256),
+            rows_per_image: None,
+        };
+        let size = Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+        let texture_info_a = TexelCopyTextureInfo {
+            texture: texture_a,
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: 0 },
+            aspect: TextureAspect::All,
+        };
+        let texture_info_b = TexelCopyTextureInfo {
+            texture: texture_b,
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: 0 },
+            aspect: TextureAspect::All,
+        };
+        let buffer_info = TexelCopyBufferInfo { buffer, layout };
+        let encoder = device.create_command_encoder();
+
+        assert_eq!(
+            encoder.copy_buffer_to_texture(buffer_info.clone(), texture_info_a.clone(), size),
+            None
+        );
+        assert_eq!(
+            encoder.copy_texture_to_buffer(texture_info_a.clone(), buffer_info, size),
+            None
+        );
+        assert_eq!(
+            encoder.copy_texture_to_texture(texture_info_a, texture_info_b, size),
+            None
+        );
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 3);
+    }
+
+    #[test]
+    fn command_encoder_query_and_timestamps_pin_validation_and_resolve() {
+        let device = noop_device();
+        let (timestamp_query, _) = device.create_query_set(QuerySetDescriptor {
+            label: "bad timestamp".to_owned(),
+            kind: QueryType::Timestamp,
+            count: 2,
+        });
+        let timestamp_encoder = device.create_command_encoder();
+        assert_eq!(
+            timestamp_encoder.write_timestamp(Arc::new(timestamp_query), 0),
+            None
+        );
+        let (command_buffer, error) = timestamp_encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("write timestamp cannot use an error query set".to_owned())
+        );
+
+        let (query_set, error) = device.create_query_set(QuerySetDescriptor {
+            label: "occlusion".to_owned(),
+            kind: QueryType::Occlusion,
+            count: 2,
+        });
+        assert_eq!(error, None);
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::QUERY_RESOLVE,
+            size: 256,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.resolve_query_set(Arc::new(query_set), 0, 2, destination, 0),
+            None
+        );
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+    }
+
+    #[test]
+    fn render_pass_encoder_lifecycle_and_debug_markers() {
+        let device = noop_device();
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.push_debug_group(), None);
+        assert_eq!(pass.insert_debug_marker(), None);
+        assert_eq!(pass.pop_debug_group(), None);
+        assert_eq!(
+            pass.record_validation_error("forced render pass error"),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(error, Some("forced render pass error".to_owned()));
+    }
+
+    #[test]
+    fn render_pass_encoder_set_pipeline_bind_group_buffers_and_draw() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let bind_group = empty_bind_group(&device);
+        let vertex_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::VERTEX,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let index_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::INDEX,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.set_bind_group(0, Some(bind_group), Vec::new()), None);
+        assert_eq!(
+            pass.set_vertex_buffer(0, Some(vertex_buffer), 0, 16, device.limits()),
+            None
+        );
+        assert_eq!(
+            pass.set_index_buffer(index_buffer, Some(IndexFormat::Uint16), 0, 16),
+            None
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 1);
+    }
+
+    #[test]
+    fn render_pass_encoder_indexed_and_indirect_draws() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let index_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::INDEX,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let indirect = noop_indirect_buffer(&device);
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_index_buffer(index_buffer, Some(IndexFormat::Uint16), 0, 16),
+            None
+        );
+        assert_eq!(pass.draw_indexed(3, 1, 0, 0, 0, device.limits()), None);
+        assert_eq!(
+            pass.draw_indirect(indirect.clone(), 0, device.limits()),
+            None
+        );
+        assert_eq!(
+            pass.draw_indexed_indirect(indirect, 0, device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+    }
+
+    #[test]
+    fn render_pass_encoder_state_setters_occlusion_query_and_execute_bundles() {
+        let device = noop_device();
+        let view = noop_render_attachment(&device);
+        let (query_set, error) = device.create_query_set(QuerySetDescriptor {
+            label: "occlusion".to_owned(),
+            kind: QueryType::Occlusion,
+            count: 2,
+        });
+        assert_eq!(error, None);
+        let (bundle_encoder, error) =
+            RenderBundleEncoder::new(render_bundle_encoder_descriptor(), device.limits());
+        assert_eq!(error, None);
+        let (bundle, error) = bundle_encoder.finish();
+        assert_eq!(error, None);
+        assert!(!bundle.is_error());
+        let bundle = Arc::new(bundle);
+
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, Some(query_set)));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_viewport(0.0, 0.0, 4.0, 4.0, 0.0, 1.0), None);
+        assert_eq!(pass.set_scissor_rect(0, 0, 4, 4), None);
+        assert_eq!(
+            pass.set_blend_constant(Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
+            None
+        );
+        assert_eq!(pass.set_stencil_reference(1), None);
+        assert_eq!(pass.begin_occlusion_query(0), None);
+        assert_eq!(pass.end_occlusion_query(), None);
+        assert_eq!(pass.execute_bundles(&[bundle]), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+    }
+
+    #[test]
+    fn compute_pass_encoder_lifecycle_and_debug_markers() {
+        let encoder = noop_device().create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.push_debug_group(), None);
+        assert_eq!(pass.insert_debug_marker(), None);
+        assert_eq!(pass.pop_debug_group(), None);
+        assert_eq!(
+            pass.record_validation_error("forced compute pass error"),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(error, Some("forced compute pass error".to_owned()));
+    }
+
+    #[test]
+    fn compute_pass_encoder_pipeline_bind_group_and_dispatch() {
+        let device = noop_device();
+        let pipeline = noop_compute_pipeline(&device);
+        let bind_group = empty_bind_group(&device);
+        let indirect = noop_indirect_buffer(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.set_bind_group(0, Some(bind_group), Vec::new()), None);
+        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+        assert_eq!(
+            pass.dispatch_workgroups_indirect(indirect, 0, device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 1);
+    }
+
+    #[test]
+    fn render_bundle_encoder_lifecycle_set_pipeline_buffers_and_draws() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let bind_group = empty_bind_group(&device);
+        let vertex_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::VERTEX,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let index_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::INDEX,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let (bundle_encoder, error) =
+            RenderBundleEncoder::new(render_bundle_encoder_descriptor(), device.limits());
+        assert_eq!(error, None);
+
+        assert_eq!(bundle_encoder.insert_debug_marker(), None);
+        assert_eq!(bundle_encoder.push_debug_group(), None);
+        assert_eq!(bundle_encoder.pop_debug_group(), None);
+        assert_eq!(bundle_encoder.set_pipeline(pipeline), None);
+        assert_eq!(
+            bundle_encoder.set_bind_group(0, Some(bind_group), Vec::new()),
+            None
+        );
+        assert_eq!(
+            bundle_encoder.set_vertex_buffer(0, Some(vertex_buffer), 0, 16, device.limits()),
+            None
+        );
+        assert_eq!(
+            bundle_encoder.set_index_buffer(index_buffer, Some(IndexFormat::Uint16), 0, 16),
+            None
+        );
+        assert_eq!(bundle_encoder.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(
+            bundle_encoder.draw_indexed(3, 1, 0, 0, 0, device.limits()),
+            None
+        );
+        let (bundle, error) = bundle_encoder.finish();
+        assert_eq!(error, None);
+        assert!(!bundle.is_error());
+    }
+
+    #[test]
+    fn render_bundle_encoder_indirect_draws() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let index_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::INDEX,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let indirect = noop_indirect_buffer(&device);
+        let (bundle_encoder, error) =
+            RenderBundleEncoder::new(render_bundle_encoder_descriptor(), device.limits());
+        assert_eq!(error, None);
+
+        assert_eq!(bundle_encoder.set_pipeline(pipeline), None);
+        assert_eq!(
+            bundle_encoder.set_index_buffer(index_buffer, Some(IndexFormat::Uint16), 0, 16),
+            None
+        );
+        assert_eq!(
+            bundle_encoder.draw_indirect(indirect.clone(), 0, device.limits()),
+            None
+        );
+        assert_eq!(
+            bundle_encoder.draw_indexed_indirect(indirect, 0, device.limits()),
+            None
+        );
+        let (bundle, error) = bundle_encoder.finish();
+        assert_eq!(error, None);
+        assert!(!bundle.is_error());
     }
 
     #[test]

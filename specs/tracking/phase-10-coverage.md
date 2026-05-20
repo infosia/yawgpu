@@ -104,6 +104,70 @@ P10.3a audit: see `specs/tracking/phase-10-audit.md`.
 | `Buffer::hal` | `buffer_accessors_error_same_destroy_hal_and_validate_queue_write` |
 | `Buffer::validate_queue_write` | `buffer_accessors_error_same_destroy_hal_and_validate_queue_write` |
 
+## yawgpu-core/src/lib.rs - Encoder / Pass / Bundle (59 pub fn)
+
+| pub fn | test name(s) |
+|---|---|
+| `CommandBuffer::is_error` | `command_encoder_create_finish_idempotent_and_command_buffer_is_error_false`, `command_encoder_debug_markers_and_validation_error` |
+| `CommandEncoder::begin_render_pass` | `render_pass_encoder_lifecycle_and_debug_markers`, `render_pass_encoder_set_pipeline_bind_group_buffers_and_draw`, `render_pass_encoder_indexed_and_indirect_draws`, `render_pass_encoder_state_setters_occlusion_query_and_execute_bundles` |
+| `CommandEncoder::begin_compute_pass` | `compute_pass_encoder_lifecycle_and_debug_markers`, `compute_pass_encoder_pipeline_bind_group_and_dispatch` |
+| `CommandEncoder::insert_debug_marker` | `command_encoder_debug_markers_and_validation_error` |
+| `CommandEncoder::record_validation_error` | `command_encoder_debug_markers_and_validation_error` |
+| `CommandEncoder::copy_buffer_to_buffer` | `command_encoder_buffer_copies_clear_and_write_validate_offsets` |
+| `CommandEncoder::clear_buffer` | `command_encoder_buffer_copies_clear_and_write_validate_offsets` |
+| `CommandEncoder::write_buffer` | `command_encoder_buffer_copies_clear_and_write_validate_offsets` |
+| `CommandEncoder::write_timestamp` | `command_encoder_query_and_timestamps_pin_validation_and_resolve` |
+| `CommandEncoder::resolve_query_set` | `command_encoder_query_and_timestamps_pin_validation_and_resolve` |
+| `CommandEncoder::copy_buffer_to_texture` | `command_encoder_texture_copies_record_copy_commands` |
+| `CommandEncoder::copy_texture_to_buffer` | `command_encoder_texture_copies_record_copy_commands` |
+| `CommandEncoder::copy_texture_to_texture` | `command_encoder_texture_copies_record_copy_commands` |
+| `CommandEncoder::push_debug_group` | `command_encoder_debug_markers_and_validation_error` |
+| `CommandEncoder::pop_debug_group` | `command_encoder_debug_markers_and_validation_error` |
+| `CommandEncoder::finish` | `command_encoder_create_finish_idempotent_and_command_buffer_is_error_false`, `command_encoder_debug_markers_and_validation_error`, `command_encoder_buffer_copies_clear_and_write_validate_offsets`, `command_encoder_texture_copies_record_copy_commands`, `command_encoder_query_and_timestamps_pin_validation_and_resolve` |
+| `RenderPassEncoder::end` | `render_pass_encoder_lifecycle_and_debug_markers`, `render_pass_encoder_set_pipeline_bind_group_buffers_and_draw`, `render_pass_encoder_indexed_and_indirect_draws`, `render_pass_encoder_state_setters_occlusion_query_and_execute_bundles` |
+| `RenderPassEncoder::insert_debug_marker` | `render_pass_encoder_lifecycle_and_debug_markers` |
+| `RenderPassEncoder::push_debug_group` | `render_pass_encoder_lifecycle_and_debug_markers` |
+| `RenderPassEncoder::pop_debug_group` | `render_pass_encoder_lifecycle_and_debug_markers` |
+| `RenderPassEncoder::set_pipeline` | `render_pass_encoder_set_pipeline_bind_group_buffers_and_draw`, `render_pass_encoder_indexed_and_indirect_draws` |
+| `RenderPassEncoder::record_validation_error` | `render_pass_encoder_lifecycle_and_debug_markers` |
+| `RenderPassEncoder::set_bind_group` | `render_pass_encoder_set_pipeline_bind_group_buffers_and_draw` |
+| `RenderPassEncoder::set_vertex_buffer` | `render_pass_encoder_set_pipeline_bind_group_buffers_and_draw` |
+| `RenderPassEncoder::set_index_buffer` | `render_pass_encoder_set_pipeline_bind_group_buffers_and_draw`, `render_pass_encoder_indexed_and_indirect_draws` |
+| `RenderPassEncoder::draw` | `render_pass_encoder_set_pipeline_bind_group_buffers_and_draw` |
+| `RenderPassEncoder::draw_indexed` | `render_pass_encoder_indexed_and_indirect_draws` |
+| `RenderPassEncoder::draw_indirect` | `render_pass_encoder_indexed_and_indirect_draws` |
+| `RenderPassEncoder::draw_indexed_indirect` | `render_pass_encoder_indexed_and_indirect_draws` |
+| `RenderPassEncoder::set_viewport` | `render_pass_encoder_state_setters_occlusion_query_and_execute_bundles` |
+| `RenderPassEncoder::set_scissor_rect` | `render_pass_encoder_state_setters_occlusion_query_and_execute_bundles` |
+| `RenderPassEncoder::set_blend_constant` | `render_pass_encoder_state_setters_occlusion_query_and_execute_bundles` |
+| `RenderPassEncoder::set_stencil_reference` | `render_pass_encoder_state_setters_occlusion_query_and_execute_bundles` |
+| `RenderPassEncoder::execute_bundles` | `render_pass_encoder_state_setters_occlusion_query_and_execute_bundles` |
+| `RenderPassEncoder::begin_occlusion_query` | `render_pass_encoder_state_setters_occlusion_query_and_execute_bundles` |
+| `RenderPassEncoder::end_occlusion_query` | `render_pass_encoder_state_setters_occlusion_query_and_execute_bundles` |
+| `ComputePassEncoder::end` | `compute_pass_encoder_lifecycle_and_debug_markers`, `compute_pass_encoder_pipeline_bind_group_and_dispatch` |
+| `ComputePassEncoder::insert_debug_marker` | `compute_pass_encoder_lifecycle_and_debug_markers` |
+| `ComputePassEncoder::push_debug_group` | `compute_pass_encoder_lifecycle_and_debug_markers` |
+| `ComputePassEncoder::pop_debug_group` | `compute_pass_encoder_lifecycle_and_debug_markers` |
+| `ComputePassEncoder::set_pipeline` | `compute_pass_encoder_pipeline_bind_group_and_dispatch` |
+| `ComputePassEncoder::record_validation_error` | `compute_pass_encoder_lifecycle_and_debug_markers` |
+| `ComputePassEncoder::set_bind_group` | `compute_pass_encoder_pipeline_bind_group_and_dispatch` |
+| `ComputePassEncoder::dispatch_workgroups` | `compute_pass_encoder_pipeline_bind_group_and_dispatch` |
+| `ComputePassEncoder::dispatch_workgroups_indirect` | `compute_pass_encoder_pipeline_bind_group_and_dispatch` |
+| `RenderBundleEncoder::new` | `render_pass_encoder_state_setters_occlusion_query_and_execute_bundles`, `render_bundle_encoder_lifecycle_set_pipeline_buffers_and_draws`, `render_bundle_encoder_indirect_draws` |
+| `RenderBundleEncoder::finish` | `render_pass_encoder_state_setters_occlusion_query_and_execute_bundles`, `render_bundle_encoder_lifecycle_set_pipeline_buffers_and_draws`, `render_bundle_encoder_indirect_draws` |
+| `RenderBundleEncoder::insert_debug_marker` | `render_bundle_encoder_lifecycle_set_pipeline_buffers_and_draws` |
+| `RenderBundleEncoder::push_debug_group` | `render_bundle_encoder_lifecycle_set_pipeline_buffers_and_draws` |
+| `RenderBundleEncoder::pop_debug_group` | `render_bundle_encoder_lifecycle_set_pipeline_buffers_and_draws` |
+| `RenderBundleEncoder::set_pipeline` | `render_bundle_encoder_lifecycle_set_pipeline_buffers_and_draws`, `render_bundle_encoder_indirect_draws` |
+| `RenderBundleEncoder::set_bind_group` | `render_bundle_encoder_lifecycle_set_pipeline_buffers_and_draws` |
+| `RenderBundleEncoder::set_vertex_buffer` | `render_bundle_encoder_lifecycle_set_pipeline_buffers_and_draws` |
+| `RenderBundleEncoder::set_index_buffer` | `render_bundle_encoder_lifecycle_set_pipeline_buffers_and_draws`, `render_bundle_encoder_indirect_draws` |
+| `RenderBundleEncoder::draw` | `render_bundle_encoder_lifecycle_set_pipeline_buffers_and_draws` |
+| `RenderBundleEncoder::draw_indexed` | `render_bundle_encoder_lifecycle_set_pipeline_buffers_and_draws` |
+| `RenderBundleEncoder::draw_indirect` | `render_bundle_encoder_indirect_draws` |
+| `RenderBundleEncoder::draw_indexed_indirect` | `render_bundle_encoder_indirect_draws` |
+| `RenderBundle::is_error` | `render_pass_encoder_state_setters_occlusion_query_and_execute_bundles`, `render_bundle_encoder_lifecycle_set_pipeline_buffers_and_draws`, `render_bundle_encoder_indirect_draws` |
+
 ## yawgpu-hal/src/noop/mod.rs (14 pub fn)
 
 | pub fn | test name(s) |
