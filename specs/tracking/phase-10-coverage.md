@@ -399,6 +399,27 @@ as a Phase-10 follow-up.
 | `map_limits_to_native` | `map_limits_to_native_round_trips_through_map_limits` |
 | `map_limits` | `map_limits_round_trips_every_field_from_native`, `map_limits_to_native_round_trips_through_map_limits` |
 
+## yawgpu/src/lib.rs - Instance + Adapter (16 pub fn)
+
+| pub fn | test name(s) |
+|---|---|
+| `wgpuCreateInstance` | `wgpuCreateInstance_noop_backend_and_null_descriptor_return_instances`, `request_noop_device_helper_returns_live_device` |
+| `wgpuInstanceRelease` | `wgpuInstanceAddRef_and_wgpuInstanceRelease_balance_owned_refs`, `wgpuCreateInstance_noop_backend_and_null_descriptor_return_instances` |
+| `wgpuInstanceAddRef` | `wgpuInstanceAddRef_and_wgpuInstanceRelease_balance_owned_refs` |
+| `wgpuInstanceCreateSurface` | `wgpuInstanceCreateSurface_accepts_noop_metal_layer_source` |
+| `wgpuInstanceRequestAdapter` | `wgpuInstanceRequestAdapter_process_events_returns_success_adapter`, `wgpuInstanceWaitAny_wait_any_only_request_adapter_fires_callback`, `request_noop_device_helper_returns_live_device` |
+| `wgpuInstanceProcessEvents` | `wgpuInstanceRequestAdapter_process_events_returns_success_adapter`, `wgpuInstanceProcessEvents_without_registered_futures_is_noop`, `wgpuInstanceWaitAny_wait_any_only_request_adapter_fires_callback`, `wgpuAdapterRequestDevice_process_events_returns_success_device`, `request_noop_device_helper_returns_live_device` |
+| `wgpuInstanceWaitAny` | `wgpuInstanceWaitAny_empty_list_returns_timed_out_and_null_list_errors`, `wgpuInstanceWaitAny_wait_any_only_request_adapter_fires_callback` |
+| `wgpuAdapterRelease` | `wgpuAdapterAddRef_and_wgpuAdapterRelease_balance_owned_refs`, `wgpuInstanceRequestAdapter_process_events_returns_success_adapter` |
+| `wgpuAdapterAddRef` | `wgpuAdapterAddRef_and_wgpuAdapterRelease_balance_owned_refs` |
+| `wgpuAdapterGetLimits` | `wgpuAdapterGetLimits_populates_noop_defaults_and_rejects_null_out` |
+| `wgpuAdapterGetFeatures` | `wgpuAdapterGetFeatures_populates_supported_features_and_free_members` |
+| `wgpuAdapterHasFeature` | `wgpuAdapterHasFeature_reports_supported_and_unknown_features` |
+| `wgpuAdapterGetInfo` | `wgpuAdapterGetInfo_populates_noop_info_and_free_members` |
+| `wgpuAdapterInfoFreeMembers` | `wgpuAdapterGetInfo_populates_noop_info_and_free_members`, `wgpuAdapterInfoFreeMembers_accepts_empty_members` |
+| `wgpuAdapterRequestDevice` | `wgpuAdapterRequestDevice_process_events_returns_success_device`, `request_noop_device_helper_returns_live_device` |
+| `wgpuSupportedFeaturesFreeMembers` | `wgpuAdapterGetFeatures_populates_supported_features_and_free_members`, `wgpuSupportedFeaturesFreeMembers_accepts_empty_features` |
+
 ## Phase 10 yawgpu-core coverage summary
 
 Total kept pub fn (post-P10.3a audit): 183
