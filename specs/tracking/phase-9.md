@@ -214,8 +214,52 @@ N/A boundary preserved — `surface_validation` 4/4 unchanged).
   frames, exit 0. Logged that Claude can run windowed examples
   in-session (memory: `claude-runs-windowed-examples`).
 
-## P9.3 — `triangle` (windowed)  *(after P9.2)*
-wgpu-native `triangle` on the real surface (GLFW-gated).
+## P9.3 — `triangle` (windowed)  *(☑ DONE — real-GPU-verified)*
+
+Done: `examples/triangle/` — wgpu-native's triangle ported onto
+P9.2's real surface/swapchain. `shader.wgsl` is the classic three-
+vertex triangle keyed off `@builtin(vertex_index)` (no bind
+groups, no vertex buffers, no uniforms) with a solid-red
+fragment. `main.c` mirrors `surface_smoke`'s window+surface+
+configure skeleton and adds: shader-module load via
+`yawgpu_load_wgsl_shader`, empty `WGPUPipelineLayout`,
+`WGPURenderPipeline` with `vs_main`/`fs_main`, no vertex buffers,
+single color target matching the **chosen surface format**
+(BGRA8/RGBA8 Unorm — pipeline target format pulled from
+`wgpuSurfaceGetCapabilities`, not hard-coded), `TriangleList`
+topology, `multisample.count = 1`. Frame loop: acquire surface
+texture → texture view → render pass clearing to black `(0,0,0,
+1)` → set pipeline → `draw(3, 1, 0, 0)` → end/submit/present →
+poll. Up to 60 frames or window close, then `exit 0`. CMake stages
+`shader.wgsl` next to the binary via `add_custom_command(POST_
+BUILD copy_if_different)` (same pattern as `examples/compute`);
+`examples/CMakeLists.txt` adds `add_subdirectory(triangle)` inside
+the `YAWGPU_GLFW_FOUND` block; README updated.
+
+No yawgpu Rust changes — the existing P7.5/P7.6e render-pipeline
++ draw path handles this entirely; P9.2 already proved the
+swapchain texture is a valid color attachment for the begin/load/
+clear/store/end path; P9.3 just exercises the `Some(pipeline)`/
+`Some(draw)` branch on top of that.
+
+**Verification (real-GPU, 2026-05-20):**
+- Noop `cargo test --workspace` **58/58 binaries** unchanged
+  (byte-for-byte). `cargo clippy --workspace --all-targets --
+  -D warnings` clean. `cargo build/clippy -p yawgpu --features
+  metal/vulkan` clean.
+- Phase-7 render e2e regression: `e2e_metal_render` 3/3 +
+  `e2e_vulkan_render` 2/2 (Bgra8Unorm color target across the
+  swapchain texture path didn't break the prior Rgba8Unorm
+  offscreen pipeline). P9.2 `surface_smoke` regression: Metal
+  and Vulkan both exit 0.
+- real-GPU `triangle` (Claude's Bash, foreground from the binary's
+  dir so `shader.wgsl` resolves): `YAWGPU_BACKEND=metal` and
+  (with `$VULKAN_SDK` env) `YAWGPU_BACKEND=vulkan` both open
+  the window, draw the red triangle on black for 60 frames, and
+  exit 0. The triangle is visibly drawn (pipeline+draw branch
+  exercised — would degenerate to a black window otherwise; the
+  existing `e2e_*_render` tests pixel-verify the same pipeline+
+  draw machinery against an offscreen target).
 
 ## P9.4 — Dawn samples (HelloTriangle / ComputeBoids …)  *(after P9.3)*
 C rewrites of the C-ABI-expressible Dawn samples; record C++-wrapper-
