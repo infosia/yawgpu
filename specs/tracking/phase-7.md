@@ -30,7 +30,7 @@ metal -- --ignored`) is run **by Claude directly** — the Bash tool
 executes on this Apple Silicon and the sandbox permits Metal device access
 (confirmed P7.1) — and logged here per slice (no manual user step for
 Metal). Vulkan (P7.6) via MoltenVK is also machine-runnable
-(`$VULKAN_SDK` = `$VULKAN_SDK`; Apple Silicon enumerates).
+(`$VULKAN_SDK` sourced; host enumerates).
 **Phase ends with the mandatory Phase Review**
 (`tracking/phase-7-review.md`).
 
@@ -276,8 +276,8 @@ Committed `phase-7: P7.5`. **Metal backend bring-up complete
 
 ## P7.6 — Vulkan bring-up (mirror P7.1–P7.5)  *(in progress)*
 
-`ash` + MoltenVK on macOS (`$VULKAN_SDK` = `~/VulkanSDK/(sdk-version)/
-macOS`, Apple Silicon enumerates via `DRIVER_ID_MOLTENVK`); naga→SPIR-V
+`ash` + MoltenVK on macOS (`$VULKAN_SDK` sourced, host enumerates
+via `DRIVER_ID_MOLTENVK`); naga→SPIR-V
 (`spv-out`); fills the **same HAL enum arms** the Metal backend proved
 (no `dyn`); Noop unchanged. **Sub-sliced** (Vulkan is ~5 Metal slices
 of explicit code — keep reviews tractable & isolate failures, mirroring
