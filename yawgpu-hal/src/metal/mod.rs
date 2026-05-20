@@ -1147,3 +1147,430 @@ fn shader_error(message: String) -> HalError {
         message,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        HalBufferCopy, HalPresentMode, HalRenderPipelineDescriptor, HalSamplerDescriptor,
+        HalTextureUsage,
+    };
+
+    fn metal_device() -> MetalDevice {
+        let instance = MetalInstance::new().expect("create Metal instance");
+        let adapter = instance
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Metal adapter");
+        adapter.create_device().expect("create Metal device")
+    }
+
+    fn texture_descriptor() -> HalTextureDescriptor {
+        HalTextureDescriptor {
+            format: HalTextureFormat::Rgba8Unorm,
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+            mip_level_count: 1,
+            sample_count: 1,
+            usage: texture_usage(),
+        }
+    }
+
+    fn texture_usage() -> HalTextureUsage {
+        HalTextureUsage {
+            copy_src: true,
+            copy_dst: true,
+            texture_binding: true,
+            storage_binding: false,
+            render_attachment: true,
+        }
+    }
+
+    fn sampler_descriptor() -> HalSamplerDescriptor {
+        HalSamplerDescriptor {
+            address_mode_u: HalAddressMode::ClampToEdge,
+            address_mode_v: HalAddressMode::ClampToEdge,
+            address_mode_w: HalAddressMode::ClampToEdge,
+            mag_filter: HalFilterMode::Linear,
+            min_filter: HalFilterMode::Linear,
+            mipmap_filter: HalMipmapFilterMode::Nearest,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 32.0,
+            compare: None,
+            max_anisotropy: 1,
+        }
+    }
+
+    fn surface_config() -> HalSurfaceConfiguration {
+        HalSurfaceConfiguration::new(
+            HalTextureFormat::Rgba8Unorm,
+            texture_usage(),
+            100,
+            100,
+            HalPresentMode::Fifo,
+        )
+    }
+
+    fn render_descriptor() -> HalRenderPipelineDescriptor {
+        HalRenderPipelineDescriptor {
+            color_formats: vec![HalTextureFormat::Rgba8Unorm],
+            vertex_buffers: Vec::new(),
+            primitive_topology: HalPrimitiveTopology::TriangleList,
+        }
+    }
+
+    fn compute_msl() -> HalShaderSource {
+        HalShaderSource::Msl(
+            r#"
+#include <metal_stdlib>
+using namespace metal;
+kernel void main0() {}
+"#
+            .to_owned(),
+        )
+    }
+
+    fn render_msl() -> HalShaderSource {
+        HalShaderSource::Msl(
+            r#"
+#include <metal_stdlib>
+using namespace metal;
+struct VertexOut { float4 position [[position]]; };
+vertex VertexOut vs_main(uint vertex_id [[vertex_id]]) {
+    VertexOut out;
+    out.position = float4(0.0, 0.0, 0.0, 1.0);
+    return out;
+}
+fragment float4 fs_main() { return float4(1.0, 0.0, 0.0, 1.0); }
+"#
+            .to_owned(),
+        )
+    }
+
+    fn metal_layer() -> Retained<CAMetalLayer> {
+        CAMetalLayer::layer()
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_instance_new_constructs() {
+        MetalInstance::new().expect("create Metal instance");
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_instance_enumerate_adapters_returns_devices() {
+        let adapters = MetalInstance::new()
+            .expect("create Metal instance")
+            .enumerate_adapters();
+        assert!(!adapters.is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_adapter_new_captures_device_name() {
+        let adapter = MetalInstance::new()
+            .expect("create Metal instance")
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Metal adapter");
+        let rebuilt = MetalAdapter::new(adapter.device.clone());
+        assert_eq!(rebuilt.name(), adapter.name());
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_adapter_name_returns_non_empty_name() {
+        let adapter = MetalInstance::new()
+            .expect("create Metal instance")
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Metal adapter");
+        assert!(!adapter.name().is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_adapter_create_device_returns_zero_allocation_device() {
+        let adapter = MetalInstance::new()
+            .expect("create Metal instance")
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Metal adapter");
+        let device = adapter.create_device().expect("create Metal device");
+        assert_eq!(device.allocation_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_device_new_starts_with_zero_allocations() {
+        let device = MetalDevice::new().expect("create Metal device");
+        assert_eq!(device.allocation_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_device_allocation_count_tracks_created_resources() {
+        let device = metal_device();
+        assert_eq!(device.allocation_count(), 0);
+        let _buffer = device.create_buffer(4);
+        let _texture = device.create_texture(&texture_descriptor());
+        let _sampler = device.create_sampler(&sampler_descriptor());
+        assert_eq!(device.allocation_count(), 3);
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_device_queue_returns_same_reference() {
+        let device = metal_device();
+        assert!(std::ptr::eq(device.queue(), device.queue()));
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_device_create_buffer_records_size_and_maps_memory() {
+        let device = metal_device();
+        let buffer = device.create_buffer(16);
+        assert_eq!(buffer.size(), 16);
+        assert!(buffer.mapped_ptr().is_some());
+        assert_eq!(device.allocation_count(), 1);
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_device_create_texture_records_descriptor_shape() {
+        let device = metal_device();
+        let texture = device.create_texture(&texture_descriptor());
+        assert_eq!(texture.width, 4);
+        assert_eq!(texture.height, 4);
+        assert_eq!(texture.depth_or_array_layers, 1);
+        assert_eq!(texture.bytes_per_pixel, 4);
+        assert!(texture.inner.is_some());
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_device_create_sampler_returns_sampler() {
+        let device = metal_device();
+        let sampler = device.create_sampler(&sampler_descriptor());
+        assert!(sampler._inner.is_some());
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_device_create_compute_pipeline_accepts_msl() {
+        let device = metal_device();
+        let pipeline = device
+            .create_compute_pipeline(compute_msl(), "main0", (1, 1, 1), &[])
+            .expect("create compute pipeline");
+        assert_eq!(pipeline.workgroup_size, (1, 1, 1));
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_device_create_render_pipeline_accepts_msl() {
+        let device = metal_device();
+        let pipeline = device
+            .create_render_pipeline(
+                render_msl(),
+                "vs_main",
+                "fs_main",
+                &render_descriptor(),
+                &[],
+            )
+            .expect("create render pipeline");
+        assert!(matches!(
+            pipeline.primitive_topology,
+            HalPrimitiveTopology::TriangleList
+        ));
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_surface_from_layer_rejects_null_layer() {
+        let error = unsafe { MetalSurface::from_layer(std::ptr::null_mut()) }
+            .expect_err("null layer must fail");
+        assert!(matches!(
+            error,
+            HalError::SwapchainCreationFailed {
+                backend: "metal",
+                message: "surface layer is null"
+            }
+        ));
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_surface_from_layer_wraps_cametal_layer() {
+        let layer = metal_layer();
+        let raw = (&*layer as *const CAMetalLayer).cast_mut().cast::<c_void>();
+        let surface = unsafe { MetalSurface::from_layer(raw) }.expect("create Metal surface");
+        assert!(surface.config.is_none());
+        assert!(surface.current_drawable.is_none());
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_surface_configure_stores_configuration() {
+        let device = metal_device();
+        let layer = metal_layer();
+        let raw = (&*layer as *const CAMetalLayer).cast_mut().cast::<c_void>();
+        let mut surface = unsafe { MetalSurface::from_layer(raw) }.expect("create Metal surface");
+        let config = surface_config();
+        surface
+            .configure(&device, config)
+            .expect("configure Metal surface");
+        assert_eq!(surface.config.expect("stored config").width, 100);
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_surface_unconfigure_clears_configuration() {
+        let device = metal_device();
+        let layer = metal_layer();
+        let raw = (&*layer as *const CAMetalLayer).cast_mut().cast::<c_void>();
+        let mut surface = unsafe { MetalSurface::from_layer(raw) }.expect("create Metal surface");
+        surface
+            .configure(&device, surface_config())
+            .expect("configure Metal surface");
+        surface.unconfigure();
+        assert!(surface.config.is_none());
+        assert!(surface.current_drawable.is_none());
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_surface_acquire_next_texture_errors_when_unconfigured() {
+        let layer = metal_layer();
+        let raw = (&*layer as *const CAMetalLayer).cast_mut().cast::<c_void>();
+        let mut surface = unsafe { MetalSurface::from_layer(raw) }.expect("create Metal surface");
+        let error = surface
+            .acquire_next_texture()
+            .expect_err("unconfigured surface must fail");
+        assert!(matches!(
+            error,
+            HalError::AcquireFailed {
+                backend: "metal",
+                message: "surface is not configured"
+            }
+        ));
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_surface_present_errors_without_acquired_drawable() {
+        let device = metal_device();
+        let layer = metal_layer();
+        let raw = (&*layer as *const CAMetalLayer).cast_mut().cast::<c_void>();
+        let mut surface = unsafe { MetalSurface::from_layer(raw) }.expect("create Metal surface");
+        let error = surface
+            .present(device.queue())
+            .expect_err("surface without drawable must fail");
+        assert!(matches!(
+            error,
+            HalError::PresentFailed {
+                backend: "metal",
+                message: "no acquired drawable to present"
+            }
+        ));
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_queue_new_constructs_queue() {
+        MetalQueue::new().expect("create Metal queue");
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_queue_submit_empty_completes() {
+        metal_device()
+            .queue()
+            .submit_empty()
+            .expect("submit empty queue work");
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_queue_submit_copies_accepts_buffer_copy() {
+        let device = metal_device();
+        let source = device.create_buffer(4);
+        let destination = device.create_buffer(4);
+        source.write(0, &[1, 2, 3, 4]).expect("write source");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::Buffer(HalBufferCopy {
+                source: HalBuffer::Metal(source),
+                source_offset: 0,
+                destination: HalBuffer::Metal(destination.clone()),
+                destination_offset: 0,
+                size: 4,
+            })])
+            .expect("submit buffer copy");
+        assert_eq!(
+            destination.read(0, 4).expect("read destination"),
+            [1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_buffer_size_returns_created_size() {
+        let buffer = metal_device().create_buffer(32);
+        assert_eq!(buffer.size(), 32);
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_buffer_write_updates_mapped_memory() {
+        let buffer = metal_device().create_buffer(4);
+        buffer.write(0, &[5, 6, 7, 8]).expect("write buffer");
+        assert_eq!(buffer.read(0, 4).expect("read buffer"), [5, 6, 7, 8]);
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_buffer_read_returns_written_bytes() {
+        let buffer = metal_device().create_buffer(4);
+        buffer.write(1, &[9, 10]).expect("write buffer");
+        assert_eq!(buffer.read(1, 2).expect("read buffer"), [9, 10]);
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_buffer_mapped_ptr_returns_non_null_pointer() {
+        let buffer = metal_device().create_buffer(4);
+        assert!(buffer.mapped_ptr().is_some());
+    }
+}
