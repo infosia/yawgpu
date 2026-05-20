@@ -842,7 +842,74 @@ pub enum HalRenderPipeline {
 
 #[cfg(test)]
 mod tests {
-    use super::{HalError, HalInstance};
+    use super::*;
+
+    fn noop_device() -> Result<HalDevice, HalError> {
+        let instance = HalInstance::new_noop();
+        let adapter = instance
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop instance yields one adapter");
+        adapter.create_device()
+    }
+
+    fn texture_descriptor() -> HalTextureDescriptor {
+        HalTextureDescriptor {
+            format: HalTextureFormat::Rgba8Unorm,
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+            mip_level_count: 1,
+            sample_count: 1,
+            usage: HalTextureUsage {
+                copy_src: true,
+                copy_dst: true,
+                texture_binding: false,
+                storage_binding: false,
+                render_attachment: true,
+            },
+        }
+    }
+
+    fn sampler_descriptor() -> HalSamplerDescriptor {
+        HalSamplerDescriptor {
+            address_mode_u: HalAddressMode::ClampToEdge,
+            address_mode_v: HalAddressMode::ClampToEdge,
+            address_mode_w: HalAddressMode::ClampToEdge,
+            mag_filter: HalFilterMode::Nearest,
+            min_filter: HalFilterMode::Nearest,
+            mipmap_filter: HalMipmapFilterMode::Nearest,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 32.0,
+            compare: None,
+            max_anisotropy: 1,
+        }
+    }
+
+    fn surface_configuration() -> HalSurfaceConfiguration {
+        HalSurfaceConfiguration::new(
+            HalTextureFormat::Bgra8Unorm,
+            HalTextureUsage {
+                copy_src: false,
+                copy_dst: false,
+                texture_binding: false,
+                storage_binding: false,
+                render_attachment: true,
+            },
+            640,
+            480,
+            HalPresentMode::Fifo,
+        )
+    }
+
+    fn render_pipeline_descriptor() -> HalRenderPipelineDescriptor {
+        HalRenderPipelineDescriptor {
+            color_formats: vec![HalTextureFormat::Rgba8Unorm],
+            vertex_buffers: Vec::new(),
+            primitive_topology: HalPrimitiveTopology::TriangleList,
+        }
+    }
 
     #[test]
     fn noop_creates_device_with_zero_allocations() -> Result<(), HalError> {
@@ -853,6 +920,247 @@ mod tests {
         let device = adapters[0].create_device()?;
         assert_eq!(device.allocation_count(), 0);
 
+        Ok(())
+    }
+
+    #[test]
+    fn create_surface_from_metal_layer_noop_ignores_layer_pointer() -> Result<(), HalError> {
+        let instance = HalInstance::new_noop();
+        let dangling = 0xdead_beefusize as *mut c_void;
+
+        // SAFETY: Noop arm does not dereference the layer pointer.
+        let surface = unsafe { instance.create_surface_from_metal_layer(dangling)? };
+
+        assert!(matches!(surface, HalSurface::Noop));
+        Ok(())
+    }
+
+    #[test]
+    fn hal_adapter_name_noop_returns_fixed_string() {
+        let adapter = HalInstance::new_noop()
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter exists");
+
+        assert_eq!(adapter.name(), "yawgpu Noop Adapter");
+    }
+
+    #[test]
+    fn hal_adapter_backend_noop_returns_noop() {
+        let adapter = HalInstance::new_noop()
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter exists");
+
+        assert_eq!(adapter.backend(), HalBackend::Noop);
+    }
+
+    #[test]
+    fn hal_device_backend_noop_returns_noop() -> Result<(), HalError> {
+        let device = noop_device()?;
+
+        assert_eq!(device.backend(), HalBackend::Noop);
+        Ok(())
+    }
+
+    #[test]
+    fn hal_device_queue_noop_returns_queue_that_submits_empty() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let queue = device.queue();
+
+        assert!(matches!(queue, HalQueue::Noop(_)));
+        queue.submit_empty()
+    }
+
+    #[test]
+    fn hal_device_create_buffer_noop_records_requested_size() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let buffer = device.create_buffer(256);
+
+        assert!(matches!(buffer, HalBuffer::Noop(_)));
+        assert_eq!(buffer.size(), 256);
+        Ok(())
+    }
+
+    #[test]
+    fn hal_device_create_texture_noop_returns_texture_and_increments_allocations(
+    ) -> Result<(), HalError> {
+        let device = noop_device()?;
+        let texture = device.create_texture(&texture_descriptor());
+
+        assert!(matches!(texture, HalTexture::Noop(_)));
+        assert_eq!(device.allocation_count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn hal_device_create_sampler_noop_returns_sampler_and_increments_allocations(
+    ) -> Result<(), HalError> {
+        let device = noop_device()?;
+        let sampler = device.create_sampler(&sampler_descriptor());
+
+        assert!(matches!(sampler, HalSampler::Noop(_)));
+        assert_eq!(device.allocation_count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn hal_device_create_compute_pipeline_noop_accepts_empty_shader() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let pipeline = device.create_compute_pipeline(
+            HalShaderSource::Msl(String::new()),
+            "main",
+            (1, 1, 1),
+            &[],
+        )?;
+
+        assert!(matches!(pipeline, HalComputePipeline::Noop));
+        Ok(())
+    }
+
+    #[test]
+    fn hal_device_create_render_pipeline_noop_accepts_empty_shader() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let pipeline = device.create_render_pipeline(
+            HalShaderSource::Msl(String::new()),
+            "vs_main",
+            "fs_main",
+            &render_pipeline_descriptor(),
+            &[],
+        )?;
+
+        assert!(matches!(pipeline, HalRenderPipeline::Noop));
+        Ok(())
+    }
+
+    #[test]
+    fn hal_surface_configuration_new_round_trips_fields() {
+        let usage = HalTextureUsage {
+            copy_src: true,
+            copy_dst: false,
+            texture_binding: true,
+            storage_binding: false,
+            render_attachment: true,
+        };
+        let config = HalSurfaceConfiguration::new(
+            HalTextureFormat::Rgba8Unorm,
+            usage,
+            320,
+            240,
+            HalPresentMode::Mailbox,
+        );
+
+        assert!(matches!(config.format, HalTextureFormat::Rgba8Unorm));
+        assert_eq!(config.usage.copy_src, usage.copy_src);
+        assert_eq!(config.usage.copy_dst, usage.copy_dst);
+        assert_eq!(config.usage.texture_binding, usage.texture_binding);
+        assert_eq!(config.usage.storage_binding, usage.storage_binding);
+        assert_eq!(config.usage.render_attachment, usage.render_attachment);
+        assert_eq!(config.width, 320);
+        assert_eq!(config.height, 240);
+        assert!(matches!(config.present_mode, HalPresentMode::Mailbox));
+    }
+
+    #[test]
+    fn hal_surface_configure_noop_returns_ok() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let mut surface = HalSurface::Noop;
+
+        surface.configure(&device, surface_configuration())
+    }
+
+    #[test]
+    fn hal_surface_unconfigure_noop_is_idempotent() {
+        let mut surface = HalSurface::Noop;
+
+        surface.unconfigure();
+        surface.unconfigure();
+    }
+
+    #[test]
+    fn hal_surface_acquire_next_texture_noop_returns_acquire_failed() {
+        let mut surface = HalSurface::Noop;
+
+        let error = surface
+            .acquire_next_texture()
+            .expect_err("Noop surface has no swapchain texture");
+        match error {
+            HalError::AcquireFailed { backend, .. } => assert_eq!(backend, "noop"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hal_surface_present_noop_returns_ok_without_acquire() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let queue = device.queue();
+        let mut surface = HalSurface::Noop;
+
+        surface.present(&queue)
+    }
+
+    #[test]
+    fn hal_queue_submit_empty_noop_returns_ok() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let queue = device.queue();
+
+        queue.submit_empty()
+    }
+
+    #[test]
+    fn hal_queue_submit_copies_noop_accepts_empty_and_buffer_copy() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let queue = device.queue();
+        let source = device.create_buffer(8);
+        let destination = device.create_buffer(8);
+        let copy = HalCopy::Buffer(HalBufferCopy {
+            source,
+            source_offset: 0,
+            destination,
+            destination_offset: 0,
+            size: 8,
+        });
+
+        queue.submit_copies(&[])?;
+        queue.submit_copies(&[copy])
+    }
+
+    #[test]
+    fn hal_buffer_size_noop_matches_creation_size() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let buffer = device.create_buffer(4096);
+
+        assert_eq!(buffer.size(), 4096);
+        Ok(())
+    }
+
+    #[test]
+    fn hal_buffer_write_noop_accepts_empty_and_non_empty_data() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let buffer = device.create_buffer(16);
+
+        buffer.write(0, &[])?;
+        buffer.write(4, &[1, 2, 3, 4])
+    }
+
+    #[test]
+    fn hal_buffer_read_noop_returns_zeroed_vector() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let buffer = device.create_buffer(16);
+
+        assert_eq!(buffer.read(0, 0)?, Vec::<u8>::new());
+        assert_eq!(buffer.read(4, 4)?, vec![0, 0, 0, 0]);
+        Ok(())
+    }
+
+    #[test]
+    fn hal_buffer_mapped_ptr_noop_returns_none() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let buffer = device.create_buffer(16);
+
+        assert!(buffer.mapped_ptr().is_none());
         Ok(())
     }
 }

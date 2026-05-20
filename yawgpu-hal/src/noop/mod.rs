@@ -134,3 +134,123 @@ pub struct NoopTexture;
 
 #[derive(Debug, Clone)]
 pub struct NoopSampler;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn noop_instance_new_constructs() {
+        let instance = NoopInstance::new();
+
+        assert_eq!(instance.enumerate_adapters().len(), 1);
+    }
+
+    #[test]
+    fn noop_instance_enumerate_adapters_returns_synthetic_adapter() {
+        let instance = NoopInstance::new();
+        let adapters = instance.enumerate_adapters();
+
+        assert_eq!(adapters.len(), 1);
+        assert_eq!(adapters[0].name(), "yawgpu Noop Adapter");
+    }
+
+    #[test]
+    fn noop_adapter_synthetic_exposes_documented_name() {
+        let adapter = NoopAdapter::synthetic();
+
+        assert_eq!(adapter.name(), "yawgpu Noop Adapter");
+    }
+
+    #[test]
+    fn noop_adapter_name_returns_fixed_string() {
+        let adapter = NoopAdapter::synthetic();
+
+        assert_eq!(adapter.name(), "yawgpu Noop Adapter");
+    }
+
+    #[test]
+    fn noop_adapter_create_device_returns_zero_allocation_device() {
+        let adapter = NoopAdapter::synthetic();
+        let device = adapter
+            .create_device()
+            .expect("Noop device creation succeeds");
+
+        assert_eq!(device.allocation_count(), 0);
+    }
+
+    #[test]
+    fn noop_device_new_starts_with_zero_allocations() {
+        let device = NoopDevice::new();
+
+        assert_eq!(device.allocation_count(), 0);
+    }
+
+    #[test]
+    fn noop_device_allocation_count_tracks_created_resources() {
+        let device = NoopDevice::new();
+
+        assert_eq!(device.allocation_count(), 0);
+        let _buffer = device.create_buffer(4);
+        assert_eq!(device.allocation_count(), 1);
+        let _texture = device.create_texture();
+        assert_eq!(device.allocation_count(), 2);
+        let _sampler = device.create_sampler();
+        assert_eq!(device.allocation_count(), 3);
+    }
+
+    #[test]
+    fn noop_device_queue_returns_same_reference() {
+        let device = NoopDevice::new();
+
+        assert!(std::ptr::eq(device.queue(), device.queue()));
+    }
+
+    #[test]
+    fn noop_device_create_buffer_records_size_and_increments_allocation_count() {
+        let device = NoopDevice::new();
+        let buffer = device.create_buffer(64);
+
+        assert_eq!(buffer.size(), 64);
+        assert_eq!(device.allocation_count(), 1);
+    }
+
+    #[test]
+    fn noop_device_create_texture_increments_allocation_count() {
+        let device = NoopDevice::new();
+        let _texture = device.create_texture();
+
+        assert_eq!(device.allocation_count(), 1);
+    }
+
+    #[test]
+    fn noop_device_create_sampler_increments_allocation_count() {
+        let device = NoopDevice::new();
+        let _sampler = device.create_sampler();
+
+        assert_eq!(device.allocation_count(), 1);
+    }
+
+    #[test]
+    #[allow(clippy::default_constructed_unit_structs)]
+    fn noop_queue_new_matches_default_smoke() {
+        let _queue = NoopQueue::new();
+        let _default_queue = NoopQueue::default();
+    }
+
+    #[test]
+    fn noop_buffer_size_returns_created_size() {
+        let device = NoopDevice::new();
+
+        assert_eq!(device.create_buffer(0).size(), 0);
+        assert_eq!(device.create_buffer(4096).size(), 4096);
+    }
+
+    #[test]
+    fn noop_buffer_mapped_ptr_returns_none() {
+        let device = NoopDevice::new();
+        let buffer = device.create_buffer(128);
+
+        assert!(buffer.mapped_ptr().is_none());
+    }
+}
