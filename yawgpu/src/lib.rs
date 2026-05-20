@@ -6507,7 +6507,10 @@ mod tests {
                 wgpuAdapterHasFeature(adapter, native::WGPUFeatureName_TimestampQuery),
                 1
             );
-            assert_eq!(wgpuAdapterHasFeature(adapter, 0xFFFF_FFFF), 0);
+            assert_eq!(
+                wgpuAdapterHasFeature(adapter, 0xFFFF_FFFFu32 as native::WGPUFeatureName),
+                0
+            );
 
             release_handles(instance, adapter, std::ptr::null());
         }

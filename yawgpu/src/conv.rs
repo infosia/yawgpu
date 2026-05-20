@@ -810,7 +810,7 @@ pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
         native::WGPUFeatureName_TimestampQuery => core::Feature::TimestampQuery,
         native::WGPUFeatureName_TextureFormatsTier1 => core::Feature::TextureFormatsTier1,
         native::WGPUFeatureName_TextureFormatsTier2 => core::Feature::TextureFormatsTier2,
-        other => core::Feature::Other(other),
+        other => core::Feature::Other(other as u32),
     }
 }
 
@@ -822,7 +822,7 @@ pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
         core::Feature::TimestampQuery => native::WGPUFeatureName_TimestampQuery,
         core::Feature::TextureFormatsTier1 => native::WGPUFeatureName_TextureFormatsTier1,
         core::Feature::TextureFormatsTier2 => native::WGPUFeatureName_TextureFormatsTier2,
-        core::Feature::Other(value) => value,
+        core::Feature::Other(value) => value as native::WGPUFeatureName,
         // exhaustive as of core::Feature @ 2026-05-17
         _ => native::WGPUFeatureName_Force32,
     }
