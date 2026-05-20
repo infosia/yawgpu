@@ -2816,3 +2816,397 @@ fn shader_error(message: &'static str) -> HalError {
         message: message.to_owned(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        HalBuffer, HalBufferCopy, HalRenderPipelineDescriptor, HalSamplerDescriptor,
+        HalTextureUsage,
+    };
+
+    fn vulkan_device() -> VulkanDevice {
+        let instance = VulkanInstance::new().expect("create Vulkan instance");
+        let adapter = instance
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Vulkan adapter");
+        adapter.create_device().expect("create Vulkan device")
+    }
+
+    fn texture_usage() -> HalTextureUsage {
+        HalTextureUsage {
+            copy_src: true,
+            copy_dst: true,
+            texture_binding: true,
+            storage_binding: false,
+            render_attachment: true,
+        }
+    }
+
+    fn texture_descriptor() -> HalTextureDescriptor {
+        HalTextureDescriptor {
+            format: HalTextureFormat::Rgba8Unorm,
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+            mip_level_count: 1,
+            sample_count: 1,
+            usage: texture_usage(),
+        }
+    }
+
+    fn sampler_descriptor() -> HalSamplerDescriptor {
+        HalSamplerDescriptor {
+            address_mode_u: HalAddressMode::ClampToEdge,
+            address_mode_v: HalAddressMode::ClampToEdge,
+            address_mode_w: HalAddressMode::ClampToEdge,
+            mag_filter: HalFilterMode::Linear,
+            min_filter: HalFilterMode::Linear,
+            mipmap_filter: HalMipmapFilterMode::Nearest,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 32.0,
+            compare: None,
+            max_anisotropy: 1,
+        }
+    }
+
+    fn render_descriptor() -> HalRenderPipelineDescriptor {
+        HalRenderPipelineDescriptor {
+            color_formats: vec![HalTextureFormat::Rgba8Unorm],
+            vertex_buffers: Vec::new(),
+            primitive_topology: HalPrimitiveTopology::TriangleList,
+        }
+    }
+
+    fn dummy_surface(instance: &VulkanInstance) -> VulkanSurface {
+        VulkanSurface {
+            instance: Arc::clone(&instance.inner),
+            surface: vk::SurfaceKHR::null(),
+            swapchain: None,
+            config: None,
+            current_image_index: None,
+        }
+    }
+
+    fn compute_spirv() -> Vec<u32> {
+        vec![
+            119734787, 65536, 524299, 10, 0, 131089, 1, 393227, 1, 1280527431, 1685353262,
+            808793134, 0, 196622, 0, 1, 327695, 5, 4, 1852399981, 0, 393232, 4, 17, 1, 1, 1,
+            196611, 2, 450, 262149, 4, 1852399981, 0, 262215, 9, 11, 25, 131091, 2, 196641, 3, 2,
+            262165, 6, 32, 0, 262167, 7, 6, 3, 262187, 6, 8, 1, 393260, 7, 9, 8, 8, 8, 327734, 2,
+            4, 0, 3, 131320, 5, 65789, 65592,
+        ]
+    }
+
+    fn vertex_spirv() -> Vec<u32> {
+        vec![
+            119734787, 65536, 524299, 21, 0, 131089, 1, 393227, 1, 1280527431, 1685353262,
+            808793134, 0, 196622, 0, 1, 393231, 0, 4, 1852399981, 0, 13, 196611, 2, 450, 262149, 4,
+            1852399981, 0, 393221, 11, 1348430951, 1700164197, 2019914866, 0, 393222, 11, 0,
+            1348430951, 1953067887, 7237481, 458758, 11, 1, 1348430951, 1953393007, 1702521171, 0,
+            458758, 11, 2, 1130327143, 1148217708, 1635021673, 6644590, 458758, 11, 3, 1130327143,
+            1147956341, 1635021673, 6644590, 196613, 13, 0, 196679, 11, 2, 327752, 11, 0, 11, 0,
+            327752, 11, 1, 11, 1, 327752, 11, 2, 11, 3, 327752, 11, 3, 11, 4, 131091, 2, 196641, 3,
+            2, 196630, 6, 32, 262167, 7, 6, 4, 262165, 8, 32, 0, 262187, 8, 9, 1, 262172, 10, 6, 9,
+            393246, 11, 7, 6, 10, 10, 262176, 12, 3, 11, 262203, 12, 13, 3, 262165, 14, 32, 1,
+            262187, 14, 15, 0, 262187, 6, 16, 0, 262187, 6, 17, 1065353216, 458796, 7, 18, 16, 16,
+            16, 17, 262176, 19, 3, 7, 327734, 2, 4, 0, 3, 131320, 5, 327745, 19, 20, 13, 15,
+            196670, 20, 18, 65789, 65592,
+        ]
+    }
+
+    fn fragment_spirv() -> Vec<u32> {
+        vec![
+            119734787, 65536, 524299, 13, 0, 131089, 1, 393227, 1, 1280527431, 1685353262,
+            808793134, 0, 196622, 0, 1, 393231, 4, 4, 1852399981, 0, 9, 196624, 4, 7, 196611, 2,
+            450, 262149, 4, 1852399981, 0, 327685, 9, 1131705711, 1919904879, 0, 262215, 9, 30, 0,
+            131091, 2, 196641, 3, 2, 196630, 6, 32, 262167, 7, 6, 4, 262176, 8, 3, 7, 262203, 8, 9,
+            3, 262187, 6, 10, 1065353216, 262187, 6, 11, 0, 458796, 7, 12, 10, 11, 11, 10, 327734,
+            2, 4, 0, 3, 131320, 5, 196670, 9, 12, 65789, 65592,
+        ]
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_instance_new_constructs() {
+        VulkanInstance::new().expect("create Vulkan instance");
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_instance_enumerate_adapters_returns_devices() {
+        let adapters = VulkanInstance::new()
+            .expect("create Vulkan instance")
+            .enumerate_adapters();
+        assert!(!adapters.is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_instance_create_surface_from_metal_layer_rejects_null_layer() {
+        let instance = VulkanInstance::new().expect("create Vulkan instance");
+        let error = unsafe { instance.create_surface_from_metal_layer(std::ptr::null_mut()) }
+            .expect_err("null layer must fail");
+        assert!(matches!(
+            error,
+            HalError::SwapchainCreationFailed {
+                backend: "vulkan",
+                message: "surface layer is null"
+            }
+        ));
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_adapter_name_returns_non_empty_name() {
+        let adapter = VulkanInstance::new()
+            .expect("create Vulkan instance")
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Vulkan adapter");
+        assert!(!adapter.name().is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_adapter_create_device_returns_zero_allocation_device() {
+        let adapter = VulkanInstance::new()
+            .expect("create Vulkan instance")
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Vulkan adapter");
+        let device = adapter.create_device().expect("create Vulkan device");
+        assert_eq!(device.allocation_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_device_allocation_count_tracks_created_resources() {
+        let device = vulkan_device();
+        assert_eq!(device.allocation_count(), 0);
+        let _buffer = device.create_buffer(4);
+        let _texture = device.create_texture(&texture_descriptor());
+        let _sampler = device.create_sampler(&sampler_descriptor());
+        assert_eq!(device.allocation_count(), 3);
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_device_queue_returns_same_reference() {
+        let device = vulkan_device();
+        assert!(std::ptr::eq(device.queue(), device.queue()));
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_device_create_buffer_records_size_and_maps_memory() {
+        let device = vulkan_device();
+        let buffer = device.create_buffer(16);
+        assert_eq!(buffer.size(), 16);
+        assert!(buffer.mapped_ptr().is_some());
+        assert_eq!(device.allocation_count(), 1);
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_device_create_texture_records_descriptor_shape() {
+        let device = vulkan_device();
+        let texture = device.create_texture(&texture_descriptor());
+        assert_eq!(texture.width, 4);
+        assert_eq!(texture.height, 4);
+        assert_eq!(texture.depth_or_array_layers, 1);
+        assert_eq!(texture.bytes_per_pixel, 4);
+        assert!(matches!(texture.format, HalTextureFormat::Rgba8Unorm));
+        assert!(texture.inner.is_some());
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_device_create_sampler_returns_sampler() {
+        let device = vulkan_device();
+        let sampler = device.create_sampler(&sampler_descriptor());
+        assert!(sampler._inner.is_some());
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_device_create_compute_pipeline_accepts_spirv() {
+        let device = vulkan_device();
+        let pipeline = device
+            .create_compute_pipeline(
+                HalShaderSource::SpirV(compute_spirv()),
+                "main",
+                (1, 1, 1),
+                &[],
+            )
+            .expect("create compute pipeline");
+        assert_ne!(pipeline.inner.pipeline, vk::Pipeline::null());
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_device_create_render_pipeline_accepts_spirv_stages() {
+        let device = vulkan_device();
+        let pipeline = device
+            .create_render_pipeline(
+                HalShaderSource::SpirVStages {
+                    vertex: vertex_spirv(),
+                    fragment: fragment_spirv(),
+                },
+                "main",
+                "main",
+                &render_descriptor(),
+                &[],
+            )
+            .expect("create render pipeline");
+        assert_ne!(pipeline.inner.pipeline, vk::Pipeline::null());
+    }
+
+    // `VulkanSurface::configure` cannot be unit-tested with a
+    // synthesized null `vk::SurfaceKHR`: the configure path calls
+    // `vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device,
+    // VK_NULL_HANDLE)` which is undefined behaviour (SIGSEGV in
+    // practice on MoltenVK). Constructing a real
+    // `VulkanSurface` requires a valid `CAMetalLayer` pointer,
+    // which would pull `objc2-quartz-core` into yawgpu-hal as a
+    // dev-dependency — deliberately out of scope for P10.1b. The
+    // happy path is exhaustively covered by Phase-9 e2e
+    // (`examples/surface_smoke`, `examples/triangle`,
+    // `examples/hello_triangle` with `YAWGPU_BACKEND=vulkan`).
+    // The null-surface validation gap is logged as a Phase 10
+    // follow-up in `specs/tracking/phase-10-coverage.md`.
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_surface_unconfigure_is_idempotent() {
+        let instance = VulkanInstance::new().expect("create Vulkan instance");
+        let mut surface = dummy_surface(&instance);
+        surface.unconfigure();
+        surface.unconfigure();
+        assert!(surface.config.is_none());
+        assert!(surface.swapchain.is_none());
+        assert!(surface.current_image_index.is_none());
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_surface_acquire_next_texture_errors_when_unconfigured() {
+        let instance = VulkanInstance::new().expect("create Vulkan instance");
+        let mut surface = dummy_surface(&instance);
+        let error = surface
+            .acquire_next_texture()
+            .expect_err("unconfigured surface must fail");
+        assert!(matches!(
+            error,
+            HalError::AcquireFailed {
+                backend: "vulkan",
+                message: "surface is not configured"
+            }
+        ));
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_surface_present_errors_without_acquired_image() {
+        let instance = VulkanInstance::new().expect("create Vulkan instance");
+        let device = vulkan_device();
+        let mut surface = dummy_surface(&instance);
+        let error = surface
+            .present(device.queue())
+            .expect_err("surface without image must fail");
+        assert!(matches!(
+            error,
+            HalError::PresentFailed {
+                backend: "vulkan",
+                message: "no acquired image to present"
+            }
+        ));
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_queue_submit_empty_completes() {
+        vulkan_device()
+            .queue()
+            .submit_empty()
+            .expect("submit empty queue work");
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_queue_submit_copies_accepts_buffer_copy() {
+        let device = vulkan_device();
+        let source = device.create_buffer(4);
+        let destination = device.create_buffer(4);
+        source.write(0, &[1, 2, 3, 4]).expect("write source");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::Buffer(HalBufferCopy {
+                source: HalBuffer::Vulkan(source),
+                source_offset: 0,
+                destination: HalBuffer::Vulkan(destination.clone()),
+                destination_offset: 0,
+                size: 4,
+            })])
+            .expect("submit buffer copy");
+        assert_eq!(
+            destination.read(0, 4).expect("read destination"),
+            [1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_buffer_size_returns_created_size() {
+        let buffer = vulkan_device().create_buffer(32);
+        assert_eq!(buffer.size(), 32);
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_buffer_write_updates_mapped_memory() {
+        let buffer = vulkan_device().create_buffer(4);
+        buffer.write(0, &[5, 6, 7, 8]).expect("write buffer");
+        assert_eq!(buffer.read(0, 4).expect("read buffer"), [5, 6, 7, 8]);
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_buffer_read_returns_written_bytes() {
+        let buffer = vulkan_device().create_buffer(4);
+        buffer.write(1, &[9, 10]).expect("write buffer");
+        assert_eq!(buffer.read(1, 2).expect("read buffer"), [9, 10]);
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_buffer_mapped_ptr_returns_non_null_pointer() {
+        let buffer = vulkan_device().create_buffer(4);
+        assert!(buffer.mapped_ptr().is_some());
+    }
+}
