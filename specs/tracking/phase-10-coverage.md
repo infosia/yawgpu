@@ -168,6 +168,29 @@ P10.3a audit: see `specs/tracking/phase-10-audit.md`.
 | `RenderBundleEncoder::draw_indexed_indirect` | `render_bundle_encoder_indirect_draws` |
 | `RenderBundle::is_error` | `render_pass_encoder_state_setters_occlusion_query_and_execute_bundles`, `render_bundle_encoder_lifecycle_set_pipeline_buffers_and_draws`, `render_bundle_encoder_indirect_draws` |
 
+## yawgpu-core/src/lib.rs - Pipeline / Shader (18 pub fn)
+
+| pub fn | test name(s) |
+|---|---|
+| `ShaderModule::is_error` | `shader_module_accessors_pin_is_error_and_diagnostic`, `device_create_shader_module_accepts_minimal_compute_wgsl` |
+| `ShaderModule::diagnostic` | `shader_module_accessors_pin_is_error_and_diagnostic`, `device_create_shader_module_accepts_minimal_compute_wgsl` |
+| `BindGroupLayout::error` | `bind_group_layout_accessors_pin_entries_error_and_same` |
+| `BindGroupLayout::entries` | `bind_group_layout_accessors_pin_entries_error_and_same`, `device_create_bind_group_layout_bind_group_and_pipeline_layout_empty` |
+| `BindGroupLayout::is_error` | `bind_group_layout_accessors_pin_entries_error_and_same`, `device_create_bind_group_layout_bind_group_and_pipeline_layout_empty` |
+| `BindGroupLayout::same` | `bind_group_layout_accessors_pin_entries_error_and_same` |
+| `BindGroup::is_error` | `bind_group_accessors_pin_entries_and_is_error`, `device_create_bind_group_layout_bind_group_and_pipeline_layout_empty` |
+| `BindGroup::entries` | `bind_group_accessors_pin_entries_and_is_error`, `device_create_bind_group_layout_bind_group_and_pipeline_layout_empty` |
+| `PipelineLayout::is_error` | `pipeline_layout_accessors_pin_bind_group_layouts_and_is_error`, `device_create_bind_group_layout_bind_group_and_pipeline_layout_empty` |
+| `PipelineLayout::bind_group_layouts` | `pipeline_layout_accessors_pin_bind_group_layouts_and_is_error`, `device_create_bind_group_layout_bind_group_and_pipeline_layout_empty` |
+| `ComputePipeline::is_error` | `compute_pipeline_accessors_and_render_pipeline_accessors`, `device_create_compute_pipeline_happy_path_and_error_scope`, `device_create_compute_pipeline_without_error_dispatch_keeps_scope_empty` |
+| `ComputePipeline::entry_name` | `compute_pipeline_accessors_and_render_pipeline_accessors`, `device_create_compute_pipeline_happy_path_and_error_scope` |
+| `ComputePipeline::bind_group_layouts` | `compute_pipeline_accessors_and_render_pipeline_accessors` |
+| `VertexFormat::from_raw` | `vertex_format_from_raw_pins_known_zero_and_unknown_values` |
+| `RenderPipeline::is_error` | `compute_pipeline_accessors_and_render_pipeline_accessors`, `device_create_render_pipeline_happy_path_and_error_scope`, `device_create_render_pipeline_without_error_dispatch_keeps_scope_empty` |
+| `RenderPipeline::vertex_entry_name` | `compute_pipeline_accessors_and_render_pipeline_accessors`, `device_create_render_pipeline_happy_path_and_error_scope` |
+| `RenderPipeline::fragment_entry_name` | `compute_pipeline_accessors_and_render_pipeline_accessors`, `device_create_render_pipeline_happy_path_and_error_scope` |
+| `RenderPipeline::bind_group_layouts` | `compute_pipeline_accessors_and_render_pipeline_accessors` |
+
 ## yawgpu-hal/src/noop/mod.rs (14 pub fn)
 
 | pub fn | test name(s) |

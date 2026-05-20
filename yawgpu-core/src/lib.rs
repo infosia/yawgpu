@@ -10413,6 +10413,221 @@ fn fs() -> @location(0) vec4<f32> {
     }
 
     #[test]
+    fn shader_module_accessors_pin_is_error_and_diagnostic() {
+        let device = noop_device();
+
+        let valid = device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@compute @workgroup_size(1) fn cs() {}".to_owned(),
+        ));
+        assert!(!valid.is_error());
+        assert_eq!(valid.diagnostic(), None);
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let invalid = device.create_shader_module(ShaderModuleSource::Wgsl("not wgsl".to_owned()));
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid shader should be scoped");
+
+        assert!(invalid.is_error());
+        assert!(invalid.diagnostic().is_some());
+        assert!(scoped.message.contains("expected global item"));
+    }
+
+    #[test]
+    fn bind_group_layout_accessors_pin_entries_error_and_same() {
+        let device = noop_device();
+        let entry = BindGroupLayoutEntry {
+            binding: 0,
+            visibility: 4,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: 4,
+            }),
+        };
+
+        let layout = device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![entry],
+            error: None,
+        });
+        let clone = layout.clone();
+        let other = device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: Vec::new(),
+            error: None,
+        });
+        let static_error = BindGroupLayout::error();
+
+        assert!(!layout.is_error());
+        assert_eq!(layout.entries(), &[entry]);
+        assert!(layout.same(&clone));
+        assert!(!layout.same(&other));
+        assert!(static_error.is_error());
+        assert!(static_error.entries().is_empty());
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let invalid = device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: 4,
+                binding_array_size: 2,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: 4,
+                }),
+            }],
+            error: None,
+        });
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid bind group layout should be scoped");
+        assert!(invalid.is_error());
+        assert_eq!(
+            error.message,
+            "bind group layout bindingArraySize greater than one is not supported"
+        );
+    }
+
+    #[test]
+    fn bind_group_accessors_pin_entries_and_is_error() {
+        let device = noop_device();
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: 4,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: 4,
+                }),
+            }],
+            error: None,
+        }));
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::UNIFORM,
+            size: 4,
+            mapped_at_creation: false,
+        }));
+        let entry = BindGroupEntry {
+            binding: 0,
+            resource: BindGroupResource::Buffer {
+                buffer,
+                device: Arc::new(device.clone()),
+                offset: 0,
+                size: 4,
+            },
+        };
+
+        let group = device.create_bind_group(layout.clone(), vec![entry.clone()]);
+        assert!(!group.is_error());
+        assert_eq!(group.entries().len(), 1);
+        assert_eq!(group.entries()[0].binding, entry.binding);
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let error_group = device.create_bind_group(layout, Vec::new());
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid bind group should be scoped");
+        assert!(error_group.is_error());
+        assert!(error_group.entries().is_empty());
+        assert_eq!(
+            error.message,
+            "bind group entry count must match bind group layout"
+        );
+    }
+
+    #[test]
+    fn pipeline_layout_accessors_pin_bind_group_layouts_and_is_error() {
+        let device = noop_device();
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: Vec::new(),
+            error: None,
+        }));
+
+        let pipeline_layout = device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![layout.clone()],
+            immediate_size: 0,
+            error: None,
+        });
+        assert!(!pipeline_layout.is_error());
+        assert_eq!(pipeline_layout.bind_group_layouts().len(), 1);
+        assert!(pipeline_layout.bind_group_layouts()[0].same(&layout));
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let error_layout = device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![Arc::new(BindGroupLayout::error())],
+            immediate_size: 0,
+            error: None,
+        });
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid pipeline layout should be scoped");
+        assert!(error_layout.is_error());
+        assert_eq!(
+            error.message,
+            "pipeline layout cannot contain an error bind group layout"
+        );
+    }
+
+    #[test]
+    fn compute_pipeline_accessors_and_render_pipeline_accessors() {
+        let device = noop_device();
+        let compute = noop_compute_pipeline(&device);
+        let render = noop_render_pipeline(&device);
+
+        assert!(!compute.is_error());
+        assert_eq!(compute.entry_name(), "cs");
+        assert!(compute.bind_group_layouts().is_empty());
+        assert!(!render.is_error());
+        assert_eq!(render.vertex_entry_name(), "vs");
+        assert_eq!(render.fragment_entry_name(), Some("fs"));
+        assert!(render.bind_group_layouts().is_empty());
+
+        let bad_shader = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Invalid("bad shader".to_owned())),
+        );
+        device.push_error_scope(ErrorFilter::Validation);
+        let bad_compute = device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Auto,
+            shader_module: bad_shader,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        });
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid compute pipeline should be scoped");
+        assert!(bad_compute.is_error());
+        assert_eq!(
+            scoped.message,
+            "compute pipeline shader module must not be an error module"
+        );
+    }
+
+    #[test]
+    fn vertex_format_from_raw_pins_known_zero_and_unknown_values() {
+        let known_values = 1..=0x29;
+        for raw in known_values {
+            let format = VertexFormat::from_raw(raw);
+            assert_eq!(format, VertexFormat::from_raw(raw));
+        }
+
+        let zero = VertexFormat::from_raw(0);
+        let unknown = VertexFormat::from_raw(0xFFFF);
+        assert_eq!(zero.info().byte_size, 16);
+        assert_eq!(unknown.info().byte_size, 16);
+        assert_eq!(zero.info().output_class, FormatOutputClass::Float);
+        assert_eq!(unknown.info().output_class, FormatOutputClass::Float);
+    }
+
+    #[test]
     fn command_encoder_create_finish_idempotent_and_command_buffer_is_error_false() {
         let encoder = noop_device().create_command_encoder();
 
