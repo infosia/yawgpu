@@ -1,5 +1,5 @@
 @group(0) @binding(0)
-var<storage, read_write> values: array<u32>;
+var<storage, read_write> values: array<u32, 4>;
 
 fn collatz_iterations(n_base: u32) -> u32 {
     var n = n_base;

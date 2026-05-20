@@ -122,6 +122,11 @@ impl NoopBuffer {
     pub fn size(&self) -> u64 {
         self.size
     }
+
+    #[must_use]
+    pub fn mapped_ptr(&self) -> Option<std::ptr::NonNull<u8>> {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]

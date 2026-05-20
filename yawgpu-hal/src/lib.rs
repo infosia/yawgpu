@@ -1,3 +1,5 @@
+use std::ptr::NonNull;
+
 #[cfg(feature = "noop")]
 pub mod noop;
 
@@ -373,6 +375,18 @@ impl HalBuffer {
             Self::Vulkan(buffer) => buffer.read(offset, len),
             #[cfg(feature = "metal")]
             Self::Metal(buffer) => buffer.read(offset, len),
+        }
+    }
+
+    #[must_use]
+    pub fn mapped_ptr(&self) -> Option<NonNull<u8>> {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(buffer) => buffer.mapped_ptr(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(buffer) => buffer.mapped_ptr(),
+            #[cfg(feature = "metal")]
+            Self::Metal(buffer) => buffer.mapped_ptr(),
         }
     }
 }

@@ -354,6 +354,11 @@ impl MetalBuffer {
         Ok(data)
     }
 
+    #[must_use]
+    pub fn mapped_ptr(&self) -> Option<NonNull<u8>> {
+        self.mapped_ptr
+    }
+
     fn inner(&self) -> Result<&ProtocolObject<dyn MTLBufferTrait>, HalError> {
         self.inner
             .as_deref()
