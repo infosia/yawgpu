@@ -1,5 +1,22 @@
+// triangle — the classic "hello triangle", windowed.
+//
+// This is the first example that draws to a window. It introduces the
+// pieces a real rendering app needs beyond the headless examples:
+//   * a surface     — the bridge between the OS window and the GPU,
+//   * a swapchain    — configured on the surface; supplies a fresh texture
+//                      to draw into each frame and presents it,
+//   * a render pipeline — vertex + fragment shaders (shader.wgsl) compiled
+//                      for the surface's pixel format.
+// The vertex shader generates three vertices from @builtin(vertex_index)
+// (no vertex buffer), and the fragment shader paints them solid red.
+//
+// The per-frame loop is: acquire a texture → record a render pass that
+// draws the triangle → submit → present. It runs ~60 frames (or until the
+// window is closed) so the program terminates on its own.
+
 #include "framework.h"
 
+// Long-lived state shared across frames; released together by _destroy().
 typedef struct TriangleApp {
     YawgpuContext context;
     WGPUQueue queue;
@@ -10,6 +27,9 @@ typedef struct TriangleApp {
     WGPURenderPipeline pipeline;
 } TriangleApp;
 
+// The surface advertises which texture formats it supports; the render
+// pipeline's color target must use one of them. We prefer BGRA8Unorm (the
+// most common swapchain format) and fall back to RGBA8Unorm.
 static bool triangle_choose_surface_format(WGPUSurface surface,
                                            WGPUAdapter adapter,
                                            WGPUTextureFormat *format) {
@@ -64,12 +84,17 @@ static void triangle_app_destroy(TriangleApp *app) {
     *app = (TriangleApp){0};
 }
 
+// Creates the WebGPU surface for the platform window. The framework hides
+// the OS-specific handle plumbing (CAMetalLayer on macOS, HWND on Windows).
 static bool triangle_create_surface(TriangleApp *app) {
     app->surface =
         yawgpu_window_create_surface(app->context.instance, app->window, "triangle surface");
     return app->surface != NULL;
 }
 
+// Builds the render pipeline from shader.wgsl. The color target format must
+// match the surface format chosen above so the pipeline can render into the
+// swapchain textures.
 static bool triangle_create_pipeline(TriangleApp *app, WGPUTextureFormat format) {
     app->shader = yawgpu_load_wgsl_shader(app->context.device, "shader.wgsl");
     if (!app->shader) {
@@ -102,15 +127,17 @@ static bool triangle_create_pipeline(TriangleApp *app, WGPUTextureFormat format)
                 .entryPoint = yawgpu_string_view("vs_main"),
                 .constantCount = 0,
                 .constants = NULL,
+                // No vertex buffers: vs_main derives positions from the
+                // built-in vertex index, so there is nothing to bind.
                 .bufferCount = 0,
                 .buffers = NULL,
             },
             .primitive = {
                 .nextInChain = NULL,
-                .topology = WGPUPrimitiveTopology_TriangleList,
+                .topology = WGPUPrimitiveTopology_TriangleList, // 3 verts = 1 triangle
                 .stripIndexFormat = WGPUIndexFormat_Undefined,
                 .frontFace = WGPUFrontFace_CCW,
-                .cullMode = WGPUCullMode_None,
+                .cullMode = WGPUCullMode_None, // draw both faces
             },
             .depthStencil = NULL,
             .multisample = {
@@ -129,8 +156,8 @@ static bool triangle_create_pipeline(TriangleApp *app, WGPUTextureFormat format)
                 .targets = (WGPUColorTargetState[]){
                     {
                         .nextInChain = NULL,
-                        .format = format,
-                        .blend = NULL,
+                        .format = format, // must match the surface format
+                        .blend = NULL,    // no blending; overwrite the target
                         .writeMask = WGPUColorWriteMask_All,
                     },
                 },
@@ -174,6 +201,9 @@ static bool triangle_app_init(TriangleApp *app) {
         return false;
     }
 
+    // Configure the swapchain. Use the actual framebuffer pixel size (which
+    // can differ from the logical window size on HiDPI displays) and
+    // present_mode Fifo (v-sync; always supported, no tearing).
     int width = 0;
     int height = 0;
     yawgpu_window_framebuffer_size(app->window, &width, &height);
@@ -198,9 +228,15 @@ static bool triangle_app_init(TriangleApp *app) {
     return true;
 }
 
+// Renders and presents one frame. All per-frame resources (the acquired
+// texture, its view, the encoder, the pass, the command buffer) are local
+// and released before returning, on every path.
 static bool triangle_render_frame(const TriangleApp *app) {
+    // Acquire the next texture to draw into from the swapchain.
     WGPUSurfaceTexture current = {0};
     wgpuSurfaceGetCurrentTexture(app->surface, &current);
+    // The Noop backend has no real swapchain and reports Lost with no
+    // texture — treat that as a no-op frame so the example still runs.
     if (current.status == WGPUSurfaceGetCurrentTextureStatus_Lost && !current.texture) {
         return true;
     }
@@ -210,6 +246,7 @@ static bool triangle_render_frame(const TriangleApp *app) {
         return false;
     }
 
+    // Render into a view of the acquired texture.
     WGPUTextureView view = wgpuTextureCreateView(current.texture, NULL);
     WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(
         app->context.device,
@@ -262,6 +299,7 @@ static bool triangle_render_frame(const TriangleApp *app) {
         wgpuTextureRelease(current.texture);
         return false;
     }
+    // Bind the pipeline and draw 3 vertices (1 instance) — one triangle.
     wgpuRenderPassEncoderSetPipeline(pass, app->pipeline);
     wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
     wgpuRenderPassEncoderEnd(pass);
@@ -284,6 +322,8 @@ static bool triangle_render_frame(const TriangleApp *app) {
     wgpuCommandBufferRelease(commands);
     wgpuCommandEncoderRelease(encoder);
 
+    // Present puts the rendered texture on screen. The acquired texture and
+    // its view are released afterwards — the next frame acquires a new one.
     WGPUStatus present_status = wgpuSurfacePresent(app->surface);
     wgpuTextureViewRelease(view);
     wgpuTextureRelease(current.texture);
@@ -301,6 +341,9 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
+    // Main loop: render a frame, then pump window events. Bounded to 60
+    // frames so the example exits without user interaction; closing the
+    // window ends it sooner.
     for (uint32_t frame = 0; frame < 60 && !yawgpu_window_should_close(app.window); ++frame) {
         if (!triangle_render_frame(&app)) {
             triangle_app_destroy(&app);

@@ -1,3 +1,15 @@
+// capture — render to an offscreen texture and save it as a PNG.
+//
+// There is no window here. The program:
+//   1. creates a texture used as a render target (RenderAttachment) that
+//      can also be copied from (CopySrc),
+//   2. runs a render pass that just clears it to solid red,
+//   3. copies the texture into a CPU-mappable buffer, and
+//   4. maps that buffer and writes the pixels out as red.png.
+//
+// The one subtlety worth studying is the **256-byte row alignment**
+// required by texture-to-buffer copies (see BufferDimensions below).
+
 #include "framework.h"
 #include "stb_image_write.h"
 
@@ -6,10 +18,15 @@
 enum {
     IMAGE_WIDTH = 100,
     IMAGE_HEIGHT = 200,
+    // WebGPU requires each row of a texture→buffer copy to start at a
+    // 256-byte boundary, so the destination buffer's stride is padded.
     COPY_BYTES_PER_ROW_ALIGNMENT = 256,
-    BYTES_PER_PIXEL = 4,
+    BYTES_PER_PIXEL = 4, // RGBA8Unorm = 4 bytes/pixel
 };
 
+// Tracks both the natural row size (`unpadded`, width * 4) and the padded
+// row stride the GPU copy actually uses. The PNG writer is told the padded
+// stride so it skips the per-row padding bytes.
 typedef struct BufferDimensions {
     uint32_t width;
     uint32_t height;
@@ -22,17 +39,20 @@ typedef struct MapState {
     bool called;
 } MapState;
 
+// All the long-lived resources, grouped so a single _destroy() can release
+// them in one place regardless of which init step failed.
 typedef struct CaptureApp {
     YawgpuContext context;
     WGPUQueue queue;
-    WGPUBuffer output_buffer;
-    WGPUTexture texture;
+    WGPUBuffer output_buffer;    // CPU-mappable copy destination
+    WGPUTexture texture;         // the offscreen render target
     WGPUTextureView texture_view;
     BufferDimensions dimensions;
     uint64_t buffer_size;
-    bool output_buffer_mapped;
+    bool output_buffer_mapped;   // so _destroy knows whether to unmap
 } CaptureApp;
 
+// Rounds `value` up to the next multiple of `alignment`.
 static uint32_t align_up_u32(uint32_t value, uint32_t alignment) {
     uint32_t remainder = value % alignment;
     if (remainder == 0) {
@@ -109,6 +129,8 @@ static bool capture_app_init(CaptureApp *app) {
         .depthOrArrayLayers = 1,
     };
 
+    // Destination buffer: MapRead so the CPU can read it, CopyDst so the
+    // texture copy can write into it. Sized for the padded row stride.
     app->output_buffer = wgpuDeviceCreateBuffer(
         app->context.device,
         &(WGPUBufferDescriptor){
@@ -118,6 +140,8 @@ static bool capture_app_init(CaptureApp *app) {
             .size = app->buffer_size,
             .mappedAtCreation = false,
         });
+    // Render target: RenderAttachment so a render pass can draw into it,
+    // CopySrc so it can be copied out to the buffer afterwards.
     app->texture = wgpuDeviceCreateTexture(
         app->context.device,
         &(WGPUTextureDescriptor){
@@ -137,6 +161,8 @@ static bool capture_app_init(CaptureApp *app) {
         return false;
     }
 
+    // A render pass attaches a *view* of the texture, not the texture
+    // itself. NULL requests a default view covering the whole texture.
     app->texture_view = wgpuTextureCreateView(app->texture, NULL);
     if (!app->texture_view) {
         fprintf(stderr, "failed to create texture view\n");
@@ -146,6 +172,8 @@ static bool capture_app_init(CaptureApp *app) {
     return true;
 }
 
+// Records and submits the GPU work, then reads the result back and writes
+// the PNG. Returns false on the first failure.
 static bool capture_app_run(CaptureApp *app) {
     WGPUExtent3D texture_size = {
         .width = app->dimensions.width,
@@ -163,6 +191,9 @@ static bool capture_app_run(CaptureApp *app) {
         return false;
     }
 
+    // A "clear-only" render pass: loadOp=Clear fills the attachment with
+    // clearValue (opaque red) at the start, storeOp=Store keeps it. No
+    // pipeline or draw call is needed — the clear alone produces the image.
     WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(
         encoder,
         &(WGPURenderPassDescriptor){
@@ -178,7 +209,7 @@ static bool capture_app_run(CaptureApp *app) {
                     .loadOp = WGPULoadOp_Clear,
                     .storeOp = WGPUStoreOp_Store,
                     .clearValue = {
-                        .r = 1.0,
+                        .r = 1.0, // opaque red
                         .g = 0.0,
                         .b = 0.0,
                         .a = 1.0,
@@ -197,6 +228,8 @@ static bool capture_app_run(CaptureApp *app) {
     wgpuRenderPassEncoderEnd(pass);
     wgpuRenderPassEncoderRelease(pass);
 
+    // Copy the rendered texture into the readback buffer. `bytesPerRow`
+    // must be the 256-byte-aligned padded stride, not width * 4.
     wgpuCommandEncoderCopyTextureToBuffer(
         encoder,
         &(WGPUTexelCopyTextureInfo){
@@ -234,6 +267,8 @@ static bool capture_app_run(CaptureApp *app) {
     wgpuCommandBufferRelease(commands);
     wgpuCommandEncoderRelease(encoder);
 
+    // Map the buffer for reading once the GPU work completes (async; we
+    // pump the event loop until the callback reports the status).
     MapState map_state = {0};
     WGPUFuture map_future = wgpuBufferMapAsync(
         app->output_buffer,
@@ -254,6 +289,8 @@ static bool capture_app_run(CaptureApp *app) {
     }
     app->output_buffer_mapped = true;
 
+    // The mapped pointer addresses the padded rows directly; stb is given
+    // the padded stride so it reads width*4 bytes and skips the padding.
     const uint8_t *pixels =
         (const uint8_t *)wgpuBufferGetConstMappedRange(app->output_buffer, 0, app->buffer_size);
     if (!pixels) {
@@ -280,6 +317,9 @@ static bool capture_app_run(CaptureApp *app) {
 }
 
 int main(void) {
+    // Two-phase structure: init() acquires resources, run() does the work.
+    // Either way _destroy() releases everything, so there is no goto-based
+    // cleanup ladder.
     CaptureApp app = {0};
     if (!capture_app_init(&app)) {
         capture_app_destroy(&app);

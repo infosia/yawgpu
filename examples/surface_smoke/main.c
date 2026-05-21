@@ -1,5 +1,14 @@
+// surface_smoke — the minimal windowed program: open a window and present.
+//
+// It is the windowing counterpart of `capture`: there is no pipeline and no
+// draw call, only a clear-only render pass that fills each frame with a
+// flat slate color. Use it to verify the window → surface → swapchain →
+// present path in isolation, without shaders or vertex data in the way.
+// It presents ~60 frames (or until the window is closed) and exits.
+
 #include "framework.h"
 
+// No pipeline/shader/buffer here — just the surface to present to.
 typedef struct SurfaceSmokeApp {
     YawgpuContext context;
     WGPUQueue queue;
@@ -106,9 +115,12 @@ static bool surface_smoke_app_init(SurfaceSmokeApp *app) {
     return true;
 }
 
+// Acquire → clear → present, with all per-frame handles released before
+// returning. No pipeline or draw is involved.
 static bool surface_smoke_render_frame(const SurfaceSmokeApp *app) {
     WGPUSurfaceTexture current = {0};
     wgpuSurfaceGetCurrentTexture(app->surface, &current);
+    // Noop has no real swapchain (Lost + no texture) — skip the frame.
     if (current.status == WGPUSurfaceGetCurrentTextureStatus_Lost && !current.texture) {
         return true;
     }
@@ -150,6 +162,8 @@ static bool surface_smoke_render_frame(const SurfaceSmokeApp *app) {
                     .view = view,
                     .depthSlice = WGPU_DEPTH_SLICE_UNDEFINED,
                     .resolveTarget = NULL,
+                    // Clear the whole frame to an opaque slate color; the
+                    // clear is the only thing this pass does.
                     .loadOp = WGPULoadOp_Clear,
                     .storeOp = WGPUStoreOp_Store,
                     .clearValue = {
