@@ -582,7 +582,7 @@ pub(crate) fn create_hal_render_pipeline(
                     ),
                 );
             }
-            let Some(module) = descriptor.vertex.shader.module.validated_wgsl() else {
+            let Some(module) = descriptor.vertex.shader.module.reflected_wgsl() else {
                 return (
                     None,
                     Some("render pipeline requires a valid WGSL shader module".to_owned()),
@@ -622,13 +622,13 @@ pub(crate) fn create_hal_render_pipeline(
             )
         }
         HalBackend::Vulkan => {
-            let Some(vertex_module) = descriptor.vertex.shader.module.validated_wgsl() else {
+            let Some(vertex_module) = descriptor.vertex.shader.module.reflected_wgsl() else {
                 return (
                     None,
                     Some("render pipeline requires a valid WGSL vertex shader module".to_owned()),
                 );
             };
-            let Some(fragment_module) = fragment.shader.module.validated_wgsl() else {
+            let Some(fragment_module) = fragment.shader.module.reflected_wgsl() else {
                 return (
                     None,
                     Some("render pipeline requires a valid WGSL fragment shader module".to_owned()),
@@ -962,7 +962,7 @@ pub(crate) fn vertex_inputs(
     vertex: &RenderPipelineVertexState,
     vertex_entry: &str,
 ) -> Result<BTreeMap<u32, shader_naga::ReflectedTypeClass>, String> {
-    let Some(module) = vertex.shader.module.validated_wgsl() else {
+    let Some(module) = vertex.shader.module.reflected_wgsl() else {
         return Err("vertex module reflection failed".to_owned());
     };
     Ok(module
@@ -989,7 +989,7 @@ pub(crate) fn resolve_render_entry(
             "render pipeline {label} shader module must not be an error module"
         ));
     }
-    let Some(module) = stage.module.validated_wgsl() else {
+    let Some(module) = stage.module.reflected_wgsl() else {
         return Err(format!(
             "render pipeline {label} stage requires a valid WGSL shader module"
         ));
@@ -1039,7 +1039,7 @@ pub(crate) fn validate_render_presence(
 
 /// Validates render constants and returns a descriptive error on failure.
 pub(crate) fn validate_render_constants(stage: &RenderPipelineShaderStage) -> Result<(), String> {
-    let Some(module) = stage.module.validated_wgsl() else {
+    let Some(module) = stage.module.reflected_wgsl() else {
         return Err("render pipeline stage requires a valid WGSL shader module".to_owned());
     };
     resolve_pipeline_constants(&module.overrides(), &stage.constants)?;
@@ -1142,7 +1142,7 @@ pub(crate) fn validate_fragment_depth_output(
     let Some(entry_name) = fragment_entry else {
         return Ok(());
     };
-    let Some(module) = fragment.shader.module.validated_wgsl() else {
+    let Some(module) = fragment.shader.module.reflected_wgsl() else {
         return Err("fragment module reflection failed".to_owned());
     };
     let outputs_frag_depth = module
@@ -1236,7 +1236,7 @@ pub(crate) fn fragment_outputs(
     let Some(entry_name) = fragment_entry else {
         return Ok(BTreeMap::new());
     };
-    let Some(module) = fragment.shader.module.validated_wgsl() else {
+    let Some(module) = fragment.shader.module.reflected_wgsl() else {
         return Err("fragment module reflection failed".to_owned());
     };
     Ok(module
@@ -1339,7 +1339,7 @@ pub(crate) fn stage_resource_bindings(
     entry_point: &str,
     pipeline_stage: PipelineShaderStage,
 ) -> Result<Vec<StageResourceBinding>, String> {
-    let Some(module) = stage.module.validated_wgsl() else {
+    let Some(module) = stage.module.reflected_wgsl() else {
         return Err("render pipeline stage requires a valid WGSL shader module".to_owned());
     };
     Ok(module
@@ -1369,7 +1369,7 @@ pub(crate) fn validate_multisample_state(
             let module = fragment
                 .shader
                 .module
-                .validated_wgsl()
+                .reflected_wgsl()
                 .ok_or_else(|| "fragment module reflection failed".to_owned())?;
             if module
                 .fragment_builtins()

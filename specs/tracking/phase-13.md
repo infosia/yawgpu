@@ -50,14 +50,23 @@ defines `YAWGPU_HAS_SHADER_PASSTHROUGH`.
 *Accept:* default + feature-on gates green; examples build unchanged
 behaviourally; no symbol added yet beyond the moved backend-select.
 
-## A1 — core data model + naga reflection  *(☐ TODO)*
+## A1 — core data model + naga reflection  *(☑ DONE)*
 
-`yawgpu-core`: generalize `ValidatedWgslModule` → `ReflectedModule`; enable
-`spv-in` under the feature; real `Spirv{words,reflected}` + new
-`Msl{source,reflection}` in `ShaderModuleSourceKind`;
-`Device::create_shader_module_spirv/_msl` + inline unit tests.
-*Accept:* rules SP1, SP5, MP1, MP5, CB1, CB2 each exercised by a unit test;
-gates green both configs.
+Done: `ValidatedWgslModule` → `ReflectedModule` (rename propagated to
+shader.rs/compute_pipeline.rs/render_pipeline.rs; `validated_wgsl()` →
+`reflected_wgsl()`). `shader_naga::reflect_spirv` (naga `spv-in` Frontend →
+shared `validate_module`), feature-gated. `ShaderModuleSourceKind` real
+`Spirv{words,reflected}` + new `Msl{source,reflection}` (both gated);
+`from_spirv` (magic-number + limit check), `from_msl` (non-empty + exactly-one
+stage bit), `spirv_passthrough`/`msl_passthrough` accessors; `MslReflection`/
+`MslEntryPoint`. `Device::create_shader_module_spirv/_msl`; the `Msl` source
+variant + the on/off `Spirv` arms in `create_shader_module` (feature-off →
+"SPIR-V passthrough not enabled" error module).
+*Gate (Claude-run):* DEFAULT (feature off) compiles without `spv-in` —
+`cargo test --workspace` + `clippy -D warnings` green (0 failed); with
+`--features shader-passthrough` clippy clean + the 3 new tests pass. No
+dead_code (accessors read the new fields). Rules SP1/SP5/MP1/MP5/MP6/CB1/CB2
+each exercised. All A1 acceptance criteria met.
 
 ## A2 — pipeline wiring + backend-match  *(☐ TODO)*
 

@@ -76,7 +76,10 @@ pub use sampler::{
     AddressMode, CompareFunction, FilterMode, MipmapFilterMode, ResolvedSamplerDescriptor, Sampler,
     SamplerDescriptor,
 };
+#[cfg(feature = "shader-passthrough")]
+pub use shader::{MslEntryPoint, MslReflection};
 pub use shader::{ShaderModule, ShaderModuleSource};
+pub use shader_naga::ReflectedModule;
 pub use texture::{Texture, TextureDescriptor, TextureDimension, TextureUsage};
 pub use texture_view::{TextureAspect, TextureView, TextureViewDescriptor, TextureViewDimension};
 
