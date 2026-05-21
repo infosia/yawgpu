@@ -49,6 +49,36 @@ fn create_surface_decodes_descriptor_chain_and_returns_error_surface_for_invalid
 }
 
 #[test]
+fn create_surface_accepts_windows_hwnd_source_on_noop() {
+    let test = ValidationTest::new();
+    unsafe {
+        let surface = create_surface_from_windows_hwnd(test.instance(), std::ptr::dangling_mut());
+        assert!(!surface.is_null());
+        assert_eq!(
+            yawgpu::wgpuSurfaceGetCapabilities(surface, test.adapter(), &mut empty_capabilities()),
+            native::WGPUStatus_Success
+        );
+
+        yawgpu::wgpuSurfaceRelease(surface);
+    }
+}
+
+#[test]
+fn create_surface_with_null_windows_hwnd_source_does_not_panic_on_noop() {
+    let test = ValidationTest::new();
+    unsafe {
+        let surface = create_surface_from_windows_hwnd(test.instance(), std::ptr::null_mut());
+        assert!(!surface.is_null());
+        assert_eq!(
+            yawgpu::wgpuSurfaceGetCapabilities(surface, test.adapter(), &mut empty_capabilities()),
+            native::WGPUStatus_Success
+        );
+
+        yawgpu::wgpuSurfaceRelease(surface);
+    }
+}
+
+#[test]
 fn get_capabilities_returns_synthetic_noop_values_and_free_members_is_safe() {
     let test = ValidationTest::new();
     unsafe {
@@ -179,6 +209,27 @@ unsafe fn create_surface(instance: native::WGPUInstance) -> native::WGPUSurface 
             sType: native::WGPUSType_SurfaceSourceMetalLayer,
         },
         layer: std::ptr::dangling_mut(),
+    };
+    let descriptor = native::WGPUSurfaceDescriptor {
+        nextInChain: (&mut source.chain) as *mut _,
+        label: empty_string_view(),
+    };
+    let surface = yawgpu::wgpuInstanceCreateSurface(instance, &descriptor);
+    assert!(!surface.is_null());
+    surface
+}
+
+unsafe fn create_surface_from_windows_hwnd(
+    instance: native::WGPUInstance,
+    hwnd: *mut std::ffi::c_void,
+) -> native::WGPUSurface {
+    let mut source = native::WGPUSurfaceSourceWindowsHWND {
+        chain: native::WGPUChainedStruct {
+            next: std::ptr::null_mut(),
+            sType: native::WGPUSType_SurfaceSourceWindowsHWND,
+        },
+        hinstance: std::ptr::null_mut(),
+        hwnd,
     };
     let descriptor = native::WGPUSurfaceDescriptor {
         nextInChain: (&mut source.chain) as *mut _,

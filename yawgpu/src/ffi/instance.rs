@@ -97,14 +97,29 @@ pub unsafe extern "C" fn wgpuInstanceCreateSurface(
     let instance = clone_handle(instance, "WGPUInstance");
     let (label, is_error, hal) = if let Some(descriptor) = descriptor.as_ref() {
         let layer = find_metal_layer_source(descriptor.nextInChain);
-        let hal = layer.and_then(|layer| {
+        let mut real_surface_creation_failed =
+            layer.is_some() && is_real_hal_instance(instance.core.hal());
+        let mut hal = layer.and_then(|layer| {
             unsafe { instance.core.create_surface_from_metal_layer(layer) }
                 .ok()
                 .and_then(real_hal_surface)
         });
+        if layer.is_none() {
+            let hwnd_source = find_windows_hwnd_source(descriptor.nextInChain);
+            real_surface_creation_failed =
+                hwnd_source.is_some() && is_real_hal_instance(instance.core.hal());
+            hal = hwnd_source.and_then(|(hinstance, hwnd)| {
+                unsafe {
+                    instance
+                        .core
+                        .create_surface_from_windows_hwnd(hinstance, hwnd)
+                }
+                .ok()
+                .and_then(real_hal_surface)
+            });
+        }
         let surface_source_is_unsupported = !has_supported_surface_source(descriptor.nextInChain);
-        let real_surface_creation_failed =
-            layer.is_some() && is_real_hal_instance(instance.core.hal()) && hal.is_none();
+        real_surface_creation_failed = real_surface_creation_failed && hal.is_none();
         (
             label_from_string_view(descriptor.label).unwrap_or_default(),
             surface_source_is_unsupported || real_surface_creation_failed,

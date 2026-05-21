@@ -843,6 +843,22 @@ unsafe fn find_metal_layer_source(
     None
 }
 
+unsafe fn find_windows_hwnd_source(
+    mut chain: *const native::WGPUChainedStruct,
+) -> Option<(*mut c_void, *mut c_void)> {
+    while let Some(link) = chain.as_ref() {
+        if link.sType == native::WGPUSType_SurfaceSourceWindowsHWND {
+            let source = (link as *const native::WGPUChainedStruct)
+                .cast::<native::WGPUSurfaceSourceWindowsHWND>();
+            return source
+                .as_ref()
+                .map(|source| (source.hinstance, source.hwnd));
+        }
+        chain = link.next;
+    }
+    None
+}
+
 fn real_hal_surface(surface: HalSurface) -> Option<HalSurface> {
     match surface {
         HalSurface::Noop => None,
@@ -2861,6 +2877,31 @@ mod tests {
                     sType: native::WGPUSType_SurfaceSourceMetalLayer,
                 },
                 layer: std::ptr::dangling_mut(),
+            };
+            let descriptor = native::WGPUSurfaceDescriptor {
+                nextInChain: (&mut source.chain) as *mut native::WGPUChainedStruct,
+                label: empty_string_view(),
+            };
+
+            let surface = wgpuInstanceCreateSurface(instance, &descriptor);
+            assert!(!surface.is_null());
+
+            wgpuSurfaceRelease(surface);
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn wgpuInstanceCreateSurface_accepts_noop_windows_hwnd_source() {
+        unsafe {
+            let instance = make_noop_instance();
+            let mut source = native::WGPUSurfaceSourceWindowsHWND {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_SurfaceSourceWindowsHWND,
+                },
+                hinstance: std::ptr::null_mut(),
+                hwnd: std::ptr::dangling_mut(),
             };
             let descriptor = native::WGPUSurfaceDescriptor {
                 nextInChain: (&mut source.chain) as *mut native::WGPUChainedStruct,
