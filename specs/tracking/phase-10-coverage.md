@@ -356,7 +356,7 @@ Phase-9 e2e (`examples/surface_smoke`, `examples/triangle`,
 | `VulkanBuffer::read` | `vulkan_buffer_read_returns_written_bytes` |
 | `VulkanBuffer::mapped_ptr` | `vulkan_buffer_mapped_ptr_returns_non_null_pointer` |
 
-## yawgpu/src/conv.rs (67 pub fn + 6 conversion impls)
+## yawgpu/src/conv/ subtree (67 pub fn + 6 conversion impls)
 
 | pub fn | test name(s) |
 |---|---|
@@ -434,7 +434,7 @@ Phase-9 e2e (`examples/surface_smoke`, `examples/triangle`,
 | `map_limits_to_native` | `map_limits_to_native_round_trips_through_map_limits` |
 | `map_limits` | `map_limits_round_trips_every_field_from_native`, `map_limits_to_native_round_trips_through_map_limits` |
 
-## yawgpu/src/lib.rs - Instance + Adapter (16 pub fn)
+## yawgpu/src/ffi/{instance,adapter}.rs - Instance + Adapter (16 pub fn)
 
 | pub fn | test name(s) |
 |---|---|
@@ -455,7 +455,7 @@ Phase-9 e2e (`examples/surface_smoke`, `examples/triangle`,
 | `wgpuAdapterRequestDevice` | `wgpuAdapterRequestDevice_process_events_returns_success_device`, `request_noop_device_helper_returns_live_device` |
 | `wgpuSupportedFeaturesFreeMembers` | `wgpuAdapterGetFeatures_populates_supported_features_and_free_members`, `wgpuSupportedFeaturesFreeMembers_accepts_empty_features` |
 
-## yawgpu/src/lib.rs - Device + Queue (32 C FFI fn + 4 public helper fn)
+## yawgpu/src/ffi/{device,queue}.rs - Device + Queue (32 C FFI fn + 4 public helper fn)
 
 | pub fn | test name(s) |
 |---|---|
@@ -496,7 +496,7 @@ Phase-9 e2e (`examples/surface_smoke`, `examples/triangle`,
 | `wgpuQueueWriteBuffer` | `wgpuQueueWriteBuffer_and_wgpuQueueWriteTexture_validate_happy_and_error_paths` |
 | `wgpuQueueWriteTexture` | `wgpuQueueWriteBuffer_and_wgpuQueueWriteTexture_validate_happy_and_error_paths` |
 
-## yawgpu/src/lib.rs - Buffer / Texture / TextureView / Sampler (26 pub fn)
+## yawgpu/src/ffi/{buffer,texture,sampler}.rs - Buffer / Texture / TextureView / Sampler (26 pub fn)
 
 | pub fn | test name(s) |
 |---|---|
@@ -527,7 +527,7 @@ Phase-9 e2e (`examples/surface_smoke`, `examples/triangle`,
 | `wgpuSamplerRelease` | `wgpuSampler_release_and_addref_lifecycle` |
 | `wgpuSamplerAddRef` | `wgpuSampler_release_and_addref_lifecycle` |
 
-## yawgpu/src/lib.rs - Encoder + Pass (49 pub fn)
+## yawgpu/src/ffi/{encoder,command_buffer,render_pass,compute_pass}.rs - Encoder + Pass (49 pub fn)
 
 | pub fn | test name(s) |
 |---|---|
@@ -581,7 +581,7 @@ Phase-9 e2e (`examples/surface_smoke`, `examples/triangle`,
 | `wgpuComputePassEncoderRelease` | `wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers`, `wgpuComputePassEncoder_set_pipeline_bind_group_and_dispatch` |
 | `wgpuComputePassEncoderAddRef` | `wgpuComputePassEncoder_lifecycle_release_addref_end_with_debug_markers` |
 
-## yawgpu/src/lib.rs - Bundle + Pipeline + Shader + BindGroup + Query + Surface (46 C FFI fn + 1 public helper fn)
+## yawgpu/src/ffi/{bundle,pipelines,shader,bindings,query,surface}.rs - Bundle + Pipeline + Shader + BindGroup + Query + Surface (46 C FFI fn + 1 public helper fn)
 
 | pub fn | test name(s) |
 |---|---|
