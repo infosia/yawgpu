@@ -11,6 +11,9 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 default = []
 metal = ["yawgpu-hal/metal", "yawgpu-test/metal"]
 vulkan = ["yawgpu-hal/vulkan", "yawgpu-test/vulkan"]
+shader-passthrough = ["yawgpu-core/shader-passthrough"]
+tiled = ["yawgpu-core/tiled", "yawgpu-hal/tiled"]
+mobile = ["shader-passthrough", "tiled"]
 
 [dependencies]
 yawgpu-core = { path = "../yawgpu-core" }

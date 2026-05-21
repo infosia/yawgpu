@@ -24,23 +24,22 @@ pub use ffi::surface::*;
 pub use ffi::texture::*;
 pub use ffi::*;
 
-/// Constant value for wgpu yawgpu instance backend noop.
-pub const WGPU_YAWGPU_INSTANCE_BACKEND_NOOP: u32 = 0;
-/// Constant value for wgpu yawgpu instance backend metal.
-pub const WGPU_YAWGPU_INSTANCE_BACKEND_METAL: u32 = 1;
-/// Constant value for wgpu yawgpu instance backend vulkan.
-pub const WGPU_YAWGPU_INSTANCE_BACKEND_VULKAN: u32 = 2;
-/// Constant value for wgpu stype yawgpu instance backend select.
-pub const WGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT: native::WGPUSType = 0x7000_0001;
+/// Constant value for the yawgpu Noop instance backend.
+pub const YAWGPU_INSTANCE_BACKEND_NOOP: u32 = 0;
+/// Constant value for the yawgpu Metal instance backend.
+pub const YAWGPU_INSTANCE_BACKEND_METAL: u32 = 1;
+/// Constant value for the yawgpu Vulkan instance backend.
+pub const YAWGPU_INSTANCE_BACKEND_VULKAN: u32 = 2;
+/// SType value for `YaWGPUInstanceBackendSelect`.
+pub const YAWGPU_STYPE_INSTANCE_BACKEND_SELECT: native::WGPUSType = 0x7000_0001;
 
 /// yawgpu vendor extension for selecting a backend at instance creation.
 ///
 /// Chain this from `WGPUInstanceDescriptor::nextInChain` with
-/// `WGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT`. This is intentionally outside
-/// webgpu.h and mirrors native-only backend selection extensions.
-/// Stores WGPUyawgpu instance backend select data used by validation and backend submission.
+/// `YAWGPU_STYPE_INSTANCE_BACKEND_SELECT`. This mirrors the declaration in
+/// yawgpu.h and native-only backend selection extensions.
 #[repr(C)]
-pub struct WGPUYawgpuInstanceBackendSelect {
+pub struct YaWGPUInstanceBackendSelect {
     /// Chain.
     pub chain: native::WGPUChainedStruct,
     /// Backend.

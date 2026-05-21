@@ -22,7 +22,23 @@ with `$VULKAN_SDK` sourced) per the `claude-runs-real-gpu-tests` memory.
 Methodology: per CLAUDE.md principle 1 — each new `pub fn` ships with a direct
 inline unit test (Red→Green); real-backend e2e is a regression layer on top.
 
-## A0 — yawgpu.h header + feature wiring  *(☐ TODO)*
+## A0 — yawgpu.h header + feature wiring  *(☑ DONE)*
+
+Done: `yawgpu/ffi/webgpu-headers/yawgpu.h` created (naming-convention header +
+renamed `YaWGPUInstanceBackendSelect` / `YAWGPU_STYPE_INSTANCE_BACKEND_SELECT` /
+`YAWGPU_INSTANCE_BACKEND_*` + empty `YAWGPU_HAS_{SHADER_PASSTHROUGH,TILED}`
+guard blocks). Rust vendor symbols renamed in `lib.rs`/`ffi/mod.rs` (no stray
+old names). Cargo features added: `yawgpu` {`shader-passthrough`,`tiled`,
+`mobile`} → `yawgpu-core` {`shader-passthrough`=`naga/spv-in`,`tiled`} +
+`yawgpu-hal` {`tiled`}; all default off. `examples/framework/framework.h`
+now `#include "yawgpu.h"` (private re-decl removed); `framework.c` uses new
+names. CMake gained `YAWGPU_EXTENSIONS` (appends cargo features + defines
+`YAWGPU_HAS_*`; default empty = unchanged; backend `target-${FEATURE}` dir
+scheme intact).
+*Gate (Claude-run):* default `cargo test --workspace` + `clippy -D warnings`
+green (0 failed); same green with `--features shader-passthrough` / `tiled` /
+`mobile` (no `dead_code` from the unused `spv-in`); metal examples build clean
+(C17-strict). All A0 acceptance criteria met.
 
 New `yawgpu.h` consolidating all `YaWGPU*` vendor declarations; absorb
 `YaWGPUInstanceBackendSelect` + its SType from `yawgpu/src/lib.rs` and the
