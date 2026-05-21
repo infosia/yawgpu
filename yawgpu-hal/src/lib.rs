@@ -100,6 +100,34 @@ impl HalInstance {
             },
         }
     }
+
+    /// # Safety
+    ///
+    /// `hwnd` must be a valid Win32 window handle and `hinstance` its module
+    /// instance; both must outlive the surface. Ignored by the Noop backend.
+    pub unsafe fn create_surface_from_windows_hwnd(
+        &self,
+        hinstance: *mut c_void,
+        hwnd: *mut c_void,
+    ) -> Result<HalSurface, HalError> {
+        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+        let _ = (hinstance, hwnd);
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => Ok(HalSurface::Noop),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(instance) => unsafe {
+                instance
+                    .create_surface_from_windows_hwnd(hinstance, hwnd)
+                    .map(HalSurface::Vulkan)
+            },
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => Err(HalError::SwapchainCreationFailed {
+                backend: "metal",
+                message: "HWND surface is not supported on Metal",
+            }),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -630,6 +658,19 @@ mod tests {
 
         // SAFETY: Noop arm does not dereference the layer pointer.
         let surface = unsafe { instance.create_surface_from_metal_layer(dangling)? };
+
+        assert!(matches!(surface, HalSurface::Noop));
+        Ok(())
+    }
+
+    #[test]
+    fn create_surface_from_windows_hwnd_noop_ignores_pointers() -> Result<(), HalError> {
+        let instance = HalInstance::new_noop();
+        let hwnd = 0xdead_beefusize as *mut c_void;
+
+        // SAFETY: Noop arm does not dereference the pointers.
+        let surface =
+            unsafe { instance.create_surface_from_windows_hwnd(std::ptr::null_mut(), hwnd)? };
 
         assert!(matches!(surface, HalSurface::Noop));
         Ok(())
