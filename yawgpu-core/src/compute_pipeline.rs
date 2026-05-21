@@ -1,0 +1,1001 @@
+use std::cell::UnsafeCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use yawgpu_hal::{
+    HalAdapter, HalAddressMode, HalBackend, HalBoundBuffer, HalBuffer, HalBufferBindingKind,
+    HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout, HalCompareFunction,
+    HalComputePass, HalComputePipeline, HalCopy, HalDescriptorBinding, HalDevice, HalDraw,
+    HalError, HalExtent3d, HalFilterMode, HalInstance, HalMipmapFilterMode, HalOrigin3d,
+    HalPrimitiveTopology, HalQueue, HalRenderColorTarget, HalRenderLoadOp, HalRenderPass,
+    HalRenderPipeline, HalRenderPipelineDescriptor, HalSampler, HalSamplerDescriptor,
+    HalShaderSource, HalSurface, HalTexture, HalTextureCopy, HalTextureDescriptor,
+    HalTextureFormat, HalTextureUsage, HalVertexAttribute, HalVertexBufferLayout, HalVertexFormat,
+    HalVertexStepMode,
+};
+
+use crate::adapter::*;
+use crate::bind_group::*;
+use crate::bind_group_layout::*;
+use crate::buffer::*;
+use crate::command_encoder::*;
+use crate::compute_pass::*;
+use crate::copy::*;
+use crate::device::*;
+use crate::error::*;
+use crate::extent::*;
+use crate::format::*;
+use crate::future::*;
+use crate::instance::*;
+use crate::limits::*;
+use crate::pass::*;
+use crate::pipeline_layout::*;
+use crate::query_set::*;
+use crate::queue::*;
+use crate::render_bundle::*;
+use crate::render_pass::*;
+use crate::render_pipeline::*;
+use crate::sampler::*;
+use crate::shader::*;
+use crate::shader_naga;
+use crate::texture::*;
+use crate::texture_view::*;
+
+#[derive(Debug, Clone)]
+pub struct ComputePipelineDescriptor {
+    pub layout: ComputePipelineLayout,
+    pub shader_module: Arc<ShaderModule>,
+    pub entry_point: Option<String>,
+    pub constants: Vec<PipelineConstant>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum ComputePipelineLayout {
+    Auto,
+    Explicit(Arc<PipelineLayout>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PipelineConstant {
+    pub key: String,
+    pub value: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ComputePipeline {
+    pub(crate) inner: Arc<ComputePipelineInner>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ComputePipelineInner {
+    pub(crate) _layout: ComputePipelineLayout,
+    pub(crate) _shader_module: Arc<ShaderModule>,
+    pub(crate) entry_name: String,
+    pub(crate) _bindings: Vec<shader_naga::ReflectedResourceBinding>,
+    pub(crate) metal_bindings: Vec<MetalBufferBinding>,
+    pub(crate) hal: Option<HalComputePipeline>,
+    pub(crate) bind_group_layouts: Vec<Arc<BindGroupLayout>>,
+    pub(crate) is_error: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolvedComputeWorkgroup {
+    pub(crate) size: [u32; 3],
+    pub(crate) storage_size: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MetalBufferBinding {
+    pub(crate) group: u32,
+    pub(crate) binding: u32,
+    pub(crate) metal_index: u32,
+    pub(crate) ty: BufferBindingType,
+}
+
+impl ComputePipeline {
+    pub(crate) fn new(
+        descriptor: ComputePipelineDescriptor,
+        is_error: bool,
+        limits: Limits,
+        hal_device: Option<&HalDevice>,
+    ) -> (Self, Option<String>) {
+        let resolved = if is_error {
+            None
+        } else {
+            resolve_compute_pipeline_descriptor(&descriptor, limits).ok()
+        };
+        let (entry_name, bindings, workgroup, bind_group_layouts) = resolved.unwrap_or_else(|| {
+            (
+                descriptor.entry_point.clone().unwrap_or_default(),
+                Vec::new(),
+                None,
+                Vec::new(),
+            )
+        });
+        let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
+        let (hal, backend_error) = if is_error {
+            (None, None)
+        } else {
+            create_hal_compute_pipeline(
+                hal_device,
+                &descriptor.shader_module,
+                &entry_name,
+                workgroup,
+                &metal_bindings,
+            )
+        };
+        let is_error = is_error || backend_error.is_some();
+        (
+            Self {
+                inner: Arc::new(ComputePipelineInner {
+                    _layout: descriptor.layout,
+                    _shader_module: descriptor.shader_module,
+                    entry_name,
+                    _bindings: bindings,
+                    metal_bindings,
+                    hal,
+                    bind_group_layouts,
+                    is_error,
+                }),
+            },
+            backend_error,
+        )
+    }
+
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.inner.is_error
+    }
+
+    #[must_use]
+    pub fn entry_name(&self) -> &str {
+        &self.inner.entry_name
+    }
+
+    #[must_use]
+    pub fn bind_group_layouts(&self) -> &[Arc<BindGroupLayout>] {
+        &self.inner.bind_group_layouts
+    }
+
+    pub(crate) fn hal(&self) -> Option<HalComputePipeline> {
+        self.inner.hal.clone()
+    }
+
+    pub(crate) fn metal_bindings(&self) -> &[MetalBufferBinding] {
+        &self.inner.metal_bindings
+    }
+}
+
+pub(crate) type ResolvedPipelineParts = (
+    String,
+    Vec<shader_naga::ReflectedResourceBinding>,
+    Option<ResolvedComputeWorkgroup>,
+    Vec<Arc<BindGroupLayout>>,
+);
+
+pub(crate) fn create_hal_compute_pipeline(
+    hal_device: Option<&HalDevice>,
+    shader_module: &ShaderModule,
+    entry_name: &str,
+    workgroup: Option<ResolvedComputeWorkgroup>,
+    metal_bindings: &[MetalBufferBinding],
+) -> (Option<HalComputePipeline>, Option<String>) {
+    let Some(hal_device) = hal_device else {
+        return (None, None);
+    };
+    let Some(module) = shader_module.validated_wgsl() else {
+        return (
+            None,
+            Some("compute pipeline requires a valid WGSL shader module".to_owned()),
+        );
+    };
+    let Some(workgroup) = workgroup else {
+        return (
+            None,
+            Some("compute pipeline workgroup size reflection failed".to_owned()),
+        );
+    };
+    let (shader, entry_point, descriptor_bindings) = match hal_device.backend() {
+        HalBackend::Metal => {
+            let msl_binding_map = shader_naga::MslBindingMap {
+                buffers: metal_bindings
+                    .iter()
+                    .map(|binding| shader_naga::MslBufferBinding {
+                        group: binding.group,
+                        binding: binding.binding,
+                        metal_index: binding.metal_index,
+                    })
+                    .collect(),
+            };
+            let generated = match module.generate_msl(entry_name, &msl_binding_map) {
+                Ok(generated) => generated,
+                Err(message) => return (None, Some(message)),
+            };
+            (
+                HalShaderSource::Msl(generated.source),
+                generated.entry_point,
+                Vec::new(),
+            )
+        }
+        HalBackend::Vulkan => {
+            let spirv = match module.generate_spirv(entry_name, naga::ShaderStage::Compute) {
+                Ok(spirv) => spirv,
+                Err(message) => return (None, Some(message)),
+            };
+            (
+                HalShaderSource::SpirV(spirv),
+                entry_name.to_owned(),
+                hal_descriptor_bindings(metal_bindings),
+            )
+        }
+        HalBackend::Noop => return (None, None),
+        _ => return (None, None),
+    };
+    match hal_device.create_compute_pipeline(
+        shader,
+        &entry_point,
+        (workgroup.size[0], workgroup.size[1], workgroup.size[2]),
+        &descriptor_bindings,
+    ) {
+        Ok(pipeline) => (Some(pipeline), None),
+        Err(error) => (None, Some(error.to_string())),
+    }
+}
+
+pub(crate) fn hal_descriptor_bindings(
+    bindings: &[MetalBufferBinding],
+) -> Vec<HalDescriptorBinding> {
+    bindings
+        .iter()
+        .map(|binding| HalDescriptorBinding {
+            group: binding.group,
+            binding: binding.binding,
+            kind: match binding.ty {
+                BufferBindingType::Uniform => HalBufferBindingKind::Uniform,
+                BufferBindingType::Storage | BufferBindingType::ReadOnlyStorage => {
+                    HalBufferBindingKind::Storage
+                }
+            },
+        })
+        .collect()
+}
+
+pub(crate) fn metal_buffer_binding_map(
+    layouts: &[Arc<BindGroupLayout>],
+) -> Vec<MetalBufferBinding> {
+    let mut bindings = Vec::new();
+    let mut metal_index = 0u32;
+    for (group_index, layout) in layouts.iter().enumerate() {
+        let Ok(group) = u32::try_from(group_index) else {
+            break;
+        };
+        for entry in layout.entries() {
+            if let Some(BindingLayoutKind::Buffer { ty, .. }) = entry.kind {
+                bindings.push(MetalBufferBinding {
+                    group,
+                    binding: entry.binding,
+                    metal_index,
+                    ty,
+                });
+                metal_index = metal_index.saturating_add(1);
+            }
+        }
+    }
+    bindings.sort_by_key(|binding| (binding.group, binding.binding));
+    for (index, binding) in bindings.iter_mut().enumerate() {
+        binding.metal_index = u32::try_from(index).unwrap_or(u32::MAX);
+    }
+    bindings
+}
+
+pub(crate) fn validate_compute_pipeline_descriptor(
+    descriptor: &ComputePipelineDescriptor,
+    limits: Limits,
+) -> Option<String> {
+    resolve_compute_pipeline_descriptor(descriptor, limits).err()
+}
+
+pub(crate) fn resolve_compute_pipeline_descriptor(
+    descriptor: &ComputePipelineDescriptor,
+    limits: Limits,
+) -> Result<ResolvedPipelineParts, String> {
+    if descriptor.shader_module.is_error() {
+        return Err("compute pipeline shader module must not be an error module".to_owned());
+    }
+    let Some(module) = descriptor.shader_module.validated_wgsl() else {
+        return Err("compute pipeline requires a valid WGSL shader module".to_owned());
+    };
+    let entry_name = resolve_compute_entry(module, descriptor.entry_point.as_deref())?;
+    let overrides = module.overrides();
+    let constants = resolve_pipeline_constants(&overrides, &descriptor.constants)?;
+    let workgroup = resolve_compute_workgroup(module, &entry_name, &overrides, &constants, limits)?;
+    let bindings = module.resource_bindings_for_entry(&entry_name)?;
+    validate_compute_pipeline_layout(&descriptor.layout, &bindings)?;
+    let bind_group_layouts =
+        effective_compute_bind_group_layouts(&descriptor.layout, &bindings, limits)?;
+    Ok((entry_name, bindings, Some(workgroup), bind_group_layouts))
+}
+
+pub(crate) fn resolve_compute_entry(
+    module: &shader_naga::ValidatedWgslModule,
+    entry_point: Option<&str>,
+) -> Result<String, String> {
+    let entries = module.entry_points();
+    let compute_entries = entries
+        .iter()
+        .filter(|entry| entry.stage == shader_naga::ReflectedShaderStage::Compute)
+        .collect::<Vec<_>>();
+
+    match entry_point {
+        None => match compute_entries.as_slice() {
+            [entry] => Ok(entry.name.clone()),
+            [] => Err("compute pipeline shader module has no compute entry point".to_owned()),
+            _ => Err(
+                "compute pipeline entryPoint is required when multiple compute entries exist"
+                    .to_owned(),
+            ),
+        },
+        Some(name) => {
+            if compute_entries.iter().any(|entry| entry.name == name) {
+                Ok(name.to_owned())
+            } else {
+                Err("compute pipeline entryPoint must name a compute entry point".to_owned())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResolvedOverrideConstant {
+    pub(crate) index: usize,
+    pub(crate) value: f64,
+}
+
+pub(crate) fn resolve_pipeline_constants(
+    overrides: &[shader_naga::ReflectedOverride],
+    constants: &[PipelineConstant],
+) -> Result<Vec<ResolvedOverrideConstant>, String> {
+    let mut seen_keys = BTreeSet::new();
+    let mut resolved = Vec::new();
+
+    for constant in constants {
+        if !seen_keys.insert(constant.key.as_str()) {
+            return Err("pipeline constant keys must be unique".to_owned());
+        }
+        let index = resolve_pipeline_constant_key(overrides, &constant.key)?;
+        validate_pipeline_constant_value(&overrides[index], constant.value)?;
+        resolved.push(ResolvedOverrideConstant {
+            index,
+            value: constant.value,
+        });
+    }
+
+    for (index, override_) in overrides.iter().enumerate() {
+        if !override_.has_default && !resolved.iter().any(|constant| constant.index == index) {
+            return Err("pipeline constant is required for override without a default".to_owned());
+        }
+    }
+
+    Ok(resolved)
+}
+
+pub(crate) fn resolve_pipeline_constant_key(
+    overrides: &[shader_naga::ReflectedOverride],
+    key: &str,
+) -> Result<usize, String> {
+    if let Ok(id) = key.parse::<u16>() {
+        return overrides
+            .iter()
+            .position(|override_| override_.id == Some(id))
+            .ok_or_else(|| "pipeline constant key does not match a shader override".to_owned());
+    }
+
+    if overrides
+        .iter()
+        .any(|override_| override_.id.is_some() && override_.name.as_deref() == Some(key))
+    {
+        return Err("pipeline constant key must use numeric id for @id overrides".to_owned());
+    }
+
+    overrides
+        .iter()
+        .position(|override_| override_.id.is_none() && override_.name.as_deref() == Some(key))
+        .ok_or_else(|| "pipeline constant key does not match a shader override".to_owned())
+}
+
+pub(crate) fn validate_pipeline_constant_value(
+    override_: &shader_naga::ReflectedOverride,
+    value: f64,
+) -> Result<(), String> {
+    if !value.is_finite() {
+        return Err("pipeline constant value must be finite".to_owned());
+    }
+    if override_.ty.components != 1 {
+        return Err("pipeline override constants must be scalar".to_owned());
+    }
+
+    match override_.ty.scalar {
+        shader_naga::ReflectedTypeScalarClass::Float => {
+            let max = if override_.ty.width == 2 {
+                65_504.0
+            } else {
+                f64::from(f32::MAX)
+            };
+            if value.abs() > max {
+                return Err("pipeline constant value is outside the override type range".to_owned());
+            }
+        }
+        shader_naga::ReflectedTypeScalarClass::Sint => {
+            if value.fract() != 0.0 || value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
+                return Err("pipeline constant value is outside the override type range".to_owned());
+            }
+        }
+        shader_naga::ReflectedTypeScalarClass::Uint => {
+            if value.fract() != 0.0 || value < 0.0 || value > f64::from(u32::MAX) {
+                return Err("pipeline constant value is outside the override type range".to_owned());
+            }
+        }
+        shader_naga::ReflectedTypeScalarClass::Bool => {}
+    }
+    Ok(())
+}
+
+pub(crate) fn resolve_compute_workgroup(
+    module: &shader_naga::ValidatedWgslModule,
+    entry_name: &str,
+    overrides: &[shader_naga::ReflectedOverride],
+    constants: &[ResolvedOverrideConstant],
+    limits: Limits,
+) -> Result<ResolvedComputeWorkgroup, String> {
+    let workgroup = module
+        .compute_workgroup_size(entry_name)?
+        .ok_or_else(|| "compute entry point workgroup size reflection failed".to_owned())?;
+    let mut size = workgroup.literal_size;
+    for (axis, key) in workgroup.override_keys.iter().enumerate() {
+        if let Some(key) = key {
+            let index = resolve_override_key(overrides, key)?;
+            let value = constants
+                .iter()
+                .find(|constant| constant.index == index)
+                .map(|constant| constant.value)
+                .or_else(|| default_override_number(&overrides[index]))
+                .ok_or_else(|| "workgroup size override has no value".to_owned())?;
+            if value.fract() != 0.0 || value < 0.0 || value > f64::from(u32::MAX) {
+                return Err("workgroup size override must resolve to a u32 value".to_owned());
+            }
+            size[axis] = value as u32;
+        }
+    }
+
+    if size[0] > limits.max_compute_workgroup_size_x {
+        return Err("compute workgroup x size exceeds the device limit".to_owned());
+    }
+    if size[1] > limits.max_compute_workgroup_size_y {
+        return Err("compute workgroup y size exceeds the device limit".to_owned());
+    }
+    if size[2] > limits.max_compute_workgroup_size_z {
+        return Err("compute workgroup z size exceeds the device limit".to_owned());
+    }
+    let invocations = size[0]
+        .checked_mul(size[1])
+        .and_then(|xy| xy.checked_mul(size[2]))
+        .ok_or_else(|| "compute workgroup invocation count overflows".to_owned())?;
+    if invocations > limits.max_compute_invocations_per_workgroup {
+        return Err("compute workgroup invocation count exceeds the device limit".to_owned());
+    }
+    if workgroup.workgroup_storage_size > u64::from(limits.max_compute_workgroup_storage_size) {
+        return Err("compute workgroup storage size exceeds the device limit".to_owned());
+    }
+
+    Ok(ResolvedComputeWorkgroup {
+        size,
+        storage_size: workgroup.workgroup_storage_size,
+    })
+}
+
+pub(crate) fn resolve_override_key(
+    overrides: &[shader_naga::ReflectedOverride],
+    key: &shader_naga::ReflectedOverrideKey,
+) -> Result<usize, String> {
+    overrides
+        .iter()
+        .position(|override_| {
+            if let Some(id) = key.id {
+                override_.id == Some(id)
+            } else {
+                override_.name == key.name
+            }
+        })
+        .ok_or_else(|| "workgroup size override key does not match a shader override".to_owned())
+}
+
+pub(crate) fn default_override_number(override_: &shader_naga::ReflectedOverride) -> Option<f64> {
+    match override_.default_value {
+        Some(shader_naga::ReflectedOverrideValue::Number(value)) => Some(value),
+        Some(shader_naga::ReflectedOverrideValue::Bool(value)) => Some(f64::from(value as u8)),
+        None => None,
+    }
+}
+
+pub(crate) fn validate_compute_pipeline_layout(
+    layout: &ComputePipelineLayout,
+    bindings: &[shader_naga::ReflectedResourceBinding],
+) -> Result<(), String> {
+    let ComputePipelineLayout::Explicit(layout) = layout else {
+        return Ok(());
+    };
+    if layout.is_error() {
+        return Err("compute pipeline layout must not be an error pipeline layout".to_owned());
+    }
+    let requirements = bindings
+        .iter()
+        .cloned()
+        .map(|binding| StageResourceBinding {
+            stage: PipelineShaderStage::Compute,
+            binding,
+        })
+        .collect::<Vec<_>>();
+    validate_pipeline_layout_stage_bindings(layout, &requirements)
+}
+
+pub(crate) fn effective_compute_bind_group_layouts(
+    layout: &ComputePipelineLayout,
+    bindings: &[shader_naga::ReflectedResourceBinding],
+    limits: Limits,
+) -> Result<Vec<Arc<BindGroupLayout>>, String> {
+    match layout {
+        ComputePipelineLayout::Explicit(layout) => Ok(layout.bind_group_layouts().to_vec()),
+        ComputePipelineLayout::Auto => derive_bind_group_layouts(
+            bindings
+                .iter()
+                .cloned()
+                .map(|binding| StageResourceBinding {
+                    stage: PipelineShaderStage::Compute,
+                    binding,
+                }),
+            limits,
+        ),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StageResourceBinding {
+    pub(crate) stage: PipelineShaderStage,
+    pub(crate) binding: shader_naga::ReflectedResourceBinding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PipelineShaderStage {
+    Vertex,
+    Fragment,
+    Compute,
+}
+
+pub(crate) fn validate_pipeline_layout_stage_bindings(
+    layout: &PipelineLayout,
+    requirements: &[StageResourceBinding],
+) -> Result<(), String> {
+    for requirement in requirements {
+        let binding = &requirement.binding;
+        if !binding.statically_used {
+            continue;
+        }
+        let group = usize::try_from(binding.group)
+            .map_err(|_| "shader binding group index is too large".to_owned())?;
+        let Some(group_layout) = layout.bind_group_layouts().get(group) else {
+            return Err("pipeline layout is missing a shader bind group".to_owned());
+        };
+        let Some(layout_entry) = group_layout
+            .entries()
+            .iter()
+            .find(|entry| entry.binding == binding.binding)
+        else {
+            return Err("pipeline layout is missing a shader binding".to_owned());
+        };
+        if layout_entry.visibility & pipeline_stage_visibility_bit(requirement.stage) == 0 {
+            return Err(
+                "pipeline layout binding visibility does not include the shader stage".to_owned(),
+            );
+        }
+        let Some(kind) = layout_entry.kind else {
+            return Err("pipeline layout binding must be valid".to_owned());
+        };
+        validate_shader_binding_compat(binding, kind)?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn derive_bind_group_layouts<I>(
+    requirements: I,
+    limits: Limits,
+) -> Result<Vec<Arc<BindGroupLayout>>, String>
+where
+    I: IntoIterator<Item = StageResourceBinding>,
+{
+    let mut groups = BTreeMap::<u32, BTreeMap<u32, BindGroupLayoutEntry>>::new();
+    for requirement in requirements {
+        let binding = requirement.binding;
+        if !binding.statically_used {
+            continue;
+        }
+        let group = groups.entry(binding.group).or_default();
+        let visibility = pipeline_stage_visibility_bit(requirement.stage);
+        let derived = reflected_bind_group_layout_entry(&binding, visibility)?;
+        match group.get_mut(&binding.binding) {
+            Some(existing) => merge_bind_group_layout_entry(existing, derived)?,
+            None => {
+                group.insert(binding.binding, derived);
+            }
+        }
+    }
+
+    let Some(max_group) = groups.keys().next_back().copied() else {
+        return Ok(Vec::new());
+    };
+    let group_count = usize::try_from(max_group)
+        .ok()
+        .and_then(|group| group.checked_add(1))
+        .ok_or_else(|| "pipeline bind group index is too large".to_owned())?;
+    if group_count > limits.max_bind_groups as usize {
+        return Err("pipeline auto layout bind group count exceeds the device limit".to_owned());
+    }
+
+    let mut layouts = Vec::with_capacity(group_count);
+    for group_index in 0..=max_group {
+        let entries = groups
+            .remove(&group_index)
+            .map(|entries| entries.into_values().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if let Some(message) =
+            crate::bind_group_layout::validate_bind_group_layout_descriptor(&entries, limits)
+        {
+            return Err(message);
+        }
+        layouts.push(Arc::new(BindGroupLayout::new(entries, false, true)));
+    }
+    Ok(layouts)
+}
+
+pub(crate) fn reflected_bind_group_layout_entry(
+    binding: &shader_naga::ReflectedResourceBinding,
+    visibility: u64,
+) -> Result<BindGroupLayoutEntry, String> {
+    Ok(BindGroupLayoutEntry {
+        binding: binding.binding,
+        visibility,
+        binding_array_size: 0,
+        kind: Some(reflected_binding_layout_kind(binding)?),
+    })
+}
+
+pub(crate) fn reflected_binding_layout_kind(
+    binding: &shader_naga::ReflectedResourceBinding,
+) -> Result<BindingLayoutKind, String> {
+    match &binding.kind {
+        shader_naga::ReflectedResourceBindingKind::Buffer(ty) => Ok(BindingLayoutKind::Buffer {
+            ty: match ty {
+                shader_naga::ReflectedBufferType::Uniform => BufferBindingType::Uniform,
+                shader_naga::ReflectedBufferType::Storage => BufferBindingType::Storage,
+                shader_naga::ReflectedBufferType::ReadOnlyStorage => {
+                    BufferBindingType::ReadOnlyStorage
+                }
+            },
+            has_dynamic_offset: false,
+            min_binding_size: binding.min_binding_size,
+        }),
+        shader_naga::ReflectedResourceBindingKind::Sampler { comparison } => {
+            Ok(BindingLayoutKind::Sampler {
+                ty: if *comparison {
+                    SamplerBindingType::Comparison
+                } else {
+                    SamplerBindingType::Filtering
+                },
+            })
+        }
+        shader_naga::ReflectedResourceBindingKind::Texture {
+            sampled,
+            sample_kind,
+            sample_usage,
+            view_dimension,
+            multisampled,
+        } => Ok(BindingLayoutKind::Texture {
+            sample_type: reflected_texture_sample_type(*sampled, *sample_kind, *sample_usage)?,
+            view_dimension: reflected_texture_view_dimension(*view_dimension),
+            multisampled: *multisampled,
+        }),
+        shader_naga::ReflectedResourceBindingKind::StorageTexture {
+            format,
+            access,
+            view_dimension,
+        } => Ok(BindingLayoutKind::StorageTexture {
+            access: reflected_storage_texture_access(access),
+            format: reflected_storage_texture_format(format)?,
+            view_dimension: reflected_texture_view_dimension(*view_dimension),
+        }),
+    }
+}
+
+pub(crate) fn reflected_texture_sample_type(
+    sampled: bool,
+    sample_kind: Option<shader_naga::ReflectedTypeScalarClass>,
+    sample_usage: shader_naga::ReflectedTextureSampleUsage,
+) -> Result<TextureSampleType, String> {
+    if !sampled {
+        return Ok(TextureSampleType::Depth);
+    }
+    match sample_kind {
+        Some(shader_naga::ReflectedTypeScalarClass::Float) => Ok(match sample_usage {
+            shader_naga::ReflectedTextureSampleUsage::Sample => TextureSampleType::Float,
+            shader_naga::ReflectedTextureSampleUsage::Load => TextureSampleType::UnfilterableFloat,
+        }),
+        Some(shader_naga::ReflectedTypeScalarClass::Sint) => Ok(TextureSampleType::Sint),
+        Some(shader_naga::ReflectedTypeScalarClass::Uint) => Ok(TextureSampleType::Uint),
+        _ => Err("pipeline texture binding sample type is unsupported".to_owned()),
+    }
+}
+
+pub(crate) fn reflected_texture_view_dimension(
+    dimension: shader_naga::ReflectedTextureViewDimension,
+) -> TextureViewDimension {
+    match dimension {
+        shader_naga::ReflectedTextureViewDimension::D1 => TextureViewDimension::D1,
+        shader_naga::ReflectedTextureViewDimension::D2 => TextureViewDimension::D2,
+        shader_naga::ReflectedTextureViewDimension::D2Array => TextureViewDimension::D2Array,
+        shader_naga::ReflectedTextureViewDimension::Cube => TextureViewDimension::Cube,
+        shader_naga::ReflectedTextureViewDimension::CubeArray => TextureViewDimension::CubeArray,
+        shader_naga::ReflectedTextureViewDimension::D3 => TextureViewDimension::D3,
+    }
+}
+
+pub(crate) fn reflected_storage_texture_access(
+    access: &shader_naga::ReflectedStorageTextureAccess,
+) -> StorageTextureAccess {
+    match (access.read, access.write) {
+        (true, true) => StorageTextureAccess::ReadWrite,
+        (true, false) => StorageTextureAccess::ReadOnly,
+        _ => StorageTextureAccess::WriteOnly,
+    }
+}
+
+pub(crate) fn reflected_storage_texture_format(format: &str) -> Result<TextureFormat, String> {
+    let raw = match format {
+        "Rgba8Unorm" => 0x0000_0016,
+        "Rgba8Snorm" => 0x0000_0018,
+        "Rgba8Uint" => 0x0000_0019,
+        "Rgba8Sint" => 0x0000_001A,
+        "Rgba16Uint" => 0x0000_0026,
+        "Rgba16Sint" => 0x0000_0027,
+        "Rgba16Float" => 0x0000_0028,
+        "R32Uint" => 0x0000_000F,
+        "R32Sint" => 0x0000_0010,
+        "R32Float" => 0x0000_000E,
+        "Rg32Uint" => 0x0000_0022,
+        "Rg32Sint" => 0x0000_0023,
+        "Rg32Float" => 0x0000_0021,
+        "Rgba32Uint" => 0x0000_002A,
+        "Rgba32Sint" => 0x0000_002B,
+        "Rgba32Float" => 0x0000_0029,
+        _ => return Err("pipeline auto layout storage texture format is unsupported".to_owned()),
+    };
+    Ok(TextureFormat::from_raw(raw))
+}
+
+pub(crate) fn merge_bind_group_layout_entry(
+    existing: &mut BindGroupLayoutEntry,
+    incoming: BindGroupLayoutEntry,
+) -> Result<(), String> {
+    existing.visibility |= incoming.visibility;
+    match (&mut existing.kind, incoming.kind) {
+        (
+            Some(BindingLayoutKind::Buffer {
+                ty,
+                min_binding_size,
+                ..
+            }),
+            Some(BindingLayoutKind::Buffer {
+                ty: incoming_ty,
+                min_binding_size: incoming_min_binding_size,
+                ..
+            }),
+        ) if *ty == incoming_ty => {
+            *min_binding_size = (*min_binding_size).max(incoming_min_binding_size);
+            Ok(())
+        }
+        (
+            Some(BindingLayoutKind::Texture { sample_type, .. }),
+            Some(BindingLayoutKind::Texture {
+                sample_type: incoming_sample_type,
+                ..
+            }),
+        ) if *sample_type == incoming_sample_type
+            || matches!(
+                (*sample_type, incoming_sample_type),
+                (
+                    TextureSampleType::Float,
+                    TextureSampleType::UnfilterableFloat
+                ) | (
+                    TextureSampleType::UnfilterableFloat,
+                    TextureSampleType::Float
+                )
+            ) =>
+        {
+            if incoming_sample_type == TextureSampleType::Float {
+                *sample_type = TextureSampleType::Float;
+            }
+            Ok(())
+        }
+        (Some(existing_kind), Some(incoming_kind)) if *existing_kind == incoming_kind => Ok(()),
+        _ => Err("pipeline auto layout has incompatible shader bindings".to_owned()),
+    }
+}
+
+pub(crate) fn pipeline_stage_visibility_bit(stage: PipelineShaderStage) -> u64 {
+    match stage {
+        PipelineShaderStage::Vertex => 1,
+        PipelineShaderStage::Fragment => 2,
+        PipelineShaderStage::Compute => 4,
+    }
+}
+
+pub(crate) fn validate_shader_binding_compat(
+    binding: &shader_naga::ReflectedResourceBinding,
+    layout_kind: BindingLayoutKind,
+) -> Result<(), String> {
+    match (&binding.kind, layout_kind) {
+        (
+            shader_naga::ReflectedResourceBindingKind::Buffer(shader_ty),
+            BindingLayoutKind::Buffer {
+                ty,
+                min_binding_size,
+                ..
+            },
+        ) => {
+            if !buffer_binding_types_compatible(*shader_ty, ty) {
+                return Err(
+                    "compute pipeline layout buffer binding type is incompatible".to_owned(),
+                );
+            }
+            if min_binding_size < binding.min_binding_size {
+                return Err("compute pipeline layout buffer minBindingSize is too small".to_owned());
+            }
+            Ok(())
+        }
+        (
+            shader_naga::ReflectedResourceBindingKind::Sampler { .. },
+            BindingLayoutKind::Sampler { .. },
+        )
+        | (
+            shader_naga::ReflectedResourceBindingKind::Texture { .. },
+            BindingLayoutKind::Texture { .. },
+        )
+        | (
+            shader_naga::ReflectedResourceBindingKind::StorageTexture { .. },
+            BindingLayoutKind::StorageTexture { .. },
+        ) => {
+            let expected = reflected_binding_layout_kind(binding)?;
+            if shader_binding_layout_kinds_compatible(expected, layout_kind) {
+                Ok(())
+            } else {
+                Err(
+                    "pipeline layout binding kind is incompatible with the shader binding"
+                        .to_owned(),
+                )
+            }
+        }
+        _ => Err("compute pipeline layout binding type is incompatible".to_owned()),
+    }
+}
+
+pub(crate) fn shader_binding_layout_kinds_compatible(
+    expected: BindingLayoutKind,
+    actual: BindingLayoutKind,
+) -> bool {
+    match (expected, actual) {
+        (
+            BindingLayoutKind::Sampler { ty: expected },
+            BindingLayoutKind::Sampler { ty: actual },
+        ) => expected == actual,
+        (
+            BindingLayoutKind::Texture {
+                sample_type,
+                view_dimension,
+                multisampled,
+            },
+            BindingLayoutKind::Texture {
+                sample_type: actual_sample_type,
+                view_dimension: actual_view_dimension,
+                multisampled: actual_multisampled,
+            },
+        ) => {
+            sample_type == actual_sample_type
+                && view_dimension == actual_view_dimension
+                && multisampled == actual_multisampled
+        }
+        (
+            BindingLayoutKind::StorageTexture {
+                access,
+                format,
+                view_dimension,
+            },
+            BindingLayoutKind::StorageTexture {
+                access: actual_access,
+                format: actual_format,
+                view_dimension: actual_view_dimension,
+            },
+        ) => {
+            access == actual_access
+                && format == actual_format
+                && view_dimension == actual_view_dimension
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn buffer_binding_types_compatible(
+    shader_ty: shader_naga::ReflectedBufferType,
+    layout_ty: BufferBindingType,
+) -> bool {
+    matches!(
+        (shader_ty, layout_ty),
+        (
+            shader_naga::ReflectedBufferType::Uniform,
+            BufferBindingType::Uniform
+        ) | (
+            shader_naga::ReflectedBufferType::Storage,
+            BufferBindingType::Storage
+        ) | (
+            shader_naga::ReflectedBufferType::ReadOnlyStorage,
+            BufferBindingType::ReadOnlyStorage
+        )
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::*;
+    use crate::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn compute_pipeline_accessors_and_render_pipeline_accessors() {
+        let device = noop_device();
+        let compute = noop_compute_pipeline(&device);
+        let render = noop_render_pipeline(&device);
+
+        assert!(!compute.is_error());
+        assert_eq!(compute.entry_name(), "cs");
+        assert!(compute.bind_group_layouts().is_empty());
+        assert!(!render.is_error());
+        assert_eq!(render.vertex_entry_name(), "vs");
+        assert_eq!(render.fragment_entry_name(), Some("fs"));
+        assert!(render.bind_group_layouts().is_empty());
+
+        let bad_shader = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Invalid("bad shader".to_owned())),
+        );
+        device.push_error_scope(ErrorFilter::Validation);
+        let bad_compute = device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Auto,
+            shader_module: bad_shader,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        });
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid compute pipeline should be scoped");
+        assert!(bad_compute.is_error());
+        assert_eq!(
+            scoped.message,
+            "compute pipeline shader module must not be an error module"
+        );
+    }
+}

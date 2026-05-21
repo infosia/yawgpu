@@ -4,6 +4,8 @@ P10.3a audit: see `specs/tracking/phase-10-audit.md`.
 
 ## yawgpu-core/src/lib.rs - Instance / Adapter / Device / Queue (51 pub fn)
 
+Definitions live in sibling modules -- see file map in HANDOFF P11.2 commit.
+
 | pub fn | test name(s) |
 |---|---|
 | `Instance::new_noop` | `creates_noop_device_and_queue` (existing), `noop_device` helper users |
@@ -60,6 +62,8 @@ P10.3a audit: see `specs/tracking/phase-10-audit.md`.
 
 ## yawgpu-core/src/lib.rs - Buffer / Texture / Sampler (40 pub fn)
 
+Definitions live in sibling modules -- see file map in HANDOFF P11.2 commit.
+
 | pub fn | test name(s) |
 |---|---|
 | `MapMode::from_bits` | `map_mode_from_bits_rejects_none_both_and_unsupported_bits` (existing) |
@@ -109,6 +113,8 @@ P10.3a audit: see `specs/tracking/phase-10-audit.md`.
 | `Buffer::validate_queue_write` | `buffer_accessors_error_same_destroy_hal_and_validate_queue_write` |
 
 ## yawgpu-core/src/lib.rs - Encoder / Pass / Bundle (59 pub fn)
+
+Definitions live in sibling modules -- see file map in HANDOFF P11.2 commit.
 
 | pub fn | test name(s) |
 |---|---|
@@ -174,6 +180,8 @@ P10.3a audit: see `specs/tracking/phase-10-audit.md`.
 
 ## yawgpu-core/src/lib.rs - Pipeline / Shader (19 pub fn)
 
+Definitions live in sibling modules -- see file map in HANDOFF P11.2 commit.
+
 | pub fn | test name(s) |
 |---|---|
 | `ShaderModule::is_error` | `shader_module_accessors_pin_is_error_and_diagnostic`, `device_create_shader_module_accepts_minimal_compute_wgsl` |
@@ -201,6 +209,8 @@ P10.3a audit: see `specs/tracking/phase-10-audit.md`.
 | `RenderPipeline::bind_group_layouts` | `compute_pipeline_accessors_and_render_pipeline_accessors` |
 
 ## yawgpu-core/src/lib.rs - Query / Error / Future (14 pub fn)
+
+Definitions live in sibling modules -- see file map in HANDOFF P11.2 commit.
 
 | pub fn | test name(s) |
 |---|---|
