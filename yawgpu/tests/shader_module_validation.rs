@@ -54,6 +54,7 @@ fn wgsl_parse_and_validation_errors_create_error_modules() {
 }
 
 #[test]
+#[cfg(not(feature = "shader-passthrough"))]
 fn spirv_source_requires_passthrough_feature() {
     let test = ValidationTest::new();
     unsafe {

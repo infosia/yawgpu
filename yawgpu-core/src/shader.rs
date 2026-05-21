@@ -161,14 +161,16 @@ impl ShaderModule {
         self.inner.diagnostic.as_deref()
     }
 
-    /// Returns the validated WGSL module when validation succeeded.
+    /// Returns shader reflection data when the module source provides it.
     #[must_use]
-    pub(crate) fn reflected_wgsl(&self) -> Option<&shader_naga::ReflectedModule> {
+    pub(crate) fn reflected(&self) -> Option<&shader_naga::ReflectedModule> {
         match &self.inner._source {
             ShaderModuleSourceKind::Wgsl { source, reflected } => {
                 let _ = source;
                 Some(reflected)
             }
+            #[cfg(feature = "shader-passthrough")]
+            ShaderModuleSourceKind::Spirv { reflected, .. } => Some(reflected),
             _ => None,
         }
     }
