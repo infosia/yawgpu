@@ -39,6 +39,15 @@ pub struct MslReflection {
     pub entry_points: Vec<MslEntryPoint>,
 }
 
+#[cfg(feature = "shader-passthrough")]
+impl MslReflection {
+    /// Creates caller-supplied MSL reflection metadata.
+    #[must_use]
+    pub fn new(entry_points: Vec<MslEntryPoint>) -> Self {
+        Self { entry_points }
+    }
+}
+
 /// Stores caller-supplied MSL entry point metadata.
 #[cfg(feature = "shader-passthrough")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +59,19 @@ pub struct MslEntryPoint {
     pub stage: u64,
     /// Compute workgroup size. Ignored for non-compute stages.
     pub workgroup_size: [u32; 3],
+}
+
+#[cfg(feature = "shader-passthrough")]
+impl MslEntryPoint {
+    /// Creates caller-supplied MSL entry-point metadata.
+    #[must_use]
+    pub fn new(name: String, stage: u64, workgroup_size: [u32; 3]) -> Self {
+        Self {
+            name,
+            stage,
+            workgroup_size,
+        }
+    }
 }
 
 /// Stores shader module data used by validation and backend submission.

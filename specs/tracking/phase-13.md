@@ -85,12 +85,26 @@ tests: `select_{compute,render}_shader_source_covers_passthrough_backend_matrix`
 `msl_compute_pipeline_requires_explicit_layout_on_noop` (MP3). All A2
 acceptance met.
 
-## A3 — C FFI + standard-SPIRV re-route  *(☐ TODO)*
+## A3 — C FFI + standard-SPIRV re-route  *(☑ DONE)*
 
-`yawgpu`: `yawgpuDeviceCreateShaderModuleSpirV/Msl` + `yawgpu.h` types +
-`conv`; re-route standard `WGPUShaderSourceSPIRV` to the SPIR-V core path
-(SP2); FFI unit tests.
-*Accept:* SP2 + the FFI happy/error paths unit-tested; gates green both configs.
+Done: `yawgpu.h` `YAWGPU_HAS_SHADER_PASSTHROUGH` block filled —
+`YaWGPUShaderModuleSpirVDescriptor`/`YaWGPUMslEntryPoint`(std `WGPUShaderStage`)/
+`YaWGPUShaderModuleMslDescriptor` + `YAWGPU_*_INIT` macros (webgpu.h style) +
+the documented Metal binding-index mapping algorithm & worked MSL example.
+Matching Rust `#[repr(C)]` mirrors in `lib.rs` (ABI-equal). FFI
+`yawgpuDeviceCreateShaderModule{SpirV,Msl}` in `ffi/shader.rs` mirror
+`wgpuDeviceCreateShaderModule`; `map_msl_entry_point` + `MslReflection::new`/
+`MslEntryPoint::new` constructors. Standard `WGPUShaderSourceSPIRV` already
+reaches the core path (A1) — covered by an FFI test.
+*Gate (Claude-run):* default + `--features shader-passthrough` `cargo test
+--workspace`/`clippy -D warnings` green; metal examples build clean with
+`-DYAWGPU_EXTENSIONS=shader-passthrough` (yawgpu.h block compiles, C17-strict).
+FFI tests: `yawgpu_spirv_shader_module_ffi_accepts_valid_words_and_errors_on_bad_input`
+(SP1), `standard_spirv_shader_source_chain_reaches_spirv_core_path` (SP2),
+`yawgpu_msl_shader_module_ffi_accepts_metadata_and_rejects_bad_stage_bits`
+(MP1/MP6).
+*MINOR (deferred to A5 review):* the feature-off "SPIR-V passthrough not enabled"
+degrade exists in `device.rs` but has no direct asserting test.
 
 ## A4 — real-backend e2e (`#[ignore]`)  *(☐ TODO)*
 
