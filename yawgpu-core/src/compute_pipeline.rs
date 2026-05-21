@@ -182,20 +182,59 @@ pub(crate) fn create_hal_compute_pipeline(
     let Some(hal_device) = hal_device else {
         return (None, None);
     };
-    let Some(module) = shader_module.reflected_wgsl() else {
-        return (
-            None,
-            Some("compute pipeline requires a valid WGSL shader module".to_owned()),
-        );
-    };
+    if matches!(hal_device.backend(), HalBackend::Noop) {
+        return (None, None);
+    }
     let Some(workgroup) = workgroup else {
         return (
             None,
             Some("compute pipeline workgroup size reflection failed".to_owned()),
         );
     };
-    let (shader, entry_point, descriptor_bindings) = match hal_device.backend() {
+    let (shader, entry_point, descriptor_bindings) = match select_compute_shader_source(
+        hal_device.backend(),
+        shader_module,
+        entry_name,
+        metal_bindings,
+    ) {
+        Ok(selection) => selection,
+        Err(message) => return (None, Some(message)),
+    };
+    match hal_device.create_compute_pipeline(
+        shader,
+        &entry_point,
+        (workgroup.size[0], workgroup.size[1], workgroup.size[2]),
+        &descriptor_bindings,
+    ) {
+        Ok(pipeline) => (Some(pipeline), None),
+        Err(error) => (None, Some(error.to_string())),
+    }
+}
+
+/// Selects the HAL shader source for a compute pipeline.
+pub(crate) fn select_compute_shader_source(
+    backend: HalBackend,
+    shader_module: &ShaderModule,
+    entry_name: &str,
+    metal_bindings: &[MetalBufferBinding],
+) -> Result<(HalShaderSource, String, Vec<HalDescriptorBinding>), String> {
+    match backend {
         HalBackend::Metal => {
+            #[cfg(feature = "shader-passthrough")]
+            if let Some((source, _)) = shader_module.msl_passthrough() {
+                return Ok((
+                    HalShaderSource::Msl(source.to_owned()),
+                    entry_name.to_owned(),
+                    Vec::new(),
+                ));
+            }
+            #[cfg(feature = "shader-passthrough")]
+            if shader_module.spirv_passthrough().is_some() {
+                return Err("SPIR-V shader module cannot be used on the Metal backend".to_owned());
+            }
+            let module = shader_module
+                .reflected()
+                .ok_or_else(|| "compute pipeline requires a reflected shader module".to_owned())?;
             let msl_binding_map = shader_naga::MslBindingMap {
                 buffers: metal_bindings
                     .iter()
@@ -206,38 +245,38 @@ pub(crate) fn create_hal_compute_pipeline(
                     })
                     .collect(),
             };
-            let generated = match module.generate_msl(entry_name, &msl_binding_map) {
-                Ok(generated) => generated,
-                Err(message) => return (None, Some(message)),
-            };
-            (
+            let generated = module.generate_msl(entry_name, &msl_binding_map)?;
+            Ok((
                 HalShaderSource::Msl(generated.source),
                 generated.entry_point,
                 Vec::new(),
-            )
+            ))
         }
         HalBackend::Vulkan => {
-            let spirv = match module.generate_spirv(entry_name, naga::ShaderStage::Compute) {
-                Ok(spirv) => spirv,
-                Err(message) => return (None, Some(message)),
-            };
-            (
+            #[cfg(feature = "shader-passthrough")]
+            if let Some((words, _)) = shader_module.spirv_passthrough() {
+                return Ok((
+                    HalShaderSource::SpirV(words.to_vec()),
+                    entry_name.to_owned(),
+                    hal_descriptor_bindings(metal_bindings),
+                ));
+            }
+            #[cfg(feature = "shader-passthrough")]
+            if shader_module.msl_passthrough().is_some() {
+                return Err("MSL shader module cannot be used on the Vulkan backend".to_owned());
+            }
+            let module = shader_module
+                .reflected()
+                .ok_or_else(|| "compute pipeline requires a reflected shader module".to_owned())?;
+            let spirv = module.generate_spirv(entry_name, naga::ShaderStage::Compute)?;
+            Ok((
                 HalShaderSource::SpirV(spirv),
                 entry_name.to_owned(),
                 hal_descriptor_bindings(metal_bindings),
-            )
+            ))
         }
-        HalBackend::Noop => return (None, None),
-        _ => return (None, None),
-    };
-    match hal_device.create_compute_pipeline(
-        shader,
-        &entry_point,
-        (workgroup.size[0], workgroup.size[1], workgroup.size[2]),
-        &descriptor_bindings,
-    ) {
-        Ok(pipeline) => (Some(pipeline), None),
-        Err(error) => (None, Some(error.to_string())),
+        HalBackend::Noop => Err("Noop backend does not create HAL shader sources".to_owned()),
+        _ => Err("unsupported backend does not create HAL shader sources".to_owned()),
     }
 }
 
@@ -305,8 +344,33 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
     if descriptor.shader_module.is_error() {
         return Err("compute pipeline shader module must not be an error module".to_owned());
     }
-    let Some(module) = descriptor.shader_module.reflected_wgsl() else {
-        return Err("compute pipeline requires a valid WGSL shader module".to_owned());
+    #[cfg(feature = "shader-passthrough")]
+    if let Some((_, reflection)) = descriptor.shader_module.msl_passthrough() {
+        let ComputePipelineLayout::Explicit(layout) = &descriptor.layout else {
+            return Err("MSL shader module requires an explicit pipeline layout".to_owned());
+        };
+        if layout.is_error() {
+            return Err("compute pipeline layout must not be an error pipeline layout".to_owned());
+        }
+        let entry = resolve_msl_entry(
+            reflection,
+            SHADER_STAGE_COMPUTE,
+            descriptor.entry_point.as_deref(),
+            "compute",
+        )?;
+        let workgroup = ResolvedComputeWorkgroup {
+            size: entry.workgroup_size,
+            storage_size: 0,
+        };
+        return Ok((
+            entry.name.clone(),
+            Vec::new(),
+            Some(workgroup),
+            layout.bind_group_layouts().to_vec(),
+        ));
+    }
+    let Some(module) = descriptor.shader_module.reflected() else {
+        return Err("compute pipeline requires a reflected shader module".to_owned());
     };
     let entry_name = resolve_compute_entry(module, descriptor.entry_point.as_deref())?;
     let overrides = module.overrides();
@@ -317,6 +381,37 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
     let bind_group_layouts =
         effective_compute_bind_group_layouts(&descriptor.layout, &bindings, limits)?;
     Ok((entry_name, bindings, Some(workgroup), bind_group_layouts))
+}
+
+#[cfg(feature = "shader-passthrough")]
+pub(crate) fn resolve_msl_entry<'a>(
+    reflection: &'a MslReflection,
+    stage: u64,
+    entry_point: Option<&str>,
+    label: &str,
+) -> Result<&'a MslEntryPoint, String> {
+    let matching = reflection
+        .entry_points
+        .iter()
+        .filter(|entry| entry.stage == stage)
+        .collect::<Vec<_>>();
+    match entry_point {
+        None => match matching.as_slice() {
+            [entry] => Ok(*entry),
+            [] => Err(format!(
+                "{label} pipeline shader module has no matching MSL entry point"
+            )),
+            _ => Err(format!(
+                "{label} pipeline entryPoint is required when multiple matching MSL entries exist"
+            )),
+        },
+        Some(name) => matching
+            .into_iter()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| {
+                format!("{label} pipeline entryPoint must name a matching MSL entry point")
+            }),
+    }
 }
 
 /// Records resolve into the command stream.
@@ -1024,5 +1119,144 @@ mod tests {
             scoped.message,
             "compute pipeline shader module must not be an error module"
         );
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    fn spirv_words(source: &str, entry_point: &str, stage: naga::ShaderStage) -> Vec<u32> {
+        shader_naga::parse_and_validate_wgsl(source)
+            .expect("test WGSL should validate")
+            .generate_spirv(entry_point, stage)
+            .expect("test WGSL should generate SPIR-V")
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    fn msl_compute_reflection() -> MslReflection {
+        MslReflection {
+            entry_points: vec![MslEntryPoint {
+                name: "cs".to_owned(),
+                stage: SHADER_STAGE_COMPUTE,
+                workgroup_size: [2, 3, 4],
+            }],
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn select_compute_shader_source_covers_passthrough_backend_matrix() {
+        let device = noop_device();
+        let wgsl = device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@compute @workgroup_size(1) fn cs() {}".to_owned(),
+        ));
+        let words = spirv_words(
+            "@compute @workgroup_size(1) fn cs() {}",
+            "cs",
+            naga::ShaderStage::Compute,
+        );
+        let spirv = device.create_shader_module_spirv(words.clone());
+        let msl_source = "kernel void cs() {}".to_owned();
+        let msl = device.create_shader_module_msl(msl_source.clone(), msl_compute_reflection());
+
+        let (source, entry, bindings) =
+            select_compute_shader_source(HalBackend::Vulkan, &wgsl, "cs", &[])
+                .expect("WGSL should generate Vulkan SPIR-V");
+        assert!(matches!(source, HalShaderSource::SpirV(words) if !words.is_empty()));
+        assert_eq!(entry, "cs");
+        assert!(bindings.is_empty());
+
+        let (source, entry, _) =
+            select_compute_shader_source(HalBackend::Vulkan, &spirv, "cs", &[])
+                .expect("SPIR-V passthrough should select Vulkan SPIR-V");
+        assert!(matches!(source, HalShaderSource::SpirV(selected) if selected == words));
+        assert_eq!(entry, "cs");
+
+        let (source, entry, _) = select_compute_shader_source(HalBackend::Metal, &msl, "cs", &[])
+            .expect("MSL passthrough should select Metal MSL");
+        assert!(matches!(source, HalShaderSource::Msl(selected) if selected == msl_source));
+        assert_eq!(entry, "cs");
+
+        assert_eq!(
+            select_compute_shader_source(HalBackend::Metal, &spirv, "cs", &[])
+                .expect_err("SPIR-V must not run on Metal"),
+            "SPIR-V shader module cannot be used on the Metal backend"
+        );
+        assert_eq!(
+            select_compute_shader_source(HalBackend::Vulkan, &msl, "cs", &[])
+                .expect_err("MSL must not run on Vulkan"),
+            "MSL shader module cannot be used on the Vulkan backend"
+        );
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn spirv_compute_pipeline_auto_layout_resolves_on_noop() {
+        let device = noop_device();
+        let words = spirv_words(
+            "@compute @workgroup_size(2, 3, 4) fn cs() {}",
+            "cs",
+            naga::ShaderStage::Compute,
+        );
+        let module = Arc::new(device.create_shader_module_spirv(words));
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Auto,
+            shader_module: module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        });
+        let scoped = device.pop_error_scope().expect("scope should exist");
+
+        assert!(!pipeline.is_error());
+        assert_eq!(pipeline.entry_name(), "cs");
+        assert!(pipeline.bind_group_layouts().is_empty());
+        assert_eq!(scoped, None);
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn msl_compute_pipeline_requires_explicit_layout_on_noop() {
+        let device = noop_device();
+        let module =
+            Arc::new(device.create_shader_module_msl(
+                "kernel void cs() {}".to_owned(),
+                msl_compute_reflection(),
+            ));
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let auto = device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Auto,
+            shader_module: Arc::clone(&module),
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        });
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("auto MSL pipeline should be scoped");
+        assert!(auto.is_error());
+        assert_eq!(
+            scoped.message,
+            "MSL shader module requires an explicit pipeline layout"
+        );
+
+        let explicit_layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: Vec::new(),
+            immediate_size: 0,
+            error: None,
+        }));
+        device.push_error_scope(ErrorFilter::Validation);
+        let explicit = device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(explicit_layout),
+            shader_module: module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        });
+        let scoped = device.pop_error_scope().expect("scope should exist");
+        assert!(!explicit.is_error());
+        assert_eq!(explicit.entry_name(), "cs");
+        assert_eq!(scoped, None);
     }
 }

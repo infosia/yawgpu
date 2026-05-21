@@ -68,13 +68,22 @@ variant + the on/off `Spirv` arms in `create_shader_module` (feature-off →
 dead_code (accessors read the new fields). Rules SP1/SP5/MP1/MP5/MP6/CB1/CB2
 each exercised. All A1 acceptance criteria met.
 
-## A2 — pipeline wiring + backend-match  *(☐ TODO)*
+## A2 — pipeline wiring + backend-match  *(☑ DONE)*
 
-Generalize `create_hal_compute_pipeline` / render equivalent: SPIR-V passthrough
-→ words verbatim to Vulkan + reflected metadata; MSL passthrough → source
-verbatim to Metal + supplied metadata; cross-backend use → device error; MSL +
-`auto` layout → error.
-*Accept:* SP3 (noop assertions), SP4, MP2, MP3, MP4 (noop) unit-tested.
+Done: `ShaderModule::reflected()` (Wgsl + Spirv) drives resolution so SPIR-V
+reflects like WGSL (`auto` layout, workgroup, bindings). MSL branch requires an
+explicit layout (auto → error) and takes entry/workgroup from metadata. The
+backend×source rule is a pure helper — `select_{compute,render}_shader_source`
+— so the cross-backend matrix is unit-testable without a real device: Vulkan
+WGSL→generate_spirv, Vulkan SPIR-V→words verbatim, Metal WGSL→generate_msl,
+Metal MSL→source verbatim, mismatches → SP4/MP2 errors.
+*Gate (Claude-run):* default + `--features shader-passthrough` `cargo test
+--workspace`/`clippy -D warnings` green; WGSL pipeline tests unchanged. A2
+tests: `select_{compute,render}_shader_source_covers_passthrough_backend_matrix`
+(SP4/MP2/MP4 incl. verbatim `selected == words`/`== msl_source`),
+`spirv_compute_pipeline_auto_layout_resolves_on_noop` (SP3),
+`msl_compute_pipeline_requires_explicit_layout_on_noop` (MP3). All A2
+acceptance met.
 
 ## A3 — C FFI + standard-SPIRV re-route  *(☐ TODO)*
 
