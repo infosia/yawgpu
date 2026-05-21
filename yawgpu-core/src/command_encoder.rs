@@ -1,0 +1,1540 @@
+use std::cell::UnsafeCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use yawgpu_hal::{
+    HalAdapter, HalAddressMode, HalBackend, HalBoundBuffer, HalBuffer, HalBufferBindingKind,
+    HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout, HalCompareFunction,
+    HalComputePass, HalComputePipeline, HalCopy, HalDescriptorBinding, HalDevice, HalDraw,
+    HalError, HalExtent3d, HalFilterMode, HalInstance, HalMipmapFilterMode, HalOrigin3d,
+    HalPrimitiveTopology, HalQueue, HalRenderColorTarget, HalRenderLoadOp, HalRenderPass,
+    HalRenderPipeline, HalRenderPipelineDescriptor, HalSampler, HalSamplerDescriptor,
+    HalShaderSource, HalSurface, HalTexture, HalTextureCopy, HalTextureDescriptor,
+    HalTextureFormat, HalTextureUsage, HalVertexAttribute, HalVertexBufferLayout, HalVertexFormat,
+    HalVertexStepMode,
+};
+
+use crate::adapter::*;
+use crate::bind_group::*;
+use crate::bind_group_layout::*;
+use crate::buffer::*;
+use crate::compute_pass::*;
+use crate::compute_pipeline::*;
+use crate::copy::*;
+use crate::device::*;
+use crate::error::*;
+use crate::extent::*;
+use crate::format::*;
+use crate::future::*;
+use crate::instance::*;
+use crate::limits::*;
+use crate::pass::*;
+use crate::pipeline_layout::*;
+use crate::query_set::*;
+use crate::queue::*;
+use crate::render_bundle::*;
+use crate::render_pass::*;
+use crate::render_pipeline::*;
+use crate::sampler::*;
+use crate::shader::*;
+use crate::shader_naga;
+use crate::texture::*;
+use crate::texture_view::*;
+
+#[derive(Debug, Clone)]
+pub struct CommandEncoder {
+    pub(crate) inner: Arc<CommandEncoderInner>,
+}
+
+#[derive(Debug)]
+pub(crate) struct CommandEncoderInner {
+    pub(crate) state: Mutex<CommandEncoderState>,
+}
+
+#[derive(Debug)]
+pub(crate) struct CommandEncoderState {
+    pub(crate) lifecycle: CommandEncoderLifecycle,
+    pub(crate) open_pass: Option<PassToken>,
+    pub(crate) next_pass_id: u64,
+    pub(crate) first_error: Option<String>,
+    pub(crate) debug_group_depth: u32,
+    pub(crate) referenced_buffers: Vec<Arc<Buffer>>,
+    pub(crate) command_ops: Vec<CommandExecution>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandEncoderLifecycle {
+    Recording,
+    Finished,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PassKind {
+    Render,
+    Compute,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PassToken {
+    pub(crate) kind: PassKind,
+    pub(crate) id: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandBuffer {
+    pub(crate) inner: Arc<CommandBufferInner>,
+}
+
+#[derive(Debug)]
+pub(crate) struct CommandBufferInner {
+    pub(crate) is_error: bool,
+    pub(crate) referenced_buffers: Vec<Arc<Buffer>>,
+    pub(crate) command_ops: Vec<CommandExecution>,
+    pub(crate) submitted: Mutex<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BufferCopyCommand {
+    pub(crate) source: Arc<Buffer>,
+    pub(crate) source_offset: u64,
+    pub(crate) destination: Arc<Buffer>,
+    pub(crate) destination_offset: u64,
+    pub(crate) size: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum TextureCopyCommand {
+    BufferToTexture {
+        source: TexelCopyBufferInfo,
+        destination: TexelCopyTextureInfo,
+        copy_size: Extent3d,
+    },
+    TextureToBuffer {
+        source: TexelCopyTextureInfo,
+        destination: TexelCopyBufferInfo,
+        copy_size: Extent3d,
+    },
+    TextureToTexture {
+        source: TexelCopyTextureInfo,
+        destination: TexelCopyTextureInfo,
+        copy_size: Extent3d,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CommandExecution {
+    BufferCopy(BufferCopyCommand),
+    TextureCopy(TextureCopyCommand),
+    ComputePass(ComputePassCommand),
+    RenderPass(RenderPassCommand),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ComputePassCommand {
+    pub(crate) pipeline: Arc<ComputePipeline>,
+    pub(crate) bind_groups: BTreeMap<u32, BoundBindGroup>,
+    pub(crate) workgroups: (u32, u32, u32),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RenderPassCommand {
+    pub(crate) pipeline: Option<Arc<RenderPipeline>>,
+    pub(crate) color_attachment: RenderPassColorExecution,
+    pub(crate) bind_groups: BTreeMap<u32, BoundBindGroup>,
+    pub(crate) vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
+    pub(crate) draw: Option<RenderDrawExecution>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RenderPassColorExecution {
+    pub(crate) texture: Texture,
+    pub(crate) load_op: LoadOp,
+    pub(crate) store_op: StoreOp,
+    pub(crate) clear_value: Color,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RenderDrawExecution {
+    pub(crate) vertex_count: u32,
+    pub(crate) instance_count: u32,
+    pub(crate) first_vertex: u32,
+    pub(crate) first_instance: u32,
+}
+
+impl CommandEncoder {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Arc::new(CommandEncoderInner {
+                state: Mutex::new(CommandEncoderState {
+                    lifecycle: CommandEncoderLifecycle::Recording,
+                    open_pass: None,
+                    next_pass_id: 0,
+                    first_error: None,
+                    debug_group_depth: 0,
+                    referenced_buffers: Vec::new(),
+                    command_ops: Vec::new(),
+                }),
+            }),
+        }
+    }
+
+    pub(crate) fn new_error(message: impl Into<String>) -> Self {
+        let encoder = Self::new();
+        encoder.record_first_error(message);
+        encoder
+    }
+
+    #[must_use]
+    pub fn begin_render_pass(
+        &self,
+        descriptor: &RenderPassDescriptor,
+    ) -> (RenderPassEncoder, Option<String>) {
+        let (token, immediate_error) = self.begin_pass(PassKind::Render);
+        let attachment_signature = render_pass_attachment_signature(descriptor).ok();
+        if immediate_error.is_none() {
+            if let Err(message) = validate_render_pass_descriptor(descriptor) {
+                self.record_first_error(message);
+            }
+        }
+        (
+            RenderPassEncoder {
+                inner: Arc::new(PassEncoderInner::new(
+                    self.clone(),
+                    token,
+                    attachment_signature,
+                    render_pass_attachment_textures(descriptor),
+                    render_pass_color_execution(descriptor),
+                    descriptor.occlusion_query_set.clone(),
+                )),
+            },
+            immediate_error,
+        )
+    }
+
+    #[must_use]
+    pub fn begin_compute_pass(&self) -> (ComputePassEncoder, Option<String>) {
+        let (token, immediate_error) = self.begin_pass(PassKind::Compute);
+        (
+            ComputePassEncoder {
+                inner: Arc::new(PassEncoderInner::new(
+                    self.clone(),
+                    token,
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                )),
+            },
+            immediate_error,
+        )
+    }
+
+    pub(crate) fn begin_pass(&self, kind: PassKind) -> (PassToken, Option<String>) {
+        let mut state = self.inner.state.lock();
+        let token = PassToken {
+            kind,
+            id: state.next_pass_id,
+        };
+        state.next_pass_id = state.next_pass_id.saturating_add(1);
+
+        if state.lifecycle != CommandEncoderLifecycle::Recording {
+            return (
+                token,
+                Some("command encoder cannot record after finish".to_owned()),
+            );
+        }
+
+        if state.open_pass.is_some() {
+            record_first_error_locked(
+                &mut state,
+                "command encoder cannot begin a pass while another pass is open",
+            );
+            return (token, None);
+        }
+
+        state.open_pass = Some(token);
+        (token, None)
+    }
+
+    pub fn insert_debug_marker(&self) -> Option<String> {
+        self.record_encoder_command()
+    }
+
+    pub fn record_validation_error(&self, message: impl Into<String>) -> Option<String> {
+        self.record_buffer_command(Vec::new(), None, None, || Err(message.into()))
+    }
+
+    pub fn copy_buffer_to_buffer(
+        &self,
+        source: Arc<Buffer>,
+        source_offset: u64,
+        destination: Arc<Buffer>,
+        destination_offset: u64,
+        size: u64,
+    ) -> Option<String> {
+        let copy = BufferCopyCommand {
+            source: Arc::clone(&source),
+            source_offset,
+            destination: Arc::clone(&destination),
+            destination_offset,
+            size,
+        };
+        self.record_buffer_command(
+            vec![Arc::clone(&source), Arc::clone(&destination)],
+            Some(copy),
+            None,
+            || {
+                validate_copy_buffer_to_buffer(
+                    &source,
+                    source_offset,
+                    &destination,
+                    destination_offset,
+                    size,
+                )
+            },
+        )
+    }
+
+    pub fn clear_buffer(&self, buffer: Arc<Buffer>, offset: u64, size: u64) -> Option<String> {
+        self.record_buffer_command(vec![Arc::clone(&buffer)], None, None, || {
+            validate_clear_buffer(&buffer, offset, size)
+        })
+    }
+
+    pub fn write_buffer(&self, buffer: Arc<Buffer>, offset: u64, size: u64) -> Option<String> {
+        self.record_buffer_command(vec![Arc::clone(&buffer)], None, None, || {
+            validate_encoder_write_buffer(&buffer, offset, size)
+        })
+    }
+
+    pub fn write_timestamp(&self, query_set: Arc<QuerySet>, query_index: u32) -> Option<String> {
+        self.record_buffer_command(Vec::new(), None, None, || {
+            validate_timestamp_query_set(&query_set, "write timestamp")?;
+            validate_query_index(&query_set, query_index, "write timestamp query index")
+        })
+    }
+
+    pub fn resolve_query_set(
+        &self,
+        query_set: Arc<QuerySet>,
+        first_query: u32,
+        query_count: u32,
+        destination: Arc<Buffer>,
+        destination_offset: u64,
+    ) -> Option<String> {
+        self.record_buffer_command(vec![Arc::clone(&destination)], None, None, || {
+            validate_resolve_query_set(
+                &query_set,
+                first_query,
+                query_count,
+                &destination,
+                destination_offset,
+            )
+        })
+    }
+
+    pub fn copy_buffer_to_texture(
+        &self,
+        source: TexelCopyBufferInfo,
+        destination: TexelCopyTextureInfo,
+        copy_size: Extent3d,
+    ) -> Option<String> {
+        let copy = TextureCopyCommand::BufferToTexture {
+            source: source.clone(),
+            destination: destination.clone(),
+            copy_size,
+        };
+        self.record_buffer_command(vec![Arc::clone(&source.buffer)], None, Some(copy), || {
+            validate_buffer_texture_copy(
+                source,
+                BufferUsage::COPY_SRC,
+                destination,
+                TextureUsage::COPY_DST,
+                copy_size,
+                "copy buffer to texture",
+            )
+        })
+    }
+
+    pub fn copy_texture_to_buffer(
+        &self,
+        source: TexelCopyTextureInfo,
+        destination: TexelCopyBufferInfo,
+        copy_size: Extent3d,
+    ) -> Option<String> {
+        let copy = TextureCopyCommand::TextureToBuffer {
+            source: source.clone(),
+            destination: destination.clone(),
+            copy_size,
+        };
+        self.record_buffer_command(
+            vec![Arc::clone(&destination.buffer)],
+            None,
+            Some(copy),
+            || {
+                validate_buffer_texture_copy(
+                    destination,
+                    BufferUsage::COPY_DST,
+                    source,
+                    TextureUsage::COPY_SRC,
+                    copy_size,
+                    "copy texture to buffer",
+                )
+            },
+        )
+    }
+
+    pub fn copy_texture_to_texture(
+        &self,
+        source: TexelCopyTextureInfo,
+        destination: TexelCopyTextureInfo,
+        copy_size: Extent3d,
+    ) -> Option<String> {
+        let copy = TextureCopyCommand::TextureToTexture {
+            source: source.clone(),
+            destination: destination.clone(),
+            copy_size,
+        };
+        self.record_buffer_command(Vec::new(), None, Some(copy), || {
+            validate_texture_to_texture_copy(source, destination, copy_size)
+        })
+    }
+
+    pub fn push_debug_group(&self) -> Option<String> {
+        let mut state = self.inner.state.lock();
+        if state.lifecycle != CommandEncoderLifecycle::Recording {
+            return Some("command encoder cannot record after finish".to_owned());
+        }
+        if state.open_pass.is_some() {
+            record_first_error_locked(
+                &mut state,
+                "command encoder command cannot be recorded while a pass is open",
+            );
+            return None;
+        }
+        state.debug_group_depth = state.debug_group_depth.saturating_add(1);
+        None
+    }
+
+    pub fn pop_debug_group(&self) -> Option<String> {
+        let mut state = self.inner.state.lock();
+        if state.lifecycle != CommandEncoderLifecycle::Recording {
+            return Some("command encoder cannot record after finish".to_owned());
+        }
+        if state.open_pass.is_some() {
+            record_first_error_locked(
+                &mut state,
+                "command encoder command cannot be recorded while a pass is open",
+            );
+            return None;
+        }
+        if state.debug_group_depth == 0 {
+            record_first_error_locked(&mut state, "command encoder debug group stack is empty");
+        } else {
+            state.debug_group_depth -= 1;
+        }
+        None
+    }
+
+    pub(crate) fn record_command_guard(&self) -> Result<(), String> {
+        let state = self.inner.state.lock();
+        if state.lifecycle != CommandEncoderLifecycle::Recording {
+            return Err("command encoder cannot record after finish".to_owned());
+        }
+        if state.open_pass.is_some() {
+            return Err(
+                "command encoder command cannot be recorded while a pass is open".to_owned(),
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn record_encoder_command(&self) -> Option<String> {
+        match self.record_command_guard() {
+            Ok(()) => None,
+            Err(message) => {
+                let mut state = self.inner.state.lock();
+                if state.lifecycle == CommandEncoderLifecycle::Recording {
+                    record_first_error_locked(&mut state, message);
+                    None
+                } else {
+                    Some(message)
+                }
+            }
+        }
+    }
+
+    pub(crate) fn record_buffer_command<F>(
+        &self,
+        referenced_buffers: Vec<Arc<Buffer>>,
+        buffer_copy: Option<BufferCopyCommand>,
+        texture_copy: Option<TextureCopyCommand>,
+        validate: F,
+    ) -> Option<String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        if let Err(message) = self.record_command_guard() {
+            let mut state = self.inner.state.lock();
+            if state.lifecycle == CommandEncoderLifecycle::Recording {
+                record_first_error_locked(&mut state, message);
+                return None;
+            }
+            return Some(message);
+        }
+
+        if let Err(message) = validate() {
+            self.record_first_error(message);
+        } else {
+            let mut state = self.inner.state.lock();
+            state.referenced_buffers.extend(referenced_buffers);
+            if let Some(copy) = buffer_copy {
+                state
+                    .command_ops
+                    .push(CommandExecution::BufferCopy(copy.clone()));
+            }
+            if let Some(copy) = texture_copy {
+                state
+                    .command_ops
+                    .push(CommandExecution::TextureCopy(copy.clone()));
+            }
+        }
+        None
+    }
+
+    #[must_use]
+    pub fn finish(&self) -> (CommandBuffer, Option<String>) {
+        let mut state = self.inner.state.lock();
+        if state.lifecycle != CommandEncoderLifecycle::Recording {
+            return (
+                CommandBuffer::new(true, Vec::new(), Vec::new()),
+                Some("command encoder cannot be finished more than once".to_owned()),
+            );
+        }
+        state.lifecycle = CommandEncoderLifecycle::Finished;
+
+        let finish_error = state
+            .first_error
+            .clone()
+            .or_else(|| {
+                state
+                    .open_pass
+                    .is_some()
+                    .then(|| "command encoder cannot finish while a pass is open".to_owned())
+            })
+            .or_else(|| {
+                (state.debug_group_depth != 0)
+                    .then(|| "command encoder debug group stack is unbalanced".to_owned())
+            });
+        let referenced_buffers = if finish_error.is_some() {
+            Vec::new()
+        } else {
+            std::mem::take(&mut state.referenced_buffers)
+        };
+        let command_ops = if finish_error.is_some() {
+            Vec::new()
+        } else {
+            std::mem::take(&mut state.command_ops)
+        };
+        (
+            CommandBuffer::new(finish_error.is_some(), referenced_buffers, command_ops),
+            finish_error,
+        )
+    }
+
+    pub(crate) fn end_pass(&self, token: PassToken) {
+        let mut state = self.inner.state.lock();
+        if state.open_pass == Some(token) {
+            state.open_pass = None;
+        }
+    }
+
+    pub(crate) fn record_first_error(&self, message: impl Into<String>) {
+        let mut state = self.inner.state.lock();
+        record_first_error_locked(&mut state, message);
+    }
+
+    pub(crate) fn record_referenced_buffer(&self, buffer: Arc<Buffer>) {
+        self.inner.state.lock().referenced_buffers.push(buffer);
+    }
+
+    pub(crate) fn record_referenced_buffers(&self, buffers: Vec<Arc<Buffer>>) {
+        self.inner.state.lock().referenced_buffers.extend(buffers);
+    }
+
+    pub(crate) fn record_compute_pass(&self, command: ComputePassCommand) {
+        self.inner
+            .state
+            .lock()
+            .command_ops
+            .push(CommandExecution::ComputePass(command));
+    }
+
+    pub(crate) fn record_render_pass(&self, command: RenderPassCommand) {
+        self.inner
+            .state
+            .lock()
+            .command_ops
+            .push(CommandExecution::RenderPass(command));
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.inner.state.lock().lifecycle == CommandEncoderLifecycle::Finished
+    }
+}
+
+pub(crate) fn validate_copy_buffer_to_buffer(
+    source: &Buffer,
+    source_offset: u64,
+    destination: &Buffer,
+    destination_offset: u64,
+    size: u64,
+) -> Result<(), String> {
+    if source.is_error() || destination.is_error() {
+        return Err("copy buffer command cannot use an error buffer".to_owned());
+    }
+    if source.is_destroyed() || destination.is_destroyed() {
+        return Err("copy buffer command cannot use a destroyed buffer".to_owned());
+    }
+    if !source.usage().contains(BufferUsage::COPY_SRC) {
+        return Err("copy source buffer must have CopySrc usage".to_owned());
+    }
+    if !destination.usage().contains(BufferUsage::COPY_DST) {
+        return Err("copy destination buffer must have CopyDst usage".to_owned());
+    }
+    if !source_offset.is_multiple_of(4) {
+        return Err("copy source offset must be 4-byte aligned".to_owned());
+    }
+    if !destination_offset.is_multiple_of(4) {
+        return Err("copy destination offset must be 4-byte aligned".to_owned());
+    }
+    if !size.is_multiple_of(4) {
+        return Err("copy size must be 4-byte aligned".to_owned());
+    }
+    validate_buffer_range(source_offset, size, source.size(), "copy source range")?;
+    validate_buffer_range(
+        destination_offset,
+        size,
+        destination.size(),
+        "copy destination range",
+    )?;
+    if size > 0 && source.same(destination) {
+        return Err("copy source and destination ranges must not use the same buffer".to_owned());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_clear_buffer(buffer: &Buffer, offset: u64, size: u64) -> Result<(), String> {
+    if buffer.is_error() {
+        return Err("clear buffer command cannot use an error buffer".to_owned());
+    }
+    if buffer.is_destroyed() {
+        return Err("clear buffer command cannot use a destroyed buffer".to_owned());
+    }
+    if !buffer.usage().contains(BufferUsage::COPY_DST) {
+        return Err("clear buffer requires CopyDst usage".to_owned());
+    }
+    if offset > buffer.size() {
+        return Err("clear buffer offset exceeds buffer size".to_owned());
+    }
+    let resolved_size = if size == u64::MAX {
+        buffer.size() - offset
+    } else {
+        size
+    };
+    if !offset.is_multiple_of(4) {
+        return Err("clear buffer offset must be 4-byte aligned".to_owned());
+    }
+    if !resolved_size.is_multiple_of(4) {
+        return Err("clear buffer size must be 4-byte aligned".to_owned());
+    }
+    validate_buffer_range(offset, resolved_size, buffer.size(), "clear buffer range")
+}
+
+pub(crate) fn validate_encoder_write_buffer(
+    buffer: &Buffer,
+    offset: u64,
+    size: u64,
+) -> Result<(), String> {
+    if buffer.is_error() {
+        return Err("command encoder write buffer cannot use an error buffer".to_owned());
+    }
+    if buffer.is_destroyed() {
+        return Err("command encoder write buffer cannot use a destroyed buffer".to_owned());
+    }
+    if !buffer.usage().contains(BufferUsage::COPY_DST) {
+        return Err("command encoder write buffer requires CopyDst usage".to_owned());
+    }
+    if !offset.is_multiple_of(4) {
+        return Err("command encoder write buffer offset must be 4-byte aligned".to_owned());
+    }
+    if !size.is_multiple_of(4) {
+        return Err("command encoder write buffer size must be 4-byte aligned".to_owned());
+    }
+    validate_buffer_range(
+        offset,
+        size,
+        buffer.size(),
+        "command encoder write buffer range",
+    )
+}
+
+pub(crate) fn validate_render_pass_descriptor(
+    descriptor: &RenderPassDescriptor,
+) -> Result<(), String> {
+    render_pass_attachment_signature(descriptor)?;
+    if let Some(query_set) = &descriptor.occlusion_query_set {
+        validate_occlusion_query_set(query_set, "render pass occlusion query set")?;
+    }
+    if let Some(timestamp_writes) = &descriptor.timestamp_writes {
+        validate_render_pass_timestamp_writes(timestamp_writes)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_render_pass_timestamp_writes(
+    timestamp_writes: &RenderPassTimestampWrites,
+) -> Result<(), String> {
+    validate_timestamp_query_set(
+        &timestamp_writes.query_set,
+        "render pass timestamp writes query set",
+    )?;
+    if timestamp_writes.beginning_index.is_none() && timestamp_writes.end_index.is_none() {
+        return Err("render pass timestamp writes requires at least one query index".to_owned());
+    }
+    if let Some(index) = timestamp_writes.beginning_index {
+        validate_query_index(
+            &timestamp_writes.query_set,
+            index,
+            "render pass beginning timestamp query index",
+        )?;
+    }
+    if let Some(index) = timestamp_writes.end_index {
+        validate_query_index(
+            &timestamp_writes.query_set,
+            index,
+            "render pass end timestamp query index",
+        )?;
+    }
+    if timestamp_writes.beginning_index == timestamp_writes.end_index {
+        return Err("render pass timestamp write indices must be distinct".to_owned());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_occlusion_query_set(
+    query_set: &QuerySet,
+    usage: &str,
+) -> Result<(), String> {
+    validate_query_set_alive(query_set, usage)?;
+    if query_set.kind() != QueryType::Occlusion {
+        return Err(format!("{usage} requires an occlusion query set"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_timestamp_query_set(
+    query_set: &QuerySet,
+    usage: &str,
+) -> Result<(), String> {
+    validate_query_set_alive(query_set, usage)?;
+    if query_set.kind() != QueryType::Timestamp {
+        return Err(format!("{usage} requires a timestamp query set"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_query_set_alive(query_set: &QuerySet, usage: &str) -> Result<(), String> {
+    if query_set.is_error() {
+        return Err(format!("{usage} cannot use an error query set"));
+    }
+    if query_set.is_destroyed() {
+        return Err(format!("{usage} cannot use a destroyed query set"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_query_index(
+    query_set: &QuerySet,
+    index: u32,
+    name: &str,
+) -> Result<(), String> {
+    if index >= query_set.count() {
+        return Err(format!("{name} exceeds query set count"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_resolve_query_set(
+    query_set: &QuerySet,
+    first_query: u32,
+    query_count: u32,
+    destination: &Buffer,
+    destination_offset: u64,
+) -> Result<(), String> {
+    validate_query_set_alive(query_set, "resolve query set")?;
+    if query_count == 0 {
+        return Err("resolve query count must be greater than zero".to_owned());
+    }
+    let end_query = first_query
+        .checked_add(query_count)
+        .ok_or_else(|| "resolve query range overflows".to_owned())?;
+    if end_query > query_set.count() {
+        return Err("resolve query range exceeds query set count".to_owned());
+    }
+    if destination.is_error() {
+        return Err("resolve query set cannot use an error destination buffer".to_owned());
+    }
+    if destination.is_destroyed() {
+        return Err("resolve query set cannot use a destroyed destination buffer".to_owned());
+    }
+    if !destination.usage().contains(BufferUsage::QUERY_RESOLVE) {
+        return Err("resolve query set destination requires QueryResolve usage".to_owned());
+    }
+    if !destination_offset.is_multiple_of(256) {
+        return Err("resolve query set destination offset must be 256-byte aligned".to_owned());
+    }
+    let byte_count = u64::from(query_count)
+        .checked_mul(8)
+        .ok_or_else(|| "resolve query byte count overflows".to_owned())?;
+    validate_buffer_range(
+        destination_offset,
+        byte_count,
+        destination.size(),
+        "resolve query destination range",
+    )
+}
+
+pub(crate) fn render_pass_attachment_signature(
+    descriptor: &RenderPassDescriptor,
+) -> Result<AttachmentSignature, String> {
+    if descriptor.color_attachments.len() > descriptor.max_color_attachments as usize {
+        return Err("render pass colorAttachmentCount exceeds the device limit".to_owned());
+    }
+
+    let mut has_attachment = false;
+    let mut render_extent = None;
+    let mut sample_count = None;
+    let mut color_formats = Vec::with_capacity(descriptor.color_attachments.len());
+
+    for attachment in &descriptor.color_attachments {
+        if let Some(attachment) = attachment {
+            has_attachment = true;
+            validate_color_attachment(attachment)?;
+            validate_render_attachment_common(
+                &attachment.view,
+                &mut render_extent,
+                &mut sample_count,
+                "render pass color attachment",
+            )?;
+            if let Some(resolve_target) = &attachment.resolve_target {
+                validate_resolve_target(&attachment.view, resolve_target)?;
+            }
+            color_formats.push(Some(attachment.view.format()));
+        } else {
+            color_formats.push(None);
+        }
+    }
+
+    let mut depth_stencil_format = None;
+    if let Some(attachment) = &descriptor.depth_stencil_attachment {
+        has_attachment = true;
+        validate_depth_stencil_attachment(attachment)?;
+        depth_stencil_format = Some(attachment.view.format());
+        validate_render_attachment_common(
+            &attachment.view,
+            &mut render_extent,
+            &mut sample_count,
+            "render pass depth-stencil attachment",
+        )?;
+    }
+
+    if !has_attachment {
+        return Err("render pass requires at least one attachment".to_owned());
+    }
+    Ok(AttachmentSignature {
+        color_formats,
+        depth_stencil_format,
+        sample_count: sample_count.unwrap_or(1),
+    })
+}
+
+pub(crate) fn render_pass_attachment_textures(descriptor: &RenderPassDescriptor) -> Vec<Texture> {
+    let mut textures = Vec::new();
+    for attachment in descriptor.color_attachments.iter().flatten() {
+        textures.push(attachment.view.texture());
+        if let Some(resolve_target) = &attachment.resolve_target {
+            textures.push(resolve_target.texture());
+        }
+    }
+    if let Some(attachment) = &descriptor.depth_stencil_attachment {
+        textures.push(attachment.view.texture());
+    }
+    textures
+}
+
+pub(crate) fn render_pass_color_execution(
+    descriptor: &RenderPassDescriptor,
+) -> Option<RenderPassColorExecution> {
+    descriptor
+        .color_attachments
+        .iter()
+        .flatten()
+        .next()
+        .map(|attachment| RenderPassColorExecution {
+            texture: attachment.view.texture(),
+            load_op: attachment.load_op,
+            store_op: attachment.store_op,
+            clear_value: attachment.clear_value,
+        })
+}
+
+pub(crate) fn validate_color_attachment(
+    attachment: &RenderPassColorAttachment,
+) -> Result<(), String> {
+    let texture = attachment.view.texture();
+    let Some(format_caps) = attachment.view.format().caps() else {
+        return Err("render pass color attachment format must be supported".to_owned());
+    };
+    if !texture.usage().contains(TextureUsage::RENDER_ATTACHMENT) {
+        return Err("render pass color attachment requires RenderAttachment usage".to_owned());
+    }
+    if !format_caps.aspects.color || !format_caps.renderable {
+        return Err("render pass color attachment format must be color-renderable".to_owned());
+    }
+    if attachment.load_op == LoadOp::Undefined {
+        return Err("render pass color attachment loadOp must be set".to_owned());
+    }
+    if attachment.store_op == StoreOp::Undefined {
+        return Err("render pass color attachment storeOp must be set".to_owned());
+    }
+    if attachment.load_op == LoadOp::Clear
+        && ![
+            attachment.clear_value.r,
+            attachment.clear_value.g,
+            attachment.clear_value.b,
+            attachment.clear_value.a,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+    {
+        return Err("render pass color clearValue components must be finite".to_owned());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_depth_stencil_attachment(
+    attachment: &RenderPassDepthStencilAttachment,
+) -> Result<(), String> {
+    let texture = attachment.view.texture();
+    let Some(format_caps) = attachment.view.format().caps() else {
+        return Err("render pass depth-stencil attachment format must be supported".to_owned());
+    };
+    if !texture.usage().contains(TextureUsage::RENDER_ATTACHMENT) {
+        return Err(
+            "render pass depth-stencil attachment requires RenderAttachment usage".to_owned(),
+        );
+    }
+    if !format_caps.aspects.depth && !format_caps.aspects.stencil {
+        return Err(
+            "render pass depth-stencil attachment format must have depth or stencil aspect"
+                .to_owned(),
+        );
+    }
+    if format_caps.aspects.depth {
+        if attachment.depth_load_op == LoadOp::Undefined {
+            return Err("render pass depth loadOp must be set".to_owned());
+        }
+        if attachment.depth_store_op == StoreOp::Undefined {
+            return Err("render pass depth storeOp must be set".to_owned());
+        }
+        if attachment.depth_load_op == LoadOp::Clear
+            && (!attachment.depth_clear_value.is_finite()
+                || !(0.0..=1.0).contains(&attachment.depth_clear_value))
+        {
+            return Err("render pass depth clear value must be finite and in [0, 1]".to_owned());
+        }
+    }
+    if format_caps.aspects.stencil {
+        if attachment.stencil_load_op == LoadOp::Undefined {
+            return Err("render pass stencil loadOp must be set".to_owned());
+        }
+        if attachment.stencil_store_op == StoreOp::Undefined {
+            return Err("render pass stencil storeOp must be set".to_owned());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_render_attachment_common(
+    view: &TextureView,
+    render_extent: &mut Option<(u32, u32)>,
+    sample_count: &mut Option<u32>,
+    label: &str,
+) -> Result<(), String> {
+    if view.is_error() {
+        return Err(format!("{label} view must not be an error view"));
+    }
+    if view.array_layer_count() != 1 {
+        return Err(format!("{label} view arrayLayerCount must be one"));
+    }
+    let extent = view.render_extent();
+    let size = (extent.width, extent.height);
+    if let Some(expected) = *render_extent {
+        if expected != size {
+            return Err("render pass attachments must have matching sizes".to_owned());
+        }
+    } else {
+        *render_extent = Some(size);
+    }
+
+    let view_sample_count = view.texture().sample_count();
+    if let Some(expected) = *sample_count {
+        if expected != view_sample_count {
+            return Err("render pass attachments must have matching sample counts".to_owned());
+        }
+    } else {
+        *sample_count = Some(view_sample_count);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_resolve_target(
+    color_view: &TextureView,
+    resolve_target: &TextureView,
+) -> Result<(), String> {
+    let color_texture = color_view.texture();
+    let resolve_texture = resolve_target.texture();
+    if color_texture.sample_count() <= 1 {
+        return Err(
+            "render pass resolveTarget requires a multisampled color attachment".to_owned(),
+        );
+    }
+    if resolve_target.is_error() {
+        return Err("render pass resolveTarget view must not be an error view".to_owned());
+    }
+    if !resolve_texture
+        .usage()
+        .contains(TextureUsage::RENDER_ATTACHMENT)
+    {
+        return Err("render pass resolveTarget requires RenderAttachment usage".to_owned());
+    }
+    if resolve_texture.sample_count() != 1 {
+        return Err("render pass resolveTarget sampleCount must be one".to_owned());
+    }
+    if color_view.format() != resolve_target.format() {
+        return Err("render pass resolveTarget format must match the color attachment".to_owned());
+    }
+    if resolve_target.array_layer_count() != 1 {
+        return Err("render pass resolveTarget view arrayLayerCount must be one".to_owned());
+    }
+    if color_view.render_extent() != resolve_target.render_extent() {
+        return Err("render pass resolveTarget size must match the color attachment".to_owned());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_buffer_texture_copy(
+    buffer_copy: TexelCopyBufferInfo,
+    required_buffer_usage: BufferUsage,
+    texture_copy: TexelCopyTextureInfo,
+    required_texture_usage: TextureUsage,
+    copy_size: Extent3d,
+    label: &str,
+) -> Result<(), String> {
+    let buffer = buffer_copy.buffer;
+    let texture = texture_copy.texture;
+    if buffer.is_error() || texture.is_error() {
+        return Err(format!("{label} cannot use an error resource"));
+    }
+    if buffer.is_destroyed() || texture.is_destroyed() {
+        return Err(format!("{label} cannot use a destroyed resource"));
+    }
+    if !buffer.usage().contains(required_buffer_usage) {
+        return Err(format!("{label} buffer has invalid usage"));
+    }
+    if !texture.usage().contains(required_texture_usage) {
+        return Err(format!("{label} texture has invalid usage"));
+    }
+    if texture.sample_count() != 1 {
+        return Err(format!("{label} texture sampleCount must be one"));
+    }
+
+    let format_caps = validate_texture_copy_subresource(
+        &texture,
+        texture_copy.mip_level,
+        texture_copy.origin,
+        copy_size,
+        texture_copy.aspect,
+        label,
+        true,
+    )?;
+    if !buffer_copy.layout.offset.is_multiple_of(4) {
+        return Err(format!("{label} buffer offset must be 4-byte aligned"));
+    }
+    let required_bytes = crate::copy::validate_texel_copy_layout(
+        format_caps,
+        texture_copy.aspect,
+        copy_size,
+        buffer_copy.layout,
+        label,
+        true,
+    )?;
+    validate_buffer_range(
+        buffer_copy.layout.offset,
+        required_bytes,
+        buffer.size(),
+        label,
+    )
+}
+
+pub(crate) fn validate_texture_to_texture_copy(
+    source_copy: TexelCopyTextureInfo,
+    destination_copy: TexelCopyTextureInfo,
+    copy_size: Extent3d,
+) -> Result<(), String> {
+    let source = source_copy.texture;
+    let destination = destination_copy.texture;
+    if source.is_error() || destination.is_error() {
+        return Err("copy texture to texture cannot use an error texture".to_owned());
+    }
+    if source.is_destroyed() || destination.is_destroyed() {
+        return Err("copy texture to texture cannot use a destroyed texture".to_owned());
+    }
+    if !source.usage().contains(TextureUsage::COPY_SRC) {
+        return Err("copy texture source must have CopySrc usage".to_owned());
+    }
+    if !destination.usage().contains(TextureUsage::COPY_DST) {
+        return Err("copy texture destination must have CopyDst usage".to_owned());
+    }
+    if source_copy.aspect != destination_copy.aspect {
+        return Err("copy texture aspects must match".to_owned());
+    }
+    if !texture_formats_copy_compatible(source.format(), destination.format()) {
+        return Err("copy texture formats are not copy-compatible".to_owned());
+    }
+    if source.sample_count() != destination.sample_count() {
+        return Err("copy texture sample counts must match".to_owned());
+    }
+
+    let source_caps = validate_texture_copy_subresource(
+        &source,
+        source_copy.mip_level,
+        source_copy.origin,
+        copy_size,
+        source_copy.aspect,
+        "copy texture source",
+        false,
+    )?;
+    validate_texture_copy_subresource(
+        &destination,
+        destination_copy.mip_level,
+        destination_copy.origin,
+        copy_size,
+        destination_copy.aspect,
+        "copy texture destination",
+        false,
+    )?;
+
+    if (source_caps.aspects.depth || source_caps.aspects.stencil)
+        && source_copy.aspect != TextureAspect::All
+    {
+        return Err("copy texture to texture depth/stencil copies require All aspect".to_owned());
+    }
+    if source.sample_count() > 1
+        && (!origin_is_zero(source_copy.origin)
+            || !origin_is_zero(destination_copy.origin)
+            || copy_size != source.subresource_size(source_copy.mip_level)
+            || copy_size != destination.subresource_size(destination_copy.mip_level))
+    {
+        return Err("copy texture multisampled copies must cover the full subresource".to_owned());
+    }
+    if source.same(&destination) {
+        validate_same_texture_copy(
+            &source,
+            source_copy.mip_level,
+            source_copy.origin,
+            destination_copy.mip_level,
+            destination_copy.origin,
+            copy_size,
+        )?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_texture_copy_subresource(
+    texture: &Texture,
+    mip_level: u32,
+    origin: Origin3d,
+    copy_size: Extent3d,
+    aspect: TextureAspect,
+    label: &str,
+    require_2d_single_layer: bool,
+) -> Result<FormatCaps, String> {
+    if mip_level >= texture.mip_level_count() {
+        return Err(format!("{label} mipLevel is out of range"));
+    }
+
+    let Some(format_caps) = texture.format().caps() else {
+        return Err(format!("{label} format must not be Undefined"));
+    };
+    validate_copy_aspect(format_caps, aspect, label)?;
+
+    let subresource = texture.subresource_size(mip_level);
+    if origin
+        .x
+        .checked_add(copy_size.width)
+        .is_none_or(|end| end > subresource.width)
+        || origin
+            .y
+            .checked_add(copy_size.height)
+            .is_none_or(|end| end > subresource.height)
+        || origin
+            .z
+            .checked_add(copy_size.depth_or_array_layers)
+            .is_none_or(|end| end > subresource.depth_or_array_layers)
+    {
+        return Err(format!("{label} range exceeds the texture subresource"));
+    }
+    if require_2d_single_layer
+        && texture.dimension() == TextureDimension::D2
+        && copy_size.depth_or_array_layers != 1
+    {
+        return Err(format!(
+            "{label} 2D copies require depthOrArrayLayers to be one"
+        ));
+    }
+    if (format_caps.aspects.depth || format_caps.aspects.stencil)
+        && (texture.dimension() != TextureDimension::D2 || copy_size.depth_or_array_layers != 1)
+    {
+        return Err(format!(
+            "{label} depth/stencil copies require a single 2D layer"
+        ));
+    }
+
+    Ok(format_caps)
+}
+
+pub(crate) fn validate_copy_aspect(
+    format_caps: FormatCaps,
+    aspect: TextureAspect,
+    label: &str,
+) -> Result<(), String> {
+    match aspect {
+        TextureAspect::All => Ok(()),
+        TextureAspect::DepthOnly if format_caps.aspects.depth => Ok(()),
+        TextureAspect::StencilOnly if format_caps.aspects.stencil => Ok(()),
+        TextureAspect::DepthOnly => {
+            Err(format!("{label} DepthOnly aspect requires a depth format"))
+        }
+        TextureAspect::StencilOnly => Err(format!(
+            "{label} StencilOnly aspect requires a stencil format"
+        )),
+    }
+}
+
+pub(crate) fn texture_formats_copy_compatible(
+    source: TextureFormat,
+    destination: TextureFormat,
+) -> bool {
+    source == destination || source.srgb_pair() == Some(destination)
+}
+
+pub(crate) fn origin_is_zero(origin: Origin3d) -> bool {
+    origin.x == 0 && origin.y == 0 && origin.z == 0
+}
+
+pub(crate) fn validate_same_texture_copy(
+    texture: &Texture,
+    source_mip_level: u32,
+    source_origin: Origin3d,
+    destination_mip_level: u32,
+    destination_origin: Origin3d,
+    copy_size: Extent3d,
+) -> Result<(), String> {
+    if copy_size.width == 0 || copy_size.height == 0 || copy_size.depth_or_array_layers == 0 {
+        return Ok(());
+    }
+    if source_mip_level != destination_mip_level {
+        return Ok(());
+    }
+    if texture.dimension() == TextureDimension::D3 {
+        return Err(
+            "copy texture to texture cannot copy within the same 3D texture mip".to_owned(),
+        );
+    }
+
+    let source_end = source_origin
+        .z
+        .saturating_add(copy_size.depth_or_array_layers);
+    let destination_end = destination_origin
+        .z
+        .saturating_add(copy_size.depth_or_array_layers);
+    if source_origin.z < destination_end && destination_origin.z < source_end {
+        return Err(
+            "copy texture to texture same-texture array layers must not overlap".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_buffer_range(
+    offset: u64,
+    size: u64,
+    buffer_size: u64,
+    label: &str,
+) -> Result<(), String> {
+    let Some(end) = offset.checked_add(size) else {
+        return Err(format!("{label} overflows"));
+    };
+    if offset > buffer_size || end > buffer_size {
+        return Err(format!("{label} exceeds buffer size"));
+    }
+    Ok(())
+}
+
+pub(crate) fn record_first_error_locked(
+    state: &mut CommandEncoderState,
+    message: impl Into<String>,
+) {
+    if state.first_error.is_none() {
+        state.first_error = Some(message.into());
+    }
+}
+
+pub(crate) fn record_first_error_option(
+    first_error: &mut Option<String>,
+    message: impl Into<String>,
+) {
+    if first_error.is_none() {
+        *first_error = Some(message.into());
+    }
+}
+
+impl CommandBuffer {
+    pub(crate) fn new(
+        is_error: bool,
+        referenced_buffers: Vec<Arc<Buffer>>,
+        command_ops: Vec<CommandExecution>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(CommandBufferInner {
+                is_error,
+                referenced_buffers,
+                command_ops,
+                submitted: Mutex::new(false),
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.inner.is_error
+    }
+
+    pub(crate) fn referenced_buffers(&self) -> &[Arc<Buffer>] {
+        &self.inner.referenced_buffers
+    }
+
+    pub(crate) fn command_ops(&self) -> &[CommandExecution] {
+        &self.inner.command_ops
+    }
+
+    pub(crate) fn mark_submitted(&self) -> Result<(), String> {
+        let mut submitted = self.inner.submitted.lock();
+        if *submitted {
+            Err("command buffer cannot be submitted more than once".to_owned())
+        } else {
+            *submitted = true;
+            Ok(())
+        }
+    }
+
+    pub(crate) fn is_submitted(&self) -> bool {
+        *self.inner.submitted.lock()
+    }
+
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::*;
+    use crate::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn command_encoder_create_finish_idempotent_and_command_buffer_is_error_false() {
+        let encoder = noop_device().create_command_encoder();
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert!(command_buffer.command_ops().is_empty());
+
+        let (second, error) = encoder.finish();
+        assert!(second.is_error());
+        assert_eq!(
+            error,
+            Some("command encoder cannot be finished more than once".to_owned())
+        );
+    }
+
+    #[test]
+    fn command_encoder_debug_markers_and_validation_error() {
+        let encoder = noop_device().create_command_encoder();
+
+        assert_eq!(encoder.push_debug_group(), None);
+        assert_eq!(encoder.insert_debug_marker(), None);
+        assert_eq!(encoder.pop_debug_group(), None);
+        assert_eq!(
+            encoder.record_validation_error("forced encoder validation"),
+            None
+        );
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(error, Some("forced encoder validation".to_owned()));
+    }
+
+    #[test]
+    fn command_encoder_buffer_copies_clear_and_write_validate_offsets() {
+        let device = noop_device();
+        let source = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+
+        assert_eq!(
+            encoder.copy_buffer_to_buffer(source.clone(), 0, destination.clone(), 0, 16),
+            None
+        );
+        assert_eq!(encoder.clear_buffer(destination.clone(), 0, 16), None);
+        assert_eq!(encoder.write_buffer(destination.clone(), 0, 16), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 1);
+
+        let invalid = device.create_command_encoder();
+        assert_eq!(
+            invalid.copy_buffer_to_buffer(source, 2, destination, 0, 4),
+            None
+        );
+        let (command_buffer, error) = invalid.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("copy source offset must be 4-byte aligned".to_owned())
+        );
+    }
+
+    #[test]
+    fn command_encoder_texture_copies_record_copy_commands() {
+        let device = noop_device();
+        let texture_a = Arc::new(device.create_texture(texture_descriptor_4x4()));
+        let texture_b = Arc::new(device.create_texture(texture_descriptor_4x4()));
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
+            size: 1024,
+            mapped_at_creation: false,
+        }));
+        let layout = TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(256),
+            rows_per_image: None,
+        };
+        let size = Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+        let texture_info_a = TexelCopyTextureInfo {
+            texture: texture_a,
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: 0 },
+            aspect: TextureAspect::All,
+        };
+        let texture_info_b = TexelCopyTextureInfo {
+            texture: texture_b,
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: 0 },
+            aspect: TextureAspect::All,
+        };
+        let buffer_info = TexelCopyBufferInfo { buffer, layout };
+        let encoder = device.create_command_encoder();
+
+        assert_eq!(
+            encoder.copy_buffer_to_texture(buffer_info.clone(), texture_info_a.clone(), size),
+            None
+        );
+        assert_eq!(
+            encoder.copy_texture_to_buffer(texture_info_a.clone(), buffer_info, size),
+            None
+        );
+        assert_eq!(
+            encoder.copy_texture_to_texture(texture_info_a, texture_info_b, size),
+            None
+        );
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 3);
+    }
+
+    #[test]
+    fn command_encoder_query_and_timestamps_pin_validation_and_resolve() {
+        let device = noop_device();
+        let (timestamp_query, _) = device.create_query_set(QuerySetDescriptor {
+            label: "bad timestamp".to_owned(),
+            kind: QueryType::Timestamp,
+            count: 2,
+        });
+        let timestamp_encoder = device.create_command_encoder();
+        assert_eq!(
+            timestamp_encoder.write_timestamp(Arc::new(timestamp_query), 0),
+            None
+        );
+        let (command_buffer, error) = timestamp_encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("write timestamp cannot use an error query set".to_owned())
+        );
+
+        let (query_set, error) = device.create_query_set(QuerySetDescriptor {
+            label: "occlusion".to_owned(),
+            kind: QueryType::Occlusion,
+            count: 2,
+        });
+        assert_eq!(error, None);
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::QUERY_RESOLVE,
+            size: 256,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.resolve_query_set(Arc::new(query_set), 0, 2, destination, 0),
+            None
+        );
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+    }
+}
