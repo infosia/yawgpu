@@ -13,6 +13,13 @@ static const wchar_t YAWGPU_WINDOW_CLASS_NAME[] = L"YawgpuExampleWindow";
 static ATOM yawgpu_window_class = 0;
 static unsigned int yawgpu_window_count = 0;
 
+static void yawgpu_unregister_window_class_if_unused(void) {
+    if (yawgpu_window_count == 0 && yawgpu_window_class) {
+        UnregisterClassW(YAWGPU_WINDOW_CLASS_NAME, GetModuleHandleW(NULL));
+        yawgpu_window_class = 0;
+    }
+}
+
 static void widen_ascii(const char *source, wchar_t *dest, size_t dest_len) {
     if (!dest || dest_len == 0) {
         return;
@@ -98,6 +105,7 @@ YawgpuWindow *yawgpu_window_create(int width, int height, const char *title) {
     if (!AdjustWindowRectEx(&rect, style, FALSE, ex_style)) {
         fprintf(stderr, "failed to adjust Win32 window rect\n");
         free(window);
+        yawgpu_unregister_window_class_if_unused();
         return NULL;
     }
 
@@ -118,6 +126,7 @@ YawgpuWindow *yawgpu_window_create(int width, int height, const char *title) {
     if (!hwnd) {
         fprintf(stderr, "failed to create Win32 window\n");
         free(window);
+        yawgpu_unregister_window_class_if_unused();
         return NULL;
     }
 
@@ -133,6 +142,7 @@ void yawgpu_window_destroy(YawgpuWindow *window) {
         return;
     }
     if (window->hwnd) {
+        SetWindowLongPtrW(window->hwnd, GWLP_USERDATA, 0);
         DestroyWindow(window->hwnd);
     }
     free(window);
@@ -140,10 +150,7 @@ void yawgpu_window_destroy(YawgpuWindow *window) {
     if (yawgpu_window_count > 0) {
         --yawgpu_window_count;
     }
-    if (yawgpu_window_count == 0 && yawgpu_window_class) {
-        UnregisterClassW(YAWGPU_WINDOW_CLASS_NAME, GetModuleHandleW(NULL));
-        yawgpu_window_class = 0;
-    }
+    yawgpu_unregister_window_class_if_unused();
 }
 
 bool yawgpu_window_should_close(YawgpuWindow *window) {
