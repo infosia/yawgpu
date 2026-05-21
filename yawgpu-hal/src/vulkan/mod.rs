@@ -1,4 +1,4 @@
-use std::ffi::{c_void, CStr, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,13 +32,19 @@ impl VulkanInstance {
     pub fn new() -> Result<Self, HalError> {
         let entry = unsafe { ash::Entry::load() }
             .map_err(|_| HalError::BackendUnavailable { backend: BACKEND })?;
-        let extension_names = [
-            vk::KHR_PORTABILITY_ENUMERATION_NAME.as_ptr(),
-            vk::KHR_SURFACE_NAME.as_ptr(),
-            vk::EXT_METAL_SURFACE_NAME.as_ptr(),
-        ];
+        let available_extensions =
+            unsafe { entry.enumerate_instance_extension_properties(None) }
+                .map_err(|_| HalError::BackendUnavailable { backend: BACKEND })?;
+        let available_extension_names = available_extensions
+            .iter()
+            .filter_map(|extension| extension.extension_name_as_c_str().ok())
+            .collect::<Vec<_>>();
+        let Some((extension_names, flags)) = instance_extension_config(&available_extension_names)
+        else {
+            return Err(HalError::BackendUnavailable { backend: BACKEND });
+        };
         let create_info = vk::InstanceCreateInfo::default()
-            .flags(vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR)
+            .flags(flags)
             .enabled_extension_names(&extension_names);
         let instance = unsafe { entry.create_instance(&create_info, None) }
             .map_err(|_| HalError::DeviceCreationFailed { backend: BACKEND })?;
@@ -94,6 +100,39 @@ impl VulkanInstance {
             current_image_index: None,
         })
     }
+}
+
+fn instance_extension_config(
+    available_extensions: &[&CStr],
+) -> Option<(Vec<*const c_char>, vk::InstanceCreateFlags)> {
+    if !has_instance_extension(available_extensions, vk::KHR_SURFACE_NAME) {
+        return None;
+    }
+
+    let mut extension_names = vec![vk::KHR_SURFACE_NAME.as_ptr()];
+    if has_instance_extension(available_extensions, vk::EXT_METAL_SURFACE_NAME) {
+        extension_names.push(vk::EXT_METAL_SURFACE_NAME.as_ptr());
+    }
+    if has_instance_extension(available_extensions, vk::KHR_WIN32_SURFACE_NAME) {
+        extension_names.push(vk::KHR_WIN32_SURFACE_NAME.as_ptr());
+    }
+
+    let portability_enumeration =
+        has_instance_extension(available_extensions, vk::KHR_PORTABILITY_ENUMERATION_NAME);
+    if portability_enumeration {
+        extension_names.push(vk::KHR_PORTABILITY_ENUMERATION_NAME.as_ptr());
+    }
+    let flags = if portability_enumeration {
+        vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR
+    } else {
+        vk::InstanceCreateFlags::default()
+    };
+
+    Some((extension_names, flags))
+}
+
+fn has_instance_extension(available_extensions: &[&CStr], name: &CStr) -> bool {
+    available_extensions.contains(&name)
 }
 
 struct VulkanInstanceInner {
@@ -260,6 +299,55 @@ pub use texture::{VulkanSampler, VulkanTexture};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn extension_names_from_pointers(extension_names: &[*const c_char]) -> Vec<&CStr> {
+        extension_names
+            .iter()
+            .map(|name| unsafe { CStr::from_ptr(*name) })
+            .collect()
+    }
+
+    #[test]
+    fn vulkan_instance_extension_config_requires_khr_surface() {
+        assert!(instance_extension_config(&[vk::KHR_WIN32_SURFACE_NAME]).is_none());
+    }
+
+    #[test]
+    fn vulkan_instance_extension_config_enables_available_optional_extensions() {
+        let (extension_names, flags) = instance_extension_config(&[
+            vk::KHR_SURFACE_NAME,
+            vk::EXT_METAL_SURFACE_NAME,
+            vk::KHR_WIN32_SURFACE_NAME,
+            vk::KHR_PORTABILITY_ENUMERATION_NAME,
+        ])
+        .expect("KHR_surface should allow instance extension configuration");
+
+        let extension_names = extension_names_from_pointers(&extension_names);
+        assert_eq!(
+            extension_names,
+            vec![
+                vk::KHR_SURFACE_NAME,
+                vk::EXT_METAL_SURFACE_NAME,
+                vk::KHR_WIN32_SURFACE_NAME,
+                vk::KHR_PORTABILITY_ENUMERATION_NAME,
+            ]
+        );
+        assert_eq!(flags, vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR);
+    }
+
+    #[test]
+    fn vulkan_instance_extension_config_skips_absent_optional_extensions() {
+        let (extension_names, flags) =
+            instance_extension_config(&[vk::KHR_SURFACE_NAME, vk::KHR_WIN32_SURFACE_NAME])
+                .expect("KHR_surface should allow instance extension configuration");
+
+        let extension_names = extension_names_from_pointers(&extension_names);
+        assert_eq!(
+            extension_names,
+            vec![vk::KHR_SURFACE_NAME, vk::KHR_WIN32_SURFACE_NAME]
+        );
+        assert_eq!(flags, vk::InstanceCreateFlags::default());
+    }
 
     #[test]
     #[ignore = "manual real Vulkan backend test"]
