@@ -1,6 +1,7 @@
 # Phase 12 — Phase Review (mandatory)
 
-Status: in progress (MINOR fixes pending). Per
+Status: **COMPLETE** (2026-05-21 — 0 CRITICAL / 0 MAJOR; MINOR #1 + #2
+fixed in `37b6f89`, #3 + #4 dropped with rationale). Per
 `../reference/workflow.md` ("Phase Review"): a fresh no-context
 subagent reviewed the cumulative Phase 12 diff (`2417855^..HEAD` —
 P12.0 spec, P12.1 cross-platform `VulkanInstance::new`, P12.2 HWND
@@ -64,13 +65,16 @@ are fixed together in one commit via handoff **P12-Review-Fix**.
 
 ## Gate
 
-Phase 12 has **0 open CRITICAL / 0 open MAJOR**, so it is COMPLETE-
-eligible once the two accepted MINOR fixes land (user elected to fix
-rather than defer). Dropped MINORs (#3, #4) recorded above with
-rationale.
+Phase 12 has **0 CRITICAL / 0 MAJOR**, and the two accepted MINOR
+fixes have landed (user elected to fix rather than defer). Dropped
+MINORs (#3, #4) recorded above with rationale. **Phase 12 COMPLETE.**
 
 ## Fix log
 
-- P12-Review-Fix (`framework_windows.c` MINOR #1 + #2): _pending —
-  commit hash to be recorded when the coding agent's fix is reviewed
-  and committed._
+- P12-Review-Fix (`framework_windows.c` MINOR #1 + #2): commit
+  `37b6f89`. Factored `yawgpu_unregister_window_class_if_unused()`
+  called on both `yawgpu_window_create` failure paths + in destroy
+  (no class-atom leak); cleared `GWLP_USERDATA` before `DestroyWindow`
+  (no dangling USERDATA). Windows examples rebuilt `/W4`-clean
+  (framework + the three windowed exes); Rust untouched, gate still
+  green.

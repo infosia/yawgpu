@@ -1,6 +1,8 @@
 # Phase 12 — Windows windowed examples (HWND surface + Win32 windowing)
 
-Status: **PLANNED** (2026-05-21 — P12.0 spec authored). Rules/plan:
+Status: **COMPLETE** (2026-05-21 — P12.0–P12.5 done, all windowed
+examples build + run on Windows/Vulkan; Phase 12 Review 0C/0M, MINOR
+fixes in `37b6f89`, log in `phase-12-review.md`). Rules/plan:
 `../blocks/85-windows-surface.md`. Roles/loop:
 `../reference/workflow.md`. Windows toolchain rules:
 `../blocks/95-windows-build.md` (unchanged).
