@@ -58,6 +58,9 @@ YawgpuWindow *yawgpu_window_create(int width, int height, const char *title);
 void yawgpu_window_destroy(YawgpuWindow *window);
 bool yawgpu_window_should_close(YawgpuWindow *window);
 void yawgpu_window_poll_events(void);
+WGPUSurface yawgpu_window_create_surface(WGPUInstance instance,
+                                         YawgpuWindow *window,
+                                         const char *label);
 void *yawgpu_window_metal_layer(YawgpuWindow *window);
 void yawgpu_window_framebuffer_size(YawgpuWindow *window, int *width, int *height);
 

@@ -65,30 +65,9 @@ static void triangle_app_destroy(TriangleApp *app) {
 }
 
 static bool triangle_create_surface(TriangleApp *app) {
-    void *layer = yawgpu_window_metal_layer(app->window);
-    if (!layer) {
-        fprintf(stderr, "failed to get CAMetalLayer\n");
-        return false;
-    }
-
-    WGPUSurfaceSourceMetalLayer metal_layer = {
-        .chain = {
-            .next = NULL,
-            .sType = WGPUSType_SurfaceSourceMetalLayer,
-        },
-        .layer = layer,
-    };
-    app->surface = wgpuInstanceCreateSurface(
-        app->context.instance,
-        &(WGPUSurfaceDescriptor){
-            .nextInChain = &metal_layer.chain,
-            .label = yawgpu_string_view("triangle surface"),
-        });
-    if (!app->surface) {
-        fprintf(stderr, "failed to create surface\n");
-        return false;
-    }
-    return true;
+    app->surface =
+        yawgpu_window_create_surface(app->context.instance, app->window, "triangle surface");
+    return app->surface != NULL;
 }
 
 static bool triangle_create_pipeline(TriangleApp *app, WGPUTextureFormat format) {
@@ -222,6 +201,9 @@ static bool triangle_app_init(TriangleApp *app) {
 static bool triangle_render_frame(const TriangleApp *app) {
     WGPUSurfaceTexture current = {0};
     wgpuSurfaceGetCurrentTexture(app->surface, &current);
+    if (current.status == WGPUSurfaceGetCurrentTextureStatus_Lost && !current.texture) {
+        return true;
+    }
     if (current.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal ||
         !current.texture) {
         fprintf(stderr, "failed to acquire surface texture, status=%u\n", current.status);
