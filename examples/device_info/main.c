@@ -1,5 +1,18 @@
+// device_info — dumps the capabilities of the selected adapter and device.
+//
+// WebGPU exposes two capability surfaces:
+//   * Limits   — numeric maxima/minima (texture sizes, binding counts,
+//                workgroup dimensions, alignment requirements, ...).
+//   * Features — optional, named capabilities a device may or may not
+//                support (timestamp queries, texture compression, f16, ...).
+// Both are reported separately by the *adapter* (what the hardware can do)
+// and by the *device* (what was actually requested/enabled). This program
+// prints all four. It is the C analogue of Dawn's `DawnInfo` sample.
+
 #include "framework.h"
 
+// Limits are printed as a name → value table; u32 and u64 fields use
+// separate helpers because of their different format specifiers.
 static void print_limit_u32(const char *name, uint32_t value) {
     printf("  %-42s %u\n", name, value);
 }
@@ -8,6 +21,7 @@ static void print_limit_u64(const char *name, uint64_t value) {
     printf("  %-42s %llu\n", name, (unsigned long long)value);
 }
 
+// Maps a feature enum to a human-readable name for printing.
 static const char *feature_name(WGPUFeatureName feature) {
     switch (feature) {
     case WGPUFeatureName_CoreFeaturesAndLimits:
@@ -112,8 +126,11 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
+    // vendor / architecture / device / backend type.
     yawgpu_print_adapter_info(context.adapter);
 
+    // Limits are written into a caller-owned struct (an out-parameter); a
+    // Success status means it was populated.
     WGPULimits adapter_limits = {0};
     if (wgpuAdapterGetLimits(context.adapter, &adapter_limits) == WGPUStatus_Success) {
         printf("\nAdapter ");
@@ -126,6 +143,8 @@ int main(void) {
         print_limits(&device_limits);
     }
 
+    // Feature queries allocate an array the caller must free with
+    // wgpuSupportedFeaturesFreeMembers once done reading it.
     WGPUSupportedFeatures adapter_features = {0};
     wgpuAdapterGetFeatures(context.adapter, &adapter_features);
     printf("\nAdapter ");

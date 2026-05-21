@@ -1,10 +1,18 @@
+// framework.c — implementation of the shared example helpers declared in
+// framework.h. The interesting recurring pattern here is how WebGPU's
+// asynchronous requests (adapter, device) are turned into simple blocking
+// calls: register a callback that stores its result into a small state
+// struct, then pump the instance event loop until the callback fires.
+
 #include "framework.h"
 
+// Captures the result of an async wgpuInstanceRequestAdapter callback.
 typedef struct RequestAdapterState {
     WGPUAdapter adapter;
     WGPURequestAdapterStatus status;
 } RequestAdapterState;
 
+// Captures the result of an async wgpuAdapterRequestDevice callback.
 typedef struct RequestDeviceState {
     WGPUDevice device;
     WGPURequestDeviceStatus status;
@@ -23,6 +31,8 @@ static void print_callback_message(const char *prefix, WGPUStringView message) {
     fputc('\n', stderr);
 }
 
+// Installed on the device so any validation/internal error that is not
+// caught by an explicit error scope is printed instead of silently ignored.
 static void uncaptured_error_callback(const WGPUDevice *device,
                                       WGPUErrorType type,
                                       WGPUStringView message,
@@ -82,6 +92,8 @@ void yawgpu_print_string_view(WGPUStringView value) {
     }
 }
 
+// Maps the YAWGPU_BACKEND environment variable to a backend enum value,
+// defaulting to Noop for unset/empty/unknown values.
 static uint32_t backend_from_environment(void) {
     const char *backend = getenv("YAWGPU_BACKEND");
     if (!backend || strcmp(backend, "") == 0 || strcmp(backend, "noop") == 0) {
@@ -98,6 +110,8 @@ static uint32_t backend_from_environment(void) {
 }
 
 WGPUInstance yawgpu_instance_create(void) {
+    // Chain the vendor backend-select struct onto the instance descriptor
+    // so the chosen backend is applied at creation time.
     WGPUYawgpuInstanceBackendSelect backend = {
         .chain = {
             .next = NULL,
@@ -111,6 +125,8 @@ WGPUInstance yawgpu_instance_create(void) {
     return wgpuCreateInstance(&descriptor);
 }
 
+// Blocks until `future` is done by processing queued events and then waiting
+// on it. This is how the examples turn async operations into synchronous code.
 void yawgpu_wait_for_future(WGPUInstance instance, WGPUFuture future) {
     wgpuInstanceProcessEvents(instance);
     WGPUFutureWaitInfo wait_info = {
@@ -136,6 +152,8 @@ WGPUAdapter yawgpu_request_adapter(WGPUInstance instance) {
 
 WGPUDevice yawgpu_request_device(WGPUInstance instance, WGPUAdapter adapter) {
     RequestDeviceState state = {0};
+    // Request a device with default limits/features, wiring up the
+    // uncaptured-error callback so mistakes surface on stderr.
     WGPUDeviceDescriptor descriptor = {
         .nextInChain = NULL,
         .label = yawgpu_string_view("yawgpu example device"),
@@ -158,6 +176,8 @@ WGPUDevice yawgpu_request_device(WGPUInstance instance, WGPUAdapter adapter) {
     return state.device;
 }
 
+// Acquires instance → adapter → device in sequence; on any failure the
+// remaining fields stay NULL and the caller releases what was obtained.
 YawgpuContext yawgpu_context_create(void) {
     YawgpuContext context = {0};
     context.instance = yawgpu_instance_create();
@@ -190,6 +210,9 @@ void yawgpu_context_release(YawgpuContext *context) {
     context->instance = NULL;
 }
 
+// Reads an entire file into a newly-allocated, NUL-terminated buffer.
+// Returns NULL (after printing the reason) on any I/O failure; the caller
+// frees the result.
 static char *read_file(const char *path, size_t *length_out) {
     FILE *file = fopen(path, "rb");
     if (!file) {
@@ -230,6 +253,13 @@ static char *read_file(const char *path, size_t *length_out) {
     return contents;
 }
 
+// Loads a WGSL file and compiles it. The WGSL source is supplied through a
+// WGPUShaderSourceWGSL struct chained onto the shader-module descriptor —
+// the standard way to pass shader text across the C ABI.
+//
+// Note: `path` is resolved relative to the current working directory, so
+// run the example binaries from their own directory (the build copies each
+// shader.wgsl next to its binary).
 WGPUShaderModule yawgpu_load_wgsl_shader(WGPUDevice device, const char *path) {
     size_t length = 0;
     char *source = read_file(path, &length);
@@ -255,11 +285,16 @@ WGPUShaderModule yawgpu_load_wgsl_shader(WGPUDevice device, const char *path) {
     return module;
 }
 
+// Creates a buffer and uploads `contents` into it. Uses the
+// `mappedAtCreation` shortcut: a buffer created mapped can be written
+// immediately via GetMappedRange + memcpy, with no queue or copy involved;
+// Unmap then hands it to the GPU.
 WGPUBuffer yawgpu_create_buffer_init(WGPUDevice device,
                                      const YawgpuBufferInitDescriptor *descriptor) {
     if (!descriptor) {
         return NULL;
     }
+    // Buffers must be non-empty; use a 4-byte minimum for a zero-size request.
     size_t size = descriptor->size == 0 ? 4 : descriptor->size;
     WGPUBuffer buffer = wgpuDeviceCreateBuffer(device, &(WGPUBufferDescriptor){
         .nextInChain = NULL,

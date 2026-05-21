@@ -1,3 +1,15 @@
+// hello_triangle — a windowed triangle fed from a vertex buffer.
+//
+// This is a port of Dawn's HelloTriangle sample. It draws the same red
+// triangle as the `triangle` example, but the difference is instructive:
+// here the vertex positions come from a real *vertex buffer* uploaded to
+// the GPU, instead of being generated inside the vertex shader from the
+// built-in vertex index. That means this example additionally shows:
+//   * uploading vertex data to a Vertex-usage buffer,
+//   * describing the buffer's layout to the pipeline (stride + attribute),
+//   * binding the buffer each frame with SetVertexBuffer before drawing.
+// Everything else (surface, swapchain, per-frame loop) mirrors `triangle`.
+
 #include "framework.h"
 
 typedef struct HelloTriangleApp {
@@ -6,11 +18,13 @@ typedef struct HelloTriangleApp {
     YawgpuWindow *window;
     WGPUSurface surface;
     WGPUShaderModule shader;
-    WGPUBuffer vertex_buffer;
+    WGPUBuffer vertex_buffer; // holds the three clip-space vertices below
     WGPUPipelineLayout pipeline_layout;
     WGPURenderPipeline pipeline;
 } HelloTriangleApp;
 
+// Three vertices as vec4 clip-space positions (x, y, z, w), one per row:
+// top-center, bottom-left, bottom-right.
 static const float vertices[12] = {
     0.0f, 0.5f, 0.0f, 1.0f,
     -0.5f, -0.5f, 0.0f, 1.0f,
@@ -82,6 +96,8 @@ static bool hello_triangle_create_surface(HelloTriangleApp *app) {
 
 static bool hello_triangle_create_pipeline(HelloTriangleApp *app, WGPUTextureFormat format) {
     app->shader = yawgpu_load_wgsl_shader(app->context.device, "shader.wgsl");
+    // Upload the vertex data once. Vertex usage makes it bindable as a
+    // vertex buffer; CopyDst lets the initial contents be written into it.
     app->vertex_buffer = yawgpu_create_buffer_init(
         app->context.device,
         &(YawgpuBufferInitDescriptor){
@@ -108,11 +124,16 @@ static bool hello_triangle_create_pipeline(HelloTriangleApp *app, WGPUTextureFor
         return false;
     }
 
+    // Describe how the pipeline reads the vertex buffer. One attribute:
+    // a vec4<f32> at byte offset 0, delivered to @location(0) in the
+    // vertex shader.
     WGPUVertexAttribute vertex_attribute = {
         .format = WGPUVertexFormat_Float32x4,
         .offset = 0,
         .shaderLocation = 0,
     };
+    // The buffer holds one vec4 per vertex, so the stride between vertices
+    // is 4 floats; stepMode=Vertex advances one stride per vertex.
     WGPUVertexBufferLayout vertex_buffer_layout = {
         .arrayStride = 4 * sizeof(float),
         .stepMode = WGPUVertexStepMode_Vertex,
@@ -131,6 +152,8 @@ static bool hello_triangle_create_pipeline(HelloTriangleApp *app, WGPUTextureFor
                 .entryPoint = yawgpu_string_view("vs_main"),
                 .constantCount = 0,
                 .constants = NULL,
+                // Unlike `triangle`, this pipeline takes one vertex buffer
+                // (described by vertex_buffer_layout above).
                 .bufferCount = 1,
                 .buffers = &vertex_buffer_layout,
             },
@@ -291,6 +314,9 @@ static bool hello_triangle_render_frame(const HelloTriangleApp *app) {
         wgpuTextureRelease(current.texture);
         return false;
     }
+    // Bind the pipeline, then bind the vertex buffer to slot 0 (matching
+    // bufferCount=1 in the pipeline) covering its whole length, then draw
+    // the 3 vertices it contains.
     wgpuRenderPassEncoderSetPipeline(pass, app->pipeline);
     wgpuRenderPassEncoderSetVertexBuffer(pass, 0, app->vertex_buffer, 0, WGPU_WHOLE_SIZE);
     wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
