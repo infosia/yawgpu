@@ -72,6 +72,10 @@ use crate::{
     native, YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_METAL,
     YAWGPU_INSTANCE_BACKEND_VULKAN, YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
 };
+#[cfg(feature = "shader-passthrough")]
+use crate::{
+    YaWGPUMslEntryPoint, YaWGPUShaderModuleMslDescriptor, YaWGPUShaderModuleSpirVDescriptor,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::os::raw::c_void;
 use std::sync::{Arc, Mutex};
@@ -4657,6 +4661,181 @@ mod tests {
             assert_validation_error_contains(instance, device, "size must be non-zero");
 
             wgpuSurfaceRelease(surface);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    fn valid_spirv_words() -> Vec<u32> {
+        vec![
+            0x0723_0203,
+            0x0001_0000,
+            0,
+            5,
+            0,
+            0x0002_0011,
+            1,
+            0x0003_000e,
+            0,
+            1,
+            0x0004_000f,
+            5,
+            1,
+            0x0000_7363,
+            0x0006_0010,
+            1,
+            17,
+            1,
+            1,
+            1,
+            0x0002_0013,
+            2,
+            0x0003_0021,
+            3,
+            2,
+            0x0005_0036,
+            2,
+            1,
+            0,
+            3,
+            0x0002_00f8,
+            4,
+            0x0001_00fd,
+            0x0001_0038,
+        ]
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    unsafe fn shader_module_is_error(module: native::WGPUShaderModule) -> bool {
+        borrow_handle::<WGPUShaderModuleImpl>(module, "WGPUShaderModule")
+            ._core
+            .is_error()
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn yawgpu_spirv_shader_module_ffi_accepts_valid_words_and_errors_on_bad_input() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let words = valid_spirv_words();
+            let descriptor = YaWGPUShaderModuleSpirVDescriptor {
+                nextInChain: std::ptr::null(),
+                label: label_view("valid spirv"),
+                codeSize: words.len() as u32,
+                code: words.as_ptr(),
+            };
+            let module = yawgpuDeviceCreateShaderModuleSpirV(device, &descriptor);
+            assert!(!module.is_null());
+            assert!(!shader_module_is_error(module));
+            wgpuShaderModuleRelease(module);
+
+            let bad_words = [0x1234_5678_u32];
+            let bad_descriptor = YaWGPUShaderModuleSpirVDescriptor {
+                nextInChain: std::ptr::null(),
+                label: label_view("bad spirv"),
+                codeSize: bad_words.len() as u32,
+                code: bad_words.as_ptr(),
+            };
+            let bad = yawgpuDeviceCreateShaderModuleSpirV(device, &bad_descriptor);
+            assert!(!bad.is_null());
+            assert!(shader_module_is_error(bad));
+            wgpuShaderModuleRelease(bad);
+
+            let empty_descriptor = YaWGPUShaderModuleSpirVDescriptor {
+                nextInChain: std::ptr::null(),
+                label: label_view("empty spirv"),
+                codeSize: 0,
+                code: std::ptr::null(),
+            };
+            let empty = yawgpuDeviceCreateShaderModuleSpirV(device, &empty_descriptor);
+            assert!(!empty.is_null());
+            assert!(shader_module_is_error(empty));
+            wgpuShaderModuleRelease(empty);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn standard_spirv_shader_source_chain_reaches_spirv_core_path() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let words = valid_spirv_words();
+            let mut source = native::WGPUShaderSourceSPIRV {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_ShaderSourceSPIRV,
+                },
+                codeSize: words.len() as u32,
+                code: words.as_ptr(),
+            };
+            let descriptor = native::WGPUShaderModuleDescriptor {
+                nextInChain: (&mut source.chain) as *mut _,
+                label: label_view("standard spirv"),
+            };
+            let module = wgpuDeviceCreateShaderModule(device, &descriptor);
+            assert!(!module.is_null());
+            assert!(!shader_module_is_error(module));
+            wgpuShaderModuleRelease(module);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn yawgpu_msl_shader_module_ffi_accepts_metadata_and_rejects_bad_stage_bits() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let entry = YaWGPUMslEntryPoint {
+                name: label_view("cs"),
+                stage: native::WGPUShaderStage_Compute,
+                workgroupSize: [2, 3, 4],
+            };
+            let descriptor = YaWGPUShaderModuleMslDescriptor {
+                nextInChain: std::ptr::null(),
+                label: label_view("valid msl"),
+                code: label_view("kernel void cs() {}"),
+                entryPointCount: 1,
+                entryPoints: &entry,
+            };
+            let module = yawgpuDeviceCreateShaderModuleMsl(device, &descriptor);
+            assert!(!module.is_null());
+            assert!(!shader_module_is_error(module));
+            wgpuShaderModuleRelease(module);
+
+            let zero_stage = YaWGPUMslEntryPoint {
+                name: label_view("cs"),
+                stage: native::WGPUShaderStage_None,
+                workgroupSize: [1, 1, 1],
+            };
+            let zero_descriptor = YaWGPUShaderModuleMslDescriptor {
+                nextInChain: std::ptr::null(),
+                label: label_view("zero stage msl"),
+                code: label_view("kernel void cs() {}"),
+                entryPointCount: 1,
+                entryPoints: &zero_stage,
+            };
+            let zero = yawgpuDeviceCreateShaderModuleMsl(device, &zero_descriptor);
+            assert!(!zero.is_null());
+            assert!(shader_module_is_error(zero));
+            wgpuShaderModuleRelease(zero);
+
+            let multi_stage = YaWGPUMslEntryPoint {
+                name: label_view("cs"),
+                stage: native::WGPUShaderStage_Vertex | native::WGPUShaderStage_Fragment,
+                workgroupSize: [1, 1, 1],
+            };
+            let multi_descriptor = YaWGPUShaderModuleMslDescriptor {
+                nextInChain: std::ptr::null(),
+                label: label_view("multi stage msl"),
+                code: label_view("kernel void cs() {}"),
+                entryPointCount: 1,
+                entryPoints: &multi_stage,
+            };
+            let multi = yawgpuDeviceCreateShaderModuleMsl(device, &multi_descriptor);
+            assert!(!multi.is_null());
+            assert!(shader_module_is_error(multi));
+            wgpuShaderModuleRelease(multi);
             release_handles(instance, adapter, device);
         }
     }
