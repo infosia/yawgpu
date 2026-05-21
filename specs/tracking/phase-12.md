@@ -49,8 +49,8 @@ run-verified on Windows in P12.5.
   refactor (R85-6). *(☑ DONE 2026-05-21, commit `74d0261`.)*
 - **P12.5** CMake builds windowed examples on Windows; docs; host
   run-verification (R85-7, R85-8). *(☑ DONE 2026-05-21, commit
-  `9e93b86`; build + headless real-GPU verified by Claude. Windowed
-  on-screen run pending on the host — see run log.)*
+  `9e93b86`; build + headless real-GPU verified by Claude; all three
+  windowed examples on-screen run confirmed by the user.)*
 - **Phase 12 Review** (mandatory) → COMPLETE
   (`tracking/phase-12-review.md`).
 
@@ -146,10 +146,10 @@ split into commits `10163ce` / `74d0261` / `9e93b86`)
   `YAWGPU_BACKEND=vulkan` reports `NVIDIA GeForce RTX 5060 Ti`,
   backendType 6 — the C FFI → Vulkan path works end-to-end on Windows
   hardware.
-- **Pending (host, on-screen):** running the three windowed exes with
-  `YAWGPU_BACKEND=vulkan` to confirm a window opens and renders ~60
-  frames then exits 0. Build + headless Vulkan verified; on-screen
-  present is the user's manual step.
+- **On-screen run CONFIRMED (user, 2026-05-21):** all three windowed
+  examples (`triangle`, `hello_triangle`, `surface_smoke`) run on
+  Windows with `YAWGPU_BACKEND=vulkan` — a window opens and renders.
+  SF3 real-presentation path now covered on Windows/Vulkan too.
 - MINOR (logged, accepted): the three windowed `main.c` gained a
   `WGPUSurfaceGetCurrentTextureStatus_Lost` frame-skip — a small
   robustness addition beyond R85-6's "no render-loop change", kept.
