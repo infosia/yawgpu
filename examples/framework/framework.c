@@ -112,10 +112,10 @@ static uint32_t backend_from_environment(void) {
 WGPUInstance yawgpu_instance_create(void) {
     // Chain the vendor backend-select struct onto the instance descriptor
     // so the chosen backend is applied at creation time.
-    WGPUYawgpuInstanceBackendSelect backend = {
+    YaWGPUInstanceBackendSelect backend = {
         .chain = {
             .next = NULL,
-            .sType = YAWGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT,
+            .sType = YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
         },
         .backend = backend_from_environment(),
     };

@@ -12,6 +12,9 @@ target_include_directories(framework PUBLIC
     "${CMAKE_SOURCE_DIR}/framework"
     "${YAWGPU_ROOT}/yawgpu/ffi/webgpu-headers"
 )
+if(YAWGPU_EXTENSION_COMPILE_DEFS)
+    target_compile_definitions(framework PUBLIC ${YAWGPU_EXTENSION_COMPILE_DEFS})
+endif()
 
 if(MSVC)
     target_compile_options(framework PRIVATE /W4)

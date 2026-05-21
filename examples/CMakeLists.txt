@@ -34,6 +34,7 @@ cmake_path(GET CMAKE_SOURCE_DIR PARENT_PATH YAWGPU_ROOT)
 set(YAWGPU_PROFILE "debug" CACHE STRING "Cargo profile used for libyawgpu")
 set_property(CACHE YAWGPU_PROFILE PROPERTY STRINGS debug release)
 set(YAWGPU_FEATURE "" CACHE STRING "Optional yawgpu cargo feature: metal or vulkan")
+set(YAWGPU_EXTENSIONS "" CACHE STRING "Optional yawgpu extension cargo features: shader-passthrough;tiled;mobile")
 
 if(YAWGPU_PROFILE STREQUAL "release")
     set(YAWGPU_CARGO_PROFILE_ARG --release)
@@ -43,10 +44,39 @@ else()
     set(YAWGPU_TARGET_PROFILE debug)
 endif()
 
-if(YAWGPU_FEATURE STREQUAL "")
-    set(YAWGPU_CARGO_FEATURE_ARGS)
+set(YAWGPU_CARGO_FEATURES)
+if(NOT YAWGPU_FEATURE STREQUAL "")
+    list(APPEND YAWGPU_CARGO_FEATURES ${YAWGPU_FEATURE})
+endif()
+
+string(REPLACE " " ";" YAWGPU_EXTENSIONS_LIST "${YAWGPU_EXTENSIONS}")
+set(YAWGPU_EXTENSION_COMPILE_DEFS)
+foreach(YAWGPU_EXTENSION IN LISTS YAWGPU_EXTENSIONS_LIST)
+    if(YAWGPU_EXTENSION STREQUAL "")
+        continue()
+    endif()
+    list(APPEND YAWGPU_CARGO_FEATURES ${YAWGPU_EXTENSION})
+    if(YAWGPU_EXTENSION STREQUAL "shader-passthrough")
+        list(APPEND YAWGPU_EXTENSION_COMPILE_DEFS YAWGPU_HAS_SHADER_PASSTHROUGH)
+    elseif(YAWGPU_EXTENSION STREQUAL "tiled")
+        list(APPEND YAWGPU_EXTENSION_COMPILE_DEFS YAWGPU_HAS_TILED)
+    elseif(YAWGPU_EXTENSION STREQUAL "mobile")
+        list(APPEND YAWGPU_EXTENSION_COMPILE_DEFS
+            YAWGPU_HAS_SHADER_PASSTHROUGH
+            YAWGPU_HAS_TILED
+        )
+    else()
+        message(FATAL_ERROR "Unknown YAWGPU_EXTENSIONS entry: ${YAWGPU_EXTENSION}")
+    endif()
+endforeach()
+list(REMOVE_DUPLICATES YAWGPU_CARGO_FEATURES)
+list(REMOVE_DUPLICATES YAWGPU_EXTENSION_COMPILE_DEFS)
+
+if(YAWGPU_CARGO_FEATURES)
+    list(JOIN YAWGPU_CARGO_FEATURES "," YAWGPU_CARGO_FEATURES_ARG)
+    set(YAWGPU_CARGO_FEATURE_ARGS --features "${YAWGPU_CARGO_FEATURES_ARG}")
 else()
-    set(YAWGPU_CARGO_FEATURE_ARGS --features ${YAWGPU_FEATURE})
+    set(YAWGPU_CARGO_FEATURE_ARGS)
 endif()
 
 # Use a feature-specific cargo target directory so that --features metal and
@@ -89,6 +119,9 @@ set_target_properties(yawgpu_c_api PROPERTIES
     IMPORTED_LOCATION "${YAWGPU_SHARED_LIB}"
     INTERFACE_INCLUDE_DIRECTORIES "${YAWGPU_ROOT}/yawgpu/ffi/webgpu-headers"
 )
+if(YAWGPU_EXTENSION_COMPILE_DEFS)
+    target_compile_definitions(yawgpu_c_api INTERFACE ${YAWGPU_EXTENSION_COMPILE_DEFS})
+endif()
 if(WIN32)
     set_target_properties(yawgpu_c_api PROPERTIES
         IMPORTED_IMPLIB "${YAWGPU_IMPORT_LIB}"

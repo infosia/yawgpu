@@ -18,25 +18,10 @@
 #include <string.h>
 
 #include "webgpu.h"
+#include "yawgpu.h"
 
 // Marks an intentionally-unused parameter (e.g. callback userdata we ignore).
 #define YAWGPU_UNUSED(x) (void)(x)
-// SType tag for yawgpu's vendor backend-select chained struct (below).
-#define YAWGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT ((WGPUSType)0x70000001u)
-
-// Backend values for WGPUYawgpuInstanceBackendSelect.backend.
-enum {
-    YAWGPU_INSTANCE_BACKEND_NOOP = 0,
-    YAWGPU_INSTANCE_BACKEND_METAL = 1,
-    YAWGPU_INSTANCE_BACKEND_VULKAN = 2,
-};
-
-// yawgpu vendor extension: chain this from WGPUInstanceDescriptor.nextInChain
-// to pick the backend at instance creation (driven by YAWGPU_BACKEND).
-typedef struct WGPUYawgpuInstanceBackendSelect {
-    WGPUChainedStruct chain;
-    uint32_t backend;
-} WGPUYawgpuInstanceBackendSelect;
 
 // The three handles every example needs, acquired together by
 // yawgpu_context_create() and released by yawgpu_context_release().

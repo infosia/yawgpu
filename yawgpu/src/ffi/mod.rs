@@ -69,8 +69,8 @@ use surface::*;
 use texture::*;
 
 use crate::{
-    native, WGPUYawgpuInstanceBackendSelect, WGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT,
-    WGPU_YAWGPU_INSTANCE_BACKEND_METAL, WGPU_YAWGPU_INSTANCE_BACKEND_VULKAN,
+    native, YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_METAL,
+    YAWGPU_INSTANCE_BACKEND_VULKAN, YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::os::raw::c_void;
@@ -1825,12 +1825,12 @@ unsafe fn instance_backend_selection(
     };
     let mut chain = descriptor.nextInChain;
     while let Some(node) = chain.as_ref() {
-        if node.sType == WGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT {
-            let selection = &*(node as *const native::WGPUChainedStruct
-                as *const WGPUYawgpuInstanceBackendSelect);
+        if node.sType == YAWGPU_STYPE_INSTANCE_BACKEND_SELECT {
+            let selection =
+                &*(node as *const native::WGPUChainedStruct as *const YaWGPUInstanceBackendSelect);
             return match selection.backend {
-                WGPU_YAWGPU_INSTANCE_BACKEND_METAL => InstanceBackendSelection::Metal,
-                WGPU_YAWGPU_INSTANCE_BACKEND_VULKAN => InstanceBackendSelection::Vulkan,
+                YAWGPU_INSTANCE_BACKEND_METAL => InstanceBackendSelection::Metal,
+                YAWGPU_INSTANCE_BACKEND_VULKAN => InstanceBackendSelection::Vulkan,
                 _ => InstanceBackendSelection::Noop,
             };
         }
@@ -1963,7 +1963,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::WGPU_YAWGPU_INSTANCE_BACKEND_NOOP;
+    use crate::YAWGPU_INSTANCE_BACKEND_NOOP;
 
     #[derive(Default)]
     struct RequestAdapterState {
@@ -2139,12 +2139,12 @@ mod tests {
     }
 
     unsafe fn make_noop_instance() -> native::WGPUInstance {
-        let mut chain = WGPUYawgpuInstanceBackendSelect {
+        let mut chain = YaWGPUInstanceBackendSelect {
             chain: native::WGPUChainedStruct {
                 next: std::ptr::null_mut(),
-                sType: WGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT,
+                sType: YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
             },
-            backend: WGPU_YAWGPU_INSTANCE_BACKEND_NOOP,
+            backend: YAWGPU_INSTANCE_BACKEND_NOOP,
         };
         let descriptor = native::WGPUInstanceDescriptor {
             nextInChain: (&mut chain.chain) as *mut native::WGPUChainedStruct,
