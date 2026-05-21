@@ -1,3 +1,4 @@
+use std::ffi::c_void;
 use std::sync::Arc;
 
 use yawgpu_hal::{HalInstance, HalSurface};
@@ -66,12 +67,29 @@ impl Instance {
     /// `layer` must be a valid, non-dangling `CAMetalLayer` instance pointer.
     pub unsafe fn create_surface_from_metal_layer(
         &self,
-        layer: *mut std::ffi::c_void,
+        layer: *mut c_void,
     ) -> Result<HalSurface, Error> {
         unsafe {
             self.inner
                 .hal
                 .create_surface_from_metal_layer(layer)
+                .map_err(Error::Hal)
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `hwnd` must be a valid Win32 window handle and `hinstance` its owning
+    /// module handle or null.
+    pub unsafe fn create_surface_from_windows_hwnd(
+        &self,
+        hinstance: *mut c_void,
+        hwnd: *mut c_void,
+    ) -> Result<HalSurface, Error> {
+        unsafe {
+            self.inner
+                .hal
+                .create_surface_from_windows_hwnd(hinstance, hwnd)
                 .map_err(Error::Hal)
         }
     }
@@ -124,6 +142,18 @@ mod tests {
 
         let surface = unsafe { instance.create_surface_from_metal_layer(std::ptr::null_mut()) }
             .expect("Noop surface creation should ignore the layer pointer");
+
+        assert!(matches!(surface, yawgpu_hal::HalSurface::Noop));
+    }
+
+    #[test]
+    fn instance_create_surface_from_windows_hwnd_noop_returns_noop_surface() {
+        let instance = Instance::new_noop();
+        let hwnd = std::ptr::dangling_mut();
+
+        let surface =
+            unsafe { instance.create_surface_from_windows_hwnd(std::ptr::null_mut(), hwnd) }
+                .expect("Noop surface creation should ignore HWND pointers");
 
         assert!(matches!(surface, yawgpu_hal::HalSurface::Noop));
     }
