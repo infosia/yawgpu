@@ -144,9 +144,12 @@ pub unsafe fn create_surface_from_windows_hwnd(
 ### R85-4 — `core::Instance::create_surface_from_windows_hwnd`
 
 `yawgpu-core/src/instance.rs`. Mirrors the metal-layer wrapper
-(instance.rs:67), forwarding to the HAL and returning the core
-`Surface` type. Same safety contract. Unit test: a Noop instance
-returns a Noop-backed surface (no GPU).
+(instance.rs:67), forwarding to the HAL and returning
+`Result<HalSurface, Error>` (the same return type as the metal-layer
+wrapper — there is no separate core `Surface` type; the wrapper just
+maps `HalError` to `core::Error`). Same `pub unsafe` + safety
+contract. Unit test: a Noop instance returns a Noop-backed surface
+(no GPU).
 
 ### R85-5 — FFI: wire HWND into `wgpuInstanceCreateSurface`
 
