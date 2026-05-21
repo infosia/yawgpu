@@ -71,27 +71,9 @@ static bool surface_smoke_app_init(SurfaceSmokeApp *app) {
         fprintf(stderr, "failed to create window\n");
         return false;
     }
-    void *layer = yawgpu_window_metal_layer(app->window);
-    if (!layer) {
-        fprintf(stderr, "failed to get CAMetalLayer\n");
-        return false;
-    }
-
-    WGPUSurfaceSourceMetalLayer metal_layer = {
-        .chain = {
-            .next = NULL,
-            .sType = WGPUSType_SurfaceSourceMetalLayer,
-        },
-        .layer = layer,
-    };
-    app->surface = wgpuInstanceCreateSurface(
-        app->context.instance,
-        &(WGPUSurfaceDescriptor){
-            .nextInChain = &metal_layer.chain,
-            .label = yawgpu_string_view("surface_smoke surface"),
-        });
+    app->surface = yawgpu_window_create_surface(
+        app->context.instance, app->window, "surface_smoke surface");
     if (!app->surface) {
-        fprintf(stderr, "failed to create surface\n");
         return false;
     }
 
@@ -127,6 +109,9 @@ static bool surface_smoke_app_init(SurfaceSmokeApp *app) {
 static bool surface_smoke_render_frame(const SurfaceSmokeApp *app) {
     WGPUSurfaceTexture current = {0};
     wgpuSurfaceGetCurrentTexture(app->surface, &current);
+    if (current.status == WGPUSurfaceGetCurrentTextureStatus_Lost && !current.texture) {
+        return true;
+    }
     if (current.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal ||
         !current.texture) {
         fprintf(stderr, "failed to acquire surface texture, status=%u\n", current.status);

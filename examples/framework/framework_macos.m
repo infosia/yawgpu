@@ -69,6 +69,34 @@ void *yawgpu_window_metal_layer(YawgpuWindow *window) {
     return window ? window->layer : NULL;
 }
 
+WGPUSurface yawgpu_window_create_surface(WGPUInstance instance,
+                                         YawgpuWindow *window,
+                                         const char *label) {
+    void *layer = yawgpu_window_metal_layer(window);
+    if (!layer) {
+        fprintf(stderr, "failed to get CAMetalLayer\n");
+        return NULL;
+    }
+
+    WGPUSurfaceSourceMetalLayer metal_layer = {
+        .chain = {
+            .next = NULL,
+            .sType = WGPUSType_SurfaceSourceMetalLayer,
+        },
+        .layer = layer,
+    };
+    WGPUSurface surface = wgpuInstanceCreateSurface(
+        instance,
+        &(WGPUSurfaceDescriptor){
+            .nextInChain = &metal_layer.chain,
+            .label = yawgpu_string_view(label),
+        });
+    if (!surface) {
+        fprintf(stderr, "failed to create surface\n");
+    }
+    return surface;
+}
+
 void yawgpu_window_framebuffer_size(YawgpuWindow *window, int *width, int *height) {
     int local_width = 0;
     int local_height = 0;
