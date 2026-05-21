@@ -40,6 +40,7 @@ run-verified on Windows in P12.5.
   commit `02e8e46`; one clippy revision P12.1-R1 applied by Claude.)*
 - **P12.2** HWND surface through HAL — `VulkanInstance` +
   `HalInstance` `create_surface_from_windows_hwnd` (R85-2, R85-3).
+  *(☑ DONE 2026-05-21, commit `6b4f591`.)*
 - **P12.3** core + FFI wiring —
   `core::Instance::create_surface_from_windows_hwnd` +
   `find_windows_hwnd_source` + `wgpuInstanceCreateSurface` (R85-4,
@@ -106,4 +107,20 @@ run-verified on Windows in P12.5.
   physical device on Windows. Phase de-risk goal met.
 - Process note: coding agent committed P12.0 spec (`2417855`) — left
   as-is (content correct). Incidental `.gitignore` (`/AGENTS.md`)
-  change left uncommitted, out of P12.1 scope.
+  change committed separately (`1cf35e8`).
+
+### P12.2 (2026-05-21, host: Windows 11 + Vulkan SDK 1.3.296.0)
+- `HalInstance` + `VulkanInstance` `create_surface_from_windows_hwnd`
+  added (R85-2/R85-3), mirroring the metal-layer twin; diff is
+  `lib.rs` +41 / `vulkan/mod.rs` +52 only (no core/FFI, no metal-path
+  change).
+- Noop default gate: `cargo test --workspace` + `cargo clippy
+  --workspace --all-targets -- -D warnings` clean.
+- `cargo clippy -p yawgpu-hal --features vulkan --all-targets -- -D
+  warnings` clean; `cargo test -p yawgpu-hal --features vulkan`:
+  40 passed, 23 ignored (new Noop `..._noop_ignores_pointers` passes).
+- Real-instance check (Windows ICD): the `#[ignore]`d
+  `vulkan_instance_create_surface_from_windows_hwnd_rejects_null_hwnd`
+  passes with `--ignored` — confirms the `hinstance/hwnd as _` casts
+  compile/link against ash 0.38 win32 types and null-hwnd is rejected
+  on a real instance.
