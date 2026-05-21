@@ -1,52 +1,162 @@
-# yawgpu
+# yawgpu (Yet Another wgpu)
 
-Yet Another wgpu — a from-scratch Rust implementation of the WebGPU C API
-(`webgpu.h`), strongly inspired by [wgpu-native].
+A from-scratch implementation of the **WebGPU C API** (`webgpu.h`) in Rust.
 
-Unlike wgpu-native (which is a C ABI shim over gfx-rs `wgpu-core`), yawgpu
-implements WebGPU semantics, validation, resource management, and the GPU
-backend (HAL) itself. The only third-party engine dependency is [naga] for
-WGSL compilation.
+yawgpu lets native applications written in C, C++, or any language with a C
+FFI talk to the GPU through the standard WebGPU interface — the same
+`wgpuCreateInstance` / `wgpuDeviceCreateBuffer` / `wgpuQueueSubmit` surface
+that browsers expose to WebAssembly — without a browser, a JavaScript engine,
+or a web runtime.
 
-## What we reuse vs. build
+## What makes it different
 
-| Layer | Source | yawgpu approach |
+yawgpu implements the **entire** WebGPU stack itself:
+
+- the **C ABI** (`webgpu.h` entry points, opaque handles, reference
+  counting),
+- **WebGPU semantics and validation** (descriptor checking, usage rules,
+  state tracking, the error-scope model),
+- **resource and lifetime management** (buffers, textures, pipelines,
+  command encoding), and
+- the **GPU backends** themselves — a hand-written hardware abstraction
+  layer that talks to Metal and Vulkan directly.
+
+The only third-party GPU-stack dependency is **naga**, used to translate
+WGSL shaders into the platform shading languages (MSL for Metal, SPIR-V for
+Vulkan). Everything else — validation, the object model, the backends — is
+original code.
+
+This is a deliberately different point in the design space from a thin C
+shim layered over an existing Rust GPU engine: yawgpu owns the whole
+pipeline from the C call down to the native graphics API, which keeps the
+implementation legible and self-contained.
+
+## Architecture
+
+yawgpu is a small Cargo workspace of layered crates:
+
+```
+        C / C++ application
+                │  webgpu.h  (standard WebGPU C ABI)
+                ▼
+┌───────────────────────────────────────────────┐
+│ yawgpu        C ABI layer                       │  cdylib + staticlib + rlib
+│               extern "C" entry points,          │
+│               opaque Arc-based handles,          │
+│               C↔Rust descriptor conversion       │
+├───────────────────────────────────────────────┤
+│ yawgpu-core   WebGPU semantics                   │  platform-independent
+│               validation, object model,          │
+│               resource lifetimes, error scopes   │
+├───────────────────────────────────────────────┤
+│ yawgpu-hal    hardware abstraction layer         │  enum dispatch (no dyn)
+│               Noop · Metal · Vulkan              │
+└───────────────────────────────────────────────┘
+                │               │
+              Metal           Vulkan
+```
+
+- **`yawgpu`** — the public crate. It exports the `webgpu.h` symbols as a C
+  dynamic/static library and binds the canonical header with `bindgen`.
+- **`yawgpu-core`** — the platform-independent heart: the WebGPU object
+  model, descriptor validation, resource state tracking, the asynchronous
+  map/submit/error-scope machinery. It has no knowledge of any specific GPU
+  API.
+- **`yawgpu-hal`** — the hardware abstraction layer. Backends are selected
+  by static `enum` dispatch (never `dyn Trait`) and gated behind Cargo
+  features, so a build only compiles the backends it needs.
+
+## Backends
+
+| Backend | Purpose | Notes |
 |---|---|---|
-| C ABI header | `webgpu-headers/webgpu.h` | Bind via `bindgen`; hand-write `extern "C"` fns |
-| C ABI structure | `wgpu-native` (inspiration) | Arc-wrapped opaque handles, `conv` module |
-| WebGPU semantics / validation | `dawn` (spec + tests) | Reimplemented in `yawgpu-core` |
-| GPU backend (HAL) | `mgpu` (structural template) | `yawgpu-hal`, enum dispatch, Noop→Vulkan→Metal (no GL/D3D) |
-| WGSL compiler | `wgpu/naga` (path dep) | Reused as-is |
-| Project conventions | `mgpu` | Mirrored (see `CLAUDE.md`) |
+| **Noop** | CPU-only reference backend | Always available; runs the full validation layer with no GPU. Ideal for CI and headless testing. |
+| **Metal** | Apple platforms | Built with the `metal` feature via the `objc2` family. |
+| **Vulkan** | Cross-platform | Built with the `vulkan` feature via `ash`; runs on MoltenVK on macOS. |
 
-## Development model
+OpenGL/GLES and Direct3D are intentionally out of scope.
 
-Test-driven, with [Dawn]'s `unittests/validation` suite treated as the
-executable specification. Tests are ported to Rust integration tests and run
-against the **Noop** backend so CI needs no GPU. See `specs/SPEC.md` for the
-phased roadmap and `specs/reference/dawn-test-mapping.md` for the test port
-plan.
+A backend is chosen at instance-creation time through a small vendor
+extension chained onto `WGPUInstanceDescriptor` — applications that only ever
+want validation can run entirely on Noop with no GPU present.
 
-Implementation is carried out by a **separate coding agent**. Claude owns
-planning, review, and integration (git). Role split and the per-slice
-loop: `specs/reference/workflow.md`.
+## Using it from C
 
-## Status
+Build the library and link against it with the vendored header:
 
-Planning. Phase 0 (workspace scaffold + FFI + test harness) not yet started.
-See `specs/tracking/phase-0.md`.
+```sh
+# Noop-only (no GPU dependencies)
+cargo build -p yawgpu --release
 
-## Layout (planned)
-
-```
-yawgpu/        C ABI crate (cdylib + staticlib), bindgen, extern "C" fns
-yawgpu-core/   WebGPU semantics, validation, resource lifetimes
-yawgpu-hal/    enum-dispatch HAL: Noop | Vulkan | Metal (feature-gated; no GL/D3D)
-yawgpu-test/   Rust port of Dawn's ValidationTest base + assert_device_error!
-examples/      hello_triangle, hello_compute, ...
-specs/         SPEC.md, blocks/, reference/, tracking/
+# with a real backend
+cargo build -p yawgpu --release --features metal      # Apple
+cargo build -p yawgpu --release --features vulkan     # Vulkan / MoltenVK
 ```
 
-[wgpu-native]: https://github.com/gfx-rs/wgpu-native
-[naga]: https://github.com/gfx-rs/wgpu/tree/trunk/naga
-[Dawn]: https://dawn.googlesource.com/dawn
+This produces `libyawgpu.{a,dylib,so}` (and a Windows `.dll`). Include
+`yawgpu/ffi/webgpu-headers/webgpu.h`, link the library, and call the standard
+`wgpu*` functions.
+
+## Using it from Rust
+
+The same entry points are available as a normal Rust crate (`rlib`); the
+generated bindings are exposed under `yawgpu::native`, and the
+`extern "C"` functions are callable directly.
+
+## Examples
+
+The `examples/` directory contains small **C programs** built with CMake that
+link against `libyawgpu` and exercise the C ABI:
+
+| Example | What it shows |
+|---|---|
+| `enumerate_adapters` | Listing adapters and their properties |
+| `device_info` | Querying adapter/device limits and features |
+| `compute` | A storage-buffer compute dispatch with readback |
+| `capture` | Offscreen render → texture → buffer readback → PNG file |
+| `surface_smoke` | Opening a window and presenting cleared frames |
+| `triangle` | A classic windowed triangle (vertex-index shader) |
+| `hello_triangle` | A windowed triangle fed from a vertex buffer |
+
+```sh
+brew install cmake glfw          # windowed examples need GLFW
+cmake -S examples -B examples/build
+cmake --build examples/build
+
+# pick a backend at runtime
+YAWGPU_BACKEND=metal  ./examples/build/triangle/triangle
+YAWGPU_BACKEND=vulkan ./examples/build/compute/compute
+```
+
+The C sources are written to modern C17 (strict ISO, no compiler
+extensions).
+
+## Shaders
+
+Shaders are authored in **WGSL** and compiled at pipeline-creation time by
+naga into the backend's native language — Metal Shading Language for Metal,
+SPIR-V for Vulkan.
+
+## Quality
+
+- **Validation-tested**: the WebGPU validation rules are exercised by an
+  extensive suite that runs on the Noop backend with no GPU, so correctness
+  checks need no hardware.
+- **Unit-tested public API**: every public function across the three crates
+  has a direct unit test.
+- **Real-GPU end-to-end tests**: buffer/texture/compute/render paths are
+  verified against live Metal and Vulkan devices.
+- **Platform coverage**:
+  - **macOS** — builds, unit tests, real-GPU end-to-end tests, and the C
+    examples all verified (Metal and Vulkan/MoltenVK).
+  - **Windows (MSVC)** — builds and passes the full unit-test suite; the C
+    examples are not yet verified on this platform.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
