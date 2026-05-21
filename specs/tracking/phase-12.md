@@ -1,0 +1,93 @@
+# Phase 12 — Windows windowed examples (HWND surface + Win32 windowing)
+
+Status: **PLANNED** (2026-05-21 — P12.0 spec authored). Rules/plan:
+`../blocks/85-windows-surface.md`. Roles/loop:
+`../reference/workflow.md`. Windows toolchain rules:
+`../blocks/95-windows-build.md` (unchanged).
+
+Goal: make **every** example build and run on Windows, including the
+three windowed ones (`surface_smoke`, `triangle`, `hello_triangle`),
+rendering for real via the **Vulkan** backend with **no GLFW
+dependency** (native Win32 windowing). Metal stays macOS-only. The
+Noop gate (`cargo test --workspace` + `cargo clippy --workspace
+--all-targets -- -D warnings`) stays green on every host; examples
+are not `cargo test` members. Real windowed runs are done on the host
+(window presents) and logged here.
+
+Decisions (user-approved 2026-05-21):
+- Windows windowing = **native Win32** (`framework_windows.c`), no
+  GLFW dependency on Windows.
+- Surface-source selection = **framework helper**
+  (`yawgpu_window_create_surface`), so windowed `main.c` stay
+  platform-agnostic (no `#ifdef`).
+
+## Why these slices, in this order
+
+The window cannot render until the whole HWND→`VkSurfaceKHR` path
+exists, and that path is dead unless `VulkanInstance::new` first
+stops being macOS-only. So the Rust/HAL plumbing (P12.1→P12.3) lands
+before the C examples (P12.4→P12.5). Each Rust slice is independently
+testable on Noop; the Vulkan arms are build-verified everywhere and
+run-verified on Windows in P12.5.
+
+## Slices
+
+- **P12.0** Spec authoring (Claude). `blocks/85-windows-surface.md` +
+  this tracking file. *(☑ DONE 2026-05-21.)*
+- **P12.1** Cross-platform `VulkanInstance::new` — capability-driven
+  instance-extension selection (R85-1). De-risks the whole phase:
+  proves a Vulkan instance comes up on Windows.
+- **P12.2** HWND surface through HAL — `VulkanInstance` +
+  `HalInstance` `create_surface_from_windows_hwnd` (R85-2, R85-3).
+- **P12.3** core + FFI wiring —
+  `core::Instance::create_surface_from_windows_hwnd` +
+  `find_windows_hwnd_source` + `wgpuInstanceCreateSurface` (R85-4,
+  R85-5).
+- **P12.4** Framework Win32 windowing + surface helper, examples
+  refactor (R85-6).
+- **P12.5** CMake builds windowed examples on Windows; docs; host
+  run-verification (R85-7, R85-8).
+- **Phase 12 Review** (mandatory) → COMPLETE
+  (`tracking/phase-12-review.md`).
+
+## Exit criteria
+
+- Noop `cargo test --workspace` + clippy gate **unchanged & green**
+  on every host; new R85-1…R85-5 unit tests pass on Noop with no GPU.
+- `cargo build -p yawgpu --features vulkan` clean on Windows & macOS;
+  `--features metal` clean on macOS.
+- macOS windowed examples still build (GLFW + metal-layer) and render
+  (real-GPU, logged) — no regression.
+- Windows: `cmake -S examples -B examples/build
+  -DYAWGPU_FEATURE=vulkan && cmake --build examples/build` builds all
+  examples incl. windowed; each windowed exe with
+  `YAWGPU_BACKEND=vulkan` opens a window and renders ~60 frames then
+  exits 0 (logged here).
+- One commit per slice (`phase-12: <slice> — <short>`); mandatory
+  Phase 12 Review logged in `tracking/phase-12-review.md`. Phase
+  cannot be COMPLETE with any open CRITICAL/MAJOR.
+
+## Phase 12 Review — focus areas (for the fresh reviewer)
+
+- **No-panic across the C ABI**: `wgpuInstanceCreateSurface` with a
+  malformed/partial `WGPUSurfaceSourceWindowsHWND` chain (null hwnd,
+  null hinstance, both) must route to an error surface, never panic.
+- **`match` totality / `cfg` arms**: every new `match self` over
+  `HalInstance` covers Noop/Vulkan/Metal under each feature
+  combination; the Metal arm of the HWND path returns an error, not
+  `unreachable!`/panic.
+- **macOS regression**: R85-1's capability-driven extension list
+  enables exactly the same extensions on MoltenVK as before
+  (portability flag still set there); the metal-layer path is byte-
+  for-byte equivalent in behavior.
+- **Block 90**: every new/changed `pub fn` (R85-1…R85-4) has an
+  inline unit test in the same commit; Noop-reachable.
+- **Refcount/leak**: the new surface path clones/drops the instance
+  handle exactly like the metal-layer path (no extra `Arc` leak in
+  the error-surface branch).
+- **No GLFW on Windows**: confirm the Windows CMake path links only
+  `user32`/`gdi32` and never probes/links GLFW.
+
+## Run log
+
+(P12.1+ verification results recorded here as slices land.)
