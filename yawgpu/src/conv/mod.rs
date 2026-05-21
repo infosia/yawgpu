@@ -26,6 +26,7 @@ use yawgpu_core as core;
 
 use crate::native;
 
+/// Constant value for wgpu strlen.
 pub const WGPU_STRLEN: usize = usize::MAX;
 
 fn set_first_error(error: &mut Option<String>, message: &str) {

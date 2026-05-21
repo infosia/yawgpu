@@ -5,6 +5,7 @@ use super::*;
 /// # Safety
 ///
 /// `descriptor`, when non-null, must point to a valid `WGPUInstanceDescriptor`.
+/// Returns WGPU create instance.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCreateInstance(
     descriptor: *const native::WGPUInstanceDescriptor,
@@ -68,6 +69,7 @@ pub unsafe extern "C" fn wgpuCreateInstance(
 ///
 /// `instance` must be a non-null handle previously returned by yawgpu and not
 /// already fully released.
+/// Returns WGPU instance release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceRelease(instance: native::WGPUInstance) {
     release_handle(instance, "WGPUInstance");
@@ -78,6 +80,7 @@ pub unsafe extern "C" fn wgpuInstanceRelease(instance: native::WGPUInstance) {
 /// # Safety
 ///
 /// `instance` must be a non-null live yawgpu instance handle.
+/// Returns WGPU instance add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceAddRef(instance: native::WGPUInstance) {
     add_ref_handle(instance, "WGPUInstance");
@@ -89,6 +92,7 @@ pub unsafe extern "C" fn wgpuInstanceAddRef(instance: native::WGPUInstance) {
 ///
 /// `instance` must be a non-null live yawgpu instance handle. `descriptor`,
 /// when non-null, must point to a valid `WGPUSurfaceDescriptor`.
+/// Returns WGPU instance create surface.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceCreateSurface(
     instance: native::WGPUInstance,
@@ -143,6 +147,7 @@ pub unsafe extern "C" fn wgpuInstanceCreateSurface(
 ///
 /// `instance_handle` must be a non-null live yawgpu instance handle. `options`,
 /// when non-null, must point to a valid `WGPURequestAdapterOptions`.
+/// Returns WGPU instance request adapter.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
     instance_handle: native::WGPUInstance,
@@ -179,6 +184,7 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
 /// # Safety
 ///
 /// `instance` must be a non-null live yawgpu instance handle.
+/// Returns WGPU instance process events.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceProcessEvents(instance: native::WGPUInstance) {
     let instance = borrow_handle(instance, "WGPUInstance");
@@ -192,6 +198,7 @@ pub unsafe extern "C" fn wgpuInstanceProcessEvents(instance: native::WGPUInstanc
 /// `instance` must be a non-null live yawgpu instance handle. If
 /// `future_count` is non-zero, `futures` must point to `future_count` valid
 /// `WGPUFutureWaitInfo` entries.
+/// Returns WGPU instance wait any.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceWaitAny(
     instance: native::WGPUInstance,

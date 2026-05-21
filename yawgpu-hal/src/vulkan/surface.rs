@@ -1,5 +1,6 @@
 use super::*;
 
+/// Stores vulkan surface data used by validation and backend submission.
 pub struct VulkanSurface {
     pub(super) instance: Arc<VulkanInstanceInner>,
     pub(super) surface: vk::SurfaceKHR,
@@ -33,6 +34,7 @@ impl Drop for VulkanSurface {
 }
 
 impl VulkanSurface {
+    /// Configures the surface's swapchain for the given format, size, and present mode.
     pub fn configure(
         &mut self,
         device: &VulkanDevice,
@@ -52,12 +54,14 @@ impl VulkanSurface {
         Ok(())
     }
 
+    /// Tears down the surface's swapchain.
     pub fn unconfigure(&mut self) {
         self.swapchain = None;
         self.config = None;
         self.current_image_index = None;
     }
 
+    /// Returns acquire next texture.
     pub fn acquire_next_texture(&mut self) -> Result<VulkanTexture, HalError> {
         let swapchain = self.swapchain.as_ref().ok_or(HalError::AcquireFailed {
             backend: BACKEND,
@@ -117,6 +121,7 @@ impl VulkanSurface {
         Ok(texture)
     }
 
+    /// Presents the most recently acquired surface texture.
     pub fn present(&mut self, queue: &VulkanQueue) -> Result<(), HalError> {
         let image_index = self
             .current_image_index
@@ -161,6 +166,7 @@ impl VulkanSurface {
     }
 }
 
+/// Holds shared state for the vulkan swapchain handle.
 pub(super) struct VulkanSwapchainInner {
     pub(super) device: Arc<VulkanDeviceInner>,
     pub(super) loader: ash::khr::swapchain::Device,
@@ -187,6 +193,7 @@ impl Drop for VulkanSwapchainInner {
     }
 }
 
+/// Creates swapchain and reports validation errors through the owning device.
 pub(super) fn create_swapchain(
     device: Arc<VulkanDeviceInner>,
     surface: vk::SurfaceKHR,
@@ -273,6 +280,7 @@ pub(super) fn create_swapchain(
     }))
 }
 
+/// Creates swapchain texture and reports validation errors through the owning device.
 pub(super) fn create_swapchain_texture(
     device: Arc<VulkanDeviceInner>,
     image: vk::Image,

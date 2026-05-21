@@ -10,32 +10,43 @@ use crate::limits::*;
 use crate::pass::*;
 use crate::render_pipeline::*;
 
+/// Describes render bundle encoder descriptor.
 #[derive(Debug, Clone)]
 pub struct RenderBundleEncoderDescriptor {
+    /// Max color attachments.
     pub max_color_attachments: u32,
+    /// Color formats.
     pub color_formats: Vec<Option<TextureFormat>>,
+    /// Depth stencil format.
     pub depth_stencil_format: Option<TextureFormat>,
+    /// Sample count.
     pub sample_count: u32,
+    /// Depth read only.
     pub depth_read_only: bool,
+    /// Stencil read only.
     pub stencil_read_only: bool,
 }
 
+/// Records commands for the RenderBundleEncoder.
 #[derive(Debug, Clone)]
 pub struct RenderBundleEncoder {
     pub(crate) inner: Arc<RenderBundleEncoderInner>,
 }
 
+/// Stores render bundle data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct RenderBundle {
     pub(crate) inner: Arc<RenderBundleInner>,
 }
 
+/// Holds shared state for the render bundle encoder handle.
 #[derive(Debug)]
 pub(crate) struct RenderBundleEncoderInner {
     pub(crate) descriptor: RenderBundleEncoderDescriptor,
     pub(crate) state: Mutex<RenderBundleEncoderState>,
 }
 
+/// Tracks the lifecycle state for render bundle encoder.
 #[derive(Debug)]
 pub(crate) struct RenderBundleEncoderState {
     pub(crate) lifecycle: RenderBundleEncoderLifecycle,
@@ -43,13 +54,18 @@ pub(crate) struct RenderBundleEncoderState {
     pub(crate) pass_state: PassEncoderState,
 }
 
+/// Enumerates render bundle encoder lifecycle values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RenderBundleEncoderLifecycle {
+    /// Recording variant.
     Recording,
+    /// Errored variant.
     Errored,
+    /// Finished variant.
     Finished,
 }
 
+/// Holds shared state for the render bundle handle.
 #[derive(Debug)]
 pub(crate) struct RenderBundleInner {
     pub(crate) is_error: bool,
@@ -57,6 +73,7 @@ pub(crate) struct RenderBundleInner {
 }
 
 impl RenderBundleEncoder {
+    /// Creates a new instance.
     #[must_use]
     pub fn new(
         descriptor: RenderBundleEncoderDescriptor,
@@ -88,6 +105,7 @@ impl RenderBundleEncoder {
         )
     }
 
+    /// Finishes recording and returns the completed object.
     pub fn finish(&self) -> (RenderBundle, Option<String>) {
         let mut state = self.inner.state.lock();
         match state.lifecycle {
@@ -123,10 +141,12 @@ impl RenderBundleEncoder {
         )
     }
 
+    /// Records a debug marker into the bundle.
     pub fn insert_debug_marker(&self) -> Option<String> {
         self.record_bundle_command(|_| Ok(()))
     }
 
+    /// Opens a debug group in the bundle.
     pub fn push_debug_group(&self) -> Option<String> {
         self.record_bundle_command(|state| {
             state.debug_group_depth = state.debug_group_depth.saturating_add(1);
@@ -134,6 +154,7 @@ impl RenderBundleEncoder {
         })
     }
 
+    /// Closes the most recently opened debug group in the bundle.
     pub fn pop_debug_group(&self) -> Option<String> {
         self.record_bundle_command(|state| {
             if state.debug_group_depth == 0 {
@@ -145,6 +166,7 @@ impl RenderBundleEncoder {
         })
     }
 
+    /// Sets pipeline on this object or encoder.
     pub fn set_pipeline(&self, pipeline: Arc<RenderPipeline>) -> Option<String> {
         self.record_bundle_command(|state| {
             validate_render_bundle_pipeline(&self.inner.descriptor, &pipeline)?;
@@ -153,6 +175,7 @@ impl RenderBundleEncoder {
         })
     }
 
+    /// Sets bind group on this object or encoder.
     pub fn set_bind_group(
         &self,
         index: u32,
@@ -175,6 +198,7 @@ impl RenderBundleEncoder {
         })
     }
 
+    /// Sets vertex buffer on this object or encoder.
     pub fn set_vertex_buffer(
         &self,
         slot: u32,
@@ -203,6 +227,7 @@ impl RenderBundleEncoder {
         })
     }
 
+    /// Sets index buffer on this object or encoder.
     pub fn set_index_buffer(
         &self,
         buffer: Arc<Buffer>,
@@ -223,6 +248,7 @@ impl RenderBundleEncoder {
         })
     }
 
+    /// Records a draw command.
     pub fn draw(
         &self,
         vertex_count: u32,
@@ -245,6 +271,7 @@ impl RenderBundleEncoder {
         })
     }
 
+    /// Records an indexed draw into the bundle after validation.
     pub fn draw_indexed(
         &self,
         index_count: u32,
@@ -268,6 +295,7 @@ impl RenderBundleEncoder {
         })
     }
 
+    /// Records an indirect draw into the bundle after validation.
     pub fn draw_indirect(
         &self,
         indirect_buffer: Arc<Buffer>,
@@ -280,6 +308,7 @@ impl RenderBundleEncoder {
         })
     }
 
+    /// Records an indexed indirect draw into the bundle after validation.
     pub fn draw_indexed_indirect(
         &self,
         indirect_buffer: Arc<Buffer>,
@@ -297,6 +326,7 @@ impl RenderBundleEncoder {
         })
     }
 
+    /// Records a command into the bundle, validating encoder state first.
     pub(crate) fn record_bundle_command<F>(&self, command: F) -> Option<String>
     where
         F: FnOnce(&mut PassEncoderState) -> Result<(), String>,
@@ -317,6 +347,7 @@ impl RenderBundleEncoder {
 }
 
 impl RenderBundle {
+    /// Creates a new instance.
     pub(crate) fn new(attachment_signature: AttachmentSignature, is_error: bool) -> Self {
         Self {
             inner: Arc::new(RenderBundleInner {
@@ -326,11 +357,13 @@ impl RenderBundle {
         }
     }
 
+    /// Returns true when this object is error.
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
     }
 
+    /// Returns the attachment signature used for render pass compatibility checks.
     #[must_use]
     pub(crate) fn attachment_signature(&self) -> &AttachmentSignature {
         &self.inner.attachment_signature
@@ -338,6 +371,7 @@ impl RenderBundle {
 }
 
 impl RenderBundleEncoderDescriptor {
+    /// Returns the attachment signature used for render pass compatibility checks.
     pub(crate) fn attachment_signature(&self) -> AttachmentSignature {
         AttachmentSignature {
             color_formats: self.color_formats.clone(),
@@ -347,6 +381,7 @@ impl RenderBundleEncoderDescriptor {
     }
 }
 
+/// Validates render bundle encoder descriptor and returns a descriptive error on failure.
 pub(crate) fn validate_render_bundle_encoder_descriptor(
     descriptor: &RenderBundleEncoderDescriptor,
     _limits: Limits,
@@ -384,6 +419,7 @@ pub(crate) fn validate_render_bundle_encoder_descriptor(
     Ok(())
 }
 
+/// Validates render bundle pipeline and returns a descriptive error on failure.
 pub(crate) fn validate_render_bundle_pipeline(
     descriptor: &RenderBundleEncoderDescriptor,
     pipeline: &RenderPipeline,

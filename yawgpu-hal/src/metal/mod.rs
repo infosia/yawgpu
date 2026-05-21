@@ -29,6 +29,7 @@ use crate::{
 
 const BACKEND: &str = "metal";
 
+/// Stores metal instance data used by validation and backend submission.
 pub struct MetalInstance;
 
 impl std::fmt::Debug for MetalInstance {
@@ -38,10 +39,12 @@ impl std::fmt::Debug for MetalInstance {
 }
 
 impl MetalInstance {
+    /// Creates a new instance.
     pub fn new() -> Result<Self, HalError> {
         Ok(Self)
     }
 
+    /// Returns adapters exposed by this instance.
     #[must_use]
     pub fn enumerate_adapters(&self) -> Vec<MetalAdapter> {
         autoreleasepool(|_| {
@@ -51,6 +54,7 @@ impl MetalInstance {
     }
 }
 
+/// Stores metal adapter data used by validation and backend submission.
 #[derive(Clone)]
 pub struct MetalAdapter {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
@@ -66,17 +70,20 @@ impl std::fmt::Debug for MetalAdapter {
 }
 
 impl MetalAdapter {
+    /// Creates a new instance.
     #[must_use]
     pub fn new(device: Retained<ProtocolObject<dyn MTLDevice>>) -> Self {
         let name = device.name().to_string();
         Self { device, name }
     }
 
+    /// Returns the name.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<MetalDevice, HalError> {
         let queue = self
             .device

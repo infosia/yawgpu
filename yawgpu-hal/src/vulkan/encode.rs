@@ -1,5 +1,6 @@
 use super::*;
 
+/// Records submit into the command stream.
 pub(super) fn submit_copies(queue: &VulkanQueueInner, copies: &[HalCopy]) -> Result<(), HalError> {
     let command_pool_info = vk::CommandPoolCreateInfo::default()
         .flags(vk::CommandPoolCreateFlags::TRANSIENT)
@@ -18,6 +19,7 @@ pub(super) fn submit_copies(queue: &VulkanQueueInner, copies: &[HalCopy]) -> Res
     result
 }
 
+/// Returns record and submit copies.
 pub(super) fn record_and_submit_copies(
     queue: &VulkanQueueInner,
     command_pool: vk::CommandPool,
@@ -114,6 +116,7 @@ pub(super) fn record_and_submit_copies(
     result
 }
 
+/// Returns transition swapchain image to present.
 pub(super) fn transition_swapchain_image_to_present(
     queue: &VulkanQueue,
     texture: &VulkanTexture,
@@ -218,6 +221,7 @@ pub(super) fn transition_swapchain_image_to_present(
     result
 }
 
+/// Records encode into the command stream.
 pub(super) fn encode_buffer_copy(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
@@ -247,6 +251,7 @@ pub(super) fn encode_buffer_copy(
     Ok(())
 }
 
+/// Records encode into the command stream.
 pub(super) fn encode_buffer_to_texture(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
@@ -283,6 +288,7 @@ pub(super) fn encode_buffer_to_texture(
     Ok(())
 }
 
+/// Records encode into the command stream.
 pub(super) fn encode_texture_to_buffer(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
@@ -319,6 +325,7 @@ pub(super) fn encode_texture_to_buffer(
     Ok(())
 }
 
+/// Records encode into the command stream.
 pub(super) fn encode_texture_to_texture(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
@@ -377,6 +384,7 @@ pub(super) fn encode_texture_to_texture(
     Ok(())
 }
 
+/// Records encode into the command stream.
 pub(super) fn encode_compute_pass(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
@@ -434,12 +442,14 @@ pub(super) fn encode_compute_pass(
     Ok(descriptor_pool)
 }
 
+/// Stores render pass temps data used by validation and backend submission.
 pub(super) struct RenderPassTemps {
     descriptor_pool: Option<vk::DescriptorPool>,
     framebuffer: vk::Framebuffer,
     render_pass: Option<vk::RenderPass>,
 }
 
+/// Records encode into the command stream.
 pub(super) fn encode_render_pass(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
@@ -576,6 +586,7 @@ pub(super) fn encode_render_pass(
     })
 }
 
+/// Creates framebuffer and reports validation errors through the owning device.
 pub(super) fn create_framebuffer(
     device: &ash::Device,
     render_pass: vk::RenderPass,
@@ -593,6 +604,7 @@ pub(super) fn create_framebuffer(
         .map_err(|_| shader_error("framebuffer creation failed"))
 }
 
+/// Validates buffer texture range and returns a descriptive error on failure.
 pub(super) fn validate_buffer_texture_range(
     buffer: &VulkanBuffer,
     copy: &HalBufferTextureCopy,
@@ -616,6 +628,7 @@ pub(super) fn validate_buffer_texture_range(
     Ok(())
 }
 
+/// Returns texture bytes per pixel.
 pub(super) fn texture_bytes_per_pixel(copy: &HalBufferTextureCopy) -> Result<u32, HalError> {
     let crate::HalTexture::Vulkan(texture) = &copy.texture else {
         return Err(texture_error("texture is not Vulkan-backed"));
@@ -626,6 +639,7 @@ pub(super) fn texture_bytes_per_pixel(copy: &HalBufferTextureCopy) -> Result<u32
     Ok(texture.bytes_per_pixel)
 }
 
+/// Returns buffer image copy.
 pub(super) fn buffer_image_copy(
     copy: &HalBufferTextureCopy,
     bytes_per_pixel: u32,
@@ -644,6 +658,7 @@ pub(super) fn buffer_image_copy(
         .image_extent(to_image_extent(copy.extent)))
 }
 
+/// Validates mip level and returns a descriptive error on failure.
 pub(super) fn validate_mip_level(mip_level: u32) -> Result<(), HalError> {
     if mip_level != 0 {
         return Err(texture_error("unsupported texture mip level"));
@@ -651,6 +666,7 @@ pub(super) fn validate_mip_level(mip_level: u32) -> Result<(), HalError> {
     Ok(())
 }
 
+/// Returns buffer row length.
 pub(super) fn buffer_row_length(bytes_per_row: u32, bytes_per_pixel: u32) -> Result<u32, HalError> {
     if bytes_per_row == 0 {
         return Ok(0);
@@ -663,6 +679,7 @@ pub(super) fn buffer_row_length(bytes_per_row: u32, bytes_per_pixel: u32) -> Res
     Ok(bytes_per_row / bytes_per_pixel)
 }
 
+/// Converts this value into image offset.
 pub(super) fn to_image_offset(x: u32, y: u32, z: u32) -> Result<vk::Offset3D, HalError> {
     Ok(vk::Offset3D {
         x: i32::try_from(x).map_err(|_| texture_error("texture x offset is too large"))?,
@@ -671,6 +688,7 @@ pub(super) fn to_image_offset(x: u32, y: u32, z: u32) -> Result<vk::Offset3D, Ha
     })
 }
 
+/// Converts this value into image extent.
 pub(super) fn to_image_extent(extent: HalExtent3d) -> vk::Extent3D {
     vk::Extent3D {
         width: extent.width,

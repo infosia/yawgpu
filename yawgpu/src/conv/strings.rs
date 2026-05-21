@@ -1,6 +1,7 @@
 use super::*;
 use std::ffi::CStr;
 
+/// Returns string view.
 #[must_use]
 pub fn string_view(data: &[u8]) -> native::WGPUStringView {
     native::WGPUStringView {

@@ -1,16 +1,23 @@
 use crate::{HalTextureFormat, HalTextureUsage};
 
+/// Wraps  for the selected backend.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub struct HalSurfaceConfiguration {
+    /// Format.
     pub format: HalTextureFormat,
+    /// Usage.
     pub usage: HalTextureUsage,
+    /// Width.
     pub width: u32,
+    /// Height.
     pub height: u32,
+    /// Present mode.
     pub present_mode: HalPresentMode,
 }
 
 impl HalSurfaceConfiguration {
+    /// Creates a new instance.
     #[must_use]
     pub fn new(
         format: HalTextureFormat,
@@ -29,11 +36,15 @@ impl HalSurfaceConfiguration {
     }
 }
 
+/// Enumerates HAL present mode values.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub enum HalPresentMode {
+    /// Fifo variant.
     Fifo,
+    /// Immediate variant.
     Immediate,
+    /// Mailbox variant.
     Mailbox,
 }
 

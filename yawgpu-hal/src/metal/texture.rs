@@ -1,5 +1,6 @@
 use super::*;
 
+/// Stores metal texture data used by validation and backend submission.
 #[derive(Clone)]
 pub struct MetalTexture {
     pub(super) inner: Option<Retained<ProtocolObject<dyn MTLTextureTrait>>>,
@@ -23,12 +24,14 @@ impl std::fmt::Debug for MetalTexture {
 }
 
 impl MetalTexture {
+    /// Returns the backing `MTLTexture`, or an error if creation failed.
     pub(super) fn inner(&self) -> Result<&ProtocolObject<dyn MTLTextureTrait>, HalError> {
         self.inner
             .as_deref()
             .ok_or_else(|| texture_error("texture allocation failed or unsupported descriptor"))
     }
 
+    /// Validates origin extent and returns a descriptive error on failure.
     pub(super) fn validate_origin_extent(
         &self,
         origin: crate::HalOrigin3d,
@@ -53,6 +56,7 @@ impl MetalTexture {
     }
 }
 
+/// Stores metal sampler data used by validation and backend submission.
 #[derive(Clone)]
 pub struct MetalSampler {
     pub(super) _inner: Option<Retained<ProtocolObject<dyn MTLSamplerState>>>,
@@ -67,6 +71,7 @@ impl std::fmt::Debug for MetalSampler {
     }
 }
 
+/// Creates texture and reports validation errors through the owning device.
 pub(super) fn create_texture(
     device: &ProtocolObject<dyn MTLDevice>,
     descriptor: &HalTextureDescriptor,
@@ -97,6 +102,7 @@ pub(super) fn create_texture(
     Ok((texture, bytes_per_pixel))
 }
 
+/// Creates sampler and reports validation errors through the owning device.
 pub(super) fn create_sampler(
     device: &ProtocolObject<dyn MTLDevice>,
     descriptor: &HalSamplerDescriptor,

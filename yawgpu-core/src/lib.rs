@@ -1,3 +1,6 @@
+#![warn(missing_docs)]
+//! Core WebGPU validation and object model used by the C API.
+
 mod adapter;
 mod bind_group;
 mod bind_group_layout;
@@ -27,6 +30,7 @@ mod test_helpers;
 mod texture;
 mod texture_view;
 
+/// Shader naga module.
 pub(crate) mod shader_naga;
 
 pub use adapter::{Adapter, Feature, FeatureLevel};

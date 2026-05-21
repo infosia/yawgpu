@@ -5,6 +5,7 @@ use super::*;
 /// # Safety
 ///
 /// `query_set` must be a non-null live yawgpu query set handle.
+/// Returns WGPU query set destroy.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQuerySetDestroy(query_set: native::WGPUQuerySet) {
     borrow_handle(query_set, "WGPUQuerySet").core.destroy();
@@ -15,6 +16,7 @@ pub unsafe extern "C" fn wgpuQuerySetDestroy(query_set: native::WGPUQuerySet) {
 /// # Safety
 ///
 /// `query_set` must be a non-null live yawgpu query set handle.
+/// Returns WGPU query set get type.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQuerySetGetType(
     query_set: native::WGPUQuerySet,
@@ -27,6 +29,7 @@ pub unsafe extern "C" fn wgpuQuerySetGetType(
 /// # Safety
 ///
 /// `query_set` must be a non-null live yawgpu query set handle.
+/// Returns WGPU query set get count.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQuerySetGetCount(query_set: native::WGPUQuerySet) -> u32 {
     borrow_handle(query_set, "WGPUQuerySet").core.count()
@@ -38,6 +41,7 @@ pub unsafe extern "C" fn wgpuQuerySetGetCount(query_set: native::WGPUQuerySet) -
 ///
 /// `query_set` must be a non-null live yawgpu query set handle. `label` must
 /// point to valid string data according to `WGPUStringView` when non-empty.
+/// Returns WGPU query set set label.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQuerySetSetLabel(
     query_set: native::WGPUQuerySet,
@@ -53,6 +57,7 @@ pub unsafe extern "C" fn wgpuQuerySetSetLabel(
 /// # Safety
 ///
 /// `query_set` must be a non-null live yawgpu query set handle.
+/// Returns WGPU query set release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQuerySetRelease(query_set: native::WGPUQuerySet) {
     release_handle(query_set, "WGPUQuerySet");
@@ -63,6 +68,7 @@ pub unsafe extern "C" fn wgpuQuerySetRelease(query_set: native::WGPUQuerySet) {
 /// # Safety
 ///
 /// `query_set` must be a non-null live yawgpu query set handle.
+/// Returns WGPU query set add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQuerySetAddRef(query_set: native::WGPUQuerySet) {
     add_ref_handle(query_set, "WGPUQuerySet");

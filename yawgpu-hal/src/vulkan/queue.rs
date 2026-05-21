@@ -1,10 +1,12 @@
 use super::*;
 
+/// Stores vulkan queue data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct VulkanQueue {
     pub(super) inner: Arc<VulkanQueueInner>,
 }
 
+/// Holds shared state for the vulkan queue handle.
 #[derive(Debug)]
 pub(super) struct VulkanQueueInner {
     pub(super) device: Arc<VulkanDeviceInner>,
@@ -12,6 +14,7 @@ pub(super) struct VulkanQueueInner {
 }
 
 impl VulkanQueue {
+    /// Submits an empty command buffer to flush the queue.
     pub fn submit_empty(&self) -> Result<(), HalError> {
         unsafe {
             self.inner
@@ -28,6 +31,7 @@ impl VulkanQueue {
         Ok(())
     }
 
+    /// Records and submits the given buffer/texture copy operations.
     pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
         if copies.is_empty() {
             return self.submit_empty();

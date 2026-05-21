@@ -7,11 +7,13 @@ use crate::adapter::*;
 use crate::error::*;
 use crate::future::*;
 
+/// Stores instance data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct Instance {
     pub(crate) inner: Arc<InstanceInner>,
 }
 
+/// Holds shared state for the instance handle.
 #[derive(Debug)]
 pub(crate) struct InstanceInner {
     pub(crate) hal: HalInstance,
@@ -19,11 +21,13 @@ pub(crate) struct InstanceInner {
 }
 
 impl Instance {
+    /// Returns new noop.
     #[must_use]
     pub fn new_noop() -> Self {
         Self::from_hal(HalInstance::new_noop())
     }
 
+    /// Constructs this object from the backend HAL object.
     #[must_use]
     pub fn from_hal(hal: HalInstance) -> Self {
         Self {
@@ -34,11 +38,13 @@ impl Instance {
         }
     }
 
+    /// Returns adapters exposed by this instance.
     #[must_use]
     pub fn enumerate_adapters(&self) -> Vec<Adapter> {
         self.enumerate_adapters_with_feature_level(FeatureLevel::Core)
     }
 
+    /// Returns adapters exposed by this instance.
     #[must_use]
     pub fn enumerate_adapters_with_feature_level(
         &self,
@@ -52,11 +58,13 @@ impl Instance {
             .collect()
     }
 
+    /// Returns the future registry used by asynchronous callbacks.
     #[must_use]
     pub fn future_registry(&self) -> &FutureRegistry {
         &self.inner.futures
     }
 
+    /// Returns the HAL.
     #[must_use]
     pub fn hal(&self) -> &HalInstance {
         &self.inner.hal

@@ -1,9 +1,11 @@
 use super::*;
 
+/// Converts this value into ns.
 pub(super) fn to_ns(value: u64) -> Result<usize, HalError> {
     usize::try_from(value).map_err(|_| buffer_error("value is too large"))
 }
 
+/// Returns buffer error.
 pub(super) fn buffer_error(message: &'static str) -> HalError {
     HalError::BufferOperationFailed {
         backend: BACKEND,
@@ -11,6 +13,7 @@ pub(super) fn buffer_error(message: &'static str) -> HalError {
     }
 }
 
+/// Validates buffer texture range and returns a descriptive error on failure.
 pub(super) fn validate_buffer_texture_range(
     buffer: &MetalBuffer,
     copy: &HalBufferTextureCopy,
@@ -34,6 +37,7 @@ pub(super) fn validate_buffer_texture_range(
     Ok(())
 }
 
+/// Returns texture bytes per pixel.
 pub(super) fn texture_bytes_per_pixel(copy: &HalBufferTextureCopy) -> Result<u32, HalError> {
     let HalTexture::Metal(texture) = &copy.texture else {
         return Err(texture_error("texture is not Metal-backed"));
@@ -44,6 +48,7 @@ pub(super) fn texture_bytes_per_pixel(copy: &HalBufferTextureCopy) -> Result<u32
     Ok(texture.bytes_per_pixel)
 }
 
+/// Returns buffer texture bytes per image.
 pub(super) fn buffer_texture_bytes_per_image(
     copy: &HalBufferTextureCopy,
 ) -> Result<usize, HalError> {
@@ -53,6 +58,7 @@ pub(super) fn buffer_texture_bytes_per_image(
     to_ns(bytes)
 }
 
+/// Converts this value into mtl origin.
 pub(super) fn to_mtl_origin(x: u32, y: u32, z: u32) -> Result<MTLOrigin, HalError> {
     Ok(MTLOrigin {
         x: to_ns(u64::from(x))?,
@@ -61,6 +67,7 @@ pub(super) fn to_mtl_origin(x: u32, y: u32, z: u32) -> Result<MTLOrigin, HalErro
     })
 }
 
+/// Converts this value into mtl size.
 pub(super) fn to_mtl_size(extent: HalExtent3d) -> Result<MTLSize, HalError> {
     Ok(MTLSize {
         width: to_ns(u64::from(extent.width))?,
@@ -69,6 +76,7 @@ pub(super) fn to_mtl_size(extent: HalExtent3d) -> Result<MTLSize, HalError> {
     })
 }
 
+/// Converts this value into mtl dispatch size.
 pub(super) fn to_mtl_dispatch_size(size: (u32, u32, u32)) -> Result<MTLSize, HalError> {
     Ok(MTLSize {
         width: to_ns(u64::from(size.0))?,
@@ -77,10 +85,12 @@ pub(super) fn to_mtl_dispatch_size(size: (u32, u32, u32)) -> Result<MTLSize, Hal
     })
 }
 
+/// Converts this value into mtl workgroup size.
 pub(super) fn to_mtl_workgroup_size(size: (u32, u32, u32)) -> Result<MTLSize, HalError> {
     to_mtl_dispatch_size(size)
 }
 
+/// Converts texture format into the corresponding yawgpu representation.
 pub(super) fn map_texture_format(
     format: HalTextureFormat,
 ) -> Result<(MTLPixelFormat, u32), HalError> {
@@ -92,6 +102,7 @@ pub(super) fn map_texture_format(
     }
 }
 
+/// Converts texture usage into the corresponding yawgpu representation.
 pub(super) fn map_texture_usage(usage: HalTextureUsage) -> MTLTextureUsage {
     let mut metal_usage = MTLTextureUsage::Unknown;
     if usage.copy_src || usage.texture_binding {
@@ -106,6 +117,7 @@ pub(super) fn map_texture_usage(usage: HalTextureUsage) -> MTLTextureUsage {
     metal_usage
 }
 
+/// Converts address mode into the corresponding yawgpu representation.
 pub(super) fn map_address_mode(mode: HalAddressMode) -> MTLSamplerAddressMode {
     match mode {
         HalAddressMode::ClampToEdge => MTLSamplerAddressMode::ClampToEdge,
@@ -114,6 +126,7 @@ pub(super) fn map_address_mode(mode: HalAddressMode) -> MTLSamplerAddressMode {
     }
 }
 
+/// Converts filter mode into the corresponding yawgpu representation.
 pub(super) fn map_filter_mode(mode: HalFilterMode) -> MTLSamplerMinMagFilter {
     match mode {
         HalFilterMode::Nearest => MTLSamplerMinMagFilter::Nearest,
@@ -121,6 +134,7 @@ pub(super) fn map_filter_mode(mode: HalFilterMode) -> MTLSamplerMinMagFilter {
     }
 }
 
+/// Converts mipmap filter mode into the corresponding yawgpu representation.
 pub(super) fn map_mipmap_filter_mode(mode: HalMipmapFilterMode) -> MTLSamplerMipFilter {
     match mode {
         HalMipmapFilterMode::Nearest => MTLSamplerMipFilter::Nearest,
@@ -128,6 +142,7 @@ pub(super) fn map_mipmap_filter_mode(mode: HalMipmapFilterMode) -> MTLSamplerMip
     }
 }
 
+/// Converts compare function into the corresponding yawgpu representation.
 pub(super) fn map_compare_function(compare: HalCompareFunction) -> MTLCompareFunction {
     match compare {
         HalCompareFunction::Never => MTLCompareFunction::Never,
@@ -141,6 +156,7 @@ pub(super) fn map_compare_function(compare: HalCompareFunction) -> MTLCompareFun
     }
 }
 
+/// Converts vertex format into the corresponding yawgpu representation.
 pub(super) fn map_vertex_format(format: HalVertexFormat) -> Result<MTLVertexFormat, HalError> {
     match format {
         HalVertexFormat::Float32 => Ok(MTLVertexFormat::Float),
@@ -153,6 +169,7 @@ pub(super) fn map_vertex_format(format: HalVertexFormat) -> Result<MTLVertexForm
     }
 }
 
+/// Converts primitive topology into the corresponding yawgpu representation.
 pub(super) fn map_primitive_topology(topology: HalPrimitiveTopology) -> MTLPrimitiveType {
     match topology {
         HalPrimitiveTopology::PointList => MTLPrimitiveType::Point,
@@ -163,6 +180,7 @@ pub(super) fn map_primitive_topology(topology: HalPrimitiveTopology) -> MTLPrimi
     }
 }
 
+/// Returns texture error.
 pub(super) fn texture_error(message: &'static str) -> HalError {
     HalError::BufferOperationFailed {
         backend: BACKEND,
@@ -170,6 +188,7 @@ pub(super) fn texture_error(message: &'static str) -> HalError {
     }
 }
 
+/// Returns shader error.
 pub(super) fn shader_error(message: String) -> HalError {
     HalError::ShaderCompilationFailed {
         backend: BACKEND,

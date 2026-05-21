@@ -20,11 +20,13 @@ use crate::sampler::*;
 use crate::shader::*;
 use crate::texture::*;
 
+/// Stores device data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct Device {
     pub(crate) inner: Arc<DeviceInner>,
 }
 
+/// Holds shared state for the device handle.
 #[derive(Debug)]
 pub(crate) struct DeviceInner {
     pub(crate) hal: HalDevice,
@@ -37,6 +39,7 @@ pub(crate) struct DeviceInner {
 }
 
 impl Device {
+    /// Constructs this object from the backend HAL object.
     #[must_use]
     pub fn from_hal(
         hal: HalDevice,
@@ -59,36 +62,43 @@ impl Device {
         }
     }
 
+    /// Returns the queue.
     #[must_use]
     pub fn queue(&self) -> Queue {
         self.inner.queue.clone()
     }
 
+    /// Returns the allocation count.
     #[must_use]
     pub fn allocation_count(&self) -> u64 {
         self.inner.hal.allocation_count()
     }
 
+    /// Returns the HAL.
     #[must_use]
     pub fn hal(&self) -> &HalDevice {
         &self.inner.hal
     }
 
+    /// Returns the limits.
     #[must_use]
     pub fn limits(&self) -> Limits {
         self.inner.limits
     }
 
+    /// Returns the features.
     #[must_use]
     pub fn features(&self) -> FeatureSet {
         self.inner.features.clone()
     }
 
+    /// Returns true when this object has the requested feature.
     #[must_use]
     pub fn has_feature(&self, feature: Feature) -> bool {
         self.inner.features.contains(&feature)
     }
 
+    /// Validates the descriptor and creates a query set on this device.
     #[must_use]
     pub fn create_query_set(&self, descriptor: QuerySetDescriptor) -> (QuerySet, Option<String>) {
         if self.is_lost() {
@@ -102,24 +112,29 @@ impl Device {
         )
     }
 
+    /// Returns true when both handles share the same backing object.
     #[must_use]
     pub fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
+    /// Sets label on this object or encoder.
     pub fn set_label(&self, label: &str) {
         *self.inner.label.lock() = label.to_owned();
     }
 
+    /// Returns the label.
     #[must_use]
     pub fn label(&self) -> String {
         self.inner.label.lock().clone()
     }
 
+    /// Destroys this object and releases backend resources.
     pub fn destroy(&self) -> Option<DeviceLostReason> {
         self.lose(DeviceLostReason::Destroyed)
     }
 
+    /// Marks the device as lost for the supplied reason.
     pub fn lose(&self, reason: DeviceLostReason) -> Option<DeviceLostReason> {
         let mut lost = self.inner.lost.lock();
         if lost.reason.is_some() {
@@ -129,16 +144,19 @@ impl Device {
         Some(reason)
     }
 
+    /// Returns true when this object is lost.
     #[must_use]
     pub fn is_lost(&self) -> bool {
         self.inner.lost.lock().reason.is_some()
     }
 
+    /// Returns the lost reason.
     #[must_use]
     pub fn lost_reason(&self) -> Option<DeviceLostReason> {
         self.inner.lost.lock().reason
     }
 
+    /// Sets uncaptured error callback on this object or encoder.
     pub fn set_uncaptured_error_callback<F>(&self, callback: Option<F>)
     where
         F: Fn(DeviceError) + Send + Sync + 'static,
@@ -146,6 +164,7 @@ impl Device {
         self.inner.error_sink.lock().uncaptured_error_callback = callback.map(|f| Arc::new(f) as _);
     }
 
+    /// Pushes an error scope with the given filter onto the device's error-scope stack.
     pub fn push_error_scope(&self, filter: ErrorFilter) {
         self.inner.error_sink.lock().scopes.push(ErrorScope {
             filter,
@@ -153,6 +172,7 @@ impl Device {
         });
     }
 
+    /// Pops the innermost error scope, returning the first matching error it captured.
     pub fn pop_error_scope(&self) -> Result<Option<DeviceError>, PopErrorScopeError> {
         self.inner
             .error_sink
@@ -163,6 +183,7 @@ impl Device {
             .ok_or(PopErrorScopeError::EmptyStack)
     }
 
+    /// Routes an error to the active error scope, or to the uncaptured-error callback if none is active.
     pub fn dispatch_error(&self, kind: ErrorKind, msg: impl Into<String>) {
         let error = DeviceError::new(kind, msg);
         let callback = {
@@ -183,6 +204,7 @@ impl Device {
         }
     }
 
+    /// Validates the descriptor and creates a buffer on this device, routing any failure to the active error scope.
     #[must_use]
     pub fn create_buffer(&self, descriptor: BufferDescriptor) -> Buffer {
         if self.is_lost() {
@@ -203,6 +225,7 @@ impl Device {
         Buffer::new(descriptor, hal, is_error)
     }
 
+    /// Validates the descriptor and creates a texture on this device.
     #[must_use]
     pub fn create_texture(&self, descriptor: TextureDescriptor) -> Texture {
         if self.is_lost() {
@@ -227,6 +250,7 @@ impl Device {
         Texture::new(descriptor, hal, is_error)
     }
 
+    /// Validates the descriptor and creates a sampler on this device.
     #[must_use]
     pub fn create_sampler(&self, descriptor: SamplerDescriptor) -> Sampler {
         let resolved = ResolvedSamplerDescriptor::from_descriptor(descriptor);
@@ -252,6 +276,7 @@ impl Device {
         Sampler::new(resolved, hal, is_error)
     }
 
+    /// Compiles and validates a shader module from its WGSL (or other supported) source.
     #[must_use]
     pub fn create_shader_module(&self, source: ShaderModuleSource) -> ShaderModule {
         if self.is_lost() {
@@ -280,6 +305,7 @@ impl Device {
         ShaderModule::new(inner, diagnostic)
     }
 
+    /// Validates the descriptor and creates a bind group layout on this device.
     #[must_use]
     pub fn create_bind_group_layout(
         &self,
@@ -301,6 +327,7 @@ impl Device {
         BindGroupLayout::new(descriptor.entries, is_error, false)
     }
 
+    /// Validates the entries against their layout and creates a bind group on this device.
     #[must_use]
     pub fn create_bind_group(
         &self,
@@ -318,6 +345,7 @@ impl Device {
         BindGroup::new(layout, entries, is_error)
     }
 
+    /// Creates a pipeline layout from the given bind group layouts.
     #[must_use]
     pub fn create_pipeline_layout(&self, descriptor: PipelineLayoutDescriptor) -> PipelineLayout {
         if self.is_lost() {
@@ -345,6 +373,7 @@ impl Device {
         )
     }
 
+    /// Creates a command encoder for recording GPU commands.
     #[must_use]
     pub fn create_command_encoder(&self) -> CommandEncoder {
         if self.is_lost() {
@@ -354,6 +383,7 @@ impl Device {
         }
     }
 
+    /// Validates and creates a compute pipeline, routing any failure to the active error scope.
     #[must_use]
     pub fn create_compute_pipeline(
         &self,
@@ -378,6 +408,7 @@ impl Device {
         pipeline
     }
 
+    /// Creates a compute pipeline, returning any error directly instead of routing it to an error scope.
     #[must_use]
     pub fn create_compute_pipeline_without_error_dispatch(
         &self,
@@ -399,6 +430,7 @@ impl Device {
         .0
     }
 
+    /// Validates and creates a render pipeline, routing any failure to the active error scope.
     #[must_use]
     pub fn create_render_pipeline(&self, descriptor: RenderPipelineDescriptor) -> RenderPipeline {
         if self.is_lost() {
@@ -420,6 +452,7 @@ impl Device {
         pipeline
     }
 
+    /// Creates a render pipeline, returning any error directly instead of routing it to an error scope.
     #[must_use]
     pub fn create_render_pipeline_without_error_dispatch(
         &self,
@@ -442,20 +475,27 @@ impl Device {
     }
 }
 
+/// Tracks the lifecycle state for device lost.
 #[derive(Debug, Default)]
 pub(crate) struct DeviceLostState {
     pub(crate) reason: Option<DeviceLostReason>,
 }
 
+/// Enumerates device lost reason values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DeviceLostReason {
+    /// Unknown variant.
     Unknown,
+    /// Destroyed variant.
     Destroyed,
+    /// Callback cancelled variant.
     CallbackCancelled,
+    /// Failed creation variant.
     FailedCreation,
 }
 
+/// Alias for feature set.
 pub type FeatureSet = BTreeSet<Feature>;
 
 #[cfg(test)]

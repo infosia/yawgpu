@@ -1,5 +1,6 @@
 use super::*;
 
+/// Converts features to native into the corresponding yawgpu representation.
 pub fn map_features_to_native(features: &core::FeatureSet) -> native::WGPUSupportedFeatures {
     let features = features
         .iter()

@@ -4,117 +4,180 @@
 
 use std::collections::BTreeMap;
 
+/// Stores validated WGSL module data used by validation and backend submission.
 #[derive(Debug)]
 pub(crate) struct ValidatedWgslModule {
+    /// Module.
     pub module: naga::Module,
+    /// Info.
     pub info: naga::valid::ModuleInfo,
 }
 
+/// Stores binding metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MslBindingMap {
+    /// Buffers.
     pub buffers: Vec<MslBufferBinding>,
 }
 
+/// Stores binding metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MslBufferBinding {
+    /// Group.
     pub group: u32,
+    /// Binding.
     pub binding: u32,
+    /// Metal index.
     pub metal_index: u32,
 }
 
+/// Stores generated shader source for generated MSL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GeneratedMsl {
+    /// Source.
     pub source: String,
+    /// Entry point.
     pub entry_point: String,
 }
 
+/// Stores generated shader source for generated render MSL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GeneratedRenderMsl {
+    /// Source.
     pub source: String,
+    /// Vertex entry point.
     pub vertex_entry_point: String,
+    /// Fragment entry point.
     pub fragment_entry_point: String,
 }
 
+/// Stores binding metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MslVertexBufferBinding {
+    /// Slot.
     pub slot: u32,
+    /// Metal index.
     pub metal_index: u32,
+    /// Array stride.
     pub array_stride: u64,
+    /// Step mode.
     pub step_mode: MslVertexStepMode,
+    /// Attributes.
     pub attributes: Vec<MslVertexAttribute>,
 }
 
+/// Enumerates msl vertex step mode values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MslVertexStepMode {
+    /// Vertex variant.
     Vertex,
+    /// Instance variant.
     Instance,
 }
 
+/// Stores attribute metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MslVertexAttribute {
+    /// Shader location.
     pub shader_location: u32,
+    /// Offset.
     pub offset: u64,
+    /// Format.
     pub format: MslVertexFormat,
 }
 
+/// Enumerates msl vertex format values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MslVertexFormat {
+    /// Float32 variant.
     Float32,
+    /// Float32x2 variant.
     Float32x2,
+    /// Float32x3 variant.
     Float32x3,
+    /// Float32x4 variant.
     Float32x4,
 }
 
+/// Enumerates reflected shader stage values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReflectedShaderStage {
+    /// Vertex variant.
     Vertex,
+    /// Fragment variant.
     Fragment,
+    /// Compute variant.
     Compute,
 }
 
+/// Stores entry metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReflectedEntryPoint {
+    /// Name.
     pub name: String,
+    /// Stage.
     pub stage: ReflectedShaderStage,
 }
 
+/// Enumerates reflected type scalar class values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReflectedTypeScalarClass {
+    /// Float variant.
     Float,
+    /// Sint variant.
     Sint,
+    /// Uint variant.
     Uint,
+    /// Bool variant.
     Bool,
 }
 
+/// Stores reflection data for reflected type class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReflectedTypeClass {
+    /// Scalar.
     pub scalar: ReflectedTypeScalarClass,
+    /// Components.
     pub components: u8,
+    /// Width.
     pub width: u8,
 }
 
+/// Stores reflection data for reflected io location.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReflectedIoLocation {
+    /// Location.
     pub location: u32,
+    /// Ty.
     pub ty: ReflectedTypeClass,
 }
 
+/// Stores entry metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReflectedEntryPointIo {
+    /// Entry point.
     pub entry_point: String,
+    /// Inputs.
     pub inputs: Vec<ReflectedIoLocation>,
+    /// Outputs.
     pub outputs: Vec<ReflectedIoLocation>,
 }
 
+/// Identifies reflected override key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReflectedOverrideKey {
+    /// Name.
     pub name: Option<String>,
+    /// Id.
     pub id: Option<u16>,
 }
 
+/// Stores reflection data for reflected workgroup size.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReflectedWorkgroupSize {
+    /// Entry point.
     pub entry_point: String,
+    /// Literal size.
     pub literal_size: [u32; 3],
     /// Per-dimension override keys for `@workgroup_size(x, y, z)`.
     ///
@@ -122,89 +185,141 @@ pub(crate) struct ReflectedWorkgroupSize {
     /// dimension is override-driven, this key lets pipeline validation apply
     /// pipeline constants before enforcing compute limits.
     pub override_keys: [Option<ReflectedOverrideKey>; 3],
+    /// Workgroup storage size.
     pub workgroup_storage_size: u64,
 }
 
+/// Enumerates reflected buffer type values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReflectedBufferType {
+    /// Uniform variant.
     Uniform,
+    /// Storage variant.
     Storage,
+    /// Read only storage variant.
     ReadOnlyStorage,
 }
 
+/// Enumerates reflected texture sample usage values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReflectedTextureSampleUsage {
+    /// Sample variant.
     Sample,
+    /// Load variant.
     Load,
 }
 
+/// Stores reflection data for reflected storage texture access.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReflectedStorageTextureAccess {
+    /// Read.
     pub read: bool,
+    /// Write.
     pub write: bool,
 }
 
+/// Enumerates reflected resource binding kind values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReflectedResourceBindingKind {
+    /// Buffer variant.
     Buffer(ReflectedBufferType),
+    /// Sampler variant.
     Sampler {
+        /// Comparison variant.
         comparison: bool,
     },
+    /// Texture variant.
     Texture {
+        /// Sampled variant.
         sampled: bool,
+        /// Sample kind variant.
         sample_kind: Option<ReflectedTypeScalarClass>,
+        /// Sample usage variant.
         sample_usage: ReflectedTextureSampleUsage,
+        /// View dimension variant.
         view_dimension: ReflectedTextureViewDimension,
+        /// Multisampled variant.
         multisampled: bool,
     },
+    /// Storage texture variant.
     StorageTexture {
+        /// Format variant.
         format: String,
+        /// Access variant.
         access: ReflectedStorageTextureAccess,
+        /// View dimension variant.
         view_dimension: ReflectedTextureViewDimension,
     },
 }
 
+/// Enumerates reflected texture view dimension values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReflectedTextureViewDimension {
+    /// D1 variant.
     D1,
+    /// D2 variant.
     D2,
+    /// D2 array variant.
     D2Array,
+    /// Cube variant.
     Cube,
+    /// Cube array variant.
     CubeArray,
+    /// D3 variant.
     D3,
 }
 
+/// Stores binding metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReflectedResourceBinding {
+    /// Group.
     pub group: u32,
+    /// Binding.
     pub binding: u32,
+    /// Kind.
     pub kind: ReflectedResourceBindingKind,
+    /// Min binding size.
     pub min_binding_size: u64,
+    /// Statically used.
     pub statically_used: bool,
 }
 
+/// Stores reflection data for reflected fragment builtins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReflectedFragmentBuiltins {
+    /// Entry point.
     pub entry_point: String,
+    /// Frag depth.
     pub frag_depth: bool,
+    /// Sample mask.
     pub sample_mask: bool,
 }
 
+/// Stores reflection data for reflected override.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ReflectedOverride {
+    /// Name.
     pub name: Option<String>,
+    /// Id.
     pub id: Option<u16>,
+    /// Ty.
     pub ty: ReflectedTypeClass,
+    /// Has default.
     pub has_default: bool,
+    /// Default value.
     pub default_value: Option<ReflectedOverrideValue>,
 }
 
+/// Enumerates reflected override value values.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum ReflectedOverrideValue {
+    /// Number variant.
     Number(f64),
+    /// Bool variant.
     Bool(bool),
 }
 
+/// Returns parse and validate wgsl.
 pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ValidatedWgslModule, String> {
     let module = naga::front::wgsl::parse_str(src).map_err(|error| error.to_string())?;
     let capabilities = naga::valid::Capabilities::SHADER_FLOAT16;
@@ -220,6 +335,7 @@ pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ValidatedWgslModule, 
 }
 
 impl ValidatedWgslModule {
+    /// Generates spirv for the validated shader module.
     pub(crate) fn generate_spirv(
         &self,
         entry_name: &str,
@@ -237,6 +353,7 @@ impl ValidatedWgslModule {
             .map_err(|error| error.to_string())
     }
 
+    /// Generates msl for the validated shader module.
     pub(crate) fn generate_msl(
         &self,
         entry_name: &str,
@@ -272,6 +389,7 @@ impl ValidatedWgslModule {
         })
     }
 
+    /// Generates render msl for the validated shader module.
     pub(crate) fn generate_render_msl(
         &self,
         vertex_entry_name: &str,
@@ -328,6 +446,7 @@ impl ValidatedWgslModule {
         })
     }
 
+    /// Returns entry points reflected by the validated shader module.
     pub(crate) fn entry_points(&self) -> Vec<ReflectedEntryPoint> {
         self.module
             .entry_points
@@ -341,6 +460,7 @@ impl ValidatedWgslModule {
             .collect()
     }
 
+    /// Returns compute workgroup size reflected by the validated shader module.
     pub(crate) fn compute_workgroup_size(
         &self,
         entry_point: &str,
@@ -373,6 +493,7 @@ impl ValidatedWgslModule {
         }))
     }
 
+    /// Returns entry point io reflected by the validated shader module.
     pub(crate) fn entry_point_io(&self) -> Vec<ReflectedEntryPointIo> {
         self.module
             .entry_points
@@ -388,6 +509,7 @@ impl ValidatedWgslModule {
             .collect()
     }
 
+    /// Returns resource bindings reflected by the validated shader module.
     pub(crate) fn resource_bindings(&self) -> Vec<ReflectedResourceBinding> {
         let mut layouter = naga::proc::Layouter::default();
         let layout_ready = layouter.update(self.module.to_ctx()).is_ok();
@@ -418,6 +540,7 @@ impl ValidatedWgslModule {
             .collect()
     }
 
+    /// Returns resource bindings for entry reflected by the validated shader module.
     pub(crate) fn resource_bindings_for_entry(
         &self,
         entry_point: &str,
@@ -460,6 +583,7 @@ impl ValidatedWgslModule {
             .collect())
     }
 
+    /// Returns fragment builtins reflected by the validated shader module.
     pub(crate) fn fragment_builtins(&self) -> Vec<ReflectedFragmentBuiltins> {
         self.module
             .entry_points
@@ -477,6 +601,7 @@ impl ValidatedWgslModule {
             .collect()
     }
 
+    /// Returns overrides reflected by the validated shader module.
     pub(crate) fn overrides(&self) -> Vec<ReflectedOverride> {
         self.module
             .overrides

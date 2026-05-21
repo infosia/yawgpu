@@ -16,16 +16,19 @@ use crate::render_pipeline::*;
 use crate::texture::*;
 use crate::texture_view::*;
 
+/// Records commands for the CommandEncoder.
 #[derive(Debug, Clone)]
 pub struct CommandEncoder {
     pub(crate) inner: Arc<CommandEncoderInner>,
 }
 
+/// Holds shared state for the command encoder handle.
 #[derive(Debug)]
 pub(crate) struct CommandEncoderInner {
     pub(crate) state: Mutex<CommandEncoderState>,
 }
 
+/// Tracks the lifecycle state for command encoder.
 #[derive(Debug)]
 pub(crate) struct CommandEncoderState {
     pub(crate) lifecycle: CommandEncoderLifecycle,
@@ -37,29 +40,38 @@ pub(crate) struct CommandEncoderState {
     pub(crate) command_ops: Vec<CommandExecution>,
 }
 
+/// Enumerates command encoder lifecycle values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandEncoderLifecycle {
+    /// Recording variant.
     Recording,
+    /// Finished variant.
     Finished,
 }
 
+/// Enumerates pass kind values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PassKind {
+    /// Render variant.
     Render,
+    /// Compute variant.
     Compute,
 }
 
+/// Stores pass token data used by validation and backend submission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PassToken {
     pub(crate) kind: PassKind,
     pub(crate) id: u64,
 }
 
+/// Stores command buffer data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct CommandBuffer {
     pub(crate) inner: Arc<CommandBufferInner>,
 }
 
+/// Holds shared state for the command buffer handle.
 #[derive(Debug)]
 pub(crate) struct CommandBufferInner {
     pub(crate) is_error: bool,
@@ -68,6 +80,7 @@ pub(crate) struct CommandBufferInner {
     pub(crate) submitted: Mutex<bool>,
 }
 
+/// Stores the data needed to replay a BufferCopyCommand.
 #[derive(Debug, Clone)]
 pub(crate) struct BufferCopyCommand {
     pub(crate) source: Arc<Buffer>,
@@ -77,33 +90,52 @@ pub(crate) struct BufferCopyCommand {
     pub(crate) size: u64,
 }
 
+/// Enumerates texture copy command values.
 #[derive(Debug, Clone)]
 pub(crate) enum TextureCopyCommand {
+    /// Buffer to texture variant.
     BufferToTexture {
+        /// Source variant.
         source: TexelCopyBufferInfo,
+        /// Destination variant.
         destination: TexelCopyTextureInfo,
+        /// Copy size variant.
         copy_size: Extent3d,
     },
+    /// Texture to buffer variant.
     TextureToBuffer {
+        /// Source variant.
         source: TexelCopyTextureInfo,
+        /// Destination variant.
         destination: TexelCopyBufferInfo,
+        /// Copy size variant.
         copy_size: Extent3d,
     },
+    /// Texture to texture variant.
     TextureToTexture {
+        /// Source variant.
         source: TexelCopyTextureInfo,
+        /// Destination variant.
         destination: TexelCopyTextureInfo,
+        /// Copy size variant.
         copy_size: Extent3d,
     },
 }
 
+/// Enumerates command execution values.
 #[derive(Debug, Clone)]
 pub(crate) enum CommandExecution {
+    /// Buffer copy variant.
     BufferCopy(BufferCopyCommand),
+    /// Texture copy variant.
     TextureCopy(TextureCopyCommand),
+    /// Compute pass variant.
     ComputePass(ComputePassCommand),
+    /// Render pass variant.
     RenderPass(RenderPassCommand),
 }
 
+/// Stores the data needed to replay a ComputePassCommand.
 #[derive(Debug, Clone)]
 pub(crate) struct ComputePassCommand {
     pub(crate) pipeline: Arc<ComputePipeline>,
@@ -111,6 +143,7 @@ pub(crate) struct ComputePassCommand {
     pub(crate) workgroups: (u32, u32, u32),
 }
 
+/// Stores the data needed to replay a RenderPassCommand.
 #[derive(Debug, Clone)]
 pub(crate) struct RenderPassCommand {
     pub(crate) pipeline: Option<Arc<RenderPipeline>>,
@@ -120,6 +153,7 @@ pub(crate) struct RenderPassCommand {
     pub(crate) draw: Option<RenderDrawExecution>,
 }
 
+/// Stores color metadata.
 #[derive(Debug, Clone)]
 pub(crate) struct RenderPassColorExecution {
     pub(crate) texture: Texture,
@@ -128,6 +162,7 @@ pub(crate) struct RenderPassColorExecution {
     pub(crate) clear_value: Color,
 }
 
+/// Stores render draw execution data used by validation and backend submission.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RenderDrawExecution {
     pub(crate) vertex_count: u32,
@@ -137,6 +172,7 @@ pub(crate) struct RenderDrawExecution {
 }
 
 impl CommandEncoder {
+    /// Creates a new instance.
     pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(CommandEncoderInner {
@@ -153,12 +189,14 @@ impl CommandEncoder {
         }
     }
 
+    /// Creates an error-state instance.
     pub(crate) fn new_error(message: impl Into<String>) -> Self {
         let encoder = Self::new();
         encoder.record_first_error(message);
         encoder
     }
 
+    /// Begins a render pass on this encoder and returns its render-pass encoder.
     #[must_use]
     pub fn begin_render_pass(
         &self,
@@ -186,6 +224,7 @@ impl CommandEncoder {
         )
     }
 
+    /// Begins a compute pass on this encoder and returns its compute-pass encoder.
     #[must_use]
     pub fn begin_compute_pass(&self) -> (ComputePassEncoder, Option<String>) {
         let (token, immediate_error) = self.begin_pass(PassKind::Compute);
@@ -204,6 +243,7 @@ impl CommandEncoder {
         )
     }
 
+    /// Begins a pass, locking the encoder until the pass ends.
     pub(crate) fn begin_pass(&self, kind: PassKind) -> (PassToken, Option<String>) {
         let mut state = self.inner.state.lock();
         let token = PassToken {
@@ -231,14 +271,17 @@ impl CommandEncoder {
         (token, None)
     }
 
+    /// Records a single debug marker into the command stream.
     pub fn insert_debug_marker(&self) -> Option<String> {
         self.record_encoder_command()
     }
 
+    /// Records a validation error against the encoder, marking it unusable.
     pub fn record_validation_error(&self, message: impl Into<String>) -> Option<String> {
         self.record_buffer_command(Vec::new(), None, None, || Err(message.into()))
     }
 
+    /// Records a buffer-to-buffer copy after validating the ranges and usages.
     pub fn copy_buffer_to_buffer(
         &self,
         source: Arc<Buffer>,
@@ -270,18 +313,21 @@ impl CommandEncoder {
         )
     }
 
+    /// Records a buffer clear (zero-fill) over the given range after validation.
     pub fn clear_buffer(&self, buffer: Arc<Buffer>, offset: u64, size: u64) -> Option<String> {
         self.record_buffer_command(vec![Arc::clone(&buffer)], None, None, || {
             validate_clear_buffer(&buffer, offset, size)
         })
     }
 
+    /// Records an encoder-side buffer write over the given range after validation.
     pub fn write_buffer(&self, buffer: Arc<Buffer>, offset: u64, size: u64) -> Option<String> {
         self.record_buffer_command(vec![Arc::clone(&buffer)], None, None, || {
             validate_encoder_write_buffer(&buffer, offset, size)
         })
     }
 
+    /// Records a timestamp write into the query set at `query_index`.
     pub fn write_timestamp(&self, query_set: Arc<QuerySet>, query_index: u32) -> Option<String> {
         self.record_buffer_command(Vec::new(), None, None, || {
             validate_timestamp_query_set(&query_set, "write timestamp")?;
@@ -289,6 +335,7 @@ impl CommandEncoder {
         })
     }
 
+    /// Records resolution of a query-set range into a destination buffer.
     pub fn resolve_query_set(
         &self,
         query_set: Arc<QuerySet>,
@@ -308,6 +355,7 @@ impl CommandEncoder {
         })
     }
 
+    /// Records a buffer-to-texture copy after validating layout, sizes, and usages.
     pub fn copy_buffer_to_texture(
         &self,
         source: TexelCopyBufferInfo,
@@ -331,6 +379,7 @@ impl CommandEncoder {
         })
     }
 
+    /// Records a texture-to-buffer copy after validating layout, sizes, and usages.
     pub fn copy_texture_to_buffer(
         &self,
         source: TexelCopyTextureInfo,
@@ -359,6 +408,7 @@ impl CommandEncoder {
         )
     }
 
+    /// Records a texture-to-texture copy after validating the regions and usages.
     pub fn copy_texture_to_texture(
         &self,
         source: TexelCopyTextureInfo,
@@ -375,6 +425,7 @@ impl CommandEncoder {
         })
     }
 
+    /// Opens a debug group in the command stream.
     pub fn push_debug_group(&self) -> Option<String> {
         let mut state = self.inner.state.lock();
         if state.lifecycle != CommandEncoderLifecycle::Recording {
@@ -391,6 +442,7 @@ impl CommandEncoder {
         None
     }
 
+    /// Closes the most recently opened debug group.
     pub fn pop_debug_group(&self) -> Option<String> {
         let mut state = self.inner.state.lock();
         if state.lifecycle != CommandEncoderLifecycle::Recording {
@@ -411,6 +463,7 @@ impl CommandEncoder {
         None
     }
 
+    /// Returns an error if the encoder is finished or otherwise unusable for recording.
     pub(crate) fn record_command_guard(&self) -> Result<(), String> {
         let state = self.inner.state.lock();
         if state.lifecycle != CommandEncoderLifecycle::Recording {
@@ -424,6 +477,7 @@ impl CommandEncoder {
         Ok(())
     }
 
+    /// Validates the encoder is recordable and notes that a command was recorded.
     pub(crate) fn record_encoder_command(&self) -> Option<String> {
         match self.record_command_guard() {
             Ok(()) => None,
@@ -439,6 +493,7 @@ impl CommandEncoder {
         }
     }
 
+    /// Records a command that references a buffer, validating the encoder and tracking the buffer.
     pub(crate) fn record_buffer_command<F>(
         &self,
         referenced_buffers: Vec<Arc<Buffer>>,
@@ -477,6 +532,7 @@ impl CommandEncoder {
         None
     }
 
+    /// Finishes recording and returns the completed object.
     #[must_use]
     pub fn finish(&self) -> (CommandBuffer, Option<String>) {
         let mut state = self.inner.state.lock();
@@ -517,6 +573,7 @@ impl CommandEncoder {
         )
     }
 
+    /// Ends pass recording.
     pub(crate) fn end_pass(&self, token: PassToken) {
         let mut state = self.inner.state.lock();
         if state.open_pass == Some(token) {
@@ -524,19 +581,23 @@ impl CommandEncoder {
         }
     }
 
+    /// Stores `message` as the encoder's first error if none has been recorded yet.
     pub(crate) fn record_first_error(&self, message: impl Into<String>) {
         let mut state = self.inner.state.lock();
         record_first_error_locked(&mut state, message);
     }
 
+    /// Tracks a buffer referenced by the encoder so it stays alive until submit.
     pub(crate) fn record_referenced_buffer(&self, buffer: Arc<Buffer>) {
         self.inner.state.lock().referenced_buffers.push(buffer);
     }
 
+    /// Tracks several buffers referenced by the encoder.
     pub(crate) fn record_referenced_buffers(&self, buffers: Vec<Arc<Buffer>>) {
         self.inner.state.lock().referenced_buffers.extend(buffers);
     }
 
+    /// Appends a finished compute-pass command to the encoder's command list.
     pub(crate) fn record_compute_pass(&self, command: ComputePassCommand) {
         self.inner
             .state
@@ -545,6 +606,7 @@ impl CommandEncoder {
             .push(CommandExecution::ComputePass(command));
     }
 
+    /// Appends a finished render-pass command to the encoder's command list.
     pub(crate) fn record_render_pass(&self, command: RenderPassCommand) {
         self.inner
             .state
@@ -553,11 +615,13 @@ impl CommandEncoder {
             .push(CommandExecution::RenderPass(command));
     }
 
+    /// Returns true when this object is finished.
     pub(crate) fn is_finished(&self) -> bool {
         self.inner.state.lock().lifecycle == CommandEncoderLifecycle::Finished
     }
 }
 
+/// Validates copy buffer to buffer and returns a descriptive error on failure.
 pub(crate) fn validate_copy_buffer_to_buffer(
     source: &Buffer,
     source_offset: u64,
@@ -599,6 +663,7 @@ pub(crate) fn validate_copy_buffer_to_buffer(
     Ok(())
 }
 
+/// Validates clear buffer and returns a descriptive error on failure.
 pub(crate) fn validate_clear_buffer(buffer: &Buffer, offset: u64, size: u64) -> Result<(), String> {
     if buffer.is_error() {
         return Err("clear buffer command cannot use an error buffer".to_owned());
@@ -626,6 +691,7 @@ pub(crate) fn validate_clear_buffer(buffer: &Buffer, offset: u64, size: u64) -> 
     validate_buffer_range(offset, resolved_size, buffer.size(), "clear buffer range")
 }
 
+/// Validates encoder write buffer and returns a descriptive error on failure.
 pub(crate) fn validate_encoder_write_buffer(
     buffer: &Buffer,
     offset: u64,
@@ -654,6 +720,7 @@ pub(crate) fn validate_encoder_write_buffer(
     )
 }
 
+/// Validates render pass descriptor and returns a descriptive error on failure.
 pub(crate) fn validate_render_pass_descriptor(
     descriptor: &RenderPassDescriptor,
 ) -> Result<(), String> {
@@ -667,6 +734,7 @@ pub(crate) fn validate_render_pass_descriptor(
     Ok(())
 }
 
+/// Validates render pass timestamp writes and returns a descriptive error on failure.
 pub(crate) fn validate_render_pass_timestamp_writes(
     timestamp_writes: &RenderPassTimestampWrites,
 ) -> Result<(), String> {
@@ -697,6 +765,7 @@ pub(crate) fn validate_render_pass_timestamp_writes(
     Ok(())
 }
 
+/// Validates occlusion query set and returns a descriptive error on failure.
 pub(crate) fn validate_occlusion_query_set(
     query_set: &QuerySet,
     usage: &str,
@@ -708,6 +777,7 @@ pub(crate) fn validate_occlusion_query_set(
     Ok(())
 }
 
+/// Validates timestamp query set and returns a descriptive error on failure.
 pub(crate) fn validate_timestamp_query_set(
     query_set: &QuerySet,
     usage: &str,
@@ -719,6 +789,7 @@ pub(crate) fn validate_timestamp_query_set(
     Ok(())
 }
 
+/// Validates query set alive and returns a descriptive error on failure.
 pub(crate) fn validate_query_set_alive(query_set: &QuerySet, usage: &str) -> Result<(), String> {
     if query_set.is_error() {
         return Err(format!("{usage} cannot use an error query set"));
@@ -729,6 +800,7 @@ pub(crate) fn validate_query_set_alive(query_set: &QuerySet, usage: &str) -> Res
     Ok(())
 }
 
+/// Validates query index and returns a descriptive error on failure.
 pub(crate) fn validate_query_index(
     query_set: &QuerySet,
     index: u32,
@@ -740,6 +812,7 @@ pub(crate) fn validate_query_index(
     Ok(())
 }
 
+/// Validates resolve query set and returns a descriptive error on failure.
 pub(crate) fn validate_resolve_query_set(
     query_set: &QuerySet,
     first_query: u32,
@@ -780,6 +853,7 @@ pub(crate) fn validate_resolve_query_set(
     )
 }
 
+/// Returns render pass attachment signature.
 pub(crate) fn render_pass_attachment_signature(
     descriptor: &RenderPassDescriptor,
 ) -> Result<AttachmentSignature, String> {
@@ -834,6 +908,7 @@ pub(crate) fn render_pass_attachment_signature(
     })
 }
 
+/// Returns render pass attachment textures.
 pub(crate) fn render_pass_attachment_textures(descriptor: &RenderPassDescriptor) -> Vec<Texture> {
     let mut textures = Vec::new();
     for attachment in descriptor.color_attachments.iter().flatten() {
@@ -848,6 +923,7 @@ pub(crate) fn render_pass_attachment_textures(descriptor: &RenderPassDescriptor)
     textures
 }
 
+/// Returns render pass color execution.
 pub(crate) fn render_pass_color_execution(
     descriptor: &RenderPassDescriptor,
 ) -> Option<RenderPassColorExecution> {
@@ -864,6 +940,7 @@ pub(crate) fn render_pass_color_execution(
         })
 }
 
+/// Validates color attachment and returns a descriptive error on failure.
 pub(crate) fn validate_color_attachment(
     attachment: &RenderPassColorAttachment,
 ) -> Result<(), String> {
@@ -898,6 +975,7 @@ pub(crate) fn validate_color_attachment(
     Ok(())
 }
 
+/// Validates depth stencil attachment and returns a descriptive error on failure.
 pub(crate) fn validate_depth_stencil_attachment(
     attachment: &RenderPassDepthStencilAttachment,
 ) -> Result<(), String> {
@@ -941,6 +1019,7 @@ pub(crate) fn validate_depth_stencil_attachment(
     Ok(())
 }
 
+/// Validates render attachment common and returns a descriptive error on failure.
 pub(crate) fn validate_render_attachment_common(
     view: &TextureView,
     render_extent: &mut Option<(u32, u32)>,
@@ -974,6 +1053,7 @@ pub(crate) fn validate_render_attachment_common(
     Ok(())
 }
 
+/// Validates resolve target and returns a descriptive error on failure.
 pub(crate) fn validate_resolve_target(
     color_view: &TextureView,
     resolve_target: &TextureView,
@@ -1009,6 +1089,7 @@ pub(crate) fn validate_resolve_target(
     Ok(())
 }
 
+/// Validates buffer texture copy and returns a descriptive error on failure.
 pub(crate) fn validate_buffer_texture_copy(
     buffer_copy: TexelCopyBufferInfo,
     required_buffer_usage: BufferUsage,
@@ -1063,6 +1144,7 @@ pub(crate) fn validate_buffer_texture_copy(
     )
 }
 
+/// Validates texture to texture copy and returns a descriptive error on failure.
 pub(crate) fn validate_texture_to_texture_copy(
     source_copy: TexelCopyTextureInfo,
     destination_copy: TexelCopyTextureInfo,
@@ -1138,6 +1220,7 @@ pub(crate) fn validate_texture_to_texture_copy(
     Ok(())
 }
 
+/// Validates texture copy subresource and returns a descriptive error on failure.
 pub(crate) fn validate_texture_copy_subresource(
     texture: &Texture,
     mip_level: u32,
@@ -1191,6 +1274,7 @@ pub(crate) fn validate_texture_copy_subresource(
     Ok(format_caps)
 }
 
+/// Validates copy aspect and returns a descriptive error on failure.
 pub(crate) fn validate_copy_aspect(
     format_caps: FormatCaps,
     aspect: TextureAspect,
@@ -1209,6 +1293,7 @@ pub(crate) fn validate_copy_aspect(
     }
 }
 
+/// Returns texture formats copy compatible.
 pub(crate) fn texture_formats_copy_compatible(
     source: TextureFormat,
     destination: TextureFormat,
@@ -1216,10 +1301,12 @@ pub(crate) fn texture_formats_copy_compatible(
     source == destination || source.srgb_pair() == Some(destination)
 }
 
+/// Returns origin is zero.
 pub(crate) fn origin_is_zero(origin: Origin3d) -> bool {
     origin.x == 0 && origin.y == 0 && origin.z == 0
 }
 
+/// Validates same texture copy and returns a descriptive error on failure.
 pub(crate) fn validate_same_texture_copy(
     texture: &Texture,
     source_mip_level: u32,
@@ -1254,6 +1341,7 @@ pub(crate) fn validate_same_texture_copy(
     Ok(())
 }
 
+/// Validates buffer range and returns a descriptive error on failure.
 pub(crate) fn validate_buffer_range(
     offset: u64,
     size: u64,
@@ -1269,6 +1357,7 @@ pub(crate) fn validate_buffer_range(
     Ok(())
 }
 
+/// Returns record first error locked.
 pub(crate) fn record_first_error_locked(
     state: &mut CommandEncoderState,
     message: impl Into<String>,
@@ -1278,6 +1367,7 @@ pub(crate) fn record_first_error_locked(
     }
 }
 
+/// Returns record first error option.
 pub(crate) fn record_first_error_option(
     first_error: &mut Option<String>,
     message: impl Into<String>,
@@ -1288,6 +1378,7 @@ pub(crate) fn record_first_error_option(
 }
 
 impl CommandBuffer {
+    /// Creates a new instance.
     pub(crate) fn new(
         is_error: bool,
         referenced_buffers: Vec<Arc<Buffer>>,
@@ -1303,19 +1394,23 @@ impl CommandBuffer {
         }
     }
 
+    /// Returns true when this object is error.
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
     }
 
+    /// Returns the referenced buffers.
     pub(crate) fn referenced_buffers(&self) -> &[Arc<Buffer>] {
         &self.inner.referenced_buffers
     }
 
+    /// Returns the command ops.
     pub(crate) fn command_ops(&self) -> &[CommandExecution] {
         &self.inner.command_ops
     }
 
+    /// Marks the produced command buffer as submitted, erroring if it was already submitted.
     pub(crate) fn mark_submitted(&self) -> Result<(), String> {
         let mut submitted = self.inner.submitted.lock();
         if *submitted {
@@ -1326,10 +1421,12 @@ impl CommandBuffer {
         }
     }
 
+    /// Returns true when this object is submitted.
     pub(crate) fn is_submitted(&self) -> bool {
         *self.inner.submitted.lock()
     }
 
+    /// Returns true when both handles share the same backing object.
     pub(crate) fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }

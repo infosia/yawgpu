@@ -5,6 +5,7 @@ use super::*;
 /// # Safety
 ///
 /// `render_bundle_encoder` and `pipeline` must be non-null live yawgpu handles.
+/// Returns WGPU render bundle encoder set pipeline.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleEncoderSetPipeline(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
@@ -25,6 +26,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetPipeline(
 /// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
 /// `group` may be null. `dynamic_offsets` must point to `dynamic_offset_count`
 /// elements when the count is non-zero.
+/// Returns WGPU render bundle encoder set bind group.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleEncoderSetBindGroup(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
@@ -53,6 +55,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetBindGroup(
 ///
 /// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
 /// `buffer` may be null.
+/// Returns WGPU render bundle encoder set vertex buffer.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleEncoderSetVertexBuffer(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
@@ -80,6 +83,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetVertexBuffer(
 /// # Safety
 ///
 /// `render_bundle_encoder` and `buffer` must be non-null live yawgpu handles.
+/// Returns WGPU render bundle encoder set index buffer.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleEncoderSetIndexBuffer(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
@@ -106,6 +110,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetIndexBuffer(
 /// # Safety
 ///
 /// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+/// Returns WGPU render bundle encoder draw.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleEncoderDraw(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
@@ -132,6 +137,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderDraw(
 /// # Safety
 ///
 /// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+/// Returns WGPU render bundle encoder draw indexed.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndexed(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
@@ -160,6 +166,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndexed(
 /// # Safety
 ///
 /// `render_bundle_encoder` and `indirect_buffer` must be non-null live yawgpu handles.
+/// Returns WGPU render bundle encoder draw indirect.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndirect(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
@@ -183,6 +190,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndirect(
 /// # Safety
 ///
 /// `render_bundle_encoder` and `indirect_buffer` must be non-null live yawgpu handles.
+/// Returns WGPU render bundle encoder draw indexed indirect.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndexedIndirect(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
@@ -206,6 +214,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndexedIndirect(
 /// # Safety
 ///
 /// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+/// Returns WGPU render bundle encoder insert debug marker.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleEncoderInsertDebugMarker(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
@@ -220,6 +229,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderInsertDebugMarker(
 /// # Safety
 ///
 /// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+/// Returns WGPU render bundle encoder push debug group.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleEncoderPushDebugGroup(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
@@ -234,6 +244,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderPushDebugGroup(
 /// # Safety
 ///
 /// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+/// Returns WGPU render bundle encoder pop debug group.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleEncoderPopDebugGroup(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
@@ -247,6 +258,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderPopDebugGroup(
 /// # Safety
 ///
 /// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+/// Returns WGPU render bundle encoder finish.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleEncoderFinish(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
@@ -267,6 +279,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderFinish(
 /// # Safety
 ///
 /// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+/// Returns WGPU render bundle encoder release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleEncoderRelease(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
@@ -279,6 +292,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderRelease(
 /// # Safety
 ///
 /// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+/// Returns WGPU render bundle encoder add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleEncoderAddRef(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
@@ -291,6 +305,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderAddRef(
 /// # Safety
 ///
 /// `render_bundle` must be a non-null live yawgpu render bundle handle.
+/// Returns WGPU render bundle release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleRelease(render_bundle: native::WGPURenderBundle) {
     release_handle(render_bundle, "WGPURenderBundle");
@@ -301,6 +316,7 @@ pub unsafe extern "C" fn wgpuRenderBundleRelease(render_bundle: native::WGPURend
 /// # Safety
 ///
 /// `render_bundle` must be a non-null live yawgpu render bundle handle.
+/// Returns WGPU render bundle add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleAddRef(render_bundle: native::WGPURenderBundle) {
     add_ref_handle(render_bundle, "WGPURenderBundle");

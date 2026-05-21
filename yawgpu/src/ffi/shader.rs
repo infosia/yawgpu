@@ -5,6 +5,7 @@ use super::*;
 /// # Safety
 ///
 /// `shader_module` must be a non-null live yawgpu shader module handle.
+/// Returns WGPU shader module get compilation info.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuShaderModuleGetCompilationInfo(
     shader_module: native::WGPUShaderModule,
@@ -27,6 +28,7 @@ pub unsafe extern "C" fn wgpuShaderModuleGetCompilationInfo(
 /// # Safety
 ///
 /// `shader_module` must be a non-null live yawgpu shader module handle.
+/// Returns WGPU shader module release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuShaderModuleRelease(shader_module: native::WGPUShaderModule) {
     release_handle(shader_module, "WGPUShaderModule");
@@ -37,6 +39,7 @@ pub unsafe extern "C" fn wgpuShaderModuleRelease(shader_module: native::WGPUShad
 /// # Safety
 ///
 /// `shader_module` must be a non-null live yawgpu shader module handle.
+/// Returns WGPU shader module add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuShaderModuleAddRef(shader_module: native::WGPUShaderModule) {
     add_ref_handle(shader_module, "WGPUShaderModule");

@@ -1,10 +1,12 @@
 use super::*;
 
+/// Stores vulkan compute pipeline data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct VulkanComputePipeline {
     pub(super) inner: Arc<VulkanComputePipelineInner>,
 }
 
+/// Holds shared state for the vulkan compute pipeline handle.
 #[derive(Debug)]
 pub(super) struct VulkanComputePipelineInner {
     pub(super) device: Arc<VulkanDeviceInner>,
@@ -34,11 +36,13 @@ impl Drop for VulkanComputePipelineInner {
     }
 }
 
+/// Stores vulkan render pipeline data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct VulkanRenderPipeline {
     pub(super) inner: Arc<VulkanRenderPipelineInner>,
 }
 
+/// Holds shared state for the vulkan render pipeline handle.
 #[derive(Debug)]
 pub(super) struct VulkanRenderPipelineInner {
     pub(super) device: Arc<VulkanDeviceInner>,
@@ -76,6 +80,7 @@ impl Drop for VulkanRenderPipelineInner {
     }
 }
 
+/// Creates compute pipeline and reports validation errors through the owning device.
 pub(super) fn create_compute_pipeline(
     device: Arc<VulkanDeviceInner>,
     shader: HalShaderSource,
@@ -163,6 +168,7 @@ pub(super) fn create_compute_pipeline(
     })
 }
 
+/// Creates render pipeline and reports validation errors through the owning device.
 pub(super) fn create_render_pipeline(
     device: Arc<VulkanDeviceInner>,
     shader: HalShaderSource,
@@ -287,6 +293,7 @@ pub(super) fn create_render_pipeline(
     })
 }
 
+/// Creates shader module and reports validation errors through the owning device.
 pub(super) fn create_shader_module(
     device: &VulkanDeviceInner,
     code: &[u32],
@@ -296,6 +303,7 @@ pub(super) fn create_shader_module(
         .map_err(|_| shader_error("shader module creation failed"))
 }
 
+/// Creates render pass and reports validation errors through the owning device.
 pub(super) fn create_render_pass(
     device: &VulkanDeviceInner,
     descriptor: &HalRenderPipelineDescriptor,
@@ -308,6 +316,7 @@ pub(super) fn create_render_pass(
     create_render_pass_for_format(&device.device, color_format)
 }
 
+/// Creates render pass for format and reports validation errors through the owning device.
 pub(super) fn create_render_pass_for_format(
     device: &ash::Device,
     color_format: HalTextureFormat,
@@ -354,6 +363,7 @@ pub(super) fn create_render_pass_for_format(
         .map_err(|_| shader_error("render pass creation failed"))
 }
 
+/// Creates graphics pipeline and reports validation errors through the owning device.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create_graphics_pipeline(
     device: &VulkanDeviceInner,
@@ -479,6 +489,7 @@ pub(super) fn create_graphics_pipeline(
     }
 }
 
+/// Creates descriptor set layouts and reports validation errors through the owning device.
 pub(super) fn create_descriptor_set_layouts(
     device: &VulkanDeviceInner,
     bindings: &[HalDescriptorBinding],
@@ -527,6 +538,7 @@ unsafe fn destroy_descriptor_set_layouts(
     }
 }
 
+/// Returns descriptor type.
 pub(super) fn descriptor_type(kind: HalBufferBindingKind) -> vk::DescriptorType {
     match kind {
         HalBufferBindingKind::Uniform => vk::DescriptorType::UNIFORM_BUFFER,
@@ -534,6 +546,7 @@ pub(super) fn descriptor_type(kind: HalBufferBindingKind) -> vk::DescriptorType 
     }
 }
 
+/// Creates compute descriptor pool and reports validation errors through the owning device.
 pub(super) fn create_compute_descriptor_pool(
     device: &ash::Device,
     pipeline: &VulkanComputePipeline,
@@ -585,6 +598,7 @@ pub(super) fn create_compute_descriptor_pool(
     Ok(Some(pool))
 }
 
+/// Returns allocate compute descriptor sets.
 pub(super) fn allocate_compute_descriptor_sets(
     device: &ash::Device,
     pool: vk::DescriptorPool,
@@ -597,6 +611,7 @@ pub(super) fn allocate_compute_descriptor_sets(
         .map_err(|_| shader_error("descriptor set allocation failed"))
 }
 
+/// Returns update compute descriptor sets.
 pub(super) fn update_compute_descriptor_sets(
     device: &ash::Device,
     pipeline: &VulkanComputePipeline,
@@ -645,6 +660,7 @@ pub(super) fn update_compute_descriptor_sets(
     Ok(())
 }
 
+/// Creates render descriptor pool and reports validation errors through the owning device.
 pub(super) fn create_render_descriptor_pool(
     device: &ash::Device,
     pipeline: &VulkanRenderPipeline,
@@ -659,6 +675,7 @@ pub(super) fn create_render_descriptor_pool(
     )
 }
 
+/// Returns allocate render descriptor sets.
 pub(super) fn allocate_render_descriptor_sets(
     device: &ash::Device,
     pool: vk::DescriptorPool,
@@ -671,6 +688,7 @@ pub(super) fn allocate_render_descriptor_sets(
         .map_err(|_| shader_error("descriptor set allocation failed"))
 }
 
+/// Returns update render descriptor sets.
 pub(super) fn update_render_descriptor_sets(
     device: &ash::Device,
     pipeline: &VulkanRenderPipeline,
@@ -719,6 +737,7 @@ pub(super) fn update_render_descriptor_sets(
     Ok(())
 }
 
+/// Returns bind render descriptor sets.
 pub(super) fn bind_render_descriptor_sets(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
@@ -740,6 +759,7 @@ pub(super) fn bind_render_descriptor_sets(
     }
 }
 
+/// Returns bind vertex buffers.
 pub(super) fn bind_vertex_buffers(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
@@ -760,6 +780,7 @@ pub(super) fn bind_vertex_buffers(
     Ok(())
 }
 
+/// Validates bound buffer range and returns a descriptive error on failure.
 pub(super) fn validate_bound_buffer_range(bound: &HalBoundBuffer) -> Result<(), HalError> {
     let crate::HalBuffer::Vulkan(buffer) = &bound.buffer else {
         return Err(buffer_error("buffer is not Vulkan-backed"));
@@ -767,6 +788,7 @@ pub(super) fn validate_bound_buffer_range(bound: &HalBoundBuffer) -> Result<(), 
     bound_buffer_range(bound, buffer.size()).map(|_| ())
 }
 
+/// Returns bound buffer range.
 pub(super) fn bound_buffer_range(
     bound: &HalBoundBuffer,
     buffer_size: u64,
@@ -791,6 +813,7 @@ pub(super) fn bound_buffer_range(
     Ok(range)
 }
 
+/// Creates descriptor pool and reports validation errors through the owning device.
 pub(super) fn create_descriptor_pool(
     device: &ash::Device,
     descriptor_set_count: usize,
@@ -839,6 +862,7 @@ pub(super) fn create_descriptor_pool(
     Ok(Some(pool))
 }
 
+/// Returns descriptor buffer info.
 pub(super) fn descriptor_buffer_info(
     bound: &HalBoundBuffer,
 ) -> Result<vk::DescriptorBufferInfo, HalError> {

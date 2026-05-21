@@ -1,6 +1,7 @@
 use super::*;
 use crate::{HalPresentMode, HalRenderPipelineDescriptor, HalSamplerDescriptor, HalTextureUsage};
 
+/// Returns vulkan device.
 pub(crate) fn vulkan_device() -> VulkanDevice {
     let instance = VulkanInstance::new().expect("create Vulkan instance");
     let adapter = instance
@@ -11,6 +12,7 @@ pub(crate) fn vulkan_device() -> VulkanDevice {
     adapter.create_device().expect("create Vulkan device")
 }
 
+/// Returns texture usage.
 pub(crate) fn texture_usage() -> HalTextureUsage {
     HalTextureUsage {
         copy_src: true,
@@ -21,6 +23,7 @@ pub(crate) fn texture_usage() -> HalTextureUsage {
     }
 }
 
+/// Returns texture descriptor.
 pub(crate) fn texture_descriptor() -> HalTextureDescriptor {
     HalTextureDescriptor {
         format: HalTextureFormat::Rgba8Unorm,
@@ -33,6 +36,7 @@ pub(crate) fn texture_descriptor() -> HalTextureDescriptor {
     }
 }
 
+/// Returns sampler descriptor.
 pub(crate) fn sampler_descriptor() -> HalSamplerDescriptor {
     HalSamplerDescriptor {
         address_mode_u: HalAddressMode::ClampToEdge,
@@ -48,6 +52,7 @@ pub(crate) fn sampler_descriptor() -> HalSamplerDescriptor {
     }
 }
 
+/// Returns render descriptor.
 pub(crate) fn render_descriptor() -> HalRenderPipelineDescriptor {
     HalRenderPipelineDescriptor {
         color_formats: vec![HalTextureFormat::Rgba8Unorm],
@@ -56,6 +61,7 @@ pub(crate) fn render_descriptor() -> HalRenderPipelineDescriptor {
     }
 }
 
+/// Returns surface config.
 pub(crate) fn surface_config() -> HalSurfaceConfiguration {
     HalSurfaceConfiguration::new(
         HalTextureFormat::Bgra8Unorm,
@@ -66,6 +72,7 @@ pub(crate) fn surface_config() -> HalSurfaceConfiguration {
     )
 }
 
+/// Returns dummy surface.
 pub(crate) fn dummy_surface(instance: &VulkanInstance) -> VulkanSurface {
     VulkanSurface {
         instance: Arc::clone(&instance.inner),
@@ -76,6 +83,7 @@ pub(crate) fn dummy_surface(instance: &VulkanInstance) -> VulkanSurface {
     }
 }
 
+/// Returns compute spirv.
 pub(crate) fn compute_spirv() -> Vec<u32> {
     vec![
         119734787, 65536, 524299, 10, 0, 131089, 1, 393227, 1, 1280527431, 1685353262, 808793134,
@@ -86,6 +94,7 @@ pub(crate) fn compute_spirv() -> Vec<u32> {
     ]
 }
 
+/// Returns vertex spirv.
 pub(crate) fn vertex_spirv() -> Vec<u32> {
     vec![
         119734787, 65536, 524299, 21, 0, 131089, 1, 393227, 1, 1280527431, 1685353262, 808793134,
@@ -102,6 +111,7 @@ pub(crate) fn vertex_spirv() -> Vec<u32> {
     ]
 }
 
+/// Returns fragment spirv.
 pub(crate) fn fragment_spirv() -> Vec<u32> {
     vec![
         119734787, 65536, 524299, 13, 0, 131089, 1, 393227, 1, 1280527431, 1685353262, 808793134,

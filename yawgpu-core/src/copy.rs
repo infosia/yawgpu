@@ -8,49 +8,75 @@ use crate::format::*;
 use crate::texture::*;
 use crate::texture_view::*;
 
+/// Stores layout metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TexelCopyBufferLayout {
+    /// Offset.
     pub offset: u64,
+    /// Bytes per row.
     pub bytes_per_row: Option<u32>,
+    /// Rows per image.
     pub rows_per_image: Option<u32>,
 }
 
+/// Stores info metadata.
 #[derive(Debug, Clone)]
 pub struct TexelCopyBufferInfo {
+    /// Buffer.
     pub buffer: Arc<Buffer>,
+    /// Layout.
     pub layout: TexelCopyBufferLayout,
 }
 
+/// Stores info metadata.
 #[derive(Debug, Clone)]
 pub struct TexelCopyTextureInfo {
+    /// Texture.
     pub texture: Arc<Texture>,
+    /// Mip level.
     pub mip_level: u32,
+    /// Origin.
     pub origin: Origin3d,
+    /// Aspect.
     pub aspect: TextureAspect,
 }
 
+/// Enumerates load op values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadOp {
+    /// Undefined variant.
     Undefined,
+    /// Load variant.
     Load,
+    /// Clear variant.
     Clear,
 }
 
+/// Enumerates store op values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreOp {
+    /// Undefined variant.
     Undefined,
+    /// Store variant.
     Store,
+    /// Discard variant.
     Discard,
 }
 
+/// Stores color metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct Color {
+    /// R.
     pub r: f64,
+    /// G.
     pub g: f64,
+    /// B.
     pub b: f64,
+    /// A.
     pub a: f64,
 }
 
+/// Validates texel copy layout and returns a descriptive error on failure.
 pub(crate) fn validate_texel_copy_layout(
     format_caps: FormatCaps,
     aspect: TextureAspect,
@@ -100,6 +126,7 @@ pub(crate) fn validate_texel_copy_layout(
     )
 }
 
+/// Returns required bytes in texel copy.
 pub(crate) fn required_bytes_in_texel_copy(
     bytes_per_row: Option<u32>,
     rows_per_image: Option<u32>,
@@ -129,6 +156,7 @@ pub(crate) fn required_bytes_in_texel_copy(
         .ok_or_else(|| format!("{label} required byte size overflows"))
 }
 
+/// Returns texel copy block size.
 pub(crate) fn texel_copy_block_size(format_caps: FormatCaps, aspect: TextureAspect) -> u32 {
     if aspect == TextureAspect::StencilOnly {
         1
@@ -137,6 +165,7 @@ pub(crate) fn texel_copy_block_size(format_caps: FormatCaps, aspect: TextureAspe
     }
 }
 
+/// Returns div ceil u32.
 pub(crate) fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
     if value == 0 {
         0
@@ -145,6 +174,7 @@ pub(crate) fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
     }
 }
 
+/// Returns HAL origin.
 pub(crate) fn hal_origin(origin: Origin3d) -> HalOrigin3d {
     HalOrigin3d {
         x: origin.x,
@@ -153,6 +183,7 @@ pub(crate) fn hal_origin(origin: Origin3d) -> HalOrigin3d {
     }
 }
 
+/// Returns HAL extent.
 pub(crate) fn hal_extent(extent: Extent3d) -> HalExtent3d {
     HalExtent3d {
         width: extent.width,

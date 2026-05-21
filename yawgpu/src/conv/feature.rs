@@ -1,5 +1,6 @@
 use super::*;
 
+/// Converts feature into the corresponding yawgpu representation.
 #[must_use]
 #[allow(clippy::unnecessary_cast)]
 pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
@@ -13,6 +14,7 @@ pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
     }
 }
 
+/// Converts feature to native into the corresponding yawgpu representation.
 #[must_use]
 #[allow(clippy::unnecessary_cast)]
 pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
@@ -28,14 +30,20 @@ pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
     }
 }
 
+/// Stores info metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct DeviceLostCallbackInfo {
+    /// Mode.
     pub mode: native::WGPUCallbackMode,
+    /// Callback.
     pub callback: native::WGPUDeviceLostCallback,
+    /// Userdata1.
     pub userdata1: usize,
+    /// Userdata2.
     pub userdata2: usize,
 }
 
+/// Converts device lost callback info into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_device_lost_callback_info(
     value: native::WGPUDeviceLostCallbackInfo,
@@ -48,6 +56,7 @@ pub fn map_device_lost_callback_info(
     }
 }
 
+/// Converts device lost reason into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_device_lost_reason(reason: core::DeviceLostReason) -> native::WGPUDeviceLostReason {
     match reason {

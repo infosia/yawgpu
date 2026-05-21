@@ -8,6 +8,7 @@ use super::*;
 /// `WGPUChainedStruct` nodes. Recognized shader-source nodes must point to
 /// valid `WGPUShaderSourceWGSL` or `WGPUShaderSourceSPIRV` storage. WGSL
 /// string data and SPIR-V word data must be valid for their declared lengths.
+/// Converts shader module descriptor into the corresponding yawgpu representation.
 #[must_use]
 pub unsafe fn map_shader_module_descriptor(
     descriptor: &native::WGPUShaderModuleDescriptor,

@@ -1,5 +1,6 @@
 use super::*;
 
+/// Stores metal device data used by validation and backend submission.
 pub struct MetalDevice {
     pub(super) device: Retained<ProtocolObject<dyn MTLDevice>>,
     pub(super) allocations: AtomicU64,
@@ -15,6 +16,7 @@ impl std::fmt::Debug for MetalDevice {
 }
 
 impl MetalDevice {
+    /// Creates a new instance.
     pub fn new() -> Result<Self, HalError> {
         let adapter = MetalInstance::new()?
             .enumerate_adapters()
@@ -24,16 +26,19 @@ impl MetalDevice {
         adapter.create_device()
     }
 
+    /// Returns the allocation count.
     #[must_use]
     pub fn allocation_count(&self) -> u64 {
         self.allocations.load(Ordering::Relaxed)
     }
 
+    /// Returns the queue.
     #[must_use]
     pub fn queue(&self) -> &MetalQueue {
         &self.queue
     }
 
+    /// Allocates a buffer of the given size on this device.
     #[must_use]
     pub fn create_buffer(&self, size: u64) -> MetalBuffer {
         self.allocations.fetch_add(1, Ordering::Relaxed);
@@ -49,6 +54,7 @@ impl MetalDevice {
         }
     }
 
+    /// Creates a texture matching the given descriptor.
     #[must_use]
     pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> MetalTexture {
         self.allocations.fetch_add(1, Ordering::Relaxed);
@@ -70,6 +76,7 @@ impl MetalDevice {
         }
     }
 
+    /// Creates a sampler matching the given descriptor.
     #[must_use]
     pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> MetalSampler {
         self.allocations.fetch_add(1, Ordering::Relaxed);
@@ -78,6 +85,7 @@ impl MetalDevice {
         }
     }
 
+    /// Creates a compute pipeline from the given shader, entry point, and bindings.
     pub fn create_compute_pipeline(
         &self,
         shader: HalShaderSource,
@@ -93,6 +101,7 @@ impl MetalDevice {
         create_compute_pipeline(&self.device, &msl_source, entry_point, workgroup_size)
     }
 
+    /// Creates a render pipeline from the given shaders, vertex layout, and color targets.
     pub fn create_render_pipeline(
         &self,
         shader: HalShaderSource,

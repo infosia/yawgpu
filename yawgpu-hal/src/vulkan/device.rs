@@ -1,5 +1,6 @@
 use super::*;
 
+/// Holds shared state for the vulkan device handle.
 pub(super) struct VulkanDeviceInner {
     pub(super) _instance: Arc<VulkanInstanceInner>,
     pub(super) device: ash::Device,
@@ -25,6 +26,7 @@ impl Drop for VulkanDeviceInner {
     }
 }
 
+/// Stores vulkan device data used by validation and backend submission.
 #[derive(Debug)]
 pub struct VulkanDevice {
     pub(super) inner: Arc<VulkanDeviceInner>,
@@ -32,16 +34,19 @@ pub struct VulkanDevice {
 }
 
 impl VulkanDevice {
+    /// Returns the allocation count.
     #[must_use]
     pub fn allocation_count(&self) -> u64 {
         self.inner.allocations.load(Ordering::Relaxed)
     }
 
+    /// Returns the queue.
     #[must_use]
     pub fn queue(&self) -> &VulkanQueue {
         &self.queue
     }
 
+    /// Allocates a buffer of the given size on this device.
     #[must_use]
     pub fn create_buffer(&self, size: u64) -> VulkanBuffer {
         self.inner.allocations.fetch_add(1, Ordering::Relaxed);
@@ -54,6 +59,7 @@ impl VulkanDevice {
         }
     }
 
+    /// Creates a texture matching the given descriptor.
     #[must_use]
     pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> VulkanTexture {
         self.inner.allocations.fetch_add(1, Ordering::Relaxed);
@@ -79,6 +85,7 @@ impl VulkanDevice {
         }
     }
 
+    /// Creates a sampler matching the given descriptor.
     #[must_use]
     pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> VulkanSampler {
         self.inner.allocations.fetch_add(1, Ordering::Relaxed);
@@ -89,6 +96,7 @@ impl VulkanDevice {
         }
     }
 
+    /// Creates a compute pipeline from the given shader, entry point, and bindings.
     pub fn create_compute_pipeline(
         &self,
         shader: HalShaderSource,
@@ -99,6 +107,7 @@ impl VulkanDevice {
         create_compute_pipeline(Arc::clone(&self.inner), shader, entry_point, bindings)
     }
 
+    /// Creates a render pipeline from the given shaders, vertex layout, and color targets.
     pub fn create_render_pipeline(
         &self,
         shader: HalShaderSource,
@@ -118,6 +127,7 @@ impl VulkanDevice {
     }
 }
 
+/// Returns physical device name.
 pub(super) fn physical_device_name(properties: vk::PhysicalDeviceProperties) -> Option<String> {
     properties
         .device_name_as_c_str()

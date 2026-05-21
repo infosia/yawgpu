@@ -5,6 +5,7 @@ use super::*;
 /// # Safety
 ///
 /// `command_encoder` and `descriptor` must be non-null live yawgpu pointers.
+/// Returns WGPU command encoder begin render pass.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderBeginRenderPass(
     command_encoder: native::WGPUCommandEncoder,
@@ -32,6 +33,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginRenderPass(
 /// # Safety
 ///
 /// `command_encoder` must be a non-null live yawgpu command encoder handle.
+/// Returns WGPU command encoder begin compute pass.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderBeginComputePass(
     command_encoder: native::WGPUCommandEncoder,
@@ -54,6 +56,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginComputePass(
 ///
 /// `command_encoder` must be a non-null live yawgpu command encoder handle.
 /// `descriptor` may be null; P6.1 stores no command buffer descriptor fields.
+/// Returns WGPU command encoder finish.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderFinish(
     command_encoder: native::WGPUCommandEncoder,
@@ -74,6 +77,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderFinish(
 /// # Safety
 ///
 /// `command_encoder` must be a non-null live yawgpu command encoder handle.
+/// Returns WGPU command encoder insert debug marker.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderInsertDebugMarker(
     command_encoder: native::WGPUCommandEncoder,
@@ -88,6 +92,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderInsertDebugMarker(
 /// # Safety
 ///
 /// `command_encoder` must be a non-null live yawgpu command encoder handle.
+/// Returns WGPU command encoder push debug group.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderPushDebugGroup(
     command_encoder: native::WGPUCommandEncoder,
@@ -102,6 +107,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderPushDebugGroup(
 /// # Safety
 ///
 /// `command_encoder` must be a non-null live yawgpu command encoder handle.
+/// Returns WGPU command encoder pop debug group.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderPopDebugGroup(
     command_encoder: native::WGPUCommandEncoder,
@@ -116,6 +122,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderPopDebugGroup(
 ///
 /// `command_encoder`, `source`, and `destination` must be non-null live yawgpu
 /// handles.
+/// Returns WGPU command encoder copy buffer to buffer.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToBuffer(
     command_encoder: native::WGPUCommandEncoder,
@@ -154,6 +161,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToBuffer(
 /// # Safety
 ///
 /// `command_encoder` and `buffer` must be non-null live yawgpu handles.
+/// Returns WGPU command encoder clear buffer.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderClearBuffer(
     command_encoder: native::WGPUCommandEncoder,
@@ -178,6 +186,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderClearBuffer(
 ///
 /// `command_encoder` and `buffer` must be non-null live yawgpu handles. `data`
 /// is not read by this P6.2 validation implementation.
+/// Returns WGPU command encoder write buffer.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderWriteBuffer(
     command_encoder: native::WGPUCommandEncoder,
@@ -211,6 +220,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderWriteBuffer(
 /// # Safety
 ///
 /// `command_encoder` and `query_set` must be non-null live yawgpu handles.
+/// Returns WGPU command encoder write timestamp.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderWriteTimestamp(
     command_encoder: native::WGPUCommandEncoder,
@@ -233,6 +243,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderWriteTimestamp(
 ///
 /// `command_encoder`, `query_set`, and `destination` must be non-null live
 /// yawgpu handles.
+/// Returns WGPU command encoder resolve query set.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderResolveQuerySet(
     command_encoder: native::WGPUCommandEncoder,
@@ -264,6 +275,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderResolveQuerySet(
 /// `command_encoder`, `source`, `destination`, and `copy_size` must be
 /// non-null. Nested buffer and texture handles must be non-null live yawgpu
 /// handles.
+/// Returns WGPU command encoder copy buffer to texture.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToTexture(
     command_encoder: native::WGPUCommandEncoder,
@@ -311,6 +323,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToTexture(
 /// `command_encoder`, `source`, `destination`, and `copy_size` must be
 /// non-null. Nested texture and buffer handles must be non-null live yawgpu
 /// handles.
+/// Returns WGPU command encoder copy texture to buffer.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToBuffer(
     command_encoder: native::WGPUCommandEncoder,
@@ -357,6 +370,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToBuffer(
 ///
 /// `command_encoder`, `source`, `destination`, and `copy_size` must be
 /// non-null. Nested texture handles must be non-null live yawgpu handles.
+/// Returns WGPU command encoder copy texture to texture.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToTexture(
     command_encoder: native::WGPUCommandEncoder,
@@ -406,6 +420,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToTexture(
 /// # Safety
 ///
 /// `command_encoder` must be a non-null live yawgpu command encoder handle.
+/// Returns WGPU command encoder release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderRelease(command_encoder: native::WGPUCommandEncoder) {
     release_handle(command_encoder, "WGPUCommandEncoder");
@@ -416,6 +431,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderRelease(command_encoder: native::WGPU
 /// # Safety
 ///
 /// `command_encoder` must be a non-null live yawgpu command encoder handle.
+/// Returns WGPU command encoder add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderAddRef(command_encoder: native::WGPUCommandEncoder) {
     add_ref_handle(command_encoder, "WGPUCommandEncoder");

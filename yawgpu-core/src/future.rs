@@ -2,26 +2,31 @@ use std::collections::BTreeMap;
 
 use parking_lot::Mutex;
 
+/// Identifies id used for cache lookup or callback tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FutureId(u64);
 
 impl FutureId {
+    /// Returns the raw 64-bit future identifier.
     #[must_use]
     pub fn get(self) -> u64 {
         self.0
     }
 
+    /// Constructs this object from raw.
     #[must_use]
     pub fn from_raw(id: u64) -> Self {
         Self(id)
     }
 }
 
+/// Stores future registry data used by validation and backend submission.
 #[derive(Debug, Default)]
 pub struct FutureRegistry {
     pub(crate) inner: Mutex<FutureRegistryInner>,
 }
 
+/// Holds shared state for the future registry handle.
 #[derive(Debug)]
 pub(crate) struct FutureRegistryInner {
     pub(crate) next_id: u64,
@@ -37,36 +42,52 @@ impl Default for FutureRegistryInner {
     }
 }
 
+/// Enumerates future state values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FutureState {
+    /// Pending variant.
     Pending,
+    /// Complete variant.
     Complete,
 }
 
+/// Enumerates future callback mode values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FutureCallbackMode {
+    /// Wait any only variant.
     WaitAnyOnly,
+    /// Allow process events variant.
     AllowProcessEvents,
+    /// Allow spontaneous variant.
     AllowSpontaneous,
 }
 
+/// Enumerates wait any status values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WaitAnyStatus {
+    /// Success variant.
     Success,
+    /// Timed out variant.
     TimedOut,
+    /// Error variant.
     Error,
 }
 
+/// Stores wait any result data used by validation and backend submission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct WaitAnyResult {
+    /// Status.
     pub status: WaitAnyStatus,
+    /// Completed.
     pub completed: Vec<FutureId>,
+    /// Callbacks to fire.
     pub callbacks_to_fire: Vec<FutureId>,
 }
 
+/// Stores entry metadata.
 #[derive(Debug)]
 pub(crate) struct FutureEntry {
     pub(crate) mode: FutureCallbackMode,
@@ -75,11 +96,13 @@ pub(crate) struct FutureEntry {
 }
 
 impl FutureRegistry {
+    /// Creates a new instance.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Registers a new pending future with the given callback mode and returns its id.
     #[must_use]
     pub fn register(&self, mode: FutureCallbackMode) -> FutureId {
         let mut inner = self.inner.lock();
@@ -96,12 +119,14 @@ impl FutureRegistry {
         id
     }
 
+    /// Marks the future with the given id as complete.
     pub fn complete(&self, id: FutureId) {
         if let Some(entry) = self.inner.lock().futures.get_mut(&id) {
             entry.state = FutureState::Complete;
         }
     }
 
+    /// Returns process events.
     #[must_use]
     pub fn process_events(&self) -> Vec<FutureId> {
         let mut inner = self.inner.lock();
@@ -126,6 +151,7 @@ impl FutureRegistry {
             .collect()
     }
 
+    /// Returns wait any.
     #[must_use]
     pub fn wait_any(&self, ids: &[FutureId]) -> WaitAnyResult {
         if ids.is_empty() {

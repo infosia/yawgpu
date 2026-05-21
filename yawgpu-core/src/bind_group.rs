@@ -9,37 +9,55 @@ use crate::sampler::*;
 use crate::texture::*;
 use crate::texture_view::*;
 
+/// Stores entry metadata.
 #[derive(Debug, Clone)]
 pub struct BindGroupEntry {
+    /// Binding.
     pub binding: u32,
+    /// Resource.
     pub resource: BindGroupResource,
 }
 
+/// Enumerates bind group resource values.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum BindGroupResource {
+    /// Buffer variant.
     Buffer {
+        /// Buffer variant.
         buffer: Arc<Buffer>,
+        /// Device variant.
         device: Arc<Device>,
+        /// Offset variant.
         offset: u64,
+        /// Size variant.
         size: u64,
     },
+    /// Sampler variant.
     Sampler {
+        /// Sampler variant.
         sampler: Arc<Sampler>,
+        /// Device variant.
         device: Arc<Device>,
     },
+    /// Texture view variant.
     TextureView {
+        /// Texture view variant.
         texture_view: Arc<TextureView>,
+        /// Device variant.
         device: Arc<Device>,
     },
+    /// Invalid variant.
     Invalid(String),
 }
 
+/// Stores bind group data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct BindGroup {
     pub(crate) inner: Arc<BindGroupInner>,
 }
 
+/// Holds shared state for the bind group handle.
 #[derive(Debug)]
 pub(crate) struct BindGroupInner {
     pub(crate) _layout: Arc<BindGroupLayout>,
@@ -48,6 +66,7 @@ pub(crate) struct BindGroupInner {
 }
 
 impl BindGroup {
+    /// Creates a new instance.
     pub(crate) fn new(
         layout: Arc<BindGroupLayout>,
         entries: Vec<BindGroupEntry>,
@@ -62,22 +81,26 @@ impl BindGroup {
         }
     }
 
+    /// Returns true when this object is error.
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
     }
 
+    /// Returns the layout.
     #[must_use]
     pub(crate) fn layout(&self) -> &Arc<BindGroupLayout> {
         &self.inner._layout
     }
 
+    /// Returns the entries.
     #[must_use]
     pub fn entries(&self) -> &[BindGroupEntry] {
         &self.inner._entries
     }
 }
 
+/// Validates bind group descriptor and returns a descriptive error on failure.
 pub(crate) fn validate_bind_group_descriptor(
     device: &Device,
     layout: &BindGroupLayout,
@@ -122,6 +145,7 @@ pub(crate) fn validate_bind_group_descriptor(
     None
 }
 
+/// Validates bind group entry and returns a descriptive error on failure.
 pub(crate) fn validate_bind_group_entry(
     device: &Device,
     entry: &BindGroupEntry,
@@ -203,6 +227,7 @@ pub(crate) fn validate_bind_group_entry(
     }
 }
 
+/// Validates bind group buffer and returns a descriptive error on failure.
 pub(crate) fn validate_bind_group_buffer(
     device: &Device,
     resource_device: &Device,
@@ -270,6 +295,7 @@ pub(crate) fn validate_bind_group_buffer(
     None
 }
 
+/// Stores bind group buffer validation data used by validation and backend submission.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BindGroupBufferValidation<'a> {
     pub(crate) buffer: &'a Buffer,
@@ -280,6 +306,7 @@ pub(crate) struct BindGroupBufferValidation<'a> {
     pub(crate) limits: Limits,
 }
 
+/// Validates bind group texture and returns a descriptive error on failure.
 pub(crate) fn validate_bind_group_texture(
     device: &Device,
     resource_device: &Device,
@@ -313,6 +340,7 @@ pub(crate) fn validate_bind_group_texture(
     None
 }
 
+/// Validates bind group storage texture and returns a descriptive error on failure.
 pub(crate) fn validate_bind_group_storage_texture(
     device: &Device,
     resource_device: &Device,

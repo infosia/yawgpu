@@ -1,6 +1,7 @@
 use super::*;
 use crate::{HalPresentMode, HalRenderPipelineDescriptor, HalSamplerDescriptor, HalTextureUsage};
 
+/// Returns metal device.
 pub(crate) fn metal_device() -> MetalDevice {
     let instance = MetalInstance::new().expect("create Metal instance");
     let adapter = instance
@@ -11,6 +12,7 @@ pub(crate) fn metal_device() -> MetalDevice {
     adapter.create_device().expect("create Metal device")
 }
 
+/// Returns texture descriptor.
 pub(crate) fn texture_descriptor() -> HalTextureDescriptor {
     HalTextureDescriptor {
         format: HalTextureFormat::Rgba8Unorm,
@@ -23,6 +25,7 @@ pub(crate) fn texture_descriptor() -> HalTextureDescriptor {
     }
 }
 
+/// Returns texture usage.
 pub(crate) fn texture_usage() -> HalTextureUsage {
     HalTextureUsage {
         copy_src: true,
@@ -33,6 +36,7 @@ pub(crate) fn texture_usage() -> HalTextureUsage {
     }
 }
 
+/// Returns sampler descriptor.
 pub(crate) fn sampler_descriptor() -> HalSamplerDescriptor {
     HalSamplerDescriptor {
         address_mode_u: HalAddressMode::ClampToEdge,
@@ -48,6 +52,7 @@ pub(crate) fn sampler_descriptor() -> HalSamplerDescriptor {
     }
 }
 
+/// Returns surface config.
 pub(crate) fn surface_config() -> HalSurfaceConfiguration {
     HalSurfaceConfiguration::new(
         HalTextureFormat::Rgba8Unorm,
@@ -58,6 +63,7 @@ pub(crate) fn surface_config() -> HalSurfaceConfiguration {
     )
 }
 
+/// Returns render descriptor.
 pub(crate) fn render_descriptor() -> HalRenderPipelineDescriptor {
     HalRenderPipelineDescriptor {
         color_formats: vec![HalTextureFormat::Rgba8Unorm],
@@ -66,6 +72,7 @@ pub(crate) fn render_descriptor() -> HalRenderPipelineDescriptor {
     }
 }
 
+/// Returns compute msl.
 pub(crate) fn compute_msl() -> HalShaderSource {
     HalShaderSource::Msl(
         r#"
@@ -77,6 +84,7 @@ kernel void main0() {}
     )
 }
 
+/// Returns render msl.
 pub(crate) fn render_msl() -> HalShaderSource {
     HalShaderSource::Msl(
         r#"
@@ -94,6 +102,7 @@ fragment float4 fs_main() { return float4(1.0, 0.0, 0.0, 1.0); }
     )
 }
 
+/// Returns metal layer.
 pub(crate) fn metal_layer() -> Retained<CAMetalLayer> {
     CAMetalLayer::layer()
 }

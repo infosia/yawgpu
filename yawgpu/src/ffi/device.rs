@@ -5,6 +5,7 @@ use super::*;
 /// # Safety
 ///
 /// `device` must be a non-null live yawgpu device handle.
+/// Returns WGPU device release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceRelease(device: native::WGPUDevice) {
     let device = device
@@ -22,6 +23,7 @@ pub unsafe extern "C" fn wgpuDeviceRelease(device: native::WGPUDevice) {
 /// # Safety
 ///
 /// `device` must be a non-null live yawgpu device handle.
+/// Returns WGPU device add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceAddRef(device: native::WGPUDevice) {
     add_ref_handle(device, "WGPUDevice");
@@ -32,6 +34,7 @@ pub unsafe extern "C" fn wgpuDeviceAddRef(device: native::WGPUDevice) {
 /// # Safety
 ///
 /// `device` must be a non-null live yawgpu device handle.
+/// Returns WGPU device destroy.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceDestroy(device: native::WGPUDevice) {
     let device_impl = borrow_handle(device, "WGPUDevice");
@@ -43,6 +46,7 @@ pub unsafe extern "C" fn wgpuDeviceDestroy(device: native::WGPUDevice) {
 /// # Safety
 ///
 /// `device` must be a non-null live yawgpu device handle.
+/// Returns WGPU device get lost future.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceGetLostFuture(device: native::WGPUDevice) -> native::WGPUFuture {
     let device_impl = borrow_handle(device, "WGPUDevice");
@@ -54,6 +58,7 @@ pub unsafe extern "C" fn wgpuDeviceGetLostFuture(device: native::WGPUDevice) -> 
 /// # Safety
 ///
 /// `device` must be a non-null live yawgpu device handle.
+/// Returns WGPU device push error scope.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDevicePushErrorScope(
     device: native::WGPUDevice,
@@ -73,6 +78,7 @@ pub unsafe extern "C" fn wgpuDevicePushErrorScope(
 ///
 /// `device` must be a non-null live yawgpu device handle. `callback_info`
 /// userdata pointers must remain valid until the callback fires.
+/// Returns WGPU device pop error scope.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDevicePopErrorScope(
     device: native::WGPUDevice,
@@ -115,6 +121,7 @@ pub unsafe extern "C" fn wgpuDevicePopErrorScope(
 ///
 /// `device` must be a non-null live yawgpu device handle. `label` must point
 /// to valid string data according to `WGPUStringView` when non-empty.
+/// Returns WGPU device set label.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceSetLabel(
     device: native::WGPUDevice,
@@ -131,6 +138,7 @@ pub unsafe extern "C" fn wgpuDeviceSetLabel(
 ///
 /// `device` must be a non-null live yawgpu device handle. `descriptor` must
 /// point to a valid `WGPUBufferDescriptor`.
+/// Returns WGPU device create buffer.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceCreateBuffer(
     device: native::WGPUDevice,
@@ -154,6 +162,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateBuffer(
 ///
 /// `device` must be a non-null live yawgpu device handle. `descriptor` must
 /// point to a valid `WGPUTextureDescriptor`.
+/// Returns WGPU device create texture.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceCreateTexture(
     device: native::WGPUDevice,
@@ -179,6 +188,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateTexture(
 ///
 /// `device` must be a non-null live yawgpu device handle. `descriptor`, when
 /// non-null, must point to a valid `WGPUSamplerDescriptor`.
+/// Returns WGPU device create sampler.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceCreateSampler(
     device: native::WGPUDevice,
@@ -201,6 +211,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateSampler(
 ///
 /// `device` must be a non-null live yawgpu device handle. `descriptor` must
 /// point to a valid `WGPUQuerySetDescriptor`.
+/// Returns WGPU device create query set.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceCreateQuerySet(
     device: native::WGPUDevice,
@@ -230,6 +241,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateQuerySet(
 /// `device` must be a non-null live yawgpu device handle. `descriptor` must
 /// point to a valid `WGPUShaderModuleDescriptor` and its extension chain must
 /// contain exactly one recognized shader source.
+/// Returns WGPU device create shader module.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceCreateShaderModule(
     device: native::WGPUDevice,
@@ -265,6 +277,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateShaderModule(
 ///
 /// `device` must be a non-null live yawgpu device handle. `descriptor` must
 /// point to a valid `WGPUBindGroupLayoutDescriptor`.
+/// Returns WGPU device create bind group layout.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceCreateBindGroupLayout(
     device: native::WGPUDevice,
@@ -292,6 +305,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateBindGroupLayout(
 /// point to a valid `WGPUBindGroupDescriptor`. `descriptor.layout` must be a
 /// non-null live yawgpu bind group layout handle. `descriptor.entries`, when
 /// non-null and `entryCount > 0`, must point to valid bind group entries.
+/// Returns WGPU device create bind group.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceCreateBindGroup(
     device: native::WGPUDevice,
@@ -321,6 +335,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateBindGroup(
 /// `device` must be a non-null live yawgpu device handle. `descriptor` must
 /// point to a valid `WGPUPipelineLayoutDescriptor`. Its `bindGroupLayouts`
 /// array may be null only when `bindGroupLayoutCount` is zero.
+/// Returns WGPU device create pipeline layout.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceCreatePipelineLayout(
     device: native::WGPUDevice,
@@ -362,6 +377,7 @@ pub unsafe extern "C" fn wgpuDeviceCreatePipelineLayout(
 /// point to a valid `WGPUComputePipelineDescriptor`. `descriptor.compute.module`
 /// must be a non-null live yawgpu shader module handle. `descriptor.layout`
 /// may be null to request automatic layout.
+/// Returns WGPU device create compute pipeline.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceCreateComputePipeline(
     device: native::WGPUDevice,
@@ -381,6 +397,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateComputePipeline(
 /// `device` must be a non-null live yawgpu device handle. `descriptor` must
 /// point to a valid `WGPUComputePipelineDescriptor`. The callback info follows
 /// the `webgpu.h` callback contract.
+/// Returns WGPU device create compute pipeline async.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceCreateComputePipelineAsync(
     device: native::WGPUDevice,
@@ -412,6 +429,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateComputePipelineAsync(
 /// and optional `descriptor.fragment.module` must be non-null live yawgpu
 /// shader module handles. `descriptor.layout`, `depthStencil`, and `fragment`
 /// may be null where allowed by WebGPU.
+/// Returns WGPU device create render pipeline.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceCreateRenderPipeline(
     device: native::WGPUDevice,
@@ -431,6 +449,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderPipeline(
 /// `device` must be a non-null live yawgpu device handle. `descriptor` must
 /// point to a valid `WGPURenderPipelineDescriptor`. The callback info follows
 /// the `webgpu.h` callback contract.
+/// Returns WGPU device create render pipeline async.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceCreateRenderPipelineAsync(
     device: native::WGPUDevice,
@@ -459,6 +478,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderPipelineAsync(
 ///
 /// `device` must be a non-null live yawgpu device handle. `descriptor` may be
 /// null; P6.1 stores no command encoder descriptor fields.
+/// Returns WGPU device create command encoder.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceCreateCommandEncoder(
     device: native::WGPUDevice,
@@ -477,6 +497,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateCommandEncoder(
 /// # Safety
 ///
 /// `device` and `descriptor` must be non-null live yawgpu pointers.
+/// Returns WGPU device create render bundle encoder.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceCreateRenderBundleEncoder(
     device: native::WGPUDevice,
@@ -505,6 +526,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderBundleEncoder(
 ///
 /// `device` must be a non-null live yawgpu device handle. `limits` must point
 /// to writable `WGPULimits` storage.
+/// Returns WGPU device get limits.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceGetLimits(
     device: native::WGPUDevice,
@@ -527,6 +549,7 @@ pub unsafe extern "C" fn wgpuDeviceGetLimits(
 ///
 /// `device` must be a non-null live yawgpu device handle. `features` must
 /// point to writable `WGPUSupportedFeatures` storage.
+/// Returns WGPU device get features.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceGetFeatures(
     device: native::WGPUDevice,
@@ -544,6 +567,7 @@ pub unsafe extern "C" fn wgpuDeviceGetFeatures(
 /// # Safety
 ///
 /// `device` must be a non-null live yawgpu device handle.
+/// Returns WGPU device has feature.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceHasFeature(
     device: native::WGPUDevice,
@@ -558,6 +582,7 @@ pub unsafe extern "C" fn wgpuDeviceHasFeature(
 /// # Safety
 ///
 /// `device` must be a non-null live yawgpu device handle.
+/// Returns WGPU device get queue.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceGetQueue(device: native::WGPUDevice) -> native::WGPUQueue {
     let device = borrow_handle(device, "WGPUDevice");

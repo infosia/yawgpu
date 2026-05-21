@@ -2,15 +2,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::HalError;
 
+/// Stores noop instance data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct NoopInstance;
 
 impl NoopInstance {
+    /// Creates a new instance.
     #[must_use]
     pub fn new() -> Self {
         Self
     }
 
+    /// Returns adapters exposed by this instance.
     #[must_use]
     pub fn enumerate_adapters(&self) -> Vec<NoopAdapter> {
         vec![NoopAdapter::synthetic()]
@@ -23,12 +26,14 @@ impl Default for NoopInstance {
     }
 }
 
+/// Stores noop adapter data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct NoopAdapter {
     name: &'static str,
 }
 
 impl NoopAdapter {
+    /// Builds the single synthetic adapter the Noop backend exposes.
     #[must_use]
     pub fn synthetic() -> Self {
         Self {
@@ -36,16 +41,19 @@ impl NoopAdapter {
         }
     }
 
+    /// Returns the name.
     #[must_use]
     pub fn name(&self) -> &'static str {
         self.name
     }
 
+    /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<NoopDevice, HalError> {
         Ok(NoopDevice::new())
     }
 }
 
+/// Stores noop device data used by validation and backend submission.
 #[derive(Debug)]
 pub struct NoopDevice {
     allocations: AtomicU64,
@@ -53,6 +61,7 @@ pub struct NoopDevice {
 }
 
 impl NoopDevice {
+    /// Creates a new instance.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -61,28 +70,33 @@ impl NoopDevice {
         }
     }
 
+    /// Returns the allocation count.
     #[must_use]
     pub fn allocation_count(&self) -> u64 {
         self.allocations.load(Ordering::Relaxed)
     }
 
+    /// Returns the queue.
     #[must_use]
     pub fn queue(&self) -> &NoopQueue {
         &self.queue
     }
 
+    /// Allocates a buffer of the given size on this device.
     #[must_use]
     pub fn create_buffer(&self, size: u64) -> NoopBuffer {
         self.allocations.fetch_add(1, Ordering::Relaxed);
         NoopBuffer { size }
     }
 
+    /// Creates a texture matching the given descriptor.
     #[must_use]
     pub fn create_texture(&self) -> NoopTexture {
         self.allocations.fetch_add(1, Ordering::Relaxed);
         NoopTexture
     }
 
+    /// Creates a sampler matching the given descriptor.
     #[must_use]
     pub fn create_sampler(&self) -> NoopSampler {
         self.allocations.fetch_add(1, Ordering::Relaxed);
@@ -96,10 +110,12 @@ impl Default for NoopDevice {
     }
 }
 
+/// Stores noop queue data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct NoopQueue;
 
 impl NoopQueue {
+    /// Creates a new instance.
     #[must_use]
     pub fn new() -> Self {
         Self
@@ -112,26 +128,31 @@ impl Default for NoopQueue {
     }
 }
 
+/// Stores noop buffer data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct NoopBuffer {
     size: u64,
 }
 
 impl NoopBuffer {
+    /// Returns the size.
     #[must_use]
     pub fn size(&self) -> u64 {
         self.size
     }
 
+    /// Returns mapped ptr.
     #[must_use]
     pub fn mapped_ptr(&self) -> Option<std::ptr::NonNull<u8>> {
         None
     }
 }
 
+/// Stores noop texture data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct NoopTexture;
 
+/// Stores noop sampler data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct NoopSampler;
 
