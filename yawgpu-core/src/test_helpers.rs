@@ -1,9 +1,7 @@
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use crate::device::FeatureSet;
 use crate::*;
 
 pub(crate) fn noop_adapter() -> Adapter {

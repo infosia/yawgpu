@@ -1,46 +1,14 @@
-use std::cell::UnsafeCell;
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-use yawgpu_hal::{
-    HalAdapter, HalAddressMode, HalBackend, HalBoundBuffer, HalBuffer, HalBufferBindingKind,
-    HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout, HalCompareFunction,
-    HalComputePass, HalComputePipeline, HalCopy, HalDescriptorBinding, HalDevice, HalDraw,
-    HalError, HalExtent3d, HalFilterMode, HalInstance, HalMipmapFilterMode, HalOrigin3d,
-    HalPrimitiveTopology, HalQueue, HalRenderColorTarget, HalRenderLoadOp, HalRenderPass,
-    HalRenderPipeline, HalRenderPipelineDescriptor, HalSampler, HalSamplerDescriptor,
-    HalShaderSource, HalSurface, HalTexture, HalTextureCopy, HalTextureDescriptor,
-    HalTextureFormat, HalTextureUsage, HalVertexAttribute, HalVertexBufferLayout, HalVertexFormat,
-    HalVertexStepMode,
-};
-
-use crate::adapter::*;
 use crate::bind_group::*;
-use crate::bind_group_layout::*;
 use crate::buffer::*;
 use crate::command_encoder::*;
-use crate::compute_pass::*;
-use crate::compute_pipeline::*;
 use crate::copy::*;
-use crate::device::*;
-use crate::error::*;
-use crate::extent::*;
-use crate::format::*;
-use crate::future::*;
-use crate::instance::*;
 use crate::limits::*;
 use crate::pass::*;
-use crate::pipeline_layout::*;
 use crate::query_set::*;
-use crate::queue::*;
 use crate::render_bundle::*;
 use crate::render_pipeline::*;
-use crate::sampler::*;
-use crate::shader::*;
-use crate::shader_naga;
-use crate::texture::*;
 use crate::texture_view::*;
 
 #[derive(Debug, Clone)]
@@ -83,49 +51,6 @@ pub struct RenderPassEncoder {
     pub(crate) inner: Arc<PassEncoderInner>,
 }
 
-pub(crate) fn validate_render_pass_descriptor(
-    descriptor: &RenderPassDescriptor,
-) -> Result<(), String> {
-    render_pass_attachment_signature(descriptor)?;
-    if let Some(query_set) = &descriptor.occlusion_query_set {
-        validate_occlusion_query_set(query_set, "render pass occlusion query set")?;
-    }
-    if let Some(timestamp_writes) = &descriptor.timestamp_writes {
-        validate_render_pass_timestamp_writes(timestamp_writes)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_render_pass_timestamp_writes(
-    timestamp_writes: &RenderPassTimestampWrites,
-) -> Result<(), String> {
-    validate_timestamp_query_set(
-        &timestamp_writes.query_set,
-        "render pass timestamp writes query set",
-    )?;
-    if timestamp_writes.beginning_index.is_none() && timestamp_writes.end_index.is_none() {
-        return Err("render pass timestamp writes requires at least one query index".to_owned());
-    }
-    if let Some(index) = timestamp_writes.beginning_index {
-        validate_query_index(
-            &timestamp_writes.query_set,
-            index,
-            "render pass beginning timestamp query index",
-        )?;
-    }
-    if let Some(index) = timestamp_writes.end_index {
-        validate_query_index(
-            &timestamp_writes.query_set,
-            index,
-            "render pass end timestamp query index",
-        )?;
-    }
-    if timestamp_writes.beginning_index == timestamp_writes.end_index {
-        return Err("render pass timestamp write indices must be distinct".to_owned());
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_occlusion_query_set(
     query_set: &QuerySet,
     usage: &str,
@@ -133,17 +58,6 @@ pub(crate) fn validate_occlusion_query_set(
     validate_query_set_alive(query_set, usage)?;
     if query_set.kind() != QueryType::Occlusion {
         return Err(format!("{usage} requires an occlusion query set"));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_timestamp_query_set(
-    query_set: &QuerySet,
-    usage: &str,
-) -> Result<(), String> {
-    validate_query_set_alive(query_set, usage)?;
-    if query_set.kind() != QueryType::Timestamp {
-        return Err(format!("{usage} requires a timestamp query set"));
     }
     Ok(())
 }
@@ -165,275 +79,6 @@ pub(crate) fn validate_query_index(
 ) -> Result<(), String> {
     if index >= query_set.count() {
         return Err(format!("{name} exceeds query set count"));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_resolve_query_set(
-    query_set: &QuerySet,
-    first_query: u32,
-    query_count: u32,
-    destination: &Buffer,
-    destination_offset: u64,
-) -> Result<(), String> {
-    validate_query_set_alive(query_set, "resolve query set")?;
-    if query_count == 0 {
-        return Err("resolve query count must be greater than zero".to_owned());
-    }
-    let end_query = first_query
-        .checked_add(query_count)
-        .ok_or_else(|| "resolve query range overflows".to_owned())?;
-    if end_query > query_set.count() {
-        return Err("resolve query range exceeds query set count".to_owned());
-    }
-    if destination.is_error() {
-        return Err("resolve query set cannot use an error destination buffer".to_owned());
-    }
-    if destination.is_destroyed() {
-        return Err("resolve query set cannot use a destroyed destination buffer".to_owned());
-    }
-    if !destination.usage().contains(BufferUsage::QUERY_RESOLVE) {
-        return Err("resolve query set destination requires QueryResolve usage".to_owned());
-    }
-    if !destination_offset.is_multiple_of(256) {
-        return Err("resolve query set destination offset must be 256-byte aligned".to_owned());
-    }
-    let byte_count = u64::from(query_count)
-        .checked_mul(8)
-        .ok_or_else(|| "resolve query byte count overflows".to_owned())?;
-    validate_buffer_range(
-        destination_offset,
-        byte_count,
-        destination.size(),
-        "resolve query destination range",
-    )
-}
-
-pub(crate) fn render_pass_attachment_signature(
-    descriptor: &RenderPassDescriptor,
-) -> Result<AttachmentSignature, String> {
-    if descriptor.color_attachments.len() > descriptor.max_color_attachments as usize {
-        return Err("render pass colorAttachmentCount exceeds the device limit".to_owned());
-    }
-
-    let mut has_attachment = false;
-    let mut render_extent = None;
-    let mut sample_count = None;
-    let mut color_formats = Vec::with_capacity(descriptor.color_attachments.len());
-
-    for attachment in &descriptor.color_attachments {
-        if let Some(attachment) = attachment {
-            has_attachment = true;
-            validate_color_attachment(attachment)?;
-            validate_render_attachment_common(
-                &attachment.view,
-                &mut render_extent,
-                &mut sample_count,
-                "render pass color attachment",
-            )?;
-            if let Some(resolve_target) = &attachment.resolve_target {
-                validate_resolve_target(&attachment.view, resolve_target)?;
-            }
-            color_formats.push(Some(attachment.view.format()));
-        } else {
-            color_formats.push(None);
-        }
-    }
-
-    let mut depth_stencil_format = None;
-    if let Some(attachment) = &descriptor.depth_stencil_attachment {
-        has_attachment = true;
-        validate_depth_stencil_attachment(attachment)?;
-        depth_stencil_format = Some(attachment.view.format());
-        validate_render_attachment_common(
-            &attachment.view,
-            &mut render_extent,
-            &mut sample_count,
-            "render pass depth-stencil attachment",
-        )?;
-    }
-
-    if !has_attachment {
-        return Err("render pass requires at least one attachment".to_owned());
-    }
-    Ok(AttachmentSignature {
-        color_formats,
-        depth_stencil_format,
-        sample_count: sample_count.unwrap_or(1),
-    })
-}
-
-pub(crate) fn render_pass_attachment_textures(descriptor: &RenderPassDescriptor) -> Vec<Texture> {
-    let mut textures = Vec::new();
-    for attachment in descriptor.color_attachments.iter().flatten() {
-        textures.push(attachment.view.texture());
-        if let Some(resolve_target) = &attachment.resolve_target {
-            textures.push(resolve_target.texture());
-        }
-    }
-    if let Some(attachment) = &descriptor.depth_stencil_attachment {
-        textures.push(attachment.view.texture());
-    }
-    textures
-}
-
-pub(crate) fn render_pass_color_execution(
-    descriptor: &RenderPassDescriptor,
-) -> Option<RenderPassColorExecution> {
-    descriptor
-        .color_attachments
-        .iter()
-        .flatten()
-        .next()
-        .map(|attachment| RenderPassColorExecution {
-            texture: attachment.view.texture(),
-            load_op: attachment.load_op,
-            store_op: attachment.store_op,
-            clear_value: attachment.clear_value,
-        })
-}
-
-pub(crate) fn validate_color_attachment(
-    attachment: &RenderPassColorAttachment,
-) -> Result<(), String> {
-    let texture = attachment.view.texture();
-    let Some(format_caps) = attachment.view.format().caps() else {
-        return Err("render pass color attachment format must be supported".to_owned());
-    };
-    if !texture.usage().contains(TextureUsage::RENDER_ATTACHMENT) {
-        return Err("render pass color attachment requires RenderAttachment usage".to_owned());
-    }
-    if !format_caps.aspects.color || !format_caps.renderable {
-        return Err("render pass color attachment format must be color-renderable".to_owned());
-    }
-    if attachment.load_op == LoadOp::Undefined {
-        return Err("render pass color attachment loadOp must be set".to_owned());
-    }
-    if attachment.store_op == StoreOp::Undefined {
-        return Err("render pass color attachment storeOp must be set".to_owned());
-    }
-    if attachment.load_op == LoadOp::Clear
-        && ![
-            attachment.clear_value.r,
-            attachment.clear_value.g,
-            attachment.clear_value.b,
-            attachment.clear_value.a,
-        ]
-        .into_iter()
-        .all(f64::is_finite)
-    {
-        return Err("render pass color clearValue components must be finite".to_owned());
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_depth_stencil_attachment(
-    attachment: &RenderPassDepthStencilAttachment,
-) -> Result<(), String> {
-    let texture = attachment.view.texture();
-    let Some(format_caps) = attachment.view.format().caps() else {
-        return Err("render pass depth-stencil attachment format must be supported".to_owned());
-    };
-    if !texture.usage().contains(TextureUsage::RENDER_ATTACHMENT) {
-        return Err(
-            "render pass depth-stencil attachment requires RenderAttachment usage".to_owned(),
-        );
-    }
-    if !format_caps.aspects.depth && !format_caps.aspects.stencil {
-        return Err(
-            "render pass depth-stencil attachment format must have depth or stencil aspect"
-                .to_owned(),
-        );
-    }
-    if format_caps.aspects.depth {
-        if attachment.depth_load_op == LoadOp::Undefined {
-            return Err("render pass depth loadOp must be set".to_owned());
-        }
-        if attachment.depth_store_op == StoreOp::Undefined {
-            return Err("render pass depth storeOp must be set".to_owned());
-        }
-        if attachment.depth_load_op == LoadOp::Clear
-            && (!attachment.depth_clear_value.is_finite()
-                || !(0.0..=1.0).contains(&attachment.depth_clear_value))
-        {
-            return Err("render pass depth clear value must be finite and in [0, 1]".to_owned());
-        }
-    }
-    if format_caps.aspects.stencil {
-        if attachment.stencil_load_op == LoadOp::Undefined {
-            return Err("render pass stencil loadOp must be set".to_owned());
-        }
-        if attachment.stencil_store_op == StoreOp::Undefined {
-            return Err("render pass stencil storeOp must be set".to_owned());
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_render_attachment_common(
-    view: &TextureView,
-    render_extent: &mut Option<(u32, u32)>,
-    sample_count: &mut Option<u32>,
-    label: &str,
-) -> Result<(), String> {
-    if view.is_error() {
-        return Err(format!("{label} view must not be an error view"));
-    }
-    if view.array_layer_count() != 1 {
-        return Err(format!("{label} view arrayLayerCount must be one"));
-    }
-    let extent = view.render_extent();
-    let size = (extent.width, extent.height);
-    if let Some(expected) = *render_extent {
-        if expected != size {
-            return Err("render pass attachments must have matching sizes".to_owned());
-        }
-    } else {
-        *render_extent = Some(size);
-    }
-
-    let view_sample_count = view.texture().sample_count();
-    if let Some(expected) = *sample_count {
-        if expected != view_sample_count {
-            return Err("render pass attachments must have matching sample counts".to_owned());
-        }
-    } else {
-        *sample_count = Some(view_sample_count);
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_resolve_target(
-    color_view: &TextureView,
-    resolve_target: &TextureView,
-) -> Result<(), String> {
-    let color_texture = color_view.texture();
-    let resolve_texture = resolve_target.texture();
-    if color_texture.sample_count() <= 1 {
-        return Err(
-            "render pass resolveTarget requires a multisampled color attachment".to_owned(),
-        );
-    }
-    if resolve_target.is_error() {
-        return Err("render pass resolveTarget view must not be an error view".to_owned());
-    }
-    if !resolve_texture
-        .usage()
-        .contains(TextureUsage::RENDER_ATTACHMENT)
-    {
-        return Err("render pass resolveTarget requires RenderAttachment usage".to_owned());
-    }
-    if resolve_texture.sample_count() != 1 {
-        return Err("render pass resolveTarget sampleCount must be one".to_owned());
-    }
-    if color_view.format() != resolve_target.format() {
-        return Err("render pass resolveTarget format must match the color attachment".to_owned());
-    }
-    if resolve_target.array_layer_count() != 1 {
-        return Err("render pass resolveTarget view arrayLayerCount must be one".to_owned());
-    }
-    if color_view.render_extent() != resolve_target.render_extent() {
-        return Err("render pass resolveTarget size must match the color attachment".to_owned());
     }
     Ok(())
 }
@@ -740,8 +385,7 @@ impl RenderPassEncoder {
 mod tests {
     use super::*;
     use crate::test_helpers::*;
-    use crate::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use std::sync::Arc;
 
     #[test]

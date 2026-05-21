@@ -1,5 +1,3 @@
-#![allow(dead_code, private_interfaces, unused_imports)]
-
 mod adapter;
 mod bind_group;
 mod bind_group_layout;
@@ -80,10 +78,8 @@ pub use texture_view::{TextureAspect, TextureView, TextureViewDescriptor, Textur
 
 #[cfg(test)]
 mod tests {
-    use crate::test_helpers::*;
+
     use crate::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
 
     #[test]
     fn creates_noop_device_and_queue() {

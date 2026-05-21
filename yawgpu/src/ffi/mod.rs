@@ -1,5 +1,3 @@
-#![allow(dead_code, private_interfaces, unused_imports)]
-
 pub mod adapter;
 pub mod bindings;
 pub mod buffer;
@@ -18,28 +16,44 @@ pub mod shader;
 pub mod surface;
 pub mod texture;
 
-pub use adapter::*;
-pub use bindings::*;
-pub use buffer::*;
-pub use bundle::*;
-pub use command_buffer::*;
-pub use compute_pass::*;
-pub use device::*;
-pub use encoder::*;
-pub use instance::*;
-pub use pipelines::*;
-pub use query::*;
-pub use queue::*;
-pub use render_pass::*;
-pub use sampler::*;
-pub use shader::*;
-pub use surface::*;
-pub use texture::*;
+#[cfg(test)]
+use adapter::*;
+#[cfg(test)]
+use bindings::*;
+#[cfg(test)]
+use buffer::*;
+#[cfg(test)]
+use bundle::*;
+#[cfg(test)]
+use command_buffer::*;
+#[cfg(test)]
+use compute_pass::*;
+#[cfg(test)]
+use device::*;
+#[cfg(test)]
+use encoder::*;
+#[cfg(test)]
+use instance::*;
+#[cfg(test)]
+use pipelines::*;
+#[cfg(test)]
+use query::*;
+#[cfg(test)]
+use queue::*;
+#[cfg(test)]
+use render_pass::*;
+#[cfg(test)]
+use sampler::*;
+#[cfg(test)]
+use shader::*;
+#[cfg(test)]
+use surface::*;
+#[cfg(test)]
+use texture::*;
 
 use crate::{
     native, WGPUYawgpuInstanceBackendSelect, WGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT,
-    WGPU_YAWGPU_INSTANCE_BACKEND_METAL, WGPU_YAWGPU_INSTANCE_BACKEND_NOOP,
-    WGPU_YAWGPU_INSTANCE_BACKEND_VULKAN,
+    WGPU_YAWGPU_INSTANCE_BACKEND_METAL, WGPU_YAWGPU_INSTANCE_BACKEND_VULKAN,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::os::raw::c_void;
@@ -1809,6 +1823,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use crate::WGPU_YAWGPU_INSTANCE_BACKEND_NOOP;
 
     #[derive(Default)]
     struct RequestAdapterState {

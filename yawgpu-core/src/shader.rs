@@ -1,47 +1,8 @@
-use std::cell::UnsafeCell;
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-use yawgpu_hal::{
-    HalAdapter, HalAddressMode, HalBackend, HalBoundBuffer, HalBuffer, HalBufferBindingKind,
-    HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout, HalCompareFunction,
-    HalComputePass, HalComputePipeline, HalCopy, HalDescriptorBinding, HalDevice, HalDraw,
-    HalError, HalExtent3d, HalFilterMode, HalInstance, HalMipmapFilterMode, HalOrigin3d,
-    HalPrimitiveTopology, HalQueue, HalRenderColorTarget, HalRenderLoadOp, HalRenderPass,
-    HalRenderPipeline, HalRenderPipelineDescriptor, HalSampler, HalSamplerDescriptor,
-    HalShaderSource, HalSurface, HalTexture, HalTextureCopy, HalTextureDescriptor,
-    HalTextureFormat, HalTextureUsage, HalVertexAttribute, HalVertexBufferLayout, HalVertexFormat,
-    HalVertexStepMode,
-};
-
-use crate::adapter::*;
-use crate::bind_group::*;
 use crate::bind_group_layout::*;
-use crate::buffer::*;
-use crate::command_encoder::*;
-use crate::compute_pass::*;
-use crate::compute_pipeline::*;
-use crate::copy::*;
-use crate::device::*;
-use crate::error::*;
-use crate::extent::*;
-use crate::format::*;
-use crate::future::*;
-use crate::instance::*;
-use crate::limits::*;
-use crate::pass::*;
-use crate::pipeline_layout::*;
-use crate::query_set::*;
-use crate::queue::*;
-use crate::render_bundle::*;
-use crate::render_pass::*;
-use crate::render_pipeline::*;
-use crate::sampler::*;
 use crate::shader_naga;
-use crate::texture::*;
-use crate::texture_view::*;
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -138,122 +99,6 @@ pub(crate) fn validate_wgsl_module_limits(module: &naga::Module) -> Result<(), S
     Ok(())
 }
 
-pub(crate) fn validate_bind_group_layout_descriptor(
-    entries: &[BindGroupLayoutEntry],
-    limits: Limits,
-) -> Option<String> {
-    if entries.len() > 1000 {
-        return Some("bind group layout entry count exceeds 1000".to_owned());
-    }
-
-    let mut bindings = BTreeSet::new();
-    let mut dynamic_uniform_buffers = 0_u32;
-    let mut dynamic_storage_buffers = 0_u32;
-    let mut stage_counts = [StageResourceCounts::default(); 3];
-
-    for entry in entries {
-        if entry.binding >= 1000 {
-            return Some("bind group layout binding must be less than 1000".to_owned());
-        }
-        if !bindings.insert(entry.binding) {
-            return Some("bind group layout bindings must be unique".to_owned());
-        }
-        if entry.binding_array_size > 1 {
-            return Some(
-                "bind group layout bindingArraySize greater than one is not supported".to_owned(),
-            );
-        }
-
-        let Some(kind) = entry.kind else {
-            return Some("bind group layout entry must set exactly one binding layout".to_owned());
-        };
-
-        match kind {
-            BindingLayoutKind::Buffer {
-                ty,
-                has_dynamic_offset,
-                ..
-            } => {
-                match ty {
-                    BufferBindingType::Uniform if has_dynamic_offset => {
-                        dynamic_uniform_buffers += 1;
-                    }
-                    BufferBindingType::Storage | BufferBindingType::ReadOnlyStorage
-                        if has_dynamic_offset =>
-                    {
-                        dynamic_storage_buffers += 1;
-                    }
-                    _ => {}
-                }
-                if dynamic_uniform_buffers > limits.max_dynamic_uniform_buffers_per_pipeline_layout
-                {
-                    return Some(
-                        "too many dynamic uniform buffers in bind group layout".to_owned(),
-                    );
-                }
-                if dynamic_storage_buffers > limits.max_dynamic_storage_buffers_per_pipeline_layout
-                {
-                    return Some(
-                        "too many dynamic storage buffers in bind group layout".to_owned(),
-                    );
-                }
-            }
-            BindingLayoutKind::Texture {
-                view_dimension,
-                multisampled,
-                ..
-            } => {
-                if multisampled && view_dimension != TextureViewDimension::D2 {
-                    return Some(
-                        "multisampled texture bindings require 2D view dimension".to_owned(),
-                    );
-                }
-            }
-            BindingLayoutKind::StorageTexture {
-                format,
-                view_dimension,
-                ..
-            } => {
-                if view_dimension == TextureViewDimension::D1 {
-                    return Some(
-                        "storage texture bindings must not use 1D view dimension".to_owned(),
-                    );
-                }
-                let Some(caps) = format.caps() else {
-                    return Some("storage texture binding format must not be Undefined".to_owned());
-                };
-                if !caps.storage_capable {
-                    return Some(
-                        "storage texture binding format must support storage usage".to_owned(),
-                    );
-                }
-            }
-            BindingLayoutKind::Sampler { .. } => {}
-        }
-
-        for stage in visible_stages(entry.visibility) {
-            stage_counts[stage].add(kind);
-            if stage_counts[stage].sampled_textures > limits.max_sampled_textures_per_shader_stage {
-                return Some("too many sampled textures for one shader stage".to_owned());
-            }
-            if stage_counts[stage].samplers > limits.max_samplers_per_shader_stage {
-                return Some("too many samplers for one shader stage".to_owned());
-            }
-            if stage_counts[stage].storage_buffers > limits.max_storage_buffers_per_shader_stage {
-                return Some("too many storage buffers for one shader stage".to_owned());
-            }
-            if stage_counts[stage].storage_textures > limits.max_storage_textures_per_shader_stage {
-                return Some("too many storage textures for one shader stage".to_owned());
-            }
-            if stage_counts[stage].uniform_buffers > limits.max_uniform_buffers_per_shader_stage {
-                return Some("too many uniform buffers for one shader stage".to_owned());
-            }
-        }
-    }
-
-    None
-}
-
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct StageResourceCounts {
     pub(crate) sampled_textures: u32,
@@ -296,8 +141,6 @@ mod tests {
     use super::*;
     use crate::test_helpers::*;
     use crate::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
 
     #[test]
     fn shader_module_accessors_pin_is_error_and_diagnostic() {
