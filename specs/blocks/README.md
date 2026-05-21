@@ -24,3 +24,9 @@ Planned blocks (created lazily, tracked in `../SPEC.md`):
 | `50-commands.md` | 6 |
 | `60-backends.md` | 7 |
 | `70-surface-query-errorscope.md` | 8 |
+| `33-shader-passthrough.md` | 13 (vendor: SPIR-V/MSL passthrough) |
+| `55-tiled-rendering.md` | 14 (vendor: TBDR mobile extension) |
+
+Vendor-extension blocks (33, 55) are **not** Dawn ports — their rules are
+exercised by direct unit tests (principle 1) + GPU-gated e2e, and they live
+behind opt-in cargo features (`shader-passthrough`, `tiled`; default off).

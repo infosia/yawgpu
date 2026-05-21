@@ -34,6 +34,11 @@ COMPLETE with an open CRITICAL/MAJOR (see `reference/workflow.md`).
 | **7** | Real backends | Dawn `end2end` Basic/Compute/Copy (GPU-gated) | Noop→**Metal→Vulkan** bring-up; real draw/dispatch. *(Order reversed from Vulkan→Metal: dev platform is macOS — Metal native, no MoltenVK; see `blocks/60-real-backends.md` / `tracking/phase-7.md`.)* |
 | **8** | Surface/Query/ErrorScope/DeviceLost | `QuerySetValidationTests`, `ErrorScopeValidationTests`, `DeviceLostValidationTests`, surface config | remaining API surface |
 | **9** | Examples + real surface/presentation | Dawn `samples/` + wgpu-native `examples/` (C, webgpu.h) | C samples ported; SF3 real window→swapchain on Metal/Vulkan. *(Post-core, user-requested; see `blocks/80-examples.md` / `tracking/phase-9.md`.)* |
+| **13** | Shader passthrough (vendor) | — (vendor extension; direct unit tests + GPU-gated e2e) | Create `WGPUShaderModule` from raw SPIR-V (Vulkan) / MSL (Metal), feature `shader-passthrough` (default off), no API breakage. *(See `blocks/33-shader-passthrough.md` / `tracking/phase-13.md`.)* |
+| **14** | Tiled rendering / TBDR (vendor) | — (vendor extension; direct unit tests + GPU-gated e2e) | Transient attachments, multi-subpass passes, framebuffer fetch, subpass pipelines (+ tile-dispatch scaffold), feature `tiled` (default off), Vulkan+Metal only, no API breakage. *(See `blocks/55-tiled-rendering.md` / `tracking/phase-14.md`.)* |
+
+> Phases 10–12 (unit-test coverage, modularization, Win32 surface) were
+> post-core, user-requested, and are tracked in `tracking/` only.
 
 ## Out of scope
 
