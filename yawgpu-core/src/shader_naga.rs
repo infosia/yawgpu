@@ -4,9 +4,9 @@
 
 use std::collections::BTreeMap;
 
-/// Stores validated WGSL module data used by validation and backend submission.
+/// Stores reflected shader module data used by validation and backend submission.
 #[derive(Debug)]
-pub(crate) struct ValidatedWgslModule {
+pub struct ReflectedModule {
     /// Module.
     pub module: naga::Module,
     /// Info.
@@ -320,8 +320,22 @@ pub(crate) enum ReflectedOverrideValue {
 }
 
 /// Returns parse and validate wgsl.
-pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ValidatedWgslModule, String> {
+pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ReflectedModule, String> {
     let module = naga::front::wgsl::parse_str(src).map_err(|error| error.to_string())?;
+    validate_module(module)
+}
+
+/// Reflects a SPIR-V module without re-emitting the input words.
+#[cfg(feature = "shader-passthrough")]
+pub(crate) fn reflect_spirv(words: &[u32]) -> Result<ReflectedModule, String> {
+    let options = naga::front::spv::Options::default();
+    let module = naga::front::spv::Frontend::new(words.iter().copied(), &options)
+        .parse()
+        .map_err(|error| error.to_string())?;
+    validate_module(module)
+}
+
+fn validate_module(module: naga::Module) -> Result<ReflectedModule, String> {
     let capabilities = naga::valid::Capabilities::SHADER_FLOAT16;
     // Enabled capabilities:
     // - SHADER_FLOAT16: Phase-5 overridable-constant validation needs WGSL
@@ -331,10 +345,10 @@ pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ValidatedWgslModule, 
     let info = validator
         .validate(&module)
         .map_err(|error| error.to_string())?;
-    Ok(ValidatedWgslModule { module, info })
+    Ok(ReflectedModule { module, info })
 }
 
-impl ValidatedWgslModule {
+impl ReflectedModule {
     /// Generates spirv for the validated shader module.
     pub(crate) fn generate_spirv(
         &self,

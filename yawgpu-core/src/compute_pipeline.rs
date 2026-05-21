@@ -182,7 +182,7 @@ pub(crate) fn create_hal_compute_pipeline(
     let Some(hal_device) = hal_device else {
         return (None, None);
     };
-    let Some(module) = shader_module.validated_wgsl() else {
+    let Some(module) = shader_module.reflected_wgsl() else {
         return (
             None,
             Some("compute pipeline requires a valid WGSL shader module".to_owned()),
@@ -305,7 +305,7 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
     if descriptor.shader_module.is_error() {
         return Err("compute pipeline shader module must not be an error module".to_owned());
     }
-    let Some(module) = descriptor.shader_module.validated_wgsl() else {
+    let Some(module) = descriptor.shader_module.reflected_wgsl() else {
         return Err("compute pipeline requires a valid WGSL shader module".to_owned());
     };
     let entry_name = resolve_compute_entry(module, descriptor.entry_point.as_deref())?;
@@ -321,7 +321,7 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
 
 /// Records resolve into the command stream.
 pub(crate) fn resolve_compute_entry(
-    module: &shader_naga::ValidatedWgslModule,
+    module: &shader_naga::ReflectedModule,
     entry_point: Option<&str>,
 ) -> Result<String, String> {
     let entries = module.entry_points();
@@ -450,7 +450,7 @@ pub(crate) fn validate_pipeline_constant_value(
 
 /// Records resolve into the command stream.
 pub(crate) fn resolve_compute_workgroup(
-    module: &shader_naga::ValidatedWgslModule,
+    module: &shader_naga::ReflectedModule,
     entry_name: &str,
     overrides: &[shader_naga::ReflectedOverride],
     constants: &[ResolvedOverrideConstant],

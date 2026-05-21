@@ -54,7 +54,7 @@ fn wgsl_parse_and_validation_errors_create_error_modules() {
 }
 
 #[test]
-fn spirv_source_is_accepted_opaquely() {
+fn spirv_source_requires_passthrough_feature() {
     let test = ValidationTest::new();
     unsafe {
         let words = [0x0723_0203_u32, 0, 0, 0, 0];
@@ -64,7 +64,10 @@ fn spirv_source_is_accepted_opaquely() {
         test.clear_errors();
         let module = yawgpu::wgpuDeviceCreateShaderModule(test.device(), &descriptor);
         assert!(!module.is_null());
-        assert!(test.errors().is_empty());
+        assert!(test
+            .errors()
+            .iter()
+            .any(|error| error.message.contains("SPIR-V passthrough not enabled")));
         yawgpu::wgpuShaderModuleRelease(module);
     }
 }

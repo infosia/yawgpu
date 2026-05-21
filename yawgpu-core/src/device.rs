@@ -290,8 +290,22 @@ impl Device {
                 Ok(inner) => (inner, None),
                 Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
             },
-            ShaderModuleSource::Spirv(words) => {
-                (ShaderModuleSourceKind::Spirv { _words: words }, None)
+            #[cfg(feature = "shader-passthrough")]
+            ShaderModuleSource::Spirv(words) => match ShaderModule::from_spirv(words) {
+                Ok(inner) => (inner, None),
+                Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
+            },
+            #[cfg(not(feature = "shader-passthrough"))]
+            ShaderModuleSource::Spirv(_) => (
+                ShaderModuleSourceKind::Invalid,
+                Some("SPIR-V passthrough not enabled".to_owned()),
+            ),
+            #[cfg(feature = "shader-passthrough")]
+            ShaderModuleSource::Msl { source, reflection } => {
+                match ShaderModule::from_msl(source, reflection) {
+                    Ok(inner) => (inner, None),
+                    Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
+                }
             }
             ShaderModuleSource::Invalid(message) => {
                 (ShaderModuleSourceKind::Invalid, Some(message))
@@ -303,6 +317,24 @@ impl Device {
             self.dispatch_error(ErrorKind::Validation, message);
         }
         ShaderModule::new(inner, diagnostic)
+    }
+
+    /// Creates a shader module from raw SPIR-V words.
+    #[cfg(feature = "shader-passthrough")]
+    #[must_use]
+    pub fn create_shader_module_spirv(&self, words: Vec<u32>) -> ShaderModule {
+        self.create_shader_module(ShaderModuleSource::Spirv(words))
+    }
+
+    /// Creates a shader module from raw MSL source and caller-supplied reflection metadata.
+    #[cfg(feature = "shader-passthrough")]
+    #[must_use]
+    pub fn create_shader_module_msl(
+        &self,
+        source: String,
+        reflection: MslReflection,
+    ) -> ShaderModule {
+        self.create_shader_module(ShaderModuleSource::Msl { source, reflection })
     }
 
     /// Validates the descriptor and creates a bind group layout on this device.
