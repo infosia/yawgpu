@@ -1,5 +1,6 @@
 use super::*;
 
+/// Stores metal surface data used by validation and backend submission.
 #[derive(Debug)]
 pub struct MetalSurface {
     pub(super) layer: Retained<CAMetalLayer>,
@@ -28,6 +29,7 @@ impl MetalSurface {
         })
     }
 
+    /// Configures the surface's swapchain for the given format, size, and present mode.
     pub fn configure(
         &mut self,
         device: &MetalDevice,
@@ -48,11 +50,13 @@ impl MetalSurface {
         Ok(())
     }
 
+    /// Tears down the surface's swapchain.
     pub fn unconfigure(&mut self) {
         self.current_drawable = None;
         self.config = None;
     }
 
+    /// Returns acquire next texture.
     pub fn acquire_next_texture(&mut self) -> Result<MetalTexture, HalError> {
         let config = self.config.ok_or(HalError::AcquireFailed {
             backend: BACKEND,
@@ -74,6 +78,7 @@ impl MetalSurface {
         })
     }
 
+    /// Presents the most recently acquired surface texture.
     pub fn present(&mut self, queue: &MetalQueue) -> Result<(), HalError> {
         let drawable = self
             .current_drawable

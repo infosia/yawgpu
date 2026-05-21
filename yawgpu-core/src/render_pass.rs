@@ -11,46 +11,71 @@ use crate::render_bundle::*;
 use crate::render_pipeline::*;
 use crate::texture_view::*;
 
+/// Describes render pass descriptor.
 #[derive(Debug, Clone)]
 pub struct RenderPassDescriptor {
+    /// Max color attachments.
     pub max_color_attachments: u32,
+    /// Color attachments.
     pub color_attachments: Vec<Option<RenderPassColorAttachment>>,
+    /// Depth stencil attachment.
     pub depth_stencil_attachment: Option<RenderPassDepthStencilAttachment>,
+    /// Occlusion query set.
     pub occlusion_query_set: Option<QuerySet>,
+    /// Timestamp writes.
     pub timestamp_writes: Option<RenderPassTimestampWrites>,
 }
 
+/// Stores render pass timestamp writes data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct RenderPassTimestampWrites {
+    /// Query set.
     pub query_set: QuerySet,
+    /// Beginning index.
     pub beginning_index: Option<u32>,
+    /// End index.
     pub end_index: Option<u32>,
 }
 
+/// Stores color metadata.
 #[derive(Debug, Clone)]
 pub struct RenderPassColorAttachment {
+    /// View.
     pub view: Arc<TextureView>,
+    /// Resolve target.
     pub resolve_target: Option<Arc<TextureView>>,
+    /// Load op.
     pub load_op: LoadOp,
+    /// Store op.
     pub store_op: StoreOp,
+    /// Clear value.
     pub clear_value: Color,
 }
 
+/// Stores render pass depth stencil attachment data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct RenderPassDepthStencilAttachment {
+    /// View.
     pub view: Arc<TextureView>,
+    /// Depth load op.
     pub depth_load_op: LoadOp,
+    /// Depth store op.
     pub depth_store_op: StoreOp,
+    /// Depth clear value.
     pub depth_clear_value: f32,
+    /// Stencil load op.
     pub stencil_load_op: LoadOp,
+    /// Stencil store op.
     pub stencil_store_op: StoreOp,
 }
 
+/// Records commands for the RenderPassEncoder.
 #[derive(Debug, Clone)]
 pub struct RenderPassEncoder {
     pub(crate) inner: Arc<PassEncoderInner>,
 }
 
+/// Validates occlusion query set and returns a descriptive error on failure.
 pub(crate) fn validate_occlusion_query_set(
     query_set: &QuerySet,
     usage: &str,
@@ -62,6 +87,7 @@ pub(crate) fn validate_occlusion_query_set(
     Ok(())
 }
 
+/// Validates query set alive and returns a descriptive error on failure.
 pub(crate) fn validate_query_set_alive(query_set: &QuerySet, usage: &str) -> Result<(), String> {
     if query_set.is_error() {
         return Err(format!("{usage} cannot use an error query set"));
@@ -72,6 +98,7 @@ pub(crate) fn validate_query_set_alive(query_set: &QuerySet, usage: &str) -> Res
     Ok(())
 }
 
+/// Validates query index and returns a descriptive error on failure.
 pub(crate) fn validate_query_index(
     query_set: &QuerySet,
     index: u32,
@@ -84,22 +111,27 @@ pub(crate) fn validate_query_index(
 }
 
 impl RenderPassEncoder {
+    /// Ends recording for this pass or encoder.
     pub fn end(&self) -> Option<String> {
         self.inner.end()
     }
 
+    /// Records a debug marker within the render pass.
     pub fn insert_debug_marker(&self) -> Option<String> {
         self.inner.insert_debug_marker()
     }
 
+    /// Opens a debug group within the render pass.
     pub fn push_debug_group(&self) -> Option<String> {
         self.inner.push_debug_group()
     }
 
+    /// Closes the most recently opened debug group in the render pass.
     pub fn pop_debug_group(&self) -> Option<String> {
         self.inner.pop_debug_group()
     }
 
+    /// Sets pipeline on this object or encoder.
     pub fn set_pipeline(&self, pipeline: Arc<RenderPipeline>) -> Option<String> {
         self.inner.record_pass_command(|state| {
             state.render_pipeline = Some(pipeline);
@@ -107,10 +139,12 @@ impl RenderPassEncoder {
         })
     }
 
+    /// Records a validation error against the render pass.
     pub fn record_validation_error(&self, message: impl Into<String>) -> Option<String> {
         self.inner.record_pass_command(|_| Err(message.into()))
     }
 
+    /// Sets bind group on this object or encoder.
     pub fn set_bind_group(
         &self,
         index: u32,
@@ -136,6 +170,7 @@ impl RenderPassEncoder {
         })
     }
 
+    /// Sets vertex buffer on this object or encoder.
     pub fn set_vertex_buffer(
         &self,
         slot: u32,
@@ -167,6 +202,7 @@ impl RenderPassEncoder {
         })
     }
 
+    /// Sets index buffer on this object or encoder.
     pub fn set_index_buffer(
         &self,
         buffer: Arc<Buffer>,
@@ -190,6 +226,7 @@ impl RenderPassEncoder {
         })
     }
 
+    /// Records a draw command.
     pub fn draw(
         &self,
         vertex_count: u32,
@@ -234,6 +271,7 @@ impl RenderPassEncoder {
         })
     }
 
+    /// Records an indexed draw after validating the bound pipeline and buffers.
     pub fn draw_indexed(
         &self,
         index_count: u32,
@@ -257,6 +295,7 @@ impl RenderPassEncoder {
         })
     }
 
+    /// Records an indirect draw sourced from a buffer after validation.
     pub fn draw_indirect(
         &self,
         indirect_buffer: Arc<Buffer>,
@@ -271,6 +310,7 @@ impl RenderPassEncoder {
         })
     }
 
+    /// Records an indexed indirect draw sourced from a buffer after validation.
     pub fn draw_indexed_indirect(
         &self,
         indirect_buffer: Arc<Buffer>,
@@ -290,6 +330,7 @@ impl RenderPassEncoder {
         })
     }
 
+    /// Sets viewport on this object or encoder.
     pub fn set_viewport(
         &self,
         x: f32,
@@ -303,6 +344,7 @@ impl RenderPassEncoder {
             .record_pass_command(|_| validate_viewport(x, y, width, height, min_depth, max_depth))
     }
 
+    /// Sets scissor rect on this object or encoder.
     pub fn set_scissor_rect(&self, x: u32, y: u32, width: u32, height: u32) -> Option<String> {
         self.inner.record_pass_command(|_| {
             x.checked_add(width)
@@ -313,6 +355,7 @@ impl RenderPassEncoder {
         })
     }
 
+    /// Sets blend constant on this object or encoder.
     pub fn set_blend_constant(&self, color: Color) -> Option<String> {
         self.inner.record_pass_command(|_| {
             if [color.r, color.g, color.b, color.a]
@@ -326,10 +369,12 @@ impl RenderPassEncoder {
         })
     }
 
+    /// Sets stencil reference on this object or encoder.
     pub fn set_stencil_reference(&self, _reference: u32) -> Option<String> {
         self.inner.record_pass_command(|_| Ok(()))
     }
 
+    /// Replays the given render bundles into this pass after validation.
     pub fn execute_bundles(&self, bundles: &[Arc<RenderBundle>]) -> Option<String> {
         self.inner.record_pass_command(|state| {
             let pass_signature = state
@@ -352,6 +397,7 @@ impl RenderPassEncoder {
         })
     }
 
+    /// Begins an occlusion query at `query_index`, counting samples for the draws that follow.
     pub fn begin_occlusion_query(&self, query_index: u32) -> Option<String> {
         self.inner.record_pass_command(|state| {
             let query_set = state
@@ -371,6 +417,7 @@ impl RenderPassEncoder {
         })
     }
 
+    /// Ends occlusion query recording.
     pub fn end_occlusion_query(&self) -> Option<String> {
         self.inner.record_pass_command(|state| {
             if state.open_occlusion_query.take().is_none() {

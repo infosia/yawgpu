@@ -1,14 +1,17 @@
 use super::*;
 
+/// Converts query type into the corresponding yawgpu representation.
 pub fn map_query_type(value: native::WGPUQueryType) -> core::QueryType {
     value.into()
 }
 
+/// Converts query type to native into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_query_type_to_native(value: core::QueryType) -> native::WGPUQueryType {
     value.into()
 }
 
+/// Converts feature level into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_feature_level(value: native::WGPUFeatureLevel) -> core::FeatureLevel {
     match value {
@@ -18,12 +21,14 @@ pub fn map_feature_level(value: native::WGPUFeatureLevel) -> core::FeatureLevel 
 }
 
 impl DeviceLostCallbackInfo {
+    /// Returns true when this object has the requested callback.
     #[must_use]
     pub fn has_callback(self) -> bool {
         self.callback.is_some()
     }
 }
 
+/// Converts error filter into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_error_filter(value: native::WGPUErrorFilter) -> Option<core::ErrorFilter> {
     match value {
@@ -34,6 +39,7 @@ pub fn map_error_filter(value: native::WGPUErrorFilter) -> Option<core::ErrorFil
     }
 }
 
+/// Converts error type into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_error_type(kind: core::ErrorKind) -> native::WGPUErrorType {
     match kind {
@@ -44,26 +50,31 @@ pub fn map_error_type(kind: core::ErrorKind) -> native::WGPUErrorType {
     }
 }
 
+/// Converts pop error scope status error into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_pop_error_scope_status_error() -> native::WGPUPopErrorScopeStatus {
     native::WGPUPopErrorScopeStatus_Error
 }
 
+/// Converts pop error scope status success into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_pop_error_scope_status_success() -> native::WGPUPopErrorScopeStatus {
     native::WGPUPopErrorScopeStatus_Success
 }
 
+/// Converts buffer usage into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_buffer_usage(value: native::WGPUBufferUsage) -> core::BufferUsage {
     core::BufferUsage::from_bits_retain(value)
 }
 
+/// Converts buffer usage to native into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_buffer_usage_to_native(value: core::BufferUsage) -> native::WGPUBufferUsage {
     value.bits()
 }
 
+/// Converts buffer map state into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_buffer_map_state(value: core::BufferMapState) -> native::WGPUBufferMapState {
     match value {
@@ -75,6 +86,7 @@ pub fn map_buffer_map_state(value: core::BufferMapState) -> native::WGPUBufferMa
     }
 }
 
+/// Converts map async status into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_map_async_status(value: core::MapAsyncStatus) -> native::WGPUMapAsyncStatus {
     match value {
@@ -87,6 +99,7 @@ pub fn map_map_async_status(value: core::MapAsyncStatus) -> native::WGPUMapAsync
     }
 }
 
+/// Converts queue work done status into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_queue_work_done_status(
     value: core::QueueWorkDoneStatus,
@@ -102,21 +115,25 @@ pub fn map_queue_work_done_status(
     }
 }
 
+/// Converts compilation info request status success into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_compilation_info_request_status_success() -> native::WGPUCompilationInfoRequestStatus {
     native::WGPUCompilationInfoRequestStatus_Success
 }
 
+/// Converts compilation message type error into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_compilation_message_type_error() -> native::WGPUCompilationMessageType {
     native::WGPUCompilationMessageType_Error
 }
 
+/// Converts map mode into the corresponding yawgpu representation.
 pub fn map_map_mode(value: native::WGPUMapMode) -> Result<core::MapMode, &'static str> {
     let bits = u32::try_from(value).map_err(|_| "map mode has unsupported bits")?;
     core::MapMode::from_bits(bits)
 }
 
+/// Converts address mode into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_address_mode(value: native::WGPUAddressMode) -> Option<core::AddressMode> {
     match value {
@@ -128,6 +145,7 @@ pub fn map_address_mode(value: native::WGPUAddressMode) -> Option<core::AddressM
     }
 }
 
+/// Converts filter mode into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_filter_mode(value: native::WGPUFilterMode) -> Option<core::FilterMode> {
     match value {
@@ -138,6 +156,7 @@ pub fn map_filter_mode(value: native::WGPUFilterMode) -> Option<core::FilterMode
     }
 }
 
+/// Converts mipmap filter mode into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_mipmap_filter_mode(
     value: native::WGPUMipmapFilterMode,
@@ -150,6 +169,7 @@ pub fn map_mipmap_filter_mode(
     }
 }
 
+/// Converts compare function into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_compare_function(value: native::WGPUCompareFunction) -> Option<core::CompareFunction> {
     match value {
@@ -166,16 +186,19 @@ pub fn map_compare_function(value: native::WGPUCompareFunction) -> Option<core::
     }
 }
 
+/// Converts texture usage into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_texture_usage(value: native::WGPUTextureUsage) -> core::TextureUsage {
     core::TextureUsage::from_bits_retain(value)
 }
 
+/// Converts texture usage to native into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_texture_usage_to_native(value: core::TextureUsage) -> native::WGPUTextureUsage {
     value.bits()
 }
 
+/// Converts texture dimension into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_texture_dimension(value: native::WGPUTextureDimension) -> core::TextureDimension {
     match value {
@@ -185,6 +208,7 @@ pub fn map_texture_dimension(value: native::WGPUTextureDimension) -> core::Textu
     }
 }
 
+/// Converts texture dimension to native into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_texture_dimension_to_native(
     value: core::TextureDimension,
@@ -198,11 +222,13 @@ pub fn map_texture_dimension_to_native(
     }
 }
 
+/// Converts query index into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_query_index(value: u32) -> Option<u32> {
     (value != native::WGPU_QUERY_SET_INDEX_UNDEFINED).then_some(value)
 }
 
+/// Converts load op into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_load_op(value: native::WGPULoadOp) -> core::LoadOp {
     match value {
@@ -212,6 +238,7 @@ pub fn map_load_op(value: native::WGPULoadOp) -> core::LoadOp {
     }
 }
 
+/// Converts store op into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_store_op(value: native::WGPUStoreOp) -> core::StoreOp {
     match value {
@@ -221,6 +248,7 @@ pub fn map_store_op(value: native::WGPUStoreOp) -> core::StoreOp {
     }
 }
 
+/// Converts texture view dimension into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_texture_view_dimension(
     value: native::WGPUTextureViewDimension,
@@ -237,6 +265,7 @@ pub fn map_texture_view_dimension(
     }
 }
 
+/// Converts texture aspect into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_texture_aspect(value: native::WGPUTextureAspect) -> Option<core::TextureAspect> {
     match value {

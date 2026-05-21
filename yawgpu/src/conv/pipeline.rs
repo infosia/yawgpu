@@ -61,6 +61,7 @@ unsafe fn map_vertex_attributes(
 /// `descriptor.layout`, when non-null, must be a live yawgpu pipeline layout.
 /// `compute.constants`, when non-null and `constantCount > 0`, must point to
 /// `constantCount` valid `WGPUConstantEntry` values.
+/// Converts compute pipeline descriptor into the corresponding yawgpu representation.
 #[must_use]
 pub unsafe fn map_compute_pipeline_descriptor(
     descriptor: &native::WGPUComputePipelineDescriptor,
@@ -100,6 +101,7 @@ pub unsafe fn map_compute_pipeline_descriptor(
 /// live yawgpu shader modules. `descriptor.layout`, when non-null, must be a
 /// live yawgpu pipeline layout. Optional pointer arrays must be valid for their
 /// declared counts.
+/// Converts render pipeline descriptor into the corresponding yawgpu representation.
 #[must_use]
 pub unsafe fn map_render_pipeline_descriptor(
     descriptor: &native::WGPURenderPipelineDescriptor,

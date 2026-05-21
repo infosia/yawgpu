@@ -6,6 +6,7 @@ use super::*;
 ///
 /// `descriptor.entries`, when non-null and `entryCount > 0`, must point to
 /// `entryCount` valid `WGPUBindGroupLayoutEntry` values.
+/// Converts bind group layout descriptor into the corresponding yawgpu representation.
 #[must_use]
 pub unsafe fn map_bind_group_layout_descriptor(
     descriptor: &native::WGPUBindGroupLayoutDescriptor,
@@ -37,6 +38,7 @@ pub unsafe fn map_bind_group_layout_descriptor(
 /// `descriptor.entries`, when non-null and `entryCount > 0`, must point to
 /// `entryCount` valid `WGPUBindGroupEntry` values. Any non-null resource
 /// handles must be live yawgpu handles of the matching type.
+/// Converts bind group entries into the corresponding yawgpu representation.
 #[must_use]
 pub unsafe fn map_bind_group_entries(
     descriptor: &native::WGPUBindGroupDescriptor,
@@ -113,6 +115,7 @@ unsafe fn map_bind_group_entry(entry: &native::WGPUBindGroupEntry) -> core::Bind
 /// `descriptor.bindGroupLayouts`, when non-null and
 /// `bindGroupLayoutCount > 0`, must point to `bindGroupLayoutCount`
 /// `WGPUBindGroupLayout` slots. Non-null slots must be live yawgpu handles.
+/// Converts pipeline layout descriptor into the corresponding yawgpu representation.
 #[must_use]
 pub unsafe fn map_pipeline_layout_descriptor(
     descriptor: &native::WGPUPipelineLayoutDescriptor,

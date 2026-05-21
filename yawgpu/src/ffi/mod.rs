@@ -1,19 +1,36 @@
+/// Adapter module.
 pub mod adapter;
+/// Bindings module.
 pub mod bindings;
+/// Buffer module.
 pub mod buffer;
+/// Bundle module.
 pub mod bundle;
+/// Command buffer module.
 pub mod command_buffer;
+/// Compute pass module.
 pub mod compute_pass;
+/// Device module.
 pub mod device;
+/// Encoder module.
 pub mod encoder;
+/// Instance module.
 pub mod instance;
+/// Pipelines module.
 pub mod pipelines;
+/// Query module.
 pub mod query;
+/// Queue module.
 pub mod queue;
+/// Render pass module.
 pub mod render_pass;
+/// Sampler module.
 pub mod sampler;
+/// Shader module.
 pub mod shader;
+/// Surface module.
 pub mod surface;
+/// Texture module.
 pub mod texture;
 
 #[cfg(test)]
@@ -90,23 +107,27 @@ enum InstanceBackendSelection {
     Vulkan,
 }
 
+/// Owns the core object and retained handles for the WGPU Adapter handle.
 pub struct WGPUAdapterImpl {
     pub(crate) core: Arc<core::Adapter>,
     pub(crate) instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Owns the core object and retained handles for the WGPU Buffer handle.
 pub struct WGPUBufferImpl {
     pub(crate) core: Arc<core::Buffer>,
     pub(crate) device: Arc<core::Device>,
     pub(crate) instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Owns the core object and retained handles for the WGPU BindGroupLayout handle.
 pub struct WGPUBindGroupLayoutImpl {
     pub(crate) _core: Arc<core::BindGroupLayout>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Owns the core object and retained handles for the WGPU BindGroup handle.
 pub struct WGPUBindGroupImpl {
     pub(crate) _core: Arc<core::BindGroup>,
     pub(crate) _layout: Arc<core::BindGroupLayout>,
@@ -114,6 +135,7 @@ pub struct WGPUBindGroupImpl {
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Owns the core object and retained handles for the WGPU Device handle.
 pub struct WGPUDeviceImpl {
     pub(crate) core: Arc<core::Device>,
     pub(crate) instance: Arc<WGPUInstanceImpl>,
@@ -129,24 +151,28 @@ pub struct WGPUDeviceImpl {
         Mutex<HashMap<RenderPipelineCacheKey, Arc<WGPURenderPipelineImpl>>>,
 }
 
+/// Owns the core object and retained handles for the WGPU Instance handle.
 pub struct WGPUInstanceImpl {
     pub(crate) core: Arc<core::Instance>,
     pub(crate) timed_wait_any_enabled: bool,
     pub(crate) pending_callbacks: Mutex<BTreeMap<u64, PendingCallback>>,
 }
 
+/// Owns the core object and retained handles for the WGPU Queue handle.
 pub struct WGPUQueueImpl {
     pub(crate) core: core::Queue,
     pub(crate) device: Arc<core::Device>,
     pub(crate) instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Owns the core object and retained handles for the WGPU Texture handle.
 pub struct WGPUTextureImpl {
     pub(crate) core: Arc<core::Texture>,
     pub(crate) device: Arc<core::Device>,
     pub(crate) instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Owns the core object and retained handles for the WGPU TextureView handle.
 pub struct WGPUTextureViewImpl {
     pub(crate) _core: Arc<core::TextureView>,
     pub(crate) _texture: Arc<core::Texture>,
@@ -154,24 +180,28 @@ pub struct WGPUTextureViewImpl {
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Owns the core object and retained handles for the WGPU Sampler handle.
 pub struct WGPUSamplerImpl {
     pub(crate) _core: Arc<core::Sampler>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Owns the core object and retained handles for the WGPU ShaderModule handle.
 pub struct WGPUShaderModuleImpl {
     pub(crate) _core: Arc<core::ShaderModule>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Owns the core object and retained handles for the WGPU PipelineLayout handle.
 pub struct WGPUPipelineLayoutImpl {
     pub(crate) _core: Arc<core::PipelineLayout>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Owns the core object and retained handles for the WGPU ComputePipeline handle.
 pub struct WGPUComputePipelineImpl {
     pub(crate) _core: Arc<core::ComputePipeline>,
     pub(crate) _device: Arc<core::Device>,
@@ -179,6 +209,7 @@ pub struct WGPUComputePipelineImpl {
     pub(crate) bind_group_layout_handles: Mutex<Vec<Option<Arc<WGPUBindGroupLayoutImpl>>>>,
 }
 
+/// Owns the core object and retained handles for the WGPU RenderPipeline handle.
 pub struct WGPURenderPipelineImpl {
     pub(crate) _core: Arc<core::RenderPipeline>,
     pub(crate) _device: Arc<core::Device>,
@@ -186,30 +217,39 @@ pub struct WGPURenderPipelineImpl {
     pub(crate) bind_group_layout_handles: Mutex<Vec<Option<Arc<WGPUBindGroupLayoutImpl>>>>,
 }
 
+/// Enumerates shader module cache key values.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ShaderModuleCacheKey {
+    /// Wgsl variant.
     Wgsl(String),
+    /// Spirv variant.
     Spirv(Vec<u32>),
 }
 
+/// Identifies pipeline layout cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PipelineLayoutCacheKey {
     bind_group_layouts: Vec<usize>,
     immediate_size: u32,
 }
 
+/// Enumerates pipeline layout identity values.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum PipelineLayoutIdentity {
+    /// Auto variant.
     Auto,
+    /// Explicit variant.
     Explicit(usize),
 }
 
+/// Identifies pipeline constant cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PipelineConstantCacheKey {
     key: String,
     value_bits: u64,
 }
 
+/// Identifies compute pipeline cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ComputePipelineCacheKey {
     module: usize,
@@ -218,6 +258,7 @@ pub(crate) struct ComputePipelineCacheKey {
     layout: PipelineLayoutIdentity,
 }
 
+/// Identifies render pipeline cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RenderPipelineCacheKey {
     layout: PipelineLayoutIdentity,
@@ -229,6 +270,7 @@ pub(crate) struct RenderPipelineCacheKey {
     fragment: Option<FragmentStateCacheKey>,
 }
 
+/// Identifies render stage cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RenderStageCacheKey {
     module: usize,
@@ -236,6 +278,7 @@ pub(crate) struct RenderStageCacheKey {
     constants: Vec<PipelineConstantCacheKey>,
 }
 
+/// Identifies fragment state cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct FragmentStateCacheKey {
     stage: RenderStageCacheKey,
@@ -243,6 +286,7 @@ pub(crate) struct FragmentStateCacheKey {
     targets: Vec<ColorTargetCacheKey>,
 }
 
+/// Identifies color target cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ColorTargetCacheKey {
     format: native::WGPUTextureFormat,
@@ -250,12 +294,14 @@ pub(crate) struct ColorTargetCacheKey {
     write_mask: native::WGPUColorWriteMask,
 }
 
+/// Identifies blend state cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct BlendStateCacheKey {
     color: BlendComponentCacheKey,
     alpha: BlendComponentCacheKey,
 }
 
+/// Identifies blend component cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct BlendComponentCacheKey {
     operation: native::WGPUBlendOperation,
@@ -263,6 +309,7 @@ pub(crate) struct BlendComponentCacheKey {
     dst_factor: native::WGPUBlendFactor,
 }
 
+/// Identifies vertex buffer layout cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct VertexBufferLayoutCacheKey {
     step_mode: native::WGPUVertexStepMode,
@@ -270,6 +317,7 @@ pub(crate) struct VertexBufferLayoutCacheKey {
     attributes: Vec<VertexAttributeCacheKey>,
 }
 
+/// Identifies vertex attribute cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct VertexAttributeCacheKey {
     format: native::WGPUVertexFormat,
@@ -277,6 +325,7 @@ pub(crate) struct VertexAttributeCacheKey {
     shader_location: u32,
 }
 
+/// Identifies primitive state cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PrimitiveStateCacheKey {
     topology: native::WGPUPrimitiveTopology,
@@ -286,6 +335,7 @@ pub(crate) struct PrimitiveStateCacheKey {
     unclipped_depth: native::WGPUBool,
 }
 
+/// Identifies depth stencil state cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct DepthStencilStateCacheKey {
     format: native::WGPUTextureFormat,
@@ -300,6 +350,7 @@ pub(crate) struct DepthStencilStateCacheKey {
     depth_bias_clamp_bits: u32,
 }
 
+/// Identifies stencil face state cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct StencilFaceStateCacheKey {
     compare: native::WGPUCompareFunction,
@@ -308,6 +359,7 @@ pub(crate) struct StencilFaceStateCacheKey {
     pass_op: native::WGPUStencilOperation,
 }
 
+/// Identifies multisample state cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct MultisampleStateCacheKey {
     count: u32,
@@ -315,6 +367,7 @@ pub(crate) struct MultisampleStateCacheKey {
     alpha_to_coverage_enabled: native::WGPUBool,
 }
 
+/// Owns the core object and retained handles for the WGPU Surface handle.
 pub struct WGPUSurfaceImpl {
     pub(crate) label: Mutex<String>,
     pub(crate) configured: Mutex<Option<SurfaceConfigurationState>>,
@@ -323,6 +376,7 @@ pub struct WGPUSurfaceImpl {
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Tracks the lifecycle state for surface configuration.
 #[derive(Debug, Clone)]
 pub(crate) struct SurfaceConfigurationState {
     device: Arc<core::Device>,
@@ -335,24 +389,28 @@ pub(crate) struct SurfaceConfigurationState {
     _alpha_mode: native::WGPUCompositeAlphaMode,
 }
 
+/// Owns the core object and retained handles for the WGPU QuerySet handle.
 pub struct WGPUQuerySetImpl {
     pub(crate) core: Arc<core::QuerySet>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Owns the core object and retained handles for the WGPU CommandEncoder handle.
 pub struct WGPUCommandEncoderImpl {
     pub(crate) core: Arc<core::CommandEncoder>,
     pub(crate) device: Arc<core::Device>,
     pub(crate) instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Owns the core object and retained handles for the WGPU CommandBuffer handle.
 pub struct WGPUCommandBufferImpl {
     pub(crate) core: Arc<core::CommandBuffer>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Owns the core object and retained handles for the WGPU RenderPassEncoder handle.
 pub struct WGPURenderPassEncoderImpl {
     pub(crate) core: Arc<core::RenderPassEncoder>,
     pub(crate) device: Arc<core::Device>,
@@ -360,6 +418,7 @@ pub struct WGPURenderPassEncoderImpl {
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Owns the core object and retained handles for the WGPU ComputePassEncoder handle.
 pub struct WGPUComputePassEncoderImpl {
     pub(crate) core: Arc<core::ComputePassEncoder>,
     pub(crate) device: Arc<core::Device>,
@@ -367,12 +426,14 @@ pub struct WGPUComputePassEncoderImpl {
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Owns the core object and retained handles for the WGPU RenderBundleEncoder handle.
 pub struct WGPURenderBundleEncoderImpl {
     pub(crate) core: Arc<core::RenderBundleEncoder>,
     pub(crate) device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }
 
+/// Owns the core object and retained handles for the WGPU RenderBundle handle.
 pub struct WGPURenderBundleImpl {
     pub(crate) core: Arc<core::RenderBundle>,
     pub(crate) _device: Arc<core::Device>,
@@ -573,6 +634,7 @@ impl WGPUDeviceImpl {
         future
     }
 
+    /// Sets uncaptured error callback on this object or encoder.
     #[doc(hidden)]
     pub fn set_uncaptured_error_callback<F>(&self, callback: Option<F>)
     where
@@ -581,6 +643,7 @@ impl WGPUDeviceImpl {
         self.core.set_uncaptured_error_callback(callback);
     }
 
+    /// Dispatches the pending error callback.
     #[doc(hidden)]
     pub fn dispatch_error(&self, kind: core::ErrorKind, message: impl Into<String>) {
         self.core.dispatch_error(kind, message);
@@ -1113,74 +1176,135 @@ fn multisample_state_cache_key(
     }
 }
 
+/// Enumerates pending callback values.
 pub(crate) enum PendingCallback {
+    /// Request adapter variant.
     RequestAdapter {
+        /// Mode variant.
         mode: native::WGPUCallbackMode,
+        /// Callback variant.
         callback: native::WGPURequestAdapterCallback,
+        /// Adapter variant.
         adapter: Arc<WGPUAdapterImpl>,
+        /// Userdata1 variant.
         userdata1: usize,
+        /// Userdata2 variant.
         userdata2: usize,
     },
+    /// Request device variant.
     RequestDevice {
+        /// Mode variant.
         mode: native::WGPUCallbackMode,
+        /// Callback variant.
         callback: native::WGPURequestDeviceCallback,
+        /// Result variant.
         result: Result<Arc<WGPUDeviceImpl>, String>,
+        /// Userdata1 variant.
         userdata1: usize,
+        /// Userdata2 variant.
         userdata2: usize,
     },
+    /// Device lost variant.
     DeviceLost {
+        /// Mode variant.
         mode: native::WGPUCallbackMode,
+        /// Callback variant.
         callback: native::WGPUDeviceLostCallback,
+        /// Device variant.
         device: usize,
+        /// Reason variant.
         reason: core::DeviceLostReason,
+        /// Userdata1 variant.
         userdata1: usize,
+        /// Userdata2 variant.
         userdata2: usize,
     },
+    /// Buffer map variant.
     BufferMap {
+        /// Mode variant.
         mode: native::WGPUCallbackMode,
+        /// Callback variant.
         callback: native::WGPUBufferMapCallback,
+        /// Device variant.
         device: Arc<core::Device>,
+        /// Buffer variant.
         buffer: Option<core::Buffer>,
+        /// Status variant.
         status: core::MapAsyncStatus,
+        /// Userdata1 variant.
         userdata1: usize,
+        /// Userdata2 variant.
         userdata2: usize,
     },
+    /// Queue work done variant.
     QueueWorkDone {
+        /// Mode variant.
         mode: native::WGPUCallbackMode,
+        /// Callback variant.
         callback: native::WGPUQueueWorkDoneCallback,
+        /// Device variant.
         device: Arc<core::Device>,
+        /// Status variant.
         status: core::QueueWorkDoneStatus,
+        /// Userdata1 variant.
         userdata1: usize,
+        /// Userdata2 variant.
         userdata2: usize,
     },
+    /// Compilation info variant.
     CompilationInfo {
+        /// Mode variant.
         mode: native::WGPUCallbackMode,
+        /// Callback variant.
         callback: native::WGPUCompilationInfoCallback,
+        /// Shader module variant.
         shader_module: Arc<core::ShaderModule>,
+        /// Userdata1 variant.
         userdata1: usize,
+        /// Userdata2 variant.
         userdata2: usize,
     },
+    /// Create compute pipeline async variant.
     CreateComputePipelineAsync {
+        /// Mode variant.
         mode: native::WGPUCallbackMode,
+        /// Callback variant.
         callback: native::WGPUCreateComputePipelineAsyncCallback,
+        /// Pipeline variant.
         pipeline: Arc<WGPUComputePipelineImpl>,
+        /// Userdata1 variant.
         userdata1: usize,
+        /// Userdata2 variant.
         userdata2: usize,
     },
+    /// Create render pipeline async variant.
     CreateRenderPipelineAsync {
+        /// Mode variant.
         mode: native::WGPUCallbackMode,
+        /// Callback variant.
         callback: native::WGPUCreateRenderPipelineAsyncCallback,
+        /// Pipeline variant.
         pipeline: Arc<WGPURenderPipelineImpl>,
+        /// Userdata1 variant.
         userdata1: usize,
+        /// Userdata2 variant.
         userdata2: usize,
     },
+    /// Pop error scope variant.
     PopErrorScope {
+        /// Mode variant.
         mode: native::WGPUCallbackMode,
+        /// Callback variant.
         callback: native::WGPUPopErrorScopeCallback,
+        /// Status variant.
         status: native::WGPUPopErrorScopeStatus,
+        /// Error variant.
         error: Option<core::DeviceError>,
+        /// Message variant.
         message: String,
+        /// Userdata1 variant.
         userdata1: usize,
+        /// Userdata2 variant.
         userdata2: usize,
     },
 }

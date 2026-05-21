@@ -13,6 +13,7 @@ use crate::query_set::*;
 use crate::render_pipeline::*;
 use crate::texture::*;
 
+/// Holds shared state for the pass encoder handle.
 #[derive(Debug)]
 pub(crate) struct PassEncoderInner {
     pub(crate) parent: CommandEncoder,
@@ -20,6 +21,7 @@ pub(crate) struct PassEncoderInner {
     pub(crate) state: Mutex<PassEncoderState>,
 }
 
+/// Tracks the lifecycle state for pass encoder.
 #[derive(Debug)]
 pub(crate) struct PassEncoderState {
     pub(crate) ended: bool,
@@ -39,6 +41,7 @@ pub(crate) struct PassEncoderState {
 }
 
 impl PassEncoderState {
+    /// Creates a new instance.
     pub(crate) fn new(
         attachment_signature: Option<AttachmentSignature>,
         attachment_textures: Vec<Texture>,
@@ -63,6 +66,7 @@ impl PassEncoderState {
         }
     }
 
+    /// Resets the tracked render-pipeline / vertex / index state for this pass.
     pub(crate) fn clear_render_state(&mut self) {
         self.render_pipeline = None;
         self.bind_groups.clear();
@@ -71,12 +75,14 @@ impl PassEncoderState {
     }
 }
 
+/// Stores bound bind group data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub(crate) struct BoundBindGroup {
     pub(crate) group: Arc<BindGroup>,
     pub(crate) dynamic_offsets: Vec<u32>,
 }
 
+/// Stores bound vertex buffer data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub(crate) struct BoundVertexBuffer {
     pub(crate) buffer: Arc<Buffer>,
@@ -84,6 +90,7 @@ pub(crate) struct BoundVertexBuffer {
     pub(crate) size: u64,
 }
 
+/// Stores bound index buffer data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub(crate) struct BoundIndexBuffer {
     pub(crate) buffer: Arc<Buffer>,
@@ -93,6 +100,7 @@ pub(crate) struct BoundIndexBuffer {
 }
 
 impl PassEncoderInner {
+    /// Creates a new instance.
     pub(crate) fn new(
         parent: CommandEncoder,
         token: PassToken,
@@ -113,6 +121,7 @@ impl PassEncoderInner {
         }
     }
 
+    /// Ends recording for this pass or encoder.
     pub(crate) fn end(&self) -> Option<String> {
         let mut state = self.state.lock();
         if state.ended {
@@ -164,10 +173,12 @@ impl PassEncoderInner {
         }
     }
 
+    /// Records a debug marker against the shared pass state.
     pub(crate) fn insert_debug_marker(&self) -> Option<String> {
         self.pass_command_guard().err()
     }
 
+    /// Opens a debug group in the shared pass state.
     pub(crate) fn push_debug_group(&self) -> Option<String> {
         if let Err(message) = self.pass_command_guard() {
             return Some(message);
@@ -177,6 +188,7 @@ impl PassEncoderInner {
         None
     }
 
+    /// Closes the most recently opened debug group in the shared pass state.
     pub(crate) fn pop_debug_group(&self) -> Option<String> {
         if let Err(message) = self.pass_command_guard() {
             return Some(message);
@@ -192,6 +204,7 @@ impl PassEncoderInner {
         }
     }
 
+    /// Records a pass command after confirming the pass is still open.
     pub(crate) fn record_pass_command<F>(&self, command: F) -> Option<String>
     where
         F: FnOnce(&mut PassEncoderState) -> Result<(), String>,
@@ -206,6 +219,7 @@ impl PassEncoderInner {
         None
     }
 
+    /// Begins a command guard for this pass.
     pub(crate) fn pass_command_guard(&self) -> Result<(), String> {
         if self.parent.is_finished() {
             let message = "pass encoder cannot be used after parent encoder finish".to_owned();
@@ -221,24 +235,38 @@ impl PassEncoderInner {
     }
 }
 
+/// Enumerates render draw kind values.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum RenderDrawKind {
+    /// Direct variant.
     Direct {
+        /// Vertex count variant.
         vertex_count: u32,
+        /// Instance count variant.
         instance_count: u32,
+        /// First vertex variant.
         first_vertex: u32,
+        /// First instance variant.
         first_instance: u32,
     },
+    /// Indexed direct variant.
     IndexedDirect {
+        /// Index count variant.
         index_count: u32,
+        /// Instance count variant.
         instance_count: u32,
+        /// First index variant.
         first_index: u32,
+        /// First instance variant.
         first_instance: u32,
     },
+    /// Indirect variant.
     Indirect,
+    /// Indexed indirect variant.
     IndexedIndirect,
 }
 
+/// Validates render draw state and returns a descriptive error on failure.
 pub(crate) fn validate_render_draw_state(
     state: &PassEncoderState,
     kind: RenderDrawKind,
@@ -278,6 +306,7 @@ pub(crate) fn validate_render_draw_state(
 }
 
 impl RenderDrawKind {
+    /// Returns true when this object is indexed.
     pub(crate) fn is_indexed(self) -> bool {
         matches!(
             self,
@@ -286,6 +315,7 @@ impl RenderDrawKind {
     }
 }
 
+/// Validates render draw base state and returns a descriptive error on failure.
 pub(crate) fn validate_render_draw_base_state(
     state: &PassEncoderState,
     limits: Limits,
@@ -313,6 +343,7 @@ pub(crate) fn validate_render_draw_base_state(
     Ok(pipeline)
 }
 
+/// Validates set index buffer and returns a descriptive error on failure.
 pub(crate) fn validate_set_index_buffer(
     buffer: &Buffer,
     format: IndexFormat,
@@ -340,6 +371,7 @@ pub(crate) fn validate_set_index_buffer(
     )
 }
 
+/// Validates set vertex buffer and returns a descriptive error on failure.
 pub(crate) fn validate_set_vertex_buffer(
     buffer: &Buffer,
     offset: u64,
@@ -365,6 +397,7 @@ pub(crate) fn validate_set_vertex_buffer(
     )
 }
 
+/// Validates vertex buffer slot and returns a descriptive error on failure.
 pub(crate) fn validate_vertex_buffer_slot(slot: u32, limits: Limits) -> Result<(), String> {
     if slot >= limits.max_vertex_buffers {
         return Err("render pass vertex buffer slot exceeds the device limit".to_owned());
@@ -372,6 +405,7 @@ pub(crate) fn validate_vertex_buffer_slot(slot: u32, limits: Limits) -> Result<(
     Ok(())
 }
 
+/// Validates clear vertex buffer and returns a descriptive error on failure.
 pub(crate) fn validate_clear_vertex_buffer(offset: u64, size: u64) -> Result<(), String> {
     if offset != 0 || size != 0 {
         return Err("render pass null vertex buffer requires zero offset and size".to_owned());
@@ -379,6 +413,7 @@ pub(crate) fn validate_clear_vertex_buffer(offset: u64, size: u64) -> Result<(),
     Ok(())
 }
 
+/// Records resolve into the command stream.
 pub(crate) fn resolve_buffer_binding_size(
     offset: u64,
     size: u64,
@@ -397,6 +432,7 @@ pub(crate) fn resolve_buffer_binding_size(
     Ok(resolved_size)
 }
 
+/// Validates strip index format and returns a descriptive error on failure.
 pub(crate) fn validate_strip_index_format(
     pipeline: &RenderPipeline,
     state: &PassEncoderState,
@@ -427,6 +463,7 @@ pub(crate) fn validate_strip_index_format(
     Ok(())
 }
 
+/// Validates vertex buffer oob and returns a descriptive error on failure.
 pub(crate) fn validate_vertex_buffer_oob(
     pipeline: &RenderPipeline,
     state: &PassEncoderState,
@@ -475,6 +512,7 @@ pub(crate) fn validate_vertex_buffer_oob(
     Ok(())
 }
 
+/// Validates index buffer oob and returns a descriptive error on failure.
 pub(crate) fn validate_index_buffer_oob(
     state: &PassEncoderState,
     first_index: u32,
@@ -506,6 +544,7 @@ pub(crate) fn validate_index_buffer_oob(
     Ok(())
 }
 
+/// Validates indirect buffer and returns a descriptive error on failure.
 pub(crate) fn validate_indirect_buffer(
     buffer: &Buffer,
     indirect_offset: u64,
@@ -534,12 +573,16 @@ const fn index_format_size(format: IndexFormat) -> u64 {
     }
 }
 
+/// Enumerates resource access values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResourceAccess {
+    /// Read variant.
     Read,
+    /// Write variant.
     Write,
 }
 
+/// Stores buffer scope use data used by validation and backend submission.
 #[derive(Debug)]
 pub(crate) struct BufferScopeUse {
     pub(crate) buffer: Arc<Buffer>,
@@ -548,12 +591,14 @@ pub(crate) struct BufferScopeUse {
     pub(crate) access: ResourceAccess,
 }
 
+/// Stores texture scope use data used by validation and backend submission.
 #[derive(Debug)]
 pub(crate) struct TextureScopeUse {
     pub(crate) texture: Texture,
     pub(crate) access: ResourceAccess,
 }
 
+/// Validates usage scope and returns a descriptive error on failure.
 pub(crate) fn validate_usage_scope(
     required_layouts: &[Arc<BindGroupLayout>],
     bound_groups: &BTreeMap<u32, BoundBindGroup>,
@@ -588,6 +633,7 @@ pub(crate) fn validate_usage_scope(
     Ok(())
 }
 
+/// Returns collect bind group usage.
 pub(crate) fn collect_bind_group_usage(
     layout: &BindGroupLayout,
     bound: &BoundBindGroup,
@@ -689,6 +735,7 @@ pub(crate) fn collect_bind_group_usage(
     Ok(())
 }
 
+/// Validates buffer usage scope and returns a descriptive error on failure.
 pub(crate) fn validate_buffer_usage_scope(buffer_uses: &[BufferScopeUse]) -> Result<(), String> {
     for (index, current) in buffer_uses.iter().enumerate() {
         for previous in &buffer_uses[..index] {
@@ -706,6 +753,7 @@ pub(crate) fn validate_buffer_usage_scope(buffer_uses: &[BufferScopeUse]) -> Res
     Ok(())
 }
 
+/// Validates texture usage scope and returns a descriptive error on failure.
 pub(crate) fn validate_texture_usage_scope(texture_uses: &[TextureScopeUse]) -> Result<(), String> {
     for (index, current) in texture_uses.iter().enumerate() {
         for previous in &texture_uses[..index] {
@@ -722,12 +770,14 @@ pub(crate) fn validate_texture_usage_scope(texture_uses: &[TextureScopeUse]) -> 
     Ok(())
 }
 
+/// Returns buffer ranges overlap.
 pub(crate) fn buffer_ranges_overlap(a: &BufferScopeUse, b: &BufferScopeUse) -> bool {
     let a_end = a.offset.saturating_add(a.size);
     let b_end = b.offset.saturating_add(b.size);
     a.offset < b_end && b.offset < a_end
 }
 
+/// Returns bind group buffer resources.
 pub(crate) fn bind_group_buffer_resources(group: &BindGroup) -> Vec<Arc<Buffer>> {
     group
         .entries()
@@ -739,6 +789,7 @@ pub(crate) fn bind_group_buffer_resources(group: &BindGroup) -> Vec<Arc<Buffer>>
         .collect()
 }
 
+/// Validates pipeline bind groups and returns a descriptive error on failure.
 pub(crate) fn validate_pipeline_bind_groups(
     required_layouts: &[Arc<BindGroupLayout>],
     bound_groups: &BTreeMap<u32, BoundBindGroup>,
@@ -766,6 +817,7 @@ pub(crate) fn validate_pipeline_bind_groups(
     Ok(())
 }
 
+/// Returns bind group layouts compatible.
 pub(crate) fn bind_group_layouts_compatible(
     required: &Arc<BindGroupLayout>,
     actual: &Arc<BindGroupLayout>,
@@ -776,6 +828,7 @@ pub(crate) fn bind_group_layouts_compatible(
     required.entries() == actual.entries()
 }
 
+/// Validates dynamic offsets and returns a descriptive error on failure.
 pub(crate) fn validate_dynamic_offsets(
     layout: &BindGroupLayout,
     group: &BindGroup,
@@ -843,6 +896,7 @@ pub(crate) fn validate_dynamic_offsets(
     Ok(())
 }
 
+/// Validates viewport and returns a descriptive error on failure.
 pub(crate) fn validate_viewport(
     x: f32,
     y: f32,

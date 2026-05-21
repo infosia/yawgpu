@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::*;
 
+/// Returns noop adapter.
 pub(crate) fn noop_adapter() -> Adapter {
     Instance::new_noop()
         .enumerate_adapters()
@@ -12,6 +13,7 @@ pub(crate) fn noop_adapter() -> Adapter {
         .expect("Noop adapter must exist")
 }
 
+/// Returns noop device.
 pub(crate) fn noop_device() -> Device {
     let instance = Instance::new_noop();
     let adapter = instance
@@ -24,6 +26,7 @@ pub(crate) fn noop_device() -> Device {
         .expect("Noop device creation")
 }
 
+/// Returns HAL noop adapter.
 pub(crate) fn hal_noop_adapter() -> yawgpu_hal::HalAdapter {
     yawgpu_hal::HalInstance::new_noop()
         .enumerate_adapters()
@@ -32,20 +35,24 @@ pub(crate) fn hal_noop_adapter() -> yawgpu_hal::HalAdapter {
         .expect("Noop HAL adapter must exist")
 }
 
+/// Returns HAL noop device.
 pub(crate) fn hal_noop_device() -> yawgpu_hal::HalDevice {
     hal_noop_adapter()
         .create_device()
         .expect("Noop HAL device creation")
 }
 
+/// Returns HAL noop queue.
 pub(crate) fn hal_noop_queue() -> yawgpu_hal::HalQueue {
     hal_noop_device().queue()
 }
 
+/// Returns rgba8 unorm.
 pub(crate) fn rgba8_unorm() -> TextureFormat {
     TextureFormat::from_raw(0x0000_0016)
 }
 
+/// Returns valid texture descriptor.
 pub(crate) fn valid_texture_descriptor() -> TextureDescriptor {
     TextureDescriptor {
         usage: TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
@@ -62,6 +69,7 @@ pub(crate) fn valid_texture_descriptor() -> TextureDescriptor {
     }
 }
 
+/// Returns texture descriptor 4x4.
 pub(crate) fn texture_descriptor_4x4() -> TextureDescriptor {
     TextureDescriptor {
         usage: TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
@@ -78,6 +86,7 @@ pub(crate) fn texture_descriptor_4x4() -> TextureDescriptor {
     }
 }
 
+/// Returns layered mipped texture descriptor.
 pub(crate) fn layered_mipped_texture_descriptor() -> TextureDescriptor {
     TextureDescriptor {
         usage: TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
@@ -94,10 +103,12 @@ pub(crate) fn layered_mipped_texture_descriptor() -> TextureDescriptor {
     }
 }
 
+/// Returns noop texture.
 pub(crate) fn noop_texture() -> Texture {
     noop_device().create_texture(texture_descriptor_4x4())
 }
 
+/// Returns noop buffer.
 pub(crate) fn noop_buffer(size: u64, usage: BufferUsage) -> Buffer {
     noop_device().create_buffer(BufferDescriptor {
         usage,
@@ -106,6 +117,7 @@ pub(crate) fn noop_buffer(size: u64, usage: BufferUsage) -> Buffer {
     })
 }
 
+/// Returns noop render attachment.
 pub(crate) fn noop_render_attachment(device: &Device) -> Arc<TextureView> {
     let texture = device.create_texture(TextureDescriptor {
         usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
@@ -133,6 +145,7 @@ pub(crate) fn noop_render_attachment(device: &Device) -> Arc<TextureView> {
     Arc::new(view)
 }
 
+/// Returns noop render pass descriptor.
 pub(crate) fn noop_render_pass_descriptor(
     view: Arc<TextureView>,
     occlusion_query_set: Option<QuerySet>,
@@ -157,18 +170,21 @@ pub(crate) fn noop_render_pass_descriptor(
     }
 }
 
+/// Returns noop compute pipeline.
 pub(crate) fn noop_compute_pipeline(device: &Device) -> Arc<ComputePipeline> {
     Arc::new(
         device.create_compute_pipeline(compute_pipeline_descriptor(compute_shader_module(device))),
     )
 }
 
+/// Returns noop render pipeline.
 pub(crate) fn noop_render_pipeline(device: &Device) -> Arc<RenderPipeline> {
     Arc::new(
         device.create_render_pipeline(render_pipeline_descriptor(render_shader_module(device))),
     )
 }
 
+/// Returns empty bind group.
 pub(crate) fn empty_bind_group(device: &Device) -> Arc<BindGroup> {
     let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
         entries: Vec::new(),
@@ -177,6 +193,7 @@ pub(crate) fn empty_bind_group(device: &Device) -> Arc<BindGroup> {
     Arc::new(device.create_bind_group(layout, Vec::new()))
 }
 
+/// Returns noop indirect buffer.
 pub(crate) fn noop_indirect_buffer(device: &Device) -> Arc<Buffer> {
     Arc::new(device.create_buffer(BufferDescriptor {
         usage: BufferUsage::INDIRECT | BufferUsage::COPY_DST,
@@ -185,6 +202,7 @@ pub(crate) fn noop_indirect_buffer(device: &Device) -> Arc<Buffer> {
     }))
 }
 
+/// Returns render bundle encoder descriptor.
 pub(crate) fn render_bundle_encoder_descriptor() -> RenderBundleEncoderDescriptor {
     RenderBundleEncoderDescriptor {
         max_color_attachments: Limits::DEFAULT.max_color_attachments,
@@ -196,12 +214,14 @@ pub(crate) fn render_bundle_encoder_descriptor() -> RenderBundleEncoderDescripto
     }
 }
 
+/// Returns compute shader module.
 pub(crate) fn compute_shader_module(device: &Device) -> Arc<ShaderModule> {
     Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
         "@compute @workgroup_size(1) fn cs() {}".to_owned(),
     )))
 }
 
+/// Returns compute pipeline descriptor.
 pub(crate) fn compute_pipeline_descriptor(module: Arc<ShaderModule>) -> ComputePipelineDescriptor {
     ComputePipelineDescriptor {
         layout: ComputePipelineLayout::Auto,
@@ -212,6 +232,7 @@ pub(crate) fn compute_pipeline_descriptor(module: Arc<ShaderModule>) -> ComputeP
     }
 }
 
+/// Returns render shader module.
 pub(crate) fn render_shader_module(device: &Device) -> Arc<ShaderModule> {
     Arc::new(
         device.create_shader_module(ShaderModuleSource::Wgsl(
@@ -231,6 +252,7 @@ return vec4<f32>(1.0, 0.0, 0.0, 1.0);
     )
 }
 
+/// Returns render pipeline descriptor.
 pub(crate) fn render_pipeline_descriptor(module: Arc<ShaderModule>) -> RenderPipelineDescriptor {
     RenderPipelineDescriptor {
         layout: RenderPipelineLayout::Auto,

@@ -2,32 +2,44 @@ use std::sync::Arc;
 
 use yawgpu_hal::HalError;
 
+/// Enumerates error values.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     #[error(transparent)]
+    /// Hal variant.
     Hal(#[from] HalError),
     #[error("{0}")]
+    /// Validation variant.
     Validation(String),
 }
 
+/// Enumerates error kind values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ErrorKind {
+    /// Validation variant.
     Validation,
+    /// Out of memory variant.
     OutOfMemory,
+    /// Internal variant.
     Internal,
 }
 
+/// Enumerates error filter values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ErrorFilter {
+    /// Validation variant.
     Validation,
+    /// Out of memory variant.
     OutOfMemory,
+    /// Internal variant.
     Internal,
 }
 
 impl ErrorFilter {
+    /// Returns true when the value matches the requested condition.
     #[must_use]
     pub(crate) fn matches(self, kind: ErrorKind) -> bool {
         matches!(
@@ -39,20 +51,26 @@ impl ErrorFilter {
     }
 }
 
+/// Enumerates pop error scope error values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PopErrorScopeError {
+    /// Empty stack variant.
     EmptyStack,
 }
 
+/// Stores device error data used by validation and backend submission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DeviceError {
+    /// Kind.
     pub kind: ErrorKind,
+    /// Message.
     pub message: String,
 }
 
 impl DeviceError {
+    /// Builds a validation `DeviceError` carrying `message`.
     #[must_use]
     pub(crate) fn validation(message: impl Into<String>) -> Self {
         Self {
@@ -61,6 +79,7 @@ impl DeviceError {
         }
     }
 
+    /// Builds an internal `DeviceError` carrying `message`.
     #[must_use]
     pub(crate) fn internal(message: impl Into<String>) -> Self {
         Self {
@@ -71,6 +90,7 @@ impl DeviceError {
 }
 
 impl DeviceError {
+    /// Creates a new instance.
     #[must_use]
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
         Self {
@@ -80,14 +100,17 @@ impl DeviceError {
     }
 }
 
+/// Alias for uncaptured error callback.
 pub(crate) type UncapturedErrorCallback = Arc<dyn Fn(DeviceError) + Send + Sync>;
 
+/// Stores error sink data used by validation and backend submission.
 #[derive(Default)]
 pub(crate) struct ErrorSink {
     pub(crate) uncaptured_error_callback: Option<UncapturedErrorCallback>,
     pub(crate) scopes: Vec<ErrorScope>,
 }
 
+/// Stores error scope data used by validation and backend submission.
 pub(crate) struct ErrorScope {
     pub(crate) filter: ErrorFilter,
     pub(crate) error: Option<DeviceError>,

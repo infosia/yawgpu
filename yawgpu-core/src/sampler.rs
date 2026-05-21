@@ -5,52 +5,82 @@ use yawgpu_hal::{
     HalSamplerDescriptor,
 };
 
+/// Enumerates address mode values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AddressMode {
+    /// Clamp to edge variant.
     ClampToEdge,
+    /// Repeat variant.
     Repeat,
+    /// Mirror repeat variant.
     MirrorRepeat,
 }
 
+/// Enumerates filter mode values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FilterMode {
+    /// Nearest variant.
     Nearest,
+    /// Linear variant.
     Linear,
 }
 
+/// Enumerates mipmap filter mode values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MipmapFilterMode {
+    /// Nearest variant.
     Nearest,
+    /// Linear variant.
     Linear,
 }
 
+/// Enumerates compare function values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CompareFunction {
+    /// Never variant.
     Never,
+    /// Less variant.
     Less,
+    /// Equal variant.
     Equal,
+    /// Less equal variant.
     LessEqual,
+    /// Greater variant.
     Greater,
+    /// Not equal variant.
     NotEqual,
+    /// Greater equal variant.
     GreaterEqual,
+    /// Always variant.
     Always,
 }
 
+/// Describes sampler descriptor.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SamplerDescriptor {
+    /// Address mode u.
     pub address_mode_u: Option<AddressMode>,
+    /// Address mode v.
     pub address_mode_v: Option<AddressMode>,
+    /// Address mode w.
     pub address_mode_w: Option<AddressMode>,
+    /// Mag filter.
     pub mag_filter: Option<FilterMode>,
+    /// Min filter.
     pub min_filter: Option<FilterMode>,
+    /// Mipmap filter.
     pub mipmap_filter: Option<MipmapFilterMode>,
+    /// Lod min clamp.
     pub lod_min_clamp: f32,
+    /// Lod max clamp.
     pub lod_max_clamp: f32,
+    /// Compare.
     pub compare: Option<CompareFunction>,
+    /// Max anisotropy.
     pub max_anisotropy: u16,
 }
 
@@ -71,21 +101,33 @@ impl Default for SamplerDescriptor {
     }
 }
 
+/// Describes resolved sampler descriptor.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResolvedSamplerDescriptor {
+    /// Address mode u.
     pub address_mode_u: AddressMode,
+    /// Address mode v.
     pub address_mode_v: AddressMode,
+    /// Address mode w.
     pub address_mode_w: AddressMode,
+    /// Mag filter.
     pub mag_filter: FilterMode,
+    /// Min filter.
     pub min_filter: FilterMode,
+    /// Mipmap filter.
     pub mipmap_filter: MipmapFilterMode,
+    /// Lod min clamp.
     pub lod_min_clamp: f32,
+    /// Lod max clamp.
     pub lod_max_clamp: f32,
+    /// Compare.
     pub compare: Option<CompareFunction>,
+    /// Max anisotropy.
     pub max_anisotropy: u16,
 }
 
 impl ResolvedSamplerDescriptor {
+    /// Constructs this object from descriptor.
     pub(crate) fn from_descriptor(descriptor: SamplerDescriptor) -> Self {
         Self {
             address_mode_u: descriptor
@@ -110,11 +152,13 @@ impl ResolvedSamplerDescriptor {
     }
 }
 
+/// Stores sampler data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct Sampler {
     pub(crate) inner: Arc<SamplerInner>,
 }
 
+/// Holds shared state for the sampler handle.
 #[derive(Debug)]
 pub(crate) struct SamplerInner {
     pub(crate) _hal: Option<HalSampler>,
@@ -123,6 +167,7 @@ pub(crate) struct SamplerInner {
 }
 
 impl Sampler {
+    /// Creates a new instance.
     pub(crate) fn new(
         descriptor: ResolvedSamplerDescriptor,
         hal: Option<HalSampler>,
@@ -137,17 +182,20 @@ impl Sampler {
         }
     }
 
+    /// Returns the descriptor.
     #[must_use]
     pub fn descriptor(&self) -> ResolvedSamplerDescriptor {
         self.inner.descriptor
     }
 
+    /// Returns true when this object is error.
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
     }
 }
 
+/// Returns HAL sampler descriptor.
 pub(crate) fn hal_sampler_descriptor(
     descriptor: &ResolvedSamplerDescriptor,
 ) -> HalSamplerDescriptor {
@@ -165,6 +213,7 @@ pub(crate) fn hal_sampler_descriptor(
     }
 }
 
+/// Returns HAL address mode.
 pub(crate) fn hal_address_mode(mode: AddressMode) -> HalAddressMode {
     match mode {
         AddressMode::ClampToEdge => HalAddressMode::ClampToEdge,
@@ -173,6 +222,7 @@ pub(crate) fn hal_address_mode(mode: AddressMode) -> HalAddressMode {
     }
 }
 
+/// Returns HAL filter mode.
 pub(crate) fn hal_filter_mode(mode: FilterMode) -> HalFilterMode {
     match mode {
         FilterMode::Nearest => HalFilterMode::Nearest,
@@ -180,6 +230,7 @@ pub(crate) fn hal_filter_mode(mode: FilterMode) -> HalFilterMode {
     }
 }
 
+/// Returns HAL mipmap filter mode.
 pub(crate) fn hal_mipmap_filter_mode(mode: MipmapFilterMode) -> HalMipmapFilterMode {
     match mode {
         MipmapFilterMode::Nearest => HalMipmapFilterMode::Nearest,
@@ -187,6 +238,7 @@ pub(crate) fn hal_mipmap_filter_mode(mode: MipmapFilterMode) -> HalMipmapFilterM
     }
 }
 
+/// Returns HAL compare function.
 pub(crate) fn hal_compare_function(compare: CompareFunction) -> HalCompareFunction {
     match compare {
         CompareFunction::Never => HalCompareFunction::Never,
@@ -200,6 +252,7 @@ pub(crate) fn hal_compare_function(compare: CompareFunction) -> HalCompareFuncti
     }
 }
 
+/// Validates sampler descriptor and returns a descriptive error on failure.
 pub(crate) fn validate_sampler_descriptor(
     descriptor: &ResolvedSamplerDescriptor,
 ) -> Option<&'static str> {

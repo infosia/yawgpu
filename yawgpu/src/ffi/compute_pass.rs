@@ -5,6 +5,7 @@ use super::*;
 /// # Safety
 ///
 /// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
+/// Returns WGPU compute pass encoder end.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuComputePassEncoderEnd(
     compute_pass_encoder: native::WGPUComputePassEncoder,
@@ -18,6 +19,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderEnd(
 /// # Safety
 ///
 /// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
+/// Returns WGPU compute pass encoder insert debug marker.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuComputePassEncoderInsertDebugMarker(
     compute_pass_encoder: native::WGPUComputePassEncoder,
@@ -32,6 +34,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderInsertDebugMarker(
 /// # Safety
 ///
 /// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
+/// Returns WGPU compute pass encoder push debug group.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuComputePassEncoderPushDebugGroup(
     compute_pass_encoder: native::WGPUComputePassEncoder,
@@ -46,6 +49,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderPushDebugGroup(
 /// # Safety
 ///
 /// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
+/// Returns WGPU compute pass encoder pop debug group.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuComputePassEncoderPopDebugGroup(
     compute_pass_encoder: native::WGPUComputePassEncoder,
@@ -59,6 +63,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderPopDebugGroup(
 /// # Safety
 ///
 /// `compute_pass_encoder` and `pipeline` must be non-null live yawgpu handles.
+/// Returns WGPU compute pass encoder set pipeline.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuComputePassEncoderSetPipeline(
     compute_pass_encoder: native::WGPUComputePassEncoder,
@@ -87,6 +92,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderSetPipeline(
 /// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
 /// `group` may be null to clear the slot. `dynamic_offsets` must point to
 /// `dynamic_offset_count` elements when the count is non-zero.
+/// Returns WGPU compute pass encoder set bind group.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuComputePassEncoderSetBindGroup(
     compute_pass_encoder: native::WGPUComputePassEncoder,
@@ -124,6 +130,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderSetBindGroup(
 /// # Safety
 ///
 /// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
+/// Returns WGPU compute pass encoder dispatch workgroups.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuComputePassEncoderDispatchWorkgroups(
     compute_pass_encoder: native::WGPUComputePassEncoder,
@@ -148,6 +155,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderDispatchWorkgroups(
 /// # Safety
 ///
 /// `compute_pass_encoder` and `indirect_buffer` must be non-null live yawgpu handles.
+/// Returns WGPU compute pass encoder dispatch workgroups indirect.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuComputePassEncoderDispatchWorkgroupsIndirect(
     compute_pass_encoder: native::WGPUComputePassEncoder,
@@ -171,6 +179,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderDispatchWorkgroupsIndirect(
 /// # Safety
 ///
 /// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
+/// Returns WGPU compute pass encoder release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuComputePassEncoderRelease(
     compute_pass_encoder: native::WGPUComputePassEncoder,
@@ -183,6 +192,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderRelease(
 /// # Safety
 ///
 /// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
+/// Returns WGPU compute pass encoder add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuComputePassEncoderAddRef(
     compute_pass_encoder: native::WGPUComputePassEncoder,

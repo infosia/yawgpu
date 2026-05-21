@@ -7,28 +7,34 @@ use crate::compute_pipeline::*;
 use crate::limits::*;
 use crate::pass::*;
 
+/// Records commands for the ComputePassEncoder.
 #[derive(Debug, Clone)]
 pub struct ComputePassEncoder {
     pub(crate) inner: Arc<PassEncoderInner>,
 }
 
 impl ComputePassEncoder {
+    /// Ends recording for this pass or encoder.
     pub fn end(&self) -> Option<String> {
         self.inner.end()
     }
 
+    /// Records a debug marker within the compute pass.
     pub fn insert_debug_marker(&self) -> Option<String> {
         self.inner.insert_debug_marker()
     }
 
+    /// Opens a debug group within the compute pass.
     pub fn push_debug_group(&self) -> Option<String> {
         self.inner.push_debug_group()
     }
 
+    /// Closes the most recently opened debug group in the compute pass.
     pub fn pop_debug_group(&self) -> Option<String> {
         self.inner.pop_debug_group()
     }
 
+    /// Sets pipeline on this object or encoder.
     pub fn set_pipeline(&self, pipeline: Arc<ComputePipeline>) -> Option<String> {
         self.inner.record_pass_command(|state| {
             state.compute_pipeline = Some(pipeline);
@@ -36,10 +42,12 @@ impl ComputePassEncoder {
         })
     }
 
+    /// Records a validation error against the compute pass.
     pub fn record_validation_error(&self, message: impl Into<String>) -> Option<String> {
         self.inner.record_pass_command(|_| Err(message.into()))
     }
 
+    /// Sets bind group on this object or encoder.
     pub fn set_bind_group(
         &self,
         index: u32,
@@ -65,6 +73,7 @@ impl ComputePassEncoder {
         })
     }
 
+    /// Records a workgroup dispatch after validating the bound pipeline and limits.
     pub fn dispatch_workgroups(&self, x: u32, y: u32, z: u32, limits: Limits) -> Option<String> {
         self.inner.record_pass_command(|state| {
             validate_compute_dispatch_state(state, limits)?;
@@ -87,6 +96,7 @@ impl ComputePassEncoder {
         })
     }
 
+    /// Records an indirect workgroup dispatch sourced from a buffer after validation.
     pub fn dispatch_workgroups_indirect(
         &self,
         indirect_buffer: Arc<Buffer>,
@@ -107,6 +117,7 @@ impl ComputePassEncoder {
     }
 }
 
+/// Validates compute dispatch state and returns a descriptive error on failure.
 pub(crate) fn validate_compute_dispatch_state(
     state: &PassEncoderState,
     limits: Limits,

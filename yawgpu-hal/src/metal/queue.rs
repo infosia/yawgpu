@@ -1,5 +1,6 @@
 use super::*;
 
+/// Stores metal queue data used by validation and backend submission.
 #[derive(Clone)]
 pub struct MetalQueue {
     pub(super) inner: Retained<ProtocolObject<dyn MTLCommandQueue>>,
@@ -12,10 +13,12 @@ impl std::fmt::Debug for MetalQueue {
 }
 
 impl MetalQueue {
+    /// Creates a new instance.
     pub fn new() -> Result<Self, HalError> {
         Ok(MetalDevice::new()?.queue().clone())
     }
 
+    /// Submits an empty command buffer to flush the queue.
     pub fn submit_empty(&self) -> Result<(), HalError> {
         let command_buffer = self
             .inner
@@ -26,6 +29,7 @@ impl MetalQueue {
         Ok(())
     }
 
+    /// Records and submits the given buffer/texture copy operations.
     pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
         if copies.is_empty() {
             return Ok(());

@@ -3,18 +3,24 @@ use std::sync::Arc;
 use crate::bind_group_layout::*;
 use crate::limits::*;
 
+/// Describes pipeline layout descriptor.
 #[derive(Debug, Clone)]
 pub struct PipelineLayoutDescriptor {
+    /// Bind group layouts.
     pub bind_group_layouts: Vec<Arc<BindGroupLayout>>,
+    /// Immediate size.
     pub immediate_size: u32,
+    /// Error.
     pub error: Option<String>,
 }
 
+/// Stores layout metadata.
 #[derive(Debug, Clone)]
 pub struct PipelineLayout {
     pub(crate) inner: Arc<PipelineLayoutInner>,
 }
 
+/// Stores layout metadata.
 #[derive(Debug)]
 pub(crate) struct PipelineLayoutInner {
     pub(crate) _bind_group_layouts: Vec<Arc<BindGroupLayout>>,
@@ -23,6 +29,7 @@ pub(crate) struct PipelineLayoutInner {
 }
 
 impl PipelineLayout {
+    /// Creates a new instance.
     pub(crate) fn new(
         bind_group_layouts: Vec<Arc<BindGroupLayout>>,
         immediate_size: u32,
@@ -37,17 +44,20 @@ impl PipelineLayout {
         }
     }
 
+    /// Returns true when this object is error.
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
     }
 
+    /// Returns the bind group layouts.
     #[must_use]
     pub fn bind_group_layouts(&self) -> &[Arc<BindGroupLayout>] {
         &self.inner._bind_group_layouts
     }
 }
 
+/// Validates pipeline layout descriptor and returns a descriptive error on failure.
 pub(crate) fn validate_pipeline_layout_descriptor(
     bind_group_layouts: &[Arc<BindGroupLayout>],
     immediate_size: u32,

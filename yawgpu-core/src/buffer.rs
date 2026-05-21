@@ -8,24 +8,35 @@ use yawgpu_hal::HalBuffer;
 use crate::error::*;
 use crate::limits::*;
 
+/// Describes buffer descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BufferDescriptor {
+    /// Usage.
     pub usage: BufferUsage,
+    /// Size.
     pub size: u64,
+    /// Mapped at creation.
     pub mapped_at_creation: bool,
 }
 
+/// Enumerates map mode values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MapMode {
+    /// Read variant.
     Read,
+    /// Write variant.
     Write,
 }
 
 impl MapMode {
+    /// Constructs this object from bits.
     pub fn from_bits(bits: u32) -> Result<Self, &'static str> {
+        /// Constant value for read.
         pub(crate) const READ: u32 = 1;
+        /// Constant value for write.
         pub(crate) const WRITE: u32 = 2;
+        /// Constant value for allowed.
         pub(crate) const ALLOWED: u32 = READ | WRITE;
 
         if bits & !ALLOWED != 0 {
@@ -39,49 +50,73 @@ impl MapMode {
     }
 }
 
+/// Enumerates map async status values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MapAsyncStatus {
+    /// Success variant.
     Success,
+    /// Callback cancelled variant.
     CallbackCancelled,
+    /// Error variant.
     Error,
+    /// Aborted variant.
     Aborted,
 }
 
+/// Enumerates queue work done status values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum QueueWorkDoneStatus {
+    /// Success variant.
     Success,
+    /// Callback cancelled variant.
     CallbackCancelled,
+    /// Error variant.
     Error,
 }
 
+/// Enumerates buffer usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BufferUsage(u64);
 
 impl BufferUsage {
+    /// Constant value for none.
     pub const NONE: Self = Self(0);
+    /// Constant value for map read.
     pub const MAP_READ: Self = Self(1);
+    /// Constant value for map write.
     pub const MAP_WRITE: Self = Self(2);
+    /// Constant value for copy src.
     pub const COPY_SRC: Self = Self(4);
+    /// Constant value for copy dst.
     pub const COPY_DST: Self = Self(8);
+    /// Constant value for index.
     pub const INDEX: Self = Self(16);
+    /// Constant value for vertex.
     pub const VERTEX: Self = Self(32);
+    /// Constant value for uniform.
     pub const UNIFORM: Self = Self(64);
+    /// Constant value for storage.
     pub const STORAGE: Self = Self(128);
+    /// Constant value for indirect.
     pub const INDIRECT: Self = Self(256);
+    /// Constant value for query resolve.
     pub const QUERY_RESOLVE: Self = Self(512);
 
+    /// Constructs this object from bits retain.
     #[must_use]
     pub fn from_bits_retain(bits: u64) -> Self {
         Self(bits)
     }
 
+    /// Returns the raw usage bitmask.
     #[must_use]
     pub fn bits(self) -> u64 {
         self.0
     }
 
+    /// Returns whether every bit set in `other` is also set in `self`.
     #[must_use]
     pub(crate) fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -96,19 +131,25 @@ impl std::ops::BitOr for BufferUsage {
     }
 }
 
+/// Enumerates buffer map state values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BufferMapState {
+    /// Unmapped variant.
     Unmapped,
+    /// Pending variant.
     Pending,
+    /// Mapped variant.
     Mapped,
 }
 
+/// Stores buffer data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct Buffer {
     pub(crate) inner: Arc<BufferInner>,
 }
 
+/// Holds shared state for the buffer handle.
 #[derive(Debug)]
 pub(crate) struct BufferInner {
     pub(crate) hal: Option<HalBuffer>,
@@ -118,6 +159,7 @@ pub(crate) struct BufferInner {
     pub(crate) state: Mutex<BufferState>,
 }
 
+/// Tracks the lifecycle state for buffer.
 #[derive(Debug)]
 pub(crate) struct BufferState {
     pub(crate) map_state: BufferMapState,
@@ -127,6 +169,7 @@ pub(crate) struct BufferState {
     pub(crate) active_map: Option<ActiveMap>,
 }
 
+/// Stores pending map data used by validation and backend submission.
 #[derive(Debug)]
 pub(crate) struct PendingMap {
     pub(crate) mode: MapMode,
@@ -135,6 +178,7 @@ pub(crate) struct PendingMap {
     pub(crate) outcome: MapAsyncStatus,
 }
 
+/// Stores active map data used by validation and backend submission.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ActiveMap {
     pub(crate) mode: MapMode,
@@ -142,11 +186,13 @@ pub(crate) struct ActiveMap {
     pub(crate) size: u64,
 }
 
+/// Stores host buffer data used by validation and backend submission.
 pub(crate) struct HostBuffer {
     pub(crate) bytes: Box<[UnsafeCell<u8>]>,
 }
 
 impl HostBuffer {
+    /// Creates a new instance.
     pub(crate) fn new(size: u64) -> Self {
         debug_assert!(
             usize::try_from(size).is_ok(),
@@ -163,6 +209,7 @@ impl HostBuffer {
         Self { bytes }
     }
 
+    /// Returns ptr at.
     pub(crate) fn ptr_at(&self, offset: u64) -> Option<*mut u8> {
         let offset = usize::try_from(offset).ok()?;
         if offset > self.bytes.len() {
@@ -172,6 +219,7 @@ impl HostBuffer {
         Some(unsafe { self.bytes.as_ptr().add(offset).cast::<u8>().cast_mut() })
     }
 
+    /// Records a write command.
     pub(crate) fn write(&self, offset: u64, data: &[u8]) -> Result<(), String> {
         let offset = usize::try_from(offset).map_err(|_| "host buffer offset is too large")?;
         let end = offset
@@ -188,6 +236,7 @@ impl HostBuffer {
         Ok(())
     }
 
+    /// Reads `size` bytes starting at `offset` from the host-side backing store.
     pub(crate) fn read(&self, offset: u64, size: u64) -> Result<Vec<u8>, String> {
         let offset = usize::try_from(offset).map_err(|_| "host buffer offset is too large")?;
         let size = usize::try_from(size).map_err(|_| "host buffer read size is too large")?;
@@ -219,6 +268,7 @@ unsafe impl Send for HostBuffer {}
 unsafe impl Sync for HostBuffer {}
 
 impl Buffer {
+    /// Creates a new instance.
     pub(crate) fn new(
         descriptor: BufferDescriptor,
         hal: Option<HalBuffer>,
@@ -255,31 +305,37 @@ impl Buffer {
         }
     }
 
+    /// Returns the size.
     #[must_use]
     pub fn size(&self) -> u64 {
         self.inner.size
     }
 
+    /// Returns the usage.
     #[must_use]
     pub fn usage(&self) -> BufferUsage {
         self.inner.usage
     }
 
+    /// Converts state into the corresponding yawgpu representation.
     #[must_use]
     pub fn map_state(&self) -> BufferMapState {
         self.inner.state.lock().map_state
     }
 
+    /// Returns true when this object is error.
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.state.lock().is_error
     }
 
+    /// Returns true when this object is destroyed.
     #[must_use]
     pub(crate) fn is_destroyed(&self) -> bool {
         self.inner.state.lock().is_destroyed
     }
 
+    /// Returns true when both handles share the same backing object.
     #[must_use]
     pub fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
@@ -334,6 +390,7 @@ impl Buffer {
             .map(|error| DeviceError::internal(error.to_string()))
     }
 
+    /// Begins an asynchronous map of the buffer range, moving it into the pending-map state.
     pub fn begin_map(&self, mode: MapMode, offset: u64, size: u64) -> Result<(), &'static str> {
         let mut state = self.inner.state.lock();
         if state.is_error {
@@ -383,6 +440,7 @@ impl Buffer {
         Ok(())
     }
 
+    /// Completes the pending map, transitioning the buffer to the mapped state.
     #[must_use]
     pub fn resolve_pending_map(&self) -> MapAsyncStatus {
         let mut state = self.inner.state.lock();
@@ -437,6 +495,7 @@ impl Buffer {
         }
     }
 
+    /// Returns mapped range.
     #[must_use]
     pub fn mapped_range(
         &self,
@@ -469,6 +528,7 @@ impl Buffer {
         self.inner.host.ptr_at(offset)
     }
 
+    /// Applies a queue-side write of `data` at `offset` to the buffer's backing store.
     pub(crate) fn write_from_queue(&self, offset: u64, data: &[u8]) -> Option<DeviceError> {
         let size = match u64::try_from(data.len()) {
             Ok(size) => size,
@@ -487,10 +547,12 @@ impl Buffer {
         None
     }
 
+    /// Returns the HAL.
     pub fn hal(&self) -> Option<HalBuffer> {
         self.inner.hal.clone()
     }
 
+    /// Validates queue write and returns a descriptive error on failure.
     pub fn validate_queue_write(&self, offset: u64, size: u64) -> Result<(), &'static str> {
         let state = self.inner.state.lock();
         if state.is_error {
@@ -521,6 +583,7 @@ impl Buffer {
     }
 }
 
+/// Validates buffer descriptor and returns a descriptive error on failure.
 pub(crate) fn validate_buffer_descriptor(
     descriptor: &BufferDescriptor,
     limits: Limits,

@@ -1,5 +1,6 @@
 use super::*;
 
+/// Converts limits to native into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_limits_to_native(limits: core::Limits) -> native::WGPULimits {
     native::WGPULimits {
@@ -41,6 +42,7 @@ pub fn map_limits_to_native(limits: core::Limits) -> native::WGPULimits {
     }
 }
 
+/// Converts limits into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_limits(value: &native::WGPULimits) -> core::Limits {
     let default = core::Limits::DEFAULT;

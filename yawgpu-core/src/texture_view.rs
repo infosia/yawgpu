@@ -4,33 +4,52 @@ use crate::extent::*;
 use crate::format::*;
 use crate::texture::*;
 
+/// Enumerates texture view dimension values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TextureViewDimension {
+    /// D1 variant.
     D1,
+    /// D2 variant.
     D2,
+    /// D2 array variant.
     D2Array,
+    /// Cube variant.
     Cube,
+    /// Cube array variant.
     CubeArray,
+    /// D3 variant.
     D3,
 }
 
+/// Enumerates texture aspect values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TextureAspect {
+    /// All variant.
     All,
+    /// Depth only variant.
     DepthOnly,
+    /// Stencil only variant.
     StencilOnly,
 }
 
+/// Describes texture view descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextureViewDescriptor {
+    /// Format.
     pub format: Option<TextureFormat>,
+    /// Dimension.
     pub dimension: Option<TextureViewDimension>,
+    /// Base mip level.
     pub base_mip_level: u32,
+    /// Mip level count.
     pub mip_level_count: Option<u32>,
+    /// Base array layer.
     pub base_array_layer: u32,
+    /// Array layer count.
     pub array_layer_count: Option<u32>,
+    /// Aspect.
     pub aspect: Option<TextureAspect>,
 }
 
@@ -38,6 +57,7 @@ pub struct TextureViewDescriptor {
 /// filled in by `Texture::resolve_view_descriptor`. Validation and view
 /// construction take this so an unresolved descriptor can't be validated
 /// or stored by mistake.
+/// Describes resolved texture view descriptor.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ResolvedTextureViewDescriptor {
     pub(crate) format: TextureFormat,
@@ -49,11 +69,13 @@ pub(crate) struct ResolvedTextureViewDescriptor {
     pub(crate) aspect: TextureAspect,
 }
 
+/// Stores texture view data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct TextureView {
     pub(crate) inner: Arc<TextureViewInner>,
 }
 
+/// Holds shared state for the texture view handle.
 #[derive(Debug)]
 pub(crate) struct TextureViewInner {
     pub(crate) texture: Texture,
@@ -68,6 +90,7 @@ pub(crate) struct TextureViewInner {
 }
 
 impl TextureView {
+    /// Creates a new instance.
     pub(crate) fn new(
         texture: Texture,
         descriptor: ResolvedTextureViewDescriptor,
@@ -88,51 +111,61 @@ impl TextureView {
         }
     }
 
+    /// Returns true when this object is error.
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
     }
 
+    /// Returns the texture.
     #[must_use]
     pub(crate) fn texture(&self) -> Texture {
         self.inner.texture.clone()
     }
 
+    /// Returns the format.
     #[must_use]
     pub fn format(&self) -> TextureFormat {
         self.inner.format
     }
 
+    /// Returns the view's dimensionality (1D / 2D / 2D-array / cube / 3D).
     #[must_use]
     pub fn dimension(&self) -> TextureViewDimension {
         self.inner.dimension
     }
 
+    /// Returns the first mip level the view exposes.
     #[must_use]
     pub(crate) fn base_mip_level(&self) -> u32 {
         self.inner.base_mip_level
     }
 
+    /// Returns the number of mip levels the view exposes.
     #[must_use]
     pub fn mip_level_count(&self) -> u32 {
         self.inner.mip_level_count
     }
 
+    /// Returns the first array layer the view exposes.
     #[must_use]
     pub fn base_array_layer(&self) -> u32 {
         self.inner.base_array_layer
     }
 
+    /// Returns the number of array layers the view exposes.
     #[must_use]
     pub(crate) fn array_layer_count(&self) -> u32 {
         self.inner.array_layer_count
     }
 
+    /// Returns which aspect (color / depth / stencil) the view targets.
     #[must_use]
     pub fn aspect(&self) -> TextureAspect {
         self.inner.aspect
     }
 
+    /// Returns render extent.
     #[must_use]
     pub(crate) fn render_extent(&self) -> Extent3d {
         let subresource = self.texture().subresource_size(self.base_mip_level());
@@ -144,6 +177,7 @@ impl TextureView {
     }
 }
 
+/// Validates texture view descriptor and returns a descriptive error on failure.
 pub(crate) fn validate_texture_view_descriptor(
     texture: &Texture,
     descriptor: &ResolvedTextureViewDescriptor,

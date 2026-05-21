@@ -5,6 +5,7 @@ use super::*;
 /// # Safety
 ///
 /// `buffer` must be a non-null live yawgpu buffer handle.
+/// Returns WGPU buffer destroy.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBufferDestroy(buffer: native::WGPUBuffer) {
     borrow_handle(buffer, "WGPUBuffer").core.destroy();
@@ -15,6 +16,7 @@ pub unsafe extern "C" fn wgpuBufferDestroy(buffer: native::WGPUBuffer) {
 /// # Safety
 ///
 /// `buffer` must be a non-null live yawgpu buffer handle.
+/// Returns WGPU buffer unmap.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBufferUnmap(buffer: native::WGPUBuffer) {
     let buffer = borrow_handle(buffer, "WGPUBuffer");
@@ -27,6 +29,7 @@ pub unsafe extern "C" fn wgpuBufferUnmap(buffer: native::WGPUBuffer) {
 ///
 /// `buffer` must be a non-null live yawgpu buffer handle. `callback_info`
 /// userdata pointers must remain valid until the callback fires.
+/// Returns WGPU buffer map async.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBufferMapAsync(
     buffer: native::WGPUBuffer,
@@ -89,6 +92,7 @@ pub unsafe extern "C" fn wgpuBufferMapAsync(
 ///
 /// `buffer` must be a non-null live yawgpu buffer handle. The returned pointer
 /// is valid only while the buffer remains mapped.
+/// Returns WGPU buffer get mapped range.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBufferGetMappedRange(
     buffer: native::WGPUBuffer,
@@ -104,6 +108,7 @@ pub unsafe extern "C" fn wgpuBufferGetMappedRange(
 ///
 /// `buffer` must be a non-null live yawgpu buffer handle. The returned pointer
 /// is valid only while the buffer remains mapped.
+/// Returns WGPU buffer get const mapped range.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBufferGetConstMappedRange(
     buffer: native::WGPUBuffer,
@@ -119,6 +124,7 @@ pub unsafe extern "C" fn wgpuBufferGetConstMappedRange(
 /// # Safety
 ///
 /// `buffer` must be a non-null live yawgpu buffer handle.
+/// Maintains WGPU buffer get map state state.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBufferGetMapState(
     buffer: native::WGPUBuffer,
@@ -131,6 +137,7 @@ pub unsafe extern "C" fn wgpuBufferGetMapState(
 /// # Safety
 ///
 /// `buffer` must be a non-null live yawgpu buffer handle.
+/// Returns WGPU buffer get size.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBufferGetSize(buffer: native::WGPUBuffer) -> u64 {
     borrow_handle(buffer, "WGPUBuffer").core.size()
@@ -141,6 +148,7 @@ pub unsafe extern "C" fn wgpuBufferGetSize(buffer: native::WGPUBuffer) -> u64 {
 /// # Safety
 ///
 /// `buffer` must be a non-null live yawgpu buffer handle.
+/// Returns WGPU buffer get usage.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBufferGetUsage(buffer: native::WGPUBuffer) -> native::WGPUBufferUsage {
     map_buffer_usage_to_native(borrow_handle(buffer, "WGPUBuffer").core.usage())
@@ -151,6 +159,7 @@ pub unsafe extern "C" fn wgpuBufferGetUsage(buffer: native::WGPUBuffer) -> nativ
 /// # Safety
 ///
 /// `buffer` must be a non-null live yawgpu buffer handle.
+/// Returns WGPU buffer release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBufferRelease(buffer: native::WGPUBuffer) {
     release_handle(buffer, "WGPUBuffer");
@@ -161,6 +170,7 @@ pub unsafe extern "C" fn wgpuBufferRelease(buffer: native::WGPUBuffer) {
 /// # Safety
 ///
 /// `buffer` must be a non-null live yawgpu buffer handle.
+/// Returns WGPU buffer add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBufferAddRef(buffer: native::WGPUBuffer) {
     add_ref_handle(buffer, "WGPUBuffer");

@@ -1,5 +1,6 @@
 use super::*;
 
+/// Records encode into the command stream.
 pub(super) fn encode_buffer_copy(
     blit: &ProtocolObject<dyn MTLBlitCommandEncoder>,
     copy: &crate::HalBufferCopy,
@@ -24,6 +25,7 @@ pub(super) fn encode_buffer_copy(
     Ok(())
 }
 
+/// Records encode into the command stream.
 pub(super) fn encode_buffer_to_texture(
     blit: &ProtocolObject<dyn MTLBlitCommandEncoder>,
     copy: &HalBufferTextureCopy,
@@ -52,6 +54,7 @@ pub(super) fn encode_buffer_to_texture(
     Ok(())
 }
 
+/// Records encode into the command stream.
 pub(super) fn encode_texture_to_buffer(
     blit: &ProtocolObject<dyn MTLBlitCommandEncoder>,
     copy: &HalBufferTextureCopy,
@@ -80,6 +83,7 @@ pub(super) fn encode_texture_to_buffer(
     Ok(())
 }
 
+/// Records encode into the command stream.
 pub(super) fn encode_texture_to_texture(
     blit: &ProtocolObject<dyn MTLBlitCommandEncoder>,
     copy: &HalTextureCopy,
@@ -108,6 +112,7 @@ pub(super) fn encode_texture_to_texture(
     Ok(())
 }
 
+/// Records encode into the command stream.
 pub(super) fn encode_compute_pass(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     pass: &HalComputePass,
@@ -148,6 +153,7 @@ fn encode_compute_buffer(
     Ok(())
 }
 
+/// Returns render pass descriptor.
 pub(super) fn render_pass_descriptor(
     pass: &HalRenderPass,
 ) -> Result<Retained<MTLRenderPassDescriptor>, HalError> {
@@ -177,6 +183,7 @@ pub(super) fn render_pass_descriptor(
     Ok(descriptor)
 }
 
+/// Records encode into the command stream.
 pub(super) fn encode_render_pass(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     pass: &HalRenderPass,

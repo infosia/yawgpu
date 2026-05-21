@@ -6,6 +6,7 @@ use crate::limits::*;
 use crate::shader::*;
 use crate::texture_view::*;
 
+/// Validates bind group layout descriptor and returns a descriptive error on failure.
 pub(crate) fn validate_bind_group_layout_descriptor(
     entries: &[BindGroupLayoutEntry],
     limits: Limits,
@@ -122,82 +123,125 @@ pub(crate) fn validate_bind_group_layout_descriptor(
     None
 }
 
+/// Describes bind group layout descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindGroupLayoutDescriptor {
+    /// Entries.
     pub entries: Vec<BindGroupLayoutEntry>,
+    /// Error.
     pub error: Option<String>,
 }
 
+/// Stores layout metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BindGroupLayoutEntry {
+    /// Binding.
     pub binding: u32,
+    /// Visibility.
     pub visibility: u64,
+    /// Binding array size.
     pub binding_array_size: u32,
+    /// Kind.
     pub kind: Option<BindingLayoutKind>,
 }
 
+/// Enumerates binding layout kind values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BindingLayoutKind {
+    /// Buffer variant.
     Buffer {
+        /// Ty variant.
         ty: BufferBindingType,
+        /// Has dynamic offset variant.
         has_dynamic_offset: bool,
+        /// Min binding size variant.
         min_binding_size: u64,
     },
+    /// Sampler variant.
     Sampler {
+        /// Ty variant.
         ty: SamplerBindingType,
     },
+    /// Texture variant.
     Texture {
+        /// Sample type variant.
         sample_type: TextureSampleType,
+        /// View dimension variant.
         view_dimension: TextureViewDimension,
+        /// Multisampled variant.
         multisampled: bool,
     },
+    /// Storage texture variant.
     StorageTexture {
+        /// Access variant.
         access: StorageTextureAccess,
+        /// Format variant.
         format: TextureFormat,
+        /// View dimension variant.
         view_dimension: TextureViewDimension,
     },
 }
 
+/// Enumerates buffer binding type values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BufferBindingType {
+    /// Uniform variant.
     Uniform,
+    /// Storage variant.
     Storage,
+    /// Read only storage variant.
     ReadOnlyStorage,
 }
 
+/// Enumerates sampler binding type values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SamplerBindingType {
+    /// Filtering variant.
     Filtering,
+    /// Non filtering variant.
     NonFiltering,
+    /// Comparison variant.
     Comparison,
 }
 
+/// Enumerates texture sample type values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TextureSampleType {
+    /// Float variant.
     Float,
+    /// Unfilterable float variant.
     UnfilterableFloat,
+    /// Depth variant.
     Depth,
+    /// Sint variant.
     Sint,
+    /// Uint variant.
     Uint,
 }
 
+/// Enumerates storage texture access values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StorageTextureAccess {
+    /// Write only variant.
     WriteOnly,
+    /// Read only variant.
     ReadOnly,
+    /// Read write variant.
     ReadWrite,
 }
 
+/// Stores layout metadata.
 #[derive(Debug, Clone)]
 pub struct BindGroupLayout {
     pub(crate) inner: Arc<BindGroupLayoutInner>,
 }
 
+/// Stores layout metadata.
 #[derive(Debug)]
 pub(crate) struct BindGroupLayoutInner {
     pub(crate) entries: Vec<BindGroupLayoutEntry>,
@@ -206,6 +250,7 @@ pub(crate) struct BindGroupLayoutInner {
 }
 
 impl BindGroupLayout {
+    /// Creates a new instance.
     pub(crate) fn new(
         entries: Vec<BindGroupLayoutEntry>,
         is_error: bool,
@@ -220,26 +265,31 @@ impl BindGroupLayout {
         }
     }
 
+    /// Creates an error bind group layout sentinel, returned after a failed creation.
     #[must_use]
     pub fn error() -> Self {
         Self::new(Vec::new(), true, false)
     }
 
+    /// Returns the entries.
     #[must_use]
     pub fn entries(&self) -> &[BindGroupLayoutEntry] {
         &self.inner.entries
     }
 
+    /// Returns true when this object is error.
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
     }
 
+    /// Returns true when this object is default.
     #[must_use]
     pub(crate) fn is_default(&self) -> bool {
         self.inner.is_default
     }
 
+    /// Returns true when both handles share the same backing object.
     #[must_use]
     pub fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)

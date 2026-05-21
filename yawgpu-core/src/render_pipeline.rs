@@ -16,6 +16,7 @@ use crate::shader::*;
 use crate::shader_naga;
 use crate::texture::*;
 
+/// Stores attachment signature data used by validation and backend submission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AttachmentSignature {
     pub(crate) color_formats: Vec<Option<TextureFormat>>,
@@ -23,65 +24,95 @@ pub(crate) struct AttachmentSignature {
     pub(crate) sample_count: u32,
 }
 
+/// Describes render pipeline descriptor.
 #[derive(Debug, Clone)]
 pub struct RenderPipelineDescriptor {
+    /// Layout.
     pub layout: RenderPipelineLayout,
+    /// Vertex.
     pub vertex: RenderPipelineVertexState,
+    /// Primitive.
     pub primitive: PrimitiveState,
+    /// Depth stencil.
     pub depth_stencil: Option<DepthStencilState>,
+    /// Multisample.
     pub multisample: MultisampleState,
+    /// Fragment.
     pub fragment: Option<RenderPipelineFragmentState>,
+    /// Error.
     pub error: Option<String>,
 }
 
+/// Enumerates render pipeline layout values.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum RenderPipelineLayout {
+    /// Auto variant.
     Auto,
+    /// Explicit variant.
     Explicit(Arc<PipelineLayout>),
 }
 
+/// Tracks the lifecycle state for render pipeline vertex.
 #[derive(Debug, Clone)]
 pub struct RenderPipelineVertexState {
+    /// Shader.
     pub shader: RenderPipelineShaderStage,
+    /// Buffer count.
     pub buffer_count: usize,
+    /// Buffers.
     pub buffers: Vec<VertexBufferLayout>,
 }
 
+/// Stores layout metadata.
 #[derive(Debug, Clone)]
 pub struct VertexBufferLayout {
+    /// Array stride.
     pub array_stride: u64,
+    /// Step mode.
     pub step_mode: VertexStepMode,
+    /// Attributes.
     pub attributes: Vec<VertexAttribute>,
 }
 
+/// Enumerates vertex step mode values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VertexStepMode {
+    /// Vertex variant.
     Vertex,
+    /// Instance variant.
     Instance,
 }
 
+/// Stores attribute metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VertexAttribute {
+    /// Format.
     pub format: VertexFormat,
+    /// Offset.
     pub offset: u64,
+    /// Shader location.
     pub shader_location: u32,
 }
 
+/// Enumerates vertex format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VertexFormat(u32);
 
 impl VertexFormat {
+    /// Constant value for fn.
     #[must_use]
     pub const fn from_raw(raw: u32) -> Self {
         Self(raw)
     }
 
+    /// Returns the raw.
     #[must_use]
     pub fn raw(self) -> u32 {
         self.0
     }
 
+    /// Returns this vertex format's byte size and output class.
     pub(crate) fn info(self) -> VertexFormatInfo {
         match self.0 {
             0x0000_0001 => VertexFormatInfo::new(1, FormatOutputClass::Uint),
@@ -151,6 +182,7 @@ impl From<VertexFormat> for i32 {
     }
 }
 
+/// Stores info metadata.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct VertexFormatInfo {
     pub(crate) byte_size: u64,
@@ -158,6 +190,7 @@ pub(crate) struct VertexFormatInfo {
 }
 
 impl VertexFormatInfo {
+    /// Constant value for fn.
     pub(crate) const fn new(byte_size: u64, output_class: FormatOutputClass) -> Self {
         Self {
             byte_size,
@@ -166,97 +199,152 @@ impl VertexFormatInfo {
     }
 }
 
+/// Tracks the lifecycle state for render pipeline fragment.
 #[derive(Debug, Clone)]
 pub struct RenderPipelineFragmentState {
+    /// Shader.
     pub shader: RenderPipelineShaderStage,
+    /// Target count.
     pub target_count: usize,
+    /// Targets.
     pub targets: Vec<ColorTargetState>,
 }
 
+/// Stores render pipeline shader stage data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct RenderPipelineShaderStage {
+    /// Module.
     pub module: Arc<ShaderModule>,
+    /// Entry point.
     pub entry_point: Option<String>,
+    /// Constants.
     pub constants: Vec<PipelineConstant>,
 }
 
+/// Stores color metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorTargetState {
+    /// Format.
     pub format: TextureFormat,
+    /// Blend.
     pub blend: bool,
+    /// Write mask.
     pub write_mask: u64,
 }
 
+/// Tracks the lifecycle state for primitive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrimitiveState {
+    /// Topology.
     pub topology: PrimitiveTopology,
+    /// Strip index format.
     pub strip_index_format: Option<IndexFormat>,
 }
 
+/// Enumerates primitive topology values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PrimitiveTopology {
+    /// Point list variant.
     PointList,
+    /// Line list variant.
     LineList,
+    /// Line strip variant.
     LineStrip,
+    /// Triangle list variant.
     TriangleList,
+    /// Triangle strip variant.
     TriangleStrip,
 }
 
+/// Enumerates index format values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IndexFormat {
+    /// Uint16 variant.
     Uint16,
+    /// Uint32 variant.
     Uint32,
 }
 
+/// Tracks the lifecycle state for depth stencil.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DepthStencilState {
+    /// Format.
     pub format: TextureFormat,
+    /// Depth write enabled.
     pub depth_write_enabled: Option<bool>,
+    /// Depth compare.
     pub depth_compare: Option<CompareFunction>,
+    /// Stencil front.
     pub stencil_front: StencilFaceState,
+    /// Stencil back.
     pub stencil_back: StencilFaceState,
+    /// Stencil read mask.
     pub stencil_read_mask: u32,
+    /// Stencil write mask.
     pub stencil_write_mask: u32,
+    /// Depth bias.
     pub depth_bias: i32,
+    /// Depth bias slope scale.
     pub depth_bias_slope_scale: f32,
+    /// Depth bias clamp.
     pub depth_bias_clamp: f32,
 }
 
+/// Tracks the lifecycle state for stencil face.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StencilFaceState {
+    /// Compare.
     pub compare: CompareFunction,
+    /// Fail op.
     pub fail_op: StencilOperation,
+    /// Depth fail op.
     pub depth_fail_op: StencilOperation,
+    /// Pass op.
     pub pass_op: StencilOperation,
 }
 
+/// Enumerates stencil operation values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StencilOperation {
+    /// Keep variant.
     Keep,
+    /// Zero variant.
     Zero,
+    /// Replace variant.
     Replace,
+    /// Invert variant.
     Invert,
+    /// Increment clamp variant.
     IncrementClamp,
+    /// Decrement clamp variant.
     DecrementClamp,
+    /// Increment wrap variant.
     IncrementWrap,
+    /// Decrement wrap variant.
     DecrementWrap,
 }
 
+/// Tracks the lifecycle state for multisample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MultisampleState {
+    /// Count.
     pub count: u32,
+    /// Mask.
     pub mask: u32,
+    /// Alpha to coverage enabled.
     pub alpha_to_coverage_enabled: bool,
 }
 
+/// Stores render pipeline data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct RenderPipeline {
     pub(crate) inner: Arc<RenderPipelineInner>,
 }
 
+/// Holds shared state for the render pipeline handle.
 #[derive(Debug)]
 pub(crate) struct RenderPipelineInner {
     pub(crate) _layout: RenderPipelineLayout,
@@ -274,6 +362,7 @@ pub(crate) struct RenderPipelineInner {
     pub(crate) is_error: bool,
 }
 
+/// Stores binding metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MetalVertexBufferBinding {
     pub(crate) slot: u32,
@@ -281,6 +370,7 @@ pub(crate) struct MetalVertexBufferBinding {
 }
 
 impl RenderPipeline {
+    /// Creates a new instance.
     pub(crate) fn new(
         descriptor: RenderPipelineDescriptor,
         is_error: bool,
@@ -346,53 +436,64 @@ impl RenderPipeline {
         )
     }
 
+    /// Returns true when this object is error.
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
     }
 
+    /// Returns vertex entry name.
     #[must_use]
     pub fn vertex_entry_name(&self) -> &str {
         &self.inner.vertex_entry_name
     }
 
+    /// Returns fragment entry name.
     #[must_use]
     pub fn fragment_entry_name(&self) -> Option<&str> {
         self.inner.fragment_entry_name.as_deref()
     }
 
+    /// Returns the bind group layouts.
     #[must_use]
     pub fn bind_group_layouts(&self) -> &[Arc<BindGroupLayout>] {
         &self.inner.bind_group_layouts
     }
 
+    /// Returns the HAL.
     pub(crate) fn hal(&self) -> Option<HalRenderPipeline> {
         self.inner.hal.clone()
     }
 
+    /// Returns the metal bindings.
     pub(crate) fn metal_bindings(&self) -> &[MetalBufferBinding] {
         &self.inner.metal_bindings
     }
 
+    /// Returns vertex buffer bindings.
     pub(crate) fn vertex_buffer_bindings(&self) -> &[MetalVertexBufferBinding] {
         &self.inner.vertex_buffer_bindings
     }
 
+    /// Returns required vertex buffer count.
     #[must_use]
     pub(crate) fn required_vertex_buffer_count(&self) -> usize {
         self.inner._vertex.buffer_count
     }
 
+    /// Returns vertex buffer layouts.
     #[must_use]
     pub(crate) fn vertex_buffer_layouts(&self) -> &[VertexBufferLayout] {
         &self.inner._vertex.buffers
     }
 
+    /// Returns primitive state.
     #[must_use]
     pub(crate) fn primitive_state(&self) -> PrimitiveState {
         self.inner._primitive
     }
 
+    /// Returns the attachment signature used for render pass compatibility checks.
     #[must_use]
     pub(crate) fn attachment_signature(&self) -> AttachmentSignature {
         AttachmentSignature {
@@ -414,6 +515,7 @@ impl RenderPipeline {
     }
 }
 
+/// Validates render pipeline descriptor and returns a descriptive error on failure.
 pub(crate) fn validate_render_pipeline_descriptor(
     descriptor: &RenderPipelineDescriptor,
     limits: Limits,
@@ -421,8 +523,10 @@ pub(crate) fn validate_render_pipeline_descriptor(
     resolve_render_pipeline_descriptor(descriptor, limits).err()
 }
 
+/// Alias for resolved render pipeline parts.
 pub(crate) type ResolvedRenderPipelineParts = (String, Option<String>, Vec<Arc<BindGroupLayout>>);
 
+/// Creates HAL render pipeline and reports validation errors through the owning device.
 pub(crate) fn create_hal_render_pipeline(
     hal_device: Option<&HalDevice>,
     descriptor: &RenderPipelineDescriptor,
@@ -566,6 +670,7 @@ pub(crate) fn create_hal_render_pipeline(
     }
 }
 
+/// Returns metal vertex buffer binding map.
 pub(crate) fn metal_vertex_buffer_binding_map(
     vertex_buffer_count: usize,
     metal_bindings: &[MetalBufferBinding],
@@ -581,6 +686,7 @@ pub(crate) fn metal_vertex_buffer_binding_map(
         .collect()
 }
 
+/// Returns msl vertex buffer bindings.
 pub(crate) fn msl_vertex_buffer_bindings(
     layouts: &[VertexBufferLayout],
     bindings: &[MetalVertexBufferBinding],
@@ -613,6 +719,7 @@ pub(crate) fn msl_vertex_buffer_bindings(
         .collect()
 }
 
+/// Returns HAL render pipeline descriptor.
 pub(crate) fn hal_render_pipeline_descriptor(
     descriptor: &RenderPipelineDescriptor,
     bindings: &[MetalVertexBufferBinding],
@@ -662,6 +769,7 @@ pub(crate) fn hal_render_pipeline_descriptor(
     })
 }
 
+/// Returns msl vertex format.
 pub(crate) fn msl_vertex_format(
     format: VertexFormat,
 ) -> Result<shader_naga::MslVertexFormat, String> {
@@ -674,6 +782,7 @@ pub(crate) fn msl_vertex_format(
     }
 }
 
+/// Returns HAL vertex format.
 pub(crate) fn hal_vertex_format(format: VertexFormat) -> HalVertexFormat {
     match format.0 {
         0x0000_001C => HalVertexFormat::Float32,
@@ -684,6 +793,7 @@ pub(crate) fn hal_vertex_format(format: VertexFormat) -> HalVertexFormat {
     }
 }
 
+/// Returns HAL primitive topology.
 pub(crate) fn hal_primitive_topology(topology: PrimitiveTopology) -> HalPrimitiveTopology {
     match topology {
         PrimitiveTopology::PointList => HalPrimitiveTopology::PointList,
@@ -694,6 +804,7 @@ pub(crate) fn hal_primitive_topology(topology: PrimitiveTopology) -> HalPrimitiv
     }
 }
 
+/// Records resolve into the command stream.
 pub(crate) fn resolve_render_pipeline_descriptor(
     descriptor: &RenderPipelineDescriptor,
     limits: Limits,
@@ -744,6 +855,7 @@ pub(crate) fn resolve_render_pipeline_descriptor(
     Ok((vertex_entry, fragment_entry, bind_group_layouts))
 }
 
+/// Validates vertex state and returns a descriptive error on failure.
 pub(crate) fn validate_vertex_state(
     vertex: &RenderPipelineVertexState,
     vertex_entry: &str,
@@ -845,6 +957,7 @@ pub(crate) fn validate_vertex_state(
     Ok(())
 }
 
+/// Returns vertex inputs.
 pub(crate) fn vertex_inputs(
     vertex: &RenderPipelineVertexState,
     vertex_entry: &str,
@@ -865,6 +978,7 @@ pub(crate) fn vertex_inputs(
         .unwrap_or_default())
 }
 
+/// Records resolve into the command stream.
 pub(crate) fn resolve_render_entry(
     stage: &RenderPipelineShaderStage,
     expected_stage: shader_naga::ReflectedShaderStage,
@@ -906,6 +1020,7 @@ pub(crate) fn resolve_render_entry(
     }
 }
 
+/// Validates render presence and returns a descriptive error on failure.
 pub(crate) fn validate_render_presence(
     descriptor: &RenderPipelineDescriptor,
 ) -> Result<(), String> {
@@ -922,6 +1037,7 @@ pub(crate) fn validate_render_presence(
     Ok(())
 }
 
+/// Validates render constants and returns a descriptive error on failure.
 pub(crate) fn validate_render_constants(stage: &RenderPipelineShaderStage) -> Result<(), String> {
     let Some(module) = stage.module.validated_wgsl() else {
         return Err("render pipeline stage requires a valid WGSL shader module".to_owned());
@@ -930,6 +1046,7 @@ pub(crate) fn validate_render_constants(stage: &RenderPipelineShaderStage) -> Re
     Ok(())
 }
 
+/// Validates primitive state and returns a descriptive error on failure.
 pub(crate) fn validate_primitive_state(primitive: PrimitiveState) -> Result<(), String> {
     if primitive.strip_index_format.is_some()
         && !matches!(
@@ -944,6 +1061,7 @@ pub(crate) fn validate_primitive_state(primitive: PrimitiveState) -> Result<(), 
     Ok(())
 }
 
+/// Validates depth bias state and returns a descriptive error on failure.
 pub(crate) fn validate_depth_bias_state(
     topology: PrimitiveTopology,
     depth_stencil: DepthStencilState,
@@ -968,6 +1086,7 @@ pub(crate) fn validate_depth_bias_state(
     Ok(())
 }
 
+/// Validates depth stencil aspects and returns a descriptive error on failure.
 pub(crate) fn validate_depth_stencil_aspects(
     depth_stencil: DepthStencilState,
 ) -> Result<(), String> {
@@ -996,6 +1115,7 @@ pub(crate) fn validate_depth_stencil_aspects(
     Ok(())
 }
 
+/// Returns depth stencil uses stencil.
 pub(crate) fn depth_stencil_uses_stencil(depth_stencil: DepthStencilState) -> bool {
     stencil_face_uses_stencil(depth_stencil.stencil_front)
         || stencil_face_uses_stencil(depth_stencil.stencil_back)
@@ -1003,6 +1123,7 @@ pub(crate) fn depth_stencil_uses_stencil(depth_stencil: DepthStencilState) -> bo
         || depth_stencil.stencil_write_mask != u32::MAX
 }
 
+/// Returns stencil face uses stencil.
 pub(crate) fn stencil_face_uses_stencil(face: StencilFaceState) -> bool {
     face.compare != CompareFunction::Always
         || face.fail_op != StencilOperation::Keep
@@ -1010,6 +1131,7 @@ pub(crate) fn stencil_face_uses_stencil(face: StencilFaceState) -> bool {
         || face.pass_op != StencilOperation::Keep
 }
 
+/// Validates fragment depth output and returns a descriptive error on failure.
 pub(crate) fn validate_fragment_depth_output(
     descriptor: &RenderPipelineDescriptor,
     fragment_entry: Option<&str>,
@@ -1038,6 +1160,7 @@ pub(crate) fn validate_fragment_depth_output(
     Ok(())
 }
 
+/// Validates color targets and returns a descriptive error on failure.
 pub(crate) fn validate_color_targets(
     descriptor: &RenderPipelineDescriptor,
     fragment_entry: Option<&str>,
@@ -1105,6 +1228,7 @@ pub(crate) fn validate_color_targets(
     Ok(())
 }
 
+/// Returns fragment outputs.
 pub(crate) fn fragment_outputs(
     fragment: &RenderPipelineFragmentState,
     fragment_entry: Option<&str>,
@@ -1128,6 +1252,7 @@ pub(crate) fn fragment_outputs(
         .unwrap_or_default())
 }
 
+/// Validates fragment output compat and returns a descriptive error on failure.
 pub(crate) fn validate_fragment_output_compat(
     output: shader_naga::ReflectedTypeClass,
     caps: FormatCaps,
@@ -1149,6 +1274,7 @@ pub(crate) fn validate_fragment_output_compat(
     Ok(())
 }
 
+/// Validates render pipeline layout and returns a descriptive error on failure.
 pub(crate) fn validate_render_pipeline_layout(
     descriptor: &RenderPipelineDescriptor,
     vertex_entry: &str,
@@ -1178,6 +1304,7 @@ pub(crate) fn validate_render_pipeline_layout(
     validate_pipeline_layout_stage_bindings(layout, &requirements)
 }
 
+/// Returns effective render bind group layouts.
 pub(crate) fn effective_render_bind_group_layouts(
     descriptor: &RenderPipelineDescriptor,
     vertex_entry: &str,
@@ -1206,6 +1333,7 @@ pub(crate) fn effective_render_bind_group_layouts(
     }
 }
 
+/// Returns stage resource bindings.
 pub(crate) fn stage_resource_bindings(
     stage: &RenderPipelineShaderStage,
     entry_point: &str,
@@ -1224,6 +1352,7 @@ pub(crate) fn stage_resource_bindings(
         .collect())
 }
 
+/// Validates multisample state and returns a descriptive error on failure.
 pub(crate) fn validate_multisample_state(
     descriptor: &RenderPipelineDescriptor,
     fragment_entry: Option<&str>,

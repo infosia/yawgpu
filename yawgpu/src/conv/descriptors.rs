@@ -16,6 +16,7 @@ pub unsafe fn map_query_set_descriptor(
     }
 }
 
+/// Converts buffer descriptor into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_buffer_descriptor(value: &native::WGPUBufferDescriptor) -> core::BufferDescriptor {
     core::BufferDescriptor {
@@ -25,6 +26,7 @@ pub fn map_buffer_descriptor(value: &native::WGPUBufferDescriptor) -> core::Buff
     }
 }
 
+/// Converts sampler descriptor into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_sampler_descriptor(
     value: Option<&native::WGPUSamplerDescriptor>,
@@ -46,6 +48,7 @@ pub fn map_sampler_descriptor(
     }
 }
 
+/// Converts extent 3d into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_extent_3d(value: native::WGPUExtent3D) -> core::Extent3d {
     core::Extent3d {
@@ -55,6 +58,7 @@ pub fn map_extent_3d(value: native::WGPUExtent3D) -> core::Extent3d {
     }
 }
 
+/// Converts origin 3d into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_origin_3d(value: native::WGPUOrigin3D) -> core::Origin3d {
     core::Origin3d {
@@ -64,6 +68,7 @@ pub fn map_origin_3d(value: native::WGPUOrigin3D) -> core::Origin3d {
     }
 }
 
+/// Converts texel copy buffer layout into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_texel_copy_buffer_layout(
     value: native::WGPUTexelCopyBufferLayout,
@@ -83,6 +88,7 @@ pub fn map_texel_copy_buffer_layout(
     }
 }
 
+/// Converts texel copy texture info parts into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_texel_copy_texture_info_parts(
     value: &native::WGPUTexelCopyTextureInfo,
@@ -226,6 +232,7 @@ unsafe fn map_render_pass_timestamp_writes(
     }
 }
 
+/// Converts color into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_color(value: native::WGPUColor) -> core::Color {
     core::Color {
@@ -266,6 +273,7 @@ pub unsafe fn map_texture_descriptor(
     }
 }
 
+/// Converts texture view descriptor into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_texture_view_descriptor(
     value: Option<&native::WGPUTextureViewDescriptor>,

@@ -5,6 +5,7 @@ use super::*;
 /// # Safety
 ///
 /// `compute_pipeline` must be a non-null live yawgpu compute pipeline handle.
+/// Returns WGPU compute pipeline get bind group layout.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuComputePipelineGetBindGroupLayout(
     compute_pipeline: native::WGPUComputePipeline,
@@ -25,6 +26,7 @@ pub unsafe extern "C" fn wgpuComputePipelineGetBindGroupLayout(
 /// # Safety
 ///
 /// `render_pipeline` must be a non-null live yawgpu render pipeline handle.
+/// Returns WGPU render pipeline get bind group layout.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPipelineGetBindGroupLayout(
     render_pipeline: native::WGPURenderPipeline,
@@ -45,6 +47,7 @@ pub unsafe extern "C" fn wgpuRenderPipelineGetBindGroupLayout(
 /// # Safety
 ///
 /// `compute_pipeline` must be a non-null live yawgpu compute pipeline handle.
+/// Returns WGPU compute pipeline release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuComputePipelineRelease(compute_pipeline: native::WGPUComputePipeline) {
     release_handle(compute_pipeline, "WGPUComputePipeline");
@@ -55,6 +58,7 @@ pub unsafe extern "C" fn wgpuComputePipelineRelease(compute_pipeline: native::WG
 /// # Safety
 ///
 /// `compute_pipeline` must be a non-null live yawgpu compute pipeline handle.
+/// Returns WGPU compute pipeline add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuComputePipelineAddRef(compute_pipeline: native::WGPUComputePipeline) {
     add_ref_handle(compute_pipeline, "WGPUComputePipeline");
@@ -65,6 +69,7 @@ pub unsafe extern "C" fn wgpuComputePipelineAddRef(compute_pipeline: native::WGP
 /// # Safety
 ///
 /// `render_pipeline` must be a non-null live yawgpu render pipeline handle.
+/// Returns WGPU render pipeline release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPipelineRelease(render_pipeline: native::WGPURenderPipeline) {
     release_handle(render_pipeline, "WGPURenderPipeline");
@@ -75,6 +80,7 @@ pub unsafe extern "C" fn wgpuRenderPipelineRelease(render_pipeline: native::WGPU
 /// # Safety
 ///
 /// `render_pipeline` must be a non-null live yawgpu render pipeline handle.
+/// Returns WGPU render pipeline add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPipelineAddRef(render_pipeline: native::WGPURenderPipeline) {
     add_ref_handle(render_pipeline, "WGPURenderPipeline");

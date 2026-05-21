@@ -23,12 +23,14 @@ const IMAGE_LAYOUT_TRANSFER_SRC: u8 = 2;
 const IMAGE_LAYOUT_COLOR_ATTACHMENT: u8 = 3;
 const IMAGE_LAYOUT_PRESENT: u8 = 4;
 
+/// Stores vulkan instance data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct VulkanInstance {
     inner: Arc<VulkanInstanceInner>,
 }
 
 impl VulkanInstance {
+    /// Creates a new instance.
     pub fn new() -> Result<Self, HalError> {
         let entry = unsafe { ash::Entry::load() }
             .map_err(|_| HalError::BackendUnavailable { backend: BACKEND })?;
@@ -56,6 +58,7 @@ impl VulkanInstance {
         })
     }
 
+    /// Returns adapters exposed by this instance.
     #[must_use]
     pub fn enumerate_adapters(&self) -> Vec<VulkanAdapter> {
         let physical_devices = unsafe { self.inner.instance.enumerate_physical_devices() };
@@ -191,6 +194,7 @@ impl Drop for VulkanInstanceInner {
     }
 }
 
+/// Stores vulkan adapter data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct VulkanAdapter {
     instance: Arc<VulkanInstanceInner>,
@@ -215,11 +219,13 @@ impl VulkanAdapter {
         })
     }
 
+    /// Returns the name.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<VulkanDevice, HalError> {
         let queue_family_index = self
             .queue_family_index()
@@ -422,9 +428,10 @@ mod tests {
     #[cfg(feature = "vulkan")]
     fn vulkan_instance_create_surface_from_windows_hwnd_rejects_null_hwnd() {
         let instance = VulkanInstance::new().expect("create Vulkan instance");
-        let error =
-            unsafe { instance.create_surface_from_windows_hwnd(std::ptr::null_mut(), std::ptr::null_mut()) }
-                .expect_err("null hwnd must fail");
+        let error = unsafe {
+            instance.create_surface_from_windows_hwnd(std::ptr::null_mut(), std::ptr::null_mut())
+        }
+        .expect_err("null hwnd must fail");
         assert!(matches!(
             error,
             HalError::SwapchainCreationFailed {

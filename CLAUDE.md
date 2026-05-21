@@ -61,6 +61,12 @@ spec-coverage gap.
 
 - `#[non_exhaustive]` on extensible public enums/structs.
 - `#[must_use]` on builders and handle-producing fns.
+- Every public item (`pub fn`, `pub struct`/fields, `pub enum`/variants,
+  `pub const`, `pub type`, `pub trait`) in `yawgpu`, `yawgpu-core`, and
+  `yawgpu-hal` carries a `///` doc comment. This is enforced by
+  `#![warn(missing_docs)]` at each crate root and escalated to an error by the
+  `-D warnings` clippy gate. Generated `yawgpu::native` bindings are exempt via
+  `#[allow(missing_docs)]`.
 - Colocate `Device::create_*` logic with the created type's module, not in
   one giant `device.rs` (mgpu convention).
 - HAL is **static enum dispatch**, never `dyn Trait`:

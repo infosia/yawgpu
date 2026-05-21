@@ -5,6 +5,7 @@ use super::*;
 /// # Safety
 ///
 /// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+/// Returns WGPU render pass encoder end.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderEnd(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -18,6 +19,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderEnd(
 /// # Safety
 ///
 /// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+/// Returns WGPU render pass encoder begin occlusion query.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderBeginOcclusionQuery(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -32,6 +34,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderBeginOcclusionQuery(
 /// # Safety
 ///
 /// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+/// Returns WGPU render pass encoder end occlusion query.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderEndOcclusionQuery(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -45,6 +48,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderEndOcclusionQuery(
 /// # Safety
 ///
 /// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+/// Returns WGPU render pass encoder insert debug marker.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderInsertDebugMarker(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -59,6 +63,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderInsertDebugMarker(
 /// # Safety
 ///
 /// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+/// Returns WGPU render pass encoder push debug group.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderPushDebugGroup(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -73,6 +78,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderPushDebugGroup(
 /// # Safety
 ///
 /// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+/// Returns WGPU render pass encoder pop debug group.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderPopDebugGroup(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -86,6 +92,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderPopDebugGroup(
 /// # Safety
 ///
 /// `render_pass_encoder` and `pipeline` must be non-null live yawgpu handles.
+/// Returns WGPU render pass encoder set pipeline.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderSetPipeline(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -114,6 +121,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetPipeline(
 /// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
 /// `group` may be null to clear the slot. `dynamic_offsets` must point to
 /// `dynamic_offset_count` elements when the count is non-zero.
+/// Returns WGPU render pass encoder set bind group.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderSetBindGroup(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -152,6 +160,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetBindGroup(
 ///
 /// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
 /// `buffer` may be null to clear the slot.
+/// Returns WGPU render pass encoder set vertex buffer.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderSetVertexBuffer(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -189,6 +198,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetVertexBuffer(
 /// # Safety
 ///
 /// `render_pass_encoder` and `buffer` must be non-null live yawgpu handles.
+/// Returns WGPU render pass encoder set index buffer.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderSetIndexBuffer(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -223,6 +233,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetIndexBuffer(
 /// # Safety
 ///
 /// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+/// Returns WGPU render pass encoder draw.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderDraw(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -249,6 +260,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderDraw(
 /// # Safety
 ///
 /// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+/// Returns WGPU render pass encoder draw indexed.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndexed(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -277,6 +289,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndexed(
 /// # Safety
 ///
 /// `render_pass_encoder` and `indirect_buffer` must be non-null live yawgpu handles.
+/// Returns WGPU render pass encoder draw indirect.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndirect(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -300,6 +313,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndirect(
 /// # Safety
 ///
 /// `render_pass_encoder` and `indirect_buffer` must be non-null live yawgpu handles.
+/// Returns WGPU render pass encoder draw indexed indirect.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndexedIndirect(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -323,6 +337,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndexedIndirect(
 /// # Safety
 ///
 /// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+/// Returns WGPU render pass encoder set viewport.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderSetViewport(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -346,6 +361,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetViewport(
 /// # Safety
 ///
 /// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+/// Returns WGPU render pass encoder set scissor rect.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderSetScissorRect(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -366,6 +382,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetScissorRect(
 /// # Safety
 ///
 /// `render_pass_encoder` and `color` must be non-null live pointers.
+/// Returns WGPU render pass encoder set blend constant.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderSetBlendConstant(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -386,6 +403,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetBlendConstant(
 /// # Safety
 ///
 /// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+/// Returns WGPU render pass encoder set stencil reference.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderSetStencilReference(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -402,6 +420,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetStencilReference(
 /// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
 /// `bundles` must point to `bundle_count` live render bundle handles when the
 /// count is non-zero.
+/// Returns WGPU render pass encoder execute bundles.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderExecuteBundles(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -433,6 +452,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderExecuteBundles(
 /// # Safety
 ///
 /// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+/// Returns WGPU render pass encoder release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderRelease(
     render_pass_encoder: native::WGPURenderPassEncoder,
@@ -445,6 +465,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderRelease(
 /// # Safety
 ///
 /// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
+/// Returns WGPU render pass encoder add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderPassEncoderAddRef(
     render_pass_encoder: native::WGPURenderPassEncoder,

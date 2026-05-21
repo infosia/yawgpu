@@ -5,6 +5,7 @@ use super::*;
 /// # Safety
 ///
 /// `queue` must be a non-null live yawgpu queue handle.
+/// Returns WGPU queue release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQueueRelease(queue: native::WGPUQueue) {
     release_handle(queue, "WGPUQueue");
@@ -15,6 +16,7 @@ pub unsafe extern "C" fn wgpuQueueRelease(queue: native::WGPUQueue) {
 /// # Safety
 ///
 /// `queue` must be a non-null live yawgpu queue handle.
+/// Returns WGPU queue add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQueueAddRef(queue: native::WGPUQueue) {
     add_ref_handle(queue, "WGPUQueue");
@@ -26,6 +28,7 @@ pub unsafe extern "C" fn wgpuQueueAddRef(queue: native::WGPUQueue) {
 ///
 /// `queue` must be a non-null live yawgpu queue handle. `label` must point to
 /// valid string data according to `WGPUStringView` when non-empty.
+/// Returns WGPU queue set label.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQueueSetLabel(
     queue: native::WGPUQueue,
@@ -42,6 +45,7 @@ pub unsafe extern "C" fn wgpuQueueSetLabel(
 ///
 /// `queue` must be a non-null live yawgpu queue handle. `callback_info`
 /// userdata pointers must remain valid until the callback fires.
+/// Returns WGPU queue on submitted work done.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQueueOnSubmittedWorkDone(
     queue: native::WGPUQueue,
@@ -66,6 +70,7 @@ pub unsafe extern "C" fn wgpuQueueOnSubmittedWorkDone(
 ///
 /// `queue` must be a non-null live yawgpu queue handle. If `command_count` is
 /// non-zero, `commands` must be non-null.
+/// Returns WGPU queue submit.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQueueSubmit(
     queue: native::WGPUQueue,
@@ -111,6 +116,7 @@ pub unsafe extern "C" fn wgpuQueueSubmit(
 ///
 /// `queue` and `buffer` must be non-null live yawgpu handles. `data` must
 /// point to `size` bytes when `size` is non-zero.
+/// Returns WGPU queue write buffer.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQueueWriteBuffer(
     queue: native::WGPUQueue,
@@ -150,6 +156,7 @@ pub unsafe extern "C" fn wgpuQueueWriteBuffer(
 /// `data_layout`, and `write_size` must be non-null pointers to valid WebGPU
 /// structs. `destination.texture` must be a non-null live yawgpu texture
 /// handle. `data` is not read by the Noop validation implementation.
+/// Returns WGPU queue write texture.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuQueueWriteTexture(
     queue: native::WGPUQueue,

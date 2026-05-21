@@ -1,5 +1,6 @@
 use super::*;
 
+/// Converts texture format into the corresponding yawgpu representation.
 pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<(vk::Format, u32), HalError> {
     match format {
         HalTextureFormat::R8Unorm => Ok((vk::Format::R8_UNORM, 1)),
@@ -9,6 +10,7 @@ pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<(vk::Format
     }
 }
 
+/// Converts texture usage into the corresponding yawgpu representation.
 pub(super) fn map_texture_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
     let mut flags = vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST;
     if usage.texture_binding {
@@ -23,6 +25,7 @@ pub(super) fn map_texture_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
     flags
 }
 
+/// Converts vertex format into the corresponding yawgpu representation.
 pub(super) fn map_vertex_format(format: HalVertexFormat) -> Result<vk::Format, HalError> {
     match format {
         HalVertexFormat::Float32 => Ok(vk::Format::R32_SFLOAT),
@@ -33,6 +36,7 @@ pub(super) fn map_vertex_format(format: HalVertexFormat) -> Result<vk::Format, H
     }
 }
 
+/// Converts primitive topology into the corresponding yawgpu representation.
 pub(super) fn map_primitive_topology(topology: HalPrimitiveTopology) -> vk::PrimitiveTopology {
     match topology {
         HalPrimitiveTopology::PointList => vk::PrimitiveTopology::POINT_LIST,
@@ -43,6 +47,7 @@ pub(super) fn map_primitive_topology(topology: HalPrimitiveTopology) -> vk::Prim
     }
 }
 
+/// Converts address mode into the corresponding yawgpu representation.
 pub(super) fn map_address_mode(mode: HalAddressMode) -> vk::SamplerAddressMode {
     match mode {
         HalAddressMode::ClampToEdge => vk::SamplerAddressMode::CLAMP_TO_EDGE,
@@ -51,6 +56,7 @@ pub(super) fn map_address_mode(mode: HalAddressMode) -> vk::SamplerAddressMode {
     }
 }
 
+/// Converts filter mode into the corresponding yawgpu representation.
 pub(super) fn map_filter_mode(mode: HalFilterMode) -> vk::Filter {
     match mode {
         HalFilterMode::Nearest => vk::Filter::NEAREST,
@@ -58,6 +64,7 @@ pub(super) fn map_filter_mode(mode: HalFilterMode) -> vk::Filter {
     }
 }
 
+/// Converts mipmap filter mode into the corresponding yawgpu representation.
 pub(super) fn map_mipmap_filter_mode(mode: HalMipmapFilterMode) -> vk::SamplerMipmapMode {
     match mode {
         HalMipmapFilterMode::Nearest => vk::SamplerMipmapMode::NEAREST,
@@ -65,6 +72,7 @@ pub(super) fn map_mipmap_filter_mode(mode: HalMipmapFilterMode) -> vk::SamplerMi
     }
 }
 
+/// Converts compare function into the corresponding yawgpu representation.
 pub(super) fn map_compare_function(compare: HalCompareFunction) -> vk::CompareOp {
     match compare {
         HalCompareFunction::Never => vk::CompareOp::NEVER,

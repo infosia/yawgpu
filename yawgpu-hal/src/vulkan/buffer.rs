@@ -1,5 +1,6 @@
 use super::*;
 
+/// Stores vulkan buffer data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct VulkanBuffer {
     pub(super) inner: Option<Arc<VulkanBufferInner>>,
@@ -7,11 +8,13 @@ pub struct VulkanBuffer {
 }
 
 impl VulkanBuffer {
+    /// Returns the size.
     #[must_use]
     pub fn size(&self) -> u64 {
         self.size
     }
 
+    /// Records a write command.
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), HalError> {
         let len = u64::try_from(data.len()).map_err(|_| buffer_error("write size is too large"))?;
         self.validate_range(offset, len)?;
@@ -29,6 +32,7 @@ impl VulkanBuffer {
         Ok(())
     }
 
+    /// Reads `len` bytes at `offset` back from the buffer into host memory.
     pub fn read(&self, offset: u64, len: u64) -> Result<Vec<u8>, HalError> {
         let len = usize::try_from(len).map_err(|_| buffer_error("read length is too large"))?;
         self.validate_range(
@@ -50,6 +54,7 @@ impl VulkanBuffer {
         Ok(data)
     }
 
+    /// Returns mapped ptr.
     #[must_use]
     pub fn mapped_ptr(&self) -> Option<NonNull<u8>> {
         self.inner
@@ -57,12 +62,14 @@ impl VulkanBuffer {
             .and_then(|inner| NonNull::new(inner.mapped))
     }
 
+    /// Returns the backing buffer state, or an error if allocation failed.
     pub(super) fn inner(&self) -> Result<&VulkanBufferInner, HalError> {
         self.inner
             .as_deref()
             .ok_or_else(|| buffer_error("buffer allocation failed"))
     }
 
+    /// Validates range and returns a descriptive error on failure.
     pub(super) fn validate_range(&self, offset: u64, len: u64) -> Result<(), HalError> {
         let end = offset
             .checked_add(len)
@@ -74,6 +81,7 @@ impl VulkanBuffer {
     }
 }
 
+/// Holds shared state for the vulkan buffer handle.
 #[derive(Debug)]
 pub(super) struct VulkanBufferInner {
     pub(super) device: Arc<VulkanDeviceInner>,
@@ -97,6 +105,7 @@ impl Drop for VulkanBufferInner {
     }
 }
 
+/// Creates buffer and reports validation errors through the owning device.
 pub(super) fn create_buffer(
     device: Arc<VulkanDeviceInner>,
     size: u64,
@@ -158,6 +167,7 @@ pub(super) fn create_buffer(
     })
 }
 
+/// Returns find memory type index.
 pub(super) fn find_memory_type_index(
     properties: &vk::PhysicalDeviceMemoryProperties,
     type_bits: u32,

@@ -1,5 +1,6 @@
 use super::*;
 
+/// Stores metal compute pipeline data used by validation and backend submission.
 #[derive(Clone)]
 pub struct MetalComputePipeline {
     pub(super) inner: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
@@ -17,6 +18,7 @@ impl std::fmt::Debug for MetalComputePipeline {
     }
 }
 
+/// Stores metal render pipeline data used by validation and backend submission.
 #[derive(Clone)]
 pub struct MetalRenderPipeline {
     pub(super) inner: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
@@ -34,6 +36,7 @@ impl std::fmt::Debug for MetalRenderPipeline {
     }
 }
 
+/// Creates compute pipeline and reports validation errors through the owning device.
 pub(super) fn create_compute_pipeline(
     device: &ProtocolObject<dyn MTLDevice>,
     msl_source: &str,
@@ -56,6 +59,7 @@ pub(super) fn create_compute_pipeline(
     })
 }
 
+/// Creates render pipeline and reports validation errors through the owning device.
 pub(super) fn create_render_pipeline(
     device: &ProtocolObject<dyn MTLDevice>,
     msl_source: &str,

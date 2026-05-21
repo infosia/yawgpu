@@ -4,19 +4,25 @@ use std::sync::Arc;
 use crate::bind_group_layout::*;
 use crate::shader_naga;
 
+/// Enumerates shader module source values.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ShaderModuleSource {
+    /// Wgsl variant.
     Wgsl(String),
+    /// Spirv variant.
     Spirv(Vec<u32>),
+    /// Invalid variant.
     Invalid(String),
 }
 
+/// Stores shader module data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct ShaderModule {
     pub(crate) inner: Arc<ShaderModuleInner>,
 }
 
+/// Holds shared state for the shader module handle.
 #[derive(Debug)]
 pub(crate) struct ShaderModuleInner {
     pub(crate) _source: ShaderModuleSourceKind,
@@ -24,19 +30,27 @@ pub(crate) struct ShaderModuleInner {
     pub(crate) is_error: bool,
 }
 
+/// Enumerates shader module source kind values.
 #[derive(Debug)]
 pub(crate) enum ShaderModuleSourceKind {
+    /// Wgsl variant.
     Wgsl {
+        /// Source variant.
         _source: String,
+        /// Validated variant.
         validated: Box<shader_naga::ValidatedWgslModule>,
     },
+    /// Spirv variant.
     Spirv {
+        /// Words variant.
         _words: Vec<u32>,
     },
+    /// Invalid variant.
     Invalid,
 }
 
 impl ShaderModule {
+    /// Creates a new instance.
     pub(crate) fn new(source: ShaderModuleSourceKind, diagnostic: Option<String>) -> Self {
         Self {
             inner: Arc::new(ShaderModuleInner {
@@ -47,6 +61,7 @@ impl ShaderModule {
         }
     }
 
+    /// Constructs this object from wgsl.
     pub(crate) fn from_wgsl(source: String) -> Result<ShaderModuleSourceKind, String> {
         let validated = shader_naga::parse_and_validate_wgsl(&source)?;
         validate_wgsl_module_limits(&validated.module)?;
@@ -56,16 +71,19 @@ impl ShaderModule {
         })
     }
 
+    /// Returns true when this object is error.
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
     }
 
+    /// Creates a validation diagnostic from the supplied message.
     #[must_use]
     pub fn diagnostic(&self) -> Option<&str> {
         self.inner.diagnostic.as_deref()
     }
 
+    /// Returns the validated WGSL module when validation succeeded.
     #[must_use]
     pub(crate) fn validated_wgsl(&self) -> Option<&shader_naga::ValidatedWgslModule> {
         match &self.inner._source {
@@ -75,6 +93,7 @@ impl ShaderModule {
     }
 }
 
+/// Validates wgsl module limits and returns a descriptive error on failure.
 pub(crate) fn validate_wgsl_module_limits(module: &naga::Module) -> Result<(), String> {
     let mut ids = BTreeSet::new();
     for (_, override_) in module.overrides.iter() {
@@ -99,6 +118,7 @@ pub(crate) fn validate_wgsl_module_limits(module: &naga::Module) -> Result<(), S
     Ok(())
 }
 
+/// Stores stage resource counts data used by validation and backend submission.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct StageResourceCounts {
     pub(crate) sampled_textures: u32,
@@ -109,6 +129,7 @@ pub(crate) struct StageResourceCounts {
 }
 
 impl StageResourceCounts {
+    /// Adds this value to the aggregate counts.
     pub(crate) fn add(&mut self, kind: BindingLayoutKind) {
         match kind {
             BindingLayoutKind::Buffer {
@@ -126,9 +147,13 @@ impl StageResourceCounts {
     }
 }
 
+/// Returns visible stages.
 pub(crate) fn visible_stages(visibility: u64) -> impl Iterator<Item = usize> {
+    /// Constant value for vertex.
     pub(crate) const VERTEX: u64 = 1;
+    /// Constant value for fragment.
     pub(crate) const FRAGMENT: u64 = 2;
+    /// Constant value for compute.
     pub(crate) const COMPUTE: u64 = 4;
     [VERTEX, FRAGMENT, COMPUTE]
         .into_iter()

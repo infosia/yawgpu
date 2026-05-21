@@ -1,11 +1,17 @@
 use super::*;
 
+/// Constant value for image layout undefined.
 pub(super) const IMAGE_LAYOUT_UNDEFINED: u8 = 0;
+/// Constant value for image layout transfer dst.
 pub(super) const IMAGE_LAYOUT_TRANSFER_DST: u8 = 1;
+/// Constant value for image layout transfer src.
 pub(super) const IMAGE_LAYOUT_TRANSFER_SRC: u8 = 2;
+/// Constant value for image layout color attachment.
 pub(super) const IMAGE_LAYOUT_COLOR_ATTACHMENT: u8 = 3;
+/// Constant value for image layout present.
 pub(super) const IMAGE_LAYOUT_PRESENT: u8 = 4;
 
+/// Stores vulkan texture data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct VulkanTexture {
     pub(super) inner: Option<Arc<VulkanTextureInner>>,
@@ -18,12 +24,14 @@ pub struct VulkanTexture {
 }
 
 impl VulkanTexture {
+    /// Returns the backing texture state, or an error if creation failed.
     pub(super) fn inner(&self) -> Result<&VulkanTextureInner, HalError> {
         self.inner
             .as_deref()
             .ok_or_else(|| texture_error("texture allocation failed or unsupported descriptor"))
     }
 
+    /// Validates origin extent and returns a descriptive error on failure.
     pub(super) fn validate_origin_extent(
         &self,
         origin: crate::HalOrigin3d,
@@ -48,6 +56,7 @@ impl VulkanTexture {
     }
 }
 
+/// Holds shared state for the vulkan texture handle.
 #[derive(Debug)]
 pub(super) struct VulkanTextureInner {
     pub(super) device: Arc<VulkanDeviceInner>,
@@ -72,11 +81,13 @@ impl Drop for VulkanTextureInner {
     }
 }
 
+/// Stores vulkan sampler data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct VulkanSampler {
     pub(super) _inner: Option<Arc<VulkanSamplerInner>>,
 }
 
+/// Holds shared state for the vulkan sampler handle.
 #[derive(Debug)]
 pub(super) struct VulkanSamplerInner {
     pub(super) device: Arc<VulkanDeviceInner>,
@@ -91,6 +102,7 @@ impl Drop for VulkanSamplerInner {
     }
 }
 
+/// Creates texture and reports validation errors through the owning device.
 pub(super) fn create_texture(
     device: Arc<VulkanDeviceInner>,
     descriptor: &HalTextureDescriptor,
@@ -172,6 +184,7 @@ pub(super) fn create_texture(
     ))
 }
 
+/// Creates sampler and reports validation errors through the owning device.
 pub(super) fn create_sampler(
     device: Arc<VulkanDeviceInner>,
     descriptor: &HalSamplerDescriptor,
@@ -201,6 +214,7 @@ pub(super) fn create_sampler(
     Ok(VulkanSamplerInner { device, sampler })
 }
 
+/// Returns transition image.
 pub(super) fn transition_image(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
@@ -235,6 +249,7 @@ pub(super) fn transition_image(
     }
 }
 
+/// Returns transfer to compute barrier.
 pub(super) fn transfer_to_compute_barrier(device: &ash::Device, command_buffer: vk::CommandBuffer) {
     let barrier = vk::MemoryBarrier::default()
         .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -252,6 +267,7 @@ pub(super) fn transfer_to_compute_barrier(device: &ash::Device, command_buffer: 
     }
 }
 
+/// Returns compute to transfer barrier.
 pub(super) fn compute_to_transfer_barrier(device: &ash::Device, command_buffer: vk::CommandBuffer) {
     let barrier = vk::MemoryBarrier::default()
         .src_access_mask(vk::AccessFlags::SHADER_WRITE)
@@ -274,6 +290,7 @@ pub(super) fn compute_to_transfer_barrier(device: &ash::Device, command_buffer: 
     }
 }
 
+/// Returns image layout.
 pub(super) fn image_layout(state: u8) -> vk::ImageLayout {
     match state {
         IMAGE_LAYOUT_TRANSFER_DST => vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -284,6 +301,7 @@ pub(super) fn image_layout(state: u8) -> vk::ImageLayout {
     }
 }
 
+/// Returns access mask for layout.
 pub(super) fn access_mask_for_layout(layout: vk::ImageLayout) -> vk::AccessFlags {
     match layout {
         vk::ImageLayout::TRANSFER_DST_OPTIMAL => vk::AccessFlags::TRANSFER_WRITE,
@@ -294,6 +312,7 @@ pub(super) fn access_mask_for_layout(layout: vk::ImageLayout) -> vk::AccessFlags
     }
 }
 
+/// Returns stage mask for layout.
 pub(super) fn stage_mask_for_layout(layout: vk::ImageLayout) -> vk::PipelineStageFlags {
     match layout {
         vk::ImageLayout::TRANSFER_DST_OPTIMAL | vk::ImageLayout::TRANSFER_SRC_OPTIMAL => {
@@ -307,6 +326,7 @@ pub(super) fn stage_mask_for_layout(layout: vk::ImageLayout) -> vk::PipelineStag
     }
 }
 
+/// Returns image subresource layers.
 pub(super) fn image_subresource_layers() -> vk::ImageSubresourceLayers {
     vk::ImageSubresourceLayers::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -315,6 +335,7 @@ pub(super) fn image_subresource_layers() -> vk::ImageSubresourceLayers {
         .layer_count(1)
 }
 
+/// Returns color subresource range.
 pub(super) fn color_subresource_range() -> vk::ImageSubresourceRange {
     vk::ImageSubresourceRange::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)

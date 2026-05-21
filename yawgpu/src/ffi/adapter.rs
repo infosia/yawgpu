@@ -5,6 +5,7 @@ use super::*;
 /// # Safety
 ///
 /// `adapter` must be a non-null live yawgpu adapter handle.
+/// Returns WGPU adapter release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuAdapterRelease(adapter: native::WGPUAdapter) {
     release_handle(adapter, "WGPUAdapter");
@@ -15,6 +16,7 @@ pub unsafe extern "C" fn wgpuAdapterRelease(adapter: native::WGPUAdapter) {
 /// # Safety
 ///
 /// `adapter` must be a non-null live yawgpu adapter handle.
+/// Returns WGPU adapter add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuAdapterAddRef(adapter: native::WGPUAdapter) {
     add_ref_handle(adapter, "WGPUAdapter");
@@ -26,6 +28,7 @@ pub unsafe extern "C" fn wgpuAdapterAddRef(adapter: native::WGPUAdapter) {
 ///
 /// `adapter` must be a non-null live yawgpu adapter handle. `limits` must
 /// point to writable `WGPULimits` storage.
+/// Returns WGPU adapter get limits.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuAdapterGetLimits(
     adapter: native::WGPUAdapter,
@@ -48,6 +51,7 @@ pub unsafe extern "C" fn wgpuAdapterGetLimits(
 ///
 /// `adapter` must be a non-null live yawgpu adapter handle. `features` must
 /// point to writable `WGPUSupportedFeatures` storage.
+/// Returns WGPU adapter get features.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuAdapterGetFeatures(
     adapter: native::WGPUAdapter,
@@ -65,6 +69,7 @@ pub unsafe extern "C" fn wgpuAdapterGetFeatures(
 /// # Safety
 ///
 /// `adapter` must be a non-null live yawgpu adapter handle.
+/// Returns WGPU adapter has feature.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuAdapterHasFeature(
     adapter: native::WGPUAdapter,
@@ -81,6 +86,7 @@ pub unsafe extern "C" fn wgpuAdapterHasFeature(
 /// `adapter` must be a non-null live yawgpu adapter handle. `info` must point
 /// to writable `WGPUAdapterInfo` storage. String members must be released with
 /// `wgpuAdapterInfoFreeMembers`.
+/// Returns WGPU adapter get info.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuAdapterGetInfo(
     adapter: native::WGPUAdapter,
@@ -99,6 +105,7 @@ pub unsafe extern "C" fn wgpuAdapterGetInfo(
 /// # Safety
 ///
 /// Any non-null string member must have been returned by yawgpu.
+/// Returns WGPU adapter info free members.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuAdapterInfoFreeMembers(info: native::WGPUAdapterInfo) {
     free_owned_string_view(info.vendor);
@@ -113,6 +120,7 @@ pub unsafe extern "C" fn wgpuAdapterInfoFreeMembers(info: native::WGPUAdapterInf
 ///
 /// `adapter` must be a non-null live yawgpu adapter handle. `descriptor`, when
 /// non-null, must point to a valid `WGPUDeviceDescriptor`.
+/// Returns WGPU adapter request device.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuAdapterRequestDevice(
     adapter: native::WGPUAdapter,
@@ -204,6 +212,7 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
 /// returned by yawgpu from `wgpuAdapterGetFeatures` or
 /// `wgpuDeviceGetFeatures`, paired with the same `featureCount`, and must not
 /// be freed more than once.
+/// Returns WGPU supported features free members.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuSupportedFeaturesFreeMembers(
     supported_features: native::WGPUSupportedFeatures,

@@ -1,3 +1,6 @@
+#![warn(missing_docs)]
+//! Backend abstraction layer for yawgpu GPU implementations.
+
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
@@ -25,33 +28,42 @@ pub use format::{
 pub use present::{HalPresentMode, HalSurfaceConfiguration};
 pub use shader::HalShaderSource;
 
+/// Noop module.
 #[cfg(feature = "noop")]
 pub mod noop;
 
+/// Metal module.
 #[cfg(feature = "metal")]
 pub mod metal;
 
+/// Vulkan module.
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 
+/// Enumerates HAL instance values.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum HalInstance {
     #[cfg(feature = "noop")]
+    /// Noop variant.
     Noop(noop::NoopInstance),
     #[cfg(feature = "vulkan")]
+    /// Vulkan variant.
     Vulkan(vulkan::VulkanInstance),
     #[cfg(feature = "metal")]
+    /// Metal variant.
     Metal(metal::MetalInstance),
 }
 
 impl HalInstance {
+    /// Returns new noop.
     #[cfg(feature = "noop")]
     #[must_use]
     pub fn new_noop() -> Self {
         Self::Noop(noop::NoopInstance::new())
     }
 
+    /// Returns adapters exposed by this instance.
     #[must_use]
     pub fn enumerate_adapters(&self) -> Vec<HalAdapter> {
         match self {
@@ -112,6 +124,8 @@ impl HalInstance {
     ) -> Result<HalSurface, HalError> {
         #[cfg(not(any(feature = "metal", feature = "vulkan")))]
         let _ = (hinstance, hwnd);
+        #[cfg(all(feature = "metal", not(feature = "vulkan")))]
+        let _ = (hinstance, hwnd);
         match self {
             #[cfg(feature = "noop")]
             Self::Noop(_) => Ok(HalSurface::Noop),
@@ -130,18 +144,23 @@ impl HalInstance {
     }
 }
 
+/// Enumerates HAL adapter values.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum HalAdapter {
     #[cfg(feature = "noop")]
+    /// Noop variant.
     Noop(noop::NoopAdapter),
     #[cfg(feature = "vulkan")]
+    /// Vulkan variant.
     Vulkan(vulkan::VulkanAdapter),
     #[cfg(feature = "metal")]
+    /// Metal variant.
     Metal(metal::MetalAdapter),
 }
 
 impl HalAdapter {
+    /// Returns the name.
     #[must_use]
     pub fn name(&self) -> String {
         match self {
@@ -154,6 +173,7 @@ impl HalAdapter {
         }
     }
 
+    /// Returns the backend.
     #[must_use]
     pub fn backend(&self) -> HalBackend {
         match self {
@@ -166,6 +186,7 @@ impl HalAdapter {
         }
     }
 
+    /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<HalDevice, HalError> {
         match self {
             #[cfg(feature = "noop")]
@@ -178,26 +199,35 @@ impl HalAdapter {
     }
 }
 
+/// Enumerates HAL backend values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HalBackend {
+    /// Noop variant.
     Noop,
+    /// Vulkan variant.
     Vulkan,
+    /// Metal variant.
     Metal,
 }
 
+/// Enumerates HAL device values.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum HalDevice {
     #[cfg(feature = "noop")]
+    /// Noop variant.
     Noop(noop::NoopDevice),
     #[cfg(feature = "vulkan")]
+    /// Vulkan variant.
     Vulkan(vulkan::VulkanDevice),
     #[cfg(feature = "metal")]
+    /// Metal variant.
     Metal(metal::MetalDevice),
 }
 
 impl HalDevice {
+    /// Returns the backend.
     #[must_use]
     pub fn backend(&self) -> HalBackend {
         match self {
@@ -210,6 +240,7 @@ impl HalDevice {
         }
     }
 
+    /// Returns the allocation count.
     #[must_use]
     pub fn allocation_count(&self) -> u64 {
         match self {
@@ -222,6 +253,7 @@ impl HalDevice {
         }
     }
 
+    /// Returns the queue.
     #[must_use]
     pub fn queue(&self) -> HalQueue {
         match self {
@@ -234,6 +266,7 @@ impl HalDevice {
         }
     }
 
+    /// Allocates a buffer of the given size on this device.
     #[must_use]
     pub fn create_buffer(&self, size: u64) -> HalBuffer {
         match self {
@@ -246,6 +279,7 @@ impl HalDevice {
         }
     }
 
+    /// Creates a texture matching the given descriptor.
     #[must_use]
     pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> HalTexture {
         #[cfg(not(any(feature = "metal", feature = "vulkan")))]
@@ -260,6 +294,7 @@ impl HalDevice {
         }
     }
 
+    /// Creates a sampler matching the given descriptor.
     #[must_use]
     pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> HalSampler {
         #[cfg(not(any(feature = "metal", feature = "vulkan")))]
@@ -274,6 +309,7 @@ impl HalDevice {
         }
     }
 
+    /// Creates a compute pipeline from the given shader, entry point, and bindings.
     pub fn create_compute_pipeline(
         &self,
         shader: HalShaderSource,
@@ -297,6 +333,7 @@ impl HalDevice {
         }
     }
 
+    /// Creates a render pipeline from the given shaders, vertex layout, and color targets.
     pub fn create_render_pipeline(
         &self,
         shader: HalShaderSource,
@@ -340,18 +377,23 @@ impl HalDevice {
     }
 }
 
+/// Enumerates HAL surface values.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum HalSurface {
     #[cfg(feature = "noop")]
+    /// Noop variant.
     Noop,
     #[cfg(feature = "vulkan")]
+    /// Vulkan variant.
     Vulkan(vulkan::VulkanSurface),
     #[cfg(feature = "metal")]
+    /// Metal variant.
     Metal(metal::MetalSurface),
 }
 
 impl HalSurface {
+    /// Configures the surface's swapchain for the given format, size, and present mode.
     pub fn configure(
         &mut self,
         device: &HalDevice,
@@ -374,6 +416,7 @@ impl HalSurface {
         }
     }
 
+    /// Tears down the surface's swapchain.
     pub fn unconfigure(&mut self) {
         match self {
             #[cfg(feature = "noop")]
@@ -385,6 +428,7 @@ impl HalSurface {
         }
     }
 
+    /// Returns acquire next texture.
     pub fn acquire_next_texture(&mut self) -> Result<HalTexture, HalError> {
         match self {
             #[cfg(feature = "noop")]
@@ -399,6 +443,7 @@ impl HalSurface {
         }
     }
 
+    /// Presents the most recently acquired surface texture.
     pub fn present(&mut self, queue: &HalQueue) -> Result<(), HalError> {
         #[allow(unreachable_patterns)]
         match (self, queue) {
@@ -416,18 +461,23 @@ impl HalSurface {
     }
 }
 
+/// Enumerates HAL queue values.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum HalQueue {
     #[cfg(feature = "noop")]
+    /// Noop variant.
     Noop(noop::NoopQueue),
     #[cfg(feature = "vulkan")]
+    /// Vulkan variant.
     Vulkan(vulkan::VulkanQueue),
     #[cfg(feature = "metal")]
+    /// Metal variant.
     Metal(metal::MetalQueue),
 }
 
 impl HalQueue {
+    /// Submits an empty command buffer to flush the queue.
     pub fn submit_empty(&self) -> Result<(), HalError> {
         match self {
             #[cfg(feature = "noop")]
@@ -439,6 +489,7 @@ impl HalQueue {
         }
     }
 
+    /// Records and submits the given buffer/texture copy operations.
     pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
         #[cfg(not(any(feature = "metal", feature = "vulkan")))]
         let _ = copies;
@@ -453,18 +504,23 @@ impl HalQueue {
     }
 }
 
+/// Enumerates HAL buffer values.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum HalBuffer {
     #[cfg(feature = "noop")]
+    /// Noop variant.
     Noop(noop::NoopBuffer),
     #[cfg(feature = "vulkan")]
+    /// Vulkan variant.
     Vulkan(vulkan::VulkanBuffer),
     #[cfg(feature = "metal")]
+    /// Metal variant.
     Metal(metal::MetalBuffer),
 }
 
 impl HalBuffer {
+    /// Returns the size.
     #[must_use]
     pub fn size(&self) -> u64 {
         match self {
@@ -477,6 +533,7 @@ impl HalBuffer {
         }
     }
 
+    /// Records a write command.
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), HalError> {
         #[cfg(not(any(feature = "metal", feature = "vulkan")))]
         let _ = (offset, data);
@@ -490,6 +547,7 @@ impl HalBuffer {
         }
     }
 
+    /// Reads `len` bytes at `offset` back from the buffer into host memory.
     pub fn read(&self, offset: u64, len: u64) -> Result<Vec<u8>, HalError> {
         #[cfg(not(any(feature = "metal", feature = "vulkan")))]
         let _ = offset;
@@ -511,6 +569,7 @@ impl HalBuffer {
         }
     }
 
+    /// Returns mapped ptr.
     #[must_use]
     pub fn mapped_ptr(&self) -> Option<NonNull<u8>> {
         match self {
@@ -524,47 +583,63 @@ impl HalBuffer {
     }
 }
 
+/// Enumerates HAL texture values.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum HalTexture {
     #[cfg(feature = "noop")]
+    /// Noop variant.
     Noop(noop::NoopTexture),
     #[cfg(feature = "vulkan")]
+    /// Vulkan variant.
     Vulkan(vulkan::VulkanTexture),
     #[cfg(feature = "metal")]
+    /// Metal variant.
     Metal(metal::MetalTexture),
 }
 
+/// Enumerates HAL sampler values.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum HalSampler {
     #[cfg(feature = "noop")]
+    /// Noop variant.
     Noop(noop::NoopSampler),
     #[cfg(feature = "vulkan")]
+    /// Vulkan variant.
     Vulkan(vulkan::VulkanSampler),
     #[cfg(feature = "metal")]
+    /// Metal variant.
     Metal(metal::MetalSampler),
 }
 
+/// Enumerates HAL compute pipeline values.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum HalComputePipeline {
     #[cfg(feature = "noop")]
+    /// Noop variant.
     Noop,
     #[cfg(feature = "vulkan")]
+    /// Vulkan variant.
     Vulkan(vulkan::VulkanComputePipeline),
     #[cfg(feature = "metal")]
+    /// Metal variant.
     Metal(metal::MetalComputePipeline),
 }
 
+/// Enumerates HAL render pipeline values.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum HalRenderPipeline {
     #[cfg(feature = "noop")]
+    /// Noop variant.
     Noop,
     #[cfg(feature = "vulkan")]
+    /// Vulkan variant.
     Vulkan(vulkan::VulkanRenderPipeline),
     #[cfg(feature = "metal")]
+    /// Metal variant.
     Metal(metal::MetalRenderPipeline),
 }
 

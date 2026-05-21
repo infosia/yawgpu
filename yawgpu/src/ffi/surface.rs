@@ -6,6 +6,7 @@ use super::*;
 ///
 /// `surface` and `adapter` must be non-null live yawgpu handles.
 /// `capabilities`, when non-null, must point to writable memory.
+/// Returns WGPU surface get capabilities.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuSurfaceGetCapabilities(
     surface: native::WGPUSurface,
@@ -36,6 +37,7 @@ pub unsafe extern "C" fn wgpuSurfaceGetCapabilities(
 /// # Safety
 ///
 /// Any non-null array member must have been returned by yawgpu.
+/// Returns WGPU surface capabilities free members.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuSurfaceCapabilitiesFreeMembers(
     capabilities: native::WGPUSurfaceCapabilities,
@@ -65,6 +67,7 @@ pub unsafe extern "C" fn wgpuSurfaceCapabilitiesFreeMembers(
 ///
 /// `surface` must be a non-null live yawgpu surface handle. `config`, when
 /// non-null, must point to a valid `WGPUSurfaceConfiguration`.
+/// Returns WGPU surface configure.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuSurfaceConfigure(
     surface: native::WGPUSurface,
@@ -135,6 +138,7 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
 /// # Safety
 ///
 /// `surface` must be a non-null live yawgpu surface handle.
+/// Returns WGPU surface unconfigure.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuSurfaceUnconfigure(surface: native::WGPUSurface) {
     let surface = borrow_handle(surface, "WGPUSurface");
@@ -158,6 +162,7 @@ pub unsafe extern "C" fn wgpuSurfaceUnconfigure(surface: native::WGPUSurface) {
 ///
 /// `surface` must be a non-null live yawgpu surface handle. `surface_texture`,
 /// when non-null, must point to writable memory.
+/// Returns WGPU surface get current texture.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
     surface: native::WGPUSurface,
@@ -230,6 +235,7 @@ pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
 /// # Safety
 ///
 /// `surface` must be a non-null live yawgpu surface handle.
+/// Returns WGPU surface present.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuSurfacePresent(surface: native::WGPUSurface) -> native::WGPUStatus {
     let surface = borrow_handle(surface, "WGPUSurface");
@@ -260,6 +266,7 @@ pub unsafe extern "C" fn wgpuSurfacePresent(surface: native::WGPUSurface) -> nat
 ///
 /// `surface` must be a non-null live yawgpu surface handle. `label` must point
 /// to valid string data according to `WGPUStringView` when non-empty.
+/// Returns WGPU surface set label.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuSurfaceSetLabel(
     surface: native::WGPUSurface,
@@ -278,6 +285,7 @@ pub unsafe extern "C" fn wgpuSurfaceSetLabel(
 /// # Safety
 ///
 /// `surface` must be a non-null live yawgpu surface handle.
+/// Returns WGPU surface release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuSurfaceRelease(surface: native::WGPUSurface) {
     release_handle(surface, "WGPUSurface");
@@ -288,6 +296,7 @@ pub unsafe extern "C" fn wgpuSurfaceRelease(surface: native::WGPUSurface) {
 /// # Safety
 ///
 /// `surface` must be a non-null live yawgpu surface handle.
+/// Returns WGPU surface add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuSurfaceAddRef(surface: native::WGPUSurface) {
     add_ref_handle(surface, "WGPUSurface");

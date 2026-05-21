@@ -9,28 +9,39 @@ use crate::format::*;
 use crate::limits::*;
 use crate::texture_view::*;
 
+/// Enumerates texture usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextureUsage(u64);
 
 impl TextureUsage {
+    /// Constant value for none.
     pub const NONE: Self = Self(0);
+    /// Constant value for copy src.
     pub const COPY_SRC: Self = Self(1);
+    /// Constant value for copy dst.
     pub const COPY_DST: Self = Self(2);
+    /// Constant value for texture binding.
     pub const TEXTURE_BINDING: Self = Self(4);
+    /// Constant value for storage binding.
     pub const STORAGE_BINDING: Self = Self(8);
+    /// Constant value for render attachment.
     pub const RENDER_ATTACHMENT: Self = Self(16);
+    /// Constant value for transient attachment.
     pub const TRANSIENT_ATTACHMENT: Self = Self(32);
 
+    /// Constructs this object from bits retain.
     #[must_use]
     pub fn from_bits_retain(bits: u64) -> Self {
         Self(bits)
     }
 
+    /// Returns the raw usage bitmask.
     #[must_use]
     pub fn bits(self) -> u64 {
         self.0
     }
 
+    /// Returns whether every bit set in `other` is also set in `self`.
     #[must_use]
     pub(crate) fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -45,30 +56,44 @@ impl std::ops::BitOr for TextureUsage {
     }
 }
 
+/// Enumerates texture dimension values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TextureDimension {
+    /// D1 variant.
     D1,
+    /// D2 variant.
     D2,
+    /// D3 variant.
     D3,
 }
 
+/// Describes texture descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextureDescriptor {
+    /// Usage.
     pub usage: TextureUsage,
+    /// Dimension.
     pub dimension: TextureDimension,
+    /// Size.
     pub size: Extent3d,
+    /// Format.
     pub format: TextureFormat,
+    /// Mip level count.
     pub mip_level_count: u32,
+    /// Sample count.
     pub sample_count: u32,
+    /// View formats.
     pub view_formats: Vec<TextureFormat>,
 }
 
+/// Stores texture data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct Texture {
     pub(crate) inner: Arc<TextureInner>,
 }
 
+/// Holds shared state for the texture handle.
 #[derive(Debug)]
 pub(crate) struct TextureInner {
     pub(crate) hal: Option<HalTexture>,
@@ -82,6 +107,7 @@ pub(crate) struct TextureInner {
     pub(crate) state: Mutex<TextureState>,
 }
 
+/// Tracks the lifecycle state for texture.
 #[derive(Debug)]
 pub(crate) struct TextureState {
     pub(crate) is_error: bool,
@@ -89,6 +115,7 @@ pub(crate) struct TextureState {
 }
 
 impl Texture {
+    /// Creates a new instance.
     pub(crate) fn new(
         descriptor: TextureDescriptor,
         hal: Option<HalTexture>,
@@ -112,41 +139,49 @@ impl Texture {
         }
     }
 
+    /// Constructs this object from the backend HAL object.
     #[must_use]
     pub fn from_hal(descriptor: TextureDescriptor, hal: HalTexture) -> Self {
         Self::new(descriptor, Some(hal), false)
     }
 
+    /// Returns the usage.
     #[must_use]
     pub fn usage(&self) -> TextureUsage {
         self.inner.usage
     }
 
+    /// Returns the texture's dimensionality (1D / 2D / 3D).
     #[must_use]
     pub fn dimension(&self) -> TextureDimension {
         self.inner.dimension
     }
 
+    /// Returns the size.
     #[must_use]
     pub fn size(&self) -> Extent3d {
         self.inner.size
     }
 
+    /// Returns the format.
     #[must_use]
     pub fn format(&self) -> TextureFormat {
         self.inner.format
     }
 
+    /// Returns mip level count.
     #[must_use]
     pub fn mip_level_count(&self) -> u32 {
         self.inner.mip_level_count
     }
 
+    /// Returns sample count.
     #[must_use]
     pub fn sample_count(&self) -> u32 {
         self.inner.sample_count
     }
 
+    /// Returns view formats.
     #[must_use]
     pub(crate) fn view_formats(&self) -> &[TextureFormat] {
         &self.inner.view_formats
@@ -156,34 +191,41 @@ impl Texture {
     /// or is explicitly listed in the texture's `viewFormats`. There is no
     /// implicit sRGB-counterpart allowance — that mirrors Dawn
     /// `Texture.cpp` `ValidateCanViewTextureAs`.
+    /// Returns true when this object is view format compatible.
     #[must_use]
     pub(crate) fn is_view_format_compatible(&self, view_format: TextureFormat) -> bool {
         view_format == self.format() || self.view_formats().contains(&view_format)
     }
 
+    /// Returns true when this object is error.
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.state.lock().is_error
     }
 
+    /// Returns true when this object is destroyed.
     #[must_use]
     pub(crate) fn is_destroyed(&self) -> bool {
         self.inner.state.lock().is_destroyed
     }
 
+    /// Returns true when both handles share the same backing object.
     #[must_use]
     pub fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
+    /// Returns the HAL.
     pub(crate) fn hal(&self) -> Option<HalTexture> {
         self.inner.hal.clone()
     }
 
+    /// Destroys this object and releases backend resources.
     pub fn destroy(&self) {
         self.inner.state.lock().is_destroyed = true;
     }
 
+    /// Creates a view of this texture, resolving defaulted fields against the texture.
     #[must_use]
     pub fn create_view(
         &self,
@@ -199,6 +241,7 @@ impl Texture {
         (TextureView::new(self.clone(), resolved, is_error), error)
     }
 
+    /// Fills in the defaulted fields of a texture-view descriptor against this texture.
     pub(crate) fn resolve_view_descriptor(
         &self,
         descriptor: TextureViewDescriptor,
@@ -239,6 +282,7 @@ impl Texture {
         }
     }
 
+    /// Validates queue write and returns a descriptive error on failure.
     pub fn validate_queue_write(
         &self,
         mip_level: u32,
@@ -254,6 +298,7 @@ impl Texture {
     }
 }
 
+/// Validates texture descriptor and returns a descriptive error on failure.
 pub(crate) fn validate_texture_descriptor(
     descriptor: &TextureDescriptor,
     limits: Limits,
@@ -359,6 +404,7 @@ pub(crate) fn validate_texture_descriptor(
     None
 }
 
+/// Validates queue write texture and returns a descriptive error on failure.
 pub(crate) fn validate_queue_write_texture(
     texture: &Texture,
     mip_level: u32,
@@ -437,6 +483,7 @@ pub(crate) fn validate_queue_write_texture(
 }
 
 impl Texture {
+    /// Returns subresource size.
     pub(crate) fn subresource_size(&self, mip_level: u32) -> Extent3d {
         let size = self.size();
         let mip = |value: u32| value.checked_shr(mip_level).unwrap_or(0).max(1);
@@ -455,6 +502,7 @@ impl Texture {
     }
 }
 
+/// Validates texel copy layout and returns a descriptive error on failure.
 pub(crate) fn validate_texel_copy_layout(
     format_caps: FormatCaps,
     aspect: TextureAspect,
@@ -504,6 +552,7 @@ pub(crate) fn validate_texel_copy_layout(
     )
 }
 
+/// Returns required bytes in texel copy.
 pub(crate) fn required_bytes_in_texel_copy(
     bytes_per_row: Option<u32>,
     rows_per_image: Option<u32>,
@@ -533,6 +582,7 @@ pub(crate) fn required_bytes_in_texel_copy(
         .ok_or_else(|| format!("{label} required byte size overflows"))
 }
 
+/// Returns texel copy block size.
 pub(crate) fn texel_copy_block_size(format_caps: FormatCaps, aspect: TextureAspect) -> u32 {
     if aspect == TextureAspect::StencilOnly {
         1
@@ -541,6 +591,7 @@ pub(crate) fn texel_copy_block_size(format_caps: FormatCaps, aspect: TextureAspe
     }
 }
 
+/// Returns div ceil u32.
 pub(crate) fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
     if value == 0 {
         0
@@ -549,6 +600,7 @@ pub(crate) fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
     }
 }
 
+/// Returns HAL texture descriptor.
 pub(crate) fn hal_texture_descriptor(descriptor: &TextureDescriptor) -> HalTextureDescriptor {
     HalTextureDescriptor {
         format: hal_texture_format(descriptor.format),
@@ -561,6 +613,7 @@ pub(crate) fn hal_texture_descriptor(descriptor: &TextureDescriptor) -> HalTextu
     }
 }
 
+/// Returns HAL texture format.
 pub(crate) fn hal_texture_format(format: TextureFormat) -> HalTextureFormat {
     match format.raw() {
         TextureFormat::R8_UNORM => HalTextureFormat::R8Unorm,
@@ -570,6 +623,7 @@ pub(crate) fn hal_texture_format(format: TextureFormat) -> HalTextureFormat {
     }
 }
 
+/// Returns HAL texture usage.
 pub(crate) fn hal_texture_usage(usage: TextureUsage) -> HalTextureUsage {
     HalTextureUsage {
         copy_src: usage.contains(TextureUsage::COPY_SRC),
@@ -580,6 +634,7 @@ pub(crate) fn hal_texture_usage(usage: TextureUsage) -> HalTextureUsage {
     }
 }
 
+/// Returns max texture mips.
 pub(crate) fn max_texture_mips(size: Extent3d, dimension: TextureDimension) -> u32 {
     let mut max_extent = size.width;
     if matches!(dimension, TextureDimension::D2 | TextureDimension::D3) {

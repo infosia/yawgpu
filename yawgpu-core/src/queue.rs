@@ -19,11 +19,13 @@ use crate::extent::*;
 use crate::pass::*;
 use crate::texture::*;
 
+/// Stores queue data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct Queue {
     pub(crate) inner: Arc<QueueInner>,
 }
 
+/// Holds shared state for the queue handle.
 #[derive(Debug)]
 pub(crate) struct QueueInner {
     pub(crate) hal: HalQueue,
@@ -31,6 +33,7 @@ pub(crate) struct QueueInner {
 }
 
 impl Queue {
+    /// Constructs this object from the backend HAL object.
     #[must_use]
     pub fn from_hal(hal: HalQueue, label: impl Into<String>) -> Self {
         Self {
@@ -41,24 +44,29 @@ impl Queue {
         }
     }
 
+    /// Returns the HAL.
     #[must_use]
     pub fn hal(&self) -> &HalQueue {
         &self.inner.hal
     }
 
+    /// Sets label on this object or encoder.
     pub fn set_label(&self, label: &str) {
         *self.inner.label.lock() = label.to_owned();
     }
 
+    /// Returns the label.
     #[must_use]
     pub fn label(&self) -> String {
         self.inner.label.lock().clone()
     }
 
+    /// Writes `data` into the buffer at `offset` directly from the queue.
     pub fn write_buffer(&self, buffer: &Buffer, offset: u64, data: &[u8]) -> Option<DeviceError> {
         buffer.write_from_queue(offset, data)
     }
 
+    /// Submits command buffers to the queue after validating each is non-error and not already submitted.
     pub fn submit(&self, command_buffers: &[Arc<CommandBuffer>]) -> Option<DeviceError> {
         for (index, command_buffer) in command_buffers.iter().enumerate() {
             if command_buffer.is_error() {
@@ -134,6 +142,7 @@ fn hal_buffer_texture_layout(
     })
 }
 
+/// Returns HAL command execution.
 pub(crate) fn hal_command_execution(op: &CommandExecution) -> Option<HalCopy> {
     match op {
         CommandExecution::BufferCopy(copy) => {
@@ -153,6 +162,7 @@ pub(crate) fn hal_command_execution(op: &CommandExecution) -> Option<HalCopy> {
     }
 }
 
+/// Returns HAL texture copy execution.
 pub(crate) fn hal_texture_copy_execution(copy: &TextureCopyCommand) -> Option<HalCopy> {
     match copy {
         TextureCopyCommand::BufferToTexture {
@@ -211,6 +221,7 @@ pub(crate) fn hal_texture_copy_execution(copy: &TextureCopyCommand) -> Option<Ha
     }
 }
 
+/// Returns HAL compute pass execution.
 pub(crate) fn hal_compute_pass_execution(pass: &ComputePassCommand) -> Option<HalCopy> {
     let pipeline = pass.pipeline.hal()?;
     let mut bind_buffers = Vec::new();
@@ -253,6 +264,7 @@ pub(crate) fn hal_compute_pass_execution(pass: &ComputePassCommand) -> Option<Ha
     }))
 }
 
+/// Returns HAL render pass execution.
 pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalCopy> {
     let (pipeline, bind_buffers, vertex_buffers, draw) =
         if let (Some(pipeline), Some(draw)) = (&pass.pipeline, pass.draw) {
@@ -309,6 +321,7 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
     }))
 }
 
+/// Returns HAL bind buffers.
 pub(crate) fn hal_bind_buffers(
     layouts: &[Arc<BindGroupLayout>],
     metal_bindings: &[MetalBufferBinding],
@@ -350,6 +363,7 @@ pub(crate) fn hal_bind_buffers(
     Some(bind_buffers)
 }
 
+/// Returns dynamic offset for binding.
 pub(crate) fn dynamic_offset_for_binding(
     layouts: &[Arc<BindGroupLayout>],
     group: u32,

@@ -1,41 +1,75 @@
+/// Stores limits metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
+    /// Max texture dimension 1d.
     pub max_texture_dimension_1d: u32,
+    /// Max texture dimension 2d.
     pub max_texture_dimension_2d: u32,
+    /// Max texture dimension 3d.
     pub max_texture_dimension_3d: u32,
+    /// Max texture array layers.
     pub max_texture_array_layers: u32,
+    /// Max bind groups.
     pub max_bind_groups: u32,
+    /// Max bind groups plus vertex buffers.
     pub max_bind_groups_plus_vertex_buffers: u32,
+    /// Max bindings per bind group.
     pub max_bindings_per_bind_group: u32,
+    /// Max dynamic uniform buffers per pipeline layout.
     pub max_dynamic_uniform_buffers_per_pipeline_layout: u32,
+    /// Max dynamic storage buffers per pipeline layout.
     pub max_dynamic_storage_buffers_per_pipeline_layout: u32,
+    /// Max sampled textures per shader stage.
     pub max_sampled_textures_per_shader_stage: u32,
+    /// Max samplers per shader stage.
     pub max_samplers_per_shader_stage: u32,
+    /// Max storage buffers per shader stage.
     pub max_storage_buffers_per_shader_stage: u32,
+    /// Max storage textures per shader stage.
     pub max_storage_textures_per_shader_stage: u32,
+    /// Max uniform buffers per shader stage.
     pub max_uniform_buffers_per_shader_stage: u32,
+    /// Max uniform buffer binding size.
     pub max_uniform_buffer_binding_size: u64,
+    /// Max storage buffer binding size.
     pub max_storage_buffer_binding_size: u64,
+    /// Min uniform buffer offset alignment.
     pub min_uniform_buffer_offset_alignment: u32,
+    /// Min storage buffer offset alignment.
     pub min_storage_buffer_offset_alignment: u32,
+    /// Max vertex buffers.
     pub max_vertex_buffers: u32,
+    /// Max buffer size.
     pub max_buffer_size: u64,
+    /// Max vertex attributes.
     pub max_vertex_attributes: u32,
+    /// Max vertex buffer array stride.
     pub max_vertex_buffer_array_stride: u32,
+    /// Max inter stage shader variables.
     pub max_inter_stage_shader_variables: u32,
+    /// Max color attachments.
     pub max_color_attachments: u32,
+    /// Max color attachment bytes per sample.
     pub max_color_attachment_bytes_per_sample: u32,
+    /// Max compute workgroup storage size.
     pub max_compute_workgroup_storage_size: u32,
+    /// Max compute invocations per workgroup.
     pub max_compute_invocations_per_workgroup: u32,
+    /// Max compute workgroup size x.
     pub max_compute_workgroup_size_x: u32,
+    /// Max compute workgroup size y.
     pub max_compute_workgroup_size_y: u32,
+    /// Max compute workgroup size z.
     pub max_compute_workgroup_size_z: u32,
+    /// Max compute workgroups per dimension.
     pub max_compute_workgroups_per_dimension: u32,
+    /// Max immediate size.
     pub max_immediate_size: u32,
 }
 
 impl Limits {
+    /// Constant value for default.
     pub const DEFAULT: Self = Self {
         max_texture_dimension_1d: 4096,
         max_texture_dimension_2d: 4096,
@@ -71,6 +105,7 @@ impl Limits {
         max_immediate_size: 64,
     };
 
+    /// Validates required limits and returns a descriptive error on failure.
     pub(crate) fn validate_required_limits(self, required: Option<&Self>) -> Result<Self, String> {
         // Block 00: for the synthetic Noop adapter, supported limits equal
         // the WebGPU spec defaults, so comparisons against `self` collapse to

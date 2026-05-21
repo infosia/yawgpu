@@ -6,11 +6,13 @@ use crate::device::*;
 use crate::error::*;
 use crate::limits::*;
 
+/// Stores adapter data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct Adapter {
     pub(crate) inner: Arc<AdapterInner>,
 }
 
+/// Holds shared state for the adapter handle.
 #[derive(Debug)]
 pub(crate) struct AdapterInner {
     pub(crate) hal: HalAdapter,
@@ -18,11 +20,13 @@ pub(crate) struct AdapterInner {
 }
 
 impl Adapter {
+    /// Constructs this object from the backend HAL object.
     #[must_use]
     pub fn from_hal(hal: HalAdapter) -> Self {
         Self::from_hal_with_feature_level(hal, FeatureLevel::Core)
     }
 
+    /// Constructs this object from hal with feature level.
     #[must_use]
     pub(crate) fn from_hal_with_feature_level(
         hal: HalAdapter,
@@ -33,16 +37,19 @@ impl Adapter {
         }
     }
 
+    /// Returns the name.
     #[must_use]
     pub fn name(&self) -> String {
         self.inner.hal.name()
     }
 
+    /// Returns the backend.
     #[must_use]
     pub fn backend(&self) -> HalBackend {
         self.inner.hal.backend()
     }
 
+    /// Returns the limits.
     #[must_use]
     pub fn limits(&self) -> Limits {
         // Block 00: the synthetic Noop adapter's supported limits are the
@@ -50,21 +57,25 @@ impl Adapter {
         Limits::DEFAULT
     }
 
+    /// Returns the feature level.
     #[must_use]
     pub(crate) fn feature_level(&self) -> FeatureLevel {
         self.inner.feature_level
     }
 
+    /// Returns the features.
     #[must_use]
     pub fn features(&self) -> FeatureSet {
         supported_features()
     }
 
+    /// Returns true when this object has the requested feature.
     #[must_use]
     pub fn has_feature(&self, feature: Feature) -> bool {
         self.features().contains(&feature)
     }
 
+    /// Creates a device and its queue from this adapter, honoring the requested limits and features.
     pub fn create_device(
         &self,
         required_limits: Option<&Limits>,
@@ -81,6 +92,7 @@ impl Adapter {
         Ok(Device::from_hal(hal, limits, features, label, queue_label))
     }
 
+    /// Resolves the requested feature list against what this adapter supports.
     pub(crate) fn resolve_features(
         &self,
         required_features: &[Feature],
@@ -106,24 +118,35 @@ impl Adapter {
     }
 }
 
+/// Enumerates feature level values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FeatureLevel {
+    /// Core variant.
     Core,
+    /// Compatibility variant.
     Compatibility,
 }
 
+/// Enumerates feature values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum Feature {
+    /// Core features and limits variant.
     CoreFeaturesAndLimits,
+    /// Rg11b10 ufloat renderable variant.
     Rg11b10UfloatRenderable,
+    /// Timestamp query variant.
     TimestampQuery,
+    /// Texture formats tier1 variant.
     TextureFormatsTier1,
+    /// Texture formats tier2 variant.
     TextureFormatsTier2,
+    /// Other variant.
     Other(u32),
 }
 
+/// Returns supported features.
 #[must_use]
 pub(crate) fn supported_features() -> FeatureSet {
     [
@@ -137,6 +160,7 @@ pub(crate) fn supported_features() -> FeatureSet {
     .collect()
 }
 
+/// Returns apply feature implications.
 pub(crate) fn apply_feature_implications(features: &mut FeatureSet) {
     if features.contains(&Feature::TextureFormatsTier2) {
         features.insert(Feature::TextureFormatsTier1);
@@ -146,6 +170,7 @@ pub(crate) fn apply_feature_implications(features: &mut FeatureSet) {
     }
 }
 
+/// Constant value for max query count.
 pub(crate) const MAX_QUERY_COUNT: u32 = 4096;
 
 #[cfg(test)]

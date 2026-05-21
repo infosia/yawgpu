@@ -14,33 +14,47 @@ use crate::shader::*;
 use crate::shader_naga;
 use crate::texture_view::*;
 
+/// Describes compute pipeline descriptor.
 #[derive(Debug, Clone)]
 pub struct ComputePipelineDescriptor {
+    /// Layout.
     pub layout: ComputePipelineLayout,
+    /// Shader module.
     pub shader_module: Arc<ShaderModule>,
+    /// Entry point.
     pub entry_point: Option<String>,
+    /// Constants.
     pub constants: Vec<PipelineConstant>,
+    /// Error.
     pub error: Option<String>,
 }
 
+/// Enumerates compute pipeline layout values.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ComputePipelineLayout {
+    /// Auto variant.
     Auto,
+    /// Explicit variant.
     Explicit(Arc<PipelineLayout>),
 }
 
+/// Stores pipeline constant data used by validation and backend submission.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PipelineConstant {
+    /// Key.
     pub key: String,
+    /// Value.
     pub value: f64,
 }
 
+/// Stores compute pipeline data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct ComputePipeline {
     pub(crate) inner: Arc<ComputePipelineInner>,
 }
 
+/// Holds shared state for the compute pipeline handle.
 #[derive(Debug)]
 pub(crate) struct ComputePipelineInner {
     pub(crate) _layout: ComputePipelineLayout,
@@ -53,12 +67,14 @@ pub(crate) struct ComputePipelineInner {
     pub(crate) is_error: bool,
 }
 
+/// Stores resolved compute workgroup data used by validation and backend submission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ResolvedComputeWorkgroup {
     pub(crate) size: [u32; 3],
     pub(crate) storage_size: u64,
 }
 
+/// Stores binding metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MetalBufferBinding {
     pub(crate) group: u32,
@@ -68,6 +84,7 @@ pub(crate) struct MetalBufferBinding {
 }
 
 impl ComputePipeline {
+    /// Creates a new instance.
     pub(crate) fn new(
         descriptor: ComputePipelineDescriptor,
         is_error: bool,
@@ -117,30 +134,36 @@ impl ComputePipeline {
         )
     }
 
+    /// Returns true when this object is error.
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
     }
 
+    /// Returns the entry name.
     #[must_use]
     pub fn entry_name(&self) -> &str {
         &self.inner.entry_name
     }
 
+    /// Returns the bind group layouts.
     #[must_use]
     pub fn bind_group_layouts(&self) -> &[Arc<BindGroupLayout>] {
         &self.inner.bind_group_layouts
     }
 
+    /// Returns the HAL.
     pub(crate) fn hal(&self) -> Option<HalComputePipeline> {
         self.inner.hal.clone()
     }
 
+    /// Returns the metal bindings.
     pub(crate) fn metal_bindings(&self) -> &[MetalBufferBinding] {
         &self.inner.metal_bindings
     }
 }
 
+/// Alias for resolved pipeline parts.
 pub(crate) type ResolvedPipelineParts = (
     String,
     Vec<shader_naga::ReflectedResourceBinding>,
@@ -148,6 +171,7 @@ pub(crate) type ResolvedPipelineParts = (
     Vec<Arc<BindGroupLayout>>,
 );
 
+/// Creates HAL compute pipeline and reports validation errors through the owning device.
 pub(crate) fn create_hal_compute_pipeline(
     hal_device: Option<&HalDevice>,
     shader_module: &ShaderModule,
@@ -217,6 +241,7 @@ pub(crate) fn create_hal_compute_pipeline(
     }
 }
 
+/// Returns HAL descriptor bindings.
 pub(crate) fn hal_descriptor_bindings(
     bindings: &[MetalBufferBinding],
 ) -> Vec<HalDescriptorBinding> {
@@ -235,6 +260,7 @@ pub(crate) fn hal_descriptor_bindings(
         .collect()
 }
 
+/// Returns metal buffer binding map.
 pub(crate) fn metal_buffer_binding_map(
     layouts: &[Arc<BindGroupLayout>],
 ) -> Vec<MetalBufferBinding> {
@@ -263,6 +289,7 @@ pub(crate) fn metal_buffer_binding_map(
     bindings
 }
 
+/// Validates compute pipeline descriptor and returns a descriptive error on failure.
 pub(crate) fn validate_compute_pipeline_descriptor(
     descriptor: &ComputePipelineDescriptor,
     limits: Limits,
@@ -270,6 +297,7 @@ pub(crate) fn validate_compute_pipeline_descriptor(
     resolve_compute_pipeline_descriptor(descriptor, limits).err()
 }
 
+/// Records resolve into the command stream.
 pub(crate) fn resolve_compute_pipeline_descriptor(
     descriptor: &ComputePipelineDescriptor,
     limits: Limits,
@@ -291,6 +319,7 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
     Ok((entry_name, bindings, Some(workgroup), bind_group_layouts))
 }
 
+/// Records resolve into the command stream.
 pub(crate) fn resolve_compute_entry(
     module: &shader_naga::ValidatedWgslModule,
     entry_point: Option<&str>,
@@ -320,12 +349,14 @@ pub(crate) fn resolve_compute_entry(
     }
 }
 
+/// Stores resolved override constant data used by validation and backend submission.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ResolvedOverrideConstant {
     pub(crate) index: usize,
     pub(crate) value: f64,
 }
 
+/// Records resolve into the command stream.
 pub(crate) fn resolve_pipeline_constants(
     overrides: &[shader_naga::ReflectedOverride],
     constants: &[PipelineConstant],
@@ -354,6 +385,7 @@ pub(crate) fn resolve_pipeline_constants(
     Ok(resolved)
 }
 
+/// Records resolve into the command stream.
 pub(crate) fn resolve_pipeline_constant_key(
     overrides: &[shader_naga::ReflectedOverride],
     key: &str,
@@ -378,6 +410,7 @@ pub(crate) fn resolve_pipeline_constant_key(
         .ok_or_else(|| "pipeline constant key does not match a shader override".to_owned())
 }
 
+/// Validates pipeline constant value and returns a descriptive error on failure.
 pub(crate) fn validate_pipeline_constant_value(
     override_: &shader_naga::ReflectedOverride,
     value: f64,
@@ -415,6 +448,7 @@ pub(crate) fn validate_pipeline_constant_value(
     Ok(())
 }
 
+/// Records resolve into the command stream.
 pub(crate) fn resolve_compute_workgroup(
     module: &shader_naga::ValidatedWgslModule,
     entry_name: &str,
@@ -468,6 +502,7 @@ pub(crate) fn resolve_compute_workgroup(
     })
 }
 
+/// Records resolve into the command stream.
 pub(crate) fn resolve_override_key(
     overrides: &[shader_naga::ReflectedOverride],
     key: &shader_naga::ReflectedOverrideKey,
@@ -484,6 +519,7 @@ pub(crate) fn resolve_override_key(
         .ok_or_else(|| "workgroup size override key does not match a shader override".to_owned())
 }
 
+/// Returns default override number.
 pub(crate) fn default_override_number(override_: &shader_naga::ReflectedOverride) -> Option<f64> {
     match override_.default_value {
         Some(shader_naga::ReflectedOverrideValue::Number(value)) => Some(value),
@@ -492,6 +528,7 @@ pub(crate) fn default_override_number(override_: &shader_naga::ReflectedOverride
     }
 }
 
+/// Validates compute pipeline layout and returns a descriptive error on failure.
 pub(crate) fn validate_compute_pipeline_layout(
     layout: &ComputePipelineLayout,
     bindings: &[shader_naga::ReflectedResourceBinding],
@@ -513,6 +550,7 @@ pub(crate) fn validate_compute_pipeline_layout(
     validate_pipeline_layout_stage_bindings(layout, &requirements)
 }
 
+/// Returns effective compute bind group layouts.
 pub(crate) fn effective_compute_bind_group_layouts(
     layout: &ComputePipelineLayout,
     bindings: &[shader_naga::ReflectedResourceBinding],
@@ -533,19 +571,25 @@ pub(crate) fn effective_compute_bind_group_layouts(
     }
 }
 
+/// Stores binding metadata.
 #[derive(Debug, Clone)]
 pub(crate) struct StageResourceBinding {
     pub(crate) stage: PipelineShaderStage,
     pub(crate) binding: shader_naga::ReflectedResourceBinding,
 }
 
+/// Enumerates pipeline shader stage values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PipelineShaderStage {
+    /// Vertex variant.
     Vertex,
+    /// Fragment variant.
     Fragment,
+    /// Compute variant.
     Compute,
 }
 
+/// Validates pipeline layout stage bindings and returns a descriptive error on failure.
 pub(crate) fn validate_pipeline_layout_stage_bindings(
     layout: &PipelineLayout,
     requirements: &[StageResourceBinding],
@@ -581,6 +625,7 @@ pub(crate) fn validate_pipeline_layout_stage_bindings(
     Ok(())
 }
 
+/// Returns derive bind group layouts.
 pub(crate) fn derive_bind_group_layouts<I>(
     requirements: I,
     limits: Limits,
@@ -632,6 +677,7 @@ where
     Ok(layouts)
 }
 
+/// Returns reflected bind group layout entry.
 pub(crate) fn reflected_bind_group_layout_entry(
     binding: &shader_naga::ReflectedResourceBinding,
     visibility: u64,
@@ -644,6 +690,7 @@ pub(crate) fn reflected_bind_group_layout_entry(
     })
 }
 
+/// Returns reflected binding layout kind.
 pub(crate) fn reflected_binding_layout_kind(
     binding: &shader_naga::ReflectedResourceBinding,
 ) -> Result<BindingLayoutKind, String> {
@@ -691,6 +738,7 @@ pub(crate) fn reflected_binding_layout_kind(
     }
 }
 
+/// Returns reflected texture sample type.
 pub(crate) fn reflected_texture_sample_type(
     sampled: bool,
     sample_kind: Option<shader_naga::ReflectedTypeScalarClass>,
@@ -710,6 +758,7 @@ pub(crate) fn reflected_texture_sample_type(
     }
 }
 
+/// Returns reflected texture view dimension.
 pub(crate) fn reflected_texture_view_dimension(
     dimension: shader_naga::ReflectedTextureViewDimension,
 ) -> TextureViewDimension {
@@ -723,6 +772,7 @@ pub(crate) fn reflected_texture_view_dimension(
     }
 }
 
+/// Returns reflected storage texture access.
 pub(crate) fn reflected_storage_texture_access(
     access: &shader_naga::ReflectedStorageTextureAccess,
 ) -> StorageTextureAccess {
@@ -733,6 +783,7 @@ pub(crate) fn reflected_storage_texture_access(
     }
 }
 
+/// Returns reflected storage texture format.
 pub(crate) fn reflected_storage_texture_format(format: &str) -> Result<TextureFormat, String> {
     let raw = match format {
         "Rgba8Unorm" => 0x0000_0016,
@@ -756,6 +807,7 @@ pub(crate) fn reflected_storage_texture_format(format: &str) -> Result<TextureFo
     Ok(TextureFormat::from_raw(raw))
 }
 
+/// Returns merge bind group layout entry.
 pub(crate) fn merge_bind_group_layout_entry(
     existing: &mut BindGroupLayoutEntry,
     incoming: BindGroupLayoutEntry,
@@ -805,6 +857,7 @@ pub(crate) fn merge_bind_group_layout_entry(
     }
 }
 
+/// Returns pipeline stage visibility bit.
 pub(crate) fn pipeline_stage_visibility_bit(stage: PipelineShaderStage) -> u64 {
     match stage {
         PipelineShaderStage::Vertex => 1,
@@ -813,6 +866,7 @@ pub(crate) fn pipeline_stage_visibility_bit(stage: PipelineShaderStage) -> u64 {
     }
 }
 
+/// Validates shader binding compat and returns a descriptive error on failure.
 pub(crate) fn validate_shader_binding_compat(
     binding: &shader_naga::ReflectedResourceBinding,
     layout_kind: BindingLayoutKind,
@@ -862,6 +916,7 @@ pub(crate) fn validate_shader_binding_compat(
     }
 }
 
+/// Returns shader binding layout kinds compatible.
 pub(crate) fn shader_binding_layout_kinds_compatible(
     expected: BindingLayoutKind,
     actual: BindingLayoutKind,
@@ -907,6 +962,7 @@ pub(crate) fn shader_binding_layout_kinds_compatible(
     }
 }
 
+/// Returns buffer binding types compatible.
 pub(crate) fn buffer_binding_types_compatible(
     shader_ty: shader_naga::ReflectedBufferType,
     layout_ty: BufferBindingType,
