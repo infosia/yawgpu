@@ -44,11 +44,13 @@ run-verified on Windows in P12.5.
 - **P12.3** core + FFI wiring —
   `core::Instance::create_surface_from_windows_hwnd` +
   `find_windows_hwnd_source` + `wgpuInstanceCreateSurface` (R85-4,
-  R85-5).
+  R85-5). *(☑ DONE 2026-05-21, commit `10163ce`.)*
 - **P12.4** Framework Win32 windowing + surface helper, examples
-  refactor (R85-6).
+  refactor (R85-6). *(☑ DONE 2026-05-21, commit `74d0261`.)*
 - **P12.5** CMake builds windowed examples on Windows; docs; host
-  run-verification (R85-7, R85-8).
+  run-verification (R85-7, R85-8). *(☑ DONE 2026-05-21, commit
+  `9e93b86`; build + headless real-GPU verified by Claude. Windowed
+  on-screen run pending on the host — see run log.)*
 - **Phase 12 Review** (mandatory) → COMPLETE
   (`tracking/phase-12-review.md`).
 
@@ -124,3 +126,30 @@ run-verified on Windows in P12.5.
   passes with `--ignored` — confirms the `hinstance/hwnd as _` casts
   compile/link against ash 0.38 win32 types and null-hwnd is rejected
   on a real instance.
+
+### P12.3 / P12.4 / P12.5 (2026-05-21, host: Windows 11 + VS 2022 +
+Vulkan SDK 1.3.296.0; coding agent delivered all three in one pass,
+split into commits `10163ce` / `74d0261` / `9e93b86`)
+- P12.3 FFI weaving traced across all cases (metal present / Noop /
+  real success+fail, HWND present / Noop / real success+fail, no
+  source, both present → metal wins); null-hwnd routes to error
+  surface (real) / Noop surface (Noop), no panic across the C ABI.
+- Noop default gate: `cargo test --workspace` clean (5 new HWND tests
+  pass) + `cargo clippy --workspace --all-targets -- -D warnings`
+  clean. `cargo build -p yawgpu --features vulkan` clean.
+- Examples build (the real P12.4/P12.5 test): `cmake -S examples -B
+  examples/build -DYAWGPU_FEATURE=vulkan` + `cmake --build` →
+  **all 8 examples build, incl. windowed `triangle` /
+  `hello_triangle` / `surface_smoke`**, `/W4` warning-free. `yawgpu.dll`
+  auto-copied next to each exe.
+- Real-GPU headless run: `enumerate_adapters` with
+  `YAWGPU_BACKEND=vulkan` reports `NVIDIA GeForce RTX 5060 Ti`,
+  backendType 6 — the C FFI → Vulkan path works end-to-end on Windows
+  hardware.
+- **Pending (host, on-screen):** running the three windowed exes with
+  `YAWGPU_BACKEND=vulkan` to confirm a window opens and renders ~60
+  frames then exits 0. Build + headless Vulkan verified; on-screen
+  present is the user's manual step.
+- MINOR (logged, accepted): the three windowed `main.c` gained a
+  `WGPUSurfaceGetCurrentTextureStatus_Lost` frame-skip — a small
+  robustness addition beyond R85-6's "no render-loop change", kept.
