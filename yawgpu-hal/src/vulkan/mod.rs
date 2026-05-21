@@ -100,6 +100,41 @@ impl VulkanInstance {
             current_image_index: None,
         })
     }
+
+    /// # Safety
+    ///
+    /// `hwnd` must be a valid Win32 window handle and `hinstance` the module
+    /// instance that registered its window class; both must outlive the surface.
+    pub unsafe fn create_surface_from_windows_hwnd(
+        &self,
+        hinstance: *mut c_void,
+        hwnd: *mut c_void,
+    ) -> Result<VulkanSurface, HalError> {
+        if hwnd.is_null() {
+            return Err(HalError::SwapchainCreationFailed {
+                backend: BACKEND,
+                message: "surface hwnd is null",
+            });
+        }
+        let loader =
+            ash::khr::win32_surface::Instance::new(&self.inner._entry, &self.inner.instance);
+        let create_info = vk::Win32SurfaceCreateInfoKHR::default()
+            .hinstance(hinstance as _)
+            .hwnd(hwnd as _);
+        let surface = unsafe { loader.create_win32_surface(&create_info, None) }.map_err(|_| {
+            HalError::SwapchainCreationFailed {
+                backend: BACKEND,
+                message: "vkCreateWin32SurfaceKHR failed",
+            }
+        })?;
+        Ok(VulkanSurface {
+            instance: Arc::clone(&self.inner),
+            surface,
+            swapchain: None,
+            config: None,
+            current_image_index: None,
+        })
+    }
 }
 
 fn instance_extension_config(
@@ -378,6 +413,23 @@ mod tests {
             HalError::SwapchainCreationFailed {
                 backend: "vulkan",
                 message: "surface layer is null"
+            }
+        ));
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_instance_create_surface_from_windows_hwnd_rejects_null_hwnd() {
+        let instance = VulkanInstance::new().expect("create Vulkan instance");
+        let error =
+            unsafe { instance.create_surface_from_windows_hwnd(std::ptr::null_mut(), std::ptr::null_mut()) }
+                .expect_err("null hwnd must fail");
+        assert!(matches!(
+            error,
+            HalError::SwapchainCreationFailed {
+                backend: "vulkan",
+                message: "surface hwnd is null"
             }
         ));
     }
