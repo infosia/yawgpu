@@ -36,7 +36,8 @@ run-verified on Windows in P12.5.
   this tracking file. *(☑ DONE 2026-05-21.)*
 - **P12.1** Cross-platform `VulkanInstance::new` — capability-driven
   instance-extension selection (R85-1). De-risks the whole phase:
-  proves a Vulkan instance comes up on Windows.
+  proves a Vulkan instance comes up on Windows. *(☑ DONE 2026-05-21,
+  commit `02e8e46`; one clippy revision P12.1-R1 applied by Claude.)*
 - **P12.2** HWND surface through HAL — `VulkanInstance` +
   `HalInstance` `create_surface_from_windows_hwnd` (R85-2, R85-3).
 - **P12.3** core + FFI wiring —
@@ -90,4 +91,19 @@ run-verified on Windows in P12.5.
 
 ## Run log
 
-(P12.1+ verification results recorded here as slices land.)
+### P12.1 (2026-05-21, host: Windows 11 + Vulkan SDK 1.3.296.0)
+- `cargo clippy -p yawgpu-hal --features vulkan --all-targets -- -D
+  warnings` clean (after P12.1-R1 fixed a `clippy::manual_contains`
+  in `has_instance_extension`).
+- `cargo test -p yawgpu-hal --features vulkan`: 39 passed, 22 ignored
+  (the 3 new `instance_extension_config` tests pass).
+- Noop default gate: `cargo clippy --workspace --all-targets -- -D
+  warnings` clean; `cargo test --workspace` clean.
+- Real-instance check (Windows ICD): the `#[ignore]`d
+  `vulkan_instance_new_constructs` and
+  `vulkan_instance_enumerate_adapters_returns_devices` both pass when
+  run with `--ignored` — Vulkan instance constructs and enumerates a
+  physical device on Windows. Phase de-risk goal met.
+- Process note: coding agent committed P12.0 spec (`2417855`) — left
+  as-is (content correct). Incidental `.gitignore` (`/AGENTS.md`)
+  change left uncommitted, out of P12.1 scope.
