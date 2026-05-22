@@ -94,7 +94,7 @@ pub use subpass::{
     AttachmentLayout, SubpassAttachmentResource, SubpassColorAttachmentBinding, SubpassDependency,
     SubpassDependencyType, SubpassDepthStencilAttachmentBinding, SubpassInputAttachment,
     SubpassLayoutDesc, SubpassPassLayout, SubpassPassLayoutDescriptor, SubpassRenderPass,
-    SubpassRenderPassDescriptor, DEPTH_STENCIL_ATTACHMENT_INDEX,
+    SubpassRenderPassDescriptor, TransientDispatchDescriptor, DEPTH_STENCIL_ATTACHMENT_INDEX,
 };
 pub use texture::{Texture, TextureDescriptor, TextureDimension, TextureUsage};
 pub use texture_view::{TextureAspect, TextureView, TextureViewDescriptor, TextureViewDimension};
