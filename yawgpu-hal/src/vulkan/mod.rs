@@ -14,13 +14,13 @@ use crate::{
     HalAddressMode, HalBoundBuffer, HalBufferBindingKind, HalBufferCopy, HalBufferTextureCopy,
     HalCompareFunction, HalComputePass, HalCopy, HalDescriptorBinding, HalError, HalExtent3d,
     HalFilterMode, HalMipmapFilterMode, HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass,
-    HalRenderPipelineDescriptor, HalSamplerDescriptor, HalShaderSource, HalSurfaceConfiguration,
-    HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat,
-    HalVertexStepMode,
+    HalRenderPipeline, HalRenderPipelineDescriptor, HalSamplerDescriptor, HalShaderSource,
+    HalSurfaceConfiguration, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
+    HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
 #[cfg(feature = "tiled")]
 use crate::{
-    HalSubpassAttachmentResource, HalSubpassDependencyType, HalSubpassPassLayout,
+    HalSubpassAttachmentResource, HalSubpassDependencyType, HalSubpassDraw, HalSubpassPassLayout,
     HalSubpassRenderPassCommand, HalTexture, HalTransientAttachment,
     HalTransientAttachmentDescriptor,
 };

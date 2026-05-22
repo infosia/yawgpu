@@ -350,9 +350,33 @@ pub(super) fn encode_render_pass(
 /// Records subpass encode into the command stream.
 #[cfg(feature = "tiled")]
 pub(super) fn encode_subpass_render_pass(
-    _encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
-    _pass: &HalSubpassRenderPassCommand,
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    pass: &HalSubpassRenderPassCommand,
 ) -> Result<(), HalError> {
+    for draw in &pass.draws {
+        encode_subpass_draw(encoder, draw)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "tiled")]
+fn encode_subpass_draw(
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    draw: &HalSubpassDraw,
+) -> Result<(), HalError> {
+    let HalRenderPipeline::Metal(pipeline) = &draw.pipeline else {
+        return Err(shader_error(
+            "subpass render pipeline is not Metal-backed".to_owned(),
+        ));
+    };
+    encoder.setRenderPipelineState(&pipeline.inner);
+    for binding in &draw.bind_buffers {
+        encode_render_bind_buffer(encoder, binding)?;
+    }
+    for binding in &draw.vertex_buffers {
+        encode_render_vertex_buffer(encoder, binding)?;
+    }
+    draw_primitives(encoder, pipeline.primitive_topology, draw.draw)?;
     Ok(())
 }
 

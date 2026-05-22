@@ -133,6 +133,27 @@ impl MetalDevice {
             descriptor,
         )
     }
+
+    /// Creates a subpass-compatible render pipeline.
+    #[cfg(feature = "tiled")]
+    pub fn create_subpass_render_pipeline(
+        &self,
+        shader: HalShaderSource,
+        vertex_entry_point: &str,
+        fragment_entry_point: &str,
+        descriptor: &HalRenderPipelineDescriptor,
+        bindings: &[HalDescriptorBinding],
+        _pass_layout: &HalSubpassPassLayout,
+        _subpass_index: u32,
+    ) -> Result<MetalRenderPipeline, HalError> {
+        self.create_render_pipeline(
+            shader,
+            vertex_entry_point,
+            fragment_entry_point,
+            descriptor,
+            bindings,
+        )
+    }
 }
 
 #[cfg(test)]

@@ -178,6 +178,22 @@ pub struct HalRenderPass {
     pub draw: Option<HalDraw>,
 }
 
+/// Stores one subpass draw command for backend execution.
+#[cfg(feature = "tiled")]
+#[derive(Debug, Clone)]
+pub struct HalSubpassDraw {
+    /// Subpass index.
+    pub subpass_index: u32,
+    /// Pipeline.
+    pub pipeline: HalRenderPipeline,
+    /// Bind buffers.
+    pub bind_buffers: Vec<HalBoundBuffer>,
+    /// Vertex buffers.
+    pub vertex_buffers: Vec<HalBoundBuffer>,
+    /// Draw.
+    pub draw: HalDraw,
+}
+
 /// Stores color metadata.
 #[derive(Debug, Clone)]
 pub struct HalRenderColorTarget {
@@ -328,6 +344,8 @@ pub struct HalSubpassRenderPassCommand {
     pub color_attachments: Vec<HalSubpassColorAttachment>,
     /// Optional depth-stencil attachment.
     pub depth_stencil_attachment: Option<HalSubpassDepthStencilAttachment>,
+    /// Draw commands.
+    pub draws: Vec<HalSubpassDraw>,
 }
 
 /// Enumerates HAL render load op values.

@@ -11,7 +11,8 @@ use yawgpu_hal::{
 use yawgpu_hal::{
     HalSubpassAttachmentLayout, HalSubpassAttachmentResource, HalSubpassColorAttachment,
     HalSubpassDependency, HalSubpassDependencyType, HalSubpassDepthStencilAttachment,
-    HalSubpassInputAttachment, HalSubpassLayout, HalSubpassPassLayout, HalSubpassRenderPassCommand,
+    HalSubpassDraw, HalSubpassInputAttachment, HalSubpassLayout, HalSubpassPassLayout,
+    HalSubpassRenderPassCommand,
 };
 
 use crate::bind_group::*;
@@ -188,7 +189,45 @@ fn hal_subpass_render_pass_execution(pass: &SubpassRenderPassCommand) -> Option<
             Some(attachment) => Some(hal_subpass_depth_stencil_attachment(attachment)?),
             None => None,
         },
+        draws: pass
+            .draws
+            .iter()
+            .map(hal_subpass_draw_execution)
+            .collect::<Option<Vec<_>>>()?,
     }))
+}
+
+#[cfg(feature = "tiled")]
+fn hal_subpass_draw_execution(draw: &SubpassDrawExecution) -> Option<HalSubpassDraw> {
+    let bind_buffers = hal_bind_buffers(
+        draw.pipeline.bind_group_layouts(),
+        draw.pipeline.metal_bindings(),
+        &draw.bind_groups,
+    )?;
+    let mut vertex_buffers = Vec::new();
+    for binding in draw.pipeline.vertex_buffer_bindings() {
+        let bound = draw.vertex_buffers.get(&binding.slot)?;
+        vertex_buffers.push(HalBoundBuffer {
+            group: 0,
+            binding: binding.slot,
+            metal_index: binding.metal_index,
+            buffer: bound.buffer.hal()?,
+            offset: bound.offset,
+            size: bound.size,
+        });
+    }
+    Some(HalSubpassDraw {
+        subpass_index: draw.subpass_index,
+        pipeline: draw.pipeline.hal()?,
+        bind_buffers,
+        vertex_buffers,
+        draw: HalDraw {
+            vertex_count: draw.draw.vertex_count,
+            instance_count: draw.draw.instance_count,
+            first_vertex: draw.draw.first_vertex,
+            first_instance: draw.draw.first_instance,
+        },
+    })
 }
 
 #[cfg(feature = "tiled")]

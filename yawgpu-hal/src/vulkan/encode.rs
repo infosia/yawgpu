@@ -71,9 +71,7 @@ pub(super) fn record_and_submit_copies(
                 }
                 HalCopy::RenderPass(pass) => {
                     let temps = encode_render_pass(&queue.device.device, command_buffer, pass)?;
-                    if let Some(pool) = temps.descriptor_pool {
-                        descriptor_pools.push(pool);
-                    }
+                    descriptor_pools.extend(temps.descriptor_pools);
                     framebuffers.push(temps.framebuffer);
                     if let Some(render_pass) = temps.render_pass {
                         render_passes.push(render_pass);
@@ -82,6 +80,7 @@ pub(super) fn record_and_submit_copies(
                 #[cfg(feature = "tiled")]
                 HalCopy::SubpassRenderPass(pass) => {
                     let temps = encode_subpass_render_pass(&queue.device, command_buffer, pass)?;
+                    descriptor_pools.extend(temps.descriptor_pools);
                     framebuffers.push(temps.framebuffer);
                 }
             }
@@ -449,7 +448,7 @@ pub(super) fn encode_compute_pass(
 
 /// Stores render pass temps data used by validation and backend submission.
 pub(super) struct RenderPassTemps {
-    descriptor_pool: Option<vk::DescriptorPool>,
+    descriptor_pools: Vec<vk::DescriptorPool>,
     framebuffer: vk::Framebuffer,
     render_pass: Option<vk::RenderPass>,
 }
@@ -499,11 +498,27 @@ pub(super) fn encode_subpass_render_pass(
             &begin_info,
             vk::SubpassContents::INLINE,
         );
-        for _ in 1..pass.layout.subpasses.len() {
-            device
-                .device
-                .cmd_next_subpass(command_buffer, vk::SubpassContents::INLINE);
+    }
+    let mut descriptor_pools = Vec::new();
+    for subpass_index in 0..pass.layout.subpasses.len() {
+        for draw in pass
+            .draws
+            .iter()
+            .filter(|draw| draw.subpass_index as usize == subpass_index)
+        {
+            if let Some(pool) = encode_subpass_draw(&device.device, command_buffer, pass, draw)? {
+                descriptor_pools.push(pool);
+            }
         }
+        if subpass_index + 1 < pass.layout.subpasses.len() {
+            unsafe {
+                device
+                    .device
+                    .cmd_next_subpass(command_buffer, vk::SubpassContents::INLINE);
+            }
+        }
+    }
+    unsafe {
         device.device.cmd_end_render_pass(command_buffer);
     }
     for texture in persistent_textures {
@@ -513,7 +528,7 @@ pub(super) fn encode_subpass_render_pass(
             .store(IMAGE_LAYOUT_TRANSFER_SRC, AtomicOrdering::Relaxed);
     }
     Ok(RenderPassTemps {
-        descriptor_pool: None,
+        descriptor_pools,
         framebuffer,
         render_pass: None,
     })
@@ -543,6 +558,146 @@ fn cached_subpass_render_pass(
         }
         Err(_) => Ok(render_pass),
     }
+}
+
+#[cfg(feature = "tiled")]
+fn encode_subpass_draw(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    pass: &HalSubpassRenderPassCommand,
+    draw: &HalSubpassDraw,
+) -> Result<Option<vk::DescriptorPool>, HalError> {
+    let HalRenderPipeline::Vulkan(pipeline) = &draw.pipeline else {
+        return Err(shader_error("subpass render pipeline is not Vulkan-backed"));
+    };
+    let descriptor_pool = create_render_descriptor_pool(device, pipeline)?;
+    let descriptor_sets = if let Some(pool) = descriptor_pool {
+        match allocate_render_descriptor_sets(device, pool, pipeline) {
+            Ok(sets) => sets,
+            Err(error) => {
+                unsafe {
+                    device.destroy_descriptor_pool(pool, None);
+                }
+                return Err(error);
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    if let Err(error) = update_subpass_descriptor_sets(device, pipeline, draw, &descriptor_sets) {
+        if let Some(pool) = descriptor_pool {
+            unsafe {
+                device.destroy_descriptor_pool(pool, None);
+            }
+        }
+        return Err(error);
+    }
+    unsafe {
+        device.cmd_bind_pipeline(
+            command_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            pipeline.inner.pipeline,
+        );
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: pass.extent.width as f32,
+            height: pass.extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: vk::Extent2D {
+                width: pass.extent.width,
+                height: pass.extent.height,
+            },
+        };
+        device.cmd_set_viewport(command_buffer, 0, &[viewport]);
+        device.cmd_set_scissor(command_buffer, 0, &[scissor]);
+        bind_render_descriptor_sets(device, command_buffer, pipeline, &descriptor_sets);
+    }
+    bind_subpass_vertex_buffers(device, command_buffer, draw)?;
+    unsafe {
+        device.cmd_draw(
+            command_buffer,
+            draw.draw.vertex_count,
+            draw.draw.instance_count,
+            draw.draw.first_vertex,
+            draw.draw.first_instance,
+        );
+    }
+    Ok(descriptor_pool)
+}
+
+#[cfg(feature = "tiled")]
+fn update_subpass_descriptor_sets(
+    device: &ash::Device,
+    pipeline: &VulkanRenderPipeline,
+    draw: &HalSubpassDraw,
+    descriptor_sets: &[vk::DescriptorSet],
+) -> Result<(), HalError> {
+    if pipeline.inner.descriptor_bindings.is_empty() {
+        return Ok(());
+    }
+    let mut buffer_infos = Vec::new();
+    let mut write_specs = Vec::new();
+    for descriptor in &pipeline.inner.descriptor_bindings {
+        let bound = draw
+            .bind_buffers
+            .iter()
+            .find(|bound| bound.group == descriptor.group && bound.binding == descriptor.binding)
+            .ok_or_else(|| shader_error("subpass descriptor binding is missing"))?;
+        let buffer_info = descriptor_buffer_info(bound)?;
+        buffer_infos.push(buffer_info);
+        write_specs.push((
+            buffer_infos.len() - 1,
+            descriptor.group,
+            descriptor.binding,
+            descriptor_type(descriptor.kind),
+        ));
+    }
+    let writes = write_specs
+        .iter()
+        .map(|(info_index, group, binding, descriptor_type)| {
+            let group = usize::try_from(*group)
+                .map_err(|_| shader_error("descriptor group index is too large"))?;
+            let descriptor_set = descriptor_sets
+                .get(group)
+                .copied()
+                .ok_or_else(|| shader_error("descriptor set is missing"))?;
+            Ok(vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(*binding)
+                .descriptor_type(*descriptor_type)
+                .buffer_info(std::slice::from_ref(&buffer_infos[*info_index])))
+        })
+        .collect::<Result<Vec<_>, HalError>>()?;
+    unsafe {
+        device.update_descriptor_sets(&writes, &[]);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "tiled")]
+fn bind_subpass_vertex_buffers(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    draw: &HalSubpassDraw,
+) -> Result<(), HalError> {
+    for bound in &draw.vertex_buffers {
+        let crate::HalBuffer::Vulkan(buffer) = &bound.buffer else {
+            return Err(buffer_error("subpass vertex buffer is not Vulkan-backed"));
+        };
+        let inner = buffer.inner()?;
+        validate_bound_buffer_range(bound)?;
+        let buffers = [inner.buffer];
+        let offsets = [bound.offset];
+        unsafe {
+            device.cmd_bind_vertex_buffers(command_buffer, bound.binding, &buffers, &offsets);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "tiled")]
@@ -940,7 +1095,7 @@ pub(super) fn encode_render_pass(
         .layout
         .store(IMAGE_LAYOUT_TRANSFER_SRC, AtomicOrdering::Relaxed);
     Ok(RenderPassTemps {
-        descriptor_pool,
+        descriptor_pools: descriptor_pool.into_iter().collect(),
         framebuffer,
         render_pass: temporary_render_pass,
     })

@@ -6,6 +6,11 @@ use yawgpu_hal::{
     HalRenderPipelineDescriptor, HalShaderSource, HalVertexAttribute, HalVertexBufferLayout,
     HalVertexFormat, HalVertexStepMode,
 };
+#[cfg(feature = "tiled")]
+use yawgpu_hal::{
+    HalSubpassAttachmentLayout, HalSubpassDependency, HalSubpassDependencyType,
+    HalSubpassInputAttachment, HalSubpassLayout, HalSubpassPassLayout,
+};
 
 use crate::bind_group_layout::*;
 use crate::compute_pipeline::*;
@@ -477,14 +482,65 @@ impl RenderPipeline {
             pass_layout: Arc::clone(&descriptor.pass_layout),
             subpass_index: descriptor.subpass_index,
         };
-        let (pipeline, error) = Self::new(descriptor.base, is_error, limits, hal_device);
-        let mut inner = (*pipeline.inner).clone_for_subpass(compatibility);
-        inner.is_error |= is_error;
+        let resolved = if is_error {
+            None
+        } else {
+            resolve_render_pipeline_descriptor(&descriptor.base, limits).ok()
+        };
+        let (vertex_entry_name, fragment_entry_name, bind_group_layouts) =
+            resolved.unwrap_or_else(|| {
+                (
+                    descriptor
+                        .base
+                        .vertex
+                        .shader
+                        .entry_point
+                        .clone()
+                        .unwrap_or_default(),
+                    descriptor
+                        .base
+                        .fragment
+                        .as_ref()
+                        .and_then(|fragment| fragment.shader.entry_point.clone()),
+                    Vec::new(),
+                )
+            });
+        let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
+        let vertex_buffer_bindings =
+            metal_vertex_buffer_binding_map(descriptor.base.vertex.buffer_count, &metal_bindings);
+        let (hal, backend_error) = if is_error {
+            (None, None)
+        } else {
+            create_hal_subpass_render_pipeline(
+                hal_device,
+                &descriptor,
+                &vertex_entry_name,
+                fragment_entry_name.as_deref(),
+                &metal_bindings,
+                &vertex_buffer_bindings,
+            )
+        };
+        let is_error = is_error || backend_error.is_some();
         (
             Self {
-                inner: Arc::new(inner),
+                inner: Arc::new(RenderPipelineInner {
+                    _layout: descriptor.base.layout,
+                    _vertex: descriptor.base.vertex,
+                    _primitive: descriptor.base.primitive,
+                    _depth_stencil: descriptor.base.depth_stencil,
+                    _multisample: descriptor.base.multisample,
+                    _fragment: descriptor.base.fragment,
+                    vertex_entry_name,
+                    fragment_entry_name,
+                    metal_bindings,
+                    vertex_buffer_bindings,
+                    hal,
+                    bind_group_layouts,
+                    subpass_compatibility: Some(compatibility),
+                    is_error,
+                }),
             },
-            error,
+            backend_error,
         )
     }
 
@@ -570,31 +626,6 @@ impl RenderPipeline {
     #[cfg(feature = "tiled")]
     pub(crate) fn subpass_compatibility(&self) -> Option<&SubpassPipelineCompatibility> {
         self.inner.subpass_compatibility.as_ref()
-    }
-}
-
-#[cfg(feature = "tiled")]
-impl RenderPipelineInner {
-    fn clone_for_subpass(
-        &self,
-        compatibility: SubpassPipelineCompatibility,
-    ) -> RenderPipelineInner {
-        RenderPipelineInner {
-            _layout: self._layout.clone(),
-            _vertex: self._vertex.clone(),
-            _primitive: self._primitive,
-            _depth_stencil: self._depth_stencil,
-            _multisample: self._multisample,
-            _fragment: self._fragment.clone(),
-            vertex_entry_name: self.vertex_entry_name.clone(),
-            fragment_entry_name: self.fragment_entry_name.clone(),
-            metal_bindings: self.metal_bindings.clone(),
-            vertex_buffer_bindings: self.vertex_buffer_bindings.clone(),
-            hal: self.hal.clone(),
-            bind_group_layouts: self.bind_group_layouts.clone(),
-            subpass_compatibility: Some(compatibility),
-            is_error: self.is_error,
-        }
     }
 }
 
@@ -686,6 +717,143 @@ pub(crate) fn create_hal_render_pipeline(
     ) {
         Ok(pipeline) => (Some(pipeline), None),
         Err(error) => (None, Some(error.to_string())),
+    }
+}
+
+/// Creates HAL subpass render pipeline and reports validation errors through the owning device.
+#[cfg(feature = "tiled")]
+pub(crate) fn create_hal_subpass_render_pipeline(
+    hal_device: Option<&HalDevice>,
+    descriptor: &SubpassRenderPipelineDescriptor,
+    vertex_entry_name: &str,
+    fragment_entry_name: Option<&str>,
+    metal_bindings: &[MetalBufferBinding],
+    vertex_buffer_bindings: &[MetalVertexBufferBinding],
+) -> (Option<HalRenderPipeline>, Option<String>) {
+    let Some(hal_device) = hal_device else {
+        return (None, None);
+    };
+    if matches!(hal_device.backend(), HalBackend::Noop) {
+        return (None, None);
+    }
+    if descriptor.base.depth_stencil.is_some()
+        || descriptor.base.multisample.count != 1
+        || descriptor
+            .base
+            .fragment
+            .as_ref()
+            .map_or(0, |fragment| fragment.target_count)
+            != 1
+    {
+        return (
+            None,
+            Some(
+                "real subpass render pipeline currently supports one single-sampled color target only"
+                    .to_owned(),
+            ),
+        );
+    }
+    if descriptor.base.fragment.is_none() {
+        return (
+            None,
+            Some("subpass render pipeline requires a fragment stage".to_owned()),
+        );
+    }
+    let Some(fragment_entry_name) = fragment_entry_name else {
+        return (
+            None,
+            Some("subpass render pipeline requires a fragment entry point".to_owned()),
+        );
+    };
+    let (shader, vertex_entry_point, fragment_entry_point, descriptor_bindings) =
+        match select_render_shader_source(
+            hal_device.backend(),
+            &descriptor.base,
+            vertex_entry_name,
+            fragment_entry_name,
+            metal_bindings,
+            vertex_buffer_bindings,
+        ) {
+            Ok(selection) => selection,
+            Err(message) => return (None, Some(message)),
+        };
+    let hal_descriptor =
+        match hal_render_pipeline_descriptor(&descriptor.base, vertex_buffer_bindings) {
+            Ok(descriptor) => descriptor,
+            Err(message) => return (None, Some(message)),
+        };
+    let hal_pass_layout = hal_subpass_pass_layout(descriptor.pass_layout.descriptor());
+    match hal_device.create_subpass_render_pipeline(
+        shader,
+        &vertex_entry_point,
+        &fragment_entry_point,
+        &hal_descriptor,
+        &descriptor_bindings,
+        &hal_pass_layout,
+        descriptor.subpass_index,
+    ) {
+        Ok(pipeline) => (Some(pipeline), None),
+        Err(error) => (None, Some(error.to_string())),
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn hal_subpass_pass_layout(
+    layout: &crate::subpass::SubpassPassLayoutDescriptor,
+) -> HalSubpassPassLayout {
+    HalSubpassPassLayout {
+        color_attachments: layout
+            .color_attachments
+            .iter()
+            .map(|attachment| HalSubpassAttachmentLayout {
+                format: hal_texture_format(attachment.format),
+                sample_count: attachment.sample_count,
+            })
+            .collect(),
+        depth_stencil_attachment: layout.depth_stencil_attachment.map(|attachment| {
+            HalSubpassAttachmentLayout {
+                format: hal_texture_format(attachment.format),
+                sample_count: attachment.sample_count,
+            }
+        }),
+        subpasses: layout
+            .subpasses
+            .iter()
+            .map(|subpass| HalSubpassLayout {
+                color_attachment_indices: subpass.color_attachment_indices.clone(),
+                uses_depth_stencil: subpass.uses_depth_stencil,
+                input_attachments: subpass
+                    .input_attachments
+                    .iter()
+                    .map(|input| HalSubpassInputAttachment {
+                        group: input.group,
+                        binding: input.binding,
+                        source_subpass: input.source_subpass,
+                        source_attachment: input.source_attachment,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        dependencies: layout
+            .dependencies
+            .iter()
+            .map(|dependency| HalSubpassDependency {
+                src_subpass: dependency.src_subpass,
+                dst_subpass: dependency.dst_subpass,
+                dependency_type: match dependency.dependency_type {
+                    crate::subpass::SubpassDependencyType::ColorToInput => {
+                        HalSubpassDependencyType::ColorToInput
+                    }
+                    crate::subpass::SubpassDependencyType::DepthToInput => {
+                        HalSubpassDependencyType::DepthToInput
+                    }
+                    crate::subpass::SubpassDependencyType::ColorDepthToInput => {
+                        HalSubpassDependencyType::ColorDepthToInput
+                    }
+                },
+                by_region: dependency.by_region,
+            })
+            .collect(),
     }
 }
 
