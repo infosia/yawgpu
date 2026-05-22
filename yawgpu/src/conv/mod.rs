@@ -412,6 +412,27 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn map_feature_accepts_tiled_vendor_feature_names() {
+        assert_eq!(
+            map_feature(crate::YaWGPUFeatureName_MultiSubpass),
+            core::Feature::MultiSubpass
+        );
+        assert_eq!(
+            map_feature_to_native(core::Feature::TransientAttachments),
+            crate::YaWGPUFeatureName_TransientAttachments
+        );
+        assert_eq!(
+            map_feature_to_native(core::Feature::ShaderFramebufferFetch),
+            crate::YaWGPUFeatureName_ShaderFramebufferFetch
+        );
+        assert_eq!(
+            map_feature_to_native(core::Feature::ProgrammableTileDispatch),
+            crate::YaWGPUFeatureName_ProgrammableTileDispatch
+        );
+    }
+
     #[test]
     fn map_query_type_round_trips_defined_and_unknown_variants() {
         for value in [

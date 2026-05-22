@@ -33,6 +33,8 @@ mod texture_view;
 /// Shader naga module.
 pub(crate) mod shader_naga;
 
+#[cfg(feature = "tiled")]
+pub use adapter::TiledCapabilities;
 pub use adapter::{Adapter, Feature, FeatureLevel};
 pub use bind_group::{BindGroup, BindGroupEntry, BindGroupResource};
 pub use bind_group_layout::{
