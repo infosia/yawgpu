@@ -18,6 +18,8 @@ use objc2_metal::{
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
+#[cfg(feature = "tiled")]
+use crate::HalTransientAttachmentDescriptor;
 use crate::{
     HalAddressMode, HalBoundBuffer, HalBuffer, HalBufferTextureCopy, HalCompareFunction,
     HalComputePass, HalCopy, HalDescriptorBinding, HalDraw, HalError, HalExtent3d, HalFilterMode,
@@ -117,6 +119,8 @@ pub use device::MetalDevice;
 pub use pipeline::{MetalComputePipeline, MetalRenderPipeline};
 pub use queue::MetalQueue;
 pub use surface::MetalSurface;
+#[cfg(feature = "tiled")]
+pub use texture::MetalTransientAttachment;
 pub use texture::{MetalSampler, MetalTexture};
 
 #[cfg(test)]

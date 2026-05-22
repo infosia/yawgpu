@@ -23,6 +23,18 @@ pub struct VulkanTexture {
     pub(super) format: HalTextureFormat,
 }
 
+/// Stores vulkan transient attachment data used by tiled rendering.
+#[cfg(feature = "tiled")]
+#[derive(Debug, Clone)]
+pub struct VulkanTransientAttachment {
+    pub(super) _inner: Arc<VulkanTextureInner>,
+    pub(super) _format: HalTextureFormat,
+    pub(super) _width: u32,
+    pub(super) _height: u32,
+    pub(super) _sample_count: u32,
+    pub(super) _lazily_allocated: bool,
+}
+
 impl VulkanTexture {
     /// Returns the backing texture state, or an error if creation failed.
     pub(super) fn inner(&self) -> Result<&VulkanTextureInner, HalError> {
@@ -184,6 +196,104 @@ pub(super) fn create_texture(
     ))
 }
 
+/// Creates a transient attachment image and view.
+#[cfg(feature = "tiled")]
+pub(super) fn create_transient_attachment(
+    device: Arc<VulkanDeviceInner>,
+    descriptor: &HalTransientAttachmentDescriptor,
+) -> Result<VulkanTransientAttachment, HalError> {
+    let (format, _) = map_texture_format(descriptor.format)?;
+    let samples = sample_count_flags(descriptor.sample_count)?;
+    let image_info = vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(format)
+        .extent(vk::Extent3D {
+            width: descriptor.width,
+            height: descriptor.height,
+            depth: 1,
+        })
+        .mip_levels(1)
+        .array_layers(1)
+        .samples(samples)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .usage(
+            vk::ImageUsageFlags::TRANSIENT_ATTACHMENT
+                | vk::ImageUsageFlags::INPUT_ATTACHMENT
+                | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        )
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .initial_layout(vk::ImageLayout::UNDEFINED);
+    let image = unsafe { device.device.create_image(&image_info, None) }
+        .map_err(|_| texture_error("transient image creation failed"))?;
+    let requirements = unsafe { device.device.get_image_memory_requirements(image) };
+    let lazy_memory = find_memory_type_index(
+        &device.memory_properties,
+        requirements.memory_type_bits,
+        vk::MemoryPropertyFlags::LAZILY_ALLOCATED,
+    );
+    let lazily_allocated = lazy_memory.is_some();
+    let memory_type_index = lazy_memory
+        .or_else(|| {
+            find_memory_type_index(
+                &device.memory_properties,
+                requirements.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+        })
+        .ok_or_else(|| {
+            unsafe {
+                device.device.destroy_image(image, None);
+            }
+            texture_error("compatible transient image memory type not found")
+        })?;
+    let allocate_info = vk::MemoryAllocateInfo::default()
+        .allocation_size(requirements.size)
+        .memory_type_index(memory_type_index);
+    let memory = unsafe { device.device.allocate_memory(&allocate_info, None) }.map_err(|_| {
+        unsafe {
+            device.device.destroy_image(image, None);
+        }
+        texture_error("transient image memory allocation failed")
+    })?;
+    if let Err(error) = unsafe { device.device.bind_image_memory(image, memory, 0) } {
+        unsafe {
+            device.device.destroy_image(image, None);
+            device.device.free_memory(memory, None);
+        }
+        return Err(map_texture_error(
+            error,
+            "transient image memory bind failed",
+        ));
+    }
+    let view_info = vk::ImageViewCreateInfo::default()
+        .image(image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(format)
+        .subresource_range(color_subresource_range());
+    let view = unsafe { device.device.create_image_view(&view_info, None) }.map_err(|_| {
+        unsafe {
+            device.device.destroy_image(image, None);
+            device.device.free_memory(memory, None);
+        }
+        texture_error("transient image view creation failed")
+    })?;
+    Ok(VulkanTransientAttachment {
+        _inner: Arc::new(VulkanTextureInner {
+            device,
+            image,
+            view,
+            memory: Some(memory),
+            owns_image: true,
+            layout: AtomicU8::new(IMAGE_LAYOUT_UNDEFINED),
+        }),
+        _format: descriptor.format,
+        _width: descriptor.width,
+        _height: descriptor.height,
+        _sample_count: descriptor.sample_count,
+        _lazily_allocated: lazily_allocated,
+    })
+}
+
 /// Creates sampler and reports validation errors through the owning device.
 pub(super) fn create_sampler(
     device: Arc<VulkanDeviceInner>,
@@ -212,6 +322,15 @@ pub(super) fn create_sampler(
     let sampler = unsafe { device.device.create_sampler(&sampler_info, None) }
         .map_err(|_| texture_error("sampler creation failed"))?;
     Ok(VulkanSamplerInner { device, sampler })
+}
+
+#[cfg(feature = "tiled")]
+fn sample_count_flags(sample_count: u32) -> Result<vk::SampleCountFlags, HalError> {
+    match sample_count {
+        1 => Ok(vk::SampleCountFlags::TYPE_1),
+        4 => Ok(vk::SampleCountFlags::TYPE_4),
+        _ => Err(texture_error("unsupported transient sample count")),
+    }
 }
 
 /// Returns transition image.

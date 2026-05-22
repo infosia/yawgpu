@@ -149,7 +149,42 @@ WGPUStatus yawgpuAdapterGetTiledCapabilities(
     WGPUAdapter adapter,
     YaWGPUTiledCapabilities* capabilities);
 
-/* B2+ adds transient/subpass surface here. */
+typedef struct YaWGPUTransientAttachmentImpl* YaWGPUTransientAttachment;
+
+typedef enum YaWGPUTransientSizeMode {
+    YaWGPUTransientSizeMode_MatchTarget = 0x00000000,
+    YaWGPUTransientSizeMode_Explicit = 0x00000001,
+    YaWGPUTransientSizeMode_Force32 = 0x7FFFFFFF
+} YaWGPUTransientSizeMode;
+
+typedef struct YaWGPUTransientAttachmentDescriptor {
+    WGPUChainedStruct const* nextInChain;
+    WGPUStringView label;
+    WGPUTextureFormat format;
+    YaWGPUTransientSizeMode sizeMode;
+    uint32_t width;
+    uint32_t height;
+    uint32_t sampleCount;
+} YaWGPUTransientAttachmentDescriptor;
+
+#define YAWGPU_TRANSIENT_ATTACHMENT_DESCRIPTOR_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUTransientAttachmentDescriptor, { \
+    /*.nextInChain=*/NULL _wgpu_COMMA \
+    /*.label=*/WGPU_STRING_VIEW_INIT _wgpu_COMMA \
+    /*.format=*/WGPUTextureFormat_Undefined _wgpu_COMMA \
+    /*.sizeMode=*/YaWGPUTransientSizeMode_MatchTarget _wgpu_COMMA \
+    /*.width=*/0 _wgpu_COMMA \
+    /*.height=*/0 _wgpu_COMMA \
+    /*.sampleCount=*/1 _wgpu_COMMA \
+})
+
+YaWGPUTransientAttachment yawgpuDeviceCreateTransientAttachment(
+    WGPUDevice device,
+    YaWGPUTransientAttachmentDescriptor const* descriptor);
+
+void yawgpuTransientAttachmentAddRef(YaWGPUTransientAttachment attachment);
+void yawgpuTransientAttachmentRelease(YaWGPUTransientAttachment attachment);
+
+/* B3+ adds subpass surface here. */
 #endif
 
 #endif

@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 shader-passthrough = ["naga/spv-in"]
-tiled = []
+tiled = ["yawgpu-hal/tiled"]
 
 [dependencies]
 yawgpu-hal = { path = "../yawgpu-hal" }

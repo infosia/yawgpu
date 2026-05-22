@@ -85,6 +85,16 @@ impl VulkanDevice {
         }
     }
 
+    /// Creates a transient attachment matching the given concrete descriptor.
+    #[cfg(feature = "tiled")]
+    pub fn create_transient_attachment(
+        &self,
+        descriptor: &HalTransientAttachmentDescriptor,
+    ) -> Result<VulkanTransientAttachment, HalError> {
+        self.inner.allocations.fetch_add(1, Ordering::Relaxed);
+        create_transient_attachment(Arc::clone(&self.inner), descriptor)
+    }
+
     /// Creates a sampler matching the given descriptor.
     #[must_use]
     pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> VulkanSampler {

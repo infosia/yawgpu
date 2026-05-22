@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use ash::vk;
 
+#[cfg(feature = "tiled")]
+use crate::HalTransientAttachmentDescriptor;
 use crate::{
     HalAddressMode, HalBoundBuffer, HalBufferBindingKind, HalBufferCopy, HalBufferTextureCopy,
     HalCompareFunction, HalComputePass, HalCopy, HalDescriptorBinding, HalError, HalExtent3d,
@@ -335,6 +337,8 @@ pub use device::VulkanDevice;
 pub use pipeline::{VulkanComputePipeline, VulkanRenderPipeline};
 pub use queue::VulkanQueue;
 pub use surface::VulkanSurface;
+#[cfg(feature = "tiled")]
+pub use texture::VulkanTransientAttachment;
 pub use texture::{VulkanSampler, VulkanTexture};
 
 #[cfg(test)]

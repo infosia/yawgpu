@@ -96,6 +96,14 @@ impl NoopDevice {
         NoopTexture
     }
 
+    /// Creates a transient attachment matching the given descriptor.
+    #[cfg(feature = "tiled")]
+    #[must_use]
+    pub fn create_transient_attachment(&self) -> NoopTransientAttachment {
+        self.allocations.fetch_add(1, Ordering::Relaxed);
+        NoopTransientAttachment
+    }
+
     /// Creates a sampler matching the given descriptor.
     #[must_use]
     pub fn create_sampler(&self) -> NoopSampler {
@@ -151,6 +159,11 @@ impl NoopBuffer {
 /// Stores noop texture data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct NoopTexture;
+
+/// Stores noop transient attachment data used by validation and backend submission.
+#[cfg(feature = "tiled")]
+#[derive(Debug, Clone)]
+pub struct NoopTransientAttachment;
 
 /// Stores noop sampler data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -240,6 +253,15 @@ mod tests {
     fn noop_device_create_texture_increments_allocation_count() {
         let device = NoopDevice::new();
         let _texture = device.create_texture();
+
+        assert_eq!(device.allocation_count(), 1);
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn noop_device_create_transient_attachment_increments_allocation_count() {
+        let device = NoopDevice::new();
+        let _attachment = device.create_transient_attachment();
 
         assert_eq!(device.allocation_count(), 1);
     }

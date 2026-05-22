@@ -182,6 +182,33 @@ pub unsafe extern "C" fn wgpuDeviceCreateTexture(
     }))
 }
 
+/// Creates a transient attachment on a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `descriptor` must
+/// point to a valid `YaWGPUTransientAttachmentDescriptor`.
+/// Returns yawgpu device create transient attachment.
+#[cfg(feature = "tiled")]
+#[no_mangle]
+pub unsafe extern "C" fn yawgpuDeviceCreateTransientAttachment(
+    device: native::WGPUDevice,
+    descriptor: *const YaWGPUTransientAttachmentDescriptor,
+) -> crate::YaWGPUTransientAttachment {
+    let device = borrow_handle(device, "WGPUDevice");
+    let descriptor = descriptor
+        .as_ref()
+        .expect("YaWGPUTransientAttachmentDescriptor must not be null");
+    let attachment = device
+        .core
+        .create_transient_attachment(map_transient_attachment_descriptor(descriptor));
+    arc_to_handle(Arc::new(YaWGPUTransientAttachmentImpl {
+        _core: Arc::new(attachment),
+        _device: Arc::clone(&device.core),
+        _instance: Arc::clone(&device.instance),
+    }))
+}
+
 /// Creates a sampler on a device.
 ///
 /// # Safety

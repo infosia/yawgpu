@@ -29,6 +29,8 @@ mod shader;
 mod test_helpers;
 mod texture;
 mod texture_view;
+#[cfg(feature = "tiled")]
+mod transient_attachment;
 
 /// Shader naga module.
 pub(crate) mod shader_naga;
@@ -85,6 +87,10 @@ pub use shader::{ShaderModule, ShaderModuleSource};
 pub use shader_naga::ReflectedModule;
 pub use texture::{Texture, TextureDescriptor, TextureDimension, TextureUsage};
 pub use texture_view::{TextureAspect, TextureView, TextureViewDescriptor, TextureViewDimension};
+#[cfg(feature = "tiled")]
+pub use transient_attachment::{
+    TransientAttachment, TransientAttachmentDescriptor, TransientSizeMode,
+};
 
 #[cfg(test)]
 mod tests {

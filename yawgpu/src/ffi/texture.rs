@@ -179,3 +179,31 @@ pub unsafe extern "C" fn wgpuTextureViewRelease(texture_view: native::WGPUTextur
 pub unsafe extern "C" fn wgpuTextureViewAddRef(texture_view: native::WGPUTextureView) {
     add_ref_handle(texture_view, "WGPUTextureView");
 }
+
+/// Releases one owned reference to a transient attachment handle.
+///
+/// # Safety
+///
+/// `attachment` must be a non-null live yawgpu transient attachment handle.
+/// Returns yawgpu transient attachment release.
+#[cfg(feature = "tiled")]
+#[no_mangle]
+pub unsafe extern "C" fn yawgpuTransientAttachmentRelease(
+    attachment: crate::YaWGPUTransientAttachment,
+) {
+    release_handle(attachment, "YaWGPUTransientAttachment");
+}
+
+/// Adds one owned reference to a transient attachment handle.
+///
+/// # Safety
+///
+/// `attachment` must be a non-null live yawgpu transient attachment handle.
+/// Returns yawgpu transient attachment add ref.
+#[cfg(feature = "tiled")]
+#[no_mangle]
+pub unsafe extern "C" fn yawgpuTransientAttachmentAddRef(
+    attachment: crate::YaWGPUTransientAttachment,
+) {
+    add_ref_handle(attachment, "YaWGPUTransientAttachment");
+}
