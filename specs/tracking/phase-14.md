@@ -233,10 +233,14 @@ suite **16/16 passed** (incl. `vulkan_two_subpass_draw_subpass_load_readback` �
 **green**, validated under `VK_LAYER_KHRONOS_validation` with **0 validation
 errors**). *Gate:* default + `shader-passthrough,tiled` test/`clippy -D warnings`
 green; `vulkan,tiled` clippy + `--tests` green.
-*Still pending (Apple Silicon, Claude):* re-verify Metal `--features metal,tiled`
-compile + `metal_two_subpass_draw_subpass_load_readback` with fix 1 applied (Metal
-input path is the color-slot map, unaffected by fixes 2/3, but the core validation
-fix 1 must be re-confirmed on Metal hardware).
+*Apple-Silicon re-verification (Claude, done):* with B5c applied, Metal
+`--features metal,tiled --test e2e_metal_tiled -- --ignored` → **5/5 passed**,
+incl. `metal_two_subpass_draw_subpass_load_readback` → **green** (fix 1's
+auto-wire-input-attachment-bind-group is correct on Metal). Noop default +
+`tiled` + `shader-passthrough,tiled` test/`clippy -D warnings` green;
+metal/vulkan/metal,tiled/vulkan,tiled `--tests` compile; MoltenVK
+`vulkan,tiled --ignored` 4/4 (2-subpass self-skips, no regression). B5 (a/b/c)
+fully verified across Noop / Metal / native-Vulkan / MoltenVK.
 
 ## B6 — framebuffer fetch path detection  *(☐ TODO)*
 
