@@ -1,14 +1,15 @@
+use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 use std::sync::Arc;
+#[cfg(feature = "tiled")]
+use std::sync::Mutex;
 
 use ash::vk;
 
-#[cfg(feature = "tiled")]
-use crate::HalTransientAttachmentDescriptor;
 use crate::{
     HalAddressMode, HalBoundBuffer, HalBufferBindingKind, HalBufferCopy, HalBufferTextureCopy,
     HalCompareFunction, HalComputePass, HalCopy, HalDescriptorBinding, HalError, HalExtent3d,
@@ -16,6 +17,12 @@ use crate::{
     HalRenderPipelineDescriptor, HalSamplerDescriptor, HalShaderSource, HalSurfaceConfiguration,
     HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat,
     HalVertexStepMode,
+};
+#[cfg(feature = "tiled")]
+use crate::{
+    HalSubpassAttachmentResource, HalSubpassDependencyType, HalSubpassPassLayout,
+    HalSubpassRenderPassCommand, HalTexture, HalTransientAttachment,
+    HalTransientAttachmentDescriptor,
 };
 
 const BACKEND: &str = "vulkan";
@@ -266,6 +273,8 @@ impl VulkanAdapter {
             memory_properties,
             queue_family_index,
             allocations: AtomicU64::new(0),
+            #[cfg(feature = "tiled")]
+            subpass_render_pass_cache: Mutex::new(BTreeMap::new()),
         });
         Ok(VulkanDevice {
             inner: Arc::clone(&inner),

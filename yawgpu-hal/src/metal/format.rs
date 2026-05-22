@@ -98,6 +98,12 @@ pub(super) fn map_texture_format(
         HalTextureFormat::R8Unorm => Ok((MTLPixelFormat::R8Unorm, 1)),
         HalTextureFormat::Rgba8Unorm => Ok((MTLPixelFormat::RGBA8Unorm, 4)),
         HalTextureFormat::Bgra8Unorm => Ok((MTLPixelFormat::BGRA8Unorm, 4)),
+        HalTextureFormat::Stencil8 => Ok((MTLPixelFormat::Stencil8, 1)),
+        HalTextureFormat::Depth16Unorm => Ok((MTLPixelFormat::Depth16Unorm, 2)),
+        HalTextureFormat::Depth24Plus => Ok((MTLPixelFormat::Depth32Float, 4)),
+        HalTextureFormat::Depth24PlusStencil8 => Ok((MTLPixelFormat::Depth24Unorm_Stencil8, 4)),
+        HalTextureFormat::Depth32Float => Ok((MTLPixelFormat::Depth32Float, 4)),
+        HalTextureFormat::Depth32FloatStencil8 => Ok((MTLPixelFormat::Depth32Float_Stencil8, 5)),
         HalTextureFormat::Unsupported => Err(texture_error("unsupported texture format")),
     }
 }

@@ -619,6 +619,12 @@ pub(crate) fn hal_texture_format(format: TextureFormat) -> HalTextureFormat {
         TextureFormat::R8_UNORM => HalTextureFormat::R8Unorm,
         TextureFormat::RGBA8_UNORM => HalTextureFormat::Rgba8Unorm,
         TextureFormat::BGRA8_UNORM => HalTextureFormat::Bgra8Unorm,
+        TextureFormat::STENCIL8 => HalTextureFormat::Stencil8,
+        TextureFormat::DEPTH16_UNORM => HalTextureFormat::Depth16Unorm,
+        TextureFormat::DEPTH24_PLUS => HalTextureFormat::Depth24Plus,
+        TextureFormat::DEPTH24_PLUS_STENCIL8 => HalTextureFormat::Depth24PlusStencil8,
+        TextureFormat::DEPTH32_FLOAT => HalTextureFormat::Depth32Float,
+        TextureFormat::DEPTH32_FLOAT_STENCIL8 => HalTextureFormat::Depth32FloatStencil8,
         _ => HalTextureFormat::Unsupported,
     }
 }

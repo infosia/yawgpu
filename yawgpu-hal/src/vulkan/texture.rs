@@ -204,6 +204,12 @@ pub(super) fn create_transient_attachment(
 ) -> Result<VulkanTransientAttachment, HalError> {
     let (format, _) = map_texture_format(descriptor.format)?;
     let samples = sample_count_flags(descriptor.sample_count)?;
+    let aspect = transient_image_aspect(descriptor.format);
+    let attachment_usage = if aspect == vk::ImageAspectFlags::COLOR {
+        vk::ImageUsageFlags::COLOR_ATTACHMENT
+    } else {
+        vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+    };
     let image_info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
         .format(format)
@@ -219,7 +225,7 @@ pub(super) fn create_transient_attachment(
         .usage(
             vk::ImageUsageFlags::TRANSIENT_ATTACHMENT
                 | vk::ImageUsageFlags::INPUT_ATTACHMENT
-                | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                | attachment_usage,
         )
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .initial_layout(vk::ImageLayout::UNDEFINED);
@@ -269,7 +275,7 @@ pub(super) fn create_transient_attachment(
         .image(image)
         .view_type(vk::ImageViewType::TYPE_2D)
         .format(format)
-        .subresource_range(color_subresource_range());
+        .subresource_range(transient_subresource_range(aspect));
     let view = unsafe { device.device.create_image_view(&view_info, None) }.map_err(|_| {
         unsafe {
             device.device.destroy_image(image, None);
@@ -292,6 +298,30 @@ pub(super) fn create_transient_attachment(
         _sample_count: descriptor.sample_count,
         _lazily_allocated: lazily_allocated,
     })
+}
+
+#[cfg(feature = "tiled")]
+fn transient_image_aspect(format: HalTextureFormat) -> vk::ImageAspectFlags {
+    match format {
+        HalTextureFormat::Stencil8 => vk::ImageAspectFlags::STENCIL,
+        HalTextureFormat::Depth16Unorm
+        | HalTextureFormat::Depth24Plus
+        | HalTextureFormat::Depth32Float => vk::ImageAspectFlags::DEPTH,
+        HalTextureFormat::Depth24PlusStencil8 | HalTextureFormat::Depth32FloatStencil8 => {
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        }
+        _ => vk::ImageAspectFlags::COLOR,
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn transient_subresource_range(aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceRange {
+    vk::ImageSubresourceRange::default()
+        .aspect_mask(aspect)
+        .base_mip_level(0)
+        .level_count(1)
+        .base_array_layer(0)
+        .layer_count(1)
 }
 
 /// Creates sampler and reports validation errors through the owning device.

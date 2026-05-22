@@ -85,6 +85,15 @@ impl MetalQueue {
                         encode_render_pass(&encoder, pass)?;
                         encoder.endEncoding();
                     }
+                    #[cfg(feature = "tiled")]
+                    HalCopy::SubpassRenderPass(pass) => {
+                        let descriptor = subpass_render_pass_descriptor(pass)?;
+                        let encoder = command_buffer
+                            .renderCommandEncoderWithDescriptor(&descriptor)
+                            .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                        encode_subpass_render_pass(&encoder, pass)?;
+                        encoder.endEncoding();
+                    }
                 }
             }
             command_buffer.commit();

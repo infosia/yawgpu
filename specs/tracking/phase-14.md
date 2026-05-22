@@ -115,18 +115,25 @@ T13 (`subpass_render_pass_requires_first_encoder_operation`),
 T14 (`subpass_render_pass_validates_attachment_consistency`). Draw machinery is
 B5; real backend execution + T11 e2e is B4b.
 
-### B4b — real Vulkan/Metal pass execution  *(☐ TODO)*
+### B4b — real Vulkan/Metal pass execution  *(☑ DONE)*
 
-Fill the HAL `begin/next/end_subpass_render_pass` Vulkan/Metal arms (B4a left
-them returning `HalError`): Vulkan caches a compatible `VkRenderPass` on the
-`SubpassPassLayout` + builds a `VkFramebuffer` over the supplied views/transients
-+ input-attachment descriptor sets, `vkCmdBeginRenderPass`→`vkCmdNextSubpass`→
-`vkCmdEndRenderPass`; Metal drives a single `MTLRenderCommandEncoder` state
-machine. Also: real MatchTarget transient allocation at begin; **tile_memory_check**
-(T6, Metal); and the **B2 depth follow-up** (DEPTH_STENCIL_ATTACHMENT usage +
-depth-aspect view for depth-format transients). Mostly exercised together with
-B5's draws — e2e (T11/T12) likely lands in B5/B8.
-*Accept:* real backend pass execution; T6 (Metal tile_memory_check) tested.
+Done: HAL Vulkan/Metal `begin/next/end_subpass_render_pass` implemented (B4a's
+`HalError` stubs replaced). Vulkan `create_subpass_render_pass` builds a
+multi-subpass `VkRenderPass` (attachment/subpass/dependency descs incl. depth
+refs + input refs) + `VkFramebuffer` over the resolved views;
+`vkCmdBeginRenderPass`→`vkCmdNextSubpass`→`vkCmdEndRenderPass` with clears. Metal
+`MTLRenderPassDescriptor` + single `MTLRenderCommandEncoder`; `next_subpass`
+advances internal state. **tile_memory_check (T6)**: `tile_memory_fits_budget`
+pure fn + `metal_tile_memory_budget_bytes`; over-budget memoryless footprint →
+`HalError`. **B2 depth follow-up folded in**: depth-format transients now use
+`DEPTH_STENCIL_ATTACHMENT` usage + depth aspect.
+*Gate (Claude-run):* default + `--features tiled` test/`clippy -D warnings`
+green; metal/vulkan/*,tiled `--tests` compile; tiled example builds. T6:
+`tile_memory_budget_check_accepts_equal_and_rejects_over_budget`.
+*Real-GPU (Claude):* Metal `metal_clear_only_subpass_pass_submits_without_device_error`
++ `..._accepts_memoryless_transient_color` → **passed**; Vulkan
+`vulkan_clear_only_subpass_pass_submits_without_device_error` → **passed** (no
+validation errors). (draws/pipelines = B5; full deferred-shading demo = B8.)
 
 ## B5 — subpass pipeline + dedicated draw encoder  *(☐ TODO)*
 

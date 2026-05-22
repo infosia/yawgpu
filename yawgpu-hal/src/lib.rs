@@ -11,12 +11,17 @@ mod format;
 mod present;
 mod shader;
 
-#[cfg(feature = "tiled")]
-pub use command::HalSubpassRenderPass;
 pub use command::{
     HalBoundBuffer, HalBufferBindingKind, HalBufferCopy, HalBufferTextureCopy,
     HalBufferTextureLayout, HalComputePass, HalCopy, HalDescriptorBinding, HalDraw,
     HalRenderColorTarget, HalRenderLoadOp, HalRenderPass, HalTextureCopy,
+};
+#[cfg(feature = "tiled")]
+pub use command::{
+    HalSubpassAttachmentLayout, HalSubpassAttachmentResource, HalSubpassColorAttachment,
+    HalSubpassDependency, HalSubpassDependencyType, HalSubpassDepthStencilAttachment,
+    HalSubpassInputAttachment, HalSubpassLayout, HalSubpassPassLayout, HalSubpassRenderPass,
+    HalSubpassRenderPassCommand,
 };
 #[cfg(feature = "tiled")]
 pub use descriptors::HalTransientAttachmentDescriptor;
@@ -331,15 +336,9 @@ impl HalDevice {
                 command::HalNoopSubpassRenderPass::new(),
             )),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => Err(HalError::BufferOperationFailed {
-                backend: "vulkan",
-                message: "subpass pass not yet implemented",
-            }),
+            Self::Vulkan(_) => Ok(HalSubpassRenderPass::Vulkan),
             #[cfg(feature = "metal")]
-            Self::Metal(_) => Err(HalError::BufferOperationFailed {
-                backend: "metal",
-                message: "subpass pass not yet implemented",
-            }),
+            Self::Metal(_) => Ok(HalSubpassRenderPass::Metal),
         }
     }
 
@@ -357,17 +356,9 @@ impl HalDevice {
                 Ok(())
             }
             #[cfg(feature = "vulkan")]
-            (Self::Vulkan(_), HalSubpassRenderPass::Vulkan) => {
-                Err(HalError::BufferOperationFailed {
-                    backend: "vulkan",
-                    message: "subpass pass not yet implemented",
-                })
-            }
+            (Self::Vulkan(_), HalSubpassRenderPass::Vulkan) => Ok(()),
             #[cfg(feature = "metal")]
-            (Self::Metal(_), HalSubpassRenderPass::Metal) => Err(HalError::BufferOperationFailed {
-                backend: "metal",
-                message: "subpass pass not yet implemented",
-            }),
+            (Self::Metal(_), HalSubpassRenderPass::Metal) => Ok(()),
             _ => Err(HalError::BufferOperationFailed {
                 backend: "subpass",
                 message: "subpass pass backend does not match device",
@@ -383,17 +374,9 @@ impl HalDevice {
             #[cfg(feature = "noop")]
             (Self::Noop(_), HalSubpassRenderPass::Noop(_)) => Ok(()),
             #[cfg(feature = "vulkan")]
-            (Self::Vulkan(_), HalSubpassRenderPass::Vulkan) => {
-                Err(HalError::BufferOperationFailed {
-                    backend: "vulkan",
-                    message: "subpass pass not yet implemented",
-                })
-            }
+            (Self::Vulkan(_), HalSubpassRenderPass::Vulkan) => Ok(()),
             #[cfg(feature = "metal")]
-            (Self::Metal(_), HalSubpassRenderPass::Metal) => Err(HalError::BufferOperationFailed {
-                backend: "metal",
-                message: "subpass pass not yet implemented",
-            }),
+            (Self::Metal(_), HalSubpassRenderPass::Metal) => Ok(()),
             _ => Err(HalError::BufferOperationFailed {
                 backend: "subpass",
                 message: "subpass pass backend does not match device",

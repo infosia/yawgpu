@@ -6,6 +6,12 @@ pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<(vk::Format
         HalTextureFormat::R8Unorm => Ok((vk::Format::R8_UNORM, 1)),
         HalTextureFormat::Rgba8Unorm => Ok((vk::Format::R8G8B8A8_UNORM, 4)),
         HalTextureFormat::Bgra8Unorm => Ok((vk::Format::B8G8R8A8_UNORM, 4)),
+        HalTextureFormat::Stencil8 => Ok((vk::Format::S8_UINT, 1)),
+        HalTextureFormat::Depth16Unorm => Ok((vk::Format::D16_UNORM, 2)),
+        HalTextureFormat::Depth24Plus => Ok((vk::Format::D32_SFLOAT, 4)),
+        HalTextureFormat::Depth24PlusStencil8 => Ok((vk::Format::D24_UNORM_S8_UINT, 4)),
+        HalTextureFormat::Depth32Float => Ok((vk::Format::D32_SFLOAT, 4)),
+        HalTextureFormat::Depth32FloatStencil8 => Ok((vk::Format::D32_SFLOAT_S8_UINT, 5)),
         HalTextureFormat::Unsupported => Err(texture_error("unsupported texture format")),
     }
 }

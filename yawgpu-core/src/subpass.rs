@@ -207,6 +207,7 @@ pub(crate) struct SubpassRenderPassInner {
     encoder: CommandEncoder,
     token: PassToken,
     layout: Arc<SubpassPassLayout>,
+    extent: Extent3d,
     color_attachments: Vec<SubpassColorAttachmentBinding>,
     depth_stencil_attachment: Option<SubpassDepthStencilAttachmentBinding>,
     hal: Mutex<Option<HalSubpassRenderPass>>,
@@ -229,6 +230,7 @@ impl SubpassRenderPass {
                 encoder,
                 token,
                 layout: Arc::clone(&descriptor.pass_layout),
+                extent: descriptor.extent,
                 color_attachments: descriptor.color_attachments,
                 depth_stencil_attachment: descriptor.depth_stencil_attachment,
                 hal: Mutex::new(hal),
@@ -305,6 +307,16 @@ impl SubpassRenderPass {
                 return Some(message);
             }
         }
+        if !self.is_error() {
+            self.inner
+                .encoder
+                .record_subpass_render_pass(SubpassRenderPassCommand {
+                    layout: Arc::clone(&self.inner.layout),
+                    extent: self.inner.extent,
+                    color_attachments: self.inner.color_attachments.clone(),
+                    depth_stencil_attachment: self.inner.depth_stencil_attachment.clone(),
+                });
+        }
         self.inner.encoder.end_pass(self.inner.token);
         None
     }
@@ -315,6 +327,15 @@ impl Drop for SubpassRenderPassInner {
         if !*self.ended.lock() {
             if let Some(pass) = self.hal.lock().take() {
                 let _ = pass.end();
+            }
+            if !self.is_error {
+                self.encoder
+                    .record_subpass_render_pass(SubpassRenderPassCommand {
+                        layout: Arc::clone(&self.layout),
+                        extent: self.extent,
+                        color_attachments: self.color_attachments.clone(),
+                        depth_stencil_attachment: self.depth_stencil_attachment.clone(),
+                    });
             }
             self.encoder.end_pass(self.token);
         }
