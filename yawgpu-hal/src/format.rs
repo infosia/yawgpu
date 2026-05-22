@@ -38,7 +38,7 @@ pub enum HalPrimitiveTopology {
 }
 
 /// Enumerates HAL texture format values.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HalTextureFormat {
     /// R8 unorm variant.
     R8Unorm,
@@ -46,6 +46,18 @@ pub enum HalTextureFormat {
     Rgba8Unorm,
     /// Bgra8 unorm variant.
     Bgra8Unorm,
+    /// Stencil8 variant.
+    Stencil8,
+    /// Depth16 unorm variant.
+    Depth16Unorm,
+    /// Depth24 plus variant.
+    Depth24Plus,
+    /// Depth24 plus stencil8 variant.
+    Depth24PlusStencil8,
+    /// Depth32 float variant.
+    Depth32Float,
+    /// Depth32 float stencil8 variant.
+    Depth32FloatStencil8,
     /// Unsupported variant.
     Unsupported,
 }

@@ -98,6 +98,43 @@ fn vulkan_explicit_transient_attachment_allocates_without_device_error() {
     }
 }
 
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_clear_only_subpass_pass_submits_without_device_error() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let captured_errors = Arc::clone(&errors);
+        yawgpu::testing_set_uncaptured_error_callback(
+            device,
+            Some(move |error| captured_errors.lock().expect("error lock").push(error)),
+        );
+
+        let texture = create_color_texture(device);
+        let view = yawgpu::wgpuTextureCreateView(texture, std::ptr::null());
+        let layout = create_single_color_subpass_layout(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        record_clear_subpass_pass(encoder, layout, view);
+        submit_encoder(queue, encoder);
+
+        assert!(errors.lock().expect("error lock").is_empty());
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::yawgpuSubpassPassLayoutRelease(layout);
+        yawgpu::wgpuTextureViewRelease(view);
+        yawgpu::wgpuTextureRelease(texture);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
 unsafe fn create_vulkan_instance() -> native::WGPUInstance {
     let mut backend = YaWGPUInstanceBackendSelect {
         chain: native::WGPUChainedStruct {
@@ -175,5 +212,113 @@ fn zeroed_tiled_capabilities() -> YaWGPUTiledCapabilities {
         maxSubpassColorAttachments: 0,
         maxInputAttachments: 0,
         estimatedTileMemoryBytes: 0,
+    }
+}
+
+unsafe fn create_single_color_subpass_layout(
+    device: native::WGPUDevice,
+) -> yawgpu::YaWGPUSubpassPassLayout {
+    let color = yawgpu::YaWGPUAttachmentLayout {
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        sampleCount: 1,
+    };
+    let color_index = 0_u32;
+    let subpass = yawgpu::YaWGPUSubpassLayoutDesc {
+        colorAttachmentIndices: &color_index,
+        colorAttachmentIndexCount: 1,
+        usesDepthStencil: 0,
+        inputAttachments: std::ptr::null(),
+        inputAttachmentCount: 0,
+    };
+    let descriptor = yawgpu::YaWGPUSubpassPassLayoutDescriptor {
+        nextInChain: std::ptr::null(),
+        label: empty_string_view(),
+        colorAttachments: &color,
+        colorAttachmentCount: 1,
+        depthStencilAttachment: yawgpu::YaWGPUAttachmentLayout {
+            format: native::WGPUTextureFormat_Undefined,
+            sampleCount: 1,
+        },
+        subpasses: &subpass,
+        subpassCount: 1,
+        dependencies: std::ptr::null(),
+        dependencyCount: 0,
+    };
+    let layout = yawgpu::yawgpuDeviceCreateSubpassPassLayout(device, &descriptor);
+    assert!(!layout.is_null());
+    layout
+}
+
+unsafe fn record_clear_subpass_pass(
+    encoder: native::WGPUCommandEncoder,
+    layout: yawgpu::YaWGPUSubpassPassLayout,
+    view: native::WGPUTextureView,
+) {
+    let color = yawgpu::YaWGPUColorAttachmentBinding {
+        kind: yawgpu::YaWGPUSubpassAttachmentKind_Persistent,
+        view,
+        resolveTarget: std::ptr::null(),
+        transient: std::ptr::null(),
+        loadOp: native::WGPULoadOp_Clear,
+        storeOp: native::WGPUStoreOp_Store,
+        clearValue: native::WGPUColor {
+            r: 0.25,
+            g: 0.5,
+            b: 0.75,
+            a: 1.0,
+        },
+    };
+    let descriptor = yawgpu::YaWGPUSubpassRenderPassDescriptor {
+        nextInChain: std::ptr::null(),
+        label: empty_string_view(),
+        passLayout: layout,
+        extent: texture_extent(),
+        colorAttachments: &color,
+        colorAttachmentCount: 1,
+        depthStencilAttachment: std::ptr::null(),
+    };
+    let pass = yawgpu::yawgpuCommandEncoderBeginSubpassRenderPass(encoder, &descriptor);
+    assert!(!pass.is_null());
+    yawgpu::yawgpuSubpassRenderPassEncoderEnd(pass);
+    yawgpu::yawgpuSubpassRenderPassEncoderRelease(pass);
+}
+
+unsafe fn create_color_texture(device: native::WGPUDevice) -> native::WGPUTexture {
+    let descriptor = native::WGPUTextureDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage: native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+        dimension: native::WGPUTextureDimension_2D,
+        size: texture_extent(),
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        mipLevelCount: 1,
+        sampleCount: 1,
+        viewFormatCount: 0,
+        viewFormats: std::ptr::null(),
+    };
+    let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+    assert!(!texture.is_null());
+    texture
+}
+
+unsafe fn submit_encoder(queue: native::WGPUQueue, encoder: native::WGPUCommandEncoder) {
+    let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+    yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+    yawgpu::wgpuCommandBufferRelease(command_buffer);
+    yawgpu::wgpuCommandEncoderRelease(encoder);
+}
+
+fn texture_extent() -> native::WGPUExtent3D {
+    native::WGPUExtent3D {
+        width: 16,
+        height: 16,
+        depthOrArrayLayers: 1,
+    }
+}
+
+fn empty_string_view() -> native::WGPUStringView {
+    native::WGPUStringView {
+        data: std::ptr::null(),
+        length: 0,
     }
 }

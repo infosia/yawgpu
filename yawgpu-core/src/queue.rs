@@ -7,6 +7,12 @@ use yawgpu_hal::{
     HalCopy, HalDraw, HalQueue, HalRenderColorTarget, HalRenderLoadOp, HalRenderPass,
     HalTextureCopy,
 };
+#[cfg(feature = "tiled")]
+use yawgpu_hal::{
+    HalSubpassAttachmentLayout, HalSubpassAttachmentResource, HalSubpassColorAttachment,
+    HalSubpassDependency, HalSubpassDependencyType, HalSubpassDepthStencilAttachment,
+    HalSubpassInputAttachment, HalSubpassLayout, HalSubpassPassLayout, HalSubpassRenderPassCommand,
+};
 
 use crate::bind_group::*;
 use crate::bind_group_layout::*;
@@ -17,6 +23,10 @@ use crate::copy::*;
 use crate::error::*;
 use crate::extent::*;
 use crate::pass::*;
+#[cfg(feature = "tiled")]
+use crate::subpass::*;
+#[cfg(feature = "tiled")]
+use crate::texture::hal_texture_format;
 use crate::texture::*;
 
 /// Stores queue data used by validation and backend submission.
@@ -159,6 +169,140 @@ pub(crate) fn hal_command_execution(op: &CommandExecution) -> Option<HalCopy> {
         CommandExecution::TextureCopy(copy) => hal_texture_copy_execution(copy),
         CommandExecution::ComputePass(pass) => hal_compute_pass_execution(pass),
         CommandExecution::RenderPass(pass) => hal_render_pass_execution(pass),
+        #[cfg(feature = "tiled")]
+        CommandExecution::SubpassRenderPass(pass) => hal_subpass_render_pass_execution(pass),
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn hal_subpass_render_pass_execution(pass: &SubpassRenderPassCommand) -> Option<HalCopy> {
+    Some(HalCopy::SubpassRenderPass(HalSubpassRenderPassCommand {
+        layout: hal_subpass_pass_layout(pass.layout.descriptor()),
+        extent: hal_extent(pass.extent),
+        color_attachments: pass
+            .color_attachments
+            .iter()
+            .map(hal_subpass_color_attachment)
+            .collect::<Option<Vec<_>>>()?,
+        depth_stencil_attachment: match &pass.depth_stencil_attachment {
+            Some(attachment) => Some(hal_subpass_depth_stencil_attachment(attachment)?),
+            None => None,
+        },
+    }))
+}
+
+#[cfg(feature = "tiled")]
+fn hal_subpass_pass_layout(layout: &SubpassPassLayoutDescriptor) -> HalSubpassPassLayout {
+    HalSubpassPassLayout {
+        color_attachments: layout
+            .color_attachments
+            .iter()
+            .map(|attachment| HalSubpassAttachmentLayout {
+                format: hal_texture_format(attachment.format),
+                sample_count: attachment.sample_count,
+            })
+            .collect(),
+        depth_stencil_attachment: layout.depth_stencil_attachment.map(|attachment| {
+            HalSubpassAttachmentLayout {
+                format: hal_texture_format(attachment.format),
+                sample_count: attachment.sample_count,
+            }
+        }),
+        subpasses: layout
+            .subpasses
+            .iter()
+            .map(|subpass| HalSubpassLayout {
+                color_attachment_indices: subpass.color_attachment_indices.clone(),
+                uses_depth_stencil: subpass.uses_depth_stencil,
+                input_attachments: subpass
+                    .input_attachments
+                    .iter()
+                    .map(|input| HalSubpassInputAttachment {
+                        group: input.group,
+                        binding: input.binding,
+                        source_subpass: input.source_subpass,
+                        source_attachment: input.source_attachment,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        dependencies: layout
+            .dependencies
+            .iter()
+            .map(|dependency| HalSubpassDependency {
+                src_subpass: dependency.src_subpass,
+                dst_subpass: dependency.dst_subpass,
+                dependency_type: match dependency.dependency_type {
+                    SubpassDependencyType::ColorToInput => HalSubpassDependencyType::ColorToInput,
+                    SubpassDependencyType::DepthToInput => HalSubpassDependencyType::DepthToInput,
+                    SubpassDependencyType::ColorDepthToInput => {
+                        HalSubpassDependencyType::ColorDepthToInput
+                    }
+                },
+                by_region: dependency.by_region,
+            })
+            .collect(),
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn hal_subpass_color_attachment(
+    attachment: &SubpassColorAttachmentBinding,
+) -> Option<HalSubpassColorAttachment> {
+    Some(HalSubpassColorAttachment {
+        resource: hal_subpass_attachment_resource(&attachment.resource)?,
+        load_op: hal_load_op(attachment.load_op),
+        store: matches!(attachment.store_op, StoreOp::Store),
+        clear_color: [
+            attachment.clear_value.r,
+            attachment.clear_value.g,
+            attachment.clear_value.b,
+            attachment.clear_value.a,
+        ],
+    })
+}
+
+#[cfg(feature = "tiled")]
+fn hal_subpass_depth_stencil_attachment(
+    attachment: &SubpassDepthStencilAttachmentBinding,
+) -> Option<HalSubpassDepthStencilAttachment> {
+    Some(HalSubpassDepthStencilAttachment {
+        resource: hal_subpass_attachment_resource(&attachment.resource)?,
+        depth_load_op: hal_load_op(attachment.depth_load_op),
+        depth_store: matches!(attachment.depth_store_op, StoreOp::Store),
+        depth_clear_value: attachment.depth_clear_value,
+        stencil_load_op: hal_load_op(attachment.stencil_load_op),
+        stencil_store: matches!(attachment.stencil_store_op, StoreOp::Store),
+        stencil_clear_value: attachment.stencil_clear_value,
+    })
+}
+
+#[cfg(feature = "tiled")]
+fn hal_subpass_attachment_resource(
+    resource: &SubpassAttachmentResource,
+) -> Option<HalSubpassAttachmentResource> {
+    match resource {
+        SubpassAttachmentResource::Persistent {
+            view,
+            resolve_target,
+        } => Some(HalSubpassAttachmentResource::Persistent {
+            texture: view.texture().hal()?,
+            resolve_target: match resolve_target {
+                Some(view) => Some(view.texture().hal()?),
+                None => None,
+            },
+        }),
+        SubpassAttachmentResource::Transient(attachment) => {
+            Some(HalSubpassAttachmentResource::Transient(attachment.hal()?))
+        }
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn hal_load_op(load_op: LoadOp) -> HalRenderLoadOp {
+    match load_op {
+        LoadOp::Load => HalRenderLoadOp::Load,
+        LoadOp::Clear | LoadOp::Undefined => HalRenderLoadOp::Clear,
     }
 }
 

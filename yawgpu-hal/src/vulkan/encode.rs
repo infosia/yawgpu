@@ -79,6 +79,11 @@ pub(super) fn record_and_submit_copies(
                         render_passes.push(render_pass);
                     }
                 }
+                #[cfg(feature = "tiled")]
+                HalCopy::SubpassRenderPass(pass) => {
+                    let temps = encode_subpass_render_pass(&queue.device, command_buffer, pass)?;
+                    framebuffers.push(temps.framebuffer);
+                }
             }
         }
         unsafe {
@@ -447,6 +452,361 @@ pub(super) struct RenderPassTemps {
     descriptor_pool: Option<vk::DescriptorPool>,
     framebuffer: vk::Framebuffer,
     render_pass: Option<vk::RenderPass>,
+}
+
+/// Records a tiled subpass render pass into the command stream.
+#[cfg(feature = "tiled")]
+pub(super) fn encode_subpass_render_pass(
+    device: &VulkanDeviceInner,
+    command_buffer: vk::CommandBuffer,
+    pass: &HalSubpassRenderPassCommand,
+) -> Result<RenderPassTemps, HalError> {
+    let render_pass = cached_subpass_render_pass(device, pass)?;
+    let (views, persistent_textures) = subpass_attachment_views(pass)?;
+    for texture in &persistent_textures {
+        transition_image(
+            &device.device,
+            command_buffer,
+            texture.inner()?,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            IMAGE_LAYOUT_COLOR_ATTACHMENT,
+        );
+    }
+    let framebuffer_info = vk::FramebufferCreateInfo::default()
+        .render_pass(render_pass)
+        .attachments(&views)
+        .width(pass.extent.width)
+        .height(pass.extent.height)
+        .layers(1);
+    let framebuffer = unsafe { device.device.create_framebuffer(&framebuffer_info, None) }
+        .map_err(|_| shader_error("subpass framebuffer creation failed"))?;
+    let clear_values = subpass_clear_values(pass);
+    let render_area = vk::Rect2D {
+        offset: vk::Offset2D { x: 0, y: 0 },
+        extent: vk::Extent2D {
+            width: pass.extent.width,
+            height: pass.extent.height,
+        },
+    };
+    let begin_info = vk::RenderPassBeginInfo::default()
+        .render_pass(render_pass)
+        .framebuffer(framebuffer)
+        .render_area(render_area)
+        .clear_values(&clear_values);
+    unsafe {
+        device.device.cmd_begin_render_pass(
+            command_buffer,
+            &begin_info,
+            vk::SubpassContents::INLINE,
+        );
+        for _ in 1..pass.layout.subpasses.len() {
+            device
+                .device
+                .cmd_next_subpass(command_buffer, vk::SubpassContents::INLINE);
+        }
+        device.device.cmd_end_render_pass(command_buffer);
+    }
+    for texture in persistent_textures {
+        texture
+            .inner()?
+            .layout
+            .store(IMAGE_LAYOUT_TRANSFER_SRC, AtomicOrdering::Relaxed);
+    }
+    Ok(RenderPassTemps {
+        descriptor_pool: None,
+        framebuffer,
+        render_pass: None,
+    })
+}
+
+#[cfg(feature = "tiled")]
+fn cached_subpass_render_pass(
+    device: &VulkanDeviceInner,
+    pass: &HalSubpassRenderPassCommand,
+) -> Result<vk::RenderPass, HalError> {
+    let key = pass.layout.clone();
+    if let Ok(cache) = device.subpass_render_pass_cache.lock() {
+        if let Some(&render_pass) = cache.get(&key) {
+            return Ok(render_pass);
+        }
+    }
+    let render_pass = create_subpass_render_pass(&device.device, pass)?;
+    match device.subpass_render_pass_cache.lock() {
+        Ok(mut cache) => {
+            let entry = cache.entry(key).or_insert(render_pass);
+            if *entry != render_pass {
+                unsafe {
+                    device.device.destroy_render_pass(render_pass, None);
+                }
+            }
+            Ok(*entry)
+        }
+        Err(_) => Ok(render_pass),
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn subpass_attachment_views(
+    pass: &HalSubpassRenderPassCommand,
+) -> Result<(Vec<vk::ImageView>, Vec<VulkanTexture>), HalError> {
+    let mut views = Vec::new();
+    let mut persistent_textures = Vec::new();
+    for attachment in &pass.color_attachments {
+        let (view, persistent) = subpass_attachment_view(&attachment.resource)?;
+        views.push(view);
+        if let Some(texture) = persistent {
+            persistent_textures.push(texture);
+        }
+    }
+    if let Some(depth) = &pass.depth_stencil_attachment {
+        let (view, persistent) = subpass_attachment_view(&depth.resource)?;
+        views.push(view);
+        if let Some(texture) = persistent {
+            persistent_textures.push(texture);
+        }
+    }
+    Ok((views, persistent_textures))
+}
+
+#[cfg(feature = "tiled")]
+fn subpass_attachment_view(
+    resource: &HalSubpassAttachmentResource,
+) -> Result<(vk::ImageView, Option<VulkanTexture>), HalError> {
+    match resource {
+        HalSubpassAttachmentResource::Persistent { texture, .. } => {
+            let HalTexture::Vulkan(texture) = texture else {
+                return Err(texture_error("subpass attachment is not Vulkan-backed"));
+            };
+            Ok((texture.inner()?.view, Some(texture.clone())))
+        }
+        HalSubpassAttachmentResource::Transient(attachment) => {
+            let HalTransientAttachment::Vulkan(attachment) = attachment else {
+                return Err(texture_error("subpass transient is not Vulkan-backed"));
+            };
+            Ok((attachment._inner.view, None))
+        }
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn create_subpass_render_pass(
+    device: &ash::Device,
+    pass: &HalSubpassRenderPassCommand,
+) -> Result<vk::RenderPass, HalError> {
+    let mut attachments = Vec::new();
+    for (index, layout) in pass.layout.color_attachments.iter().enumerate() {
+        let binding = pass
+            .color_attachments
+            .get(index)
+            .ok_or_else(|| shader_error("subpass color attachment binding missing"))?;
+        let (format, _) = map_texture_format(layout.format)?;
+        attachments.push(
+            vk::AttachmentDescription::default()
+                .format(format)
+                .samples(vk_sample_count(layout.sample_count)?)
+                .load_op(vk_load_op(binding.load_op))
+                .store_op(if binding.store {
+                    vk::AttachmentStoreOp::STORE
+                } else {
+                    vk::AttachmentStoreOp::DONT_CARE
+                })
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+        );
+    }
+    if let Some(layout) = pass.layout.depth_stencil_attachment {
+        let (format, _) = map_texture_format(layout.format)?;
+        attachments.push(
+            vk::AttachmentDescription::default()
+                .format(format)
+                .samples(vk_sample_count(layout.sample_count)?)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+        );
+    }
+    let depth_index = pass.layout.color_attachments.len() as u32;
+    let color_refs = pass
+        .layout
+        .subpasses
+        .iter()
+        .map(|subpass| {
+            subpass
+                .color_attachment_indices
+                .iter()
+                .map(|&attachment| {
+                    vk::AttachmentReference::default()
+                        .attachment(attachment)
+                        .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let input_refs = pass
+        .layout
+        .subpasses
+        .iter()
+        .map(|subpass| {
+            subpass
+                .input_attachments
+                .iter()
+                .map(|input| {
+                    let (attachment, layout) = if input.source_attachment == u32::MAX {
+                        (
+                            depth_index,
+                            vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                        )
+                    } else {
+                        (
+                            input.source_attachment,
+                            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        )
+                    };
+                    vk::AttachmentReference::default()
+                        .attachment(attachment)
+                        .layout(layout)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let depth_refs = pass
+        .layout
+        .subpasses
+        .iter()
+        .map(|subpass| {
+            subpass.uses_depth_stencil.then(|| {
+                vk::AttachmentReference::default()
+                    .attachment(depth_index)
+                    .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut subpasses = Vec::new();
+    for (index, subpass) in pass.layout.subpasses.iter().enumerate() {
+        let mut description = vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&color_refs[index])
+            .input_attachments(&input_refs[index]);
+        if let Some(depth_ref) = depth_refs[index].as_ref() {
+            description = description.depth_stencil_attachment(depth_ref);
+        }
+        let _ = subpass;
+        subpasses.push(description);
+    }
+    let dependencies = subpass_dependencies(pass);
+    let render_pass_info = vk::RenderPassCreateInfo::default()
+        .attachments(&attachments)
+        .subpasses(&subpasses)
+        .dependencies(&dependencies);
+    unsafe { device.create_render_pass(&render_pass_info, None) }
+        .map_err(|_| shader_error("subpass render pass creation failed"))
+}
+
+#[cfg(feature = "tiled")]
+fn subpass_dependencies(pass: &HalSubpassRenderPassCommand) -> Vec<vk::SubpassDependency> {
+    let mut dependencies = vec![vk::SubpassDependency::default()
+        .src_subpass(vk::SUBPASS_EXTERNAL)
+        .dst_subpass(0)
+        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)];
+    dependencies.extend(pass.layout.dependencies.iter().map(|dependency| {
+        let (src_stage, src_access, dst_stage, dst_access) = match dependency.dependency_type {
+            HalSubpassDependencyType::ColorToInput => (
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::AccessFlags::INPUT_ATTACHMENT_READ,
+            ),
+            HalSubpassDependencyType::DepthToInput => (
+                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::AccessFlags::INPUT_ATTACHMENT_READ,
+            ),
+            HalSubpassDependencyType::ColorDepthToInput => (
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::AccessFlags::INPUT_ATTACHMENT_READ,
+            ),
+        };
+        vk::SubpassDependency::default()
+            .src_subpass(dependency.src_subpass)
+            .dst_subpass(dependency.dst_subpass)
+            .src_stage_mask(src_stage)
+            .dst_stage_mask(dst_stage)
+            .src_access_mask(src_access)
+            .dst_access_mask(dst_access)
+            .dependency_flags(if dependency.by_region {
+                vk::DependencyFlags::BY_REGION
+            } else {
+                vk::DependencyFlags::empty()
+            })
+    }));
+    dependencies.push(
+        vk::SubpassDependency::default()
+            .src_subpass(pass.layout.subpasses.len().saturating_sub(1) as u32)
+            .dst_subpass(vk::SUBPASS_EXTERNAL)
+            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
+            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ),
+    );
+    dependencies
+}
+
+#[cfg(feature = "tiled")]
+fn subpass_clear_values(pass: &HalSubpassRenderPassCommand) -> Vec<vk::ClearValue> {
+    let mut values = pass
+        .color_attachments
+        .iter()
+        .map(|attachment| vk::ClearValue {
+            color: vk::ClearColorValue {
+                float32: [
+                    attachment.clear_color[0] as f32,
+                    attachment.clear_color[1] as f32,
+                    attachment.clear_color[2] as f32,
+                    attachment.clear_color[3] as f32,
+                ],
+            },
+        })
+        .collect::<Vec<_>>();
+    if let Some(depth) = &pass.depth_stencil_attachment {
+        values.push(vk::ClearValue {
+            depth_stencil: vk::ClearDepthStencilValue {
+                depth: depth.depth_clear_value,
+                stencil: depth.stencil_clear_value,
+            },
+        });
+    }
+    values
+}
+
+#[cfg(feature = "tiled")]
+fn vk_load_op(load_op: HalRenderLoadOp) -> vk::AttachmentLoadOp {
+    match load_op {
+        HalRenderLoadOp::Load => vk::AttachmentLoadOp::LOAD,
+        HalRenderLoadOp::Clear => vk::AttachmentLoadOp::CLEAR,
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn vk_sample_count(sample_count: u32) -> Result<vk::SampleCountFlags, HalError> {
+    match sample_count {
+        1 => Ok(vk::SampleCountFlags::TYPE_1),
+        4 => Ok(vk::SampleCountFlags::TYPE_4),
+        _ => Err(texture_error("unsupported subpass sample count")),
+    }
 }
 
 /// Records encode into the command stream.

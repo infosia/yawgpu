@@ -8,6 +8,8 @@ pub(super) struct VulkanDeviceInner {
     pub(super) memory_properties: vk::PhysicalDeviceMemoryProperties,
     pub(super) queue_family_index: u32,
     pub(super) allocations: AtomicU64,
+    #[cfg(feature = "tiled")]
+    pub(super) subpass_render_pass_cache: Mutex<BTreeMap<HalSubpassPassLayout, vk::RenderPass>>,
 }
 
 impl fmt::Debug for VulkanDeviceInner {
@@ -21,6 +23,12 @@ impl fmt::Debug for VulkanDeviceInner {
 impl Drop for VulkanDeviceInner {
     fn drop(&mut self) {
         unsafe {
+            #[cfg(feature = "tiled")]
+            if let Ok(cache) = self.subpass_render_pass_cache.lock() {
+                for &render_pass in cache.values() {
+                    self.device.destroy_render_pass(render_pass, None);
+                }
+            }
             self.device.destroy_device(None);
         }
     }

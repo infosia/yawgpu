@@ -18,8 +18,6 @@ use objc2_metal::{
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
-#[cfg(feature = "tiled")]
-use crate::HalTransientAttachmentDescriptor;
 use crate::{
     HalAddressMode, HalBoundBuffer, HalBuffer, HalBufferTextureCopy, HalCompareFunction,
     HalComputePass, HalCopy, HalDescriptorBinding, HalDraw, HalError, HalExtent3d, HalFilterMode,
@@ -27,6 +25,11 @@ use crate::{
     HalRenderPipelineDescriptor, HalSamplerDescriptor, HalShaderSource, HalSurfaceConfiguration,
     HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage,
     HalVertexFormat, HalVertexStepMode,
+};
+#[cfg(feature = "tiled")]
+use crate::{
+    HalSubpassAttachmentResource, HalSubpassRenderPassCommand, HalTransientAttachment,
+    HalTransientAttachmentDescriptor,
 };
 
 const BACKEND: &str = "metal";

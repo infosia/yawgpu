@@ -136,6 +136,9 @@ pub(crate) enum CommandExecution {
     ComputePass(ComputePassCommand),
     /// Render pass variant.
     RenderPass(RenderPassCommand),
+    #[cfg(feature = "tiled")]
+    /// Subpass render pass variant.
+    SubpassRenderPass(SubpassRenderPassCommand),
 }
 
 /// Stores the data needed to replay a ComputePassCommand.
@@ -154,6 +157,16 @@ pub(crate) struct RenderPassCommand {
     pub(crate) bind_groups: BTreeMap<u32, BoundBindGroup>,
     pub(crate) vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
     pub(crate) draw: Option<RenderDrawExecution>,
+}
+
+/// Stores the data needed to replay a SubpassRenderPassCommand.
+#[cfg(feature = "tiled")]
+#[derive(Debug, Clone)]
+pub(crate) struct SubpassRenderPassCommand {
+    pub(crate) layout: Arc<SubpassPassLayout>,
+    pub(crate) extent: Extent3d,
+    pub(crate) color_attachments: Vec<SubpassColorAttachmentBinding>,
+    pub(crate) depth_stencil_attachment: Option<SubpassDepthStencilAttachmentBinding>,
 }
 
 /// Stores color metadata.
@@ -294,15 +307,8 @@ impl CommandEncoder {
         let hal = if is_error {
             None
         } else {
-            match device.inner.hal.begin_subpass_render_pass() {
-                Ok(pass) => Some(pass),
-                Err(error) => {
-                    record_first_error_locked(&mut state, error.to_string());
-                    None
-                }
-            }
+            device.inner.hal.begin_subpass_render_pass().ok()
         };
-        let is_error = is_error || hal.is_none();
         if let Some(message) = validation_error {
             record_first_error_locked(&mut state, message);
         }
@@ -690,6 +696,16 @@ impl CommandEncoder {
             .lock()
             .command_ops
             .push(CommandExecution::RenderPass(command));
+    }
+
+    /// Appends a finished subpass-render-pass command to the encoder's command list.
+    #[cfg(feature = "tiled")]
+    pub(crate) fn record_subpass_render_pass(&self, command: SubpassRenderPassCommand) {
+        self.inner
+            .state
+            .lock()
+            .command_ops
+            .push(CommandExecution::SubpassRenderPass(command));
     }
 
     /// Returns true when this object is finished.

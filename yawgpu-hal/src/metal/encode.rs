@@ -183,6 +183,146 @@ pub(super) fn render_pass_descriptor(
     Ok(descriptor)
 }
 
+/// Returns whether a memoryless footprint fits within a tile memory budget.
+#[cfg(feature = "tiled")]
+#[must_use]
+pub fn tile_memory_fits_budget(bytes_per_pixel: u64, sample_count: u32, budget: u64) -> bool {
+    bytes_per_pixel.saturating_mul(u64::from(sample_count)) <= budget
+}
+
+/// Returns subpass render pass descriptor.
+#[cfg(feature = "tiled")]
+pub(super) fn subpass_render_pass_descriptor(
+    pass: &HalSubpassRenderPassCommand,
+) -> Result<Retained<MTLRenderPassDescriptor>, HalError> {
+    let memoryless_bytes = subpass_memoryless_bytes_per_pixel(pass)?;
+    let budget = metal_tile_memory_budget_bytes();
+    if !tile_memory_fits_budget(memoryless_bytes, 1, budget) {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "subpass memoryless attachments exceed tile memory budget",
+        });
+    }
+    let descriptor = MTLRenderPassDescriptor::renderPassDescriptor();
+    let first_subpass = pass
+        .layout
+        .subpasses
+        .first()
+        .ok_or_else(|| texture_error("subpass render pass requires at least one subpass"))?;
+    let color_attachments = descriptor.colorAttachments();
+    for &attachment_index in &first_subpass.color_attachment_indices {
+        let slot = to_ns(u64::from(attachment_index))?;
+        let binding = pass
+            .color_attachments
+            .get(attachment_index as usize)
+            .ok_or_else(|| texture_error("subpass color attachment binding missing"))?;
+        let color = unsafe { color_attachments.objectAtIndexedSubscript(slot) };
+        color.setTexture(Some(subpass_attachment_texture(&binding.resource)?));
+        color.setLoadAction(mtl_load_action(binding.load_op));
+        color.setStoreAction(if binding.store {
+            MTLStoreAction::Store
+        } else {
+            MTLStoreAction::DontCare
+        });
+        let [r, g, b, a] = binding.clear_color;
+        color.setClearColor(MTLClearColor {
+            red: r,
+            green: g,
+            blue: b,
+            alpha: a,
+        });
+    }
+    if first_subpass.uses_depth_stencil {
+        if let Some(depth) = &pass.depth_stencil_attachment {
+            let depth_attachment = descriptor.depthAttachment();
+            depth_attachment.setTexture(Some(subpass_attachment_texture(&depth.resource)?));
+            depth_attachment.setLoadAction(mtl_load_action(depth.depth_load_op));
+            depth_attachment.setStoreAction(if depth.depth_store {
+                MTLStoreAction::Store
+            } else {
+                MTLStoreAction::DontCare
+            });
+            depth_attachment.setClearDepth(f64::from(depth.depth_clear_value));
+            let stencil_attachment = descriptor.stencilAttachment();
+            stencil_attachment.setTexture(Some(subpass_attachment_texture(&depth.resource)?));
+            stencil_attachment.setLoadAction(mtl_load_action(depth.stencil_load_op));
+            stencil_attachment.setStoreAction(if depth.stencil_store {
+                MTLStoreAction::Store
+            } else {
+                MTLStoreAction::DontCare
+            });
+            stencil_attachment.setClearStencil(depth.stencil_clear_value);
+        }
+    }
+    Ok(descriptor)
+}
+
+#[cfg(feature = "tiled")]
+fn subpass_attachment_texture(
+    resource: &HalSubpassAttachmentResource,
+) -> Result<&ProtocolObject<dyn MTLTextureTrait>, HalError> {
+    match resource {
+        HalSubpassAttachmentResource::Persistent { texture, .. } => {
+            let HalTexture::Metal(texture) = texture else {
+                return Err(texture_error("subpass attachment is not Metal-backed"));
+            };
+            texture.inner()
+        }
+        HalSubpassAttachmentResource::Transient(attachment) => {
+            let HalTransientAttachment::Metal(attachment) = attachment else {
+                return Err(texture_error("subpass transient is not Metal-backed"));
+            };
+            Ok(&attachment._inner)
+        }
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn subpass_memoryless_bytes_per_pixel(pass: &HalSubpassRenderPassCommand) -> Result<u64, HalError> {
+    let mut total = 0_u64;
+    for attachment in &pass.color_attachments {
+        if let HalSubpassAttachmentResource::Transient(HalTransientAttachment::Metal(transient)) =
+            &attachment.resource
+        {
+            if transient._memoryless {
+                total = total
+                    .checked_add(u64::from(format_bytes_per_pixel(transient._format)?))
+                    .ok_or_else(|| texture_error("subpass tile memory footprint overflows"))?;
+            }
+        }
+    }
+    if let Some(depth) = &pass.depth_stencil_attachment {
+        if let HalSubpassAttachmentResource::Transient(HalTransientAttachment::Metal(transient)) =
+            &depth.resource
+        {
+            if transient._memoryless {
+                total = total
+                    .checked_add(u64::from(format_bytes_per_pixel(transient._format)?))
+                    .ok_or_else(|| texture_error("subpass tile memory footprint overflows"))?;
+            }
+        }
+    }
+    Ok(total)
+}
+
+#[cfg(feature = "tiled")]
+fn metal_tile_memory_budget_bytes() -> u64 {
+    256 * 1024
+}
+
+#[cfg(feature = "tiled")]
+fn format_bytes_per_pixel(format: HalTextureFormat) -> Result<u32, HalError> {
+    map_texture_format(format).map(|(_, bytes)| bytes)
+}
+
+#[cfg(feature = "tiled")]
+fn mtl_load_action(load_op: HalRenderLoadOp) -> MTLLoadAction {
+    match load_op {
+        HalRenderLoadOp::Load => MTLLoadAction::Load,
+        HalRenderLoadOp::Clear => MTLLoadAction::Clear,
+    }
+}
+
 /// Records encode into the command stream.
 pub(super) fn encode_render_pass(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
@@ -205,6 +345,26 @@ pub(super) fn encode_render_pass(
     }
     draw_primitives(encoder, pipeline.primitive_topology, draw)?;
     Ok(())
+}
+
+/// Records subpass encode into the command stream.
+#[cfg(feature = "tiled")]
+pub(super) fn encode_subpass_render_pass(
+    _encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    _pass: &HalSubpassRenderPassCommand,
+) -> Result<(), HalError> {
+    Ok(())
+}
+
+#[cfg(all(test, feature = "tiled"))]
+mod tiled_tests {
+    use super::*;
+
+    #[test]
+    fn tile_memory_budget_check_accepts_equal_and_rejects_over_budget() {
+        assert!(tile_memory_fits_budget(1024, 4, 4096));
+        assert!(!tile_memory_fits_budget(1025, 4, 4096));
+    }
 }
 
 fn encode_render_bind_buffer(
