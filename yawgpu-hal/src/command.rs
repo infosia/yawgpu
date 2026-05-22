@@ -144,6 +144,10 @@ pub enum HalBufferBindingKind {
     Uniform,
     /// Storage variant.
     Storage,
+    /// Input attachment variant (a subpass-local framebuffer read, wired from the
+    /// pass layout's input-source mapping rather than a caller-bound resource).
+    #[cfg(feature = "tiled")]
+    InputAttachment,
 }
 
 /// Wraps  for the selected backend.
