@@ -199,7 +199,168 @@ typedef struct YaWGPUInputAttachmentBindingLayout {
 })
 
 /* Input attachment resources are auto-wired from the subpass pass layout. */
-/* B4+ adds subpass surface here. */
+
+typedef struct YaWGPUSubpassPassLayoutImpl* YaWGPUSubpassPassLayout;
+typedef struct YaWGPUSubpassRenderPassEncoderImpl* YaWGPUSubpassRenderPassEncoder;
+
+typedef struct YaWGPUAttachmentLayout {
+    WGPUTextureFormat format;
+    uint32_t sampleCount;
+} YaWGPUAttachmentLayout;
+
+#define YAWGPU_ATTACHMENT_LAYOUT_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUAttachmentLayout, { \
+    /*.format=*/WGPUTextureFormat_Undefined _wgpu_COMMA \
+    /*.sampleCount=*/1 _wgpu_COMMA \
+})
+
+typedef enum YaWGPUSubpassDependencyType {
+    YaWGPUSubpassDependencyType_ColorToInput = 0x00000000,
+    YaWGPUSubpassDependencyType_DepthToInput = 0x00000001,
+    YaWGPUSubpassDependencyType_ColorDepthToInput = 0x00000002,
+    YaWGPUSubpassDependencyType_Force32 = 0x7FFFFFFF
+} YaWGPUSubpassDependencyType;
+
+typedef struct YaWGPUSubpassDependency {
+    uint32_t srcSubpass;
+    uint32_t dstSubpass;
+    YaWGPUSubpassDependencyType dependencyType;
+    WGPUBool byRegion;
+} YaWGPUSubpassDependency;
+
+#define YAWGPU_DEPTH_STENCIL_ATTACHMENT_INDEX 0xFFFFFFFFu
+
+typedef struct YaWGPUSubpassInputAttachment {
+    uint32_t group;
+    uint32_t binding;
+    uint32_t sourceSubpass;
+    uint32_t sourceAttachment;
+} YaWGPUSubpassInputAttachment;
+
+typedef struct YaWGPUSubpassLayoutDesc {
+    uint32_t const* colorAttachmentIndices;
+    size_t colorAttachmentIndexCount;
+    WGPUBool usesDepthStencil;
+    YaWGPUSubpassInputAttachment const* inputAttachments;
+    size_t inputAttachmentCount;
+} YaWGPUSubpassLayoutDesc;
+
+#define YAWGPU_SUBPASS_LAYOUT_DESC_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUSubpassLayoutDesc, { \
+    /*.colorAttachmentIndices=*/NULL _wgpu_COMMA \
+    /*.colorAttachmentIndexCount=*/0 _wgpu_COMMA \
+    /*.usesDepthStencil=*/0 _wgpu_COMMA \
+    /*.inputAttachments=*/NULL _wgpu_COMMA \
+    /*.inputAttachmentCount=*/0 _wgpu_COMMA \
+})
+
+typedef struct YaWGPUSubpassPassLayoutDescriptor {
+    WGPUChainedStruct const* nextInChain;
+    WGPUStringView label;
+    YaWGPUAttachmentLayout const* colorAttachments;
+    size_t colorAttachmentCount;
+    YaWGPUAttachmentLayout depthStencilAttachment;
+    YaWGPUSubpassLayoutDesc const* subpasses;
+    size_t subpassCount;
+    YaWGPUSubpassDependency const* dependencies;
+    size_t dependencyCount;
+} YaWGPUSubpassPassLayoutDescriptor;
+
+#define YAWGPU_SUBPASS_PASS_LAYOUT_DESCRIPTOR_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUSubpassPassLayoutDescriptor, { \
+    /*.nextInChain=*/NULL _wgpu_COMMA \
+    /*.label=*/WGPU_STRING_VIEW_INIT _wgpu_COMMA \
+    /*.colorAttachments=*/NULL _wgpu_COMMA \
+    /*.colorAttachmentCount=*/0 _wgpu_COMMA \
+    /*.depthStencilAttachment=*/{WGPUTextureFormat_Undefined, 1} _wgpu_COMMA \
+    /*.subpasses=*/NULL _wgpu_COMMA \
+    /*.subpassCount=*/0 _wgpu_COMMA \
+    /*.dependencies=*/NULL _wgpu_COMMA \
+    /*.dependencyCount=*/0 _wgpu_COMMA \
+})
+
+YaWGPUSubpassPassLayout yawgpuDeviceCreateSubpassPassLayout(
+    WGPUDevice device,
+    YaWGPUSubpassPassLayoutDescriptor const* descriptor);
+void yawgpuSubpassPassLayoutAddRef(YaWGPUSubpassPassLayout layout);
+void yawgpuSubpassPassLayoutRelease(YaWGPUSubpassPassLayout layout);
+
+typedef enum YaWGPUSubpassAttachmentKind {
+    YaWGPUSubpassAttachmentKind_Persistent = 0x00000000,
+    YaWGPUSubpassAttachmentKind_Transient = 0x00000001,
+    YaWGPUSubpassAttachmentKind_Force32 = 0x7FFFFFFF
+} YaWGPUSubpassAttachmentKind;
+
+typedef struct YaWGPUColorAttachmentBinding {
+    YaWGPUSubpassAttachmentKind kind;
+    WGPUTextureView view;
+    WGPUTextureView resolveTarget;
+    YaWGPUTransientAttachment transient;
+    WGPULoadOp loadOp;
+    WGPUStoreOp storeOp;
+    WGPUColor clearValue;
+} YaWGPUColorAttachmentBinding;
+
+#define YAWGPU_COLOR_ATTACHMENT_BINDING_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUColorAttachmentBinding, { \
+    /*.kind=*/YaWGPUSubpassAttachmentKind_Persistent _wgpu_COMMA \
+    /*.view=*/NULL _wgpu_COMMA \
+    /*.resolveTarget=*/NULL _wgpu_COMMA \
+    /*.transient=*/NULL _wgpu_COMMA \
+    /*.loadOp=*/WGPULoadOp_Load _wgpu_COMMA \
+    /*.storeOp=*/WGPUStoreOp_Store _wgpu_COMMA \
+    /*.clearValue=*/{0, 0, 0, 0} _wgpu_COMMA \
+})
+
+typedef struct YaWGPUDepthStencilAttachmentBinding {
+    YaWGPUSubpassAttachmentKind kind;
+    WGPUTextureView view;
+    YaWGPUTransientAttachment transient;
+    WGPULoadOp depthLoadOp;
+    WGPUStoreOp depthStoreOp;
+    float depthClearValue;
+    WGPULoadOp stencilLoadOp;
+    WGPUStoreOp stencilStoreOp;
+    uint32_t stencilClearValue;
+} YaWGPUDepthStencilAttachmentBinding;
+
+#define YAWGPU_DEPTH_STENCIL_ATTACHMENT_BINDING_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUDepthStencilAttachmentBinding, { \
+    /*.kind=*/YaWGPUSubpassAttachmentKind_Persistent _wgpu_COMMA \
+    /*.view=*/NULL _wgpu_COMMA \
+    /*.transient=*/NULL _wgpu_COMMA \
+    /*.depthLoadOp=*/WGPULoadOp_Load _wgpu_COMMA \
+    /*.depthStoreOp=*/WGPUStoreOp_Store _wgpu_COMMA \
+    /*.depthClearValue=*/1.0f _wgpu_COMMA \
+    /*.stencilLoadOp=*/WGPULoadOp_Load _wgpu_COMMA \
+    /*.stencilStoreOp=*/WGPUStoreOp_Store _wgpu_COMMA \
+    /*.stencilClearValue=*/0 _wgpu_COMMA \
+})
+
+typedef struct YaWGPUSubpassRenderPassDescriptor {
+    WGPUChainedStruct const* nextInChain;
+    WGPUStringView label;
+    YaWGPUSubpassPassLayout passLayout;
+    WGPUExtent3D extent;
+    YaWGPUColorAttachmentBinding const* colorAttachments;
+    size_t colorAttachmentCount;
+    YaWGPUDepthStencilAttachmentBinding const* depthStencilAttachment;
+} YaWGPUSubpassRenderPassDescriptor;
+
+#define YAWGPU_SUBPASS_RENDER_PASS_DESCRIPTOR_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUSubpassRenderPassDescriptor, { \
+    /*.nextInChain=*/NULL _wgpu_COMMA \
+    /*.label=*/WGPU_STRING_VIEW_INIT _wgpu_COMMA \
+    /*.passLayout=*/NULL _wgpu_COMMA \
+    /*.extent=*/{0, 0, 1} _wgpu_COMMA \
+    /*.colorAttachments=*/NULL _wgpu_COMMA \
+    /*.colorAttachmentCount=*/0 _wgpu_COMMA \
+    /*.depthStencilAttachment=*/NULL _wgpu_COMMA \
+})
+
+YaWGPUSubpassRenderPassEncoder yawgpuCommandEncoderBeginSubpassRenderPass(
+    WGPUCommandEncoder encoder,
+    YaWGPUSubpassRenderPassDescriptor const* descriptor);
+void yawgpuSubpassRenderPassEncoderNextSubpass(YaWGPUSubpassRenderPassEncoder encoder);
+void yawgpuSubpassRenderPassEncoderEnd(YaWGPUSubpassRenderPassEncoder encoder);
+void yawgpuSubpassRenderPassEncoderAddRef(YaWGPUSubpassRenderPassEncoder encoder);
+void yawgpuSubpassRenderPassEncoderRelease(YaWGPUSubpassRenderPassEncoder encoder);
+
+/* B4b+ adds real backend subpass execution here. */
 #endif
 
 #endif

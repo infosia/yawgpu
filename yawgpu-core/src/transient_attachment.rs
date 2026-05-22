@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use yawgpu_hal::{HalTransientAttachment, HalTransientAttachmentDescriptor};
 
 use crate::format::*;
@@ -41,7 +42,7 @@ pub struct TransientAttachment {
 #[derive(Debug)]
 pub(crate) struct TransientAttachmentInner {
     pub(crate) descriptor: TransientAttachmentDescriptor,
-    pub(crate) hal: Option<HalTransientAttachment>,
+    pub(crate) hal: Mutex<Option<HalTransientAttachment>>,
     pub(crate) is_error: bool,
 }
 
@@ -56,7 +57,7 @@ impl TransientAttachment {
         Self {
             inner: Arc::new(TransientAttachmentInner {
                 descriptor,
-                hal,
+                hal: Mutex::new(hal),
                 is_error,
             }),
         }
@@ -71,13 +72,21 @@ impl TransientAttachment {
     /// Returns the HAL attachment, if it has already been allocated.
     #[must_use]
     pub fn hal(&self) -> Option<HalTransientAttachment> {
-        self.inner.hal.clone()
+        self.inner.hal.lock().clone()
     }
 
     /// Returns true when this object is error.
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
+    }
+
+    /// Stores the HAL allocation resolved at pass begin for match-target attachments.
+    pub(crate) fn set_hal_for_match_target(&self, hal: HalTransientAttachment) {
+        let mut current = self.inner.hal.lock();
+        if current.is_none() {
+            *current = Some(hal);
+        }
     }
 }
 

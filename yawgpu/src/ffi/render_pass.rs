@@ -14,6 +14,88 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderEnd(
     dispatch_optional_error(&pass.device, pass.core.end());
 }
 
+/// Advances a subpass render pass to the next subpass.
+///
+/// # Safety
+///
+/// `encoder` must be a non-null live yawgpu subpass render pass encoder.
+/// Returns yawgpu subpass render pass encoder next subpass.
+#[cfg(feature = "tiled")]
+#[no_mangle]
+pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderNextSubpass(
+    encoder: crate::YaWGPUSubpassRenderPassEncoder,
+) {
+    let pass = borrow_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
+    dispatch_optional_error(&pass.device, pass.core.next_subpass());
+}
+
+/// Ends a subpass render pass.
+///
+/// # Safety
+///
+/// `encoder` must be a non-null live yawgpu subpass render pass encoder.
+/// Returns yawgpu subpass render pass encoder end.
+#[cfg(feature = "tiled")]
+#[no_mangle]
+pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderEnd(
+    encoder: crate::YaWGPUSubpassRenderPassEncoder,
+) {
+    let pass = borrow_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
+    dispatch_optional_error(&pass.device, pass.core.end());
+}
+
+/// Adds one owned reference to a subpass render pass encoder.
+///
+/// # Safety
+///
+/// `encoder` must be a non-null live yawgpu subpass render pass encoder.
+/// Returns yawgpu subpass render pass encoder add ref.
+#[cfg(feature = "tiled")]
+#[no_mangle]
+pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderAddRef(
+    encoder: crate::YaWGPUSubpassRenderPassEncoder,
+) {
+    add_ref_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
+}
+
+/// Releases one owned reference to a subpass render pass encoder.
+///
+/// # Safety
+///
+/// `encoder` must be a non-null live yawgpu subpass render pass encoder.
+/// Returns yawgpu subpass render pass encoder release.
+#[cfg(feature = "tiled")]
+#[no_mangle]
+pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderRelease(
+    encoder: crate::YaWGPUSubpassRenderPassEncoder,
+) {
+    release_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
+}
+
+/// Adds one owned reference to a subpass pass layout.
+///
+/// # Safety
+///
+/// `layout` must be a non-null live yawgpu subpass pass layout.
+/// Returns yawgpu subpass pass layout add ref.
+#[cfg(feature = "tiled")]
+#[no_mangle]
+pub unsafe extern "C" fn yawgpuSubpassPassLayoutAddRef(layout: crate::YaWGPUSubpassPassLayout) {
+    add_ref_handle(layout, "YaWGPUSubpassPassLayout");
+}
+
+/// Releases one owned reference to a subpass pass layout.
+///
+/// # Safety
+///
+/// `layout` must be a non-null live yawgpu subpass pass layout.
+/// Returns yawgpu subpass pass layout release.
+#[cfg(feature = "tiled")]
+#[no_mangle]
+pub unsafe extern "C" fn yawgpuSubpassPassLayoutRelease(layout: crate::YaWGPUSubpassPassLayout) {
+    release_handle(layout, "YaWGPUSubpassPassLayout");
+}
+
 /// Begins an occlusion query in a render pass.
 ///
 /// # Safety

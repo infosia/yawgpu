@@ -85,18 +85,48 @@ subpass execution is B8.
 *Note:* SPIR-V subpass codegen works; MSL **global** `subpass_input` needs the
 pass-local color-slot map → supplied in B4 (test tolerates the not-yet path).
 
-## B4 — pass layout object + multi-subpass render pass  *(☐ TODO)*
+## B4 — pass layout object + multi-subpass render pass
 
-`YaWGPUSubpassPassLayout` Arc resource (the single compat source of truth;
-Vulkan caches a compatible `VkRenderPass` on it). Then
-`BeginSubpassRenderPass`/`NextSubpass`/`End` + encoder handle (refcount):
-attaches the supplied views/transient handles to the layout (the `Transient`
-branch carries the handle directly — no index table); Vulkan `VkFramebuffer`
-over the views + input-attachment descriptor sets from the layout; Metal
-single-encoder state machine; eager-dispatch ordering guard; layout-consistency
-+ capability-limit checks; pass-lifetime retention of views/transients/layout.
-*Accept:* T10, T13, T14 unit-tested; T11 (noop), T12 (noop) unit-tested;
-T11/T12 e2e.
+Split for reviewability (matches the reference's scaffolding-then-impl pattern):
+**B4a** = pass layout + pass lifecycle + validation, Noop-complete; **B4b** =
+real Vulkan/Metal pass execution + MatchTarget alloc + tile_memory_check + the
+B2 depth-format usage fix + e2e.
+
+### B4a — pass layout + pass lifecycle core (Noop)  *(☑ DONE)*
+
+Done: new `core::subpass` module — `SubpassPassLayout` Arc resource +
+`Device::create_subpass_pass_layout` with validation (T10: subpass/color/input
+counts vs `tiled_capabilities`, input source range). `SubpassRenderPass`
+encoder via `CommandEncoder::begin_subpass_render_pass`: eager-dispatch guard
+(T13, must be first encoder op), attachment↔layout consistency (T14),
+MatchTarget resolution + `Arc` retention of layout/views/transients across the
+caller's `Release` (T12), `next_subpass`/`end`/Drop-safe. HAL
+`begin/next/end_subpass_render_pass` (enum-dispatch): Noop records; Vulkan/Metal
+arms return `HalError` "subpass pass not yet implemented" (no panic — B4b
+replaces). C: `yawgpu.h` pass-layout + tagged attachment-binding + encoder
+surface + INIT macros; Rust `#[repr(C)]` mirrors + conv;
+`yawgpuDeviceCreateSubpassPassLayout`/`AddRef`/`Release`,
+`yawgpuCommandEncoderBeginSubpassRenderPass`/`NextSubpass`/`End`/`AddRef`/`Release`.
+*Gate (Claude-run):* default + `--features tiled` test/`clippy -D warnings`
+green; metal/vulkan/*,tiled `--tests` compile (subpass arms return `HalError`);
+tiled example builds. Tests: T10 (`subpass_pass_layout_validates_inputs_and_counts`),
+T12 (`subpass_render_pass_lifecycle_retains_resources_and_resolves_match_target`),
+T13 (`subpass_render_pass_requires_first_encoder_operation`),
+T14 (`subpass_render_pass_validates_attachment_consistency`). Draw machinery is
+B5; real backend execution + T11 e2e is B4b.
+
+### B4b — real Vulkan/Metal pass execution  *(☐ TODO)*
+
+Fill the HAL `begin/next/end_subpass_render_pass` Vulkan/Metal arms (B4a left
+them returning `HalError`): Vulkan caches a compatible `VkRenderPass` on the
+`SubpassPassLayout` + builds a `VkFramebuffer` over the supplied views/transients
++ input-attachment descriptor sets, `vkCmdBeginRenderPass`→`vkCmdNextSubpass`→
+`vkCmdEndRenderPass`; Metal drives a single `MTLRenderCommandEncoder` state
+machine. Also: real MatchTarget transient allocation at begin; **tile_memory_check**
+(T6, Metal); and the **B2 depth follow-up** (DEPTH_STENCIL_ATTACHMENT usage +
+depth-aspect view for depth-format transients). Mostly exercised together with
+B5's draws — e2e (T11/T12) likely lands in B5/B8.
+*Accept:* real backend pass execution; T6 (Metal tile_memory_check) tested.
 
 ## B5 — subpass pipeline + dedicated draw encoder  *(☐ TODO)*
 

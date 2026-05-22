@@ -209,6 +209,32 @@ pub unsafe extern "C" fn yawgpuDeviceCreateTransientAttachment(
     }))
 }
 
+/// Creates a subpass pass layout on a device.
+///
+/// # Safety
+///
+/// `device` and `descriptor` must be non-null live yawgpu pointers.
+/// Returns yawgpu device create subpass pass layout.
+#[cfg(feature = "tiled")]
+#[no_mangle]
+pub unsafe extern "C" fn yawgpuDeviceCreateSubpassPassLayout(
+    device: native::WGPUDevice,
+    descriptor: *const YaWGPUSubpassPassLayoutDescriptor,
+) -> crate::YaWGPUSubpassPassLayout {
+    let device = borrow_handle(device, "WGPUDevice");
+    let descriptor = descriptor
+        .as_ref()
+        .expect("YaWGPUSubpassPassLayoutDescriptor must not be null");
+    let layout = device
+        .core
+        .create_subpass_pass_layout(map_subpass_pass_layout_descriptor(descriptor));
+    arc_to_handle(Arc::new(YaWGPUSubpassPassLayoutImpl {
+        _core: Arc::new(layout),
+        _device: Arc::clone(&device.core),
+        _instance: Arc::clone(&device.instance),
+    }))
+}
+
 /// Creates a sampler on a device.
 ///
 /// # Safety

@@ -77,15 +77,16 @@ use crate::{
     YaWGPUMslEntryPoint, YaWGPUShaderModuleMslDescriptor, YaWGPUShaderModuleSpirVDescriptor,
 };
 #[cfg(feature = "tiled")]
-use crate::{YaWGPUTiledCapabilities, YaWGPUTransientAttachmentDescriptor};
+use crate::{
+    YaWGPUSubpassPassLayoutDescriptor, YaWGPUSubpassRenderPassDescriptor, YaWGPUTiledCapabilities,
+    YaWGPUTransientAttachmentDescriptor,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::os::raw::c_void;
 use std::sync::{Arc, Mutex};
 
 use yawgpu_core as core;
 
-#[cfg(feature = "tiled")]
-use crate::conv::map_transient_attachment_descriptor;
 use crate::conv::{
     add_ref_handle, arc_to_handle, borrow_handle, clone_handle, free_supported_features,
     label_from_string_view, map_bind_group_entries, map_bind_group_layout_descriptor,
@@ -102,6 +103,11 @@ use crate::conv::{
     map_texture_descriptor, map_texture_dimension_to_native, map_texture_format_to_native,
     map_texture_usage, map_texture_usage_to_native, map_texture_view_descriptor, release_handle,
     string_view, string_view_to_str, DeviceLostCallbackInfo,
+};
+#[cfg(feature = "tiled")]
+use crate::conv::{
+    map_subpass_pass_layout_descriptor, map_subpass_render_pass_descriptor,
+    map_transient_attachment_descriptor,
 };
 use yawgpu_hal::{
     HalInstance, HalPresentMode, HalSurface, HalSurfaceConfiguration, HalTextureFormat,
@@ -193,6 +199,24 @@ pub struct WGPUTextureViewImpl {
 pub struct YaWGPUTransientAttachmentImpl {
     pub(crate) _core: Arc<core::TransientAttachment>,
     pub(crate) _device: Arc<core::Device>,
+    pub(crate) _instance: Arc<WGPUInstanceImpl>,
+}
+
+/// Owns the core object and retained handles for the yawgpu subpass pass layout handle.
+#[cfg(feature = "tiled")]
+pub struct YaWGPUSubpassPassLayoutImpl {
+    pub(crate) _core: Arc<core::SubpassPassLayout>,
+    pub(crate) _device: Arc<core::Device>,
+    pub(crate) _instance: Arc<WGPUInstanceImpl>,
+}
+
+/// Owns the core object and retained handles for the yawgpu subpass render pass encoder handle.
+#[cfg(feature = "tiled")]
+pub struct YaWGPUSubpassRenderPassEncoderImpl {
+    pub(crate) core: Arc<core::SubpassRenderPass>,
+    pub(crate) device: Arc<core::Device>,
+    pub(crate) _parent: Arc<core::CommandEncoder>,
+    pub(crate) _layout: Arc<core::SubpassPassLayout>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }
 

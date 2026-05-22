@@ -138,6 +138,192 @@ pub struct YaWGPUInputAttachmentBindingLayout {
     pub multisampled: native::WGPUBool,
 }
 
+/// yawgpu subpass pass layout handle.
+#[cfg(feature = "tiled")]
+pub type YaWGPUSubpassPassLayout = *const YaWGPUSubpassPassLayoutImpl;
+/// yawgpu subpass render pass encoder handle.
+#[cfg(feature = "tiled")]
+pub type YaWGPUSubpassRenderPassEncoder = *const YaWGPUSubpassRenderPassEncoderImpl;
+/// Depth-stencil source attachment sentinel.
+#[cfg(feature = "tiled")]
+pub const YAWGPU_DEPTH_STENCIL_ATTACHMENT_INDEX: u32 = u32::MAX;
+/// Subpass dependency type.
+#[cfg(feature = "tiled")]
+pub type YaWGPUSubpassDependencyType = u32;
+/// Color-to-input dependency.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUSubpassDependencyType_ColorToInput: YaWGPUSubpassDependencyType = 0;
+/// Depth-to-input dependency.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUSubpassDependencyType_DepthToInput: YaWGPUSubpassDependencyType = 1;
+/// Color-depth-to-input dependency.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUSubpassDependencyType_ColorDepthToInput: YaWGPUSubpassDependencyType = 2;
+/// Subpass attachment kind.
+#[cfg(feature = "tiled")]
+pub type YaWGPUSubpassAttachmentKind = u32;
+/// Persistent texture view attachment kind.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUSubpassAttachmentKind_Persistent: YaWGPUSubpassAttachmentKind = 0;
+/// Transient attachment kind.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUSubpassAttachmentKind_Transient: YaWGPUSubpassAttachmentKind = 1;
+
+/// yawgpu subpass attachment layout.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct YaWGPUAttachmentLayout {
+    /// Format.
+    pub format: native::WGPUTextureFormat,
+    /// Sample count.
+    pub sampleCount: u32,
+}
+
+/// yawgpu subpass dependency.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct YaWGPUSubpassDependency {
+    /// Source subpass.
+    pub srcSubpass: u32,
+    /// Destination subpass.
+    pub dstSubpass: u32,
+    /// Dependency type.
+    pub dependencyType: YaWGPUSubpassDependencyType,
+    /// Whether dependency is region-local.
+    pub byRegion: native::WGPUBool,
+}
+
+/// yawgpu subpass input attachment source.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct YaWGPUSubpassInputAttachment {
+    /// Bind group.
+    pub group: u32,
+    /// Binding.
+    pub binding: u32,
+    /// Source subpass.
+    pub sourceSubpass: u32,
+    /// Source attachment.
+    pub sourceAttachment: u32,
+}
+
+/// yawgpu subpass layout descriptor.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct YaWGPUSubpassLayoutDesc {
+    /// Color attachment indices.
+    pub colorAttachmentIndices: *const u32,
+    /// Color attachment index count.
+    pub colorAttachmentIndexCount: usize,
+    /// Uses depth-stencil.
+    pub usesDepthStencil: native::WGPUBool,
+    /// Input attachments.
+    pub inputAttachments: *const YaWGPUSubpassInputAttachment,
+    /// Input attachment count.
+    pub inputAttachmentCount: usize,
+}
+
+/// yawgpu subpass pass layout descriptor.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct YaWGPUSubpassPassLayoutDescriptor {
+    /// Extension chain.
+    pub nextInChain: *const native::WGPUChainedStruct,
+    /// Label.
+    pub label: native::WGPUStringView,
+    /// Color attachments.
+    pub colorAttachments: *const YaWGPUAttachmentLayout,
+    /// Color attachment count.
+    pub colorAttachmentCount: usize,
+    /// Depth-stencil attachment. Undefined format means absent.
+    pub depthStencilAttachment: YaWGPUAttachmentLayout,
+    /// Subpasses.
+    pub subpasses: *const YaWGPUSubpassLayoutDesc,
+    /// Subpass count.
+    pub subpassCount: usize,
+    /// Dependencies.
+    pub dependencies: *const YaWGPUSubpassDependency,
+    /// Dependency count.
+    pub dependencyCount: usize,
+}
+
+/// yawgpu color attachment binding.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct YaWGPUColorAttachmentBinding {
+    /// Attachment kind.
+    pub kind: YaWGPUSubpassAttachmentKind,
+    /// Persistent view.
+    pub view: native::WGPUTextureView,
+    /// Persistent resolve target.
+    pub resolveTarget: native::WGPUTextureView,
+    /// Transient attachment.
+    pub transient: YaWGPUTransientAttachment,
+    /// Load op.
+    pub loadOp: native::WGPULoadOp,
+    /// Store op.
+    pub storeOp: native::WGPUStoreOp,
+    /// Clear value.
+    pub clearValue: native::WGPUColor,
+}
+
+/// yawgpu depth-stencil attachment binding.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct YaWGPUDepthStencilAttachmentBinding {
+    /// Attachment kind.
+    pub kind: YaWGPUSubpassAttachmentKind,
+    /// Persistent view.
+    pub view: native::WGPUTextureView,
+    /// Transient attachment.
+    pub transient: YaWGPUTransientAttachment,
+    /// Depth load op.
+    pub depthLoadOp: native::WGPULoadOp,
+    /// Depth store op.
+    pub depthStoreOp: native::WGPUStoreOp,
+    /// Depth clear value.
+    pub depthClearValue: f32,
+    /// Stencil load op.
+    pub stencilLoadOp: native::WGPULoadOp,
+    /// Stencil store op.
+    pub stencilStoreOp: native::WGPUStoreOp,
+    /// Stencil clear value.
+    pub stencilClearValue: u32,
+}
+
+/// yawgpu subpass render pass descriptor.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct YaWGPUSubpassRenderPassDescriptor {
+    /// Extension chain.
+    pub nextInChain: *const native::WGPUChainedStruct,
+    /// Label.
+    pub label: native::WGPUStringView,
+    /// Pass layout.
+    pub passLayout: YaWGPUSubpassPassLayout,
+    /// Extent.
+    pub extent: native::WGPUExtent3D,
+    /// Color attachments.
+    pub colorAttachments: *const YaWGPUColorAttachmentBinding,
+    /// Color attachment count.
+    pub colorAttachmentCount: usize,
+    /// Depth-stencil attachment.
+    pub depthStencilAttachment: *const YaWGPUDepthStencilAttachmentBinding,
+}
+
 /// yawgpu vendor extension descriptor for creating a shader module from SPIR-V words.
 #[cfg(feature = "shader-passthrough")]
 #[allow(non_snake_case)]
