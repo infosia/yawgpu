@@ -20,8 +20,8 @@ pub use command::{
 pub use command::{
     HalSubpassAttachmentLayout, HalSubpassAttachmentResource, HalSubpassColorAttachment,
     HalSubpassDependency, HalSubpassDependencyType, HalSubpassDepthStencilAttachment,
-    HalSubpassInputAttachment, HalSubpassLayout, HalSubpassPassLayout, HalSubpassRenderPass,
-    HalSubpassRenderPassCommand,
+    HalSubpassDraw, HalSubpassInputAttachment, HalSubpassLayout, HalSubpassPassLayout,
+    HalSubpassRenderPass, HalSubpassRenderPassCommand,
 };
 #[cfg(feature = "tiled")]
 pub use descriptors::HalTransientAttachmentDescriptor;
@@ -461,6 +461,58 @@ impl HalDevice {
                     fragment_entry_point,
                     descriptor,
                     bindings,
+                )
+                .map(HalRenderPipeline::Metal),
+        }
+    }
+    /// Creates a subpass-compatible render pipeline from the given shaders and pass layout.
+    #[cfg(feature = "tiled")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_subpass_render_pipeline(
+        &self,
+        shader: HalShaderSource,
+        vertex_entry_point: &str,
+        fragment_entry_point: &str,
+        descriptor: &HalRenderPipelineDescriptor,
+        bindings: &[HalDescriptorBinding],
+        pass_layout: &HalSubpassPassLayout,
+        subpass_index: u32,
+    ) -> Result<HalRenderPipeline, HalError> {
+        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+        let _ = (
+            shader,
+            vertex_entry_point,
+            fragment_entry_point,
+            descriptor,
+            bindings,
+            pass_layout,
+            subpass_index,
+        );
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => Ok(HalRenderPipeline::Noop),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(device) => device
+                .create_subpass_render_pipeline(
+                    shader,
+                    vertex_entry_point,
+                    fragment_entry_point,
+                    descriptor,
+                    bindings,
+                    pass_layout,
+                    subpass_index,
+                )
+                .map(HalRenderPipeline::Vulkan),
+            #[cfg(feature = "metal")]
+            Self::Metal(device) => device
+                .create_subpass_render_pipeline(
+                    shader,
+                    vertex_entry_point,
+                    fragment_entry_point,
+                    descriptor,
+                    bindings,
+                    pass_layout,
+                    subpass_index,
                 )
                 .map(HalRenderPipeline::Metal),
         }

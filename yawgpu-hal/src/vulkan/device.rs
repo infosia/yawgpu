@@ -143,6 +143,30 @@ impl VulkanDevice {
             bindings,
         )
     }
+
+    /// Creates a subpass-compatible render pipeline.
+    #[cfg(feature = "tiled")]
+    pub fn create_subpass_render_pipeline(
+        &self,
+        shader: HalShaderSource,
+        vertex_entry_point: &str,
+        fragment_entry_point: &str,
+        descriptor: &HalRenderPipelineDescriptor,
+        bindings: &[HalDescriptorBinding],
+        pass_layout: &HalSubpassPassLayout,
+        subpass_index: u32,
+    ) -> Result<VulkanRenderPipeline, HalError> {
+        create_subpass_render_pipeline(
+            Arc::clone(&self.inner),
+            shader,
+            vertex_entry_point,
+            fragment_entry_point,
+            descriptor,
+            bindings,
+            pass_layout,
+            subpass_index,
+        )
+    }
 }
 
 /// Returns physical device name.
