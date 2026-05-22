@@ -370,6 +370,18 @@ typedef struct YaWGPUSubpassRenderPassDescriptor {
     /*.depthStencilAttachment=*/NULL _wgpu_COMMA \
 })
 
+typedef struct YaWGPUTransientDispatchDescriptor {
+    WGPUChainedStruct const* nextInChain;
+    uint32_t tileWidth;
+    uint32_t tileHeight;
+} YaWGPUTransientDispatchDescriptor;
+
+#define YAWGPU_TRANSIENT_DISPATCH_DESCRIPTOR_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUTransientDispatchDescriptor, { \
+    /*.nextInChain=*/NULL _wgpu_COMMA \
+    /*.tileWidth=*/0 _wgpu_COMMA \
+    /*.tileHeight=*/0 _wgpu_COMMA \
+})
+
 YaWGPUSubpassRenderPassEncoder yawgpuCommandEncoderBeginSubpassRenderPass(
     WGPUCommandEncoder encoder,
     YaWGPUSubpassRenderPassDescriptor const* descriptor);
@@ -381,6 +393,7 @@ void yawgpuSubpassRenderPassEncoderSetVertexBuffer(YaWGPUSubpassRenderPassEncode
 void yawgpuSubpassRenderPassEncoderSetIndexBuffer(YaWGPUSubpassRenderPassEncoder encoder, WGPUBuffer buffer, WGPUIndexFormat format, uint64_t offset, uint64_t size);
 void yawgpuSubpassRenderPassEncoderDraw(YaWGPUSubpassRenderPassEncoder encoder, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance);
 void yawgpuSubpassRenderPassEncoderDrawIndexed(YaWGPUSubpassRenderPassEncoder encoder, uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t baseVertex, uint32_t firstInstance);
+void yawgpuSubpassRenderPassEncoderDispatchTransient(YaWGPUSubpassRenderPassEncoder encoder, YaWGPUTransientDispatchDescriptor const* descriptor);
 void yawgpuSubpassRenderPassEncoderSetViewport(YaWGPUSubpassRenderPassEncoder encoder, float x, float y, float width, float height, float minDepth, float maxDepth);
 void yawgpuSubpassRenderPassEncoderSetScissorRect(YaWGPUSubpassRenderPassEncoder encoder, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
 void yawgpuSubpassRenderPassEncoderAddRef(YaWGPUSubpassRenderPassEncoder encoder);

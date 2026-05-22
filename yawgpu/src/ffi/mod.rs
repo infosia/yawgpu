@@ -72,15 +72,15 @@ use crate::{
     native, YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_METAL,
     YAWGPU_INSTANCE_BACKEND_VULKAN, YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
 };
-#[cfg(feature = "shader-passthrough")]
-use crate::{
-    YaWGPUMslEntryPoint, YaWGPUShaderModuleMslDescriptor, YaWGPUShaderModuleSpirVDescriptor,
-};
 #[cfg(feature = "tiled")]
 use crate::{
     YaWGPUSubpassPassLayoutDescriptor, YaWGPUSubpassRenderPassDescriptor,
     YaWGPUSubpassRenderPipelineDescriptor, YaWGPUTiledCapabilities,
-    YaWGPUTransientAttachmentDescriptor,
+    YaWGPUTransientAttachmentDescriptor, YaWGPUTransientDispatchDescriptor,
+};
+#[cfg(feature = "shader-passthrough")]
+use crate::{
+    YaWGPUMslEntryPoint, YaWGPUShaderModuleMslDescriptor, YaWGPUShaderModuleSpirVDescriptor,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::os::raw::c_void;
@@ -109,6 +109,7 @@ use crate::conv::{
 use crate::conv::{
     map_subpass_pass_layout_descriptor, map_subpass_render_pass_descriptor,
     map_subpass_render_pipeline_descriptor, map_transient_attachment_descriptor,
+    map_transient_dispatch_descriptor,
 };
 use yawgpu_hal::{
     HalInstance, HalPresentMode, HalSurface, HalSurfaceConfiguration, HalTextureFormat,
@@ -3328,6 +3329,79 @@ mod tests {
             yawgpuTransientAttachmentRelease(attachment);
             yawgpuTransientAttachmentRelease(attachment);
 
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn yawgpuSubpassRenderPassEncoderDispatchTransient_reports_unsupported() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let device = request_noop_device(instance, adapter);
+
+            let subpass = crate::YaWGPUSubpassLayoutDesc {
+                colorAttachmentIndices: std::ptr::null(),
+                colorAttachmentIndexCount: 0,
+                usesDepthStencil: 0,
+                inputAttachments: std::ptr::null(),
+                inputAttachmentCount: 0,
+            };
+            let layout_descriptor = YaWGPUSubpassPassLayoutDescriptor {
+                nextInChain: std::ptr::null(),
+                label: empty_string_view(),
+                colorAttachments: std::ptr::null(),
+                colorAttachmentCount: 0,
+                depthStencilAttachment: crate::YaWGPUAttachmentLayout {
+                    format: native::WGPUTextureFormat_Undefined,
+                    sampleCount: 1,
+                },
+                subpasses: &subpass,
+                subpassCount: 1,
+                dependencies: std::ptr::null(),
+                dependencyCount: 0,
+            };
+            let layout = yawgpuDeviceCreateSubpassPassLayout(device, &layout_descriptor);
+            assert!(!layout.is_null());
+
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass_descriptor = YaWGPUSubpassRenderPassDescriptor {
+                nextInChain: std::ptr::null(),
+                label: empty_string_view(),
+                passLayout: layout,
+                extent: native::WGPUExtent3D {
+                    width: 4,
+                    height: 4,
+                    depthOrArrayLayers: 1,
+                },
+                colorAttachments: std::ptr::null(),
+                colorAttachmentCount: 0,
+                depthStencilAttachment: std::ptr::null(),
+            };
+            let pass = yawgpuCommandEncoderBeginSubpassRenderPass(encoder, &pass_descriptor);
+            assert!(!pass.is_null());
+
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let dispatch = YaWGPUTransientDispatchDescriptor {
+                nextInChain: std::ptr::null(),
+                tileWidth: 8,
+                tileHeight: 8,
+            };
+            yawgpuSubpassRenderPassEncoderDispatchTransient(pass, &dispatch);
+            assert_validation_error_contains(
+                instance,
+                device,
+                "programmable tile dispatch is not implemented",
+            );
+
+            yawgpuSubpassRenderPassEncoderEnd(pass);
+            yawgpuSubpassRenderPassEncoderRelease(pass);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!command_buffer.is_null());
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuCommandEncoderRelease(encoder);
+            yawgpuSubpassPassLayoutRelease(layout);
             release_handles(instance, adapter, device);
         }
     }

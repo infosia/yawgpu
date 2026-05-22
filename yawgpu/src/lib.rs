@@ -339,6 +339,19 @@ pub struct YaWGPUSubpassRenderPassDescriptor {
     pub depthStencilAttachment: *const YaWGPUDepthStencilAttachmentBinding,
 }
 
+/// yawgpu programmable transient tile dispatch descriptor.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct YaWGPUTransientDispatchDescriptor {
+    /// Extension chain.
+    pub nextInChain: *const native::WGPUChainedStruct,
+    /// Tile width.
+    pub tileWidth: u32,
+    /// Tile height.
+    pub tileHeight: u32,
+}
+
 /// yawgpu vendor extension descriptor for creating a shader module from SPIR-V words.
 #[cfg(feature = "shader-passthrough")]
 #[allow(non_snake_case)]

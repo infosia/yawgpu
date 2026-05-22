@@ -424,6 +424,18 @@ pub unsafe fn map_subpass_render_pass_descriptor(
     }
 }
 
+/// Converts a transient dispatch descriptor to the core representation.
+#[cfg(feature = "tiled")]
+#[must_use]
+pub fn map_transient_dispatch_descriptor(
+    descriptor: &crate::YaWGPUTransientDispatchDescriptor,
+) -> core::TransientDispatchDescriptor {
+    core::TransientDispatchDescriptor {
+        tile_width: descriptor.tileWidth,
+        tile_height: descriptor.tileHeight,
+    }
+}
+
 #[cfg(feature = "tiled")]
 fn map_color_attachment_binding(
     attachment: &crate::YaWGPUColorAttachmentBinding,

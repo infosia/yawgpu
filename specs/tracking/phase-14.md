@@ -265,11 +265,20 @@ test/`clippy -D warnings` green. T17:
 4/4 (no extensions → `ShaderFramebufferFetch` honestly not advertised, no
 false-fail).
 
-## B7 — programmable tile dispatch scaffold  *(☐ TODO)*
+## B7 — programmable tile dispatch scaffold  *(☑ DONE)*
 
-`yawgpuSubpassRenderPassEncoderDispatchTransient` wired through C/core/HAL,
-returns unsupported on every backend.
-*Accept:* T18 unit-tested (returns unsupported on all backends).
+Done: `YaWGPUTransientDispatchDescriptor { tileWidth, tileHeight }` + INIT in
+`yawgpu.h`; Rust `#[repr(C)]` mirror + conv; core
+`SubpassRenderPass::dispatch_transient` records the unsupported error
+("programmable tile dispatch is not implemented") through the encoder's error
+sink (no panic, no real backend needed); FFI
+`yawgpuSubpassRenderPassEncoderDispatchTransient` routes it to the device error
+sink. Scaffold only — no working backend impl exists to port.
+*Gate (Claude-run):* all five build configs compile (default / vulkan / metal /
+metal,tiled / vulkan,tiled `--tests`); default + `--features tiled` test/`clippy
+-D warnings` green; tiled example builds. T18:
+`subpass_render_pass_dispatch_transient_records_unsupported_error`. Noop-complete
+(the unsupported guarantee is structural across all backends).
 
 ## B8 — examples + e2e + Phase Review  *(☐ TODO)*
 
