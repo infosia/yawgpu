@@ -639,6 +639,7 @@ name = "yawgpu"
 version = "0.1.0"
 dependencies = [
  "bindgen",
+ "naga",
  "yawgpu-core",
  "yawgpu-hal",
  "yawgpu-test",

@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use yawgpu::native;
 #[cfg(feature = "vulkan")]
 use yawgpu::{
-    WGPUYawgpuInstanceBackendSelect, WGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT,
-    WGPU_YAWGPU_INSTANCE_BACKEND_VULKAN,
+    YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_VULKAN,
+    YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
 };
 use yawgpu_test::wait;
 #[cfg(feature = "vulkan")]
@@ -96,12 +96,12 @@ fn default_instance_still_selects_noop() {
 
 #[cfg(feature = "vulkan")]
 unsafe fn create_vulkan_instance() -> native::WGPUInstance {
-    let mut backend = WGPUYawgpuInstanceBackendSelect {
+    let mut backend = YaWGPUInstanceBackendSelect {
         chain: native::WGPUChainedStruct {
             next: std::ptr::null_mut(),
-            sType: WGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT,
+            sType: YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
         },
-        backend: WGPU_YAWGPU_INSTANCE_BACKEND_VULKAN,
+        backend: YAWGPU_INSTANCE_BACKEND_VULKAN,
     };
     let descriptor = native::WGPUInstanceDescriptor {
         nextInChain: (&mut backend.chain) as *mut native::WGPUChainedStruct,

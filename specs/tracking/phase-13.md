@@ -106,10 +106,26 @@ FFI tests: `yawgpu_spirv_shader_module_ffi_accepts_valid_words_and_errors_on_bad
 *MINOR (deferred to A5 review):* the feature-off "SPIR-V passthrough not enabled"
 degrade exists in `device.rs` but has no direct asserting test.
 
-## A4 — real-backend e2e (`#[ignore]`)  *(☐ TODO)*
+## A4 — real-backend e2e (`#[ignore]`)  *(☑ DONE)*
 
-Vulkan SPIR-V compute + render (SP3); Metal MSL compute + render (MP4). Run by
-Claude; log results here.
+Done: **(0)** finished the A0 vendor-symbol rename leak in `yawgpu/tests/` — all
+10 `e2e_{metal,vulkan}_*.rs` still used the old `WGPUYawgpu*` names and failed
+to compile under `--features metal`/`vulkan` (A0's gate omitted the
+backend-feature `--tests` build; that's now added to the standing gate). **(1)**
+new `e2e_{metal,vulkan}_shader_passthrough.rs` (`#[ignore]`, cfg-gated on
+backend + `shader-passthrough`); SPIR-V words generated at test time from WGSL
+via a `naga` dev-dependency (`wgsl-in,spv-out`).
+*Build:* `cargo build -p yawgpu --tests` with `metal` / `vulkan` /
+`metal,shader-passthrough` / `vulkan,shader-passthrough` all compile; default
+Noop `cargo test --workspace` + `clippy -D warnings` green.
+*Real-GPU runs (Claude, this Apple Silicon):*
+- Metal `--features metal,shader-passthrough -- --ignored`:
+  `metal_msl_compute_fills_storage_buffer`, `metal_msl_render_draws_constant_color_triangle`
+  → **2 passed** (MP4 verified).
+- Vulkan (MoltenVK, `$VULKAN_SDK` 1.3.296.0 sourced)
+  `--features vulkan,shader-passthrough -- --ignored`:
+  `vulkan_spirv_compute_fills_storage_buffer`, `vulkan_spirv_render_draws_constant_color_triangle`
+  → **2 passed** (SP3 verified).
 
 ## A5 — Phase Review  *(☐ TODO)*
 

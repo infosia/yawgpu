@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use yawgpu::native;
 #[cfg(feature = "metal")]
 use yawgpu::{
-    WGPUYawgpuInstanceBackendSelect, WGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT,
-    WGPU_YAWGPU_INSTANCE_BACKEND_METAL,
+    YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_METAL,
+    YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
 };
 use yawgpu_test::wait;
 #[cfg(feature = "metal")]
@@ -338,12 +338,12 @@ unsafe fn create_wgsl_module(device: native::WGPUDevice, source: &str) -> native
 
 #[cfg(feature = "metal")]
 unsafe fn create_metal_instance() -> native::WGPUInstance {
-    let mut backend = WGPUYawgpuInstanceBackendSelect {
+    let mut backend = YaWGPUInstanceBackendSelect {
         chain: native::WGPUChainedStruct {
             next: std::ptr::null_mut(),
-            sType: WGPU_STYPE_YAWGPU_INSTANCE_BACKEND_SELECT,
+            sType: YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
         },
-        backend: WGPU_YAWGPU_INSTANCE_BACKEND_METAL,
+        backend: YAWGPU_INSTANCE_BACKEND_METAL,
     };
     let descriptor = native::WGPUInstanceDescriptor {
         nextInChain: (&mut backend.chain) as *mut native::WGPUChainedStruct,

@@ -23,4 +23,5 @@ yawgpu-hal = { path = "../yawgpu-hal" }
 bindgen = "0.72"
 
 [dev-dependencies]
+naga = { workspace = true, features = ["wgsl-in", "spv-out"] }
 yawgpu-test = { path = "../yawgpu-test" }
