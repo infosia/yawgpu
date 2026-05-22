@@ -135,14 +135,48 @@ green; metal/vulkan/*,tiled `--tests` compile; tiled example builds. T6:
 `vulkan_clear_only_subpass_pass_submits_without_device_error` → **passed** (no
 validation errors). (draws/pipelines = B5; full deferred-shading demo = B8.)
 
-## B5 — subpass pipeline + dedicated draw encoder  *(☐ TODO)*
+## B5 — subpass pipeline + dedicated draw encoder
 
-`yawgpuDeviceCreateSubpassRenderPipeline` referencing the **same**
-`passLayout`+`subpassIndex` (Vulkan compat `VkRenderPass` from the layout, Metal
-forward); the dedicated draw machinery
-(`yawgpuSubpassRenderPassEncoderSet*/Draw*/...`) with resource tracking;
-pipeline↔pass layout-match check at draw.
-*Accept:* T15 (noop), T16 (noop) unit-tested; both e2e.
+Split for reviewability (the real-backend draw execution is the heavy half, like
+B4): **B5a** = subpass-pipeline descriptor/validation + draw-command recording +
+resource tracking, Noop-complete; **B5b** = real HAL draw execution + Vulkan
+subpass-pipeline↔cached-multi-subpass-pass compatibility + INPUT_ATTACHMENT
+descriptor binding + Metal color-slot map + the 2-subpass draw+read e2e.
+
+### B5a — subpass pipeline + draw recording (Noop)  *(☑ DONE)*
+
+Done: `SubpassRenderPipelineDescriptor` (base RP descriptor + `passLayout` +
+`subpass_index`); `Device::create_subpass_render_pipeline` +
+`validate_subpass_render_pipeline_descriptor` (T15: color/depth formats vs the
+layout's subpass, subpass-index range, layout-match). `SubpassRenderPass`
+draw methods (`set_pipeline`/`set_bind_group`/`set_vertex_buffer`/
+`set_index_buffer`/`draw`/`draw_indexed`/`set_viewport`/`set_scissor_rect`)
+record into the active subpass + register resource tracking (T16). C:
+`yawgpu.h` `YaWGPUSubpassRenderPipelineDescriptor` + INIT +
+`yawgpuDeviceCreateSubpassRenderPipeline` + the
+`yawgpuSubpassRenderPassEncoder*` draw fns; Rust `#[repr(C)]` mirror + conv
+(embedded base descriptor). `RenderPipeline::new_subpass` carries `subpass_index`.
+*Gate (Claude-run):* default + `--features tiled` test/`clippy -D warnings`
+green; metal/vulkan/*,tiled `--tests` compile; tiled example builds. Tests: T15
+(`subpass_render_pipeline_validates_layout_formats_and_subpass_match`), T16
+(`subpass_render_pass_draw_records_active_subpass_and_resources`).
+*Gap → B5b:* no HAL changes yet — draws are recorded in core but not executed on
+a real backend; the subpass pipeline is not yet built against the cached
+multi-subpass `VkRenderPass`; no input-attachment descriptor binding / Metal
+color-slot map; no e2e.
+
+### B5b — real backend draw execution + input wiring + e2e  *(☐ TODO)*
+
+Fill the HAL: record subpass draws into the active `HalSubpassRenderPass`
+(Vulkan command buffer / Metal `MTLRenderCommandEncoder`); build the Vulkan
+subpass `VkGraphicsPipeline` against the **cached multi-subpass `VkRenderPass`**
+with `.subpass(subpass_index)` (not the throwaway pass `create_render_pipeline`
+uses); allocate + bind `VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT` sets from the pass
+layout's input source mapping; supply the Metal pass-local color-slot map so the
+global `subpass_input` MSL form lowers. e2e: a 2-subpass G-buffer→lighting
+draw+`subpassLoad`+read on Vulkan and Metal.
+*Accept:* T15/T16 e2e; subpass pipelines bind the cached pass; no Vulkan
+validation errors.
 
 ## B6 — framebuffer fetch path detection  *(☐ TODO)*
 

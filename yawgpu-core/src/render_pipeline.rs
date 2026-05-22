@@ -15,6 +15,8 @@ use crate::pipeline_layout::*;
 use crate::sampler::*;
 use crate::shader::*;
 use crate::shader_naga;
+#[cfg(feature = "tiled")]
+use crate::subpass::SubpassPassLayout;
 use crate::texture::*;
 
 /// Stores attachment signature data used by validation and backend submission.
@@ -360,7 +362,31 @@ pub(crate) struct RenderPipelineInner {
     pub(crate) vertex_buffer_bindings: Vec<MetalVertexBufferBinding>,
     pub(crate) hal: Option<HalRenderPipeline>,
     pub(crate) bind_group_layouts: Vec<Arc<BindGroupLayout>>,
+    #[cfg(feature = "tiled")]
+    pub(crate) subpass_compatibility: Option<SubpassPipelineCompatibility>,
     pub(crate) is_error: bool,
+}
+
+/// Describes subpass-pipeline compatibility metadata.
+#[cfg(feature = "tiled")]
+#[derive(Debug, Clone)]
+pub(crate) struct SubpassPipelineCompatibility {
+    pub(crate) pass_layout: Arc<SubpassPassLayout>,
+    pub(crate) subpass_index: u32,
+}
+
+/// Describes a subpass render pipeline descriptor.
+#[cfg(feature = "tiled")]
+#[derive(Debug, Clone)]
+pub struct SubpassRenderPipelineDescriptor {
+    /// Base render pipeline descriptor.
+    pub base: RenderPipelineDescriptor,
+    /// Compatible subpass pass layout.
+    pub pass_layout: Arc<SubpassPassLayout>,
+    /// Compatible subpass index.
+    pub subpass_index: u32,
+    /// Descriptor error from FFI conversion.
+    pub error: Option<String>,
 }
 
 /// Stores binding metadata.
@@ -430,10 +456,35 @@ impl RenderPipeline {
                     vertex_buffer_bindings,
                     hal,
                     bind_group_layouts,
+                    #[cfg(feature = "tiled")]
+                    subpass_compatibility: None,
                     is_error,
                 }),
             },
             backend_error,
+        )
+    }
+
+    /// Creates a new subpass-compatible render pipeline.
+    #[cfg(feature = "tiled")]
+    pub(crate) fn new_subpass(
+        descriptor: SubpassRenderPipelineDescriptor,
+        is_error: bool,
+        limits: Limits,
+        hal_device: Option<&HalDevice>,
+    ) -> (Self, Option<String>) {
+        let compatibility = SubpassPipelineCompatibility {
+            pass_layout: Arc::clone(&descriptor.pass_layout),
+            subpass_index: descriptor.subpass_index,
+        };
+        let (pipeline, error) = Self::new(descriptor.base, is_error, limits, hal_device);
+        let mut inner = (*pipeline.inner).clone_for_subpass(compatibility);
+        inner.is_error |= is_error;
+        (
+            Self {
+                inner: Arc::new(inner),
+            },
+            error,
         )
     }
 
@@ -512,6 +563,37 @@ impl RenderPipeline {
                 .unwrap_or_default(),
             depth_stencil_format: self.inner._depth_stencil.map(|depth| depth.format),
             sample_count: self.inner._multisample.count,
+        }
+    }
+
+    /// Returns subpass compatibility metadata.
+    #[cfg(feature = "tiled")]
+    pub(crate) fn subpass_compatibility(&self) -> Option<&SubpassPipelineCompatibility> {
+        self.inner.subpass_compatibility.as_ref()
+    }
+}
+
+#[cfg(feature = "tiled")]
+impl RenderPipelineInner {
+    fn clone_for_subpass(
+        &self,
+        compatibility: SubpassPipelineCompatibility,
+    ) -> RenderPipelineInner {
+        RenderPipelineInner {
+            _layout: self._layout.clone(),
+            _vertex: self._vertex.clone(),
+            _primitive: self._primitive,
+            _depth_stencil: self._depth_stencil,
+            _multisample: self._multisample,
+            _fragment: self._fragment.clone(),
+            vertex_entry_name: self.vertex_entry_name.clone(),
+            fragment_entry_name: self.fragment_entry_name.clone(),
+            metal_bindings: self.metal_bindings.clone(),
+            vertex_buffer_bindings: self.vertex_buffer_bindings.clone(),
+            hal: self.hal.clone(),
+            bind_group_layouts: self.bind_group_layouts.clone(),
+            subpass_compatibility: Some(compatibility),
+            is_error: self.is_error,
         }
     }
 }

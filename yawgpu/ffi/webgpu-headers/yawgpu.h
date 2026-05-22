@@ -282,6 +282,24 @@ YaWGPUSubpassPassLayout yawgpuDeviceCreateSubpassPassLayout(
 void yawgpuSubpassPassLayoutAddRef(YaWGPUSubpassPassLayout layout);
 void yawgpuSubpassPassLayoutRelease(YaWGPUSubpassPassLayout layout);
 
+typedef struct YaWGPUSubpassRenderPipelineDescriptor {
+    WGPUChainedStruct const* nextInChain;
+    WGPURenderPipelineDescriptor base;
+    YaWGPUSubpassPassLayout passLayout;
+    uint32_t subpassIndex;
+} YaWGPUSubpassRenderPipelineDescriptor;
+
+#define YAWGPU_SUBPASS_RENDER_PIPELINE_DESCRIPTOR_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUSubpassRenderPipelineDescriptor, { \
+    /*.nextInChain=*/NULL _wgpu_COMMA \
+    /*.base=*/WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT _wgpu_COMMA \
+    /*.passLayout=*/NULL _wgpu_COMMA \
+    /*.subpassIndex=*/0 _wgpu_COMMA \
+})
+
+WGPURenderPipeline yawgpuDeviceCreateSubpassRenderPipeline(
+    WGPUDevice device,
+    YaWGPUSubpassRenderPipelineDescriptor const* descriptor);
+
 typedef enum YaWGPUSubpassAttachmentKind {
     YaWGPUSubpassAttachmentKind_Persistent = 0x00000000,
     YaWGPUSubpassAttachmentKind_Transient = 0x00000001,
@@ -357,6 +375,14 @@ YaWGPUSubpassRenderPassEncoder yawgpuCommandEncoderBeginSubpassRenderPass(
     YaWGPUSubpassRenderPassDescriptor const* descriptor);
 void yawgpuSubpassRenderPassEncoderNextSubpass(YaWGPUSubpassRenderPassEncoder encoder);
 void yawgpuSubpassRenderPassEncoderEnd(YaWGPUSubpassRenderPassEncoder encoder);
+void yawgpuSubpassRenderPassEncoderSetPipeline(YaWGPUSubpassRenderPassEncoder encoder, WGPURenderPipeline pipeline);
+void yawgpuSubpassRenderPassEncoderSetBindGroup(YaWGPUSubpassRenderPassEncoder encoder, uint32_t groupIndex, WGPUBindGroup group, size_t dynamicOffsetCount, uint32_t const* dynamicOffsets);
+void yawgpuSubpassRenderPassEncoderSetVertexBuffer(YaWGPUSubpassRenderPassEncoder encoder, uint32_t slot, WGPUBuffer buffer, uint64_t offset, uint64_t size);
+void yawgpuSubpassRenderPassEncoderSetIndexBuffer(YaWGPUSubpassRenderPassEncoder encoder, WGPUBuffer buffer, WGPUIndexFormat format, uint64_t offset, uint64_t size);
+void yawgpuSubpassRenderPassEncoderDraw(YaWGPUSubpassRenderPassEncoder encoder, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance);
+void yawgpuSubpassRenderPassEncoderDrawIndexed(YaWGPUSubpassRenderPassEncoder encoder, uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t baseVertex, uint32_t firstInstance);
+void yawgpuSubpassRenderPassEncoderSetViewport(YaWGPUSubpassRenderPassEncoder encoder, float x, float y, float width, float height, float minDepth, float maxDepth);
+void yawgpuSubpassRenderPassEncoderSetScissorRect(YaWGPUSubpassRenderPassEncoder encoder, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
 void yawgpuSubpassRenderPassEncoderAddRef(YaWGPUSubpassRenderPassEncoder encoder);
 void yawgpuSubpassRenderPassEncoderRelease(YaWGPUSubpassRenderPassEncoder encoder);
 

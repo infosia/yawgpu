@@ -257,6 +257,21 @@ pub struct YaWGPUSubpassPassLayoutDescriptor {
     pub dependencyCount: usize,
 }
 
+/// yawgpu subpass render pipeline descriptor.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct YaWGPUSubpassRenderPipelineDescriptor {
+    /// Extension chain.
+    pub nextInChain: *const native::WGPUChainedStruct,
+    /// Base render pipeline descriptor.
+    pub base: native::WGPURenderPipelineDescriptor,
+    /// Compatible pass layout.
+    pub passLayout: YaWGPUSubpassPassLayout,
+    /// Compatible subpass index.
+    pub subpassIndex: u32,
+}
+
 /// yawgpu color attachment binding.
 #[cfg(feature = "tiled")]
 #[allow(non_snake_case)]

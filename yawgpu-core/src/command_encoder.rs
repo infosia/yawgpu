@@ -167,6 +167,8 @@ pub(crate) struct SubpassRenderPassCommand {
     pub(crate) extent: Extent3d,
     pub(crate) color_attachments: Vec<SubpassColorAttachmentBinding>,
     pub(crate) depth_stencil_attachment: Option<SubpassDepthStencilAttachmentBinding>,
+    #[allow(dead_code)]
+    pub(crate) draws: Vec<SubpassDrawExecution>,
 }
 
 /// Stores color metadata.
