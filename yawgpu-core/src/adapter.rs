@@ -66,7 +66,22 @@ impl Adapter {
     /// Returns the features.
     #[must_use]
     pub fn features(&self) -> FeatureSet {
-        supported_features()
+        #[cfg(not(feature = "tiled"))]
+        {
+            supported_features()
+        }
+
+        #[cfg(feature = "tiled")]
+        {
+            let mut features = supported_features();
+            if tiled_features_supported(self.backend()) {
+                features.insert(Feature::MultiSubpass);
+                features.insert(Feature::TransientAttachments);
+                features.insert(Feature::ShaderFramebufferFetch);
+                features.insert(Feature::ProgrammableTileDispatch);
+            }
+            features
+        }
     }
 
     /// Returns true when this object has the requested feature.
@@ -142,8 +157,34 @@ pub enum Feature {
     TextureFormatsTier1,
     /// Texture formats tier2 variant.
     TextureFormatsTier2,
+    /// Multi-subpass render pass support.
+    #[cfg(feature = "tiled")]
+    MultiSubpass,
+    /// Transient attachment support.
+    #[cfg(feature = "tiled")]
+    TransientAttachments,
+    /// Shader framebuffer fetch support.
+    #[cfg(feature = "tiled")]
+    ShaderFramebufferFetch,
+    /// Programmable tile dispatch support.
+    #[cfg(feature = "tiled")]
+    ProgrammableTileDispatch,
     /// Other variant.
     Other(u32),
+}
+
+/// Stores tiled rendering limits exposed by the adapter.
+#[cfg(feature = "tiled")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TiledCapabilities {
+    /// Maximum number of subpasses in one tiled render pass.
+    pub max_subpasses: u32,
+    /// Maximum number of color attachments in a subpass.
+    pub max_subpass_color_attachments: u32,
+    /// Maximum number of input attachments in a subpass.
+    pub max_input_attachments: u32,
+    /// Estimated tile memory budget, in bytes.
+    pub estimated_tile_memory_bytes: u32,
 }
 
 /// Returns supported features.
@@ -158,6 +199,37 @@ pub(crate) fn supported_features() -> FeatureSet {
     ]
     .into_iter()
     .collect()
+}
+
+/// Returns true when tiled rendering features are supported by `backend`.
+#[cfg(feature = "tiled")]
+#[must_use]
+pub(crate) fn tiled_features_supported(backend: HalBackend) -> bool {
+    matches!(backend, HalBackend::Metal | HalBackend::Vulkan)
+}
+
+#[cfg(feature = "tiled")]
+impl Adapter {
+    /// Returns tiled rendering capabilities for this adapter.
+    #[must_use]
+    pub fn tiled_capabilities(&self) -> TiledCapabilities {
+        if !tiled_features_supported(self.backend()) {
+            return TiledCapabilities {
+                max_subpasses: 0,
+                max_subpass_color_attachments: 0,
+                max_input_attachments: 0,
+                estimated_tile_memory_bytes: 0,
+            };
+        }
+
+        let limits = self.limits();
+        TiledCapabilities {
+            max_subpasses: 4,
+            max_subpass_color_attachments: limits.max_color_attachments,
+            max_input_attachments: limits.max_color_attachments,
+            estimated_tile_memory_bytes: 256 * 1024,
+        }
+    }
 }
 
 /// Returns apply feature implications.
@@ -226,5 +298,35 @@ mod tests {
         assert_eq!(device.label(), "device label");
         assert!(device.has_feature(Feature::CoreFeaturesAndLimits));
         assert_eq!(device.queue().label(), "queue label");
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn tiled_features_supported_is_backend_aware_and_noop_does_not_advertise() {
+        assert!(!tiled_features_supported(HalBackend::Noop));
+        assert!(tiled_features_supported(HalBackend::Metal));
+        assert!(tiled_features_supported(HalBackend::Vulkan));
+
+        let adapter = noop_adapter();
+        assert!(!adapter.has_feature(Feature::MultiSubpass));
+        assert!(!adapter.has_feature(Feature::TransientAttachments));
+        assert!(!adapter.has_feature(Feature::ShaderFramebufferFetch));
+        assert!(!adapter.has_feature(Feature::ProgrammableTileDispatch));
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn tiled_capabilities_are_zero_on_noop() {
+        let adapter = noop_adapter();
+
+        assert_eq!(
+            adapter.tiled_capabilities(),
+            TiledCapabilities {
+                max_subpasses: 0,
+                max_subpass_color_attachments: 0,
+                max_input_attachments: 0,
+                estimated_tile_memory_bytes: 0,
+            }
+        );
     }
 }

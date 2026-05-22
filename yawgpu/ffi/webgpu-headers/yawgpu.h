@@ -124,7 +124,32 @@ WGPUShaderModule yawgpuDeviceCreateShaderModuleMsl(
 #endif
 
 #if defined(YAWGPU_HAS_TILED)
-/* Phase 14 adds the tiled surface here. */
+#define YaWGPUFeatureName_MultiSubpass ((WGPUFeatureName)0x70010001u)
+#define YaWGPUFeatureName_TransientAttachments ((WGPUFeatureName)0x70010002u)
+#define YaWGPUFeatureName_ShaderFramebufferFetch ((WGPUFeatureName)0x70010003u)
+#define YaWGPUFeatureName_ProgrammableTileDispatch ((WGPUFeatureName)0x70010004u)
+
+typedef struct YaWGPUTiledCapabilities {
+    WGPUChainedStruct const* nextInChain;
+    uint32_t maxSubpasses;
+    uint32_t maxSubpassColorAttachments;
+    uint32_t maxInputAttachments;
+    uint32_t estimatedTileMemoryBytes;
+} YaWGPUTiledCapabilities;
+
+#define YAWGPU_TILED_CAPABILITIES_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUTiledCapabilities, { \
+    /*.nextInChain=*/NULL _wgpu_COMMA \
+    /*.maxSubpasses=*/0 _wgpu_COMMA \
+    /*.maxSubpassColorAttachments=*/0 _wgpu_COMMA \
+    /*.maxInputAttachments=*/0 _wgpu_COMMA \
+    /*.estimatedTileMemoryBytes=*/0 _wgpu_COMMA \
+})
+
+WGPUStatus yawgpuAdapterGetTiledCapabilities(
+    WGPUAdapter adapter,
+    YaWGPUTiledCapabilities* capabilities);
+
+/* B2+ adds transient/subpass surface here. */
 #endif
 
 #endif

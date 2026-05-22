@@ -22,11 +22,24 @@ naga subpass IR is already present in the pinned naga (see
 `../reference/dependencies.md`) — B3 enables + wires it, it does not implement
 naga.
 
-## B1 — features + TiledCapabilities query  *(☐ TODO)*
+## B1 — features + TiledCapabilities query  *(☑ DONE)*
 
-Vendor `WGPUFeatureName` constants + `yawgpuAdapterGetTiledCapabilities`
-backed by per-backend limits; Noop returns zeros.
-*Accept:* T1, T2 unit-tested (noop) + e2e advertise check.
+Done: core `Feature::{MultiSubpass,TransientAttachments,ShaderFramebufferFetch,
+ProgrammableTileDispatch}` (gated); `Adapter::features()` advertises them only
+when `tiled` is on AND `tiled_features_supported(backend)` (pure helper: Noop
+false / Metal+Vulkan true). `TiledCapabilities` + `Adapter::tiled_capabilities()`
+(Noop zeros; Metal/Vulkan from limits). C: `yawgpu.h` `YAWGPU_HAS_TILED` block
+(feature-name `#define`s, `YaWGPUTiledCapabilities` + INIT macro, query decl);
+Rust `#[repr(C)]` mirror + `YaWGPUFeatureName_*` consts; `conv/feature.rs`
+maps the vendor names both ways; `yawgpuAdapterGetTiledCapabilities` FFI.
+*Gate (Claude-run):* default + `--features tiled` test/`clippy -D warnings`
+green; metal/vulkan/metal,tiled/vulkan,tiled `--tests` compile; metal example
+builds with `-DYAWGPU_EXTENSIONS=tiled`. T1
+(`yawgpuAdapterGetTiledCapabilities_writes_noop_zeros_and_rejects_null_out`),
+T2 (`map_feature_accepts_tiled_vendor_feature_names`,
+`wgpuAdapterHasFeature_reports_...`). *Real-GPU (Claude):*
+`metal_tiled_features_and_capabilities_are_advertised`,
+`vulkan_tiled_features_and_capabilities_are_advertised` → **both passed**.
 
 ## B2 — transient attachment resource  *(☐ TODO)*
 

@@ -68,6 +68,8 @@ use surface::*;
 #[cfg(test)]
 use texture::*;
 
+#[cfg(feature = "tiled")]
+use crate::YaWGPUTiledCapabilities;
 use crate::{
     native, YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_METAL,
     YAWGPU_INSTANCE_BACKEND_VULKAN, YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
@@ -3226,6 +3228,42 @@ mod tests {
             assert_eq!(
                 wgpuAdapterHasFeature(adapter, 0xFFFF_FFFFu32 as native::WGPUFeatureName),
                 0
+            );
+
+            release_handles(instance, adapter, std::ptr::null());
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn yawgpuAdapterGetTiledCapabilities_writes_noop_zeros_and_rejects_null_out() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let preserved_chain = native::WGPUChainedStruct {
+                next: std::ptr::null_mut(),
+                sType: 0xCAFE,
+            };
+            let mut capabilities = YaWGPUTiledCapabilities {
+                nextInChain: &preserved_chain,
+                maxSubpasses: 99,
+                maxSubpassColorAttachments: 99,
+                maxInputAttachments: 99,
+                estimatedTileMemoryBytes: 99,
+            };
+
+            assert_eq!(
+                yawgpuAdapterGetTiledCapabilities(adapter, &mut capabilities),
+                native::WGPUStatus_Success
+            );
+            assert_eq!(capabilities.nextInChain, &preserved_chain);
+            assert_eq!(capabilities.maxSubpasses, 0);
+            assert_eq!(capabilities.maxSubpassColorAttachments, 0);
+            assert_eq!(capabilities.maxInputAttachments, 0);
+            assert_eq!(capabilities.estimatedTileMemoryBytes, 0);
+            assert_eq!(
+                yawgpuAdapterGetTiledCapabilities(adapter, std::ptr::null_mut()),
+                native::WGPUStatus_Error
             );
 
             release_handles(instance, adapter, std::ptr::null());

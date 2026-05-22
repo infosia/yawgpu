@@ -100,6 +100,35 @@ pub unsafe extern "C" fn wgpuAdapterGetInfo(
     native::WGPUStatus_Success
 }
 
+/// Gets yawgpu tiled rendering capabilities for an adapter.
+///
+/// # Safety
+///
+/// `adapter` must be a non-null live yawgpu adapter handle. `capabilities`
+/// must point to writable `YaWGPUTiledCapabilities` storage.
+/// Returns yawgpu adapter get tiled capabilities.
+#[cfg(feature = "tiled")]
+#[no_mangle]
+pub unsafe extern "C" fn yawgpuAdapterGetTiledCapabilities(
+    adapter: native::WGPUAdapter,
+    capabilities: *mut YaWGPUTiledCapabilities,
+) -> native::WGPUStatus {
+    let adapter = borrow_handle(adapter, "WGPUAdapter");
+    let Some(capabilities) = capabilities.as_mut() else {
+        return native::WGPUStatus_Error;
+    };
+    let next_in_chain = capabilities.nextInChain;
+    let tiled = adapter.core.tiled_capabilities();
+    *capabilities = YaWGPUTiledCapabilities {
+        nextInChain: next_in_chain,
+        maxSubpasses: tiled.max_subpasses,
+        maxSubpassColorAttachments: tiled.max_subpass_color_attachments,
+        maxInputAttachments: tiled.max_input_attachments,
+        estimatedTileMemoryBytes: tiled.estimated_tile_memory_bytes,
+    };
+    native::WGPUStatus_Success
+}
+
 /// Frees string members allocated by `wgpuAdapterGetInfo`.
 ///
 /// # Safety

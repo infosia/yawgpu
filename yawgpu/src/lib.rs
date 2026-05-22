@@ -32,6 +32,22 @@ pub const YAWGPU_INSTANCE_BACKEND_METAL: u32 = 1;
 pub const YAWGPU_INSTANCE_BACKEND_VULKAN: u32 = 2;
 /// SType value for `YaWGPUInstanceBackendSelect`.
 pub const YAWGPU_STYPE_INSTANCE_BACKEND_SELECT: native::WGPUSType = 0x7000_0001;
+/// Feature value for tiled multi-subpass render passes.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUFeatureName_MultiSubpass: native::WGPUFeatureName = 0x7001_0001;
+/// Feature value for tiled transient attachments.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUFeatureName_TransientAttachments: native::WGPUFeatureName = 0x7001_0002;
+/// Feature value for tiled shader framebuffer fetch.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUFeatureName_ShaderFramebufferFetch: native::WGPUFeatureName = 0x7001_0003;
+/// Feature value for tiled programmable tile dispatch.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUFeatureName_ProgrammableTileDispatch: native::WGPUFeatureName = 0x7001_0004;
 
 /// yawgpu vendor extension for selecting a backend at instance creation.
 ///
@@ -44,6 +60,23 @@ pub struct YaWGPUInstanceBackendSelect {
     pub chain: native::WGPUChainedStruct,
     /// Backend.
     pub backend: u32,
+}
+
+/// yawgpu vendor extension result for querying tiled rendering capabilities.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct YaWGPUTiledCapabilities {
+    /// Extension chain.
+    pub nextInChain: *const native::WGPUChainedStruct,
+    /// Maximum number of subpasses in one tiled render pass.
+    pub maxSubpasses: u32,
+    /// Maximum number of color attachments in a subpass.
+    pub maxSubpassColorAttachments: u32,
+    /// Maximum number of input attachments in a subpass.
+    pub maxInputAttachments: u32,
+    /// Estimated tile memory budget, in bytes.
+    pub estimatedTileMemoryBytes: u32,
 }
 
 /// yawgpu vendor extension descriptor for creating a shader module from SPIR-V words.
