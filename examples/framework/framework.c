@@ -18,6 +18,8 @@ typedef struct RequestDeviceState {
     WGPURequestDeviceStatus status;
 } RequestDeviceState;
 
+static unsigned int g_uncaptured_error_count = 0;
+
 static void print_callback_message(const char *prefix, WGPUStringView message) {
     if (!message.data || message.length == 0) {
         return;
@@ -41,6 +43,7 @@ static void uncaptured_error_callback(const WGPUDevice *device,
     YAWGPU_UNUSED(device);
     YAWGPU_UNUSED(userdata1);
     YAWGPU_UNUSED(userdata2);
+    g_uncaptured_error_count += 1;
     fprintf(stderr, "[yawgpu] uncaptured error type=%u: ", type);
     yawgpu_print_string_view(message);
     fputc('\n', stderr);
@@ -90,6 +93,10 @@ void yawgpu_print_string_view(WGPUStringView value) {
     } else {
         printf("%.*s", (int)value.length, value.data);
     }
+}
+
+unsigned int yawgpu_uncaptured_error_count(void) {
+    return g_uncaptured_error_count;
 }
 
 // Maps the YAWGPU_BACKEND environment variable to a backend enum value,
@@ -154,16 +161,9 @@ WGPUDevice yawgpu_request_device(WGPUInstance instance, WGPUAdapter adapter) {
     RequestDeviceState state = {0};
     // Request a device with default limits/features, wiring up the
     // uncaptured-error callback so mistakes surface on stderr.
-    WGPUDeviceDescriptor descriptor = {
-        .nextInChain = NULL,
-        .label = yawgpu_string_view("yawgpu example device"),
-        .uncapturedErrorCallbackInfo = {
-            .nextInChain = NULL,
-            .callback = uncaptured_error_callback,
-            .userdata1 = NULL,
-            .userdata2 = NULL,
-        },
-    };
+    WGPUDeviceDescriptor descriptor = WGPU_DEVICE_DESCRIPTOR_INIT;
+    descriptor.label = yawgpu_string_view("yawgpu example device");
+    descriptor.uncapturedErrorCallbackInfo.callback = uncaptured_error_callback;
     WGPURequestDeviceCallbackInfo callback_info = {
         .nextInChain = NULL,
         .mode = WGPUCallbackMode_AllowProcessEvents,

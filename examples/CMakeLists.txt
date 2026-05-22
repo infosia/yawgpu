@@ -45,6 +45,7 @@ else()
 endif()
 
 set(YAWGPU_CARGO_FEATURES)
+set(YAWGPU_ENABLED_EXTENSIONS)
 if(NOT YAWGPU_FEATURE STREQUAL "")
     list(APPEND YAWGPU_CARGO_FEATURES ${YAWGPU_FEATURE})
 endif()
@@ -55,6 +56,7 @@ foreach(YAWGPU_EXTENSION IN LISTS YAWGPU_EXTENSIONS_LIST)
     if(YAWGPU_EXTENSION STREQUAL "")
         continue()
     endif()
+    list(APPEND YAWGPU_ENABLED_EXTENSIONS ${YAWGPU_EXTENSION})
     list(APPEND YAWGPU_CARGO_FEATURES ${YAWGPU_EXTENSION})
     if(YAWGPU_EXTENSION STREQUAL "shader-passthrough")
         list(APPEND YAWGPU_EXTENSION_COMPILE_DEFS YAWGPU_HAS_SHADER_PASSTHROUGH)
@@ -71,6 +73,7 @@ foreach(YAWGPU_EXTENSION IN LISTS YAWGPU_EXTENSIONS_LIST)
 endforeach()
 list(REMOVE_DUPLICATES YAWGPU_CARGO_FEATURES)
 list(REMOVE_DUPLICATES YAWGPU_EXTENSION_COMPILE_DEFS)
+list(REMOVE_DUPLICATES YAWGPU_ENABLED_EXTENSIONS)
 
 if(YAWGPU_CARGO_FEATURES)
     list(JOIN YAWGPU_CARGO_FEATURES "," YAWGPU_CARGO_FEATURES_ARG)
@@ -79,15 +82,22 @@ else()
     set(YAWGPU_CARGO_FEATURE_ARGS)
 endif()
 
-# Use a feature-specific cargo target directory so that --features metal and
-# --features vulkan dylibs do not overwrite each other in target/${profile}.
-# Without this, the surface_smoke binary in build-metal would dlopen whichever
-# dylib was built last and silently fall back to the Noop arm in
-# `#[cfg(not(feature = "metal"))]`.
+# Use a feature/extension-specific cargo target directory so dylibs from
+# different build configurations do not overwrite each other in target/${profile}.
+# Without this, a build configured with `-DYAWGPU_EXTENSIONS=tiled` can later
+# dlopen a no-extension dylib from a plain build with the same backend feature.
 if(YAWGPU_FEATURE STREQUAL "")
     set(YAWGPU_TARGET_ROOT "${YAWGPU_ROOT}/target")
 else()
     set(YAWGPU_TARGET_ROOT "${YAWGPU_ROOT}/target-${YAWGPU_FEATURE}")
+endif()
+if(YAWGPU_ENABLED_EXTENSIONS)
+    list(JOIN YAWGPU_ENABLED_EXTENSIONS "-" YAWGPU_EXTENSIONS_TARGET_SUFFIX)
+    if(YAWGPU_FEATURE STREQUAL "")
+        set(YAWGPU_TARGET_ROOT "${YAWGPU_ROOT}/target-${YAWGPU_EXTENSIONS_TARGET_SUFFIX}")
+    else()
+        set(YAWGPU_TARGET_ROOT "${YAWGPU_ROOT}/target-${YAWGPU_FEATURE}-${YAWGPU_EXTENSIONS_TARGET_SUFFIX}")
+    endif()
 endif()
 
 if(DEFINED ENV{CARGO_BUILD_TARGET})
@@ -172,6 +182,7 @@ add_subdirectory(enumerate_adapters)
 add_subdirectory(compute)
 add_subdirectory(device_info)
 add_subdirectory(capture)
+add_subdirectory(tiled_deferred)
 if(YAWGPU_WINDOWED_EXAMPLES)
     add_subdirectory(surface_smoke)
     add_subdirectory(triangle)
