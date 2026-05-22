@@ -21,14 +21,14 @@ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use crate::{
     HalAddressMode, HalBoundBuffer, HalBuffer, HalBufferTextureCopy, HalCompareFunction,
     HalComputePass, HalCopy, HalDescriptorBinding, HalDraw, HalError, HalExtent3d, HalFilterMode,
-    HalMipmapFilterMode, HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass, HalRenderPipeline,
+    HalMipmapFilterMode, HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass,
     HalRenderPipelineDescriptor, HalSamplerDescriptor, HalShaderSource, HalSurfaceConfiguration,
     HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage,
     HalVertexFormat, HalVertexStepMode,
 };
 #[cfg(feature = "tiled")]
 use crate::{
-    HalSubpassAttachmentResource, HalSubpassDraw, HalSubpassPassLayout,
+    HalRenderPipeline, HalSubpassAttachmentResource, HalSubpassDraw, HalSubpassPassLayout,
     HalSubpassRenderPassCommand, HalTransientAttachment, HalTransientAttachmentDescriptor,
 };
 

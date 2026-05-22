@@ -9,6 +9,8 @@ pub(super) struct VulkanDeviceInner {
     pub(super) queue_family_index: u32,
     pub(super) allocations: AtomicU64,
     #[cfg(feature = "tiled")]
+    pub(super) framebuffer_fetch_path: FramebufferFetchPath,
+    #[cfg(feature = "tiled")]
     pub(super) subpass_render_pass_cache: Mutex<BTreeMap<HalSubpassPassLayout, vk::RenderPass>>,
 }
 
@@ -52,6 +54,23 @@ impl VulkanDevice {
     #[must_use]
     pub fn queue(&self) -> &VulkanQueue {
         &self.queue
+    }
+
+    /// Returns the detected shader framebuffer-fetch path.
+    #[cfg(feature = "tiled")]
+    #[must_use]
+    pub fn framebuffer_fetch_path(&self) -> FramebufferFetchPath {
+        self.inner.framebuffer_fetch_path
+    }
+
+    /// Returns true when shader framebuffer fetch is supported.
+    #[cfg(feature = "tiled")]
+    #[must_use]
+    pub fn supports_shader_framebuffer_fetch(&self) -> bool {
+        !matches!(
+            self.inner.framebuffer_fetch_path,
+            FramebufferFetchPath::Disabled
+        )
     }
 
     /// Allocates a buffer of the given size on this device.
