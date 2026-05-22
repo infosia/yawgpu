@@ -76,6 +76,16 @@ impl MetalDevice {
         }
     }
 
+    /// Creates a transient attachment matching the given concrete descriptor.
+    #[cfg(feature = "tiled")]
+    pub fn create_transient_attachment(
+        &self,
+        descriptor: &HalTransientAttachmentDescriptor,
+    ) -> Result<MetalTransientAttachment, HalError> {
+        self.allocations.fetch_add(1, Ordering::Relaxed);
+        create_transient_attachment(&self.device, descriptor)
+    }
+
     /// Creates a sampler matching the given descriptor.
     #[must_use]
     pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> MetalSampler {

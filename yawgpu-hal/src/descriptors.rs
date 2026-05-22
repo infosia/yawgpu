@@ -79,6 +79,20 @@ pub struct HalTextureDescriptor {
     pub usage: HalTextureUsage,
 }
 
+/// Describes HAL transient attachment descriptor.
+#[cfg(feature = "tiled")]
+#[derive(Debug, Clone, Copy)]
+pub struct HalTransientAttachmentDescriptor {
+    /// Format.
+    pub format: HalTextureFormat,
+    /// Width.
+    pub width: u32,
+    /// Height.
+    pub height: u32,
+    /// Sample count.
+    pub sample_count: u32,
+}
+
 /// Describes HAL sampler descriptor.
 #[derive(Debug, Clone, Copy)]
 pub struct HalSamplerDescriptor {

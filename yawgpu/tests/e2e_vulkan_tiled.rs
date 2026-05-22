@@ -1,6 +1,7 @@
 #![cfg(all(feature = "vulkan", feature = "tiled"))]
 
 use std::os::raw::c_void;
+use std::sync::{Arc, Mutex};
 
 use yawgpu::{
     native, YaWGPUInstanceBackendSelect, YaWGPUTiledCapabilities, YAWGPU_INSTANCE_BACKEND_VULKAN,
@@ -56,6 +57,47 @@ fn vulkan_tiled_features_and_capabilities_are_advertised() {
     }
 }
 
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_explicit_transient_attachment_allocates_without_device_error() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let captured_errors = Arc::clone(&errors);
+        yawgpu::testing_set_uncaptured_error_callback(
+            device,
+            Some(move |error| captured_errors.lock().expect("error lock").push(error)),
+        );
+        let descriptor = yawgpu::YaWGPUTransientAttachmentDescriptor {
+            nextInChain: std::ptr::null(),
+            label: native::WGPUStringView {
+                data: std::ptr::null(),
+                length: 0,
+            },
+            format: native::WGPUTextureFormat_RGBA8Unorm,
+            sizeMode: yawgpu::YaWGPUTransientSizeMode_Explicit,
+            width: 16,
+            height: 16,
+            sampleCount: 1,
+        };
+
+        let attachment = yawgpu::yawgpuDeviceCreateTransientAttachment(device, &descriptor);
+        assert!(!attachment.is_null());
+        assert!(errors.lock().expect("error lock").is_empty());
+
+        yawgpu::yawgpuTransientAttachmentRelease(attachment);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
 unsafe fn create_vulkan_instance() -> native::WGPUInstance {
     let mut backend = YaWGPUInstanceBackendSelect {
         chain: native::WGPUChainedStruct {
@@ -87,6 +129,23 @@ unsafe fn request_adapter(instance: native::WGPUInstance) -> native::WGPUAdapter
     adapter
 }
 
+unsafe fn request_device(
+    instance: native::WGPUInstance,
+    adapter: native::WGPUAdapter,
+) -> native::WGPUDevice {
+    let mut device = std::ptr::null();
+    let callback_info = native::WGPURequestDeviceCallbackInfo {
+        nextInChain: std::ptr::null_mut(),
+        mode: native::WGPUCallbackMode_AllowProcessEvents,
+        callback: Some(request_device_callback),
+        userdata1: (&mut device as *mut native::WGPUDevice).cast(),
+        userdata2: std::ptr::null_mut(),
+    };
+    let future = yawgpu::wgpuAdapterRequestDevice(adapter, std::ptr::null(), callback_info);
+    wait(instance, future);
+    device
+}
+
 unsafe extern "C" fn request_adapter_callback(
     status: native::WGPURequestAdapterStatus,
     adapter: native::WGPUAdapter,
@@ -96,6 +155,17 @@ unsafe extern "C" fn request_adapter_callback(
 ) {
     assert_eq!(status, native::WGPURequestAdapterStatus_Success);
     *(userdata1 as *mut native::WGPUAdapter) = adapter;
+}
+
+unsafe extern "C" fn request_device_callback(
+    status: native::WGPURequestDeviceStatus,
+    device: native::WGPUDevice,
+    _message: native::WGPUStringView,
+    userdata1: *mut c_void,
+    _userdata2: *mut c_void,
+) {
+    assert_eq!(status, native::WGPURequestDeviceStatus_Success);
+    *(userdata1 as *mut native::WGPUDevice) = device;
 }
 
 fn zeroed_tiled_capabilities() -> YaWGPUTiledCapabilities {

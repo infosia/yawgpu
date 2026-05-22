@@ -79,6 +79,46 @@ pub struct YaWGPUTiledCapabilities {
     pub estimatedTileMemoryBytes: u32,
 }
 
+/// yawgpu transient attachment handle.
+#[cfg(feature = "tiled")]
+pub type YaWGPUTransientAttachment = *const YaWGPUTransientAttachmentImpl;
+/// Transient attachment size mode for tiled rendering.
+#[cfg(feature = "tiled")]
+pub type YaWGPUTransientSizeMode = u32;
+/// Match the subpass render target size at pass begin.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUTransientSizeMode_MatchTarget: YaWGPUTransientSizeMode = 0;
+/// Use the descriptor's explicit width and height.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUTransientSizeMode_Explicit: YaWGPUTransientSizeMode = 1;
+/// Force this enum to 32 bits in C.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUTransientSizeMode_Force32: YaWGPUTransientSizeMode = 0x7FFF_FFFF;
+
+/// yawgpu vendor extension descriptor for creating a transient attachment.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct YaWGPUTransientAttachmentDescriptor {
+    /// Extension chain.
+    pub nextInChain: *const native::WGPUChainedStruct,
+    /// Debug label.
+    pub label: native::WGPUStringView,
+    /// Attachment format.
+    pub format: native::WGPUTextureFormat,
+    /// Size mode.
+    pub sizeMode: YaWGPUTransientSizeMode,
+    /// Explicit width. Ignored for match-target attachments.
+    pub width: u32,
+    /// Explicit height. Ignored for match-target attachments.
+    pub height: u32,
+    /// Sample count.
+    pub sampleCount: u32,
+}
+
 /// yawgpu vendor extension descriptor for creating a shader module from SPIR-V words.
 #[cfg(feature = "shader-passthrough")]
 #[allow(non_snake_case)]

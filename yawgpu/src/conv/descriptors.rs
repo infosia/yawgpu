@@ -273,6 +273,25 @@ pub unsafe fn map_texture_descriptor(
     }
 }
 
+/// Converts a transient attachment descriptor to the core representation.
+#[cfg(feature = "tiled")]
+#[must_use]
+pub fn map_transient_attachment_descriptor(
+    value: &crate::YaWGPUTransientAttachmentDescriptor,
+) -> core::TransientAttachmentDescriptor {
+    core::TransientAttachmentDescriptor {
+        format: map_texture_format(value.format),
+        size: match value.sizeMode {
+            crate::YaWGPUTransientSizeMode_Explicit => core::TransientSizeMode::Explicit {
+                width: value.width,
+                height: value.height,
+            },
+            _ => core::TransientSizeMode::MatchTarget,
+        },
+        sample_count: value.sampleCount,
+    }
+}
+
 /// Converts texture view descriptor into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_texture_view_descriptor(

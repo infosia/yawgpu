@@ -19,6 +19,8 @@ use crate::render_pipeline::*;
 use crate::sampler::*;
 use crate::shader::*;
 use crate::texture::*;
+#[cfg(feature = "tiled")]
+use crate::transient_attachment::*;
 
 /// Stores device data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -248,6 +250,42 @@ impl Device {
         };
 
         Texture::new(descriptor, hal, is_error)
+    }
+
+    /// Validates the descriptor and creates a transient attachment on this device.
+    #[cfg(feature = "tiled")]
+    #[must_use]
+    pub fn create_transient_attachment(
+        &self,
+        descriptor: TransientAttachmentDescriptor,
+    ) -> TransientAttachment {
+        if self.is_lost() {
+            return TransientAttachment::new(descriptor, None, true);
+        }
+        let error = validate_transient_attachment_descriptor(&descriptor);
+        let is_error = error.is_some();
+        if let Some(message) = error {
+            self.dispatch_error(ErrorKind::Validation, message);
+        }
+
+        let hal =
+            if is_error {
+                None
+            } else if let TransientSizeMode::Explicit { width, height } = descriptor.size {
+                match self.inner.hal.create_transient_attachment(
+                    &hal_transient_attachment_descriptor(&descriptor, width, height),
+                ) {
+                    Ok(hal) => Some(hal),
+                    Err(error) => {
+                        self.dispatch_error(ErrorKind::Validation, error.to_string());
+                        return TransientAttachment::new(descriptor, None, true);
+                    }
+                }
+            } else {
+                None
+            };
+
+        TransientAttachment::new(descriptor, hal, is_error)
     }
 
     /// Validates the descriptor and creates a sampler on this device.
@@ -684,6 +722,54 @@ mod tests {
         assert!(error_texture.is_error());
         assert_eq!(error.kind, ErrorKind::Validation);
         assert_eq!(error.message, "2D texture width is out of range");
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn device_create_transient_attachment_validates_explicit_and_defers_match_target() {
+        let device = noop_device();
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let zero = device.create_transient_attachment(TransientAttachmentDescriptor {
+            format: TextureFormat::from(TextureFormat::RGBA8_UNORM),
+            size: TransientSizeMode::Explicit {
+                width: 0,
+                height: 1,
+            },
+            sample_count: 1,
+        });
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("zero explicit size should be scoped");
+        assert!(zero.is_error());
+        assert_eq!(
+            error.message,
+            "explicit transient attachment size must be non-zero"
+        );
+
+        let explicit = device.create_transient_attachment(TransientAttachmentDescriptor {
+            format: TextureFormat::from(TextureFormat::RGBA8_UNORM),
+            size: TransientSizeMode::Explicit {
+                width: 4,
+                height: 4,
+            },
+            sample_count: 1,
+        });
+        assert!(!explicit.is_error());
+        assert!(explicit.hal().is_some());
+
+        let match_target = device.create_transient_attachment(TransientAttachmentDescriptor {
+            format: TextureFormat::from(TextureFormat::RGBA8_UNORM),
+            size: TransientSizeMode::MatchTarget,
+            sample_count: 1,
+        });
+        assert!(!match_target.is_error());
+        assert!(matches!(
+            match_target.descriptor().size,
+            TransientSizeMode::MatchTarget
+        ));
+        assert!(match_target.hal().is_none());
     }
 
     #[test]

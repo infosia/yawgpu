@@ -16,6 +16,8 @@ pub use command::{
     HalBufferTextureLayout, HalComputePass, HalCopy, HalDescriptorBinding, HalDraw,
     HalRenderColorTarget, HalRenderLoadOp, HalRenderPass, HalTextureCopy,
 };
+#[cfg(feature = "tiled")]
+pub use descriptors::HalTransientAttachmentDescriptor;
 pub use descriptors::{
     HalExtent3d, HalOrigin3d, HalRenderPipelineDescriptor, HalSamplerDescriptor,
     HalTextureDescriptor, HalVertexAttribute, HalVertexBufferLayout,
@@ -291,6 +293,30 @@ impl HalDevice {
             Self::Vulkan(device) => HalTexture::Vulkan(device.create_texture(descriptor)),
             #[cfg(feature = "metal")]
             Self::Metal(device) => HalTexture::Metal(device.create_texture(descriptor)),
+        }
+    }
+
+    /// Creates a transient attachment matching the given concrete descriptor.
+    #[cfg(feature = "tiled")]
+    pub fn create_transient_attachment(
+        &self,
+        descriptor: &HalTransientAttachmentDescriptor,
+    ) -> Result<HalTransientAttachment, HalError> {
+        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+        let _ = descriptor;
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(device) => Ok(HalTransientAttachment::Noop(
+                device.create_transient_attachment(),
+            )),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(device) => device
+                .create_transient_attachment(descriptor)
+                .map(HalTransientAttachment::Vulkan),
+            #[cfg(feature = "metal")]
+            Self::Metal(device) => device
+                .create_transient_attachment(descriptor)
+                .map(HalTransientAttachment::Metal),
         }
     }
 
@@ -596,6 +622,22 @@ pub enum HalTexture {
     #[cfg(feature = "metal")]
     /// Metal variant.
     Metal(metal::MetalTexture),
+}
+
+/// Enumerates HAL transient attachment values.
+#[cfg(feature = "tiled")]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum HalTransientAttachment {
+    #[cfg(feature = "noop")]
+    /// Noop variant.
+    Noop(noop::NoopTransientAttachment),
+    #[cfg(feature = "vulkan")]
+    /// Vulkan variant.
+    Vulkan(vulkan::VulkanTransientAttachment),
+    #[cfg(feature = "metal")]
+    /// Metal variant.
+    Metal(metal::MetalTransientAttachment),
 }
 
 /// Enumerates HAL sampler values.

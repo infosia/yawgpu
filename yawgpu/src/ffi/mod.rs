@@ -68,8 +68,6 @@ use surface::*;
 #[cfg(test)]
 use texture::*;
 
-#[cfg(feature = "tiled")]
-use crate::YaWGPUTiledCapabilities;
 use crate::{
     native, YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_METAL,
     YAWGPU_INSTANCE_BACKEND_VULKAN, YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
@@ -78,12 +76,16 @@ use crate::{
 use crate::{
     YaWGPUMslEntryPoint, YaWGPUShaderModuleMslDescriptor, YaWGPUShaderModuleSpirVDescriptor,
 };
+#[cfg(feature = "tiled")]
+use crate::{YaWGPUTiledCapabilities, YaWGPUTransientAttachmentDescriptor};
 use std::collections::{BTreeMap, HashMap};
 use std::os::raw::c_void;
 use std::sync::{Arc, Mutex};
 
 use yawgpu_core as core;
 
+#[cfg(feature = "tiled")]
+use crate::conv::map_transient_attachment_descriptor;
 use crate::conv::{
     add_ref_handle, arc_to_handle, borrow_handle, clone_handle, free_supported_features,
     label_from_string_view, map_bind_group_entries, map_bind_group_layout_descriptor,
@@ -182,6 +184,14 @@ pub struct WGPUTextureImpl {
 pub struct WGPUTextureViewImpl {
     pub(crate) _core: Arc<core::TextureView>,
     pub(crate) _texture: Arc<core::Texture>,
+    pub(crate) _device: Arc<core::Device>,
+    pub(crate) _instance: Arc<WGPUInstanceImpl>,
+}
+
+/// Owns the core object and retained handles for the yawgpu transient attachment handle.
+#[cfg(feature = "tiled")]
+pub struct YaWGPUTransientAttachmentImpl {
+    pub(crate) _core: Arc<core::TransientAttachment>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }
@@ -3267,6 +3277,33 @@ mod tests {
             );
 
             release_handles(instance, adapter, std::ptr::null());
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn yawgpuDeviceCreateTransientAttachment_returns_handle_and_refcounts() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let device = request_noop_device(instance, adapter);
+            let descriptor = YaWGPUTransientAttachmentDescriptor {
+                nextInChain: std::ptr::null(),
+                label: empty_string_view(),
+                format: native::WGPUTextureFormat_RGBA8Unorm,
+                sizeMode: crate::YaWGPUTransientSizeMode_Explicit,
+                width: 4,
+                height: 4,
+                sampleCount: 1,
+            };
+
+            let attachment = yawgpuDeviceCreateTransientAttachment(device, &descriptor);
+            assert!(!attachment.is_null());
+            yawgpuTransientAttachmentAddRef(attachment);
+            yawgpuTransientAttachmentRelease(attachment);
+            yawgpuTransientAttachmentRelease(attachment);
+
+            release_handles(instance, adapter, device);
         }
     }
 

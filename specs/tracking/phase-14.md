@@ -41,12 +41,28 @@ T2 (`map_feature_accepts_tiled_vendor_feature_names`,
 `metal_tiled_features_and_capabilities_are_advertised`,
 `vulkan_tiled_features_and_capabilities_are_advertised` → **both passed**.
 
-## B2 — transient attachment resource  *(☐ TODO)*
+## B2 — transient attachment resource  *(☑ DONE)*
 
-`YaWGPUTransientAttachment` Arc resource + descriptor; Vulkan
-`LAZILY_ALLOCATED`+`TRANSIENT_ATTACHMENT|INPUT_ATTACHMENT` (fallback normal),
-Metal `Memoryless` (fallback `Private`+warn); Metal `tile_memory_check`.
-*Accept:* T3, T5 unit-tested (noop); T4, T6 e2e.
+Done: `core::transient_attachment` module — `TransientAttachment` Arc resource +
+`TransientAttachmentDescriptor`/`TransientSizeMode`; `Device::create_transient_attachment`
+(Explicit → eager HAL alloc, MatchTarget → descriptor only / `hal=None`,
+zero-size Explicit → error). HAL `HalTransientAttachment` enum +
+`create_transient_attachment`: Vulkan `VkImage`(`TRANSIENT_ATTACHMENT|INPUT_ATTACHMENT|
+COLOR_ATTACHMENT`) bound to `LAZILY_ALLOCATED` mem with `DEVICE_LOCAL` fallback
+(image cleaned up on every error path) + view; Metal `MTLStorageMode::Memoryless`;
+Noop placeholder. C: yawgpu.h handle + `YaWGPUTransientSizeMode` +
+`YaWGPUTransientAttachmentDescriptor` + INIT + `yawgpuDeviceCreateTransientAttachment`/
+`AddRef`/`Release`; Rust `#[repr(C)]` mirror; FFI Arc handle.
+*Scope moved to B4:* MatchTarget extent resolution (T5b) + `tile_memory_check` (T6).
+*Gate (Claude-run):* default + `--features tiled` test/`clippy -D warnings` green;
+metal/vulkan/*,tiled `--tests` compile; metal example builds with tiled. T3
+(`yawgpuDeviceCreateTransientAttachment_returns_handle_and_refcounts`), T5
+(`device_create_transient_attachment_validates_explicit_and_defers_match_target`).
+*Real-GPU (Claude):* `metal_explicit_transient_attachment_allocates_without_device_error`,
+`vulkan_explicit_transient_attachment_allocates_without_device_error` → **both passed**.
+*Follow-up (do in B4):* the Vulkan transient image hardcodes `COLOR_ATTACHMENT`
+usage + color-aspect view; depth-format transients need `DEPTH_STENCIL_ATTACHMENT`
+usage + depth aspect (wire + test when depth subpass attachments land).
 
 ## B3 — subpass IR + input-attachment binding  *(☐ TODO)*
 
