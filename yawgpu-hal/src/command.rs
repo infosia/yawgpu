@@ -1,6 +1,94 @@
+#[cfg(feature = "tiled")]
+use crate::HalError;
 use crate::{
     HalBuffer, HalComputePipeline, HalExtent3d, HalOrigin3d, HalRenderPipeline, HalTexture,
 };
+
+/// Stores Noop subpass render pass state.
+#[cfg(all(feature = "noop", feature = "tiled"))]
+#[derive(Debug, Clone)]
+pub struct HalNoopSubpassRenderPass {
+    active_subpass: u32,
+}
+
+#[cfg(all(feature = "noop", feature = "tiled"))]
+impl HalNoopSubpassRenderPass {
+    /// Creates a new Noop subpass render pass state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { active_subpass: 0 }
+    }
+
+    /// Advances the active subpass index.
+    pub fn next_subpass(&mut self) {
+        self.active_subpass = self.active_subpass.saturating_add(1);
+    }
+}
+
+#[cfg(all(feature = "noop", feature = "tiled"))]
+impl Default for HalNoopSubpassRenderPass {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Enumerates HAL subpass render pass values.
+#[cfg(feature = "tiled")]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum HalSubpassRenderPass {
+    #[cfg(feature = "noop")]
+    /// Noop variant.
+    Noop(HalNoopSubpassRenderPass),
+    #[cfg(feature = "vulkan")]
+    /// Vulkan placeholder variant.
+    Vulkan,
+    #[cfg(feature = "metal")]
+    /// Metal placeholder variant.
+    Metal,
+}
+
+#[cfg(feature = "tiled")]
+impl HalSubpassRenderPass {
+    /// Advances the backend subpass render pass.
+    pub fn next_subpass(&mut self) -> Result<(), HalError> {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(pass) => {
+                pass.next_subpass();
+                Ok(())
+            }
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan => Err(HalError::BufferOperationFailed {
+                backend: "vulkan",
+                message: "subpass pass not yet implemented",
+            }),
+            #[cfg(feature = "metal")]
+            Self::Metal => Err(HalError::BufferOperationFailed {
+                backend: "metal",
+                message: "subpass pass not yet implemented",
+            }),
+        }
+    }
+
+    /// Ends the backend subpass render pass.
+    pub fn end(self) -> Result<(), HalError> {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => Ok(()),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan => Err(HalError::BufferOperationFailed {
+                backend: "vulkan",
+                message: "subpass pass not yet implemented",
+            }),
+            #[cfg(feature = "metal")]
+            Self::Metal => Err(HalError::BufferOperationFailed {
+                backend: "metal",
+                message: "subpass pass not yet implemented",
+            }),
+        }
+    }
+}
 
 /// Wraps  for the selected backend.
 #[derive(Debug, Clone)]

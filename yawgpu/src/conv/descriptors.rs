@@ -292,6 +292,235 @@ pub fn map_transient_attachment_descriptor(
     }
 }
 
+/// Converts a subpass pass layout descriptor to the core representation.
+///
+/// # Safety
+///
+/// Any non-null pointer/count pairs in `descriptor` must point to live arrays
+/// of at least the declared count for the duration of this call.
+#[cfg(feature = "tiled")]
+#[must_use]
+pub unsafe fn map_subpass_pass_layout_descriptor(
+    descriptor: &crate::YaWGPUSubpassPassLayoutDescriptor,
+) -> core::SubpassPassLayoutDescriptor {
+    let mut error = None;
+    let color_attachments = slice_or_error(
+        descriptor.colorAttachments,
+        descriptor.colorAttachmentCount,
+        "subpass pass layout colorAttachments must not be null when count is non-zero",
+        &mut error,
+    )
+    .iter()
+    .map(|attachment| core::AttachmentLayout {
+        format: map_texture_format(attachment.format),
+        sample_count: attachment.sampleCount,
+    })
+    .collect();
+    let depth_stencil_attachment = (descriptor.depthStencilAttachment.format
+        != native::WGPUTextureFormat_Undefined)
+        .then(|| core::AttachmentLayout {
+            format: map_texture_format(descriptor.depthStencilAttachment.format),
+            sample_count: descriptor.depthStencilAttachment.sampleCount,
+        });
+    let subpasses = slice_or_error(
+        descriptor.subpasses,
+        descriptor.subpassCount,
+        "subpass pass layout subpasses must not be null when count is non-zero",
+        &mut error,
+    )
+    .iter()
+    .map(|subpass| core::SubpassLayoutDesc {
+        color_attachment_indices: slice_or_error(
+            subpass.colorAttachmentIndices,
+            subpass.colorAttachmentIndexCount,
+            "subpass colorAttachmentIndices must not be null when count is non-zero",
+            &mut error,
+        )
+        .to_vec(),
+        uses_depth_stencil: subpass.usesDepthStencil != 0,
+        input_attachments: slice_or_error(
+            subpass.inputAttachments,
+            subpass.inputAttachmentCount,
+            "subpass inputAttachments must not be null when count is non-zero",
+            &mut error,
+        )
+        .iter()
+        .map(|input| core::SubpassInputAttachment {
+            group: input.group,
+            binding: input.binding,
+            source_subpass: input.sourceSubpass,
+            source_attachment: input.sourceAttachment,
+        })
+        .collect(),
+    })
+    .collect();
+    let dependencies = slice_or_error(
+        descriptor.dependencies,
+        descriptor.dependencyCount,
+        "subpass pass layout dependencies must not be null when count is non-zero",
+        &mut error,
+    )
+    .iter()
+    .map(|dependency| core::SubpassDependency {
+        src_subpass: dependency.srcSubpass,
+        dst_subpass: dependency.dstSubpass,
+        dependency_type: match dependency.dependencyType {
+            crate::YaWGPUSubpassDependencyType_DepthToInput => {
+                core::SubpassDependencyType::DepthToInput
+            }
+            crate::YaWGPUSubpassDependencyType_ColorDepthToInput => {
+                core::SubpassDependencyType::ColorDepthToInput
+            }
+            _ => core::SubpassDependencyType::ColorToInput,
+        },
+        by_region: dependency.byRegion != 0,
+    })
+    .collect();
+    core::SubpassPassLayoutDescriptor {
+        color_attachments,
+        depth_stencil_attachment,
+        subpasses,
+        dependencies,
+        error,
+    }
+}
+
+/// Converts a subpass render pass descriptor to the core representation.
+///
+/// # Safety
+///
+/// `descriptor.passLayout` and every non-null resource handle must be live C
+/// handles returned by yawgpu. Any non-null pointer/count pairs must point to
+/// live arrays of at least the declared count for the duration of this call.
+#[cfg(feature = "tiled")]
+#[must_use]
+pub unsafe fn map_subpass_render_pass_descriptor(
+    descriptor: &crate::YaWGPUSubpassRenderPassDescriptor,
+) -> core::SubpassRenderPassDescriptor {
+    let mut error = None;
+    let pass_layout = clone_handle::<crate::YaWGPUSubpassPassLayoutImpl>(
+        descriptor.passLayout,
+        "YaWGPUSubpassPassLayout",
+    );
+    let color_attachments = slice_or_error(
+        descriptor.colorAttachments,
+        descriptor.colorAttachmentCount,
+        "subpass render pass colorAttachments must not be null when count is non-zero",
+        &mut error,
+    )
+    .iter()
+    .map(|attachment| map_color_attachment_binding(attachment, &mut error))
+    .collect();
+    let depth_stencil_attachment = descriptor
+        .depthStencilAttachment
+        .as_ref()
+        .map(|attachment| map_depth_stencil_attachment_binding(attachment, &mut error));
+    core::SubpassRenderPassDescriptor {
+        pass_layout: Arc::clone(&pass_layout._core),
+        extent: map_extent_3d(descriptor.extent),
+        color_attachments,
+        depth_stencil_attachment,
+        error,
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn map_color_attachment_binding(
+    attachment: &crate::YaWGPUColorAttachmentBinding,
+    error: &mut Option<String>,
+) -> core::SubpassColorAttachmentBinding {
+    core::SubpassColorAttachmentBinding {
+        resource: map_subpass_attachment_resource(
+            attachment.kind,
+            attachment.view,
+            attachment.resolveTarget,
+            attachment.transient,
+            error,
+        ),
+        load_op: map_load_op(attachment.loadOp),
+        store_op: map_store_op(attachment.storeOp),
+        clear_value: map_color(attachment.clearValue),
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn map_depth_stencil_attachment_binding(
+    attachment: &crate::YaWGPUDepthStencilAttachmentBinding,
+    error: &mut Option<String>,
+) -> core::SubpassDepthStencilAttachmentBinding {
+    core::SubpassDepthStencilAttachmentBinding {
+        resource: map_subpass_attachment_resource(
+            attachment.kind,
+            attachment.view,
+            std::ptr::null(),
+            attachment.transient,
+            error,
+        ),
+        depth_load_op: map_load_op(attachment.depthLoadOp),
+        depth_store_op: map_store_op(attachment.depthStoreOp),
+        depth_clear_value: attachment.depthClearValue,
+        stencil_load_op: map_load_op(attachment.stencilLoadOp),
+        stencil_store_op: map_store_op(attachment.stencilStoreOp),
+        stencil_clear_value: attachment.stencilClearValue,
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn map_subpass_attachment_resource(
+    kind: crate::YaWGPUSubpassAttachmentKind,
+    view: native::WGPUTextureView,
+    resolve_target: native::WGPUTextureView,
+    transient: crate::YaWGPUTransientAttachment,
+    error: &mut Option<String>,
+) -> core::SubpassAttachmentResource {
+    if kind == crate::YaWGPUSubpassAttachmentKind_Transient {
+        if transient.is_null() || !view.is_null() || !resolve_target.is_null() {
+            set_first_error(
+                error,
+                "transient subpass attachment must set only transient",
+            );
+        }
+        let transient = unsafe {
+            clone_handle::<crate::YaWGPUTransientAttachmentImpl>(
+                transient,
+                "YaWGPUTransientAttachment",
+            )
+        };
+        return core::SubpassAttachmentResource::Transient(Arc::clone(&transient._core));
+    }
+    if view.is_null() || !transient.is_null() {
+        set_first_error(
+            error,
+            "persistent subpass attachment must set only view resources",
+        );
+    }
+    let view = unsafe { clone_handle::<crate::WGPUTextureViewImpl>(view, "WGPUTextureView") };
+    let resolve_target = (!resolve_target.is_null()).then(|| unsafe {
+        clone_handle::<crate::WGPUTextureViewImpl>(resolve_target, "WGPUTextureView")
+    });
+    core::SubpassAttachmentResource::Persistent {
+        view: Arc::clone(&view._core),
+        resolve_target: resolve_target.map(|view| Arc::clone(&view._core)),
+    }
+}
+
+#[cfg(feature = "tiled")]
+unsafe fn slice_or_error<'a, T>(
+    ptr: *const T,
+    count: usize,
+    message: &str,
+    error: &mut Option<String>,
+) -> &'a [T] {
+    if count == 0 {
+        &[]
+    } else if ptr.is_null() {
+        set_first_error(error, message);
+        &[]
+    } else {
+        std::slice::from_raw_parts(ptr, count)
+    }
+}
+
 /// Converts texture view descriptor into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_texture_view_descriptor(

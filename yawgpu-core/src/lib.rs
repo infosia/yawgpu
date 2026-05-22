@@ -25,6 +25,8 @@ mod render_pass;
 mod render_pipeline;
 mod sampler;
 mod shader;
+#[cfg(feature = "tiled")]
+mod subpass;
 #[cfg(test)]
 mod test_helpers;
 mod texture;
@@ -85,6 +87,13 @@ pub use shader::{MslEntryPoint, MslReflection};
 pub use shader::{ShaderModule, ShaderModuleSource};
 #[cfg(feature = "shader-passthrough")]
 pub use shader_naga::ReflectedModule;
+#[cfg(feature = "tiled")]
+pub use subpass::{
+    AttachmentLayout, SubpassAttachmentResource, SubpassColorAttachmentBinding, SubpassDependency,
+    SubpassDependencyType, SubpassDepthStencilAttachmentBinding, SubpassInputAttachment,
+    SubpassLayoutDesc, SubpassPassLayout, SubpassPassLayoutDescriptor, SubpassRenderPass,
+    SubpassRenderPassDescriptor, DEPTH_STENCIL_ATTACHMENT_INDEX,
+};
 pub use texture::{Texture, TextureDescriptor, TextureDimension, TextureUsage};
 pub use texture_view::{TextureAspect, TextureView, TextureViewDescriptor, TextureViewDimension};
 #[cfg(feature = "tiled")]

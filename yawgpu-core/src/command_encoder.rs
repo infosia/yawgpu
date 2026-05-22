@@ -13,6 +13,8 @@ use crate::pass::*;
 use crate::query_set::*;
 use crate::render_pass::*;
 use crate::render_pipeline::*;
+#[cfg(feature = "tiled")]
+use crate::subpass::*;
 use crate::texture::*;
 use crate::texture_view::*;
 
@@ -36,6 +38,7 @@ pub(crate) struct CommandEncoderState {
     pub(crate) next_pass_id: u64,
     pub(crate) first_error: Option<String>,
     pub(crate) debug_group_depth: u32,
+    pub(crate) has_recorded_command: bool,
     pub(crate) referenced_buffers: Vec<Arc<Buffer>>,
     pub(crate) command_ops: Vec<CommandExecution>,
 }
@@ -182,6 +185,7 @@ impl CommandEncoder {
                     next_pass_id: 0,
                     first_error: None,
                     debug_group_depth: 0,
+                    has_recorded_command: false,
                     referenced_buffers: Vec::new(),
                     command_ops: Vec::new(),
                 }),
@@ -243,6 +247,73 @@ impl CommandEncoder {
         )
     }
 
+    /// Begins a tiled subpass render pass.
+    #[cfg(feature = "tiled")]
+    #[must_use]
+    pub fn begin_subpass_render_pass(
+        &self,
+        device: &crate::Device,
+        descriptor: SubpassRenderPassDescriptor,
+    ) -> (SubpassRenderPass, Option<String>) {
+        let mut state = self.inner.state.lock();
+        let token = PassToken {
+            kind: PassKind::Render,
+            id: state.next_pass_id,
+        };
+        state.next_pass_id = state.next_pass_id.saturating_add(1);
+        if state.lifecycle != CommandEncoderLifecycle::Recording {
+            return (
+                SubpassRenderPass::new(self.clone(), token, descriptor, None, true),
+                Some("command encoder cannot record after finish".to_owned()),
+            );
+        }
+        if state.open_pass.is_some() {
+            record_first_error_locked(
+                &mut state,
+                "command encoder cannot begin a pass while another pass is open",
+            );
+            return (
+                SubpassRenderPass::new(self.clone(), token, descriptor, None, true),
+                None,
+            );
+        }
+        if state.has_recorded_command {
+            record_first_error_locked(
+                &mut state,
+                "subpass render pass must be the first command encoder operation",
+            );
+            return (
+                SubpassRenderPass::new(self.clone(), token, descriptor, None, true),
+                None,
+            );
+        }
+        let validation_error = validate_subpass_render_pass_descriptor(&descriptor).or_else(|| {
+            resolve_subpass_render_pass_resources(device, &device.inner.hal, &descriptor).err()
+        });
+        let is_error = validation_error.is_some();
+        let hal = if is_error {
+            None
+        } else {
+            match device.inner.hal.begin_subpass_render_pass() {
+                Ok(pass) => Some(pass),
+                Err(error) => {
+                    record_first_error_locked(&mut state, error.to_string());
+                    None
+                }
+            }
+        };
+        let is_error = is_error || hal.is_none();
+        if let Some(message) = validation_error {
+            record_first_error_locked(&mut state, message);
+        }
+        state.has_recorded_command = true;
+        state.open_pass = Some(token);
+        (
+            SubpassRenderPass::new(self.clone(), token, descriptor, hal, is_error),
+            None,
+        )
+    }
+
     /// Begins a pass, locking the encoder until the pass ends.
     pub(crate) fn begin_pass(&self, kind: PassKind) -> (PassToken, Option<String>) {
         let mut state = self.inner.state.lock();
@@ -268,6 +339,7 @@ impl CommandEncoder {
         }
 
         state.open_pass = Some(token);
+        state.has_recorded_command = true;
         (token, None)
     }
 
@@ -439,6 +511,7 @@ impl CommandEncoder {
             return None;
         }
         state.debug_group_depth = state.debug_group_depth.saturating_add(1);
+        state.has_recorded_command = true;
         None
     }
 
@@ -480,7 +553,10 @@ impl CommandEncoder {
     /// Validates the encoder is recordable and notes that a command was recorded.
     pub(crate) fn record_encoder_command(&self) -> Option<String> {
         match self.record_command_guard() {
-            Ok(()) => None,
+            Ok(()) => {
+                self.inner.state.lock().has_recorded_command = true;
+                None
+            }
             Err(message) => {
                 let mut state = self.inner.state.lock();
                 if state.lifecycle == CommandEncoderLifecycle::Recording {
@@ -517,6 +593,7 @@ impl CommandEncoder {
             self.record_first_error(message);
         } else {
             let mut state = self.inner.state.lock();
+            state.has_recorded_command = true;
             state.referenced_buffers.extend(referenced_buffers);
             if let Some(copy) = buffer_copy {
                 state
