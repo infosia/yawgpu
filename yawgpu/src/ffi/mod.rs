@@ -78,7 +78,8 @@ use crate::{
 };
 #[cfg(feature = "tiled")]
 use crate::{
-    YaWGPUSubpassPassLayoutDescriptor, YaWGPUSubpassRenderPassDescriptor, YaWGPUTiledCapabilities,
+    YaWGPUSubpassPassLayoutDescriptor, YaWGPUSubpassRenderPassDescriptor,
+    YaWGPUSubpassRenderPipelineDescriptor, YaWGPUTiledCapabilities,
     YaWGPUTransientAttachmentDescriptor,
 };
 use std::collections::{BTreeMap, HashMap};
@@ -107,7 +108,7 @@ use crate::conv::{
 #[cfg(feature = "tiled")]
 use crate::conv::{
     map_subpass_pass_layout_descriptor, map_subpass_render_pass_descriptor,
-    map_transient_attachment_descriptor,
+    map_subpass_render_pipeline_descriptor, map_transient_attachment_descriptor,
 };
 use yawgpu_hal::{
     HalInstance, HalPresentMode, HalSurface, HalSurfaceConfiguration, HalTextureFormat,

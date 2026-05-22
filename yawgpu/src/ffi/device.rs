@@ -235,6 +235,33 @@ pub unsafe extern "C" fn yawgpuDeviceCreateSubpassPassLayout(
     }))
 }
 
+/// Creates a subpass-compatible render pipeline on a device.
+///
+/// # Safety
+///
+/// `device` and `descriptor` must be non-null live yawgpu pointers.
+/// Returns yawgpu device create subpass render pipeline.
+#[cfg(feature = "tiled")]
+#[no_mangle]
+pub unsafe extern "C" fn yawgpuDeviceCreateSubpassRenderPipeline(
+    device: native::WGPUDevice,
+    descriptor: *const YaWGPUSubpassRenderPipelineDescriptor,
+) -> native::WGPURenderPipeline {
+    let device = borrow_handle(device, "WGPUDevice");
+    let descriptor = descriptor
+        .as_ref()
+        .expect("YaWGPUSubpassRenderPipelineDescriptor must not be null");
+    let pipeline = device
+        .core
+        .create_subpass_render_pipeline(map_subpass_render_pipeline_descriptor(descriptor));
+    arc_to_handle(Arc::new(WGPURenderPipelineImpl {
+        _core: Arc::new(pipeline),
+        _device: Arc::clone(&device.core),
+        _instance: Arc::clone(&device.instance),
+        bind_group_layout_handles: Mutex::new(Vec::new()),
+    }))
+}
+
 /// Creates a sampler on a device.
 ///
 /// # Safety
