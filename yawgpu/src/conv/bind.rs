@@ -162,6 +162,17 @@ fn map_bind_group_layout_entry(
     let mut present_count = 0;
     let mut kind = None;
 
+    #[cfg(feature = "tiled")]
+    if let Some(input_attachment) = unsafe { input_attachment_binding_layout(entry.nextInChain) } {
+        present_count += 1;
+        if !standard_binding_layout_fields_empty(entry) {
+            set_first_error(
+                error,
+                "input attachment binding layout must not set standard binding layout fields",
+            );
+        }
+        kind = map_input_attachment_binding_layout(input_attachment, error);
+    }
     if entry.buffer.type_ != native::WGPUBufferBindingType_BindingNotUsed {
         present_count += 1;
         kind = map_buffer_binding_layout(entry.buffer, error);
@@ -190,6 +201,52 @@ fn map_bind_group_layout_entry(
         binding_array_size: entry.bindingArraySize,
         kind,
     }
+}
+
+#[cfg(feature = "tiled")]
+unsafe fn input_attachment_binding_layout<'a>(
+    mut chain: *const native::WGPUChainedStruct,
+) -> Option<&'a crate::YaWGPUInputAttachmentBindingLayout> {
+    while let Some(node) = chain.as_ref() {
+        if node.sType == crate::YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT {
+            return Some(
+                &*(node as *const native::WGPUChainedStruct
+                    as *const crate::YaWGPUInputAttachmentBindingLayout),
+            );
+        }
+        chain = node.next;
+    }
+    None
+}
+
+#[cfg(feature = "tiled")]
+fn standard_binding_layout_fields_empty(entry: &native::WGPUBindGroupLayoutEntry) -> bool {
+    entry.buffer.type_ == native::WGPUBufferBindingType_BindingNotUsed
+        && entry.sampler.type_ == native::WGPUSamplerBindingType_BindingNotUsed
+        && entry.texture.sampleType == native::WGPUTextureSampleType_BindingNotUsed
+        && entry.storageTexture.access == native::WGPUStorageTextureAccess_BindingNotUsed
+}
+
+#[cfg(feature = "tiled")]
+fn map_input_attachment_binding_layout(
+    layout: &crate::YaWGPUInputAttachmentBindingLayout,
+    error: &mut Option<String>,
+) -> Option<core::BindingLayoutKind> {
+    let sample_type = match layout.sampleType {
+        native::WGPUTextureSampleType_Undefined | native::WGPUTextureSampleType_Float => {
+            core::TextureSampleType::Float
+        }
+        native::WGPUTextureSampleType_Sint => core::TextureSampleType::Sint,
+        native::WGPUTextureSampleType_Uint => core::TextureSampleType::Uint,
+        _ => {
+            set_first_error(error, "invalid input attachment sample type");
+            return None;
+        }
+    };
+    Some(core::BindingLayoutKind::InputAttachment {
+        sample_type,
+        multisampled: layout.multisampled != 0,
+    })
 }
 
 fn map_buffer_binding_layout(

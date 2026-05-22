@@ -685,6 +685,8 @@ pub(crate) fn collect_bind_group_usage(
                 access: StorageTextureAccess::WriteOnly | StorageTextureAccess::ReadWrite,
                 ..
             } => Some(ResourceAccess::Write),
+            #[cfg(feature = "tiled")]
+            BindingLayoutKind::InputAttachment { .. } => None,
             BindingLayoutKind::Sampler { .. } => None,
         };
         let Some(access) = access else {

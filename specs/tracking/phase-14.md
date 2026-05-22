@@ -64,13 +64,26 @@ metal/vulkan/*,tiled `--tests` compile; metal example builds with tiled. T3
 usage + color-aspect view; depth-format transients need `DEPTH_STENCIL_ATTACHMENT`
 usage + depth aspect (wire + test when depth subpass attachments land).
 
-## B3 — subpass IR + input-attachment binding  *(☐ TODO)*
+## B3 — subpass IR + input-attachment binding  *(☑ DONE)*
 
-Enable naga subpass features under `tiled`; `YaWGPUInputAttachmentBindingLayout`
-chained on BGL entry (`group`+`binding`); `BindingType::InputAttachment` through
-bind-group-layout / pipeline-layout; pass-local auto-wiring (no caller bind
-group/view); scalar-kind check.
-*Accept:* T7 (noop) + T9 unit-tested; T8 e2e.
+Done (naga subpass IR is unconditional in the pinned fork — no feature to
+enable, just wiring): `BindingLayoutKind::InputAttachment { sample_type,
+multisampled }` + validation/visibility/count arms. Reflection: naga
+`ImageClass::Subpass { Color { kind } }` → `ReflectedResourceBindingKind::InputAttachment`
+→ `reflected_bind_group_layout_entry`; shader scalar-kind vs declared layout
+`sample_type` checked at pipeline-layout derivation (T9). C: `yawgpu.h`
+`YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT` + `YaWGPUInputAttachmentBindingLayout`
++ INIT; Rust `#[repr(C)]` mirror + SType const; `conv/bind.rs` decodes the chained
+entry → `InputAttachment` kind.
+*Gate (Claude-run):* default + `--features tiled` test/`clippy -D warnings`
+green; metal/vulkan/*,tiled `--tests` compile; metal example builds with tiled.
+Tests: T7 (`map_bind_group_layout_descriptor_decodes_input_attachment_entry`),
+T8 (`subpass_input_shader_generates_spirv_and_msl_status_is_known`,
+`reflects_subpass_input_binding_kind`), T9
+(`subpass_input_explicit_layout_checks_sample_type`). Noop-complete; real-GPU
+subpass execution is B8.
+*Note:* SPIR-V subpass codegen works; MSL **global** `subpass_input` needs the
+pass-local color-slot map → supplied in B4 (test tolerates the not-yet path).
 
 ## B4 — pass layout object + multi-subpass render pass  *(☐ TODO)*
 

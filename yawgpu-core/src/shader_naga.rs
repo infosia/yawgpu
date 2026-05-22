@@ -241,6 +241,14 @@ pub(crate) enum ReflectedResourceBindingKind {
         /// Multisampled variant.
         multisampled: bool,
     },
+    /// Input attachment variant.
+    #[cfg(feature = "tiled")]
+    InputAttachment {
+        /// Sample kind variant.
+        sample_kind: ReflectedTypeScalarClass,
+        /// Multisampled variant.
+        multisampled: bool,
+    },
     /// Storage texture variant.
     StorageTexture {
         /// Format variant.
@@ -955,6 +963,14 @@ fn resource_binding_kind(
                     view_dimension: reflected_texture_view_dimension(*dim, *arrayed),
                     multisampled: *multi,
                 }),
+                #[cfg(feature = "tiled")]
+                naga::ImageClass::Subpass {
+                    aspect: naga::SubpassAspect::Color { kind },
+                    multi,
+                } => Some(ReflectedResourceBindingKind::InputAttachment {
+                    sample_kind: scalar_kind_class(*kind)?,
+                    multisampled: *multi,
+                }),
                 naga::ImageClass::Storage { format, access } => {
                     Some(ReflectedResourceBindingKind::StorageTexture {
                         format: format!("{format:?}"),
@@ -1310,6 +1326,28 @@ mod tests {
             .find(|binding| binding.binding == 3)
             .unwrap();
         assert!(!unused.statically_used);
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn reflects_subpass_input_binding_kind() {
+        let module = parse_and_validate_wgsl(
+            "@group(0) @binding(0) var s: subpass_input<i32>;
+             @fragment fn fs() -> @location(0) vec4<i32> {
+                 return subpassLoad(s);
+             }",
+        )
+        .unwrap();
+
+        let bindings = module.resource_bindings_for_entry("fs").unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings[0].kind,
+            ReflectedResourceBindingKind::InputAttachment {
+                sample_kind: ReflectedTypeScalarClass::Sint,
+                multisampled: false
+            }
+        );
     }
 
     #[test]
