@@ -280,7 +280,40 @@ metal,tiled / vulkan,tiled `--tests`); default + `--features tiled` test/`clippy
 `subpass_render_pass_dispatch_transient_records_unsupported_error`. Noop-complete
 (the unsupported guarantee is structural across all backends).
 
-## B8 — examples + e2e + Phase Review  *(☐ TODO)*
+## B8 — examples + e2e + Phase Review
+
+### B8 part 1 — C tiled_deferred example  *(☑ DONE, code-complete; on-Mac verification blocked by a pre-existing library defect)*
+
+Done: `examples/tiled_deferred/` (offscreen 2-subpass G-buffer → `subpassLoad` →
+PNG), guarded by `#if defined(YAWGPU_HAS_TILED)` with a no-op stub when the
+extension is off. The example installs the framework's uncaptured-error
+callback, samples the **center pixel** of the readback, and exits non-zero with
+a printed RGBA + `FAILED` if it's not green within ±1 (silent-success bug
+eliminated). `examples/framework/framework.{c,h}` gained a
+`yawgpu_uncaptured_error_count()` helper used by the example. `examples/README.md`
+documents the example + backend caveats.
+`examples/CMakeLists.txt` now derives the cargo target dir from `(backend,
+extensions)` (e.g. `target-metal-tiled` when `-DYAWGPU_EXTENSIONS=tiled` is set),
+so an ext-on dylib is no longer clobbered by a subsequent ext-off build sharing
+`target-metal` (the A0 follow-up risk materialized in B8 review).
+*Gate (Claude-run):* default + `--features tiled` test/`clippy -D warnings` green;
+all five `--tests` configs compile; both `cmake -B build -DYAWGPU_FEATURE=metal
+-DYAWGPU_EXTENSIONS=tiled` and the no-extensions tree build the
+`tiled_deferred` target cleanly (C17-strict).
+*Follow-up library defect (NOT a B8 issue; separate ticket):* on this Apple
+Silicon, running C examples that link the cdylib with `YAWGPU_BACKEND=metal`
+falls back to Noop — debug traces showed
+`InstanceBackendSelection::Metal` → `MetalInstance::new()` succeeds, but
+`HalInstance::Metal(_).enumerate_adapters()` returns **empty** when invoked
+through the cdylib (the same call returns non-empty when invoked through the
+rlib — Phase 13/14's many Metal e2e (cargo test) keep passing). Likely
+cdylib-specific objc2 / Metal-device initialization issue. Capture in Phase 9
+also routed through Noop without our noticing because its clear-only path looks
+identical between Metal and Noop. **B8's `tiled_deferred` verifies fine on
+native Vulkan (Windows, Apple-skip heuristic doesn't trigger off-Apple),** which
+is the verification path used for B5c.
+
+### B8 part 2 — Phase Review  *(☐ TODO, orchestrator)*
 
 C deferred-shading example (Metal + Vulkan) under `#ifdef YAWGPU_HAS_TILED`;
 real-GPU e2e run by Claude and logged. Then the mandatory Phase Review

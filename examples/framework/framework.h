@@ -48,6 +48,8 @@ typedef struct YawgpuBufferInitDescriptor {
 WGPUStringView yawgpu_string_view(const char *value);
 // Prints a WGPUStringView to stdout, honoring its (possibly non-NUL) length.
 void yawgpu_print_string_view(WGPUStringView value);
+// Number of uncaptured device errors reported through the framework callback.
+unsigned int yawgpu_uncaptured_error_count(void);
 
 // Creates an instance with the backend chosen by the YAWGPU_BACKEND env var.
 WGPUInstance yawgpu_instance_create(void);

@@ -42,6 +42,8 @@ GLFW, and Linux windowed examples are not enabled in this phase.
 
 `capture` renders a solid color to an offscreen RGBA8 texture, copies it via T2B to a readback buffer, and writes `red.png` in the binary's current working directory.
 
+`tiled_deferred` demonstrates yawgpu's tiled extension from C: it records a two-subpass offscreen pass, reads a G-buffer through a subpass input, copies the persistent output texture to a readback buffer, validates the center pixel, and writes `tiled_deferred.png`. Build it with `-DYAWGPU_EXTENSIONS=tiled` on a backend with native subpass-input reads such as Metal or Vulkan; MoltenVK does not support this path. Without that extension the example builds as a stub that prints `tiled extension not enabled`.
+
 `surface_smoke` opens a window, clears the swapchain to a slate color for about 60 frames or until the window is closed, and then exits.
 
 `triangle` opens a window, draws a red triangle on a black background for about 60 frames or until the window is closed, and then exits with status 0.
