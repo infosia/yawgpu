@@ -146,6 +146,7 @@ impl VulkanDevice {
 
     /// Creates a subpass-compatible render pipeline.
     #[cfg(feature = "tiled")]
+    #[allow(clippy::too_many_arguments)]
     pub fn create_subpass_render_pipeline(
         &self,
         shader: HalShaderSource,

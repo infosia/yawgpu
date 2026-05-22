@@ -300,6 +300,7 @@ pub(super) fn create_render_pipeline(
 
 /// Creates a subpass-compatible render pipeline.
 #[cfg(feature = "tiled")]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_subpass_render_pipeline(
     device: Arc<VulkanDeviceInner>,
     shader: HalShaderSource,
@@ -842,7 +843,7 @@ pub(super) fn create_descriptor_set_layouts(
                     .binding(binding.binding)
                     .descriptor_type(descriptor_type(binding.kind))
                     .descriptor_count(1)
-                    .stage_flags(stage_flags)
+                    .stage_flags(binding_stage_flags(binding.kind, stage_flags))
             })
             .collect::<Vec<_>>();
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&layout_bindings);
@@ -877,6 +878,24 @@ pub(super) fn descriptor_type(kind: HalBufferBindingKind) -> vk::DescriptorType 
     match kind {
         HalBufferBindingKind::Uniform => vk::DescriptorType::UNIFORM_BUFFER,
         HalBufferBindingKind::Storage => vk::DescriptorType::STORAGE_BUFFER,
+        #[cfg(feature = "tiled")]
+        HalBufferBindingKind::InputAttachment => vk::DescriptorType::INPUT_ATTACHMENT,
+    }
+}
+
+/// Returns the descriptor set layout stage flags for one binding.
+///
+/// Input attachments may only be read in the fragment stage
+/// (`VUID-VkDescriptorSetLayoutBinding-descriptorType-01510`), so they take
+/// `FRAGMENT` regardless of the pipeline-wide default; other bindings use it.
+fn binding_stage_flags(
+    kind: HalBufferBindingKind,
+    default: vk::ShaderStageFlags,
+) -> vk::ShaderStageFlags {
+    match kind {
+        HalBufferBindingKind::Uniform | HalBufferBindingKind::Storage => default,
+        #[cfg(feature = "tiled")]
+        HalBufferBindingKind::InputAttachment => vk::ShaderStageFlags::FRAGMENT,
     }
 }
 
@@ -1184,6 +1203,22 @@ pub(super) fn create_descriptor_pool(
                         .map_err(|_| shader_error("storage descriptor count is too large"))?,
                 ),
         );
+    }
+    #[cfg(feature = "tiled")]
+    {
+        let input_attachment_count = bindings
+            .iter()
+            .filter(|binding| matches!(binding.kind, HalBufferBindingKind::InputAttachment))
+            .count();
+        if input_attachment_count > 0 {
+            pool_sizes.push(
+                vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::INPUT_ATTACHMENT)
+                    .descriptor_count(u32::try_from(input_attachment_count).map_err(|_| {
+                        shader_error("input attachment descriptor count is too large")
+                    })?),
+            );
+        }
     }
     let pool_info = vk::DescriptorPoolCreateInfo::default()
         .max_sets(

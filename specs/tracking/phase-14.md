@@ -190,6 +190,54 @@ clear-only subpass) pass on MoltenVK.
 the real driver name (vendor hardcoded "yawgpu", description empty) — MoltenVK
 detection falls back to the Apple-GPU heuristic.
 
+### B5c — native-Vulkan input-attachment correction  *(☑ DONE)*
+
+Running the full Phase 13/14 e2e on a **native Windows Vulkan driver** (the first
+time `vulkan_two_subpass_draw_subpass_load_readback` ran outside MoltenVK's
+self-skip) exposed that **B5b's "`VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT` sets wired
+from the layout's input source mapping" was not actually implemented** — only the
+render-pass-level `pInputAttachments` refs existed. The descriptor-set side was
+absent (`HalBufferBindingKind` had no `InputAttachment`, so the auto-derived
+descriptor set layout never declared the input, and `update_subpass_descriptor_sets`
+only wrote buffers), so `subpassLoad` read undefined → black. It went undetected
+because MoltenVK self-skips this test and no native Vulkan driver had run it.
+Three distinct fixes (all Noop-green + native-Vulkan-verified):
+1. **Core bind-group validation** (`pass.rs` `validate_subpass_pipeline_bind_groups`,
+   used by `subpass.rs` draw): input-attachment-only bind group layouts are
+   auto-wired by the pass, so they no longer require a caller `set_bind_group`
+   (previously failed `"pipeline requires a missing bind group"` on **all**
+   backends — so B5b's Metal "passed" claim is not reproducible with the committed
+   code either). Unit test
+   `subpass_render_pass_draw_auto_wires_input_attachment_bind_group`.
+2. **Vulkan input-attachment descriptors** (core + HAL): `HalBufferBindingKind::
+   InputAttachment` (tiled-gated); core `input_attachment_hal_bindings` appends
+   them to the Vulkan subpass pipeline's descriptor bindings (Metal still uses the
+   color-slot map); `create_descriptor_set_layouts` emits `INPUT_ATTACHMENT` with
+   FRAGMENT-only stage flags (VUID-…-01510); descriptor pool sizes it;
+   `update_subpass_descriptor_sets` resolves each input's source attachment →
+   framebuffer view and writes a `SHADER_READ_ONLY_OPTIMAL` (depth →
+   `DEPTH_STENCIL_READ_ONLY_OPTIMAL`) image descriptor. Unit test
+   `input_attachment_hal_bindings_extracts_only_input_attachment_entries`.
+3. **Texture usage** (`vulkan/format.rs`): under `tiled`, render-attachment
+   textures also get `VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT` so a persistent G-buffer
+   can be read as a subpass input (was failing
+   `VUID-VkFramebufferCreateInfo-pAttachments-00879` /
+   `VkWriteDescriptorSet-descriptorType-00338`).
+
+Also fixed the unrelated `e2e_vulkan_render` clear-color readback assertions
+(`[26,51,77,255]`): float→unorm8 of `0.1/0.2/0.3` lands on `.5` rounding ties, so a
+native driver returns `[25,51,76,255]` while MoltenVK rounds up — now compared with
+a ±1 tolerance (`contains_pixel_approx`).
+*Real-GPU (Claude, native Windows Vulkan):* full `--features vulkan,tiled --ignored`
+suite **16/16 passed** (incl. `vulkan_two_subpass_draw_subpass_load_readback` →
+**green**, validated under `VK_LAYER_KHRONOS_validation` with **0 validation
+errors**). *Gate:* default + `shader-passthrough,tiled` test/`clippy -D warnings`
+green; `vulkan,tiled` clippy + `--tests` green.
+*Still pending (Apple Silicon, Claude):* re-verify Metal `--features metal,tiled`
+compile + `metal_two_subpass_draw_subpass_load_readback` with fix 1 applied (Metal
+input path is the color-slot map, unaffected by fixes 2/3, but the core validation
+fix 1 must be re-confirmed on Metal hardware).
+
 ## B6 — framebuffer fetch path detection  *(☐ TODO)*
 
 Vulkan `FramebufferFetchPath` (`TileImage`/`RasterOrderAttachmentAccess`/

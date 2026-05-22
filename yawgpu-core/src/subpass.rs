@@ -545,7 +545,7 @@ impl SubpassRenderPass {
                 .as_ref()
                 .ok_or_else(|| "subpass render pass draw requires a render pipeline".to_owned())?;
             validate_subpass_pipeline_compatible(&self.inner.layout, active_subpass, pipeline)?;
-            validate_pipeline_bind_groups(
+            validate_subpass_pipeline_bind_groups(
                 pipeline.bind_group_layouts(),
                 &state.bind_groups,
                 limits,
@@ -1335,5 +1335,73 @@ mod tests {
         assert_eq!(command.draws.len(), 1);
         assert_eq!(command.draws[0].subpass_index, 0);
         assert_eq!(command.draws[0].draw.vertex_count, 3);
+    }
+
+    #[test]
+    fn subpass_render_pass_draw_auto_wires_input_attachment_bind_group() {
+        // A subpass-input binding is supplied by the pass from its input-source
+        // mapping, so drawing a pipeline whose only bind group is the input
+        // attachment must succeed without a caller `set_bind_group` call.
+        let device = noop_device();
+        let layout = Arc::new(device.create_subpass_pass_layout(two_subpass_layout_descriptor()));
+
+        let writer = Arc::new(device.create_subpass_render_pipeline(subpass_pipeline_descriptor(
+            &device,
+            Arc::clone(&layout),
+            0,
+        )));
+        assert!(!writer.is_error());
+
+        let reader_module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@group(0) @binding(0) var gbuffer: subpass_input<f32>;
+             @vertex fn vs() -> @builtin(position) vec4<f32> {
+                 return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+             }
+             @fragment fn fs() -> @location(0) vec4<f32> {
+                 let loaded = subpassLoad(gbuffer);
+                 return vec4<f32>(loaded.g, loaded.r, loaded.b, 1.0);
+             }"
+            .to_owned(),
+        )));
+        let reader = Arc::new(device.create_subpass_render_pipeline(
+            SubpassRenderPipelineDescriptor {
+                base: render_pipeline_descriptor(reader_module),
+                pass_layout: Arc::clone(&layout),
+                subpass_index: 1,
+                error: None,
+            },
+        ));
+        assert!(!reader.is_error());
+        // The reader pipeline's auto layout carries exactly the input-attachment group.
+        assert_eq!(reader.bind_group_layouts().len(), 1);
+
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_subpass_render_pass(
+            &device,
+            SubpassRenderPassDescriptor {
+                pass_layout: layout,
+                extent: Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                color_attachments: vec![persistent_color(&device), persistent_color(&device)],
+                depth_stencil_attachment: None,
+                error: None,
+            },
+        );
+        assert_eq!(error, None);
+        assert_eq!(pass.set_pipeline(writer), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.next_subpass(), None);
+        assert_eq!(pass.set_pipeline(reader), None);
+        // No `set_bind_group` for group 0: the input attachment is auto-wired by
+        // the subpass pass, so the draw must still validate.
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
     }
 }

@@ -8,8 +8,8 @@ use yawgpu_hal::{
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
-    HalSubpassAttachmentLayout, HalSubpassDependency, HalSubpassDependencyType,
-    HalSubpassInputAttachment, HalSubpassLayout, HalSubpassPassLayout,
+    HalBufferBindingKind, HalSubpassAttachmentLayout, HalSubpassDependency,
+    HalSubpassDependencyType, HalSubpassInputAttachment, HalSubpassLayout, HalSubpassPassLayout,
 };
 
 use crate::bind_group_layout::*;
@@ -518,6 +518,7 @@ impl RenderPipeline {
                 fragment_entry_name.as_deref(),
                 &metal_bindings,
                 &vertex_buffer_bindings,
+                &bind_group_layouts,
             )
         };
         let is_error = is_error || backend_error.is_some();
@@ -729,6 +730,7 @@ pub(crate) fn create_hal_subpass_render_pipeline(
     fragment_entry_name: Option<&str>,
     metal_bindings: &[MetalBufferBinding],
     vertex_buffer_bindings: &[MetalVertexBufferBinding],
+    bind_group_layouts: &[Arc<BindGroupLayout>],
 ) -> (Option<HalRenderPipeline>, Option<String>) {
     let Some(hal_device) = hal_device else {
         return (None, None);
@@ -765,7 +767,7 @@ pub(crate) fn create_hal_subpass_render_pipeline(
             Some("subpass render pipeline requires a fragment entry point".to_owned()),
         );
     };
-    let (shader, vertex_entry_point, fragment_entry_point, descriptor_bindings) =
+    let (shader, vertex_entry_point, fragment_entry_point, mut descriptor_bindings) =
         match select_render_shader_source(
             hal_device.backend(),
             &descriptor.base,
@@ -777,6 +779,12 @@ pub(crate) fn create_hal_subpass_render_pipeline(
             Ok(selection) => selection,
             Err(message) => return (None, Some(message)),
         };
+    // Vulkan reads subpass inputs through `INPUT_ATTACHMENT` descriptors wired
+    // from the pass layout's input-source mapping; the Metal backend instead
+    // reads them via the color-slot map, so it takes no extra descriptors here.
+    if matches!(hal_device.backend(), HalBackend::Vulkan) {
+        descriptor_bindings.extend(input_attachment_hal_bindings(bind_group_layouts));
+    }
     let hal_descriptor =
         match hal_render_pipeline_descriptor(&descriptor.base, vertex_buffer_bindings) {
             Ok(descriptor) => descriptor,
@@ -795,6 +803,30 @@ pub(crate) fn create_hal_subpass_render_pipeline(
         Ok(pipeline) => (Some(pipeline), None),
         Err(error) => (None, Some(error.to_string())),
     }
+}
+
+/// Builds HAL input-attachment descriptor bindings from the resolved bind group
+/// layouts (Vulkan binds subpass inputs through `INPUT_ATTACHMENT` descriptors).
+#[cfg(feature = "tiled")]
+fn input_attachment_hal_bindings(
+    bind_group_layouts: &[Arc<BindGroupLayout>],
+) -> Vec<HalDescriptorBinding> {
+    let mut bindings = Vec::new();
+    for (group_index, layout) in bind_group_layouts.iter().enumerate() {
+        let Ok(group) = u32::try_from(group_index) else {
+            break;
+        };
+        for entry in layout.entries() {
+            if matches!(entry.kind, Some(BindingLayoutKind::InputAttachment { .. })) {
+                bindings.push(HalDescriptorBinding {
+                    group,
+                    binding: entry.binding,
+                    kind: HalBufferBindingKind::InputAttachment,
+                });
+            }
+        }
+    }
+    bindings
 }
 
 #[cfg(feature = "tiled")]
@@ -2090,5 +2122,59 @@ mod tests {
         let scoped = device.pop_error_scope().expect("scope should exist");
         assert!(!matched_pipeline.is_error());
         assert_eq!(scoped, None);
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn input_attachment_hal_bindings_extracts_only_input_attachment_entries() {
+        let device = noop_device();
+        // Group 0 mixes an input attachment (binding 0) with a uniform (binding 1);
+        // group 1 holds only a uniform. Only the input attachment must be emitted.
+        let group0 = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: SHADER_STAGE_FRAGMENT,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::InputAttachment {
+                        sample_type: TextureSampleType::Float,
+                        multisampled: false,
+                    }),
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: SHADER_STAGE_FRAGMENT,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: 0,
+                    }),
+                },
+            ],
+            error: None,
+        }));
+        let group1 = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_FRAGMENT,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: 0,
+                }),
+            }],
+            error: None,
+        }));
+
+        let bindings = input_attachment_hal_bindings(&[group0, group1]);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].group, 0);
+        assert_eq!(bindings[0].binding, 0);
+        assert!(matches!(
+            bindings[0].kind,
+            HalBufferBindingKind::InputAttachment
+        ));
     }
 }

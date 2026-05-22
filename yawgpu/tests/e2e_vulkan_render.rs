@@ -56,7 +56,7 @@ fn fs() -> @location(0) vec4<f32> {
         let pixels = read_unpacked_texture_buffer(instance, readback);
 
         assert!(contains_pixel(&pixels, [255, 0, 0, 255]));
-        assert!(contains_pixel(&pixels, [26, 51, 77, 255]));
+        assert!(contains_pixel_approx(&pixels, [26, 51, 77, 255], 1));
         assert!(errors.lock().expect("error lock").is_empty());
         yawgpu::wgpuBufferRelease(readback);
         yawgpu::wgpuDeviceRelease(device);
@@ -107,7 +107,7 @@ fn fs() -> @location(0) vec4<f32> {
         let pixels = read_unpacked_texture_buffer(instance, readback);
 
         assert!(contains_pixel(&pixels, [0, 255, 0, 255]));
-        assert!(contains_pixel(&pixels, [26, 51, 77, 255]));
+        assert!(contains_pixel_approx(&pixels, [26, 51, 77, 255], 1));
         assert!(errors.lock().expect("error lock").is_empty());
         yawgpu::wgpuBufferRelease(readback);
         yawgpu::wgpuDeviceRelease(device);
@@ -493,6 +493,20 @@ fn contains_pixel(pixels: &[u8], rgba: [u8; 4]) -> bool {
     pixels
         .chunks_exact(BYTES_PER_PIXEL)
         .any(|pixel| pixel == rgba)
+}
+
+/// Returns whether any pixel matches `rgba` within `tolerance` per channel.
+///
+/// Float→unorm8 conversion of a color whose channels land on a `.5` rounding
+/// tie (e.g. `0.1 * 255 = 25.5`) is implementation-defined in Vulkan, so the
+/// clear-color background can read back as 25 or 26 depending on the driver.
+fn contains_pixel_approx(pixels: &[u8], rgba: [u8; 4], tolerance: u8) -> bool {
+    pixels.chunks_exact(BYTES_PER_PIXEL).any(|pixel| {
+        pixel
+            .iter()
+            .zip(rgba.iter())
+            .all(|(actual, expected)| actual.abs_diff(*expected) <= tolerance)
+    })
 }
 
 fn vertex_buffer_size() -> u64 {

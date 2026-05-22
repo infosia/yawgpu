@@ -506,7 +506,9 @@ pub(super) fn encode_subpass_render_pass(
             .iter()
             .filter(|draw| draw.subpass_index as usize == subpass_index)
         {
-            if let Some(pool) = encode_subpass_draw(&device.device, command_buffer, pass, draw)? {
+            if let Some(pool) =
+                encode_subpass_draw(&device.device, command_buffer, pass, draw, &views)?
+            {
                 descriptor_pools.push(pool);
             }
         }
@@ -566,6 +568,7 @@ fn encode_subpass_draw(
     command_buffer: vk::CommandBuffer,
     pass: &HalSubpassRenderPassCommand,
     draw: &HalSubpassDraw,
+    views: &[vk::ImageView],
 ) -> Result<Option<vk::DescriptorPool>, HalError> {
     let HalRenderPipeline::Vulkan(pipeline) = &draw.pipeline else {
         return Err(shader_error("subpass render pipeline is not Vulkan-backed"));
@@ -584,7 +587,9 @@ fn encode_subpass_draw(
     } else {
         Vec::new()
     };
-    if let Err(error) = update_subpass_descriptor_sets(device, pipeline, draw, &descriptor_sets) {
+    if let Err(error) =
+        update_subpass_descriptor_sets(device, pipeline, pass, draw, &descriptor_sets, views)
+    {
         if let Some(pool) = descriptor_pool {
             unsafe {
                 device.destroy_descriptor_pool(pool, None);
@@ -634,43 +639,104 @@ fn encode_subpass_draw(
 fn update_subpass_descriptor_sets(
     device: &ash::Device,
     pipeline: &VulkanRenderPipeline,
+    pass: &HalSubpassRenderPassCommand,
     draw: &HalSubpassDraw,
     descriptor_sets: &[vk::DescriptorSet],
+    views: &[vk::ImageView],
 ) -> Result<(), HalError> {
     if pipeline.inner.descriptor_bindings.is_empty() {
         return Ok(());
     }
+    let subpass_inputs = pass
+        .layout
+        .subpasses
+        .get(draw.subpass_index as usize)
+        .map(|subpass| subpass.input_attachments.as_slice())
+        .unwrap_or(&[]);
+    // Tracks whether a write references `buffer_infos` or `image_infos`; both Vecs
+    // are fully built before any `WriteDescriptorSet` borrows into them.
+    enum DescriptorInfo {
+        Buffer(usize),
+        Image(usize),
+    }
     let mut buffer_infos = Vec::new();
+    let mut image_infos = Vec::new();
     let mut write_specs = Vec::new();
     for descriptor in &pipeline.inner.descriptor_bindings {
-        let bound = draw
-            .bind_buffers
-            .iter()
-            .find(|bound| bound.group == descriptor.group && bound.binding == descriptor.binding)
-            .ok_or_else(|| shader_error("subpass descriptor binding is missing"))?;
-        let buffer_info = descriptor_buffer_info(bound)?;
-        buffer_infos.push(buffer_info);
-        write_specs.push((
-            buffer_infos.len() - 1,
-            descriptor.group,
-            descriptor.binding,
-            descriptor_type(descriptor.kind),
-        ));
+        match descriptor.kind {
+            HalBufferBindingKind::Uniform | HalBufferBindingKind::Storage => {
+                let bound = draw
+                    .bind_buffers
+                    .iter()
+                    .find(|bound| {
+                        bound.group == descriptor.group && bound.binding == descriptor.binding
+                    })
+                    .ok_or_else(|| shader_error("subpass descriptor binding is missing"))?;
+                buffer_infos.push(descriptor_buffer_info(bound)?);
+                write_specs.push((
+                    DescriptorInfo::Buffer(buffer_infos.len() - 1),
+                    descriptor.group,
+                    descriptor.binding,
+                    descriptor_type(descriptor.kind),
+                ));
+            }
+            HalBufferBindingKind::InputAttachment => {
+                let input = subpass_inputs
+                    .iter()
+                    .find(|input| {
+                        input.group == descriptor.group && input.binding == descriptor.binding
+                    })
+                    .ok_or_else(|| shader_error("subpass input attachment mapping is missing"))?;
+                let (view_index, image_layout) = if input.source_attachment == u32::MAX {
+                    (
+                        pass.layout.color_attachments.len(),
+                        vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                    )
+                } else {
+                    (
+                        input.source_attachment as usize,
+                        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    )
+                };
+                let view = views
+                    .get(view_index)
+                    .copied()
+                    .ok_or_else(|| shader_error("subpass input attachment view is missing"))?;
+                image_infos.push(
+                    vk::DescriptorImageInfo::default()
+                        .image_view(view)
+                        .image_layout(image_layout),
+                );
+                write_specs.push((
+                    DescriptorInfo::Image(image_infos.len() - 1),
+                    descriptor.group,
+                    descriptor.binding,
+                    vk::DescriptorType::INPUT_ATTACHMENT,
+                ));
+            }
+        }
     }
     let writes = write_specs
         .iter()
-        .map(|(info_index, group, binding, descriptor_type)| {
+        .map(|(info, group, binding, descriptor_type)| {
             let group = usize::try_from(*group)
                 .map_err(|_| shader_error("descriptor group index is too large"))?;
             let descriptor_set = descriptor_sets
                 .get(group)
                 .copied()
                 .ok_or_else(|| shader_error("descriptor set is missing"))?;
-            Ok(vk::WriteDescriptorSet::default()
+            let write = vk::WriteDescriptorSet::default()
                 .dst_set(descriptor_set)
                 .dst_binding(*binding)
-                .descriptor_type(*descriptor_type)
-                .buffer_info(std::slice::from_ref(&buffer_infos[*info_index])))
+                .descriptor_type(*descriptor_type);
+            Ok(match info {
+                DescriptorInfo::Buffer(index) => {
+                    write.buffer_info(std::slice::from_ref(&buffer_infos[*index]))
+                }
+                DescriptorInfo::Image(index) => {
+                    write.image_info(std::slice::from_ref(&image_infos[*index]))
+                }
+            })
         })
         .collect::<Result<Vec<_>, HalError>>()?;
     unsafe {

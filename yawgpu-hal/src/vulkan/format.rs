@@ -27,6 +27,12 @@ pub(super) fn map_texture_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
     }
     if usage.render_attachment {
         flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
+        // With the tiled extension a render target can also be read back as a
+        // subpass input attachment, which requires `INPUT_ATTACHMENT` usage.
+        #[cfg(feature = "tiled")]
+        {
+            flags |= vk::ImageUsageFlags::INPUT_ATTACHMENT;
+        }
     }
     flags
 }
