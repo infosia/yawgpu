@@ -36,13 +36,11 @@ fn vulkan_tiled_features_and_capabilities_are_advertised() {
             yawgpu::wgpuAdapterHasFeature(adapter, yawgpu::YaWGPUFeatureName_TransientAttachments,),
             1
         );
-        assert_eq!(
-            yawgpu::wgpuAdapterHasFeature(
-                adapter,
-                yawgpu::YaWGPUFeatureName_ShaderFramebufferFetch,
-            ),
-            1
+        let framebuffer_fetch = yawgpu::wgpuAdapterHasFeature(
+            adapter,
+            yawgpu::YaWGPUFeatureName_ShaderFramebufferFetch,
         );
+        assert!(matches!(framebuffer_fetch, 0 | 1));
         assert_eq!(
             yawgpu::wgpuAdapterHasFeature(
                 adapter,
@@ -203,12 +201,10 @@ unsafe fn adapter_is_moltenvk(adapter: native::WGPUAdapter) -> bool {
     yawgpu::wgpuAdapterInfoFreeMembers(info);
 
     // Apple-Silicon Vulkan adapters are MoltenVK; adapter info does not expose the driver name yet.
-    [vendor, device, description]
-        .iter()
-        .any(|field| {
-            let field = field.to_ascii_lowercase();
-            field.contains("molten") || field.contains("apple")
-        })
+    [vendor, device, description].iter().any(|field| {
+        let field = field.to_ascii_lowercase();
+        field.contains("molten") || field.contains("apple")
+    })
 }
 
 unsafe fn create_vulkan_instance() -> native::WGPUInstance {

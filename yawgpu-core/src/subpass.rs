@@ -1345,15 +1345,18 @@ mod tests {
         let device = noop_device();
         let layout = Arc::new(device.create_subpass_pass_layout(two_subpass_layout_descriptor()));
 
-        let writer = Arc::new(device.create_subpass_render_pipeline(subpass_pipeline_descriptor(
-            &device,
-            Arc::clone(&layout),
-            0,
-        )));
+        let writer = Arc::new(
+            device.create_subpass_render_pipeline(subpass_pipeline_descriptor(
+                &device,
+                Arc::clone(&layout),
+                0,
+            )),
+        );
         assert!(!writer.is_error());
 
-        let reader_module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
-            "@group(0) @binding(0) var gbuffer: subpass_input<f32>;
+        let reader_module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@group(0) @binding(0) var gbuffer: subpass_input<f32>;
              @vertex fn vs() -> @builtin(position) vec4<f32> {
                  return vec4<f32>(0.0, 0.0, 0.0, 1.0);
              }
@@ -1361,8 +1364,9 @@ mod tests {
                  let loaded = subpassLoad(gbuffer);
                  return vec4<f32>(loaded.g, loaded.r, loaded.b, 1.0);
              }"
-            .to_owned(),
-        )));
+                .to_owned(),
+            )),
+        );
         let reader = Arc::new(device.create_subpass_render_pipeline(
             SubpassRenderPipelineDescriptor {
                 base: render_pipeline_descriptor(reader_module),

@@ -1,3 +1,4 @@
+#[cfg(feature = "tiled")]
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt;
@@ -10,19 +11,19 @@ use std::sync::Mutex;
 
 use ash::vk;
 
+#[cfg(feature = "tiled")]
+use crate::{
+    FramebufferFetchPath, HalRenderPipeline, HalSubpassAttachmentResource,
+    HalSubpassDependencyType, HalSubpassDraw, HalSubpassPassLayout, HalSubpassRenderPassCommand,
+    HalTexture, HalTransientAttachment, HalTransientAttachmentDescriptor,
+};
 use crate::{
     HalAddressMode, HalBoundBuffer, HalBufferBindingKind, HalBufferCopy, HalBufferTextureCopy,
     HalCompareFunction, HalComputePass, HalCopy, HalDescriptorBinding, HalError, HalExtent3d,
     HalFilterMode, HalMipmapFilterMode, HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass,
-    HalRenderPipeline, HalRenderPipelineDescriptor, HalSamplerDescriptor, HalShaderSource,
-    HalSurfaceConfiguration, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
-    HalTextureUsage, HalVertexFormat, HalVertexStepMode,
-};
-#[cfg(feature = "tiled")]
-use crate::{
-    HalSubpassAttachmentResource, HalSubpassDependencyType, HalSubpassDraw, HalSubpassPassLayout,
-    HalSubpassRenderPassCommand, HalTexture, HalTransientAttachment,
-    HalTransientAttachmentDescriptor,
+    HalRenderPipelineDescriptor, HalSamplerDescriptor, HalShaderSource, HalSurfaceConfiguration,
+    HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat,
+    HalVertexStepMode,
 };
 
 const BACKEND: &str = "vulkan";
@@ -209,6 +210,8 @@ pub struct VulkanAdapter {
     instance: Arc<VulkanInstanceInner>,
     physical_device: vk::PhysicalDevice,
     name: String,
+    #[cfg(feature = "tiled")]
+    framebuffer_fetch_path: FramebufferFetchPath,
 }
 
 impl VulkanAdapter {
@@ -221,10 +224,15 @@ impl VulkanAdapter {
                 .instance
                 .get_physical_device_properties(physical_device)
         };
+        let name = physical_device_name(properties)?;
+        #[cfg(feature = "tiled")]
+        let framebuffer_fetch_path = detect_framebuffer_fetch_path(&instance, physical_device);
         Some(Self {
             instance,
             physical_device,
-            name: physical_device_name(properties)?,
+            name,
+            #[cfg(feature = "tiled")]
+            framebuffer_fetch_path,
         })
     }
 
@@ -232,6 +240,20 @@ impl VulkanAdapter {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns the detected shader framebuffer-fetch path.
+    #[cfg(feature = "tiled")]
+    #[must_use]
+    pub fn framebuffer_fetch_path(&self) -> FramebufferFetchPath {
+        self.framebuffer_fetch_path
+    }
+
+    /// Returns true when shader framebuffer fetch is supported.
+    #[cfg(feature = "tiled")]
+    #[must_use]
+    pub fn supports_shader_framebuffer_fetch(&self) -> bool {
+        !matches!(self.framebuffer_fetch_path, FramebufferFetchPath::Disabled)
     }
 
     /// Creates a device (and its default queue) on this adapter.
@@ -274,6 +296,8 @@ impl VulkanAdapter {
             queue_family_index,
             allocations: AtomicU64::new(0),
             #[cfg(feature = "tiled")]
+            framebuffer_fetch_path: self.framebuffer_fetch_path,
+            #[cfg(feature = "tiled")]
             subpass_render_pass_cache: Mutex::new(BTreeMap::new()),
         });
         Ok(VulkanDevice {
@@ -304,20 +328,50 @@ impl VulkanAdapter {
     }
 
     fn has_device_extension(&self, name: &CStr) -> bool {
-        let extensions = unsafe {
-            self.instance
-                .instance
-                .enumerate_device_extension_properties(self.physical_device)
-        };
-        let Ok(extensions) = extensions else {
-            return false;
-        };
-        extensions.iter().any(|extension| {
-            extension
-                .extension_name_as_c_str()
-                .is_ok_and(|extension_name| extension_name == name)
-        })
+        has_device_extension_for_physical_device(&self.instance, self.physical_device, name)
     }
+}
+
+#[cfg(feature = "tiled")]
+fn detect_framebuffer_fetch_path(
+    instance: &Arc<VulkanInstanceInner>,
+    physical_device: vk::PhysicalDevice,
+) -> FramebufferFetchPath {
+    if has_device_extension_for_physical_device(
+        instance,
+        physical_device,
+        vk::EXT_SHADER_TILE_IMAGE_NAME,
+    ) {
+        return FramebufferFetchPath::TileImage;
+    }
+    if has_device_extension_for_physical_device(
+        instance,
+        physical_device,
+        vk::EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_NAME,
+    ) {
+        return FramebufferFetchPath::RasterOrderAttachmentAccess;
+    }
+    FramebufferFetchPath::Disabled
+}
+
+fn has_device_extension_for_physical_device(
+    instance: &Arc<VulkanInstanceInner>,
+    physical_device: vk::PhysicalDevice,
+    name: &CStr,
+) -> bool {
+    let extensions = unsafe {
+        instance
+            .instance
+            .enumerate_device_extension_properties(physical_device)
+    };
+    let Ok(extensions) = extensions else {
+        return false;
+    };
+    extensions.iter().any(|extension| {
+        extension
+            .extension_name_as_c_str()
+            .is_ok_and(|extension_name| extension_name == name)
+    })
 }
 
 mod buffer;

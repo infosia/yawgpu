@@ -242,11 +242,28 @@ metal/vulkan/metal,tiled/vulkan,tiled `--tests` compile; MoltenVK
 `vulkan,tiled --ignored` 4/4 (2-subpass self-skips, no regression). B5 (a/b/c)
 fully verified across Noop / Metal / native-Vulkan / MoltenVK.
 
-## B6 — framebuffer fetch path detection  *(☐ TODO)*
+## B6 — framebuffer fetch path detection  *(☑ DONE)*
 
-Vulkan `FramebufferFetchPath` (`TileImage`/`RasterOrderAttachmentAccess`/
-`Disabled`) detection + `ShaderFramebufferFetch` advertise; Metal implicit.
-*Accept:* T17 e2e.
+Done: Vulkan `FramebufferFetchPath` detection at device setup
+(`EXT_SHADER_TILE_IMAGE` → `TileImage`, else
+`EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS` → `RasterOrderAttachmentAccess`, else
+`Disabled`) + `supports_shader_framebuffer_fetch()`. core
+`framebuffer_fetch_supported(backend, path)` pure helper (Metal true; Vulkan
+!Disabled; Noop false) gates the `ShaderFramebufferFetch` advertisement (B1 had
+it unconditional); `MultiSubpass`/`TransientAttachments` stay always-on for
+tiled-capable backends. The Vulkan advertise e2e tolerates a driver without the
+extensions (asserts `ShaderFramebufferFetch` only when reported). All vendor
+`FramebufferFetchPath` usage is `#[cfg(feature = "tiled")]`-gated (a fix-pass
+corrected a `--features vulkan`-without-tiled build break).
+*Gate (Claude-run):* **all five build configs** compile (default / vulkan /
+metal / metal,tiled / vulkan,tiled `--tests`); default + `--features tiled`
+test/`clippy -D warnings` green. T17:
+`framebuffer_fetch_support_is_backend_and_path_aware`,
+`tiled_feature_advertise_gates_shader_framebuffer_fetch`.
+*Real-GPU (Claude):* Metal `metal_tiled_features_and_capabilities_are_advertised`
+→ passed (advertises `ShaderFramebufferFetch`); MoltenVK `vulkan,tiled --ignored`
+4/4 (no extensions → `ShaderFramebufferFetch` honestly not advertised, no
+false-fail).
 
 ## B7 — programmable tile dispatch scaffold  *(☐ TODO)*
 

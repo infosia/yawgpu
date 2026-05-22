@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+#[cfg(feature = "tiled")]
+use yawgpu_hal::FramebufferFetchPath;
 use yawgpu_hal::{HalAdapter, HalBackend};
 
 use crate::device::*;
@@ -74,12 +76,11 @@ impl Adapter {
         #[cfg(feature = "tiled")]
         {
             let mut features = supported_features();
-            if tiled_features_supported(self.backend()) {
-                features.insert(Feature::MultiSubpass);
-                features.insert(Feature::TransientAttachments);
-                features.insert(Feature::ShaderFramebufferFetch);
-                features.insert(Feature::ProgrammableTileDispatch);
-            }
+            add_tiled_features(
+                &mut features,
+                self.backend(),
+                self.inner.hal.framebuffer_fetch_path(),
+            );
             features
         }
     }
@@ -208,6 +209,31 @@ pub(crate) fn tiled_features_supported(backend: HalBackend) -> bool {
     matches!(backend, HalBackend::Metal | HalBackend::Vulkan)
 }
 
+/// Returns true when shader framebuffer fetch is supported by backend/path.
+#[cfg(feature = "tiled")]
+#[must_use]
+pub(crate) fn framebuffer_fetch_supported(backend: HalBackend, path: FramebufferFetchPath) -> bool {
+    match backend {
+        HalBackend::Metal => true,
+        HalBackend::Vulkan => !matches!(path, FramebufferFetchPath::Disabled),
+        HalBackend::Noop => false,
+        _ => false,
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn add_tiled_features(features: &mut FeatureSet, backend: HalBackend, path: FramebufferFetchPath) {
+    if !tiled_features_supported(backend) {
+        return;
+    }
+    features.insert(Feature::MultiSubpass);
+    features.insert(Feature::TransientAttachments);
+    if framebuffer_fetch_supported(backend, path) {
+        features.insert(Feature::ShaderFramebufferFetch);
+    }
+    features.insert(Feature::ProgrammableTileDispatch);
+}
+
 #[cfg(feature = "tiled")]
 impl Adapter {
     /// Returns tiled rendering capabilities for this adapter.
@@ -312,6 +338,75 @@ mod tests {
         assert!(!adapter.has_feature(Feature::TransientAttachments));
         assert!(!adapter.has_feature(Feature::ShaderFramebufferFetch));
         assert!(!adapter.has_feature(Feature::ProgrammableTileDispatch));
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn framebuffer_fetch_support_is_backend_and_path_aware() {
+        assert!(framebuffer_fetch_supported(
+            HalBackend::Metal,
+            FramebufferFetchPath::Disabled
+        ));
+        assert!(framebuffer_fetch_supported(
+            HalBackend::Vulkan,
+            FramebufferFetchPath::TileImage
+        ));
+        assert!(framebuffer_fetch_supported(
+            HalBackend::Vulkan,
+            FramebufferFetchPath::RasterOrderAttachmentAccess
+        ));
+        assert!(!framebuffer_fetch_supported(
+            HalBackend::Vulkan,
+            FramebufferFetchPath::Disabled
+        ));
+        assert!(!framebuffer_fetch_supported(
+            HalBackend::Noop,
+            FramebufferFetchPath::TileImage
+        ));
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn tiled_feature_advertise_gates_shader_framebuffer_fetch() {
+        let mut vulkan_disabled = supported_features();
+        add_tiled_features(
+            &mut vulkan_disabled,
+            HalBackend::Vulkan,
+            FramebufferFetchPath::Disabled,
+        );
+        assert!(vulkan_disabled.contains(&Feature::MultiSubpass));
+        assert!(vulkan_disabled.contains(&Feature::TransientAttachments));
+        assert!(!vulkan_disabled.contains(&Feature::ShaderFramebufferFetch));
+        assert!(vulkan_disabled.contains(&Feature::ProgrammableTileDispatch));
+
+        let mut vulkan_tile_image = supported_features();
+        add_tiled_features(
+            &mut vulkan_tile_image,
+            HalBackend::Vulkan,
+            FramebufferFetchPath::TileImage,
+        );
+        assert!(vulkan_tile_image.contains(&Feature::ShaderFramebufferFetch));
+
+        let mut vulkan_roaa = supported_features();
+        add_tiled_features(
+            &mut vulkan_roaa,
+            HalBackend::Vulkan,
+            FramebufferFetchPath::RasterOrderAttachmentAccess,
+        );
+        assert!(vulkan_roaa.contains(&Feature::ShaderFramebufferFetch));
+
+        let mut metal = supported_features();
+        add_tiled_features(
+            &mut metal,
+            HalBackend::Metal,
+            FramebufferFetchPath::Disabled,
+        );
+        assert!(metal.contains(&Feature::ShaderFramebufferFetch));
+
+        let mut noop = supported_features();
+        add_tiled_features(&mut noop, HalBackend::Noop, FramebufferFetchPath::TileImage);
+        assert!(!noop.contains(&Feature::MultiSubpass));
+        assert!(!noop.contains(&Feature::ShaderFramebufferFetch));
     }
 
     #[cfg(feature = "tiled")]

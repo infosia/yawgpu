@@ -37,6 +37,19 @@ pub use format::{
 pub use present::{HalPresentMode, HalSurfaceConfiguration};
 pub use shader::HalShaderSource;
 
+/// Enumerates backend paths for shader framebuffer fetch.
+#[cfg(feature = "tiled")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FramebufferFetchPath {
+    /// Shader framebuffer fetch is unavailable.
+    Disabled,
+    /// Vulkan `VK_EXT_shader_tile_image` path.
+    TileImage,
+    /// Vulkan raster-order attachment access path.
+    RasterOrderAttachmentAccess,
+}
+
 /// Noop module.
 #[cfg(feature = "noop")]
 pub mod noop;
@@ -195,6 +208,30 @@ impl HalAdapter {
         }
     }
 
+    /// Returns the detected shader framebuffer-fetch path.
+    #[cfg(feature = "tiled")]
+    #[must_use]
+    pub fn framebuffer_fetch_path(&self) -> FramebufferFetchPath {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => FramebufferFetchPath::Disabled,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.framebuffer_fetch_path(),
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => FramebufferFetchPath::TileImage,
+        }
+    }
+
+    /// Returns true when shader framebuffer fetch is supported.
+    #[cfg(feature = "tiled")]
+    #[must_use]
+    pub fn supports_shader_framebuffer_fetch(&self) -> bool {
+        !matches!(
+            self.framebuffer_fetch_path(),
+            FramebufferFetchPath::Disabled
+        )
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<HalDevice, HalError> {
         match self {
@@ -247,6 +284,30 @@ impl HalDevice {
             #[cfg(feature = "metal")]
             Self::Metal(_) => HalBackend::Metal,
         }
+    }
+
+    /// Returns the detected shader framebuffer-fetch path.
+    #[cfg(feature = "tiled")]
+    #[must_use]
+    pub fn framebuffer_fetch_path(&self) -> FramebufferFetchPath {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => FramebufferFetchPath::Disabled,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(device) => device.framebuffer_fetch_path(),
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => FramebufferFetchPath::TileImage,
+        }
+    }
+
+    /// Returns true when shader framebuffer fetch is supported.
+    #[cfg(feature = "tiled")]
+    #[must_use]
+    pub fn supports_shader_framebuffer_fetch(&self) -> bool {
+        !matches!(
+            self.framebuffer_fetch_path(),
+            FramebufferFetchPath::Disabled
+        )
     }
 
     /// Returns the allocation count.

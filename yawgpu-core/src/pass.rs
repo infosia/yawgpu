@@ -848,7 +848,12 @@ fn validate_bound_bind_group(
     if !bind_group_layouts_compatible(required_layout, bound.group.layout()) {
         return Err("pipeline bind group layout is incompatible".to_owned());
     }
-    validate_dynamic_offsets(required_layout, &bound.group, &bound.dynamic_offsets, limits)
+    validate_dynamic_offsets(
+        required_layout,
+        &bound.group,
+        &bound.dynamic_offsets,
+        limits,
+    )
 }
 
 /// Returns whether every entry in the layout is an input attachment.
