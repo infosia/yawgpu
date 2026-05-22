@@ -192,6 +192,7 @@ generalizes the backend branch:
   handle; no pipeline is built. ☐ (UT)
 - **MP6** each `YaWGPUMslEntryPoint.stage` must have exactly one
   `WGPUShaderStage` bit set (Vertex/Fragment/Compute); zero or multiple ⇒ error. ☐ (UT)
+- **MP7** an empty MSL `code` source ⇒ error module. ☐ (UT)
 
 ### Common / handle behaviour (P13.3)
 

@@ -94,7 +94,7 @@ pub(crate) enum ShaderModuleSourceKind {
     /// Wgsl variant.
     Wgsl {
         /// Source variant.
-        source: String,
+        _source: String,
         /// Reflected variant.
         reflected: Box<shader_naga::ReflectedModule>,
     },
@@ -135,7 +135,7 @@ impl ShaderModule {
         let reflected = shader_naga::parse_and_validate_wgsl(&source)?;
         validate_module_limits(&reflected.module)?;
         Ok(ShaderModuleSourceKind::Wgsl {
-            source,
+            _source: source,
             reflected: Box::new(reflected),
         })
     }
@@ -187,10 +187,7 @@ impl ShaderModule {
     #[must_use]
     pub(crate) fn reflected(&self) -> Option<&shader_naga::ReflectedModule> {
         match &self.inner._source {
-            ShaderModuleSourceKind::Wgsl { source, reflected } => {
-                let _ = source;
-                Some(reflected)
-            }
+            ShaderModuleSourceKind::Wgsl { reflected, .. } => Some(reflected),
             #[cfg(feature = "shader-passthrough")]
             ShaderModuleSourceKind::Spirv { reflected, .. } => Some(reflected),
             _ => None,
