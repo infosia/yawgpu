@@ -705,6 +705,20 @@ pub(crate) fn select_render_shader_source(
                     hal_descriptor_bindings(metal_bindings),
                 ));
             }
+            #[cfg(feature = "shader-passthrough")]
+            if descriptor
+                .vertex
+                .shader
+                .module
+                .spirv_passthrough()
+                .is_some()
+                || fragment.shader.module.spirv_passthrough().is_some()
+            {
+                return Err(
+                    "render pipeline cannot mix a SPIR-V passthrough module with a non-SPIR-V module"
+                        .to_owned(),
+                );
+            }
             let vertex_module = descriptor.vertex.shader.module.reflected().ok_or_else(|| {
                 "render pipeline requires a reflected vertex shader module".to_owned()
             })?;
@@ -1506,6 +1520,8 @@ pub(crate) fn validate_multisample_state(
 mod tests {
     use super::*;
     #[cfg(feature = "shader-passthrough")]
+    use crate::ErrorFilter;
+    #[cfg(feature = "shader-passthrough")]
     use crate::test_helpers::*;
 
     #[cfg(feature = "shader-passthrough")]
@@ -1588,6 +1604,20 @@ mod tests {
         let msl_module =
             Arc::new(device.create_shader_module_msl(msl_source.clone(), msl_render_reflection()));
         let msl_descriptor = render_pipeline_descriptor(Arc::clone(&msl_module));
+        let mut mixed_vertex_spirv = render_pipeline_descriptor(Arc::clone(&vertex_spirv));
+        mixed_vertex_spirv
+            .fragment
+            .as_mut()
+            .expect("fragment should exist")
+            .shader
+            .module = Arc::clone(&wgsl_module);
+        let mut mixed_fragment_spirv = render_pipeline_descriptor(Arc::clone(&wgsl_module));
+        mixed_fragment_spirv
+            .fragment
+            .as_mut()
+            .expect("fragment should exist")
+            .shader
+            .module = Arc::clone(&fragment_spirv);
 
         let (source, vertex_entry, fragment_entry, bindings) =
             select_render_shader_source(HalBackend::Vulkan, &wgsl_descriptor, "vs", "fs", &[], &[])
@@ -1613,6 +1643,30 @@ mod tests {
             HalShaderSource::SpirVStages { vertex, fragment }
                 if vertex == vertex_words && fragment == fragment_words
         ));
+        assert_eq!(
+            select_render_shader_source(
+                HalBackend::Vulkan,
+                &mixed_vertex_spirv,
+                "vs",
+                "fs",
+                &[],
+                &[],
+            )
+            .expect_err("mixed SPIR-V vertex and WGSL fragment must be rejected"),
+            "render pipeline cannot mix a SPIR-V passthrough module with a non-SPIR-V module"
+        );
+        assert_eq!(
+            select_render_shader_source(
+                HalBackend::Vulkan,
+                &mixed_fragment_spirv,
+                "vs",
+                "fs",
+                &[],
+                &[],
+            )
+            .expect_err("mixed WGSL vertex and SPIR-V fragment must be rejected"),
+            "render pipeline cannot mix a SPIR-V passthrough module with a non-SPIR-V module"
+        );
 
         let (source, vertex_entry, fragment_entry, _) =
             select_render_shader_source(HalBackend::Metal, &msl_descriptor, "vs", "fs", &[], &[])
@@ -1631,5 +1685,44 @@ mod tests {
                 .expect_err("MSL must not run on Vulkan"),
             "MSL shader module cannot be used on the Vulkan backend"
         );
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn msl_render_pipeline_requires_explicit_layout_on_noop() {
+        let device = noop_device();
+        let module = Arc::new(device.create_shader_module_msl(
+            "vertex float4 vs() { return float4(0); }\nfragment float4 fs() { return float4(1); }"
+                .to_owned(),
+            msl_render_reflection(),
+        ));
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let auto = device.create_render_pipeline(render_pipeline_descriptor(Arc::clone(&module)));
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("auto MSL render pipeline should be scoped");
+        assert!(auto.is_error());
+        assert_eq!(
+            scoped.message,
+            "MSL shader module requires an explicit pipeline layout"
+        );
+
+        let explicit_layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: Vec::new(),
+            immediate_size: 0,
+            error: None,
+        }));
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.layout = RenderPipelineLayout::Explicit(explicit_layout);
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let explicit = device.create_render_pipeline(descriptor);
+        let scoped = device.pop_error_scope().expect("scope should exist");
+        assert!(!explicit.is_error());
+        assert_eq!(explicit.vertex_entry_name(), "vs");
+        assert_eq!(explicit.fragment_entry_name(), Some("fs"));
+        assert_eq!(scoped, None);
     }
 }

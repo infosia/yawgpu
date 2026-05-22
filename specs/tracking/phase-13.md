@@ -1,6 +1,8 @@
 # Phase 13 — Shader passthrough (SPIR-V / MSL)
 
-Status: **PLANNED**. Rules/plan: `../blocks/33-shader-passthrough.md`.
+Status: **COMPLETE** (A0-A4 done + real-GPU verified; Phase 13 Review CLOSED —
+0C/2M/4m, all MAJOR + kept MINOR fixed, see A5). Commits `phase-13: A0` →
+`phase-13: phase review`. Rules/plan: `../blocks/33-shader-passthrough.md`.
 Roles/loop: `../reference/workflow.md`.
 
 **Vendor extension**, gated by cargo feature **`shader-passthrough`** (default
@@ -127,8 +129,31 @@ Noop `cargo test --workspace` + `clippy -D warnings` green.
   `vulkan_spirv_compute_fills_storage_buffer`, `vulkan_spirv_render_draws_constant_color_triangle`
   → **2 passed** (SP3 verified).
 
-## A5 — Phase Review  *(☐ TODO)*
+## A5 — Phase Review  *(☑ DONE — CLOSED)*
 
-Fresh no-context subagent reviews the cumulative diff; CRITICAL/MAJOR/MINOR;
-fix in severity order; cannot be COMPLETE with any open CRITICAL/MAJOR. Recorded
-in `phase-13-review.md`.
+Clean Review (fresh no-context subagent, diff `c2fc3e6..d6fe762` + block 33 +
+CLAUDE.md + naming-conventions): **6 findings — 0 CRITICAL / 2 MAJOR / 4 MINOR.**
+
+Triage + resolution:
+- **MAJOR 1 (fixed)** — `select_render_shader_source` Vulkan arm took the
+  verbatim path only when *both* stages were SPIR-V; a SPIR-V+WGSL mix fell
+  through to `generate_spirv`, re-emitting the SPIR-V (SP3 violation). Fix:
+  reject any mixed SPIR-V-passthrough + non-SPIR-V render pipeline
+  (render_pipeline.rs:718) + matrix tests for both mix directions.
+- **MAJOR 2 (fixed)** — render-path MP3 was enforced but untested. Added
+  `msl_render_pipeline_requires_explicit_layout_on_noop`.
+- **MINOR 1 (fixed)** — `pub use ReflectedModule` is now
+  `#[cfg(feature = "shader-passthrough")]` (no naga-internals leak in the
+  default build).
+- **MINOR 2 (fixed)** — restored the WGSL `_source` field name; dropped the
+  `let _ = source;` hack.
+- **MINOR 3 (deferred, rationale)** — vendor SpirV/Msl FFI entry points don't use
+  the shader-module cache. Functionally correct; passthrough modules are
+  typically created once, so dedupe value is low. Left as-is.
+- **MINOR 4 (fixed, spec)** — empty-MSL rejection now recorded as rule MP7 in
+  block 33.
+
+*Final gate (Claude-run):* default + `--features shader-passthrough`
+`cargo test --workspace` / `clippy -D warnings` green; `cargo build -p yawgpu
+--tests` with metal / vulkan / `*,shader-passthrough` all compile. No open
+CRITICAL/MAJOR → **Phase 13 COMPLETE**.

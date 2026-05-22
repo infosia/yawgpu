@@ -79,6 +79,7 @@ pub use sampler::{
 #[cfg(feature = "shader-passthrough")]
 pub use shader::{MslEntryPoint, MslReflection};
 pub use shader::{ShaderModule, ShaderModuleSource};
+#[cfg(feature = "shader-passthrough")]
 pub use shader_naga::ReflectedModule;
 pub use texture::{Texture, TextureDescriptor, TextureDimension, TextureUsage};
 pub use texture_view::{TextureAspect, TextureView, TextureViewDescriptor, TextureViewDimension};
