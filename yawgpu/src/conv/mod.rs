@@ -1184,6 +1184,16 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tiled")]
+    fn unused_buffer_layout() -> native::WGPUBufferBindingLayout {
+        native::WGPUBufferBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            type_: native::WGPUBufferBindingType_BindingNotUsed,
+            hasDynamicOffset: 0,
+            minBindingSize: 0,
+        }
+    }
+
     fn unused_sampler_layout() -> native::WGPUSamplerBindingLayout {
         native::WGPUSamplerBindingLayout {
             nextInChain: std::ptr::null_mut(),
@@ -1250,6 +1260,59 @@ mod tests {
             .error
             .expect("error")
             .contains("must not be null"));
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn map_bind_group_layout_descriptor_decodes_input_attachment_entry() {
+        let mut input_attachment = crate::YaWGPUInputAttachmentBindingLayout {
+            chain: native::WGPUChainedStruct {
+                next: std::ptr::null_mut(),
+                sType: crate::YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT,
+            },
+            sampleType: native::WGPUTextureSampleType_Sint,
+            multisampled: 1,
+        };
+        let entry = native::WGPUBindGroupLayoutEntry {
+            nextInChain: (&mut input_attachment.chain) as *mut native::WGPUChainedStruct,
+            binding: 4,
+            visibility: native::WGPUShaderStage_Fragment,
+            bindingArraySize: 0,
+            buffer: unused_buffer_layout(),
+            sampler: unused_sampler_layout(),
+            texture: unused_texture_layout(),
+            storageTexture: unused_storage_texture_layout(),
+        };
+        let descriptor = native::WGPUBindGroupLayoutDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            entryCount: 1,
+            entries: &entry,
+        };
+
+        let mapped = unsafe { map_bind_group_layout_descriptor(&descriptor) };
+        assert_eq!(mapped.error, None);
+        assert_eq!(
+            mapped.entries[0].kind,
+            Some(core::BindingLayoutKind::InputAttachment {
+                sample_type: core::TextureSampleType::Sint,
+                multisampled: true
+            })
+        );
+
+        let device = device_impl();
+        device.core.push_error_scope(core::ErrorFilter::Validation);
+        let layout = Arc::new(device.core.create_bind_group_layout(mapped));
+        let pipeline_layout = device
+            .core
+            .create_pipeline_layout(core::PipelineLayoutDescriptor {
+                bind_group_layouts: vec![layout],
+                immediate_size: 0,
+                error: None,
+            });
+        let scoped = device.core.pop_error_scope().expect("scope should exist");
+        assert!(!pipeline_layout.is_error());
+        assert_eq!(scoped, None);
     }
 
     #[test]

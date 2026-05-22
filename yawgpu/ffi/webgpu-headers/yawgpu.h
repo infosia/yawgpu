@@ -184,7 +184,22 @@ YaWGPUTransientAttachment yawgpuDeviceCreateTransientAttachment(
 void yawgpuTransientAttachmentAddRef(YaWGPUTransientAttachment attachment);
 void yawgpuTransientAttachmentRelease(YaWGPUTransientAttachment attachment);
 
-/* B3+ adds subpass surface here. */
+#define YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT ((WGPUSType)0x70000010u)
+
+typedef struct YaWGPUInputAttachmentBindingLayout {
+    WGPUChainedStruct chain;
+    WGPUTextureSampleType sampleType;
+    WGPUBool multisampled;
+} YaWGPUInputAttachmentBindingLayout;
+
+#define YAWGPU_INPUT_ATTACHMENT_BINDING_LAYOUT_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUInputAttachmentBindingLayout, { \
+    /*.chain=*/{NULL, YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT} _wgpu_COMMA \
+    /*.sampleType=*/WGPUTextureSampleType_Float _wgpu_COMMA \
+    /*.multisampled=*/0 _wgpu_COMMA \
+})
+
+/* Input attachment resources are auto-wired from the subpass pass layout. */
+/* B4+ adds subpass surface here. */
 #endif
 
 #endif

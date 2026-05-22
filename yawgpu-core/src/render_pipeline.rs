@@ -1519,12 +1519,12 @@ pub(crate) fn validate_multisample_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "shader-passthrough")]
-    use crate::ErrorFilter;
-    #[cfg(feature = "shader-passthrough")]
+    #[cfg(any(feature = "shader-passthrough", feature = "tiled"))]
     use crate::test_helpers::*;
+    #[cfg(any(feature = "shader-passthrough", feature = "tiled"))]
+    use crate::ErrorFilter;
 
-    #[cfg(feature = "shader-passthrough")]
+    #[cfg(any(feature = "shader-passthrough", feature = "tiled"))]
     use std::sync::Arc;
 
     #[test]
@@ -1723,6 +1723,122 @@ mod tests {
         assert!(!explicit.is_error());
         assert_eq!(explicit.vertex_entry_name(), "vs");
         assert_eq!(explicit.fragment_entry_name(), Some("fs"));
+        assert_eq!(scoped, None);
+    }
+
+    #[cfg(feature = "tiled")]
+    fn subpass_input_shader(sample: &str) -> String {
+        format!(
+            "@group(0) @binding(0) var s: subpass_input<{sample}>;
+             @vertex
+             fn vs() -> @builtin(position) vec4<f32> {{
+                 return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+             }}
+             @fragment
+             fn fs() -> @location(0) vec4<f32> {{
+                 let loaded = subpassLoad(s);
+                 if loaded.x == {zero} {{
+                     return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+                 }}
+                 return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+             }}",
+            zero = if sample == "f32" { "0.0" } else { "0" }
+        )
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_input_shader_generates_spirv_and_msl_status_is_known() {
+        let module = shader_naga::parse_and_validate_wgsl(&subpass_input_shader("f32"))
+            .expect("subpass input WGSL should validate");
+
+        let spirv = module
+            .generate_spirv("fs", naga::ShaderStage::Fragment)
+            .expect("subpass input fragment shader should generate SPIR-V");
+        assert!(!spirv.is_empty());
+
+        let msl = module.generate_render_msl(
+            "vs",
+            "fs",
+            &shader_naga::MslBindingMap {
+                buffers: Vec::new(),
+            },
+            &[],
+        );
+        if let Ok(msl) = msl {
+            assert!(msl.source.contains("[[color("));
+        } else {
+            // The pinned naga MSL backend needs a subpass color-slot map for
+            // global `subpass_input` values; B4 supplies that pass-local map.
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_input_explicit_layout_checks_sample_type() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(subpass_input_shader("i32"))),
+        );
+        let float_layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_FRAGMENT,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::InputAttachment {
+                    sample_type: TextureSampleType::Float,
+                    multisampled: false,
+                }),
+            }],
+            error: None,
+        }));
+        let sint_layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_FRAGMENT,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::InputAttachment {
+                    sample_type: TextureSampleType::Sint,
+                    multisampled: false,
+                }),
+            }],
+            error: None,
+        }));
+
+        let float_pipeline_layout =
+            Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+                bind_group_layouts: vec![float_layout],
+                immediate_size: 0,
+                error: None,
+            }));
+        let mut mismatch = render_pipeline_descriptor(Arc::clone(&module));
+        mismatch.layout = RenderPipelineLayout::Explicit(float_pipeline_layout);
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let mismatch_pipeline = device.create_render_pipeline(mismatch);
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("mismatch should be scoped");
+        assert!(mismatch_pipeline.is_error());
+        assert_eq!(
+            scoped.message,
+            "pipeline layout binding kind is incompatible with the shader binding"
+        );
+
+        let sint_pipeline_layout =
+            Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+                bind_group_layouts: vec![sint_layout],
+                immediate_size: 0,
+                error: None,
+            }));
+        let mut matched = render_pipeline_descriptor(module);
+        matched.layout = RenderPipelineLayout::Explicit(sint_pipeline_layout);
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let matched_pipeline = device.create_render_pipeline(matched);
+        let scoped = device.pop_error_scope().expect("scope should exist");
+        assert!(!matched_pipeline.is_error());
         assert_eq!(scoped, None);
     }
 }

@@ -821,6 +821,14 @@ pub(crate) fn reflected_binding_layout_kind(
             view_dimension: reflected_texture_view_dimension(*view_dimension),
             multisampled: *multisampled,
         }),
+        #[cfg(feature = "tiled")]
+        shader_naga::ReflectedResourceBindingKind::InputAttachment {
+            sample_kind,
+            multisampled,
+        } => Ok(BindingLayoutKind::InputAttachment {
+            sample_type: reflected_input_attachment_sample_type(*sample_kind)?,
+            multisampled: *multisampled,
+        }),
         shader_naga::ReflectedResourceBindingKind::StorageTexture {
             format,
             access,
@@ -850,6 +858,19 @@ pub(crate) fn reflected_texture_sample_type(
         Some(shader_naga::ReflectedTypeScalarClass::Sint) => Ok(TextureSampleType::Sint),
         Some(shader_naga::ReflectedTypeScalarClass::Uint) => Ok(TextureSampleType::Uint),
         _ => Err("pipeline texture binding sample type is unsupported".to_owned()),
+    }
+}
+
+/// Returns reflected input attachment sample type.
+#[cfg(feature = "tiled")]
+pub(crate) fn reflected_input_attachment_sample_type(
+    sample_kind: shader_naga::ReflectedTypeScalarClass,
+) -> Result<TextureSampleType, String> {
+    match sample_kind {
+        shader_naga::ReflectedTypeScalarClass::Float => Ok(TextureSampleType::Float),
+        shader_naga::ReflectedTypeScalarClass::Sint => Ok(TextureSampleType::Sint),
+        shader_naga::ReflectedTypeScalarClass::Uint => Ok(TextureSampleType::Uint),
+        _ => Err("pipeline input attachment sample type is unsupported".to_owned()),
     }
 }
 
@@ -1007,6 +1028,21 @@ pub(crate) fn validate_shader_binding_compat(
                 )
             }
         }
+        #[cfg(feature = "tiled")]
+        (
+            shader_naga::ReflectedResourceBindingKind::InputAttachment { .. },
+            BindingLayoutKind::InputAttachment { .. },
+        ) => {
+            let expected = reflected_binding_layout_kind(binding)?;
+            if shader_binding_layout_kinds_compatible(expected, layout_kind) {
+                Ok(())
+            } else {
+                Err(
+                    "pipeline layout binding kind is incompatible with the shader binding"
+                        .to_owned(),
+                )
+            }
+        }
         _ => Err("compute pipeline layout binding type is incompatible".to_owned()),
     }
 }
@@ -1053,6 +1089,17 @@ pub(crate) fn shader_binding_layout_kinds_compatible(
                 && format == actual_format
                 && view_dimension == actual_view_dimension
         }
+        #[cfg(feature = "tiled")]
+        (
+            BindingLayoutKind::InputAttachment {
+                sample_type,
+                multisampled,
+            },
+            BindingLayoutKind::InputAttachment {
+                sample_type: actual_sample_type,
+                multisampled: actual_multisampled,
+            },
+        ) => sample_type == actual_sample_type && multisampled == actual_multisampled,
         _ => false,
     }
 }

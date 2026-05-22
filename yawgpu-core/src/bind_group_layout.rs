@@ -78,6 +78,15 @@ pub(crate) fn validate_bind_group_layout_descriptor(
                     );
                 }
             }
+            #[cfg(feature = "tiled")]
+            BindingLayoutKind::InputAttachment { .. } => {
+                if entry.visibility & !SHADER_STAGE_FRAGMENT != 0 {
+                    return Some(
+                        "input attachment bindings must only be visible to the fragment stage"
+                            .to_owned(),
+                    );
+                }
+            }
             BindingLayoutKind::StorageTexture {
                 format,
                 view_dimension,
@@ -169,6 +178,14 @@ pub enum BindingLayoutKind {
         sample_type: TextureSampleType,
         /// View dimension variant.
         view_dimension: TextureViewDimension,
+        /// Multisampled variant.
+        multisampled: bool,
+    },
+    /// Input attachment variant.
+    #[cfg(feature = "tiled")]
+    InputAttachment {
+        /// Sample type variant.
+        sample_type: TextureSampleType,
         /// Multisampled variant.
         multisampled: bool,
     },

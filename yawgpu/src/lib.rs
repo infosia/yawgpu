@@ -48,6 +48,9 @@ pub const YaWGPUFeatureName_ShaderFramebufferFetch: native::WGPUFeatureName = 0x
 #[cfg(feature = "tiled")]
 #[allow(non_upper_case_globals)]
 pub const YaWGPUFeatureName_ProgrammableTileDispatch: native::WGPUFeatureName = 0x7001_0004;
+/// SType value for `YaWGPUInputAttachmentBindingLayout`.
+#[cfg(feature = "tiled")]
+pub const YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT: native::WGPUSType = 0x7000_0010;
 
 /// yawgpu vendor extension for selecting a backend at instance creation.
 ///
@@ -117,6 +120,22 @@ pub struct YaWGPUTransientAttachmentDescriptor {
     pub height: u32,
     /// Sample count.
     pub sampleCount: u32,
+}
+
+/// yawgpu vendor extension bind group layout entry for input attachments.
+///
+/// Chain this from `WGPUBindGroupLayoutEntry::nextInChain`. The resource is
+/// auto-wired from the subpass pass layout; callers do not bind a texture view.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct YaWGPUInputAttachmentBindingLayout {
+    /// Extension chain.
+    pub chain: native::WGPUChainedStruct,
+    /// Input attachment sample type.
+    pub sampleType: native::WGPUTextureSampleType,
+    /// Whether the input attachment is multisampled.
+    pub multisampled: native::WGPUBool,
 }
 
 /// yawgpu vendor extension descriptor for creating a shader module from SPIR-V words.
