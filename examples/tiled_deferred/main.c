@@ -384,9 +384,20 @@ static YaWGPUSubpassPassLayout create_pass_layout(TiledDeferredApp *app) {
         {.format = WGPUTextureFormat_RGBA16Float, .sampleCount = 1},
         {.format = app->output_format, .sampleCount = 1},
     };
+    // Per-subpass output assignments by flat slot. The G-Buffer writes
+    // albedo + normal; lighting writes lit; composite writes the output.
     uint32_t subpass0_colors[2] = {0, 1};
     uint32_t subpass1_colors[1] = {2};
     uint32_t subpass2_colors[1] = {3};
+
+    // Per-subpass input-attachment declarations. Each entry maps a shader
+    // binding `@group(g) @binding(b)` to the flat color-attachment slot it
+    // samples from. yawgpu auto-wires these at submit time — the caller's
+    // bind group does NOT supply views for these slots (Vulkan reads them
+    // through `INPUT_ATTACHMENT` descriptors emitted from the layout;
+    // Metal reads them via naga's MSL `subpass_color_slots` map).
+    //   Subpass 1 (Lighting): reads albedo (slot 0) and normal (slot 1).
+    //   Subpass 2 (Composite): reads lit (slot 2).
     YaWGPUSubpassInputAttachment subpass1_inputs[2] = {
         {.group = 0, .binding = 0, .sourceSubpass = 0, .sourceAttachment = 0},
         {.group = 0, .binding = 1, .sourceSubpass = 0, .sourceAttachment = 1},
@@ -394,6 +405,12 @@ static YaWGPUSubpassPassLayout create_pass_layout(TiledDeferredApp *app) {
     YaWGPUSubpassInputAttachment subpass2_inputs[1] = {
         {.group = 0, .binding = 0, .sourceSubpass = 1, .sourceAttachment = 2},
     };
+
+    // Per-subpass shape: which color slots this subpass writes, whether it
+    // uses the depth-stencil attachment, and which prior outputs it reads
+    // as inputs. `usesDepthStencil` is read both by validation (must match
+    // each subpass pipeline's depth-stencil state) and by the encoder
+    // (Vulkan emits depth references in the matching subpass description).
     YaWGPUSubpassLayoutDesc subpasses[3] = {
         {.colorAttachmentIndices = subpass0_colors,
          .colorAttachmentIndexCount = 2,
@@ -411,6 +428,14 @@ static YaWGPUSubpassPassLayout create_pass_layout(TiledDeferredApp *app) {
          .inputAttachments = subpass2_inputs,
          .inputAttachmentCount = 1},
     };
+
+    // Dependencies declare the producer/consumer ordering between subpasses.
+    // `ColorToInput` means subpass `dst` reads (via input attachment) what
+    // subpass `src` wrote. On Vulkan this lowers to a pipeline barrier
+    // between the color-write stage and the fragment-input-read stage;
+    // on Metal the encoder is implicitly tile-coherent so the dependencies
+    // exist for layout validation only. `byRegion = true` allows the GPU
+    // to honor the barrier per-tile (TBDR fast path).
     YaWGPUSubpassDependency dependencies[2] = {
         {.srcSubpass = 0,
          .dstSubpass = 1,
@@ -421,6 +446,13 @@ static YaWGPUSubpassPassLayout create_pass_layout(TiledDeferredApp *app) {
          .dependencyType = YaWGPUSubpassDependencyType_ColorToInput,
          .byRegion = true},
     };
+
+    // Assemble the layout descriptor and create the Arc-counted layout
+    // handle. The returned `YaWGPUSubpassPassLayout` is shared by every
+    // subpass pipeline (via `passLayout` + `subpassIndex` on
+    // `YaWGPUSubpassRenderPipelineDescriptor`) and by `BeginSubpassRenderPass`
+    // at submit time — both must agree on the layout for the pipeline to
+    // be subpass-compatible.
     YaWGPUSubpassPassLayoutDescriptor descriptor = {
         .label = yawgpu_string_view("tiled deferred pass layout"),
         .colorAttachments = color_layouts,
@@ -434,7 +466,17 @@ static YaWGPUSubpassPassLayout create_pass_layout(TiledDeferredApp *app) {
     return yawgpuDeviceCreateSubpassPassLayout(app->context.device, &descriptor);
 }
 
+// Allocates all GPU buffers the example needs. We use the
+// `yawgpu_create_buffer_init` framework helper which combines
+// `wgpuDeviceCreateBuffer(mappedAtCreation=true)` + a `memcpy` into the
+// mapped range + `wgpuBufferUnmap` into a single call (analogous to
+// wgpu's `Device::create_buffer_init`).
 static bool create_buffers(TiledDeferredApp *app) {
+    // Pre-expand the indexed cube (24 vertices + 36 indices) into a flat
+    // 36-vertex triangle list, so the G-Buffer pipeline can issue a
+    // non-indexed `Draw` (3 verts/triangle × 12 triangles × INSTANCE_COUNT
+    // instances) without needing `SetIndexBuffer`. Trades a one-off
+    // upload-time cost for fewer encoder calls per frame.
     Vertex vertices[VERTEX_COUNT];
     uint16_t indices[INDEX_COUNT];
     Vertex draw_vertices[INDEX_COUNT];
@@ -442,6 +484,10 @@ static bool create_buffers(TiledDeferredApp *app) {
     for (uint32_t i = 0; i < INDEX_COUNT; ++i) {
         draw_vertices[i] = vertices[indices[i]];
     }
+
+    // Vertex buffer: bound at slot 0 of the gbuffer pipeline (Float32x3 ×3
+    // attributes per `Vertex`). Index buffer is created for completeness
+    // but is unused with the pre-expanded vertex list above.
     app->vertex_buffer = yawgpu_create_buffer_init(
         app->context.device,
         &(YawgpuBufferInitDescriptor){.label = "tiled deferred vertices",
@@ -454,6 +500,11 @@ static bool create_buffers(TiledDeferredApp *app) {
                                       .usage = WGPUBufferUsage_Index,
                                       .contents = indices,
                                       .size = sizeof(indices)});
+
+    // Uniform + light-params buffers. Both have `CopyDst` so per-frame
+    // updates via `wgpuQueueWriteBuffer` work (see `write_frame_uniforms`).
+    // Initial contents are zeroed; `render_*_frame` rewrites them with the
+    // real camera + light state before each draw.
     Uniforms uniforms = {0};
     LightParams lights = {0};
     app->uniform_buffer = yawgpu_create_buffer_init(
@@ -473,6 +524,11 @@ static bool create_buffers(TiledDeferredApp *app) {
         fprintf(stderr, "failed to create buffers\n");
         return false;
     }
+
+    // Verify mode: also allocate a CPU-mappable readback buffer sized to
+    // the padded output texture (one row aligned to 256 bytes per the
+    // texture-to-buffer copy rules). `CopyDst | MapRead` are the two usage
+    // bits needed for `CopyTextureToBuffer` + `BufferMapAsync(Read)`.
     if (app->verify) {
         app->dimensions = buffer_dimensions_create(app->width, app->height);
         app->output_buffer_size =
@@ -491,6 +547,11 @@ static bool create_buffers(TiledDeferredApp *app) {
     return true;
 }
 
+// G-Buffer bind group layout: one vertex-stage uniform (the camera's
+// view-projection matrix). A "bind group layout" is the *shape* of a bind
+// group — what binding numbers exist, what type each is, which shader
+// stages can read it. Pipelines depend on layouts; concrete bind groups
+// fill the layout in with actual buffer/texture handles.
 static WGPUBindGroupLayout create_uniform_bgl(TiledDeferredApp *app, const char *label) {
     WGPUBindGroupLayoutEntry entry = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
     entry.binding = 0;
@@ -505,6 +566,14 @@ static WGPUBindGroupLayout create_uniform_bgl(TiledDeferredApp *app, const char 
     return wgpuDeviceCreateBindGroupLayout(app->context.device, &descriptor);
 }
 
+// Lighting input-attachment BGL (@group(0)): two `subpass_input<f32>`
+// bindings for albedo + normal. These are declared with yawgpu's vendor
+// `YaWGPUInputAttachmentBindingLayout` chained struct (sType
+// `YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT`) — that's how the core
+// recognizes the slot as an input attachment vs a regular texture binding.
+// At submit time the subpass pass auto-wires the bound texture from the
+// pass layout's `subpass.input_attachments` map; the caller never supplies
+// `WGPUBindGroupEntry`s for these slots (see `create_bind_groups`).
 static WGPUBindGroupLayout create_lighting_bgl(TiledDeferredApp *app) {
     YaWGPUInputAttachmentBindingLayout input0 = {
         .chain = {.next = NULL, .sType = YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT},
@@ -530,6 +599,10 @@ static WGPUBindGroupLayout create_lighting_bgl(TiledDeferredApp *app) {
     return wgpuDeviceCreateBindGroupLayout(app->context.device, &descriptor);
 }
 
+// Lighting uniform BGL (@group(1)): the per-frame `LightParams` block.
+// Lives in a separate group from the input attachments so the caller-bound
+// bind group is non-empty (the pure-input-attachment group 0 has no entries
+// at all — yawgpu auto-wires it).
 static WGPUBindGroupLayout create_lighting_uniform_bgl(TiledDeferredApp *app) {
     WGPUBindGroupLayoutEntry entry = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
     entry.binding = 0;
@@ -544,6 +617,8 @@ static WGPUBindGroupLayout create_lighting_uniform_bgl(TiledDeferredApp *app) {
     return wgpuDeviceCreateBindGroupLayout(app->context.device, &descriptor);
 }
 
+// Composite BGL (@group(0)): one `subpass_input<f32>` for the lit HDR
+// attachment. Same vendor-struct pattern as the lighting BGL above.
 static WGPUBindGroupLayout create_composite_bgl(TiledDeferredApp *app) {
     YaWGPUInputAttachmentBindingLayout input = {
         .chain = {.next = NULL, .sType = YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT},
@@ -586,6 +661,15 @@ static WGPUPipelineLayout create_pipeline_layout2(TiledDeferredApp *app,
     return wgpuDeviceCreatePipelineLayout(app->context.device, &descriptor);
 }
 
+// Fills in the bind-group-layout shapes with concrete buffer/texture
+// handles. We only create groups for layouts whose entries the caller has
+// to supply: the gbuffer uniform group (view-proj at binding 0 of group 0)
+// and the lighting `LightParams` group (binding 0 of group 1). The two
+// input-attachment-only layouts (lighting @group(0) inputs, composite
+// @group(0) input) get NO bind group object — yawgpu auto-wires their
+// slots at subpass begin from the pass layout's input-source map, so
+// `SetBindGroup` is never called for them at draw time (see
+// `record_tiled_pass`).
 static bool create_bind_groups(TiledDeferredApp *app) {
     WGPUBindGroupEntry uniform_entry = WGPU_BIND_GROUP_ENTRY_INIT;
     uniform_entry.binding = 0;
@@ -615,6 +699,26 @@ static bool create_bind_groups(TiledDeferredApp *app) {
     return app->uniform_bind_group && app->lighting_bind_group;
 }
 
+// Builds one subpass render pipeline. A subpass pipeline is a regular
+// `WGPURenderPipelineDescriptor` (vertex + fragment + primitive + depth +
+// multisample state) wrapped in yawgpu's vendor `YaWGPUSubpassRenderPipelineDescriptor`
+// that binds it to a specific (passLayout, subpassIndex). The layout +
+// subpass index tell the core which color/depth attachments this pipeline
+// targets and which input attachments it samples — used both for
+// validation (subpass-compatibility) and for codegen (Metal needs the
+// pass-local subpass_color_slots map to lower `subpass_input` correctly).
+//
+// `targets` describes the fragment outputs (one entry per `@location(N)`
+// the shader writes). For multi-target output (G-Buffer's albedo +
+// normal) pass an array of 2; for single-target (lighting / composite)
+// pass one. The HAL pipeline declares pixel formats for ALL pass layout
+// color slots regardless (cascade fix `f9bf265`), so the fragment only
+// needs to enumerate the slots it actually writes.
+//
+// `vertex_layout` is NULL for fullscreen-triangle passes (lighting +
+// composite) where the vertex shader synthesizes positions from
+// `@builtin(vertex_index)`. With NULL we set `cullMode = None` since the
+// fullscreen triangle's wind order isn't well-defined.
 static WGPURenderPipeline create_pipeline(TiledDeferredApp *app,
                                           const char *label,
                                           WGPUShaderModule module,
@@ -654,7 +758,18 @@ static WGPURenderPipeline create_pipeline(TiledDeferredApp *app,
     return yawgpuDeviceCreateSubpassRenderPipeline(app->context.device, &descriptor);
 }
 
+// Builds all bind-group layouts + pipeline layouts + bind groups + the
+// three subpass render pipelines. Order matters: BGLs feed into pipeline
+// layouts, pipeline layouts feed into pipelines, and bind groups can be
+// built any time after their BGL exists (but before draws use them).
 static bool create_pipelines(TiledDeferredApp *app) {
+    // Pick the fragment entry name per backend. Block 55's "dual
+    // convention accepted" rule lets the lighting + composite shaders
+    // expose two entries (`fs` for Vulkan with subpass-local @location(0)
+    // remapped by VkRenderPass; `fs_metal` for Metal with the flat MTL
+    // slot @location(N) written directly because naga MSL doesn't
+    // subpass-remap). G-Buffer pipeline doesn't need it — its outputs
+    // are already at flat slots 0 + 1 in subpass 0.
     const char *lighting_fs = "fs";
     const char *composite_fs = "fs";
     WGPUAdapterInfo info = {0};
@@ -690,6 +805,10 @@ static bool create_pipelines(TiledDeferredApp *app) {
         return false;
     }
 
+    // Vertex layout for the G-Buffer pipeline: three Float32x3 attributes
+    // matching `gbuffer.wgsl::VertexInput` (position, normal, color).
+    // arrayStride = `sizeof(Vertex)`, attribute offsets are byte offsets
+    // into a single interleaved vertex.
     WGPUVertexAttribute attributes[3] = {
         {.format = WGPUVertexFormat_Float32x3, .offset = 0, .shaderLocation = 0},
         {.format = WGPUVertexFormat_Float32x3, .offset = 3 * sizeof(float), .shaderLocation = 1},
@@ -701,6 +820,15 @@ static bool create_pipelines(TiledDeferredApp *app) {
         .attributeCount = 3,
         .attributes = attributes,
     };
+
+    // Depth state for the G-Buffer subpass only. `Less` + `depth_write=true`
+    // produces normal opaque-geometry depth testing. Lighting + composite
+    // pipelines pass `depth_stencil = NULL` because their fullscreen
+    // triangles should ignore depth — yawgpu's Metal HAL synthesizes a
+    // no-op `MTLDepthStencilState` (Always, no write) in that case so the
+    // encoder doesn't inherit the G-Buffer's depth state across subpass
+    // boundaries (Metal's depth-stencil state persists in a single encoder
+    // until rebound; see commit af1bdd2).
     WGPUDepthStencilState depth_stencil = WGPU_DEPTH_STENCIL_STATE_INIT;
     depth_stencil.format = WGPUTextureFormat_Depth32Float;
     depth_stencil.depthWriteEnabled = WGPUOptionalBool_True;
@@ -767,6 +895,14 @@ static WGPUTexture create_attachment_texture(TiledDeferredApp *app,
     return wgpuDeviceCreateTexture(app->context.device, &descriptor);
 }
 
+// Allocates the four intermediate textures (albedo, normal, depth, lit)
+// + a `WGPUTextureView` per attachment for binding in the pass.
+// `RenderAttachment` usage is required for any texture written as a color
+// or depth target inside a render pass. Verify mode additionally allocates
+// the output texture with `CopySrc` so `CopyTextureToBuffer` can drain it
+// to the CPU-mappable readback buffer; windowed mode reuses the swapchain
+// `output_view` (which carries the surface's own usage bits) and skips the
+// owned output texture entirely.
 static bool create_attachments(TiledDeferredApp *app,
                                WGPUTextureView output_view,
                                AttachmentResources *attachments) {
@@ -830,7 +966,19 @@ static void destroy_attachments(AttachmentResources *attachments, bool release_o
     *attachments = (AttachmentResources){0};
 }
 
+// Rewrites the per-frame uniform buffers (camera view-proj for the
+// G-Buffer pipeline; light positions + camera_pos + inv_view_proj +
+// screen_size for the lighting pipeline) for the given time. Uses
+// `wgpuQueueWriteBuffer` for the upload: this enqueues an asynchronous
+// "write `data` into `buffer` at `offset`" command that's guaranteed to
+// complete before any subsequent submit on the same queue can read the
+// buffer. No staging buffer or explicit copy encoder needed.
+//
+// Scene values (eye orbit, target=(0,0,0), 4 light positions/intensities)
+// are byte-identical to wgpu's deferred_rendering reference.
 static void write_frame_uniforms(TiledDeferredApp *app, float time_seconds) {
+    // Eye orbits the origin on a horizontal circle at radius 12, height 8,
+    // offset +15 on Z so the grid is centered slightly in front of the camera.
     Vec3 eye = vec3_make(12.0f * cosf(time_seconds * 0.3f),
                          8.0f,
                          12.0f * sinf(time_seconds * 0.3f) + 15.0f);
@@ -840,6 +988,9 @@ static void write_frame_uniforms(TiledDeferredApp *app, float time_seconds) {
                             (float)app->width / (float)app->height,
                             0.1f,
                             100.0f);
+    // glam convention: view_proj = projection * view. `inv_view_proj` is
+    // needed by the lighting shader to reconstruct world position from
+    // (screen_uv, depth) — see lighting.wgsl.
     Mat4 view_proj = mat4_mul(projection, view);
     Mat4 inv_view_proj = mat4_identity();
     mat4_inverse(view_proj, &inv_view_proj);
@@ -928,15 +1079,28 @@ static bool record_tiled_pass(TiledDeferredApp *app,
         .colorAttachmentCount = 4,
         .depthStencilAttachment = &depth,
     };
+    // Open the multi-subpass render pass. yawgpu records the layout's
+    // first-subpass attachment state into the encoder; subsequent
+    // `NextSubpass` calls advance the layout cursor without ending the
+    // underlying encoder.
     YaWGPUSubpassRenderPassEncoder pass =
         yawgpuCommandEncoderBeginSubpassRenderPass(encoder, &descriptor);
     if (!pass) {
         fprintf(stderr, "failed to begin subpass render pass\n");
         return false;
     }
+
+    // Viewport + scissor cover the whole render target. Both apply to all
+    // subpasses within the pass — there's no per-subpass viewport state.
     yawgpuSubpassRenderPassEncoderSetViewport(pass, 0.0f, 0.0f, (float)app->width,
                                               (float)app->height, 0.0f, 1.0f);
     yawgpuSubpassRenderPassEncoderSetScissorRect(pass, 0, 0, app->width, app->height);
+
+    // Subpass 0 (G-Buffer): set the gbuffer pipeline, bind the view-proj
+    // uniform at @group(0), bind the (pre-expanded) vertex buffer at
+    // slot 0, draw 36 vertices × INSTANCE_COUNT (25) instances. The
+    // vertex shader uses `@builtin(instance_index)` to lay each instance
+    // out as a tile of the 5x5 grid (see gbuffer.wgsl).
     yawgpuSubpassRenderPassEncoderSetPipeline(pass, app->gbuffer_pipeline);
     yawgpuSubpassRenderPassEncoderSetBindGroup(pass, 0, app->uniform_bind_group, 0, NULL);
     yawgpuSubpassRenderPassEncoderSetVertexBuffer(pass,
@@ -946,11 +1110,20 @@ static bool record_tiled_pass(TiledDeferredApp *app,
                                                   sizeof(Vertex) * INDEX_COUNT);
     yawgpuSubpassRenderPassEncoderDraw(pass, INDEX_COUNT, INSTANCE_COUNT, 0, 0);
 
+    // Subpass 1 (Lighting): switch to the lighting pipeline, bind
+    // `LightParams` at @group(1) (the input-attachment group at @group(0)
+    // is auto-wired by the pass — no `SetBindGroup(0, ...)` call needed),
+    // draw a fullscreen triangle (3 verts × 1 instance, vertex shader
+    // synthesizes the positions).
     yawgpuSubpassRenderPassEncoderNextSubpass(pass);
     yawgpuSubpassRenderPassEncoderSetPipeline(pass, app->lighting_pipeline);
     yawgpuSubpassRenderPassEncoderSetBindGroup(pass, 1, app->lighting_bind_group, 0, NULL);
     yawgpuSubpassRenderPassEncoderDraw(pass, 3, 1, 0, 0);
 
+    // Subpass 2 (Composite): switch to the composite pipeline, draw a
+    // fullscreen triangle. No `SetBindGroup` call at all — composite's
+    // only bind-group layout is input-attachment-only and the pass
+    // auto-wires it.
     yawgpuSubpassRenderPassEncoderNextSubpass(pass);
     yawgpuSubpassRenderPassEncoderSetPipeline(pass, app->composite_pipeline);
     yawgpuSubpassRenderPassEncoderDraw(pass, 3, 1, 0, 0);
@@ -959,6 +1132,12 @@ static bool record_tiled_pass(TiledDeferredApp *app,
     return true;
 }
 
+// Blocks until all GPU work submitted so far finishes. WebGPU exposes this
+// via `wgpuQueueOnSubmittedWorkDone` which returns a `WGPUFuture`; we drive
+// it to completion via the framework helper `yawgpu_wait_for_future` (which
+// calls `wgpuInstanceProcessEvents` in a loop until the callback fires).
+// Only used in --verify mode where we need to know the render finished
+// before mapping the readback buffer.
 static bool wait_for_queue(TiledDeferredApp *app) {
     QueueWorkDoneState queue_state = {0};
     WGPUFuture queue_future = wgpuQueueOnSubmittedWorkDone(
@@ -974,6 +1153,11 @@ static bool wait_for_queue(TiledDeferredApp *app) {
     return true;
 }
 
+// Finishes the encoder into a command buffer, submits it to the queue, and
+// optionally waits for completion. `wgpuCommandEncoderFinish` consumes the
+// encoder — `wgpuQueueSubmit` then enqueues the resulting command buffer
+// for execution. The buffer is released right after submit since the queue
+// holds its own reference until the GPU finishes with it.
 static bool submit_encoder(TiledDeferredApp *app, WGPUCommandEncoder encoder, bool wait) {
     WGPUCommandBuffer commands = wgpuCommandEncoderFinish(
         encoder,
@@ -1008,6 +1192,12 @@ static bool verify_center_pixel(const TiledDeferredApp *app, const uint8_t *pixe
     return ok;
 }
 
+// Maps the verify-mode readback buffer, hands its bytes off to
+// `verify_center_pixel` + `stbi_write_png`. `wgpuBufferMapAsync` is the
+// only WebGPU API to read GPU buffer contents from the CPU; it returns a
+// future, drives the mapping when the GPU finishes the previous submit,
+// then `wgpuBufferGetConstMappedRange` exposes a CPU pointer into the
+// mapped range that's valid until `wgpuBufferUnmap` (or buffer release).
 static bool readback_verify_and_write_png(TiledDeferredApp *app) {
     MapState map_state = {0};
     WGPUFuture map_future = wgpuBufferMapAsync(
@@ -1049,6 +1239,9 @@ static bool readback_verify_and_write_png(TiledDeferredApp *app) {
     return pixel_ok;
 }
 
+// --verify entry point. Renders exactly one frame at t=0 to an offscreen
+// output texture, copies the texture to the readback buffer, waits for
+// the GPU to finish, then maps + samples the center pixel.
 static bool render_verify(TiledDeferredApp *app) {
     write_frame_uniforms(app, 0.0f);
     AttachmentResources attachments = {0};
@@ -1056,6 +1249,9 @@ static bool render_verify(TiledDeferredApp *app) {
         destroy_attachments(&attachments, true);
         return false;
     }
+    // Each frame uses a fresh command encoder. The encoder accumulates the
+    // pass + copy commands; `submit_encoder` finishes it into a command
+    // buffer and submits.
     WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(
         app->context.device,
         &(WGPUCommandEncoderDescriptor){.label = yawgpu_string_view("tiled deferred encoder")});
@@ -1065,8 +1261,13 @@ static bool render_verify(TiledDeferredApp *app) {
     }
     bool ok = record_tiled_pass(app, encoder, &attachments);
     if (ok) {
-        // Pass + texture-to-buffer copy in a single encoder so they submit as
-        // one ordered command buffer.
+        // CopyTextureToBuffer drains the output texture into the readback
+        // buffer. The destination's `bytesPerRow` must be a multiple of
+        // `COPY_BYTES_PER_ROW_ALIGNMENT` (256 in WebGPU); see
+        // `buffer_dimensions_create` where we pad the row stride to satisfy
+        // that. Doing the pass + copy in the SAME encoder guarantees they
+        // submit as a single ordered command buffer (no inter-submit
+        // synchronization needed).
         WGPUExtent3D copy_size = {.width = app->width, .height = app->height, .depthOrArrayLayers = 1};
         wgpuCommandEncoderCopyTextureToBuffer(
             encoder,
@@ -1086,6 +1287,11 @@ static bool render_verify(TiledDeferredApp *app) {
     if (!ok) {
         return false;
     }
+    // Anything routed to the device error sink during this run (failed
+    // validation, etc.) is reflected here. WebGPU validation runs async,
+    // so a pipeline that's secretly an error pipeline shows up as an
+    // uncaptured error not as a creation-time return value — checking
+    // the count after a known-good submit window is the C-side idiom.
     if (yawgpu_uncaptured_error_count() != app->initial_error_count) {
         fprintf(stderr, "tiled_deferred: FAILED due to uncaptured device error\n");
         return false;
@@ -1096,6 +1302,22 @@ static bool render_verify(TiledDeferredApp *app) {
     return true;
 }
 
+// Renders one frame to the swapchain in windowed mode. The flow is the
+// canonical WebGPU windowed-render loop:
+//   1. Acquire the swapchain's current texture (`wgpuSurfaceGetCurrentTexture`).
+//      On Lost (resized/minimized/window-gone), return without rendering;
+//      the next frame will reconfigure or re-acquire.
+//   2. Create a texture view over it — the view, not the texture, is what
+//      attaches into the pass's composite-subpass color slot.
+//   3. Allocate intermediate attachments (albedo, normal, depth, lit) +
+//      record + submit (no wait — we want the next frame to overlap with
+//      this frame's GPU work for throughput).
+//   4. `wgpuSurfacePresent` hands the rendered texture back to the OS
+//      compositor for display.
+//   5. Release/free everything tied to this frame. Intermediate
+//      attachments are throwaway and freed every frame; the swapchain
+//      texture is also released (the next call to `GetCurrentTexture`
+//      retains a fresh one).
 static bool render_window_frame(TiledDeferredApp *app) {
     WGPUSurfaceTexture current = {0};
     wgpuSurfaceGetCurrentTexture(app->surface, &current);
@@ -1112,6 +1334,7 @@ static bool render_window_frame(TiledDeferredApp *app) {
     bool ok = output_view && create_attachments(app, output_view, &attachments);
     WGPUCommandEncoder encoder = NULL;
     if (ok) {
+        // Animate camera + lights against wall-clock seconds since startup.
         float seconds = (float)(clock() - app->start_clock) / (float)CLOCKS_PER_SEC;
         write_frame_uniforms(app, seconds);
         encoder = wgpuDeviceCreateCommandEncoder(app->context.device, NULL);
