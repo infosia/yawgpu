@@ -6,6 +6,7 @@ pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<(vk::Format
         HalTextureFormat::R8Unorm => Ok((vk::Format::R8_UNORM, 1)),
         HalTextureFormat::Rgba8Unorm => Ok((vk::Format::R8G8B8A8_UNORM, 4)),
         HalTextureFormat::Bgra8Unorm => Ok((vk::Format::B8G8R8A8_UNORM, 4)),
+        HalTextureFormat::Rgba16Float => Ok((vk::Format::R16G16B16A16_SFLOAT, 8)),
         HalTextureFormat::Stencil8 => Ok((vk::Format::S8_UINT, 1)),
         HalTextureFormat::Depth16Unorm => Ok((vk::Format::D16_UNORM, 2)),
         HalTextureFormat::Depth24Plus => Ok((vk::Format::D32_SFLOAT, 4)),

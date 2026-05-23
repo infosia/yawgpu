@@ -46,6 +46,8 @@ pub enum HalTextureFormat {
     Rgba8Unorm,
     /// Bgra8 unorm variant.
     Bgra8Unorm,
+    /// Rgba16 float variant.
+    Rgba16Float,
     /// Stencil8 variant.
     Stencil8,
     /// Depth16 unorm variant.

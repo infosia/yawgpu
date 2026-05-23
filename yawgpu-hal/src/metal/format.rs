@@ -98,6 +98,7 @@ pub(super) fn map_texture_format(
         HalTextureFormat::R8Unorm => Ok((MTLPixelFormat::R8Unorm, 1)),
         HalTextureFormat::Rgba8Unorm => Ok((MTLPixelFormat::RGBA8Unorm, 4)),
         HalTextureFormat::Bgra8Unorm => Ok((MTLPixelFormat::BGRA8Unorm, 4)),
+        HalTextureFormat::Rgba16Float => Ok((MTLPixelFormat::RGBA16Float, 8)),
         HalTextureFormat::Stencil8 => Ok((MTLPixelFormat::Stencil8, 1)),
         HalTextureFormat::Depth16Unorm => Ok((MTLPixelFormat::Depth16Unorm, 2)),
         HalTextureFormat::Depth24Plus => Ok((MTLPixelFormat::Depth32Float, 4)),
