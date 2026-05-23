@@ -350,13 +350,26 @@ defined when a real backend implementation lands.
        Reinhard tonemap, writes to the swapchain (sRGB / linear converted
        in hardware).
   - **WGSL in three separate files** `gbuffer.wgsl`, `lighting.wgsl`,
-    `composite.wgsl`, copied verbatim from the wgpu reference (CMake's
-    `add_custom_command` POST_BUILD copies them next to the binary, mirroring
-    `examples/triangle`). The lighting + composite fragments use the
-    **subpass-local convention** (`@location(0)`) so a single WGSL source
-    works for both Vulkan and Metal — the cascade `validate_color_targets`
-    accepts either convention; the WGSL author picks the subpass-local form
-    for portability.
+    `composite.wgsl` (CMake's `add_custom_command` POST_BUILD copies them
+    next to the binary, mirroring `examples/triangle`).
+    - **`gbuffer.wgsl` is copied verbatim** from the wgpu reference.
+      Its fragment writes `@location(0)` (albedo) + `@location(1)` (normal),
+      which match flat MTL slots 0 + 1 — no per-backend divergence needed.
+    - **`lighting.wgsl` and `composite.wgsl` diverge from the wgpu reference**:
+      because naga's MSL backend does not subpass-remap fragment output
+      `@location(N)` (see the "dual convention accepted" rule above), the
+      subpass-local `@location(0)` lighting/composite shaders work on Vulkan
+      (`VkRenderPass` remaps) but write to MTL slot 0 — never reaching the
+      lit (flat slot 2) or output (flat slot 3) attachments — on Metal.
+      Each file therefore declares **two fragment entry points**, mirroring
+      the 2-subpass smoke (`yawgpu/tests/e2e_metal_tiled.rs`):
+      - lighting: `fn fs() -> @location(0)` (Vulkan) +
+        `fn fs_metal() -> @location(2)` (Metal flat slot for lit).
+      - composite: `fn fs() -> @location(0)` (Vulkan) +
+        `fn fs_metal() -> @location(3)` (Metal flat slot for output).
+      The C example selects the entry by `WGPUAdapterInfo.backendType`
+      at runtime, the same pattern used elsewhere in the repo. Document
+      this divergence at the top of each WGSL file.
   - **Two run modes** controlled by the `--verify` CLI flag:
     - **Default (windowed demo).** Open a GLFW window (Metal `CAMetalLayer`
       or Vulkan `VK_KHR_*_surface`), configure a swapchain on the surface,
