@@ -333,6 +333,26 @@ defined when a real backend implementation lands.
     and `yawgpu/tests/e2e_metal_tiled.rs` — `fs` for Vulkan, `fs_metal` for
     Metal). The example `examples/tiled_deferred` picks the entry by
     `WGPUAdapterInfo.backendType` at runtime.
+- **Subpass pipelines support multi-color targets and depth-stencil.**
+  The Phase 14 B-slice scaffold restricted real-backend subpass pipelines
+  to a single single-sampled color target with no depth attachment ("real
+  subpass render pipeline currently supports one single-sampled color
+  target only"). That was a temporary scaffold ceiling for the 2-subpass
+  smoke test, not a permanent rule. The full contract is:
+  - A subpass pipeline's `fragment.targets[]` may have **N ≥ 1** entries,
+    matching the subpass's `color_attachment_indices.len()`. HAL backends
+    wire each target's blend / write-mask / format into the correct flat
+    slot (Metal's `colorAttachments[i]` and Vulkan's
+    `PipelineColorBlendStateCreateInfo.attachments[i]`).
+  - `depth_stencil` may be `Some(...)` when the subpass declares
+    `uses_depth_stencil = true`; the HAL pipeline carries the depth
+    pixel format (Metal `MTLRenderPipelineDescriptor.depthAttachmentPixelFormat`,
+    Vulkan `vk::PipelineDepthStencilStateCreateInfo`) plus write-enable
+    / compare-op / (optional) stencil-ops / depth bias. The encoder
+    binds the resulting depth-stencil state at draw time (`MTLDepthStencilState`
+    for Metal; baked into the `vk::Pipeline` for Vulkan).
+  - **Multisample > 1** remains a separate follow-up; the deferred demo
+    is single-sampled.
 - **Reference example (`examples/tiled_deferred`) — deferred-shading demo.**
   yawgpu's flagship tiled-rendering demo mirrors the wgpu reference example
   `wgpu-tiled/examples/features/src/deferred_rendering` (in
