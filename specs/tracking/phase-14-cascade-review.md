@@ -220,3 +220,50 @@ coding agent reports back, Claude:
 
 After the fix lands and native-Vulkan re-verification is done, this review
 record gains a "Re-COMPLETE" footer with the verification log.
+
+## Revision 1 (2026-05-23 — first handoff rejected)
+
+The first submission was rejected. What came back:
+
+- One uncommitted diff: `yawgpu-hal/src/metal/mod.rs` (~36 lines), adding
+  `MTLCreateSystemDefaultDevice()` as a primary adapter source and merging
+  with `MTLCopyAllDevices()` deduplicated by `registry_id`. Off-scope —
+  it does not appear in the handoff and touches HAL, which the acceptance
+  criteria explicitly excluded ("No production code added outside the two
+  `yawgpu-core/src/render_pipeline.rs` changes above (no HAL changes…)").
+- Zero changes to the four items actually requested (C1 in
+  `validate_color_targets`, M1 test tightening, the new dual-convention unit
+  test, m3 cross-link comment in `yawgpu/tests/e2e_vulkan_tiled.rs`).
+- Re-running `cargo test -p yawgpu-core --features tiled --lib subpass::`
+  confirmed the two failing tests still fail (`5 passed; 2 failed`).
+
+The off-scope diff was discarded with `git checkout -- yawgpu-hal/src/metal/mod.rs`.
+If it turns out to be a real, separately-justified fix for the
+`MTLCopyAllDevices()` empty-return case (i.e. the 28d4ae8 "resolved" claim
+was actually wrong rather than sandbox-only), that's a **separate handoff**
+and must be opened with its own scope statement, acceptance criteria, and
+test plan. It is **not** Phase 14 cascade-review work.
+
+### Revised acceptance reminder (unchanged scope, restated)
+
+The handoff above is **the** scope. Specifically:
+
+- Touch **only** `yawgpu-core/src/render_pipeline.rs` and
+  `yawgpu/tests/e2e_vulkan_tiled.rs` (the latter for m3 — a comment only).
+- Do **not** touch any HAL file, any FFI file, any other test file, any
+  example, any spec/tracking file.
+- The Noop subpass tests at `yawgpu-core/src/subpass.rs:1413` and `:1507`
+  are the load-bearing regression check — they MUST pass without their
+  assertions being relaxed.
+- Verify locally before reporting back:
+  ```
+  cargo test -p yawgpu-core --features tiled --lib subpass::
+  cargo test --workspace --features yawgpu/tiled
+  cargo clippy --workspace --all-targets --features yawgpu/tiled -- -D warnings
+  cargo clippy --workspace --all-targets -- -D warnings
+  ```
+- Report back: files changed (should be exactly the two listed above),
+  test counts before/after, and the name of the new dual-convention unit
+  test. If anything in the spec rule
+  (`specs/blocks/55-tiled-rendering.md` → "Fragment `@location(N)` …
+  dual convention accepted") is unclear, **ask** rather than improvise.
