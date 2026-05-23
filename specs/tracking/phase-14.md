@@ -1,6 +1,14 @@
 # Phase 14 — Tiled rendering (TBDR mobile extension)
 
-Status: **COMPLETE** (B1-B6 + B8 done; B7 REMOVED; Phase 14 Review CLOSED — 0C/7M/11m, all MAJOR + kept MINOR fixed). Commits `phase-14: B1` → `phase-14: phase review`. Rules/plan: `../blocks/55-tiled-rendering.md`.
+Status: **COMPLETE** (B1-B6 + B8 done; B7 REMOVED; original Phase 14 Review
+CLOSED — 0C/7M/11m, all MAJOR + kept MINOR fixed). Commits `phase-14: B1` →
+`phase-14: phase review`. **Cascade re-open + close** (silent-skip → real
+green): `phase-14-cascade-review.md`, closed at `97e1818`. **Phase 14.x
+extensions** (post-cascade, driven by the flagship 3-subpass deferred-rendering
+example port): mixed input-attachment bind groups, depth + multi-color subpass
+pipelines, Rgba16Float, no-op MTLDepthStencilState fallback — see "Phase 14.x
+extensions" section at the bottom and `phase-14x-review.md` (when written) for
+the post-extension Phase Review. Rules/plan: `../blocks/55-tiled-rendering.md`.
 Roles/loop: `../reference/workflow.md`. Depends on Phase 13's `yawgpu.h` +
 feature scaffolding (A0).
 
@@ -538,3 +546,143 @@ opportunistic CI, but it masked an actual regression because the harness
 treated 0 ran ≡ green. Future Phase Review must re-run real-GPU e2e with
 the sandbox explicitly disabled before any green-on-Metal claim — and
 must inspect the test runner's "N ignored" count, not just exit code.
+
+## Phase 14.x extensions (2026-05-23 — post-cascade, driven by deferred-rendering example port)
+
+After the cascade-review closed at `97e1818`, porting the wgpu reference
+`deferred_rendering` 3-subpass demo into `examples/tiled_deferred` surfaced a
+chain of library limitations that the cascade hadn't exercised (the original
+2-subpass smoke is intentionally minimal — single color target, no depth, no
+mixed bind groups, no Rgba16Float, no inter-subpass depth-state transitions).
+Each was fixed as a focused slice; the chain is recorded here as the canonical
+log of "what tiled-rendering needed to ship a real-world demo".
+
+### Library landings
+
+1. **`76aaaac`** — *Mixed input-attachment bind groups.*
+   `yawgpu-core::validate_bind_group_descriptor` was rejecting bind groups
+   whose entry count didn't exactly match the layout's entry count. The
+   wgpu reference's `lighting.wgsl` puts `[subpass_input, subpass_input,
+   uniform]` into a single `@group(0)` and the caller supplies only the
+   uniform entry (the two input-attachment slots are auto-wired by the
+   subpass pass). Relax the validation so `InputAttachment`-kind slots may
+   be omitted; non-input slots still required. Spec rule lives in
+   `specs/blocks/55-tiled-rendering.md` → "Input attachments are pass-local,
+   auto-wired" (the "Mixed group" clause). Inline unit tests cover the
+   accepted/rejected cases. HAL-side per-binding auto-wire (Vulkan
+   `INPUT_ATTACHMENT` descriptor + Metal color-slot map) already handled
+   mixed groups — this was purely a core validation gap.
+
+2. **`b94d780`** — *Depth-stencil + multi-color subpass pipelines.*
+   The Phase 14 B-slice scaffold at `yawgpu-core/src/render_pipeline.rs`
+   hard-rejected real-backend subpass pipelines with `depth_stencil.is_some()`
+   or `fragment.target_count \!= 1`. The deferred demo's G-Buffer needs both
+   (2 color targets + Depth32Float). Adds `HalDepthStencilState` /
+   `HalStencilFaceState` / `HalStencilOperation` to the HAL; wires
+   Metal's `setDepthAttachmentPixelFormat` + `MTLDepthStencilState` and
+   Vulkan's `PipelineDepthStencilStateCreateInfo`; expands the hardcoded
+   length-1 Vulkan color-blend-attachment array to `color_formats.len()`.
+   Multisample > 1 remains explicitly out of scope. Spec rule in 55-
+   tiled-rendering.md → "Subpass pipelines support multi-color targets and
+   depth-stencil". Three Noop unit tests cover the new flow.
+
+3. **`e9ebde1`** — *Metal subpass-pass `stencilAttachment` format-aspect gate.*
+   `subpass_render_pass_descriptor` was setting the encoder's
+   `stencilAttachment.setTexture(...)` unconditionally whenever the pass
+   layout had a depth-stencil attachment, regardless of whether the
+   attachment's format actually had a stencil aspect. For Depth32Float
+   (depth-only) this caused Metal to silently reject the entire render
+   pass. Pipeline-side already gated correctly via `format_has_depth_aspect` /
+   `format_has_stencil_aspect`; encoder side now matches.
+
+4. **`087c51f`** — *Rgba16Float texture format.*
+   The public `TextureFormat::RGBA16_FLOAT` was advertised since Phase 0
+   with renderable + blendable + multisample + storage caps, but the HAL
+   layer had no matching variant — `hal_texture_format` fell through to
+   `HalTextureFormat::Unsupported` and the Metal/Vulkan map errored with
+   "unsupported texture format". Surfaced as silent pipeline-creation
+   failure (an error pipeline) the moment any subpass pipeline used the
+   format, which the deferred demo does for the normal + lit attachments.
+   Adds `HalTextureFormat::Rgba16Float` and the core/HAL mappings
+   (`MTLPixelFormat::RGBA16Float`, `vk::Format::R16G16B16A16_SFLOAT`).
+
+5. **`af1bdd2`** — *Metal no-op `MTLDepthStencilState` fallback.*
+   Metal's depth-stencil state persists across draws within a single
+   `MTLRenderCommandEncoder` — the multi-subpass pass shares one encoder,
+   so a depth-bearing subpass (G-Buffer) leaves its depth state in effect
+   for later subpasses (lighting + composite) whose pipelines have
+   `depth_stencil = None`. The G-Buffer's `depth_compare = Less` +
+   `depth_write = true` ended up rewriting the depth buffer in subpass 1's
+   fullscreen triangle (at NDC z=0), then failing subpass 2's identical
+   triangle against `0 < 0`. Fix: every `MetalRenderPipeline` now carries
+   an `MTLDepthStencilState` unconditionally; when the public descriptor's
+   `depth_stencil` is `None` we synthesize a no-op state (`Always`, no
+   write, no stencil), so binding such a pipeline cleanly disables the
+   depth/stencil path on the encoder. Vulkan is unaffected (depth-stencil
+   state is baked into `VkPipeline`).
+
+### Example port
+
+- **`bd2764b`** — `examples/tiled_deferred` rewritten as the 3-subpass
+  deferred-rendering port from `../wgpu/examples/features/src/deferred_rendering`.
+  4 color attachments (albedo / normal / lit / output) + Depth32Float;
+  G-Buffer subpass renders an instanced 5×5 cube grid; lighting subpass
+  does Blinn-Phong + 4 orbiting point lights + hemispherical ambient;
+  composite subpass tonemaps with Reinhard. `gbuffer.wgsl` byte-equal to
+  the wgpu reference; `lighting.wgsl` + `composite.wgsl` use the dual
+  fragment-entry pattern (`fs` for Vulkan `@location(0)`, `fs_metal` for
+  the flat MTL slot — 2 and 3 respectively). Two run modes: windowed demo
+  (default, GLFW) and `--verify` (offscreen → PNG + center-pixel sanity).
+  MoltenVK self-skips both modes via `adapter_is_moltenvk` (the lighting
+  subpass needs framebuffer-fetch / input-attachment paths MoltenVK doesn't
+  expose). `math.h` carries minimal Vec3 / Mat4 helpers (no third-party
+  math dependency); column-major matching glam's `to_cols_array_2d`.
+
+- **`fbd6823`** — Fix transposed `mat4_look_at_rh` in the example's
+  `math.h`. The initial port stored the matrix row-major while every
+  other helper read it column-major, so the view matrix was glam's
+  transpose. Perspective happened to be sparse-enough to look "almost
+  right" — visible cubes but a wrong frame/scale and wrong inv_view_proj
+  for lighting world-position reconstruction (subpass 1 used a
+  transposed inverse). After the fix the demo matches the wgpu reference
+  screenshot's framing + lavender/purple Blinn-Phong tones.
+
+- **`6cd881e`** — Windows portability + interactive windowed mode.
+  POSIX `<strings.h>` → conditional under non-MSVC + `_strnicmp` shim
+  under `_MSC_VER`. `set_shader_prefix` handles both `/` and `\` so the
+  WGSL files are located next to the binary regardless of how `argv[0]`
+  is spelled. Windowed mode drops the 120-frame cap and runs until the
+  user closes the window. (User-verified on Windows native Vulkan.)
+
+### End-to-end verification
+
+- **Metal (this M2, sandbox off, 2026-05-23):**
+  - `examples/build-tm/tiled_deferred/tiled_deferred --verify`: exit 0,
+    center pixel `(130, 60, 57, 255)`, `tiled_deferred.png` shows the
+    full 5×5 cube grid with Blinn-Phong lighting (matches wgpu reference
+    framing modulo verify-mode's linear `Rgba8Unorm` output vs the
+    windowed `Bgra8UnormSrgb` swapchain's gamma).
+  - Phase 14 Metal tiled e2e (`e2e_metal_tiled` `--ignored`): 5/5,
+    including the original 2-subpass smoke (no regression from any of
+    1-5 above).
+- **Vulkan native (Windows, user-verified 2026-05-23):** the same demo
+  renders correctly. MoltenVK on macOS continues to self-skip via
+  `adapter_is_moltenvk` (documented in `phase-14-cascade-review.md`).
+- Default + `--features yawgpu/tiled` test/clippy gates: green.
+
+### Items deferred out of Phase 14.x (still open as separate follow-ups)
+
+- The `wgpuCreateInstance` silent fallback to Noop when the Vulkan loader
+  can't be found at runtime (`DYLD_LIBRARY_PATH` is missing). Mitigated
+  in the C example via the MoltenVK self-skip but the underlying FFI
+  behavior is unchanged. Separate; see m2 above.
+- Vulkan adapter info doesn't report the real driver name; MoltenVK
+  detection still falls back to an Apple-GPU heuristic.
+- Multisample > 1 for subpass pipelines (explicitly out of scope of
+  slice 2 above).
+- Pre-existing non-tiled buffer/texture-usage VUIDs tracked in
+  `vulkan-buffer-texture-usage-vuids.md`.
+
+A fresh **Phase 14.x Phase Review** on the post-cascade slice range
+(`97e1818..6cd881e`) is the next workflow step before re-declaring
+Phase 14 fully COMPLETE; see `phase-14x-review.md` (TBD).

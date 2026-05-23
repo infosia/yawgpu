@@ -1,13 +1,41 @@
-# Parked handoff — refine `examples/tiled_deferred` (3-subpass port)
+# DONE — refine `examples/tiled_deferred` (3-subpass port)
 
 This handoff was authored against `specs/blocks/55-tiled-rendering.md` →
 "Reference example (`examples/tiled_deferred`) — deferred-shading demo"
 and would rewrite `examples/tiled_deferred` as a 3-subpass demo
 equivalent to `../wgpu/examples/features/src/deferred_rendering`.
 
-**Status:** parked **again** 2026-05-23, waiting on the Phase 14.x
-library work that lifts the subpass-pipeline scaffold's depth-stencil +
-multi-color restriction (the active `HANDOFF.md` dispatches that work).
+**Status:** **DONE 2026-05-23.** Landed across `bd2764b` (initial port) +
+`fbd6823` (look_at transpose fix) + `6cd881e` (Windows portability +
+windowed-loop). Five library prereqs that this port surfaced landed
+between the parking and the final commit:
+
+1. `76aaaac` — mixed input-attachment bind groups (lighting's `[input,
+   input, uniform]` @group(0)).
+2. `b94d780` — depth-stencil + multi-color subpass pipelines.
+3. `e9ebde1` — Metal subpass `stencilAttachment` format-aspect gate.
+4. `087c51f` — Rgba16Float HAL format support.
+5. `af1bdd2` — Metal no-op `MTLDepthStencilState` fallback.
+
+End-to-end verification:
+- Mac Metal (`tiled_deferred --verify`): center pixel `(130, 60, 57, 255)`,
+  full 5×5 cube grid with Blinn-Phong lighting in `tiled_deferred.png`.
+- Windows native Vulkan (user-verified): renders correctly.
+- MoltenVK on macOS self-skips via `adapter_is_moltenvk` (lighting subpass
+  needs framebuffer-fetch / input-attachment paths MoltenVK doesn't expose).
+
+The body below is preserved as historical context — it captures the spec
++ guidance the Phase 14.x cycle was driven by. Don't re-dispatch unless
+the example breaks against a future API change; see
+`specs/tracking/phase-14.md` → "Phase 14.x extensions" for the canonical
+final-state log.
+
+---
+
+**Historical parking notes (kept for context):** parked **again** 2026-05-23,
+waiting on the Phase 14.x library work that lifts the subpass-pipeline
+scaffold's depth-stencil + multi-color restriction (the active `HANDOFF.md`
+at that point dispatched that work — long since closed; see #5 above).
 
 **Workflow change (also 2026-05-23):** per user feedback
 ([[feedback-example-vs-library-workflow]]), example development +
