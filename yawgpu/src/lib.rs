@@ -44,6 +44,7 @@ pub const YaWGPUFeatureName_TransientAttachments: native::WGPUFeatureName = 0x70
 #[cfg(feature = "tiled")]
 #[allow(non_upper_case_globals)]
 pub const YaWGPUFeatureName_ShaderFramebufferFetch: native::WGPUFeatureName = 0x7001_0003;
+// 0x7001_0004 reserved — see `yawgpu.h` "Programmable tile dispatch — removed".
 /// SType value for `YaWGPUInputAttachmentBindingLayout`.
 #[cfg(feature = "tiled")]
 pub const YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT: native::WGPUSType = 0x7000_0010;

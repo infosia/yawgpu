@@ -1,6 +1,6 @@
 # Phase 14 — Tiled rendering (TBDR mobile extension)
 
-Status: **PLANNED**. Rules/plan: `../blocks/55-tiled-rendering.md`.
+Status: **COMPLETE** (B1-B6 + B8 done; B7 REMOVED; Phase 14 Review CLOSED — 0C/7M/11m, all MAJOR + kept MINOR fixed). Commits `phase-14: B1` → `phase-14: phase review`. Rules/plan: `../blocks/55-tiled-rendering.md`.
 Roles/loop: `../reference/workflow.md`. Depends on Phase 13's `yawgpu.h` +
 feature scaffolding (A0).
 
@@ -319,7 +319,72 @@ identical between Metal and Noop. **B8's `tiled_deferred` verifies fine on
 native Vulkan (Windows, Apple-skip heuristic doesn't trigger off-Apple),** which
 is the verification path used for B5c.
 
-### B8 part 2 — Phase Review  *(☐ TODO, orchestrator)*
+### B8 part 2 — Phase Review  *(☑ DONE — CLOSED)*
+
+Clean Review (fresh no-context subagent, diff `f3db0de..0fc75fc` + block 55 +
+CLAUDE.md + naming-conventions): **18 findings — 0 CRITICAL / 7 MAJOR /
+11 MINOR.**
+
+Triage + resolution:
+- **MAJOR 1 (fixed)** — Vulkan device didn't enable the `EXT_SHADER_TILE_IMAGE`/
+  `EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS` extension it detected; the
+  ShaderFramebufferFetch advertise was a lie. Fix: pick the right extension by
+  detected `FramebufferFetchPath` and add it to the logical-device extension list.
+- **MAJOR 2 (fixed)** — Metal `MTLRenderPassDescriptor` only attached the first
+  subpass's color slots, so later subpasses writing other slots had undefined
+  targets. Fix: `subpass_color_attachment_indices` returns the **union** of all
+  subpasses' indices; the e2e 2-subpass tests no longer rely on
+  `contains_pixel`-any-match — they now assert the **center pixel** is green
+  ±1 (`assert_center_pixel_approx`), so the union fix is testable. Mirror unit
+  test added.
+- **MAJOR 3 (fixed)** — Vulkan tiled depth attachment hardcoded
+  `loadOp=CLEAR/storeOp=DONT_CARE`. Fix: map the binding's
+  `depth/stencil_load_op/store_op` to `vk::AttachmentLoadOp/StoreOp`, gating
+  stencil ops on the format's aspect.
+- **MAJOR 4 (fixed)** — `MatchTarget` transient cached the first-pass extent.
+  Fix: a second begin with a different extent now returns an error
+  ("already resolved with a different extent"); same-extent reuse still works.
+- **MAJOR 5 (fixed)** — `validate_subpass_pass_layout_descriptor` hardcoded
+  `max_subpasses=4`. Fix: `tiled_capabilities_for_device` threads
+  `Adapter::tiled_capabilities()` into the validation; Noop (zero caps) skips
+  the count enforcement (documented exemption).
+- **MAJOR 6 (fixed)** — `validate_subpass_render_pipeline_descriptor` dropped
+  the wrapped `base.error`. Fix: the validator now propagates `descriptor.base.error`
+  before its own checks; unit test added.
+- **MAJOR 7 (fixed)** — `tile_memory_fits_budget` hardcoded `sample_count=1`.
+  Fix: `subpass_memoryless_sample_count` computes the max across memoryless
+  attachments and feeds it to the budget check.
+- **MINOR (Vulkan final_layout, fixed)** — transient images now stay in
+  `COLOR_ATTACHMENT_OPTIMAL` (or `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`) instead of
+  the layout-vs-usage-inconsistent `TRANSFER_SRC_OPTIMAL`.
+- **MINOR 7 (spec, fixed)** — added a `// 0x7001_0004 reserved` comment next to
+  the `YaWGPUFeatureName_*` consts in `yawgpu/src/lib.rs`, mirroring `yawgpu.h`'s
+  reservation block.
+- **Deferred (recorded, accepted v1 approximations)** — silent Memoryless→Private
+  fallback log; hardcoded `max_subpasses=4` / 256 KiB tile-budget defaults in
+  adapter caps (validation now reads them; real per-backend refinement is a
+  follow-up); `bind_group_layout_is_input_attachment_only` empty-layout
+  handling; `Force32` C-only enum-width asymmetry; `pub type
+  YaWGPUSubpassDependencyType = u32` doc sparseness;
+  `SubpassRenderPassInner::Drop` re-locking pattern; `MultiSubpass`/
+  `TransientAttachments` always-on advertise (currently capability-checked only
+  for ShaderFramebufferFetch); inline `pub const` styling.
+
+*Final gate (Claude-run):* default + `--features tiled` test/`clippy -D warnings`
+green; **seven** backend `--tests` configs (default / metal / vulkan /
+metal,tiled / vulkan,tiled / metal,mobile / vulkan,mobile) all compile.
+Real-GPU re-runs: **Metal 5/5** incl. `metal_two_subpass_draw_subpass_load_readback`
+with the tightened center-pixel assertion → **green pass**; MoltenVK
+`vulkan,tiled` 4/4 (2-subpass self-skips, no regression). No open
+CRITICAL/MAJOR → **Phase 14 COMPLETE**.
+
+Pending separately (not Phase-14-blocking):
+- Native Vulkan (Windows) re-verification of MAJOR 1/2/3 effects on a real
+  driver (the user's existing native-Vulkan verification workflow).
+- cdylib + Metal `enumerate_adapters` empty-return on Apple Silicon
+  (cargo-test/rlib unaffected; C examples on Mac silently fall back to Noop).
+- Vulkan adapter info doesn't report the real driver name; MoltenVK detection
+  falls back to Apple-GPU heuristic.
 
 C deferred-shading example (Metal + Vulkan) under `#ifdef YAWGPU_HAS_TILED`;
 real-GPU e2e run by Claude and logged. Then the mandatory Phase Review

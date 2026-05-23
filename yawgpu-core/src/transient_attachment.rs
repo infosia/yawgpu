@@ -43,6 +43,7 @@ pub struct TransientAttachment {
 pub(crate) struct TransientAttachmentInner {
     pub(crate) descriptor: TransientAttachmentDescriptor,
     pub(crate) hal: Mutex<Option<HalTransientAttachment>>,
+    pub(crate) resolved_match_target_extent: Mutex<Option<(u32, u32)>>,
     pub(crate) is_error: bool,
 }
 
@@ -58,6 +59,7 @@ impl TransientAttachment {
             inner: Arc::new(TransientAttachmentInner {
                 descriptor,
                 hal: Mutex::new(hal),
+                resolved_match_target_extent: Mutex::new(None),
                 is_error,
             }),
         }
@@ -79,6 +81,32 @@ impl TransientAttachment {
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
+    }
+
+    /// Validates the concrete extent for a match-target attachment.
+    ///
+    /// MatchTarget is resolved per begin. The current implementation reuses a
+    /// same-size allocation and rejects a different extent to avoid silently
+    /// retaining an image with stale dimensions.
+    pub(crate) fn validate_match_target_extent(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Result<(), String> {
+        let mut current = self.inner.resolved_match_target_extent.lock();
+        match *current {
+            Some((current_width, current_height))
+                if current_width != width || current_height != height =>
+            {
+                Err("match-target transient attachment was already resolved with a different extent"
+                    .to_owned())
+            }
+            Some(_) => Ok(()),
+            None => {
+                *current = Some((width, height));
+                Ok(())
+            }
+        }
     }
 
     /// Stores the HAL allocation resolved at pass begin for match-target attachments.

@@ -161,7 +161,7 @@ fn vulkan_two_subpass_draw_subpass_load_readback() {
         let readback = run_two_subpass_draw_readback(device);
         let pixels = read_unpacked_texture_buffer(instance, readback);
 
-        assert!(contains_pixel(&pixels, [0, 255, 0, 255]));
+        assert_center_pixel_approx(&pixels, [0, 255, 0, 255], 1);
         assert!(errors.lock().expect("error lock").is_empty());
         yawgpu::wgpuBufferRelease(readback);
         yawgpu::wgpuDeviceRelease(device);
@@ -743,10 +743,20 @@ fn texture_extent() -> native::WGPUExtent3D {
     }
 }
 
-fn contains_pixel(pixels: &[u8], rgba: [u8; 4]) -> bool {
-    pixels
-        .chunks_exact(BYTES_PER_PIXEL)
-        .any(|pixel| pixel == rgba)
+fn assert_center_pixel_approx(pixels: &[u8], rgba: [u8; 4], tolerance: u8) {
+    let center_x = WIDTH as usize / 2;
+    let center_y = HEIGHT as usize / 2;
+    let offset = center_y * ROW_BYTES + center_x * BYTES_PER_PIXEL;
+    let pixel = &pixels[offset..offset + BYTES_PER_PIXEL];
+    for (&actual, &expected) in pixel.iter().zip(rgba.iter()) {
+        assert!(
+            actual.abs_diff(expected) <= tolerance,
+            "center pixel {:?} did not match {:?} within {}",
+            pixel,
+            rgba,
+            tolerance
+        );
+    }
 }
 
 fn zeroed_adapter_info() -> native::WGPUAdapterInfo {
