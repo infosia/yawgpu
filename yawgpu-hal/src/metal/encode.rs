@@ -234,31 +234,39 @@ pub(super) fn subpass_render_pass_descriptor(
             alpha: a,
         });
     }
-    if pass
-        .layout
-        .subpasses
-        .iter()
-        .any(|subpass| subpass.uses_depth_stencil)
-    {
-        if let Some(depth) = &pass.depth_stencil_attachment {
-            let depth_attachment = descriptor.depthAttachment();
-            depth_attachment.setTexture(Some(subpass_attachment_texture(&depth.resource)?));
-            depth_attachment.setLoadAction(mtl_load_action(depth.depth_load_op));
-            depth_attachment.setStoreAction(if depth.depth_store {
-                MTLStoreAction::Store
-            } else {
-                MTLStoreAction::DontCare
-            });
-            depth_attachment.setClearDepth(f64::from(depth.depth_clear_value));
-            let stencil_attachment = descriptor.stencilAttachment();
-            stencil_attachment.setTexture(Some(subpass_attachment_texture(&depth.resource)?));
-            stencil_attachment.setLoadAction(mtl_load_action(depth.stencil_load_op));
-            stencil_attachment.setStoreAction(if depth.stencil_store {
-                MTLStoreAction::Store
-            } else {
-                MTLStoreAction::DontCare
-            });
-            stencil_attachment.setClearStencil(depth.stencil_clear_value);
+    if let Some(layout_depth_stencil) = &pass.layout.depth_stencil_attachment {
+        if pass
+            .layout
+            .subpasses
+            .iter()
+            .any(|subpass| subpass.uses_depth_stencil)
+        {
+            if let Some(depth) = &pass.depth_stencil_attachment {
+                let format = layout_depth_stencil.format;
+                if format_has_depth_aspect(format) {
+                    let depth_attachment = descriptor.depthAttachment();
+                    depth_attachment.setTexture(Some(subpass_attachment_texture(&depth.resource)?));
+                    depth_attachment.setLoadAction(mtl_load_action(depth.depth_load_op));
+                    depth_attachment.setStoreAction(if depth.depth_store {
+                        MTLStoreAction::Store
+                    } else {
+                        MTLStoreAction::DontCare
+                    });
+                    depth_attachment.setClearDepth(f64::from(depth.depth_clear_value));
+                }
+                if format_has_stencil_aspect(format) {
+                    let stencil_attachment = descriptor.stencilAttachment();
+                    stencil_attachment
+                        .setTexture(Some(subpass_attachment_texture(&depth.resource)?));
+                    stencil_attachment.setLoadAction(mtl_load_action(depth.stencil_load_op));
+                    stencil_attachment.setStoreAction(if depth.stencil_store {
+                        MTLStoreAction::Store
+                    } else {
+                        MTLStoreAction::DontCare
+                    });
+                    stencil_attachment.setClearStencil(depth.stencil_clear_value);
+                }
+            }
         }
     }
     Ok(descriptor)
@@ -365,6 +373,28 @@ fn mtl_load_action(load_op: HalRenderLoadOp) -> MTLLoadAction {
         HalRenderLoadOp::Load => MTLLoadAction::Load,
         HalRenderLoadOp::Clear => MTLLoadAction::Clear,
     }
+}
+
+#[cfg(feature = "tiled")]
+fn format_has_depth_aspect(format: HalTextureFormat) -> bool {
+    matches!(
+        format,
+        HalTextureFormat::Depth16Unorm
+            | HalTextureFormat::Depth24Plus
+            | HalTextureFormat::Depth24PlusStencil8
+            | HalTextureFormat::Depth32Float
+            | HalTextureFormat::Depth32FloatStencil8
+    )
+}
+
+#[cfg(feature = "tiled")]
+fn format_has_stencil_aspect(format: HalTextureFormat) -> bool {
+    matches!(
+        format,
+        HalTextureFormat::Stencil8
+            | HalTextureFormat::Depth24PlusStencil8
+            | HalTextureFormat::Depth32FloatStencil8
+    )
 }
 
 /// Records encode into the command stream.
