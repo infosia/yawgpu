@@ -67,11 +67,9 @@ pub(super) fn create_render_pipeline(
     fragment_entry_point: &str,
     descriptor: &HalRenderPipelineDescriptor,
 ) -> Result<MetalRenderPipeline, HalError> {
-    let color_format = descriptor
-        .color_formats
-        .first()
-        .copied()
-        .ok_or_else(|| shader_error("render pipeline requires a color target".to_owned()))?;
+    if descriptor.color_formats.is_empty() {
+        return Err(shader_error("render pipeline requires a color target".to_owned()));
+    }
     let source = NSString::from_str(msl_source);
     let library = device
         .newLibraryWithSource_options_error(&source, None)
@@ -89,10 +87,17 @@ pub(super) fn create_render_pipeline(
     let pipeline_descriptor = MTLRenderPipelineDescriptor::new();
     pipeline_descriptor.setVertexFunction(Some(&vertex_function));
     pipeline_descriptor.setFragmentFunction(Some(&fragment_function));
-    let (pixel_format, _) = map_texture_format(color_format)?;
+    // Each `color_formats[i]` populates `MTLRenderPipelineDescriptor.colorAttachments[i].pixelFormat`,
+    // so the MTL pipeline's color-attachment layout matches the encoder slot-for-slot.
+    // For subpass pipelines this carries every layout slot's format (including
+    // ones the current subpass doesn't write to) — the fragment shader's
+    // `[[color(N)]]` outputs naturally land in the right MTL slot.
     let color_attachments = pipeline_descriptor.colorAttachments();
-    let color = unsafe { color_attachments.objectAtIndexedSubscript(0) };
-    color.setPixelFormat(pixel_format);
+    for (i, &color_format) in descriptor.color_formats.iter().enumerate() {
+        let (pixel_format, _) = map_texture_format(color_format)?;
+        let attach = unsafe { color_attachments.objectAtIndexedSubscript(i) };
+        attach.setPixelFormat(pixel_format);
+    }
     let vertex_descriptor = MTLVertexDescriptor::new();
     for buffer in &descriptor.vertex_buffers {
         let metal_index = buffer

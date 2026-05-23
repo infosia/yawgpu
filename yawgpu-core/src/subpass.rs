@@ -712,7 +712,15 @@ fn validate_subpass_render_pipeline_descriptor(
         }
         _ => {}
     }
-    validate_render_pipeline_descriptor(&descriptor.base, limits)
+    // Reuse `resolve_render_pipeline_descriptor` directly so we can pass the
+    // subpass's color-attachment indices (so fragment `@location(N)` is
+    // validated against the flat MTL slot index, not the subpass-relative one).
+    crate::render_pipeline::resolve_render_pipeline_descriptor(
+        &descriptor.base,
+        limits,
+        Some(&subpass.color_attachment_indices),
+    )
+    .err()
 }
 
 /// Validates a subpass pass layout descriptor.

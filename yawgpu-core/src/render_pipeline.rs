@@ -412,7 +412,7 @@ impl RenderPipeline {
         let resolved = if is_error {
             None
         } else {
-            resolve_render_pipeline_descriptor(&descriptor, limits).ok()
+            resolve_render_pipeline_descriptor(&descriptor, limits, None).ok()
         };
         let (vertex_entry_name, fragment_entry_name, bind_group_layouts) =
             resolved.unwrap_or_else(|| {
@@ -485,7 +485,20 @@ impl RenderPipeline {
         let resolved = if is_error {
             None
         } else {
-            resolve_render_pipeline_descriptor(&descriptor.base, limits).ok()
+            resolve_render_pipeline_descriptor(
+                &descriptor.base,
+                limits,
+                Some(
+                    &descriptor
+                        .pass_layout
+                        .descriptor()
+                        .subpasses
+                        .get(descriptor.subpass_index as usize)
+                        .map(|s| s.color_attachment_indices.clone())
+                        .unwrap_or_default(),
+                ),
+            )
+            .ok()
         };
         let (vertex_entry_name, fragment_entry_name, bind_group_layouts) =
             resolved.unwrap_or_else(|| {
@@ -635,7 +648,7 @@ pub(crate) fn validate_render_pipeline_descriptor(
     descriptor: &RenderPipelineDescriptor,
     limits: Limits,
 ) -> Option<String> {
-    resolve_render_pipeline_descriptor(descriptor, limits).err()
+    resolve_render_pipeline_descriptor(descriptor, limits, None).err()
 }
 
 /// Alias for resolved render pipeline parts.
@@ -701,6 +714,7 @@ pub(crate) fn create_hal_render_pipeline(
             fragment_entry_name,
             metal_bindings,
             vertex_buffer_bindings,
+            &[],
         ) {
             Ok(selection) => selection,
             Err(message) => return (None, Some(message)),
@@ -767,6 +781,25 @@ pub(crate) fn create_hal_subpass_render_pipeline(
             Some("subpass render pipeline requires a fragment entry point".to_owned()),
         );
     };
+    // Build the Metal pass-local color-slot map from the pass layout's input
+    // attachments for this subpass: each `subpass_input` shader binding
+    // `(group, binding)` maps to its `source_attachment` color slot index in
+    // the layout's color attachments. naga's MSL backend lowers
+    // `subpassLoad(global)` to `[[color(N)]]` using this map; without it,
+    // subpass inputs would silently read zero.
+    let subpass_color_slots: Vec<((u32, u32), u32)> = descriptor
+        .pass_layout
+        .descriptor()
+        .subpasses
+        .get(descriptor.subpass_index as usize)
+        .map(|subpass| {
+            subpass
+                .input_attachments
+                .iter()
+                .map(|input| ((input.group, input.binding), input.source_attachment))
+                .collect()
+        })
+        .unwrap_or_default();
     let (shader, vertex_entry_point, fragment_entry_point, mut descriptor_bindings) =
         match select_render_shader_source(
             hal_device.backend(),
@@ -775,13 +808,14 @@ pub(crate) fn create_hal_subpass_render_pipeline(
             fragment_entry_name,
             metal_bindings,
             vertex_buffer_bindings,
+            &subpass_color_slots,
         ) {
             Ok(selection) => selection,
             Err(message) => return (None, Some(message)),
         };
     // Vulkan reads subpass inputs through `INPUT_ATTACHMENT` descriptors wired
-    // from the pass layout's input-source mapping; the Metal backend instead
-    // reads them via the color-slot map, so it takes no extra descriptors here.
+    // from the pass layout's input-source mapping; the Metal backend reads them
+    // via the color-slot map supplied above, so it takes no extra descriptors here.
     if matches!(hal_device.backend(), HalBackend::Vulkan) {
         descriptor_bindings.extend(input_attachment_hal_bindings(bind_group_layouts));
     }
@@ -897,6 +931,7 @@ pub(crate) fn select_render_shader_source(
     fragment_entry_name: &str,
     metal_bindings: &[MetalBufferBinding],
     vertex_buffer_bindings: &[MetalVertexBufferBinding],
+    subpass_color_slots: &[((u32, u32), u32)],
 ) -> Result<(HalShaderSource, String, String, Vec<HalDescriptorBinding>), String> {
     let fragment = descriptor
         .fragment
@@ -957,6 +992,7 @@ pub(crate) fn select_render_shader_source(
                 fragment_entry_name,
                 &msl_binding_map,
                 &msl_vertex_buffers,
+                subpass_color_slots,
             )?;
             Ok((
                 HalShaderSource::Msl(generated.source),
@@ -1161,6 +1197,7 @@ pub(crate) fn hal_primitive_topology(topology: PrimitiveTopology) -> HalPrimitiv
 pub(crate) fn resolve_render_pipeline_descriptor(
     descriptor: &RenderPipelineDescriptor,
     limits: Limits,
+    subpass_color_attachment_indices: Option<&[u32]>,
 ) -> Result<ResolvedRenderPipelineParts, String> {
     if let RenderPipelineLayout::Explicit(layout) = &descriptor.layout {
         if layout.is_error() {
@@ -1201,7 +1238,12 @@ pub(crate) fn resolve_render_pipeline_descriptor(
         validate_depth_stencil_aspects(depth_stencil)?;
     }
     validate_fragment_depth_output(descriptor, fragment_entry.as_deref())?;
-    validate_color_targets(descriptor, fragment_entry.as_deref(), limits)?;
+    validate_color_targets(
+        descriptor,
+        fragment_entry.as_deref(),
+        limits,
+        subpass_color_attachment_indices,
+    )?;
     validate_render_pipeline_layout(descriptor, &vertex_entry, fragment_entry.as_deref())?;
     validate_multisample_state(descriptor, fragment_entry.as_deref())?;
     let bind_group_layouts = effective_render_bind_group_layouts(
@@ -1549,6 +1591,7 @@ pub(crate) fn validate_color_targets(
     descriptor: &RenderPipelineDescriptor,
     fragment_entry: Option<&str>,
     limits: Limits,
+    subpass_color_attachment_indices: Option<&[u32]>,
 ) -> Result<(), String> {
     let Some(fragment) = &descriptor.fragment else {
         return Ok(());
@@ -1597,7 +1640,14 @@ pub(crate) fn validate_color_targets(
         }
 
         if !skip_shader_outputs {
-            match outputs.get(&(index as u32)) {
+            // For subpass-aware pipelines, the fragment's `@location(N)` uses
+            // the **flat MTL color-attachment index** (per the layout), not the
+            // subpass-relative index. Look up the shader output by that flat
+            // index when subpass color-attachment indices are supplied.
+            let location = subpass_color_attachment_indices
+                .and_then(|indices| indices.get(index).copied())
+                .unwrap_or(index as u32);
+            match outputs.get(&location) {
                 Some(output) => validate_fragment_output_compat(*output, caps)?,
                 None if target.write_mask != 0 => {
                     return Err(
@@ -1902,7 +1952,7 @@ mod tests {
             .module = Arc::clone(&fragment_spirv);
 
         let (source, vertex_entry, fragment_entry, bindings) =
-            select_render_shader_source(HalBackend::Vulkan, &wgsl_descriptor, "vs", "fs", &[], &[])
+            select_render_shader_source(HalBackend::Vulkan, &wgsl_descriptor, "vs", "fs", &[], &[], &[])
                 .expect("WGSL should generate Vulkan SPIR-V stages");
         assert!(
             matches!(source, HalShaderSource::SpirVStages { vertex, fragment } if !vertex.is_empty() && !fragment.is_empty())
@@ -1916,6 +1966,7 @@ mod tests {
             &spirv_descriptor,
             "vs",
             "fs",
+            &[],
             &[],
             &[],
         )
@@ -1933,6 +1984,7 @@ mod tests {
                 "fs",
                 &[],
                 &[],
+                &[],
             )
             .expect_err("mixed SPIR-V vertex and WGSL fragment must be rejected"),
             "render pipeline cannot mix a SPIR-V passthrough module with a non-SPIR-V module"
@@ -1945,25 +1997,26 @@ mod tests {
                 "fs",
                 &[],
                 &[],
+                &[],
             )
             .expect_err("mixed WGSL vertex and SPIR-V fragment must be rejected"),
             "render pipeline cannot mix a SPIR-V passthrough module with a non-SPIR-V module"
         );
 
         let (source, vertex_entry, fragment_entry, _) =
-            select_render_shader_source(HalBackend::Metal, &msl_descriptor, "vs", "fs", &[], &[])
+            select_render_shader_source(HalBackend::Metal, &msl_descriptor, "vs", "fs", &[], &[], &[])
                 .expect("MSL passthrough should select Metal MSL");
         assert!(matches!(source, HalShaderSource::Msl(selected) if selected == msl_source));
         assert_eq!(vertex_entry, "vs");
         assert_eq!(fragment_entry, "fs");
 
         assert_eq!(
-            select_render_shader_source(HalBackend::Metal, &spirv_descriptor, "vs", "fs", &[], &[])
+            select_render_shader_source(HalBackend::Metal, &spirv_descriptor, "vs", "fs", &[], &[], &[])
                 .expect_err("SPIR-V must not run on Metal"),
             "SPIR-V shader module cannot be used on the Metal backend"
         );
         assert_eq!(
-            select_render_shader_source(HalBackend::Vulkan, &msl_descriptor, "vs", "fs", &[], &[])
+            select_render_shader_source(HalBackend::Vulkan, &msl_descriptor, "vs", "fs", &[], &[], &[])
                 .expect_err("MSL must not run on Vulkan"),
             "MSL shader module cannot be used on the Vulkan backend"
         );
@@ -2046,6 +2099,7 @@ mod tests {
                 buffers: Vec::new(),
             },
             &[],
+            &[((0, 0), 0)],
         );
         if let Ok(msl) = msl {
             assert!(msl.source.contains("[[color("));
