@@ -2,31 +2,40 @@
 
 This handoff was authored against `specs/blocks/55-tiled-rendering.md` →
 "Reference example (`examples/tiled_deferred`) — deferred-shading demo"
-and would have rewritten `examples/tiled_deferred` as a 3-subpass demo
+and would rewrite `examples/tiled_deferred` as a 3-subpass demo
 equivalent to `../wgpu/examples/features/src/deferred_rendering`.
 
-**Status:** parked, waiting on the mixed input-attachment bind-group
-library work (next active `HANDOFF.md`, captured here on the same date).
+**Status:** parked **again** 2026-05-23, waiting on the Phase 14.x
+library work that lifts the subpass-pipeline scaffold's depth-stencil +
+multi-color restriction (the active `HANDOFF.md` dispatches that work).
 
-**Reason for parking:** the wgpu reference's `lighting.wgsl` places two
-`subpass_input<f32>` bindings (`@group(0) @binding(0..=1)`) and one
-`var<uniform> LightParams` (`@group(0) @binding(2)`) into a single bind
-group. Today's `yawgpu-core::bind_group::validate_bind_group_descriptor`
-rejects a bind group whose `entries[]` count differs from the layout's
-entry count, so the caller cannot create a bind group that supplies only
-the non-input entry while leaving the two input-attachment slots
-auto-wired. Re-dispatch this handoff *unchanged* once that library
-change lands; the WGSL stays verbatim with the reference.
+**Workflow change (also 2026-05-23):** per user feedback
+([[feedback-example-vs-library-workflow]]), example development +
+debugging in `examples/` is now Claude's direct responsibility (the
+handoff-then-review cycle is too expensive for the trial-and-error
+shape of example work). The agent's `examples/tiled_deferred/` WIP
+(unstaged on disk: `main.c` 1753-line rewrite, `gbuffer.wgsl`,
+`lighting.wgsl`, `composite.wgsl`, `math.h`, updated `CMakeLists.txt`)
+becomes Claude's baseline. Claude resumes example verification + debug
+directly once the library landing is in.
 
-When re-dispatching, place the content below back into `HANDOFF.md`
-(under `# Task: ...`) and confirm the spec rule it references
-("Mixed group" wording added 2026-05-23) is still in place.
+**Reason for parking (second time):** the wgpu reference's G-Buffer
+subpass writes **2 color targets** (albedo + normal) AND has a
+**depth-stencil attachment**. `yawgpu-core/src/render_pipeline.rs:755`
+today hard-rejects subpass pipelines whose descriptor has
+`depth_stencil.is_some()` OR `fragment.target_count != 1`. Additionally
+the HAL's `HalRenderPipelineDescriptor` does not yet carry a
+`depth_stencil` field at all, and Vulkan's `create_graphics_pipeline` has
+a hardcoded length-1 color-blend-attachment array. The deferred demo
+cannot proceed until the library supports multi-color + depth subpass
+pipelines.
+
+This doc retains the original handoff body (with Revision 1 from the
+WGSL-semantics correction round) as a reference for what the example
+must do. Re-running the example after library landing should not need
+re-dispatching this handoff verbatim — Claude takes over directly.
 
 ---
-
-(The exact handoff body, verbatim from the `HANDOFF.md` it was originally
-written into, follows. Do not edit it here — fix the spec or write a
-revision instead, the same way other revisions in this repo work.)
 
 # Task: Refine `examples/tiled_deferred` — port `wgpu deferred_rendering`
 
@@ -92,16 +101,66 @@ implementation directive.
 
 ## What to do
 
-### 1. Three WGSL files, verbatim
+### 1. Three WGSL files — gbuffer verbatim, lighting/composite dual-entry
 
-Copy `../wgpu/examples/features/src/deferred_rendering/{gbuffer,lighting,composite}.wgsl`
-to `examples/tiled_deferred/` byte-for-byte. Do not adapt them — the
-contract says verbatim. The lighting + composite fragments already use
-the **subpass-local** `@location(0)` convention, which the cascade's
-tolerant `validate_color_targets` accepts on both Vulkan (subpass-local)
-and Metal (the fallback flat lookup also matches `@location(0)` when the
-subpass writes its local color slot 0). No `fs_metal` second entry point
-is needed for this example, unlike the 2-subpass smoke test.
+**This section was revised 2026-05-23 (Revision 1).** The earlier
+"verbatim all three" directive was wrong: naga's MSL backend does not
+subpass-remap fragment output `@location(N)`, so verbatim
+`lighting.wgsl` / `composite.wgsl` with `@location(0)` will write to MTL
+slot 0 instead of the lit (flat slot 2) and output (flat slot 3)
+attachments on Metal — Metal verify would be black. Validation
+accepting both conventions doesn't help: validation only checks "is
+there an output for that location", not where it lands.
+
+Do this instead:
+
+- **`gbuffer.wgsl`**: copy from
+  `../wgpu/examples/features/src/deferred_rendering/gbuffer.wgsl`
+  byte-for-byte. Its fragment writes `@location(0)` (albedo) +
+  `@location(1)` (normal), which already match flat MTL slots 0 + 1 in
+  subpass 0 — no divergence needed.
+- **`lighting.wgsl`**: start from the wgpu reference, then add a
+  **second** fragment entry point next to `fs`:
+  ```wgsl
+  // Vulkan: subpass-local @location(0) is remapped by VkRenderPass to flat
+  // attachment slot 2 (the lit HDR target).
+  @fragment
+  fn fs(in: VertexOutput) -> @location(0) vec4<f32> { ... existing body ... }
+
+  // Metal: naga MSL does not subpass-remap; flat MTL slot 2 must be
+  // declared on the WGSL output directly.
+  @fragment
+  fn fs_metal(in: VertexOutput) -> @location(2) vec4<f32> { ... same body ... }
+  ```
+  Comment the divergence at the top of the file, citing the
+  block-55 "dual convention accepted" rule.
+- **`composite.wgsl`**: same pattern, but the flat slot is 3 (the
+  output attachment):
+  ```wgsl
+  @fragment fn fs(in: VertexOutput) -> @location(0) vec4<f32> { ... }
+  @fragment fn fs_metal(in: VertexOutput) -> @location(3) vec4<f32> { ... }
+  ```
+
+In `main.c`, when creating the lighting + composite pipelines, query
+`WGPUAdapterInfo.backendType` once at startup and pick the fragment
+entry name:
+
+```c
+const char *lighting_fs = "fs";
+const char *composite_fs = "fs";
+WGPUAdapterInfo info = WGPU_ADAPTER_INFO_INIT;
+if (wgpuAdapterGetInfo(app->context.adapter, &info) == WGPUStatus_Success) {
+    if (info.backendType == WGPUBackendType_Metal) {
+        lighting_fs = "fs_metal";
+        composite_fs = "fs_metal";
+    }
+    wgpuAdapterInfoFreeMembers(info);
+}
+```
+
+This is the same dual-entry-point pattern used by
+`yawgpu/tests/e2e_metal_tiled.rs` and the prior 2-subpass tiled_deferred.
+`gbuffer.wgsl` does not need it (its outputs already match flat slots).
 
 ### 2. Math helpers
 
@@ -200,10 +259,18 @@ Update `examples/tiled_deferred/CMakeLists.txt`:
 
 ## Acceptance criteria
 
-- [ ] Three WGSL files in `examples/tiled_deferred/` byte-equal to the
-      wgpu reference (`diff -q` against
-      `../wgpu/examples/features/src/deferred_rendering/{gbuffer,lighting,composite}.wgsl`
-      should report no diff).
+- [ ] `gbuffer.wgsl` in `examples/tiled_deferred/` is byte-equal to
+      the wgpu reference (`diff -q` against
+      `../wgpu/examples/features/src/deferred_rendering/gbuffer.wgsl`
+      reports no diff).
+- [ ] `lighting.wgsl` and `composite.wgsl` declare BOTH a `fs` (writes
+      `@location(0)`) and an `fs_metal` (writes `@location(2)` and
+      `@location(3)` respectively) fragment entry point, with a header
+      comment citing the block-55 "dual convention accepted" rule.
+      The shared body must be identical between the two entry points
+      (only the output location differs).
+- [ ] `main.c` selects `lighting_fs` / `composite_fs` based on
+      `WGPUAdapterInfo.backendType == WGPUBackendType_Metal`.
 - [ ] `cmake -S examples -B examples/build-tm -DYAWGPU_FEATURE=metal
       -DYAWGPU_EXTENSIONS=tiled && cmake --build examples/build-tm --target tiled_deferred`
       succeeds (Claude verifies).
@@ -253,6 +320,69 @@ Update `examples/tiled_deferred/CMakeLists.txt`:
 - The `--verify` exit status + center-pixel report on whichever
   backend you tested locally (if any).
 - Anything in the spec rule or this handoff that was unclear — **ask**
-  rather than improvise. The previous round had a misaligned-handoff
-  failure; if any acceptance criterion looks impossible without
+  rather than improvise. Two prior rounds were rejected for missed
+  WGSL semantics; if any acceptance criterion looks impossible without
   touching a non-allowlisted file, STOP and surface that.
+
+## Revision 1 (2026-05-23 — WGSL semantics correction)
+
+The earlier "all three WGSL files verbatim" directive in Section 1 above
+was wrong: naga's MSL backend does not subpass-remap fragment output
+`@location(N)`, so verbatim `lighting.wgsl` / `composite.wgsl` with
+`@location(0)` lands in MTL slot 0 on Metal — never reaching the lit
+(flat slot 2) or output (flat slot 3) attachments. Metal verify would
+be black. The C1 cascade fix relaxed *validation* to accept either
+convention (`outputs.get(&subpass_local).or_else(|| outputs.get(&flat))`),
+but validation is a "does the shader write to a location" check, not a
+"does the location route to the right MTL slot" routing. The routing is
+naga's responsibility, and naga doesn't remap.
+
+Section 1 above has been rewritten in place to require:
+- `gbuffer.wgsl`: verbatim (its outputs are already at flat slots 0 + 1).
+- `lighting.wgsl` and `composite.wgsl`: keep the wgpu reference's `fs`
+  entry point (Vulkan), add a sibling `fs_metal` whose
+  `@location(N)` matches the flat MTL slot for that subpass's output
+  (2 for lighting, 3 for composite). Identical bodies; only the output
+  location differs. Same divergence pattern documented in
+  `specs/blocks/55-tiled-rendering.md`'s "dual convention accepted" rule
+  and used by `yawgpu/tests/e2e_metal_tiled.rs`.
+- `main.c`: pick `lighting_fs` / `composite_fs` from
+  `WGPUAdapterInfo.backendType`.
+
+Acceptance criteria in this file have been updated to match.
+
+If your in-progress `main.c` already implements the rest of the
+contract (3-subpass pass layout, mixed bind group for lighting, vertex
+buffers, etc.), the surgical delta is:
+1. Write the two new WGSL files with both entry points (do not
+   regenerate the others).
+2. Thread the entry-name selection into the lighting + composite
+   pipeline-creation calls.
+3. Re-run the verify gate on Metal — center pixel should now be lit
+   instead of black.
+
+## Revision 2 (2026-05-23 — parked again, library blocker)
+
+Agent reported successful implementation of:
+- 3-subpass deferred shading demo in `main.c` (1753-line rewrite from the
+  2-subpass version).
+- `gbuffer.wgsl` byte-equal to wgpu reference.
+- `lighting.wgsl` / `composite.wgsl` with `fs` + `fs_metal` dual entries
+  per Revision 1.
+- Runtime entry-name selection in `main.c` via `WGPUAdapterInfo.backendType`.
+- `math.h` (Mat4/Vec3 helpers, no third-party math).
+- `CMakeLists.txt` POST_BUILD copies for the three WGSLs.
+
+Result on Metal `--verify`:
+
+    tiled_deferred: center pixel RGBA=(0,0,0,0), rgb_sum=0 FAILED
+
+Root cause is not in the example. `yawgpu-core/src/render_pipeline.rs:755`'s
+scaffold guard rejects the gbuffer subpass pipeline (2 color targets +
+depth_stencil = Some). The deferred demo cannot proceed until the library
+supports multi-color + depth subpass pipelines.
+
+When the Phase 14.x library work lands, this handoff body re-dispatches
+unchanged. Expected verify outcome on Metal: green-lit cube grid center
+pixel; on MoltenVK: still self-skip (the lighting subpass needs the
+framebuffer-fetch path that MoltenVK doesn't expose).
