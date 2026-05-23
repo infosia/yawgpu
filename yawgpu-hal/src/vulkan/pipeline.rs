@@ -846,6 +846,10 @@ pub(super) fn create_graphics_pipeline(
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(vk::SampleCountFlags::TYPE_1)
         .sample_shading_enable(false);
+    // `PipelineColorBlendStateCreateInfo.attachmentCount` must equal the
+    // subpass's color-attachment count. We size to `descriptor.color_formats.len()`
+    // — the pipeline carries one entry per attachment the subpass writes,
+    // each with default "no blend, write all" state.
     let color_attachments = (0..descriptor.color_formats.len())
         .map(|_| color_blend_attachment_default())
         .collect::<Vec<_>>();

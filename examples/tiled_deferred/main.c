@@ -1,4 +1,45 @@
-// tiled_deferred - three-subpass deferred shading demo for yawgpu's tiled API.
+// tiled_deferred — three-subpass deferred shading demo for yawgpu's tiled API.
+//
+// Ports `../wgpu/examples/features/src/deferred_rendering` to C against the
+// yawgpu C ABI, exercising the full multi-subpass tiled-rendering surface
+// added in Phase 14 (multi-subpass render passes + input-attachment binding
+// type + subpass render pipelines + per-pass dependencies).
+//
+// Render graph (single render pass, three subpasses sharing one
+// MTLRenderCommandEncoder on Metal / one VkRenderPass on Vulkan):
+//
+//   Subpass 0  G-Buffer    gbuffer.wgsl
+//     - draws an instanced 5x5 cube grid
+//     - writes albedo (Rgba8Unorm, flat slot 0)
+//              normal (Rgba16Float, flat slot 1; alpha carries clip-space z)
+//     - uses   depth  (Depth32Float, Less + write)
+//   Subpass 1  Lighting    lighting.wgsl
+//     - fullscreen triangle; reads albedo + normal as subpass inputs
+//     - reconstructs world position from depth + inverse view-proj uniform
+//     - shades with Blinn-Phong + 4 orbiting point lights + hemisphere ambient
+//     - writes lit HDR (Rgba16Float, flat slot 2)
+//   Subpass 2  Composite   composite.wgsl
+//     - fullscreen triangle; reads lit HDR as subpass input
+//     - applies Reinhard tonemapping (linear out; sRGB swapchain handles gamma)
+//     - writes output (swapchain in windowed mode / Rgba8Unorm in verify, flat slot 3)
+//
+// Two run modes:
+//   * Default (windowed): GLFW window, animated camera + lights against
+//     wall-clock seconds; loops until the user closes the window. Self-skips
+//     on MoltenVK (lighting needs the framebuffer-fetch / input-attachment
+//     path MoltenVK doesn't expose).
+//   * `--verify`: render one frame at t=0 to an offscreen Rgba8Unorm texture,
+//     copy to a readback buffer, sample the center pixel, write
+//     `tiled_deferred.png`. Exit code 0 iff alpha > 0 and R+G+B > 12 — i.e.
+//     composite actually reached the output (vs. just the clear value).
+//
+// Per-backend WGSL `@location(N)` convention (block 55 "dual convention
+// accepted"): the lighting + composite shaders ship two fragment entry
+// points — `fs` writes the subpass-local @location(0) for Vulkan
+// (`VkRenderPass` remaps to the flat slot), `fs_metal` writes the flat MTL
+// slot directly (naga's MSL backend does not subpass-remap). `main.c::
+// create_pipelines` picks the entry name from `WGPUAdapterInfo.backendType`
+// at startup.
 
 #include "framework.h"
 
@@ -328,7 +369,15 @@ static TiledBackendStatus require_tiled_backend(WGPUAdapter adapter) {
     return TILED_BACKEND_OK;
 }
 
+// Describes the *shape* of the multi-subpass render pass: which color
+// attachments exist (by flat index), which subpass writes which one, and
+// which subpasses read prior outputs as input attachments. The layout is
+// created once and shared by both pipeline creation (subpass-compat metadata)
+// and pass begin (attachment count/format check).
 static YaWGPUSubpassPassLayout create_pass_layout(TiledDeferredApp *app) {
+    // Flat color attachments: [0]=albedo, [1]=normal, [2]=lit (HDR), [3]=output.
+    // `output_format` is the swapchain format in windowed mode (sRGB) or
+    // RGBA8Unorm in verify mode (linear).
     YaWGPUAttachmentLayout color_layouts[4] = {
         {.format = WGPUTextureFormat_RGBA8Unorm, .sampleCount = 1},
         {.format = WGPUTextureFormat_RGBA16Float, .sampleCount = 1},
@@ -826,9 +875,19 @@ static void write_frame_uniforms(TiledDeferredApp *app, float time_seconds) {
     wgpuQueueWriteBuffer(app->queue, app->light_buffer, 0, &lights, sizeof(lights));
 }
 
+// Records the single multi-subpass render pass: BeginSubpass → set pipeline
+// + bind groups + draw for subpass 0 → NextSubpass → ... → End. yawgpu maps
+// this to one MTLRenderCommandEncoder on Metal (state machine; no
+// per-subpass MTL barriers — Metal is implicitly tile-coherent) and one
+// VkRenderPass with `vkCmdNextSubpass` on Vulkan.
 static bool record_tiled_pass(TiledDeferredApp *app,
                               WGPUCommandEncoder encoder,
                               const AttachmentResources *attachments) {
+    // Color attachments map slot-for-slot to the pass layout's
+    // `color_layouts` (albedo/normal/lit/output). Intermediate G-Buffer +
+    // lit slots use storeOp=Discard since downstream subpasses read them
+    // via the input-attachment path (tile-resident on TBDR; no DRAM
+    // round-trip). Only the swapchain/verify output stores.
     YaWGPUColorAttachmentBinding colors[4] = {
         {.kind = YaWGPUSubpassAttachmentKind_Persistent,
          .view = attachments->albedo_view,

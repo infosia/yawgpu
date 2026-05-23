@@ -1,3 +1,22 @@
+// Minimal Vec3 / Mat4 helpers for the tiled_deferred example.
+//
+// No third-party math library — the demo only needs look-at, perspective,
+// matrix multiplication, and matrix inverse. Conventions mirror the wgpu
+// reference's `glam` usage so the WGSL uniforms can be uploaded byte-for-byte
+// with what `mat4_look_at_rh` / `mat4_perspective_rh` produce here:
+//   * Column-major storage: `m[col * 4 + row]`. Matches glam's
+//     `to_cols_array_2d()` layout that the WGSL `mat4x4<f32>` reads.
+//   * Right-handed view space (`mat4_look_at_rh`): forward = normalize(center - eye),
+//     side = forward × up, up = side × forward, eye translation negated.
+//   * Right-handed perspective with WebGPU NDC depth [0, 1]
+//     (`mat4_perspective_rh`): identical to glam's `Mat4::perspective_rh`.
+//   * `mat4_inverse` is the cofactor-expansion adjugate / determinant —
+//     general enough for the deferred lighting subpass's
+//     world-position-from-depth reconstruction.
+//
+// All helpers are `static inline` since this header is included from a single
+// translation unit (`main.c`).
+
 #ifndef YAWGPU_TILED_DEFERRED_MATH_H
 #define YAWGPU_TILED_DEFERRED_MATH_H
 
