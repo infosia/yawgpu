@@ -7,8 +7,9 @@ green): `phase-14-cascade-review.md`, closed at `97e1818`. **Phase 14.x
 extensions** (post-cascade, driven by the flagship 3-subpass deferred-rendering
 example port): mixed input-attachment bind groups, depth + multi-color subpass
 pipelines, Rgba16Float, no-op MTLDepthStencilState fallback — see "Phase 14.x
-extensions" section at the bottom and `phase-14x-review.md` (when written) for
-the post-extension Phase Review. Rules/plan: `../blocks/55-tiled-rendering.md`.
+extensions" section at the bottom. **Phase 14.x review** (0C/3M/6m, all
+MAJOR + m6 fixed, m1–m5 deferred as polish): `phase-14x-review.md`,
+re-COMPLETE at `a2d2ddd`. Rules/plan: `../blocks/55-tiled-rendering.md`.
 Roles/loop: `../reference/workflow.md`. Depends on Phase 13's `yawgpu.h` +
 feature scaffolding (A0).
 
@@ -684,5 +685,8 @@ log of "what tiled-rendering needed to ship a real-world demo".
   `vulkan-buffer-texture-usage-vuids.md`.
 
 A fresh **Phase 14.x Phase Review** on the post-cascade slice range
-(`97e1818..6cd881e`) is the next workflow step before re-declaring
-Phase 14 fully COMPLETE; see `phase-14x-review.md` (TBD).
+(`97e1818..6cd881e`) ran 2026-05-24; record + fixes in
+`phase-14x-review.md`. 0 CRITICAL / 3 MAJOR / 6 MINOR; all 3 MAJORs +
+1 incidental MINOR (m6) fixed at `a2d2ddd`; 5 MINORs (m1–m5) deferred
+as polish. **Phase 14 (with all Phase 14.x extensions) re-stands
+COMPLETE at `a2d2ddd`.**
