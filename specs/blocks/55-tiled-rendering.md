@@ -3,7 +3,9 @@
 Phase 14. **Vendor extension** (not a Dawn port): tile-based deferred
 rendering primitives for mobile GPUs — transient/memoryless attachments,
 multi-subpass render passes, subpass-input / framebuffer fetch, subpass-aware
-render pipelines, and (scaffold-only) programmable tile dispatch. Rules are
+render pipelines. (Programmable tile dispatch was an earlier scaffold; it was
+removed before Phase 14 closed — see "Programmable tile dispatch — removed".)
+Rules are
 exercised by **direct unit tests** (CLAUDE.md principle 1) plus real-backend
 `#[ignore]` e2e. Status legend: ☐ todo ◐ partial ☑ done.
 
@@ -47,7 +49,7 @@ WGPUStatus yawgpuAdapterGetTiledCapabilities(
 #define YaWGPUFeatureName_MultiSubpass             ((WGPUFeatureName)0x70010001)
 #define YaWGPUFeatureName_TransientAttachments     ((WGPUFeatureName)0x70010002)
 #define YaWGPUFeatureName_ShaderFramebufferFetch   ((WGPUFeatureName)0x70010003)
-#define YaWGPUFeatureName_ProgrammableTileDispatch ((WGPUFeatureName)0x70010004)
+/* 0x70010004 reserved — see "Programmable tile dispatch — removed". */
 ```
 
 ### Transient attachment — first-class Arc resource (B2)
@@ -261,22 +263,15 @@ Because both the pipeline and the pass reference the **same**
 `YaWGPUSubpassPassLayout`, compatibility information is described once and
 cannot drift between the two call sites.
 
-### Programmable tile dispatch — scaffold only (B7)
+### Programmable tile dispatch — removed (was scaffold-only)
 
-```c
-typedef struct YaWGPUTransientDispatchDescriptor {
-    WGPUChainedStruct const* nextInChain;
-    uint32_t tileWidth;
-    uint32_t tileHeight;
-} YaWGPUTransientDispatchDescriptor;
-
-/* Returns an unsupported error on every backend in Phase 14; the C entry point
-   and core/HAL plumbing exist so the surface is stable, but no backend
-   implements it yet. */
-void yawgpuSubpassRenderPassEncoderDispatchTransient(
-    YaWGPUSubpassRenderPassEncoder e,
-    YaWGPUTransientDispatchDescriptor const* descriptor);
-```
+Removed in Phase 14 (post-B6). It had no implementation on any backend and no
+implementation plan, so shipping the surface ahead of a real impl only locked us
+into an API shape that wasn't driven by anything. The numeric IDs
+(`YaWGPUFeatureName_ProgrammableTileDispatch == 0x70010004`, and any future
+tile-dispatch SType / C entry-point name) are **reserved** by a comment in
+`yawgpu.h` so they aren't reused for unrelated features. The API shape will be
+defined when a real backend implementation lands.
 
 ## Design decisions
 
@@ -399,11 +394,6 @@ void yawgpuSubpassRenderPassEncoderDispatchTransient(
   `RasterOrderAttachmentAccess` / `Disabled`); Metal implicit; the
   `ShaderFramebufferFetch` feature is advertised accordingly. ☐ (e2e)
 
-### Programmable tile dispatch — scaffold (P14.7)
-
-- **T18** `DispatchTransient` is wired through C/core/HAL but returns an
-  unsupported error on every backend. ☐ (UT)
-
 ## Async
 
 No new async surface. Submission/work-done reuse block 50's queue machinery.
@@ -433,7 +423,8 @@ No new async surface. Submission/work-done reuse block 50's queue machinery.
 - **B5** subpass render pipeline (references layout) + dedicated draw encoder
   (T15/T16).
 - **B6** framebuffer fetch path detection + feature advertise (T17).
-- **B7** programmable tile dispatch scaffold (T18).
+- **B7** ~~programmable tile dispatch scaffold~~ — REMOVED (no implementation on
+  any backend; numeric ID reserved in `yawgpu.h`).
 - **B8** examples (Metal+Vulkan deferred-shading) + e2e (`#[ignore]`) +
   **Phase Review**.
 
@@ -442,11 +433,9 @@ No new async surface. Submission/work-done reuse block 50's queue machinery.
 1. **Eager-dispatch ordering** — subpass pass must be the first encoder op (T13).
 2. **MSL subpass-input globals unsupported** — `@color(N)` entry-point form only;
    the global `var g: subpass_input<f32>;` form works on Vulkan only.
-3. **Programmable tile dispatch** is scaffold only (T18) — no working backend
-   implementation exists to port.
-4. **Timestamp / occlusion queries inside subpass passes are out of scope for
+3. **Timestamp / occlusion queries inside subpass passes are out of scope for
    v1** (the standard render pass covers the common case).
-5. **GLES / DX12** — not applicable (yawgpu has no such backends).
+4. **GLES / DX12** — not applicable (yawgpu has no such backends).
 
 ## Open questions
 

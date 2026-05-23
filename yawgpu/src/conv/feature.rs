@@ -16,10 +16,6 @@ pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
         crate::YaWGPUFeatureName_TransientAttachments => core::Feature::TransientAttachments,
         #[cfg(feature = "tiled")]
         crate::YaWGPUFeatureName_ShaderFramebufferFetch => core::Feature::ShaderFramebufferFetch,
-        #[cfg(feature = "tiled")]
-        crate::YaWGPUFeatureName_ProgrammableTileDispatch => {
-            core::Feature::ProgrammableTileDispatch
-        }
         other => core::Feature::Other(other as u32),
     }
 }
@@ -40,10 +36,6 @@ pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
         core::Feature::TransientAttachments => crate::YaWGPUFeatureName_TransientAttachments,
         #[cfg(feature = "tiled")]
         core::Feature::ShaderFramebufferFetch => crate::YaWGPUFeatureName_ShaderFramebufferFetch,
-        #[cfg(feature = "tiled")]
-        core::Feature::ProgrammableTileDispatch => {
-            crate::YaWGPUFeatureName_ProgrammableTileDispatch
-        }
         core::Feature::Other(value) => value as native::WGPUFeatureName,
         // exhaustive as of core::Feature @ 2026-05-17
         _ => native::WGPUFeatureName_Force32,

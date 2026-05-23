@@ -44,10 +44,6 @@ pub const YaWGPUFeatureName_TransientAttachments: native::WGPUFeatureName = 0x70
 #[cfg(feature = "tiled")]
 #[allow(non_upper_case_globals)]
 pub const YaWGPUFeatureName_ShaderFramebufferFetch: native::WGPUFeatureName = 0x7001_0003;
-/// Feature value for tiled programmable tile dispatch.
-#[cfg(feature = "tiled")]
-#[allow(non_upper_case_globals)]
-pub const YaWGPUFeatureName_ProgrammableTileDispatch: native::WGPUFeatureName = 0x7001_0004;
 /// SType value for `YaWGPUInputAttachmentBindingLayout`.
 #[cfg(feature = "tiled")]
 pub const YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT: native::WGPUSType = 0x7000_0010;
@@ -337,19 +333,6 @@ pub struct YaWGPUSubpassRenderPassDescriptor {
     pub colorAttachmentCount: usize,
     /// Depth-stencil attachment.
     pub depthStencilAttachment: *const YaWGPUDepthStencilAttachmentBinding,
-}
-
-/// yawgpu programmable transient tile dispatch descriptor.
-#[cfg(feature = "tiled")]
-#[allow(non_snake_case)]
-#[repr(C)]
-pub struct YaWGPUTransientDispatchDescriptor {
-    /// Extension chain.
-    pub nextInChain: *const native::WGPUChainedStruct,
-    /// Tile width.
-    pub tileWidth: u32,
-    /// Tile height.
-    pub tileHeight: u32,
 }
 
 /// yawgpu vendor extension descriptor for creating a shader module from SPIR-V words.

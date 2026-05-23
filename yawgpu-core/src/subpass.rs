@@ -200,15 +200,6 @@ pub struct SubpassRenderPassDescriptor {
     pub error: Option<String>,
 }
 
-/// Describes a programmable transient tile dispatch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TransientDispatchDescriptor {
-    /// Tile width.
-    pub tile_width: u32,
-    /// Tile height.
-    pub tile_height: u32,
-}
-
 /// Stores the data needed to replay one subpass draw.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -512,28 +503,6 @@ impl SubpassRenderPass {
             },
             limits,
         )
-    }
-
-    /// Records a programmable transient tile dispatch.
-    pub fn dispatch_transient(&self, descriptor: TransientDispatchDescriptor) -> Option<String> {
-        let _ = descriptor;
-        if *self.inner.ended.lock() {
-            let message = "subpass render pass has already ended".to_owned();
-            self.inner.encoder.record_first_error(message.clone());
-            return Some(message);
-        }
-        if self.inner.encoder.is_finished() {
-            let message =
-                "subpass render pass cannot be used after parent encoder finish".to_owned();
-            self.inner.encoder.record_first_error(message.clone());
-            return Some(message);
-        }
-        if self.is_error() {
-            return None;
-        }
-        let message = "programmable tile dispatch is not implemented".to_owned();
-        self.inner.encoder.record_first_error(message.clone());
-        Some(message)
     }
 
     /// Sets viewport on this subpass render pass.
@@ -1366,42 +1335,6 @@ mod tests {
         assert_eq!(command.draws.len(), 1);
         assert_eq!(command.draws[0].subpass_index, 0);
         assert_eq!(command.draws[0].draw.vertex_count, 3);
-    }
-
-    #[test]
-    fn subpass_render_pass_dispatch_transient_records_unsupported_error() {
-        let device = noop_device();
-        let layout = Arc::new(device.create_subpass_pass_layout(two_subpass_layout_descriptor()));
-        let encoder = device.create_command_encoder();
-        let (pass, error) = encoder.begin_subpass_render_pass(
-            &device,
-            SubpassRenderPassDescriptor {
-                pass_layout: layout,
-                extent: Extent3d {
-                    width: 4,
-                    height: 4,
-                    depth_or_array_layers: 1,
-                },
-                color_attachments: vec![persistent_color(&device), persistent_color(&device)],
-                depth_stencil_attachment: None,
-                error: None,
-            },
-        );
-        assert_eq!(error, None);
-        assert_eq!(
-            pass.dispatch_transient(TransientDispatchDescriptor {
-                tile_width: 8,
-                tile_height: 8,
-            }),
-            Some("programmable tile dispatch is not implemented".to_owned())
-        );
-        assert_eq!(pass.end(), None);
-        let (command_buffer, error) = encoder.finish();
-        assert!(command_buffer.is_error());
-        assert_eq!(
-            error,
-            Some("programmable tile dispatch is not implemented".to_owned())
-        );
     }
 
     #[test]
