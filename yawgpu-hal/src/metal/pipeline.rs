@@ -147,15 +147,35 @@ pub(super) fn create_render_pipeline(
     let inner = device
         .newRenderPipelineStateWithDescriptor_error(&pipeline_descriptor)
         .map_err(|error| shader_error(error.localizedDescription().to_string()))?;
-    let depth_stencil_state = descriptor
-        .depth_stencil
-        .map(|depth_stencil| create_depth_stencil_state(device, depth_stencil))
-        .transpose()?;
+    // Every render pipeline carries an `MTLDepthStencilState`. When the
+    // public descriptor opts out of depth-stencil (Option::None) we still
+    // bind a no-op state (depthCompare=Always, depthWrite=false, no stencil)
+    // so the encoder doesn't inherit a previous pipeline's depth test/write
+    // against a shared depth attachment. Without this, multi-subpass passes
+    // where one subpass uses depth and a later subpass doesn't would fail
+    // depth-test for the later subpass's draws (the lighting/composite
+    // fullscreen triangles in tiled_deferred specifically lose to the
+    // gbuffer subpass's previously written depth values).
+    let depth_stencil_state = match descriptor.depth_stencil {
+        Some(depth_stencil) => Some(create_depth_stencil_state(device, depth_stencil)?),
+        None => Some(create_noop_depth_stencil_state(device)),
+    };
     Ok(MetalRenderPipeline {
         inner,
         depth_stencil_state,
         primitive_topology: descriptor.primitive_topology,
     })
+}
+
+fn create_noop_depth_stencil_state(
+    device: &ProtocolObject<dyn MTLDevice>,
+) -> Retained<ProtocolObject<dyn MTLDepthStencilState>> {
+    let descriptor = MTLDepthStencilDescriptor::new();
+    descriptor.setDepthCompareFunction(MTLCompareFunction::Always);
+    descriptor.setDepthWriteEnabled(false);
+    device
+        .newDepthStencilStateWithDescriptor(&descriptor)
+        .expect("no-op MTLDepthStencilState creation cannot fail")
 }
 
 fn create_depth_stencil_state(
