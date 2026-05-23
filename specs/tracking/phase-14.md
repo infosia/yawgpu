@@ -405,6 +405,31 @@ Pending separately (not Phase-14-blocking):
 - Vulkan adapter info doesn't report the real driver name; MoltenVK detection
   falls back to Apple-GPU heuristic.
 
+## C-example MoltenVK self-skip (added 2026-05-23)
+
+Verifying `examples/tiled_deferred` on MoltenVK surfaced two non-bugs that
+were nonetheless trip-hazards:
+- The cdylib loads `libvulkan.dylib` at runtime; without
+  `DYLD_LIBRARY_PATH=${VULKAN_SDK}/lib` the loader fails to find it and the
+  `wgpuCreateInstance` FFI silently falls back to Noop (returns backendType
+  `Null` instead of `Vulkan`). This is intentional for "graceful degradation"
+  but masked the next issue. Document this in any Vulkan run instructions.
+- On MoltenVK, the subpass-input read path the example uses (and that
+  `e2e_vulkan_tiled.rs::vulkan_two_subpass_draw_subpass_load_readback`
+  exercises) is not supported. The e2e test already self-skips via
+  `adapter_is_moltenvk()`; the C example now does the same — `require_tiled_backend`
+  returns `TILED_BACKEND_SKIP` and `main` exits 0 with a clear message instead
+  of producing a misleading `(0,0,0,0)` "failure".
+
+Run matrix on this M2 with the cdylib + C example:
+- `YAWGPU_FEATURE=metal YAWGPU_EXTENSIONS=tiled` + `YAWGPU_BACKEND=metal`:
+  `center pixel RGBA=(0,255,0,255) OK`, green PNG, exit 0.
+- `YAWGPU_FEATURE=vulkan YAWGPU_EXTENSIONS=tiled` + `YAWGPU_BACKEND=vulkan`
+  (MoltenVK): self-skip with explanatory message, exit 0.
+- Native-Vulkan (Windows) path remains covered by the prior Windows
+  re-verification (`cargo test --features vulkan,tiled` on a native driver,
+  commit `1cd0a0c`).
+
 C deferred-shading example (Metal + Vulkan) under `#ifdef YAWGPU_HAS_TILED`;
 real-GPU e2e run by Claude and logged. Then the mandatory Phase Review
 (`phase-14-review.md`): fresh subagent, CRITICAL/MAJOR/MINOR, fix in severity
