@@ -297,9 +297,23 @@ defined when a real backend implementation lands.
 - **Input attachments are pass-local, auto-wired.** The pass layout declares,
   per subpass, which prior attachment feeds which `(group, binding)`. yawgpu
   binds it automatically (Vulkan `INPUT_ATTACHMENT` descriptor from the layout;
-  Metal implicit `[[color(N)]]`). The caller never creates a bind group or
-  supplies a view for an input attachment. The `(group, binding)` pair uniquely
-  identifies the shader binding (resolves the earlier ambiguity).
+  Metal implicit `[[color(N)]]`). The caller never supplies a view for an
+  input-attachment binding slot — regardless of whether the slot lives in an
+  input-attachment-**only** group or a **mixed** group that also carries
+  other resources. The `(group, binding)` pair uniquely identifies the shader
+  binding (resolves the earlier ambiguity). Concretely:
+  - **Input-only group** (every slot is `InputAttachment`): the caller does
+    not call `wgpuRenderPassEncoderSetBindGroup` for that group at all; the
+    subpass pass auto-wires every slot.
+  - **Mixed group** (input + non-input slots): the caller creates a
+    `WGPUBindGroup` whose `entries[]` covers **only the non-input slots**,
+    then calls `setBindGroup` normally. `wgpuDeviceCreateBindGroup` accepts
+    a descriptor with the input-slot entries omitted (validation allows the
+    entry-count and per-binding-coverage gaps for `InputAttachment` kinds
+    only); the pass auto-wires those slots at submit time the same way it
+    does for input-only groups. This is the pattern used by wgpu's
+    `deferred_rendering` lighting bind group (2 subpass inputs + 1 uniform
+    in `@group(0)`).
 - **Fragment `@location(N)` on subpass pipelines: dual convention accepted.**
   naga lowers `@location` differently per backend, so the WGSL author has two
   valid choices and yawgpu's validation must accept either (the HAL is the
