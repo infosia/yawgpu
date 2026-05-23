@@ -431,42 +431,88 @@ static bool verify_center_pixel(const TiledDeferredApp *app, const uint8_t *pixe
     return ok;
 }
 
-static bool require_tiled_backend(WGPUAdapter adapter) {
+// Detects MoltenVK adapters by sniffing vendor/device/description for
+// "molten" or "apple" (mirrors `e2e_vulkan_tiled.rs::adapter_is_moltenvk`).
+// MoltenVK doesn't yet expose the subpass input-attachment read path this
+// example needs, so callers should self-skip rather than emit a misleading
+// (0,0,0,0) "failure" that looks like a yawgpu regression.
+static bool adapter_is_moltenvk(WGPUAdapter adapter) {
+    WGPUAdapterInfo info = {0};
+    if (wgpuAdapterGetInfo(adapter, &info) != WGPUStatus_Success) {
+        return false;
+    }
+    const WGPUStringView fields[3] = { info.vendor, info.device, info.description };
+    bool is_moltenvk = false;
+    for (size_t i = 0; i < 3 && !is_moltenvk; ++i) {
+        if (!fields[i].data || fields[i].length == 0) continue;
+        size_t n = fields[i].length;
+        const char *s = fields[i].data;
+        if (n >= 6) {
+            for (size_t j = 0; j + 6 <= n; ++j) {
+                if (strncasecmp(s + j, "molten", 6) == 0) { is_moltenvk = true; break; }
+            }
+        }
+        if (!is_moltenvk && n >= 5) {
+            for (size_t j = 0; j + 5 <= n; ++j) {
+                if (strncasecmp(s + j, "apple", 5) == 0) { is_moltenvk = true; break; }
+            }
+        }
+    }
+    wgpuAdapterInfoFreeMembers(info);
+    return is_moltenvk;
+}
+
+// Tri-state init/backend-check result so MoltenVK self-skip exits 0
+// (skipped, not failed) and real failures exit nonzero.
+typedef enum {
+    TILED_BACKEND_OK = 0,
+    TILED_BACKEND_FAIL = 1,
+    TILED_BACKEND_SKIP = 2,
+} TiledBackendStatus;
+
+static TiledBackendStatus require_tiled_backend(WGPUAdapter adapter) {
     WGPUAdapterInfo info = {0};
     if (wgpuAdapterGetInfo(adapter, &info) != WGPUStatus_Success) {
         fprintf(stderr, "failed to query adapter info\n");
-        return false;
+        return TILED_BACKEND_FAIL;
     }
     WGPUBackendType backend = info.backendType;
     wgpuAdapterInfoFreeMembers(info);
     if (backend != WGPUBackendType_Metal && backend != WGPUBackendType_Vulkan) {
         fprintf(stderr, "tiled_deferred requires Metal or native Vulkan; selected backend type=%u\n",
                 (unsigned int)backend);
-        return false;
+        return TILED_BACKEND_FAIL;
+    }
+    if (backend == WGPUBackendType_Vulkan && adapter_is_moltenvk(adapter)) {
+        fprintf(stderr,
+                "skipping tiled_deferred on MoltenVK; subpass-input read requires "
+                "a native Vulkan driver (mirrors e2e_vulkan_tiled.rs self-skip)\n");
+        return TILED_BACKEND_SKIP;
     }
     if (!wgpuAdapterHasFeature(adapter, YaWGPUFeatureName_MultiSubpass)) {
         fprintf(stderr, "tiled_deferred requires YaWGPUFeatureName_MultiSubpass\n");
-        return false;
+        return TILED_BACKEND_FAIL;
     }
-    return true;
+    return TILED_BACKEND_OK;
 }
 
-static bool tiled_deferred_app_init(TiledDeferredApp *app) {
+static TiledBackendStatus tiled_deferred_app_init(TiledDeferredApp *app) {
     *app = (TiledDeferredApp){0};
     app->context = yawgpu_context_create();
     if (!app->context.instance || !app->context.adapter || !app->context.device) {
         fprintf(stderr, "failed to create yawgpu context\n");
-        return false;
+        return TILED_BACKEND_FAIL;
     }
     app->initial_error_count = yawgpu_uncaptured_error_count();
-    if (!require_tiled_backend(app->context.adapter)) {
-        return false;
+    TiledBackendStatus backend_status = require_tiled_backend(app->context.adapter);
+    if (backend_status != TILED_BACKEND_OK) {
+        return backend_status;
     }
 
     app->queue = wgpuDeviceGetQueue(app->context.device);
     if (!app->queue) {
         fprintf(stderr, "failed to get device queue\n");
-        return false;
+        return TILED_BACKEND_FAIL;
     }
 
     app->dimensions = buffer_dimensions_create(IMAGE_WIDTH, IMAGE_HEIGHT);
@@ -482,7 +528,7 @@ static bool tiled_deferred_app_init(TiledDeferredApp *app) {
         });
     if (!app->output_buffer) {
         fprintf(stderr, "failed to create tiled deferred output buffer\n");
-        return false;
+        return TILED_BACKEND_FAIL;
     }
 
     WGPUExtent3D texture_size = {
@@ -491,7 +537,7 @@ static bool tiled_deferred_app_init(TiledDeferredApp *app) {
         .depthOrArrayLayers = 1,
     };
     if (!create_textures(app, texture_size)) {
-        return false;
+        return TILED_BACKEND_FAIL;
     }
 
     app->pass_layout = create_pass_layout(app);
@@ -503,7 +549,7 @@ static bool tiled_deferred_app_init(TiledDeferredApp *app) {
                                           LOAD_WGSL);
     if (!app->pass_layout || !app->write_module || !app->load_module) {
         fprintf(stderr, "failed to create tiled deferred layout or shaders\n");
-        return false;
+        return TILED_BACKEND_FAIL;
     }
 
     // The lighting subpass writes to a different MTL color slot than it reads,
@@ -531,10 +577,10 @@ static bool tiled_deferred_app_init(TiledDeferredApp *app) {
                                                  load_fs);
     if (!app->write_pipeline || !app->load_pipeline) {
         fprintf(stderr, "failed to create tiled deferred pipelines\n");
-        return false;
+        return TILED_BACKEND_FAIL;
     }
 
-    return true;
+    return TILED_BACKEND_OK;
 }
 
 static bool record_tiled_pass(TiledDeferredApp *app, WGPUCommandEncoder encoder) {
@@ -718,7 +764,12 @@ static bool tiled_deferred_app_run(TiledDeferredApp *app) {
 
 int main(void) {
     TiledDeferredApp app = {0};
-    if (!tiled_deferred_app_init(&app)) {
+    TiledBackendStatus init_status = tiled_deferred_app_init(&app);
+    if (init_status == TILED_BACKEND_SKIP) {
+        tiled_deferred_app_destroy(&app);
+        return EXIT_SUCCESS;
+    }
+    if (init_status != TILED_BACKEND_OK) {
         tiled_deferred_app_destroy(&app);
         return EXIT_FAILURE;
     }
