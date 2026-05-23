@@ -22,6 +22,7 @@ impl std::fmt::Debug for MetalComputePipeline {
 #[derive(Clone)]
 pub struct MetalRenderPipeline {
     pub(super) inner: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    pub(super) depth_stencil_state: Option<Retained<ProtocolObject<dyn MTLDepthStencilState>>>,
     pub(super) primitive_topology: HalPrimitiveTopology,
 }
 
@@ -32,6 +33,10 @@ impl std::fmt::Debug for MetalRenderPipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MetalRenderPipeline")
             .field("primitive_topology", &self.primitive_topology)
+            .field(
+                "has_depth_stencil_state",
+                &self.depth_stencil_state.is_some(),
+            )
             .finish()
     }
 }
@@ -68,7 +73,9 @@ pub(super) fn create_render_pipeline(
     descriptor: &HalRenderPipelineDescriptor,
 ) -> Result<MetalRenderPipeline, HalError> {
     if descriptor.color_formats.is_empty() {
-        return Err(shader_error("render pipeline requires a color target".to_owned()));
+        return Err(shader_error(
+            "render pipeline requires a color target".to_owned(),
+        ));
     }
     let source = NSString::from_str(msl_source);
     let library = device
@@ -97,6 +104,15 @@ pub(super) fn create_render_pipeline(
         let (pixel_format, _) = map_texture_format(color_format)?;
         let attach = unsafe { color_attachments.objectAtIndexedSubscript(i) };
         attach.setPixelFormat(pixel_format);
+    }
+    if let Some(depth_stencil) = descriptor.depth_stencil {
+        let (pixel_format, _) = map_texture_format(depth_stencil.format)?;
+        if format_has_depth_aspect(depth_stencil.format) {
+            pipeline_descriptor.setDepthAttachmentPixelFormat(pixel_format);
+        }
+        if format_has_stencil_aspect(depth_stencil.format) {
+            pipeline_descriptor.setStencilAttachmentPixelFormat(pixel_format);
+        }
     }
     let vertex_descriptor = MTLVertexDescriptor::new();
     for buffer in &descriptor.vertex_buffers {
@@ -131,8 +147,87 @@ pub(super) fn create_render_pipeline(
     let inner = device
         .newRenderPipelineStateWithDescriptor_error(&pipeline_descriptor)
         .map_err(|error| shader_error(error.localizedDescription().to_string()))?;
+    let depth_stencil_state = descriptor
+        .depth_stencil
+        .map(|depth_stencil| create_depth_stencil_state(device, depth_stencil))
+        .transpose()?;
     Ok(MetalRenderPipeline {
         inner,
+        depth_stencil_state,
         primitive_topology: descriptor.primitive_topology,
     })
+}
+
+fn create_depth_stencil_state(
+    device: &ProtocolObject<dyn MTLDevice>,
+    depth_stencil: HalDepthStencilState,
+) -> Result<Retained<ProtocolObject<dyn MTLDepthStencilState>>, HalError> {
+    let descriptor = MTLDepthStencilDescriptor::new();
+    descriptor.setDepthCompareFunction(map_compare_function(depth_stencil.depth_compare));
+    descriptor.setDepthWriteEnabled(depth_stencil.depth_write_enabled);
+    if format_has_stencil_aspect(depth_stencil.format) {
+        let front = create_stencil_descriptor(
+            depth_stencil.stencil_front,
+            depth_stencil.stencil_read_mask,
+            depth_stencil.stencil_write_mask,
+        );
+        let back = create_stencil_descriptor(
+            depth_stencil.stencil_back,
+            depth_stencil.stencil_read_mask,
+            depth_stencil.stencil_write_mask,
+        );
+        descriptor.setFrontFaceStencil(Some(&front));
+        descriptor.setBackFaceStencil(Some(&back));
+    }
+    device
+        .newDepthStencilStateWithDescriptor(&descriptor)
+        .ok_or_else(|| shader_error("depth stencil state creation failed".to_owned()))
+}
+
+fn create_stencil_descriptor(
+    face: HalStencilFaceState,
+    read_mask: u32,
+    write_mask: u32,
+) -> Retained<MTLStencilDescriptor> {
+    let descriptor = MTLStencilDescriptor::new();
+    descriptor.setStencilCompareFunction(map_compare_function(face.compare));
+    descriptor.setStencilFailureOperation(map_stencil_operation(face.fail_op));
+    descriptor.setDepthFailureOperation(map_stencil_operation(face.depth_fail_op));
+    descriptor.setDepthStencilPassOperation(map_stencil_operation(face.pass_op));
+    descriptor.setReadMask(read_mask);
+    descriptor.setWriteMask(write_mask);
+    descriptor
+}
+
+fn map_stencil_operation(operation: HalStencilOperation) -> MTLStencilOperation {
+    match operation {
+        HalStencilOperation::Keep => MTLStencilOperation::Keep,
+        HalStencilOperation::Zero => MTLStencilOperation::Zero,
+        HalStencilOperation::Replace => MTLStencilOperation::Replace,
+        HalStencilOperation::Invert => MTLStencilOperation::Invert,
+        HalStencilOperation::IncrementClamp => MTLStencilOperation::IncrementClamp,
+        HalStencilOperation::DecrementClamp => MTLStencilOperation::DecrementClamp,
+        HalStencilOperation::IncrementWrap => MTLStencilOperation::IncrementWrap,
+        HalStencilOperation::DecrementWrap => MTLStencilOperation::DecrementWrap,
+    }
+}
+
+fn format_has_depth_aspect(format: HalTextureFormat) -> bool {
+    matches!(
+        format,
+        HalTextureFormat::Depth16Unorm
+            | HalTextureFormat::Depth24Plus
+            | HalTextureFormat::Depth24PlusStencil8
+            | HalTextureFormat::Depth32Float
+            | HalTextureFormat::Depth32FloatStencil8
+    )
+}
+
+fn format_has_stencil_aspect(format: HalTextureFormat) -> bool {
+    matches!(
+        format,
+        HalTextureFormat::Stencil8
+            | HalTextureFormat::Depth24PlusStencil8
+            | HalTextureFormat::Depth32FloatStencil8
+    )
 }

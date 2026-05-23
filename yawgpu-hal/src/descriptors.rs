@@ -1,6 +1,6 @@
 use crate::{
     HalAddressMode, HalCompareFunction, HalFilterMode, HalMipmapFilterMode, HalPrimitiveTopology,
-    HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
+    HalStencilOperation, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
 
 /// Describes HAL render pipeline descriptor.
@@ -8,10 +8,50 @@ use crate::{
 pub struct HalRenderPipelineDescriptor {
     /// Color formats.
     pub color_formats: Vec<HalTextureFormat>,
+    /// Depth stencil state.
+    pub depth_stencil: Option<HalDepthStencilState>,
     /// Vertex buffers.
     pub vertex_buffers: Vec<HalVertexBufferLayout>,
     /// Primitive topology.
     pub primitive_topology: HalPrimitiveTopology,
+}
+
+/// Describes HAL depth stencil state.
+#[derive(Debug, Clone, Copy)]
+pub struct HalDepthStencilState {
+    /// Format.
+    pub format: HalTextureFormat,
+    /// Depth write enabled.
+    pub depth_write_enabled: bool,
+    /// Depth compare.
+    pub depth_compare: HalCompareFunction,
+    /// Stencil front state.
+    pub stencil_front: HalStencilFaceState,
+    /// Stencil back state.
+    pub stencil_back: HalStencilFaceState,
+    /// Stencil read mask.
+    pub stencil_read_mask: u32,
+    /// Stencil write mask.
+    pub stencil_write_mask: u32,
+    /// Depth bias.
+    pub depth_bias: i32,
+    /// Depth bias slope scale.
+    pub depth_bias_slope_scale: f32,
+    /// Depth bias clamp.
+    pub depth_bias_clamp: f32,
+}
+
+/// Describes HAL stencil face state.
+#[derive(Debug, Clone, Copy)]
+pub struct HalStencilFaceState {
+    /// Compare function.
+    pub compare: HalCompareFunction,
+    /// Stencil fail operation.
+    pub fail_op: HalStencilOperation,
+    /// Depth fail operation.
+    pub depth_fail_op: HalStencilOperation,
+    /// Depth stencil pass operation.
+    pub pass_op: HalStencilOperation,
 }
 
 /// Stores layout metadata.

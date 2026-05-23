@@ -443,12 +443,7 @@ pub(super) fn create_render_pass(
     device: &VulkanDeviceInner,
     descriptor: &HalRenderPipelineDescriptor,
 ) -> Result<vk::RenderPass, HalError> {
-    let color_format = descriptor
-        .color_formats
-        .first()
-        .copied()
-        .ok_or_else(|| shader_error("render pipeline requires a color target"))?;
-    create_render_pass_for_format(&device.device, color_format)
+    create_render_pass_for_descriptor(&device.device, descriptor)
 }
 
 /// Creates render pass for format and reports validation errors through the owning device.
@@ -456,23 +451,79 @@ pub(super) fn create_render_pass_for_format(
     device: &ash::Device,
     color_format: HalTextureFormat,
 ) -> Result<vk::RenderPass, HalError> {
-    let (format, _) = map_texture_format(color_format)?;
-    let attachment = vk::AttachmentDescription::default()
-        .format(format)
-        .samples(vk::SampleCountFlags::TYPE_1)
-        .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(vk::AttachmentStoreOp::STORE)
-        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-        .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-    let color_reference = vk::AttachmentReference::default()
-        .attachment(0)
-        .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-    let color_references = [color_reference];
+    create_render_pass_for_descriptor(
+        device,
+        &HalRenderPipelineDescriptor {
+            color_formats: vec![color_format],
+            depth_stencil: None,
+            vertex_buffers: Vec::new(),
+            primitive_topology: HalPrimitiveTopology::TriangleList,
+        },
+    )
+}
+
+fn create_render_pass_for_descriptor(
+    device: &ash::Device,
+    descriptor: &HalRenderPipelineDescriptor,
+) -> Result<vk::RenderPass, HalError> {
+    if descriptor.color_formats.is_empty() {
+        return Err(shader_error("render pipeline requires a color target"));
+    }
+    let mut attachments = Vec::new();
+    let mut color_references = Vec::new();
+    for (index, color_format) in descriptor.color_formats.iter().copied().enumerate() {
+        let (format, _) = map_texture_format(color_format)?;
+        attachments.push(
+            vk::AttachmentDescription::default()
+                .format(format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+        );
+        color_references.push(
+            vk::AttachmentReference::default()
+                .attachment(
+                    u32::try_from(index)
+                        .map_err(|_| shader_error("color attachment index is too large"))?,
+                )
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+        );
+    }
+    let depth_reference = if let Some(depth_stencil) = descriptor.depth_stencil {
+        let (format, _) = map_texture_format(depth_stencil.format)?;
+        let index = u32::try_from(attachments.len())
+            .map_err(|_| shader_error("depth attachment index is too large"))?;
+        attachments.push(
+            vk::AttachmentDescription::default()
+                .format(format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::CLEAR)
+                .stencil_store_op(vk::AttachmentStoreOp::STORE)
+                .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+        );
+        Some(
+            vk::AttachmentReference::default()
+                .attachment(index)
+                .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+        )
+    } else {
+        None
+    };
     let subpass = vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
         .color_attachments(&color_references);
+    let subpass = if let Some(depth_reference) = depth_reference.as_ref() {
+        subpass.depth_stencil_attachment(depth_reference)
+    } else {
+        subpass
+    };
     let dependency_in = vk::SubpassDependency::default()
         .src_subpass(vk::SUBPASS_EXTERNAL)
         .dst_subpass(0)
@@ -487,7 +538,6 @@ pub(super) fn create_render_pass_for_format(
         .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
         .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
         .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
-    let attachments = [attachment];
     let subpasses = [subpass];
     let dependencies = [dependency_in, dependency_out];
     let render_pass_info = vk::RenderPassCreateInfo::default()
@@ -765,33 +815,50 @@ pub(super) fn create_graphics_pipeline(
     let viewport_state = vk::PipelineViewportStateCreateInfo::default()
         .viewport_count(1)
         .scissor_count(1);
+    let has_depth_bias = descriptor.depth_stencil.is_some_and(|depth_stencil| {
+        depth_stencil.depth_bias != 0
+            || depth_stencil.depth_bias_slope_scale != 0.0
+            || depth_stencil.depth_bias_clamp != 0.0
+    });
     let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
         .depth_clamp_enable(false)
         .rasterizer_discard_enable(false)
         .polygon_mode(vk::PolygonMode::FILL)
         .cull_mode(vk::CullModeFlags::NONE)
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-        .depth_bias_enable(false)
+        .depth_bias_enable(has_depth_bias)
+        .depth_bias_constant_factor(
+            descriptor
+                .depth_stencil
+                .map_or(0.0, |depth_stencil| depth_stencil.depth_bias as f32),
+        )
+        .depth_bias_slope_factor(
+            descriptor
+                .depth_stencil
+                .map_or(0.0, |depth_stencil| depth_stencil.depth_bias_slope_scale),
+        )
+        .depth_bias_clamp(
+            descriptor
+                .depth_stencil
+                .map_or(0.0, |depth_stencil| depth_stencil.depth_bias_clamp),
+        )
         .line_width(1.0);
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(vk::SampleCountFlags::TYPE_1)
         .sample_shading_enable(false);
-    let color_attachment = vk::PipelineColorBlendAttachmentState::default()
-        .blend_enable(false)
-        .color_write_mask(
-            vk::ColorComponentFlags::R
-                | vk::ColorComponentFlags::G
-                | vk::ColorComponentFlags::B
-                | vk::ColorComponentFlags::A,
-        );
-    let color_attachments = [color_attachment];
+    let color_attachments = (0..descriptor.color_formats.len())
+        .map(|_| color_blend_attachment_default())
+        .collect::<Vec<_>>();
     let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
         .logic_op_enable(false)
         .attachments(&color_attachments);
+    let depth_stencil = descriptor
+        .depth_stencil
+        .map(vk_pipeline_depth_stencil_state);
     let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
     let dynamic_state =
         vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-    let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+    let mut pipeline_info = vk::GraphicsPipelineCreateInfo::default()
         .stages(&shader_stages)
         .vertex_input_state(&vertex_input)
         .input_assembly_state(&input_assembly)
@@ -803,6 +870,9 @@ pub(super) fn create_graphics_pipeline(
         .layout(pipeline_layout)
         .render_pass(render_pass)
         .subpass(subpass_index);
+    if let Some(depth_stencil) = depth_stencil.as_ref() {
+        pipeline_info = pipeline_info.depth_stencil_state(depth_stencil);
+    }
     let pipelines = unsafe {
         device
             .device
@@ -821,6 +891,81 @@ pub(super) fn create_graphics_pipeline(
             }
             Err(shader_error("graphics pipeline creation failed"))
         }
+    }
+}
+
+fn color_blend_attachment_default() -> vk::PipelineColorBlendAttachmentState {
+    vk::PipelineColorBlendAttachmentState::default()
+        .blend_enable(false)
+        .color_write_mask(
+            vk::ColorComponentFlags::R
+                | vk::ColorComponentFlags::G
+                | vk::ColorComponentFlags::B
+                | vk::ColorComponentFlags::A,
+        )
+}
+
+fn vk_pipeline_depth_stencil_state(
+    depth_stencil: HalDepthStencilState,
+) -> vk::PipelineDepthStencilStateCreateInfo<'static> {
+    let depth_test_enabled = depth_stencil.depth_write_enabled
+        || !matches!(depth_stencil.depth_compare, HalCompareFunction::Always);
+    let stencil_enabled = stencil_face_uses_stencil(depth_stencil.stencil_front)
+        || stencil_face_uses_stencil(depth_stencil.stencil_back)
+        || depth_stencil.stencil_read_mask != u32::MAX
+        || depth_stencil.stencil_write_mask != u32::MAX;
+    vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(depth_test_enabled)
+        .depth_write_enable(depth_stencil.depth_write_enabled)
+        .depth_compare_op(map_compare_function(depth_stencil.depth_compare))
+        .depth_bounds_test_enable(false)
+        .stencil_test_enable(stencil_enabled)
+        .front(vk_stencil_op_state(
+            depth_stencil.stencil_front,
+            depth_stencil.stencil_read_mask,
+            depth_stencil.stencil_write_mask,
+        ))
+        .back(vk_stencil_op_state(
+            depth_stencil.stencil_back,
+            depth_stencil.stencil_read_mask,
+            depth_stencil.stencil_write_mask,
+        ))
+        .min_depth_bounds(0.0)
+        .max_depth_bounds(1.0)
+}
+
+fn vk_stencil_op_state(
+    face: crate::HalStencilFaceState,
+    read_mask: u32,
+    write_mask: u32,
+) -> vk::StencilOpState {
+    vk::StencilOpState::default()
+        .fail_op(map_stencil_operation(face.fail_op))
+        .pass_op(map_stencil_operation(face.pass_op))
+        .depth_fail_op(map_stencil_operation(face.depth_fail_op))
+        .compare_op(map_compare_function(face.compare))
+        .compare_mask(read_mask)
+        .write_mask(write_mask)
+        .reference(0)
+}
+
+fn stencil_face_uses_stencil(face: crate::HalStencilFaceState) -> bool {
+    !matches!(face.compare, HalCompareFunction::Always)
+        || !matches!(face.fail_op, HalStencilOperation::Keep)
+        || !matches!(face.depth_fail_op, HalStencilOperation::Keep)
+        || !matches!(face.pass_op, HalStencilOperation::Keep)
+}
+
+fn map_stencil_operation(operation: HalStencilOperation) -> vk::StencilOp {
+    match operation {
+        HalStencilOperation::Keep => vk::StencilOp::KEEP,
+        HalStencilOperation::Zero => vk::StencilOp::ZERO,
+        HalStencilOperation::Replace => vk::StencilOp::REPLACE,
+        HalStencilOperation::Invert => vk::StencilOp::INVERT,
+        HalStencilOperation::IncrementClamp => vk::StencilOp::INCREMENT_AND_CLAMP,
+        HalStencilOperation::DecrementClamp => vk::StencilOp::DECREMENT_AND_CLAMP,
+        HalStencilOperation::IncrementWrap => vk::StencilOp::INCREMENT_AND_WRAP,
+        HalStencilOperation::DecrementWrap => vk::StencilOp::DECREMENT_AND_WRAP,
     }
 }
 
