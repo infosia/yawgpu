@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use yawgpu_hal::{
-    HalBackend, HalDescriptorBinding, HalDevice, HalPrimitiveTopology, HalRenderPipeline,
-    HalRenderPipelineDescriptor, HalShaderSource, HalVertexAttribute, HalVertexBufferLayout,
+    HalBackend, HalCompareFunction, HalDepthStencilState, HalDescriptorBinding, HalDevice,
+    HalPrimitiveTopology, HalRenderPipeline, HalRenderPipelineDescriptor, HalShaderSource,
+    HalStencilFaceState, HalStencilOperation, HalVertexAttribute, HalVertexBufferLayout,
     HalVertexFormat, HalVertexStepMode,
 };
 #[cfg(feature = "tiled")]
@@ -749,25 +750,14 @@ pub(crate) fn create_hal_subpass_render_pipeline(
     let Some(hal_device) = hal_device else {
         return (None, None);
     };
-    if matches!(hal_device.backend(), HalBackend::Noop) {
-        return (None, None);
-    }
-    if descriptor.base.depth_stencil.is_some()
-        || descriptor.base.multisample.count != 1
-        || descriptor
-            .base
-            .fragment
-            .as_ref()
-            .map_or(0, |fragment| fragment.target_count)
-            != 1
-    {
+    if descriptor.base.multisample.count != 1 {
         return (
             None,
-            Some(
-                "real subpass render pipeline currently supports one single-sampled color target only"
-                    .to_owned(),
-            ),
+            Some("subpass render pipeline does not yet support multisample > 1".to_owned()),
         );
+    }
+    if matches!(hal_device.backend(), HalBackend::Noop) {
+        return (None, None);
     }
     if descriptor.base.fragment.is_none() {
         return (
@@ -1153,9 +1143,50 @@ pub(crate) fn hal_render_pipeline_descriptor(
         .collect::<Result<Vec<_>, String>>()?;
     Ok(HalRenderPipelineDescriptor {
         color_formats,
+        depth_stencil: descriptor.depth_stencil.map(hal_depth_stencil_state),
         vertex_buffers,
         primitive_topology: hal_primitive_topology(descriptor.primitive.topology),
     })
+}
+
+fn hal_depth_stencil_state(depth_stencil: DepthStencilState) -> HalDepthStencilState {
+    HalDepthStencilState {
+        format: hal_texture_format(depth_stencil.format),
+        depth_write_enabled: depth_stencil.depth_write_enabled.unwrap_or(false),
+        depth_compare: depth_stencil
+            .depth_compare
+            .map(crate::sampler::hal_compare_function)
+            .unwrap_or(HalCompareFunction::Always),
+        stencil_front: hal_stencil_face_state(depth_stencil.stencil_front),
+        stencil_back: hal_stencil_face_state(depth_stencil.stencil_back),
+        stencil_read_mask: depth_stencil.stencil_read_mask,
+        stencil_write_mask: depth_stencil.stencil_write_mask,
+        depth_bias: depth_stencil.depth_bias,
+        depth_bias_slope_scale: depth_stencil.depth_bias_slope_scale,
+        depth_bias_clamp: depth_stencil.depth_bias_clamp,
+    }
+}
+
+fn hal_stencil_face_state(face: StencilFaceState) -> HalStencilFaceState {
+    HalStencilFaceState {
+        compare: crate::sampler::hal_compare_function(face.compare),
+        fail_op: hal_stencil_operation(face.fail_op),
+        depth_fail_op: hal_stencil_operation(face.depth_fail_op),
+        pass_op: hal_stencil_operation(face.pass_op),
+    }
+}
+
+fn hal_stencil_operation(operation: StencilOperation) -> HalStencilOperation {
+    match operation {
+        StencilOperation::Keep => HalStencilOperation::Keep,
+        StencilOperation::Zero => HalStencilOperation::Zero,
+        StencilOperation::Replace => HalStencilOperation::Replace,
+        StencilOperation::Invert => HalStencilOperation::Invert,
+        StencilOperation::IncrementClamp => HalStencilOperation::IncrementClamp,
+        StencilOperation::DecrementClamp => HalStencilOperation::DecrementClamp,
+        StencilOperation::IncrementWrap => HalStencilOperation::IncrementWrap,
+        StencilOperation::DecrementWrap => HalStencilOperation::DecrementWrap,
+    }
 }
 
 /// Returns msl vertex format.
@@ -1854,6 +1885,11 @@ pub(crate) fn validate_multisample_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "tiled")]
+    use crate::subpass::{
+        AttachmentLayout, SubpassDependency, SubpassDependencyType, SubpassInputAttachment,
+        SubpassLayoutDesc, SubpassPassLayoutDescriptor,
+    };
     #[cfg(any(feature = "shader-passthrough", feature = "tiled"))]
     use crate::test_helpers::*;
     #[cfg(any(feature = "shader-passthrough", feature = "tiled"))]
@@ -1954,9 +1990,16 @@ mod tests {
             .shader
             .module = Arc::clone(&fragment_spirv);
 
-        let (source, vertex_entry, fragment_entry, bindings) =
-            select_render_shader_source(HalBackend::Vulkan, &wgsl_descriptor, "vs", "fs", &[], &[], &[])
-                .expect("WGSL should generate Vulkan SPIR-V stages");
+        let (source, vertex_entry, fragment_entry, bindings) = select_render_shader_source(
+            HalBackend::Vulkan,
+            &wgsl_descriptor,
+            "vs",
+            "fs",
+            &[],
+            &[],
+            &[],
+        )
+        .expect("WGSL should generate Vulkan SPIR-V stages");
         assert!(
             matches!(source, HalShaderSource::SpirVStages { vertex, fragment } if !vertex.is_empty() && !fragment.is_empty())
         );
@@ -2006,21 +2049,44 @@ mod tests {
             "render pipeline cannot mix a SPIR-V passthrough module with a non-SPIR-V module"
         );
 
-        let (source, vertex_entry, fragment_entry, _) =
-            select_render_shader_source(HalBackend::Metal, &msl_descriptor, "vs", "fs", &[], &[], &[])
-                .expect("MSL passthrough should select Metal MSL");
+        let (source, vertex_entry, fragment_entry, _) = select_render_shader_source(
+            HalBackend::Metal,
+            &msl_descriptor,
+            "vs",
+            "fs",
+            &[],
+            &[],
+            &[],
+        )
+        .expect("MSL passthrough should select Metal MSL");
         assert!(matches!(source, HalShaderSource::Msl(selected) if selected == msl_source));
         assert_eq!(vertex_entry, "vs");
         assert_eq!(fragment_entry, "fs");
 
         assert_eq!(
-            select_render_shader_source(HalBackend::Metal, &spirv_descriptor, "vs", "fs", &[], &[], &[])
-                .expect_err("SPIR-V must not run on Metal"),
+            select_render_shader_source(
+                HalBackend::Metal,
+                &spirv_descriptor,
+                "vs",
+                "fs",
+                &[],
+                &[],
+                &[]
+            )
+            .expect_err("SPIR-V must not run on Metal"),
             "SPIR-V shader module cannot be used on the Metal backend"
         );
         assert_eq!(
-            select_render_shader_source(HalBackend::Vulkan, &msl_descriptor, "vs", "fs", &[], &[], &[])
-                .expect_err("MSL must not run on Vulkan"),
+            select_render_shader_source(
+                HalBackend::Vulkan,
+                &msl_descriptor,
+                "vs",
+                "fs",
+                &[],
+                &[],
+                &[]
+            )
+            .expect_err("MSL must not run on Vulkan"),
             "MSL shader module cannot be used on the Vulkan backend"
         );
     }
@@ -2102,6 +2168,194 @@ mod tests {
              }}"
             ))),
         )
+    }
+
+    #[cfg(feature = "tiled")]
+    fn depth32_float() -> TextureFormat {
+        TextureFormat::from_raw(0x30)
+    }
+
+    #[cfg(feature = "tiled")]
+    fn subpass_attachment_layout(format: TextureFormat) -> AttachmentLayout {
+        AttachmentLayout {
+            format,
+            sample_count: 1,
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    fn multi_color_depth_layout_descriptor() -> SubpassPassLayoutDescriptor {
+        SubpassPassLayoutDescriptor {
+            color_attachments: vec![
+                subpass_attachment_layout(rgba8_unorm()),
+                subpass_attachment_layout(rgba8_unorm()),
+                subpass_attachment_layout(rgba8_unorm()),
+            ],
+            depth_stencil_attachment: Some(subpass_attachment_layout(depth32_float())),
+            subpasses: vec![
+                SubpassLayoutDesc {
+                    color_attachment_indices: vec![0, 1],
+                    uses_depth_stencil: true,
+                    input_attachments: Vec::new(),
+                },
+                SubpassLayoutDesc {
+                    color_attachment_indices: vec![2],
+                    uses_depth_stencil: false,
+                    input_attachments: vec![SubpassInputAttachment {
+                        group: 0,
+                        binding: 0,
+                        source_subpass: 0,
+                        source_attachment: 0,
+                    }],
+                },
+            ],
+            dependencies: vec![SubpassDependency {
+                src_subpass: 0,
+                dst_subpass: 1,
+                dependency_type: SubpassDependencyType::ColorToInput,
+                by_region: true,
+            }],
+            error: None,
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    fn multi_output_render_shader_module(device: &crate::device::Device) -> Arc<ShaderModule> {
+        Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@vertex
+                 fn vs() -> @builtin(position) vec4<f32> {
+                     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+                 }
+
+                 struct Output {
+                     @location(0) a: vec4<f32>,
+                     @location(1) b: vec4<f32>,
+                 }
+
+                 @fragment
+                 fn fs() -> Output {
+                     var out: Output;
+                     out.a = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+                     out.b = vec4<f32>(0.0, 1.0, 0.0, 1.0);
+                     return out;
+                 }"
+                .to_owned(),
+            )),
+        )
+    }
+
+    #[cfg(feature = "tiled")]
+    fn subpass_pipeline_descriptor_for_layout(
+        device: &crate::device::Device,
+        layout: Arc<SubpassPassLayout>,
+    ) -> SubpassRenderPipelineDescriptor {
+        let module = multi_output_render_shader_module(device);
+        let mut base = render_pipeline_descriptor(module);
+        base.depth_stencil = Some(DepthStencilState {
+            format: depth32_float(),
+            depth_write_enabled: Some(true),
+            depth_compare: Some(CompareFunction::Less),
+            stencil_front: StencilFaceState {
+                compare: CompareFunction::Always,
+                fail_op: StencilOperation::Keep,
+                depth_fail_op: StencilOperation::Keep,
+                pass_op: StencilOperation::Keep,
+            },
+            stencil_back: StencilFaceState {
+                compare: CompareFunction::Always,
+                fail_op: StencilOperation::Keep,
+                depth_fail_op: StencilOperation::Keep,
+                pass_op: StencilOperation::Keep,
+            },
+            stencil_read_mask: u32::MAX,
+            stencil_write_mask: u32::MAX,
+            depth_bias: 0,
+            depth_bias_slope_scale: 0.0,
+            depth_bias_clamp: 0.0,
+        });
+        if let Some(fragment) = &mut base.fragment {
+            fragment.target_count = 2;
+            fragment.targets = vec![
+                ColorTargetState {
+                    format: rgba8_unorm(),
+                    blend: false,
+                    write_mask: 0xF,
+                },
+                ColorTargetState {
+                    format: rgba8_unorm(),
+                    blend: false,
+                    write_mask: 0xF,
+                },
+            ];
+        }
+        SubpassRenderPipelineDescriptor {
+            base,
+            pass_layout: layout,
+            subpass_index: 0,
+            error: None,
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_pipeline_accepts_depth_stencil() {
+        let device = noop_device();
+        let layout =
+            Arc::new(device.create_subpass_pass_layout(multi_color_depth_layout_descriptor()));
+        let descriptor = subpass_pipeline_descriptor_for_layout(&device, layout);
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_subpass_render_pipeline(descriptor);
+        let scoped = device.pop_error_scope().expect("scope should exist");
+
+        assert!(!pipeline.is_error());
+        assert_eq!(scoped, None);
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_pipeline_accepts_multiple_color_targets() {
+        let device = noop_device();
+        let layout =
+            Arc::new(device.create_subpass_pass_layout(multi_color_depth_layout_descriptor()));
+        let descriptor = subpass_pipeline_descriptor_for_layout(&device, layout);
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_subpass_render_pipeline(descriptor);
+        let scoped = device.pop_error_scope().expect("scope should exist");
+
+        assert!(!pipeline.is_error());
+        assert_eq!(scoped, None);
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_pipeline_rejects_multisample_above_one() {
+        let device = noop_device();
+        let mut layout_descriptor = multi_color_depth_layout_descriptor();
+        for attachment in &mut layout_descriptor.color_attachments {
+            attachment.sample_count = 4;
+        }
+        if let Some(depth) = &mut layout_descriptor.depth_stencil_attachment {
+            depth.sample_count = 4;
+        }
+        let layout = Arc::new(device.create_subpass_pass_layout(layout_descriptor));
+        let mut descriptor = subpass_pipeline_descriptor_for_layout(&device, layout);
+        descriptor.base.multisample.count = 4;
+
+        device.push_error_scope(ErrorFilter::Internal);
+        let pipeline = device.create_subpass_render_pipeline(descriptor);
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("multisample rejection should be scoped");
+
+        assert!(pipeline.is_error());
+        assert_eq!(
+            scoped.message,
+            "subpass render pipeline does not yet support multisample > 1"
+        );
     }
 
     #[cfg(feature = "tiled")]

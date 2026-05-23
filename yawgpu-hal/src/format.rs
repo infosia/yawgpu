@@ -126,3 +126,24 @@ pub enum HalCompareFunction {
     /// Always variant.
     Always,
 }
+
+/// Enumerates HAL stencil operation values.
+#[derive(Debug, Clone, Copy)]
+pub enum HalStencilOperation {
+    /// Keep variant.
+    Keep,
+    /// Zero variant.
+    Zero,
+    /// Replace variant.
+    Replace,
+    /// Invert variant.
+    Invert,
+    /// Increment clamp variant.
+    IncrementClamp,
+    /// Decrement clamp variant.
+    DecrementClamp,
+    /// Increment wrap variant.
+    IncrementWrap,
+    /// Decrement wrap variant.
+    DecrementWrap,
+}
