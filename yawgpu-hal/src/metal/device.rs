@@ -143,6 +143,17 @@ impl MetalDevice {
     /// — emitted by naga as MSL `[[color(N)]]` — lands in MTL slot N (the
     /// global flat numbering; see e2e shader comments mirroring mgpu's
     /// `hello_deferred`).
+    ///
+    /// When the caller's `descriptor.depth_stencil` is `None` but the pass
+    /// layout declares a depth-stencil attachment, the MTL pipeline still
+    /// needs `setDepthAttachmentPixelFormat` to match the encoder's bound
+    /// depth attachment (Apple requires the format to match per
+    /// `MTLRenderPipelineDescriptor`). Synthesize a no-op
+    /// `HalDepthStencilState` carrying the layout's format so the pipeline
+    /// declares the right `depthAttachmentPixelFormat`; the actual depth
+    /// test/write stays disabled via the no-op `MTLDepthStencilState` that
+    /// `create_render_pipeline` falls back to (depthCompare=Always,
+    /// depthWrite=false, no stencil).
     #[cfg(feature = "tiled")]
     pub fn create_subpass_render_pipeline(
         &self,
@@ -161,6 +172,28 @@ impl MetalDevice {
             .iter()
             .map(|a| a.format)
             .collect();
+        if adjusted.depth_stencil.is_none() {
+            if let Some(layout_ds) = pass_layout.depth_stencil_attachment.as_ref() {
+                let stencil_disabled = HalStencilFaceState {
+                    compare: HalCompareFunction::Always,
+                    fail_op: HalStencilOperation::Keep,
+                    depth_fail_op: HalStencilOperation::Keep,
+                    pass_op: HalStencilOperation::Keep,
+                };
+                adjusted.depth_stencil = Some(HalDepthStencilState {
+                    format: layout_ds.format,
+                    depth_write_enabled: false,
+                    depth_compare: HalCompareFunction::Always,
+                    stencil_front: stencil_disabled,
+                    stencil_back: stencil_disabled,
+                    stencil_read_mask: 0,
+                    stencil_write_mask: 0,
+                    depth_bias: 0,
+                    depth_bias_slope_scale: 0.0,
+                    depth_bias_clamp: 0.0,
+                });
+            }
+        }
         self.create_render_pipeline(
             shader,
             vertex_entry_point,

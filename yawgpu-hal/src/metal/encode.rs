@@ -411,9 +411,7 @@ pub(super) fn encode_render_pass(
         ));
     };
     encoder.setRenderPipelineState(&pipeline.inner);
-    if let Some(depth_stencil_state) = pipeline.depth_stencil_state.as_deref() {
-        encoder.setDepthStencilState(Some(depth_stencil_state));
-    }
+    encoder.setDepthStencilState(Some(&pipeline.depth_stencil_state));
     for binding in &pass.bind_buffers {
         encode_render_bind_buffer(encoder, binding)?;
     }
@@ -447,9 +445,7 @@ fn encode_subpass_draw(
         ));
     };
     encoder.setRenderPipelineState(&pipeline.inner);
-    if let Some(depth_stencil_state) = pipeline.depth_stencil_state.as_deref() {
-        encoder.setDepthStencilState(Some(depth_stencil_state));
-    }
+    encoder.setDepthStencilState(Some(&pipeline.depth_stencil_state));
     for binding in &draw.bind_buffers {
         encode_render_bind_buffer(encoder, binding)?;
     }
