@@ -83,15 +83,20 @@ static inline Mat4 mat4_look_at_rh(Vec3 eye, Vec3 center, Vec3 up) {
     Vec3 s = vec3_normalize(vec3_cross(f, up));
     Vec3 u = vec3_cross(s, f);
 
+    // Column-major storage (m[col*4 + row]), matching glam's `from_cols`.
+    // col 0 = (s.x, u.x, -f.x, 0)
+    // col 1 = (s.y, u.y, -f.y, 0)
+    // col 2 = (s.z, u.z, -f.z, 0)
+    // col 3 = (-eye·s, -eye·u, eye·f, 1)
     Mat4 out = mat4_identity();
     out.m[0] = s.x;
-    out.m[1] = s.y;
-    out.m[2] = s.z;
-    out.m[4] = u.x;
+    out.m[1] = u.x;
+    out.m[2] = -f.x;
+    out.m[4] = s.y;
     out.m[5] = u.y;
-    out.m[6] = u.z;
-    out.m[8] = -f.x;
-    out.m[9] = -f.y;
+    out.m[6] = -f.y;
+    out.m[8] = s.z;
+    out.m[9] = u.z;
     out.m[10] = -f.z;
     out.m[12] = -vec3_dot(s, eye);
     out.m[13] = -vec3_dot(u, eye);
