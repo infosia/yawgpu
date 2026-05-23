@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 
 use yawgpu_hal::{HalDevice, HalSubpassRenderPass};
 
-use crate::adapter::tiled_features_supported;
+use crate::adapter::{tiled_features_supported, TiledCapabilities};
 use crate::bind_group::*;
 use crate::buffer::*;
 use crate::command_encoder::*;
@@ -660,6 +660,9 @@ fn validate_subpass_render_pipeline_descriptor(
     if let Some(error) = &descriptor.error {
         return Some(error.clone());
     }
+    if let Some(error) = &descriptor.base.error {
+        return Some(error.clone());
+    }
     if descriptor.pass_layout.is_error() {
         return Some("subpass render pipeline layout must not be an error layout".to_owned());
     }
@@ -720,23 +723,50 @@ pub(crate) fn validate_subpass_pass_layout_descriptor(
     if let Some(error) = &descriptor.error {
         return Some(error.clone());
     }
-    let caps = crate::TiledCapabilities {
+    let caps = tiled_capabilities_for_device(device);
+    validate_subpass_pass_layout_descriptor_with_caps(descriptor, caps)
+}
+
+fn tiled_capabilities_for_device(device: &Device) -> TiledCapabilities {
+    if !tiled_features_supported(device.hal().backend()) {
+        return TiledCapabilities {
+            max_subpasses: 0,
+            max_subpass_color_attachments: 0,
+            max_input_attachments: 0,
+            estimated_tile_memory_bytes: 0,
+        };
+    }
+    let limits = device.limits();
+    TiledCapabilities {
         max_subpasses: 4,
-        max_subpass_color_attachments: device.limits().max_color_attachments,
-        max_input_attachments: device.limits().max_sampled_textures_per_shader_stage,
-        estimated_tile_memory_bytes: 0,
-    };
+        max_subpass_color_attachments: limits.max_color_attachments,
+        max_input_attachments: limits.max_color_attachments,
+        estimated_tile_memory_bytes: 256 * 1024,
+    }
+}
+
+fn validate_subpass_pass_layout_descriptor_with_caps(
+    descriptor: &SubpassPassLayoutDescriptor,
+    caps: TiledCapabilities,
+) -> Option<String> {
+    let enforce_caps = caps.max_subpasses != 0
+        || caps.max_subpass_color_attachments != 0
+        || caps.max_input_attachments != 0;
     if descriptor.subpasses.is_empty() {
         return Some("subpass pass layout requires at least one subpass".to_owned());
     }
-    if descriptor.subpasses.len() > caps.max_subpasses as usize {
+    // Noop advertises zero tiled capabilities but still accepts subpass objects
+    // so validation and lifecycle tests remain GPU-independent.
+    if enforce_caps && descriptor.subpasses.len() > caps.max_subpasses as usize {
         return Some("subpass count exceeds tiled capabilities".to_owned());
     }
     for (subpass_index, subpass) in descriptor.subpasses.iter().enumerate() {
-        if subpass.color_attachment_indices.len() > caps.max_subpass_color_attachments as usize {
+        if enforce_caps
+            && subpass.color_attachment_indices.len() > caps.max_subpass_color_attachments as usize
+        {
             return Some("subpass color attachment count exceeds tiled capabilities".to_owned());
         }
-        if subpass.input_attachments.len() > caps.max_input_attachments as usize {
+        if enforce_caps && subpass.input_attachments.len() > caps.max_input_attachments as usize {
             return Some("subpass input attachment count exceeds tiled capabilities".to_owned());
         }
         for &color_index in &subpass.color_attachment_indices {
@@ -851,6 +881,7 @@ fn resolve_resource(
             }
             if matches!(attachment.descriptor().size, TransientSizeMode::MatchTarget) {
                 let descriptor = attachment.descriptor();
+                attachment.validate_match_target_extent(extent.width, extent.height)?;
                 let hal_descriptor =
                     hal_transient_attachment_descriptor(&descriptor, extent.width, extent.height);
                 let hal_attachment = hal
@@ -1046,7 +1077,6 @@ mod tests {
             "subpass input sourceSubpass must refer to a prior subpass"
         );
 
-        device.push_error_scope(ErrorFilter::Validation);
         let mut too_many = two_subpass_layout_descriptor();
         too_many.subpasses = vec![
             SubpassLayoutDesc {
@@ -1056,13 +1086,30 @@ mod tests {
             };
             5
         ];
-        let layout = device.create_subpass_pass_layout(too_many);
-        let scoped = device
-            .pop_error_scope()
-            .expect("scope should exist")
-            .expect("over-capability count should be scoped");
-        assert!(layout.is_error());
-        assert_eq!(scoped.message, "subpass count exceeds tiled capabilities");
+        assert_eq!(
+            validate_subpass_pass_layout_descriptor_with_caps(
+                &too_many,
+                TiledCapabilities {
+                    max_subpasses: 4,
+                    max_subpass_color_attachments: 4,
+                    max_input_attachments: 4,
+                    estimated_tile_memory_bytes: 0,
+                },
+            ),
+            Some("subpass count exceeds tiled capabilities".to_owned())
+        );
+        assert_eq!(
+            validate_subpass_pass_layout_descriptor_with_caps(
+                &too_many,
+                TiledCapabilities {
+                    max_subpasses: 0,
+                    max_subpass_color_attachments: 0,
+                    max_input_attachments: 0,
+                    estimated_tile_memory_bytes: 0,
+                },
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1194,6 +1241,69 @@ mod tests {
         assert_eq!(pass.end(), None);
 
         let encoder = device.create_command_encoder();
+        let (same_extent_pass, error) = encoder.begin_subpass_render_pass(
+            &device,
+            SubpassRenderPassDescriptor {
+                pass_layout: Arc::clone(&layout),
+                extent: Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                color_attachments: vec![
+                    persistent_color(&device),
+                    SubpassColorAttachmentBinding {
+                        resource: SubpassAttachmentResource::Transient(Arc::clone(&transient)),
+                        load_op: LoadOp::Clear,
+                        store_op: StoreOp::Discard,
+                        clear_value: black(),
+                    },
+                ],
+                depth_stencil_attachment: None,
+                error: None,
+            },
+        );
+        assert_eq!(error, None);
+        assert!(!same_extent_pass.is_error());
+        assert_eq!(same_extent_pass.end(), None);
+
+        let encoder = device.create_command_encoder();
+        let (different_extent_pass, error) = encoder.begin_subpass_render_pass(
+            &device,
+            SubpassRenderPassDescriptor {
+                pass_layout: Arc::clone(&layout),
+                extent: Extent3d {
+                    width: 8,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                color_attachments: vec![
+                    persistent_color(&device),
+                    SubpassColorAttachmentBinding {
+                        resource: SubpassAttachmentResource::Transient(Arc::clone(&transient)),
+                        load_op: LoadOp::Clear,
+                        store_op: StoreOp::Discard,
+                        clear_value: black(),
+                    },
+                ],
+                depth_stencil_attachment: None,
+                error: None,
+            },
+        );
+        assert_eq!(error, None);
+        assert!(different_extent_pass.is_error());
+        drop(different_extent_pass);
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some(
+                "match-target transient attachment was already resolved with a different extent"
+                    .to_owned()
+            )
+        );
+
+        let encoder = device.create_command_encoder();
         let (drop_pass, _) = encoder.begin_subpass_render_pass(
             &device,
             SubpassRenderPassDescriptor {
@@ -1255,6 +1365,17 @@ mod tests {
             scoped.message,
             "subpass render pipeline subpassIndex is out of range"
         );
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let mut base_error = subpass_pipeline_descriptor(&device, Arc::clone(&layout), 0);
+        base_error.base.error = Some("base render pipeline conversion failed".to_owned());
+        let bad = device.create_subpass_render_pipeline(base_error);
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("base descriptor error should be scoped");
+        assert!(bad.is_error());
+        assert_eq!(scoped.message, "base render pipeline conversion failed");
 
         let wrong_subpass = Arc::new(
             device.create_subpass_render_pipeline(subpass_pipeline_descriptor(&device, layout, 1)),

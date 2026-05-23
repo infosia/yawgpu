@@ -273,6 +273,11 @@ impl VulkanAdapter {
         if self.has_device_extension(vk::KHR_SWAPCHAIN_NAME) {
             extension_names.push(vk::KHR_SWAPCHAIN_NAME.as_ptr());
         }
+        #[cfg(feature = "tiled")]
+        if let Some(extension_name) = framebuffer_fetch_extension_name(self.framebuffer_fetch_path)
+        {
+            extension_names.push(extension_name.as_ptr());
+        }
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&extension_names);
@@ -329,6 +334,17 @@ impl VulkanAdapter {
 
     fn has_device_extension(&self, name: &CStr) -> bool {
         has_device_extension_for_physical_device(&self.instance, self.physical_device, name)
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn framebuffer_fetch_extension_name(path: FramebufferFetchPath) -> Option<&'static CStr> {
+    match path {
+        FramebufferFetchPath::TileImage => Some(vk::EXT_SHADER_TILE_IMAGE_NAME),
+        FramebufferFetchPath::RasterOrderAttachmentAccess => {
+            Some(vk::EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_NAME)
+        }
+        FramebufferFetchPath::Disabled => None,
     }
 }
 
@@ -455,6 +471,23 @@ mod tests {
             vec![vk::KHR_SURFACE_NAME, vk::KHR_WIN32_SURFACE_NAME]
         );
         assert_eq!(flags, vk::InstanceCreateFlags::default());
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn framebuffer_fetch_extension_name_matches_detected_path() {
+        assert_eq!(
+            framebuffer_fetch_extension_name(FramebufferFetchPath::TileImage),
+            Some(vk::EXT_SHADER_TILE_IMAGE_NAME)
+        );
+        assert_eq!(
+            framebuffer_fetch_extension_name(FramebufferFetchPath::RasterOrderAttachmentAccess),
+            Some(vk::EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_NAME)
+        );
+        assert_eq!(
+            framebuffer_fetch_extension_name(FramebufferFetchPath::Disabled),
+            None
+        );
     }
 
     #[test]

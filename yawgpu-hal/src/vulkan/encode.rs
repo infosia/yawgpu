@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "tiled")]
+use crate::{HalSubpassAttachmentLayout, HalSubpassDepthStencilAttachment};
 
 /// Records submit into the command stream.
 pub(super) fn submit_copies(queue: &VulkanQueueInner, copies: &[HalCopy]) -> Result<(), HalError> {
@@ -834,22 +836,15 @@ fn create_subpass_render_pass(
                 .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                 .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
                 .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+                .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
         );
     }
     if let Some(layout) = pass.layout.depth_stencil_attachment {
-        let (format, _) = map_texture_format(layout.format)?;
-        attachments.push(
-            vk::AttachmentDescription::default()
-                .format(format)
-                .samples(vk_sample_count(layout.sample_count)?)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
-        );
+        let binding = pass
+            .depth_stencil_attachment
+            .as_ref()
+            .ok_or_else(|| shader_error("subpass depth-stencil attachment binding missing"))?;
+        attachments.push(vk_depth_stencil_attachment_description(layout, binding)?);
     }
     let depth_index = pass.layout.color_attachments.len() as u32;
     let color_refs = pass
@@ -1018,6 +1013,115 @@ fn vk_load_op(load_op: HalRenderLoadOp) -> vk::AttachmentLoadOp {
     match load_op {
         HalRenderLoadOp::Load => vk::AttachmentLoadOp::LOAD,
         HalRenderLoadOp::Clear => vk::AttachmentLoadOp::CLEAR,
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn vk_depth_stencil_attachment_description(
+    layout: HalSubpassAttachmentLayout,
+    binding: &HalSubpassDepthStencilAttachment,
+) -> Result<vk::AttachmentDescription, HalError> {
+    let (format, _) = map_texture_format(layout.format)?;
+    let has_depth = format_has_depth_aspect(layout.format);
+    let has_stencil = format_has_stencil_aspect(layout.format);
+    Ok(vk::AttachmentDescription::default()
+        .format(format)
+        .samples(vk_sample_count(layout.sample_count)?)
+        .load_op(if has_depth {
+            vk_load_op(binding.depth_load_op)
+        } else {
+            vk::AttachmentLoadOp::DONT_CARE
+        })
+        .store_op(if has_depth && binding.depth_store {
+            vk::AttachmentStoreOp::STORE
+        } else {
+            vk::AttachmentStoreOp::DONT_CARE
+        })
+        .stencil_load_op(if has_stencil {
+            vk_load_op(binding.stencil_load_op)
+        } else {
+            vk::AttachmentLoadOp::DONT_CARE
+        })
+        .stencil_store_op(if has_stencil && binding.stencil_store {
+            vk::AttachmentStoreOp::STORE
+        } else {
+            vk::AttachmentStoreOp::DONT_CARE
+        })
+        .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+        .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL))
+}
+
+#[cfg(feature = "tiled")]
+fn format_has_depth_aspect(format: HalTextureFormat) -> bool {
+    matches!(
+        format,
+        HalTextureFormat::Depth16Unorm
+            | HalTextureFormat::Depth24Plus
+            | HalTextureFormat::Depth24PlusStencil8
+            | HalTextureFormat::Depth32Float
+            | HalTextureFormat::Depth32FloatStencil8
+    )
+}
+
+#[cfg(feature = "tiled")]
+fn format_has_stencil_aspect(format: HalTextureFormat) -> bool {
+    matches!(
+        format,
+        HalTextureFormat::Stencil8
+            | HalTextureFormat::Depth24PlusStencil8
+            | HalTextureFormat::Depth32FloatStencil8
+    )
+}
+
+#[cfg(all(test, feature = "tiled"))]
+mod tiled_tests {
+    use super::*;
+    use crate::HalSubpassAttachmentResource;
+
+    fn dummy_depth_binding() -> HalSubpassDepthStencilAttachment {
+        HalSubpassDepthStencilAttachment {
+            resource: HalSubpassAttachmentResource::Transient(HalTransientAttachment::Noop(
+                crate::noop::NoopTransientAttachment,
+            )),
+            depth_load_op: HalRenderLoadOp::Load,
+            depth_store: true,
+            depth_clear_value: 1.0,
+            stencil_load_op: HalRenderLoadOp::Clear,
+            stencil_store: true,
+            stencil_clear_value: 7,
+        }
+    }
+
+    #[test]
+    fn depth_stencil_attachment_description_uses_binding_ops_by_aspect() {
+        let depth_only = vk_depth_stencil_attachment_description(
+            HalSubpassAttachmentLayout {
+                format: HalTextureFormat::Depth32Float,
+                sample_count: 1,
+            },
+            &dummy_depth_binding(),
+        )
+        .expect("depth-only description");
+        assert_eq!(depth_only.load_op, vk::AttachmentLoadOp::LOAD);
+        assert_eq!(depth_only.store_op, vk::AttachmentStoreOp::STORE);
+        assert_eq!(depth_only.stencil_load_op, vk::AttachmentLoadOp::DONT_CARE);
+        assert_eq!(
+            depth_only.stencil_store_op,
+            vk::AttachmentStoreOp::DONT_CARE
+        );
+
+        let depth_stencil = vk_depth_stencil_attachment_description(
+            HalSubpassAttachmentLayout {
+                format: HalTextureFormat::Depth24PlusStencil8,
+                sample_count: 1,
+            },
+            &dummy_depth_binding(),
+        )
+        .expect("depth-stencil description");
+        assert_eq!(depth_stencil.load_op, vk::AttachmentLoadOp::LOAD);
+        assert_eq!(depth_stencil.store_op, vk::AttachmentStoreOp::STORE);
+        assert_eq!(depth_stencil.stencil_load_op, vk::AttachmentLoadOp::CLEAR);
+        assert_eq!(depth_stencil.stencil_store_op, vk::AttachmentStoreOp::STORE);
     }
 }
 

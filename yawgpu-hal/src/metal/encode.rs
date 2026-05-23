@@ -196,21 +196,23 @@ pub(super) fn subpass_render_pass_descriptor(
     pass: &HalSubpassRenderPassCommand,
 ) -> Result<Retained<MTLRenderPassDescriptor>, HalError> {
     let memoryless_bytes = subpass_memoryless_bytes_per_pixel(pass)?;
+    let sample_count = subpass_memoryless_sample_count(pass);
     let budget = metal_tile_memory_budget_bytes();
-    if !tile_memory_fits_budget(memoryless_bytes, 1, budget) {
+    if !tile_memory_fits_budget(memoryless_bytes, sample_count, budget) {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "subpass memoryless attachments exceed tile memory budget",
         });
     }
     let descriptor = MTLRenderPassDescriptor::renderPassDescriptor();
-    let first_subpass = pass
-        .layout
-        .subpasses
-        .first()
-        .ok_or_else(|| texture_error("subpass render pass requires at least one subpass"))?;
+    if pass.layout.subpasses.is_empty() {
+        return Err(texture_error(
+            "subpass render pass requires at least one subpass",
+        ));
+    }
     let color_attachments = descriptor.colorAttachments();
-    for &attachment_index in &first_subpass.color_attachment_indices {
+    let attachment_indices = subpass_color_attachment_indices(pass);
+    for attachment_index in attachment_indices {
         let slot = to_ns(u64::from(attachment_index))?;
         let binding = pass
             .color_attachments
@@ -232,7 +234,12 @@ pub(super) fn subpass_render_pass_descriptor(
             alpha: a,
         });
     }
-    if first_subpass.uses_depth_stencil {
+    if pass
+        .layout
+        .subpasses
+        .iter()
+        .any(|subpass| subpass.uses_depth_stencil)
+    {
         if let Some(depth) = &pass.depth_stencil_attachment {
             let depth_attachment = descriptor.depthAttachment();
             depth_attachment.setTexture(Some(subpass_attachment_texture(&depth.resource)?));
@@ -255,6 +262,19 @@ pub(super) fn subpass_render_pass_descriptor(
         }
     }
     Ok(descriptor)
+}
+
+#[cfg(feature = "tiled")]
+fn subpass_color_attachment_indices(pass: &HalSubpassRenderPassCommand) -> Vec<u32> {
+    let mut indices = pass
+        .layout
+        .subpasses
+        .iter()
+        .flat_map(|subpass| subpass.color_attachment_indices.iter().copied())
+        .collect::<Vec<_>>();
+    indices.sort_unstable();
+    indices.dedup();
+    indices
 }
 
 #[cfg(feature = "tiled")]
@@ -303,6 +323,30 @@ fn subpass_memoryless_bytes_per_pixel(pass: &HalSubpassRenderPassCommand) -> Res
         }
     }
     Ok(total)
+}
+
+#[cfg(feature = "tiled")]
+fn subpass_memoryless_sample_count(pass: &HalSubpassRenderPassCommand) -> u32 {
+    let mut sample_count = 1;
+    for attachment in &pass.color_attachments {
+        if let HalSubpassAttachmentResource::Transient(HalTransientAttachment::Metal(transient)) =
+            &attachment.resource
+        {
+            if transient._memoryless {
+                sample_count = sample_count.max(transient._sample_count);
+            }
+        }
+    }
+    if let Some(depth) = &pass.depth_stencil_attachment {
+        if let HalSubpassAttachmentResource::Transient(HalTransientAttachment::Metal(transient)) =
+            &depth.resource
+        {
+            if transient._memoryless {
+                sample_count = sample_count.max(transient._sample_count);
+            }
+        }
+    }
+    sample_count
 }
 
 #[cfg(feature = "tiled")]
@@ -383,11 +427,45 @@ fn encode_subpass_draw(
 #[cfg(all(test, feature = "tiled"))]
 mod tiled_tests {
     use super::*;
+    use crate::HalSubpassLayout;
 
     #[test]
     fn tile_memory_budget_check_accepts_equal_and_rejects_over_budget() {
         assert!(tile_memory_fits_budget(1024, 4, 4096));
         assert!(!tile_memory_fits_budget(1025, 4, 4096));
+    }
+
+    #[test]
+    fn subpass_color_attachment_indices_returns_union_across_subpasses() {
+        let pass = HalSubpassRenderPassCommand {
+            layout: HalSubpassPassLayout {
+                color_attachments: Vec::new(),
+                depth_stencil_attachment: None,
+                subpasses: vec![
+                    HalSubpassLayout {
+                        color_attachment_indices: vec![1, 0],
+                        uses_depth_stencil: false,
+                        input_attachments: Vec::new(),
+                    },
+                    HalSubpassLayout {
+                        color_attachment_indices: vec![2, 1],
+                        uses_depth_stencil: true,
+                        input_attachments: Vec::new(),
+                    },
+                ],
+                dependencies: Vec::new(),
+            },
+            extent: HalExtent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            color_attachments: Vec::new(),
+            depth_stencil_attachment: None,
+            draws: Vec::new(),
+        };
+
+        assert_eq!(subpass_color_attachment_indices(&pass), vec![0, 1, 2]);
     }
 }
 
