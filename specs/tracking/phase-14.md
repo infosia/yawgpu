@@ -402,3 +402,67 @@ C deferred-shading example (Metal + Vulkan) under `#ifdef YAWGPU_HAS_TILED`;
 real-GPU e2e run by Claude and logged. Then the mandatory Phase Review
 (`phase-14-review.md`): fresh subagent, CRITICAL/MAJOR/MINOR, fix in severity
 order, no COMPLETE with open CRITICAL/MAJOR.
+
+## Honest re-verification (2026-05-23 post-reboot, sandbox disabled)
+
+**Issue.** Earlier "Metal 5/5 green" claims (including the
+`metal_two_subpass_draw_subpass_load_readback` center-pixel assertion) had
+been silently produced by `real_backend_skip_reason(RealBackend::Metal)`
+self-skipping when `MTLCopyAllDevices()` returned empty under Claude Code's
+Bash sandbox. The test framework's "passed with 0 ran" output looks identical
+to a real green. Confirmed root cause: re-running with
+`dangerouslyDisableSandbox: true` after a reboot, the same 2-subpass test
+actually executed and **failed** with center pixel `(0, 0, 0, 0)` — the
+subpass output never reached the surface texture.
+
+**Root cause (subpass on Metal).** WGSL `subpass_input<T> + subpassLoad` was
+not being lowered correctly to MTL by naga because the `subpass_color_slots`
+slot map was empty, and even with it correctly populated naga's MSL backend
+does not subpass-remap fragment `@location(N)` — it emits the global flat
+MTL color index. Combined with two HAL bugs (Metal `create_render_pipeline`
+only configuring `colorAttachments[0]`; Metal `create_subpass_render_pipeline`
+discarding `pass_layout`), the lighting subpass's `@location(0)` write
+went to the G-buffer base color slot instead of the output color slot.
+
+**Fix (cascade).**
+1. `yawgpu-core/shader_naga.rs`: thread
+   `subpass_color_slots: &[((u32, u32), u32)]` into `generate_render_msl`
+   and populate `naga::back::msl::Options::subpass_color_slots` from the
+   subpass's input-attachment list (`(group, binding) → source_attachment`).
+2. `yawgpu-core/render_pipeline.rs`: add
+   `subpass_color_attachment_indices: Option<&[u32]>` to
+   `resolve_render_pipeline_descriptor` / `validate_color_targets`, so the
+   subpass arm checks each fragment `@location(N)` against the flat MTL
+   slot (not the dense subpass-local index).
+3. `yawgpu-core/subpass.rs`: pass
+   `Some(&subpass.color_attachment_indices)` through the new parameter.
+4. `yawgpu-hal/metal/pipeline.rs`: iterate **all** `descriptor.color_formats`
+   into `colorAttachments[i].pixelFormat`, not just slot 0.
+5. `yawgpu-hal/metal/device.rs::create_subpass_render_pipeline`: rebuild
+   `color_formats` from the full pass-layout color attachments so the MTL
+   pipeline matches the encoder's `MTLRenderPassDescriptor` slot-for-slot.
+6. `yawgpu/tests/e2e_metal_tiled.rs` + `examples/tiled_deferred/main.c`:
+   adopt mgpu's dual-fragment-entry-point pattern (`fs` for Vulkan
+   subpass-local `@location(0)`, `fs_metal` for Metal flat `@location(1)`),
+   per `mgpu/examples/hello_deferred/shaders/subpass_gbuffer.wgsl`. The C
+   example selects the entry by querying `WGPUAdapterInfo::backendType`.
+
+**Honest re-verification result (sandbox disabled, this M2):**
+- Phase 14 Metal tiled e2e: **5/5 passed**, 0 ignored — incl. real
+  `metal_two_subpass_draw_subpass_load_readback` center-pixel = (0,255,0,255).
+- Phase 14 MoltenVK Vulkan tiled e2e: **4/4 passed**, 0 ignored — no
+  regression from the validation thread-through.
+- Phase 13 A4 Metal MSL passthrough e2e: **2/2 passed** — confirms the
+  `create_render_pipeline` slot-iteration change didn't regress non-subpass.
+- Phase 13 Vulkan SPIR-V passthrough e2e: **2/2 passed**.
+- `examples/tiled_deferred` on Metal: prints
+  `center pixel RGBA=(0,255,0,255) OK` and writes a green PNG.
+- Default + `--features tiled` `cargo test` / `clippy -D warnings`: green.
+- 7 backend `--tests` configs (default / metal / vulkan / metal,tiled /
+  vulkan,tiled / metal,mobile / vulkan,mobile): all compile, 0 errors.
+
+**Lesson.** "Self-skip when backend unavailable" is the right policy for
+opportunistic CI, but it masked an actual regression because the harness
+treated 0 ran ≡ green. Future Phase Review must re-run real-GPU e2e with
+the sandbox explicitly disabled before any green-on-Metal claim — and
+must inspect the test runner's "N ignored" count, not just exit code.

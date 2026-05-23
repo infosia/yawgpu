@@ -113,8 +113,20 @@ static const char *LOAD_WGSL =
     "    return out;\n"
     "}\n"
     "\n"
+    "// Two fragment entry points handle the Vulkan/Metal attachment-numbering\n"
+    "// difference (mirroring mgpu's hello_deferred): naga MSL does not\n"
+    "// subpass-remap a fragment's `@location(N)` to the global MTL color slot\n"
+    "// index, so on Metal we declare a separate entry whose location matches\n"
+    "// the slot the lighting subpass writes (here: slot 1, the output). On\n"
+    "// Vulkan the subpass-local `@location(0)` is remapped by `VkRenderPass`.\n"
     "@fragment\n"
     "fn fs() -> @location(0) vec4<f32> {\n"
+    "    let loaded = subpassLoad(gbuffer);\n"
+    "    return vec4<f32>(loaded.g, loaded.r, loaded.b, 1.0);\n"
+    "}\n"
+    "\n"
+    "@fragment\n"
+    "fn fs_metal() -> @location(1) vec4<f32> {\n"
     "    let loaded = subpassLoad(gbuffer);\n"
     "    return vec4<f32>(loaded.g, loaded.r, loaded.b, 1.0);\n"
     "}\n";
@@ -248,7 +260,8 @@ static YaWGPUSubpassPassLayout create_pass_layout(TiledDeferredApp *app) {
 static WGPURenderPipeline create_subpass_pipeline(TiledDeferredApp *app,
                                                   uint32_t subpass_index,
                                                   WGPUShaderModule module,
-                                                  const char *label) {
+                                                  const char *label,
+                                                  const char *fragment_entry) {
     app->color_targets[subpass_index] = (WGPUColorTargetState){
         .nextInChain = NULL,
         .format = WGPUTextureFormat_RGBA8Unorm,
@@ -258,7 +271,7 @@ static WGPURenderPipeline create_subpass_pipeline(TiledDeferredApp *app,
     app->fragment_states[subpass_index] = (WGPUFragmentState){
         .nextInChain = NULL,
         .module = module,
-        .entryPoint = sized_string_view("fs"),
+        .entryPoint = sized_string_view(fragment_entry),
         .constantCount = 0,
         .constants = NULL,
         .targetCount = 1,
@@ -493,14 +506,29 @@ static bool tiled_deferred_app_init(TiledDeferredApp *app) {
         return false;
     }
 
+    // The lighting subpass writes to a different MTL color slot than it reads,
+    // so on Metal we pick the `fs_metal` entry point whose `@location(1)`
+    // matches the global flat numbering. Vulkan uses subpass-local numbering
+    // and stays on `fs`. (See LOAD_WGSL + mgpu hello_deferred for the same
+    // pattern.)
+    WGPUAdapterInfo info = WGPU_ADAPTER_INFO_INIT;
+    const char *load_fs = "fs";
+    if (wgpuAdapterGetInfo(app->context.adapter, &info) == WGPUStatus_Success) {
+        if (info.backendType == WGPUBackendType_Metal) {
+            load_fs = "fs_metal";
+        }
+        wgpuAdapterInfoFreeMembers(info);
+    }
     app->write_pipeline = create_subpass_pipeline(app,
                                                   0,
                                                   app->write_module,
-                                                  "tiled deferred gbuffer pipeline");
+                                                  "tiled deferred gbuffer pipeline",
+                                                  "fs");
     app->load_pipeline = create_subpass_pipeline(app,
                                                  1,
                                                  app->load_module,
-                                                 "tiled deferred output pipeline");
+                                                 "tiled deferred output pipeline",
+                                                 load_fs);
     if (!app->write_pipeline || !app->load_pipeline) {
         fprintf(stderr, "failed to create tiled deferred pipelines\n");
         return false;

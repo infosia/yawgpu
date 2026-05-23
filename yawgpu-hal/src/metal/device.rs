@@ -135,6 +135,14 @@ impl MetalDevice {
     }
 
     /// Creates a subpass-compatible render pipeline.
+    ///
+    /// The MTL pipeline gets one `colorAttachments[i].pixelFormat` per slot in
+    /// the pass layout (not just the slots this subpass writes), so the
+    /// pipeline's color-attachment layout matches the encoder's
+    /// `MTLRenderPassDescriptor` slot-for-slot. The WGSL fragment's `@location(N)`
+    /// — emitted by naga as MSL `[[color(N)]]` — lands in MTL slot N (the
+    /// global flat numbering; see e2e shader comments mirroring mgpu's
+    /// `hello_deferred`).
     #[cfg(feature = "tiled")]
     pub fn create_subpass_render_pipeline(
         &self,
@@ -143,15 +151,22 @@ impl MetalDevice {
         fragment_entry_point: &str,
         descriptor: &HalRenderPipelineDescriptor,
         bindings: &[HalDescriptorBinding],
-        _pass_layout: &HalSubpassPassLayout,
+        pass_layout: &HalSubpassPassLayout,
         _subpass_index: u32,
     ) -> Result<MetalRenderPipeline, HalError> {
+        let _ = bindings; // Metal subpass inputs use the color-slot map, not descriptors.
+        let mut adjusted = descriptor.clone();
+        adjusted.color_formats = pass_layout
+            .color_attachments
+            .iter()
+            .map(|a| a.format)
+            .collect();
         self.create_render_pipeline(
             shader,
             vertex_entry_point,
             fragment_entry_point,
-            descriptor,
-            bindings,
+            &adjusted,
+            &[],
         )
     }
 }

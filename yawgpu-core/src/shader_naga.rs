@@ -418,6 +418,7 @@ impl ReflectedModule {
         fragment_entry_name: &str,
         binding_map: &MslBindingMap,
         vertex_buffers: &[MslVertexBufferBinding],
+        subpass_color_slots: &[((u32, u32), u32)],
     ) -> Result<GeneratedRenderMsl, String> {
         let resources = msl_resources(binding_map)?;
         let mut per_entry_point_map = BTreeMap::new();
@@ -435,10 +436,15 @@ impl ReflectedModule {
                 ..Default::default()
             },
         );
+        let mut color_slot_map = naga::FastHashMap::default();
+        for &(key, slot) in subpass_color_slots {
+            color_slot_map.insert(key, slot);
+        }
         let options = naga::back::msl::Options {
             lang_version: (2, 4),
             per_entry_point_map,
             fake_missing_bindings: false,
+            subpass_color_slots: color_slot_map,
             ..Default::default()
         };
         let pipeline_options = naga::back::msl::PipelineOptions {

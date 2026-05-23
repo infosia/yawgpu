@@ -233,8 +233,24 @@ unsafe fn run_two_subpass_draw_readback(device: native::WGPUDevice) -> native::W
     let layout = create_two_subpass_input_layout(device);
     let write_module = create_wgsl_module(device, SUBPASS_WRITE_SHADER);
     let load_module = create_wgsl_module(device, SUBPASS_LOAD_SHADER);
-    let write_pipeline = create_subpass_pipeline(device, layout, 0, write_module);
-    let load_pipeline = create_subpass_pipeline(device, layout, 1, load_module);
+    let rgba_target = native::WGPUColorTargetState {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        blend: std::ptr::null(),
+        writeMask: native::WGPUColorWriteMask_All,
+    };
+    let targets = [rgba_target];
+    // Subpass 1 on Metal writes to MTL color attachment 1 (the output slot)
+    // via `fs_metal`'s `@location(1)`. The pipeline target array has one entry
+    // (matching the subpass's single `color_attachment_indices=[1]`); the HAL
+    // backs every MTL `colorAttachments[i]` from the pass layout's flat
+    // attachment list so the pipeline is format-compatible with the encoder.
+    // (Mirrors mgpu's hello_deferred — naga MSL doesn't subpass-remap output
+    // locations; the shader author writes the global flat index directly.)
+    let write_pipeline =
+        create_subpass_pipeline(device, layout, 0, write_module, "fs", &targets);
+    let load_pipeline =
+        create_subpass_pipeline(device, layout, 1, load_module, "fs_metal", &targets);
 
     let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
     record_two_subpass_draw(
@@ -328,21 +344,17 @@ unsafe fn create_subpass_pipeline(
     pass_layout: yawgpu::YaWGPUSubpassPassLayout,
     subpass_index: u32,
     module: native::WGPUShaderModule,
+    fragment_entry: &str,
+    targets: &[native::WGPUColorTargetState],
 ) -> native::WGPURenderPipeline {
-    let color_target = native::WGPUColorTargetState {
-        nextInChain: std::ptr::null_mut(),
-        format: native::WGPUTextureFormat_RGBA8Unorm,
-        blend: std::ptr::null(),
-        writeMask: native::WGPUColorWriteMask_All,
-    };
     let fragment = native::WGPUFragmentState {
         nextInChain: std::ptr::null_mut(),
         module,
-        entryPoint: string_view("fs"),
+        entryPoint: string_view(fragment_entry),
         constantCount: 0,
         constants: std::ptr::null(),
-        targetCount: 1,
-        targets: &color_target,
+        targetCount: targets.len(),
+        targets: targets.as_ptr(),
     };
     let base = native::WGPURenderPipelineDescriptor {
         nextInChain: std::ptr::null_mut(),
@@ -869,8 +881,20 @@ fn vs(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
     return out;
 }
 
+// Two fragment entry points mirror the Vulkan / Metal attachment-numbering
+// difference (same idea as mgpu's hello_deferred): naga MSL doesn't remap a
+// subpass's `@location(N)` to the global MTL color-attachment index, so on
+// Metal we need a separate entry whose location matches the MTL slot the
+// lighting subpass writes (here: slot 1, the output). On Vulkan the
+// subpass-local `@location(0)` is remapped by `VkRenderPass`.
 @fragment
 fn fs() -> @location(0) vec4<f32> {
+    let loaded = subpassLoad(gbuffer);
+    return vec4<f32>(loaded.g, loaded.r, loaded.b, 1.0);
+}
+
+@fragment
+fn fs_metal() -> @location(1) vec4<f32> {
     let loaded = subpassLoad(gbuffer);
     return vec4<f32>(loaded.g, loaded.r, loaded.b, 1.0);
 }
