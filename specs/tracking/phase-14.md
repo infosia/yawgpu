@@ -265,20 +265,26 @@ test/`clippy -D warnings` green. T17:
 4/4 (no extensions → `ShaderFramebufferFetch` honestly not advertised, no
 false-fail).
 
-## B7 — programmable tile dispatch scaffold  *(☑ DONE)*
+## B7 — programmable tile dispatch scaffold  *(✗ REMOVED, post-B6)*
 
-Done: `YaWGPUTransientDispatchDescriptor { tileWidth, tileHeight }` + INIT in
-`yawgpu.h`; Rust `#[repr(C)]` mirror + conv; core
-`SubpassRenderPass::dispatch_transient` records the unsupported error
-("programmable tile dispatch is not implemented") through the encoder's error
-sink (no panic, no real backend needed); FFI
-`yawgpuSubpassRenderPassEncoderDispatchTransient` routes it to the device error
-sink. Scaffold only — no working backend impl exists to port.
-*Gate (Claude-run):* all five build configs compile (default / vulkan / metal /
-metal,tiled / vulkan,tiled `--tests`); default + `--features tiled` test/`clippy
--D warnings` green; tiled example builds. T18:
-`subpass_render_pass_dispatch_transient_records_unsupported_error`. Noop-complete
-(the unsupported guarantee is structural across all backends).
+Originally landed as a scaffold (commit `a2cb43d`): a `YaWGPUTransientDispatchDescriptor`
++ `yawgpuSubpassRenderPassEncoderDispatchTransient` that returned an unsupported
+error on every backend, plus a `Feature::ProgrammableTileDispatch` advertised on
+tiled-capable backends. **Removed before Phase 14 Review** by design decision:
+no backend implements it (reference forks don't either), no implementation plan,
+and shipping a guessed-API scaffold ahead of any real impl only locks in a shape
+that isn't driven by anything — while the advertise misleads consumers into
+thinking the feature is usable. The numeric IDs are **reserved** in `yawgpu.h`
+(`0x70010004` + future tile-dispatch SType / C entry-point names) so they
+aren't reused for unrelated features.
+*Gate (Claude-run, post-removal):* all five build configs compile (default /
+vulkan / metal / metal,tiled / vulkan,tiled `--tests`); default + `--features
+tiled` test/`clippy -D warnings` green; tiled example builds. No stray
+`ProgrammableTileDispatch`/`DispatchTransient`/`TransientDispatchDescriptor`/
+`dispatch_transient` symbols in `yawgpu/src`/`yawgpu-core/src`/`yawgpu-hal/src`/
+`yawgpu.h` (only the reserved-ID comment remains). B6's
+`tiled_feature_advertise_*` test was adjusted to no longer assert the removed
+feature.
 
 ## B8 — examples + e2e + Phase Review
 

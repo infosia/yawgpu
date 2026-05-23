@@ -43,14 +43,6 @@ fn metal_tiled_features_and_capabilities_are_advertised() {
             ),
             1
         );
-        assert_eq!(
-            yawgpu::wgpuAdapterHasFeature(
-                adapter,
-                yawgpu::YaWGPUFeatureName_ProgrammableTileDispatch,
-            ),
-            1
-        );
-
         let mut capabilities = zeroed_tiled_capabilities();
         assert_eq!(
             yawgpu::yawgpuAdapterGetTiledCapabilities(adapter, &mut capabilities),

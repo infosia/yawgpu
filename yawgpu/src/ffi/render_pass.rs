@@ -250,26 +250,6 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderDrawIndexed(
     );
 }
 
-/// Records a programmable transient tile dispatch.
-///
-/// # Safety
-///
-/// `encoder` and `descriptor` must be non-null live yawgpu pointers.
-/// Returns yawgpu subpass render pass encoder dispatch transient.
-#[cfg(feature = "tiled")]
-#[no_mangle]
-pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderDispatchTransient(
-    encoder: crate::YaWGPUSubpassRenderPassEncoder,
-    descriptor: *const YaWGPUTransientDispatchDescriptor,
-) {
-    let pass = borrow_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
-    let descriptor = descriptor
-        .as_ref()
-        .expect("YaWGPUTransientDispatchDescriptor must not be null");
-    let descriptor = map_transient_dispatch_descriptor(descriptor);
-    dispatch_optional_error(&pass.device, pass.core.dispatch_transient(descriptor));
-}
-
 /// Sets the subpass viewport.
 ///
 /// # Safety

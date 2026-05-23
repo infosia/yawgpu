@@ -167,9 +167,6 @@ pub enum Feature {
     /// Shader framebuffer fetch support.
     #[cfg(feature = "tiled")]
     ShaderFramebufferFetch,
-    /// Programmable tile dispatch support.
-    #[cfg(feature = "tiled")]
-    ProgrammableTileDispatch,
     /// Other variant.
     Other(u32),
 }
@@ -231,7 +228,6 @@ fn add_tiled_features(features: &mut FeatureSet, backend: HalBackend, path: Fram
     if framebuffer_fetch_supported(backend, path) {
         features.insert(Feature::ShaderFramebufferFetch);
     }
-    features.insert(Feature::ProgrammableTileDispatch);
 }
 
 #[cfg(feature = "tiled")]
@@ -337,7 +333,6 @@ mod tests {
         assert!(!adapter.has_feature(Feature::MultiSubpass));
         assert!(!adapter.has_feature(Feature::TransientAttachments));
         assert!(!adapter.has_feature(Feature::ShaderFramebufferFetch));
-        assert!(!adapter.has_feature(Feature::ProgrammableTileDispatch));
     }
 
     #[cfg(feature = "tiled")]
@@ -377,7 +372,6 @@ mod tests {
         assert!(vulkan_disabled.contains(&Feature::MultiSubpass));
         assert!(vulkan_disabled.contains(&Feature::TransientAttachments));
         assert!(!vulkan_disabled.contains(&Feature::ShaderFramebufferFetch));
-        assert!(vulkan_disabled.contains(&Feature::ProgrammableTileDispatch));
 
         let mut vulkan_tile_image = supported_features();
         add_tiled_features(

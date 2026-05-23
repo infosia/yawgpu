@@ -427,10 +427,6 @@ mod tests {
             map_feature_to_native(core::Feature::ShaderFramebufferFetch),
             crate::YaWGPUFeatureName_ShaderFramebufferFetch
         );
-        assert_eq!(
-            map_feature_to_native(core::Feature::ProgrammableTileDispatch),
-            crate::YaWGPUFeatureName_ProgrammableTileDispatch
-        );
     }
 
     #[test]
