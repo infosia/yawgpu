@@ -67,6 +67,7 @@ pub(crate) fn surface_config() -> HalSurfaceConfiguration {
 pub(crate) fn render_descriptor() -> HalRenderPipelineDescriptor {
     HalRenderPipelineDescriptor {
         color_formats: vec![HalTextureFormat::Rgba8Unorm],
+        depth_stencil: None,
         vertex_buffers: Vec::new(),
         primitive_topology: HalPrimitiveTopology::TriangleList,
     }
