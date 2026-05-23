@@ -9,12 +9,13 @@ use objc2_foundation::{NSArray, NSString};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer as MTLBufferTrait, MTLClearColor, MTLCommandBuffer,
     MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction, MTLComputeCommandEncoder,
-    MTLComputePipelineState, MTLCopyAllDevices, MTLDevice, MTLDrawable, MTLLibrary, MTLLoadAction,
-    MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerAddressMode,
-    MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerMipFilter, MTLSamplerState, MTLSize,
-    MTLStorageMode, MTLStoreAction, MTLTexture as MTLTextureTrait, MTLTextureDescriptor,
-    MTLTextureType, MTLTextureUsage, MTLVertexDescriptor, MTLVertexFormat, MTLVertexStepFunction,
+    MTLComputePipelineState, MTLCopyAllDevices, MTLCreateSystemDefaultDevice, MTLDevice,
+    MTLDrawable, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType,
+    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
+    MTLRenderPipelineState, MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerDescriptor,
+    MTLSamplerMinMagFilter, MTLSamplerMipFilter, MTLSamplerState, MTLSize, MTLStorageMode,
+    MTLStoreAction, MTLTexture as MTLTextureTrait, MTLTextureDescriptor, MTLTextureType,
+    MTLTextureUsage, MTLVertexDescriptor, MTLVertexFormat, MTLVertexStepFunction,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
@@ -53,8 +54,23 @@ impl MetalInstance {
     #[must_use]
     pub fn enumerate_adapters(&self) -> Vec<MetalAdapter> {
         autoreleasepool(|_| {
+            let mut adapters = Vec::new();
+            if let Some(device) = MTLCreateSystemDefaultDevice() {
+                adapters.push(MetalAdapter::new(device));
+            }
+
             let devices: Retained<NSArray<ProtocolObject<dyn MTLDevice>>> = MTLCopyAllDevices();
-            devices.into_iter().map(MetalAdapter::new).collect()
+            for device in devices {
+                let registry_id = device.registryID();
+                if adapters
+                    .iter()
+                    .any(|adapter: &MetalAdapter| adapter.registry_id() == registry_id)
+                {
+                    continue;
+                }
+                adapters.push(MetalAdapter::new(device));
+            }
+            adapters
         })
     }
 }
@@ -86,6 +102,12 @@ impl MetalAdapter {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns the IORegistry ID for this adapter's Metal device.
+    #[must_use]
+    pub fn registry_id(&self) -> u64 {
+        self.device.registryID()
     }
 
     /// Creates a device (and its default queue) on this adapter.
