@@ -110,7 +110,12 @@ pub(crate) fn validate_bind_group_descriptor(
     if layout.is_error() {
         return Some("cannot create bind group from an error bind group layout".to_owned());
     }
-    if entries.len() != layout.entries().len() {
+    let required_entry_count = layout
+        .entries()
+        .iter()
+        .filter(|entry| !bind_group_layout_entry_is_input_attachment(entry))
+        .count();
+    if entries.len() != required_entry_count {
         return Some("bind group entry count must match bind group layout".to_owned());
     }
 
@@ -137,12 +142,29 @@ pub(crate) fn validate_bind_group_descriptor(
     }
 
     for layout_entry in layout.entries() {
-        if !seen.contains(&layout_entry.binding) {
+        if !seen.contains(&layout_entry.binding)
+            && !bind_group_layout_entry_is_input_attachment(layout_entry)
+        {
             return Some("bind group is missing a layout binding".to_owned());
         }
     }
 
     None
+}
+
+fn bind_group_layout_entry_is_input_attachment(entry: &BindGroupLayoutEntry) -> bool {
+    #[cfg(feature = "tiled")]
+    {
+        matches!(
+            entry.kind,
+            Some(BindingLayoutKind::InputAttachment { .. })
+        )
+    }
+    #[cfg(not(feature = "tiled"))]
+    {
+        let _ = entry;
+        false
+    }
 }
 
 /// Validates bind group entry and returns a descriptive error on failure.
@@ -221,6 +243,11 @@ pub(crate) fn validate_bind_group_entry(
             resource_device,
             texture_view,
             view_dimension,
+        ),
+        #[cfg(feature = "tiled")]
+        (_, BindingLayoutKind::InputAttachment { .. }) => Some(
+            "input-attachment binding must not be supplied in the bind group; it is auto-wired by the subpass pass"
+                .to_owned(),
         ),
         (BindGroupResource::Invalid(message), _) => Some(message.clone()),
         _ => Some("bind group entry resource kind must match the layout".to_owned()),
@@ -370,6 +397,8 @@ pub(crate) fn validate_bind_group_storage_texture(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "tiled")]
+    use crate::shader::SHADER_STAGE_FRAGMENT;
     use crate::test_helpers::*;
     use crate::*;
 
@@ -422,6 +451,105 @@ mod tests {
         assert_eq!(
             error.message,
             "bind group entry count must match bind group layout"
+        );
+    }
+
+    #[cfg(feature = "tiled")]
+    fn input_attachment_layout_entry(binding: u32) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: SHADER_STAGE_FRAGMENT,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::InputAttachment {
+                sample_type: TextureSampleType::Float,
+                multisampled: false,
+            }),
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    fn uniform_layout_entry(binding: u32) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: SHADER_STAGE_FRAGMENT,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: 4,
+            }),
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    fn uniform_bind_group_entry(device: &Device, binding: u32) -> BindGroupEntry {
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::UNIFORM,
+            size: 4,
+            mapped_at_creation: false,
+        }));
+        BindGroupEntry {
+            binding,
+            resource: BindGroupResource::Buffer {
+                buffer,
+                device: Arc::new(device.clone()),
+                offset: 0,
+                size: 4,
+            },
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn validate_bind_group_descriptor_accepts_mixed_group_with_input_omitted() {
+        let device = noop_device();
+        let layout = device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![input_attachment_layout_entry(0), uniform_layout_entry(1)],
+            error: None,
+        });
+        let entries = vec![uniform_bind_group_entry(&device, 1)];
+
+        assert_eq!(
+            validate_bind_group_descriptor(&device, &layout, &entries, device.limits()),
+            None
+        );
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn validate_bind_group_descriptor_rejects_mixed_group_missing_non_input() {
+        let device = noop_device();
+        let layout = device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![input_attachment_layout_entry(0), uniform_layout_entry(1)],
+            error: None,
+        });
+
+        assert_eq!(
+            validate_bind_group_descriptor(&device, &layout, &[], device.limits()),
+            Some("bind group entry count must match bind group layout".to_owned())
+        );
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn validate_bind_group_descriptor_rejects_explicit_view_for_input_slot() {
+        let device = noop_device();
+        let layout = device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![input_attachment_layout_entry(0)],
+            error: None,
+        });
+        let view = noop_render_attachment(&device);
+        let entries = vec![BindGroupEntry {
+            binding: 0,
+            resource: BindGroupResource::TextureView {
+                texture_view: view,
+                device: Arc::new(device.clone()),
+            },
+        }];
+
+        assert_eq!(
+            validate_bind_group_descriptor(&device, &layout, &entries, device.limits()),
+            Some("bind group entry count must match bind group layout".to_owned())
         );
     }
 }
