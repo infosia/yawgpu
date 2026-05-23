@@ -14,8 +14,14 @@ int main(void) {
 #include "math.h"
 #include "stb_image_write.h"
 
-#include <strings.h>
+#include <string.h>
 #include <time.h>
+
+#if defined(_MSC_VER)
+#define strncasecmp _strnicmp
+#else
+#include <strings.h>
+#endif
 
 enum {
     WINDOW_WIDTH = 1024,
@@ -210,7 +216,9 @@ static void create_cube_vertices(Vertex vertices[VERTEX_COUNT], uint16_t indices
 
 static void set_shader_prefix(TiledDeferredApp *app, const char *argv0) {
     app->shader_prefix[0] = '\0';
-    const char *slash = strrchr(argv0, '/');
+    const char *fwd = strrchr(argv0, '/');
+    const char *bwd = strrchr(argv0, '\\');
+    const char *slash = (fwd && bwd) ? (fwd > bwd ? fwd : bwd) : (fwd ? fwd : bwd);
     if (!slash) {
         return;
     }
@@ -1189,7 +1197,7 @@ int main(int argc, char **argv) {
         ok = render_verify(&app);
     } else {
         ok = true;
-        for (uint32_t frame = 0; frame < 120 && !yawgpu_window_should_close(app.window); ++frame) {
+        while (!yawgpu_window_should_close(app.window)) {
             if (!render_window_frame(&app)) {
                 ok = false;
                 break;
