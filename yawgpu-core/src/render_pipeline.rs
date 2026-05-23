@@ -1640,14 +1640,17 @@ pub(crate) fn validate_color_targets(
         }
 
         if !skip_shader_outputs {
-            // For subpass-aware pipelines, the fragment's `@location(N)` uses
-            // the **flat MTL color-attachment index** (per the layout), not the
-            // subpass-relative index. Look up the shader output by that flat
-            // index when subpass color-attachment indices are supplied.
-            let location = subpass_color_attachment_indices
+            // Block 55 accepts both subpass-local and flat-slot `@location`
+            // conventions for subpass pipelines. Vulkan remaps the
+            // subpass-local index through VkRenderPass, while Metal's MSL
+            // path emits the flat color slot directly; HAL routing decides
+            // which convention is used at submission time.
+            let subpass_local = index as u32;
+            let flat = subpass_color_attachment_indices
                 .and_then(|indices| indices.get(index).copied())
-                .unwrap_or(index as u32);
-            match outputs.get(&location) {
+                .unwrap_or(subpass_local);
+            let output = outputs.get(&subpass_local).or_else(|| outputs.get(&flat));
+            match output {
                 Some(output) => validate_fragment_output_compat(*output, caps)?,
                 None if target.write_mask != 0 => {
                     return Err(
@@ -2082,6 +2085,52 @@ mod tests {
     }
 
     #[cfg(feature = "tiled")]
+    fn render_shader_module_with_fragment_location(
+        device: &crate::device::Device,
+        location: u32,
+    ) -> Arc<ShaderModule> {
+        Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(format!(
+                "@vertex
+             fn vs() -> @builtin(position) vec4<f32> {{
+                 return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+             }}
+
+             @fragment
+             fn fs() -> @location({location}) vec4<f32> {{
+                 return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+             }}"
+            ))),
+        )
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn validate_color_targets_subpass_accepts_both_location_conventions() {
+        let device = noop_device();
+        let limits = device.limits();
+        let subpass_slot_one = [1];
+
+        let subpass_local =
+            render_pipeline_descriptor(render_shader_module_with_fragment_location(&device, 0));
+        resolve_render_pipeline_descriptor(&subpass_local, limits, Some(&subpass_slot_one))
+            .expect("subpass-local fragment output should be accepted");
+
+        let flat_slot =
+            render_pipeline_descriptor(render_shader_module_with_fragment_location(&device, 1));
+        resolve_render_pipeline_descriptor(&flat_slot, limits, Some(&subpass_slot_one))
+            .expect("flat-slot fragment output should be accepted");
+
+        let missing_slot =
+            render_pipeline_descriptor(render_shader_module_with_fragment_location(&device, 3));
+        assert_eq!(
+            resolve_render_pipeline_descriptor(&missing_slot, limits, Some(&[2]))
+                .expect_err("unmatched fragment output should require writeMask 0"),
+            "render pipeline color target without shader output must use writeMask 0"
+        );
+    }
+
+    #[cfg(feature = "tiled")]
     #[test]
     fn subpass_input_shader_generates_spirv_and_msl_status_is_known() {
         let module = shader_naga::parse_and_validate_wgsl(&subpass_input_shader("f32"))
@@ -2092,21 +2141,18 @@ mod tests {
             .expect("subpass input fragment shader should generate SPIR-V");
         assert!(!spirv.is_empty());
 
-        let msl = module.generate_render_msl(
-            "vs",
-            "fs",
-            &shader_naga::MslBindingMap {
-                buffers: Vec::new(),
-            },
-            &[],
-            &[((0, 0), 0)],
-        );
-        if let Ok(msl) = msl {
-            assert!(msl.source.contains("[[color("));
-        } else {
-            // The pinned naga MSL backend needs a subpass color-slot map for
-            // global `subpass_input` values; B4 supplies that pass-local map.
-        }
+        let msl = module
+            .generate_render_msl(
+                "vs",
+                "fs",
+                &shader_naga::MslBindingMap {
+                    buffers: Vec::new(),
+                },
+                &[],
+                &[((0, 0), 0)],
+            )
+            .expect("naga must lower subpass_input when subpass_color_slots is populated");
+        assert!(msl.source.contains("[[color("));
     }
 
     #[cfg(feature = "tiled")]
