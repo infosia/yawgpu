@@ -267,3 +267,37 @@ The handoff above is **the** scope. Specifically:
   test. If anything in the spec rule
   (`specs/blocks/55-tiled-rendering.md` → "Fragment `@location(N)` …
   dual convention accepted") is unclear, **ask** rather than improvise.
+
+## Revision 2 (2026-05-23 — corrective record)
+
+Revision 1's framing — that the agent's submission was "off-scope" — was
+wrong. Root cause: the agent reads `HANDOFF.md` at the repo root (the
+workflow's actual dispatch surface), not embedded sections of
+`tracking/*.md`. The HANDOFF.md present at that moment described the
+"cdylib + Metal `enumerate_adapters` empty-return" task, complete with the
+`MTLCreateSystemDefaultDevice` + dedup-by-`registryID` analysis. The
+agent's submission was an exact implementation of THAT task. My
+orchestration error was twofold:
+
+1. I never wrote a HANDOFF.md for the C1/M1/m3 cascade-review work — only
+   embedded it in `phase-14-cascade-review.md`, where the agent does not
+   look. The agent had no way to know cascade-review work was the
+   intended next task.
+2. I then reviewed the agent's submission against the wrong document
+   (the embedded handoff) and discarded it.
+
+The discarded HAL fix has been restored in `ccf5c8f` after honest
+re-verification (`enumerate_adapters` example now correctly enumerates the
+Apple M2; Metal e2e tiled 5/5, hal Metal unit tests 26/26, all builds
+clean). `82212d9` is left in place for honesty.
+
+`phase-14.md` item #4's earlier "Metal-only resolved as sandbox" claim
+(commit `28d4ae8` / `7b7d13a`) was also incorrect — the underlying
+`MTLCopyAllDevices()` empty-return on Apple Silicon was a real cdylib bug,
+not a sandbox artifact. That tracking text is now corrected in the same
+phase-14.md commit that records this corrective record.
+
+The C1/M1/m3 work is now dispatched via a fresh `HANDOFF.md` containing
+the scope detailed above. A follow-up sub-task in the same HANDOFF.md
+covers the missing yawgpu-hal Metal dedup unit test that should have
+shipped with `ccf5c8f` per CLAUDE.md principle 1.

@@ -395,19 +395,31 @@ Pending separately (not Phase-14-blocking):
   not Phase-14-introduced, not Phase-14-blocking.
 - ~~cdylib + Metal `enumerate_adapters` empty-return on Apple Silicon
   (cargo-test/rlib unaffected; C examples on Mac silently fall back to Noop).~~
-  **Resolved 2026-05-23 (Metal only).** Same root cause as the Metal test
-  silent-skip: Claude Code's Bash sandbox was blocking `MTLCopyAllDevices()`
-  in spawned child processes; once a Metal-built C example is run with the
-  sandbox off, the cdylib enumerates Metal correctly. Confirmed by
-  `examples/tiled_deferred` on Metal printing `center pixel RGBA=(0,255,0,255) OK`
-  and writing a real green PNG — i.e. the C binary linked against
-  `libyawgpu.dylib` actually exercised real Metal rather than falling back to
-  Noop. **m2 caveat:** the silent-fallback to Noop in `wgpuCreateInstance`
-  (`yawgpu/src/ffi/instance.rs:31, 54`) is still present and bites Vulkan
-  the same way — the cdylib loads `libvulkan.dylib` at runtime, so without
-  `DYLD_LIBRARY_PATH=${VULKAN_SDK}/lib` the FFI silently selects Noop
-  (`backendType = Null`). See "C-example MoltenVK self-skip" below for the
-  Vulkan-side workaround in the example.
+  **Initial 28d4ae8 "sandbox-only resolved" claim was wrong; actually fixed
+  in `ccf5c8f` (2026-05-23).** The defect was real: `MTLCopyAllDevices()`
+  returns empty in a cdylib-loading C process that hasn't otherwise touched
+  Metal (no NSApplication / no prior device creation). The rlib/cargo-test
+  path was unaffected because libtest's harness incidentally warmed that
+  framework-internal state. `MTLCreateSystemDefaultDevice()` is unaffected
+  by it. Fix (per `HANDOFF.md`, implemented by the coding agent and applied
+  in `ccf5c8f`): seed `MetalInstance::enumerate_adapters` with
+  `MTLCreateSystemDefaultDevice()` then merge `MTLCopyAllDevices()` entries
+  deduplicated by `registryID`. Confirmed by `enumerate_adapters` C example
+  now reporting `device: Apple M2, backendType: 5` (was: `Noop, type=1`)
+  and `tiled_deferred` Metal still green. **m2 caveat (still open):** the
+  silent-fallback to Noop in `wgpuCreateInstance` itself
+  (`yawgpu/src/ffi/instance.rs:31, 54`) remains and bites Vulkan via the
+  `libvulkan.dylib` runtime-load path (no `DYLD_LIBRARY_PATH` → silent
+  `backendType = Null`); the C example self-skip in `03cb073` is the only
+  current mitigation. Separate follow-up. **Orchestration note:** my initial
+  28d4ae8 was based on observing that the `tiled_deferred` example happened
+  to enumerate Metal in one sandbox-off run; that single positive result
+  did not constitute proof — and indeed wasn't representative — so I
+  misattributed the prior failures to the sandbox alone. The agent's
+  HANDOFF.md analysis (process state, not sandbox) was correct from the
+  start; I then compounded the mistake by reviewing the agent's submission
+  against the wrong handoff document and rejecting it in `82212d9`. See
+  `phase-14-cascade-review.md` Revision 2 for the corrective record.
 - Vulkan adapter info doesn't report the real driver name; MoltenVK detection
   falls back to Apple-GPU heuristic.
 
