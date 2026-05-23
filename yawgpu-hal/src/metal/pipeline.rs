@@ -19,10 +19,15 @@ impl std::fmt::Debug for MetalComputePipeline {
 }
 
 /// Stores metal render pipeline data used by validation and backend submission.
+///
+/// `depth_stencil_state` is always populated: when the public descriptor opts
+/// out of depth-stencil, `create_render_pipeline` synthesizes a no-op state
+/// (`Always`, no write, no stencil) so the encoder never silently inherits a
+/// previous pipeline's depth-stencil state across draws.
 #[derive(Clone)]
 pub struct MetalRenderPipeline {
     pub(super) inner: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
-    pub(super) depth_stencil_state: Option<Retained<ProtocolObject<dyn MTLDepthStencilState>>>,
+    pub(super) depth_stencil_state: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     pub(super) primitive_topology: HalPrimitiveTopology,
 }
 
@@ -33,10 +38,6 @@ impl std::fmt::Debug for MetalRenderPipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MetalRenderPipeline")
             .field("primitive_topology", &self.primitive_topology)
-            .field(
-                "has_depth_stencil_state",
-                &self.depth_stencil_state.is_some(),
-            )
             .finish()
     }
 }
@@ -157,8 +158,8 @@ pub(super) fn create_render_pipeline(
     // fullscreen triangles in tiled_deferred specifically lose to the
     // gbuffer subpass's previously written depth values).
     let depth_stencil_state = match descriptor.depth_stencil {
-        Some(depth_stencil) => Some(create_depth_stencil_state(device, depth_stencil)?),
-        None => Some(create_noop_depth_stencil_state(device)),
+        Some(depth_stencil) => create_depth_stencil_state(device, depth_stencil)?,
+        None => create_noop_depth_stencil_state(device)?,
     };
     Ok(MetalRenderPipeline {
         inner,
@@ -169,13 +170,13 @@ pub(super) fn create_render_pipeline(
 
 fn create_noop_depth_stencil_state(
     device: &ProtocolObject<dyn MTLDevice>,
-) -> Retained<ProtocolObject<dyn MTLDepthStencilState>> {
+) -> Result<Retained<ProtocolObject<dyn MTLDepthStencilState>>, HalError> {
     let descriptor = MTLDepthStencilDescriptor::new();
     descriptor.setDepthCompareFunction(MTLCompareFunction::Always);
     descriptor.setDepthWriteEnabled(false);
     device
         .newDepthStencilStateWithDescriptor(&descriptor)
-        .expect("no-op MTLDepthStencilState creation cannot fail")
+        .ok_or_else(|| shader_error("no-op MTLDepthStencilState creation failed".to_owned()))
 }
 
 fn create_depth_stencil_state(

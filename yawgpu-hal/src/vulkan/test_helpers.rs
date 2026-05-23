@@ -56,6 +56,7 @@ pub(crate) fn sampler_descriptor() -> HalSamplerDescriptor {
 pub(crate) fn render_descriptor() -> HalRenderPipelineDescriptor {
     HalRenderPipelineDescriptor {
         color_formats: vec![HalTextureFormat::Rgba8Unorm],
+        depth_stencil: None,
         vertex_buffers: Vec::new(),
         primitive_topology: HalPrimitiveTopology::TriangleList,
     }
