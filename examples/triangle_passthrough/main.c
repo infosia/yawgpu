@@ -229,12 +229,12 @@ static WGPUShaderModule create_msl_module(PassthroughApp *app, const char *name)
 
     // Two entry points for this example's red triangle: vertex `vs_main`
     // and fragment `fs_main`. `workgroupSize` is only meaningful for
-    // compute (`WGPUShaderStage_Compute`); leave it zeroed for graphics
-    // stages. We zero-initialize the struct explicitly because the
-    // `YAWGPU_MSL_ENTRY_POINT_INIT` macro has commas inside `{0, 0, 0}`
-    // that the C preprocessor can't disambiguate when expanded inside a
-    // larger arg list.
-    YaWGPUMslEntryPoint entries[2] = {0};
+    // compute (`WGPUShaderStage_Compute`); the `_INIT` macro leaves it
+    // zeroed which is exactly what we want for graphics stages.
+    YaWGPUMslEntryPoint entries[2] = {
+        YAWGPU_MSL_ENTRY_POINT_INIT,
+        YAWGPU_MSL_ENTRY_POINT_INIT,
+    };
     entries[0].name = yawgpu_string_view("vs_main");
     entries[0].stage = WGPUShaderStage_Vertex;
     entries[1].name = yawgpu_string_view("fs_main");
