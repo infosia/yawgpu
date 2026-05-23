@@ -301,3 +301,35 @@ The C1/M1/m3 work is now dispatched via a fresh `HANDOFF.md` containing
 the scope detailed above. A follow-up sub-task in the same HANDOFF.md
 covers the missing yawgpu-hal Metal dedup unit test that should have
 shipped with `ccf5c8f` per CLAUDE.md principle 1.
+
+## Revision 2 → done (`2543abf`)
+
+Second submission matched the HANDOFF.md scope exactly. Files changed:
+`yawgpu-core/src/render_pipeline.rs`, `yawgpu/tests/e2e_vulkan_tiled.rs`,
+`yawgpu-hal/src/metal/mod.rs` (precisely the three allowed). Acceptance:
+
+| Gate | Before | After |
+|---|---|---|
+| `cargo test -p yawgpu-core --features tiled --lib subpass::` | 5 passed; 2 failed | **7 passed; 0 failed** |
+| `cargo test -p yawgpu-hal --features metal -- --ignored` | 26 passed | **27 passed** (+ `metal_enumerate_adapters_returns_dedup_set_with_registry_id`) |
+| `e2e_metal_tiled` (`--ignored`, sandbox off) | 5/5 | 5/5 (no regression) |
+| `e2e_vulkan_tiled` (`--ignored`, MoltenVK) | 3 run + 1 self-skip | 3 run + 1 self-skip (no regression) |
+| `clippy --workspace --features yawgpu/tiled -D warnings` | clean | clean |
+| `clippy --workspace -D warnings` (default) | clean | clean |
+| `clippy -p yawgpu-hal --features metal -D warnings` | clean | clean |
+
+CRITICAL C1 closed. MAJOR M1 closed. MINOR m3 closed (m1, m2 closed by
+Claude in the prior tracking commits). No CRITICAL/MAJOR remain.
+
+### Open items before Phase 14 can be re-declared COMPLETE
+
+- **Native-Vulkan re-verification of the cascade + C1 fix on a real
+  driver** (Windows / Linux; MoltenVK self-skips
+  `vulkan_two_subpass_draw_subpass_load_readback`). Prior native-Vulkan
+  run was `1cd0a0c`, which predates this cascade and the C1 dual-convention
+  fix; the spec rule in `specs/blocks/55-tiled-rendering.md` ("dual
+  convention accepted") must be exercised on a real Vulkan driver before
+  re-COMPLETE. **Owner: user; not blockable on this M2.**
+- The `wgpuCreateInstance` silent-fallback-to-Noop on Vulkan
+  (`DYLD_LIBRARY_PATH` issue tracked in m2). Separate follow-up; not a
+  Phase 14 cascade blocker.
