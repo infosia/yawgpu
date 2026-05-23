@@ -300,6 +300,25 @@ defined when a real backend implementation lands.
   Metal implicit `[[color(N)]]`). The caller never creates a bind group or
   supplies a view for an input attachment. The `(group, binding)` pair uniquely
   identifies the shader binding (resolves the earlier ambiguity).
+- **Fragment `@location(N)` on subpass pipelines: dual convention accepted.**
+  naga lowers `@location` differently per backend, so the WGSL author has two
+  valid choices and yawgpu's validation must accept either (the HAL is the
+  authority on routing):
+  - **Vulkan (subpass-local).** WGSL writes the *subpass-local* index
+    starting from 0 (e.g. a subpass with `color_attachment_indices = [1]`
+    accepts `@location(0)`). naga's SPIR-V backend emits `Location 0` and
+    `VkRenderPass` remaps it to the flat attachment slot.
+  - **Metal (flat slot).** naga's MSL backend does **not** subpass-remap; the
+    WGSL must write the *flat MTL slot* directly (the same subpass accepts
+    `@location(1)`).
+  - **Validation rule.** For a subpass pipeline's fragment target at
+    subpass-local index `i`, the shader is valid if it writes either
+    `@location(i)` *or* `@location(layout.color_attachment_indices[i])`. A
+    pipeline that needs to support both backends from a single WGSL source
+    therefore needs two fragment entry points (cf. `mgpu/examples/hello_deferred`
+    and `yawgpu/tests/e2e_metal_tiled.rs` — `fs` for Vulkan, `fs_metal` for
+    Metal). The example `examples/tiled_deferred` picks the entry by
+    `WGPUAdapterInfo.backendType` at runtime.
 - **Multi-subpass execution.** Vulkan: `vkCmdBeginRenderPass` (multi-subpass
   `VkRenderPass` from the layout) → `vkCmdNextSubpass` → `vkCmdEndRenderPass`.
   Metal: a single `MTLRenderCommandEncoder` state machine; `next_subpass`
