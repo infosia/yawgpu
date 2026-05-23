@@ -183,6 +183,9 @@ fn suppress_moltenvk_probe_logs() {
 }
 
 unsafe fn adapter_is_moltenvk(adapter: native::WGPUAdapter) -> bool {
+    // Kept in sync with `examples/tiled_deferred/main.c::adapter_is_moltenvk`.
+    // Both implementations look for "molten" or "apple" (case-insensitive)
+    // in vendor/device/description; future edits should update both sides.
     let mut info = zeroed_adapter_info();
     if yawgpu::wgpuAdapterGetInfo(adapter, &mut info) != native::WGPUStatus_Success {
         return false;

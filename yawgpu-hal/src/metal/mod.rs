@@ -172,6 +172,25 @@ mod tests {
     #[test]
     #[ignore = "manual real Metal backend test"]
     #[cfg(feature = "metal")]
+    fn metal_enumerate_adapters_returns_dedup_set_with_registry_id() {
+        let adapters = MetalInstance::new()
+            .expect("create Metal instance")
+            .enumerate_adapters();
+        assert!(!adapters.is_empty());
+
+        let mut registry_ids = std::collections::BTreeSet::new();
+        for adapter in &adapters {
+            assert!(
+                registry_ids.insert(adapter.registry_id()),
+                "duplicate Metal registry ID"
+            );
+        }
+        assert_ne!(adapters[0].registry_id(), 0);
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
     fn metal_adapter_new_captures_device_name() {
         let adapter = MetalInstance::new()
             .expect("create Metal instance")
