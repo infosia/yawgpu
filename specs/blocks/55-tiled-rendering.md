@@ -319,6 +319,57 @@ defined when a real backend implementation lands.
     and `yawgpu/tests/e2e_metal_tiled.rs` — `fs` for Vulkan, `fs_metal` for
     Metal). The example `examples/tiled_deferred` picks the entry by
     `WGPUAdapterInfo.backendType` at runtime.
+- **Reference example (`examples/tiled_deferred`) — deferred-shading demo.**
+  yawgpu's flagship tiled-rendering demo mirrors the wgpu reference example
+  `wgpu-tiled/examples/features/src/deferred_rendering` (in
+  `../wgpu/examples/features/src/deferred_rendering` for this fork).
+  Target shape:
+  - **Three subpasses** in one render pass:
+    1. **G-Buffer** — instanced 5×5 cube grid, writes `albedo` (`Rgba8Unorm`)
+       + `world_normal+depth` (`Rgba16Float`) with depth testing
+       (`Depth32Float`, `LessEqual`, write-enabled).
+    2. **Lighting** — fullscreen triangle, reads `albedo` + `normal` as
+       subpass inputs, Blinn-Phong with 4 orbiting point lights +
+       hemisphere ambient, reconstructs world position from depth + inverse
+       view-proj, writes HDR result to `Rgba16Float`.
+    3. **Composite** — fullscreen triangle, reads HDR via subpass input,
+       Reinhard tonemap, writes to the swapchain (sRGB / linear converted
+       in hardware).
+  - **WGSL in three separate files** `gbuffer.wgsl`, `lighting.wgsl`,
+    `composite.wgsl`, copied verbatim from the wgpu reference (CMake's
+    `add_custom_command` POST_BUILD copies them next to the binary, mirroring
+    `examples/triangle`). The lighting + composite fragments use the
+    **subpass-local convention** (`@location(0)`) so a single WGSL source
+    works for both Vulkan and Metal — the cascade `validate_color_targets`
+    accepts either convention; the WGSL author picks the subpass-local form
+    for portability.
+  - **Two run modes** controlled by the `--verify` CLI flag:
+    - **Default (windowed demo).** Open a GLFW window (Metal `CAMetalLayer`
+      or Vulkan `VK_KHR_*_surface`), configure a swapchain on the surface,
+      run the main loop with animated camera + lights (orbiting on
+      sub-second-of-day clock) until the user closes the window.
+    - **`--verify`** (CI/regression). Render exactly one frame at `time = 0.0`
+      to an offscreen `Rgba8Unorm` texture (skip the window), copy to a
+      readback buffer, and inspect the center pixel: assert it represents
+      a lit cube (alpha > 0, non-zero RGB) rather than the cleared
+      background. Also writes the frame to `tiled_deferred.png` for visual
+      inspection. The verify mode is the load-bearing
+      "deferred-pipeline-actually-ran" check; it is what cargo-style CI
+      gates would call once the C example becomes part of an automated
+      gate.
+  - **Scene values are verbatim from the wgpu reference** so the two
+    examples produce visually equivalent output: 5×5 cube grid with spacing
+    3.0, eye orbits at radius 12 + offset (0, 8, 15), `frac_pi_4` fovy,
+    near/far 0.1/100.0, light positions/intensities exactly as in the
+    reference's `LightParams` write.
+  - **No depth-format transient attachments yet** (B2 follow-up;
+    `examples/tiled_deferred` allocates a regular `RENDER_ATTACHMENT` depth
+    texture, like the wgpu reference). When B2's depth-transient gap closes,
+    the example switches to `transient` for the depth + g-buffer + HDR slots
+    and only the swapchain target stays persistent.
+  - **Math** (Mat4 / Vec3 / look_at / perspective / inverse) lives in a
+    tiny `examples/tiled_deferred/math.h` (or inline at the top of `main.c`)
+    — minimal C helpers, no third-party math dependency.
 - **Multi-subpass execution.** Vulkan: `vkCmdBeginRenderPass` (multi-subpass
   `VkRenderPass` from the layout) → `vkCmdNextSubpass` → `vkCmdEndRenderPass`.
   Metal: a single `MTLRenderCommandEncoder` state machine; `next_subpass`
