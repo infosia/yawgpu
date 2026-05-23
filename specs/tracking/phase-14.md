@@ -395,13 +395,19 @@ Pending separately (not Phase-14-blocking):
   not Phase-14-introduced, not Phase-14-blocking.
 - ~~cdylib + Metal `enumerate_adapters` empty-return on Apple Silicon
   (cargo-test/rlib unaffected; C examples on Mac silently fall back to Noop).~~
-  **Resolved 2026-05-23.** Same root cause as the Metal test silent-skip:
-  Claude Code's Bash sandbox was blocking `MTLCopyAllDevices()` in spawned
-  child processes; once a Metal-built C example is run with the sandbox off,
-  the cdylib enumerates Metal correctly. Confirmed by `examples/tiled_deferred`
-  on Metal printing `center pixel RGBA=(0,255,0,255) OK` and writing a real
-  green PNG — i.e. the C binary linked against `libyawgpu.dylib` actually
-  exercised real Metal rather than falling back to Noop.
+  **Resolved 2026-05-23 (Metal only).** Same root cause as the Metal test
+  silent-skip: Claude Code's Bash sandbox was blocking `MTLCopyAllDevices()`
+  in spawned child processes; once a Metal-built C example is run with the
+  sandbox off, the cdylib enumerates Metal correctly. Confirmed by
+  `examples/tiled_deferred` on Metal printing `center pixel RGBA=(0,255,0,255) OK`
+  and writing a real green PNG — i.e. the C binary linked against
+  `libyawgpu.dylib` actually exercised real Metal rather than falling back to
+  Noop. **m2 caveat:** the silent-fallback to Noop in `wgpuCreateInstance`
+  (`yawgpu/src/ffi/instance.rs:31, 54`) is still present and bites Vulkan
+  the same way — the cdylib loads `libvulkan.dylib` at runtime, so without
+  `DYLD_LIBRARY_PATH=${VULKAN_SDK}/lib` the FFI silently selects Noop
+  (`backendType = Null`). See "C-example MoltenVK self-skip" below for the
+  Vulkan-side workaround in the example.
 - Vulkan adapter info doesn't report the real driver name; MoltenVK detection
   falls back to Apple-GPU heuristic.
 
@@ -482,14 +488,26 @@ went to the G-buffer base color slot instead of the output color slot.
 **Honest re-verification result (sandbox disabled, this M2):**
 - Phase 14 Metal tiled e2e: **5/5 passed**, 0 ignored — incl. real
   `metal_two_subpass_draw_subpass_load_readback` center-pixel = (0,255,0,255).
-- Phase 14 MoltenVK Vulkan tiled e2e: **4/4 passed**, 0 ignored — no
-  regression from the validation thread-through.
+- Phase 14 MoltenVK Vulkan tiled e2e: **3 run + 1 self-skip on MoltenVK**
+  (`vulkan_two_subpass_draw_subpass_load_readback` self-skips via
+  `adapter_is_moltenvk`; cargo's "4 passed" output therefore does NOT mean
+  the 2-subpass center-pixel check was re-verified post-cascade). Native
+  Vulkan re-verification (Windows / Linux with a real driver) is **still
+  owed** before re-COMPLETE — the prior native-Vulkan run (commit `1cd0a0c`)
+  predates this cascade.
 - Phase 13 A4 Metal MSL passthrough e2e: **2/2 passed** — confirms the
   `create_render_pipeline` slot-iteration change didn't regress non-subpass.
 - Phase 13 Vulkan SPIR-V passthrough e2e: **2/2 passed**.
 - `examples/tiled_deferred` on Metal: prints
   `center pixel RGBA=(0,255,0,255) OK` and writes a green PNG.
 - Default + `--features tiled` `cargo test` / `clippy -D warnings`: green.
+  **Caveat (m1):** that gate covered the cdylib path but not
+  `cargo test -p yawgpu-core --features tiled --lib subpass::`, which was
+  later confirmed FAILING on this cascade (see
+  `phase-14-cascade-review.md` C1). A workspace-level
+  `cargo test --features yawgpu/tiled` would have caught it; pre-merge gate
+  ran without `tiled` features so the subpass tests under
+  `#[cfg(feature = "tiled")]` never executed.
 - 7 backend `--tests` configs (default / metal / vulkan / metal,tiled /
   vulkan,tiled / metal,mobile / vulkan,mobile): all compile, 0 errors.
 

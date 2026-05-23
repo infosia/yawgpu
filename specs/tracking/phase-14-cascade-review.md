@@ -106,8 +106,10 @@ All five findings are kept (no false positives).
   `@location(layout.color_attachment_indices[i])`").
 
 The corresponding `validate_color_targets` logic + tests are the coding
-agent's work (handoff below). Tracking-doc minors (m1, m2) and the C-side
-cross-link (m3) are Claude's because they live in `specs/` / docs.
+agent's work (handoff below). Tracking-doc minors **m1 and m2 are Claude's**
+(they live in `specs/tracking/phase-14.md`). **m3 (reciprocal cross-link
+comment in `yawgpu/tests/e2e_vulkan_tiled.rs`) is the coding agent's** —
+it touches test code; bundled into the same handoff.
 
 ## Handoff — coding agent (CRITICAL + MAJOR fix)
 
@@ -169,6 +171,11 @@ Produce (production code):
    once with WGSL `@location(0)` against `color_attachment_indices=[1]` (Vulkan
    convention), once with WGSL `@location(1)` against the same
    `color_attachment_indices=[1]` (Metal convention) — and assert both `Ok`.
+
+4. **m3 cross-link comment** in `yawgpu/tests/e2e_vulkan_tiled.rs:185-200`
+   (`adapter_is_moltenvk`): add a one-line comment noting the heuristic is
+   intentionally mirrored in `examples/tiled_deferred/main.c::adapter_is_moltenvk`
+   so future edits stay in sync. Doc-only; no behaviour change.
 
 Out of scope: HAL changes, real-backend changes, spec edits, commits, any
 change to the cascade's commit history.
