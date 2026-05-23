@@ -8,6 +8,12 @@ FFI talk to the GPU through the standard WebGPU interface — the same
 that browsers expose to WebAssembly — without a browser, a JavaScript engine,
 or a web runtime.
 
+On top of the standard `webgpu.h`, yawgpu ships a small companion header
+[`yawgpu.h`](yawgpu/ffi/webgpu-headers/yawgpu.h) that adds vendor extensions
+for backend selection, precompiled-shader passthrough (SPIR-V / MSL), and
+tile-based deferred rendering (subpasses, transient attachments, framebuffer
+fetch). See **[Vendor extensions](#vendor-extensions-yawgpuh)** below.
+
 ## What makes it different
 
 yawgpu implements the **entire** WebGPU stack itself:
@@ -38,6 +44,7 @@ yawgpu is a small Cargo workspace of layered crates:
 ```
         C / C++ application
                 │  webgpu.h  (standard WebGPU C ABI)
+                │  yawgpu.h  (vendor extensions)
                 ▼
 ┌───────────────────────────────────────────────┐
 │ yawgpu        C ABI layer                       │  cdylib + staticlib + rlib
@@ -76,13 +83,132 @@ yawgpu is a small Cargo workspace of layered crates:
 
 OpenGL/GLES and Direct3D are intentionally out of scope.
 
-A backend is chosen at instance-creation time through a small vendor
-extension chained onto `WGPUInstanceDescriptor` — applications that only ever
-want validation can run entirely on Noop with no GPU present.
+A backend is chosen at instance-creation time through `YaWGPUInstanceBackendSelect`
+(see below) — applications that only ever want validation can run entirely
+on Noop with no GPU present.
+
+## Vendor extensions (`yawgpu.h`)
+
+`yawgpu.h` is a companion header that sits next to `webgpu.h` and exposes
+the yawgpu-specific surface area. It follows a strict naming convention so
+that vendor symbols never collide with the standard WebGPU C API:
+
+| Kind | Prefix | Example |
+|---|---|---|
+| Functions | `yawgpu*` | `yawgpuDeviceCreateShaderModuleSpirV` |
+| Types / structs / enums / handles | `YaWGPU*` | `YaWGPUTransientAttachment` |
+| Constants / macros / SType tags | `YAWGPU_*` / `YAWGPU_STYPE_*` | `YAWGPU_STYPE_INSTANCE_BACKEND_SELECT` |
+| Feature names | `YaWGPUFeatureName_*` | `YaWGPUFeatureName_MultiSubpass` |
+
+Every descriptor ships a matching `YAWGPU_*_INIT` zero/sentinel initializer
+macro, mirroring `webgpu.h` ergonomics. Each extension is gated by an
+opt-in Cargo feature; the default build only exposes the standard WebGPU C
+API plus backend selection.
+
+| Cargo feature | What it adds | Header guard |
+|---|---|---|
+| *(none — always on)* | Backend selection via `YaWGPUInstanceBackendSelect` | — |
+| `shader-passthrough` | Raw SPIR-V / MSL shader modules, bypassing WGSL→naga | `YAWGPU_HAS_SHADER_PASSTHROUGH` |
+| `tiled` | TBDR primitives: subpasses, transient attachments, framebuffer fetch | `YAWGPU_HAS_TILED` |
+| `mobile` | Aggregate of `shader-passthrough` + `tiled` for mobile GPU targets | both guards |
+
+### Backend selection (always available)
+
+Chain `YaWGPUInstanceBackendSelect` onto `WGPUInstanceDescriptor` to pick
+which backend the instance will create:
+
+```c
+#include "webgpu.h"
+#include "yawgpu.h"
+
+YaWGPUInstanceBackendSelect sel = {
+    .chain   = { .sType = YAWGPU_STYPE_INSTANCE_BACKEND_SELECT },
+    .backend = YAWGPU_INSTANCE_BACKEND_METAL,   /* or _VULKAN, _NOOP */
+};
+WGPUInstanceDescriptor desc = { .nextInChain = &sel.chain };
+WGPUInstance instance = wgpuCreateInstance(&desc);
+```
+
+The same effect is available via the `YAWGPU_BACKEND` environment variable
+that the bundled C examples use.
+
+### Shader passthrough — `shader-passthrough`
+
+Engines that already ship native shader bytes (a `.spv` blob for Vulkan, an
+MSL source string for Metal) can hand them straight to yawgpu rather than
+authoring WGSL. The default pipeline path always goes through naga; this
+extension keeps the caller's bytes intact and only uses naga's reflection
+to recover the metadata pipeline creation needs.
+
+```c
+/* Vulkan: SPIR-V words go in; naga reflects entry points and bindings. */
+YaWGPUShaderModuleSpirVDescriptor spv = YAWGPU_SHADER_MODULE_SPIRV_DESCRIPTOR_INIT;
+spv.codeSize = word_count;
+spv.code     = spirv_words;
+WGPUShaderModule m = yawgpuDeviceCreateShaderModuleSpirV(device, &spv);
+
+/* Metal: caller supplies MSL source + entry-point metadata. The pipeline
+   layout drives the Metal binding-index mapping documented in yawgpu.h. */
+YaWGPUMslEntryPoint entries[] = {
+    { .name = { .data = "vs_main", .length = 7 }, .stage = WGPUShaderStage_Vertex   },
+    { .name = { .data = "fs_main", .length = 7 }, .stage = WGPUShaderStage_Fragment },
+};
+YaWGPUShaderModuleMslDescriptor msl = YAWGPU_SHADER_MODULE_MSL_DESCRIPTOR_INIT;
+msl.code            = (WGPUStringView){ msl_src, msl_src_len };
+msl.entryPoints     = entries;
+msl.entryPointCount = 2;
+WGPUShaderModule m = yawgpuDeviceCreateShaderModuleMsl(device, &msl);
+```
+
+`examples/triangle_passthrough` exercises both paths on the same triangle
+program.
+
+### Tiled rendering — `tiled`
+
+On tile-based deferred renderers (Apple GPUs; mobile Vulkan on Adreno /
+Mali / PowerVR) a multi-pass G-buffer pipeline can keep intermediate
+attachments **in tile memory** instead of round-tripping to system RAM.
+WebGPU's core API has no concept of subpasses or transient attachments;
+this extension exposes them as additive vendor entry points.
+
+The shape is:
+
+- **Capabilities** — `yawgpuAdapterGetTiledCapabilities` reports
+  `maxSubpasses`, `maxSubpassColorAttachments`, `maxInputAttachments`, and
+  an `estimatedTileMemoryBytes` hint. Three vendor feature names
+  (`YaWGPUFeatureName_MultiSubpass`, `_TransientAttachments`,
+  `_ShaderFramebufferFetch`) plug into the standard
+  `wgpuAdapterHasFeature` / `WGPUDeviceDescriptor.requiredFeatures` flow.
+- **Transient attachments** — `YaWGPUTransientAttachment` is a first-class
+  Arc resource with no DRAM backing (`VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT`
+  + `LAZILY_ALLOCATED` on Vulkan; `MTLStorageModeMemoryless` on Metal).
+  It is only legal as a slot inside a subpass render pass — never bound
+  through a bind group.
+- **Subpass pass layout** — a reusable `YaWGPUSubpassPassLayout`
+  describes attachment formats, per-subpass usage, input-attachment source
+  mapping, and dependencies once; both pipeline creation and pass begin
+  reference it. This is the single source of truth for Vulkan
+  `VkRenderPass` compatibility.
+- **Subpass-aware render pipelines** — `yawgpuDeviceCreateSubpassRenderPipeline`
+  wraps `WGPURenderPipelineDescriptor` with a `(passLayout, subpassIndex)`
+  pair.
+- **Subpass-input bindings** — chain `YaWGPUInputAttachmentBindingLayout`
+  onto a bind-group-layout entry to mark a `(group, binding)` as an input
+  attachment. The *resource* feeding it is wired automatically from the
+  pass layout's source mapping; the caller never creates a bind group or
+  view for it.
+- **Subpass render pass encoder** — `yawgpuCommandEncoderBeginSubpassRenderPass`
+  → record draws → `yawgpuSubpassRenderPassEncoderNextSubpass` → more
+  draws → `…End`. Mirrors the WebGPU render-pass-encoder shape with a
+  `nextSubpass` step in the middle.
+
+`examples/tiled_deferred` records a two-subpass offscreen pass (G-buffer →
+lighting) that reads the G-buffer through a subpass input from tile
+memory, then copies the persistent output to a PNG.
 
 ## Using it from C
 
-Build the library and link against it with the vendored header:
+Build the library and link against it with the vendored headers:
 
 ```sh
 # Noop-only (no GPU dependencies)
@@ -91,11 +217,16 @@ cargo build -p yawgpu --release
 # with a real backend
 cargo build -p yawgpu --release --features metal      # Apple
 cargo build -p yawgpu --release --features vulkan     # Vulkan / MoltenVK
+
+# with vendor extensions
+cargo build -p yawgpu --release --features "vulkan tiled"
+cargo build -p yawgpu --release --features "metal mobile"   # = shader-passthrough + tiled
 ```
 
 This produces `libyawgpu.{a,dylib,so}` (and a Windows `.dll`). Include
-`yawgpu/ffi/webgpu-headers/webgpu.h`, link the library, and call the standard
-`wgpu*` functions.
+`yawgpu/ffi/webgpu-headers/webgpu.h` (and `yawgpu.h` for the vendor
+extensions), link the library, and call the standard `wgpu*` /
+`yawgpu*` functions.
 
 ## Using it from Rust
 
@@ -106,36 +237,62 @@ generated bindings are exposed under `yawgpu::native`, and the
 ## Examples
 
 The `examples/` directory contains small **C programs** built with CMake that
-link against `libyawgpu` and exercise the C ABI:
+link against `libyawgpu` and exercise both the standard `webgpu.h` and the
+`yawgpu.h` vendor extensions:
 
-| Example | What it shows |
-|---|---|
-| `enumerate_adapters` | Listing adapters and their properties |
-| `device_info` | Querying adapter/device limits and features |
-| `compute` | A storage-buffer compute dispatch with readback |
-| `capture` | Offscreen render → texture → buffer readback → PNG file |
-| `surface_smoke` | Opening a window and presenting cleared frames |
-| `triangle` | A classic windowed triangle (vertex-index shader) |
-| `hello_triangle` | A windowed triangle fed from a vertex buffer |
+| Example | What it shows | Requires |
+|---|---|---|
+| `enumerate_adapters` | Listing adapters and their properties | core |
+| `device_info` | Querying adapter/device limits and features | core |
+| `compute` | A storage-buffer compute dispatch with readback | core |
+| `capture` | Offscreen render → texture → buffer readback → PNG file | core |
+| `surface_smoke` | Opening a window and presenting cleared frames | core |
+| `triangle` | A classic windowed triangle (vertex-index shader) | core |
+| `hello_triangle` | A windowed triangle fed from a vertex buffer | core |
+| `triangle_passthrough` | The same triangle driven from precompiled SPIR-V and MSL | `shader-passthrough` |
+| `tiled_deferred` | Two-subpass G-buffer + lighting with a tile-memory input attachment | `tiled` (Metal / native Vulkan; not MoltenVK) |
+
+Pick a backend at runtime with `YAWGPU_BACKEND`:
 
 ```sh
-brew install cmake glfw          # windowed examples need GLFW
+# macOS
+brew install cmake glfw
 cmake -S examples -B examples/build
 cmake --build examples/build
 
-# pick a backend at runtime
 YAWGPU_BACKEND=metal  ./examples/build/triangle/triangle
 YAWGPU_BACKEND=vulkan ./examples/build/compute/compute
+
+# extensions: pass YAWGPU_EXTENSIONS as a CMake cache string
+cmake -S examples -B examples/build-tiled \
+      -DYAWGPU_FEATURE=metal -DYAWGPU_EXTENSIONS="tiled"
+cmake --build examples/build-tiled
 ```
+
+On Windows (MSVC + Vulkan SDK):
+
+```powershell
+cmake -S examples -B examples/build -DYAWGPU_FEATURE=vulkan
+cmake --build examples/build
+$env:YAWGPU_BACKEND = "vulkan"
+examples\build\triangle\Debug\triangle.exe
+```
+
+Windowed examples use GLFW on macOS and native Win32 on Windows. See
+[`examples/README.md`](examples/README.md) for the full build matrix.
 
 The C sources are written to modern C17 (strict ISO, no compiler
 extensions).
 
 ## Shaders
 
-Shaders are authored in **WGSL** and compiled at pipeline-creation time by
-naga into the backend's native language — Metal Shading Language for Metal,
-SPIR-V for Vulkan.
+By default, shaders are authored in **WGSL** and compiled at pipeline-creation
+time by naga into the backend's native language — Metal Shading Language
+for Metal, SPIR-V for Vulkan.
+
+With the `shader-passthrough` extension, callers can also hand precompiled
+SPIR-V or MSL straight to the backend; see
+[Shader passthrough](#shader-passthrough--shader-passthrough) above.
 
 ## Quality
 
@@ -145,12 +302,15 @@ SPIR-V for Vulkan.
 - **Unit-tested public API**: every public function across the three crates
   has a direct unit test.
 - **Real-GPU end-to-end tests**: buffer/texture/compute/render paths are
-  verified against live Metal and Vulkan devices.
+  verified against live Metal and Vulkan devices, including the tiled
+  two-subpass G-buffer path.
 - **Platform coverage**:
   - **macOS** — builds, unit tests, real-GPU end-to-end tests, and the C
-    examples all verified (Metal and Vulkan/MoltenVK).
-  - **Windows (MSVC)** — builds and passes the full unit-test suite; the C
-    examples are not yet verified on this platform.
+    examples all verified (Metal and Vulkan/MoltenVK; MoltenVK does not
+    support the native subpass-input read path used by `tiled_deferred`).
+  - **Windows (MSVC)** — builds and passes the full unit-test suite; the
+    windowed and tiled C examples are runtime-verified against native
+    Vulkan drivers.
 
 ## License
 
