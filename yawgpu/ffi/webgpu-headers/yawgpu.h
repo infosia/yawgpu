@@ -49,7 +49,7 @@ typedef struct YaWGPUMslEntryPoint {
 #define YAWGPU_MSL_ENTRY_POINT_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUMslEntryPoint, { \
     /*.name=*/WGPU_STRING_VIEW_INIT _wgpu_COMMA \
     /*.stage=*/WGPUShaderStage_None _wgpu_COMMA \
-    /*.workgroupSize=*/{0, 0, 0} _wgpu_COMMA \
+    /*.workgroupSize=*/{0 _wgpu_COMMA 0 _wgpu_COMMA 0} _wgpu_COMMA \
 })
 
 typedef struct YaWGPUShaderModuleMslDescriptor {
