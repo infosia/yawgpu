@@ -379,8 +379,20 @@ with the tightened center-pixel assertion → **green pass**; MoltenVK
 CRITICAL/MAJOR → **Phase 14 COMPLETE**.
 
 Pending separately (not Phase-14-blocking):
-- Native Vulkan (Windows) re-verification of MAJOR 1/2/3 effects on a real
-  driver (the user's existing native-Vulkan verification workflow).
+- ~~Native Vulkan (Windows) re-verification of MAJOR 1/2/3 effects on a real
+  driver~~ — **DONE 2026-05-23.** `cargo test -p yawgpu --features vulkan,tiled
+  --no-fail-fast -- --ignored` with `VK_LAYER_KHRONOS_validation`: tiled e2e
+  **4/4 passed with zero validation errors** in the tiled section
+  (`vulkan_tiled_features_and_capabilities_are_advertised`,
+  `vulkan_explicit_transient_attachment_allocates_without_device_error`,
+  `vulkan_clear_only_subpass_pass_submits_without_device_error`,
+  `vulkan_two_subpass_draw_subpass_load_readback` → **green** center-pixel).
+  MAJOR 1 (extension-enable for ShaderFramebufferFetch path), MAJOR 2 (Metal
+  union — N/A on Vulkan), and MAJOR 3 (depth load/store op mapping) all hold
+  on a real driver. Surfaced a separate set of pre-existing non-tiled Vulkan
+  buffer/texture VUIDs (UNIFORM/STORAGE/VERTEX buffer-usage bits and image-view
+  usage on transfer-only images) — tracked in [vulkan-buffer-texture-usage-vuids.md](vulkan-buffer-texture-usage-vuids.md);
+  not Phase-14-introduced, not Phase-14-blocking.
 - cdylib + Metal `enumerate_adapters` empty-return on Apple Silicon
   (cargo-test/rlib unaffected; C examples on Mac silently fall back to Noop).
 - Vulkan adapter info doesn't report the real driver name; MoltenVK detection
