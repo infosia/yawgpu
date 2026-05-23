@@ -393,8 +393,15 @@ Pending separately (not Phase-14-blocking):
   buffer/texture VUIDs (UNIFORM/STORAGE/VERTEX buffer-usage bits and image-view
   usage on transfer-only images) — tracked in [vulkan-buffer-texture-usage-vuids.md](vulkan-buffer-texture-usage-vuids.md);
   not Phase-14-introduced, not Phase-14-blocking.
-- cdylib + Metal `enumerate_adapters` empty-return on Apple Silicon
-  (cargo-test/rlib unaffected; C examples on Mac silently fall back to Noop).
+- ~~cdylib + Metal `enumerate_adapters` empty-return on Apple Silicon
+  (cargo-test/rlib unaffected; C examples on Mac silently fall back to Noop).~~
+  **Resolved 2026-05-23.** Same root cause as the Metal test silent-skip:
+  Claude Code's Bash sandbox was blocking `MTLCopyAllDevices()` in spawned
+  child processes; once a Metal-built C example is run with the sandbox off,
+  the cdylib enumerates Metal correctly. Confirmed by `examples/tiled_deferred`
+  on Metal printing `center pixel RGBA=(0,255,0,255) OK` and writing a real
+  green PNG — i.e. the C binary linked against `libyawgpu.dylib` actually
+  exercised real Metal rather than falling back to Noop.
 - Vulkan adapter info doesn't report the real driver name; MoltenVK detection
   falls back to Apple-GPU heuristic.
 
