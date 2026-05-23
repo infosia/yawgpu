@@ -108,3 +108,15 @@ Full process: `specs/reference/workflow.md` → "Phase Review".
 - No credentials, signing material, or device-specific secrets committed.
 - `.gitignore`: `target/`, `.claude/`, local test transcripts.
 - Generated bindings are build artifacts (`$OUT_DIR`), not committed.
+
+## Tooling — sandbox
+
+- **Avoid `dangerouslyDisableSandbox: true` whenever possible.** Prefer
+  sandboxed Bash commands. Only disable when there is no alternative —
+  e.g. real-GPU Metal e2e runs (the Bash sandbox blocks
+  `MTLCopyAllDevices()` in spawned child processes; see
+  [[claude-runs-real-gpu-tests]]) or a specific operation that has
+  already been shown to fail under the sandbox in this session. Network
+  ops (`git push`/`pull`) and other ad-hoc commands should be invoked
+  by the user via the `!` prompt, not run by Claude with the sandbox
+  disabled.

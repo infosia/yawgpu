@@ -242,6 +242,9 @@ pub(super) fn subpass_render_pass_descriptor(
             .any(|subpass| subpass.uses_depth_stencil)
         {
             if let Some(depth) = &pass.depth_stencil_attachment {
+                // Gate each side on the format's aspect: binding a depth-only
+                // texture (e.g. Depth32Float) to stencilAttachment.setTexture
+                // makes Metal silently reject the entire render pass.
                 let format = layout_depth_stencil.format;
                 if format_has_depth_aspect(format) {
                     let depth_attachment = descriptor.depthAttachment();
@@ -272,6 +275,11 @@ pub(super) fn subpass_render_pass_descriptor(
     Ok(descriptor)
 }
 
+// Returns the union of color-attachment flat slots referenced across all
+// subpasses, sorted + deduplicated. The MTLRenderPassDescriptor gets one
+// `colorAttachments[i]` entry per slot ever used by the pass — a slot
+// shared between subpasses (e.g. read in one, written in another) appears
+// only once.
 #[cfg(feature = "tiled")]
 fn subpass_color_attachment_indices(pass: &HalSubpassRenderPassCommand) -> Vec<u32> {
     let mut indices = pass

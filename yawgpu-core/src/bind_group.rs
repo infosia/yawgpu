@@ -101,6 +101,13 @@ impl BindGroup {
 }
 
 /// Validates bind group descriptor and returns a descriptive error on failure.
+///
+/// `InputAttachment`-kind layout slots may be omitted by the caller — the
+/// subpass render pass auto-wires them from the pass layout's input-source
+/// map (block 55 "Input attachments are pass-local, auto-wired"). Non-input
+/// slots are still required; an explicit `TextureView` supplied for an
+/// input-attachment slot is still rejected (the slot owner is the pass, not
+/// the caller).
 pub(crate) fn validate_bind_group_descriptor(
     device: &Device,
     layout: &BindGroupLayout,
