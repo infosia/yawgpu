@@ -444,9 +444,11 @@ Run matrix on this M2 with the cdylib + C example:
   `center pixel RGBA=(0,255,0,255) OK`, green PNG, exit 0.
 - `YAWGPU_FEATURE=vulkan YAWGPU_EXTENSIONS=tiled` + `YAWGPU_BACKEND=vulkan`
   (MoltenVK): self-skip with explanatory message, exit 0.
-- Native-Vulkan (Windows) path remains covered by the prior Windows
-  re-verification (`cargo test --features vulkan,tiled` on a native driver,
-  commit `1cd0a0c`).
+- Native-Vulkan (Windows) path: re-verified post-cascade at `a9a4d4d`
+  (`cargo test --features vulkan,tiled --no-fail-fast -- --ignored` on a
+  native driver, `VK_LAYER_KHRONOS_validation` on): `e2e_vulkan_tiled`
+  4/4 incl. `vulkan_two_subpass_draw_subpass_load_readback` →
+  green center pixel, zero validation errors in the tiled section.
 
 C deferred-shading example (Metal + Vulkan) under `#ifdef YAWGPU_HAS_TILED`;
 real-GPU e2e run by Claude and logged. Then the mandatory Phase Review
@@ -504,9 +506,17 @@ went to the G-buffer base color slot instead of the output color slot.
   (`vulkan_two_subpass_draw_subpass_load_readback` self-skips via
   `adapter_is_moltenvk`; cargo's "4 passed" output therefore does NOT mean
   the 2-subpass center-pixel check was re-verified post-cascade). Native
-  Vulkan re-verification (Windows / Linux with a real driver) is **still
-  owed** before re-COMPLETE — the prior native-Vulkan run (commit `1cd0a0c`)
-  predates this cascade.
+  Vulkan re-verification (Windows / Linux with a real driver) was
+  **still owed** at the time the cascade closed — now **DONE
+  2026-05-23 at `a9a4d4d`** on the Windows native Vulkan driver:
+  `e2e_vulkan_tiled` **4/4 passed**, including
+  `vulkan_two_subpass_draw_subpass_load_readback` → green center pixel,
+  with **zero validation-layer errors** in the tiled section. Confirms
+  the C1 tolerant `validate_color_targets` (subpass-local index lookup
+  with fallback to flat layout index) holds on a real Vulkan driver.
+  Pre-existing non-tiled F1/F2/F3 VUIDs unchanged (tracked in
+  `vulkan-buffer-texture-usage-vuids.md`). See
+  `phase-14-cascade-review.md` Revision 2.
 - Phase 13 A4 Metal MSL passthrough e2e: **2/2 passed** — confirms the
   `create_render_pipeline` slot-iteration change didn't regress non-subpass.
 - Phase 13 Vulkan SPIR-V passthrough e2e: **2/2 passed**.

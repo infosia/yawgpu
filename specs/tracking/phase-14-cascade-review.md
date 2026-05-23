@@ -323,13 +323,24 @@ Claude in the prior tracking commits). No CRITICAL/MAJOR remain.
 
 ### Open items before Phase 14 can be re-declared COMPLETE
 
-- **Native-Vulkan re-verification of the cascade + C1 fix on a real
+- ~~**Native-Vulkan re-verification of the cascade + C1 fix on a real
   driver** (Windows / Linux; MoltenVK self-skips
   `vulkan_two_subpass_draw_subpass_load_readback`). Prior native-Vulkan
   run was `1cd0a0c`, which predates this cascade and the C1 dual-convention
-  fix; the spec rule in `specs/blocks/55-tiled-rendering.md` ("dual
-  convention accepted") must be exercised on a real Vulkan driver before
-  re-COMPLETE. **Owner: user; not blockable on this M2.**
+  fix.~~ — **DONE 2026-05-23 at `a9a4d4d`** on the Windows native Vulkan
+  driver. `cargo test -p yawgpu --features vulkan,tiled --no-fail-fast --
+  --ignored` with `VK_LAYER_KHRONOS_validation`: `e2e_vulkan_tiled` **4/4
+  passed** including `vulkan_two_subpass_draw_subpass_load_readback` →
+  green center pixel — exercising the C1 tolerant `validate_color_targets`
+  path with `outputs.get(&subpass_local_index)` falling back to the flat
+  layout index. **Zero validation-layer errors** in the tiled section. The
+  rest of the `--features vulkan,tiled --ignored` suite (15 non-tiled
+  tests) is functionally green with no new VUIDs vs the pre-cascade
+  baseline — only the pre-existing F1/F2/F3 buffer/texture-usage VUIDs
+  tracked in `vulkan-buffer-texture-usage-vuids.md` remain, none
+  cascade-introduced.
 - The `wgpuCreateInstance` silent-fallback-to-Noop on Vulkan
   (`DYLD_LIBRARY_PATH` issue tracked in m2). Separate follow-up; not a
   Phase 14 cascade blocker.
+
+All cascade-review blockers closed. Phase 14 re-COMPLETE stands at `a9a4d4d`.
