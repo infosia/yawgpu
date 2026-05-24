@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use parking_lot::MutexGuard;
 
 use super::buffer::GlesBuffer;
 use super::egl::{EglContext, EglSurface};
@@ -51,6 +52,10 @@ impl Drop for GlesDeviceInner {
 }
 
 impl GlesDeviceInner {
+    pub(super) fn current_lock_acquire(&self) -> MutexGuard<'_, ()> {
+        self.current_lock.lock()
+    }
+
     pub(super) fn with_current_context<R>(
         &self,
         f: impl FnOnce(&glow::Context) -> R,
@@ -119,6 +124,10 @@ impl GlesDevice {
     #[must_use]
     pub fn queue(&self) -> &GlesQueue {
         &self.queue
+    }
+
+    pub(super) fn inner_clone(&self) -> Arc<GlesDeviceInner> {
+        Arc::clone(&self.inner)
     }
 
     /// Allocates a buffer of the given size on this device.

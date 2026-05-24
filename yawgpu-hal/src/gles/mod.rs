@@ -27,10 +27,6 @@ pub use texture::GlesTexture;
 
 const BACKEND: &str = "gles";
 
-fn unavailable<T>() -> Result<T, crate::HalError> {
-    Err(crate::HalError::BackendUnavailable { backend: BACKEND })
-}
-
 pub(super) fn rebuild_hal_error(error: &crate::HalError) -> crate::HalError {
     // TODO: Consider deriving Clone for HalError upstream once all variants are
     // confirmed cheap or intentionally cloneable.

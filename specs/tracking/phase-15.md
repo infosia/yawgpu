@@ -1,7 +1,7 @@
 # Phase 15 — GLES backend (Tier 2 / experimental)
 
 Status: **P15.0 + P15.1 + P15.1a + P15.2 + P15.3 + P15.4 + P15.5
-DONE; P15.6 PLANNED.** Rules / plan:
++ P15.6 DONE; Phase 15 Review PENDING.** Rules / plan:
 `../blocks/67-gles-backend.md`. Roles / loop:
 `../reference/workflow.md`.
 
@@ -732,16 +732,140 @@ Acceptance (all 13 green):
   and uniform-color shaders**)
 - `cargo build -p yawgpu --features vulkan` ✓
 
-## P15.6 — Surface (Android ANativeWindow + Windows ANGLE HWND)  *(☐ PLANNED)*
+## P15.6 — Surface (Android ANativeWindow + Windows ANGLE HWND) + Present  *(☑ DONE)*
 
-## P15.6 — Surface (Android ANativeWindow + Windows ANGLE HWND)  *(☐ PLANNED)*
+Done (2026-05-24, commit pending at write time): real EGL
+window surface creation (HWND for Windows ANGLE,
+ANativeWindow for Android) + configure + acquire + present
+(back-buffer blit-to-default-FB + `eglSwapBuffers`) on
+Windows ANGLE. **Phase 15's final functional slice.**
 
-`examples/triangle` runs under `--features gles` on ANGLE.
+`yawgpu-hal/src/gles/instance.rs` gained
+`GlesInstance::create_surface_from_windows_hwnd(*mut c_void)`
+and `..._from_android_native_window(*mut c_void)`, both
+routing through a private `create_window_surface(native: *mut
+c_void)` that reuses `choose_config` (RGBA8 + GLES3 +
+PBUFFER_BIT) and calls
+`eglCreateWindowSurface(display, config, native as _, None)`.
+The cast resolves both HWND and ANativeWindow as
+`*mut c_void` under `khronos_egl::NativeWindowType`. Errors
+map to `HalError::SwapchainCreationFailed`.
 
-## Phase 15 Review  *(☐ PLANNED)*
+`yawgpu-hal/src/lib.rs` switched the two
+`HalInstance::create_surface_from_*` Gles arms from
+`Err(BackendUnavailable)` to forwarding through the new
+`GlesInstance` methods + wrapping as `HalSurface::Gles`.
 
-Mandatory Clean Review Then Fix per `specs/reference/workflow.md`.
-Logged in `tracking/phase-15-review.md` at slice-completion time.
+`yawgpu-hal/src/gles/surface.rs` rewrote `GlesSurface` as
+`Arc<GlesSurfaceInner { instance, window_surface: EglSurface,
+state: Mutex<GlesSurfaceState> }>` with
+`GlesSurfaceState::configured: Option<ConfiguredSurface
+{ device: Arc<GlesDeviceInner>, back_buffer: GlesTexture,
+width, height, swap_interval }>`. Drop calls
+`make_current(None,None,None,None)` first (best-effort
+release) then `destroy_surface(...)`; all errors swallowed.
+
+`configure(device, config)`: validates `Rgba8Unorm` + non-zero
+dims (inline-tested), allocates the back-buffer via the
+existing `GlesTexture::new` path with `{ copy_src: true,
+render_attachment: true, ..default }` usage, sets
+`eglSwapInterval` (Fifo→1, Immediate/Mailbox→0;
+inline-tested) via a transient window-surface make-current
+behind the device's make-current mutex with the
+`RestoreCurrent` Drop guard restoring the pbuffer. Replaces
+`state.configured`, releasing the previous back buffer if
+any.
+
+`unconfigure()` drops the `ConfiguredSurface`; the EGL
+window surface stays alive on `GlesSurfaceInner` until the
+`GlesSurface` itself drops.
+
+`acquire_next_texture()` returns
+`configured.back_buffer.clone()` (Arc-backed; cheap).
+Un-configured surface → `AcquireFailed`.
+
+`present(queue)` runs `blit_and_swap`:
+1. `current_lock_acquire` takes the device's make-current mutex.
+2. `eglMakeCurrent(display, window, window, context)`.
+3. `RestoreCurrent` Drop guard ensures the pbuffer is
+   re-bound at scope end (success or error).
+4. `glCreateFramebuffer` → `glFramebufferTexture2D
+   (READ_FRAMEBUFFER, COLOR_ATTACHMENT0, back_buffer)` →
+   `glReadBuffer(COLOR_ATTACHMENT0)` → completeness check →
+   `glBindFramebuffer(DRAW_FRAMEBUFFER, None)` (window is
+   the default FB now) → `glBlitFramebuffer(0,0,w,h,
+   0,0,w,h, COLOR_BUFFER_BIT, NEAREST)` → unbind + delete
+   read FBO.
+5. `eglSwapBuffers(display, window_surface)`. Errors →
+   `PresentFailed`.
+
+The `GlesQueue` argument to `present` is intentionally
+unused — queue work is already flushed by prior submits'
+`glFlush` / `glMemoryBarrier(ALL_BARRIER_BITS)`; EGL's
+swap acts as the final fence.
+
+New module-private helpers:
+- `GlesDeviceInner::current_lock_acquire()
+  -> MutexGuard<'_, ()>` exposes the existing make-current
+  mutex to the surface module (`with_current_context`
+  wasn't usable because the closure binds the pbuffer; the
+  surface module needs the window bound for blit + swap).
+- `GlesDevice::inner_clone() -> Arc<GlesDeviceInner>` so the
+  surface stores the device's inner Arc on configure.
+
+`unavailable<T>()` helper removed from `gles/mod.rs` — no
+more callsites; all P15.0 stub paths are now real or use
+specific `HalError` variants.
+
+Optional `e2e_gles_surface.rs` test: **agent skipped** per
+the handoff's optional clause. Visual verification of the
+full surface + render + present path is the manual
+`examples/triangle --features gles` route on ANGLE — same
+precedent as Vulkan/Metal swapchain testing in the project
+(no automated headless surface tests for those either).
+
+Acceptance (all 13 green; `e2e_gles_surface` intentionally
+absent):
+- `cargo build -p yawgpu` (Noop default) ✓
+- `cargo build -p yawgpu --features gles` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo clippy -p yawgpu --features gles --all-targets -- -D warnings` ✓
+- `cargo test --workspace` ✓ (Noop pass count unchanged)
+- `cargo test -p yawgpu --features gles --test e2e_gles_smoke
+  -- --ignored` ✓ (1/1)
+- `cargo test -p yawgpu --features gles --test e2e_gles_basic
+  -- --ignored` ✓ (3/3 P15.1 regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_ffi
+  -- --ignored` ✓ (3/3 P15.1a regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_buffer
+  -- --ignored` ✓ (2/2 P15.2 regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_texture
+  -- --ignored` ✓ (3/3 P15.3 regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_compute
+  -- --ignored` ✓ (2/2 P15.4 regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_render
+  -- --ignored` ✓ (2/2 P15.5 regression)
+- `cargo build -p yawgpu --features vulkan` ✓
+
+## Phase 15 Review  *(☐ PENDING — final mandatory gate before Phase 15 COMPLETE)*
+
+Per `specs/reference/workflow.md` → "Phase Review", a fresh
+no-context subagent reviews the cumulative Phase 15 diff
+(`fdf3007..HEAD`) against `blocks/67-gles-backend.md` +
+`CLAUDE.md` + the Phase 15 exit criteria. Emits
+CRITICAL/MAJOR/MINOR findings; severity-ordered fixes;
+Phase 15 cannot close with any open CRITICAL/MAJOR. Logged
+in `tracking/phase-15-review.md` at review-start time.
+
+Manual `examples/triangle --features gles` verification on
+ANGLE provides the end-to-end visual confirmation. The
+example today selects backend via the yawgpu.h
+`YaWGPUInstanceBackendSelect` extension (off-limits for GLES
+per the user's scope rule); a small example-side change to
+use `WGPURequestAdapterOptions.backendType =
+WGPUBackendType_OpenGLES` may be required. Decision +
+implementation are Phase 15 COMPLETE-followup work, not
+review-blocking.
 Phase 15 cannot be marked COMPLETE with any open CRITICAL/MAJOR
 finding. MINORs may defer with explicit rationale.
 
@@ -828,8 +952,12 @@ finding. MINORs may defer with explicit rationale.
 - **`GlesSampler::raw_or_err`** is currently
   `#[allow(dead_code)]` — sampler-bind is a P15.4 concern.
   Remove the allow when P15.4 lands.
-- **Real test for `GlesSurface::present`.** Still a no-op
-  placeholder; revisit in P15.6.
+- ~~**Real test for `GlesSurface::present`.**~~ **Closed by
+  P15.6** — the present path is now implemented and
+  manually verified via `examples/triangle`. An automated
+  Win32-hidden-window `e2e_gles_surface.rs` test remains a
+  follow-up option (skipped in P15.6 per the handoff's
+  optional clause).
 
 ## Open follow-ups added by P15.4
 
@@ -905,3 +1033,41 @@ finding. MINORs may defer with explicit rationale.
   boundary; reintroduce when HAL grows a blend descriptor.
 - **VAO caching.** P15.5 creates a transient VAO per pass;
   cache by pipeline + vertex-buffer-handle-set for perf.
+
+## Open follow-ups added by P15.6
+
+- **Real multi-buffer swap chain ring.** P15.6 uses a
+  single back-buffer reused across acquire/present cycles
+  (back-buffer is allocated at `configure()`, returned from
+  every `acquire_next_texture()`, blitted to default FB at
+  `present()`). A real swap chain ring (N back buffers,
+  rotation, no blit) needs either
+  `EGL_EXT_swap_buffers_with_damage` plumbing or
+  platform-specific buffer pooling. Slot in if mobile
+  profiling demands the extra throughput.
+- **True `Mailbox` semantics.** Currently
+  Mailbox/Immediate both map to `eglSwapInterval(0)`. True
+  Mailbox needs `EGL_EXT_present_opaque` or platform-side
+  tricks. Documented in the matrix as a known limitation.
+- **Surface format / present-mode caps from EGL config.**
+  `wgpuSurfaceGetCapabilities` returns a fixed set
+  (Rgba8Unorm + Fifo/Immediate/Mailbox). Querying real EGL
+  config caps lets us advertise actual driver-supported
+  formats (e.g. some ANGLE builds expose BGRA8888).
+- **Optional `e2e_gles_surface.rs` (Win32 hidden window).**
+  The handoff marked it optional; agent skipped. A future
+  small slice can add it using the `windows` crate
+  (`CreateWindowExW` with `WS_OVERLAPPEDWINDOW` but no
+  `ShowWindow`) for automated regression coverage of the
+  surface path.
+- **Example-side backend selection for GLES.** Examples
+  currently select backend via the yawgpu.h
+  `YaWGPUInstanceBackendSelect` extension. GLES needs the
+  standard webgpu.h `WGPURequestAdapterOptions.backendType =
+  WGPUBackendType_OpenGLES` path (P15.1a-wired). The
+  example C code needs a small change to read e.g.
+  `YAWGPU_BACKEND=gles` and translate to a
+  `backendType` field rather than the vendor extension —
+  Phase 15 COMPLETE follow-up, not slice-blocking.
+- **Multi-color-target presentation.** Tied to the P15.5
+  multi-target follow-up; not a surface-specific concern.

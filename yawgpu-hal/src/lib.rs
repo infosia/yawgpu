@@ -164,10 +164,10 @@ impl HalInstance {
         hinstance: *mut c_void,
         hwnd: *mut c_void,
     ) -> Result<HalSurface, HalError> {
-        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
-        let _ = (hinstance, hwnd);
-        #[cfg(all(feature = "metal", not(feature = "vulkan")))]
-        let _ = (hinstance, hwnd);
+        #[cfg(not(feature = "vulkan"))]
+        let _ = hinstance;
+        #[cfg(not(any(feature = "gles", feature = "vulkan")))]
+        let _ = hwnd;
         match self {
             #[cfg(feature = "noop")]
             Self::Noop(_) => Ok(HalSurface::Noop),
@@ -183,7 +183,11 @@ impl HalInstance {
                 message: "HWND surface is not supported on Metal",
             }),
             #[cfg(feature = "gles")]
-            Self::Gles(_) => Err(HalError::BackendUnavailable { backend: "gles" }),
+            Self::Gles(instance) => unsafe {
+                instance
+                    .create_surface_from_windows_hwnd(hwnd)
+                    .map(HalSurface::Gles)
+            },
         }
     }
 
@@ -195,6 +199,7 @@ impl HalInstance {
         &self,
         window: *mut c_void,
     ) -> Result<HalSurface, HalError> {
+        #[cfg(not(feature = "gles"))]
         let _ = window;
         match self {
             #[cfg(feature = "noop")]
@@ -210,7 +215,11 @@ impl HalInstance {
                 message: "Android native window surface is not supported on Metal",
             }),
             #[cfg(feature = "gles")]
-            Self::Gles(_) => Err(HalError::BackendUnavailable { backend: "gles" }),
+            Self::Gles(instance) => unsafe {
+                instance
+                    .create_surface_from_android_native_window(window)
+                    .map(HalSurface::Gles)
+            },
         }
     }
 }
