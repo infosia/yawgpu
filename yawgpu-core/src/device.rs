@@ -221,7 +221,11 @@ impl Device {
         let hal = if is_error {
             None
         } else {
-            Some(self.inner.hal.create_buffer(descriptor.size))
+            Some(
+                self.inner
+                    .hal
+                    .create_buffer(descriptor.size, hal_buffer_usage(descriptor.usage)),
+            )
         };
 
         Buffer::new(descriptor, hal, is_error)

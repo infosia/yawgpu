@@ -40,8 +40,10 @@ impl MetalDevice {
 
     /// Allocates a buffer of the given size on this device.
     #[must_use]
-    pub fn create_buffer(&self, size: u64) -> MetalBuffer {
+    pub fn create_buffer(&self, size: u64, _usage: HalBufferUsage) -> MetalBuffer {
         self.allocations.fetch_add(1, Ordering::Relaxed);
+        // MTLBuffer has no per-usage validation; the parameter is accepted
+        // for HAL symmetry.
         let buffer = self.device.newBufferWithLength_options(
             usize::try_from(size).unwrap_or(usize::MAX),
             MTLResourceOptions::StorageModeShared,
@@ -223,7 +225,7 @@ mod tests {
     fn metal_device_allocation_count_tracks_created_resources() {
         let device = metal_device();
         assert_eq!(device.allocation_count(), 0);
-        let _buffer = device.create_buffer(4);
+        let _buffer = device.create_buffer(4, HalBufferUsage::default());
         let _texture = device.create_texture(&texture_descriptor());
         let _sampler = device.create_sampler(&sampler_descriptor());
         assert_eq!(device.allocation_count(), 3);
@@ -242,7 +244,7 @@ mod tests {
     #[cfg(feature = "metal")]
     fn metal_device_create_buffer_records_size_and_maps_memory() {
         let device = metal_device();
-        let buffer = device.create_buffer(16);
+        let buffer = device.create_buffer(16, HalBufferUsage::default());
         assert_eq!(buffer.size(), 16);
         assert!(buffer.mapped_ptr().is_some());
         assert_eq!(device.allocation_count(), 1);
