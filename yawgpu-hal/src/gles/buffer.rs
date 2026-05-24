@@ -4,7 +4,7 @@ use std::sync::Arc;
 use glow::HasContext;
 
 use super::device::GlesDeviceInner;
-use super::BACKEND;
+use super::{rebuild_hal_error, BACKEND};
 use crate::{HalBufferUsage, HalError};
 
 pub(super) struct GlesBufferInner {
@@ -152,32 +152,6 @@ fn allocate_buffer(device: &Arc<GlesDeviceInner>, size: u64) -> Result<glow::Buf
             Ok(buffer)
         })
         .and_then(|result| result)
-}
-
-fn rebuild_hal_error(error: &HalError) -> HalError {
-    match error {
-        HalError::BackendUnavailable { backend } => HalError::BackendUnavailable { backend },
-        HalError::DeviceCreationFailed { backend } => HalError::DeviceCreationFailed { backend },
-        HalError::QueueSubmissionFailed { backend } => HalError::QueueSubmissionFailed { backend },
-        HalError::BufferOperationFailed { backend, message } => {
-            HalError::BufferOperationFailed { backend, message }
-        }
-        HalError::ShaderCompilationFailed { backend, message } => {
-            HalError::ShaderCompilationFailed {
-                backend,
-                message: message.clone(),
-            }
-        }
-        HalError::SwapchainCreationFailed { backend, message } => {
-            HalError::SwapchainCreationFailed { backend, message }
-        }
-        HalError::AcquireFailed { backend, message } => {
-            HalError::AcquireFailed { backend, message }
-        }
-        HalError::PresentFailed { backend, message } => {
-            HalError::PresentFailed { backend, message }
-        }
-    }
 }
 
 fn check_range(offset: u64, len: u64, size: u64, operation: &'static str) -> Result<(), HalError> {

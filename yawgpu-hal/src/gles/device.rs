@@ -130,16 +130,16 @@ impl GlesDevice {
 
     /// Creates a texture matching the given descriptor.
     #[must_use]
-    pub fn create_texture(&self, _descriptor: &HalTextureDescriptor) -> GlesTexture {
+    pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> GlesTexture {
         self.inner.allocations.fetch_add(1, Ordering::Relaxed);
-        GlesTexture
+        GlesTexture::new(Arc::clone(&self.inner), descriptor)
     }
 
     /// Creates a sampler matching the given descriptor.
     #[must_use]
-    pub fn create_sampler(&self, _descriptor: &HalSamplerDescriptor) -> GlesSampler {
+    pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> GlesSampler {
         self.inner.allocations.fetch_add(1, Ordering::Relaxed);
-        GlesSampler
+        GlesSampler::new(Arc::clone(&self.inner), descriptor)
     }
 
     /// Creates a compute pipeline from the given shader, entry point, and bindings.

@@ -7,6 +7,7 @@ mod adapter;
 mod buffer;
 mod device;
 mod egl;
+mod format;
 mod instance;
 mod pipeline;
 mod queue;
@@ -28,4 +29,38 @@ const BACKEND: &str = "gles";
 
 fn unavailable<T>() -> Result<T, crate::HalError> {
     Err(crate::HalError::BackendUnavailable { backend: BACKEND })
+}
+
+pub(super) fn rebuild_hal_error(error: &crate::HalError) -> crate::HalError {
+    // TODO: Consider deriving Clone for HalError upstream once all variants are
+    // confirmed cheap or intentionally cloneable.
+    match error {
+        crate::HalError::BackendUnavailable { backend } => {
+            crate::HalError::BackendUnavailable { backend }
+        }
+        crate::HalError::DeviceCreationFailed { backend } => {
+            crate::HalError::DeviceCreationFailed { backend }
+        }
+        crate::HalError::QueueSubmissionFailed { backend } => {
+            crate::HalError::QueueSubmissionFailed { backend }
+        }
+        crate::HalError::BufferOperationFailed { backend, message } => {
+            crate::HalError::BufferOperationFailed { backend, message }
+        }
+        crate::HalError::ShaderCompilationFailed { backend, message } => {
+            crate::HalError::ShaderCompilationFailed {
+                backend,
+                message: message.clone(),
+            }
+        }
+        crate::HalError::SwapchainCreationFailed { backend, message } => {
+            crate::HalError::SwapchainCreationFailed { backend, message }
+        }
+        crate::HalError::AcquireFailed { backend, message } => {
+            crate::HalError::AcquireFailed { backend, message }
+        }
+        crate::HalError::PresentFailed { backend, message } => {
+            crate::HalError::PresentFailed { backend, message }
+        }
+    }
 }
