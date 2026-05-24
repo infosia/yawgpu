@@ -9,20 +9,26 @@ use super::surface::GlesSurface;
 use super::BACKEND;
 use crate::HalError;
 
-pub(super) struct GlesInstanceInner {
+pub(super) enum GlesInstanceInner {
+    Egl(Box<EglInstanceState>),
+    #[cfg(windows)]
+    Wgl(super::wgl::WglInstanceState),
+}
+
+pub(super) struct EglInstanceState {
     pub(super) egl: EglInstance,
     pub(super) display: EglDisplay,
 }
 
 // SAFETY: `GlesInstanceInner` only shares the dynamically loaded EGL function
-// table and an initialized display handle. Device-level GL/EGL context use is
-// serialized by `GlesDeviceInner::current_lock`.
+// table / WGL loader state and initialized display handles. Device-level GL
+// context use is serialized by `GlesDeviceInner::current_lock`.
 unsafe impl Send for GlesInstanceInner {}
 // SAFETY: See the `Send` impl; shared access does not mutate Rust-managed
-// state, and EGL calls that bind contexts are serialized at the device level.
+// state, and calls that bind contexts are serialized at the device level.
 unsafe impl Sync for GlesInstanceInner {}
 
-impl Drop for GlesInstanceInner {
+impl Drop for EglInstanceState {
     fn drop(&mut self) {
         let _ = self.egl.terminate(self.display);
     }
@@ -42,26 +48,29 @@ impl std::fmt::Debug for GlesInstance {
 impl GlesInstance {
     /// Creates a new GLES instance.
     pub fn new() -> Result<Self, HalError> {
-        let egl = gles_egl::load_egl()?;
-        // get_and_initialize_display returns an EGLDisplay that has already
-        // had eglInitialize called on it successfully (cascading through
-        // ANGLE backends on Windows; default-display on other platforms).
-        let display = gles_egl::get_and_initialize_display(&egl)
-            .ok_or(HalError::BackendUnavailable { backend: BACKEND })?;
-        egl.bind_api(egl::OPENGL_ES_API)
-            .map_err(|_| HalError::BackendUnavailable { backend: BACKEND })?;
-
-        Ok(Self {
-            inner: Arc::new(GlesInstanceInner { egl, display }),
-        })
+        match backend_from_env() {
+            BackendChoice::Egl => Self::new_egl(),
+            #[cfg(windows)]
+            BackendChoice::Wgl => {
+                let state = super::wgl::WglInstanceState::new()?;
+                eprintln!("yawgpu-gles: using WGL backend (host OpenGL ES profile)");
+                Ok(Self {
+                    inner: Arc::new(GlesInstanceInner::Wgl(state)),
+                })
+            }
+        }
     }
 
     /// Returns adapters exposed by this instance.
     #[must_use]
     pub fn enumerate_adapters(&self) -> Vec<GlesAdapter> {
-        choose_config(&self.inner)
-            .map(|config| vec![GlesAdapter::new(Arc::clone(&self.inner), config)])
-            .unwrap_or_default()
+        match self.inner.as_ref() {
+            GlesInstanceInner::Egl(egl_state) => choose_config(egl_state)
+                .map(|config| vec![GlesAdapter::new_egl(Arc::clone(&self.inner), config)])
+                .unwrap_or_default(),
+            #[cfg(windows)]
+            GlesInstanceInner::Wgl(_) => vec![GlesAdapter::new_wgl(Arc::clone(&self.inner))],
+        }
     }
 
     /// # Safety
@@ -87,11 +96,17 @@ impl GlesInstance {
     }
 
     fn create_window_surface(&self, native: *mut c_void) -> Result<GlesSurface, HalError> {
-        let config = choose_config(&self.inner)?;
+        let GlesInstanceInner::Egl(egl_state) = self.inner.as_ref() else {
+            return Err(HalError::SwapchainCreationFailed {
+                backend: BACKEND,
+                message: "WGL surface creation not implemented; use EGL backend or run the headless e2e tests instead",
+            });
+        };
+        let config = choose_config(egl_state)?;
         let surface = unsafe {
-            self.inner
+            egl_state
                 .egl
-                .create_window_surface(self.inner.display, config, native as _, None)
+                .create_window_surface(egl_state.display, config, native as _, None)
         }
         .map_err(|_| HalError::SwapchainCreationFailed {
             backend: BACKEND,
@@ -102,9 +117,27 @@ impl GlesInstance {
             surface,
         ))
     }
+
+    fn new_egl() -> Result<Self, HalError> {
+        let egl = gles_egl::load_egl()?;
+        // get_and_initialize_display returns an EGLDisplay that has already
+        // had eglInitialize called on it successfully (cascading through
+        // ANGLE backends on Windows; default-display on other platforms).
+        let display = gles_egl::get_and_initialize_display(&egl)
+            .ok_or(HalError::BackendUnavailable { backend: BACKEND })?;
+        egl.bind_api(egl::OPENGL_ES_API)
+            .map_err(|_| HalError::BackendUnavailable { backend: BACKEND })?;
+
+        Ok(Self {
+            inner: Arc::new(GlesInstanceInner::Egl(Box::new(EglInstanceState {
+                egl,
+                display,
+            }))),
+        })
+    }
 }
 
-fn choose_config(instance: &GlesInstanceInner) -> Result<EglConfig, HalError> {
+fn choose_config(instance: &EglInstanceState) -> Result<EglConfig, HalError> {
     let attribs = [
         egl::SURFACE_TYPE,
         egl::PBUFFER_BIT,
@@ -125,4 +158,49 @@ fn choose_config(instance: &GlesInstanceInner) -> Result<EglConfig, HalError> {
         .choose_first_config(instance.display, &attribs)
         .map_err(|_| HalError::BackendUnavailable { backend: BACKEND })?
         .ok_or(HalError::BackendUnavailable { backend: BACKEND })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BackendChoice {
+    Egl,
+    #[cfg(windows)]
+    Wgl,
+}
+
+pub(super) fn backend_from_env() -> BackendChoice {
+    parse_backend(std::env::var("YAWGPU_GLES_BACKEND").ok().as_deref())
+}
+
+pub(super) fn parse_backend(value: Option<&str>) -> BackendChoice {
+    match value {
+        #[cfg(windows)]
+        Some("wgl") => BackendChoice::Wgl,
+        Some("egl") | Some("") | None => BackendChoice::Egl,
+        Some(other) => {
+            eprintln!("yawgpu-gles: unknown YAWGPU_GLES_BACKEND={other:?}; falling back to egl");
+            BackendChoice::Egl
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_backend_defaults_to_egl() {
+        assert_eq!(parse_backend(None), BackendChoice::Egl);
+        assert_eq!(parse_backend(Some("")), BackendChoice::Egl);
+        assert_eq!(parse_backend(Some("egl")), BackendChoice::Egl);
+        assert_eq!(parse_backend(Some("unknown")), BackendChoice::Egl);
+    }
+
+    #[test]
+    fn parse_backend_handles_wgl_by_platform() {
+        #[cfg(windows)]
+        assert_eq!(parse_backend(Some("wgl")), BackendChoice::Wgl);
+
+        #[cfg(not(windows))]
+        assert_eq!(parse_backend(Some("wgl")), BackendChoice::Egl);
+    }
 }

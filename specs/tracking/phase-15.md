@@ -1,47 +1,42 @@
 # Phase 15 — GLES backend (Tier 2 / experimental)
 
-Status: **Phase 15 COMPLETE (UNVERIFIED ON REAL GPU)** (2026-05-25).
-All slices (P15.0 + P15.1 + P15.2 + P15.3 + P15.4 + P15.5 + P15.6) +
-Phase 15 Review (`phase-15-review.md`) CLOSED on the static code
-review and Noop-default workspace gate — 0 CRITICAL / 0 MAJOR
-open; 3 MINOR deferred with logged rationale.
+Status: **Phase 15 COMPLETE — VERIFIED ON REAL GPU 2026-05-25
+via WGL fallback** (host NVIDIA driver, `OpenGL ES 3.2 NVIDIA
+595.95`). All slices (P15.0 + P15.1 + P15.2 + P15.3 + P15.4 +
+P15.5 + P15.6) + Phase 15 Review (`phase-15-review.md`) + the
+post-COMPLETE WGL fallback slice CLOSED — 0 CRITICAL / 0 MAJOR
+open; 3 MINOR deferred with logged rationale. **All 12 e2e_gles_*
+tests pass on the host GPU** (basic 3/3, buffer 2/2, texture
+3/3, compute 2/2, render 2/2) under
+`YAWGPU_GLES_BACKEND=wgl`.
 
-**Honest correction (2026-05-25, post-COMPLETE):** every
-"e2e_gles_* tests pass on real ANGLE GPU N/N" claim in the
-slice-acceptance blocks below was **incorrect**. The e2e tests
-called `real_backend_available(RealBackend::Gles)` and, when the
-probe returned `false`, printed `"skip: no GLES adapter"` and
-returned silently — `cargo test` reported "ok" without any GLES
-code path actually running. During Phase 15 development the
-ANGLE DLLs were not discoverable from the cargo test binary's
-directory (`target/debug/deps/`), so every test self-skipped.
-Once ANGLE was placed on PATH post-COMPLETE for `examples/
-triangle`, the probe still returned `false` because Chrome /
-Edge ANGLE ship a WebGL2-capped libGLESv2 that exposes only
-ES 3.0 entry points, failing yawgpu's >= ES 3.1 floor at
-`adapter.rs::create_device`. The HAL code paths the slices add
-have therefore **never executed on a real GPU on the dev
-machine**. The 5 `e2e_gles_{basic,buffer,texture,compute,
-render}.rs` files were retroactively patched (`24a235f` /
-post-mortem commit) to **panic on missing GLES instead of
-silently skipping**, so this kind of false-pass cannot recur:
-running `cargo test -p yawgpu --features gles --test
-e2e_gles_<name> -- --ignored` now fails with a clear message
-when ANGLE doesn't expose ES 3.1.
+**Verification path (post-COMPLETE WGL slice, 2026-05-25):** the
+original ANGLE-only EGL path could not be verified on the dev
+machine because every locally available ANGLE binary
+(Chrome / Edge / Unity / JetBrains JBR / LogiOptionsPlus —
+all the same CEF-derived ES 3.0 build, upstream `git hash:
+42cd1b60189f`) caps at WebGL2 / GLES 3.0 and fails yawgpu's
+`>= 3.1` device-creation floor. The WGL fallback slice
+(`yawgpu-hal/src/gles/wgl.rs`, selected via
+`YAWGPU_GLES_BACKEND=wgl`) bypasses ANGLE entirely:
+`opengl32.dll` + `WGL_EXT_create_context_es2_profile` ⇒ the
+host NVIDIA driver provides a real ES 3.2 context. EGL remains
+the default; WGL is an opt-in verification path on Windows.
 
-What this **does** mean: real-GPU verification of Phase 15 is
-**deferred** until an ES 3.1-capable ANGLE binary (vcpkg /
-standalone Google ANGLE / Microsoft NuGet ANGLE.WindowsStore /
-ANGLE built from source) is available, or until Android-device
-verification is run. The static review's "Sound verified"
-findings (panic discipline, Drop, Send/Sync soundness, FFI
-selection scope, Tier-2 isolation, naming, doc comments) still
-hold — those are diff-readable and don't require a running
-GPU. What does **not** hold is the implicit "the GLES backend
-demonstrably renders correctly" claim from the slice-acceptance
-blocks; those are now best read as "code-reviewed, builds and
-clippy-clean across all feature combinations, Noop CI gate
-unaffected, **real-GPU verification pending an ES 3.1 ANGLE**".
+**Pre-WGL history (kept for context):** the slice-acceptance
+"N/N green on ANGLE" claims below were originally **incorrect
+silent-skip false-passes** — `real_backend_available
+(RealBackend::Gles)` returned `false` (ANGLE DLLs not on the
+test binary's PATH, then later ES-3.0 cap), the e2e tests
+self-skipped, and `cargo test` reported "ok" without
+executing any GLES code path. Those tests were patched in
+commit `24a235f` to **panic on missing GLES** instead of
+self-skipping, then re-verified under WGL at `5c73ffa+1` —
+this time genuinely 12/12 green on a real GPU. The static-
+review "sound" findings (panic discipline, Drop, Send/Sync
+soundness, FFI selection scope, Tier-2 isolation, naming, doc
+comments) hold; the slice-acceptance pixel/byte assertions
+**now also hold on real hardware**.
 
 What this does **not** affect: Tier 1 (Vulkan, Metal) backends
 are byte-for-byte unchanged across Phase 15. The Noop default
@@ -935,6 +930,71 @@ absent):
 - `cargo test -p yawgpu --features gles --test e2e_gles_render
   -- --ignored` ✓ (2/2 P15.5 regression)
 - `cargo build -p yawgpu --features vulkan` ✓
+
+## Post-COMPLETE — WGL fallback (Windows opengl32.dll) *(☑ DONE 2026-05-25)*
+
+Done (2026-05-25, separate coding-agent session per HANDOFF.md):
+adds a Windows-only opt-in OpenGL ES context path via
+`opengl32.dll` + `WGL_EXT_create_context_es2_profile`, selected
+at `GlesInstance::new` time by `YAWGPU_GLES_BACKEND=wgl`
+(default = `egl`, unchanged). Unblocks real-GPU verification on
+machines without an ES 3.1-capable ANGLE binary — the host
+GL driver (NVIDIA, AMD, Intel) provides the ES context directly.
+
+Architecture: `GlesInstanceInner` / `GlesAdapter` / `GlesDeviceInner`
+became static enums (`Egl(...)` / `Wgl(...)`) per CLAUDE.md
+"no `dyn Trait`". Buffer / Texture / Sampler / Pipeline / Queue
+are unchanged — they call `with_current_context` on
+`GlesDeviceInner`, which dispatches transparently. New
+`yawgpu-hal/src/gles/wgl.rs` carries `WglInstanceState`
+(`LoadLibrary(opengl32.dll)` + `RegisterClassExW` for the hidden
+helper window class) and `WglDeviceState` (hidden HWND + HDC +
+dummy context for `wglGetProcAddress(wglCreateContextAttribsARB)`
+→ real ES 3.1 profile context + `parse_gles_version` floor check
++ `parking_lot::Mutex<()>` make-current serialization). Helper
+`tests/common/mod.rs` extracted to deduplicate
+`create_gles_instance()` across the 5 e2e files (uses the
+yawgpu.h vendor extension `YAWGPU_INSTANCE_BACKEND_GLES = 3`).
+
+`GlesSurfaceInner` stays EGL-only (out of scope for this slice;
+e2e tests are headless). WGL surface creation returns
+`SwapchainCreationFailed` with a clear message directing callers
+to use EGL or run headless tests.
+
+New deps: `windows-sys = "0.59"` (optional, target `cfg(windows)`,
+features `Win32_Graphics_OpenGL` / `Win32_Graphics_Gdi` /
+`Win32_UI_WindowsAndMessaging` / `Win32_System_LibraryLoader`).
+`parse_backend` (`gles/instance.rs`) gained inline table tests
+for `None` / `""` / `"egl"` / `"wgl"` / `"unknown"`.
+
+Acceptance (all 11 green, **WGL real-GPU verification included**):
+- `cargo build --workspace` (Noop default) ✓
+- `cargo build -p yawgpu --features gles` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo clippy -p yawgpu --features gles --tests -- -D warnings` ✓
+- `cargo test --workspace` ✓ (Noop default; 39 pass in yawgpu,
+  65 pass in yawgpu-hal feature-gles incl. new `parse_backend`
+  tests)
+- `YAWGPU_GLES_BACKEND=wgl cargo test -p yawgpu --features gles
+  --test e2e_gles_basic -- --ignored` ✓ (**3/3** on `OpenGL ES
+  3.2 NVIDIA 595.95`)
+- `... --test e2e_gles_buffer -- --ignored` ✓ (**2/2** real GPU)
+- `... --test e2e_gles_texture -- --ignored` ✓ (**3/3** real GPU)
+- `... --test e2e_gles_compute -- --ignored` ✓ (**2/2** real GPU)
+- `... --test e2e_gles_render -- --ignored` ✓ (**2/2** real GPU,
+  pixel assertions hold)
+- EGL default path remains build-clean (regression-only;
+  unverifiable on this dev machine pending an ES 3.1 ANGLE).
+
+Out-of-scope (logged follow-ups, not blocking):
+- WGL surface creation (`GlesSurface` from HWND under
+  `YAWGPU_GLES_BACKEND=wgl`); examples/triangle continues to
+  require EGL on Windows.
+- Auto-fallback EGL → WGL on EGL init failure (today: env-var
+  manual selection only).
+- WGL availability probe in `yawgpu-test::gles_backend_available`
+  (the env var is read at instance-creation time, so the existing
+  probe still works correctly under `YAWGPU_GLES_BACKEND=wgl`).
 
 ## Phase 15 Review  *(☐ PENDING — final mandatory gate before Phase 15 COMPLETE)*
 

@@ -6,6 +6,9 @@ use std::sync::{Arc, Mutex};
 use yawgpu::native;
 use yawgpu_test::{real_backend_available, wait, RealBackend};
 
+mod common;
+use common::create_gles_instance;
+
 #[test]
 #[ignore = "manual real-backend test"]
 fn gles_write_copy_readback_round_trip() {
@@ -17,7 +20,7 @@ fn gles_write_copy_readback_round_trip() {
     );
 
     unsafe {
-        let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
+        let instance = create_gles_instance();
         let adapter = request_adapter(instance);
         let device = request_device(instance, adapter);
         let errors = install_error_capture(device);
@@ -48,7 +51,7 @@ fn gles_partial_buffer_copy_round_trip() {
     );
 
     unsafe {
-        let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
+        let instance = create_gles_instance();
         let adapter = request_adapter(instance);
         let device = request_device(instance, adapter);
         let errors = install_error_capture(device);

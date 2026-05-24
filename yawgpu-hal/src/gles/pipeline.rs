@@ -220,6 +220,7 @@ fn build_compute_program(
                     message: format!("GLES compute program link failed: {log}"),
                 });
             }
+            bind_program_blocks_from_source(gl, program, source);
             Ok(program)
         })
         .and_then(|result| result)
@@ -292,11 +293,70 @@ fn build_render_program(
                     message: format!("GLES render program link failed: {log}"),
                 });
             }
+            bind_program_blocks_from_source(gl, program, vertex_source);
+            bind_program_blocks_from_source(gl, program, fragment_source);
             let first_instance_location =
                 gl.get_uniform_location(program, "naga_vs_first_instance");
             Ok((program, first_instance_location))
         })
         .and_then(|result| result)
+}
+
+fn bind_program_blocks_from_source(gl: &glow::Context, program: glow::Program, source: &str) {
+    for line in source.lines().map(str::trim) {
+        let words = line.split_whitespace().collect::<Vec<_>>();
+        let Some((kind, name)) = block_kind_and_name(&words) else {
+            continue;
+        };
+        let Some(binding) = block_binding_from_name(name) else {
+            continue;
+        };
+        unsafe {
+            match kind {
+                BlockKind::Uniform => {
+                    if let Some(index) = gl.get_uniform_block_index(program, name) {
+                        gl.uniform_block_binding(program, index, binding);
+                    }
+                }
+                BlockKind::Storage => {
+                    if let Some(index) = gl.get_shader_storage_block_index(program, name) {
+                        gl.shader_storage_block_binding(program, index, binding);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlockKind {
+    Uniform,
+    Storage,
+}
+
+fn block_kind_and_name<'a>(words: &'a [&str]) -> Option<(BlockKind, &'a str)> {
+    let (kind, index) = words
+        .iter()
+        .position(|word| *word == "uniform")
+        .map(|index| (BlockKind::Uniform, index))
+        .or_else(|| {
+            words
+                .iter()
+                .position(|word| *word == "buffer")
+                .map(|index| (BlockKind::Storage, index))
+        })?;
+    words
+        .get(index + 1)
+        .map(|name| (kind, name.trim_end_matches('{')))
+}
+
+fn block_binding_from_name(name: &str) -> Option<u32> {
+    let rest = name.split_once("_block_")?.1;
+    let digits = rest
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
 }
 
 fn compile_shader(
@@ -323,5 +383,37 @@ fn compile_shader(
             });
         }
         Ok(shader)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_binding_from_name_extracts_naga_binding_suffix() {
+        assert_eq!(block_binding_from_name("Data_block_0Compute"), Some(0));
+        assert_eq!(block_binding_from_name("Color_block_12Fragment"), Some(12));
+        assert_eq!(block_binding_from_name("Data"), None);
+        assert_eq!(block_binding_from_name("Data_block_Compute"), None);
+    }
+
+    #[test]
+    fn block_kind_and_name_parses_uniform_and_storage_lines() {
+        assert_eq!(
+            block_kind_and_name(&["layout(std140)", "uniform", "Color_block_1Fragment", "{"]),
+            Some((BlockKind::Uniform, "Color_block_1Fragment"))
+        );
+        assert_eq!(
+            block_kind_and_name(&[
+                "layout(std430)",
+                "readonly",
+                "buffer",
+                "Data_block_0Compute",
+                "{",
+            ]),
+            Some((BlockKind::Storage, "Data_block_0Compute"))
+        );
+        assert_eq!(block_kind_and_name(&["void", "main()"]), None);
     }
 }

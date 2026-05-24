@@ -6,7 +6,7 @@ use parking_lot::MutexGuard;
 
 use super::buffer::GlesBuffer;
 use super::egl::{EglContext, EglSurface};
-use super::instance::GlesInstanceInner;
+use super::instance::{EglInstanceState, GlesInstanceInner};
 use super::pipeline::{GlesComputePipeline, GlesRenderPipeline};
 use super::queue::GlesQueue;
 use super::sampler::GlesSampler;
@@ -17,13 +17,19 @@ use crate::{
     HalSamplerDescriptor, HalShaderSource, HalShaderStage, HalTextureDescriptor,
 };
 
-pub(super) struct GlesDeviceInner {
+pub(super) enum GlesDeviceInner {
+    Egl(EglDeviceState),
+    #[cfg(windows)]
+    Wgl(super::wgl::WglDeviceState),
+}
+
+pub(super) struct EglDeviceState {
     pub(super) instance: Arc<GlesInstanceInner>,
     pub(super) context: EglContext,
     pub(super) surface: EglSurface,
     pub(super) gl: glow::Context,
     current_lock: Mutex<()>,
-    allocations: AtomicU64,
+    pub(super) allocations: AtomicU64,
 }
 
 // SAFETY: All access to the EGL context and `glow::Context` goes through
@@ -34,37 +40,86 @@ unsafe impl Send for GlesDeviceInner {}
 // `current_lock`, and resource teardown only runs after the final `Arc` drops.
 unsafe impl Sync for GlesDeviceInner {}
 
-impl Drop for GlesDeviceInner {
+impl Drop for EglDeviceState {
     fn drop(&mut self) {
-        let _ = self
-            .instance
-            .egl
-            .make_current(self.instance.display, None, None, None);
-        let _ = self
-            .instance
-            .egl
-            .destroy_surface(self.instance.display, self.surface);
-        let _ = self
-            .instance
-            .egl
-            .destroy_context(self.instance.display, self.context);
+        if let GlesInstanceInner::Egl(egl_state) = self.instance.as_ref() {
+            let _ = egl_state
+                .egl
+                .make_current(egl_state.display, None, None, None);
+            let _ = egl_state
+                .egl
+                .destroy_surface(egl_state.display, self.surface);
+            let _ = egl_state
+                .egl
+                .destroy_context(egl_state.display, self.context);
+        }
     }
 }
 
 impl GlesDeviceInner {
     pub(super) fn current_lock_acquire(&self) -> MutexGuard<'_, ()> {
-        self.current_lock.lock()
+        match self {
+            Self::Egl(state) => state.current_lock.lock(),
+            #[cfg(windows)]
+            Self::Wgl(state) => state.current_lock_acquire(),
+        }
     }
 
     pub(super) fn with_current_context<R>(
         &self,
         f: impl FnOnce(&glow::Context) -> R,
     ) -> Result<R, HalError> {
+        match self {
+            Self::Egl(state) => state.with_current_context(f),
+            #[cfg(windows)]
+            Self::Wgl(state) => state.with_current_context(f),
+        }
+    }
+
+    pub(super) fn egl_state(&self) -> Option<&EglDeviceState> {
+        match self {
+            Self::Egl(state) => Some(state),
+            #[cfg(windows)]
+            Self::Wgl(_) => None,
+        }
+    }
+
+    fn allocation_count(&self) -> u64 {
+        match self {
+            Self::Egl(state) => state.allocations.load(Ordering::Relaxed),
+            #[cfg(windows)]
+            Self::Wgl(state) => state.allocations.load(Ordering::Relaxed),
+        }
+    }
+
+    fn allocation_increment(&self) {
+        match self {
+            Self::Egl(state) => {
+                state.allocations.fetch_add(1, Ordering::Relaxed);
+            }
+            #[cfg(windows)]
+            Self::Wgl(state) => {
+                state.allocations.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+impl EglDeviceState {
+    fn egl_instance(&self) -> Result<&EglInstanceState, HalError> {
+        let GlesInstanceInner::Egl(state) = self.instance.as_ref() else {
+            return Err(HalError::QueueSubmissionFailed { backend: BACKEND });
+        };
+        Ok(state)
+    }
+
+    fn with_current_context<R>(&self, f: impl FnOnce(&glow::Context) -> R) -> Result<R, HalError> {
         let _guard = self.current_lock.lock();
-        self.instance
+        let instance = self.egl_instance()?;
+        instance
             .egl
             .make_current(
-                self.instance.display,
+                instance.display,
                 Some(self.surface),
                 Some(self.surface),
                 Some(self.context),
@@ -96,20 +151,27 @@ impl std::fmt::Debug for GlesDevice {
 }
 
 impl GlesDevice {
-    pub(super) fn from_parts(
+    pub(super) fn from_egl(
         instance: Arc<GlesInstanceInner>,
         context: EglContext,
         surface: EglSurface,
         gl: glow::Context,
     ) -> Self {
-        let inner = Arc::new(GlesDeviceInner {
+        let inner = Arc::new(GlesDeviceInner::Egl(EglDeviceState {
             instance,
             context,
             surface,
             gl,
             current_lock: Mutex::new(()),
             allocations: AtomicU64::new(0),
-        });
+        }));
+        let queue = GlesQueue::new(Arc::clone(&inner));
+        Self { inner, queue }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn from_wgl(state: super::wgl::WglDeviceState) -> Self {
+        let inner = Arc::new(GlesDeviceInner::Wgl(state));
         let queue = GlesQueue::new(Arc::clone(&inner));
         Self { inner, queue }
     }
@@ -117,7 +179,7 @@ impl GlesDevice {
     /// Returns the allocation count.
     #[must_use]
     pub fn allocation_count(&self) -> u64 {
-        self.inner.allocations.load(Ordering::Relaxed)
+        self.inner.allocation_count()
     }
 
     /// Returns the queue.
@@ -133,21 +195,21 @@ impl GlesDevice {
     /// Allocates a buffer of the given size on this device.
     #[must_use]
     pub fn create_buffer(&self, size: u64, usage: HalBufferUsage) -> GlesBuffer {
-        self.inner.allocations.fetch_add(1, Ordering::Relaxed);
+        self.inner.allocation_increment();
         GlesBuffer::new(Arc::clone(&self.inner), size, usage)
     }
 
     /// Creates a texture matching the given descriptor.
     #[must_use]
     pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> GlesTexture {
-        self.inner.allocations.fetch_add(1, Ordering::Relaxed);
+        self.inner.allocation_increment();
         GlesTexture::new(Arc::clone(&self.inner), descriptor)
     }
 
     /// Creates a sampler matching the given descriptor.
     #[must_use]
     pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> GlesSampler {
-        self.inner.allocations.fetch_add(1, Ordering::Relaxed);
+        self.inner.allocation_increment();
         GlesSampler::new(Arc::clone(&self.inner), descriptor)
     }
 

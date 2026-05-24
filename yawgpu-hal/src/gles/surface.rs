@@ -3,9 +3,9 @@ use std::sync::Arc;
 use glow::HasContext;
 use parking_lot::Mutex;
 
-use super::device::{GlesDevice, GlesDeviceInner};
+use super::device::{EglDeviceState, GlesDevice, GlesDeviceInner};
 use super::egl::EglSurface;
-use super::instance::GlesInstanceInner;
+use super::instance::{EglInstanceState, GlesInstanceInner};
 use super::texture::GlesTexture;
 use super::BACKEND;
 use crate::{
@@ -28,14 +28,14 @@ unsafe impl Sync for GlesSurfaceInner {}
 
 impl Drop for GlesSurfaceInner {
     fn drop(&mut self) {
-        let _ = self
-            .instance
-            .egl
-            .make_current(self.instance.display, None, None, None);
-        let _ = self
-            .instance
-            .egl
-            .destroy_surface(self.instance.display, self.window_surface);
+        if let GlesInstanceInner::Egl(egl_state) = self.instance.as_ref() {
+            let _ = egl_state
+                .egl
+                .make_current(egl_state.display, None, None, None);
+            let _ = egl_state
+                .egl
+                .destroy_surface(egl_state.display, self.window_surface);
+        }
     }
 }
 
@@ -221,22 +221,24 @@ fn set_swap_interval(
     interval: i32,
 ) -> Result<(), HalError> {
     let _guard = device.current_lock_acquire();
-    instance
+    let egl_state = egl_instance(instance)?;
+    let device_state = egl_device(device)?;
+    egl_state
         .egl
         .make_current(
-            instance.display,
+            egl_state.display,
             Some(window_surface),
             Some(window_surface),
-            Some(device.context),
+            Some(device_state.context),
         )
         .map_err(|_| HalError::SwapchainCreationFailed {
             backend: BACKEND,
             message: "eglMakeCurrent(window) failed",
         })?;
     let _restore = RestoreCurrent { instance, device };
-    instance
+    egl_state
         .egl
-        .swap_interval(instance.display, interval)
+        .swap_interval(egl_state.display, interval)
         .map_err(|_| HalError::SwapchainCreationFailed {
             backend: BACKEND,
             message: "eglSwapInterval failed",
@@ -252,23 +254,25 @@ fn blit_and_swap(
     height: i32,
 ) -> Result<(), HalError> {
     let _guard = device.current_lock_acquire();
-    instance
+    let egl_state = egl_instance(instance)?;
+    let device_state = egl_device(device)?;
+    egl_state
         .egl
         .make_current(
-            instance.display,
+            egl_state.display,
             Some(window_surface),
             Some(window_surface),
-            Some(device.context),
+            Some(device_state.context),
         )
         .map_err(|_| HalError::PresentFailed {
             backend: BACKEND,
             message: "eglMakeCurrent(window) failed",
         })?;
     let _restore = RestoreCurrent { instance, device };
-    blit_back_buffer_to_window(&device.gl, back_buffer_texture, width, height)?;
-    instance
+    blit_back_buffer_to_window(&device_state.gl, back_buffer_texture, width, height)?;
+    egl_state
         .egl
-        .swap_buffers(instance.display, window_surface)
+        .swap_buffers(egl_state.display, window_surface)
         .map_err(|_| HalError::PresentFailed {
             backend: BACKEND,
             message: "eglSwapBuffers failed",
@@ -282,13 +286,36 @@ struct RestoreCurrent<'a> {
 
 impl Drop for RestoreCurrent<'_> {
     fn drop(&mut self) {
-        let _ = self.instance.egl.make_current(
-            self.instance.display,
-            Some(self.device.surface),
-            Some(self.device.surface),
-            Some(self.device.context),
+        let (Some(instance), Some(device)) = (
+            egl_instance(self.instance).ok(),
+            egl_device(self.device).ok(),
+        ) else {
+            return;
+        };
+        let _ = instance.egl.make_current(
+            instance.display,
+            Some(device.surface),
+            Some(device.surface),
+            Some(device.context),
         );
     }
+}
+
+fn egl_instance(instance: &Arc<GlesInstanceInner>) -> Result<&EglInstanceState, HalError> {
+    let GlesInstanceInner::Egl(state) = instance.as_ref() else {
+        return Err(HalError::SwapchainCreationFailed {
+            backend: BACKEND,
+            message: "GLES surface is only available with the EGL backend",
+        });
+    };
+    Ok(state)
+}
+
+fn egl_device(device: &Arc<GlesDeviceInner>) -> Result<&EglDeviceState, HalError> {
+    device.egl_state().ok_or(HalError::SwapchainCreationFailed {
+        backend: BACKEND,
+        message: "GLES surface is only available with the EGL backend",
+    })
 }
 
 fn blit_back_buffer_to_window(

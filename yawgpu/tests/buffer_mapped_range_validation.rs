@@ -87,22 +87,13 @@ fn whole_map_size_uses_active_mapped_range() {
         let buffer = create_buffer(test.device(), 64, native::WGPUBufferUsage_MapWrite, false);
         map_and_wait(test.instance(), buffer, native::WGPUMapMode_Write, 16, 16);
 
-        assert!(!yawgpu::wgpuBufferGetMappedRange(
-            buffer,
-            16,
-            native::WGPU_WHOLE_MAP_SIZE,
-        )
-        .is_null());
-        assert!(!yawgpu::wgpuBufferGetMappedRange(
-            buffer,
-            20,
-            native::WGPU_WHOLE_MAP_SIZE,
-        )
-        .is_null());
         assert!(
-            yawgpu::wgpuBufferGetMappedRange(buffer, 8, native::WGPU_WHOLE_MAP_SIZE)
-                .is_null()
+            !yawgpu::wgpuBufferGetMappedRange(buffer, 16, native::WGPU_WHOLE_MAP_SIZE,).is_null()
         );
+        assert!(
+            !yawgpu::wgpuBufferGetMappedRange(buffer, 20, native::WGPU_WHOLE_MAP_SIZE,).is_null()
+        );
+        assert!(yawgpu::wgpuBufferGetMappedRange(buffer, 8, native::WGPU_WHOLE_MAP_SIZE).is_null());
         yawgpu::wgpuBufferRelease(buffer);
 
         assert!(test.errors().is_empty());

@@ -43,11 +43,15 @@ below and refined as P15.x slices land.
   errors. The FFI-boundary `expect` exception (CLAUDE.md core principle 3)
   does not extend to GLES bring-up code.
 - **Out of scope for Phase 15:** D3D backends (permanent); desktop GL
-  (4.x) / WGL / Wayland / X11 / WebGL / Emscripten; multi-context
+  (4.x) / Wayland / X11 / WebGL / Emscripten; multi-context
   threading beyond single-shared-context serialization; persistent
   buffer mapping fallback emulation when `GL_EXT_buffer_storage` is
   absent (use per-call `glMapBufferRange`); ANGLE backend selection
   (D3D11 vs Vulkan inside ANGLE — leave to ANGLE defaults).
+  **WGL** was originally out-of-scope but was added post-COMPLETE
+  (2026-05-25) as a Windows-only opt-in verification path; see the
+  "Context backend (Windows)" matrix row and `tracking/phase-15.md`
+  → "Post-COMPLETE — WGL fallback".
 
 ### Minimum GLES version
 
@@ -211,6 +215,7 @@ Entries are filled in / refined as P15.x slices land. Anything left as
 | `drawIndirect` / `drawIndexedIndirect` | `glDrawArraysIndirect` / `glDrawElementsIndirect` | ✗ Deferred — `HalRenderPass`/`HalDraw` carry no indirect variant in core |
 | `first_instance` direct | naga injects `uniform uint naga_vs_first_instance`; HAL sets it via `glUniform1ui` per draw before `glDrawArraysInstanced` | ☑ (P15.5; uniform-injection path implemented, unexercised by e2e but code path active) |
 | `first_instance` indirect | ✗ Unsupported — feature not advertised | locked ✗ |
+| Context backend (Windows) | Default: EGL (`libEGL.dll` ⇒ ANGLE platform-display cascade through Vulkan → D3D11). Opt-in fallback: WGL (`opengl32.dll` + `WGL_EXT_create_context_es2_profile`) selected via `YAWGPU_GLES_BACKEND=wgl`. Both routes converge on the same `glow::Context` API below the make-current seam; `GlesInstanceInner` / `GlesAdapter` / `GlesDeviceInner` are static enums (`Egl(...)` / `Wgl(...)`) per CLAUDE.md "no `dyn Trait`". | ☑ (P15.6 EGL + post-COMPLETE WGL slice; WGL verified on `OpenGL ES 3.2 NVIDIA 595.95`, 12/12 e2e green) |
 | Surface (Android) | `eglCreateWindowSurface(ANativeWindow*)` via `GlesInstance::create_surface_from_android_native_window`. Reuses the existing `choose_config` (RGBA8 + GLES3 + PBUFFER_BIT). | ☑ (P15.6; code path implemented; manual visual verification via Android-side example) |
 | Surface (Windows ANGLE) | `eglCreateWindowSurface(HWND)` via `GlesInstance::create_surface_from_windows_hwnd`. ANGLE accepts the pbuffer-capable config for window surfaces too. | ☑ (P15.6; manual visual verification via `examples/triangle`) |
 | Present | Back-buffer (`GlesTexture` allocated at `configure()` with `RENDER_ATTACHMENT \| COPY_SRC`) blitted via transient read-FBO + `glBlitFramebuffer` to default FBO, then `eglSwapBuffers`. `RestoreCurrent` Drop guard re-binds the pbuffer after swap (even on error). | ☑ (P15.6) |

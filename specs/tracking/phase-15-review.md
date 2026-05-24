@@ -146,14 +146,32 @@ Drop, Send/Sync soundness, FFI selection scope, Tier-2 /
 core-validation isolation, Noop / Vulkan / Metal-unchanged,
 ✗ Deferred matrix items returning clean errors, naming,
 doc comments) **were diff-readable** and remain valid. What
-is **not** in evidence is the implicit "the GLES path
-renders / dispatches / copies correctly on real GPU" — that
-requires an ES 3.1 ANGLE binary the dev machine does not
-currently have (Chrome / Edge cap at ES 3.0; ANGLE's Vulkan
-backend fails initialization against the host NVIDIA Vulkan
-ICD with VK_ERROR_INITIALIZATION_FAILED for reasons internal
-to the Chrome ANGLE build). Re-running the e2e suite once an
-ES 3.1 ANGLE binary is available (vcpkg `angle:x64-windows`,
-NuGet `ANGLE.WindowsStore`, standalone Google ANGLE CI
-artifact, or built from source via `depot_tools` + `gn`) is
-tracked as a Phase 15 post-COMPLETE follow-up.
+was **not** in evidence at COMPLETE time was the implicit
+"the GLES path renders / dispatches / copies correctly on
+real GPU" — that required an ES 3.1+ context the dev machine
+could not deliver via ANGLE (Chrome / Edge / Unity / JBR /
+LogiOptionsPlus all share the same upstream CEF-derived ES
+3.0-capped libGLESv2 build).
+
+## Real-GPU verification update (2026-05-25, post-Phase-15 WGL slice)
+
+The gap was closed by a post-COMPLETE WGL fallback slice
+(logged under `tracking/phase-15.md` → "Post-COMPLETE — WGL
+fallback"). It adds an opt-in Windows context backend that
+bypasses ANGLE: `YAWGPU_GLES_BACKEND=wgl` ⇒ `opengl32.dll` +
+`WGL_EXT_create_context_es2_profile` ⇒ host driver ES 3.1+
+context. On the dev machine the NVIDIA driver returned
+`GL_VERSION = "OpenGL ES 3.2 NVIDIA 595.95"`.
+
+Result: all **12 / 12** `e2e_gles_*` tests pass on the host
+GPU (basic 3/3, buffer 2/2, texture 3/3, compute 2/2, render
+2/2 — including pixel-content assertions). The post-mortem
+panic-on-missing-GLES guard remains in place; the e2e suite
+can no longer silent-skip. The implicit "renders / dispatches
+/ copies correctly on real GPU" claim therefore now **holds**
+on the WGL path. The original ANGLE-EGL execution path is
+still unverified on this machine (no ES 3.1 ANGLE binary
+locally), but the production HAL code is identical for the
+two context backends below the make-current seam — the WGL
+verification exercises the same `glow::Context` calls EGL
+would.

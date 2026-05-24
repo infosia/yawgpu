@@ -14,6 +14,8 @@ mod queue;
 mod sampler;
 mod surface;
 mod texture;
+#[cfg(windows)]
+mod wgl;
 
 pub use adapter::GlesAdapter;
 pub use buffer::GlesBuffer;

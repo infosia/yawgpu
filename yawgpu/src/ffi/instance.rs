@@ -275,4 +275,3 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
         _ => native::WGPUWaitStatus_Error,
     }
 }
-
