@@ -38,6 +38,33 @@ pub(super) fn map_texture_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
     flags
 }
 
+/// Converts buffer usage into the corresponding Vulkan representation.
+pub(super) fn map_buffer_usage(usage: HalBufferUsage) -> vk::BufferUsageFlags {
+    // TRANSFER_SRC | TRANSFER_DST are always set because yawgpu uses staging
+    // buffers for mapAtCreation and writeBuffer regardless of the caller's
+    // declared usage. See specs/tracking/vulkan-buffer-texture-usage-vuids.md § F1.
+    let mut flags = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
+    if usage.index {
+        flags |= vk::BufferUsageFlags::INDEX_BUFFER;
+    }
+    if usage.vertex {
+        flags |= vk::BufferUsageFlags::VERTEX_BUFFER;
+    }
+    if usage.uniform {
+        flags |= vk::BufferUsageFlags::UNIFORM_BUFFER;
+    }
+    if usage.storage {
+        flags |= vk::BufferUsageFlags::STORAGE_BUFFER;
+    }
+    if usage.indirect {
+        flags |= vk::BufferUsageFlags::INDIRECT_BUFFER;
+    }
+    // query_resolve is a transfer-dst write; the bit is already on the
+    // baseline above. map_read / map_write are host-memory properties and
+    // have no Vulkan buffer-usage equivalent.
+    flags
+}
+
 /// Converts vertex format into the corresponding yawgpu representation.
 pub(super) fn map_vertex_format(format: HalVertexFormat) -> Result<vk::Format, HalError> {
     match format {
@@ -96,5 +123,66 @@ pub(super) fn map_compare_function(compare: HalCompareFunction) -> vk::CompareOp
         HalCompareFunction::NotEqual => vk::CompareOp::NOT_EQUAL,
         HalCompareFunction::GreaterEqual => vk::CompareOp::GREATER_OR_EQUAL,
         HalCompareFunction::Always => vk::CompareOp::ALWAYS,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_buffer_usage_always_sets_transfer_src_and_transfer_dst() {
+        let flags = map_buffer_usage(HalBufferUsage::default());
+
+        assert!(flags.contains(vk::BufferUsageFlags::TRANSFER_SRC));
+        assert!(flags.contains(vk::BufferUsageFlags::TRANSFER_DST));
+    }
+
+    #[test]
+    fn map_buffer_usage_sets_vertex_when_requested() {
+        let usage = HalBufferUsage {
+            vertex: true,
+            ..HalBufferUsage::default()
+        };
+
+        assert!(map_buffer_usage(usage).contains(vk::BufferUsageFlags::VERTEX_BUFFER));
+    }
+
+    #[test]
+    fn map_buffer_usage_sets_uniform_storage_index_indirect() {
+        let cases = [
+            (
+                HalBufferUsage {
+                    uniform: true,
+                    ..HalBufferUsage::default()
+                },
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+            ),
+            (
+                HalBufferUsage {
+                    storage: true,
+                    ..HalBufferUsage::default()
+                },
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+            ),
+            (
+                HalBufferUsage {
+                    index: true,
+                    ..HalBufferUsage::default()
+                },
+                vk::BufferUsageFlags::INDEX_BUFFER,
+            ),
+            (
+                HalBufferUsage {
+                    indirect: true,
+                    ..HalBufferUsage::default()
+                },
+                vk::BufferUsageFlags::INDIRECT_BUFFER,
+            ),
+        ];
+
+        for (usage, expected) in cases {
+            assert!(map_buffer_usage(usage).contains(expected));
+        }
     }
 }

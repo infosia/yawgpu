@@ -79,6 +79,31 @@ pub struct HalTextureUsage {
     pub render_attachment: bool,
 }
 
+/// Enumerates HAL buffer usage.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HalBufferUsage {
+    /// MAP_READ.
+    pub map_read: bool,
+    /// MAP_WRITE.
+    pub map_write: bool,
+    /// Copy src.
+    pub copy_src: bool,
+    /// Copy dst.
+    pub copy_dst: bool,
+    /// Index buffer.
+    pub index: bool,
+    /// Vertex buffer.
+    pub vertex: bool,
+    /// Uniform buffer.
+    pub uniform: bool,
+    /// Storage buffer.
+    pub storage: bool,
+    /// Indirect buffer.
+    pub indirect: bool,
+    /// Query resolve destination.
+    pub query_resolve: bool,
+}
+
 /// Enumerates HAL address mode values.
 #[derive(Debug, Clone, Copy)]
 pub enum HalAddressMode {
@@ -148,4 +173,25 @@ pub enum HalStencilOperation {
     IncrementWrap,
     /// Decrement wrap variant.
     DecrementWrap,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hal_buffer_usage_default_is_all_false() {
+        let usage = HalBufferUsage::default();
+
+        assert!(!usage.map_read);
+        assert!(!usage.map_write);
+        assert!(!usage.copy_src);
+        assert!(!usage.copy_dst);
+        assert!(!usage.index);
+        assert!(!usage.vertex);
+        assert!(!usage.uniform);
+        assert!(!usage.storage);
+        assert!(!usage.indirect);
+        assert!(!usage.query_resolve);
+    }
 }

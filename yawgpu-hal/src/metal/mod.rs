@@ -21,12 +21,13 @@ use objc2_metal::{
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use crate::{
-    HalAddressMode, HalBoundBuffer, HalBuffer, HalBufferTextureCopy, HalCompareFunction,
-    HalComputePass, HalCopy, HalDepthStencilState, HalDescriptorBinding, HalDraw, HalError,
-    HalExtent3d, HalFilterMode, HalMipmapFilterMode, HalPrimitiveTopology, HalRenderLoadOp,
-    HalRenderPass, HalRenderPipelineDescriptor, HalSamplerDescriptor, HalShaderSource,
-    HalStencilFaceState, HalStencilOperation, HalSurfaceConfiguration, HalTexture, HalTextureCopy,
-    HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
+    HalAddressMode, HalBoundBuffer, HalBuffer, HalBufferTextureCopy, HalBufferUsage,
+    HalCompareFunction, HalComputePass, HalCopy, HalDepthStencilState, HalDescriptorBinding,
+    HalDraw, HalError, HalExtent3d, HalFilterMode, HalMipmapFilterMode, HalPrimitiveTopology,
+    HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor, HalSamplerDescriptor,
+    HalShaderSource, HalStencilFaceState, HalStencilOperation, HalSurfaceConfiguration,
+    HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage,
+    HalVertexFormat, HalVertexStepMode,
 };
 #[cfg(feature = "tiled")]
 use crate::{

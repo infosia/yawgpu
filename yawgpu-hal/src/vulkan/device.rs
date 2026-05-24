@@ -75,9 +75,9 @@ impl VulkanDevice {
 
     /// Allocates a buffer of the given size on this device.
     #[must_use]
-    pub fn create_buffer(&self, size: u64) -> VulkanBuffer {
+    pub fn create_buffer(&self, size: u64, usage: HalBufferUsage) -> VulkanBuffer {
         self.inner.allocations.fetch_add(1, Ordering::Relaxed);
-        match create_buffer(Arc::clone(&self.inner), size) {
+        match create_buffer(Arc::clone(&self.inner), size, usage) {
             Ok(inner) => VulkanBuffer {
                 inner: Some(Arc::new(inner)),
                 size,
@@ -210,7 +210,7 @@ mod tests {
     fn vulkan_device_allocation_count_tracks_created_resources() {
         let device = vulkan_device();
         assert_eq!(device.allocation_count(), 0);
-        let _buffer = device.create_buffer(4);
+        let _buffer = device.create_buffer(4, HalBufferUsage::default());
         let _texture = device.create_texture(&texture_descriptor());
         let _sampler = device.create_sampler(&sampler_descriptor());
         assert_eq!(device.allocation_count(), 3);
@@ -229,7 +229,7 @@ mod tests {
     #[cfg(feature = "vulkan")]
     fn vulkan_device_create_buffer_records_size_and_maps_memory() {
         let device = vulkan_device();
-        let buffer = device.create_buffer(16);
+        let buffer = device.create_buffer(16, HalBufferUsage::default());
         assert_eq!(buffer.size(), 16);
         assert!(buffer.mapped_ptr().is_some());
         assert_eq!(device.allocation_count(), 1);

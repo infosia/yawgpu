@@ -131,6 +131,23 @@ impl std::ops::BitOr for BufferUsage {
     }
 }
 
+/// Converts a validated WebGPU `BufferUsage` bitfield into the HAL-level
+/// struct so the backend layer can see which usage bits the caller declared.
+pub(crate) fn hal_buffer_usage(usage: BufferUsage) -> yawgpu_hal::HalBufferUsage {
+    yawgpu_hal::HalBufferUsage {
+        map_read: usage.contains(BufferUsage::MAP_READ),
+        map_write: usage.contains(BufferUsage::MAP_WRITE),
+        copy_src: usage.contains(BufferUsage::COPY_SRC),
+        copy_dst: usage.contains(BufferUsage::COPY_DST),
+        index: usage.contains(BufferUsage::INDEX),
+        vertex: usage.contains(BufferUsage::VERTEX),
+        uniform: usage.contains(BufferUsage::UNIFORM),
+        storage: usage.contains(BufferUsage::STORAGE),
+        indirect: usage.contains(BufferUsage::INDIRECT),
+        query_resolve: usage.contains(BufferUsage::QUERY_RESOLVE),
+    }
+}
+
 /// Enumerates buffer map state values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -624,6 +641,44 @@ mod tests {
         let usage = BufferUsage::from_bits_retain(raw);
 
         assert_eq!(usage.bits(), raw);
+    }
+
+    #[test]
+    fn hal_buffer_usage_maps_every_bit() {
+        let all = BufferUsage::MAP_READ
+            | BufferUsage::MAP_WRITE
+            | BufferUsage::COPY_SRC
+            | BufferUsage::COPY_DST
+            | BufferUsage::INDEX
+            | BufferUsage::VERTEX
+            | BufferUsage::UNIFORM
+            | BufferUsage::STORAGE
+            | BufferUsage::INDIRECT
+            | BufferUsage::QUERY_RESOLVE;
+        let usage = hal_buffer_usage(all);
+
+        assert!(usage.map_read);
+        assert!(usage.map_write);
+        assert!(usage.copy_src);
+        assert!(usage.copy_dst);
+        assert!(usage.index);
+        assert!(usage.vertex);
+        assert!(usage.uniform);
+        assert!(usage.storage);
+        assert!(usage.indirect);
+        assert!(usage.query_resolve);
+
+        let empty = hal_buffer_usage(BufferUsage::NONE);
+        assert!(!empty.map_read);
+        assert!(!empty.map_write);
+        assert!(!empty.copy_src);
+        assert!(!empty.copy_dst);
+        assert!(!empty.index);
+        assert!(!empty.vertex);
+        assert!(!empty.uniform);
+        assert!(!empty.storage);
+        assert!(!empty.indirect);
+        assert!(!empty.query_resolve);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::HalError;
+use crate::{HalBufferUsage, HalError};
 
 /// Stores noop instance data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -84,7 +84,7 @@ impl NoopDevice {
 
     /// Allocates a buffer of the given size on this device.
     #[must_use]
-    pub fn create_buffer(&self, size: u64) -> NoopBuffer {
+    pub fn create_buffer(&self, size: u64, _usage: HalBufferUsage) -> NoopBuffer {
         self.allocations.fetch_add(1, Ordering::Relaxed);
         NoopBuffer { size }
     }
@@ -225,7 +225,7 @@ mod tests {
         let device = NoopDevice::new();
 
         assert_eq!(device.allocation_count(), 0);
-        let _buffer = device.create_buffer(4);
+        let _buffer = device.create_buffer(4, HalBufferUsage::default());
         assert_eq!(device.allocation_count(), 1);
         let _texture = device.create_texture();
         assert_eq!(device.allocation_count(), 2);
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn noop_device_create_buffer_records_size_and_increments_allocation_count() {
         let device = NoopDevice::new();
-        let buffer = device.create_buffer(64);
+        let buffer = device.create_buffer(64, HalBufferUsage::default());
 
         assert_eq!(buffer.size(), 64);
         assert_eq!(device.allocation_count(), 1);
@@ -285,14 +285,17 @@ mod tests {
     fn noop_buffer_size_returns_created_size() {
         let device = NoopDevice::new();
 
-        assert_eq!(device.create_buffer(0).size(), 0);
-        assert_eq!(device.create_buffer(4096).size(), 4096);
+        assert_eq!(device.create_buffer(0, HalBufferUsage::default()).size(), 0);
+        assert_eq!(
+            device.create_buffer(4096, HalBufferUsage::default()).size(),
+            4096
+        );
     }
 
     #[test]
     fn noop_buffer_mapped_ptr_returns_none() {
         let device = NoopDevice::new();
-        let buffer = device.create_buffer(128);
+        let buffer = device.create_buffer(128, HalBufferUsage::default());
 
         assert!(buffer.mapped_ptr().is_none());
     }

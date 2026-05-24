@@ -109,11 +109,12 @@ impl Drop for VulkanBufferInner {
 pub(super) fn create_buffer(
     device: Arc<VulkanDeviceInner>,
     size: u64,
+    usage: HalBufferUsage,
 ) -> Result<VulkanBufferInner, HalError> {
     let allocation_size = size.max(1);
     let create_info = vk::BufferCreateInfo::default()
         .size(allocation_size)
-        .usage(vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST)
+        .usage(map_buffer_usage(usage))
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
     let buffer = unsafe { device.device.create_buffer(&create_info, None) }
         .map_err(|_| buffer_error("buffer creation failed"))?;
@@ -186,11 +187,13 @@ pub(super) fn find_memory_type_index(
 #[cfg(test)]
 mod tests {
     use super::super::test_helpers::*;
+    use super::*;
+
     #[test]
     #[ignore = "manual real Vulkan backend test"]
     #[cfg(feature = "vulkan")]
     fn vulkan_buffer_size_returns_created_size() {
-        let buffer = vulkan_device().create_buffer(32);
+        let buffer = vulkan_device().create_buffer(32, HalBufferUsage::default());
         assert_eq!(buffer.size(), 32);
     }
 
@@ -198,7 +201,7 @@ mod tests {
     #[ignore = "manual real Vulkan backend test"]
     #[cfg(feature = "vulkan")]
     fn vulkan_buffer_write_updates_mapped_memory() {
-        let buffer = vulkan_device().create_buffer(4);
+        let buffer = vulkan_device().create_buffer(4, HalBufferUsage::default());
         buffer.write(0, &[5, 6, 7, 8]).expect("write buffer");
         assert_eq!(buffer.read(0, 4).expect("read buffer"), [5, 6, 7, 8]);
     }
@@ -207,7 +210,7 @@ mod tests {
     #[ignore = "manual real Vulkan backend test"]
     #[cfg(feature = "vulkan")]
     fn vulkan_buffer_read_returns_written_bytes() {
-        let buffer = vulkan_device().create_buffer(4);
+        let buffer = vulkan_device().create_buffer(4, HalBufferUsage::default());
         buffer.write(1, &[9, 10]).expect("write buffer");
         assert_eq!(buffer.read(1, 2).expect("read buffer"), [9, 10]);
     }
@@ -216,7 +219,7 @@ mod tests {
     #[ignore = "manual real Vulkan backend test"]
     #[cfg(feature = "vulkan")]
     fn vulkan_buffer_mapped_ptr_returns_non_null_pointer() {
-        let buffer = vulkan_device().create_buffer(4);
+        let buffer = vulkan_device().create_buffer(4, HalBufferUsage::default());
         assert!(buffer.mapped_ptr().is_some());
     }
 }
