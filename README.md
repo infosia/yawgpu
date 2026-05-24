@@ -303,7 +303,9 @@ SPIR-V or MSL straight to the backend; see
   has a direct unit test.
 - **Real-GPU end-to-end tests**: buffer/texture/compute/render paths are
   verified against live Metal and Vulkan devices, including the tiled
-  two-subpass G-buffer path.
+  two-subpass G-buffer path. The Vulkan backend runs **validation-clean**
+  under `VK_LAYER_KHRONOS_validation` (zero VUID violations across the
+  full `--ignored` suite).
 - **Platform coverage**:
   - **macOS** — builds, unit tests, real-GPU end-to-end tests, and the C
     examples all verified (Metal and Vulkan/MoltenVK; MoltenVK does not
