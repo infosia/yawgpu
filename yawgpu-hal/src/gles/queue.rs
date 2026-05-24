@@ -4,7 +4,9 @@ use glow::HasContext;
 
 use super::device::GlesDeviceInner;
 use super::BACKEND;
-use crate::{HalBuffer, HalBufferCopy, HalCopy, HalError};
+use crate::{
+    HalBuffer, HalBufferCopy, HalBufferTextureCopy, HalCopy, HalError, HalTexture, HalTextureCopy,
+};
 
 /// Stores GLES queue data used by validation and backend submission.
 #[derive(Clone)]
@@ -48,11 +50,14 @@ impl GlesQueue {
                 for copy in copies {
                     match copy {
                         HalCopy::Buffer(copy) => submit_buffer_copy(gl, copy)?,
+                        HalCopy::BufferToTexture(copy) => submit_buffer_to_texture(gl, copy)?,
+                        HalCopy::TextureToBuffer(copy) => submit_texture_to_buffer(gl, copy)?,
+                        HalCopy::TextureToTexture(copy) => submit_texture_to_texture(gl, copy)?,
                         _ => {
                             return Err(HalError::BufferOperationFailed {
                                 backend: BACKEND,
                                 message:
-                                    "GLES backend supports only buffer-to-buffer copies in P15.2",
+                                    "GLES backend supports only buffer and texture copies in P15.3",
                             });
                         }
                     }
@@ -111,4 +116,315 @@ fn submit_buffer_copy(gl: &glow::Context, copy: &HalBufferCopy) -> Result<(), Ha
     }
 
     Ok(())
+}
+
+fn submit_buffer_to_texture(
+    gl: &glow::Context,
+    copy: &HalBufferTextureCopy,
+) -> Result<(), HalError> {
+    let HalBuffer::Gles(source) = &copy.buffer else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "buffer-to-texture source is not a GLES buffer",
+        });
+    };
+    let HalTexture::Gles(destination) = &copy.texture else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "buffer-to-texture destination is not a GLES texture",
+        });
+    };
+
+    ensure_2d_copy(copy.extent.depth_or_array_layers, copy.origin.z)?;
+    let buffer = source.raw_or_err()?;
+    let texture = destination.raw_or_err()?;
+    let meta = destination.meta();
+    let row_pixels = pixels_per_row(
+        copy.buffer_layout.bytes_per_row,
+        meta.format.bytes_per_pixel,
+    )?;
+    let mip_level = i32_from_u32(copy.mip_level, "texture mip level exceeds GLES limit")?;
+    let x = i32_from_u32(copy.origin.x, "texture x origin exceeds GLES limit")?;
+    let y = i32_from_u32(copy.origin.y, "texture y origin exceeds GLES limit")?;
+    let width = i32_from_u32(copy.extent.width, "texture copy width exceeds GLES limit")?;
+    let height = i32_from_u32(copy.extent.height, "texture copy height exceeds GLES limit")?;
+    let buffer_offset = u32_from_u64(
+        copy.buffer_layout.offset,
+        "buffer-to-texture offset exceeds GLES limit",
+    )?;
+
+    unsafe {
+        gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(buffer));
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, row_pixels);
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+        gl.tex_sub_image_2d(
+            glow::TEXTURE_2D,
+            mip_level,
+            x,
+            y,
+            width,
+            height,
+            meta.format.format,
+            meta.format.ty,
+            glow::PixelUnpackData::BufferOffset(buffer_offset),
+        );
+        gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+    }
+
+    Ok(())
+}
+
+fn submit_texture_to_buffer(
+    gl: &glow::Context,
+    copy: &HalBufferTextureCopy,
+) -> Result<(), HalError> {
+    let HalTexture::Gles(source) = &copy.texture else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture-to-buffer source is not a GLES texture",
+        });
+    };
+    let HalBuffer::Gles(destination) = &copy.buffer else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture-to-buffer destination is not a GLES buffer",
+        });
+    };
+
+    ensure_2d_copy(copy.extent.depth_or_array_layers, copy.origin.z)?;
+    let texture = source.raw_or_err()?;
+    let buffer = destination.raw_or_err()?;
+    let meta = source.meta();
+    let row_pixels = pixels_per_row(
+        copy.buffer_layout.bytes_per_row,
+        meta.format.bytes_per_pixel,
+    )?;
+    let mip_level = i32_from_u32(copy.mip_level, "texture mip level exceeds GLES limit")?;
+    let x = i32_from_u32(copy.origin.x, "texture x origin exceeds GLES limit")?;
+    let y = i32_from_u32(copy.origin.y, "texture y origin exceeds GLES limit")?;
+    let width = i32_from_u32(copy.extent.width, "texture copy width exceeds GLES limit")?;
+    let height = i32_from_u32(copy.extent.height, "texture copy height exceeds GLES limit")?;
+    let buffer_offset = u32_from_u64(
+        copy.buffer_layout.offset,
+        "texture-to-buffer offset exceeds GLES limit",
+    )?;
+
+    unsafe {
+        let framebuffer = gl
+            .create_framebuffer()
+            .map_err(|_| HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "glCreateFramebuffer failed",
+            })?;
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
+        gl.framebuffer_texture_2d(
+            glow::READ_FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(texture),
+            mip_level,
+        );
+        gl.read_buffer(glow::COLOR_ATTACHMENT0);
+        if gl.check_framebuffer_status(glow::READ_FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            gl.delete_framebuffer(framebuffer);
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "framebuffer incomplete for texture-to-buffer copy",
+            });
+        }
+        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(buffer));
+        gl.pixel_store_i32(glow::PACK_ROW_LENGTH, row_pixels);
+        gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+        gl.read_pixels(
+            x,
+            y,
+            width,
+            height,
+            meta.format.format,
+            meta.format.ty,
+            glow::PixelPackData::BufferOffset(buffer_offset),
+        );
+        gl.pixel_store_i32(glow::PACK_ROW_LENGTH, 0);
+        gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        gl.delete_framebuffer(framebuffer);
+    }
+
+    Ok(())
+}
+
+fn submit_texture_to_texture(gl: &glow::Context, copy: &HalTextureCopy) -> Result<(), HalError> {
+    let HalTexture::Gles(source) = &copy.source else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture-to-texture source is not a GLES texture",
+        });
+    };
+    let HalTexture::Gles(destination) = &copy.destination else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture-to-texture destination is not a GLES texture",
+        });
+    };
+
+    if !supports_copy_image(gl) {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GL_EXT_copy_image required for texture-to-texture copies; not supported by this GLES driver",
+        });
+    }
+
+    ensure_2d_copy(copy.extent.depth_or_array_layers, copy.source_origin.z)?;
+    ensure_2d_copy(copy.extent.depth_or_array_layers, copy.destination_origin.z)?;
+    let source_texture = source.raw_or_err()?;
+    let destination_texture = destination.raw_or_err()?;
+    let source_mip_level = i32_from_u32(
+        copy.source_mip_level,
+        "source texture mip level exceeds GLES limit",
+    )?;
+    let destination_mip_level = i32_from_u32(
+        copy.destination_mip_level,
+        "destination texture mip level exceeds GLES limit",
+    )?;
+    let source_x = i32_from_u32(
+        copy.source_origin.x,
+        "source texture x origin exceeds GLES limit",
+    )?;
+    let source_y = i32_from_u32(
+        copy.source_origin.y,
+        "source texture y origin exceeds GLES limit",
+    )?;
+    let destination_x = i32_from_u32(
+        copy.destination_origin.x,
+        "destination texture x origin exceeds GLES limit",
+    )?;
+    let destination_y = i32_from_u32(
+        copy.destination_origin.y,
+        "destination texture y origin exceeds GLES limit",
+    )?;
+    let width = i32_from_u32(copy.extent.width, "texture copy width exceeds GLES limit")?;
+    let height = i32_from_u32(copy.extent.height, "texture copy height exceeds GLES limit")?;
+
+    unsafe {
+        gl.copy_image_sub_data(
+            source_texture,
+            glow::TEXTURE_2D,
+            source_mip_level,
+            source_x,
+            source_y,
+            0,
+            destination_texture,
+            glow::TEXTURE_2D,
+            destination_mip_level,
+            destination_x,
+            destination_y,
+            0,
+            width,
+            height,
+            1,
+        );
+    }
+
+    Ok(())
+}
+
+fn supports_copy_image(gl: &glow::Context) -> bool {
+    gl.supported_extensions().contains("GL_EXT_copy_image")
+        || unsafe { gles_version_at_least_3_2(&gl.get_parameter_string(glow::VERSION)) }
+}
+
+fn gles_version_at_least_3_2(version: &str) -> bool {
+    let Some(version_start) = version.find(|ch: char| ch.is_ascii_digit()) else {
+        return false;
+    };
+    let version = &version[version_start..];
+    let mut parts = version
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty());
+    let major = parts.next().and_then(|part| part.parse::<u32>().ok());
+    let minor = parts.next().and_then(|part| part.parse::<u32>().ok());
+    matches!((major, minor), (Some(major), Some(minor)) if major > 3 || (major == 3 && minor >= 2))
+}
+
+fn ensure_2d_copy(depth_or_array_layers: u32, z: u32) -> Result<(), HalError> {
+    if depth_or_array_layers != 1 || z != 0 {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "only 2D texture copies are supported on GLES (P15.3)",
+        });
+    }
+    Ok(())
+}
+
+fn pixels_per_row(bytes_per_row: u32, bytes_per_pixel: u32) -> Result<i32, HalError> {
+    if bytes_per_pixel == 0 || !bytes_per_row.is_multiple_of(bytes_per_pixel) {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "bytes_per_row is not a multiple of bytes_per_pixel",
+        });
+    }
+    i32::try_from(bytes_per_row / bytes_per_pixel).map_err(|_| HalError::BufferOperationFailed {
+        backend: BACKEND,
+        message: "row pixel count exceeds GLES limit",
+    })
+}
+
+fn i32_from_u32(value: u32, message: &'static str) -> Result<i32, HalError> {
+    i32::try_from(value).map_err(|_| HalError::BufferOperationFailed {
+        backend: BACKEND,
+        message,
+    })
+}
+
+fn u32_from_u64(value: u64, message: &'static str) -> Result<u32, HalError> {
+    u32::try_from(value).map_err(|_| HalError::BufferOperationFailed {
+        backend: BACKEND,
+        message,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pixels_per_row_accepts_aligned_and_zero_stride() {
+        assert_eq!(pixels_per_row(256, 4).expect("aligned row"), 64);
+        assert_eq!(pixels_per_row(0, 4).expect("zero row stride"), 0);
+    }
+
+    #[test]
+    fn pixels_per_row_rejects_unaligned_and_zero_pixel_size() {
+        let unaligned = pixels_per_row(255, 4).expect_err("unaligned row must error");
+        assert!(matches!(
+            unaligned,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message: "bytes_per_row is not a multiple of bytes_per_pixel",
+            }
+        ));
+
+        let zero_pixel_size = pixels_per_row(8, 0).expect_err("zero pixel size must error");
+        assert!(matches!(
+            zero_pixel_size,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message: "bytes_per_row is not a multiple of bytes_per_pixel",
+            }
+        ));
+    }
+
+    #[test]
+    fn gles_version_at_least_3_2_parses_common_strings() {
+        assert!(gles_version_at_least_3_2("OpenGL ES 3.2 ANGLE"));
+        assert!(gles_version_at_least_3_2("OpenGL ES 4.0"));
+        assert!(!gles_version_at_least_3_2("OpenGL ES 3.1 ANGLE"));
+        assert!(!gles_version_at_least_3_2("not a version"));
+    }
 }

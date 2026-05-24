@@ -192,15 +192,15 @@ Entries are filled in / refined as P15.x slices land. Anything left as
 | Buffer create / map / unmap | `glBufferData(NULL, size, DYNAMIC_DRAW)` + `glBufferSubData` (write) + `glMapBufferRange(MAP_READ_BIT)` (read). HostBuffer path in core (`mapped_ptr` returns `None`); persistent map deferred. | ☑ (P15.2; ANGLE round-trip verified) |
 | Buffer-to-buffer copy | `glCopyBufferSubData` via `GL_COPY_READ_BUFFER` / `GL_COPY_WRITE_BUFFER` | ☑ (P15.2; ANGLE round-trip verified, full + partial offsets) |
 | `mappedAtCreation` | Allocate + map immediately; flush on unmap | ☑ (P15.2; transparent via HostBuffer path) |
-| Texture: 1D | `GL_TEXTURE_2D` with height=1 (no native 1D in GLES) | ? (P15.3) |
-| Texture: 2D | `GL_TEXTURE_2D` + `glTexStorage2D` | ? (P15.3) |
-| Texture: 2D array | `GL_TEXTURE_2D_ARRAY` + `glTexStorage3D` | ? (P15.3) |
-| Texture: 3D | `GL_TEXTURE_3D` + `glTexStorage3D` | ? (P15.3) |
-| Texture: cube | `GL_TEXTURE_CUBE_MAP` + `glTexStorage2D` | ? (P15.3) |
-| Texture views | Subrange metadata + resolve at bind | ? (P15.3) |
-| Storage textures (read/write) | `glBindImageTexture`; restricted format set | ? (P15.3 / P15.4) |
-| B2T / T2B / T2T copies | `glTexSubImage*` + PBO unpack/pack | ? (P15.3) |
-| Sampler creation | `glGenSamplers` + `glSamplerParameteri` | ? (P15.3) |
+| Texture: 1D | `GL_TEXTURE_2D` with height=1 (no native 1D in GLES) | ✗ Deferred — `allocate_texture` rejects `depth_or_array_layers != 1`; needs distinct 1D path |
+| Texture: 2D | `GL_TEXTURE_2D` + `glTexStorage2D` (non-multisample, RGBA8Unorm baseline) | ☑ (P15.3; ANGLE verified) |
+| Texture: 2D array | `GL_TEXTURE_2D_ARRAY` + `glTexStorage3D` | ✗ Deferred (P15.3 rejects layers > 1) |
+| Texture: 3D | `GL_TEXTURE_3D` + `glTexStorage3D` | ✗ Deferred |
+| Texture: cube | `GL_TEXTURE_CUBE_MAP` + `glTexStorage2D` | ✗ Deferred |
+| Texture views | Subrange metadata resolved by core; HAL receives `HalTexture` + mip/origin in copy descriptors | ☑ (P15.3; degenerate — no HAL-level view object) |
+| Storage textures (read/write) | `glBindImageTexture`; restricted format set | ? (P15.4) |
+| B2T / T2B / T2T copies | `glTexSubImage2D` (PBO unpack + `UNPACK_ROW_LENGTH`) / transient FBO + `glReadPixels` (PBO pack + `PACK_ROW_LENGTH` + `read_buffer(COLOR_ATTACHMENT0)`) / `glCopyImageSubData` (GLES 3.2 or `GL_EXT_copy_image`) | ☑ (P15.3; ANGLE verified; 2D only) |
+| Sampler creation | `glGenSamplers` + `glSamplerParameteri/f` (filter / address / mipmap / compare / anisotropy via `GL_EXT_texture_filter_anisotropic`) | ☑ (P15.3; `ClampToBorder` not supported) |
 | Compute shader | Native compute | ? (P15.4) |
 | Compute dispatch (direct) | `glDispatchCompute` | ? (P15.4) |
 | Compute dispatch (indirect) | `glDispatchComputeIndirect` | ? (P15.4) |

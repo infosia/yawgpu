@@ -1,8 +1,8 @@
 # Phase 15 — GLES backend (Tier 2 / experimental)
 
-Status: **P15.0 + P15.1 + P15.1a + P15.2 DONE; P15.3+ PLANNED.**
-Rules / plan: `../blocks/67-gles-backend.md`. Roles / loop:
-`../reference/workflow.md`.
+Status: **P15.0 + P15.1 + P15.1a + P15.2 + P15.3 DONE; P15.4+
+PLANNED.** Rules / plan: `../blocks/67-gles-backend.md`. Roles /
+loop: `../reference/workflow.md`.
 
 **Tier:** Tier 2 (best-effort, experimental). The `gles` cargo
 feature is the sole experimental signal — no runtime markers
@@ -365,15 +365,113 @@ Acceptance (all 10 green):
   full and partial-offset variants**)
 - `cargo build -p yawgpu --features vulkan` ✓
 
-## P15.3 — Texture/Sampler + B2T/T2B/T2T  *(☐ PLANNED)*
+## P15.3 — Texture/Sampler + B2T/T2B/T2T  *(☑ DONE)*
 
-Reuses `e2e_copy` texture subset. Decision required:
-storage-texture format gating timing.
+Done (2026-05-24, commit pending at write time): real GL-backed
+`GlesTexture` + `GlesSampler` + the three texture-side copy
+paths (B2T / T2B / T2T) for 2D non-multisample RGBA8Unorm
+textures on Windows ANGLE.
 
-## P15.3 — Texture/Sampler + B2T/T2B/T2T  *(☐ PLANNED)*
+New `yawgpu-hal/src/gles/format.rs` exposes module-private
+`GlesFormat { internal, format, ty, bytes_per_pixel }` + a
+`map_texture_format` table currently mapping only
+`Rgba8Unorm`; other formats return
+`HalError::BufferOperationFailed` with a P15.3-named message
+(no speculative format expansion). `fallback_format` returns
+RGBA8Unorm for the `derive_meta` path so meta is populated
+even when allocation failed (Drop / accessors still work).
 
-Reuses `e2e_copy` texture subset. Decision required:
-storage-texture format gating timing.
+`GlesTextureInner` follows the P15.2 buffer pattern:
+`Arc<GlesDeviceInner>` + `Result<glow::Texture, HalError>` +
+`GlesTextureMeta { format, width, height, mip_level_count }`.
+Drop deletes the GL texture when allocation succeeded; the
+make-current `Err` is swallowed. `allocate_texture` rejects
+`sample_count != 1`, `depth_or_array_layers != 1`, and
+`mip_level_count == 0` before `glCreateTexture` +
+`glBindTexture` + `glTexStorage2D` + unbind via
+`with_current_context`. `raw_or_err` / `meta` accessors mirror
+`GlesBuffer`.
+
+`GlesSamplerInner` mirrors the same `Result<glow::Sampler,
+HalError>` pattern. `allocate_sampler` maps the descriptor
+through four pure helpers (`map_filter_mode`,
+`map_address_mode`, `map_min_filter`,
+`map_compare_function`), each inline-table-tested, and issues
+`glSamplerParameteri/f` for wrap (`S`/`T`/`R`), mag/min
+filter, LOD clamps, optional compare mode
+(`COMPARE_REF_TO_TEXTURE` + compare func when
+`descriptor.compare` is `Some`), and optional anisotropy when
+`GL_EXT_texture_filter_anisotropic` is reported and
+`max_anisotropy > 1`. `ClampToBorder` is intentionally
+unmapped — GLES 3.1 core does not support it without
+`GL_EXT_texture_border_clamp`; the e2e test uses
+`ClampToEdge` so this gap doesn't fire.
+
+`rebuild_hal_error` moved from `buffer.rs` to `gles/mod.rs` so
+`buffer.rs` / `texture.rs` / `sampler.rs` share the single
+matcher (carries the `TODO: Consider deriving Clone for
+HalError upstream` note).
+
+`GlesQueue::submit_copies` extended with three new arms:
+
+- **`HalCopy::BufferToTexture`** → `submit_buffer_to_texture`:
+  binds `GL_PIXEL_UNPACK_BUFFER`, sets `GL_UNPACK_ROW_LENGTH`
+  (via `pixels_per_row(bytes_per_row, bytes_per_pixel)`) and
+  `GL_UNPACK_ALIGNMENT = 1`, calls `glTexSubImage2D` with the
+  PBO offset variant, resets `UNPACK_*` to defaults (0 / 4).
+- **`HalCopy::TextureToBuffer`** → `submit_texture_to_buffer`:
+  creates a transient FBO, attaches the source mip via
+  `glFramebufferTexture2D(COLOR_ATTACHMENT0)`, sets
+  `glReadBuffer(COLOR_ATTACHMENT0)` (required on GLES 3.0+
+  for non-default FBO reads), validates completeness, binds
+  `GL_PIXEL_PACK_BUFFER`, sets `PACK_ROW_LENGTH` /
+  `PACK_ALIGNMENT = 1`, calls `glReadPixels` with the PBO
+  offset variant, resets pack state, deletes the FBO.
+- **`HalCopy::TextureToTexture`** → `submit_texture_to_texture`:
+  inspects `supports_copy_image(gl)` (which checks both
+  `gl.supported_extensions().contains("GL_EXT_copy_image")`
+  AND the parsed `glGetString(GL_VERSION)` via the pure
+  `gles_version_at_least_3_2` helper — inline-tested); on
+  miss, returns a clear error directing the caller to expect
+  the extension. When supported, issues
+  `glCopyImageSubData(GL_TEXTURE_2D, …, GL_TEXTURE_2D, …, w,
+  h, 1)`.
+
+`ensure_2d_copy(depth_or_array_layers, z)` is shared by the
+three new arms to reject 3D / array slice copies up front.
+`i32_from_u32` / `u32_from_u64` consolidate numeric-conversion
+error mapping. `pixels_per_row` carries a 4-case inline test
+(`(256,4)→Ok(64)`, `(0,4)→Ok(0)` zero-stride single-row,
+`(255,4)→Err`, `(8,0)→Err`).
+
+`yawgpu/tests/e2e_gles_texture.rs` mirrors
+`e2e_vulkan_texture.rs` (4×4 RGBA8Unorm, `bytes_per_row = 256`,
+4 rows; same `write_padded_pixels` / `read_unpacked_texture_
+buffer` helpers translating between tight pixel arrays and
+padded buffer rows). Three tests cover buffer→texture→buffer
+round-trip (B2T + T2B), texture→texture round-trip
+(B2T + T2T + T2B), and sampler-creation smoke; all 3/3 green
+on real ANGLE with no device errors.
+
+Acceptance (all 11 green):
+- `cargo build -p yawgpu` (Noop default) ✓
+- `cargo build -p yawgpu --features gles` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo clippy -p yawgpu --features gles --all-targets -- -D warnings` ✓
+- `cargo test --workspace` ✓ (Noop pass count unchanged; new
+  inline tests live under `--features gles`)
+- `cargo test -p yawgpu --features gles --test e2e_gles_smoke
+  -- --ignored` ✓ (1/1)
+- `cargo test -p yawgpu --features gles --test e2e_gles_basic
+  -- --ignored` ✓ (3/3 P15.1 regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_ffi
+  -- --ignored` ✓ (3/3 P15.1a regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_buffer
+  -- --ignored` ✓ (2/2 P15.2 regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_texture
+  -- --ignored` ✓ (**3/3 on real ANGLE; B2T+T2B / B2T+T2T+T2B
+  / sampler smoke**)
+- `cargo build -p yawgpu --features vulkan` ✓
 
 ## P15.4 — Shader (naga→GLSL ES 3.10) + compute  *(☐ PLANNED)*
 
@@ -439,12 +537,46 @@ finding. MINORs may defer with explicit rationale.
   Optional optimization; functional behavior is already
   complete. Slot in opportunistically.
 - **`rebuild_hal_error` matcher must grow with `HalError`
-  variants.** P15.2 ships a manual matcher (`HalError` is not
-  `Clone`) covering the eight current variants. Any new variant
+  variants.** Now lives in `yawgpu-hal/src/gles/mod.rs` (moved
+  from `buffer.rs` in P15.3) and is shared by
+  `buffer.rs` / `texture.rs` / `sampler.rs`. Any new variant
   added to `yawgpu-hal/src/error.rs` must be added to this
-  matcher in `yawgpu-hal/src/gles/buffer.rs` to keep
-  `raw_or_err` working. Two alternatives if this becomes a
-  maintenance burden: (a) derive / implement `Clone` on
-  `HalError` and drop the matcher, or (b) wrap `glow::Buffer`
-  in `Result<_, Arc<HalError>>` so the inner can be cloned
-  cheaply.
+  matcher to keep the `raw_or_err` accessors working. Two
+  alternatives if maintenance becomes a burden: (a) derive /
+  implement `Clone` on `HalError` and drop the matcher, or (b)
+  wrap the GL handle in `Result<_, Arc<HalError>>` so the
+  inner can be cloned cheaply.
+
+## Open follow-ups added by P15.3
+
+- **Texture dimensions beyond 2D.** `allocate_texture` rejects
+  `depth_or_array_layers != 1` and `sample_count != 1`.
+  Adding 1D (2D with h=1), 2D array (`GL_TEXTURE_2D_ARRAY` +
+  `glTexStorage3D`), 3D (`GL_TEXTURE_3D`), cube
+  (`GL_TEXTURE_CUBE_MAP`), and multisample (renderbuffers)
+  paths is required before P15.6's swapchain integration
+  would expose them; can land opportunistically. Each gains
+  matching arms in `submit_buffer_to_texture` /
+  `submit_texture_to_buffer` / `submit_texture_to_texture`.
+- **Texture format expansion.** P15.3 maps only
+  `Rgba8Unorm`. Add formats incrementally as later e2e tests
+  exercise them — at minimum the render targets P15.5 will
+  use (`Bgra8Unorm` via `EXT_texture_format_BGRA8888`,
+  `Rgba16Float`, depth/stencil formats). Don't speculate;
+  add per-test.
+- **T2T fallback when neither GLES 3.2 nor
+  `GL_EXT_copy_image` is available.** Today returns a clean
+  error. An FBO-blit fallback (`glBlitFramebuffer`) would
+  cover color textures; precision is exact for `RGBA8` and
+  similar UNORM formats. Slot in if a target driver lacks
+  the extension.
+- **`ClampToBorder` address mode.** GLES 3.1 core lacks it;
+  `GL_EXT_texture_border_clamp` is required. Today the
+  sampler creation returns an error if requested. Add
+  extension probe + `GL_TEXTURE_BORDER_COLOR` plumbing when
+  a real consumer surfaces.
+- **`GlesSampler::raw_or_err`** is currently
+  `#[allow(dead_code)]` — sampler-bind is a P15.4 concern.
+  Remove the allow when P15.4 lands.
+- **Real test for `GlesSurface::present`.** Still a no-op
+  placeholder; revisit in P15.6.
