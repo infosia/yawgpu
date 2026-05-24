@@ -181,6 +181,22 @@ WGPUDevice yawgpu_request_device(WGPUInstance instance, WGPUAdapter adapter) {
 
 // Acquires instance → adapter → device in sequence; on any failure the
 // remaining fields stay NULL and the caller releases what was obtained.
+// Logs the selected backend so callers can tell at a glance when a
+// requested backend (e.g. YAWGPU_BACKEND=gles) silently fell back to Noop
+// because of a missing dynamic library (ANGLE on Windows, libEGL.so on
+// Android/Linux) or an unavailable driver. WGPUBackendType numeric values
+// come from webgpu.h.
+static const char *backend_type_name(uint32_t backend_type) {
+    switch (backend_type) {
+        case 1: return "Null (Noop)";
+        case 5: return "Metal";
+        case 6: return "Vulkan";
+        case 7: return "OpenGL";
+        case 8: return "OpenGLES";
+        default: return "Other";
+    }
+}
+
 YawgpuContext yawgpu_context_create(void) {
     YawgpuContext context = {0};
     context.instance = yawgpu_instance_create();
@@ -190,6 +206,14 @@ YawgpuContext yawgpu_context_create(void) {
     context.adapter = yawgpu_request_adapter(context.instance);
     if (!context.adapter) {
         return context;
+    }
+    WGPUAdapterInfo info = {0};
+    if (wgpuAdapterGetInfo(context.adapter, &info) == WGPUStatus_Success) {
+        const char *requested = getenv("YAWGPU_BACKEND");
+        printf("yawgpu: backend=%s (requested YAWGPU_BACKEND=%s)\n",
+               backend_type_name(info.backendType),
+               requested && *requested ? requested : "<unset>");
+        wgpuAdapterInfoFreeMembers(info);
     }
     context.device = yawgpu_request_device(context.instance, context.adapter);
     return context;

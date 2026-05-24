@@ -43,10 +43,11 @@ impl GlesInstance {
     /// Creates a new GLES instance.
     pub fn new() -> Result<Self, HalError> {
         let egl = gles_egl::load_egl()?;
-        let display = unsafe { egl.get_display(egl::DEFAULT_DISPLAY) }
+        // get_and_initialize_display returns an EGLDisplay that has already
+        // had eglInitialize called on it successfully (cascading through
+        // ANGLE backends on Windows; default-display on other platforms).
+        let display = gles_egl::get_and_initialize_display(&egl)
             .ok_or(HalError::BackendUnavailable { backend: BACKEND })?;
-        egl.initialize(display)
-            .map_err(|_| HalError::BackendUnavailable { backend: BACKEND })?;
         egl.bind_api(egl::OPENGL_ES_API)
             .map_err(|_| HalError::BackendUnavailable { backend: BACKEND })?;
 
