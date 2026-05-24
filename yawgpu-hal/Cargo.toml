@@ -9,7 +9,7 @@ default = ["noop"]
 noop = []
 vulkan = ["dep:ash"]
 metal = ["dep:objc2", "dep:objc2-core-foundation", "dep:objc2-foundation", "dep:objc2-metal", "dep:objc2-quartz-core"]
-gles = ["dep:glow", "dep:khronos-egl", "dep:libloading"]
+gles = ["dep:glow", "dep:khronos-egl", "dep:libloading", "dep:parking_lot"]
 tiled = []
 
 [dependencies]
@@ -22,4 +22,5 @@ objc2-core-foundation = { workspace = true, optional = true }
 objc2-foundation = { workspace = true, optional = true }
 objc2-metal = { workspace = true, optional = true }
 objc2-quartz-core = { workspace = true, optional = true, features = ["CALayer", "CAMetalLayer", "objc2-core-foundation", "objc2-metal"] }
+parking_lot = { workspace = true, optional = true }
 thiserror.workspace = true

@@ -820,6 +820,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-metal",
  "objc2-quartz-core",
+ "parking_lot",
  "thiserror",
 ]
 
@@ -831,6 +832,7 @@ dependencies = [
  "objc2-metal",
  "yawgpu",
  "yawgpu-core",
+ "yawgpu-hal",
 ]
 
 [[package]]

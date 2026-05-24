@@ -45,8 +45,14 @@ pub fn real_backend_skip_reason(backend: RealBackend) -> Option<String> {
 
 #[cfg(feature = "gles")]
 fn gles_backend_available() -> bool {
-    // P15.0: scaffold only. Real EGL availability probing lands in P15.1.
-    false
+    let Ok(instance) = yawgpu_hal::gles::GlesInstance::new() else {
+        return false;
+    };
+    let adapters = instance.enumerate_adapters();
+    let Some(adapter) = adapters.into_iter().next() else {
+        return false;
+    };
+    adapter.create_device().is_ok()
 }
 
 #[cfg(not(feature = "gles"))]

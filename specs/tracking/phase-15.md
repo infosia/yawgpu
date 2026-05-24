@@ -1,6 +1,6 @@
 # Phase 15 — GLES backend (Tier 2 / experimental)
 
-Status: **P15.0 DONE; P15.1+ PLANNED.** Rules / plan:
+Status: **P15.0 + P15.1 DONE; P15.2+ PLANNED.** Rules / plan:
 `../blocks/67-gles-backend.md`. Roles / loop:
 `../reference/workflow.md`.
 
@@ -157,16 +157,83 @@ Report back: files changed, any planned deliverables intentionally
 deferred (+why).
 ```
 
-## P15.1 — EGL display + Instance/Adapter/Device/Queue  *(☐ PLANNED)*
+## P15.1 — EGL display + Instance/Adapter/Device/Queue  *(☑ DONE)*
 
-Goal: real EGL bring-up via `khronos-egl` dynamic loading; one
-adapter from a default RGBA8 `EGLConfig`; shared GL context per
-`HalDevice`; `submit_empty` issues `glFlush`.
+Done (2026-05-24, commit pending at write time): real EGL bring-up
+on Windows ANGLE behind the `gles` feature. `yawgpu-hal/src/gles/`
+split into per-resource files mirroring `vulkan/`'s layout
+(`egl.rs` / `instance.rs` / `adapter.rs` / `device.rs` /
+`queue.rs` + stubs for `buffer.rs` / `texture.rs` / `sampler.rs`
+/ `surface.rs` / `pipeline.rs`). `egl.rs` loads `libEGL.dll` via
+`khronos-egl` dynamic; honors `YAWGPU_ANGLE_PATH` env var by
+preloading ANGLE DLLs from a user-specified directory before the
+default loader runs (`std::mem::forget` keeps the preloaded
+library alive for subsequent `LoadLibrary` calls to resolve the
+ANGLE EGL/GLESv2 symbols). `GlesInstance::new` performs
+`get_display(EGL_DEFAULT_DISPLAY)` + `initialize` + `bind_api
+(OPENGL_ES_API)`; failure on any step ⇒
+`HalError::BackendUnavailable`. `enumerate_adapters` returns one
+adapter per RGBA8888 + PBUFFER_BIT + OPENGL_ES3_BIT config
+(`choose_first_config`), empty on miss. `GlesAdapter::create_
+device` builds the real `EGLContext` (MAJOR_VERSION=3, MINOR_
+VERSION=1), 1×1 pbuffer surface, make-currents, loads `glow` via
+`from_loader_function(eglGetProcAddress)`, parses `GL_VERSION`
+via the pure `parse_gles_version` helper (table-tested for "ES
+3.1" / "ES 3.2 ANGLE" / "ES 3.0" + reject cases "ES-CM 1.1" /
+empty / "OpenGL 4.5"), rejects versions `< 3.1` and tears the
+context/surface back down. `GlesDeviceInner` carries the EGL
+context + surface + `glow::Context` + `parking_lot::Mutex<()>` +
+`AtomicU64` allocation counter; `with_current_context<R>(impl
+FnOnce(&glow::Context) -> R)` is the make-current-and-run helper.
+`Drop` order: `make_current(None,None,None,None)` →
+`destroy_surface` → `destroy_context` → instance Arc Drop runs
+`eglTerminate`. `GlesQueue::submit_empty` make-currents +
+`glFlush`. Resource creators not in P15.1 scope stay
+`unavailable()` (buffer/texture/sampler/pipelines/surface);
+infallible creators increment the allocation counter to preserve
+the Noop counting contract. `yawgpu-test::gles_backend_
+available()` now performs a real instance+adapter+device probe
+(mirrors `vulkan_backend_available`); a `yawgpu-hal` dep was
+added (optional, gated on the `gles` feature) so the probe can
+construct `GlesInstance` directly. New
+`yawgpu/tests/e2e_gles_basic.rs` covers adapter name + non-empty
+backend, device queue + empty submit, and zero-allocation at
+creation; all three pass on ANGLE.
 
-Real-GPU verification: `cargo test --features gles -- --ignored`
-on Windows ANGLE; user logs results here.
+Spec divergence noted: the original block 67 entry for "Error
+mapping" mentioned `HalError::BackendOperationFailed`; the
+actual `HalError` enum has `BufferOperationFailed`
+(plus `Acquire/Present/SwapchainCreationFailed` and the
+`backend`-only variants `BackendUnavailable` /
+`DeviceCreationFailed` / `QueueSubmissionFailed` /
+`ShaderCompilationFailed`). The agent used the existing variants
+correctly; the block 67 cell needs a follow-up edit if we want
+prose accuracy.
 
-(Detailed deliverables / handoff to be drafted when P15.0 lands.)
+Coverage trade-off (carried into P15.2+): the P15.0 mod.rs
+inline tests that constructed `GlesDevice::new_for_scaffold()` /
+`GlesQueue` unit values were dropped during the module split
+since the production constructors are now `pub(super)` and
+require a real EGL chain. This matches the Vulkan/Metal pattern
+(no inline tests on driver-required pub fns; coverage comes
+from `e2e_*` instead). `parse_gles_version` is the only new pure
+function and is fully covered. The `gles_surface_present_is_
+covered_by_e2e` test in `surface.rs` is a no-op placeholder; the
+real present path lands in P15.6 with the surface implementation
+and will get a real test then.
+
+Acceptance (all 8 green):
+- `cargo build -p yawgpu` (Noop default) ✓
+- `cargo build -p yawgpu --features gles` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo clippy -p yawgpu --features gles --all-targets -- -D warnings` ✓
+- `cargo test --workspace` ✓ (Noop default unchanged)
+- `cargo test -p yawgpu --features gles --test e2e_gles_smoke
+  -- --ignored` ✓ (1/1)
+- `cargo test -p yawgpu --features gles --test e2e_gles_basic
+  -- --ignored` ✓ (**3/3, real ANGLE GPU**)
+- `cargo build -p yawgpu --features vulkan` ✓ (regression
+  clean)
 
 ## P15.2 — Buffer + Queue write/read + B2B copy  *(☐ PLANNED)*
 
@@ -209,3 +276,30 @@ finding. MINORs may defer with explicit rationale.
 - Buffer mapping fence model definition.
 - Storage-texture format gating timing.
 - Resource hazard barrier mask defaults.
+
+## Open follow-ups added by P15.1
+
+- **FFI selection wiring for GLES.** P15.1 only opens the HAL
+  path; reaching the GLES adapter through the standard webgpu.h
+  `wgpuInstanceRequestAdapter` requires routing
+  `WGPURequestAdapterOptions.backendType =
+  WGPUBackendType_OpenGLES` to the GLES `HalInstance` arm.
+  Today the existing backend selection lives in the yawgpu.h
+  vendor extension `YaWGPUInstanceBackendSelect`, which is
+  off-limits for the GLES backend per the user's "yawgpu.h is
+  out of scope" instruction. Decide whether to land this as a
+  pre-P15.2 micro-slice (so `e2e_basic`-style tests can target
+  GLES through the FFI) or roll into P15.6 alongside the
+  surface work.
+- **block 67 "Error mapping" wording.** The cell references
+  `HalError::BackendOperationFailed` which is not an actual
+  enum variant (the closest is `BufferOperationFailed`). Update
+  the cell to list the real variants the GLES backend uses
+  (`BackendUnavailable` / `DeviceCreationFailed` /
+  `QueueSubmissionFailed` for the `backend`-only kinds;
+  `BufferOperationFailed` / `Acquire`/`Present`/
+  `SwapchainCreationFailed` for the kinds with messages) so
+  future slices have an accurate reference.
+- **Real test for `GlesSurface::present`.** The current placeholder
+  in `surface.rs` is a no-op. Replace with a real test when P15.6
+  brings up surface creation.

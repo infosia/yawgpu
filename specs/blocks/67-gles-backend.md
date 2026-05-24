@@ -188,7 +188,7 @@ Entries are filled in / refined as P15.x slices land. Anything left as
 
 | Area | GLES 3.1 mapping | Initial status |
 |---|---|---|
-| Adapter / device creation | EGL display + shared context | ? (P15.1) |
+| Adapter / device creation | EGL display + shared context | ☑ (P15.1; ANGLE on Windows verified) |
 | Buffer create / map / unmap | `glBufferData` + `glMapBufferRange` (per-call) | ? (P15.2) |
 | Buffer-to-buffer copy | `glCopyBufferSubData` | ? (P15.2) |
 | `mappedAtCreation` | Allocate + map immediately; flush on unmap | ? (P15.2) |
