@@ -81,7 +81,13 @@ yawgpu is a small Cargo workspace of layered crates:
 | **Metal** | Apple platforms | Built with the `metal` feature via the `objc2` family. |
 | **Vulkan** | Cross-platform | Built with the `vulkan` feature via `ash`; targets **Vulkan 1.1+** (MoltenVK ≥ 1.1 on macOS, native drivers elsewhere). |
 
-OpenGL/GLES and Direct3D are intentionally out of scope.
+Direct3D is intentionally out of scope. An opt-in **OpenGL ES** backend
+(`gles` feature, Tier 2 / experimental) targeting Android (native EGL)
+and Windows ANGLE is under development; it is best-effort only — paths
+that do not cleanly map to GLES 3.1 are rejected at the HAL layer, and
+the `yawgpu.h` vendor extensions are not implemented for GLES. The
+caller is expected to supply ANGLE's `libEGL.dll` / `libGLESv2.dll` on
+Windows; yawgpu does not bundle ANGLE.
 
 A backend is chosen at instance-creation time through `YaWGPUInstanceBackendSelect`
 (see below) — applications that only ever want validation can run entirely
