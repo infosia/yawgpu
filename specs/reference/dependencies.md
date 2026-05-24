@@ -153,10 +153,24 @@ slice; not done during active development.
   the EGL library is not link-time available. Static linking is
   explicitly avoided.
 - **libloading 0.8**: cross-platform `dlopen` shim used by
-  `khronos-egl`'s dynamic backend and (post-P15.0) by the GLES
-  HAL to resolve ANGLE-on-Windows EGL/GLES libraries. Optional
-  `yawgpu-hal` dep gated on `gles` (P15.0).
+  `khronos-egl`'s dynamic backend and by the GLES HAL to resolve
+  ANGLE-on-Windows EGL/GLES libraries via the
+  `YAWGPU_ANGLE_PATH` env var (P15.1). Optional `yawgpu-hal` dep
+  gated on `gles` (P15.0).
+- **parking_lot** (workspace version, no version bump): added as
+  an optional `yawgpu-hal` dep behind the `gles` feature in
+  P15.1 to provide the `Mutex<()>` that serializes
+  `eglMakeCurrent` + GL command issuance on the shared
+  per-`HalDevice` GL context. Already present as a workspace
+  dep for other crates; gating it on `gles` keeps the default
+  Noop build's dep graph unchanged.
 
-These three crates are pulled **only** with `--features gles` —
+These four crates are pulled **only** with `--features gles` —
 default Noop builds, Vulkan-feature builds, and Metal-feature
-builds do not see them. Real EGL/GL calls land starting P15.1.
+builds do not see them. Real EGL/GL calls land in P15.1
+(`GlesInstance::new` initializes the display; `GlesAdapter::
+create_device` creates a 3.1+ context + 1×1 pbuffer and loads
+GL via `glow`; `GlesQueue::submit_empty` make-currents + flushes).
+Verified on Windows ANGLE — `libEGL.dll` / `libGLESv2.dll`
+discovered via the default Windows DLL search path (or
+`YAWGPU_ANGLE_PATH` for an explicit directory).
