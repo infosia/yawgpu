@@ -79,7 +79,7 @@ yawgpu is a small Cargo workspace of layered crates:
 |---|---|---|
 | **Noop** | CPU-only reference backend | Always available; runs the full validation layer with no GPU. Ideal for CI and headless testing. |
 | **Metal** | Apple platforms | Built with the `metal` feature via the `objc2` family. |
-| **Vulkan** | Cross-platform | Built with the `vulkan` feature via `ash`; runs on MoltenVK on macOS. |
+| **Vulkan** | Cross-platform | Built with the `vulkan` feature via `ash`; targets **Vulkan 1.1+** (MoltenVK ≥ 1.1 on macOS, native drivers elsewhere). |
 
 OpenGL/GLES and Direct3D are intentionally out of scope.
 

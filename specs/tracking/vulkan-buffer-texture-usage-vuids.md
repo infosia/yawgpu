@@ -53,22 +53,19 @@ the view machinery is invoked) **or** a place in the HAL that creates a
 view path without going through `map_texture_usage`. Investigate before
 fixing — the underlying flag mapping looks right.
 
-### F3 — SPIR-V env extension declaration
+### F3 — SPIR-V env extension declaration *(CLOSED 2026-05-24, commit `c664c24`)*
 
 `VUID-VkShaderModuleCreateInfo-pCode-08742` — shaders declare
 `SPV_KHR_storage_buffer_storage_class` but the device is targeted at
 Vulkan 1.0 and `VK_KHR_storage_buffer_storage_class` is not enabled.
 
-**Fix locked (2026-05-24):** **option A — request Vulkan 1.1** at
-`vkCreateInstance` (`pApplicationInfo.apiVersion = VK_API_VERSION_1_1`)
-*and* reject pre-1.1 physical devices at `VulkanAdapter::new`. Rationale:
-1.1 makes `SPV_KHR_storage_buffer_storage_class` core, so no KHR device
-extension needs to be listed; it also unblocks any future SPIR-V 1.3 features
-naga emits. 1.1 is universally available on every driver yawgpu targets
-(MoltenVK ≥ 1.1.0, native Windows/Linux Vulkan, Android Adreno/Mali/PowerVR
-≥ 2018). The block-60 minimum version is updated accordingly; the
-coding-agent handoff lives in `HANDOFF.md` (root) for the Vulkan-1.1-minimum
-slice.
+**Fix shipped (commit `c664c24`):** `VulkanInstance::new` chains a
+`pApplicationInfo` declaring `VK_API_VERSION_1_1` via the
+`YAWGPU_VULKAN_API_VERSION` constant; `VulkanAdapter::new` drops physical
+devices whose `properties.api_version` is below 1.1 through the
+`is_supported_api_version` helper. The 08742 VUID no longer appears under
+`VK_LAYER_KHRONOS_validation` on the native Windows Vulkan driver.
+Block 60 § "Minimum Vulkan version" carries the authoritative rule.
 
 ## Why none of this was caught earlier
 
