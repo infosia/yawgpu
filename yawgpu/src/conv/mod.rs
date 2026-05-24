@@ -127,8 +127,6 @@ mod tests {
     fn instance_impl() -> Arc<WGPUInstanceImpl> {
         Arc::new(WGPUInstanceImpl {
             core: Arc::new(core::Instance::new_noop()),
-            #[cfg(feature = "gles")]
-            gles_core: None,
             timed_wait_any_enabled: false,
             pending_callbacks: Mutex::new(BTreeMap::new()),
         })

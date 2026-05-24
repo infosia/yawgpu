@@ -99,8 +99,8 @@ unsigned int yawgpu_uncaptured_error_count(void) {
     return g_uncaptured_error_count;
 }
 
-// Maps the YAWGPU_BACKEND environment variable to a backend enum value,
-// defaulting to Noop for unset/empty/unknown values.
+// Maps the YAWGPU_BACKEND environment variable to a yawgpu.h backend enum
+// value, defaulting to Noop for unset/empty/unknown values.
 static uint32_t backend_from_environment(void) {
     const char *backend = getenv("YAWGPU_BACKEND");
     if (!backend || strcmp(backend, "") == 0 || strcmp(backend, "noop") == 0) {
@@ -111,6 +111,9 @@ static uint32_t backend_from_environment(void) {
     }
     if (strcmp(backend, "vulkan") == 0) {
         return YAWGPU_INSTANCE_BACKEND_VULKAN;
+    }
+    if (strcmp(backend, "gles") == 0) {
+        return YAWGPU_INSTANCE_BACKEND_GLES;
     }
     fprintf(stderr, "unknown YAWGPU_BACKEND=%s, using noop\n", backend);
     return YAWGPU_INSTANCE_BACKEND_NOOP;

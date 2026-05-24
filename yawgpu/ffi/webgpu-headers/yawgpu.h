@@ -61,6 +61,10 @@ enum {
     YAWGPU_INSTANCE_BACKEND_METAL = 1,
     /** Khronos Vulkan backend. Available on Linux / Windows / Android / MoltenVK builds. */
     YAWGPU_INSTANCE_BACKEND_VULKAN = 2,
+    /** OpenGL ES 3.1+ backend (Tier 2 / experimental). Available on Android (native EGL)
+     *  and Windows ANGLE. Requires the `gles` cargo feature to be compiled in;
+     *  otherwise instance creation falls back to Noop. */
+    YAWGPU_INSTANCE_BACKEND_GLES = 3,
 };
 
 /**
