@@ -12,6 +12,25 @@ and manages git (`init`/`add`/`commit`). Claude does not write production
 code; the coding agent does not plan, edit `specs/`, change scope, or commit.
 Full detail: `specs/reference/workflow.md`.
 
+## Backend support tiers
+
+| Tier | Backends | Meaning |
+|---|---|---|
+| **Tier 1 — Supported** | Vulkan, Metal | webgpu.h semantics fully mapped. Phase Review-clean implies "conformant on real GPU" within the slices brought up so far. API and behaviour changes follow normal SemVer discipline. |
+| **Tier 2 — Experimental (best-effort)** | GLES (Android + Windows ANGLE) | Behind opt-in `gles` cargo feature; never in `default`. webgpu.h paths that cannot be cleanly mapped to GLES 3.1 may be **rejected at the HAL layer with `HalError`**, which `yawgpu-core` surfaces as a device error. Feature set and behaviour may change without SemVer guarantees. Real-GPU verification is manual on Windows ANGLE only. |
+
+**Operational rule (Tier-independent core validation).** `yawgpu-core`
+validation is identical regardless of the backend tier — a rule that
+fires for Vulkan/Metal must fire identically for GLES. Tier 2 is
+"best-effort" only at the **HAL execution** layer: the GLES backend may
+return `HalError` for a validated WebGPU operation that has no clean
+GLES 3.1 mapping. Such cases must be catalogued in
+`specs/blocks/67-gles-backend.md` ("WebGPU × GLES mapping matrix"),
+never silently widened in core. **Never relax a core rule to make a
+Tier 2 backend pass.**
+
+**D3D backends (D3D11 / D3D12) remain permanently out of scope.**
+
 ## Language
 
 - **All repository documentation, specs, comments, and identifiers: English.**
@@ -70,7 +89,8 @@ spec-coverage gap.
 - Colocate `Device::create_*` logic with the created type's module, not in
   one giant `device.rs` (mgpu convention).
 - HAL is **static enum dispatch**, never `dyn Trait`:
-  `enum HalDevice { Noop(..), Vulkan(..), Metal(..) }`, backends `cfg`-gated.
+  `enum HalDevice { Noop(..), Vulkan(..), Metal(..), Gles(..) }`, backends
+  `cfg`-gated. (`Gles` arm is Tier 2; see "Backend support tiers" above.)
 - C↔Rust conversions live in `yawgpu/src/conv.rs` (macro-driven, like
   wgpu-native's `conv.rs`).
 - bindgen output is `include!`d into a `pub mod native { ... }`; never edit
@@ -97,8 +117,10 @@ Full process: `specs/reference/workflow.md` → "Phase Review".
 
 ## Out of scope (initially)
 
-- **GL / D3D backends.** Primary platforms are Vulkan and Metal only. Do not
-  add or stub OpenGL/OpenGL ES or DirectX HAL variants.
+- **D3D backends (D3D11 / D3D12).** Permanently out of scope. (GLES is
+  now Tier 2 / experimental — see "Backend support tiers" above and
+  `specs/blocks/67-gles-backend.md` for the Android + Windows ANGLE
+  bring-up plan.)
 - Dawn `wire/` tests — they validate dawn-wire IPC, which yawgpu has no
   analog for. The C ABI boundary is our equivalent boundary.
 - Dawn `end2end` tests — deferred to Phase 7 (real backends), GPU-gated.
