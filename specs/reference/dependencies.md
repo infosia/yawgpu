@@ -24,9 +24,10 @@
   `[patch."https://github.com/infosia/wgpu.git"] naga = { path = "wgpu/naga" }`.
 - **bindgen** (build-dep): generate `webgpu.h` bindings.
 - HAL backends: `ash` (Vulkan), `objc2`/`objc2-metal`/`block2` (Metal) —
-  added Phase 7, feature-gated. Noop has no GPU deps. **Vulkan and Metal are
-  the only real backends; OpenGL/GLES and DirectX are out of scope** (no GL/
-  D3D crates pulled in).
+  added Phase 7, feature-gated. Noop has no GPU deps. **DirectX is the only
+  permanently out-of-scope backend family.** GLES is **Tier 2 /
+  experimental** (`glow` / `khronos-egl` / `libloading`, added Phase 15,
+  feature-gated; see "Phase 15 / GLES backend" below).
 - Workspace-wide: `thiserror`, `parking_lot`, `bitflags`, `smallvec`,
   `raw-window-handle` (mirrors wgpu-native/mgpu).
 
@@ -135,3 +136,27 @@ slice; not done during active development.
   feature. P7.6a also adds naga's `spv-out` feature to `yawgpu-core`
   so the Vulkan SPIR-V shader path can be implemented in P7.6d without
   another dependency-graph change.
+
+## Phase 15 / GLES backend (Tier 2 / experimental)
+
+- **glow 0.14**: GL function loader, wired as an optional
+  `yawgpu-hal` dependency behind the `gles` feature (P15.0,
+  2026-05-24). Selected to match wgpu-hal's workspace pin. No
+  function pointers are loaded in P15.0; the dep exists so the
+  scaffold module can `use glow as _;` to prove linkage. Real
+  loader bring-up lands in P15.1.
+- **khronos-egl 6** (`features = ["dynamic"]`): EGL dynamic
+  binding, wired as an optional `yawgpu-hal` dependency behind
+  the `gles` feature (P15.0). The `dynamic` feature selects the
+  `libloading`-backed runtime EGL resolver — required for both
+  Android (`libEGL.so`) and Windows ANGLE (`libEGL.dll`) where
+  the EGL library is not link-time available. Static linking is
+  explicitly avoided.
+- **libloading 0.8**: cross-platform `dlopen` shim used by
+  `khronos-egl`'s dynamic backend and (post-P15.0) by the GLES
+  HAL to resolve ANGLE-on-Windows EGL/GLES libraries. Optional
+  `yawgpu-hal` dep gated on `gles` (P15.0).
+
+These three crates are pulled **only** with `--features gles` —
+default Noop builds, Vulkan-feature builds, and Metal-feature
+builds do not see them. Real EGL/GL calls land starting P15.1.

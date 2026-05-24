@@ -60,6 +60,10 @@ pub mod noop;
 #[cfg(feature = "metal")]
 pub mod metal;
 
+/// GLES module.
+#[cfg(feature = "gles")]
+pub mod gles;
+
 /// Vulkan module.
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
@@ -77,6 +81,9 @@ pub enum HalInstance {
     #[cfg(feature = "metal")]
     /// Metal variant.
     Metal(metal::MetalInstance),
+    #[cfg(feature = "gles")]
+    /// GLES variant.
+    Gles(gles::GlesInstance),
 }
 
 impl HalInstance {
@@ -109,6 +116,12 @@ impl HalInstance {
                 .into_iter()
                 .map(HalAdapter::Metal)
                 .collect(),
+            #[cfg(feature = "gles")]
+            Self::Gles(instance) => instance
+                .enumerate_adapters()
+                .into_iter()
+                .map(HalAdapter::Gles)
+                .collect(),
         }
     }
 
@@ -134,6 +147,11 @@ impl HalInstance {
             Self::Metal(_) => unsafe {
                 metal::MetalSurface::from_layer(layer).map(HalSurface::Metal)
             },
+            #[cfg(feature = "gles")]
+            Self::Gles(_) => Err(HalError::SwapchainCreationFailed {
+                backend: "gles",
+                message: "Metal layer surface is not supported on GLES",
+            }),
         }
     }
 
@@ -164,6 +182,35 @@ impl HalInstance {
                 backend: "metal",
                 message: "HWND surface is not supported on Metal",
             }),
+            #[cfg(feature = "gles")]
+            Self::Gles(_) => Err(HalError::BackendUnavailable { backend: "gles" }),
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `window` must be a valid `ANativeWindow*` from the Android NDK and
+    /// must outlive the resulting surface. Ignored by the Noop backend.
+    pub unsafe fn create_surface_from_android_native_window(
+        &self,
+        window: *mut c_void,
+    ) -> Result<HalSurface, HalError> {
+        let _ = window;
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => Ok(HalSurface::Noop),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => Err(HalError::SwapchainCreationFailed {
+                backend: "vulkan",
+                message: "Android native window surface not implemented",
+            }),
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => Err(HalError::SwapchainCreationFailed {
+                backend: "metal",
+                message: "Android native window surface is not supported on Metal",
+            }),
+            #[cfg(feature = "gles")]
+            Self::Gles(_) => Err(HalError::BackendUnavailable { backend: "gles" }),
         }
     }
 }
@@ -181,6 +228,9 @@ pub enum HalAdapter {
     #[cfg(feature = "metal")]
     /// Metal variant.
     Metal(metal::MetalAdapter),
+    #[cfg(feature = "gles")]
+    /// GLES variant.
+    Gles(gles::GlesAdapter),
 }
 
 impl HalAdapter {
@@ -194,6 +244,8 @@ impl HalAdapter {
             Self::Vulkan(adapter) => adapter.name().to_owned(),
             #[cfg(feature = "metal")]
             Self::Metal(adapter) => adapter.name().to_owned(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.name().to_owned(),
         }
     }
 
@@ -207,6 +259,8 @@ impl HalAdapter {
             Self::Vulkan(_) => HalBackend::Vulkan,
             #[cfg(feature = "metal")]
             Self::Metal(_) => HalBackend::Metal,
+            #[cfg(feature = "gles")]
+            Self::Gles(_) => HalBackend::Gles,
         }
     }
 
@@ -221,6 +275,8 @@ impl HalAdapter {
             Self::Vulkan(adapter) => adapter.framebuffer_fetch_path(),
             #[cfg(feature = "metal")]
             Self::Metal(_) => FramebufferFetchPath::TileImage,
+            #[cfg(feature = "gles")]
+            Self::Gles(_) => FramebufferFetchPath::Disabled,
         }
     }
 
@@ -243,6 +299,8 @@ impl HalAdapter {
             Self::Vulkan(adapter) => adapter.create_device().map(HalDevice::Vulkan),
             #[cfg(feature = "metal")]
             Self::Metal(adapter) => adapter.create_device().map(HalDevice::Metal),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.create_device().map(HalDevice::Gles),
         }
     }
 }
@@ -257,6 +315,8 @@ pub enum HalBackend {
     Vulkan,
     /// Metal variant.
     Metal,
+    /// GLES variant.
+    Gles,
 }
 
 /// Enumerates HAL device values.
@@ -272,6 +332,9 @@ pub enum HalDevice {
     #[cfg(feature = "metal")]
     /// Metal variant.
     Metal(metal::MetalDevice),
+    #[cfg(feature = "gles")]
+    /// GLES variant.
+    Gles(gles::GlesDevice),
 }
 
 impl HalDevice {
@@ -285,6 +348,8 @@ impl HalDevice {
             Self::Vulkan(_) => HalBackend::Vulkan,
             #[cfg(feature = "metal")]
             Self::Metal(_) => HalBackend::Metal,
+            #[cfg(feature = "gles")]
+            Self::Gles(_) => HalBackend::Gles,
         }
     }
 
@@ -299,6 +364,8 @@ impl HalDevice {
             Self::Vulkan(device) => device.framebuffer_fetch_path(),
             #[cfg(feature = "metal")]
             Self::Metal(_) => FramebufferFetchPath::TileImage,
+            #[cfg(feature = "gles")]
+            Self::Gles(_) => FramebufferFetchPath::Disabled,
         }
     }
 
@@ -322,6 +389,8 @@ impl HalDevice {
             Self::Vulkan(device) => device.allocation_count(),
             #[cfg(feature = "metal")]
             Self::Metal(device) => device.allocation_count(),
+            #[cfg(feature = "gles")]
+            Self::Gles(device) => device.allocation_count(),
         }
     }
 
@@ -335,6 +404,8 @@ impl HalDevice {
             Self::Vulkan(device) => HalQueue::Vulkan(device.queue().clone()),
             #[cfg(feature = "metal")]
             Self::Metal(device) => HalQueue::Metal(device.queue().clone()),
+            #[cfg(feature = "gles")]
+            Self::Gles(device) => HalQueue::Gles(device.queue().clone()),
         }
     }
 
@@ -348,6 +419,8 @@ impl HalDevice {
             Self::Vulkan(device) => HalBuffer::Vulkan(device.create_buffer(size, usage)),
             #[cfg(feature = "metal")]
             Self::Metal(device) => HalBuffer::Metal(device.create_buffer(size, usage)),
+            #[cfg(feature = "gles")]
+            Self::Gles(device) => HalBuffer::Gles(device.create_buffer(size, usage)),
         }
     }
 
@@ -363,6 +436,8 @@ impl HalDevice {
             Self::Vulkan(device) => HalTexture::Vulkan(device.create_texture(descriptor)),
             #[cfg(feature = "metal")]
             Self::Metal(device) => HalTexture::Metal(device.create_texture(descriptor)),
+            #[cfg(feature = "gles")]
+            Self::Gles(device) => HalTexture::Gles(device.create_texture(descriptor)),
         }
     }
 
@@ -387,6 +462,8 @@ impl HalDevice {
             Self::Metal(device) => device
                 .create_transient_attachment(descriptor)
                 .map(HalTransientAttachment::Metal),
+            #[cfg(feature = "gles")]
+            Self::Gles(_) => Err(HalError::BackendUnavailable { backend: "gles" }),
         }
     }
 
@@ -402,6 +479,8 @@ impl HalDevice {
             Self::Vulkan(_) => Ok(HalSubpassRenderPass::Vulkan),
             #[cfg(feature = "metal")]
             Self::Metal(_) => Ok(HalSubpassRenderPass::Metal),
+            #[cfg(feature = "gles")]
+            Self::Gles(_) => Err(HalError::BackendUnavailable { backend: "gles" }),
         }
     }
 
@@ -459,6 +538,8 @@ impl HalDevice {
             Self::Vulkan(device) => HalSampler::Vulkan(device.create_sampler(descriptor)),
             #[cfg(feature = "metal")]
             Self::Metal(device) => HalSampler::Metal(device.create_sampler(descriptor)),
+            #[cfg(feature = "gles")]
+            Self::Gles(device) => HalSampler::Gles(device.create_sampler(descriptor)),
         }
     }
 
@@ -470,7 +551,7 @@ impl HalDevice {
         workgroup_size: (u32, u32, u32),
         bindings: &[HalDescriptorBinding],
     ) -> Result<HalComputePipeline, HalError> {
-        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+        #[cfg(not(any(feature = "gles", feature = "metal", feature = "vulkan")))]
         let _ = (shader, entry_point, workgroup_size, bindings);
         match self {
             #[cfg(feature = "noop")]
@@ -483,6 +564,10 @@ impl HalDevice {
             Self::Metal(device) => device
                 .create_compute_pipeline(shader, entry_point, workgroup_size, bindings)
                 .map(HalComputePipeline::Metal),
+            #[cfg(feature = "gles")]
+            Self::Gles(device) => device
+                .create_compute_pipeline(shader, entry_point, workgroup_size, bindings)
+                .map(HalComputePipeline::Gles),
         }
     }
 
@@ -495,7 +580,7 @@ impl HalDevice {
         descriptor: &HalRenderPipelineDescriptor,
         bindings: &[HalDescriptorBinding],
     ) -> Result<HalRenderPipeline, HalError> {
-        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+        #[cfg(not(any(feature = "gles", feature = "metal", feature = "vulkan")))]
         let _ = (
             shader,
             vertex_entry_point,
@@ -526,6 +611,16 @@ impl HalDevice {
                     bindings,
                 )
                 .map(HalRenderPipeline::Metal),
+            #[cfg(feature = "gles")]
+            Self::Gles(device) => device
+                .create_render_pipeline(
+                    shader,
+                    vertex_entry_point,
+                    fragment_entry_point,
+                    descriptor,
+                    bindings,
+                )
+                .map(HalRenderPipeline::Gles),
         }
     }
     /// Creates a subpass-compatible render pipeline from the given shaders and pass layout.
@@ -578,6 +673,8 @@ impl HalDevice {
                     subpass_index,
                 )
                 .map(HalRenderPipeline::Metal),
+            #[cfg(feature = "gles")]
+            Self::Gles(_) => Err(HalError::BackendUnavailable { backend: "gles" }),
         }
     }
 }
@@ -595,6 +692,9 @@ pub enum HalSurface {
     #[cfg(feature = "metal")]
     /// Metal variant.
     Metal(metal::MetalSurface),
+    #[cfg(feature = "gles")]
+    /// GLES variant.
+    Gles(gles::GlesSurface),
 }
 
 impl HalSurface {
@@ -614,6 +714,8 @@ impl HalSurface {
             (Self::Vulkan(surface), HalDevice::Vulkan(device)) => surface.configure(device, config),
             #[cfg(feature = "metal")]
             (Self::Metal(surface), HalDevice::Metal(device)) => surface.configure(device, config),
+            #[cfg(feature = "gles")]
+            (Self::Gles(surface), HalDevice::Gles(device)) => surface.configure(device, config),
             _ => Err(HalError::SwapchainCreationFailed {
                 backend: "surface",
                 message: "surface and device backends do not match",
@@ -630,6 +732,8 @@ impl HalSurface {
             Self::Vulkan(surface) => surface.unconfigure(),
             #[cfg(feature = "metal")]
             Self::Metal(surface) => surface.unconfigure(),
+            #[cfg(feature = "gles")]
+            Self::Gles(surface) => surface.unconfigure(),
         }
     }
 
@@ -645,6 +749,8 @@ impl HalSurface {
             Self::Vulkan(surface) => surface.acquire_next_texture().map(HalTexture::Vulkan),
             #[cfg(feature = "metal")]
             Self::Metal(surface) => surface.acquire_next_texture().map(HalTexture::Metal),
+            #[cfg(feature = "gles")]
+            Self::Gles(surface) => surface.acquire_next_texture().map(HalTexture::Gles),
         }
     }
 
@@ -658,6 +764,8 @@ impl HalSurface {
             (Self::Vulkan(surface), HalQueue::Vulkan(queue)) => surface.present(queue),
             #[cfg(feature = "metal")]
             (Self::Metal(surface), HalQueue::Metal(queue)) => surface.present(queue),
+            #[cfg(feature = "gles")]
+            (Self::Gles(surface), HalQueue::Gles(queue)) => surface.present(queue),
             _ => Err(HalError::PresentFailed {
                 backend: "surface",
                 message: "surface and queue backends do not match",
@@ -679,6 +787,9 @@ pub enum HalQueue {
     #[cfg(feature = "metal")]
     /// Metal variant.
     Metal(metal::MetalQueue),
+    #[cfg(feature = "gles")]
+    /// GLES variant.
+    Gles(gles::GlesQueue),
 }
 
 impl HalQueue {
@@ -691,6 +802,8 @@ impl HalQueue {
             Self::Vulkan(queue) => queue.submit_empty(),
             #[cfg(feature = "metal")]
             Self::Metal(queue) => queue.submit_empty(),
+            #[cfg(feature = "gles")]
+            Self::Gles(queue) => queue.submit_empty(),
         }
     }
 
@@ -705,6 +818,8 @@ impl HalQueue {
             Self::Vulkan(queue) => queue.submit_copies(copies),
             #[cfg(feature = "metal")]
             Self::Metal(queue) => queue.submit_copies(copies),
+            #[cfg(feature = "gles")]
+            Self::Gles(queue) => queue.submit_copies(copies),
         }
     }
 }
@@ -722,6 +837,9 @@ pub enum HalBuffer {
     #[cfg(feature = "metal")]
     /// Metal variant.
     Metal(metal::MetalBuffer),
+    #[cfg(feature = "gles")]
+    /// GLES variant.
+    Gles(gles::GlesBuffer),
 }
 
 impl HalBuffer {
@@ -735,6 +853,8 @@ impl HalBuffer {
             Self::Vulkan(buffer) => buffer.size(),
             #[cfg(feature = "metal")]
             Self::Metal(buffer) => buffer.size(),
+            #[cfg(feature = "gles")]
+            Self::Gles(buffer) => buffer.size(),
         }
     }
 
@@ -749,6 +869,8 @@ impl HalBuffer {
             Self::Vulkan(buffer) => buffer.write(offset, data),
             #[cfg(feature = "metal")]
             Self::Metal(buffer) => buffer.write(offset, data),
+            #[cfg(feature = "gles")]
+            Self::Gles(buffer) => buffer.write(offset, data),
         }
     }
 
@@ -771,6 +893,8 @@ impl HalBuffer {
             Self::Vulkan(buffer) => buffer.read(offset, len),
             #[cfg(feature = "metal")]
             Self::Metal(buffer) => buffer.read(offset, len),
+            #[cfg(feature = "gles")]
+            Self::Gles(buffer) => buffer.read(offset, len),
         }
     }
 
@@ -784,6 +908,8 @@ impl HalBuffer {
             Self::Vulkan(buffer) => buffer.mapped_ptr(),
             #[cfg(feature = "metal")]
             Self::Metal(buffer) => buffer.mapped_ptr(),
+            #[cfg(feature = "gles")]
+            Self::Gles(buffer) => buffer.mapped_ptr(),
         }
     }
 }
@@ -801,6 +927,9 @@ pub enum HalTexture {
     #[cfg(feature = "metal")]
     /// Metal variant.
     Metal(metal::MetalTexture),
+    #[cfg(feature = "gles")]
+    /// GLES variant.
+    Gles(gles::GlesTexture),
 }
 
 /// Enumerates HAL transient attachment values.
@@ -832,6 +961,9 @@ pub enum HalSampler {
     #[cfg(feature = "metal")]
     /// Metal variant.
     Metal(metal::MetalSampler),
+    #[cfg(feature = "gles")]
+    /// GLES variant.
+    Gles(gles::GlesSampler),
 }
 
 /// Enumerates HAL compute pipeline values.
@@ -847,6 +979,9 @@ pub enum HalComputePipeline {
     #[cfg(feature = "metal")]
     /// Metal variant.
     Metal(metal::MetalComputePipeline),
+    #[cfg(feature = "gles")]
+    /// GLES variant.
+    Gles(gles::GlesComputePipeline),
 }
 
 /// Enumerates HAL render pipeline values.
@@ -862,6 +997,9 @@ pub enum HalRenderPipeline {
     #[cfg(feature = "metal")]
     /// Metal variant.
     Metal(metal::MetalRenderPipeline),
+    #[cfg(feature = "gles")]
+    /// GLES variant.
+    Gles(gles::GlesRenderPipeline),
 }
 
 #[cfg(test)]
@@ -968,6 +1106,19 @@ mod tests {
         // SAFETY: Noop arm does not dereference the pointers.
         let surface =
             unsafe { instance.create_surface_from_windows_hwnd(std::ptr::null_mut(), hwnd)? };
+
+        assert!(matches!(surface, HalSurface::Noop));
+        Ok(())
+    }
+
+    #[test]
+    fn create_surface_from_android_native_window_noop_ignores_window_pointer(
+    ) -> Result<(), HalError> {
+        let instance = HalInstance::new_noop();
+        let window = 0xdead_beefusize as *mut c_void;
+
+        // SAFETY: Noop arm does not dereference the window pointer.
+        let surface = unsafe { instance.create_surface_from_android_native_window(window)? };
 
         assert!(matches!(surface, HalSurface::Noop));
         Ok(())
