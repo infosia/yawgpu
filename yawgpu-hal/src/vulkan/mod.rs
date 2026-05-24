@@ -27,6 +27,9 @@ use crate::{
 };
 
 const BACKEND: &str = "vulkan";
+/// Minimum Vulkan API version yawgpu requests at vkCreateInstance.
+/// Documented in specs/blocks/60-real-backends.md § Minimum Vulkan version.
+const YAWGPU_VULKAN_API_VERSION: u32 = vk::API_VERSION_1_1;
 const IMAGE_LAYOUT_UNDEFINED: u8 = 0;
 const IMAGE_LAYOUT_TRANSFER_DST: u8 = 1;
 const IMAGE_LAYOUT_TRANSFER_SRC: u8 = 2;
@@ -55,7 +58,12 @@ impl VulkanInstance {
         else {
             return Err(HalError::BackendUnavailable { backend: BACKEND });
         };
+        let app_info = vk::ApplicationInfo::default()
+            .application_name(c"yawgpu")
+            .engine_name(c"yawgpu")
+            .api_version(YAWGPU_VULKAN_API_VERSION);
         let create_info = vk::InstanceCreateInfo::default()
+            .application_info(&app_info)
             .flags(flags)
             .enabled_extension_names(&extension_names);
         let instance = unsafe { entry.create_instance(&create_info, None) }
@@ -183,6 +191,12 @@ fn has_instance_extension(available_extensions: &[&CStr], name: &CStr) -> bool {
     available_extensions.contains(&name)
 }
 
+fn is_supported_api_version(api_version: u32) -> bool {
+    let major = vk::api_version_major(api_version);
+    let minor = vk::api_version_minor(api_version);
+    (major, minor) >= (1, 1)
+}
+
 struct VulkanInstanceInner {
     _entry: ash::Entry,
     instance: ash::Instance,
@@ -224,6 +238,9 @@ impl VulkanAdapter {
                 .instance
                 .get_physical_device_properties(physical_device)
         };
+        if !is_supported_api_version(properties.api_version) {
+            return None;
+        }
         let name = physical_device_name(properties)?;
         #[cfg(feature = "tiled")]
         let framebuffer_fetch_path = detect_framebuffer_fetch_path(&instance, physical_device);
@@ -429,6 +446,27 @@ mod tests {
             .iter()
             .map(|name| unsafe { CStr::from_ptr(*name) })
             .collect()
+    }
+
+    #[test]
+    fn yawgpu_vulkan_api_version_is_at_least_1_1() {
+        let major = vk::api_version_major(YAWGPU_VULKAN_API_VERSION);
+        let minor = vk::api_version_minor(YAWGPU_VULKAN_API_VERSION);
+
+        assert!((major, minor) >= (1, 1));
+    }
+
+    #[test]
+    fn is_supported_api_version_accepts_1_1_and_above() {
+        assert!(is_supported_api_version(vk::API_VERSION_1_1));
+        assert!(is_supported_api_version(vk::API_VERSION_1_2));
+        assert!(is_supported_api_version(vk::API_VERSION_1_3));
+    }
+
+    #[test]
+    fn is_supported_api_version_rejects_1_0() {
+        assert!(!is_supported_api_version(vk::API_VERSION_1_0));
+        assert!(!is_supported_api_version(vk::make_api_version(0, 1, 0, 0)));
     }
 
     #[test]
