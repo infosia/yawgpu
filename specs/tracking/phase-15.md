@@ -1,7 +1,7 @@
 # Phase 15 — GLES backend (Tier 2 / experimental)
 
-Status: **P15.0 + P15.1 DONE; P15.2+ PLANNED.** Rules / plan:
-`../blocks/67-gles-backend.md`. Roles / loop:
+Status: **P15.0 + P15.1 + P15.1a DONE; P15.2+ PLANNED.** Rules /
+plan: `../blocks/67-gles-backend.md`. Roles / loop:
 `../reference/workflow.md`.
 
 **Tier:** Tier 2 (best-effort, experimental). The `gles` cargo
@@ -235,10 +235,74 @@ Acceptance (all 8 green):
 - `cargo build -p yawgpu --features vulkan` ✓ (regression
   clean)
 
+## P15.1a — FFI selection via standard webgpu.h backendType  *(☑ DONE)*
+
+Done (2026-05-24, commit pending at write time): wired
+`wgpuInstanceRequestAdapter` to honor
+`WGPURequestAdapterOptions.backendType = WGPUBackendType_OpenGLES`
+without touching `YaWGPUInstanceBackendSelect` (the yawgpu.h
+vendor extension, off-limits per the user's GLES scope rule).
+`WGPUInstanceImpl` gained a `#[cfg(feature = "gles")] gles_core:
+Option<Arc<core::Instance>>` field, populated at
+`wgpuCreateInstance` by `probe_gles_core()`
+(`GlesInstance::new()?` → `HalInstance::Gles(...)` →
+`core::Instance::from_hal(...)`; silent `None` on any failure,
+no panic). Both `new_noop` and `from_core` route through the new
+`with_gles_probe` constructor so the side-instance probe runs
+regardless of which primary backend
+`YaWGPUInstanceBackendSelect` chose. `wgpuInstanceRequestAdapter`
+now reads `options.backendType`: `OpenGLES` →
+`select_request_adapter` enumerates from `gles_core`; any other
+value (including `Undefined`) → existing primary-instance path
+unchanged. When the GLES path is requested but `gles_core` is
+`None` (feature absent OR EGL/ANGLE init failed), the callback
+fires with `WGPURequestAdapterStatus_Unavailable` and a null
+adapter via a new `PendingCallback::RequestAdapterError` variant
+(integrated into both `callback_mode()` and the dispatch arm of
+`PendingCallback::fire`). `adapter_info_from_core` gained the
+`HalBackend::Gles → WGPUBackendType_OpenGLES` arm. New
+`yawgpu/tests/e2e_gles_ffi.rs` covers three paths: GLES adapter
+returned when requested (assert
+`AdapterInfo.backendType == WGPUBackendType_OpenGLES`), Noop
+adapter returned for `Undefined` (regression check — the new
+branch must not change the default path), and the Unavailable
+callback path (self-skipped when GLES *is* available on the
+host; the inline `select_request_adapter_opengles_with_no_side_
+instance_returns_none` unit test covers the logic directly
+either way). The yawgpu.h vendor extension surface is **byte-
+for-byte unchanged**.
+
+Spec correction landed alongside: block 67 "Error mapping" cell
+was previously claiming `HalError::BackendOperationFailed` (not
+a real variant); rewritten to list the actual variants used
+(`BufferOperationFailed` + `backend`-only kinds +
+message-carrying surface kinds). This closes the corresponding
+open follow-up from P15.1.
+
+Acceptance (all 9 green):
+- `cargo build -p yawgpu` (Noop default) ✓
+- `cargo build -p yawgpu --features gles` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo clippy -p yawgpu --features gles --all-targets -- -D warnings` ✓
+- `cargo test --workspace` ✓ (125 passed = P15.1's 123 + 2 new
+  inline tests for `select_request_adapter`; Noop pass count
+  delta is just the new tests, no regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_smoke
+  -- --ignored` ✓ (1/1)
+- `cargo test -p yawgpu --features gles --test e2e_gles_basic
+  -- --ignored` ✓ (3/3 regression; HAL path unchanged)
+- `cargo test -p yawgpu --features gles --test e2e_gles_ffi
+  -- --ignored` ✓ (3/3 on real ANGLE; unavailable test
+  self-skips because GLES is available)
+- `cargo build -p yawgpu --features vulkan` ✓
+
 ## P15.2 — Buffer + Queue write/read + B2B copy  *(☐ PLANNED)*
 
 Reuses `e2e_buffer`. Decision required: buffer-mapping fence model
-(see `blocks/67` open questions).
+(see `blocks/67` open questions). FFI integration is now in place
+(P15.1a), so e2e_buffer can target GLES through the standard
+`backendType = WGPUBackendType_OpenGLES` path — no additional
+wiring needed beyond the buffer HAL implementation itself.
 
 ## P15.3 — Texture/Sampler + B2T/T2B/T2T  *(☐ PLANNED)*
 
@@ -277,29 +341,22 @@ finding. MINORs may defer with explicit rationale.
 - Storage-texture format gating timing.
 - Resource hazard barrier mask defaults.
 
-## Open follow-ups added by P15.1
+## Open follow-ups
 
-- **FFI selection wiring for GLES.** P15.1 only opens the HAL
-  path; reaching the GLES adapter through the standard webgpu.h
-  `wgpuInstanceRequestAdapter` requires routing
-  `WGPURequestAdapterOptions.backendType =
-  WGPUBackendType_OpenGLES` to the GLES `HalInstance` arm.
-  Today the existing backend selection lives in the yawgpu.h
-  vendor extension `YaWGPUInstanceBackendSelect`, which is
-  off-limits for the GLES backend per the user's "yawgpu.h is
-  out of scope" instruction. Decide whether to land this as a
-  pre-P15.2 micro-slice (so `e2e_basic`-style tests can target
-  GLES through the FFI) or roll into P15.6 alongside the
-  surface work.
-- **block 67 "Error mapping" wording.** The cell references
-  `HalError::BackendOperationFailed` which is not an actual
-  enum variant (the closest is `BufferOperationFailed`). Update
-  the cell to list the real variants the GLES backend uses
-  (`BackendUnavailable` / `DeviceCreationFailed` /
-  `QueueSubmissionFailed` for the `backend`-only kinds;
-  `BufferOperationFailed` / `Acquire`/`Present`/
-  `SwapchainCreationFailed` for the kinds with messages) so
-  future slices have an accurate reference.
-- **Real test for `GlesSurface::present`.** The current placeholder
-  in `surface.rs` is a no-op. Replace with a real test when P15.6
-  brings up surface creation.
+- ~~**FFI selection wiring for GLES.**~~ **Closed by P15.1a.**
+  `wgpuInstanceRequestAdapter` routes
+  `backendType == WGPUBackendType_OpenGLES` to a side
+  `gles_core` instance; `YaWGPUInstanceBackendSelect` is
+  untouched.
+- ~~**block 67 "Error mapping" wording.**~~ **Closed by
+  P15.1a** (spec correction landed in the same commit).
+- **Real test for `GlesSurface::present`.** The current
+  placeholder in `surface.rs` is a no-op. Replace with a real
+  test when P15.6 brings up surface creation.
+- **Generalize `backendType` routing to other backends.**
+  P15.1a routes only `OpenGLES`; `Metal` / `Vulkan` / `D3D*`
+  values continue to be ignored, and `YaWGPUInstanceBackendSelect`
+  remains the selector for those. If the project later wants
+  full `backendType` honoring, generalize `select_request_adapter`
+  (and decide how it interacts with the yawgpu.h vendor
+  extension). Not in Phase 15 scope.

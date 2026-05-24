@@ -155,16 +155,23 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
     callback_info: native::WGPURequestAdapterCallbackInfo,
 ) -> native::WGPUFuture {
     let instance = borrow_handle(instance_handle, "WGPUInstance");
-    let feature_level = options
-        .as_ref()
+    let options_ref = options.as_ref();
+    let feature_level = options_ref
         .map(|options| map_feature_level(options.featureLevel))
         .unwrap_or(core::FeatureLevel::Core);
-    let adapter = instance
-        .core
-        .enumerate_adapters_with_feature_level(feature_level)
-        .into_iter()
-        .next()
-        .expect("Noop instance must expose an adapter");
+    let backend_type = options_ref
+        .map(|options| options.backendType)
+        .unwrap_or(native::WGPUBackendType_Undefined);
+    let Some(adapter) = select_request_adapter(instance, backend_type, feature_level) else {
+        return instance.register_callback(PendingCallback::RequestAdapterError {
+            mode: callback_info.mode,
+            status: native::WGPURequestAdapterStatus_Unavailable,
+            callback: callback_info.callback,
+            message: "requested adapter backend is unavailable".to_owned(),
+            userdata1: callback_info.userdata1 as usize,
+            userdata2: callback_info.userdata2 as usize,
+        });
+    };
     let adapter = Arc::new(WGPUAdapterImpl {
         core: Arc::new(adapter),
         instance: clone_handle(instance_handle, "WGPUInstance"),
@@ -177,6 +184,32 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
         userdata1: callback_info.userdata1 as usize,
         userdata2: callback_info.userdata2 as usize,
     })
+}
+
+fn select_request_adapter(
+    instance: &WGPUInstanceImpl,
+    backend_type: native::WGPUBackendType,
+    feature_level: core::FeatureLevel,
+) -> Option<core::Adapter> {
+    #[cfg(feature = "gles")]
+    if backend_type == native::WGPUBackendType_OpenGLES {
+        return instance.gles_core.as_ref().and_then(|core_instance| {
+            core_instance
+                .enumerate_adapters_with_feature_level(feature_level)
+                .into_iter()
+                .next()
+        });
+    }
+    #[cfg(not(feature = "gles"))]
+    if backend_type == native::WGPUBackendType_OpenGLES {
+        return None;
+    }
+
+    instance
+        .core
+        .enumerate_adapters_with_feature_level(feature_level)
+        .into_iter()
+        .next()
 }
 
 /// Processes callbacks whose mode allows process-events delivery.
@@ -234,5 +267,56 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
         core::WaitAnyStatus::TimedOut => native::WGPUWaitStatus_TimedOut,
         core::WaitAnyStatus::Error => native::WGPUWaitStatus_Error,
         _ => native::WGPUWaitStatus_Error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_request_adapter_undefined_returns_primary_noop_adapter() {
+        let instance = WGPUInstanceImpl::new_noop(false);
+
+        let adapter = select_request_adapter(
+            &instance,
+            native::WGPUBackendType_Undefined,
+            core::FeatureLevel::Core,
+        );
+
+        assert!(adapter.is_some());
+    }
+
+    #[test]
+    #[cfg(feature = "gles")]
+    fn select_request_adapter_opengles_with_no_side_instance_returns_none() {
+        let instance = WGPUInstanceImpl {
+            core: Arc::new(core::Instance::new_noop()),
+            gles_core: None,
+            timed_wait_any_enabled: false,
+            pending_callbacks: Mutex::new(BTreeMap::new()),
+        };
+
+        let adapter = select_request_adapter(
+            &instance,
+            native::WGPUBackendType_OpenGLES,
+            core::FeatureLevel::Core,
+        );
+
+        assert!(adapter.is_none());
+    }
+
+    #[test]
+    #[cfg(not(feature = "gles"))]
+    fn select_request_adapter_opengles_without_gles_feature_returns_none() {
+        let instance = WGPUInstanceImpl::new_noop(false);
+
+        let adapter = select_request_adapter(
+            &instance,
+            native::WGPUBackendType_OpenGLES,
+            core::FeatureLevel::Core,
+        );
+
+        assert!(adapter.is_none());
     }
 }
