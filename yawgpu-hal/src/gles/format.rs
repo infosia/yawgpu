@@ -1,5 +1,5 @@
 use super::BACKEND;
-use crate::{HalError, HalTextureFormat};
+use crate::{HalError, HalPrimitiveTopology, HalTextureFormat, HalVertexFormat};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct GlesFormat {
@@ -9,6 +9,13 @@ pub(super) struct GlesFormat {
     pub(super) bytes_per_pixel: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct GlesVertexFormat {
+    pub(super) components: i32,
+    pub(super) ty: u32,
+    pub(super) normalized: bool,
+}
+
 pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<GlesFormat, HalError> {
     match format {
         HalTextureFormat::Rgba8Unorm => Ok(rgba8_unorm()),
@@ -16,6 +23,45 @@ pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<GlesFormat,
             backend: BACKEND,
             message: "texture format not supported on GLES (P15.3)",
         }),
+    }
+}
+
+pub(super) fn map_vertex_format(format: HalVertexFormat) -> Result<GlesVertexFormat, HalError> {
+    match format {
+        HalVertexFormat::Float32 => Ok(GlesVertexFormat {
+            components: 1,
+            ty: glow::FLOAT,
+            normalized: false,
+        }),
+        HalVertexFormat::Float32x2 => Ok(GlesVertexFormat {
+            components: 2,
+            ty: glow::FLOAT,
+            normalized: false,
+        }),
+        HalVertexFormat::Float32x3 => Ok(GlesVertexFormat {
+            components: 3,
+            ty: glow::FLOAT,
+            normalized: false,
+        }),
+        HalVertexFormat::Float32x4 => Ok(GlesVertexFormat {
+            components: 4,
+            ty: glow::FLOAT,
+            normalized: false,
+        }),
+        HalVertexFormat::Unsupported => Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "Unsupported vertex format requested",
+        }),
+    }
+}
+
+pub(super) fn map_primitive_topology(topology: HalPrimitiveTopology) -> u32 {
+    match topology {
+        HalPrimitiveTopology::PointList => glow::POINTS,
+        HalPrimitiveTopology::LineList => glow::LINES,
+        HalPrimitiveTopology::LineStrip => glow::LINE_STRIP,
+        HalPrimitiveTopology::TriangleList => glow::TRIANGLES,
+        HalPrimitiveTopology::TriangleStrip => glow::TRIANGLE_STRIP,
     }
 }
 
@@ -59,5 +105,66 @@ mod tests {
                 message: "texture format not supported on GLES (P15.3)",
             }
         ));
+    }
+
+    #[test]
+    fn map_vertex_format_table() {
+        let float = map_vertex_format(HalVertexFormat::Float32).expect("Float32 supported");
+        assert_eq!(float.components, 1);
+        assert_eq!(float.ty, glow::FLOAT);
+        assert!(!float.normalized);
+
+        assert_eq!(
+            map_vertex_format(HalVertexFormat::Float32x2)
+                .expect("Float32x2 supported")
+                .components,
+            2
+        );
+        assert_eq!(
+            map_vertex_format(HalVertexFormat::Float32x3)
+                .expect("Float32x3 supported")
+                .components,
+            3
+        );
+        assert_eq!(
+            map_vertex_format(HalVertexFormat::Float32x4)
+                .expect("Float32x4 supported")
+                .components,
+            4
+        );
+
+        let error = map_vertex_format(HalVertexFormat::Unsupported)
+            .expect_err("unsupported vertex format must error");
+        assert!(matches!(
+            error,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message: "Unsupported vertex format requested",
+            }
+        ));
+    }
+
+    #[test]
+    fn map_primitive_topology_table() {
+        assert_eq!(
+            map_primitive_topology(HalPrimitiveTopology::PointList),
+            glow::POINTS
+        );
+        assert_eq!(
+            map_primitive_topology(HalPrimitiveTopology::LineList),
+            glow::LINES
+        );
+        assert_eq!(
+            map_primitive_topology(HalPrimitiveTopology::LineStrip),
+            glow::LINE_STRIP
+        );
+        assert_eq!(
+            map_primitive_topology(HalPrimitiveTopology::TriangleList),
+            glow::TRIANGLES
+        );
+        assert_eq!(
+            map_primitive_topology(HalPrimitiveTopology::TriangleStrip),
+            glow::TRIANGLE_STRIP
+        );
     }
 }

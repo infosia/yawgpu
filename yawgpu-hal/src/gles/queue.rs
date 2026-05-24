@@ -3,10 +3,12 @@ use std::sync::Arc;
 use glow::HasContext;
 
 use super::device::GlesDeviceInner;
+use super::format::{map_primitive_topology, map_vertex_format};
 use super::BACKEND;
 use crate::{
     HalBuffer, HalBufferBindingKind, HalBufferCopy, HalBufferTextureCopy, HalComputePass,
-    HalComputePipeline, HalCopy, HalDescriptorBinding, HalError, HalTexture, HalTextureCopy,
+    HalComputePipeline, HalCopy, HalDescriptorBinding, HalError, HalRenderLoadOp, HalRenderPass,
+    HalRenderPipeline, HalTexture, HalTextureCopy, HalVertexStepMode,
 };
 
 /// Stores GLES queue data used by validation and backend submission.
@@ -55,11 +57,13 @@ impl GlesQueue {
                         HalCopy::TextureToBuffer(copy) => submit_texture_to_buffer(gl, copy)?,
                         HalCopy::TextureToTexture(copy) => submit_texture_to_texture(gl, copy)?,
                         HalCopy::ComputePass(pass) => submit_compute_pass(gl, pass)?,
-                        _ => {
+                        HalCopy::RenderPass(pass) => submit_render_pass(gl, pass)?,
+                        #[cfg(feature = "tiled")]
+                        HalCopy::SubpassRenderPass(_) => {
                             return Err(HalError::BufferOperationFailed {
                                 backend: BACKEND,
                                 message:
-                                    "GLES backend supports only buffer, texture, and compute commands in P15.4",
+                                    "GLES backend supports only buffer, texture, compute, and render commands in P15.5",
                             });
                         }
                     }
@@ -144,7 +148,7 @@ fn submit_compute_pass(gl: &glow::Context, pass: &HalComputePass) -> Result<(), 
                     message: "compute pass binding is not a GLES buffer",
                 });
             };
-            let target = compute_binding_target(pipeline.bindings(), bound.binding)?;
+            let target = binding_target(pipeline.bindings(), bound.binding)?;
             let buffer = buffer.raw_or_err()?;
             let offset =
                 i32::try_from(bound.offset).map_err(|_| HalError::BufferOperationFailed {
@@ -171,16 +175,13 @@ fn submit_compute_pass(gl: &glow::Context, pass: &HalComputePass) -> Result<(), 
     Ok(())
 }
 
-fn compute_binding_target(
-    bindings: &[HalDescriptorBinding],
-    binding: u32,
-) -> Result<u32, HalError> {
+fn binding_target(bindings: &[HalDescriptorBinding], binding: u32) -> Result<u32, HalError> {
     let descriptor = bindings
         .iter()
         .find(|descriptor| descriptor.group == 0 && descriptor.binding == binding)
         .ok_or(HalError::BufferOperationFailed {
             backend: BACKEND,
-            message: "compute buffer binding is missing from pipeline layout",
+            message: "buffer binding is missing from pipeline layout",
         })?;
     match descriptor.kind {
         HalBufferBindingKind::Uniform => Ok(glow::UNIFORM_BUFFER),
@@ -188,9 +189,258 @@ fn compute_binding_target(
         #[cfg(feature = "tiled")]
         HalBufferBindingKind::InputAttachment => Err(HalError::BufferOperationFailed {
             backend: BACKEND,
-            message: "input attachments are not valid compute buffer bindings",
+            message: "input attachments are not valid buffer bindings",
         }),
     }
+}
+
+fn submit_render_pass(gl: &glow::Context, pass: &HalRenderPass) -> Result<(), HalError> {
+    let Some(HalRenderPipeline::Gles(pipeline)) = &pass.pipeline else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "render pass requires a GLES pipeline",
+        });
+    };
+    let fbo = create_render_fbo(gl, pass)?;
+    let vao = unsafe {
+        gl.create_vertex_array()
+            .map_err(|_| HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "glCreateVertexArray failed",
+            })
+    };
+    let vao = match vao {
+        Ok(vao) => vao,
+        Err(error) => {
+            unsafe {
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+                gl.delete_framebuffer(fbo);
+            }
+            return Err(error);
+        }
+    };
+    let _cleanup = RenderPassCleanup { gl, fbo, vao };
+    run_render_draw(gl, pass, pipeline, vao)
+}
+
+struct RenderPassCleanup<'a> {
+    gl: &'a glow::Context,
+    fbo: glow::Framebuffer,
+    vao: glow::VertexArray,
+}
+
+impl Drop for RenderPassCleanup<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            self.gl.bind_vertex_array(None);
+            self.gl.delete_vertex_array(self.vao);
+            self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+            self.gl.delete_framebuffer(self.fbo);
+            self.gl.use_program(None);
+            self.gl.memory_barrier(glow::ALL_BARRIER_BITS);
+        }
+    }
+}
+
+fn create_render_fbo(
+    gl: &glow::Context,
+    pass: &HalRenderPass,
+) -> Result<glow::Framebuffer, HalError> {
+    let HalTexture::Gles(target_texture) = &pass.color_target.texture else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "render pass color target is not a GLES texture",
+        });
+    };
+    let color_texture = target_texture.raw_or_err()?;
+    let meta = target_texture.meta();
+    let width = i32_from_u32(meta.width, "render target width exceeds GLES limit")?;
+    let height = i32_from_u32(meta.height, "render target height exceeds GLES limit")?;
+
+    unsafe {
+        let fbo = gl
+            .create_framebuffer()
+            .map_err(|_| HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "glCreateFramebuffer failed (render)",
+            })?;
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
+        gl.framebuffer_texture_2d(
+            glow::DRAW_FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(color_texture),
+            0,
+        );
+        gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+        if gl.check_framebuffer_status(glow::DRAW_FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+            gl.delete_framebuffer(fbo);
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "framebuffer incomplete for render pass",
+            });
+        }
+        gl.viewport(0, 0, width, height);
+        if matches!(pass.color_target.load_op, HalRenderLoadOp::Clear) {
+            let [r, g, b, a] = pass.color_target.clear_color;
+            gl.clear_color(r as f32, g as f32, b as f32, a as f32);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+        }
+        Ok(fbo)
+    }
+}
+
+fn run_render_draw(
+    gl: &glow::Context,
+    pass: &HalRenderPass,
+    pipeline: &super::pipeline::GlesRenderPipeline,
+    vao: glow::VertexArray,
+) -> Result<(), HalError> {
+    let program = pipeline.raw_or_err()?;
+    unsafe {
+        gl.use_program(Some(program));
+    }
+    bind_render_buffers(gl, pass, pipeline)?;
+    bind_vertex_buffers(gl, pass, pipeline, vao)?;
+    if let Some(draw) = pass.draw {
+        if let Some(location) = pipeline.first_instance_location() {
+            unsafe {
+                gl.uniform_1_u32(Some(location), draw.first_instance);
+            }
+        }
+        let topology = map_primitive_topology(pipeline.primitive_topology());
+        let first_vertex = i32_from_u32(draw.first_vertex, "draw firstVertex exceeds GLES limit")?;
+        let vertex_count = i32_from_u32(draw.vertex_count, "draw vertexCount exceeds GLES limit")?;
+        unsafe {
+            if draw.instance_count == 1 && draw.first_instance == 0 {
+                gl.draw_arrays(topology, first_vertex, vertex_count);
+            } else {
+                let instance_count =
+                    i32_from_u32(draw.instance_count, "draw instanceCount exceeds GLES limit")?;
+                gl.draw_arrays_instanced(topology, first_vertex, vertex_count, instance_count);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn bind_render_buffers(
+    gl: &glow::Context,
+    pass: &HalRenderPass,
+    pipeline: &super::pipeline::GlesRenderPipeline,
+) -> Result<(), HalError> {
+    for bound in &pass.bind_buffers {
+        if bound.group != 0 {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES render supports only bind group 0",
+            });
+        }
+        let HalBuffer::Gles(buffer) = &bound.buffer else {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "render pass binding is not a GLES buffer",
+            });
+        };
+        let target = binding_target(pipeline.bindings(), bound.binding)?;
+        let buffer = buffer.raw_or_err()?;
+        let offset = i32::try_from(bound.offset).map_err(|_| HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "render buffer binding offset exceeds GLES limit",
+        })?;
+        let size = i32::try_from(bound.size).map_err(|_| HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "render buffer binding size exceeds GLES limit",
+        })?;
+        unsafe {
+            gl.bind_buffer_range(target, bound.binding, Some(buffer), offset, size);
+        }
+    }
+    Ok(())
+}
+
+fn bind_vertex_buffers(
+    gl: &glow::Context,
+    pass: &HalRenderPass,
+    pipeline: &super::pipeline::GlesRenderPipeline,
+    vao: glow::VertexArray,
+) -> Result<(), HalError> {
+    unsafe {
+        gl.bind_vertex_array(Some(vao));
+    }
+    for bound in &pass.vertex_buffers {
+        let layout_index =
+            usize::try_from(bound.binding).map_err(|_| HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "vertex buffer binding index exceeds host limit",
+            })?;
+        let Some(layout) = pipeline.vertex_buffers().get(layout_index) else {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "vertex buffer binding is missing from pipeline layout",
+            });
+        };
+        let HalBuffer::Gles(buffer) = &bound.buffer else {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "vertex buffer binding is not a GLES buffer",
+            });
+        };
+        let buffer = buffer.raw_or_err()?;
+        let stride =
+            i32::try_from(layout.array_stride).map_err(|_| HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "vertex buffer stride exceeds GLES limit",
+            })?;
+        let buffer_offset =
+            i64::try_from(bound.offset).map_err(|_| HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "vertex buffer offset exceeds GLES limit",
+            })?;
+        unsafe {
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffer));
+        }
+        for attribute in &layout.attributes {
+            let format = map_vertex_format(attribute.format)?;
+            let attribute_offset = buffer_offset
+                .checked_add(i64::try_from(attribute.offset).map_err(|_| {
+                    HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message: "vertex attribute offset exceeds GLES limit",
+                    }
+                })?)
+                .ok_or(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "vertex attribute offset exceeds GLES limit",
+                })?;
+            let attribute_offset =
+                i32::try_from(attribute_offset).map_err(|_| HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "vertex attribute offset exceeds GLES limit",
+                })?;
+            unsafe {
+                gl.enable_vertex_attrib_array(attribute.shader_location);
+                gl.vertex_attrib_pointer_f32(
+                    attribute.shader_location,
+                    format.components,
+                    format.ty,
+                    format.normalized,
+                    stride,
+                    attribute_offset,
+                );
+                gl.vertex_attrib_divisor(
+                    attribute.shader_location,
+                    if matches!(layout.step_mode, HalVertexStepMode::Instance) {
+                        1
+                    } else {
+                        0
+                    },
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn submit_buffer_to_texture(
@@ -504,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_binding_target_maps_buffer_kinds() {
+    fn binding_target_maps_buffer_kinds() {
         let bindings = [
             HalDescriptorBinding {
                 group: 0,
@@ -519,19 +769,19 @@ mod tests {
         ];
 
         assert_eq!(
-            compute_binding_target(&bindings, 0).expect("uniform binding"),
+            binding_target(&bindings, 0).expect("uniform binding"),
             glow::UNIFORM_BUFFER
         );
         assert_eq!(
-            compute_binding_target(&bindings, 1).expect("storage binding"),
+            binding_target(&bindings, 1).expect("storage binding"),
             glow::SHADER_STORAGE_BUFFER
         );
-        let missing = compute_binding_target(&bindings, 2).expect_err("missing binding");
+        let missing = binding_target(&bindings, 2).expect_err("missing binding");
         assert!(matches!(
             missing,
             HalError::BufferOperationFailed {
                 backend: "gles",
-                message: "compute buffer binding is missing from pipeline layout",
+                message: "buffer binding is missing from pipeline layout",
             }
         ));
     }

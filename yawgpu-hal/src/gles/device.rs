@@ -10,7 +10,7 @@ use super::pipeline::{GlesComputePipeline, GlesRenderPipeline};
 use super::queue::GlesQueue;
 use super::sampler::GlesSampler;
 use super::texture::GlesTexture;
-use super::{unavailable, BACKEND};
+use super::BACKEND;
 use crate::{
     HalBufferUsage, HalDescriptorBinding, HalError, HalRenderPipelineDescriptor,
     HalSamplerDescriptor, HalShaderSource, HalShaderStage, HalTextureDescriptor,
@@ -166,12 +166,24 @@ impl GlesDevice {
     /// Creates a render pipeline from the given shaders, vertex layout, and color targets.
     pub fn create_render_pipeline(
         &self,
-        _shader: HalShaderSource,
+        shader: HalShaderSource,
         _vertex_entry_point: &str,
         _fragment_entry_point: &str,
-        _descriptor: &HalRenderPipelineDescriptor,
-        _bindings: &[HalDescriptorBinding],
+        descriptor: &HalRenderPipelineDescriptor,
+        bindings: &[HalDescriptorBinding],
     ) -> Result<GlesRenderPipeline, HalError> {
-        unavailable()
+        let HalShaderSource::GlslStages { vertex, fragment } = shader else {
+            return Err(HalError::ShaderCompilationFailed {
+                backend: BACKEND,
+                message: "GLES render pipeline requires GlslStages shader source".to_owned(),
+            });
+        };
+        GlesRenderPipeline::new(
+            Arc::clone(&self.inner),
+            vertex,
+            fragment,
+            descriptor.clone(),
+            bindings,
+        )
     }
 }

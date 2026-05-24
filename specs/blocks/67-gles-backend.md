@@ -204,12 +204,12 @@ Entries are filled in / refined as P15.x slices land. Anything left as
 | Compute shader | naga WGSL → GLSL ES 3.10 (`use_framebuffer_fetch=false`, `zero_initialize_workgroup_memory=true`) compiled via `glCreateShader(COMPUTE_SHADER)` + `glLinkProgram`; bind-group bindings honored via `bind_buffer_range(SHADER_STORAGE_BUFFER \| UNIFORM_BUFFER)` against the WGSL `@binding(N)` emitted as `layout(binding=N)`. Single bind group (`@group(0)`) only. | ☑ (P15.4; ANGLE verified) |
 | Compute dispatch (direct) | `glDispatchCompute(x, y, z)` + `glMemoryBarrier(ALL_BARRIER_BITS)` | ☑ (P15.4) |
 | Compute dispatch (indirect) | `glDispatchComputeIndirect` | ✗ Deferred — `HalComputePass` carries no indirect variant in core; gate first on a core HAL extension |
-| Vertex shader / fragment shader | naga GLSL ES 3.10 output (vertex/fragment writers) | ? (P15.5) |
-| Render pipeline state | Cached GL state set on bind | ? (P15.5) |
-| Render pass (color + depth/stencil) | FBO + `glClearBuffer*` + load/store emulation | ? (P15.5) |
-| `draw` / `drawIndexed` | Standard GL draw calls | ? (P15.5) |
-| `drawIndirect` / `drawIndexedIndirect` | `glDrawArraysIndirect` / `glDrawElementsIndirect` | ? (P15.5) |
-| `first_instance` direct | naga uniform injection | ? (P15.5) |
+| Vertex shader / fragment shader | naga GLSL ES 3.10 output (per-stage emission); shared `generate_glsl` accepts Vertex / Fragment / Compute; wrapped as `HalShaderSource::GlslStages { vertex, fragment }` for render | ☑ (P15.5; ANGLE verified) |
+| Render pipeline state | Cached: GL program + `Vec<HalVertexBufferLayout>` + primitive topology + bindings + `Option<UniformLocation>` for naga's `naga_vs_first_instance` | ☑ (P15.5) |
+| Render pass (color + depth/stencil) | Transient FBO + `glFramebufferTexture2D(COLOR_ATTACHMENT0)` + `glDrawBuffers` + `glViewport` + clear (`glClearColor`/`glClear`); `RenderPassCleanup` Drop guard ensures VAO + FBO + program-state + memory-barrier cleanup runs regardless of inner error | ◐ (P15.5: color-only; depth/stencil deferred) |
+| `draw` / `drawIndexed` | `glDrawArrays` / `glDrawArraysInstanced`; indexed deferred (needs `HalRenderPass`/`HalDraw` core extension) | ◐ (P15.5: drawArrays + drawArraysInstanced only) |
+| `drawIndirect` / `drawIndexedIndirect` | `glDrawArraysIndirect` / `glDrawElementsIndirect` | ✗ Deferred — `HalRenderPass`/`HalDraw` carry no indirect variant in core |
+| `first_instance` direct | naga injects `uniform uint naga_vs_first_instance`; HAL sets it via `glUniform1ui` per draw before `glDrawArraysInstanced` | ☑ (P15.5; uniform-injection path implemented, unexercised by e2e but code path active) |
 | `first_instance` indirect | ✗ Unsupported — feature not advertised | locked ✗ |
 | Surface (Android) | `eglCreateWindowSurface(ANativeWindow*)` | ? (P15.6) |
 | Surface (Windows ANGLE) | `eglCreateWindowSurface(HWND)` via ANGLE | ? (P15.6) |

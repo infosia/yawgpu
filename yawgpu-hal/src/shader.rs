@@ -13,6 +13,13 @@ pub enum HalShaderSource {
         /// Fragment variant.
         fragment: Vec<u32>,
     },
+    /// GLSL render stages.
+    GlslStages {
+        /// Vertex stage GLSL ES source.
+        vertex: String,
+        /// Fragment stage GLSL ES source.
+        fragment: String,
+    },
     /// Glsl variant.
     Glsl {
         /// Source variant.
