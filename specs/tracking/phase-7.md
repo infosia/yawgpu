@@ -14,6 +14,24 @@ Rules/plan: `../blocks/60-real-backends.md`. Roles/loop:
 > by the CI Noop binaries + Metal Noop test); q5 narrow
 > `shader_naga.rs`'s blanket `#![allow(dead_code)]`. Future real-
 > backend handoffs: do not run workspace `cargo fmt` (q4 churn).
+>
+> **q6 (added 2026-05-25, Phase-15 post-mortem aftermath)** —
+> `e2e_metal_*.rs` / `e2e_vulkan_*.rs` (13 files total) **silently
+> skip on missing real backend** via `if real_backend_skip_reason(X).
+> is_some() { return; }` and `cargo test` reports them as "ok". Same
+> false-pass risk that bit Phase 15 (see `phase-15-review.md`
+> post-mortem). Should be patched to `assert!(real_backend_
+> available(X), "...")` like the GLES tests were on 2026-05-25 (commit
+> 6819d44). Also: the `metal_backend_available()` /
+> `vulkan_backend_available()` probes only test instance / device-
+> enumeration, not full device creation — weaker than
+> `gles_backend_available()`'s probe which goes all the way through
+> `create_device`. Tighten both probes + flip skip-to-panic in the
+> same cleanup slice. Non-urgent: Tier 1 backends *are* GPU-verified
+> in practice (Claude has run them on macOS Metal + Windows native
+> Vulkan repeatedly), so the false-pass window has been small for
+> Tier 1; this is mostly a defense-in-depth fix to ensure future
+> environment-shift slips can't recur.
 
 **Roadmap divergence (approved):** SPEC roadmap lists Phase 7 as
 "Vulkan→Metal"; we bring up **Metal first, then Vulkan** because the
