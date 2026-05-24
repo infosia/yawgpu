@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use khronos_egl as egl;
+use std::ffi::c_void;
 
 use super::adapter::GlesAdapter;
 use super::egl::{self as gles_egl, EglConfig, EglDisplay, EglInstance};
+use super::surface::GlesSurface;
 use super::BACKEND;
 use crate::HalError;
 
@@ -59,6 +61,45 @@ impl GlesInstance {
         choose_config(&self.inner)
             .map(|config| vec![GlesAdapter::new(Arc::clone(&self.inner), config)])
             .unwrap_or_default()
+    }
+
+    /// # Safety
+    ///
+    /// `hwnd` must be a valid Win32 window handle backed by an
+    /// ANGLE-compatible window class for the lifetime of the resulting surface.
+    pub unsafe fn create_surface_from_windows_hwnd(
+        &self,
+        hwnd: *mut c_void,
+    ) -> Result<GlesSurface, HalError> {
+        self.create_window_surface(hwnd)
+    }
+
+    /// # Safety
+    ///
+    /// `window` must be a valid `ANativeWindow*` for the lifetime of the
+    /// resulting surface.
+    pub unsafe fn create_surface_from_android_native_window(
+        &self,
+        window: *mut c_void,
+    ) -> Result<GlesSurface, HalError> {
+        self.create_window_surface(window)
+    }
+
+    fn create_window_surface(&self, native: *mut c_void) -> Result<GlesSurface, HalError> {
+        let config = choose_config(&self.inner)?;
+        let surface = unsafe {
+            self.inner
+                .egl
+                .create_window_surface(self.inner.display, config, native as _, None)
+        }
+        .map_err(|_| HalError::SwapchainCreationFailed {
+            backend: BACKEND,
+            message: "eglCreateWindowSurface failed",
+        })?;
+        Ok(GlesSurface::from_window_surface(
+            Arc::clone(&self.inner),
+            surface,
+        ))
     }
 }
 

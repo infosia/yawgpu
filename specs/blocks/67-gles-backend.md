@@ -211,9 +211,9 @@ Entries are filled in / refined as P15.x slices land. Anything left as
 | `drawIndirect` / `drawIndexedIndirect` | `glDrawArraysIndirect` / `glDrawElementsIndirect` | ✗ Deferred — `HalRenderPass`/`HalDraw` carry no indirect variant in core |
 | `first_instance` direct | naga injects `uniform uint naga_vs_first_instance`; HAL sets it via `glUniform1ui` per draw before `glDrawArraysInstanced` | ☑ (P15.5; uniform-injection path implemented, unexercised by e2e but code path active) |
 | `first_instance` indirect | ✗ Unsupported — feature not advertised | locked ✗ |
-| Surface (Android) | `eglCreateWindowSurface(ANativeWindow*)` | ? (P15.6) |
-| Surface (Windows ANGLE) | `eglCreateWindowSurface(HWND)` via ANGLE | ? (P15.6) |
-| Present | `eglSwapBuffers` | ? (P15.6) |
+| Surface (Android) | `eglCreateWindowSurface(ANativeWindow*)` via `GlesInstance::create_surface_from_android_native_window`. Reuses the existing `choose_config` (RGBA8 + GLES3 + PBUFFER_BIT). | ☑ (P15.6; code path implemented; manual visual verification via Android-side example) |
+| Surface (Windows ANGLE) | `eglCreateWindowSurface(HWND)` via `GlesInstance::create_surface_from_windows_hwnd`. ANGLE accepts the pbuffer-capable config for window surfaces too. | ☑ (P15.6; manual visual verification via `examples/triangle`) |
+| Present | Back-buffer (`GlesTexture` allocated at `configure()` with `RENDER_ATTACHMENT \| COPY_SRC`) blitted via transient read-FBO + `glBlitFramebuffer` to default FBO, then `eglSwapBuffers`. `RestoreCurrent` Drop guard re-binds the pbuffer after swap (even on error). | ☑ (P15.6) |
 | Timestamp / occlusion queries | GLES has `EXT_disjoint_timer_query`; not advertised initially | ✗ (Tier 2, deferred) |
 | Bundle execution | Reuses pass-level GL calls | ? (P15.5) |
 | `tiled` feature | Not advertised on GLES; yawgpu.h tiled APIs reject GLES device | locked ✗ |
