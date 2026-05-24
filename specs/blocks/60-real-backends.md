@@ -61,6 +61,23 @@ Validation stays in `yawgpu-core` (Phases 0–6); the backend only
 **executes** already-validated work. A backend op failing at the
 driver level → `HalError` → device error (no panic).
 
+### Minimum Vulkan version
+
+The Vulkan HAL targets **Vulkan 1.1** as its minimum. This is declared via
+`pApplicationInfo.apiVersion = VK_API_VERSION_1_1` at `vkCreateInstance`,
+and `VulkanAdapter::new` rejects physical devices whose
+`VkPhysicalDeviceProperties.apiVersion` is below 1.1 (returning `None` so
+the adapter is silently dropped from `enumerate_adapters`).
+
+Rationale: naga's SPIR-V output declares `SPV_KHR_storage_buffer_storage_class`,
+which is core in Vulkan 1.1 (and would otherwise require enabling
+`VK_KHR_storage_buffer_storage_class` as a device extension). 1.1 also
+unblocks subgroup operations, 16-bit storage, and variable pointers — all
+features naga may emit lazily. The 1.1 baseline is universally available
+across the drivers yawgpu targets (MoltenVK ≥ 1.1.0, native desktop Vulkan,
+Android mobile Vulkan since 2018). Follow-up tracking lives in
+`specs/tracking/vulkan-buffer-texture-usage-vuids.md` § F3.
+
 ## Slices → end2end port targets
 
 Dawn `dawn/src/dawn/tests/end2end/`. Port the **minimal**
