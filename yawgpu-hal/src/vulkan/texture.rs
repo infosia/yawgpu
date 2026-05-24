@@ -114,6 +114,16 @@ impl Drop for VulkanSamplerInner {
     }
 }
 
+/// True iff `usage` requires a `VkImageView` to be created alongside the
+/// `VkImage`. View-compatible bits per VUID-VkImageViewCreateInfo-image-04441
+/// (SAMPLED / STORAGE / *_ATTACHMENT). yawgpu's render_attachment maps to
+/// COLOR_ATTACHMENT (and INPUT_ATTACHMENT under the tiled feature), so the
+/// three caller-facing usage bits cover all view-compatible image-usage flags
+/// map_texture_usage can emit.
+fn texture_usage_needs_view(usage: HalTextureUsage) -> bool {
+    usage.texture_binding || usage.storage_binding || usage.render_attachment
+}
+
 /// Creates texture and reports validation errors through the owning device.
 pub(super) fn create_texture(
     device: Arc<VulkanDeviceInner>,
@@ -171,18 +181,22 @@ pub(super) fn create_texture(
         }
         return Err(map_texture_error(error, "image memory bind failed"));
     }
-    let view_info = vk::ImageViewCreateInfo::default()
-        .image(image)
-        .view_type(vk::ImageViewType::TYPE_2D)
-        .format(format)
-        .subresource_range(color_subresource_range());
-    let view = unsafe { device.device.create_image_view(&view_info, None) }.map_err(|_| {
-        unsafe {
-            device.device.destroy_image(image, None);
-            device.device.free_memory(memory, None);
-        }
-        texture_error("image view creation failed")
-    })?;
+    let view = if texture_usage_needs_view(descriptor.usage) {
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(color_subresource_range());
+        unsafe { device.device.create_image_view(&view_info, None) }.map_err(|_| {
+            unsafe {
+                device.device.destroy_image(image, None);
+                device.device.free_memory(memory, None);
+            }
+            texture_error("image view creation failed")
+        })?
+    } else {
+        vk::ImageView::null()
+    };
     Ok((
         VulkanTextureInner {
             device,
@@ -492,4 +506,49 @@ pub(super) fn color_subresource_range() -> vk::ImageSubresourceRange {
         .level_count(1)
         .base_array_layer(0)
         .layer_count(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texture_usage(
+        texture_binding: bool,
+        storage_binding: bool,
+        render_attachment: bool,
+    ) -> HalTextureUsage {
+        HalTextureUsage {
+            copy_src: false,
+            copy_dst: false,
+            texture_binding,
+            storage_binding,
+            render_attachment,
+        }
+    }
+
+    #[test]
+    fn texture_usage_needs_view_returns_true_for_render_attachment() {
+        assert!(texture_usage_needs_view(texture_usage(false, false, true)));
+    }
+
+    #[test]
+    fn texture_usage_needs_view_returns_true_for_texture_binding() {
+        assert!(texture_usage_needs_view(texture_usage(true, false, false)));
+    }
+
+    #[test]
+    fn texture_usage_needs_view_returns_true_for_storage_binding() {
+        assert!(texture_usage_needs_view(texture_usage(false, true, false)));
+    }
+
+    #[test]
+    fn texture_usage_needs_view_returns_false_for_copy_only() {
+        assert!(!texture_usage_needs_view(HalTextureUsage {
+            copy_src: true,
+            copy_dst: true,
+            texture_binding: false,
+            storage_binding: false,
+            render_attachment: false,
+        }));
+    }
 }
