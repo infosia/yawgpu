@@ -189,9 +189,9 @@ Entries are filled in / refined as P15.x slices land. Anything left as
 | Area | GLES 3.1 mapping | Initial status |
 |---|---|---|
 | Adapter / device creation | EGL display + shared context | ☑ (P15.1; ANGLE on Windows verified) |
-| Buffer create / map / unmap | `glBufferData` + `glMapBufferRange` (per-call) | ? (P15.2) |
-| Buffer-to-buffer copy | `glCopyBufferSubData` | ? (P15.2) |
-| `mappedAtCreation` | Allocate + map immediately; flush on unmap | ? (P15.2) |
+| Buffer create / map / unmap | `glBufferData(NULL, size, DYNAMIC_DRAW)` + `glBufferSubData` (write) + `glMapBufferRange(MAP_READ_BIT)` (read). HostBuffer path in core (`mapped_ptr` returns `None`); persistent map deferred. | ☑ (P15.2; ANGLE round-trip verified) |
+| Buffer-to-buffer copy | `glCopyBufferSubData` via `GL_COPY_READ_BUFFER` / `GL_COPY_WRITE_BUFFER` | ☑ (P15.2; ANGLE round-trip verified, full + partial offsets) |
+| `mappedAtCreation` | Allocate + map immediately; flush on unmap | ☑ (P15.2; transparent via HostBuffer path) |
 | Texture: 1D | `GL_TEXTURE_2D` with height=1 (no native 1D in GLES) | ? (P15.3) |
 | Texture: 2D | `GL_TEXTURE_2D` + `glTexStorage2D` | ? (P15.3) |
 | Texture: 2D array | `GL_TEXTURE_2D_ARRAY` + `glTexStorage3D` | ? (P15.3) |
