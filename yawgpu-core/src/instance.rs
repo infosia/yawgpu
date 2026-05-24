@@ -101,6 +101,22 @@ impl Instance {
                 .map_err(Error::Hal)
         }
     }
+
+    /// # Safety
+    ///
+    /// `window` must be a valid `ANativeWindow*` from the Android NDK and must
+    /// outlive the surface.
+    pub unsafe fn create_surface_from_android_native_window(
+        &self,
+        window: *mut c_void,
+    ) -> Result<HalSurface, Error> {
+        unsafe {
+            self.inner
+                .hal
+                .create_surface_from_android_native_window(window)
+                .map_err(Error::Hal)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -162,6 +178,17 @@ mod tests {
         let surface =
             unsafe { instance.create_surface_from_windows_hwnd(std::ptr::null_mut(), hwnd) }
                 .expect("Noop surface creation should ignore HWND pointers");
+
+        assert!(matches!(surface, yawgpu_hal::HalSurface::Noop));
+    }
+
+    #[test]
+    fn instance_create_surface_from_android_native_window_noop_returns_noop_surface() {
+        let instance = Instance::new_noop();
+        let window = std::ptr::dangling_mut();
+
+        let surface = unsafe { instance.create_surface_from_android_native_window(window) }
+            .expect("Noop surface creation should ignore Android native window pointers");
 
         assert!(matches!(surface, yawgpu_hal::HalSurface::Noop));
     }

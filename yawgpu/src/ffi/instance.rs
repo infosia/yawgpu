@@ -108,15 +108,31 @@ pub unsafe extern "C" fn wgpuInstanceCreateSurface(
                 .ok()
                 .and_then(real_hal_surface)
         });
+        let mut found_hwnd_source = false;
         if layer.is_none() {
             let hwnd_source = find_windows_hwnd_source(descriptor.nextInChain);
+            found_hwnd_source = hwnd_source.is_some();
             real_surface_creation_failed =
-                hwnd_source.is_some() && is_real_hal_instance(instance.core.hal());
+                found_hwnd_source && is_real_hal_instance(instance.core.hal());
             hal = hwnd_source.and_then(|(hinstance, hwnd)| {
                 unsafe {
                     instance
                         .core
                         .create_surface_from_windows_hwnd(hinstance, hwnd)
+                }
+                .ok()
+                .and_then(real_hal_surface)
+            });
+        }
+        if layer.is_none() && !found_hwnd_source && hal.is_none() {
+            let android_source = find_android_native_window_source(descriptor.nextInChain);
+            real_surface_creation_failed =
+                android_source.is_some() && is_real_hal_instance(instance.core.hal());
+            hal = android_source.and_then(|window| {
+                unsafe {
+                    instance
+                        .core
+                        .create_surface_from_android_native_window(window)
                 }
                 .ok()
                 .and_then(real_hal_surface)
