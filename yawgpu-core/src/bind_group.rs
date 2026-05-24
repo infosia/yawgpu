@@ -162,10 +162,7 @@ pub(crate) fn validate_bind_group_descriptor(
 fn bind_group_layout_entry_is_input_attachment(entry: &BindGroupLayoutEntry) -> bool {
     #[cfg(feature = "tiled")]
     {
-        matches!(
-            entry.kind,
-            Some(BindingLayoutKind::InputAttachment { .. })
-        )
+        matches!(entry.kind, Some(BindingLayoutKind::InputAttachment { .. }))
     }
     #[cfg(not(feature = "tiled"))]
     {

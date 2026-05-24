@@ -247,8 +247,7 @@ unsafe fn run_two_subpass_draw_readback(device: native::WGPUDevice) -> native::W
     // attachment list so the pipeline is format-compatible with the encoder.
     // (Mirrors mgpu's hello_deferred — naga MSL doesn't subpass-remap output
     // locations; the shader author writes the global flat index directly.)
-    let write_pipeline =
-        create_subpass_pipeline(device, layout, 0, write_module, "fs", &targets);
+    let write_pipeline = create_subpass_pipeline(device, layout, 0, write_module, "fs", &targets);
     let load_pipeline =
         create_subpass_pipeline(device, layout, 1, load_module, "fs_metal", &targets);
 

@@ -6,6 +6,9 @@ use std::sync::{Arc, Mutex};
 use yawgpu::native;
 use yawgpu_test::{real_backend_available, wait, RealBackend};
 
+mod common;
+use common::create_gles_instance;
+
 const WIDTH: u32 = 4;
 const HEIGHT: u32 = 4;
 const BYTES_PER_PIXEL: usize = 4;
@@ -24,7 +27,7 @@ fn gles_buffer_texture_buffer_round_trip() {
     );
 
     unsafe {
-        let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
+        let instance = create_gles_instance();
         let adapter = request_adapter(instance);
         let device = request_device(instance, adapter);
         let errors = install_error_capture(device);
@@ -53,7 +56,7 @@ fn gles_texture_texture_round_trip() {
     );
 
     unsafe {
-        let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
+        let instance = create_gles_instance();
         let adapter = request_adapter(instance);
         let device = request_device(instance, adapter);
         let errors = install_error_capture(device);
@@ -82,7 +85,7 @@ fn gles_sampler_creation_has_no_device_error() {
     );
 
     unsafe {
-        let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
+        let instance = create_gles_instance();
         let adapter = request_adapter(instance);
         let device = request_device(instance, adapter);
         let errors = install_error_capture(device);

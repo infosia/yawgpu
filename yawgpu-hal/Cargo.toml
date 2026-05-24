@@ -9,7 +9,7 @@ default = ["noop"]
 noop = []
 vulkan = ["dep:ash"]
 metal = ["dep:objc2", "dep:objc2-core-foundation", "dep:objc2-foundation", "dep:objc2-metal", "dep:objc2-quartz-core"]
-gles = ["dep:glow", "dep:khronos-egl", "dep:libloading", "dep:parking_lot"]
+gles = ["dep:glow", "dep:khronos-egl", "dep:libloading", "dep:parking_lot", "dep:windows-sys"]
 tiled = []
 
 [dependencies]
@@ -24,3 +24,11 @@ objc2-metal = { workspace = true, optional = true }
 objc2-quartz-core = { workspace = true, optional = true, features = ["CALayer", "CAMetalLayer", "objc2-core-foundation", "objc2-metal"] }
 parking_lot = { workspace = true, optional = true }
 thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Graphics_OpenGL",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+], optional = true }

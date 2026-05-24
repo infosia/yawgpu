@@ -6,6 +6,9 @@ use std::sync::{Arc, Mutex};
 use yawgpu::native;
 use yawgpu_test::{real_backend_available, wait, RealBackend};
 
+mod common;
+use common::create_gles_instance;
+
 const ELEMENTS: usize = 8;
 const BUFFER_SIZE: u64 = (ELEMENTS * std::mem::size_of::<u32>()) as u64;
 
@@ -20,7 +23,7 @@ fn gles_compute_fills_storage_buffer() {
     );
 
     unsafe {
-        let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
+        let instance = create_gles_instance();
         let adapter = request_adapter(instance);
         let device = request_device(instance, adapter);
         let errors = install_error_capture(device);
@@ -66,7 +69,7 @@ fn gles_compute_reads_input_and_writes_output_storage_buffers() {
     );
 
     unsafe {
-        let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
+        let instance = create_gles_instance();
         let adapter = request_adapter(instance);
         let device = request_device(instance, adapter);
         let errors = install_error_capture(device);

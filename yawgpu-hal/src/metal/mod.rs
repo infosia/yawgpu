@@ -25,9 +25,9 @@ use crate::{
     HalCompareFunction, HalComputePass, HalCopy, HalDepthStencilState, HalDescriptorBinding,
     HalDraw, HalError, HalExtent3d, HalFilterMode, HalMipmapFilterMode, HalPrimitiveTopology,
     HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor, HalSamplerDescriptor,
-    HalShaderSource, HalStencilFaceState, HalStencilOperation, HalSurfaceConfiguration,
-    HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage,
-    HalVertexFormat, HalVertexStepMode,
+    HalShaderSource, HalStencilFaceState, HalStencilOperation, HalSurfaceConfiguration, HalTexture,
+    HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat,
+    HalVertexStepMode,
 };
 #[cfg(feature = "tiled")]
 use crate::{
