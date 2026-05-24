@@ -8,6 +8,7 @@ use yawgpu_core::{DeviceError, ErrorKind};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RealBackend {
+    Gles,
     Metal,
     Vulkan,
 }
@@ -16,6 +17,7 @@ impl RealBackend {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Gles => "gles",
             Self::Metal => "metal",
             Self::Vulkan => "vulkan",
         }
@@ -25,6 +27,7 @@ impl RealBackend {
 #[must_use]
 pub fn real_backend_available(backend: RealBackend) -> bool {
     match backend {
+        RealBackend::Gles => gles_backend_available(),
         RealBackend::Metal => metal_backend_available(),
         RealBackend::Vulkan => vulkan_backend_available(),
     }
@@ -38,6 +41,17 @@ pub fn real_backend_skip_reason(backend: RealBackend) -> Option<String> {
             backend.name()
         )
     })
+}
+
+#[cfg(feature = "gles")]
+fn gles_backend_available() -> bool {
+    // P15.0: scaffold only. Real EGL availability probing lands in P15.1.
+    false
+}
+
+#[cfg(not(feature = "gles"))]
+fn gles_backend_available() -> bool {
+    false
 }
 
 #[cfg(feature = "metal")]

@@ -1,6 +1,6 @@
 # Phase 15 — GLES backend (Tier 2 / experimental)
 
-Status: **PLANNED** (not started). Rules / plan:
+Status: **P15.0 DONE; P15.1+ PLANNED.** Rules / plan:
 `../blocks/67-gles-backend.md`. Roles / loop:
 `../reference/workflow.md`.
 
@@ -38,12 +38,50 @@ backend only executes already-validated work; driver failure →
 `HalError` → device error, never panic; **no core-rule relaxation
 for Tier 2**.
 
-## P15.0 — Scaffolding + gating harness  *(☐ PLANNED)*
+## P15.0 — Scaffolding + gating harness  *(☑ DONE)*
 
-Goal: add the `gles` cargo feature and `Gles` enum arms to
-`yawgpu-hal` returning `HalError::BackendUnavailable` so every
-crate builds clean with `--features gles`. Land all Tier 2
-documentation edits. No GLES code path executed.
+Done (2026-05-24, commit pending at write time): `gles` cargo
+feature wired in `yawgpu-hal` / `yawgpu` / `yawgpu-test` with
+optional `glow 0.14` / `khronos-egl 6` (dynamic) / `libloading
+0.8` deps (recorded in `reference/dependencies.md`). New
+`yawgpu-hal/src/gles/mod.rs` scaffold module mirrors the P7.0
+Metal placeholder shape: every fallible entry returns
+`HalError::BackendUnavailable { backend: "gles" }`; infallible
+creators are allocation-counting no-ops; `use glow as _; use
+khronos_egl as _; use libloading as _;` proves the link with
+zero EGL/GL calls. `HalBackend::Gles` + `Gles(...)` arms added to
+every HAL enum (`HalInstance/HalAdapter/HalDevice/HalQueue/
+HalSurface/HalBuffer/HalTexture/HalSampler/HalComputePipeline/
+HalRenderPipeline`); per the block 67 Tier 2 policy
+`HalTransientAttachment` and `HalSubpassRenderPass` (both
+`tiled`-only) do **not** gain a `Gles` variant — the
+`HalDevice` tiled-method arms return `BackendUnavailable`
+directly. New `HalInstance::create_surface_from_android_native_
+window` method added with the four-backend dispatch (Noop ok;
+Vulkan / Metal Err with backend-specific messages; Gles
+BackendUnavailable). `yawgpu-test` gained `RealBackend::Gles`
++ `gles_backend_available()` returning false in P15.0 +
+existing `real_backend_skip_reason` format reused. One
+`#[ignore]`'d `yawgpu/tests/e2e_gles_smoke.rs` asserts
+unavailability and passes under `--features gles --
+--ignored`. Inline `#[cfg(test)] mod tests` covers every new
+`pub fn` (24 unit tests in the gles module).
+
+Acceptance (all green):
+- `cargo build -p yawgpu` (Noop default) ✓
+- `cargo build -p yawgpu --features gles` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo clippy -p yawgpu --features gles --all-targets -- -D warnings` ✓
+- `cargo test --workspace` ✓ (Noop default; GLES smoke
+  `#[ignore]`-skipped as expected)
+- `cargo test -p yawgpu --features gles --test e2e_gles_smoke
+  -- --ignored` ✓ (1/1)
+- `cargo build -p yawgpu --features vulkan` ✓ (regression
+  clean)
+- Metal feature on Windows is pre-existing unbuildable
+  (`objc2` is Apple-only); not a regression of this slice.
+
+Original deliverables list (kept for traceability):
 
 Deliverables:
 
