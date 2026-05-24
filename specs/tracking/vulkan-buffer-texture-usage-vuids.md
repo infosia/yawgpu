@@ -59,11 +59,16 @@ fixing — the underlying flag mapping looks right.
 `SPV_KHR_storage_buffer_storage_class` but the device is targeted at
 Vulkan 1.0 and `VK_KHR_storage_buffer_storage_class` is not enabled.
 
-**Fix sketch:** either request Vulkan 1.1 in `vkCreateInstance`
-(`api_version = vk::API_VERSION_1_1`) or enable
-`VK_KHR_storage_buffer_storage_class` as a device extension. 1.1 is
-trivially available on every driver we care about and removes the need to
-list the KHR extension.
+**Fix locked (2026-05-24):** **option A — request Vulkan 1.1** at
+`vkCreateInstance` (`pApplicationInfo.apiVersion = VK_API_VERSION_1_1`)
+*and* reject pre-1.1 physical devices at `VulkanAdapter::new`. Rationale:
+1.1 makes `SPV_KHR_storage_buffer_storage_class` core, so no KHR device
+extension needs to be listed; it also unblocks any future SPIR-V 1.3 features
+naga emits. 1.1 is universally available on every driver yawgpu targets
+(MoltenVK ≥ 1.1.0, native Windows/Linux Vulkan, Android Adreno/Mali/PowerVR
+≥ 2018). The block-60 minimum version is updated accordingly; the
+coding-agent handoff lives in `HANDOFF.md` (root) for the Vulkan-1.1-minimum
+slice.
 
 ## Why none of this was caught earlier
 
