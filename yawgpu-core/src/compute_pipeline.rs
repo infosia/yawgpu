@@ -275,6 +275,29 @@ pub(crate) fn select_compute_shader_source(
                 hal_descriptor_bindings(metal_bindings),
             ))
         }
+        #[cfg(feature = "gles")]
+        HalBackend::Gles => {
+            #[cfg(feature = "shader-passthrough")]
+            if shader_module.spirv_passthrough().is_some()
+                || shader_module.msl_passthrough().is_some()
+            {
+                return Err(
+                    "passthrough shader modules cannot be used on the GLES backend".to_owned(),
+                );
+            }
+            let module = shader_module
+                .reflected()
+                .ok_or_else(|| "compute pipeline requires a reflected shader module".to_owned())?;
+            let generated = module.generate_glsl(entry_name, naga::ShaderStage::Compute)?;
+            Ok((
+                HalShaderSource::Glsl {
+                    source: generated.source,
+                    stage: yawgpu_hal::HalShaderStage::Compute,
+                },
+                generated.entry_point,
+                hal_descriptor_bindings(metal_bindings),
+            ))
+        }
         HalBackend::Noop => Err("Noop backend does not create HAL shader sources".to_owned()),
         _ => Err("unsupported backend does not create HAL shader sources".to_owned()),
     }
@@ -1231,6 +1254,31 @@ mod tests {
                 .expect_err("MSL must not run on Vulkan"),
             "MSL shader module cannot be used on the Vulkan backend"
         );
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn select_compute_shader_source_generates_gles_glsl() {
+        let device = noop_device();
+        let wgsl = device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@compute @workgroup_size(2, 1, 1) fn cs() {}".to_owned(),
+        ));
+
+        let (source, entry, bindings) =
+            select_compute_shader_source(HalBackend::Gles, &wgsl, "cs", &[])
+                .expect("WGSL should generate GLES GLSL");
+
+        let HalShaderSource::Glsl {
+            source,
+            stage: yawgpu_hal::HalShaderStage::Compute,
+        } = source
+        else {
+            panic!("GLES should select compute GLSL");
+        };
+        assert_eq!(entry, "cs");
+        assert!(bindings.is_empty());
+        assert!(source.contains("#version 310 es"));
+        assert!(source.contains("local_size_x = 2"));
     }
 
     #[cfg(feature = "shader-passthrough")]

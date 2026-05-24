@@ -201,10 +201,10 @@ Entries are filled in / refined as P15.x slices land. Anything left as
 | Storage textures (read/write) | `glBindImageTexture`; restricted format set | ? (P15.4) |
 | B2T / T2B / T2T copies | `glTexSubImage2D` (PBO unpack + `UNPACK_ROW_LENGTH`) / transient FBO + `glReadPixels` (PBO pack + `PACK_ROW_LENGTH` + `read_buffer(COLOR_ATTACHMENT0)`) / `glCopyImageSubData` (GLES 3.2 or `GL_EXT_copy_image`) | ☑ (P15.3; ANGLE verified; 2D only) |
 | Sampler creation | `glGenSamplers` + `glSamplerParameteri/f` (filter / address / mipmap / compare / anisotropy via `GL_EXT_texture_filter_anisotropic`) | ☑ (P15.3; `ClampToBorder` not supported) |
-| Compute shader | Native compute | ? (P15.4) |
-| Compute dispatch (direct) | `glDispatchCompute` | ? (P15.4) |
-| Compute dispatch (indirect) | `glDispatchComputeIndirect` | ? (P15.4) |
-| Vertex shader / fragment shader | naga GLSL-ES output | ? (P15.4 / P15.5) |
+| Compute shader | naga WGSL → GLSL ES 3.10 (`use_framebuffer_fetch=false`, `zero_initialize_workgroup_memory=true`) compiled via `glCreateShader(COMPUTE_SHADER)` + `glLinkProgram`; bind-group bindings honored via `bind_buffer_range(SHADER_STORAGE_BUFFER \| UNIFORM_BUFFER)` against the WGSL `@binding(N)` emitted as `layout(binding=N)`. Single bind group (`@group(0)`) only. | ☑ (P15.4; ANGLE verified) |
+| Compute dispatch (direct) | `glDispatchCompute(x, y, z)` + `glMemoryBarrier(ALL_BARRIER_BITS)` | ☑ (P15.4) |
+| Compute dispatch (indirect) | `glDispatchComputeIndirect` | ✗ Deferred — `HalComputePass` carries no indirect variant in core; gate first on a core HAL extension |
+| Vertex shader / fragment shader | naga GLSL ES 3.10 output (vertex/fragment writers) | ? (P15.5) |
 | Render pipeline state | Cached GL state set on bind | ? (P15.5) |
 | Render pass (color + depth/stencil) | FBO + `glClearBuffer*` + load/store emulation | ? (P15.5) |
 | `draw` / `drawIndexed` | Standard GL draw calls | ? (P15.5) |

@@ -37,7 +37,7 @@ pub use format::{
     HalVertexStepMode,
 };
 pub use present::{HalPresentMode, HalSurfaceConfiguration};
-pub use shader::HalShaderSource;
+pub use shader::{HalShaderSource, HalShaderStage};
 
 /// Enumerates backend paths for shader framebuffer fetch.
 #[cfg(feature = "tiled")]
