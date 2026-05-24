@@ -1,15 +1,14 @@
 # Vulkan buffer/texture usage VUIDs — pre-existing, surfaced 2026-05-23
 
-Status: **OPEN.** Not Phase-14-introduced (the Vulkan HAL buffer path has
-hardcoded `TRANSFER_SRC | TRANSFER_DST` since the backend landed in Phase 7);
-surfaced by running the `--features vulkan,tiled --ignored` suite on a
-native Windows Vulkan driver with `VK_LAYER_KHRONOS_validation` enabled.
-All affected tests still pass functionally (drivers tolerate the missing
-flags), but the layer reports real spec violations.
+Status: **CLOSED 2026-05-24** (F1: `483f90f`, F2: `fe08b59`, F3: `c664c24`).
+The `--features vulkan,tiled --ignored` suite under
+`VK_LAYER_KHRONOS_validation` on a native Windows Vulkan driver now
+prints zero VUID lines; the Vulkan backend is validation-clean.
+Originally surfaced by running that suite on 2026-05-23 — not Phase-14-introduced.
 
 ## Findings
 
-### F1 — Buffer usage hardcoded `TRANSFER_SRC | TRANSFER_DST`
+### F1 — Buffer usage hardcoded `TRANSFER_SRC | TRANSFER_DST` *(CLOSED 2026-05-24, commit `483f90f`)*
 
 `yawgpu-hal/src/vulkan/buffer.rs:116` creates every Vulkan buffer with:
 
@@ -32,7 +31,7 @@ non-transfer usage bit.
   without `VK_BUFFER_USAGE_VERTEX_BUFFER_BIT`
   (`e2e_vulkan_render::*`).
 
-**Fix locked (2026-05-24):** thread caller usage through the HAL.
+**Fix shipped (commit `483f90f`):** caller usage now threads through the HAL.
 `HalDevice::create_buffer` currently takes `size: u64` only
 (`yawgpu-core/src/device.rs:224`), so the WebGPU usage bits validated in
 `yawgpu-core` are dropped at the HAL boundary. Fix is structural:
@@ -63,7 +62,7 @@ non-transfer usage bit.
 
 Coding-agent handoff: V11.3 in `HANDOFF.md`.
 
-### F2 — Image views over transfer-only images
+### F2 — Image views over transfer-only images *(CLOSED 2026-05-24, commit `fe08b59`)*
 
 `VUID-VkImageViewCreateInfo-image-04441` fires in
 `e2e_vulkan_texture::vulkan_buffer_texture_buffer_round_trip` and
@@ -78,7 +77,7 @@ of whether the caller's usage permits a view. Copy-only textures (used
 purely as staging sources/destinations) trip 04441 because the view they
 get isn't usage-compatible.
 
-**Fix locked (2026-05-24):** make the image view creation conditional.
+**Fix shipped (commit `fe08b59`):** image view creation is now conditional.
 Skip `vkCreateImageView` when the caller's `HalTextureUsage` has no
 view-compatible bit set (`texture_binding`, `storage_binding`, or
 `render_attachment` are all `false`); store `vk::ImageView::null()`
