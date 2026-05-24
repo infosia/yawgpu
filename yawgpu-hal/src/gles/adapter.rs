@@ -42,18 +42,61 @@ impl GlesAdapter {
 
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<GlesDevice, HalError> {
-        let context_attribs = [
+        // One-shot EGL display introspection so failures surface what ANGLE /
+        // the host EGL stack actually reports. Cheap; called once per device.
+        if let Ok(version) = self
+            .instance
+            .egl
+            .query_string(Some(self.instance.display), egl::VERSION)
+        {
+            eprintln!(
+                "yawgpu-gles: EGL_VERSION={:?}",
+                version.to_string_lossy()
+            );
+        }
+        if let Ok(vendor) = self
+            .instance
+            .egl
+            .query_string(Some(self.instance.display), egl::VENDOR)
+        {
+            eprintln!(
+                "yawgpu-gles: EGL_VENDOR={:?}",
+                vendor.to_string_lossy()
+            );
+        }
+
+        // Try ES 3.1 first (CONTEXT_MAJOR_VERSION=3 + CONTEXT_MINOR_VERSION=1).
+        // If ANGLE rejects with BadMatch (some configs don't accept MINOR),
+        // fall back to ES 3 (CLIENT_VERSION=3, no MINOR). The downstream
+        // GL_VERSION check still enforces the >= 3.1 floor.
+        let attribs_es31 = [
             egl::CONTEXT_MAJOR_VERSION,
             3,
             egl::CONTEXT_MINOR_VERSION,
             1,
             egl::NONE,
         ];
-        let context = self
-            .instance
-            .egl
-            .create_context(self.instance.display, self.config, None, &context_attribs)
-            .map_err(|_| HalError::DeviceCreationFailed { backend: BACKEND })?;
+        let attribs_es3 = [egl::CONTEXT_CLIENT_VERSION, 3, egl::NONE];
+        let context = match self.instance.egl.create_context(
+            self.instance.display,
+            self.config,
+            None,
+            &attribs_es31,
+        ) {
+            Ok(ctx) => ctx,
+            Err(err) => {
+                eprintln!(
+                    "yawgpu-gles: eglCreateContext(ES 3.1) failed: {err:?}; retrying with ES 3"
+                );
+                self.instance
+                    .egl
+                    .create_context(self.instance.display, self.config, None, &attribs_es3)
+                    .map_err(|err2| {
+                        eprintln!("yawgpu-gles: eglCreateContext(ES 3) failed: {err2:?}");
+                        HalError::DeviceCreationFailed { backend: BACKEND }
+                    })?
+            }
+        };
 
         let pbuffer_attribs = [egl::WIDTH, 1, egl::HEIGHT, 1, egl::NONE];
         let surface = match self.instance.egl.create_pbuffer_surface(
@@ -62,23 +105,20 @@ impl GlesAdapter {
             &pbuffer_attribs,
         ) {
             Ok(surface) => surface,
-            Err(_) => {
+            Err(err) => {
+                eprintln!("yawgpu-gles: eglCreatePbufferSurface failed: {err:?}");
                 destroy_context(&self.instance, context);
                 return Err(HalError::DeviceCreationFailed { backend: BACKEND });
             }
         };
 
-        if self
-            .instance
-            .egl
-            .make_current(
-                self.instance.display,
-                Some(surface),
-                Some(surface),
-                Some(context),
-            )
-            .is_err()
-        {
+        if let Err(err) = self.instance.egl.make_current(
+            self.instance.display,
+            Some(surface),
+            Some(surface),
+            Some(context),
+        ) {
+            eprintln!("yawgpu-gles: eglMakeCurrent(pbuffer) failed: {err:?}");
             destroy_surface(&self.instance, surface);
             destroy_context(&self.instance, context);
             return Err(HalError::DeviceCreationFailed { backend: BACKEND });
@@ -95,11 +135,13 @@ impl GlesAdapter {
         };
         let version = unsafe { gl.get_parameter_string(glow::VERSION) };
         let Some((major, minor)) = parse_gles_version(&version) else {
+            eprintln!("yawgpu-gles: unable to parse GL_VERSION={version:?}");
             destroy_surface(&self.instance, surface);
             destroy_context(&self.instance, context);
             return Err(HalError::DeviceCreationFailed { backend: BACKEND });
         };
         if (major, minor) < (3, 1) {
+            eprintln!("yawgpu-gles: GLES {major}.{minor} below the required 3.1 (GL_VERSION={version:?})");
             destroy_surface(&self.instance, surface);
             destroy_context(&self.instance, context);
             return Err(HalError::DeviceCreationFailed { backend: BACKEND });
