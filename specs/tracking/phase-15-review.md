@@ -60,5 +60,64 @@ written rationale; phase cannot close with any open CRITICAL/MAJOR.
 
 ## Resolution log
 
-To be filled in after the q1 fix slice lands and re-gating green.
-At that point: Phase 15 COMPLETE.
+**CLOSED** (2026-05-25). Q1 MAJOR + Q2/Q3 MINOR fixed in the
+fix-slice; Q4/Q5/Q6 MINOR deferred with rationale (logged above
+and as follow-up entries in `phase-15.md`).
+
+Fix-slice changes:
+- **Q1** (`yawgpu-hal/src/gles/queue.rs`): `submit_render_pass`
+  refactored — FBO is created first (load_op clear runs
+  unconditionally), then a three-arm match on `pass.pipeline`:
+  `None` → `RenderPassCleanup { vao: None }` + `return Ok(())`
+  (clear-only); `Some(Gles)` → existing draw path; `Some(_)` →
+  Drop-guarded `BufferOperationFailed`. `RenderPassCleanup.vao`
+  promoted to `Option<glow::VertexArray>`; Drop no-ops the
+  VAO unbind/delete when `None`. The error path during VAO
+  creation also routes through the Drop guard for FBO release
+  (defense-in-depth bonus). `e2e_gles_render` regression-clean.
+- **Q2** (`yawgpu-core/src/instance.rs` +
+  `yawgpu/src/ffi/{instance,mod}.rs`):
+  `core::Instance::create_surface_from_android_native_window`
+  added mirroring the existing Windows HWND method (with a Noop
+  inline unit test).
+  `find_android_native_window_source` helper added to
+  `ffi/mod.rs` mirroring `find_windows_hwnd_source`.
+  `wgpuInstanceCreateSurface` gained an Android branch after
+  the existing HWND check (gated by a `found_hwnd_source`
+  flag so metal/hwnd/android priority order is explicit). The
+  metal/hwnd/no-source paths are byte-for-byte unchanged.
+- **Q3** (`yawgpu-hal/src/gles/queue.rs::tests`): three new
+  inline tests — `i32_from_u32_accepts_in_range_and_rejects
+  _overflow`, `u32_from_u64_accepts_in_range_and_rejects_overflow`,
+  `ensure_2d_copy_accepts_layer_one_z_zero_only`.
+
+Gate at close (all 13 green):
+- `cargo build -p yawgpu` (Noop default) ✓
+- `cargo build -p yawgpu --features gles` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo clippy -p yawgpu --features gles --all-targets -- -D warnings` ✓
+- `cargo test --workspace` ✓ (Noop pass count unchanged from
+  pre-fix; core gained 1 new inline test, gles queue gained 3)
+- `cargo test -p yawgpu --features gles --test e2e_gles_smoke
+  -- --ignored` ✓ (1/1)
+- `cargo test -p yawgpu --features gles --test e2e_gles_basic
+  -- --ignored` ✓ (3/3)
+- `cargo test -p yawgpu --features gles --test e2e_gles_ffi
+  -- --ignored` ✓ (3/3)
+- `cargo test -p yawgpu --features gles --test e2e_gles_buffer
+  -- --ignored` ✓ (2/2)
+- `cargo test -p yawgpu --features gles --test e2e_gles_texture
+  -- --ignored` ✓ (3/3)
+- `cargo test -p yawgpu --features gles --test e2e_gles_compute
+  -- --ignored` ✓ (2/2)
+- `cargo test -p yawgpu --features gles --test e2e_gles_render
+  -- --ignored` ✓ (2/2; Q1 regression clean)
+- `cargo build -p yawgpu --features vulkan` ✓
+
+**Phase 15 COMPLETE.** Tier 2 / experimental GLES backend
+covers the webgpu.h core surface (Instance / Adapter / Device /
+Queue / Buffer + B2B / Texture + Sampler + B2T/T2B/T2T /
+Compute + Dispatch / Render + Draw / Surface + Present) on
+Windows ANGLE with HAL-side Android ANativeWindow support
+(FFI bridge now wired). Core validation stays Tier-independent.
+Noop / Vulkan / Metal backends byte-for-byte unchanged.

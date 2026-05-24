@@ -1,8 +1,10 @@
 # Phase 15 — GLES backend (Tier 2 / experimental)
 
-Status: **P15.0 + P15.1 + P15.1a + P15.2 + P15.3 + P15.4 + P15.5
-+ P15.6 DONE; Phase 15 Review PENDING.** Rules / plan:
-`../blocks/67-gles-backend.md`. Roles / loop:
+Status: **Phase 15 COMPLETE** (2026-05-25). All slices
+(P15.0 + P15.1 + P15.1a + P15.2 + P15.3 + P15.4 + P15.5 + P15.6) +
+Phase 15 Review (`phase-15-review.md`) CLOSED — 0 CRITICAL /
+0 MAJOR open; 3 MINOR deferred with logged rationale. Rules /
+plan: `../blocks/67-gles-backend.md`. Roles / loop:
 `../reference/workflow.md`.
 
 **Tier:** Tier 2 (best-effort, experimental). The `gles` cargo

@@ -984,6 +984,20 @@ unsafe fn find_windows_hwnd_source(
     None
 }
 
+unsafe fn find_android_native_window_source(
+    mut chain: *const native::WGPUChainedStruct,
+) -> Option<*mut c_void> {
+    while let Some(link) = chain.as_ref() {
+        if link.sType == native::WGPUSType_SurfaceSourceAndroidNativeWindow {
+            let source = (link as *const native::WGPUChainedStruct)
+                .cast::<native::WGPUSurfaceSourceAndroidNativeWindow>();
+            return source.as_ref().map(|source| source.window);
+        }
+        chain = link.next;
+    }
+    None
+}
+
 fn real_hal_surface(surface: HalSurface) -> Option<HalSurface> {
     match surface {
         HalSurface::Noop => None,

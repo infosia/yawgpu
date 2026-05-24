@@ -195,13 +195,21 @@ fn binding_target(bindings: &[HalDescriptorBinding], binding: u32) -> Result<u32
 }
 
 fn submit_render_pass(gl: &glow::Context, pass: &HalRenderPass) -> Result<(), HalError> {
-    let Some(HalRenderPipeline::Gles(pipeline)) = &pass.pipeline else {
-        return Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "render pass requires a GLES pipeline",
-        });
-    };
     let fbo = create_render_fbo(gl, pass)?;
+    let pipeline = match &pass.pipeline {
+        None => {
+            let _cleanup = RenderPassCleanup { gl, fbo, vao: None };
+            return Ok(());
+        }
+        Some(HalRenderPipeline::Gles(pipeline)) => pipeline,
+        Some(_) => {
+            let _cleanup = RenderPassCleanup { gl, fbo, vao: None };
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "render pass pipeline is not a GLES pipeline",
+            });
+        }
+    };
     let vao = unsafe {
         gl.create_vertex_array()
             .map_err(|_| HalError::BufferOperationFailed {
@@ -212,28 +220,31 @@ fn submit_render_pass(gl: &glow::Context, pass: &HalRenderPass) -> Result<(), Ha
     let vao = match vao {
         Ok(vao) => vao,
         Err(error) => {
-            unsafe {
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
-                gl.delete_framebuffer(fbo);
-            }
+            let _cleanup = RenderPassCleanup { gl, fbo, vao: None };
             return Err(error);
         }
     };
-    let _cleanup = RenderPassCleanup { gl, fbo, vao };
+    let _cleanup = RenderPassCleanup {
+        gl,
+        fbo,
+        vao: Some(vao),
+    };
     run_render_draw(gl, pass, pipeline, vao)
 }
 
 struct RenderPassCleanup<'a> {
     gl: &'a glow::Context,
     fbo: glow::Framebuffer,
-    vao: glow::VertexArray,
+    vao: Option<glow::VertexArray>,
 }
 
 impl Drop for RenderPassCleanup<'_> {
     fn drop(&mut self) {
         unsafe {
-            self.gl.bind_vertex_array(None);
-            self.gl.delete_vertex_array(self.vao);
+            if let Some(vao) = self.vao {
+                self.gl.bind_vertex_array(None);
+                self.gl.delete_vertex_array(vao);
+            }
             self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
             self.gl.delete_framebuffer(self.fbo);
             self.gl.use_program(None);
@@ -742,6 +753,68 @@ mod tests {
                 backend: "gles",
                 message: "bytes_per_row is not a multiple of bytes_per_pixel",
             }
+        ));
+    }
+
+    #[test]
+    fn i32_from_u32_accepts_in_range_and_rejects_overflow() {
+        assert_eq!(i32_from_u32(0, "test").expect("zero is in range"), 0);
+        assert_eq!(
+            i32_from_u32(i32::MAX as u32, "test").expect("i32::MAX is in range"),
+            i32::MAX
+        );
+        let overflow = i32_from_u32(i32::MAX as u32 + 1, "overflow message")
+            .expect_err("overflow must be rejected");
+        assert!(matches!(
+            overflow,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message: "overflow message",
+            }
+        ));
+    }
+
+    #[test]
+    fn u32_from_u64_accepts_in_range_and_rejects_overflow() {
+        assert_eq!(u32_from_u64(0, "test").expect("zero is in range"), 0);
+        assert_eq!(
+            u32_from_u64(u64::from(u32::MAX), "test").expect("u32::MAX is in range"),
+            u32::MAX
+        );
+        let overflow = u32_from_u64(u64::from(u32::MAX) + 1, "overflow message")
+            .expect_err("overflow must be rejected");
+        assert!(matches!(
+            overflow,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message: "overflow message",
+            }
+        ));
+    }
+
+    #[test]
+    fn ensure_2d_copy_accepts_layer_one_z_zero_only() {
+        assert!(ensure_2d_copy(1, 0).is_ok());
+        assert!(matches!(
+            ensure_2d_copy(2, 0),
+            Err(HalError::BufferOperationFailed {
+                backend: "gles",
+                ..
+            })
+        ));
+        assert!(matches!(
+            ensure_2d_copy(1, 1),
+            Err(HalError::BufferOperationFailed {
+                backend: "gles",
+                ..
+            })
+        ));
+        assert!(matches!(
+            ensure_2d_copy(0, 0),
+            Err(HalError::BufferOperationFailed {
+                backend: "gles",
+                ..
+            })
         ));
     }
 
