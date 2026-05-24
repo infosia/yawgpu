@@ -33,9 +33,11 @@ bring-up verified by Dawn `end2end` Basic/Compute/Copy ports.
   in library code (Objective-C/`ash` boundaries may `expect` only
   where a null/!success is a true programming error, mirroring the C
   FFI-boundary exception).
-- Out of scope: GL/D3D (permanent); Dawn `wire/`; multi-adapter
+- Out of scope: **D3D** (permanent); Dawn `wire/`; multi-adapter
   selection beyond what Basic/Compute/Copy need; swapchain/surface
   (Phase 8); robustness/zero-init/advanced end2end suites (revisit).
+  *(GLES was previously listed here; it is now Tier 2 / experimental
+  brought up in Phase 15 — see `67-gles-backend.md`.)*
 
 ## HAL contract the real backends must satisfy
 

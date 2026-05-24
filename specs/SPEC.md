@@ -36,15 +36,17 @@ COMPLETE with an open CRITICAL/MAJOR (see `reference/workflow.md`).
 | **9** | Examples + real surface/presentation | Dawn `samples/` + wgpu-native `examples/` (C, webgpu.h) | C samples ported; SF3 real window→swapchain on Metal/Vulkan. *(Post-core, user-requested; see `blocks/80-examples.md` / `tracking/phase-9.md`.)* |
 | **13** | Shader passthrough (vendor) | — (vendor extension; direct unit tests + GPU-gated e2e) | Create `WGPUShaderModule` from raw SPIR-V (Vulkan) / MSL (Metal), feature `shader-passthrough` (default off), no API breakage. *(See `blocks/33-shader-passthrough.md` / `tracking/phase-13.md`.)* |
 | **14** | Tiled rendering / TBDR (vendor) | — (vendor extension; direct unit tests + GPU-gated e2e) | Transient attachments, multi-subpass passes, framebuffer fetch, subpass pipelines (+ tile-dispatch scaffold), feature `tiled` (default off), Vulkan+Metal only, no API breakage. *(See `blocks/55-tiled-rendering.md` / `tracking/phase-14.md`.)* |
+| **15** | GLES backend — **Tier 2 / experimental** | Reuses Phase 7 e2e ports under `--features gles` (basic/buffer/copy/compute_dispatch/render); no new Dawn-derived tests | Android (native EGL) + Windows ANGLE only; opt-in `gles` cargo feature (default off); webgpu.h paths that do not cleanly map to GLES 3.1 may be rejected at HAL (no core-rule relaxation); yawgpu.h vendor extensions (`tiled`, `shader-passthrough`) **not** implemented for GLES; minimum e2e set must pass manually on Windows ANGLE, unsupported areas catalogued in the block 67 mapping matrix. *(See `blocks/67-gles-backend.md` / `tracking/phase-15.md`.)* |
 
 > Phases 10–12 (unit-test coverage, modularization, Win32 surface) were
 > post-core, user-requested, and are tracked in `tracking/` only.
 
 ## Out of scope
 
-- **OpenGL / OpenGL ES and DirectX (D3D11/D3D12) backends.** Primary
-  platforms are **Vulkan and Metal** only; no GL/D3D backend in the initial
-  implementation (the HAL enum may gain variants later, but none planned).
+- **DirectX (D3D11 / D3D12) backends.** Permanently out of scope.
+  (GLES is **Tier 2 / experimental**, brought up in Phase 15 — see
+  `blocks/67-gles-backend.md`. Tier 1 = Vulkan + Metal. The HAL enum
+  is open to additional variants but no D3D variant is planned.)
 - Dawn `wire/` (dawn-wire IPC) — no yawgpu analog.
 - Multi-threading correctness beyond what ported tests require (revisit later).
 

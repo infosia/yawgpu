@@ -12,10 +12,19 @@ Dawn's tests as the spec.
 ```
   C consumer  ──►  yawgpu (C ABI)  ──►  yawgpu-core  ──►  yawgpu-hal  ──►  GPU
                    bindgen types        WebGPU            enum dispatch    Noop /
-                   extern "C" fns        semantics,        Noop|Vk|Metal   Vulkan /
-                   Arc handles           validation,                       Metal
-                   conv.rs               resource hub
+                   extern "C" fns        semantics,        Noop|Vk|Metal|  Vulkan /
+                   Arc handles           validation,        Gles (T2)      Metal /
+                   conv.rs               resource hub                       GLES (T2)
 ```
+
+## Backend support tiers
+
+| Tier | Backends | Notes |
+|---|---|---|
+| **Tier 1 — Supported** | Vulkan, Metal | webgpu.h semantics fully mapped; Phase Review-clean implies real-GPU conformance for the bring-up scope landed so far. |
+| **Tier 2 — Experimental (best-effort)** | GLES (Android + Windows ANGLE) | Opt-in `gles` cargo feature; never in `default`. Paths that do not cleanly map to GLES 3.1 may be rejected at the HAL layer with `HalError` (surfaced as a device error by `yawgpu-core`). Core validation is identical regardless of tier; see `CLAUDE.md` "Backend support tiers" and `specs/blocks/67-gles-backend.md`. |
+
+D3D11/D3D12 remain permanently out of scope.
 
 ### yawgpu (C ABI crate)
 
@@ -46,14 +55,17 @@ Reimplements the parts of Dawn's `native/` we need:
 
 - mgpu-hal–style **static enum dispatch**. One enum per resource:
   `HalInstance/HalAdapter/HalDevice/HalBuffer/...` with variants
-  `Noop | Vulkan | Metal`, backends behind Cargo features.
+  `Noop | Vulkan | Metal | Gles`, backends behind Cargo features.
 - **Noop** backend implemented first: synthetic, allocation-tracking, no GPU.
   It is the CI substrate and the TDD substrate for all validation phases.
-- **Primary platforms: Vulkan (ash) and Metal (objc2).** These are the only
-  real backends targeted. Both added at Phase 7 for end2end.
-- **OpenGL / OpenGL ES and DirectX (D3D11/D3D12) are explicitly out of scope
-  for the initial implementation.** The `HalXxx` enum stays open to adding
-  variants later, but no D3D/GL variant is planned or stubbed for now.
+- **Tier 1 real backends: Vulkan (ash) and Metal (objc2).** Brought up at
+  Phase 7 for end2end.
+- **Tier 2 real backend: GLES** (via `glow` + `khronos-egl`), targeting
+  Android (native EGL) and Windows ANGLE only. Brought up at Phase 15
+  (`specs/blocks/67-gles-backend.md`). Best-effort: webgpu.h paths that do
+  not cleanly map to GLES 3.1 may be rejected at HAL with `HalError`.
+- **DirectX (D3D11/D3D12) is permanently out of scope.** The `HalXxx`
+  enum stays open to additional variants, but no D3D variant is planned.
 
 ### yawgpu-test
 

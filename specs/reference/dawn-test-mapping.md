@@ -78,3 +78,15 @@ WebGPU is conformant.
 - Async cases use `yawgpu-test` future/poll helpers; Noop completes on poll.
 - Skip backend-parametrized macros (`DAWN_INSTANTIATE_TEST`); yawgpu runs
   Noop only for validation.
+
+## Phase 15 (GLES backend, Tier 2)
+
+Phase 15 brings up a GLES backend behind the opt-in `gles` cargo
+feature (Android + Windows ANGLE only). It **adds no new
+Dawn-derived port rows**: the existing Phase 7 e2e ports
+(`e2e_basic`, `e2e_buffer`, `e2e_copy`, `e2e_compute_dispatch`) are
+re-run under `--features gles -- --ignored` on real ANGLE hardware.
+Webgpu paths that do not cleanly map to GLES 3.1 are catalogued in
+`specs/blocks/67-gles-backend.md` "WebGPU × GLES mapping matrix" and
+rejected at the HAL layer with `HalError` — core validation is
+**Tier-independent** and never relaxed for GLES.
