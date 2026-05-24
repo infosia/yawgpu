@@ -5,7 +5,8 @@ use glow::HasContext;
 use super::device::GlesDeviceInner;
 use super::BACKEND;
 use crate::{
-    HalBuffer, HalBufferCopy, HalBufferTextureCopy, HalCopy, HalError, HalTexture, HalTextureCopy,
+    HalBuffer, HalBufferBindingKind, HalBufferCopy, HalBufferTextureCopy, HalComputePass,
+    HalComputePipeline, HalCopy, HalDescriptorBinding, HalError, HalTexture, HalTextureCopy,
 };
 
 /// Stores GLES queue data used by validation and backend submission.
@@ -53,11 +54,12 @@ impl GlesQueue {
                         HalCopy::BufferToTexture(copy) => submit_buffer_to_texture(gl, copy)?,
                         HalCopy::TextureToBuffer(copy) => submit_texture_to_buffer(gl, copy)?,
                         HalCopy::TextureToTexture(copy) => submit_texture_to_texture(gl, copy)?,
+                        HalCopy::ComputePass(pass) => submit_compute_pass(gl, pass)?,
                         _ => {
                             return Err(HalError::BufferOperationFailed {
                                 backend: BACKEND,
                                 message:
-                                    "GLES backend supports only buffer and texture copies in P15.3",
+                                    "GLES backend supports only buffer, texture, and compute commands in P15.4",
                             });
                         }
                     }
@@ -116,6 +118,79 @@ fn submit_buffer_copy(gl: &glow::Context, copy: &HalBufferCopy) -> Result<(), Ha
     }
 
     Ok(())
+}
+
+fn submit_compute_pass(gl: &glow::Context, pass: &HalComputePass) -> Result<(), HalError> {
+    let HalComputePipeline::Gles(pipeline) = &pass.pipeline else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "compute pass pipeline is not a GLES pipeline",
+        });
+    };
+    let program = pipeline.raw_or_err()?;
+    let bindings = pass
+        .bind_buffers
+        .iter()
+        .map(|bound| {
+            if bound.group != 0 {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "GLES compute supports only bind group 0",
+                });
+            }
+            let HalBuffer::Gles(buffer) = &bound.buffer else {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "compute pass binding is not a GLES buffer",
+                });
+            };
+            let target = compute_binding_target(pipeline.bindings(), bound.binding)?;
+            let buffer = buffer.raw_or_err()?;
+            let offset =
+                i32::try_from(bound.offset).map_err(|_| HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "compute buffer binding offset exceeds GLES limit",
+                })?;
+            let size = i32::try_from(bound.size).map_err(|_| HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "compute buffer binding size exceeds GLES limit",
+            })?;
+            Ok((target, bound.binding, buffer, offset, size))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    unsafe {
+        gl.use_program(Some(program));
+        for (target, binding, buffer, offset, size) in bindings {
+            gl.bind_buffer_range(target, binding, Some(buffer), offset, size);
+        }
+        gl.dispatch_compute(pass.workgroups.0, pass.workgroups.1, pass.workgroups.2);
+        gl.memory_barrier(glow::ALL_BARRIER_BITS);
+        gl.use_program(None);
+    }
+
+    Ok(())
+}
+
+fn compute_binding_target(
+    bindings: &[HalDescriptorBinding],
+    binding: u32,
+) -> Result<u32, HalError> {
+    let descriptor = bindings
+        .iter()
+        .find(|descriptor| descriptor.group == 0 && descriptor.binding == binding)
+        .ok_or(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "compute buffer binding is missing from pipeline layout",
+        })?;
+    match descriptor.kind {
+        HalBufferBindingKind::Uniform => Ok(glow::UNIFORM_BUFFER),
+        HalBufferBindingKind::Storage => Ok(glow::SHADER_STORAGE_BUFFER),
+        #[cfg(feature = "tiled")]
+        HalBufferBindingKind::InputAttachment => Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "input attachments are not valid compute buffer bindings",
+        }),
+    }
 }
 
 fn submit_buffer_to_texture(
@@ -426,5 +501,38 @@ mod tests {
         assert!(gles_version_at_least_3_2("OpenGL ES 4.0"));
         assert!(!gles_version_at_least_3_2("OpenGL ES 3.1 ANGLE"));
         assert!(!gles_version_at_least_3_2("not a version"));
+    }
+
+    #[test]
+    fn compute_binding_target_maps_buffer_kinds() {
+        let bindings = [
+            HalDescriptorBinding {
+                group: 0,
+                binding: 0,
+                kind: HalBufferBindingKind::Uniform,
+            },
+            HalDescriptorBinding {
+                group: 0,
+                binding: 1,
+                kind: HalBufferBindingKind::Storage,
+            },
+        ];
+
+        assert_eq!(
+            compute_binding_target(&bindings, 0).expect("uniform binding"),
+            glow::UNIFORM_BUFFER
+        );
+        assert_eq!(
+            compute_binding_target(&bindings, 1).expect("storage binding"),
+            glow::SHADER_STORAGE_BUFFER
+        );
+        let missing = compute_binding_target(&bindings, 2).expect_err("missing binding");
+        assert!(matches!(
+            missing,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message: "compute buffer binding is missing from pipeline layout",
+            }
+        ));
     }
 }

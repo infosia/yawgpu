@@ -40,6 +40,16 @@ pub(crate) struct GeneratedMsl {
     pub entry_point: String,
 }
 
+/// Stores generated shader source for generated GLSL.
+#[cfg(feature = "gles")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GeneratedGlsl {
+    /// Source.
+    pub source: String,
+    /// Entry point.
+    pub entry_point: String,
+}
+
 /// Stores generated shader source for generated render MSL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GeneratedRenderMsl {
@@ -373,6 +383,49 @@ impl ReflectedModule {
         };
         naga::back::spv::write_vec(&self.module, &self.info, &options, Some(&pipeline_options))
             .map_err(|error| error.to_string())
+    }
+
+    /// Generates GLSL ES for the validated compute shader module.
+    #[cfg(feature = "gles")]
+    pub(crate) fn generate_glsl(
+        &self,
+        entry_name: &str,
+        stage: naga::ShaderStage,
+    ) -> Result<GeneratedGlsl, String> {
+        if stage != naga::ShaderStage::Compute {
+            return Err("GLES GLSL generation currently only supports compute shaders".to_owned());
+        }
+
+        let options = naga::back::glsl::Options {
+            version: naga::back::glsl::Version::Embedded {
+                version: 310,
+                is_webgl: false,
+            },
+            writer_flags: naga::back::glsl::WriterFlags::empty(),
+            binding_map: naga::back::glsl::BindingMap::default(),
+            zero_initialize_workgroup_memory: true,
+            use_framebuffer_fetch: false,
+        };
+        let pipeline_options = naga::back::glsl::PipelineOptions {
+            shader_stage: stage,
+            entry_point: entry_name.to_owned(),
+            multiview: None,
+        };
+        let mut source = String::new();
+        let mut writer = naga::back::glsl::Writer::new(
+            &mut source,
+            &self.module,
+            &self.info,
+            &options,
+            &pipeline_options,
+            naga::proc::BoundsCheckPolicies::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        let _reflection = writer.write().map_err(|error| error.to_string())?;
+        Ok(GeneratedGlsl {
+            source,
+            entry_point: entry_name.to_owned(),
+        })
     }
 
     /// Generates msl for the validated shader module.
@@ -1193,6 +1246,8 @@ mod tests {
         ReflectedShaderStage, ReflectedTextureSampleUsage, ReflectedTextureViewDimension,
         ReflectedTypeScalarClass,
     };
+    #[cfg(feature = "gles")]
+    use naga::ShaderStage;
 
     #[test]
     fn parses_and_validates_trivial_wgsl() {
@@ -1398,5 +1453,17 @@ mod tests {
             .unwrap();
         assert_eq!(int.ty.scalar, ReflectedTypeScalarClass::Sint);
         assert!(int.has_default);
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn generate_glsl_rejects_non_compute_stage() {
+        let module = parse_and_validate_wgsl("@compute @workgroup_size(1) fn cs() {}").unwrap();
+
+        let err = module
+            .generate_glsl("cs", ShaderStage::Vertex)
+            .expect_err("non-compute GLSL generation should fail");
+
+        assert!(err.contains("only supports compute shaders"));
     }
 }

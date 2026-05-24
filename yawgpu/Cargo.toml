@@ -9,7 +9,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
 default = []
-gles = ["yawgpu-hal/gles", "yawgpu-test/gles"]
+gles = ["yawgpu-core/gles", "yawgpu-hal/gles", "yawgpu-test/gles"]
 metal = ["yawgpu-hal/metal", "yawgpu-test/metal"]
 vulkan = ["yawgpu-hal/vulkan", "yawgpu-test/vulkan"]
 shader-passthrough = ["yawgpu-core/shader-passthrough"]

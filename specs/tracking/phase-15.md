@@ -1,8 +1,8 @@
 # Phase 15 — GLES backend (Tier 2 / experimental)
 
-Status: **P15.0 + P15.1 + P15.1a + P15.2 + P15.3 DONE; P15.4+
-PLANNED.** Rules / plan: `../blocks/67-gles-backend.md`. Roles /
-loop: `../reference/workflow.md`.
+Status: **P15.0 + P15.1 + P15.1a + P15.2 + P15.3 + P15.4 DONE;
+P15.5+ PLANNED.** Rules / plan: `../blocks/67-gles-backend.md`.
+Roles / loop: `../reference/workflow.md`.
 
 **Tier:** Tier 2 (best-effort, experimental). The `gles` cargo
 feature is the sole experimental signal — no runtime markers
@@ -473,11 +473,124 @@ Acceptance (all 11 green):
   / sampler smoke**)
 - `cargo build -p yawgpu --features vulkan` ✓
 
-## P15.4 — Shader (naga→GLSL ES 3.10) + compute  *(☐ PLANNED)*
+## P15.4 — Shader (naga→GLSL ES 3.10) + compute  *(☑ DONE)*
 
-Reuses `e2e_compute_dispatch`. Naga `glsl-out` smoke confirmed in
-P15.0/P15.1; any uncovered WGSL constructs flow into this slice's
-scope.
+Done (2026-05-24, commit pending at write time): WGSL→GLSL ES
+3.10 compilation + GL compute pipeline + direct dispatch on
+Windows ANGLE. Phase 15's most complex slice — touches both
+yawgpu-core (shader generation) and yawgpu-hal (pipeline +
+dispatch).
+
+Cargo wiring: `yawgpu-core/Cargo.toml` exposes
+`gles = ["naga/glsl-out"]`; `yawgpu/Cargo.toml` `gles` feature
+gains `"yawgpu-core/gles"`. naga `glsl-out` compiles only with
+the feature, so the Noop default dep graph is unchanged.
+
+`yawgpu-hal/src/shader.rs` extended with
+`HalShaderSource::Glsl { source, stage }` (the enum gains
+`#[non_exhaustive]`) + new `HalShaderStage` enum (Vertex /
+Fragment / Compute, `#[non_exhaustive]`).  `HalShaderStage`
+re-exported from `yawgpu-hal/src/lib.rs`.
+
+`yawgpu-core/src/shader_naga.rs` gained
+`pub(crate) GeneratedGlsl { source, entry_point }` +
+`ReflectedModule::generate_glsl(entry, stage)` behind
+`#[cfg(feature = "gles")]`. Compute-only in P15.4
+(`generate_glsl_rejects_non_compute_stage` inline test locks
+the contract). naga API confirmed: `Options` has a
+`use_framebuffer_fetch: false` field (caught by the agent;
+absent from the handoff snippet) and uses
+`BindingMap::default()`.
+`Writer::new(..., BoundsCheckPolicies::default())` returns
+`ReflectionInfo` from `writer.write()` which is intentionally
+discarded — only the emitted GLSL string is needed.
+
+`yawgpu-core/src/compute_pipeline.rs::select_compute_shader_
+source` gained the `HalBackend::Gles` arm
+(`#[cfg(feature = "gles")]`-gated): rejects passthrough
+modules, generates GLSL via
+`module.generate_glsl(entry, Compute)`, wraps as
+`HalShaderSource::Glsl { stage: Compute }` + threads
+`hal_descriptor_bindings(metal_bindings)` as the binding
+metadata. New inline test
+`select_compute_shader_source_generates_gles_glsl` asserts
+the emitted source contains `#version 310 es` and the correct
+`local_size_x` from the WGSL `@workgroup_size`.
+`select_render_shader_source` deliberately **untouched** —
+P15.5 owns the render path.
+
+`yawgpu-hal/src/gles/pipeline.rs` rewrote
+`GlesComputePipeline` as
+`Arc<GlesComputePipelineInner { device, program:
+Result<glow::Program, HalError>, workgroup_size, bindings:
+Vec<HalDescriptorBinding> }>`. `build_compute_program` runs
+`glCreateShader(COMPUTE_SHADER)` → `shaderSource` →
+`compileShader` → check status (info log → `HalError::Shader
+CompilationFailed { message: String }`), then `createProgram`
+→ `attachShader` → `linkProgram` → `detachShader` →
+`deleteShader` → check link status (info log → error). Drop
+deletes the program via the make-current helper.
+`GlesRenderPipeline` stays a stub (P15.5).
+
+`yawgpu-hal/src/gles/device.rs::create_compute_pipeline`
+switched from `unavailable()` to a real route: matches
+`HalShaderSource::Glsl { stage: Compute }` only; other
+variants / non-Compute stages return
+`ShaderCompilationFailed`.
+
+`yawgpu-hal/src/gles/queue.rs` gained the
+`HalCopy::ComputePass(pass)` arm via `submit_compute_pass`:
+validates the pipeline (`HalComputePipeline::Gles(_)`),
+enforces single bind group (`@group(0)`), resolves each
+`HalBoundBuffer.binding` to its GL target through
+`compute_binding_target(pipeline.bindings(), binding)` (inline
+table-tested: Uniform → `GL_UNIFORM_BUFFER`, Storage →
+`GL_SHADER_STORAGE_BUFFER`, missing-binding → clean error),
+then `use_program(Some)` + per-binding
+`bind_buffer_range(target, binding, Some(buffer), offset,
+size)` + `dispatch_compute(x, y, z)` +
+`memory_barrier(ALL_BARRIER_BITS)` + `use_program(None)`.
+The catchall message updated from "P15.3" to "P15.4" (now
+only `RenderPass` / `SubpassRenderPass` remain unsupported).
+
+New `yawgpu/tests/e2e_gles_compute.rs` mirrors
+`e2e_vulkan_compute.rs` with `WGPURequestAdapterOptions
+.backendType = WGPUBackendType_OpenGLES`. Two tests cover
+single-SSBO (fill with squares) and dual-SSBO (input + 1)
+compute paths; both 2/2 green on real ANGLE with no device
+errors.
+
+Emitted GLSL shape (from the agent's report):
+`#version 310 es` + `precision highp float/int;` +
+`layout(local_size_x=N, …) in;` +
+`layout(std430) buffer …` with `layout(binding=N)` on each
+storage buffer mirroring the WGSL `@binding(N)`. The
+`bind_buffer_range` GL binding index therefore equals the
+WGSL `@binding(N)` directly — no remap needed for single-group
+layouts.
+
+Acceptance (all 12 green):
+- `cargo build -p yawgpu` (Noop default) ✓
+- `cargo build -p yawgpu --features gles` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo clippy -p yawgpu --features gles --all-targets -- -D warnings` ✓
+- `cargo test --workspace` ✓ (Noop pass count unchanged; the
+  new gles-gated inline tests don't fire under default
+  features)
+- `cargo test -p yawgpu --features gles --test e2e_gles_smoke
+  -- --ignored` ✓ (1/1)
+- `cargo test -p yawgpu --features gles --test e2e_gles_basic
+  -- --ignored` ✓ (3/3 P15.1 regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_ffi
+  -- --ignored` ✓ (3/3 P15.1a regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_buffer
+  -- --ignored` ✓ (2/2 P15.2 regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_texture
+  -- --ignored` ✓ (3/3 P15.3 regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_compute
+  -- --ignored` ✓ (**2/2 on real ANGLE; WGSL → GLSL ES 3.10
+  → GL program → `glDispatchCompute` round-trip succeeded**)
+- `cargo build -p yawgpu --features vulkan` ✓
 
 ## P15.5 — Render pipeline + draw  *(☐ PLANNED)*
 
@@ -580,3 +693,45 @@ finding. MINORs may defer with explicit rationale.
   Remove the allow when P15.4 lands.
 - **Real test for `GlesSurface::present`.** Still a no-op
   placeholder; revisit in P15.6.
+
+## Open follow-ups added by P15.4
+
+- **Multi-group bind layouts** (`@group(N>0)` in WGSL). P15.4
+  rejects them with a clean error from `submit_compute_pass`
+  (and the same will apply in P15.5 for render bind groups
+  unless addressed). naga's `BindingMap` can be populated to
+  flatten `(group, binding)` → a single GL binding index;
+  pair it with HAL-side accounting that tracks max
+  bindings-per-target. Defer until a test exercises
+  multi-group.
+- **Storage textures in compute** (`glBindImageTexture` +
+  `image2D` / `imageStore` / `imageLoad` in GLSL). Not used by
+  `e2e_gles_compute`. Land when a compute test demands it.
+- **Indirect compute dispatch**
+  (`glDispatchComputeIndirect`). The HAL currently has no
+  `HalComputePass` indirect variant. To add: extend
+  `HalComputePass` with `Option<HalIndirectBuffer { buffer:
+  HalBuffer, offset: u64 }>`, plumb it through core's
+  `ComputePassCommand`, then route in the GLES
+  `submit_compute_pass`. Touches all backends; gate on a real
+  driver for the indirect-dispatch e2e port from Phase 7.
+- **Tighter `glMemoryBarrier` masks.** P15.4 issues
+  `ALL_BARRIER_BITS` after every dispatch. Profiling on
+  mobile may favor narrower masks
+  (`SHADER_STORAGE_BARRIER_BIT |
+  BUFFER_UPDATE_BARRIER_BIT`); deferred as a perf
+  optimization.
+- **`GlesComputePipelineInner.program` is `Result<glow::Program,
+  HalError>` but the constructor returns `Result<Self, HalError>`
+  short-circuiting the `Err` arm.** The wrapper is therefore
+  dead weight in the Ok-only path (`raw_or_err` cannot return
+  `Err` in practice). Either downgrade to a bare
+  `glow::Program` field, or align with the
+  `GlesBuffer`/`GlesTexture` pattern (infallible new + capture
+  Err inside) when adding a similar `GlesRenderPipeline` in
+  P15.5. Cosmetic, no behaviour impact.
+- **Vertex / fragment GLSL paths in
+  `ReflectedModule::generate_glsl`.** Currently returns the
+  "only supports compute" error for non-Compute stages. P15.5
+  needs vertex+fragment emission (and `select_render_shader_
+  source` Gles arm).

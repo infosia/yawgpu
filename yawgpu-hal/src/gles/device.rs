@@ -13,7 +13,7 @@ use super::texture::GlesTexture;
 use super::{unavailable, BACKEND};
 use crate::{
     HalBufferUsage, HalDescriptorBinding, HalError, HalRenderPipelineDescriptor,
-    HalSamplerDescriptor, HalShaderSource, HalTextureDescriptor,
+    HalSamplerDescriptor, HalShaderSource, HalShaderStage, HalTextureDescriptor,
 };
 
 pub(super) struct GlesDeviceInner {
@@ -145,12 +145,22 @@ impl GlesDevice {
     /// Creates a compute pipeline from the given shader, entry point, and bindings.
     pub fn create_compute_pipeline(
         &self,
-        _shader: HalShaderSource,
+        shader: HalShaderSource,
         _entry_point: &str,
-        _workgroup_size: (u32, u32, u32),
-        _bindings: &[HalDescriptorBinding],
+        workgroup_size: (u32, u32, u32),
+        bindings: &[HalDescriptorBinding],
     ) -> Result<GlesComputePipeline, HalError> {
-        unavailable()
+        let HalShaderSource::Glsl {
+            source,
+            stage: HalShaderStage::Compute,
+        } = shader
+        else {
+            return Err(HalError::ShaderCompilationFailed {
+                backend: BACKEND,
+                message: "GLES compute pipeline requires compute GLSL source".to_owned(),
+            });
+        };
+        GlesComputePipeline::new(Arc::clone(&self.inner), source, workgroup_size, bindings)
     }
 
     /// Creates a render pipeline from the given shaders, vertex layout, and color targets.
