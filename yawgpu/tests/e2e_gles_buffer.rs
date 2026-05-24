@@ -9,10 +9,12 @@ use yawgpu_test::{real_backend_available, wait, RealBackend};
 #[test]
 #[ignore = "manual real-backend test"]
 fn gles_write_copy_readback_round_trip() {
-    if !real_backend_available(RealBackend::Gles) {
-        eprintln!("skip: no GLES adapter");
-        return;
-    }
+    assert!(
+        real_backend_available(RealBackend::Gles),
+        "GLES backend not available; install an ANGLE build with ES 3.1 support \
+         (Chrome / Edge ANGLE caps at ES 3.0; see specs/blocks/67-gles-backend.md). \
+         Without a real GLES adapter this test cannot verify the GLES execution path."
+    );
 
     unsafe {
         let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
@@ -38,10 +40,12 @@ fn gles_write_copy_readback_round_trip() {
 #[test]
 #[ignore = "manual real-backend test"]
 fn gles_partial_buffer_copy_round_trip() {
-    if !real_backend_available(RealBackend::Gles) {
-        eprintln!("skip: no GLES adapter");
-        return;
-    }
+    assert!(
+        real_backend_available(RealBackend::Gles),
+        "GLES backend not available; install an ANGLE build with ES 3.1 support \
+         (Chrome / Edge ANGLE caps at ES 3.0; see specs/blocks/67-gles-backend.md). \
+         Without a real GLES adapter this test cannot verify the GLES execution path."
+    );
 
     unsafe {
         let instance = yawgpu::wgpuCreateInstance(std::ptr::null());

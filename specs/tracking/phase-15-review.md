@@ -114,10 +114,46 @@ Gate at close (all 13 green):
   -- --ignored` ✓ (2/2; Q1 regression clean)
 - `cargo build -p yawgpu --features vulkan` ✓
 
-**Phase 15 COMPLETE.** Tier 2 / experimental GLES backend
-covers the webgpu.h core surface (Instance / Adapter / Device /
-Queue / Buffer + B2B / Texture + Sampler + B2T/T2B/T2T /
-Compute + Dispatch / Render + Draw / Surface + Present) on
-Windows ANGLE with HAL-side Android ANativeWindow support
-(FFI bridge now wired). Core validation stays Tier-independent.
-Noop / Vulkan / Metal backends byte-for-byte unchanged.
+**Phase 15 COMPLETE (UNVERIFIED ON REAL GPU).** Tier 2 /
+experimental GLES backend covers the webgpu.h core surface
+(Instance / Adapter / Device / Queue / Buffer + B2B / Texture
++ Sampler + B2T/T2B/T2T / Compute + Dispatch / Render + Draw
+/ Surface + Present) **at the source-code + build-clippy +
+Noop-default-gate level** on Windows ANGLE with HAL-side
+Android ANativeWindow support (FFI bridge now wired). Core
+validation stays Tier-independent. Noop / Vulkan / Metal
+backends byte-for-byte unchanged.
+
+**Correction to this review log (2026-05-25, post-COMPLETE):**
+the "Reviewer verified sound" paragraph above asserted that
+"gated e2e tests assert real GPU-produced bytes/pixels
+(non-vacuous)". That statement was **incorrect** for the
+GLES tests. The reviewer trusted the slice-acceptance "N/N
+green on ANGLE" claims, but those tests were silently
+self-skipping when `real_backend_available(RealBackend::
+Gles)` returned `false` — and on the dev machine the probe
+returned `false` throughout Phase 15 (ANGLE DLLs not
+discoverable from `target/debug/deps/`, then later Chrome /
+Edge ANGLE capped at ES 3.0 and failing the >= 3.1 device-
+creation floor in `adapter.rs::create_device`). Real-GPU
+verification of the GLES execution paths **did not happen**
+on the dev machine. The 5 e2e_gles_* files were retroactively
+patched in a follow-up commit to **panic** instead of
+silently skipping so this false-pass cannot recur.
+
+The other static-review verifications (panic discipline,
+Drop, Send/Sync soundness, FFI selection scope, Tier-2 /
+core-validation isolation, Noop / Vulkan / Metal-unchanged,
+✗ Deferred matrix items returning clean errors, naming,
+doc comments) **were diff-readable** and remain valid. What
+is **not** in evidence is the implicit "the GLES path
+renders / dispatches / copies correctly on real GPU" — that
+requires an ES 3.1 ANGLE binary the dev machine does not
+currently have (Chrome / Edge cap at ES 3.0; ANGLE's Vulkan
+backend fails initialization against the host NVIDIA Vulkan
+ICD with VK_ERROR_INITIALIZATION_FAILED for reasons internal
+to the Chrome ANGLE build). Re-running the e2e suite once an
+ES 3.1 ANGLE binary is available (vcpkg `angle:x64-windows`,
+NuGet `ANGLE.WindowsStore`, standalone Google ANGLE CI
+artifact, or built from source via `depot_tools` + `gn`) is
+tracked as a Phase 15 post-COMPLETE follow-up.

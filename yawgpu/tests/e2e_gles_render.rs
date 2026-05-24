@@ -17,10 +17,12 @@ const TRIANGLE_VERTICES: [f32; 6] = [-0.9, -0.9, 0.2, -0.9, -0.9, 0.2];
 #[test]
 #[ignore = "manual real-backend test"]
 fn gles_render_constant_color_triangle_readback() {
-    if !real_backend_available(RealBackend::Gles) {
-        eprintln!("skip: no GLES adapter");
-        return;
-    }
+    assert!(
+        real_backend_available(RealBackend::Gles),
+        "GLES backend not available; install an ANGLE build with ES 3.1 support \
+         (Chrome / Edge ANGLE caps at ES 3.0; see specs/blocks/67-gles-backend.md). \
+         Without a real GLES adapter this test cannot verify the GLES execution path."
+    );
 
     unsafe {
         let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
@@ -61,10 +63,12 @@ fn fs() -> @location(0) vec4<f32> {
 #[test]
 #[ignore = "manual real-backend test"]
 fn gles_render_uniform_color_triangle_readback() {
-    if !real_backend_available(RealBackend::Gles) {
-        eprintln!("skip: no GLES adapter");
-        return;
-    }
+    assert!(
+        real_backend_available(RealBackend::Gles),
+        "GLES backend not available; install an ANGLE build with ES 3.1 support \
+         (Chrome / Edge ANGLE caps at ES 3.0; see specs/blocks/67-gles-backend.md). \
+         Without a real GLES adapter this test cannot verify the GLES execution path."
+    );
 
     unsafe {
         let instance = yawgpu::wgpuCreateInstance(std::ptr::null());

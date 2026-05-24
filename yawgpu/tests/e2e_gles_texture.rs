@@ -16,10 +16,12 @@ const BUFFER_SIZE: usize = BYTES_PER_ROW as usize * HEIGHT as usize;
 #[test]
 #[ignore = "manual real-backend test"]
 fn gles_buffer_texture_buffer_round_trip() {
-    if !real_backend_available(RealBackend::Gles) {
-        eprintln!("skip: no GLES adapter");
-        return;
-    }
+    assert!(
+        real_backend_available(RealBackend::Gles),
+        "GLES backend not available; install an ANGLE build with ES 3.1 support \
+         (Chrome / Edge ANGLE caps at ES 3.0; see specs/blocks/67-gles-backend.md). \
+         Without a real GLES adapter this test cannot verify the GLES execution path."
+    );
 
     unsafe {
         let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
@@ -43,10 +45,12 @@ fn gles_buffer_texture_buffer_round_trip() {
 #[test]
 #[ignore = "manual real-backend test"]
 fn gles_texture_texture_round_trip() {
-    if !real_backend_available(RealBackend::Gles) {
-        eprintln!("skip: no GLES adapter");
-        return;
-    }
+    assert!(
+        real_backend_available(RealBackend::Gles),
+        "GLES backend not available; install an ANGLE build with ES 3.1 support \
+         (Chrome / Edge ANGLE caps at ES 3.0; see specs/blocks/67-gles-backend.md). \
+         Without a real GLES adapter this test cannot verify the GLES execution path."
+    );
 
     unsafe {
         let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
@@ -70,10 +74,12 @@ fn gles_texture_texture_round_trip() {
 #[test]
 #[ignore = "manual real-backend test"]
 fn gles_sampler_creation_has_no_device_error() {
-    if !real_backend_available(RealBackend::Gles) {
-        eprintln!("skip: no GLES adapter");
-        return;
-    }
+    assert!(
+        real_backend_available(RealBackend::Gles),
+        "GLES backend not available; install an ANGLE build with ES 3.1 support \
+         (Chrome / Edge ANGLE caps at ES 3.0; see specs/blocks/67-gles-backend.md). \
+         Without a real GLES adapter this test cannot verify the GLES execution path."
+    );
 
     unsafe {
         let instance = yawgpu::wgpuCreateInstance(std::ptr::null());

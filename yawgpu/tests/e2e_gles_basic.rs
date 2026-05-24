@@ -7,10 +7,12 @@ use yawgpu_test::{real_backend_available, RealBackend};
 #[test]
 #[ignore = "real-backend smoke tests are manually run with backend features"]
 fn gles_adapter_name_is_present() {
-    if !real_backend_available(RealBackend::Gles) {
-        eprintln!("skip: no GLES adapter");
-        return;
-    }
+    assert!(
+        real_backend_available(RealBackend::Gles),
+        "GLES backend not available; install an ANGLE build with ES 3.1 support \
+         (Chrome / Edge ANGLE caps at ES 3.0; see specs/blocks/67-gles-backend.md). \
+         Without a real GLES adapter this test cannot verify the GLES execution path."
+    );
     let instance = HalInstance::Gles(GlesInstance::new().expect("EGL init"));
     let adapter = instance
         .enumerate_adapters()
@@ -25,10 +27,12 @@ fn gles_adapter_name_is_present() {
 #[test]
 #[ignore = "real-backend smoke tests are manually run with backend features"]
 fn gles_device_queue_submits_empty() {
-    if !real_backend_available(RealBackend::Gles) {
-        eprintln!("skip: no GLES adapter");
-        return;
-    }
+    assert!(
+        real_backend_available(RealBackend::Gles),
+        "GLES backend not available; install an ANGLE build with ES 3.1 support \
+         (Chrome / Edge ANGLE caps at ES 3.0; see specs/blocks/67-gles-backend.md). \
+         Without a real GLES adapter this test cannot verify the GLES execution path."
+    );
     let instance = HalInstance::Gles(GlesInstance::new().expect("EGL init"));
     let adapter = instance
         .enumerate_adapters()
@@ -44,10 +48,12 @@ fn gles_device_queue_submits_empty() {
 #[test]
 #[ignore = "real-backend smoke tests are manually run with backend features"]
 fn gles_device_reports_zero_allocations_at_creation() {
-    if !real_backend_available(RealBackend::Gles) {
-        eprintln!("skip: no GLES adapter");
-        return;
-    }
+    assert!(
+        real_backend_available(RealBackend::Gles),
+        "GLES backend not available; install an ANGLE build with ES 3.1 support \
+         (Chrome / Edge ANGLE caps at ES 3.0; see specs/blocks/67-gles-backend.md). \
+         Without a real GLES adapter this test cannot verify the GLES execution path."
+    );
     let instance = HalInstance::Gles(GlesInstance::new().expect("EGL init"));
     let adapter = instance
         .enumerate_adapters()

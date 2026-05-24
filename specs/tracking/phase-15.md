@@ -1,9 +1,57 @@
 # Phase 15 — GLES backend (Tier 2 / experimental)
 
-Status: **Phase 15 COMPLETE** (2026-05-25). All slices
-(P15.0 + P15.1 + P15.2 + P15.3 + P15.4 + P15.5 + P15.6) + Phase 15
-Review (`phase-15-review.md`) CLOSED — 0 CRITICAL / 0 MAJOR
+Status: **Phase 15 COMPLETE (UNVERIFIED ON REAL GPU)** (2026-05-25).
+All slices (P15.0 + P15.1 + P15.2 + P15.3 + P15.4 + P15.5 + P15.6) +
+Phase 15 Review (`phase-15-review.md`) CLOSED on the static code
+review and Noop-default workspace gate — 0 CRITICAL / 0 MAJOR
 open; 3 MINOR deferred with logged rationale.
+
+**Honest correction (2026-05-25, post-COMPLETE):** every
+"e2e_gles_* tests pass on real ANGLE GPU N/N" claim in the
+slice-acceptance blocks below was **incorrect**. The e2e tests
+called `real_backend_available(RealBackend::Gles)` and, when the
+probe returned `false`, printed `"skip: no GLES adapter"` and
+returned silently — `cargo test` reported "ok" without any GLES
+code path actually running. During Phase 15 development the
+ANGLE DLLs were not discoverable from the cargo test binary's
+directory (`target/debug/deps/`), so every test self-skipped.
+Once ANGLE was placed on PATH post-COMPLETE for `examples/
+triangle`, the probe still returned `false` because Chrome /
+Edge ANGLE ship a WebGL2-capped libGLESv2 that exposes only
+ES 3.0 entry points, failing yawgpu's >= ES 3.1 floor at
+`adapter.rs::create_device`. The HAL code paths the slices add
+have therefore **never executed on a real GPU on the dev
+machine**. The 5 `e2e_gles_{basic,buffer,texture,compute,
+render}.rs` files were retroactively patched (`24a235f` /
+post-mortem commit) to **panic on missing GLES instead of
+silently skipping**, so this kind of false-pass cannot recur:
+running `cargo test -p yawgpu --features gles --test
+e2e_gles_<name> -- --ignored` now fails with a clear message
+when ANGLE doesn't expose ES 3.1.
+
+What this **does** mean: real-GPU verification of Phase 15 is
+**deferred** until an ES 3.1-capable ANGLE binary (vcpkg /
+standalone Google ANGLE / Microsoft NuGet ANGLE.WindowsStore /
+ANGLE built from source) is available, or until Android-device
+verification is run. The static review's "Sound verified"
+findings (panic discipline, Drop, Send/Sync soundness, FFI
+selection scope, Tier-2 isolation, naming, doc comments) still
+hold — those are diff-readable and don't require a running
+GPU. What does **not** hold is the implicit "the GLES backend
+demonstrably renders correctly" claim from the slice-acceptance
+blocks; those are now best read as "code-reviewed, builds and
+clippy-clean across all feature combinations, Noop CI gate
+unaffected, **real-GPU verification pending an ES 3.1 ANGLE**".
+
+What this does **not** affect: Tier 1 (Vulkan, Metal) backends
+are byte-for-byte unchanged across Phase 15. The Noop default
+CI gate's pass count is unchanged. The yawgpu.h vendor
+extension `YAWGPU_INSTANCE_BACKEND_GLES = 3` is wired and
+selects the GLES primary instance as designed; that path was
+verified by `triangle.exe` printing `backend=OpenGLES` after
+the recent `examples/framework` patch. The reachability of the
+GLES path is real; what is unverified is its correct
+execution on the GPU.
 
 **P15.1a was reverted on 2026-05-25** after the user authorized
 extending `yawgpu.h` with `YAWGPU_INSTANCE_BACKEND_GLES = 3`;
