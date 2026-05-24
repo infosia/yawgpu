@@ -32,11 +32,36 @@ non-transfer usage bit.
   without `VK_BUFFER_USAGE_VERTEX_BUFFER_BIT`
   (`e2e_vulkan_render::*`).
 
-**Fix sketch:** add a `map_buffer_usage(HalBufferUsage) -> vk::BufferUsageFlags`
-analogous to `vulkan/format.rs::map_texture_usage`, called from
-`create_buffer`. Always OR in `TRANSFER_SRC | TRANSFER_DST` (yawgpu uses
-staging for `mapAtCreation` / `writeBuffer` paths). Index/indirect/query
-bits too. Add a HAL unit test asserting the mapping.
+**Fix locked (2026-05-24):** thread caller usage through the HAL.
+`HalDevice::create_buffer` currently takes `size: u64` only
+(`yawgpu-core/src/device.rs:224`), so the WebGPU usage bits validated in
+`yawgpu-core` are dropped at the HAL boundary. Fix is structural:
+
+1. Introduce `HalBufferUsage` in `yawgpu-hal/src/format.rs`, mirroring
+   `HalTextureUsage`'s `Debug + Clone + Copy` struct-of-bools shape, with
+   fields `map_read`, `map_write`, `copy_src`, `copy_dst`, `index`,
+   `vertex`, `uniform`, `storage`, `indirect`, `query_resolve`.
+2. Extend `HalDevice::create_buffer(&self, size: u64, usage: HalBufferUsage)`
+   across all three backends (Noop accepts and discards; Metal accepts and
+   discards for now — `MTLBuffer` has no equivalent validation; Vulkan
+   propagates).
+3. Add `map_buffer_usage(HalBufferUsage) -> vk::BufferUsageFlags` in
+   `yawgpu-hal/src/vulkan/format.rs`. Always OR in
+   `TRANSFER_SRC | TRANSFER_DST` (yawgpu uses staging for `mapAtCreation` /
+   `writeBuffer` paths). Map `index → INDEX_BUFFER`,
+   `vertex → VERTEX_BUFFER`, `uniform → UNIFORM_BUFFER`,
+   `storage → STORAGE_BUFFER`, `indirect → INDIRECT_BUFFER`,
+   `query_resolve → TRANSFER_DST` (no dedicated flag; query copy is a
+   transfer-dst write). `map_read` / `map_write` map to nothing (host
+   visibility is on memory, not buffer usage).
+4. `yawgpu-core/src/buffer.rs` adds a `hal_buffer_usage(BufferUsage) ->
+   HalBufferUsage` conversion helper; `device.rs:224` calls
+   `self.inner.hal.create_buffer(descriptor.size,
+   hal_buffer_usage(descriptor.usage))`.
+5. Inline unit tests per CLAUDE.md principle 1 for the new public/internal
+   functions (struct construction, the mapping table, the core conversion).
+
+Coding-agent handoff: V11.3 in `HANDOFF.md`.
 
 ### F2 — Image views over transfer-only images
 
@@ -46,12 +71,24 @@ bits too. Add a HAL unit test asserting the mapping.
 only usage is `COPY_SRC | COPY_DST`. View-compatible bits
 (`SAMPLED` / `STORAGE` / `*_ATTACHMENT` / `INPUT_ATTACHMENT`) are absent.
 
-`vulkan/format.rs::map_texture_usage` already maps the WGPU texture usage
-flags correctly, so this is likely a **test-design** issue (the tests
-exercise copy-only round-trips and never sample / render the texture, yet
-the view machinery is invoked) **or** a place in the HAL that creates a
-view path without going through `map_texture_usage`. Investigate before
-fixing — the underlying flag mapping looks right.
+`vulkan/format.rs::map_texture_usage` maps the WGPU texture usage flags
+correctly. The bug is in `vulkan/texture.rs:174-185`: `create_texture`
+**unconditionally** calls `vkCreateImageView` for every texture, regardless
+of whether the caller's usage permits a view. Copy-only textures (used
+purely as staging sources/destinations) trip 04441 because the view they
+get isn't usage-compatible.
+
+**Fix locked (2026-05-24):** make the image view creation conditional.
+Skip `vkCreateImageView` when the caller's `HalTextureUsage` has no
+view-compatible bit set (`texture_binding`, `storage_binding`, or
+`render_attachment` are all `false`); store `vk::ImageView::null()`
+in that case. The Drop impl is naturally safe — the Vulkan spec defines
+`vkDestroyImageView(VK_NULL_HANDLE, …)` as a no-op. Downstream consumers
+in `vulkan/encode.rs` (`:803`, `:809`, `:1281`) only read the view for
+render-pass attachment / bind-group resource paths; yawgpu-core
+validation already rejects binding or attaching a texture without the
+matching usage bit, so a copy-only texture never reaches those sites.
+Coding-agent handoff: V11.2 in `HANDOFF.md`.
 
 ### F3 — SPIR-V env extension declaration *(CLOSED 2026-05-24, commit `c664c24`)*
 
