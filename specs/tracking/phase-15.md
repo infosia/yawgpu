@@ -1,7 +1,7 @@
 # Phase 15 — GLES backend (Tier 2 / experimental)
 
-Status: **P15.0 + P15.1 + P15.1a DONE; P15.2+ PLANNED.** Rules /
-plan: `../blocks/67-gles-backend.md`. Roles / loop:
+Status: **P15.0 + P15.1 + P15.1a + P15.2 DONE; P15.3+ PLANNED.**
+Rules / plan: `../blocks/67-gles-backend.md`. Roles / loop:
 `../reference/workflow.md`.
 
 **Tier:** Tier 2 (best-effort, experimental). The `gles` cargo
@@ -296,13 +296,79 @@ Acceptance (all 9 green):
   self-skips because GLES is available)
 - `cargo build -p yawgpu --features vulkan` ✓
 
-## P15.2 — Buffer + Queue write/read + B2B copy  *(☐ PLANNED)*
+## P15.2 — Buffer + Queue write/read + B2B copy  *(☑ DONE)*
 
-Reuses `e2e_buffer`. Decision required: buffer-mapping fence model
-(see `blocks/67` open questions). FFI integration is now in place
-(P15.1a), so e2e_buffer can target GLES through the standard
-`backendType = WGPUBackendType_OpenGLES` path — no additional
-wiring needed beyond the buffer HAL implementation itself.
+Done (2026-05-24, commit pending at write time): real GL-backed
+`GlesBuffer` with HostBuffer fallback path
+(`mapped_ptr` returns `None`; persistent mapping deferred).
+`GlesBufferInner { Arc<GlesDeviceInner>,
+Result<glow::Buffer, HalError>, size }` keeps `create_buffer`
+infallible at the HAL dispatch level — allocation failures are
+captured inside the buffer and surface at first
+`write`/`read`/`submit_copies` use via the new `raw_or_err`
+accessor. `Drop` deletes the GL buffer when allocation
+succeeded, swallows the make-current `Err` if device teardown
+is already in flight (no panic). `GlesBuffer::new` runs
+`glCreateBuffer` + `glBindBuffer(GL_COPY_WRITE_BUFFER)` +
+`glBufferData(NULL, size, GL_DYNAMIC_DRAW)` once at creation.
+`write` issues `glBufferSubData` on `GL_COPY_WRITE_BUFFER`;
+`read` uses `glMapBufferRange(MAP_READ_BIT)` + memcpy +
+`glUnmapBuffer` on `GL_COPY_READ_BUFFER` (intentionally **not**
+`glGetBufferSubData` since that requires GLES 3.2). Bounds
+checks via a pure `check_range(offset, len, size, op)` helper
+covered by inline unit tests (overflow + OOB rejection,
+zero-length accept). `GlesQueue::submit_copies` dispatches
+`HalCopy::Buffer` via `glCopyBufferSubData(GL_COPY_READ_BUFFER,
+GL_COPY_WRITE_BUFFER, ...)` and rejects all other variants
+with a P15.2-named message; ends with `glFlush` matching the
+empty-submit shape. No explicit `glFenceSync`; the make-current
+`Mutex<()>` plus core's `wgpuInstanceWaitAny` → `resolve_pending
+_map` → `HalBuffer::read` flow provides the read-after-submit
+ordering needed by the e2e round-trip.
+
+`HalError` is not `Clone`; the agent wrote an explicit
+`rebuild_hal_error(&HalError) -> HalError` matcher for all
+current variants instead of bumping the public derive. (If
+future slices grow `HalError` variants, this helper must be
+extended too — flagged as a minor follow-up.)
+
+New `yawgpu/tests/e2e_gles_buffer.rs` mirrors
+`e2e_vulkan_buffer.rs` but selects the GLES backend via
+standard `WGPURequestAdapterOptions.backendType =
+WGPUBackendType_OpenGLES` (no `YaWGPUInstanceBackendSelect`
+chain). Two tests cover full-buffer (offset 0/0) and partial
+(src=8, dst=16) B2B copies; both round-trip identical bytes
+out of `wgpuBufferGetConstMappedRange`. The
+`default_noop_path` regression check was skipped as a
+duplication with `e2e_metal_buffer` / `e2e_vulkan_buffer`'s
+equivalent tests (consistent with the handoff's optional
+clause).
+
+Acceptance (all 10 green):
+- `cargo build -p yawgpu` (Noop default) ✓
+- `cargo build -p yawgpu --features gles` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo clippy -p yawgpu --features gles --all-targets -- -D warnings` ✓
+- `cargo test --workspace` ✓ (Noop pass count unchanged at 125;
+  the new `check_range` unit tests live in `gles/buffer.rs`
+  which only compiles under `--features gles`, so the Noop
+  workspace gate is unaffected)
+- `cargo test -p yawgpu --features gles --test e2e_gles_smoke
+  -- --ignored` ✓ (1/1)
+- `cargo test -p yawgpu --features gles --test e2e_gles_basic
+  -- --ignored` ✓ (3/3 P15.1 regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_ffi
+  -- --ignored` ✓ (3/3 P15.1a regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_buffer
+  -- --ignored` ✓ (**2/2 on real ANGLE; write → B2B copy →
+  mapAsync → getConstMappedRange round-trip succeeded for both
+  full and partial-offset variants**)
+- `cargo build -p yawgpu --features vulkan` ✓
+
+## P15.3 — Texture/Sampler + B2T/T2B/T2T  *(☐ PLANNED)*
+
+Reuses `e2e_copy` texture subset. Decision required:
+storage-texture format gating timing.
 
 ## P15.3 — Texture/Sampler + B2T/T2B/T2T  *(☐ PLANNED)*
 
@@ -360,3 +426,25 @@ finding. MINORs may defer with explicit rationale.
   full `backendType` honoring, generalize `select_request_adapter`
   (and decide how it interacts with the yawgpu.h vendor
   extension). Not in Phase 15 scope.
+
+## Open follow-ups added by P15.2
+
+- **Persistent buffer mapping** (`GL_EXT_buffer_storage` +
+  `GL_MAP_PERSISTENT_BIT` + `GL_MAP_COHERENT_BIT`). P15.2 ships
+  the HostBuffer-fallback path (`mapped_ptr` returns `None`),
+  which round-trips correctly via core's `resolve_pending_map`
+  → `HalBuffer::read` copy. Persistent map would replace the
+  copy with a direct pointer to GPU memory (matching the
+  Metal/Vulkan `mapped_ptr` path), reducing read-back latency.
+  Optional optimization; functional behavior is already
+  complete. Slot in opportunistically.
+- **`rebuild_hal_error` matcher must grow with `HalError`
+  variants.** P15.2 ships a manual matcher (`HalError` is not
+  `Clone`) covering the eight current variants. Any new variant
+  added to `yawgpu-hal/src/error.rs` must be added to this
+  matcher in `yawgpu-hal/src/gles/buffer.rs` to keep
+  `raw_or_err` working. Two alternatives if this becomes a
+  maintenance burden: (a) derive / implement `Clone` on
+  `HalError` and drop the matcher, or (b) wrap `glow::Buffer`
+  in `Result<_, Arc<HalError>>` so the inner can be cloned
+  cheaply.
