@@ -30,6 +30,10 @@ pub const YAWGPU_INSTANCE_BACKEND_NOOP: u32 = 0;
 pub const YAWGPU_INSTANCE_BACKEND_METAL: u32 = 1;
 /// Constant value for the yawgpu Vulkan instance backend.
 pub const YAWGPU_INSTANCE_BACKEND_VULKAN: u32 = 2;
+/// Constant value for the yawgpu GLES (Tier 2 / experimental) instance backend.
+/// Requires the `gles` cargo feature; otherwise instance creation falls back
+/// to Noop.
+pub const YAWGPU_INSTANCE_BACKEND_GLES: u32 = 3;
 /// SType value for `YaWGPUInstanceBackendSelect`.
 pub const YAWGPU_STYPE_INSTANCE_BACKEND_SELECT: native::WGPUSType = 0x7000_0001;
 /// Feature value for tiled multi-subpass render passes.

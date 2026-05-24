@@ -69,8 +69,9 @@ use surface::*;
 use texture::*;
 
 use crate::{
-    native, YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_METAL,
-    YAWGPU_INSTANCE_BACKEND_VULKAN, YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
+    native, YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_GLES,
+    YAWGPU_INSTANCE_BACKEND_METAL, YAWGPU_INSTANCE_BACKEND_VULKAN,
+    YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
 };
 #[cfg(feature = "shader-passthrough")]
 use crate::{
@@ -120,6 +121,7 @@ enum InstanceBackendSelection {
     Noop,
     Metal,
     Vulkan,
+    Gles,
 }
 
 /// Owns the core object and retained handles for the WGPU Adapter handle.
@@ -169,9 +171,6 @@ pub struct WGPUDeviceImpl {
 /// Owns the core object and retained handles for the WGPU Instance handle.
 pub struct WGPUInstanceImpl {
     pub(crate) core: Arc<core::Instance>,
-    /// Side instance used when callers request `WGPUBackendType_OpenGLES`.
-    #[cfg(feature = "gles")]
-    pub(crate) gles_core: Option<Arc<core::Instance>>,
     pub(crate) timed_wait_any_enabled: bool,
     pub(crate) pending_callbacks: Mutex<BTreeMap<u64, PendingCallback>>,
 }
@@ -490,16 +489,8 @@ impl WGPUInstanceImpl {
     }
 
     fn from_core(core: core::Instance, timed_wait_any_enabled: bool) -> Arc<Self> {
-        Self::with_gles_probe(core, timed_wait_any_enabled)
-    }
-
-    fn with_gles_probe(core: core::Instance, timed_wait_any_enabled: bool) -> Arc<Self> {
-        #[cfg(feature = "gles")]
-        let gles_core = probe_gles_core();
         Arc::new(Self {
             core: Arc::new(core),
-            #[cfg(feature = "gles")]
-            gles_core,
             timed_wait_any_enabled,
             pending_callbacks: Mutex::new(BTreeMap::new()),
         })
@@ -602,16 +593,6 @@ impl WGPUInstanceImpl {
 
         result
     }
-}
-
-#[cfg(feature = "gles")]
-fn probe_gles_core() -> Option<Arc<core::Instance>> {
-    let gles_instance = yawgpu_hal::gles::GlesInstance::new().ok()?;
-    let hal_instance = yawgpu_hal::HalInstance::Gles(gles_instance);
-    if hal_instance.enumerate_adapters().is_empty() {
-        return None;
-    }
-    Some(Arc::new(core::Instance::from_hal(hal_instance)))
 }
 
 impl Drop for WGPUBufferImpl {
@@ -1267,21 +1248,6 @@ pub(crate) enum PendingCallback {
         /// Userdata2 variant.
         userdata2: usize,
     },
-    /// Request adapter error variant.
-    RequestAdapterError {
-        /// Mode variant.
-        mode: native::WGPUCallbackMode,
-        /// Status variant.
-        status: native::WGPURequestAdapterStatus,
-        /// Callback variant.
-        callback: native::WGPURequestAdapterCallback,
-        /// Message variant.
-        message: String,
-        /// Userdata1 variant.
-        userdata1: usize,
-        /// Userdata2 variant.
-        userdata2: usize,
-    },
     /// Request device variant.
     RequestDevice {
         /// Mode variant.
@@ -1404,7 +1370,6 @@ impl PendingCallback {
     fn callback_mode(&self) -> core::FutureCallbackMode {
         let mode = match self {
             Self::RequestAdapter { mode, .. }
-            | Self::RequestAdapterError { mode, .. }
             | Self::RequestDevice { mode, .. }
             | Self::DeviceLost { mode, .. }
             | Self::BufferMap { mode, .. }
@@ -1440,26 +1405,6 @@ impl PendingCallback {
                         userdata1 as *mut c_void,
                         userdata2 as *mut c_void,
                     );
-                }
-            }
-            Self::RequestAdapterError {
-                status,
-                callback,
-                message,
-                userdata1,
-                userdata2,
-                ..
-            } => {
-                if let Some(callback) = callback {
-                    let message = owned_string_view(&message);
-                    callback(
-                        status,
-                        std::ptr::null(),
-                        message,
-                        userdata1 as *mut c_void,
-                        userdata2 as *mut c_void,
-                    );
-                    free_owned_string_view(message);
                 }
             }
             Self::RequestDevice {
@@ -1947,6 +1892,7 @@ unsafe fn instance_backend_selection(
             return match selection.backend {
                 YAWGPU_INSTANCE_BACKEND_METAL => InstanceBackendSelection::Metal,
                 YAWGPU_INSTANCE_BACKEND_VULKAN => InstanceBackendSelection::Vulkan,
+                YAWGPU_INSTANCE_BACKEND_GLES => InstanceBackendSelection::Gles,
                 _ => InstanceBackendSelection::Noop,
             };
         }

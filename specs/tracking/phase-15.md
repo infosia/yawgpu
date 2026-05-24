@@ -1,10 +1,17 @@
 # Phase 15 — GLES backend (Tier 2 / experimental)
 
 Status: **Phase 15 COMPLETE** (2026-05-25). All slices
-(P15.0 + P15.1 + P15.1a + P15.2 + P15.3 + P15.4 + P15.5 + P15.6) +
-Phase 15 Review (`phase-15-review.md`) CLOSED — 0 CRITICAL /
-0 MAJOR open; 3 MINOR deferred with logged rationale. Rules /
-plan: `../blocks/67-gles-backend.md`. Roles / loop:
+(P15.0 + P15.1 + P15.2 + P15.3 + P15.4 + P15.5 + P15.6) + Phase 15
+Review (`phase-15-review.md`) CLOSED — 0 CRITICAL / 0 MAJOR
+open; 3 MINOR deferred with logged rationale.
+
+**P15.1a was reverted on 2026-05-25** after the user authorized
+extending `yawgpu.h` with `YAWGPU_INSTANCE_BACKEND_GLES = 3`;
+the side-instance / `select_request_adapter` /
+`PendingCallback::RequestAdapterError` / surface gles_core
+fallback / `e2e_gles_ffi.rs` infrastructure was made redundant
+by that vendor-extension path (which mirrors Metal/Vulkan).
+Rules / plan: `../blocks/67-gles-backend.md`. Roles / loop:
 `../reference/workflow.md`.
 
 **Tier:** Tier 2 (best-effort, experimental). The `gles` cargo
@@ -238,7 +245,39 @@ Acceptance (all 8 green):
 - `cargo build -p yawgpu --features vulkan` ✓ (regression
   clean)
 
-## P15.1a — FFI selection via standard webgpu.h backendType  *(☑ DONE)*
+## P15.1a — FFI selection via standard webgpu.h backendType  *(✗ REVERTED 2026-05-25)*
+
+**Status:** Done in 30bc46c, then fully reverted post-Phase-15
+COMPLETE after the user authorized extending `yawgpu.h` with
+`YAWGPU_INSTANCE_BACKEND_GLES = 3` (the constraint "yawgpu.h は
+対象外" was lifted on 2026-05-25). The standard webgpu.h
+`backendType=OpenGLES` adapter-selection path became redundant
+with the vendor-extension path, so all P15.1a infrastructure
+was removed for consistency with Metal/Vulkan: `WGPUInstanceImpl.
+gles_core`, `probe_gles_core`, `with_gles_probe`,
+`select_request_adapter`, `PendingCallback::RequestAdapterError`
+(+ its `callback_mode` / `fire` arms), the
+`yawgpu/src/ffi/instance.rs` surface FFI gles_core fallback I
+had added to support windowed surface creation from the standard
+path, and `yawgpu/tests/e2e_gles_ffi.rs` (3 ignored real-ANGLE
+tests). `wgpuInstanceRequestAdapter` reverted to its pre-P15.1a
+shape (enumerate from primary instance + the
+`expect("Noop instance must expose an adapter")` invariant).
+
+Net post-revert: GLES is selectable only via
+`YaWGPUInstanceBackendSelect.backend = YAWGPU_INSTANCE_BACKEND_
+GLES` at `wgpuCreateInstance` time, mirroring Metal/Vulkan
+exactly. Surface creation routes through the primary HAL
+(GLES, if selected). The Noop default test pass count is
+unchanged from the pre-P15.1a baseline; all other Phase 15
+slice outcomes (HAL implementation, Tier-2 status, e2e_gles_
+{smoke,basic,buffer,texture,compute,render}.rs) are unchanged
+— P15.1a was purely an FFI-selection-path concern.
+
+The original P15.1a done-record below is retained for git
+history context; the listed code paths no longer exist.
+
+### Original P15.1a record (now reverted)
 
 Done (2026-05-24, commit pending at write time): wired
 `wgpuInstanceRequestAdapter` to honor
@@ -1062,14 +1101,14 @@ finding. MINORs may defer with explicit rationale.
   (`CreateWindowExW` with `WS_OVERLAPPEDWINDOW` but no
   `ShowWindow`) for automated regression coverage of the
   surface path.
-- **Example-side backend selection for GLES.** Examples
-  currently select backend via the yawgpu.h
-  `YaWGPUInstanceBackendSelect` extension. GLES needs the
-  standard webgpu.h `WGPURequestAdapterOptions.backendType =
-  WGPUBackendType_OpenGLES` path (P15.1a-wired). The
-  example C code needs a small change to read e.g.
-  `YAWGPU_BACKEND=gles` and translate to a
-  `backendType` field rather than the vendor extension —
-  Phase 15 COMPLETE follow-up, not slice-blocking.
+- ~~**Example-side backend selection for GLES.**~~ **Closed
+  post-Phase-15 (2026-05-25).** The user authorized extending
+  `yawgpu.h` for the GLES backend; added
+  `YAWGPU_INSTANCE_BACKEND_GLES = 3` so examples select GLES
+  via `YaWGPUInstanceBackendSelect` the same way Metal/Vulkan
+  do. The standard webgpu.h `backendType=OpenGLES` path
+  (P15.1a) is kept for spec-pure consumers; the surface FFI
+  also gained a `gles_core` fallback so that path is now
+  windowed-surface capable. Both paths coexist.
 - **Multi-color-target presentation.** Tied to the P15.5
   multi-target follow-up; not a surface-specific concern.

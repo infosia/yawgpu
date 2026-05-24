@@ -59,6 +59,29 @@ pub unsafe extern "C" fn wgpuCreateInstance(
                 WGPUInstanceImpl::new_noop(timed_wait_any_enabled)
             }
         }
+        InstanceBackendSelection::Gles => {
+            #[cfg(feature = "gles")]
+            {
+                match yawgpu_hal::gles::GlesInstance::new() {
+                    Ok(instance) => {
+                        let hal_instance = yawgpu_hal::HalInstance::Gles(instance);
+                        if hal_instance.enumerate_adapters().is_empty() {
+                            WGPUInstanceImpl::new_noop(timed_wait_any_enabled)
+                        } else {
+                            WGPUInstanceImpl::from_core(
+                                core::Instance::from_hal(hal_instance),
+                                timed_wait_any_enabled,
+                            )
+                        }
+                    }
+                    Err(_) => WGPUInstanceImpl::new_noop(timed_wait_any_enabled),
+                }
+            }
+            #[cfg(not(feature = "gles"))]
+            {
+                WGPUInstanceImpl::new_noop(timed_wait_any_enabled)
+            }
+        }
     };
     arc_to_handle(instance)
 }
@@ -171,23 +194,16 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
     callback_info: native::WGPURequestAdapterCallbackInfo,
 ) -> native::WGPUFuture {
     let instance = borrow_handle(instance_handle, "WGPUInstance");
-    let options_ref = options.as_ref();
-    let feature_level = options_ref
+    let feature_level = options
+        .as_ref()
         .map(|options| map_feature_level(options.featureLevel))
         .unwrap_or(core::FeatureLevel::Core);
-    let backend_type = options_ref
-        .map(|options| options.backendType)
-        .unwrap_or(native::WGPUBackendType_Undefined);
-    let Some(adapter) = select_request_adapter(instance, backend_type, feature_level) else {
-        return instance.register_callback(PendingCallback::RequestAdapterError {
-            mode: callback_info.mode,
-            status: native::WGPURequestAdapterStatus_Unavailable,
-            callback: callback_info.callback,
-            message: "requested adapter backend is unavailable".to_owned(),
-            userdata1: callback_info.userdata1 as usize,
-            userdata2: callback_info.userdata2 as usize,
-        });
-    };
+    let adapter = instance
+        .core
+        .enumerate_adapters_with_feature_level(feature_level)
+        .into_iter()
+        .next()
+        .expect("Noop instance must expose an adapter");
     let adapter = Arc::new(WGPUAdapterImpl {
         core: Arc::new(adapter),
         instance: clone_handle(instance_handle, "WGPUInstance"),
@@ -200,32 +216,6 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
         userdata1: callback_info.userdata1 as usize,
         userdata2: callback_info.userdata2 as usize,
     })
-}
-
-fn select_request_adapter(
-    instance: &WGPUInstanceImpl,
-    backend_type: native::WGPUBackendType,
-    feature_level: core::FeatureLevel,
-) -> Option<core::Adapter> {
-    #[cfg(feature = "gles")]
-    if backend_type == native::WGPUBackendType_OpenGLES {
-        return instance.gles_core.as_ref().and_then(|core_instance| {
-            core_instance
-                .enumerate_adapters_with_feature_level(feature_level)
-                .into_iter()
-                .next()
-        });
-    }
-    #[cfg(not(feature = "gles"))]
-    if backend_type == native::WGPUBackendType_OpenGLES {
-        return None;
-    }
-
-    instance
-        .core
-        .enumerate_adapters_with_feature_level(feature_level)
-        .into_iter()
-        .next()
 }
 
 /// Processes callbacks whose mode allows process-events delivery.
@@ -286,53 +276,3 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn select_request_adapter_undefined_returns_primary_noop_adapter() {
-        let instance = WGPUInstanceImpl::new_noop(false);
-
-        let adapter = select_request_adapter(
-            &instance,
-            native::WGPUBackendType_Undefined,
-            core::FeatureLevel::Core,
-        );
-
-        assert!(adapter.is_some());
-    }
-
-    #[test]
-    #[cfg(feature = "gles")]
-    fn select_request_adapter_opengles_with_no_side_instance_returns_none() {
-        let instance = WGPUInstanceImpl {
-            core: Arc::new(core::Instance::new_noop()),
-            gles_core: None,
-            timed_wait_any_enabled: false,
-            pending_callbacks: Mutex::new(BTreeMap::new()),
-        };
-
-        let adapter = select_request_adapter(
-            &instance,
-            native::WGPUBackendType_OpenGLES,
-            core::FeatureLevel::Core,
-        );
-
-        assert!(adapter.is_none());
-    }
-
-    #[test]
-    #[cfg(not(feature = "gles"))]
-    fn select_request_adapter_opengles_without_gles_feature_returns_none() {
-        let instance = WGPUInstanceImpl::new_noop(false);
-
-        let adapter = select_request_adapter(
-            &instance,
-            native::WGPUBackendType_OpenGLES,
-            core::FeatureLevel::Core,
-        );
-
-        assert!(adapter.is_none());
-    }
-}
