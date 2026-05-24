@@ -1044,6 +1044,43 @@ pub(crate) fn select_render_shader_source(
                 hal_descriptor_bindings(metal_bindings),
             ))
         }
+        #[cfg(feature = "gles")]
+        HalBackend::Gles => {
+            #[cfg(feature = "shader-passthrough")]
+            if descriptor.vertex.shader.module.msl_passthrough().is_some()
+                || fragment.shader.module.msl_passthrough().is_some()
+                || descriptor
+                    .vertex
+                    .shader
+                    .module
+                    .spirv_passthrough()
+                    .is_some()
+                || fragment.shader.module.spirv_passthrough().is_some()
+            {
+                return Err(
+                    "passthrough shader modules cannot be used on the GLES backend".to_owned(),
+                );
+            }
+            let vertex_module = descriptor.vertex.shader.module.reflected().ok_or_else(|| {
+                "render pipeline requires a reflected vertex shader module".to_owned()
+            })?;
+            let fragment_module = fragment.shader.module.reflected().ok_or_else(|| {
+                "render pipeline requires a reflected fragment shader module".to_owned()
+            })?;
+            let vertex_glsl =
+                vertex_module.generate_glsl(vertex_entry_name, naga::ShaderStage::Vertex)?;
+            let fragment_glsl =
+                fragment_module.generate_glsl(fragment_entry_name, naga::ShaderStage::Fragment)?;
+            Ok((
+                HalShaderSource::GlslStages {
+                    vertex: vertex_glsl.source,
+                    fragment: fragment_glsl.source,
+                },
+                vertex_entry_name.to_owned(),
+                fragment_entry_name.to_owned(),
+                hal_descriptor_bindings(metal_bindings),
+            ))
+        }
         HalBackend::Noop => Err("Noop backend does not create HAL shader sources".to_owned()),
         _ => Err("unsupported backend does not create HAL shader sources".to_owned()),
     }
@@ -1890,12 +1927,12 @@ mod tests {
         AttachmentLayout, SubpassDependency, SubpassDependencyType, SubpassInputAttachment,
         SubpassLayoutDesc, SubpassPassLayoutDescriptor,
     };
-    #[cfg(any(feature = "shader-passthrough", feature = "tiled"))]
+    #[cfg(any(feature = "gles", feature = "shader-passthrough", feature = "tiled"))]
     use crate::test_helpers::*;
     #[cfg(any(feature = "shader-passthrough", feature = "tiled"))]
     use crate::ErrorFilter;
 
-    #[cfg(any(feature = "shader-passthrough", feature = "tiled"))]
+    #[cfg(any(feature = "gles", feature = "shader-passthrough", feature = "tiled"))]
     use std::sync::Arc;
 
     #[test]
@@ -2089,6 +2126,48 @@ mod tests {
             .expect_err("MSL must not run on Vulkan"),
             "MSL shader module cannot be used on the Vulkan backend"
         );
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn select_render_shader_source_generates_gles_glsl_stages() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "struct VertexOut {
+                 @builtin(position) position: vec4<f32>,
+             }
+
+             @vertex
+             fn vs(@location(0) position: vec2<f32>) -> VertexOut {
+                 var out: VertexOut;
+                 out.position = vec4<f32>(position, 0.0, 1.0);
+                 return out;
+             }
+
+             @fragment
+             fn fs() -> @location(0) vec4<f32> {
+                 return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+             }"
+                .to_owned(),
+            )),
+        );
+        let descriptor = render_pipeline_descriptor(module);
+
+        let (source, vertex_entry, fragment_entry, bindings) =
+            select_render_shader_source(HalBackend::Gles, &descriptor, "vs", "fs", &[], &[], &[])
+                .expect("WGSL should generate GLES GLSL stages");
+
+        assert!(
+            matches!(source, HalShaderSource::GlslStages { vertex, fragment }
+                if vertex.contains("#version 310 es")
+                    && fragment.contains("#version 310 es")
+                    && vertex.contains("void main()")
+                    && fragment.contains("void main()"))
+        );
+        assert_eq!(vertex_entry, "vs");
+        assert_eq!(fragment_entry, "fs");
+        assert!(bindings.is_empty());
     }
 
     #[cfg(feature = "shader-passthrough")]

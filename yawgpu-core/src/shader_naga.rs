@@ -385,17 +385,13 @@ impl ReflectedModule {
             .map_err(|error| error.to_string())
     }
 
-    /// Generates GLSL ES for the validated compute shader module.
+    /// Generates GLSL ES for the validated shader module.
     #[cfg(feature = "gles")]
     pub(crate) fn generate_glsl(
         &self,
         entry_name: &str,
         stage: naga::ShaderStage,
     ) -> Result<GeneratedGlsl, String> {
-        if stage != naga::ShaderStage::Compute {
-            return Err("GLES GLSL generation currently only supports compute shaders".to_owned());
-        }
-
         let options = naga::back::glsl::Options {
             version: naga::back::glsl::Version::Embedded {
                 version: 310,
@@ -1457,13 +1453,37 @@ mod tests {
 
     #[cfg(feature = "gles")]
     #[test]
-    fn generate_glsl_rejects_non_compute_stage() {
-        let module = parse_and_validate_wgsl("@compute @workgroup_size(1) fn cs() {}").unwrap();
+    fn generate_glsl_emits_vertex_main() {
+        let module = parse_and_validate_wgsl(
+            "@vertex fn vs() -> @builtin(position) vec4<f32> {
+                return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+            }",
+        )
+        .unwrap();
 
-        let err = module
-            .generate_glsl("cs", ShaderStage::Vertex)
-            .expect_err("non-compute GLSL generation should fail");
+        let generated = module
+            .generate_glsl("vs", ShaderStage::Vertex)
+            .expect("vertex GLSL generation should succeed");
 
-        assert!(err.contains("only supports compute shaders"));
+        assert!(generated.source.contains("#version 310 es"));
+        assert!(generated.source.contains("void main()"));
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn generate_glsl_emits_fragment_main() {
+        let module = parse_and_validate_wgsl(
+            "@fragment fn fs() -> @location(0) vec4<f32> {
+                return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+            }",
+        )
+        .unwrap();
+
+        let generated = module
+            .generate_glsl("fs", ShaderStage::Fragment)
+            .expect("fragment GLSL generation should succeed");
+
+        assert!(generated.source.contains("#version 310 es"));
+        assert!(generated.source.contains("void main()"));
     }
 }

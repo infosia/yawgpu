@@ -1,8 +1,9 @@
 # Phase 15 — GLES backend (Tier 2 / experimental)
 
-Status: **P15.0 + P15.1 + P15.1a + P15.2 + P15.3 + P15.4 DONE;
-P15.5+ PLANNED.** Rules / plan: `../blocks/67-gles-backend.md`.
-Roles / loop: `../reference/workflow.md`.
+Status: **P15.0 + P15.1 + P15.1a + P15.2 + P15.3 + P15.4 + P15.5
+DONE; P15.6 PLANNED.** Rules / plan:
+`../blocks/67-gles-backend.md`. Roles / loop:
+`../reference/workflow.md`.
 
 **Tier:** Tier 2 (best-effort, experimental). The `gles` cargo
 feature is the sole experimental signal — no runtime markers
@@ -592,10 +593,146 @@ Acceptance (all 12 green):
   → GL program → `glDispatchCompute` round-trip succeeded**)
 - `cargo build -p yawgpu --features vulkan` ✓
 
-## P15.5 — Render pipeline + draw  *(☐ PLANNED)*
+## P15.5 — Render pipeline + draw  *(☑ DONE)*
 
-Reuses `e2e_basic` draw portion. `first_instance` via naga uniform
-injection.
+Done (2026-05-24, commit pending at write time): real GLES
+render pipeline + drawArrays on Windows ANGLE. Touches core
+(GLSL ES vertex/fragment emission + `select_render_shader_
+source` Gles arm) and HAL (`GlesRenderPipeline` real impl,
+`submit_render_pass`, vertex format + topology mappers).
+
+`yawgpu-hal/src/shader.rs` extended with `HalShaderSource::
+GlslStages { vertex, fragment }` mirroring `SpirVStages`.
+`Glsl { source, stage }` stays as the compute-side variant.
+
+`yawgpu-core/src/shader_naga.rs::generate_glsl` accepts all
+three `naga::ShaderStage` variants (Compute / Vertex /
+Fragment) via the same `Writer::new` + `BoundsCheckPolicies::
+default()` machinery; no additional `WriterFlags` needed for
+vertex/fragment (agent-confirmed). New inline tests assert
+emitted source for Vertex and Fragment stages contain
+`#version 310 es` + `void main()`.
+
+`yawgpu-core/src/render_pipeline.rs::select_render_shader_
+source` gained the `HalBackend::Gles` arm
+(`#[cfg(feature = "gles")]`): rejects passthrough modules,
+runs `generate_glsl(entry, Vertex)` + `generate_glsl(entry,
+Fragment)` independently on the vertex/fragment reflected
+modules (mirroring the Vulkan path's per-module spv-out call;
+no same-module guard), wraps as `HalShaderSource::GlslStages
+{ vertex, fragment }`, threads `hal_descriptor_bindings`.
+Inline test pattern-matches the wrapper shape.
+
+`yawgpu-hal/src/gles/format.rs` gained
+`map_vertex_format(HalVertexFormat) ->
+Result<GlesVertexFormat, HalError>` (Float32 / Float32x2 /
+Float32x3 / Float32x4 mapped to `(components, GL_FLOAT,
+normalized=false)`; Unsupported → error) and
+`map_primitive_topology(HalPrimitiveTopology) -> u32`
+(PointList / LineList / LineStrip / TriangleList /
+TriangleStrip mapped to the corresponding `glow::*` constants).
+Both pure, both inline table-tested.
+
+`yawgpu-hal/src/gles/pipeline.rs` rewrote `GlesRenderPipeline`
+as `Arc<GlesRenderPipelineInner { device, program: Result<glow
+::Program, HalError>, vertex_buffers: Vec<HalVertexBufferLayout>,
+primitive_topology, bindings: Vec<HalDescriptorBinding>,
+first_instance_location: Option<glow::UniformLocation> }>`.
+Agent design call: `glow::UniformLocation` is **not** assumed
+`Copy` — stored as `Option<glow::UniformLocation>` directly,
+passed to the queue as `Option<&glow::UniformLocation>`.
+Build path: `glCreateShader(VERTEX_SHADER)` + compile + status
+check + info-log → `ShaderCompilationFailed { message:
+String }`, same for FRAGMENT_SHADER, then `createProgram` +
+`attachShader` × 2 + `linkProgram` + status check + info-log
+→ error, then `detachShader` × 2 + `deleteShader` × 2. After
+link, `get_uniform_location(program, "naga_vs_first_instance")`
+is queried and stored (`None` if absent). Pipeline-create
+validation rejects multi-color-target / non-`Rgba8Unorm` /
+depth-stencil specified / sample_count > 1 with P15.5-named
+clean errors.
+
+`yawgpu-hal/src/gles/device.rs::create_render_pipeline`
+switched from `unavailable()` to a real route: matches
+`HalShaderSource::GlslStages` only; other variants return
+`ShaderCompilationFailed`.
+
+`yawgpu-hal/src/gles/queue.rs::submit_copies` gained the
+`HalCopy::RenderPass(pass)` arm via `submit_render_pass`.
+Agent design call: cleanup uses an **outer-scope Drop guard**
+(`RenderPassCleanup { gl, fbo, vao }` with a `Drop` impl that
+unbinds VAO + deletes VAO + unbinds FBO + deletes FBO +
+`use_program(None)` + `memory_barrier(ALL_BARRIER_BITS)`).
+The Drop guard is constructed after both the FBO and VAO are
+successfully created; subsequent `bind_render_buffers` /
+`bind_vertex_buffers` / draw failures unwind through the
+guard, ensuring cleanup runs regardless. Pre-guard FBO
+creation failure falls back to a hand-coded cleanup; pre-guard
+VAO creation failure releases the FBO explicitly before
+returning.
+
+The render path reuses `binding_target` (renamed from
+P15.4's `compute_binding_target`) for UBO/SSBO bindings — the
+function is identical for compute and render. The P15.4
+inline tests for `binding_target` still apply.
+
+Vertex attribute setup: per-binding `glBindBuffer(ARRAY_BUFFER)`
++ for each attribute `glEnableVertexAttribArray` +
+`glVertexAttribPointer(loc, components, GL_FLOAT, false, stride,
+buffer_offset + attr.offset)` + `glVertexAttribDivisor(loc, 1)`
+when step_mode == Instance, else `divisor(loc, 0)`. The
+pipeline's stored `vertex_buffers: Vec<HalVertexBufferLayout>`
+indexes by `bound.binding`.
+
+Draw: `glDrawArrays(topology, first_vertex, vertex_count)` for
+the no-instancing case (instance_count==1 AND
+first_instance==0); otherwise `glDrawArraysInstanced(topology,
+first_vertex, vertex_count, instance_count)`. `first_instance`
+uniform is set via `glUniform1ui` when the
+`first_instance_location` is `Some` (the e2e tests don't use
+`@builtin(instance_index)`, so the location is `None` and the
+uniform set is skipped).
+
+The `submit_copies` catchall now only rejects
+`SubpassRenderPass` and any future variant; the message
+updated from "P15.4" to "P15.5".
+
+New `yawgpu/tests/e2e_gles_render.rs` mirrors
+`e2e_vulkan_render.rs` with `backendType = WGPUBackendType_
+OpenGLES`. Two tests cover constant-color triangle (no bind
+group; red fragment) and uniform-color triangle (UBO bind
+group; green from uniform); both 2/2 green on real ANGLE with
+the pixel-content assertions
+(`contains_pixel([255,0,0,255])` / `contains_pixel([0,255,0,255])`
+plus the cleared-corner `contains_pixel_approx([26,51,77,255], 1)`)
+all passing.
+
+Acceptance (all 13 green):
+- `cargo build -p yawgpu` (Noop default) ✓
+- `cargo build -p yawgpu --features gles` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo clippy -p yawgpu --features gles --all-targets -- -D warnings` ✓
+- `cargo test --workspace` ✓ (Noop pass count unchanged)
+- `cargo test -p yawgpu --features gles --test e2e_gles_smoke
+  -- --ignored` ✓ (1/1)
+- `cargo test -p yawgpu --features gles --test e2e_gles_basic
+  -- --ignored` ✓ (3/3 P15.1 regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_ffi
+  -- --ignored` ✓ (3/3 P15.1a regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_buffer
+  -- --ignored` ✓ (2/2 P15.2 regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_texture
+  -- --ignored` ✓ (3/3 P15.3 regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_compute
+  -- --ignored` ✓ (2/2 P15.4 regression)
+- `cargo test -p yawgpu --features gles --test e2e_gles_render
+  -- --ignored` ✓ (**2/2 on real ANGLE; vertex+fragment GLSL ES
+  3.10 → GL program → FBO + viewport + clear + UBO bind + VAO
+  + drawArrays round-trip succeeded for both constant-color
+  and uniform-color shaders**)
+- `cargo build -p yawgpu --features vulkan` ✓
+
+## P15.6 — Surface (Android ANativeWindow + Windows ANGLE HWND)  *(☐ PLANNED)*
 
 ## P15.6 — Surface (Android ANativeWindow + Windows ANGLE HWND)  *(☐ PLANNED)*
 
@@ -730,8 +867,41 @@ finding. MINORs may defer with explicit rationale.
   `GlesBuffer`/`GlesTexture` pattern (infallible new + capture
   Err inside) when adding a similar `GlesRenderPipeline` in
   P15.5. Cosmetic, no behaviour impact.
-- **Vertex / fragment GLSL paths in
-  `ReflectedModule::generate_glsl`.** Currently returns the
-  "only supports compute" error for non-Compute stages. P15.5
-  needs vertex+fragment emission (and `select_render_shader_
-  source` Gles arm).
+- ~~**Vertex / fragment GLSL paths**~~ **Closed by P15.5.**
+
+## Open follow-ups added by P15.5
+
+- **Indexed draw / drawIndirect / drawIndexedIndirect.** The
+  HAL today doesn't carry index-buffer / index-format /
+  indirect-buffer fields on `HalDraw` or `HalRenderPass`.
+  Adding indexed draw requires extending those structs (core
+  change touching all backends); the GLES execution side is
+  cheap (`glDrawElements` /
+  `glDrawElementsInstanced` / `glDrawArraysIndirect`).
+- **Depth / stencil attachment.** P15.5 rejects `descriptor.
+  depth_stencil = Some(_)` at pipeline create. Adding it means:
+  pipeline-create accepts depth-stencil format + compare /
+  write enables + stencil ops; `submit_render_pass` attaches a
+  depth-stencil texture/renderbuffer to the FBO and configures
+  `glDepthMask` / `glDepthFunc` / `glStencil*` per the
+  pipeline state.
+- **Multi-color-target.** P15.5 enforces single color target.
+  Extending to N targets: pipeline carries
+  `Vec<HalTextureFormat>`; `submit_render_pass` accepts N
+  `HalRenderColorTarget`s, attaches each to `GL_COLOR_
+  ATTACHMENT{0..N-1}`, and updates the `glDrawBuffers` call.
+- **Non-`Rgba8Unorm` color formats** for render. Tied to the
+  ongoing P15.3-follow-up of expanding the GLES format table.
+- **Sampler binding in render.** `binding_target` covers
+  UBO/SSBO; texture+sampler binding for render needs
+  `glActiveTexture` + `glBindTexture` + `glBindSampler(unit,
+  sampler)` + setting the sampler uniform location, plus
+  naga's combined-texture-sampler emission. Slot into
+  P15.x when a real consumer surfaces.
+- **Cull mode / front face / scissor.** GL defaults
+  (CCW front, no cull, no scissor) work for the e2e test;
+  WebGPU-aware values plumb through when needed.
+- **Color blend state.** Currently dropped at the core
+  boundary; reintroduce when HAL grows a blend descriptor.
+- **VAO caching.** P15.5 creates a transient VAO per pass;
+  cache by pipeline + vertex-buffer-handle-set for perf.
