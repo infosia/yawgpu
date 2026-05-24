@@ -12,10 +12,12 @@ const BUFFER_SIZE: u64 = (ELEMENTS * std::mem::size_of::<u32>()) as u64;
 #[test]
 #[ignore = "manual real-backend test"]
 fn gles_compute_fills_storage_buffer() {
-    if !real_backend_available(RealBackend::Gles) {
-        eprintln!("skip: no GLES adapter");
-        return;
-    }
+    assert!(
+        real_backend_available(RealBackend::Gles),
+        "GLES backend not available; install an ANGLE build with ES 3.1 support \
+         (Chrome / Edge ANGLE caps at ES 3.0; see specs/blocks/67-gles-backend.md). \
+         Without a real GLES adapter this test cannot verify the GLES execution path."
+    );
 
     unsafe {
         let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
@@ -56,10 +58,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 #[test]
 #[ignore = "manual real-backend test"]
 fn gles_compute_reads_input_and_writes_output_storage_buffers() {
-    if !real_backend_available(RealBackend::Gles) {
-        eprintln!("skip: no GLES adapter");
-        return;
-    }
+    assert!(
+        real_backend_available(RealBackend::Gles),
+        "GLES backend not available; install an ANGLE build with ES 3.1 support \
+         (Chrome / Edge ANGLE caps at ES 3.0; see specs/blocks/67-gles-backend.md). \
+         Without a real GLES adapter this test cannot verify the GLES execution path."
+    );
 
     unsafe {
         let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
