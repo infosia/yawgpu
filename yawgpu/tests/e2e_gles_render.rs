@@ -518,7 +518,7 @@ unsafe fn request_adapter(instance: native::WGPUInstance) -> native::WGPUAdapter
         featureLevel: native::WGPUFeatureLevel_Undefined,
         powerPreference: native::WGPUPowerPreference_Undefined,
         forceFallbackAdapter: 0,
-        backendType: native::WGPUBackendType_OpenGLES,
+        backendType: native::WGPUBackendType_Undefined,
         compatibleSurface: std::ptr::null(),
     };
     let mut adapter: native::WGPUAdapter = std::ptr::null();
