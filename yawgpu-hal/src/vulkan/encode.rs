@@ -1,5 +1,7 @@
 use super::*;
 #[cfg(feature = "tiled")]
+use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
+#[cfg(feature = "tiled")]
 use crate::{HalSubpassAttachmentLayout, HalSubpassDepthStencilAttachment};
 
 /// Records submit into the command stream.
@@ -1049,28 +1051,6 @@ fn vk_depth_stencil_attachment_description(
         })
         .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
         .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL))
-}
-
-#[cfg(feature = "tiled")]
-fn format_has_depth_aspect(format: HalTextureFormat) -> bool {
-    matches!(
-        format,
-        HalTextureFormat::Depth16Unorm
-            | HalTextureFormat::Depth24Plus
-            | HalTextureFormat::Depth24PlusStencil8
-            | HalTextureFormat::Depth32Float
-            | HalTextureFormat::Depth32FloatStencil8
-    )
-}
-
-#[cfg(feature = "tiled")]
-fn format_has_stencil_aspect(format: HalTextureFormat) -> bool {
-    matches!(
-        format,
-        HalTextureFormat::Stencil8
-            | HalTextureFormat::Depth24PlusStencil8
-            | HalTextureFormat::Depth32FloatStencil8
-    )
 }
 
 #[cfg(all(test, feature = "tiled"))]

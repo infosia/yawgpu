@@ -175,6 +175,28 @@ pub enum HalStencilOperation {
     DecrementWrap,
 }
 
+#[allow(dead_code)]
+pub(crate) fn format_has_depth_aspect(format: HalTextureFormat) -> bool {
+    matches!(
+        format,
+        HalTextureFormat::Depth16Unorm
+            | HalTextureFormat::Depth24Plus
+            | HalTextureFormat::Depth24PlusStencil8
+            | HalTextureFormat::Depth32Float
+            | HalTextureFormat::Depth32FloatStencil8
+    )
+}
+
+#[allow(dead_code)]
+pub(crate) fn format_has_stencil_aspect(format: HalTextureFormat) -> bool {
+    matches!(
+        format,
+        HalTextureFormat::Stencil8
+            | HalTextureFormat::Depth24PlusStencil8
+            | HalTextureFormat::Depth32FloatStencil8
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +215,58 @@ mod tests {
         assert!(!usage.storage);
         assert!(!usage.indirect);
         assert!(!usage.query_resolve);
+    }
+
+    #[test]
+    fn hal_stencil_operation_variants_are_constructible() {
+        let operations = [
+            HalStencilOperation::Keep,
+            HalStencilOperation::Zero,
+            HalStencilOperation::Replace,
+            HalStencilOperation::Invert,
+            HalStencilOperation::IncrementClamp,
+            HalStencilOperation::DecrementClamp,
+            HalStencilOperation::IncrementWrap,
+            HalStencilOperation::DecrementWrap,
+        ];
+
+        assert!(matches!(operations[0], HalStencilOperation::Keep));
+        assert!(matches!(operations[1], HalStencilOperation::Zero));
+        assert!(matches!(operations[2], HalStencilOperation::Replace));
+        assert!(matches!(operations[3], HalStencilOperation::Invert));
+        assert!(matches!(operations[4], HalStencilOperation::IncrementClamp));
+        assert!(matches!(operations[5], HalStencilOperation::DecrementClamp));
+        assert!(matches!(operations[6], HalStencilOperation::IncrementWrap));
+        assert!(matches!(operations[7], HalStencilOperation::DecrementWrap));
+    }
+
+    #[test]
+    fn format_has_depth_aspect_covers_relevant_formats() {
+        assert!(format_has_depth_aspect(HalTextureFormat::Depth16Unorm));
+        assert!(format_has_depth_aspect(HalTextureFormat::Depth24Plus));
+        assert!(format_has_depth_aspect(
+            HalTextureFormat::Depth24PlusStencil8
+        ));
+        assert!(format_has_depth_aspect(HalTextureFormat::Depth32Float));
+        assert!(format_has_depth_aspect(
+            HalTextureFormat::Depth32FloatStencil8
+        ));
+        assert!(!format_has_depth_aspect(HalTextureFormat::Stencil8));
+        assert!(!format_has_depth_aspect(HalTextureFormat::Rgba16Float));
+    }
+
+    #[test]
+    fn format_has_stencil_aspect_covers_relevant_formats() {
+        assert!(format_has_stencil_aspect(HalTextureFormat::Stencil8));
+        assert!(format_has_stencil_aspect(
+            HalTextureFormat::Depth24PlusStencil8
+        ));
+        assert!(format_has_stencil_aspect(
+            HalTextureFormat::Depth32FloatStencil8
+        ));
+        assert!(!format_has_stencil_aspect(HalTextureFormat::Depth16Unorm));
+        assert!(!format_has_stencil_aspect(HalTextureFormat::Depth24Plus));
+        assert!(!format_has_stencil_aspect(HalTextureFormat::Depth32Float));
+        assert!(!format_has_stencil_aspect(HalTextureFormat::Rgba16Float));
     }
 }

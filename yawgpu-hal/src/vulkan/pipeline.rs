@@ -1,4 +1,5 @@
 use super::*;
+use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 
 /// Stores vulkan compute pipeline data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -495,16 +496,34 @@ fn create_render_pass_for_descriptor(
     }
     let depth_reference = if let Some(depth_stencil) = descriptor.depth_stencil {
         let (format, _) = map_texture_format(depth_stencil.format)?;
+        let has_depth = format_has_depth_aspect(depth_stencil.format);
+        let has_stencil = format_has_stencil_aspect(depth_stencil.format);
         let index = u32::try_from(attachments.len())
             .map_err(|_| shader_error("depth attachment index is too large"))?;
         attachments.push(
             vk::AttachmentDescription::default()
                 .format(format)
                 .samples(vk::SampleCountFlags::TYPE_1)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .stencil_load_op(vk::AttachmentLoadOp::CLEAR)
-                .stencil_store_op(vk::AttachmentStoreOp::STORE)
+                .load_op(if has_depth {
+                    vk::AttachmentLoadOp::CLEAR
+                } else {
+                    vk::AttachmentLoadOp::DONT_CARE
+                })
+                .store_op(if has_depth {
+                    vk::AttachmentStoreOp::STORE
+                } else {
+                    vk::AttachmentStoreOp::DONT_CARE
+                })
+                .stencil_load_op(if has_stencil {
+                    vk::AttachmentLoadOp::CLEAR
+                } else {
+                    vk::AttachmentLoadOp::DONT_CARE
+                })
+                .stencil_store_op(if has_stencil {
+                    vk::AttachmentStoreOp::STORE
+                } else {
+                    vk::AttachmentStoreOp::DONT_CARE
+                })
                 .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                 .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
         );
