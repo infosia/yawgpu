@@ -78,6 +78,45 @@ pub struct HalVertexAttribute {
     pub metal_buffer_index: u32,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stencil_face_state() -> HalStencilFaceState {
+        HalStencilFaceState {
+            compare: HalCompareFunction::Always,
+            fail_op: HalStencilOperation::Keep,
+            depth_fail_op: HalStencilOperation::Replace,
+            pass_op: HalStencilOperation::IncrementClamp,
+        }
+    }
+
+    #[test]
+    fn hal_depth_stencil_state_constructs_and_formats_debug() {
+        let state = HalDepthStencilState {
+            format: HalTextureFormat::Depth24PlusStencil8,
+            depth_write_enabled: true,
+            depth_compare: HalCompareFunction::LessEqual,
+            stencil_front: stencil_face_state(),
+            stencil_back: stencil_face_state(),
+            stencil_read_mask: 0xff,
+            stencil_write_mask: 0xff,
+            depth_bias: 42,
+            depth_bias_slope_scale: 1.5,
+            depth_bias_clamp: 0.25,
+        };
+
+        assert!(format!("{state:?}").contains("HalDepthStencilState"));
+    }
+
+    #[test]
+    fn hal_stencil_face_state_constructs_and_formats_debug() {
+        let state = stencil_face_state();
+
+        assert!(format!("{state:?}").contains("HalStencilFaceState"));
+    }
+}
+
 /// Stores origin metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct HalOrigin3d {

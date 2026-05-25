@@ -1,4 +1,5 @@
 use super::*;
+use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 
 /// Stores metal compute pipeline data used by validation and backend submission.
 #[derive(Clone)]
@@ -29,6 +30,9 @@ pub struct MetalRenderPipeline {
     pub(super) inner: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     pub(super) depth_stencil_state: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     pub(super) primitive_topology: HalPrimitiveTopology,
+    pub(super) depth_bias: i32,
+    pub(super) depth_bias_slope_scale: f32,
+    pub(super) depth_bias_clamp: f32,
 }
 
 unsafe impl Send for MetalRenderPipeline {}
@@ -157,6 +161,16 @@ pub(super) fn create_render_pipeline(
     // depth-test for the later subpass's draws (the lighting/composite
     // fullscreen triangles in tiled_deferred specifically lose to the
     // gbuffer subpass's previously written depth values).
+    let (depth_bias, depth_bias_slope_scale, depth_bias_clamp) = descriptor
+        .depth_stencil
+        .map(|depth_stencil| {
+            (
+                depth_stencil.depth_bias,
+                depth_stencil.depth_bias_slope_scale,
+                depth_stencil.depth_bias_clamp,
+            )
+        })
+        .unwrap_or((0, 0.0, 0.0));
     let depth_stencil_state = match descriptor.depth_stencil {
         Some(depth_stencil) => create_depth_stencil_state(device, depth_stencil)?,
         None => create_noop_depth_stencil_state(device)?,
@@ -165,6 +179,9 @@ pub(super) fn create_render_pipeline(
         inner,
         depth_stencil_state,
         primitive_topology: descriptor.primitive_topology,
+        depth_bias,
+        depth_bias_slope_scale,
+        depth_bias_clamp,
     })
 }
 
@@ -231,24 +248,4 @@ fn map_stencil_operation(operation: HalStencilOperation) -> MTLStencilOperation 
         HalStencilOperation::IncrementWrap => MTLStencilOperation::IncrementWrap,
         HalStencilOperation::DecrementWrap => MTLStencilOperation::DecrementWrap,
     }
-}
-
-fn format_has_depth_aspect(format: HalTextureFormat) -> bool {
-    matches!(
-        format,
-        HalTextureFormat::Depth16Unorm
-            | HalTextureFormat::Depth24Plus
-            | HalTextureFormat::Depth24PlusStencil8
-            | HalTextureFormat::Depth32Float
-            | HalTextureFormat::Depth32FloatStencil8
-    )
-}
-
-fn format_has_stencil_aspect(format: HalTextureFormat) -> bool {
-    matches!(
-        format,
-        HalTextureFormat::Stencil8
-            | HalTextureFormat::Depth24PlusStencil8
-            | HalTextureFormat::Depth32FloatStencil8
-    )
 }

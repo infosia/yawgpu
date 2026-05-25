@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "tiled")]
+use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 
 /// Records encode into the command stream.
 pub(super) fn encode_buffer_copy(
@@ -383,28 +385,6 @@ fn mtl_load_action(load_op: HalRenderLoadOp) -> MTLLoadAction {
     }
 }
 
-#[cfg(feature = "tiled")]
-fn format_has_depth_aspect(format: HalTextureFormat) -> bool {
-    matches!(
-        format,
-        HalTextureFormat::Depth16Unorm
-            | HalTextureFormat::Depth24Plus
-            | HalTextureFormat::Depth24PlusStencil8
-            | HalTextureFormat::Depth32Float
-            | HalTextureFormat::Depth32FloatStencil8
-    )
-}
-
-#[cfg(feature = "tiled")]
-fn format_has_stencil_aspect(format: HalTextureFormat) -> bool {
-    matches!(
-        format,
-        HalTextureFormat::Stencil8
-            | HalTextureFormat::Depth24PlusStencil8
-            | HalTextureFormat::Depth32FloatStencil8
-    )
-}
-
 /// Records encode into the command stream.
 pub(super) fn encode_render_pass(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
@@ -420,6 +400,11 @@ pub(super) fn encode_render_pass(
     };
     encoder.setRenderPipelineState(&pipeline.inner);
     encoder.setDepthStencilState(Some(&pipeline.depth_stencil_state));
+    encoder.setDepthBias_slopeScale_clamp(
+        pipeline.depth_bias as f32,
+        pipeline.depth_bias_slope_scale,
+        pipeline.depth_bias_clamp,
+    );
     for binding in &pass.bind_buffers {
         encode_render_bind_buffer(encoder, binding)?;
     }
@@ -454,6 +439,11 @@ fn encode_subpass_draw(
     };
     encoder.setRenderPipelineState(&pipeline.inner);
     encoder.setDepthStencilState(Some(&pipeline.depth_stencil_state));
+    encoder.setDepthBias_slopeScale_clamp(
+        pipeline.depth_bias as f32,
+        pipeline.depth_bias_slope_scale,
+        pipeline.depth_bias_clamp,
+    );
     for binding in &draw.bind_buffers {
         encode_render_bind_buffer(encoder, binding)?;
     }

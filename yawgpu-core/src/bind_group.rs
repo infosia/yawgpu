@@ -539,12 +539,12 @@ mod tests {
     fn validate_bind_group_descriptor_rejects_explicit_view_for_input_slot() {
         let device = noop_device();
         let layout = device.create_bind_group_layout(BindGroupLayoutDescriptor {
-            entries: vec![input_attachment_layout_entry(0)],
+            entries: vec![uniform_layout_entry(0), input_attachment_layout_entry(1)],
             error: None,
         });
         let view = noop_render_attachment(&device);
         let entries = vec![BindGroupEntry {
-            binding: 0,
+            binding: 1,
             resource: BindGroupResource::TextureView {
                 texture_view: view,
                 device: Arc::new(device.clone()),
@@ -553,7 +553,10 @@ mod tests {
 
         assert_eq!(
             validate_bind_group_descriptor(&device, &layout, &entries, device.limits()),
-            Some("bind group entry count must match bind group layout".to_owned())
+            Some(
+                "input-attachment binding must not be supplied in the bind group; it is auto-wired by the subpass pass"
+                    .to_owned()
+            )
         );
     }
 }

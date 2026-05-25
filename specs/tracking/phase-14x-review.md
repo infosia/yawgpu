@@ -54,29 +54,44 @@ Files reviewed:
 
 ### MINOR
 
-- **[m1]** Third bind-group test
+- ~~**[m1]** Third bind-group test
   (`validate_bind_group_descriptor_rejects_explicit_view_for_input_slot`)
   exits via the count check, not via the `(_, InputAttachment)` arm in
-  `validate_bind_group_entry`; the arm is uncovered by direct test.
-- **[m2]** `format_has_depth_aspect` / `format_has_stencil_aspect` duplicated
+  `validate_bind_group_entry`; the arm is uncovered by direct test.~~
+  **Closed 2026-05-25** — rewrote the layout / entry combination so
+  the count check passes and the explicit input-attachment binding
+  reaches the `(_, BindingLayoutKind::InputAttachment { .. })` arm.
+- ~~**[m2]** `format_has_depth_aspect` / `format_has_stencil_aspect` duplicated
   in `metal/pipeline.rs`, `metal/encode.rs`, `vulkan/encode.rs`. Could be a
-  single `pub(crate)` helper in `yawgpu-hal/src/format.rs`.
-- **[m3]** Metal silently drops `HalDepthStencilState.depth_bias*`;
+  single `pub(crate)` helper in `yawgpu-hal/src/format.rs`.~~
+  **Closed 2026-05-25** — centralized both helpers in
+  `yawgpu-hal/src/format.rs` and routed Metal / Vulkan callers through
+  the shared definitions.
+- ~~**[m3]** Metal silently drops `HalDepthStencilState.depth_bias*`;
   `create_depth_stencil_state` only reads compare / write / stencil_*.
   Metal needs `setDepthBias(...)` on the encoder, not the pipeline state —
   spec text in 55-tiled-rendering.md is misleading. The deferred demo
   doesn't use depth bias so the gap doesn't bite, but the contract drift
-  is real.
-- **[m4]** New public HAL types (`HalDepthStencilState`, `HalStencilFaceState`,
+  is real.~~
+  **Closed 2026-05-25** — `MetalRenderPipeline` now retains the
+  depth-bias triple and both render-pass encoder bind sites apply it
+  with `setDepthBias_slopeScale_clamp`.
+- ~~**[m4]** New public HAL types (`HalDepthStencilState`, `HalStencilFaceState`,
   `HalStencilOperation`) + the `HalTextureFormat::Rgba16Float` variant lack
   direct unit tests at the HAL crate. CLAUDE.md principle 1; weak case since
   they're pure data shapes (exercised via Noop pipeline creation in
-  yawgpu-core).
-- **[m5]** Vulkan render-pass attachment description sets
+  yawgpu-core).~~
+  **Closed 2026-05-25** — added inline HAL unit tests for the
+  depth-stencil data shapes, stencil operations, `Rgba16Float`, and
+  centralized aspect helpers.
+- ~~**[m5]** Vulkan render-pass attachment description sets
   `stencil_load_op = CLEAR` and `stencil_store_op = STORE` unconditionally on
   depth attachments, including depth-only formats (`Depth32Float`,
   `Depth24Plus`, `Depth16Unorm`). Vulkan ignores these for formats without
-  a stencil aspect, but the validation layer flags `BestPractices` warnings.
+  a stencil aspect, but the validation layer flags `BestPractices` warnings.~~
+  **Closed 2026-05-25** — non-tiled Vulkan render-pass creation now
+  gates depth and stencil load/store ops independently using the shared
+  aspect helpers.
 - **[m6]** `MetalRenderPipeline::depth_stencil_state` typed `Option<...>` but
   after `af1bdd2` always `Some(...)`; the encoder's `as_deref()` branches
   were dead.
@@ -84,9 +99,9 @@ Files reviewed:
 ## Triage
 
 All three MAJOR findings are kept. All MINOR findings are kept (no false
-positives) but only m6 is fixed alongside M1-M3 (it falls out of the same
-change). m1–m5 are deferred to a follow-up — they're polish, not
-correctness blockers.
+positives). m6 was fixed alongside M1-M3 (it fell out of the same
+change); m1–m5 were deferred at re-COMPLETE and then closed in a
+2026-05-25 follow-up polish slice.
 
 ## Fixes
 
@@ -128,9 +143,9 @@ All green on this M2 (2026-05-24, sandbox off):
 
 ## Re-COMPLETE
 
-No CRITICAL/MAJOR findings remain open. The five MINOR findings (m1–m5) are
-deferred as polish; none block correctness.
+No CRITICAL/MAJOR findings remain open. All MINOR findings are now closed:
+m1/m2/m3/m4/m5 in the 2026-05-25 follow-up polish slice, and m6 alongside
+M1-M3.
 
 **Phase 14 (with all Phase 14.x extensions) re-stands COMPLETE at `a2d2ddd`.**
-Next polish round (the five deferred MINORs) can be a single small commit
-when the user wants it.
+The deferred MINOR polish round is closed.
