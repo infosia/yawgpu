@@ -56,12 +56,11 @@ impl Drop for GlesSurfaceInner {
             }
             #[cfg(windows)]
             GlesSurfaceKind::Wgl(kind) => {
-                if let Some(configured) = self.state.lock().configured.as_ref() {
-                    let _guard = configured.device.current_lock_acquire();
-                    super::wgl::release_surface_dc(&kind.surface);
-                } else {
-                    super::wgl::release_surface_dc(&kind.surface);
-                }
+                // `release_surface_dc` is `wglMakeCurrent(NULL,NULL)` (per-thread)
+                // + `ReleaseDC(hwnd, hdc)` (per-HDC). Neither races with device-
+                // side GL operations on other threads, so no make-current lock
+                // is needed — symmetric with the EGL arm above.
+                super::wgl::release_surface_dc(&kind.surface);
             }
         }
     }

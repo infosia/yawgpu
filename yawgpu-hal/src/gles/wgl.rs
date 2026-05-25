@@ -116,28 +116,15 @@ impl WglInstanceState {
                 message: "GetDC on user HWND failed",
             });
         }
-
-        let pfd = build_pixel_format_descriptor();
-        let pixel_format = unsafe { ChoosePixelFormat(hdc, &pfd) };
-        if pixel_format == 0 {
+        if !set_pixel_format(hdc) {
             unsafe {
                 let _ = ReleaseDC(hwnd, hdc);
             }
             return Err(HalError::SwapchainCreationFailed {
                 backend: BACKEND,
-                message: "ChoosePixelFormat on user HWND failed",
+                message: "ChoosePixelFormat / SetPixelFormat on user HWND failed",
             });
         }
-        if unsafe { SetPixelFormat(hdc, pixel_format, &pfd) } == 0 {
-            unsafe {
-                let _ = ReleaseDC(hwnd, hdc);
-            }
-            return Err(HalError::SwapchainCreationFailed {
-                backend: BACKEND,
-                message: "SetPixelFormat on user HWND failed",
-            });
-        }
-
         Ok(WglSurfaceState { hwnd, hdc })
     }
 }
