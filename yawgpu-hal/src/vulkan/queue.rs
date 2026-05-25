@@ -11,6 +11,15 @@ pub struct VulkanQueue {
 pub(super) struct VulkanQueueInner {
     pub(super) device: Arc<VulkanDeviceInner>,
     pub(super) queue: vk::Queue,
+    pub(super) retire: Mutex<RetireRing>,
+}
+
+impl Drop for VulkanQueueInner {
+    fn drop(&mut self) {
+        if let Ok(mut retire) = self.retire.lock() {
+            let _ = retire.wait_all(&self.device.device);
+        }
+    }
 }
 
 impl VulkanQueue {

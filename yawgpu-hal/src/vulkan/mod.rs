@@ -5,9 +5,7 @@ use std::fmt;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
-use std::sync::Arc;
-#[cfg(feature = "tiled")]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ash::vk;
 
@@ -15,7 +13,7 @@ use ash::vk;
 use crate::{
     FramebufferFetchPath, HalRenderPipeline, HalSubpassAttachmentResource,
     HalSubpassDependencyType, HalSubpassDraw, HalSubpassPassLayout, HalSubpassRenderPassCommand,
-    HalTexture, HalTransientAttachment, HalTransientAttachmentDescriptor,
+    HalTransientAttachment, HalTransientAttachmentDescriptor,
 };
 use crate::{
     HalAddressMode, HalBoundBuffer, HalBufferBindingKind, HalBufferCopy, HalBufferTextureCopy,
@@ -23,8 +21,8 @@ use crate::{
     HalDescriptorBinding, HalError, HalExtent3d, HalFilterMode, HalMipmapFilterMode,
     HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor,
     HalSamplerDescriptor, HalShaderSource, HalStencilOperation, HalSurfaceConfiguration,
-    HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat,
-    HalVertexStepMode,
+    HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage,
+    HalVertexFormat, HalVertexStepMode,
 };
 
 const BACKEND: &str = "vulkan";
@@ -114,12 +112,19 @@ impl VulkanInstance {
                 message: "vkCreateMetalSurfaceEXT failed",
             }
         })?;
+        let surface_inner = Arc::new(VulkanSurfaceInner::new(Arc::clone(&self.inner), surface));
         Ok(VulkanSurface {
-            instance: Arc::clone(&self.inner),
             surface,
+            surface_inner,
             swapchain: None,
             config: None,
             current_image_index: None,
+            pending_state: Arc::new(Mutex::new(SurfacePendingState::new())),
+            image_acquired_semaphores: Vec::new(),
+            render_finished_semaphores: Vec::new(),
+            present_ready_semaphores: Vec::new(),
+            in_flight_fences: Vec::new(),
+            next_sync_index: 0,
         })
     }
 
@@ -149,12 +154,19 @@ impl VulkanInstance {
                 message: "vkCreateWin32SurfaceKHR failed",
             }
         })?;
+        let surface_inner = Arc::new(VulkanSurfaceInner::new(Arc::clone(&self.inner), surface));
         Ok(VulkanSurface {
-            instance: Arc::clone(&self.inner),
             surface,
+            surface_inner,
             swapchain: None,
             config: None,
             current_image_index: None,
+            pending_state: Arc::new(Mutex::new(SurfacePendingState::new())),
+            image_acquired_semaphores: Vec::new(),
+            render_finished_semaphores: Vec::new(),
+            present_ready_semaphores: Vec::new(),
+            in_flight_fences: Vec::new(),
+            next_sync_index: 0,
         })
     }
 }
@@ -329,6 +341,7 @@ impl VulkanAdapter {
                 inner: Arc::new(VulkanQueueInner {
                     device: inner,
                     queue,
+                    retire: Mutex::new(RetireRing::new(RETIRE_RING_SIZE)),
                 }),
             },
         })

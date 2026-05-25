@@ -94,6 +94,7 @@ impl VulkanDevice {
             Ok((inner, bytes_per_pixel)) => VulkanTexture {
                 inner: Some(Arc::new(inner)),
                 swapchain: None,
+                surface_pending: None,
                 width: descriptor.width,
                 height: descriptor.height,
                 depth_or_array_layers: descriptor.depth_or_array_layers,
@@ -103,6 +104,7 @@ impl VulkanDevice {
             Err(_) => VulkanTexture {
                 inner: None,
                 swapchain: None,
+                surface_pending: None,
                 width: descriptor.width,
                 height: descriptor.height,
                 depth_or_array_layers: descriptor.depth_or_array_layers,

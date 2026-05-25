@@ -94,7 +94,7 @@ impl MetalSurface {
         })
     }
 
-    /// Presents the most recently acquired surface texture.
+    /// Submits a present command buffer for the most recently acquired drawable.
     pub fn present(&mut self, queue: &MetalQueue) -> Result<(), HalError> {
         let drawable = self
             .current_drawable
@@ -103,9 +103,17 @@ impl MetalSurface {
                 backend: BACKEND,
                 message: "no acquired drawable to present",
             })?;
-        let _ = queue;
-        drawable.present();
-        Ok(())
+        autoreleasepool(|_| {
+            let command_buffer = queue.inner.commandBuffer().ok_or(HalError::PresentFailed {
+                backend: BACKEND,
+                message: "present command buffer creation failed",
+            })?;
+            let drawable_ref: &ProtocolObject<dyn MTLDrawable> =
+                unsafe { &*((&*drawable as *const ProtocolObject<dyn CAMetalDrawable>).cast()) };
+            command_buffer.presentDrawable(drawable_ref);
+            command_buffer.commit();
+            Ok(())
+        })
     }
 }
 
