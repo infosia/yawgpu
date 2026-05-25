@@ -75,12 +75,22 @@ pub(crate) fn surface_config() -> HalSurfaceConfiguration {
 
 /// Returns dummy surface.
 pub(crate) fn dummy_surface(instance: &VulkanInstance) -> VulkanSurface {
+    let surface = vk::SurfaceKHR::null();
     VulkanSurface {
-        instance: Arc::clone(&instance.inner),
-        surface: vk::SurfaceKHR::null(),
+        surface,
+        surface_inner: Arc::new(VulkanSurfaceInner::new(
+            Arc::clone(&instance.inner),
+            surface,
+        )),
         swapchain: None,
         config: None,
         current_image_index: None,
+        pending_state: Arc::new(Mutex::new(SurfacePendingState::new())),
+        image_acquired_semaphores: Vec::new(),
+        render_finished_semaphores: Vec::new(),
+        present_ready_semaphores: Vec::new(),
+        in_flight_fences: Vec::new(),
+        next_sync_index: 0,
     }
 }
 

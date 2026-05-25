@@ -16,11 +16,7 @@ pub(super) fn submit_copies(queue: &VulkanQueueInner, copies: &[HalCopy]) -> Res
             .create_command_pool(&command_pool_info, None)
     }
     .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
-    let result = record_and_submit_copies(queue, command_pool, copies);
-    unsafe {
-        queue.device.device.destroy_command_pool(command_pool, None);
-    }
-    result
+    record_and_submit_copies(queue, command_pool, copies)
 }
 
 /// Returns record and submit copies.
@@ -32,6 +28,7 @@ pub(super) fn record_and_submit_copies(
     let mut descriptor_pools = Vec::new();
     let mut framebuffers = Vec::new();
     let mut render_passes = Vec::new();
+    let surface_pending = find_surface_pending(copies);
     let result = (|| {
         let allocate_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
@@ -96,31 +93,57 @@ pub(super) fn record_and_submit_copies(
                 .end_command_buffer(command_buffer)
                 .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
             let command_buffers = [command_buffer];
-            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+            let mut wait_semaphores = Vec::new();
+            let mut wait_stages = Vec::new();
+            let mut signal_semaphores = Vec::new();
+            let mut surface_retire = None;
+            if let Some(pending_state) = surface_pending.as_ref() {
+                let mut state = pending_state
+                    .lock()
+                    .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                if let Some(pending) = state.pending_acquire.as_mut() {
+                    if !pending.consumed {
+                        wait_semaphores.push(pending.acquired_sem);
+                        wait_stages.push(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT);
+                        signal_semaphores.push(pending.render_finished_sem);
+                        pending.consumed = true;
+                        surface_retire = Some(Arc::clone(pending_state));
+                    }
+                }
+            }
+            let fence_info = vk::FenceCreateInfo::default();
+            let fence = queue
+                .device
+                .device
+                .create_fence(&fence_info, None)
+                .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+            let submit_info = vk::SubmitInfo::default()
+                .wait_semaphores(&wait_semaphores)
+                .wait_dst_stage_mask(&wait_stages)
+                .command_buffers(&command_buffers)
+                .signal_semaphores(&signal_semaphores);
             queue
                 .device
                 .device
-                .queue_submit(queue.queue, &[submit_info], vk::Fence::null())
+                .queue_submit(queue.queue, &[submit_info], fence)
                 .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
-            queue
-                .device
-                .device
-                .queue_wait_idle(queue.queue)
-                .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+            let cleanup = retire_ops(command_pool, descriptor_pools, framebuffers, render_passes);
+            if let Some(pending_state) = surface_retire {
+                pending_state
+                    .lock()
+                    .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?
+                    .retire
+                    .retire(&queue.device.device, fence, cleanup, true)?;
+            } else {
+                queue
+                    .retire
+                    .lock()
+                    .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?
+                    .retire(&queue.device.device, fence, cleanup, true)?;
+            }
         }
         Ok(())
     })();
-    unsafe {
-        for framebuffer in framebuffers {
-            queue.device.device.destroy_framebuffer(framebuffer, None);
-        }
-        for render_pass in render_passes {
-            queue.device.device.destroy_render_pass(render_pass, None);
-        }
-        for pool in descriptor_pools {
-            queue.device.device.destroy_descriptor_pool(pool, None);
-        }
-    }
     result
 }
 
@@ -128,22 +151,38 @@ pub(super) fn record_and_submit_copies(
 pub(super) fn transition_swapchain_image_to_present(
     queue: &VulkanQueue,
     texture: &VulkanTexture,
+    pending_state: Arc<Mutex<SurfacePendingState>>,
+    wait_semaphore: vk::Semaphore,
+    signal_semaphore: vk::Semaphore,
+    fence: vk::Fence,
 ) -> Result<(), HalError> {
     let inner = texture.inner()?;
-    let command_pool_info = vk::CommandPoolCreateInfo::default()
-        .queue_family_index(queue.inner.device.queue_family_index)
-        .flags(vk::CommandPoolCreateFlags::TRANSIENT);
-    let command_pool = unsafe {
-        queue
-            .inner
-            .device
-            .device
-            .create_command_pool(&command_pool_info, None)
-    }
-    .map_err(|_| HalError::PresentFailed {
-        backend: BACKEND,
-        message: "command pool creation failed",
-    })?;
+    let command_pool = {
+        let mut state = pending_state.lock().map_err(|_| HalError::PresentFailed {
+            backend: BACKEND,
+            message: "surface pending state lock failed",
+        })?;
+        if let Some(command_pool) = state.transition_command_pool {
+            command_pool
+        } else {
+            let command_pool_info = vk::CommandPoolCreateInfo::default()
+                .queue_family_index(queue.inner.device.queue_family_index)
+                .flags(vk::CommandPoolCreateFlags::TRANSIENT);
+            let command_pool = unsafe {
+                queue
+                    .inner
+                    .device
+                    .device
+                    .create_command_pool(&command_pool_info, None)
+            }
+            .map_err(|_| HalError::PresentFailed {
+                backend: BACKEND,
+                message: "command pool creation failed",
+            })?;
+            state.transition_command_pool = Some(command_pool);
+            command_pool
+        }
+    };
     let result = (|| {
         let allocate_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
@@ -197,36 +236,121 @@ pub(super) fn transition_swapchain_image_to_present(
                     message: "command buffer end failed",
                 })?;
             let command_buffers = [command_buffer];
-            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+            let wait_semaphores = [wait_semaphore];
+            let wait_stages = [vk::PipelineStageFlags::BOTTOM_OF_PIPE];
+            let signal_semaphores = [signal_semaphore];
+            let submit_info = vk::SubmitInfo::default()
+                .wait_semaphores(&wait_semaphores)
+                .wait_dst_stage_mask(&wait_stages)
+                .command_buffers(&command_buffers)
+                .signal_semaphores(&signal_semaphores);
             queue
                 .inner
                 .device
                 .device
-                .queue_submit(queue.inner.queue, &[submit_info], vk::Fence::null())
+                .queue_submit(queue.inner.queue, &[submit_info], fence)
                 .map_err(|_| HalError::PresentFailed {
                     backend: BACKEND,
                     message: "queue submit failed",
                 })?;
-            queue
-                .inner
-                .device
-                .device
-                .queue_wait_idle(queue.inner.queue)
+            pending_state
+                .lock()
                 .map_err(|_| HalError::PresentFailed {
                     backend: BACKEND,
-                    message: "queue wait failed",
+                    message: "surface pending state lock failed",
+                })?
+                .retire
+                .retire(
+                    &queue.inner.device.device,
+                    fence,
+                    vec![RetireOp::CommandBuffer {
+                        pool: command_pool,
+                        buffer: command_buffer,
+                    }],
+                    false,
+                )
+                .map_err(|_| HalError::PresentFailed {
+                    backend: BACKEND,
+                    message: "transition retire registration failed",
                 })?;
         }
         Ok(())
     })();
-    unsafe {
-        queue
-            .inner
-            .device
-            .device
-            .destroy_command_pool(command_pool, None);
-    }
     result
+}
+
+fn retire_ops(
+    command_pool: vk::CommandPool,
+    descriptor_pools: Vec<vk::DescriptorPool>,
+    framebuffers: Vec<vk::Framebuffer>,
+    render_passes: Vec<vk::RenderPass>,
+) -> Vec<RetireOp> {
+    let mut cleanup = Vec::new();
+    cleanup.push(RetireOp::CommandPool(command_pool));
+    cleanup.extend(descriptor_pools.into_iter().map(RetireOp::DescriptorPool));
+    cleanup.extend(framebuffers.into_iter().map(RetireOp::Framebuffer));
+    cleanup.extend(render_passes.into_iter().map(RetireOp::RenderPass));
+    cleanup
+}
+
+fn find_surface_pending(copies: &[HalCopy]) -> Option<Arc<Mutex<SurfacePendingState>>> {
+    copies.iter().find_map(surface_pending_from_copy)
+}
+
+fn surface_pending_from_copy(copy: &HalCopy) -> Option<Arc<Mutex<SurfacePendingState>>> {
+    match copy {
+        HalCopy::Buffer(_) | HalCopy::ComputePass(_) => None,
+        HalCopy::BufferToTexture(copy) | HalCopy::TextureToBuffer(copy) => {
+            surface_pending_from_hal_texture(&copy.texture)
+        }
+        HalCopy::TextureToTexture(copy) => surface_pending_from_hal_texture(&copy.source)
+            .or_else(|| surface_pending_from_hal_texture(&copy.destination)),
+        HalCopy::RenderPass(pass) => surface_pending_from_hal_texture(&pass.color_target.texture),
+        #[cfg(feature = "tiled")]
+        HalCopy::SubpassRenderPass(pass) => surface_pending_from_subpass(pass),
+    }
+}
+
+fn surface_pending_from_hal_texture(
+    texture: &HalTexture,
+) -> Option<Arc<Mutex<SurfacePendingState>>> {
+    let HalTexture::Vulkan(texture) = texture else {
+        return None;
+    };
+    texture.surface_pending.as_ref().map(Arc::clone)
+}
+
+#[cfg(feature = "tiled")]
+fn surface_pending_from_subpass(
+    pass: &HalSubpassRenderPassCommand,
+) -> Option<Arc<Mutex<SurfacePendingState>>> {
+    pass.color_attachments
+        .iter()
+        .find_map(|attachment| surface_pending_from_attachment_resource(&attachment.resource))
+        .or_else(|| {
+            pass.depth_stencil_attachment
+                .as_ref()
+                .and_then(|attachment| {
+                    surface_pending_from_attachment_resource(&attachment.resource)
+                })
+        })
+}
+
+#[cfg(feature = "tiled")]
+fn surface_pending_from_attachment_resource(
+    resource: &HalSubpassAttachmentResource,
+) -> Option<Arc<Mutex<SurfacePendingState>>> {
+    match resource {
+        HalSubpassAttachmentResource::Persistent {
+            texture,
+            resolve_target,
+        } => surface_pending_from_hal_texture(texture).or_else(|| {
+            resolve_target
+                .as_ref()
+                .and_then(surface_pending_from_hal_texture)
+        }),
+        HalSubpassAttachmentResource::Transient(_) => None,
+    }
 }
 
 /// Records encode into the command stream.

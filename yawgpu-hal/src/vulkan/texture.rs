@@ -16,6 +16,7 @@ pub(super) const IMAGE_LAYOUT_PRESENT: u8 = 4;
 pub struct VulkanTexture {
     pub(super) inner: Option<Arc<VulkanTextureInner>>,
     pub(super) swapchain: Option<Arc<VulkanSwapchainInner>>,
+    pub(super) surface_pending: Option<Arc<Mutex<SurfacePendingState>>>,
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) depth_or_array_layers: u32,

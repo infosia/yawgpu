@@ -140,9 +140,10 @@ struct and `HalPresentMode` enum.
   (the drawable knows which CBs wrote its texture and waits for
   them) + the fact that `submit_copies` already does
   `waitUntilCompleted()` before present. Correct but unusual;
-  **deferred** — a doc-comment explaining the choice is
-  sufficient and the canonical pattern can land with the
-  semaphore-driven Vulkan refactor (m4).
+  **Closed 2026-05-26** — `MetalSurface::present` now creates a
+  command buffer, schedules `presentDrawable:`, and commits it
+  without adding a new wait; `submit_copies` keeps its existing
+  `waitUntilCompleted()` behavior.
 
 ### m4 — Vulkan present path has four CPU stalls per frame
 - `yawgpu-hal/src/vulkan/mod.rs` `VulkanSurface::present` /
@@ -150,9 +151,11 @@ struct and `HalPresentMode` enum.
   submit-copies queue_wait_idle, transition submit +
   queue_wait_idle, vkQueuePresentKHR + queue_wait_idle. Smoke-
   test-acceptable; a semaphore-driven path is a sizable
-  refactor. **Deferred** — tracked implicitly by the
-  ComputeBoids deferred slice which would need it for real
-  perf.
+  refactor. **Closed 2026-05-26** — Vulkan surface acquire now
+  uses per-frame acquire / render-finished / present-ready
+  semaphores, queue submissions retire transient resources behind
+  fences, and present waits on the present-ready semaphore instead
+  of idling the queue.
 
 ### m5 — `unsafe impl Send/Sync for MetalSurface` is loose for `CAMetalLayer` thread-confinement
 - `yawgpu-hal/src/metal/mod.rs` — `CAMetalLayer` mutating
@@ -243,18 +246,33 @@ All four MAJOR findings fixed in a single follow-up commit:
   memory-safety bug on most loaders, and is **distinct from
   the original MAJOR K3 finding** (which was about
   `destroy_image_view` of a view referencing a destroyed
-  image — that path is now safe). The complete fix is an
-  additional Arc-share of `vk::SurfaceKHR` into
-  `VulkanSwapchainInner` (or moving the surface handle's
-  ownership down into the swapchain inner so destruction
-  cascades), tracked as a Phase-9-follow-up alongside the
-  ComputeBoids deferred slice (which would benefit from the
-  same semaphore-driven path m4). The bundled examples
-  release each surface texture before
-  `wgpuSurfaceUnconfigure` / `wgpuSurfaceRelease` and do not
-  trigger this path; real-GPU-verified runs of all three windowed
-  examples (`surface_smoke`, `triangle`, `hello_triangle`)
-  on both Metal and Vulkan exit 0 after these fixes.
+  swapchain image).
+  **Closed 2026-05-26** — `Drop for VulkanSurface` waits all
+  surface-tracked in-flight fences and retires deferred resources
+  before dropping its swapchain reference; the surface handle is
+  shared with live swapchain handles so it is destroyed only after
+  those handles are gone.
+
+## Fix log (2026-05-26)
+
+Post-COMPLETE present-path polish:
+
+- **m3 fixed**: `MetalSurface::present` switched from
+  `drawable.present()` to the canonical command-buffer
+  `presentDrawable:` path. The command buffer is committed without
+  `waitUntilCompleted()` so presentation can overlap the next
+  frame; Metal submit synchronization remains unchanged.
+- **m4 fixed**: Vulkan surface acquire/present now uses a
+  per-surface pending-acquire slot plus acquire / render-finished /
+  present-ready semaphore rings. `submit_copies` consumes the
+  acquire semaphore when it sees a swapchain-backed texture and
+  signals render-finished; the present transition waits that signal
+  and signals present-ready for `vkQueuePresentKHR`.
+- **K3-r fixed**: Vulkan surface and queue transient resources are
+  retired through a 3-slot fence ring. `Drop for VulkanSurface`
+  drains the surface retire ring before releasing the swapchain and
+  `VkSurfaceKHR` lifetime is tied to the swapchain-held surface
+  handle so retained swapchain textures cannot outlive the surface.
 
 ## Verification (real-GPU, 2026-05-20)
 
@@ -273,9 +291,10 @@ All four MAJOR findings fixed in a single follow-up commit:
 
 ## Status
 
-**Phase 9 COMPLETE** — 0 critical / 0 major / 7 minor (all
-deferred with rationale above) + 1 minor residual K3-r
-follow-up. Block 80 inventory satisfied: enumerate_adapters,
+**Phase 9 COMPLETE** — 0 critical / 0 major; m3 / m4 and
+the residual K3-r follow-up are closed as of 2026-05-26.
+Remaining minor items stay deferred with rationale above. Block
+80 inventory satisfied: enumerate_adapters,
 compute, device_info (headless P9.0), capture (offscreen
 T2B+PNG P9.1), surface_smoke + triangle + hello_triangle
 (windowed P9.2–P9.4). Deferred Dawn samples logged:
