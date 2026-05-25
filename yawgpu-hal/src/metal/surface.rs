@@ -8,6 +8,22 @@ pub struct MetalSurface {
     pub(super) config: Option<HalSurfaceConfiguration>,
 }
 
+// SAFETY: `MetalSurface` owns a `Retained<CAMetalLayer>` plus an optional
+// drawable / config snapshot. The `CAMetalLayer` reference itself can be
+// moved across threads — `Retained<...>` performs `retain` / `release`
+// atomically, and Apple permits `nextDrawable` (called from
+// `acquire_next_texture`) off the main thread. The remaining configuration-
+// mutating accessors (`setDrawableSize:`, `setPixelFormat:`,
+// `setDevice:` — all driven from `MetalSurface::configure`) are
+// main-thread-only per Apple's QuartzCore docs. yawgpu's examples and tests
+// only invoke `configure` from the same thread that owns the window
+// (`main` on macOS, where GLFW already requires that), so the
+// main-thread invariant holds in practice. Sharing the surface across
+// threads beyond what the examples exercise (e.g. driving `configure`
+// from a worker) would violate that invariant; this loose `Send` /
+// `Sync` matches the broader HAL convention and is documented here so a
+// future Send/Sync audit can tighten it (e.g. wrap mutating ops in a
+// main-thread runner) without missing the constraint.
 unsafe impl Send for MetalSurface {}
 unsafe impl Sync for MetalSurface {}
 

@@ -149,3 +149,19 @@ M1-M3.
 
 **Phase 14 (with all Phase 14.x extensions) re-stands COMPLETE at `a2d2ddd`.**
 The deferred MINOR polish round is closed.
+
+## Post-COMPLETE — clippy::too_many_arguments on `create_subpass_render_pipeline` *(☑ DONE 2026-05-25)*
+
+Surfaced during the Phase 14.x MINOR closeout in `c135c9b`:
+`cargo clippy -p yawgpu --features "metal tiled" --all-targets -- -D
+warnings` was failing on
+`MetalDevice::create_subpass_render_pipeline`'s 8-arg signature
+(limit 7). The eight parameters each represent an orthogonal
+concern (shader source, two entry-point names, the base render
+descriptor, bindings, the pass-level layout, the subpass index)
+and mirror the shape `HalSubpassRenderPipelineDescriptor` carries
+from `yawgpu-core` — folding them into a struct would just
+re-spell the same eight values without simplifying anything.
+Closed by annotating the site with
+`#[allow(clippy::too_many_arguments)]` and a brief comment.
+`--features "metal tiled"` clippy is now green on this M2.

@@ -156,7 +156,14 @@ impl MetalDevice {
     /// test/write stays disabled via the no-op `MTLDepthStencilState` that
     /// `create_render_pipeline` falls back to (depthCompare=Always,
     /// depthWrite=false, no stencil).
+    // Each parameter here represents an orthogonal concern (shader source,
+    // two entry points, the base render descriptor, bindings, the pass-level
+    // layout, the subpass index) and matches the shapes the
+    // `HalSubpassRenderPipelineDescriptor` carries from `yawgpu-core`. Folding
+    // them into a struct would just be re-spelling the same eight values, so
+    // accept the clippy warning at this site.
     #[cfg(feature = "tiled")]
+    #[allow(clippy::too_many_arguments)]
     pub fn create_subpass_render_pipeline(
         &self,
         shader: HalShaderSource,

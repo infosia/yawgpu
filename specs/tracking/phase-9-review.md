@@ -112,8 +112,12 @@ struct and `HalPresentMode` enum.
 - `examples/framework/framework_macos.m` —
   `yawgpu_window_destroy` calls `glfwTerminate()`; safe for the
   current three single-window examples; multi-window would need
-  refcounting or split init/shutdown. **Deferred** — scope-
-  limited.
+  refcounting or split init/shutdown.
+  **Closed 2026-05-25** — added a `yawgpu_window_count`
+  refcount mirroring the `framework_windows.c` pattern;
+  `glfwInit()` runs once before the first window and
+  `glfwTerminate()` only after the last window is destroyed.
+  Single-window examples are byte-for-byte unchanged.
 
 ### m2 — `shader.wgsl` is CWD-relative, not binary-dir relative
 - `examples/framework/framework.c` `yawgpu_load_wgsl_shader`
@@ -153,10 +157,16 @@ struct and `HalPresentMode` enum.
 ### m5 — `unsafe impl Send/Sync for MetalSurface` is loose for `CAMetalLayer` thread-confinement
 - `yawgpu-hal/src/metal/mod.rs` — `CAMetalLayer` mutating
   accessors are main-thread-only; current examples all run on
-  main thread (GLFW requirement). **Deferred** — matches the
-  broader HAL's loose Send/Sync convention; suggested fix is a
-  SAFETY comment documenting the main-thread invariant, can
-  land with a future HAL Send/Sync audit.
+  main thread (GLFW requirement).
+  **Closed 2026-05-25** — added a SAFETY block above
+  `unsafe impl Send / Sync for MetalSurface` in
+  `yawgpu-hal/src/metal/surface.rs` documenting the main-thread
+  invariant for the mutating accessors driven by
+  `MetalSurface::configure`. The loose `Send` / `Sync` matches
+  the rest of the Metal HAL; tightening (e.g. wrapping mutating
+  ops in a main-thread runner) is left to the future HAL
+  Send/Sync audit, which can pick this comment up as the
+  starting reference.
 
 ### m6 — `surface_smoke/main.c` is less defensive than `triangle`/`hello_triangle`
 - `examples/surface_smoke/main.c` — no `if (!commands)` check
