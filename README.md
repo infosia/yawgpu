@@ -321,9 +321,9 @@ link against `libyawgpu` and exercise both the standard `webgpu.h` and the
 | `compute` | A storage-buffer compute dispatch with readback | core |
 | `capture` | Offscreen render → texture → buffer readback → PNG file | core |
 | `surface_smoke` | Opening a window and presenting cleared frames | core |
-| `triangle` | A classic windowed triangle (vertex-index shader) | core |
-| `hello_triangle` | A windowed triangle fed from a vertex buffer | core |
-| `triangle_passthrough` | The same triangle driven from precompiled SPIR-V and MSL | `shader-passthrough` |
+| `triangle` | A classic windowed RGB-gradient triangle (vertex-index shader) | core |
+| `hello_triangle` | The same RGB-gradient triangle fed from an interleaved (position + color) vertex buffer | core |
+| `triangle_passthrough` | The same gradient triangle driven from precompiled SPIR-V and MSL | `shader-passthrough` |
 | `tiled_deferred` | Two-subpass G-buffer + lighting with a tile-memory input attachment | `tiled` (Metal / native Vulkan; not MoltenVK) |
 
 Pick a backend at runtime with `YAWGPU_BACKEND`:

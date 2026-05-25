@@ -8,7 +8,9 @@
 //   * a render pipeline — vertex + fragment shaders (shader.wgsl) compiled
 //                      for the surface's pixel format.
 // The vertex shader generates three vertices from @builtin(vertex_index)
-// (no vertex buffer), and the fragment shader paints them solid red.
+// (no vertex buffer) and assigns each one a primary color (red, green,
+// blue); the fragment shader receives the interpolated color across the
+// surface — i.e. a classic RGB-corner gradient triangle.
 //
 // The per-frame loop is: acquire a texture → record a render pass that
 // draws the triangle → submit → present. It runs ~60 frames (or until the

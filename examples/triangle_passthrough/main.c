@@ -1,6 +1,6 @@
-// triangle_passthrough — same red triangle as `examples/triangle`, but
-// fed to the GPU through yawgpu's vendor SPIR-V / MSL shader-passthrough
-// APIs instead of the WGSL path.
+// triangle_passthrough — same RGB-corner gradient triangle as
+// `examples/triangle`, but fed to the GPU through yawgpu's vendor
+// SPIR-V / MSL shader-passthrough APIs instead of the WGSL path.
 //
 // Why this exists
 // ---------------
@@ -227,8 +227,8 @@ static WGPUShaderModule create_msl_module(PassthroughApp *app, const char *name)
         return NULL;
     }
 
-    // Two entry points for this example's red triangle: vertex `vs_main`
-    // and fragment `fs_main`. `workgroupSize` is only meaningful for
+    // Two entry points for this example's gradient triangle: vertex
+    // `vs_main` and fragment `fs_main`. `workgroupSize` is only meaningful for
     // compute (`WGPUShaderStage_Compute`); the `_INIT` macro leaves it
     // zeroed which is exactly what we want for graphics stages.
     YaWGPUMslEntryPoint entries[2] = {

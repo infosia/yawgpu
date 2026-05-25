@@ -15,6 +15,8 @@
 
 #version 450
 
+layout(location = 0) out vec3 v_color;
+
 void main() {
     // Three positions derived from gl_VertexIndex, matching the WGSL
     // reference (`@vertex fn vs_main(@builtin(vertex_index) i): @builtin(position)`):
@@ -26,4 +28,13 @@ void main() {
     float x = float(int(gl_VertexIndex) - 1);
     float y = float(int(gl_VertexIndex & 1) * 2 - 1);
     gl_Position = vec4(x, -y, 0.0, 1.0);
+
+    // Per-vertex RGB so the fragment stage receives an interpolated
+    // gradient (red at vertex 0, green at vertex 1, blue at vertex 2).
+    vec3 colors[3] = vec3[3](
+        vec3(1.0, 0.0, 0.0),
+        vec3(0.0, 1.0, 0.0),
+        vec3(0.0, 0.0, 1.0)
+    );
+    v_color = colors[gl_VertexIndex];
 }
