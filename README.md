@@ -57,11 +57,14 @@ yawgpu is a small Cargo workspace of layered crates:
 │               resource lifetimes, error scopes   │
 ├───────────────────────────────────────────────┤
 │ yawgpu-hal    hardware abstraction layer         │  enum dispatch (no dyn)
-│               Noop · Metal · Vulkan              │
+│               Noop · Metal · Vulkan · GLES*      │
 └───────────────────────────────────────────────┘
-                │               │
-              Metal           Vulkan
+                │               │             │
+              Metal           Vulkan      OpenGL ES*
+                                          (experimental)
 ```
+
+\* OpenGL ES is opt-in / Tier 2 — see Backends below.
 
 - **`yawgpu`** — the public crate. It exports the `webgpu.h` symbols as a C
   dynamic/static library and binds the canonical header with `bindgen`.
@@ -75,19 +78,23 @@ yawgpu is a small Cargo workspace of layered crates:
 
 ## Backends
 
-| Backend | Purpose | Notes |
+| Backend | Tier | Notes |
 |---|---|---|
-| **Noop** | CPU-only reference backend | Always available; runs the full validation layer with no GPU. Ideal for CI and headless testing. |
-| **Metal** | Apple platforms | Built with the `metal` feature via the `objc2` family. |
-| **Vulkan** | Cross-platform | Built with the `vulkan` feature via `ash`; targets **Vulkan 1.1+** (MoltenVK ≥ 1.1 on macOS, native drivers elsewhere). |
+| **Noop** | reference | CPU-only; always available. Runs the full validation layer with no GPU. Ideal for CI and headless testing. |
+| **Metal** | 1 — supported | Apple platforms. Built with the `metal` feature via the `objc2` family. |
+| **Vulkan** | 1 — supported | Cross-platform. Built with the `vulkan` feature via `ash`; targets **Vulkan 1.1+** (MoltenVK ≥ 1.1 on macOS, native drivers elsewhere). |
+| **OpenGL ES** | 2 — experimental | Opt-in `gles` feature (never in default). Targets Android (native EGL) and Windows (ANGLE by default, host GL via opt-in `YAWGPU_GLES_BACKEND=wgl`). Best-effort: paths that do not cleanly map to GLES 3.1 are rejected at the HAL layer with `HalError`; `yawgpu.h` vendor extensions (`tiled`, `shader-passthrough`) are not implemented for GLES. |
 
-Direct3D is intentionally out of scope. An opt-in **OpenGL ES** backend
-(`gles` feature, Tier 2 / experimental) targeting Android (native EGL)
-and Windows ANGLE is under development; it is best-effort only — paths
-that do not cleanly map to GLES 3.1 are rejected at the HAL layer, and
-the `yawgpu.h` vendor extensions are not implemented for GLES. The
-caller is expected to supply ANGLE's `libEGL.dll` / `libGLESv2.dll` on
-Windows; yawgpu does not bundle ANGLE.
+Direct3D is intentionally out of scope.
+
+The OpenGL ES backend goes through ANGLE by default on Windows
+(`libEGL.dll` / `libGLESv2.dll` — yawgpu does not bundle ANGLE; the
+caller must place an ES 3.1-capable build on the DLL search path or
+set `YAWGPU_ANGLE_PATH=<dir>` to preload from). On systems where the
+locally available ANGLE binary caps at ES 3.0 (Chromium / CEF builds
+do), set `YAWGPU_GLES_BACKEND=wgl` to bypass ANGLE and use the host
+GL driver via `WGL_EXT_create_context_es2_profile` — verified on
+NVIDIA / AMD / Intel desktop drivers.
 
 A backend is chosen at instance-creation time through `YaWGPUInstanceBackendSelect`
 (see below) — applications that only ever want validation can run entirely
@@ -129,7 +136,7 @@ which backend the instance will create:
 
 YaWGPUInstanceBackendSelect sel = {
     .chain   = { .sType = YAWGPU_STYPE_INSTANCE_BACKEND_SELECT },
-    .backend = YAWGPU_INSTANCE_BACKEND_METAL,   /* or _VULKAN, _NOOP */
+    .backend = YAWGPU_INSTANCE_BACKEND_METAL,   /* or _VULKAN, _GLES, _NOOP */
 };
 WGPUInstanceDescriptor desc = { .nextInChain = &sel.chain };
 WGPUInstance instance = wgpuCreateInstance(&desc);
@@ -223,6 +230,7 @@ cargo build -p yawgpu --release
 # with a real backend
 cargo build -p yawgpu --release --features metal      # Apple
 cargo build -p yawgpu --release --features vulkan     # Vulkan / MoltenVK
+cargo build -p yawgpu --release --features gles       # Android / Windows ANGLE (Tier 2)
 
 # with vendor extensions
 cargo build -p yawgpu --release --features "vulkan tiled"
@@ -284,6 +292,20 @@ $env:YAWGPU_BACKEND = "vulkan"
 examples\build\triangle\Debug\triangle.exe
 ```
 
+To run the windowed examples through the OpenGL ES backend on Windows
+(opt-in / Tier 2 — requires either an ES 3.1-capable ANGLE on PATH or
+the host GL driver via WGL):
+
+```powershell
+cmake -S examples -B examples/build-gles -DYAWGPU_FEATURE=gles
+cmake --build examples/build-gles
+$env:YAWGPU_BACKEND = "gles"
+# Default: ANGLE (libEGL.dll on PATH). If the local ANGLE caps at ES 3.0,
+# bypass it and use the host GL driver instead:
+$env:YAWGPU_GLES_BACKEND = "wgl"
+examples\build-gles\triangle\Debug\triangle.exe
+```
+
 Windowed examples use GLFW on macOS and native Win32 on Windows. See
 [`examples/README.md`](examples/README.md) for the full build matrix.
 
@@ -311,14 +333,19 @@ SPIR-V or MSL straight to the backend; see
   verified against live Metal and Vulkan devices, including the tiled
   two-subpass G-buffer path. The Vulkan backend runs **validation-clean**
   under `VK_LAYER_KHRONOS_validation` (zero VUID violations across the
-  full `--ignored` suite).
+  full `--ignored` suite). The OpenGL ES backend (Tier 2) is verified
+  end-to-end on a host NVIDIA driver via the WGL fallback
+  (`YAWGPU_GLES_BACKEND=wgl`), covering buffer / texture / compute /
+  render e2e suites plus the windowed `triangle` example.
 - **Platform coverage**:
   - **macOS** — builds, unit tests, real-GPU end-to-end tests, and the C
     examples all verified (Metal and Vulkan/MoltenVK; MoltenVK does not
     support the native subpass-input read path used by `tiled_deferred`).
   - **Windows (MSVC)** — builds and passes the full unit-test suite; the
     windowed and tiled C examples are runtime-verified against native
-    Vulkan drivers.
+    Vulkan drivers, and the windowed `triangle` example additionally
+    runs through the OpenGL ES backend via the WGL fallback (host GL
+    driver, opt-in).
 
 ## License
 

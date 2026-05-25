@@ -164,13 +164,28 @@ slice; not done during active development.
   per-`HalDevice` GL context. Already present as a workspace
   dep for other crates; gating it on `gles` keeps the default
   Noop build's dep graph unchanged.
+- **windows-sys 0.59** (target `cfg(windows)`, optional): added
+  as a `yawgpu-hal` dep behind the `gles` feature in the
+  post-COMPLETE WGL fallback slice (2026-05-25). Features
+  enabled: `Win32_Graphics_OpenGL` (WGL + opengl32.dll +
+  `SwapBuffers`), `Win32_Graphics_Gdi` (`GetDC` / `ReleaseDC` /
+  `ChoosePixelFormat`), `Win32_UI_WindowsAndMessaging`
+  (`CreateWindowExW` / `RegisterClassExW` for the hidden helper
+  window), and `Win32_System_LibraryLoader` (`LoadLibraryW` /
+  `GetProcAddress` for `opengl32.dll`). Only pulled with
+  `--features gles` **and** on Windows targets; Android EGL
+  builds and non-Windows hosts do not see this dep.
 
-These four crates are pulled **only** with `--features gles` —
+These crates are pulled **only** with `--features gles` —
 default Noop builds, Vulkan-feature builds, and Metal-feature
 builds do not see them. Real EGL/GL calls land in P15.1
 (`GlesInstance::new` initializes the display; `GlesAdapter::
 create_device` creates a 3.1+ context + 1×1 pbuffer and loads
 GL via `glow`; `GlesQueue::submit_empty` make-currents + flushes).
-Verified on Windows ANGLE — `libEGL.dll` / `libGLESv2.dll`
-discovered via the default Windows DLL search path (or
-`YAWGPU_ANGLE_PATH` for an explicit directory).
+Verified on Windows: ANGLE path via `libEGL.dll` /
+`libGLESv2.dll` discovered via the default Windows DLL search
+path (or `YAWGPU_ANGLE_PATH` for an explicit directory), and the
+opt-in WGL fallback path (`YAWGPU_GLES_BACKEND=wgl`) via the host
+GL driver using `WGL_EXT_create_context_es2_profile`. The latter
+unblocks real-GPU verification on machines whose locally
+available ANGLE caps at ES 3.0 (Chromium / CEF builds).

@@ -21,8 +21,8 @@ Dawn's tests as the spec.
 
 | Tier | Backends | Notes |
 |---|---|---|
-| **Tier 1 — Supported** | Vulkan, Metal | webgpu.h semantics fully mapped; Phase Review-clean implies real-GPU conformance for the bring-up scope landed so far. |
-| **Tier 2 — Experimental (best-effort)** | GLES (Android + Windows ANGLE) | Opt-in `gles` cargo feature; never in `default`. Paths that do not cleanly map to GLES 3.1 may be rejected at the HAL layer with `HalError` (surfaced as a device error by `yawgpu-core`). Core validation is identical regardless of tier; see `CLAUDE.md` "Backend support tiers" and `specs/blocks/67-gles-backend.md`. |
+| **Tier 1 — Supported** | Vulkan, Metal | webgpu.h semantics fully mapped; real-GPU conformance verified for the bring-up scope landed so far. |
+| **Tier 2 — Experimental (best-effort)** | GLES (Android + Windows) | Opt-in `gles` cargo feature; never in `default`. Paths that do not cleanly map to GLES 3.1 may be rejected at the HAL layer with `HalError` (surfaced as a device error by `yawgpu-core`). Core validation is identical regardless of tier. On Windows the default context backend is ANGLE; an opt-in WGL fallback (`YAWGPU_GLES_BACKEND=wgl`) bypasses ANGLE and uses the host GL driver via `WGL_EXT_create_context_es2_profile` for environments where the locally available ANGLE caps at ES 3.0. See `CLAUDE.md` "Backend support tiers" and `specs/blocks/67-gles-backend.md`. |
 
 D3D11/D3D12 remain permanently out of scope.
 
@@ -58,12 +58,15 @@ Reimplements the parts of Dawn's `native/` we need:
   `Noop | Vulkan | Metal | Gles`, backends behind Cargo features.
 - **Noop** backend implemented first: synthetic, allocation-tracking, no GPU.
   It is the CI substrate and the TDD substrate for all validation phases.
-- **Tier 1 real backends: Vulkan (ash) and Metal (objc2).** Brought up at
-  Phase 7 for end2end.
-- **Tier 2 real backend: GLES** (via `glow` + `khronos-egl`), targeting
-  Android (native EGL) and Windows ANGLE only. Brought up at Phase 15
-  (`specs/blocks/67-gles-backend.md`). Best-effort: webgpu.h paths that do
-  not cleanly map to GLES 3.1 may be rejected at HAL with `HalError`.
+- **Tier 1 real backends: Vulkan (ash) and Metal (objc2)** — full
+  webgpu.h surface, real-GPU end-to-end verified.
+- **Tier 2 real backend: GLES** (via `glow` + `khronos-egl` for EGL;
+  `windows-sys` for the Windows opt-in WGL context backend), targeting
+  Android (native EGL) and Windows (ANGLE default, opt-in WGL fallback
+  for ES 3.0-capped ANGLE environments). Best-effort: webgpu.h paths
+  that do not cleanly map to GLES 3.1 may be rejected at HAL with
+  `HalError`. See `specs/blocks/67-gles-backend.md` for the mapping
+  matrix.
 - **DirectX (D3D11/D3D12) is permanently out of scope.** The `HalXxx`
   enum stays open to additional variants, but no D3D variant is planned.
 
@@ -87,8 +90,9 @@ synchronously on poll, which keeps ported async validation tests deterministic.
 ## Key risks / decisions
 
 - **Scope**: full WebGPU + own HAL is large. Mitigation: strict TDD slices by
-  Dawn test file; Noop keeps every phase shippable without a GPU.
-- **naga**: path dep on `wgpu/naga` (decided). Needed Phase 4+.
+  Dawn test file; Noop keeps every slice shippable without a GPU.
+- **naga**: path dep on `wgpu/naga` (decided). Used for WGSL parse +
+  per-backend shader emission (MSL / SPIR-V / GLSL ES).
 - **Wire**: explicitly out of scope; no dawn-wire analog.
 - **Header drift**: pin the `webgpu.h` we bindgen against; record its commit
   in `specs/reference/dependencies.md`.
