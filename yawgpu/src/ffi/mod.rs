@@ -73,6 +73,11 @@ use crate::{
     YAWGPU_INSTANCE_BACKEND_METAL, YAWGPU_INSTANCE_BACKEND_VULKAN,
     YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
 };
+#[cfg(feature = "gles")]
+use crate::{
+    YaWGPUGlesContextBackend, YAWGPU_GLES_CONTEXT_BACKEND_DEFAULT, YAWGPU_GLES_CONTEXT_BACKEND_EGL,
+    YAWGPU_GLES_CONTEXT_BACKEND_WGL, YAWGPU_STYPE_GLES_CONTEXT_BACKEND,
+};
 #[cfg(feature = "shader-passthrough")]
 use crate::{
     YaWGPUMslEntryPoint, YaWGPUShaderModuleMslDescriptor, YaWGPUShaderModuleSpirVDescriptor,
@@ -1901,6 +1906,47 @@ unsafe fn instance_backend_selection(
     InstanceBackendSelection::Noop
 }
 
+#[cfg(feature = "gles")]
+unsafe fn gles_context_backend_choice(
+    descriptor: *const native::WGPUInstanceDescriptor,
+) -> Option<yawgpu_hal::gles::BackendChoice> {
+    let Some(descriptor) = descriptor.as_ref() else {
+        return None;
+    };
+    let mut chain = descriptor.nextInChain;
+    while let Some(node) = chain.as_ref() {
+        if node.sType == YAWGPU_STYPE_GLES_CONTEXT_BACKEND {
+            let selection =
+                &*(node as *const native::WGPUChainedStruct as *const YaWGPUGlesContextBackend);
+            return match selection.contextBackend {
+                YAWGPU_GLES_CONTEXT_BACKEND_DEFAULT => None,
+                YAWGPU_GLES_CONTEXT_BACKEND_EGL => Some(yawgpu_hal::gles::BackendChoice::Egl),
+                YAWGPU_GLES_CONTEXT_BACKEND_WGL => {
+                    #[cfg(windows)]
+                    {
+                        Some(yawgpu_hal::gles::BackendChoice::Wgl)
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        eprintln!(
+                            "yawgpu-gles: YAWGPU_GLES_CONTEXT_BACKEND_WGL is unavailable on this host; falling back to egl"
+                        );
+                        Some(yawgpu_hal::gles::BackendChoice::Egl)
+                    }
+                }
+                other => {
+                    eprintln!(
+                        "yawgpu-gles: unknown YaWGPUGlesContextBackend.contextBackend={other}; falling back to egl"
+                    );
+                    Some(yawgpu_hal::gles::BackendChoice::Egl)
+                }
+            };
+        }
+        chain = node.next;
+    }
+    None
+}
+
 unsafe fn required_features_from_descriptor(
     descriptor: &native::WGPUDeviceDescriptor,
 ) -> Vec<core::Feature> {
@@ -2215,6 +2261,106 @@ mod tests {
             requiredLimits: std::ptr::null(),
         };
         wgpuCreateInstance(&descriptor)
+    }
+
+    #[cfg(feature = "gles")]
+    fn make_instance_descriptor(
+        next_in_chain: *mut native::WGPUChainedStruct,
+    ) -> native::WGPUInstanceDescriptor {
+        native::WGPUInstanceDescriptor {
+            nextInChain: next_in_chain,
+            requiredFeatureCount: 0,
+            requiredFeatures: std::ptr::null(),
+            requiredLimits: std::ptr::null(),
+        }
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn gles_context_backend_choice_defaults_to_env_path() {
+        unsafe {
+            assert_eq!(gles_context_backend_choice(std::ptr::null()), None);
+
+            let mut selection = YaWGPUGlesContextBackend {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: YAWGPU_STYPE_GLES_CONTEXT_BACKEND,
+                },
+                contextBackend: YAWGPU_GLES_CONTEXT_BACKEND_DEFAULT,
+            };
+            let descriptor = make_instance_descriptor(&mut selection.chain);
+
+            assert_eq!(gles_context_backend_choice(&descriptor), None);
+        }
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn gles_context_backend_choice_maps_explicit_values() {
+        unsafe {
+            let mut egl_selection = YaWGPUGlesContextBackend {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: YAWGPU_STYPE_GLES_CONTEXT_BACKEND,
+                },
+                contextBackend: YAWGPU_GLES_CONTEXT_BACKEND_EGL,
+            };
+            let descriptor = make_instance_descriptor(&mut egl_selection.chain);
+
+            assert_eq!(
+                gles_context_backend_choice(&descriptor),
+                Some(yawgpu_hal::gles::BackendChoice::Egl)
+            );
+
+            let mut wgl_selection = YaWGPUGlesContextBackend {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: YAWGPU_STYPE_GLES_CONTEXT_BACKEND,
+                },
+                contextBackend: YAWGPU_GLES_CONTEXT_BACKEND_WGL,
+            };
+            let descriptor = make_instance_descriptor(&mut wgl_selection.chain);
+            #[cfg(windows)]
+            assert_eq!(
+                gles_context_backend_choice(&descriptor),
+                Some(yawgpu_hal::gles::BackendChoice::Wgl)
+            );
+            #[cfg(not(windows))]
+            assert_eq!(
+                gles_context_backend_choice(&descriptor),
+                Some(yawgpu_hal::gles::BackendChoice::Egl)
+            );
+
+            let mut unknown_selection = YaWGPUGlesContextBackend {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: YAWGPU_STYPE_GLES_CONTEXT_BACKEND,
+                },
+                contextBackend: 99,
+            };
+            let descriptor = make_instance_descriptor(&mut unknown_selection.chain);
+            assert_eq!(
+                gles_context_backend_choice(&descriptor),
+                Some(yawgpu_hal::gles::BackendChoice::Egl)
+            );
+        }
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn gles_context_backend_choice_ignores_other_chain_entries() {
+        unsafe {
+            let mut backend = YaWGPUInstanceBackendSelect {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
+                },
+                backend: YAWGPU_INSTANCE_BACKEND_GLES,
+            };
+            let descriptor = make_instance_descriptor(&mut backend.chain);
+
+            assert_eq!(gles_context_backend_choice(&descriptor), None);
+        }
     }
 
     unsafe fn request_noop_adapter(instance: native::WGPUInstance) -> native::WGPUAdapter {

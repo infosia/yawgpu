@@ -62,7 +62,8 @@ pub unsafe extern "C" fn wgpuCreateInstance(
         InstanceBackendSelection::Gles => {
             #[cfg(feature = "gles")]
             {
-                match yawgpu_hal::gles::GlesInstance::new() {
+                let context_backend = gles_context_backend_choice(descriptor);
+                match yawgpu_hal::gles::GlesInstance::new_with_choice(context_backend) {
                     Ok(instance) => {
                         let hal_instance = yawgpu_hal::HalInstance::Gles(instance);
                         if hal_instance.enumerate_adapters().is_empty() {

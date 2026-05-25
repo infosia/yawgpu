@@ -51,7 +51,11 @@ below and refined as P15.x slices land.
   **WGL** was originally out-of-scope but was added post-COMPLETE
   (2026-05-25) as a Windows-only opt-in verification path; see the
   "Context backend (Windows)" matrix row and `tracking/phase-15.md`
-  → "Post-COMPLETE — WGL fallback".
+  → "Post-COMPLETE — WGL fallback". A later post-COMPLETE addition
+  exposed `YaWGPUGlesContextBackend` /
+  `YAWGPU_STYPE_GLES_CONTEXT_BACKEND` so applications can force
+  EGL or WGL from the instance descriptor; a non-default chain value
+  wins over `YAWGPU_GLES_BACKEND`.
 
 ### Minimum GLES version
 
@@ -215,7 +219,7 @@ Entries are filled in / refined as P15.x slices land. Anything left as
 | `drawIndirect` / `drawIndexedIndirect` | `glDrawArraysIndirect` / `glDrawElementsIndirect` | ✗ Deferred — `HalRenderPass`/`HalDraw` carry no indirect variant in core |
 | `first_instance` direct | naga injects `uniform uint naga_vs_first_instance`; HAL sets it via `glUniform1ui` per draw before `glDrawArraysInstanced` | ☑ (P15.5; uniform-injection path implemented, unexercised by e2e but code path active) |
 | `first_instance` indirect | ✗ Unsupported — feature not advertised | locked ✗ |
-| Context backend (Windows) | Default: EGL (`libEGL.dll` ⇒ ANGLE platform-display cascade through Vulkan → D3D11). Opt-in fallback: WGL (`opengl32.dll` + `WGL_EXT_create_context_es2_profile`) selected via `YAWGPU_GLES_BACKEND=wgl`. Both routes converge on the same `glow::Context` API below the make-current seam; `GlesInstanceInner` / `GlesAdapter` / `GlesDeviceInner` / `GlesSurfaceInner` are static enums (`Egl(...)` / `Wgl(...)`) per CLAUDE.md "no `dyn Trait`". WGL surface (HWND): `ChoosePixelFormat`/`SetPixelFormat` with the same descriptor as the helper HWND (shared HGLRC), `wglMakeCurrent(surface.hdc, hglrc)` + glow blit + `SwapBuffers(hdc)` for present; `RestoreCurrent` Drop guard re-binds the helper HDC. | ☑ (P15.6 EGL + post-COMPLETE WGL context + post-COMPLETE WGL surface slices; WGL verified on `OpenGL ES 3.2 NVIDIA 595.95`, 12/12 e2e green + `examples/triangle` runs 60 frames clean) |
+| Context backend (Windows) | Default: EGL (`libEGL.dll` ⇒ ANGLE platform-display cascade through Vulkan → D3D11). Opt-in fallback: WGL (`opengl32.dll` + `WGL_EXT_create_context_es2_profile`) selected via `YAWGPU_GLES_BACKEND=wgl`, or programmatically through `YaWGPUGlesContextBackend` (`YAWGPU_STYPE_GLES_CONTEXT_BACKEND`) chained onto `WGPUInstanceDescriptor.nextInChain`. Resolution is chain `EGL`/`WGL` value > env var > default EGL; `DEFAULT` defers to the env var, WGL on non-Windows falls back to EGL, and the chain entry is ignored when the resolved instance backend is not GLES. Both routes converge on the same `glow::Context` API below the make-current seam; `GlesInstanceInner` / `GlesAdapter` / `GlesDeviceInner` / `GlesSurfaceInner` are static enums (`Egl(...)` / `Wgl(...)`) per CLAUDE.md "no `dyn Trait`". WGL surface (HWND): `ChoosePixelFormat`/`SetPixelFormat` with the same descriptor as the helper HWND (shared HGLRC), `wglMakeCurrent(surface.hdc, hglrc)` + glow blit + `SwapBuffers(hdc)` for present; `RestoreCurrent` Drop guard re-binds the helper HDC. | ☑ (P15.6 EGL + post-COMPLETE WGL context + post-COMPLETE WGL surface slices + programmatic override; WGL verified on `OpenGL ES 3.2 NVIDIA 595.95`, 12/12 e2e green + `examples/triangle` runs 60 frames clean) |
 | Surface (Android) | `eglCreateWindowSurface(ANativeWindow*)` via `GlesInstance::create_surface_from_android_native_window`. Reuses the existing `choose_config` (RGBA8 + GLES3 + PBUFFER_BIT). | ☑ (P15.6; code path implemented; manual visual verification via Android-side example) |
 | Surface (Windows ANGLE) | `eglCreateWindowSurface(HWND)` via `GlesInstance::create_surface_from_windows_hwnd`. ANGLE accepts the pbuffer-capable config for window surfaces too. | ☑ (P15.6; manual visual verification via `examples/triangle`) |
 | Present | Back-buffer (`GlesTexture` allocated at `configure()` with `RENDER_ATTACHMENT \| COPY_SRC`) blitted via transient read-FBO + `glBlitFramebuffer` to default FBO, then `eglSwapBuffers`. `RestoreCurrent` Drop guard re-binds the pbuffer after swap (even on error). | ☑ (P15.6) |
