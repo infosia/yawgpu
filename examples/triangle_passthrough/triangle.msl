@@ -16,6 +16,7 @@ using namespace metal;
 
 struct VertexOut {
     float4 position [[position]];
+    float3 color;
 };
 
 vertex VertexOut vs_main(uint vertex_id [[vertex_id]]) {
@@ -23,11 +24,21 @@ vertex VertexOut vs_main(uint vertex_id [[vertex_id]]) {
     //   vertex 0 -> (-1, -1), vertex 1 -> (0, +1), vertex 2 -> (+1, -1).
     float x = float(int(vertex_id) - 1);
     float y = float(int(vertex_id & 1u) * 2 - 1);
+
+    // Per-vertex RGB so the fragment stage receives an interpolated
+    // gradient (red at vertex 0, green at vertex 1, blue at vertex 2).
+    constexpr float3 colors[3] = {
+        float3(1.0, 0.0, 0.0),
+        float3(0.0, 1.0, 0.0),
+        float3(0.0, 0.0, 1.0),
+    };
+
     VertexOut out;
     out.position = float4(x, y, 0.0, 1.0);
+    out.color = colors[vertex_id];
     return out;
 }
 
-fragment float4 fs_main() {
-    return float4(1.0, 0.0, 0.0, 1.0);
+fragment float4 fs_main(VertexOut in [[stage_in]]) {
+    return float4(in.color, 1.0);
 }

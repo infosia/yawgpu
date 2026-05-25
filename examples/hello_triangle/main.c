@@ -1,12 +1,15 @@
 // hello_triangle — a windowed triangle fed from a vertex buffer.
 //
-// This is a port of Dawn's HelloTriangle sample. It draws the same red
-// triangle as the `triangle` example, but the difference is instructive:
-// here the vertex positions come from a real *vertex buffer* uploaded to
-// the GPU, instead of being generated inside the vertex shader from the
-// built-in vertex index. That means this example additionally shows:
-//   * uploading vertex data to a Vertex-usage buffer,
-//   * describing the buffer's layout to the pipeline (stride + attribute),
+// This is a port of Dawn's HelloTriangle sample. It draws the same
+// RGB-corner gradient triangle as the `triangle` example, but the
+// difference is instructive: here the vertex positions AND colors come
+// from a real *vertex buffer* uploaded to the GPU, instead of being
+// generated inside the vertex shader from the built-in vertex index.
+// That means this example additionally shows:
+//   * uploading interleaved vertex data (pos + color) to a Vertex-usage
+//     buffer,
+//   * describing the buffer's layout to the pipeline (stride + two
+//     attributes at different byte offsets / shader locations),
 //   * binding the buffer each frame with SetVertexBuffer before drawing.
 // Everything else (surface, swapchain, per-frame loop) mirrors `triangle`.
 
@@ -23,12 +26,14 @@ typedef struct HelloTriangleApp {
     WGPURenderPipeline pipeline;
 } HelloTriangleApp;
 
-// Three vertices as vec4 clip-space positions (x, y, z, w), one per row:
-// top-center, bottom-left, bottom-right.
-static const float vertices[12] = {
-    0.0f, 0.5f, 0.0f, 1.0f,
-    -0.5f, -0.5f, 0.0f, 1.0f,
-    0.5f, -0.5f, 0.0f, 1.0f,
+// Three vertices, each a vec4 clip-space position (x, y, z, w) followed
+// by a vec3 RGB color (r, g, b) — top-center red, bottom-left green,
+// bottom-right blue. The pipeline interpolates the color across the
+// surface to produce a per-vertex gradient.
+static const float vertices[21] = {
+     0.0f,  0.5f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, // top:    red
+    -0.5f, -0.5f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, // BL:     green
+     0.5f, -0.5f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // BR:     blue
 };
 
 static bool hello_triangle_choose_surface_format(WGPUSurface surface,
@@ -124,21 +129,28 @@ static bool hello_triangle_create_pipeline(HelloTriangleApp *app, WGPUTextureFor
         return false;
     }
 
-    // Describe how the pipeline reads the vertex buffer. One attribute:
-    // a vec4<f32> at byte offset 0, delivered to @location(0) in the
-    // vertex shader.
-    WGPUVertexAttribute vertex_attribute = {
-        .format = WGPUVertexFormat_Float32x4,
-        .offset = 0,
-        .shaderLocation = 0,
+    // Describe how the pipeline reads the vertex buffer. Two attributes:
+    //   * a vec4<f32> position at byte offset 0   → @location(0)
+    //   * a vec3<f32> color    at byte offset 16  → @location(1)
+    WGPUVertexAttribute vertex_attributes[2] = {
+        {
+            .format = WGPUVertexFormat_Float32x4,
+            .offset = 0,
+            .shaderLocation = 0,
+        },
+        {
+            .format = WGPUVertexFormat_Float32x3,
+            .offset = 4 * sizeof(float),
+            .shaderLocation = 1,
+        },
     };
-    // The buffer holds one vec4 per vertex, so the stride between vertices
-    // is 4 floats; stepMode=Vertex advances one stride per vertex.
+    // Each vertex is 4 floats of position + 3 floats of color = 7 floats;
+    // stepMode=Vertex advances one stride per vertex.
     WGPUVertexBufferLayout vertex_buffer_layout = {
-        .arrayStride = 4 * sizeof(float),
+        .arrayStride = 7 * sizeof(float),
         .stepMode = WGPUVertexStepMode_Vertex,
-        .attributeCount = 1,
-        .attributes = &vertex_attribute,
+        .attributeCount = 2,
+        .attributes = vertex_attributes,
     };
     app->pipeline = wgpuDeviceCreateRenderPipeline(
         app->context.device,

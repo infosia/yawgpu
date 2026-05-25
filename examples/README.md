@@ -46,6 +46,6 @@ GLFW, and Linux windowed examples are not enabled in this phase.
 
 `surface_smoke` opens a window, clears the swapchain to a slate color for about 60 frames or until the window is closed, and then exits.
 
-`triangle` opens a window, draws a red triangle on a black background for about 60 frames or until the window is closed, and then exits with status 0.
+`triangle` opens a window, draws an RGB-corner gradient triangle (red / green / blue at the three vertices, smoothly interpolated across the surface) on a black background for about 60 frames or until the window is closed, and then exits with status 0.
 
-`hello_triangle` is the Dawn HelloTriangle port and has the same prerequisites as `triangle`. It draws the same red-on-black triangle for about 60 frames, but feeds positions from a vertex buffer instead of P9.3's `@builtin(vertex_index)` shader.
+`hello_triangle` is the Dawn HelloTriangle port and has the same prerequisites as `triangle`. It draws the same RGB-corner gradient triangle for about 60 frames, but feeds positions **and** per-vertex colors from a real (interleaved) vertex buffer instead of deriving them in the shader from P9.3's `@builtin(vertex_index)`.
