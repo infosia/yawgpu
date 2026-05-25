@@ -18,16 +18,26 @@ struct YawgpuWindow {
     CAMetalLayer *layer;
 };
 
+// Live-window refcount so `glfwInit` is called once before the first window
+// and `glfwTerminate` only fires after the last one goes away. Matches the
+// `yawgpu_window_count` pattern in framework_windows.c. Examples are
+// single-threaded (GLFW requires the main thread anyway), so no atomic.
+static int yawgpu_window_count = 0;
+
 YawgpuWindow *yawgpu_window_create(int width, int height, const char *title) {
-    if (!glfwInit()) {
-        return NULL;
+    if (yawgpu_window_count == 0) {
+        if (!glfwInit()) {
+            return NULL;
+        }
     }
     // GLFW would create an OpenGL context by default; NO_API disables that
     // since we drive the surface through Metal/Vulkan ourselves.
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     GLFWwindow *handle = glfwCreateWindow(width, height, title, NULL, NULL);
     if (!handle) {
-        glfwTerminate();
+        if (yawgpu_window_count == 0) {
+            glfwTerminate();
+        }
         return NULL;
     }
 
@@ -48,11 +58,14 @@ YawgpuWindow *yawgpu_window_create(int width, int height, const char *title) {
     if (!window) {
         [layer release];
         glfwDestroyWindow(handle);
-        glfwTerminate();
+        if (yawgpu_window_count == 0) {
+            glfwTerminate();
+        }
         return NULL;
     }
     window->handle = handle;
     window->layer = layer;
+    ++yawgpu_window_count;
     return window;
 }
 
@@ -67,7 +80,13 @@ void yawgpu_window_destroy(YawgpuWindow *window) {
         glfwDestroyWindow(window->handle);
     }
     free(window);
-    glfwTerminate();
+
+    if (yawgpu_window_count > 0) {
+        --yawgpu_window_count;
+    }
+    if (yawgpu_window_count == 0) {
+        glfwTerminate();
+    }
 }
 
 bool yawgpu_window_should_close(YawgpuWindow *window) {
