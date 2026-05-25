@@ -22,7 +22,7 @@ Dawn's tests as the spec.
 | Tier | Backends | Notes |
 |---|---|---|
 | **Tier 1 — Supported** | Vulkan, Metal | webgpu.h semantics fully mapped; real-GPU conformance verified for the bring-up scope landed so far. |
-| **Tier 2 — Experimental (best-effort)** | GLES (Android + Windows) | Opt-in `gles` cargo feature; never in `default`. Paths that do not cleanly map to GLES 3.1 may be rejected at the HAL layer with `HalError` (surfaced as a device error by `yawgpu-core`). Core validation is identical regardless of tier. On Windows the default context backend is ANGLE; an opt-in WGL fallback (`YAWGPU_GLES_BACKEND=wgl`) bypasses ANGLE and uses the host GL driver via `WGL_EXT_create_context_es2_profile` for environments where the locally available ANGLE caps at ES 3.0. See `CLAUDE.md` "Backend support tiers" and `specs/blocks/67-gles-backend.md`. |
+| **Tier 2 — Experimental (best-effort)** | GLES (Android + Windows) | Opt-in `gles` cargo feature; never in `default`. Paths that do not cleanly map to GLES 3.1 may be rejected at the HAL layer with `HalError` (surfaced as a device error by `yawgpu-core`). Core validation is identical regardless of tier. On Windows the default context backend is ANGLE; an opt-in WGL fallback bypasses ANGLE and uses the host GL driver via `WGL_EXT_create_context_es2_profile` for environments where the locally available ANGLE caps at ES 3.0 — selected through either the `YAWGPU_GLES_BACKEND=wgl` env var or the `YaWGPUGlesContextBackend` chain entry on `WGPUInstanceDescriptor.nextInChain` (chain wins; see `specs/blocks/67-gles-backend.md` "Context backend (Windows)" row). See `CLAUDE.md` "Backend support tiers" and `specs/blocks/67-gles-backend.md`. |
 
 D3D11/D3D12 remain permanently out of scope.
 

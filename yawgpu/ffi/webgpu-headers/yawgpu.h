@@ -158,7 +158,7 @@ typedef struct YaWGPUGlesContextBackend {
 
 /** Default initializer for @ref YaWGPUGlesContextBackend. */
 #define YAWGPU_GLES_CONTEXT_BACKEND_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUGlesContextBackend, { \
-    /*.chain=*/{NULL, YAWGPU_STYPE_GLES_CONTEXT_BACKEND} _wgpu_COMMA \
+    /*.chain=*/{NULL _wgpu_COMMA YAWGPU_STYPE_GLES_CONTEXT_BACKEND} _wgpu_COMMA \
     /*.contextBackend=*/YAWGPU_GLES_CONTEXT_BACKEND_DEFAULT _wgpu_COMMA \
 })
 
