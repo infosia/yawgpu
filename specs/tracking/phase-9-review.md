@@ -120,10 +120,14 @@ struct and `HalPresentMode` enum.
   uses `fopen(path, "rb")`. CMake stages `shader.wgsl` next to
   the binary but `fopen` resolves relative to CWD. Running
   from the repo root yields a "failed to load shader.wgsl"
-  error. Phase-9.md notes Claude ran "from the binary's dir";
-  `examples/README.md` does not. **Deferred** — a one-line
-  README note suffices; a more robust `dladdr` /
-  `argv[0]+dirname` fix is a polish task.
+  error.
+  **Closed 2026-05-25** — added `yawgpu_set_argv0(argv0)` to the
+  framework; when called, `yawgpu_load_wgsl_shader` resolves
+  relative paths against the binary's directory derived from
+  `argv[0]`. `triangle` / `hello_triangle` now forward
+  `argv[0]` from `main`; absolute paths and the legacy
+  cwd-relative behaviour (when `yawgpu_set_argv0` is not
+  called) remain supported byte-for-byte.
 
 ### m3 — `MetalSurface::present` uses `drawable.present()`
 - `yawgpu-hal/src/metal/mod.rs` — Apple's canonical pattern is
@@ -156,15 +160,25 @@ struct and `HalPresentMode` enum.
 
 ### m6 — `surface_smoke/main.c` is less defensive than `triangle`/`hello_triangle`
 - `examples/surface_smoke/main.c` — no `if (!commands)` check
-  after `wgpuCommandEncoderFinish`. **Deferred** — finish does
-  not return NULL on the clear-only smoke path; example
-  consistency only.
+  after `wgpuCommandEncoderFinish`.
+  **Closed 2026-05-25** — verified the
+  `surface_smoke/main.c:197-203` `if (!commands)` branch is
+  already present and matches the `triangle` / `hello_triangle`
+  pattern (released elsewhere; spec entry was stale). No code
+  change.
 
 ### m7 — Example failure paths leak handles before exit
 - `examples/compute/main.c`, `examples/device_info/main.c`
   return EXIT_FAILURE on map/finish failure without going
-  through the cleanup block. **Deferred** — OS reclaims at
-  process exit; not a leak in any meaningful sense.
+  through the cleanup block.
+  **Closed 2026-05-25** — `compute/main.c` rewritten to use
+  `goto cleanup;` with an `exit_status` and `mapped` flag so
+  both failure sites (`map_state` not Success, `GetConstMappedRange`
+  returning null) tear down every allocated handle in the
+  same order as the success path. `device_info/main.c` was
+  already correct — its single failure path at lines 121-127
+  already calls `yawgpu_context_release` before
+  `EXIT_FAILURE` (spec entry was stale).
 
 ## Fix log (2026-05-20)
 

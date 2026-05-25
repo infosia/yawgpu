@@ -266,6 +266,54 @@ void yawgpu_context_release(YawgpuContext *context) {
     context->instance = NULL;
 }
 
+// Directory part of argv[0] (with trailing separator), or "" when the
+// caller hasn't called yawgpu_set_argv0 — in which case yawgpu_load_wgsl_shader
+// falls back to the original cwd-relative behaviour.
+static char g_binary_dir_prefix[1024] = "";
+
+void yawgpu_set_argv0(const char *argv0) {
+    g_binary_dir_prefix[0] = '\0';
+    if (!argv0) {
+        return;
+    }
+    const char *fwd = strrchr(argv0, '/');
+    const char *bwd = strrchr(argv0, '\\');
+    const char *slash = (fwd && bwd) ? (fwd > bwd ? fwd : bwd) : (fwd ? fwd : bwd);
+    if (!slash) {
+        return;
+    }
+    size_t length = (size_t)(slash - argv0 + 1);
+    if (length >= sizeof(g_binary_dir_prefix)) {
+        return;
+    }
+    memcpy(g_binary_dir_prefix, argv0, length);
+    g_binary_dir_prefix[length] = '\0';
+}
+
+// Returns a malloc'd path: when the prefix is set and `path` is relative,
+// `prefix + path`; otherwise a copy of `path`. NULL on alloc failure.
+static char *resolve_shader_path(const char *path) {
+    bool is_absolute = path[0] == '/' || path[0] == '\\' ||
+                       (path[0] != '\0' && path[1] == ':');
+    if (g_binary_dir_prefix[0] == '\0' || is_absolute) {
+        size_t length = strlen(path);
+        char *out = (char *)malloc(length + 1);
+        if (out) {
+            memcpy(out, path, length + 1);
+        }
+        return out;
+    }
+    size_t prefix_len = strlen(g_binary_dir_prefix);
+    size_t path_len = strlen(path);
+    char *out = (char *)malloc(prefix_len + path_len + 1);
+    if (!out) {
+        return NULL;
+    }
+    memcpy(out, g_binary_dir_prefix, prefix_len);
+    memcpy(out + prefix_len, path, path_len + 1);
+    return out;
+}
+
 // Reads an entire file into a newly-allocated, NUL-terminated buffer.
 // Returns NULL (after printing the reason) on any I/O failure; the caller
 // frees the result.
@@ -313,12 +361,19 @@ static char *read_file(const char *path, size_t *length_out) {
 // WGPUShaderSourceWGSL struct chained onto the shader-module descriptor —
 // the standard way to pass shader text across the C ABI.
 //
-// Note: `path` is resolved relative to the current working directory, so
-// run the example binaries from their own directory (the build copies each
-// shader.wgsl next to its binary).
+// Path resolution: absolute paths are used as-is. Relative paths are
+// resolved against the directory prefix set by yawgpu_set_argv0() if any;
+// otherwise they remain cwd-relative (matches pre-existing behaviour for
+// callers that don't forward argv[0]). CMake stages each example's WGSL
+// next to its binary, so the prefix lets binaries run from any cwd.
 WGPUShaderModule yawgpu_load_wgsl_shader(WGPUDevice device, const char *path) {
+    char *resolved = resolve_shader_path(path);
+    if (!resolved) {
+        return NULL;
+    }
     size_t length = 0;
-    char *source = read_file(path, &length);
+    char *source = read_file(resolved, &length);
+    free(resolved);
     if (!source) {
         return NULL;
     }

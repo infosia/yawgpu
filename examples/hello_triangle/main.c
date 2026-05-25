@@ -362,7 +362,11 @@ static bool hello_triangle_render_frame(const HelloTriangleApp *app) {
     return true;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    // Let the framework resolve `shader.wgsl` next to this binary regardless
+    // of cwd. Safe to call with NULL.
+    yawgpu_set_argv0(argc > 0 ? argv[0] : NULL);
+
     HelloTriangleApp app = {0};
     if (!hello_triangle_app_init(&app)) {
         hello_triangle_app_destroy(&app);
