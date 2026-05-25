@@ -41,7 +41,11 @@ static void map_callback(WGPUMapAsyncStatus status,
     }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    // Let the framework resolve `shader.wgsl` next to this binary regardless
+    // of cwd. Safe to call with NULL.
+    yawgpu_set_argv0(argc > 0 ? argv[0] : NULL);
+
     uint32_t input[] = {1, 2, 3, 4};
     const size_t byte_size = sizeof(input);
     const uint32_t element_count = (uint32_t)(byte_size / sizeof(input[0]));
@@ -183,10 +187,14 @@ int main(void) {
         });
     yawgpu_wait_for_future(context.instance, map_future);
 
+    int exit_status = EXIT_SUCCESS;
+    bool mapped = false;
     if (!map_state.called || map_state.status != WGPUMapAsyncStatus_Success) {
         fprintf(stderr, "readback map did not complete successfully\n");
-        return EXIT_FAILURE;
+        exit_status = EXIT_FAILURE;
+        goto cleanup;
     }
+    mapped = true;
 
     // Once mapped, GetConstMappedRange yields a CPU pointer into the
     // buffer's bytes that stays valid until wgpuBufferUnmap is called.
@@ -194,7 +202,8 @@ int main(void) {
         (const uint32_t *)wgpuBufferGetConstMappedRange(readback, 0, byte_size);
     if (!result) {
         fprintf(stderr, "readback mapped range is null\n");
-        return EXIT_FAILURE;
+        exit_status = EXIT_FAILURE;
+        goto cleanup;
     }
 
     // On a real backend this prints the Collatz step of each input
@@ -210,9 +219,13 @@ int main(void) {
         wgpuAdapterInfoFreeMembers(adapter_info);
     }
 
-    // Unmap invalidates `result`, then release every handle (reverse order)
-    // and tear down the context.
-    wgpuBufferUnmap(readback);
+cleanup:
+    // Unmap (if still mapped) invalidates `result`, then release every handle
+    // (reverse order) and tear down the context. Reached from both the
+    // success path and the early-failure `goto`s above.
+    if (mapped) {
+        wgpuBufferUnmap(readback);
+    }
     wgpuCommandBufferRelease(commands);
     wgpuCommandEncoderRelease(encoder);
     wgpuBindGroupRelease(bind_group);
@@ -223,5 +236,5 @@ int main(void) {
     wgpuShaderModuleRelease(shader);
     wgpuQueueRelease(queue);
     yawgpu_context_release(&context);
-    return EXIT_SUCCESS;
+    return exit_status;
 }

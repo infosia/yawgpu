@@ -67,7 +67,16 @@ YawgpuContext yawgpu_context_create(void);
 // Releases whatever handles a context holds; safe on a zeroed/partial one.
 void yawgpu_context_release(YawgpuContext *context);
 
+// Stores the directory part of `argv0` as a path prefix that
+// yawgpu_load_wgsl_shader prepends to relative paths. Lets callers run
+// example binaries from any cwd as long as `main` forwards `argv[0]`.
+// Pass NULL (or omit the call) to keep the legacy cwd-relative behaviour.
+void yawgpu_set_argv0(const char *argv0);
+
 // Reads a WGSL file from `path` and compiles it into a shader module.
+// Absolute paths are used as-is; relative paths are resolved against the
+// prefix set via yawgpu_set_argv0() if non-empty, otherwise against the
+// current working directory (legacy behaviour).
 WGPUShaderModule yawgpu_load_wgsl_shader(WGPUDevice device, const char *path);
 // Creates a buffer (mappedAtCreation) and memcpy's `contents` into it.
 WGPUBuffer yawgpu_create_buffer_init(WGPUDevice device,
