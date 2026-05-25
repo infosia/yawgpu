@@ -5,7 +5,7 @@
 //! so the GLES e2e tests can run against the host GL driver without ANGLE.
 
 use std::ffi::CString;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use glow::HasContext;
@@ -16,8 +16,8 @@ use windows_sys::Win32::Graphics::OpenGL::{
     wglCreateContext, wglDeleteContext, wglGetProcAddress, wglMakeCurrent, HGLRC,
 };
 use windows_sys::Win32::Graphics::OpenGL::{
-    ChoosePixelFormat, SetPixelFormat, PFD_DOUBLEBUFFER, PFD_DRAW_TO_WINDOW, PFD_MAIN_PLANE,
-    PFD_SUPPORT_OPENGL, PFD_TYPE_RGBA, PIXELFORMATDESCRIPTOR,
+    ChoosePixelFormat, SetPixelFormat, SwapBuffers, PFD_DOUBLEBUFFER, PFD_DRAW_TO_WINDOW,
+    PFD_MAIN_PLANE, PFD_SUPPORT_OPENGL, PFD_TYPE_RGBA, PIXELFORMATDESCRIPTOR,
 };
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -34,10 +34,12 @@ const WGL_CONTEXT_MINOR_VERSION_ARB: i32 = 0x2092;
 const WGL_CONTEXT_PROFILE_MASK_ARB: i32 = 0x9126;
 const WGL_CONTEXT_ES2_PROFILE_BIT_EXT: i32 = 0x0000_0004;
 static NEXT_CLASS_ID: AtomicU64 = AtomicU64::new(1);
+static REPORTED_MISSING_SWAP_INTERVAL: AtomicBool = AtomicBool::new(false);
 
 type WglCreateContextAttribsArbFn =
     unsafe extern "system" fn(hdc: HDC, share_context: HGLRC, attribs: *const i32) -> HGLRC;
 type WglGetExtensionsStringArbFn = unsafe extern "system" fn(hdc: HDC) -> *const i8;
+type WglSwapIntervalExtFn = unsafe extern "system" fn(interval: i32) -> i32;
 
 pub(super) struct WglInstanceState {
     opengl32: HMODULE,
@@ -104,6 +106,39 @@ impl WglInstanceState {
             hinstance,
             class_name,
         })
+    }
+
+    pub(super) fn create_window_surface(&self, hwnd: HWND) -> Result<WglSurfaceState, HalError> {
+        let hdc = unsafe { GetDC(hwnd) };
+        if hdc.is_null() {
+            return Err(HalError::SwapchainCreationFailed {
+                backend: BACKEND,
+                message: "GetDC on user HWND failed",
+            });
+        }
+
+        let pfd = build_pixel_format_descriptor();
+        let pixel_format = unsafe { ChoosePixelFormat(hdc, &pfd) };
+        if pixel_format == 0 {
+            unsafe {
+                let _ = ReleaseDC(hwnd, hdc);
+            }
+            return Err(HalError::SwapchainCreationFailed {
+                backend: BACKEND,
+                message: "ChoosePixelFormat on user HWND failed",
+            });
+        }
+        if unsafe { SetPixelFormat(hdc, pixel_format, &pfd) } == 0 {
+            unsafe {
+                let _ = ReleaseDC(hwnd, hdc);
+            }
+            return Err(HalError::SwapchainCreationFailed {
+                backend: BACKEND,
+                message: "SetPixelFormat on user HWND failed",
+            });
+        }
+
+        Ok(WglSurfaceState { hwnd, hdc })
     }
 }
 
@@ -296,6 +331,26 @@ impl WglDeviceState {
         self.current_lock.lock()
     }
 
+    pub(super) fn gl(&self) -> &glow::Context {
+        &self.gl
+    }
+
+    pub(super) fn make_current_on_hdc(&self, hdc: HDC) -> Result<(), HalError> {
+        if unsafe { wglMakeCurrent(hdc, self.hglrc) } == 0 {
+            return Err(HalError::PresentFailed {
+                backend: BACKEND,
+                message: "wglMakeCurrent(window) failed",
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn restore_current(&self) {
+        unsafe {
+            let _ = wglMakeCurrent(self.hdc, self.hglrc);
+        }
+    }
+
     pub(super) fn with_current_context<R>(
         &self,
         f: impl FnOnce(&glow::Context) -> R,
@@ -305,6 +360,59 @@ impl WglDeviceState {
             return Err(HalError::QueueSubmissionFailed { backend: BACKEND });
         }
         Ok(f(&self.gl))
+    }
+}
+
+pub(super) struct WglSurfaceState {
+    hwnd: HWND,
+    hdc: HDC,
+}
+
+// SAFETY: The HWND/HDC are immutable handles. GL access is serialized by the
+// configured device's context lock in `surface.rs`.
+unsafe impl Send for WglSurfaceState {}
+// SAFETY: See the `Send` impl.
+unsafe impl Sync for WglSurfaceState {}
+
+impl WglSurfaceState {
+    pub(super) fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
+
+    pub(super) fn hdc(&self) -> HDC {
+        self.hdc
+    }
+}
+
+pub(super) fn release_surface_dc(surface: &WglSurfaceState) {
+    unsafe {
+        let _ = wglMakeCurrent(std::ptr::null_mut(), std::ptr::null_mut());
+        let _ = ReleaseDC(surface.hwnd(), surface.hdc());
+    }
+}
+
+pub(super) fn swap_buffers(hdc: HDC) -> Result<(), HalError> {
+    if unsafe { SwapBuffers(hdc) } == 0 {
+        return Err(HalError::PresentFailed {
+            backend: BACKEND,
+            message: "SwapBuffers failed",
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn swap_interval(interval: i32) {
+    let Some(wgl_swap_interval) = load_wgl_proc::<WglSwapIntervalExtFn>("wglSwapIntervalEXT")
+    else {
+        if !REPORTED_MISSING_SWAP_INTERVAL.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "yawgpu-gles: wglSwapIntervalEXT not found; present mode interval is a no-op"
+            );
+        }
+        return;
+    };
+    unsafe {
+        let _ = wgl_swap_interval(interval);
     }
 }
 
@@ -334,6 +442,12 @@ fn create_helper_window(wgl_state: &WglInstanceState) -> Result<HWND, HalError> 
 }
 
 fn set_pixel_format(hdc: HDC) -> bool {
+    let pfd = build_pixel_format_descriptor();
+    let pixel_format = unsafe { ChoosePixelFormat(hdc, &pfd) };
+    pixel_format != 0 && unsafe { SetPixelFormat(hdc, pixel_format, &pfd) } != 0
+}
+
+fn build_pixel_format_descriptor() -> PIXELFORMATDESCRIPTOR {
     let mut pfd: PIXELFORMATDESCRIPTOR = unsafe { std::mem::zeroed() };
     pfd.nSize = std::mem::size_of::<PIXELFORMATDESCRIPTOR>() as u16;
     pfd.nVersion = 1;
@@ -344,9 +458,7 @@ fn set_pixel_format(hdc: HDC) -> bool {
     pfd.cDepthBits = 24;
     pfd.cStencilBits = 8;
     pfd.iLayerType = PFD_MAIN_PLANE as u8;
-
-    let pixel_format = unsafe { ChoosePixelFormat(hdc, &pfd) };
-    pixel_format != 0 && unsafe { SetPixelFormat(hdc, pixel_format, &pfd) } != 0
+    pfd
 }
 
 fn destroy_dummy_and_window(dummy_context: HGLRC, hwnd: HWND, hdc: HDC) {
@@ -379,4 +491,29 @@ fn load_wgl_proc<T>(name: &str) -> Option<T> {
     let cname = CString::new(name).ok()?;
     let proc = unsafe { wglGetProcAddress(cname.as_ptr() as *const u8) }?;
     Some(unsafe { std::mem::transmute_copy(&proc) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_pixel_format_descriptor_matches_wgl_surface_contract() {
+        let pfd = build_pixel_format_descriptor();
+        assert_eq!(
+            pfd.nSize,
+            std::mem::size_of::<PIXELFORMATDESCRIPTOR>() as u16
+        );
+        assert_eq!(pfd.nVersion, 1);
+        assert_eq!(
+            pfd.dwFlags,
+            PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER
+        );
+        assert_eq!(pfd.iPixelType, PFD_TYPE_RGBA);
+        assert_eq!(pfd.cColorBits, 32);
+        assert_eq!(pfd.cAlphaBits, 8);
+        assert_eq!(pfd.cDepthBits, 24);
+        assert_eq!(pfd.cStencilBits, 8);
+        assert_eq!(pfd.iLayerType, PFD_MAIN_PLANE as u8);
+    }
 }

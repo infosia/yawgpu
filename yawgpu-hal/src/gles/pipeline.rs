@@ -230,11 +230,14 @@ fn validate_render_pipeline_descriptor(
     descriptor: &HalRenderPipelineDescriptor,
 ) -> Result<(), HalError> {
     if descriptor.color_formats.len() != 1
-        || descriptor.color_formats[0] != HalTextureFormat::Rgba8Unorm
+        || !matches!(
+            descriptor.color_formats[0],
+            HalTextureFormat::Rgba8Unorm | HalTextureFormat::Bgra8Unorm
+        )
     {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
-            message: "GLES P15.5 render pipeline supports exactly one RGBA8Unorm color target",
+            message: "GLES P15.5 render pipeline supports exactly one RGBA8Unorm or BGRA8Unorm color target",
         });
     }
     if descriptor.depth_stencil.is_some() {
