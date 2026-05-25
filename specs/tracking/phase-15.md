@@ -1174,6 +1174,55 @@ runs locally when changing GLES code paths that touch Android-
 relevant arms (EGL display creation, ANativeWindow surface,
 non-Windows make-current).
 
+## Post-COMPLETE — iOS aarch64 cross-build verified (Metal) *(☑ DONE 2026-05-25)*
+
+First cross-build of the Metal backend for iOS targets
+(`aarch64-apple-ios` real-device + `aarch64-apple-ios-sim`
+Apple-Silicon simulator) from a macOS arm64 host with Xcode
+26.5 / iOS SDK 26.5. Closes the implicit "does the Metal code
+actually compile for iOS, not just macOS?" gap — until now,
+Metal had only been built and verified for `aarch64-apple-
+darwin`.
+
+Logged here (rather than in a Phase 7 / Metal-specific
+tracking file) for parity with the Android cross-build entry
+immediately above — both are "post-Phase-15, post-COMPLETE
+platform verifications" exercised in the same session.
+
+Setup: nothing beyond Xcode + `rustup target add`. The Apple
+toolchain auto-resolves the iOS sysroot via `xcrun`, and
+bindgen picks up the Apple SDK on its own — no analog to the
+Android `BINDGEN_EXTRA_CLANG_ARGS_*` env var is needed.
+
+```
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+cargo build --release --target aarch64-apple-ios     -p yawgpu --features "metal mobile"
+cargo build --release --target aarch64-apple-ios-sim -p yawgpu --features "metal mobile"
+```
+
+Result on this host (M2, macOS 26.0, Xcode 26.5):
+- `cargo check --target aarch64-apple-ios     -p yawgpu --features metal` → green in 52s
+- `cargo build --release --target aarch64-apple-ios     -p yawgpu --features metal`        → green in 19s, **zero warnings**
+- `cargo build --release --target aarch64-apple-ios     -p yawgpu --features "metal mobile"` → green in 14s, **zero warnings**
+- `cargo build --release --target aarch64-apple-ios-sim -p yawgpu --features "metal mobile"` → green in 23s, **zero warnings**
+- Artifacts: `libyawgpu.{a,dylib,rlib}` under
+  `target/aarch64-apple-ios{,-sim}/release/`. Both dylibs are
+  Mach-O 64-bit ARM64. The device dylib carries
+  `LC_VERSION_MIN_IPHONEOS` + sdk 26.5; the simulator dylib
+  carries `LC_BUILD_VERSION platform=iOSSimulator` (`7`) +
+  minos 14.0 + sdk 26.5.
+
+`MTLCopyAllDevices()` is used in
+`yawgpu-hal/src/metal/mod.rs:64` and is conventionally
+"macOS-only" in Apple's docs, but `objc2-metal v0.3.2` exposes
+it for all Apple platforms — the iOS link succeeds. Real-iOS
+runtime behaviour (does the call return an empty array? does
+it weak-link?) is a downstream concern for the first iOS
+integrator; build-side, nothing further is needed.
+
+CI policy unchanged: iOS cross-build is not added to the
+default gate. Manual verification step, same as Android.
+
 ## Open follow-ups (carried from `blocks/67-gles-backend.md`)
 
 - naga `glsl-out` coverage smoke for Phase 7 e2e shaders.
