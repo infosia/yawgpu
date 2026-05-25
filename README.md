@@ -276,6 +276,32 @@ On Linux hosts replace `darwin-x86_64` with `linux-x86_64`. The
 target API level (`24` above) is the Vulkan / GLES 3.1 floor;
 raise it if a dependency demands a newer one.
 
+### Cross-building for iOS
+
+The Metal backend cross-builds for both real iOS devices and
+the Apple-Silicon iOS simulator (verified 2026-05-25 from a
+macOS arm64 host with Xcode 26.5 / iOS SDK 26.5). No extra
+toolchain setup is required — the Apple `cc` / linker found
+via `xcrun` handles sysroot resolution automatically, and
+`build.rs`'s bindgen pass picks up the right Apple SDK on its
+own.
+
+```sh
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+
+# Real iOS devices (arm64)
+cargo build --release --target aarch64-apple-ios     -p yawgpu --features metal
+cargo build --release --target aarch64-apple-ios     -p yawgpu --features "metal mobile"
+
+# iOS Simulator on Apple Silicon
+cargo build --release --target aarch64-apple-ios-sim -p yawgpu --features "metal mobile"
+```
+
+Produces `libyawgpu.{a,dylib,rlib}` under
+`target/aarch64-apple-ios{,-sim}/release/`. The dylibs are
+tagged `LC_VERSION_MIN_IPHONEOS` (device) and `LC_BUILD_VERSION
+platform=iOSSimulator` (sim).
+
 ## Using it from Rust
 
 The same entry points are available as a normal Rust crate (`rlib`); the
@@ -385,6 +411,12 @@ SPIR-V or MSL straight to the backend; see
     "Cross-building for Android" above), including the `mobile`
     extension combo (`shader-passthrough` + `tiled`). Real-device
     runtime verification is left to downstream integrators.
+  - **iOS (`aarch64-apple-ios` + `aarch64-apple-ios-sim`)** — the
+    Metal backend cross-builds for both real devices and the
+    Apple-Silicon iOS Simulator from a macOS arm64 host with Xcode
+    26.5 / iOS SDK 26.5, including the `mobile` extension combo
+    (see "Cross-building for iOS" above). Real-device runtime
+    verification is left to downstream integrators.
 
 ## License
 
