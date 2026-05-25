@@ -3,6 +3,15 @@
 //! This module owns the Windows ANGLE / EGL bring-up path. Resource
 //! implementations not covered by the current phase remain unavailable stubs.
 
+// The static-enum dispatch pattern (CLAUDE.md "no `dyn Trait`") gives
+// `GlesInstanceInner` / `GlesSurfaceInner` exactly one variant on
+// non-Windows (the `Wgl` arm is `#[cfg(windows)]`-gated), which makes
+// every `if let GlesInstanceInner::Egl(_) = ...` / `let ... else` in
+// this module trivially irrefutable on those targets. The patterns
+// themselves are correct and stay refutable on Windows; suppress the
+// lint at module scope rather than annotating each call site.
+#![allow(irrefutable_let_patterns)]
+
 mod adapter;
 mod buffer;
 mod device;

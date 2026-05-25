@@ -11,14 +11,25 @@ pub(super) type EglSurface = egl::Surface;
 
 // ANGLE platform-selection constants (EGL_ANGLE_platform_angle extension).
 // Not exported by khronos-egl; declared here. Values from ANGLE's
-// EGL/eglext_angle.h.
+// EGL/eglext_angle.h. Only consumed by the Windows ANGLE
+// platform-display cascade in `get_and_initialize_display`, so gate the
+// declarations to `cfg(windows)` to keep non-Windows builds clean under
+// `-D warnings`.
+#[cfg(windows)]
 pub(super) const EGL_PLATFORM_ANGLE_ANGLE: egl::Enum = 0x3202;
+#[cfg(windows)]
 pub(super) const EGL_PLATFORM_ANGLE_TYPE_ANGLE: egl::Attrib = 0x3203;
+#[cfg(windows)]
 pub(super) const EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE: egl::Attrib = 0x3208;
+#[cfg(windows)]
 pub(super) const EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE: egl::Attrib = 0x3450;
+#[cfg(windows)]
 pub(super) const EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE: egl::Attrib = 0x3209;
+#[cfg(windows)]
 pub(super) const EGL_PLATFORM_ANGLE_DEVICE_TYPE_HARDWARE_ANGLE: egl::Attrib = 0x320A;
+#[cfg(windows)]
 pub(super) const EGL_PLATFORM_ANGLE_MAX_VERSION_MAJOR_ANGLE: egl::Attrib = 0x3210;
+#[cfg(windows)]
 pub(super) const EGL_PLATFORM_ANGLE_MAX_VERSION_MINOR_ANGLE: egl::Attrib = 0x3211;
 
 /// Acquires the EGL display that gives the best chance of an ES 3.1

@@ -1910,9 +1910,7 @@ unsafe fn instance_backend_selection(
 unsafe fn gles_context_backend_choice(
     descriptor: *const native::WGPUInstanceDescriptor,
 ) -> Option<yawgpu_hal::gles::BackendChoice> {
-    let Some(descriptor) = descriptor.as_ref() else {
-        return None;
-    };
+    let descriptor = descriptor.as_ref()?;
     let mut chain = descriptor.nextInChain;
     while let Some(node) = chain.as_ref() {
         if node.sType == YAWGPU_STYPE_GLES_CONTEXT_BACKEND {
