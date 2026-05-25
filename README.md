@@ -242,6 +242,40 @@ This produces `libyawgpu.{a,dylib,so}` (and a Windows `.dll`). Include
 extensions), link the library, and call the standard `wgpu*` /
 `yawgpu*` functions.
 
+### Cross-building for Android
+
+Both the Vulkan and OpenGL ES backends cross-build for
+`aarch64-linux-android` (verified 2026-05-25 from a macOS arm64
+host with NDK r30). Vulkan is the Tier 1 path on real Android
+devices; GLES is the Tier 2 fallback.
+
+```sh
+rustup target add aarch64-linux-android
+
+export ANDROID_NDK_HOME=/path/to/ndk           # e.g. ~/Library/Android/sdk/ndk/30.0.14904198
+export NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+export SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/sysroot"
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android24-clang"
+export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android24-clang"
+export CXX_aarch64_linux_android="$NDK_BIN/aarch64-linux-android24-clang++"
+export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
+# Load-bearing: without this, build.rs's bindgen pass over webgpu.h
+# can't find <math.h> and the build fails.
+export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--target=aarch64-linux-android24 --sysroot=$SYSROOT"
+
+# Vulkan (Tier 1) — ash dynamically loads libvulkan.so at runtime,
+# which Android 7.0+ (API 24+) ships with the platform.
+cargo build --release --target aarch64-linux-android -p yawgpu --features vulkan
+cargo build --release --target aarch64-linux-android -p yawgpu --features "vulkan mobile"
+
+# GLES (Tier 2)
+cargo build --release --target aarch64-linux-android -p yawgpu --features gles
+```
+
+On Linux hosts replace `darwin-x86_64` with `linux-x86_64`. The
+target API level (`24` above) is the Vulkan / GLES 3.1 floor;
+raise it if a dependency demands a newer one.
+
 ## Using it from Rust
 
 The same entry points are available as a normal Rust crate (`rlib`); the
@@ -346,6 +380,11 @@ SPIR-V or MSL straight to the backend; see
     Vulkan drivers, and the windowed `triangle` example additionally
     runs through the OpenGL ES backend via the WGL fallback (host GL
     driver, opt-in).
+  - **Android (`aarch64-linux-android`)** — both Vulkan and OpenGL ES
+    backends cross-build from a macOS arm64 host with NDK r30 (see
+    "Cross-building for Android" above), including the `mobile`
+    extension combo (`shader-passthrough` + `tiled`). Real-device
+    runtime verification is left to downstream integrators.
 
 ## License
 

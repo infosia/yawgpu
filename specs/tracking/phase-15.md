@@ -1109,6 +1109,71 @@ review-blocking.
 Phase 15 cannot be marked COMPLETE with any open CRITICAL/MAJOR
 finding. MINORs may defer with explicit rationale.
 
+## Post-COMPLETE — Android aarch64 cross-build verified (GLES + Vulkan) *(☑ DONE 2026-05-25)*
+
+First cross-build of yawgpu for an Android target host
+(macOS arm64 → `aarch64-linux-android`). Covers both the
+GLES backend (the Phase 15 deliverable — its Android surface
+entry point had only been exercised by `cargo check` on
+macOS host, never by a real Android-target compile) and the
+Vulkan backend (no Android-target build had been recorded
+either, even though Vulkan is the Tier 1 mobile path on real
+devices).
+
+Setup (one-off, not committed to repo `.cargo/config.toml` —
+NDK path is developer-machine-specific):
+
+```
+rustup target add aarch64-linux-android
+export ANDROID_NDK_HOME=/path/to/ndk/30.0.14904198
+export NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+export SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/sysroot"
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android24-clang"
+export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android24-clang"
+export CXX_aarch64_linux_android="$NDK_BIN/aarch64-linux-android24-clang++"
+export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
+export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--target=aarch64-linux-android24 --sysroot=$SYSROOT"
+
+cargo build --release --target aarch64-linux-android -p yawgpu --features gles
+```
+
+The `BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android` env var is
+**load-bearing** — without it, `yawgpu/build.rs`'s bindgen pass
+on `webgpu.h` invokes clang with no Android sysroot and dies
+on `'math.h' file not found`. Bindgen 0.72 honors this env-var
+form (target-suffixed, underscored), so no `build.rs` change is
+required.
+
+Result on this host (M2, macOS 26.0):
+- `cargo check --target aarch64-linux-android -p yawgpu --features gles` → green in 7s
+- `cargo build --release --target aarch64-linux-android -p yawgpu --features gles` → green in 21s
+- `cargo build --release --target aarch64-linux-android -p yawgpu --features vulkan` → green in 12s, **zero warnings**
+- `cargo build --release --target aarch64-linux-android -p yawgpu --features "vulkan mobile"` → green in 14s, **zero warnings** (mobile = shader-passthrough + tiled)
+- Artifacts: `target/aarch64-linux-android/release/libyawgpu.so`
+  (3.4 MB GLES / 3.7 MB Vulkan, ELF 64-bit ARM aarch64,
+  dynamically linked) + `libyawgpu.a` (~35 MB) + `libyawgpu.rlib`
+
+Vulkan-on-Android note: `ash` loads `libvulkan.so` dynamically
+at runtime (`libloading::Library::new("libvulkan.so")`) — no
+NDK Vulkan loader linkage at build time. Android 7.0+ (API
+24+) ships `libvulkan.so` as part of the platform, so the
+runtime side is automatic on real devices.
+
+Warnings: 14 in `yawgpu-hal` — all pre-existing, none Android-
+specific. They surface only when the non-Windows GLES path is
+built (Android, Linux-ANGLE, etc.) because the `#[cfg(windows)]`
+WGL arm vanishes and leaves the remaining `match`/`if let`/
+`let-else` patterns irrefutable, and the ANGLE-only constants
+(`EGL_PLATFORM_ANGLE_*` in `gles/egl.rs`) become dead. Style
+cleanup tracked as a non-blocking follow-up; does not affect
+build success.
+
+CI policy unchanged: Android cross-build is not added to the
+default gate. This is a manual verification step the developer
+runs locally when changing GLES code paths that touch Android-
+relevant arms (EGL display creation, ANativeWindow surface,
+non-Windows make-current).
+
 ## Open follow-ups (carried from `blocks/67-gles-backend.md`)
 
 - naga `glsl-out` coverage smoke for Phase 7 e2e shaders.
@@ -1311,3 +1376,31 @@ finding. MINORs may defer with explicit rationale.
   windowed-surface capable. Both paths coexist.
 - **Multi-color-target presentation.** Tied to the P15.5
   multi-target follow-up; not a surface-specific concern.
+
+## Open follow-ups added by Android cross-build verification (2026-05-25)
+
+- **`yawgpu-hal` non-Windows warnings.** When the `#[cfg(windows)]`
+  WGL arm vanishes (Android, Linux+ANGLE, etc.), 14 warnings
+  surface: 5 `irrefutable_let_patterns` (the static
+  `GlesInstanceInner` / `GlesSurfaceInner` enums are
+  effectively single-variant on non-Windows) and 9
+  `dead_code` warnings for the ANGLE-only `EGL_PLATFORM_*`
+  constants in `gles/egl.rs`. None affect runtime
+  correctness. Cleanup options: gate the irrefutable
+  `match`/`let-else` arms behind `#[cfg(windows)]` to fall
+  back to direct field access on non-Windows, or accept the
+  warnings as the cost of the static-enum pattern. The dead
+  ANGLE constants should be `#[cfg_attr(not(windows),
+  allow(dead_code))]` at minimum (the user may still want
+  them at the source-of-truth layer even when only the
+  Windows path consumes them today). Non-blocking; clippy
+  `-D warnings` gate still runs against the macOS-host
+  default build (Noop) and the Windows ANGLE build, both of
+  which have all `#[cfg(windows)]` arms active and so do not
+  hit these warnings.
+- **Document Android cross-build in README.** README §"Using
+  it from C" lists `--features gles` as the build flag for
+  "Android / Windows ANGLE" but does not spell out the NDK +
+  `BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android` env-var
+  contract. A short callout would save the next developer a
+  bindgen-error round trip.
