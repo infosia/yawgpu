@@ -50,7 +50,12 @@ impl std::fmt::Debug for GlesInstance {
 impl GlesInstance {
     /// Creates a new GLES instance.
     pub fn new() -> Result<Self, HalError> {
-        match backend_from_env() {
+        Self::new_with_choice(None)
+    }
+
+    /// Creates a new GLES instance with an optional context-backend override.
+    pub fn new_with_choice(choice: Option<BackendChoice>) -> Result<Self, HalError> {
+        match choice.unwrap_or_else(backend_from_env) {
             BackendChoice::Egl => Self::new_egl(),
             #[cfg(windows)]
             BackendChoice::Wgl => {
@@ -177,9 +182,12 @@ fn choose_config(instance: &EglInstanceState) -> Result<EglConfig, HalError> {
         .ok_or(HalError::BackendUnavailable { backend: BACKEND })
 }
 
+/// Selects the GLES context backend used when creating a GLES instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum BackendChoice {
+pub enum BackendChoice {
+    /// EGL context backend.
     Egl,
+    /// Windows WGL context backend.
     #[cfg(windows)]
     Wgl,
 }
@@ -219,5 +227,18 @@ mod tests {
 
         #[cfg(not(windows))]
         assert_eq!(parse_backend(Some("wgl")), BackendChoice::Egl);
+    }
+
+    #[test]
+    fn new_with_choice_uses_explicit_egl_when_available() {
+        let instance = match GlesInstance::new_with_choice(Some(BackendChoice::Egl)) {
+            Ok(instance) => instance,
+            Err(error) => {
+                eprintln!("skipping GLES EGL constructor test; backend unavailable: {error:?}");
+                return;
+            }
+        };
+
+        assert!(matches!(instance.inner.as_ref(), GlesInstanceInner::Egl(_)));
     }
 }

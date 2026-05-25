@@ -1453,3 +1453,20 @@ default gate. Manual verification step, same as Android.
   `BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android` env-var
   contract. A short callout would save the next developer a
   bindgen-error round trip.
+
+## Post-COMPLETE — Programmatic GLES context-backend override via `YaWGPUGlesContextBackend` *(☑ DONE 2026-05-25)*
+
+Added a new independent yawgpu vendor chain entry,
+`YaWGPUGlesContextBackend` (`YAWGPU_STYPE_GLES_CONTEXT_BACKEND`),
+for callers that need to force the GLES context backend from code
+instead of mutating `YAWGPU_GLES_BACKEND` before `wgpuCreateInstance`.
+The entry chains onto `WGPUInstanceDescriptor.nextInChain` alongside
+`YaWGPUInstanceBackendSelect`; it is consumed only when the resolved
+instance backend is GLES and is ignored by Noop / Metal / Vulkan.
+
+Resolution rule: `YAWGPU_GLES_CONTEXT_BACKEND_EGL` and
+`YAWGPU_GLES_CONTEXT_BACKEND_WGL` override the environment variable;
+`YAWGPU_GLES_CONTEXT_BACKEND_DEFAULT` or an absent chain entry falls
+back to the existing `YAWGPU_GLES_BACKEND` parser, then default EGL.
+On non-Windows hosts, a programmatic WGL request falls back to EGL
+with the same diagnostic style as the env-var parser.

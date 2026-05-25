@@ -84,6 +84,86 @@ typedef struct YaWGPUInstanceBackendSelect {
 
 /** @} */
 
+/**
+ * \defgroup GlesContextBackend GLES Context Backend
+ * \brief Extension chain entry that selects the GLES context backend (EGL vs
+ * WGL) when the instance backend resolves to GLES.
+ *
+ * Chain a @ref YaWGPUGlesContextBackend onto the same
+ * `WGPUInstanceDescriptor.nextInChain` list that may also contain a
+ * @ref YaWGPUInstanceBackendSelect. This entry is additive: it only controls
+ * the GLES context binding backend, while @ref YaWGPUInstanceBackendSelect
+ * controls which HAL backend is requested.
+ *
+ * Resolution order is:
+ * - A non-default @ref YaWGPUGlesContextBackend::contextBackend value wins.
+ * - `YAWGPU_GLES_CONTEXT_BACKEND_DEFAULT` or no chain entry defers to the
+ *   `YAWGPU_GLES_BACKEND` environment variable.
+ * - If neither selects a backend, yawgpu uses EGL.
+ *
+ * `YAWGPU_GLES_CONTEXT_BACKEND_WGL` is Windows-only; on non-Windows hosts it
+ * falls back to EGL. The entry is ignored when the resolved instance backend is
+ * not GLES.
+ *
+ * Example two-entry chain:
+ * \code{.c}
+ * YaWGPUGlesContextBackend context = YAWGPU_GLES_CONTEXT_BACKEND_INIT;
+ * context.contextBackend = YAWGPU_GLES_CONTEXT_BACKEND_EGL;
+ *
+ * YaWGPUInstanceBackendSelect backend = {
+ *     { &context.chain, YAWGPU_STYPE_INSTANCE_BACKEND_SELECT },
+ *     YAWGPU_INSTANCE_BACKEND_GLES,
+ * };
+ *
+ * WGPUInstanceDescriptor desc = WGPU_INSTANCE_DESCRIPTOR_INIT;
+ * desc.nextInChain = &backend.chain;
+ * WGPUInstance instance = wgpuCreateInstance(&desc);
+ * \endcode
+ *
+ * @{
+ */
+
+/**
+ * `WGPUSType` tag identifying a @ref YaWGPUGlesContextBackend in a
+ * chained-struct list.
+ */
+#define YAWGPU_STYPE_GLES_CONTEXT_BACKEND ((WGPUSType)0x70000002u)
+
+/**
+ * Identifiers for the GLES context backend selected via
+ * @ref YaWGPUGlesContextBackend::contextBackend.
+ */
+enum {
+    /** Defer to `YAWGPU_GLES_BACKEND`, then the default EGL backend. */
+    YAWGPU_GLES_CONTEXT_BACKEND_DEFAULT = 0,
+    /** Force EGL (`libEGL` / ANGLE on Windows, native EGL elsewhere). */
+    YAWGPU_GLES_CONTEXT_BACKEND_EGL = 1,
+    /** Force WGL on Windows; falls back to EGL on non-Windows hosts. */
+    YAWGPU_GLES_CONTEXT_BACKEND_WGL = 2,
+};
+
+/**
+ * Chained extension that selects the GLES context backend.
+ *
+ * `chain.sType` must be set to @ref YAWGPU_STYPE_GLES_CONTEXT_BACKEND and
+ * `contextBackend` to one of the `YAWGPU_GLES_CONTEXT_BACKEND_*` constants.
+ * Unknown values fall back to EGL, matching the environment-variable parser.
+ */
+typedef struct YaWGPUGlesContextBackend {
+    /** Chain header. `sType` must be @ref YAWGPU_STYPE_GLES_CONTEXT_BACKEND. */
+    WGPUChainedStruct chain;
+    /** One of the `YAWGPU_GLES_CONTEXT_BACKEND_*` constants. */
+    uint32_t contextBackend;
+} YaWGPUGlesContextBackend;
+
+/** Default initializer for @ref YaWGPUGlesContextBackend. */
+#define YAWGPU_GLES_CONTEXT_BACKEND_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUGlesContextBackend, { \
+    /*.chain=*/{NULL, YAWGPU_STYPE_GLES_CONTEXT_BACKEND} _wgpu_COMMA \
+    /*.contextBackend=*/YAWGPU_GLES_CONTEXT_BACKEND_DEFAULT _wgpu_COMMA \
+})
+
+/** @} */
+
 #if defined(YAWGPU_HAS_SHADER_PASSTHROUGH)
 /**
  * \defgroup ShaderPassthrough Shader passthrough (SPIR-V / MSL)

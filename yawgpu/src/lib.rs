@@ -36,6 +36,14 @@ pub const YAWGPU_INSTANCE_BACKEND_VULKAN: u32 = 2;
 pub const YAWGPU_INSTANCE_BACKEND_GLES: u32 = 3;
 /// SType value for `YaWGPUInstanceBackendSelect`.
 pub const YAWGPU_STYPE_INSTANCE_BACKEND_SELECT: native::WGPUSType = 0x7000_0001;
+/// Constant value that defers GLES context backend selection to the env var.
+pub const YAWGPU_GLES_CONTEXT_BACKEND_DEFAULT: u32 = 0;
+/// Constant value for the EGL GLES context backend.
+pub const YAWGPU_GLES_CONTEXT_BACKEND_EGL: u32 = 1;
+/// Constant value for the Windows WGL GLES context backend.
+pub const YAWGPU_GLES_CONTEXT_BACKEND_WGL: u32 = 2;
+/// SType value for `YaWGPUGlesContextBackend`.
+pub const YAWGPU_STYPE_GLES_CONTEXT_BACKEND: native::WGPUSType = 0x7000_0002;
 /// Feature value for tiled multi-subpass render passes.
 #[cfg(feature = "tiled")]
 #[allow(non_upper_case_globals)]
@@ -64,6 +72,20 @@ pub struct YaWGPUInstanceBackendSelect {
     pub chain: native::WGPUChainedStruct,
     /// Backend.
     pub backend: u32,
+}
+
+/// yawgpu vendor extension for selecting the GLES context backend.
+///
+/// Chain this from `WGPUInstanceDescriptor::nextInChain` with
+/// `YAWGPU_STYPE_GLES_CONTEXT_BACKEND`. The value is only consumed when the
+/// resolved instance backend is GLES.
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct YaWGPUGlesContextBackend {
+    /// Extension chain.
+    pub chain: native::WGPUChainedStruct,
+    /// GLES context backend.
+    pub contextBackend: u32,
 }
 
 /// yawgpu vendor extension result for querying tiled rendering capabilities.
