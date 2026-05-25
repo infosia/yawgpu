@@ -14,9 +14,24 @@ use crate::{
 };
 
 pub(super) struct GlesSurfaceInner {
+    state: Mutex<GlesSurfaceState>,
+    kind: GlesSurfaceKind,
+}
+
+enum GlesSurfaceKind {
+    Egl(EglSurfaceKind),
+    #[cfg(windows)]
+    Wgl(WglSurfaceKind),
+}
+
+struct EglSurfaceKind {
     instance: Arc<GlesInstanceInner>,
     window_surface: EglSurface,
-    state: Mutex<GlesSurfaceState>,
+}
+
+#[cfg(windows)]
+struct WglSurfaceKind {
+    surface: super::wgl::WglSurfaceState,
 }
 
 // SAFETY: The EGL window surface handle is only used while holding the
@@ -28,13 +43,26 @@ unsafe impl Sync for GlesSurfaceInner {}
 
 impl Drop for GlesSurfaceInner {
     fn drop(&mut self) {
-        if let GlesInstanceInner::Egl(egl_state) = self.instance.as_ref() {
-            let _ = egl_state
-                .egl
-                .make_current(egl_state.display, None, None, None);
-            let _ = egl_state
-                .egl
-                .destroy_surface(egl_state.display, self.window_surface);
+        match &self.kind {
+            GlesSurfaceKind::Egl(kind) => {
+                if let GlesInstanceInner::Egl(egl_state) = kind.instance.as_ref() {
+                    let _ = egl_state
+                        .egl
+                        .make_current(egl_state.display, None, None, None);
+                    let _ = egl_state
+                        .egl
+                        .destroy_surface(egl_state.display, kind.window_surface);
+                }
+            }
+            #[cfg(windows)]
+            GlesSurfaceKind::Wgl(kind) => {
+                if let Some(configured) = self.state.lock().configured.as_ref() {
+                    let _guard = configured.device.current_lock_acquire();
+                    super::wgl::release_surface_dc(&kind.surface);
+                } else {
+                    super::wgl::release_surface_dc(&kind.surface);
+                }
+            }
         }
     }
 }
@@ -73,15 +101,30 @@ impl std::fmt::Debug for GlesSurface {
 }
 
 impl GlesSurface {
-    pub(super) fn from_window_surface(
+    pub(super) fn from_egl_window(
         instance: Arc<GlesInstanceInner>,
         window_surface: EglSurface,
     ) -> Self {
         Self {
             inner: Arc::new(GlesSurfaceInner {
-                instance,
-                window_surface,
                 state: Mutex::new(GlesSurfaceState::default()),
+                kind: GlesSurfaceKind::Egl(EglSurfaceKind {
+                    instance,
+                    window_surface,
+                }),
+            }),
+        }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn from_wgl_window(
+        _instance: Arc<GlesInstanceInner>,
+        surface: super::wgl::WglSurfaceState,
+    ) -> Self {
+        Self {
+            inner: Arc::new(GlesSurfaceInner {
+                state: Mutex::new(GlesSurfaceState::default()),
+                kind: GlesSurfaceKind::Wgl(WglSurfaceKind { surface }),
             }),
         }
     }
@@ -102,12 +145,7 @@ impl GlesSurface {
                 message: "surface back-buffer allocation failed",
             })?;
         let swap_interval = swap_interval_for_present_mode(config.present_mode);
-        set_swap_interval(
-            &self.inner.instance,
-            &device,
-            self.inner.window_surface,
-            swap_interval,
-        )?;
+        set_swap_interval(&self.inner.kind, &device, swap_interval)?;
         self.inner.state.lock().configured = Some(ConfiguredSurface {
             device,
             back_buffer,
@@ -162,22 +200,18 @@ impl GlesSurface {
             backend: BACKEND,
             message: "surface height exceeds GLES limit",
         })?;
-        blit_and_swap(
-            &self.inner.instance,
-            &device,
-            self.inner.window_surface,
-            texture,
-            width,
-            height,
-        )
+        blit_and_swap(&self.inner.kind, &device, texture, width, height)
     }
 }
 
 fn validate_config(config: HalSurfaceConfiguration) -> Result<(), HalError> {
-    if config.format != HalTextureFormat::Rgba8Unorm {
+    if !matches!(
+        config.format,
+        HalTextureFormat::Rgba8Unorm | HalTextureFormat::Bgra8Unorm
+    ) {
         return Err(HalError::SwapchainCreationFailed {
             backend: BACKEND,
-            message: "GLES surfaces support only Rgba8Unorm format",
+            message: "GLES surfaces support only Rgba8Unorm and Bgra8Unorm formats",
         });
     }
     if config.width == 0 || config.height == 0 {
@@ -191,7 +225,7 @@ fn validate_config(config: HalSurfaceConfiguration) -> Result<(), HalError> {
 
 fn back_buffer_descriptor(config: HalSurfaceConfiguration) -> HalTextureDescriptor {
     HalTextureDescriptor {
-        format: HalTextureFormat::Rgba8Unorm,
+        format: config.format,
         width: config.width,
         height: config.height,
         depth_or_array_layers: 1,
@@ -215,89 +249,135 @@ fn swap_interval_for_present_mode(mode: HalPresentMode) -> i32 {
 }
 
 fn set_swap_interval(
-    instance: &Arc<GlesInstanceInner>,
+    kind: &GlesSurfaceKind,
     device: &Arc<GlesDeviceInner>,
-    window_surface: EglSurface,
     interval: i32,
 ) -> Result<(), HalError> {
     let _guard = device.current_lock_acquire();
-    let egl_state = egl_instance(instance)?;
-    let device_state = egl_device(device)?;
-    egl_state
-        .egl
-        .make_current(
-            egl_state.display,
-            Some(window_surface),
-            Some(window_surface),
-            Some(device_state.context),
-        )
-        .map_err(|_| HalError::SwapchainCreationFailed {
-            backend: BACKEND,
-            message: "eglMakeCurrent(window) failed",
-        })?;
-    let _restore = RestoreCurrent { instance, device };
-    egl_state
-        .egl
-        .swap_interval(egl_state.display, interval)
-        .map_err(|_| HalError::SwapchainCreationFailed {
-            backend: BACKEND,
-            message: "eglSwapInterval failed",
-        })
+    match kind {
+        GlesSurfaceKind::Egl(kind) => {
+            let egl_state = egl_instance(&kind.instance)?;
+            let device_state = egl_device(device)?;
+            egl_state
+                .egl
+                .make_current(
+                    egl_state.display,
+                    Some(kind.window_surface),
+                    Some(kind.window_surface),
+                    Some(device_state.context),
+                )
+                .map_err(|_| HalError::SwapchainCreationFailed {
+                    backend: BACKEND,
+                    message: "eglMakeCurrent(window) failed",
+                })?;
+            let _restore = RestoreCurrent::Egl {
+                instance: &kind.instance,
+                device,
+            };
+            egl_state
+                .egl
+                .swap_interval(egl_state.display, interval)
+                .map_err(|_| HalError::SwapchainCreationFailed {
+                    backend: BACKEND,
+                    message: "eglSwapInterval failed",
+                })
+        }
+        #[cfg(windows)]
+        GlesSurfaceKind::Wgl(kind) => {
+            let device_state = wgl_device(device)?;
+            device_state
+                .make_current_on_hdc(kind.surface.hdc())
+                .map_err(|_| HalError::SwapchainCreationFailed {
+                    backend: BACKEND,
+                    message: "wglMakeCurrent(window) failed",
+                })?;
+            let _restore = RestoreCurrent::Wgl { device };
+            super::wgl::swap_interval(interval);
+            Ok(())
+        }
+    }
 }
 
 fn blit_and_swap(
-    instance: &Arc<GlesInstanceInner>,
+    kind: &GlesSurfaceKind,
     device: &Arc<GlesDeviceInner>,
-    window_surface: EglSurface,
     back_buffer_texture: glow::Texture,
     width: i32,
     height: i32,
 ) -> Result<(), HalError> {
     let _guard = device.current_lock_acquire();
-    let egl_state = egl_instance(instance)?;
-    let device_state = egl_device(device)?;
-    egl_state
-        .egl
-        .make_current(
-            egl_state.display,
-            Some(window_surface),
-            Some(window_surface),
-            Some(device_state.context),
-        )
-        .map_err(|_| HalError::PresentFailed {
-            backend: BACKEND,
-            message: "eglMakeCurrent(window) failed",
-        })?;
-    let _restore = RestoreCurrent { instance, device };
-    blit_back_buffer_to_window(&device_state.gl, back_buffer_texture, width, height)?;
-    egl_state
-        .egl
-        .swap_buffers(egl_state.display, window_surface)
-        .map_err(|_| HalError::PresentFailed {
-            backend: BACKEND,
-            message: "eglSwapBuffers failed",
-        })
+    match kind {
+        GlesSurfaceKind::Egl(kind) => {
+            let egl_state = egl_instance(&kind.instance)?;
+            let device_state = egl_device(device)?;
+            egl_state
+                .egl
+                .make_current(
+                    egl_state.display,
+                    Some(kind.window_surface),
+                    Some(kind.window_surface),
+                    Some(device_state.context),
+                )
+                .map_err(|_| HalError::PresentFailed {
+                    backend: BACKEND,
+                    message: "eglMakeCurrent(window) failed",
+                })?;
+            let _restore = RestoreCurrent::Egl {
+                instance: &kind.instance,
+                device,
+            };
+            blit_back_buffer_to_window(&device_state.gl, back_buffer_texture, width, height)?;
+            egl_state
+                .egl
+                .swap_buffers(egl_state.display, kind.window_surface)
+                .map_err(|_| HalError::PresentFailed {
+                    backend: BACKEND,
+                    message: "eglSwapBuffers failed",
+                })
+        }
+        #[cfg(windows)]
+        GlesSurfaceKind::Wgl(kind) => {
+            let device_state = wgl_device(device)?;
+            device_state.make_current_on_hdc(kind.surface.hdc())?;
+            let _restore = RestoreCurrent::Wgl { device };
+            blit_back_buffer_to_window(device_state.gl(), back_buffer_texture, width, height)?;
+            super::wgl::swap_buffers(kind.surface.hdc())
+        }
+    }
 }
 
-struct RestoreCurrent<'a> {
-    instance: &'a Arc<GlesInstanceInner>,
-    device: &'a Arc<GlesDeviceInner>,
+enum RestoreCurrent<'a> {
+    Egl {
+        instance: &'a Arc<GlesInstanceInner>,
+        device: &'a Arc<GlesDeviceInner>,
+    },
+    #[cfg(windows)]
+    Wgl { device: &'a Arc<GlesDeviceInner> },
 }
 
 impl Drop for RestoreCurrent<'_> {
     fn drop(&mut self) {
-        let (Some(instance), Some(device)) = (
-            egl_instance(self.instance).ok(),
-            egl_device(self.device).ok(),
-        ) else {
-            return;
-        };
-        let _ = instance.egl.make_current(
-            instance.display,
-            Some(device.surface),
-            Some(device.surface),
-            Some(device.context),
-        );
+        match self {
+            RestoreCurrent::Egl { instance, device } => {
+                let (Some(instance), Some(device)) =
+                    (egl_instance(instance).ok(), egl_device(device).ok())
+                else {
+                    return;
+                };
+                let _ = instance.egl.make_current(
+                    instance.display,
+                    Some(device.surface),
+                    Some(device.surface),
+                    Some(device.context),
+                );
+            }
+            #[cfg(windows)]
+            RestoreCurrent::Wgl { device } => {
+                if let Ok(device) = wgl_device(device) {
+                    device.restore_current();
+                }
+            }
+        }
     }
 }
 
@@ -316,6 +396,17 @@ fn egl_device(device: &Arc<GlesDeviceInner>) -> Result<&EglDeviceState, HalError
         backend: BACKEND,
         message: "GLES surface is only available with the EGL backend",
     })
+}
+
+#[cfg(windows)]
+fn wgl_device(device: &Arc<GlesDeviceInner>) -> Result<&super::wgl::WglDeviceState, HalError> {
+    let GlesDeviceInner::Wgl(state) = device.as_ref() else {
+        return Err(HalError::SwapchainCreationFailed {
+            backend: BACKEND,
+            message: "GLES WGL surface requires a WGL device",
+        });
+    };
+    Ok(state)
 }
 
 fn blit_back_buffer_to_window(
@@ -379,22 +470,24 @@ mod tests {
     }
 
     #[test]
-    fn validate_config_accepts_rgba8_non_zero_surface() {
-        let config = HalSurfaceConfiguration::new(
-            HalTextureFormat::Rgba8Unorm,
-            HalTextureUsage {
-                copy_src: false,
-                copy_dst: false,
-                texture_binding: false,
-                storage_binding: false,
-                render_attachment: true,
-            },
-            320,
-            240,
-            HalPresentMode::Fifo,
-        );
+    fn validate_config_accepts_rgba8_and_bgra8_non_zero_surface() {
+        for format in [HalTextureFormat::Rgba8Unorm, HalTextureFormat::Bgra8Unorm] {
+            let config = HalSurfaceConfiguration::new(
+                format,
+                HalTextureUsage {
+                    copy_src: false,
+                    copy_dst: false,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: true,
+                },
+                320,
+                240,
+                HalPresentMode::Fifo,
+            );
 
-        assert!(validate_config(config).is_ok());
+            assert!(validate_config(config).is_ok());
+        }
     }
 
     #[test]
@@ -407,7 +500,7 @@ mod tests {
             render_attachment: true,
         };
         let format = HalSurfaceConfiguration::new(
-            HalTextureFormat::Bgra8Unorm,
+            HalTextureFormat::Depth24Plus,
             usage,
             320,
             240,
@@ -417,7 +510,7 @@ mod tests {
             validate_config(format),
             Err(HalError::SwapchainCreationFailed {
                 backend: "gles",
-                message: "GLES surfaces support only Rgba8Unorm format",
+                message: "GLES surfaces support only Rgba8Unorm and Bgra8Unorm formats",
             })
         ));
 

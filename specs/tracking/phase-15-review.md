@@ -175,3 +175,17 @@ locally), but the production HAL code is identical for the
 two context backends below the make-current seam — the WGL
 verification exercises the same `glow::Context` calls EGL
 would.
+
+A follow-up WGL **surface** slice (`tracking/phase-15.md` →
+"Post-COMPLETE — WGL surface", 2026-05-25) extended the
+verification to the HWND-surface path: `examples/triangle`
+runs end-to-end under `YAWGPU_BACKEND=gles
+YAWGPU_GLES_BACKEND=wgl`, completing all 60 frames
+(`triangle_app_init` → 60× acquire → render pass → drawArrays
+→ present + `eglSwapBuffers`-equivalent `SwapBuffers(hdc)`)
+with `EXIT=0` and zero device errors. The WGL surface path
+shares the `blit_back_buffer_to_window` glow-side blit code
+with EGL — the only kind-dispatched parts are make-current
+and swap. Net: the GLES backend's full **render-pass-to-
+present** pipeline is now verified end-to-end on host
+hardware for the first time on this machine.

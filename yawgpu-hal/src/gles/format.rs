@@ -18,7 +18,7 @@ pub(super) struct GlesVertexFormat {
 
 pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<GlesFormat, HalError> {
     match format {
-        HalTextureFormat::Rgba8Unorm => Ok(rgba8_unorm()),
+        HalTextureFormat::Rgba8Unorm | HalTextureFormat::Bgra8Unorm => Ok(rgba8_unorm()),
         _ => Err(HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "texture format not supported on GLES (P15.3)",
@@ -83,14 +83,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn map_texture_format_rgba8unorm_returns_rgba8_triplet() {
-        let format =
-            map_texture_format(HalTextureFormat::Rgba8Unorm).expect("RGBA8Unorm is supported");
+    fn map_texture_format_rgba8_and_bgra8_return_rgba8_triplet() {
+        for texture_format in [HalTextureFormat::Rgba8Unorm, HalTextureFormat::Bgra8Unorm] {
+            let format = map_texture_format(texture_format).expect("RGBA/BGRA8 is supported");
 
-        assert_eq!(format.internal, glow::RGBA8);
-        assert_eq!(format.format, glow::RGBA);
-        assert_eq!(format.ty, glow::UNSIGNED_BYTE);
-        assert_eq!(format.bytes_per_pixel, 4);
+            assert_eq!(format.internal, glow::RGBA8);
+            assert_eq!(format.format, glow::RGBA);
+            assert_eq!(format.ty, glow::UNSIGNED_BYTE);
+            assert_eq!(format.bytes_per_pixel, 4);
+        }
     }
 
     #[test]

@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use khronos_egl as egl;
 use std::ffi::c_void;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::HWND;
 
 use super::adapter::GlesAdapter;
 use super::egl::{self as gles_egl, EglConfig, EglDisplay, EglInstance};
@@ -92,30 +94,45 @@ impl GlesInstance {
         &self,
         window: *mut c_void,
     ) -> Result<GlesSurface, HalError> {
+        let GlesInstanceInner::Egl(_) = self.inner.as_ref() else {
+            return Err(HalError::SwapchainCreationFailed {
+                backend: BACKEND,
+                message: "GLES Android surface requires the EGL backend",
+            });
+        };
         self.create_window_surface(window)
     }
 
     fn create_window_surface(&self, native: *mut c_void) -> Result<GlesSurface, HalError> {
-        let GlesInstanceInner::Egl(egl_state) = self.inner.as_ref() else {
-            return Err(HalError::SwapchainCreationFailed {
-                backend: BACKEND,
-                message: "WGL surface creation not implemented; use EGL backend or run the headless e2e tests instead",
-            });
-        };
-        let config = choose_config(egl_state)?;
-        let surface = unsafe {
-            egl_state
-                .egl
-                .create_window_surface(egl_state.display, config, native as _, None)
+        match self.inner.as_ref() {
+            GlesInstanceInner::Egl(egl_state) => {
+                let config = choose_config(egl_state)?;
+                let surface = unsafe {
+                    egl_state.egl.create_window_surface(
+                        egl_state.display,
+                        config,
+                        native as _,
+                        None,
+                    )
+                }
+                .map_err(|_| HalError::SwapchainCreationFailed {
+                    backend: BACKEND,
+                    message: "eglCreateWindowSurface failed",
+                })?;
+                Ok(GlesSurface::from_egl_window(
+                    Arc::clone(&self.inner),
+                    surface,
+                ))
+            }
+            #[cfg(windows)]
+            GlesInstanceInner::Wgl(wgl_state) => {
+                let surface = wgl_state.create_window_surface(native as HWND)?;
+                Ok(GlesSurface::from_wgl_window(
+                    Arc::clone(&self.inner),
+                    surface,
+                ))
+            }
         }
-        .map_err(|_| HalError::SwapchainCreationFailed {
-            backend: BACKEND,
-            message: "eglCreateWindowSurface failed",
-        })?;
-        Ok(GlesSurface::from_window_surface(
-            Arc::clone(&self.inner),
-            surface,
-        ))
     }
 
     fn new_egl() -> Result<Self, HalError> {

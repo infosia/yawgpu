@@ -987,14 +987,105 @@ Acceptance (all 11 green, **WGL real-GPU verification included**):
   unverifiable on this dev machine pending an ES 3.1 ANGLE).
 
 Out-of-scope (logged follow-ups, not blocking):
-- WGL surface creation (`GlesSurface` from HWND under
+- ~~WGL surface creation (`GlesSurface` from HWND under
   `YAWGPU_GLES_BACKEND=wgl`); examples/triangle continues to
-  require EGL on Windows.
+  require EGL on Windows.~~ **Closed by the WGL surface slice
+  (2026-05-25, see next section).**
 - Auto-fallback EGL → WGL on EGL init failure (today: env-var
   manual selection only).
 - WGL availability probe in `yawgpu-test::gles_backend_available`
   (the env var is read at instance-creation time, so the existing
   probe still works correctly under `YAWGPU_GLES_BACKEND=wgl`).
+
+## Post-COMPLETE — WGL surface (HWND → present) *(☑ DONE 2026-05-25)*
+
+Done (2026-05-25, separate coding-agent session per HANDOFF.md):
+adds the WGL **surface** path so `examples/triangle` runs end-to-end
+under `YAWGPU_GLES_BACKEND=wgl`. Builds on the WGL fallback slice
+(`51b0789`), which added only the context backend. Closes the
+"WGL surface creation not implemented" caveat from the previous
+slice.
+
+Architecture: `GlesSurfaceInner` became a static enum
+(`Egl(...)` / `Wgl(...)`) mirroring the `GlesInstanceInner` /
+`GlesAdapter` / `GlesDeviceInner` pattern (CLAUDE.md
+"no `dyn Trait`"). `GlesSurfaceKind::Wgl(WglSurfaceKind {
+surface: WglSurfaceState })` carries the user-provided HWND +
+its HDC. `WglSurfaceState` (in `gles/wgl.rs`) is constructed by
+`WglInstanceState::create_window_surface(hwnd)`: `GetDC(hwnd)` →
+`ChoosePixelFormat` + `SetPixelFormat` with the same descriptor
+the helper HWND uses (extracted to `build_pixel_format_descriptor()`
+so helper-HWND and user-HWND get identical pixel formats —
+guarantees HGLRC compatibility). Drop releases via
+`wglMakeCurrent(NULL,NULL)` + `ReleaseDC(hwnd, hdc)`; the HWND
+itself is caller-owned and **not** destroyed.
+
+`set_swap_interval` / `blit_and_swap` in `gles/surface.rs` became
+kind-dispatched. WGL arm: `WglDeviceState::make_current_on_hdc
+(surface.hdc)` → `wglSwapIntervalEXT` (cached lookup, silent
+no-op on missing) → glow blit → `SwapBuffers(surface.hdc)`.
+`RestoreCurrent` became an enum (`Egl { instance, device }` /
+`Wgl { device }`); the Wgl arm re-binds the device's helper HDC
+via `WglDeviceState::restore_current()` on Drop. The single HGLRC
+is reused across helper HDC and user HDC — both share the same
+pixel format descriptor so make-current is valid.
+
+`HalInstance::create_surface_from_android_native_window` Wgl arm
+explicitly rejects with `SwapchainCreationFailed { message:
+"GLES Android surface requires the EGL backend" }`. (Android+WGL
+is non-sensical.)
+
+**Format expansion (scope creep, accepted):** `validate_config`
++ `map_texture_format` + `validate_render_pipeline_descriptor`
+extended to accept `Bgra8Unorm` alongside `Rgba8Unorm`
+(internally aliased to RGBA8 — GLES has no native BGRA8 internal
+format, but the WebGPU contract for render targets is
+shader-rgba-semantic on both, so aliasing is correct for the
+render-and-present case the triangle example exercises). The
+triangle example prefers `BGRA8Unorm` as the natural Windows
+swapchain format; without this change it falls back to RGBA8
+(still works, but `wgpuSurfaceGetCapabilities` would advertise
+only RGBA8). The aliasing would be incorrect for CPU readback
+of a BGRA-tagged texture (byte-swap semantics differ) — not
+exercised by the triangle example, logged as a known
+limitation.
+
+Real-GPU verification on this machine:
+- `cargo build --workspace`, `cargo build -p yawgpu --features
+  gles`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo clippy -p yawgpu --features gles --tests -- -D
+  warnings`, `cargo test --workspace` — all green.
+- yawgpu-hal `--features gles` lib tests: **66 passed** (was
+  65, +1 = `build_pixel_format_descriptor_matches_wgl_surface_
+  contract` inline test).
+- `YAWGPU_GLES_BACKEND=wgl` e2e regression on host NVIDIA
+  driver (`OpenGL ES 3.2 NVIDIA 595.95`): **12/12 still green**
+  (basic 3/3, buffer 2/2, texture 3/3, compute 2/2, render 2/2).
+- **`examples/triangle` under `YAWGPU_BACKEND=gles
+  YAWGPU_GLES_BACKEND=wgl`**: `EXIT=0` after 60 frames, log:
+  ```
+  yawgpu-gles: using WGL backend (host OpenGL ES profile)
+  yawgpu-gles: WGL GL_VERSION="OpenGL ES 3.2 NVIDIA 595.95"
+  yawgpu: backend=OpenGLES (requested YAWGPU_BACKEND=gles)
+  ```
+  60 frames of acquire → render pass → drawArrays → present
+  (transient FBO + glBlitFramebuffer + SwapBuffers) on the
+  user HWND without any device error. This is the first
+  end-to-end Windows-host visual-path verification of the GLES
+  backend.
+
+Out-of-scope (logged follow-ups, not blocking):
+- Window resize handling (back-buffer becomes stale on resize;
+  the triangle example doesn't resize).
+- Multi-window / multi-surface per device (current model: single
+  HGLRC, surfaces multiplex via make-current).
+- BGRA8 byte-order correctness for CPU readback (currently
+  aliased to RGBA8 internally).
+- Hidden-window e2e test for the WGL surface path (the surface
+  code is verified manually via examples/triangle; an automated
+  Win32-hidden-window test would close that gap).
+- Auto-fallback EGL → WGL on EGL init failure (still env-var
+  manual selection only).
 
 ## Phase 15 Review  *(☐ PENDING — final mandatory gate before Phase 15 COMPLETE)*
 
