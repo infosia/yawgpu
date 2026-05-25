@@ -145,6 +145,29 @@ WGPUInstance instance = wgpuCreateInstance(&desc);
 The same effect is available via the `YAWGPU_BACKEND` environment variable
 that the bundled C examples use.
 
+When the resolved instance backend is GLES, an independent chain entry
+`YaWGPUGlesContextBackend` (sType `YAWGPU_STYPE_GLES_CONTEXT_BACKEND`)
+can additionally pin the GLES context backend to EGL or WGL without
+touching the `YAWGPU_GLES_BACKEND` environment variable:
+
+```c
+YaWGPUGlesContextBackend ctx = YAWGPU_GLES_CONTEXT_BACKEND_INIT;
+ctx.contextBackend = YAWGPU_GLES_CONTEXT_BACKEND_WGL; /* or _EGL, or _DEFAULT */
+
+YaWGPUInstanceBackendSelect sel = {
+    .chain   = { .next = &ctx.chain, .sType = YAWGPU_STYPE_INSTANCE_BACKEND_SELECT },
+    .backend = YAWGPU_INSTANCE_BACKEND_GLES,
+};
+WGPUInstanceDescriptor desc = { .nextInChain = &sel.chain };
+WGPUInstance instance = wgpuCreateInstance(&desc);
+```
+
+Resolution order is: a non-default chain value wins; `..._DEFAULT` (or
+no chain entry) defers to `YAWGPU_GLES_BACKEND`; otherwise the
+default EGL path is taken. `YAWGPU_GLES_CONTEXT_BACKEND_WGL` is
+Windows-only and falls back to EGL on non-Windows hosts. The entry
+is ignored when the resolved instance backend is not GLES.
+
 ### Shader passthrough — `shader-passthrough`
 
 Engines that already ship native shader bytes (a `.spv` blob for Vulkan, an

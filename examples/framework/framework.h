@@ -52,6 +52,11 @@ void yawgpu_print_string_view(WGPUStringView value);
 unsigned int yawgpu_uncaptured_error_count(void);
 
 // Creates an instance with the backend chosen by the YAWGPU_BACKEND env var.
+// Also chains a YaWGPUGlesContextBackend entry whose value comes from the
+// optional YAWGPU_GLES_CONTEXT_BACKEND env var (egl / wgl / default); the
+// library ignores it for non-GLES backends and treats DEFAULT (the unset
+// case) as "defer to YAWGPU_GLES_BACKEND", preserving the existing
+// behaviour byte-for-byte for callers that don't set the new var.
 WGPUInstance yawgpu_instance_create(void);
 // Drives wgpuInstanceRequestAdapter to completion and returns the adapter.
 WGPUAdapter yawgpu_request_adapter(WGPUInstance instance);

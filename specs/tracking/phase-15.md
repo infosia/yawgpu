@@ -1447,12 +1447,12 @@ default gate. Manual verification step, same as Android.
   default build (Noop) and the Windows ANGLE build, both of
   which have all `#[cfg(windows)]` arms active and so do not
   hit these warnings.
-- **Document Android cross-build in README.** README §"Using
-  it from C" lists `--features gles` as the build flag for
-  "Android / Windows ANGLE" but does not spell out the NDK +
-  `BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android` env-var
-  contract. A short callout would save the next developer a
-  bindgen-error round trip.
+- ~~**Document Android cross-build in README.**~~ **Closed
+  2026-05-25.** README §"Using it from C" gained a
+  "Cross-building for Android" sub-section listing the
+  `rustup target add`, the NDK environment variables, and the
+  load-bearing `BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android`
+  recipe; "Platform coverage" gained an Android row.
 
 ## Post-COMPLETE — Programmatic GLES context-backend override via `YaWGPUGlesContextBackend` *(☑ DONE 2026-05-25)*
 
@@ -1470,3 +1470,44 @@ Resolution rule: `YAWGPU_GLES_CONTEXT_BACKEND_EGL` and
 back to the existing `YAWGPU_GLES_BACKEND` parser, then default EGL.
 On non-Windows hosts, a programmatic WGL request falls back to EGL
 with the same diagnostic style as the env-var parser.
+
+## Post-COMPLETE — Documentation + framework helper for `YaWGPUGlesContextBackend` *(☑ DONE 2026-05-25)*
+
+Closes the HANDOFF "out of scope / explicit non-goals" entries that
+deferred user-facing surface area for the chain entry to a follow-up:
+
+- `README.md` "Backend selection" subsection: added a C snippet
+  showing the two-entry chain (`YaWGPUInstanceBackendSelect` linked
+  to `YaWGPUGlesContextBackend`) plus the precedence rule.
+- `DESIGN.md` Backend support tiers row: noted the chain entry
+  alongside the existing `YAWGPU_GLES_BACKEND=wgl` env-var mention.
+- `specs/SPEC.md` Phase 15 row: same.
+- `examples/framework/framework.c::yawgpu_instance_create`: chains
+  a `YaWGPUGlesContextBackend` whose value is sourced from a new
+  optional `YAWGPU_GLES_CONTEXT_BACKEND` env var (`egl` / `wgl` /
+  `default`). Default keeps byte-for-byte backward compatibility
+  (library treats `_DEFAULT` as "defer to `YAWGPU_GLES_BACKEND`").
+  Header comment on `yawgpu_instance_create` updated to match.
+
+While landing the `YAWGPU_GLES_CONTEXT_BACKEND_INIT` macro through
+framework.c, the same `_wgpu_MAKE_INIT_STRUCT(...)` macro-arg
+problem surfaced as for the pre-existing
+`YAWGPU_INPUT_ATTACHMENT_BINDING_LAYOUT_INIT`: the inner
+`{NULL, YAWGPU_STYPE_*}` brace pair contains an unescaped comma,
+which the C preprocessor sees as an extra macro argument. Fixed
+for the new INIT macro by using `_wgpu_COMMA`. The matching defect
+in `YAWGPU_INPUT_ATTACHMENT_BINDING_LAYOUT_INIT` is **pre-existing
+and currently latent** — no C code exercises that macro today
+(only Rust callers via bindgen, which use the struct definition,
+not the INIT macro). Worth fixing in a follow-up commit; tracked
+below.
+
+## Open follow-ups added by the documentation slice (2026-05-25)
+
+- **`YAWGPU_INPUT_ATTACHMENT_BINDING_LAYOUT_INIT` has an unescaped
+  inner comma.** Same `_wgpu_MAKE_INIT_STRUCT` macro-arg defect as
+  `YAWGPU_GLES_CONTEXT_BACKEND_INIT` had before the fix in this
+  slice; `{NULL, YAWGPU_STYPE_*}` needs `{NULL _wgpu_COMMA
+  YAWGPU_STYPE_*}` to compile from C. Currently latent (no C caller
+  uses the INIT macro for that struct). One-line fix; bundle into
+  the next yawgpu.h docs commit.

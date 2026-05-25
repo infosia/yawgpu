@@ -119,12 +119,41 @@ static uint32_t backend_from_environment(void) {
     return YAWGPU_INSTANCE_BACKEND_NOOP;
 }
 
+// Maps the YAWGPU_GLES_CONTEXT_BACKEND environment variable to a yawgpu.h
+// GLES context-backend enum value, defaulting to DEFAULT (= defer to the
+// library's own YAWGPU_GLES_BACKEND parser) for unset/empty/unknown values.
+// Lets examples force EGL or WGL from the chain without polluting
+// YAWGPU_GLES_BACKEND for the rest of the process.
+static uint32_t gles_context_backend_from_environment(void) {
+    const char *value = getenv("YAWGPU_GLES_CONTEXT_BACKEND");
+    if (!value || strcmp(value, "") == 0 || strcmp(value, "default") == 0) {
+        return YAWGPU_GLES_CONTEXT_BACKEND_DEFAULT;
+    }
+    if (strcmp(value, "egl") == 0) {
+        return YAWGPU_GLES_CONTEXT_BACKEND_EGL;
+    }
+    if (strcmp(value, "wgl") == 0) {
+        return YAWGPU_GLES_CONTEXT_BACKEND_WGL;
+    }
+    fprintf(stderr,
+            "unknown YAWGPU_GLES_CONTEXT_BACKEND=%s, deferring to library default\n",
+            value);
+    return YAWGPU_GLES_CONTEXT_BACKEND_DEFAULT;
+}
+
 WGPUInstance yawgpu_instance_create(void) {
+    // Optional second chain entry: only consumed when the resolved instance
+    // backend is GLES, ignored otherwise. The library treats DEFAULT as
+    // "fall through to YAWGPU_GLES_BACKEND", so leaving the env var unset
+    // gives the existing behaviour byte-for-byte.
+    YaWGPUGlesContextBackend gles_context = YAWGPU_GLES_CONTEXT_BACKEND_INIT;
+    gles_context.contextBackend = gles_context_backend_from_environment();
+
     // Chain the vendor backend-select struct onto the instance descriptor
     // so the chosen backend is applied at creation time.
     YaWGPUInstanceBackendSelect backend = {
         .chain = {
-            .next = NULL,
+            .next = &gles_context.chain,
             .sType = YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
         },
         .backend = backend_from_environment(),
