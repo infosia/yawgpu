@@ -1428,25 +1428,18 @@ default gate. Manual verification step, same as Android.
 
 ## Open follow-ups added by Android cross-build verification (2026-05-25)
 
-- **`yawgpu-hal` non-Windows warnings.** When the `#[cfg(windows)]`
-  WGL arm vanishes (Android, Linux+ANGLE, etc.), 14 warnings
-  surface: 5 `irrefutable_let_patterns` (the static
-  `GlesInstanceInner` / `GlesSurfaceInner` enums are
-  effectively single-variant on non-Windows) and 9
-  `dead_code` warnings for the ANGLE-only `EGL_PLATFORM_*`
-  constants in `gles/egl.rs`. None affect runtime
-  correctness. Cleanup options: gate the irrefutable
-  `match`/`let-else` arms behind `#[cfg(windows)]` to fall
-  back to direct field access on non-Windows, or accept the
-  warnings as the cost of the static-enum pattern. The dead
-  ANGLE constants should be `#[cfg_attr(not(windows),
-  allow(dead_code))]` at minimum (the user may still want
-  them at the source-of-truth layer even when only the
-  Windows path consumes them today). Non-blocking; clippy
-  `-D warnings` gate still runs against the macOS-host
-  default build (Noop) and the Windows ANGLE build, both of
-  which have all `#[cfg(windows)]` arms active and so do not
-  hit these warnings.
+- ~~**`yawgpu-hal` non-Windows warnings.**~~ **Closed
+  2026-05-25.** The 6 `irrefutable_let_patterns` and 8
+  `dead_code` warnings that surface when the `#[cfg(windows)]`
+  WGL arm vanishes (Android, Linux+ANGLE, etc.) are now
+  suppressed: ANGLE-only `EGL_PLATFORM_*` constants in
+  `gles/egl.rs` are `#[cfg(windows)]`-gated, and the
+  module-scope `#![allow(irrefutable_let_patterns)]` in
+  `gles/mod.rs` accepts the static-enum side-effect with a
+  comment pointing at CLAUDE.md "no `dyn Trait`". Clippy
+  `-D warnings` is now green under `--features gles` on
+  macOS / Android / Linux hosts as well as the existing
+  Windows ANGLE build.
 - ~~**Document Android cross-build in README.**~~ **Closed
   2026-05-25.** README §"Using it from C" gained a
   "Cross-building for Android" sub-section listing the
@@ -1504,10 +1497,9 @@ below.
 
 ## Open follow-ups added by the documentation slice (2026-05-25)
 
-- **`YAWGPU_INPUT_ATTACHMENT_BINDING_LAYOUT_INIT` has an unescaped
-  inner comma.** Same `_wgpu_MAKE_INIT_STRUCT` macro-arg defect as
-  `YAWGPU_GLES_CONTEXT_BACKEND_INIT` had before the fix in this
-  slice; `{NULL, YAWGPU_STYPE_*}` needs `{NULL _wgpu_COMMA
-  YAWGPU_STYPE_*}` to compile from C. Currently latent (no C caller
-  uses the INIT macro for that struct). One-line fix; bundle into
-  the next yawgpu.h docs commit.
+- ~~**`YAWGPU_INPUT_ATTACHMENT_BINDING_LAYOUT_INIT` has an unescaped
+  inner comma.**~~ **Closed 2026-05-25.** Switched the inner
+  `{NULL, YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT}` to use
+  `_wgpu_COMMA`, matching the `YAWGPU_GLES_CONTEXT_BACKEND_INIT`
+  fix and the working `YAWGPU_SHADER_MODULE_*_INIT` macros. INIT
+  macro is now C-callable should a consumer surface.

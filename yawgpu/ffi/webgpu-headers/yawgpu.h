@@ -632,7 +632,7 @@ typedef struct YaWGPUInputAttachmentBindingLayout {
  * Initializer for @ref YaWGPUInputAttachmentBindingLayout.
  */
 #define YAWGPU_INPUT_ATTACHMENT_BINDING_LAYOUT_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUInputAttachmentBindingLayout, { \
-    /*.chain=*/{NULL, YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT} _wgpu_COMMA \
+    /*.chain=*/{NULL _wgpu_COMMA YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT} _wgpu_COMMA \
     /*.sampleType=*/WGPUTextureSampleType_Float _wgpu_COMMA \
     /*.multisampled=*/0 _wgpu_COMMA \
 })
