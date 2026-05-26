@@ -641,10 +641,7 @@ mod tests {
             .depth_stencil_attachment
             .as_ref()
             .expect("non-null depth-stencil pointer should map to Some");
-        assert_eq!(
-            ds.format.raw(),
-            native::WGPUTextureFormat_Depth32Float as u32
-        );
+        assert_eq!(ds.format, native::WGPUTextureFormat_Depth32Float.into());
         assert_eq!(ds.sample_count, 4);
         assert!(mapped.error.is_none());
     }
