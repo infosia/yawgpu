@@ -453,11 +453,15 @@ static YaWGPUSubpassPassLayout create_pass_layout(TiledDeferredApp *app) {
     // `YaWGPUSubpassRenderPipelineDescriptor`) and by `BeginSubpassRenderPass`
     // at submit time — both must agree on the layout for the pipeline to
     // be subpass-compatible.
+    YaWGPUAttachmentLayout depth_layout = {
+        .format = WGPUTextureFormat_Depth32Float,
+        .sampleCount = 1,
+    };
     YaWGPUSubpassPassLayoutDescriptor descriptor = {
         .label = yawgpu_string_view("tiled deferred pass layout"),
         .colorAttachments = color_layouts,
         .colorAttachmentCount = 4,
-        .depthStencilAttachment = {.format = WGPUTextureFormat_Depth32Float, .sampleCount = 1},
+        .depthStencilAttachment = &depth_layout,
         .subpasses = subpasses,
         .subpassCount = 3,
         .dependencies = dependencies,

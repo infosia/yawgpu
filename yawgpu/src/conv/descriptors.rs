@@ -316,12 +316,14 @@ pub unsafe fn map_subpass_pass_layout_descriptor(
         sample_count: attachment.sampleCount,
     })
     .collect();
-    let depth_stencil_attachment = (descriptor.depthStencilAttachment.format
-        != native::WGPUTextureFormat_Undefined)
-        .then(|| core::AttachmentLayout {
-            format: map_texture_format(descriptor.depthStencilAttachment.format),
-            sample_count: descriptor.depthStencilAttachment.sampleCount,
-        });
+    let depth_stencil_attachment =
+        descriptor
+            .depthStencilAttachment
+            .as_ref()
+            .map(|layout| core::AttachmentLayout {
+                format: map_texture_format(layout.format),
+                sample_count: layout.sampleCount,
+            });
     let subpasses = slice_or_error(
         descriptor.subpasses,
         descriptor.subpassCount,
@@ -557,5 +559,93 @@ pub fn map_texture_view_descriptor(
             Some(value.arrayLayerCount)
         },
         aspect: map_texture_aspect(value.aspect),
+    }
+}
+
+#[cfg(all(test, feature = "tiled"))]
+mod tests {
+    use super::*;
+
+    fn empty_string_view() -> native::WGPUStringView {
+        native::WGPUStringView {
+            data: std::ptr::null(),
+            length: 0,
+        }
+    }
+
+    fn minimal_descriptor(
+        color: &crate::YaWGPUAttachmentLayout,
+        subpass: &crate::YaWGPUSubpassLayoutDesc,
+        depth_stencil: *const crate::YaWGPUAttachmentLayout,
+    ) -> crate::YaWGPUSubpassPassLayoutDescriptor {
+        crate::YaWGPUSubpassPassLayoutDescriptor {
+            nextInChain: std::ptr::null(),
+            label: empty_string_view(),
+            colorAttachments: color,
+            colorAttachmentCount: 1,
+            depthStencilAttachment: depth_stencil,
+            subpasses: subpass,
+            subpassCount: 1,
+            dependencies: std::ptr::null(),
+            dependencyCount: 0,
+        }
+    }
+
+    #[test]
+    fn subpass_pass_layout_descriptor_depth_stencil_null_maps_to_none() {
+        let color = crate::YaWGPUAttachmentLayout {
+            format: native::WGPUTextureFormat_RGBA8Unorm,
+            sampleCount: 1,
+        };
+        let color_index: u32 = 0;
+        let subpass = crate::YaWGPUSubpassLayoutDesc {
+            colorAttachmentIndices: &color_index,
+            colorAttachmentIndexCount: 1,
+            usesDepthStencil: 0,
+            inputAttachments: std::ptr::null(),
+            inputAttachmentCount: 0,
+        };
+        let descriptor = minimal_descriptor(&color, &subpass, std::ptr::null());
+
+        let mapped = unsafe { map_subpass_pass_layout_descriptor(&descriptor) };
+
+        assert!(mapped.depth_stencil_attachment.is_none());
+        assert!(mapped.error.is_none());
+        assert_eq!(mapped.color_attachments.len(), 1);
+        assert_eq!(mapped.color_attachments[0].sample_count, 1);
+    }
+
+    #[test]
+    fn subpass_pass_layout_descriptor_depth_stencil_non_null_maps_to_some() {
+        let color = crate::YaWGPUAttachmentLayout {
+            format: native::WGPUTextureFormat_RGBA8Unorm,
+            sampleCount: 4,
+        };
+        let color_index: u32 = 0;
+        let subpass = crate::YaWGPUSubpassLayoutDesc {
+            colorAttachmentIndices: &color_index,
+            colorAttachmentIndexCount: 1,
+            usesDepthStencil: 1,
+            inputAttachments: std::ptr::null(),
+            inputAttachmentCount: 0,
+        };
+        let depth_stencil = crate::YaWGPUAttachmentLayout {
+            format: native::WGPUTextureFormat_Depth32Float,
+            sampleCount: 4,
+        };
+        let descriptor = minimal_descriptor(&color, &subpass, &depth_stencil);
+
+        let mapped = unsafe { map_subpass_pass_layout_descriptor(&descriptor) };
+
+        let ds = mapped
+            .depth_stencil_attachment
+            .as_ref()
+            .expect("non-null depth-stencil pointer should map to Some");
+        assert_eq!(
+            ds.format.raw(),
+            native::WGPUTextureFormat_Depth32Float as u32
+        );
+        assert_eq!(ds.sample_count, 4);
+        assert!(mapped.error.is_none());
     }
 }

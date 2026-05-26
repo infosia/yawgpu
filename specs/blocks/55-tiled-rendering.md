@@ -159,12 +159,26 @@ typedef struct YaWGPUSubpassPassLayoutDescriptor {
     WGPUStringView                     label;
     YaWGPUAttachmentLayout const*  colorAttachments;     /* indexed by slot */
     size_t                             colorAttachmentCount;
-    YaWGPUAttachmentLayout         depthStencilAttachment;/* format Undefined = none */
+    YaWGPUAttachmentLayout const*  depthStencilAttachment;/* nullable: NULL = none */
     YaWGPUSubpassLayoutDesc const* subpasses;
     size_t                             subpassCount;
     YaWGPUSubpassDependency const* dependencies;
     size_t                             dependencyCount;
 } YaWGPUSubpassPassLayoutDescriptor;
+```
+
+**Depth-stencil presence convention (TDS1).** `depthStencilAttachment` is
+a nullable pointer to a `YaWGPUAttachmentLayout`: `NULL` means the pass
+has no depth-stencil slot; a non-`NULL` pointer means the pass declares
+one with the pointed-to format and sample count. This matches the
+nullable-pointer convention used by
+`YaWGPUSubpassRenderPassDescriptor.depthStencilAttachment` (TDS2 below
+at the bind-time side), so layout-time and bind-time descriptors express
+"no depth-stencil" the same way. The pointer is only dereferenced
+during the `yawgpuDeviceCreateSubpassPassLayout` call; ownership is not
+transferred.
+
+```c
 
 YaWGPUSubpassPassLayout yawgpuDeviceCreateSubpassPassLayout(
     WGPUDevice device, YaWGPUSubpassPassLayoutDescriptor const* descriptor);
