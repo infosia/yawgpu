@@ -2,64 +2,106 @@ use super::*;
 
 /// Creates a new WebGPU instance.
 ///
+/// Resolves the HAL backend per the `YaWGPUInstanceBackendSelect` chain entry,
+/// when present, following rules IB1-IB4 from
+/// `specs/blocks/60-real-backends.md`:
+///
+/// - **IB1** No chain entry: returns a Noop instance.
+/// - **IB2** Chain `backend = YAWGPU_INSTANCE_BACKEND_NOOP`: returns a Noop
+///   instance.
+/// - **IB3** Chain `backend = YAWGPU_INSTANCE_BACKEND_{METAL, VULKAN, GLES}`:
+///   strict. Returns NULL when the matching cargo feature was not compiled in,
+///   when the backend's `HalInstance::new` returns `Err`, or when
+///   `enumerate_adapters()` returns empty. A best-effort diagnostic is written
+///   to `stderr`.
+/// - **IB4** Chain `backend` value outside the four constants above: returns
+///   a Noop instance (lenient — newer-header constants stay forward-compatible
+///   against older `yawgpu` builds).
+///
 /// # Safety
 ///
 /// `descriptor`, when non-null, must point to a valid `WGPUInstanceDescriptor`.
-/// Returns WGPU create instance.
+/// Returns the new instance handle, or NULL when an IB3 strict failure occurs.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCreateInstance(
     descriptor: *const native::WGPUInstanceDescriptor,
 ) -> native::WGPUInstance {
     let timed_wait_any_enabled = instance_has_timed_wait_any(descriptor);
-    let instance = match instance_backend_selection(descriptor) {
-        InstanceBackendSelection::Noop => WGPUInstanceImpl::new_noop(timed_wait_any_enabled),
-        InstanceBackendSelection::Metal => {
+    let selection = instance_backend_selection(descriptor);
+    let instance = match selection {
+        // IB1 (no chain) and IB2 (chain == NOOP) / IB4 (chain == unknown).
+        None | Some(InstanceBackendSelection::Noop) => {
+            WGPUInstanceImpl::new_noop(timed_wait_any_enabled)
+        }
+        Some(InstanceBackendSelection::Metal) => {
             #[cfg(feature = "metal")]
             {
                 match yawgpu_hal::metal::MetalInstance::new() {
                     Ok(instance) => {
                         let hal_instance = yawgpu_hal::HalInstance::Metal(instance);
                         if hal_instance.enumerate_adapters().is_empty() {
-                            WGPUInstanceImpl::new_noop(timed_wait_any_enabled)
-                        } else {
-                            WGPUInstanceImpl::from_core(
-                                core::Instance::from_hal(hal_instance),
-                                timed_wait_any_enabled,
-                            )
+                            eprintln!(
+                                "yawgpu-metal: YAWGPU_INSTANCE_BACKEND_METAL requested but enumerate_adapters returned no adapters; returning NULL instance"
+                            );
+                            return std::ptr::null();
                         }
+                        WGPUInstanceImpl::from_core(
+                            core::Instance::from_hal(hal_instance),
+                            timed_wait_any_enabled,
+                        )
                     }
-                    Err(_) => WGPUInstanceImpl::new_noop(timed_wait_any_enabled),
+                    Err(err) => {
+                        eprintln!(
+                            "yawgpu-metal: YAWGPU_INSTANCE_BACKEND_METAL requested but HalInstance::new failed ({err:?}); returning NULL instance"
+                        );
+                        return std::ptr::null();
+                    }
                 }
             }
             #[cfg(not(feature = "metal"))]
             {
-                WGPUInstanceImpl::new_noop(timed_wait_any_enabled)
+                let _ = timed_wait_any_enabled;
+                eprintln!(
+                    "yawgpu-metal: YAWGPU_INSTANCE_BACKEND_METAL requested but yawgpu was built without feature=metal; returning NULL instance"
+                );
+                return std::ptr::null();
             }
         }
-        InstanceBackendSelection::Vulkan => {
+        Some(InstanceBackendSelection::Vulkan) => {
             #[cfg(feature = "vulkan")]
             {
                 match yawgpu_hal::vulkan::VulkanInstance::new() {
                     Ok(instance) => {
                         let hal_instance = yawgpu_hal::HalInstance::Vulkan(instance);
                         if hal_instance.enumerate_adapters().is_empty() {
-                            WGPUInstanceImpl::new_noop(timed_wait_any_enabled)
-                        } else {
-                            WGPUInstanceImpl::from_core(
-                                core::Instance::from_hal(hal_instance),
-                                timed_wait_any_enabled,
-                            )
+                            eprintln!(
+                                "yawgpu-vulkan: YAWGPU_INSTANCE_BACKEND_VULKAN requested but enumerate_adapters returned no adapters; returning NULL instance"
+                            );
+                            return std::ptr::null();
                         }
+                        WGPUInstanceImpl::from_core(
+                            core::Instance::from_hal(hal_instance),
+                            timed_wait_any_enabled,
+                        )
                     }
-                    Err(_) => WGPUInstanceImpl::new_noop(timed_wait_any_enabled),
+                    Err(err) => {
+                        eprintln!(
+                            "yawgpu-vulkan: YAWGPU_INSTANCE_BACKEND_VULKAN requested but HalInstance::new failed ({err:?}); returning NULL instance"
+                        );
+                        return std::ptr::null();
+                    }
                 }
             }
             #[cfg(not(feature = "vulkan"))]
             {
-                WGPUInstanceImpl::new_noop(timed_wait_any_enabled)
+                let _ = timed_wait_any_enabled;
+                eprintln!(
+                    "yawgpu-vulkan: YAWGPU_INSTANCE_BACKEND_VULKAN requested but yawgpu was built without feature=vulkan; returning NULL instance"
+                );
+                return std::ptr::null();
             }
         }
-        InstanceBackendSelection::Gles => {
+        Some(InstanceBackendSelection::Gles) => {
             #[cfg(feature = "gles")]
             {
                 let context_backend = gles_context_backend_choice(descriptor);
@@ -67,20 +109,31 @@ pub unsafe extern "C" fn wgpuCreateInstance(
                     Ok(instance) => {
                         let hal_instance = yawgpu_hal::HalInstance::Gles(instance);
                         if hal_instance.enumerate_adapters().is_empty() {
-                            WGPUInstanceImpl::new_noop(timed_wait_any_enabled)
-                        } else {
-                            WGPUInstanceImpl::from_core(
-                                core::Instance::from_hal(hal_instance),
-                                timed_wait_any_enabled,
-                            )
+                            eprintln!(
+                                "yawgpu-gles: YAWGPU_INSTANCE_BACKEND_GLES requested but enumerate_adapters returned no adapters; returning NULL instance"
+                            );
+                            return std::ptr::null();
                         }
+                        WGPUInstanceImpl::from_core(
+                            core::Instance::from_hal(hal_instance),
+                            timed_wait_any_enabled,
+                        )
                     }
-                    Err(_) => WGPUInstanceImpl::new_noop(timed_wait_any_enabled),
+                    Err(err) => {
+                        eprintln!(
+                            "yawgpu-gles: YAWGPU_INSTANCE_BACKEND_GLES requested but HalInstance::new failed ({err:?}); returning NULL instance"
+                        );
+                        return std::ptr::null();
+                    }
                 }
             }
             #[cfg(not(feature = "gles"))]
             {
-                WGPUInstanceImpl::new_noop(timed_wait_any_enabled)
+                let _ = timed_wait_any_enabled;
+                eprintln!(
+                    "yawgpu-gles: YAWGPU_INSTANCE_BACKEND_GLES requested but yawgpu was built without feature=gles; returning NULL instance"
+                );
+                return std::ptr::null();
             }
         }
     };

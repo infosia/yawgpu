@@ -80,6 +80,72 @@ across the drivers yawgpu targets (MoltenVK ≥ 1.1.0, native desktop Vulkan,
 Android mobile Vulkan since 2018). Follow-up tracking lives in
 `specs/tracking/vulkan-buffer-texture-usage-vuids.md` § F3.
 
+## Instance backend selection (`YaWGPUInstanceBackendSelect`)
+
+The `YaWGPUInstanceBackendSelect` chain entry pins the HAL backend chosen
+by `wgpuCreateInstance`. The rules below govern its behaviour and apply
+uniformly across Tier 1 (Metal, Vulkan) and Tier 2 (GLES) backends.
+
+- **IB1** No chain entry present ⇒ `wgpuCreateInstance` returns a Noop
+  instance (unchanged). This is the lenient default that keeps "I just
+  want a WebGPU instance for unit tests" working with no per-call
+  configuration.
+- **IB2** Chain entry with `backend == YAWGPU_INSTANCE_BACKEND_NOOP` ⇒
+  returns a Noop instance (unchanged). This preserves an opt-in "I want
+  Noop explicitly" route.
+- **IB3** Chain entry with `backend == YAWGPU_INSTANCE_BACKEND_{METAL,
+  VULKAN, GLES}` is **strict**: `wgpuCreateInstance` returns `NULL`
+  if any of the following hold:
+  - the matching cargo feature (`metal` / `vulkan` / `gles`) was not
+    compiled into this `yawgpu` build;
+  - the backend's `HalInstance::new` returns `Err`;
+  - the backend's `enumerate_adapters()` returns empty.
+
+  A best-effort diagnostic line is written to `stderr` via `eprintln!`
+  (matching the existing `YaWGPUGlesContextBackend` diagnostic style)
+  identifying which of the three causes fired. The caller's only in-band
+  signal is the `NULL` return — there is no error callback on
+  `wgpuCreateInstance` per webgpu.h.
+
+  **Rationale:** the silent-Noop fallback that previously fired here
+  caused test code that explicitly requested Metal/Vulkan/GLES to
+  produce false-positive passes against a Noop instance. Tests can now
+  fail-fast on backend-availability mismatches.
+
+- **IB4** Chain entry with an unrecognised `backend` value (anything
+  outside the four `YAWGPU_INSTANCE_BACKEND_*` constants) is treated as
+  if no chain were present (returns Noop). This is the only remaining
+  lenient case, kept so that an older `yawgpu` build reading a
+  descriptor produced by a newer header (which may define additional
+  backend constants) does not immediately fail. Callers wanting strict
+  detection can verify the chosen backend via
+  `wgpuAdapterGetInfo().backendType` after `wgpuInstanceRequestAdapter`.
+
+The same `NULL`-on-strict-failure contract applies regardless of how the
+yawgpu instance descriptor is constructed (with or without the
+`YaWGPUGlesContextBackend` companion chain).
+
+### Acceptance tests (Noop gate)
+
+Direct unit tests on `wgpuCreateInstance` covering each rule, in
+`yawgpu/src/ffi/instance.rs` (or `yawgpu/src/ffi/mod.rs` where the
+existing `instance_backend_selection` tests live):
+
+- **IB1**: descriptor with `nextInChain == NULL` ⇒ non-NULL handle.
+- **IB2**: chain `backend = NOOP` ⇒ non-NULL handle.
+- **IB3-no-feature**: chain `backend = METAL/VULKAN/GLES` on a build
+  whose matching cargo feature is **not** enabled ⇒ NULL handle. (The
+  Noop gate runs without any of these features, so the chain entries
+  for Metal/Vulkan/GLES all hit this path.)
+- **IB4**: chain `backend = 0x42` (or any unrecognised value) ⇒
+  non-NULL handle (Noop fallback). 
+
+The existing chain-routing tests at `yawgpu/src/ffi/mod.rs` must be
+audited and any that depended on the silent-Noop fallback for
+Metal/Vulkan/GLES updated to either (a) drop the chain entry, (b)
+switch to `backend = NOOP`, or (c) be moved behind the matching
+backend feature flag.
+
 ## Slices → end2end port targets
 
 Dawn `dawn/src/dawn/tests/end2end/`. Port the **minimal**
