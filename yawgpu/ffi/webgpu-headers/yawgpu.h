@@ -841,10 +841,12 @@ typedef struct YaWGPUSubpassPassLayoutDescriptor {
     /** Number of elements in @ref colorAttachments. */
     size_t colorAttachmentCount;
     /**
-     * Optional depth-stencil slot. `format == WGPUTextureFormat_Undefined`
-     * means the pass has no depth-stencil attachment.
+     * Optional depth-stencil slot. Nullable pointer; `NULL` means the pass
+     * has no depth-stencil slot. The pointer is only dereferenced during
+     * the @ref yawgpuDeviceCreateSubpassPassLayout call; ownership is not
+     * transferred.
      */
-    YaWGPUAttachmentLayout depthStencilAttachment;
+    YaWGPUAttachmentLayout const* depthStencilAttachment;
     /** Per-subpass static descriptions. The array length is the subpass count. */
     YaWGPUSubpassLayoutDesc const* subpasses;
     /** Number of elements in @ref subpasses. Must be `≥ 1`. */
@@ -867,7 +869,7 @@ typedef struct YaWGPUSubpassPassLayoutDescriptor {
     /*.label=*/WGPU_STRING_VIEW_INIT _wgpu_COMMA \
     /*.colorAttachments=*/NULL _wgpu_COMMA \
     /*.colorAttachmentCount=*/0 _wgpu_COMMA \
-    /*.depthStencilAttachment=*/{WGPUTextureFormat_Undefined, 1} _wgpu_COMMA \
+    /*.depthStencilAttachment=*/NULL _wgpu_COMMA \
     /*.subpasses=*/NULL _wgpu_COMMA \
     /*.subpassCount=*/0 _wgpu_COMMA \
     /*.dependencies=*/NULL _wgpu_COMMA \
@@ -1113,6 +1115,37 @@ typedef struct YaWGPUSubpassRenderPassDescriptor {
     /*.colorAttachmentCount=*/0 _wgpu_COMMA \
     /*.depthStencilAttachment=*/NULL _wgpu_COMMA \
 })
+
+/*
+ * `YaWGPUSubpassRenderPassEncoder` vs `WGPURenderPassEncoder`
+ * -----------------------------------------------------------
+ * `YaWGPUSubpassRenderPassEncoder` is a *separate handle type* from the
+ * standard `WGPURenderPassEncoder`. The two are **not type-compatible**:
+ * the standard `wgpuRenderPassEncoder*` entry points cannot be used on a
+ * subpass encoder and vice versa. This is deliberate — a subpass encoder
+ * is bound to a `YaWGPUSubpassPassLayout` and tracks the current
+ * subpass index, which the standard encoder does not.
+ *
+ * The subpass encoder exposes the focused subset of recording verbs
+ * needed by tile-based deferred shading: pipeline + bind group bind,
+ * vertex/index buffer bind, non-indexed/indexed draw, viewport /
+ * scissor, subpass advance, end, and refcount. Other commands available
+ * on the standard `WGPURenderPassEncoder` — listed below — are **not
+ * provided** on the subpass encoder today. Code that needs any of them
+ * must use the standard render pass path (`wgpuCommandEncoderBeginRenderPass`
+ * + `wgpuRenderPassEncoder*`) instead of the subpass path.
+ *
+ *   - `SetBlendConstant`, `SetStencilReference`, `SetImmediates`, `SetLabel`
+ *   - `DrawIndirect`, `DrawIndexedIndirect`
+ *   - `BeginOcclusionQuery`, `EndOcclusionQuery`
+ *   - `ExecuteBundles`
+ *   - `PushDebugGroup`, `PopDebugGroup`, `InsertDebugMarker`
+ *
+ * These omissions are not a guarantee — future yawgpu versions may add a
+ * subset of them where the semantics map cleanly onto a multi-subpass
+ * pass. There is no plan to make the two encoder types interchangeable
+ * at the C ABI level; the type split is part of the safety contract.
+ */
 
 /**
  * Begins a subpass render pass on the given command encoder.

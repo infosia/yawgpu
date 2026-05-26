@@ -312,10 +312,7 @@ unsafe fn create_two_subpass_input_layout(
         label: empty_string_view(),
         colorAttachments: attachments.as_ptr(),
         colorAttachmentCount: attachments.len(),
-        depthStencilAttachment: yawgpu::YaWGPUAttachmentLayout {
-            format: native::WGPUTextureFormat_Undefined,
-            sampleCount: 1,
-        },
+        depthStencilAttachment: std::ptr::null(),
         subpasses: subpasses.as_ptr(),
         subpassCount: subpasses.len(),
         dependencies: &dependency,
@@ -508,10 +505,7 @@ unsafe fn create_single_color_subpass_layout(
         label: empty_string_view(),
         colorAttachments: &color,
         colorAttachmentCount: 1,
-        depthStencilAttachment: yawgpu::YaWGPUAttachmentLayout {
-            format: native::WGPUTextureFormat_Undefined,
-            sampleCount: 1,
-        },
+        depthStencilAttachment: std::ptr::null(),
         subpasses: &subpass,
         subpassCount: 1,
         dependencies: std::ptr::null(),

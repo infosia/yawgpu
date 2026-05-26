@@ -294,8 +294,9 @@ pub struct YaWGPUSubpassPassLayoutDescriptor {
     pub colorAttachments: *const YaWGPUAttachmentLayout,
     /// Color attachment count.
     pub colorAttachmentCount: usize,
-    /// Depth-stencil attachment. Undefined format means absent.
-    pub depthStencilAttachment: YaWGPUAttachmentLayout,
+    /// Depth-stencil attachment. Nullable pointer; `NULL` means the pass
+    /// has no depth-stencil slot.
+    pub depthStencilAttachment: *const YaWGPUAttachmentLayout,
     /// Subpasses.
     pub subpasses: *const YaWGPUSubpassLayoutDesc,
     /// Subpass count.
