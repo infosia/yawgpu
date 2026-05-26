@@ -127,8 +127,8 @@ API plus backend selection.
 
 ### Backend selection (always available)
 
-Chain `YaWGPUInstanceBackendSelect` onto `WGPUInstanceDescriptor` to pick
-which backend the instance will create:
+Chain `YaWGPUInstanceBackendSelect` onto `WGPUInstanceDescriptor` to pin
+the instance to a single HAL backend at creation time:
 
 ```c
 #include "webgpu.h"
@@ -142,8 +142,27 @@ WGPUInstanceDescriptor desc = { .nextInChain = &sel.chain };
 WGPUInstance instance = wgpuCreateInstance(&desc);
 ```
 
-The same effect is available via the `YAWGPU_BACKEND` environment variable
-that the bundled C examples use.
+This is distinct from the standard `WGPURequestAdapterOptions.backendType`
+hint, which filters adapters per-request after every backend's runtime is
+already up. `YaWGPUInstanceBackendSelect` decides at `wgpuCreateInstance`
+time, so:
+
+- **Only the chosen backend's runtime is initialized.** `_NOOP` truly
+  touches no GPU driver — useful for validation-only CI; `_METAL` skips
+  the Vulkan ICD scan, and vice versa.
+- **No silent multi-backend leakage.** `wgpuInstanceEnumerateAdapters`
+  returns adapters from exactly one backend, which keeps e2e tests
+  (`yawgpu/tests/e2e_metal_*.rs`, `e2e_vulkan_*.rs`, `e2e_gles_*.rs`)
+  isolated and lets a single process compare backends side-by-side by
+  holding two pinned instances at once.
+- **Fully programmatic.** The library does not read `YAWGPU_BACKEND`
+  itself — only the bundled examples' framework does, as a convenience
+  for `./example` CLI invocations. Applications that want backend
+  control without env-var coupling get a clean C API path.
+
+If the requested backend isn't compiled in or isn't usable on the host,
+adapter enumeration comes back empty so the caller sees the failure
+immediately (no silent fallback to a different backend).
 
 When the resolved instance backend is GLES, an independent chain entry
 `YaWGPUGlesContextBackend` (sType `YAWGPU_STYPE_GLES_CONTEXT_BACKEND`)
