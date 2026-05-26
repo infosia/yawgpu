@@ -1883,27 +1883,32 @@ unsafe fn instance_has_timed_wait_any(descriptor: *const native::WGPUInstanceDes
     features.contains(&native::WGPUInstanceFeatureName_TimedWaitAny)
 }
 
+/// Resolves the requested HAL backend from the descriptor's chain.
+///
+/// Returns `None` when no `YaWGPUInstanceBackendSelect` chain entry is present
+/// (IB1). Returns `Some(InstanceBackendSelection)` when a chain entry was
+/// supplied; the variant is `Noop` for `YAWGPU_INSTANCE_BACKEND_NOOP` (IB2) or
+/// any unrecognised value (IB4), and `Metal`/`Vulkan`/`Gles` for the matching
+/// constants (IB3 — strict semantics enforced at the call site).
 unsafe fn instance_backend_selection(
     descriptor: *const native::WGPUInstanceDescriptor,
-) -> InstanceBackendSelection {
-    let Some(descriptor) = descriptor.as_ref() else {
-        return InstanceBackendSelection::Noop;
-    };
+) -> Option<InstanceBackendSelection> {
+    let descriptor = descriptor.as_ref()?;
     let mut chain = descriptor.nextInChain;
     while let Some(node) = chain.as_ref() {
         if node.sType == YAWGPU_STYPE_INSTANCE_BACKEND_SELECT {
             let selection =
                 &*(node as *const native::WGPUChainedStruct as *const YaWGPUInstanceBackendSelect);
-            return match selection.backend {
+            return Some(match selection.backend {
                 YAWGPU_INSTANCE_BACKEND_METAL => InstanceBackendSelection::Metal,
                 YAWGPU_INSTANCE_BACKEND_VULKAN => InstanceBackendSelection::Vulkan,
                 YAWGPU_INSTANCE_BACKEND_GLES => InstanceBackendSelection::Gles,
                 _ => InstanceBackendSelection::Noop,
-            };
+            });
         }
         chain = node.next;
     }
-    InstanceBackendSelection::Noop
+    None
 }
 
 #[cfg(feature = "gles")]
@@ -3176,6 +3181,178 @@ mod tests {
 
             wgpuInstanceRelease(default_instance);
             wgpuInstanceRelease(noop_instance);
+        }
+    }
+
+    // --- IB1-IB4 acceptance tests (specs/blocks/60-real-backends.md) ---
+
+    /// IB1: no chain entry present ⇒ non-NULL Noop instance.
+    #[test]
+    fn wgpuCreateInstance_ib1_no_chain_returns_noop_instance() {
+        unsafe {
+            let descriptor = native::WGPUInstanceDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                requiredFeatureCount: 0,
+                requiredFeatures: std::ptr::null(),
+                requiredLimits: std::ptr::null(),
+            };
+            let instance = wgpuCreateInstance(&descriptor);
+            assert!(!instance.is_null(), "IB1: no chain must yield non-NULL");
+            assert!(matches!(
+                borrow_handle(instance, "WGPUInstance").core.hal(),
+                HalInstance::Noop(_)
+            ));
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    /// IB2: chain `backend = NOOP` ⇒ non-NULL Noop instance.
+    #[test]
+    fn wgpuCreateInstance_ib2_noop_backend_chain_returns_noop_instance() {
+        unsafe {
+            let instance = make_noop_instance();
+            assert!(
+                !instance.is_null(),
+                "IB2: chain backend=NOOP must yield non-NULL"
+            );
+            assert!(matches!(
+                borrow_handle(instance, "WGPUInstance").core.hal(),
+                HalInstance::Noop(_)
+            ));
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    unsafe fn make_real_backend_instance(backend: u32) -> native::WGPUInstance {
+        let mut chain = YaWGPUInstanceBackendSelect {
+            chain: native::WGPUChainedStruct {
+                next: std::ptr::null_mut(),
+                sType: YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
+            },
+            backend,
+        };
+        let descriptor = native::WGPUInstanceDescriptor {
+            nextInChain: (&mut chain.chain) as *mut native::WGPUChainedStruct,
+            requiredFeatureCount: 0,
+            requiredFeatures: std::ptr::null(),
+            requiredLimits: std::ptr::null(),
+        };
+        wgpuCreateInstance(&descriptor)
+    }
+
+    /// IB3-no-feature: chain `backend = METAL` without `feature = "metal"` ⇒
+    /// NULL. The Noop gate runs without the `metal` feature so this is the
+    /// path that fires in CI.
+    #[cfg(not(feature = "metal"))]
+    #[test]
+    fn wgpuCreateInstance_ib3_metal_without_feature_returns_null() {
+        unsafe {
+            let instance = make_real_backend_instance(YAWGPU_INSTANCE_BACKEND_METAL);
+            assert!(
+                instance.is_null(),
+                "IB3: requesting METAL without feature=metal must yield NULL"
+            );
+        }
+    }
+
+    /// IB3 success path on `feature = "metal"`: returns non-NULL when a Metal
+    /// adapter is present; otherwise returns NULL (no-adapter strict failure).
+    /// Either outcome is acceptable here; the test exists to keep the
+    /// metal-feature code path covered.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn wgpuCreateInstance_ib3_metal_with_feature_returns_handle_or_null() {
+        unsafe {
+            let instance = make_real_backend_instance(YAWGPU_INSTANCE_BACKEND_METAL);
+            if instance.is_null() {
+                return;
+            }
+            assert!(matches!(
+                borrow_handle(instance, "WGPUInstance").core.hal(),
+                HalInstance::Metal(_)
+            ));
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    /// IB3-no-feature: chain `backend = VULKAN` without `feature = "vulkan"`
+    /// ⇒ NULL.
+    #[cfg(not(feature = "vulkan"))]
+    #[test]
+    fn wgpuCreateInstance_ib3_vulkan_without_feature_returns_null() {
+        unsafe {
+            let instance = make_real_backend_instance(YAWGPU_INSTANCE_BACKEND_VULKAN);
+            assert!(
+                instance.is_null(),
+                "IB3: requesting VULKAN without feature=vulkan must yield NULL"
+            );
+        }
+    }
+
+    /// IB3 success path on `feature = "vulkan"`: returns non-NULL when a
+    /// Vulkan adapter is present; otherwise returns NULL.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn wgpuCreateInstance_ib3_vulkan_with_feature_returns_handle_or_null() {
+        unsafe {
+            let instance = make_real_backend_instance(YAWGPU_INSTANCE_BACKEND_VULKAN);
+            if instance.is_null() {
+                return;
+            }
+            assert!(matches!(
+                borrow_handle(instance, "WGPUInstance").core.hal(),
+                HalInstance::Vulkan(_)
+            ));
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    /// IB3-no-feature: chain `backend = GLES` without `feature = "gles"`
+    /// ⇒ NULL.
+    #[cfg(not(feature = "gles"))]
+    #[test]
+    fn wgpuCreateInstance_ib3_gles_without_feature_returns_null() {
+        unsafe {
+            let instance = make_real_backend_instance(YAWGPU_INSTANCE_BACKEND_GLES);
+            assert!(
+                instance.is_null(),
+                "IB3: requesting GLES without feature=gles must yield NULL"
+            );
+        }
+    }
+
+    /// IB3 success path on `feature = "gles"`: returns non-NULL when a GLES
+    /// adapter is present; otherwise returns NULL.
+    #[cfg(feature = "gles")]
+    #[test]
+    fn wgpuCreateInstance_ib3_gles_with_feature_returns_handle_or_null() {
+        unsafe {
+            let instance = make_real_backend_instance(YAWGPU_INSTANCE_BACKEND_GLES);
+            if instance.is_null() {
+                return;
+            }
+            assert!(matches!(
+                borrow_handle(instance, "WGPUInstance").core.hal(),
+                HalInstance::Gles(_)
+            ));
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    /// IB4: chain `backend = 0x42` (unrecognised) ⇒ non-NULL Noop instance.
+    #[test]
+    fn wgpuCreateInstance_ib4_unknown_backend_returns_noop_instance() {
+        unsafe {
+            let instance = make_real_backend_instance(0x42);
+            assert!(
+                !instance.is_null(),
+                "IB4: unknown backend must yield non-NULL Noop"
+            );
+            assert!(matches!(
+                borrow_handle(instance, "WGPUInstance").core.hal(),
+                HalInstance::Noop(_)
+            ));
+            wgpuInstanceRelease(instance);
         }
     }
 

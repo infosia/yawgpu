@@ -31,8 +31,9 @@ pub const YAWGPU_INSTANCE_BACKEND_METAL: u32 = 1;
 /// Constant value for the yawgpu Vulkan instance backend.
 pub const YAWGPU_INSTANCE_BACKEND_VULKAN: u32 = 2;
 /// Constant value for the yawgpu GLES (Tier 2 / experimental) instance backend.
-/// Requires the `gles` cargo feature; otherwise instance creation falls back
-/// to Noop.
+/// Requires the `gles` cargo feature; otherwise (per the IB3 rules on
+/// `YaWGPUInstanceBackendSelect`) `wgpuCreateInstance` returns NULL when this
+/// backend is explicitly requested.
 pub const YAWGPU_INSTANCE_BACKEND_GLES: u32 = 3;
 /// SType value for `YaWGPUInstanceBackendSelect`.
 pub const YAWGPU_STYPE_INSTANCE_BACKEND_SELECT: native::WGPUSType = 0x7000_0001;
@@ -65,7 +66,27 @@ pub const YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT: native::WGPUSType = 0x70
 ///
 /// Chain this from `WGPUInstanceDescriptor::nextInChain` with
 /// `YAWGPU_STYPE_INSTANCE_BACKEND_SELECT`. This mirrors the declaration in
-/// yawgpu.h and native-only backend selection extensions.
+/// yawgpu.h and native-only backend selection extensions. Resolution rules
+/// applied by `wgpuCreateInstance` (return value in parentheses):
+///
+/// - **No chain entry present** (`nextInChain` does not contain a
+///   `YaWGPUInstanceBackendSelect`): a Noop instance is returned (non-NULL).
+/// - **`backend == YAWGPU_INSTANCE_BACKEND_NOOP`**: a Noop instance is
+///   returned (non-NULL).
+/// - **`backend == YAWGPU_INSTANCE_BACKEND_{METAL, VULKAN, GLES}`**: strict.
+///   `wgpuCreateInstance` returns NULL when the matching cargo feature was
+///   not compiled into this yawgpu build, when the backend's instance
+///   creation fails, or when the backend exposes no adapters. A best-effort
+///   diagnostic line is written to `stderr` identifying which cause fired
+///   (the only in-band signal is the NULL return; webgpu.h does not provide
+///   an error callback on `wgpuCreateInstance`). Callers wanting to confirm
+///   which backend was selected may inspect
+///   `wgpuAdapterGetInfo().backendType` after `wgpuInstanceRequestAdapter`.
+/// - **Unrecognised `backend` value** (anything outside the four constants
+///   above): treated as if no chain were present and returns a Noop instance
+///   (non-NULL). This keeps older yawgpu builds forward-compatible with
+///   descriptors produced from a newer header that may define additional
+///   backend constants.
 #[repr(C)]
 pub struct YaWGPUInstanceBackendSelect {
     /// Chain.
@@ -147,8 +168,13 @@ pub struct YaWGPUTransientAttachmentDescriptor {
 
 /// yawgpu vendor extension bind group layout entry for input attachments.
 ///
-/// Chain this from `WGPUBindGroupLayoutEntry::nextInChain`. The resource is
-/// auto-wired from the subpass pass layout; callers do not bind a texture view.
+/// Chain this from `WGPUBindGroupLayoutEntry::nextInChain`. When this chain is
+/// present the enclosing entry's `buffer`/`sampler`/`texture`/`storageTexture`
+/// fields must be left zero-initialized; setting any standard binding-layout
+/// field alongside this chain is rejected at bind-group-layout creation. The
+/// resource itself is auto-wired from the subpass pass layout, so the matching
+/// `WGPUBindGroupEntry` must be omitted from the bind group's `entries` array
+/// (supplying any entry for that binding is rejected at bind-group creation).
 #[cfg(feature = "tiled")]
 #[allow(non_snake_case)]
 #[repr(C)]
@@ -287,7 +313,12 @@ pub struct YaWGPUSubpassPassLayoutDescriptor {
 pub struct YaWGPUSubpassRenderPipelineDescriptor {
     /// Extension chain.
     pub nextInChain: *const native::WGPUChainedStruct,
-    /// Base render pipeline descriptor.
+    /// Base render pipeline descriptor. `fragment.targets`,
+    /// `multisample.count`, and `depthStencil` must match the subpass selected
+    /// by `passLayout` / `subpassIndex` (count, per-target `format`, sample
+    /// count, and depth-stencil format/presence are all validated at pipeline
+    /// creation; mismatches return a NULL pipeline with an error pushed to
+    /// the device's error scope).
     pub base: native::WGPURenderPipelineDescriptor,
     /// Compatible pass layout.
     pub passLayout: YaWGPUSubpassPassLayout,

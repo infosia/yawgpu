@@ -63,7 +63,8 @@ enum {
     YAWGPU_INSTANCE_BACKEND_VULKAN = 2,
     /** OpenGL ES 3.1+ backend (Tier 2 / experimental). Available on Android (native EGL)
      *  and Windows ANGLE. Requires the `gles` cargo feature to be compiled in;
-     *  otherwise instance creation falls back to Noop. */
+     *  otherwise (per IB3 rules above) `wgpuCreateInstance` returns NULL when
+     *  this backend is explicitly requested via @ref YaWGPUInstanceBackendSelect. */
     YAWGPU_INSTANCE_BACKEND_GLES = 3,
 };
 
@@ -71,9 +72,28 @@ enum {
  * Chained extension that selects a specific HAL backend.
  *
  * `chain.sType` must be set to @ref YAWGPU_STYPE_INSTANCE_BACKEND_SELECT and
- * `backend` to one of the `YAWGPU_INSTANCE_BACKEND_*` constants. If the
- * requested backend is not compiled in or not available on the host, instance
- * creation falls back to the standard yawgpu selection policy.
+ * `backend` to one of the `YAWGPU_INSTANCE_BACKEND_*` constants. Resolution
+ * follows these rules (`wgpuCreateInstance` return value in parentheses):
+ *
+ * - **No chain entry present** (`nextInChain` does not contain a
+ *   @ref YaWGPUInstanceBackendSelect): a Noop instance is returned
+ *   (non-NULL).
+ * - **`backend == YAWGPU_INSTANCE_BACKEND_NOOP`**: a Noop instance is
+ *   returned (non-NULL).
+ * - **`backend == YAWGPU_INSTANCE_BACKEND_{METAL, VULKAN, GLES}`**: strict.
+ *   `wgpuCreateInstance` returns NULL when the matching cargo feature was
+ *   not compiled into this yawgpu build, when the backend's instance
+ *   creation fails, or when the backend exposes no adapters. A best-effort
+ *   diagnostic line is written to `stderr` identifying which cause fired
+ *   (the only in-band signal is the NULL return; webgpu.h does not provide
+ *   an error callback on `wgpuCreateInstance`). Callers wanting to confirm
+ *   which backend was selected may inspect
+ *   `wgpuAdapterGetInfo().backendType` after `wgpuInstanceRequestAdapter`.
+ * - **Unrecognised `backend` value** (anything outside the four constants
+ *   above): treated as if no chain were present and returns a Noop instance
+ *   (non-NULL). This keeps older yawgpu builds forward-compatible with
+ *   descriptors produced from a newer header that may define additional
+ *   backend constants.
  */
 typedef struct YaWGPUInstanceBackendSelect {
     /** Chain header. `sType` must be @ref YAWGPU_STYPE_INSTANCE_BACKEND_SELECT. */
@@ -612,9 +632,12 @@ void yawgpuTransientAttachmentRelease(YaWGPUTransientAttachment attachment);
  * input-attachment binding (Vulkan `VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT` /
  * Metal subpass color read).
  *
- * The entry's `texture` field is otherwise ignored; the binding's source
- * attachment is taken from the subpass layout when a bind group is created
- * for this layout.
+ * When this chain entry is present, the enclosing `WGPUBindGroupLayoutEntry`'s
+ * `buffer`, `sampler`, `texture`, and `storageTexture` fields must all be
+ * zero-initialized (i.e. left at their `INIT` defaults). Setting any of those
+ * standard binding-layout fields alongside this chain is a validation error;
+ * the binding's source attachment is taken from the subpass layout when a
+ * bind group is created for this layout.
  *
  * Default values can be set using @ref YAWGPU_INPUT_ATTACHMENT_BINDING_LAYOUT_INIT
  * as initializer.
@@ -638,11 +661,13 @@ typedef struct YaWGPUInputAttachmentBindingLayout {
 })
 
 /*
- * Input attachment resources are auto-wired from the subpass pass layout:
- * a `WGPUBindGroupEntry` whose layout entry carries
- * @ref YaWGPUInputAttachmentBindingLayout looks up its source view from
- * the subpass's input-attachment table rather than from the bind-group
- * entry's `textureView` field, which is ignored.
+ * Input attachment resources are auto-wired from the subpass pass layout.
+ * Any layout slot that uses @ref YaWGPUInputAttachmentBindingLayout MUST be
+ * omitted entirely from the corresponding `WGPUBindGroupDescriptor.entries`
+ * array — the subpass pass populates the binding from its input-attachment
+ * table. Supplying any `WGPUBindGroupEntry` (with or without a `textureView`)
+ * whose `binding` matches an input-attachment layout slot is a validation
+ * error.
  */
 
 /**
@@ -895,9 +920,18 @@ typedef struct YaWGPUSubpassRenderPipelineDescriptor {
     /**
      * Standard WGPU render pipeline descriptor. The descriptor's
      * `fragment.targets` and `depthStencil` slots must be consistent with
-     * the subpass's color attachments and depth-stencil use — the backend
-     * will derive its pipeline color-target layout from @ref passLayout,
-     * not from `base.fragment.targets`.
+     * the subpass referenced by @ref passLayout / @ref subpassIndex:
+     *
+     * - `fragment.targets` count must equal the subpass's color attachment count.
+     * - Each `targets[i].format` must equal the pass layout's format for the
+     *   matching color attachment.
+     * - `multisample.count` must equal the pass layout's sample count.
+     * - `depthStencil` must be present iff the pass layout declares a
+     *   depth-stencil slot, and its format must match.
+     *
+     * Mismatches are caught at pipeline creation and produce a validation
+     * error (the call returns `NULL` with the error pushed to the device's
+     * error scope).
      */
     WGPURenderPipelineDescriptor base;
     /** The pass layout this pipeline participates in. Must be non-`NULL`. */
