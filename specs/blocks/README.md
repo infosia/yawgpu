@@ -26,6 +26,7 @@ Planned blocks (created lazily, tracked in `../SPEC.md`):
 | `70-surface-query-errorscope.md` | 8 |
 | `33-shader-passthrough.md` | 13 (vendor: SPIR-V/MSL passthrough) |
 | `55-tiled-rendering.md` | 14 (vendor: TBDR mobile extension) |
+| `91-cts-conformance.md` | 16 (WebGPU CTS validation port; ledger in `tracking/cts-coverage.md`) |
 
 Vendor-extension blocks (33, 55) are **not** Dawn ports — their rules are
 exercised by direct unit tests (principle 1) + GPU-gated e2e, and they live
