@@ -1,0 +1,208 @@
+# CTS coverage ledger — `api/validation`
+
+Live status of porting the WebGPU CTS (`gpuweb/cts`,
+`src/webgpu/api/validation/`) onto the yawgpu C FFI. Methodology,
+exclusions, harness contract, directory layout, and the `$CTS`
+checkout-path convention: `specs/blocks/91-cts-conformance.md`.
+
+This ledger is at **spec-file granularity** (129 rows). The per-`g.test()`
+checklist for an area lives in that area's Phase-B task handoff; this
+table is the master index of which areas are done vs untouched.
+
+**The CTS port is counted independently of the legacy Dawn tests.** A
+spec is `ported` once every non-excluded `g.test()` has its own Rust
+`#[test]` under `tests/cts/validation/…`, **regardless of whether a
+legacy `yawgpu/tests/*.rs` already exercises the same rule** —
+duplication across the two layers is allowed. There is therefore no
+"partially covered by legacy" state: a spec is `todo` until its CTS
+cases are ported, then `ported`.
+
+## Status legend
+
+| status | meaning |
+|---|---|
+| `ported` | every non-excluded `g.test()` has a Rust `#[test]` under `tests/cts/validation/…`, green on Noop |
+| `ported*` | as `ported`, but some web-only subcases were excluded (noted in-row) |
+| `todo` | not yet ported to `tests/cts/` (a legacy Dawn test may still overlap — see related-test column) |
+| `N/A` | excluded (web/canvas/WebCodecs/IDL/empty); reason in-row |
+
+The **related legacy test** column is *informational only*: the legacy
+`yawgpu/tests/*.rs` (Dawn-ported) file that overlaps this CTS spec, kept
+as a pointer to prior art a porter may consult for the Rust idiom. It is
+never a reason to skip a CTS case.
+
+## Snapshot
+
+- 129 spec files / 704 `g.test()` cases total in `api/validation`.
+- Excluded (`N/A`): 4 whole spec files (web/empty).
+- `ported`: 0 (Phase B not started).
+- `todo`: 125 spec files (38 of which have an overlapping legacy Dawn
+  test, listed in the related-test column for reference).
+
+## Coverage matrix
+
+| spec file | cases | related legacy test (info) | status |
+|---|---|---|---|
+| **buffer/** | | | |
+| `create.spec.ts` | 5 | buffer_creation_validation.rs | `todo` |
+| `destroy.spec.ts` | 4 | — | `todo` |
+| `mapping.spec.ts` | 33 | buffer_map_validation.rs / buffer_mapped_range_validation.rs | `todo` |
+| `threading.spec.ts` | 0 | — | `N/A` — web (worker postMessage); 0 cases |
+| **capability_checks/** | | | |
+| `features/clip_distances.spec.ts` | 2 | — | `todo` |
+| `features/query_types.spec.ts` | 2 | — | `todo` |
+| `features/subgroup_size_control.spec.ts` | 1 | — | `todo` |
+| `features/texture_component_swizzle.spec.ts` | 4 | — | `todo` — compatibility_mode deferred |
+| `features/texture_formats.spec.ts` | 13 | features_validation.rs / texture_format_validation.rs | `todo` — canvas_configuration* excluded |
+| `features/texture_formats_tier1.spec.ts` | 8 | — | `todo` |
+| `features/texture_formats_tier2.spec.ts` | 3 | — | `todo` |
+| `limits/maxBindGroups.spec.ts` | 4 | — | `todo` |
+| `limits/maxBindGroupsPlusVertexBuffers.spec.ts` | 2 | — | `todo` |
+| `limits/maxBindingsPerBindGroup.spec.ts` | 3 | — | `todo` |
+| `limits/maxBufferSize.spec.ts` | 1 | — | `todo` |
+| `limits/maxColorAttachmentBytesPerSample.spec.ts` | 3 | — | `todo` |
+| `limits/maxColorAttachments.spec.ts` | 5 | — | `todo` |
+| `limits/maxComputeInvocationsPerWorkgroup.spec.ts` | 1 | — | `todo` |
+| `limits/maxComputeWorkgroupSizeX.spec.ts` | 2 | — | `todo` |
+| `limits/maxComputeWorkgroupSizeY.spec.ts` | 2 | — | `todo` |
+| `limits/maxComputeWorkgroupSizeZ.spec.ts` | 2 | — | `todo` |
+| `limits/maxComputeWorkgroupStorageSize.spec.ts` | 1 | — | `todo` |
+| `limits/maxComputeWorkgroupsPerDimension.spec.ts` | 2 | — | `todo` |
+| `limits/maxDynamicStorageBuffersPerPipelineLayout.spec.ts` | 2 | — | `todo` |
+| `limits/maxDynamicUniformBuffersPerPipelineLayout.spec.ts` | 2 | — | `todo` |
+| `limits/maxInterStageShaderVariables.spec.ts` | 1 | — | `todo` |
+| `limits/maxSampledTexturesPerShaderStage.spec.ts` | 3 | — | `todo` |
+| `limits/maxSamplersPerShaderStage.spec.ts` | 3 | — | `todo` |
+| `limits/maxStorageBufferBindingSize.spec.ts` | 3 | — | `todo` |
+| `limits/maxStorageBuffersInFragmentStage.spec.ts` | 3 | — | `todo` |
+| `limits/maxStorageBuffersInVertexStage.spec.ts` | 3 | — | `todo` |
+| `limits/maxStorageBuffersPerShaderStage.spec.ts` | 3 | — | `todo` |
+| `limits/maxStorageTexturesInFragmentStage.spec.ts` | 3 | — | `todo` |
+| `limits/maxStorageTexturesInVertexStage.spec.ts` | 3 | — | `todo` |
+| `limits/maxStorageTexturesPerShaderStage.spec.ts` | 3 | — | `todo` |
+| `limits/maxTextureArrayLayers.spec.ts` | 1 | — | `todo` |
+| `limits/maxTextureDimension1D.spec.ts` | 1 | — | `todo` |
+| `limits/maxTextureDimension2D.spec.ts` | 3 | — | `todo` — configure/getCurrentTexture native-mapped |
+| `limits/maxTextureDimension3D.spec.ts` | 1 | — | `todo` |
+| `limits/maxUniformBufferBindingSize.spec.ts` | 2 | — | `todo` |
+| `limits/maxUniformBuffersPerShaderStage.spec.ts` | 3 | — | `todo` |
+| `limits/maxVertexAttributes.spec.ts` | 1 | — | `todo` |
+| `limits/maxVertexBufferArrayStride.spec.ts` | 2 | — | `todo` |
+| `limits/maxVertexBuffers.spec.ts` | 3 | — | `todo` |
+| `limits/minStorageBufferOffsetAlignment.spec.ts` | 4 | — | `todo` |
+| `limits/minUniformBufferOffsetAlignment.spec.ts` | 4 | — | `todo` |
+| **(top-level)/** | | | |
+| `compute_pipeline.spec.ts` | 19 | compute_pipeline_validation.rs | `todo` |
+| `createBindGroup.spec.ts` | 27 | bind_group_validation.rs | `todo` — external_texture,* subcases excluded |
+| `createBindGroupLayout.spec.ts` | 11 | bind_group_layout_validation.rs | `todo` |
+| `createPipelineLayout.spec.ts` | 7 | pipeline_layout_validation.rs | `todo` |
+| `createSampler.spec.ts` | 2 | sampler_validation.rs | `todo` |
+| `createTexture.spec.ts` | 21 | texture_creation_validation.rs | `todo` |
+| `createView.spec.ts` | 10 | texture_view_validation.rs | `todo` |
+| `debugMarker.spec.ts` | 2 | debug_marker_validation.rs | `todo` |
+| `dispatch.spec.ts` | 2 | — | `todo` |
+| `error_scope.spec.ts` | 6 | error_scope_validation.rs | `todo` |
+| `getBindGroupLayout.spec.ts` | 4 | get_bind_group_layout_validation.rs | `todo` |
+| `gpu_external_texture_expiration.spec.ts` | 6 | — | `N/A` — web (WebCodecs external texture) |
+| `layout_shader_compat.spec.ts` | 1 | — | `todo` |
+| `non_filterable_texture.spec.ts` | 1 | — | `todo` |
+| **encoding/** | | | |
+| `beginComputePass.spec.ts` | 4 | — | `todo` |
+| `beginRenderPass.spec.ts` | 4 | — | `todo` |
+| `createRenderBundleEncoder.spec.ts` | 6 | render_bundle_validation.rs | `todo` |
+| `encoder_open_state.spec.ts` | 4 | command_encoder_lifecycle_validation.rs | `todo` |
+| `encoder_state.spec.ts` | 6 | command_encoder_lifecycle_validation.rs / pass_state_validation.rs | `todo` |
+| `programmable/pipeline_bind_group_compat.spec.ts` | 10 | resource_usage_tracking_validation.rs | `todo` |
+| `programmable/pipeline_immediate.spec.ts` | 4 | — | `todo` |
+| `queries/begin_end.spec.ts` | 4 | query_validation.rs | `todo` |
+| `queries/general.spec.ts` | 3 | query_validation.rs | `todo` |
+| `queries/resolveQuerySet.spec.ts` | 6 | query_validation.rs | `todo` |
+| `render_bundle.spec.ts` | 6 | render_bundle_validation.rs | `todo` |
+| **encoding/cmds/** | | | |
+| `clearBuffer.spec.ts` | 8 | — | `todo` |
+| `compute_pass.spec.ts` | 6 | — | `todo` |
+| `copyBufferToBuffer.spec.ts` | 8 | command_buffer_copy_validation.rs | `todo` |
+| `copyTextureToTexture.spec.ts` | 12 | command_texture_copy_validation.rs | `todo` |
+| `debug.spec.ts` | 3 | debug_marker_validation.rs | `todo` |
+| `index_access.spec.ts` | 2 | — | `todo` |
+| `render/draw.spec.ts` | 8 | — | `todo` |
+| `render/dynamic_state.spec.ts` | 8 | — | `todo` |
+| `render/indirect_draw.spec.ts` | 5 | — | `todo` |
+| `render/indirect_multi_draw.spec.ts` | 6 | — | `todo` |
+| `render/setIndexBuffer.spec.ts` | 5 | — | `todo` |
+| `render/setPipeline.spec.ts` | 2 | — | `todo` |
+| `render/setVertexBuffer.spec.ts` | 6 | — | `todo` |
+| `render/state_tracking.spec.ts` | 4 | — | `todo` |
+| `render_pass.spec.ts` | 0 | — | `N/A` — empty placeholder; 0 cases |
+| `setBindGroup.spec.ts` | 6 | — | `todo` |
+| `setImmediates.spec.ts` | 3 | — | `todo` |
+| **image_copy/** | | | |
+| `buffer_related.spec.ts` | 4 | — | `todo` |
+| `buffer_texture_copies.spec.ts` | 7 | — | `todo` |
+| `layout_related.spec.ts` | 7 | — | `todo` |
+| `texture_related.spec.ts` | 9 | — | `todo` |
+| **pipeline/** | | | |
+| `immediates.spec.ts` | 1 | — | `todo` |
+| **query_set/** | | | |
+| `create.spec.ts` | 1 | query_validation.rs | `todo` |
+| `destroy.spec.ts` | 2 | query_validation.rs | `todo` |
+| **queue/** | | | |
+| `buffer_mapped.spec.ts` | 5 | — | `todo` |
+| `copyToTexture/CopyExternalImageToTexture.spec.ts` | 12 | — | `N/A` — web (ImageBitmap/canvas source) |
+| `destroyed/buffer.spec.ts` | 8 | — | `todo` |
+| `destroyed/query_set.spec.ts` | 4 | — | `todo` |
+| `destroyed/texture.spec.ts` | 6 | — | `todo` |
+| `submit.spec.ts` | 4 | queue_submit_validation.rs | `todo` |
+| `writeBuffer.spec.ts` | 4 | queue_buffer_validation.rs | `todo` |
+| `writeTexture.spec.ts` | 4 | queue_write_texture_validation.rs | `todo` |
+| **render_pass/** | | | |
+| `attachment_compatibility.spec.ts` | 12 | — | `todo` |
+| `render_pass_descriptor.spec.ts` | 32 | render_pass_descriptor_validation.rs | `todo` |
+| `resolve.spec.ts` | 1 | — | `todo` |
+| **render_pipeline/** | | | |
+| `depth_stencil_state.spec.ts` | 9 | render_pipeline_validation.rs | `todo` |
+| `float32_blendable.spec.ts` | 1 | — | `todo` |
+| `fragment_state.spec.ts` | 13 | render_pipeline_validation.rs | `todo` |
+| `inter_stage.spec.ts` | 9 | render_pipeline_validation.rs | `todo` |
+| `misc.spec.ts` | 6 | render_pipeline_validation.rs | `todo` |
+| `multisample_state.spec.ts` | 3 | render_pipeline_validation.rs | `todo` |
+| `overrides.spec.ts` | 10 | render_pipeline_validation.rs | `todo` |
+| `primitive_state.spec.ts` | 2 | render_pipeline_validation.rs | `todo` |
+| `resource_compatibility.spec.ts` | 1 | render_pipeline_validation.rs | `todo` |
+| `shader_module.spec.ts` | 3 | render_pipeline_validation.rs / shader_module_validation.rs | `todo` |
+| `vertex_state.spec.ts` | 12 | vertex_state_validation.rs | `todo` |
+| **resource_usages/** | | | |
+| `buffer/in_pass_encoder.spec.ts` | 6 | — | `todo` |
+| `buffer/in_pass_misc.spec.ts` | 3 | — | `todo` |
+| `texture/in_pass_encoder.spec.ts` | 11 | — | `todo` |
+| `texture/in_render_common.spec.ts` | 5 | — | `todo` |
+| `texture/in_render_misc.spec.ts` | 5 | — | `todo` |
+| **shader_module/** | | | |
+| `entry_point.spec.ts` | 6 | shader_module_validation.rs | `todo` |
+| `overrides.spec.ts` | 2 | shader_module_validation.rs | `todo` |
+| **state/** | | | |
+| `device_lost/destroy.spec.ts` | 32 | device_lost_validation.rs | `todo` — importExternalTexture/copyExternalImageToTexture excluded |
+| **texture/** | | | |
+| `bgra8unorm_storage.spec.ts` | 4 | — | `todo` — canvas subcases excluded |
+| `destroy.spec.ts` | 4 | — | `todo` |
+| `float32_filterable.spec.ts` | 1 | — | `todo` |
+| `rg11b10ufloat_renderable.spec.ts` | 5 | — | `todo` |
+
+**Total: 129 spec files / 704 `g.test()` cases.**
+
+## Regenerating this matrix
+
+The case counts come straight from the CTS checkout. To refresh after a
+CTS pull (counts only — the mapping / status / exclusion columns are
+hand-maintained), point `CTS` at your local `gpuweb/cts` checkout root:
+
+```sh
+python3 - "$CTS" <<'PY'
+import re, glob, sys
+root=sys.argv[1]+"/src/webgpu/api/validation"
+for f in sorted(glob.glob(root+"/**/*.spec.ts", recursive=True)):
+    rel=f[len(root)+1:]
+    n=len(re.findall(r"g\.test\(\s*[`'\"]([^`'\"]+)", open(f,encoding="utf-8",errors="replace").read()))
+    print(f"{n:3d}  {rel}")
+PY
+```

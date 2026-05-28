@@ -1,0 +1,218 @@
+# Block 91 — WebGPU CTS conformance porting (validation first)
+
+This block defines how the **WebGPU Conformance Test Suite** (CTS,
+the normative TypeScript suite `gpuweb/cts`) is ported onto the yawgpu
+**C FFI** as Rust integration tests. It is the going-forward source for
+*new* spec-conformance test work, layered on top of the Phase 0–9
+Dawn-ported validation tests (see `90-unit-tests.md` for the
+relationship between unit tests, Dawn ports, and this effort).
+
+> **CTS path convention.** All `src/webgpu/…` paths in this block and in
+> `tracking/cts-coverage.md` are **relative to the root of a local CTS
+> checkout**, denoted `$CTS`. Set it to wherever `gpuweb/cts` is cloned
+> on your machine; no fixed sibling location is assumed by these docs.
+
+CTS is **not executed** against yawgpu — it targets a JavaScript
+`navigator.gpu` implementation in a browser / Node. Instead, each
+`g.test(...)` case is **read for intent and re-expressed** as a Rust
+test driving `webgpu.h` through the `yawgpu` crate. The CTS file is the
+executable spec; the Rust port is its conformance witness.
+
+The live coverage matrix (every CTS `*.spec.ts` → mapped yawgpu test →
+status) is `specs/tracking/cts-coverage.md`. This block is the
+*methodology*; that file is the *ledger*.
+
+## Scope
+
+- **In scope now:** `src/webgpu/api/validation/` — 129 spec files /
+  704 `g.test()` cases. These are error-path / rule-validation tests
+  that run on the **Noop** HAL with no GPU, so they belong in CI and
+  reuse the existing `yawgpu-test::ValidationTest` harness.
+- **Deferred (later phases):**
+  - `src/webgpu/api/operation/` — 72 spec files. Behavioural / readback
+    tests; require a real GPU. Port as `e2e_*` (`#[ignore]`,
+    Metal/Vulkan-gated) on top of a new `OperationTest` harness
+    (CTS `GPUTest` analogue). Tracked separately when that phase opens.
+  - `src/webgpu/shader/validation` + `shader/execution` — WGSL surface;
+    large, tied to the shader-passthrough work; its own initiative.
+
+## Out of scope (permanently, for this port)
+
+These CTS areas have no C-ABI analogue and are **excluded**, flagged
+`N/A` in the matrix with the reason:
+
+- `web_platform/`, `canvas`, `external_texture`, `compat/`,
+  `queue/copyToTexture/CopyExternalImageToTexture` — web/canvas/WebCodecs
+  surfaces. yawgpu has no `HTMLCanvasElement` / `ImageBitmap` /
+  `VideoFrame`.
+- `idl/` — checks the JavaScript IDL surface; the C header surface is a
+  separate concern, not a CTS port.
+- `stress/`, `manual/`, `demo/` — not normative.
+- Individual **web-only subcases** inside an otherwise-portable spec
+  (e.g. `createBindGroup` `external_texture,*`, `state/device_lost`
+  `importExternalTexture` / `copyExternalImageToTexture,*`,
+  `texture_formats` `canvas_configuration*`) are dropped; the spec still
+  reaches `ported` once its non-web cases are done, with the excluded
+  subcases noted in the matrix (`ported*`).
+
+D3D backends remain permanently out of scope (CLAUDE.md). GLES is
+Tier 2 — a validation rule fires identically on every backend
+(Tier-independent core validation), so these tests are **not**
+backend-specific; they assert `yawgpu-core` behaviour on Noop.
+
+## Directory structure (CTS-mirrored)
+
+CTS directory layout is mirrored 1:1 under `yawgpu/tests/cts/`:
+
+```
+yawgpu/tests/cts/validation/
+  buffer/        { create.rs, destroy.rs, mapping.rs }
+  texture/       { create_texture.rs, create_view.rs, destroy.rs, ... }
+  encoding/cmds/ { copy_buffer_to_buffer.rs, ... }
+  capability_checks/limits/ { max_bind_groups.rs, ... }
+  ...
+```
+
+Cargo only auto-discovers test **binaries** from files directly under
+`yawgpu/tests/`. Subdirectories are not compiled on their own. So each
+CTS second-level area gets **one thin aggregator binary** at the
+`tests/` root that pulls its subtree in with `#[path]`:
+
+```rust
+// yawgpu/tests/cts_validation_buffer.rs
+#[path = "cts/validation/buffer/create.rs"]   mod create;
+#[path = "cts/validation/buffer/destroy.rs"]  mod destroy;
+#[path = "cts/validation/buffer/mapping.rs"]  mod mapping;
+```
+
+This keeps the on-disk tree identical to CTS, gives one test binary per
+area (≈13 for validation — parallel compile, bounded link cost), and
+keeps shared helpers in the `yawgpu-test` crate reachable from all of
+them. Aggregators are added per area as that area's slice is dispatched;
+do not pre-create empty ones.
+
+**File naming.** Rust module files use `snake_case`; the CTS spec name
+is preserved as closely as Rust allows (`copyBufferToBuffer.spec.ts` →
+`copy_buffer_to_buffer.rs`). Each `g.test('foo,bar')` case maps to a
+`#[test] fn foo_bar()` (commas → underscores). A doc comment at the top
+of each Rust file cites the CTS source path it ports.
+
+## Mapping CTS constructs → Rust
+
+| CTS construct | Rust port |
+|---|---|
+| `g.test('a,b').fn(t => …)` | `#[test] fn a_b()` in the mirrored file |
+| `t.device`, `t.queue` | `ValidationTest::new()` → `.device()`, queue via FFI |
+| `t.expectValidationError(() => …)` | `assert_device_error!{ … }` |
+| "should succeed" / no error | `expect_no_validation_error` (new harness helper) |
+| `t.expectGPUError('out-of-memory', …)` | error-scope helper + filter on error type |
+| `await t.device.popErrorScope()` | error-sink inspection (`ValidationTest::errors`) |
+| `await buffer.mapAsync(…)` etc. | Future-poll helper (drive `WGPUFuture` to completion) |
+| `createRenderPipelineAsync` etc. | Future-poll helper |
+| `u.combine('k', [v…]).combine(…)` | table-driven: cartesian-product helper → loop of subcases |
+| device with feature/limit X | `ValidationTest::with_features(…)` / `with_limits(…)` (new) |
+| `t.skip(…)` on missing feature | early `return` after `real_backend`/feature probe |
+
+Subcases (`.params(u => u.combine(…))`) are ported as an in-test loop
+over a `&[…]` table or via the cartesian-product helper, with each
+iteration labelled (e.g. `eprintln!`/`assert!(…, "case {i}: …")`) so a
+failure identifies the offending combination — the Rust test stays one
+`#[test]` per `g.test()`.
+
+## `yawgpu-test` harness contract (extensions needed)
+
+Phase A adds these to the `yawgpu-test` crate (implemented by the
+coding agent; see the Phase A handoff). Existing surface:
+`ValidationTest`, `assert_device_error!`, `real_backend_available`,
+`assert_current_device_error_after`.
+
+New, required before bulk porting:
+
+1. **`expect_no_validation_error`** — positive counterpart to
+   `assert_device_error!`: run a closure, assert the error sink stayed
+   empty (CTS's implicit "this should succeed").
+2. **Cartesian-product helper** — replicate `u.combine()` so subcase
+   tables are declared once and iterated, e.g.
+   `for (a, b) in cartesian(&AS, &BS) { … }` or a `combine!` macro.
+3. **Feature/limit-gated device builder** — `ValidationTest::with_features(&[…])`
+   and `with_limits(WGPULimits)` so `capability_checks/*` can request a
+   device at/over a limit and assert the create call errors. Must work
+   on Noop (Noop advertises the default limit set).
+4. **Future-poll helper** — drive a `WGPUFuture` to completion on Noop
+   for async cases (`mapAsync`, `createRenderPipelineAsync`,
+   `popErrorScope` where modelled as a future). Promote/consolidate the
+   logic already in `yawgpu/tests/future_modes.rs`.
+
+Harness changes ship with their own inline unit tests (principle 1).
+
+## Per-area porting workflow (one slice = one CTS area)
+
+**The CTS port is a self-contained conformance layer, counted
+independently of the legacy Dawn-ported tests.** Every non-excluded
+CTS `g.test()` gets its own Rust `#[test]` under `tests/cts/validation/…`,
+**even when a legacy `yawgpu/tests/*.rs` file already exercises the same
+rule** — duplication across the two layers is allowed and expected. The
+legacy Dawn tests stay as-is; we do not delete, merge, or dedupe against
+them. The "related legacy test" column in the matrix is **informational
+only** (a pointer to prior art a porter may consult for the Rust idiom),
+never a reason to skip a CTS case.
+
+For each area in the matrix:
+
+1. **Read the CTS spec(s)** for the area. Optionally glance at the
+   related legacy test (matrix column) for the Rust idiom — but port
+   every CTS case regardless of overlap.
+2. **Port every case** into the mirrored `cts/validation/<area>/`
+   files, one `#[test]` per `g.test()`, subcases as in-test tables.
+3. **Green on Noop**, no GPU. Any case that can only be a real-GPU
+   behavioural check (not a validation rule) is **deferred to the
+   operation phase**, not silently dropped — note it in the matrix.
+4. **Update `specs/tracking/cts-coverage.md`**: flip the spec's status
+   `todo` → `ported`, record the Rust file.
+5. Slice review (Claude) against acceptance criteria below.
+
+A whole CTS area being `ported` means: every non-`N/A` `g.test()` in
+its spec files has a corresponding Rust `#[test]` (subcases covered by
+the in-test table), green on Noop.
+
+## Acceptance criteria (per slice)
+
+- [ ] every non-excluded `g.test()` in the area's spec file(s) has a
+      corresponding `#[test]` (subcases enumerated in-test) under
+      `tests/cts/validation/…` — overlap with a legacy Dawn test is fine
+- [ ] excluded subcases are `N/A`-flagged with reason; deferred-to-
+      operation cases noted — nothing silently dropped
+- [ ] `cargo test` green on Noop, no GPU; no panics in
+      `yawgpu-core`/`yawgpu-hal`; CLAUDE.md conventions met
+- [ ] `specs/tracking/cts-coverage.md` status + Rust-file columns updated
+- [ ] the area's aggregator binary `cts_validation_<area>.rs` wires in
+      the new module files
+
+## Phasing
+
+- **Phase A — scaffolding** (this block + matrix + harness extensions +
+  Cargo/dir wiring). Authored docs by Claude; harness + scaffolding by
+  the coding agent.
+- **Phase B — validation port**, area by area (see matrix grouping).
+  Suggested order maximises early CI value and reuse:
+  buffer → texture (createTexture/createView/createSampler/destroy) →
+  image_copy → queue → render_pipeline (+ pipeline/compute_pipeline/
+  shader_module/layout_shader_compat) → bind-group family
+  (createBindGroup/Layout, getBindGroupLayout, createPipelineLayout) →
+  render_pass → encoding (cmds/programmable/queries + dispatch/debug) →
+  resource_usages → query_set → capability_checks (features → limits) →
+  state/device_lost + error_scope.
+  Validation port closes with a mandatory **Phase Review**.
+- **Phase C — operation port** (deferred; real GPU, `OperationTest`).
+- **Phase D — shader/WGSL** (deferred; separate initiative).
+
+## Open questions
+
+- Operation-phase `OperationTest` harness shape (readback / `expectContents`
+  / tracked-resource lifetimes) — designed when Phase C opens.
+- Whether `capability_checks/limits` (35 mechanical spec files) is worth
+  one-`#[test]`-per-limit or a single table-driven generator over the
+  limit set; decide at the B-capability_checks slice.
+- `surface`-mapped limit subcases (`configure`/`getCurrentTexture` in
+  `maxTextureDimension2D`) — map onto native surface or defer with the
+  rest of surface validation.
