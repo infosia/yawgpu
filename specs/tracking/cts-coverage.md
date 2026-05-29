@@ -35,11 +35,13 @@ never a reason to skip a CTS case.
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
 - Excluded (`N/A`): 4 whole spec files (web/empty).
-- `ported`: 34 (`buffer/`; texture creation; `image_copy/`; `queue/`;
+- `ported`: 37 (`buffer/`; texture creation; `image_copy/`; `queue/`;
   shader_module; compute_pipeline; immediates; layout_shader_compat;
-  **`render_pipeline/` complete** — all 11 specs). Several `ported*` with
-  subcases `#[ignore]`d behind core gaps — assertions are spec-correct.
-- `todo`: 91 spec files (28 of which have an overlapping legacy Dawn
+  `render_pipeline/` complete; bind-group-layout family —
+  createBindGroupLayout, createPipelineLayout, getBindGroupLayout).
+  Several `ported*` with subcases `#[ignore]`d behind core gaps —
+  assertions are spec-correct. `createBindGroup` still `todo`.
+- `todo`: 88 spec files (28 of which have an overlapping legacy Dawn
   test, listed in the related-test column for reference).
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
@@ -105,15 +107,15 @@ never a reason to skip a CTS case.
 | **(top-level)/** | | | |
 | `compute_pipeline.spec.ts` | 19 | compute_pipeline_validation.rs | `ported*` → `cts/validation/compute_pipeline.rs` (override/storage + resource_compatibility cases `#[ignore]`d: core does not yet evaluate pipeline overrides at createComputePipeline nor reject layout/shader resource mismatches) |
 | `createBindGroup.spec.ts` | 27 | bind_group_validation.rs | `todo` — external_texture,* subcases excluded |
-| `createBindGroupLayout.spec.ts` | 11 | bind_group_layout_validation.rs | `todo` |
-| `createPipelineLayout.spec.ts` | 7 | pipeline_layout_validation.rs | `todo` |
+| `createBindGroupLayout.spec.ts` | 11 | bind_group_layout_validation.rs | `ported*` → `cts/validation/create_bind_group_layout.rs` (6 `#[ignore]`d: vertex-stage storage restrictions, multisample sampleType, cross-BGL resource aggregation, storage-texture dimension/format core gaps) |
+| `createPipelineLayout.spec.ts` | 7 | pipeline_layout_validation.rs | `ported*` → `cts/validation/create_pipeline_layout.rs` (5 `#[ignore]`d: dynamic-buffer max, 3 null/sparse-BGL slots, immediate_data_size) |
 | `createSampler.spec.ts` | 2 | sampler_validation.rs | `ported` → `cts/validation/texture/create_sampler.rs` |
 | `createTexture.spec.ts` | 21 | texture_creation_validation.rs | `ported` → `cts/validation/texture/create_texture.rs` |
 | `createView.spec.ts` | 10 | texture_view_validation.rs | `ported` → `cts/validation/texture/create_view.rs` |
 | `debugMarker.spec.ts` | 2 | debug_marker_validation.rs | `todo` |
 | `dispatch.spec.ts` | 2 | — | `todo` |
 | `error_scope.spec.ts` | 6 | error_scope_validation.rs | `todo` |
-| `getBindGroupLayout.spec.ts` | 4 | get_bind_group_layout_validation.rs | `todo` |
+| `getBindGroupLayout.spec.ts` | 4 | get_bind_group_layout_validation.rs | `ported*` → `cts/validation/get_bind_group_layout.rs` (2 index_range `#[ignore]`d: core rejects index beyond concrete layout count, CTS expects empty layout < maxBindGroups; unique_js_object adapted — JS identity N/A) |
 | `gpu_external_texture_expiration.spec.ts` | 6 | — | `N/A` — web (WebCodecs external texture) |
 | `layout_shader_compat.spec.ts` | 1 | — | `ported*` → `cts/validation/layout_shader_compat.rs` (the case is `#[ignore]`d: core does not reject layout/shader resource mismatches — the earlier "active mismatch cases" were false-greens, corrected) |
 | `non_filterable_texture.spec.ts` | 1 | — | `todo` |
