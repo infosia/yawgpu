@@ -68,3 +68,18 @@ mod dispatch;
 
 #[path = "cts/validation/debug_marker.rs"]
 mod debug_marker;
+
+#[path = "cts/validation/encoding/queries/begin_end.rs"]
+mod queries_begin_end;
+
+#[path = "cts/validation/encoding/queries/general.rs"]
+mod queries_general;
+
+#[path = "cts/validation/encoding/queries/resolve_query_set.rs"]
+mod resolve_query_set;
+
+#[path = "cts/validation/encoding/render_bundle.rs"]
+mod render_bundle;
+
+#[path = "cts/validation/encoding/create_render_bundle_encoder.rs"]
+mod create_render_bundle_encoder;
