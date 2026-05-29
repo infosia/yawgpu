@@ -28,6 +28,15 @@ impl TextureUsage {
     pub const RENDER_ATTACHMENT: Self = Self(16);
     /// Constant value for transient attachment.
     pub const TRANSIENT_ATTACHMENT: Self = Self(32);
+    /// Mask of all known texture usage bits.
+    pub const ALL: Self = Self(
+        Self::COPY_SRC.0
+            | Self::COPY_DST.0
+            | Self::TEXTURE_BINDING.0
+            | Self::STORAGE_BINDING.0
+            | Self::RENDER_ATTACHMENT.0
+            | Self::TRANSIENT_ATTACHMENT.0,
+    );
 
     /// Constructs this object from bits retain.
     #[must_use]
@@ -279,6 +288,7 @@ impl Texture {
             base_array_layer,
             array_layer_count,
             aspect: descriptor.aspect.unwrap_or(TextureAspect::All),
+            usage: descriptor.usage.unwrap_or_else(|| self.usage()),
         }
     }
 
@@ -309,6 +319,9 @@ pub(crate) fn validate_texture_descriptor(
 
     if usage.bits() == 0 {
         return Some("texture usage must be non-zero");
+    }
+    if usage.bits() & !TextureUsage::ALL.bits() != 0 {
+        return Some("texture usage contains unknown bits");
     }
     if descriptor.sample_count != 1 && descriptor.sample_count != 4 {
         return Some("texture sample count must be 1 or 4");
@@ -387,6 +400,13 @@ pub(crate) fn validate_texture_descriptor(
     let Some(format_caps) = descriptor.format.caps() else {
         return Some("texture format must not be Undefined");
     };
+    if descriptor
+        .view_formats
+        .iter()
+        .any(|view_format| view_format.caps().is_none())
+    {
+        return Some("texture viewFormats must not contain Undefined");
+    }
     if multisampled && !format_caps.multisample_capable {
         return Some("multisampled texture format must support multisampling");
     }
@@ -674,6 +694,18 @@ mod tests {
     }
 
     #[test]
+    fn validate_texture_descriptor_rejects_unknown_usage_bits() {
+        let mut descriptor = texture_descriptor_4x4();
+        descriptor.usage =
+            TextureUsage::from_bits_retain(TextureUsage::TEXTURE_BINDING.bits() | (1_u64 << 40));
+
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT),
+            Some("texture usage contains unknown bits")
+        );
+    }
+
+    #[test]
     fn texture_from_hal_and_descriptor_accessors_round_trip() {
         let descriptor = texture_descriptor_4x4();
         let texture = Texture::from_hal(
@@ -707,6 +739,7 @@ mod tests {
             base_array_layer: 0,
             array_layer_count: None,
             aspect: None,
+            usage: None,
         });
         assert_eq!(error, None);
         assert!(!view.is_error());
@@ -794,6 +827,7 @@ mod tests {
             base_array_layer: 0,
             array_layer_count: None,
             aspect: None,
+            usage: None,
         });
 
         assert_eq!(scoped.kind, ErrorKind::Validation);

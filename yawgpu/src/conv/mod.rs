@@ -266,6 +266,7 @@ mod tests {
             base_array_layer: 0,
             array_layer_count: None,
             aspect: None,
+            usage: None,
         });
         arc_to_handle(Arc::new(WGPUTextureViewImpl {
             _core: Arc::new(view),

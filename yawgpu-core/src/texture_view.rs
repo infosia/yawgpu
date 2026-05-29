@@ -51,6 +51,8 @@ pub struct TextureViewDescriptor {
     pub array_layer_count: Option<u32>,
     /// Aspect.
     pub aspect: Option<TextureAspect>,
+    /// Usage override for this view. `None` inherits the texture usage.
+    pub usage: Option<TextureUsage>,
 }
 
 /// A `TextureViewDescriptor` with every defaulted/inferred field already
@@ -67,6 +69,7 @@ pub(crate) struct ResolvedTextureViewDescriptor {
     pub(crate) base_array_layer: u32,
     pub(crate) array_layer_count: u32,
     pub(crate) aspect: TextureAspect,
+    pub(crate) usage: TextureUsage,
 }
 
 /// Stores texture view data used by validation and backend submission.
@@ -86,6 +89,7 @@ pub(crate) struct TextureViewInner {
     pub(crate) base_array_layer: u32,
     pub(crate) array_layer_count: u32,
     pub(crate) aspect: TextureAspect,
+    pub(crate) usage: TextureUsage,
     pub(crate) is_error: bool,
 }
 
@@ -106,6 +110,7 @@ impl TextureView {
                 base_array_layer: descriptor.base_array_layer,
                 array_layer_count: descriptor.array_layer_count,
                 aspect: descriptor.aspect,
+                usage: descriptor.usage,
                 is_error,
             }),
         }
@@ -165,6 +170,12 @@ impl TextureView {
         self.inner.aspect
     }
 
+    /// Returns the usage visible through this texture view.
+    #[must_use]
+    pub fn usage(&self) -> TextureUsage {
+        self.inner.usage
+    }
+
     /// Returns render extent.
     #[must_use]
     pub(crate) fn render_extent(&self) -> Extent3d {
@@ -188,8 +199,19 @@ pub(crate) fn validate_texture_view_descriptor(
         mip_level_count,
         array_layer_count,
         aspect,
+        usage,
         ..
     } = *descriptor;
+
+    if usage.bits() == 0 {
+        return Some("texture view usage must be non-zero");
+    }
+    if usage.bits() & !TextureUsage::ALL.bits() != 0 {
+        return Some("texture view usage contains unknown bits");
+    }
+    if usage.bits() & !texture.usage().bits() != 0 {
+        return Some("texture view usage must be a subset of the texture usage");
+    }
 
     if mip_level_count == 0 {
         return Some("texture view mipLevelCount must be greater than zero");
@@ -249,6 +271,12 @@ pub(crate) fn validate_texture_view_descriptor(
     let Some(format_caps) = format.caps() else {
         return Some("texture view format must not be Undefined");
     };
+    if usage.contains(TextureUsage::RENDER_ATTACHMENT) && !format_caps.renderable {
+        return Some("RenderAttachment texture view format must be renderable");
+    }
+    if usage.contains(TextureUsage::STORAGE_BINDING) && !format_caps.storage_capable {
+        return Some("StorageBinding texture view format must support storage usage");
+    }
     match aspect {
         TextureAspect::All => {}
         TextureAspect::DepthOnly if !format_caps.aspects.depth => {
@@ -280,6 +308,7 @@ mod tests {
             base_array_layer: 1,
             array_layer_count: Some(2),
             aspect: Some(TextureAspect::All),
+            usage: Some(TextureUsage::COPY_SRC),
         });
 
         assert_eq!(error, None);
@@ -289,5 +318,43 @@ mod tests {
         assert_eq!(view.mip_level_count(), 1);
         assert_eq!(view.base_array_layer(), 1);
         assert_eq!(view.aspect(), TextureAspect::All);
+        assert_eq!(view.usage(), TextureUsage::COPY_SRC);
+    }
+
+    #[test]
+    fn texture_view_usage_must_be_known_and_subset_of_texture_usage() {
+        let texture = noop_device().create_texture(TextureDescriptor {
+            usage: TextureUsage::TEXTURE_BINDING | TextureUsage::RENDER_ATTACHMENT,
+            ..layered_mipped_texture_descriptor()
+        });
+
+        let (_, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: Some(TextureUsage::STORAGE_BINDING),
+        });
+        assert_eq!(
+            error,
+            Some("texture view usage must be a subset of the texture usage")
+        );
+
+        let (_, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: Some(TextureUsage::from_bits_retain(
+                TextureUsage::TEXTURE_BINDING.bits() | (1_u64 << 40),
+            )),
+        });
+        assert_eq!(error, Some("texture view usage contains unknown bits"));
     }
 }

@@ -35,8 +35,9 @@ never a reason to skip a CTS case.
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
 - Excluded (`N/A`): 4 whole spec files (web/empty).
-- `ported`: 3 (`buffer/` area complete: create, destroy, mapping).
-- `todo`: 122 spec files (36 of which have an overlapping legacy Dawn
+- `ported`: 7 (`buffer/` complete; texture creation: createTexture,
+  createView, createSampler, texture/destroy).
+- `todo`: 118 spec files (33 of which have an overlapping legacy Dawn
   test, listed in the related-test column for reference).
 
 ## Coverage matrix
@@ -96,9 +97,9 @@ never a reason to skip a CTS case.
 | `createBindGroup.spec.ts` | 27 | bind_group_validation.rs | `todo` — external_texture,* subcases excluded |
 | `createBindGroupLayout.spec.ts` | 11 | bind_group_layout_validation.rs | `todo` |
 | `createPipelineLayout.spec.ts` | 7 | pipeline_layout_validation.rs | `todo` |
-| `createSampler.spec.ts` | 2 | sampler_validation.rs | `todo` |
-| `createTexture.spec.ts` | 21 | texture_creation_validation.rs | `todo` |
-| `createView.spec.ts` | 10 | texture_view_validation.rs | `todo` |
+| `createSampler.spec.ts` | 2 | sampler_validation.rs | `ported` → `cts/validation/texture/create_sampler.rs` |
+| `createTexture.spec.ts` | 21 | texture_creation_validation.rs | `ported` → `cts/validation/texture/create_texture.rs` |
+| `createView.spec.ts` | 10 | texture_view_validation.rs | `ported` → `cts/validation/texture/create_view.rs` |
 | `debugMarker.spec.ts` | 2 | debug_marker_validation.rs | `todo` |
 | `dispatch.spec.ts` | 2 | — | `todo` |
 | `error_scope.spec.ts` | 6 | error_scope_validation.rs | `todo` |
@@ -184,7 +185,7 @@ never a reason to skip a CTS case.
 | `device_lost/destroy.spec.ts` | 32 | device_lost_validation.rs | `todo` — importExternalTexture/copyExternalImageToTexture excluded |
 | **texture/** | | | |
 | `bgra8unorm_storage.spec.ts` | 4 | — | `todo` — canvas subcases excluded |
-| `destroy.spec.ts` | 4 | — | `todo` |
+| `destroy.spec.ts` | 4 | — | `ported` → `cts/validation/texture/destroy.rs` |
 | `float32_filterable.spec.ts` | 1 | — | `todo` |
 | `rg11b10ufloat_renderable.spec.ts` | 5 | — | `todo` |
 

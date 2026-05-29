@@ -35,11 +35,19 @@ fn lod_clamps_must_be_finite() {
                 ..default_descriptor()
             },
         );
-        assert_sampler_ok(
+        assert_sampler_error(
             &test,
             native::WGPUSamplerDescriptor {
                 lodMinClamp: -1.0,
                 lodMaxClamp: 64.0,
+                ..default_descriptor()
+            },
+        );
+        assert_sampler_error(
+            &test,
+            native::WGPUSamplerDescriptor {
+                lodMinClamp: 2.0,
+                lodMaxClamp: 1.0,
                 ..default_descriptor()
             },
         );
