@@ -34,15 +34,15 @@ never a reason to skip a CTS case.
 ## Snapshot
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
-- Excluded (`N/A`): 4 whole spec files (web/empty).
-- `ported`: 55 (`buffer/`; texture creation; `image_copy/`; `queue/`;
+- Excluded (`N/A`): 5 whole spec files (web/empty/multiDraw-absent).
+- `ported`: 57 (`buffer/`; texture creation; `image_copy/`; `queue/`;
   shader_module; compute_pipeline; immediates; layout_shader_compat;
   `render_pipeline/` complete; bind-group family complete;
   `render_pass/` complete; encoding: encoder state + begin passes +
-  cmds copies/clear + cmds render (draw, set{Vertex,Index}Buffer,
-  setPipeline, state_tracking, index_access)). Several `ported*` with
+  cmds copies/clear + cmds render (draw, set*, state_tracking,
+  index_access, dynamic_state, indirect_draw)). Several `ported*` with
   subcases `#[ignore]`d behind core gaps — assertions are spec-correct.
-- `todo`: 70 spec files (28 of which have an overlapping legacy Dawn
+- `todo`: 67 spec files (28 of which have an overlapping legacy Dawn
   test, listed in the related-test column for reference).
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
@@ -140,9 +140,9 @@ never a reason to skip a CTS case.
 | `debug.spec.ts` | 3 | debug_marker_validation.rs | `todo` |
 | `index_access.spec.ts` | 2 | — | `ported` → `cts/validation/encoding/cmds/index_access.rs` |
 | `render/draw.spec.ts` | 8 | — | `ported*` → `cts/validation/encoding/cmds/render/draw.rs` (5 active; 3 `#[ignore]`d: vertex-OOB lastStride, maxDrawCount unmodeled, last_buffer_setting CTS-unimplemented) |
-| `render/dynamic_state.spec.ts` | 8 | — | `todo` |
-| `render/indirect_draw.spec.ts` | 5 | — | `todo` |
-| `render/indirect_multi_draw.spec.ts` | 6 | — | `todo` |
+| `render/dynamic_state.spec.ts` | 8 | — | `ported*` → `cts/validation/encoding/cmds/render/dynamic_state.rs` (5 active; 3 `#[ignore]`d: viewport/scissor attachment-bounds gaps; scissor negative-arg N/A: C unsigned) |
+| `render/indirect_draw.spec.ts` | 5 | — | `ported*` → `cts/validation/encoding/cmds/render/indirect_draw.rs` (3 active; 2 `#[ignore]`d: destroyed-buffer submit-timing, indirect-buffer device-mismatch) |
+| `render/indirect_multi_draw.spec.ts` | 6 | — | `N/A` — multiDraw* absent from yawgpu C ABI (no multiDrawIndirect/Indexed symbols) |
 | `render/setIndexBuffer.spec.ts` | 5 | — | `ported*` → `cts/validation/encoding/cmds/render/set_index_buffer.rs` (3 active; 2 `#[ignore]`d: destroyed-buffer submit-timing, bundle device-mismatch) |
 | `render/setPipeline.spec.ts` | 2 | — | `ported*` → `cts/validation/encoding/cmds/render/set_pipeline.rs` (2 `#[ignore]`d: error-pipeline validated at draw-time not setPipeline; bundle device-mismatch) |
 | `render/setVertexBuffer.spec.ts` | 6 | — | `ported*` → `cts/validation/encoding/cmds/render/set_vertex_buffer.rs` (4 active; 2 `#[ignore]`d: destroyed-buffer submit-timing, bundle device-mismatch) |
