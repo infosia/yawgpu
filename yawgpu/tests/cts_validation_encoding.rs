@@ -23,3 +23,21 @@ mod copy_buffer_to_buffer;
 
 #[path = "cts/validation/encoding/cmds/copy_texture_to_texture.rs"]
 mod copy_texture_to_texture;
+
+#[path = "cts/validation/encoding/cmds/render/draw.rs"]
+mod render_draw;
+
+#[path = "cts/validation/encoding/cmds/render/set_vertex_buffer.rs"]
+mod render_set_vertex_buffer;
+
+#[path = "cts/validation/encoding/cmds/render/set_index_buffer.rs"]
+mod render_set_index_buffer;
+
+#[path = "cts/validation/encoding/cmds/render/set_pipeline.rs"]
+mod render_set_pipeline;
+
+#[path = "cts/validation/encoding/cmds/render/state_tracking.rs"]
+mod render_state_tracking;
+
+#[path = "cts/validation/encoding/cmds/index_access.rs"]
+mod index_access;
