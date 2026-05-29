@@ -14,8 +14,19 @@ review the diff, then Phase B (per-area porting) can begin.
 - [x] `specs/blocks/91-cts-conformance.md` (methodology) — Claude
 - [x] `specs/tracking/cts-coverage.md` (ledger, 129-row matrix) — Claude
 - [x] `specs/tracking/cts-phase-a.md` (this handoff) — Claude
-- [ ] `yawgpu-test` harness extensions — coding agent
-- [ ] `tests/cts/` directory + first aggregator wiring — coding agent
+- [x] `yawgpu-test` harness extensions — coding agent (done; reviewed)
+- [x] `tests/cts/` directory + first aggregator wiring — coding agent
+      (done; `buffer/create` ported, 5/5 green on Noop)
+
+**Review note (Claude, on completion):** the coding agent also added a
+core validation rule to `yawgpu-core/src/buffer.rs` (reject unknown
+buffer-usage bits — `"buffer usage contains unknown bits"`), which the
+CTS `usage` case requires (`(usage & ~kAllBufferUsageBits) === 0`). This
+was technically outside the Phase-A "flag, don't fix core" scope, but
+the change is spec-correct, minimal, and unit-tested — accepted as a
+genuine validation gap surfaced by the port. Recorded here as the kind
+of core fix future slices should ideally route through a separate fix
+handoff.
 
 ---
 

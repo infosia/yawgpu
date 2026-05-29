@@ -35,8 +35,8 @@ never a reason to skip a CTS case.
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
 - Excluded (`N/A`): 4 whole spec files (web/empty).
-- `ported`: 0 (Phase B not started).
-- `todo`: 125 spec files (38 of which have an overlapping legacy Dawn
+- `ported`: 1 (`buffer/create` — Phase A worked area).
+- `todo`: 124 spec files (37 of which have an overlapping legacy Dawn
   test, listed in the related-test column for reference).
 
 ## Coverage matrix
@@ -44,7 +44,7 @@ never a reason to skip a CTS case.
 | spec file | cases | related legacy test (info) | status |
 |---|---|---|---|
 | **buffer/** | | | |
-| `create.spec.ts` | 5 | buffer_creation_validation.rs | `todo` |
+| `create.spec.ts` | 5 | buffer_creation_validation.rs | `ported` → `cts/validation/buffer/create.rs` |
 | `destroy.spec.ts` | 4 | — | `todo` |
 | `mapping.spec.ts` | 33 | buffer_map_validation.rs / buffer_mapped_range_validation.rs | `todo` |
 | `threading.spec.ts` | 0 | — | `N/A` — web (worker postMessage); 0 cases |
