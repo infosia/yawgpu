@@ -196,6 +196,7 @@ pub(crate) struct BufferState {
     pub(crate) is_destroyed: bool,
     pub(crate) pending_map: Option<PendingMap>,
     pub(crate) active_map: Option<ActiveMap>,
+    pub(crate) mapped_ranges: Vec<MappedRange>,
 }
 
 /// Stores pending map data used by validation and backend submission.
@@ -211,6 +212,12 @@ pub(crate) struct PendingMap {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ActiveMap {
     pub(crate) mode: MapMode,
+    pub(crate) offset: u64,
+    pub(crate) size: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MappedRange {
     pub(crate) offset: u64,
     pub(crate) size: u64,
 }
@@ -303,12 +310,12 @@ impl Buffer {
         hal: Option<HalBuffer>,
         is_error: bool,
     ) -> Self {
-        let map_state = if descriptor.mapped_at_creation && !is_error {
+        let map_state = if descriptor.mapped_at_creation {
             BufferMapState::Mapped
         } else {
             BufferMapState::Unmapped
         };
-        let active_map = if descriptor.mapped_at_creation && !is_error {
+        let active_map = if descriptor.mapped_at_creation {
             Some(ActiveMap {
                 mode: MapMode::Write,
                 offset: 0,
@@ -322,13 +329,18 @@ impl Buffer {
                 hal,
                 usage: descriptor.usage,
                 size: descriptor.size,
-                host: HostBuffer::new(if is_error { 0 } else { descriptor.size }),
+                host: HostBuffer::new(if is_error && !descriptor.mapped_at_creation {
+                    0
+                } else {
+                    descriptor.size
+                }),
                 state: Mutex::new(BufferState {
                     map_state,
                     is_error,
                     is_destroyed: false,
                     pending_map: None,
                     active_map,
+                    mapped_ranges: Vec::new(),
                 }),
             }),
         }
@@ -383,6 +395,7 @@ impl Buffer {
         }
         state.map_state = BufferMapState::Unmapped;
         state.active_map = None;
+        state.mapped_ranges.clear();
     }
 
     /// Marks any pending map as aborted without draining `pending_map`.
@@ -398,6 +411,7 @@ impl Buffer {
         }
         state.map_state = BufferMapState::Unmapped;
         state.active_map = None;
+        state.mapped_ranges.clear();
         drop(state);
 
         let active_map = active_map?;
@@ -466,6 +480,7 @@ impl Buffer {
             outcome: MapAsyncStatus::Success,
         });
         state.active_map = None;
+        state.mapped_ranges.clear();
         Ok(())
     }
 
@@ -502,9 +517,11 @@ impl Buffer {
                 offset: pending.offset,
                 size: pending.size,
             });
+            state.mapped_ranges.clear();
             BufferMapState::Mapped
         } else {
             state.active_map = None;
+            state.mapped_ranges.clear();
             BufferMapState::Unmapped
         };
         outcome
@@ -521,6 +538,7 @@ impl Buffer {
             pending.outcome = MapAsyncStatus::Aborted;
             state.map_state = BufferMapState::Unmapped;
             state.active_map = None;
+            state.mapped_ranges.clear();
         }
     }
 
@@ -532,7 +550,7 @@ impl Buffer {
         offset: u64,
         size: Option<u64>,
     ) -> Option<*mut u8> {
-        let state = self.inner.state.lock();
+        let mut state = self.inner.state.lock();
         if state.is_destroyed || state.map_state != BufferMapState::Mapped {
             return None;
         }
@@ -540,8 +558,17 @@ impl Buffer {
         if !const_access && active.mode == MapMode::Read {
             return None;
         }
+        if !offset.is_multiple_of(8) {
+            return None;
+        }
         let map_end = active.offset.checked_add(active.size)?;
-        let size = size.unwrap_or_else(|| map_end.saturating_sub(offset));
+        let size = match size {
+            Some(size) => size,
+            None => self.inner.size.checked_sub(offset)?,
+        };
+        if !size.is_multiple_of(4) {
+            return None;
+        }
         if offset < active.offset || offset > map_end {
             return None;
         }
@@ -549,6 +576,15 @@ impl Buffer {
         if end > map_end {
             return None;
         }
+        let range = MappedRange { offset, size };
+        if state
+            .mapped_ranges
+            .iter()
+            .any(|existing| ranges_overlap(*existing, range))
+        {
+            return None;
+        }
+        state.mapped_ranges.push(range);
         drop(state);
         if let Some(mapped_ptr) = self.inner.hal.as_ref().and_then(HalBuffer::mapped_ptr) {
             let offset = usize::try_from(offset).ok()?;
@@ -610,6 +646,16 @@ impl Buffer {
         }
         Ok(())
     }
+}
+
+fn ranges_overlap(a: MappedRange, b: MappedRange) -> bool {
+    let Some(a_end) = a.offset.checked_add(a.size) else {
+        return true;
+    };
+    let Some(b_end) = b.offset.checked_add(b.size) else {
+        return true;
+    };
+    !(a.offset >= b_end || b.offset >= a_end)
 }
 
 /// Validates buffer descriptor and returns a descriptive error on failure.
@@ -780,8 +826,15 @@ mod tests {
         assert!(buffer.mapped_range(true, 0, Some(8)).is_some());
         assert_eq!(buffer.mapped_range(false, 0, Some(8)), None);
         assert_eq!(buffer.mapped_range(true, 12, Some(8)), None);
+        assert_eq!(buffer.mapped_range(true, 0, Some(2)), None);
         assert_eq!(buffer.unmap(), None);
         assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
+
+        let partial = noop_buffer(64, BufferUsage::MAP_WRITE);
+        assert_eq!(partial.begin_map(MapMode::Write, 16, 16), Ok(()));
+        assert_eq!(partial.resolve_pending_map(), MapAsyncStatus::Success);
+        assert_eq!(partial.mapped_range(false, 16, None), None);
+        assert!(partial.mapped_range(false, 16, Some(16)).is_some());
     }
 
     #[test]
@@ -794,6 +847,47 @@ mod tests {
         assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
         assert_eq!(buffer.resolve_pending_map(), MapAsyncStatus::Aborted);
         assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
+    }
+
+    #[test]
+    fn mapped_ranges_must_be_disjoint_until_unmap_or_remap() {
+        let buffer = noop_device().create_buffer(BufferDescriptor {
+            usage: BufferUsage::MAP_WRITE,
+            size: 80,
+            mapped_at_creation: false,
+        });
+        buffer
+            .begin_map(MapMode::Write, 0, 80)
+            .expect("map should begin");
+        assert_eq!(buffer.resolve_pending_map(), MapAsyncStatus::Success);
+
+        assert!(buffer.mapped_range(false, 16, Some(20)).is_some());
+        assert_eq!(buffer.mapped_range(false, 24, Some(0)), None);
+        assert!(buffer.mapped_range(false, 40, Some(8)).is_some());
+
+        assert_eq!(buffer.unmap(), None);
+        buffer
+            .begin_map(MapMode::Write, 0, 80)
+            .expect("map should begin after unmap");
+        assert_eq!(buffer.resolve_pending_map(), MapAsyncStatus::Success);
+        assert!(buffer.mapped_range(false, 24, Some(0)).is_some());
+    }
+
+    #[test]
+    fn invalid_mapped_at_creation_buffer_still_exposes_initial_mapping() {
+        let buffer = noop_device().create_buffer(BufferDescriptor {
+            usage: BufferUsage::NONE,
+            size: 16,
+            mapped_at_creation: true,
+        });
+
+        assert!(buffer.is_error());
+        assert_eq!(buffer.map_state(), BufferMapState::Mapped);
+        assert!(buffer.mapped_range(false, 0, None).is_some());
+        assert_eq!(
+            buffer.begin_map(MapMode::Write, 0, 4),
+            Err("cannot map an error buffer")
+        );
     }
 
     #[test]
