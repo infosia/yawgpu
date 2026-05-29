@@ -39,6 +39,10 @@ fn const_and_non_const_access_follow_map_mode() {
         let write = create_buffer(test.device(), 16, native::WGPUBufferUsage_MapWrite, false);
         map_and_wait(test.instance(), write, native::WGPUMapMode_Write, 0, 4);
         assert!(!yawgpu::wgpuBufferGetMappedRange(write, 0, 4).is_null());
+        yawgpu::wgpuBufferRelease(write);
+
+        let write = create_buffer(test.device(), 16, native::WGPUBufferUsage_MapWrite, false);
+        map_and_wait(test.instance(), write, native::WGPUMapMode_Write, 0, 4);
         assert!(!yawgpu::wgpuBufferGetConstMappedRange(write, 0, 4).is_null());
         yawgpu::wgpuBufferRelease(write);
 
@@ -81,19 +85,20 @@ fn offset_plus_size_beyond_mapped_end_returns_null() {
 }
 
 #[test]
-fn whole_map_size_uses_active_mapped_range() {
+fn whole_map_size_uses_buffer_size_then_validates_against_active_mapped_range() {
     let test = ValidationTest::new();
     unsafe {
         let buffer = create_buffer(test.device(), 64, native::WGPUBufferUsage_MapWrite, false);
         map_and_wait(test.instance(), buffer, native::WGPUMapMode_Write, 16, 16);
 
         assert!(
-            !yawgpu::wgpuBufferGetMappedRange(buffer, 16, native::WGPU_WHOLE_MAP_SIZE,).is_null()
+            yawgpu::wgpuBufferGetMappedRange(buffer, 16, native::WGPU_WHOLE_MAP_SIZE).is_null()
         );
         assert!(
-            !yawgpu::wgpuBufferGetMappedRange(buffer, 20, native::WGPU_WHOLE_MAP_SIZE,).is_null()
+            yawgpu::wgpuBufferGetMappedRange(buffer, 20, native::WGPU_WHOLE_MAP_SIZE).is_null()
         );
         assert!(yawgpu::wgpuBufferGetMappedRange(buffer, 8, native::WGPU_WHOLE_MAP_SIZE).is_null());
+        assert!(!yawgpu::wgpuBufferGetMappedRange(buffer, 16, 16).is_null());
         yawgpu::wgpuBufferRelease(buffer);
 
         assert!(test.errors().is_empty());
@@ -145,8 +150,10 @@ fn write_mapped_range_points_into_stable_host_backing() {
         ptr.add(2).write(33);
         ptr.add(3).write(44);
 
-        let const_ptr = yawgpu::wgpuBufferGetConstMappedRange(buffer, 8, 4).cast::<u8>();
-        assert_eq!(std::slice::from_raw_parts(const_ptr, 4), &[11, 22, 33, 44]);
+        assert_eq!(
+            std::slice::from_raw_parts(ptr.cast_const(), 4),
+            &[11, 22, 33, 44]
+        );
         yawgpu::wgpuBufferRelease(buffer);
 
         assert!(test.errors().is_empty());
