@@ -22,7 +22,7 @@ cases are ported, then `ported`.
 | status | meaning |
 |---|---|
 | `ported` | every non-excluded `g.test()` has a Rust `#[test]` under `tests/cts/validation/…`, green on Noop |
-| `ported*` | as `ported`, but some web-only subcases were excluded (noted in-row) |
+| `ported*` | as `ported`, but some subcases were excluded or `#[ignore]`d (web-only, or deferred behind a core gap with a spec-correct assertion) — reason in-row |
 | `todo` | not yet ported to `tests/cts/` (a legacy Dawn test may still overlap — see related-test column) |
 | `N/A` | excluded (web/canvas/WebCodecs/IDL/empty); reason in-row |
 
@@ -35,11 +35,17 @@ never a reason to skip a CTS case.
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
 - Excluded (`N/A`): 4 whole spec files (web/empty).
-- `ported`: 18 (`buffer/`; texture creation; `image_copy/`; `queue/`
-  complete except web `copyToTexture` — compressed / depth32float-stencil8
-  subcases deferred on Noop).
-- `todo`: 107 spec files (30 of which have an overlapping legacy Dawn
+- `ported`: 23 (`buffer/`; texture creation; `image_copy/`; `queue/`;
+  shader_module entry_point + overrides; compute_pipeline; pipeline
+  immediates; layout_shader_compat). Some `ported*` with subcases
+  `#[ignore]`d behind core gaps (compute-pipeline override evaluation,
+  resource/layout compatibility matrix) — assertions are spec-correct.
+- `todo`: 102 spec files (28 of which have an overlapping legacy Dawn
   test, listed in the related-test column for reference).
+- Known core gaps surfaced (recommended follow-up): evaluate
+  pipeline-overridable constants at createComputePipeline (then apply
+  workgroup-size / storage-size limit + override-expression error checks);
+  complete pipeline-layout/resource compatibility validation.
 
 ## Coverage matrix
 
@@ -94,7 +100,7 @@ never a reason to skip a CTS case.
 | `limits/minStorageBufferOffsetAlignment.spec.ts` | 4 | — | `todo` |
 | `limits/minUniformBufferOffsetAlignment.spec.ts` | 4 | — | `todo` |
 | **(top-level)/** | | | |
-| `compute_pipeline.spec.ts` | 19 | compute_pipeline_validation.rs | `todo` |
+| `compute_pipeline.spec.ts` | 19 | compute_pipeline_validation.rs | `ported*` → `cts/validation/compute_pipeline.rs` (4 override/storage cases `#[ignore]`d: core does not yet evaluate pipeline overrides at createComputePipeline; resource-compat matrix gap `#[ignore]`d) |
 | `createBindGroup.spec.ts` | 27 | bind_group_validation.rs | `todo` — external_texture,* subcases excluded |
 | `createBindGroupLayout.spec.ts` | 11 | bind_group_layout_validation.rs | `todo` |
 | `createPipelineLayout.spec.ts` | 7 | pipeline_layout_validation.rs | `todo` |
@@ -106,7 +112,7 @@ never a reason to skip a CTS case.
 | `error_scope.spec.ts` | 6 | error_scope_validation.rs | `todo` |
 | `getBindGroupLayout.spec.ts` | 4 | get_bind_group_layout_validation.rs | `todo` |
 | `gpu_external_texture_expiration.spec.ts` | 6 | — | `N/A` — web (WebCodecs external texture) |
-| `layout_shader_compat.spec.ts` | 1 | — | `todo` |
+| `layout_shader_compat.spec.ts` | 1 | — | `ported*` → `cts/validation/layout_shader_compat.rs` (full layout/shader matrix `#[ignore]`d: core gap; real missing/visibility/wrong-kind cases active) |
 | `non_filterable_texture.spec.ts` | 1 | — | `todo` |
 | **encoding/** | | | |
 | `beginComputePass.spec.ts` | 4 | — | `todo` |
@@ -144,7 +150,7 @@ never a reason to skip a CTS case.
 | `layout_related.spec.ts` | 7 | — | `ported*` → `cts/validation/image_copy/layout_related.rs` (compressed-format subcases deferred: Noop lacks feature) |
 | `texture_related.spec.ts` | 9 | — | `ported*` → `cts/validation/image_copy/texture_related.rs` (compressed-format subcases deferred: Noop lacks feature) |
 | **pipeline/** | | | |
-| `immediates.spec.ts` | 1 | — | `todo` |
+| `immediates.spec.ts` | 1 | — | `ported*` → `cts/validation/pipeline/immediates.rs` (immediateSize limit only; shader-side immediate mismatch N/A — yawgpu has no shader immediate model) |
 | **query_set/** | | | |
 | `create.spec.ts` | 1 | query_validation.rs | `todo` |
 | `destroy.spec.ts` | 2 | query_validation.rs | `todo` |
@@ -180,8 +186,8 @@ never a reason to skip a CTS case.
 | `texture/in_render_common.spec.ts` | 5 | — | `todo` |
 | `texture/in_render_misc.spec.ts` | 5 | — | `todo` |
 | **shader_module/** | | | |
-| `entry_point.spec.ts` | 6 | shader_module_validation.rs | `todo` |
-| `overrides.spec.ts` | 2 | shader_module_validation.rs | `todo` |
+| `entry_point.spec.ts` | 6 | shader_module_validation.rs | `ported` → `cts/validation/shader_module/entry_point.rs` |
+| `overrides.spec.ts` | 2 | shader_module_validation.rs | `ported` → `cts/validation/shader_module/overrides.rs` |
 | **state/** | | | |
 | `device_lost/destroy.spec.ts` | 32 | device_lost_validation.rs | `todo` — importExternalTexture/copyExternalImageToTexture excluded |
 | **texture/** | | | |
