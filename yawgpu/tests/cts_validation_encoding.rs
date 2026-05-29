@@ -41,3 +41,12 @@ mod render_state_tracking;
 
 #[path = "cts/validation/encoding/cmds/index_access.rs"]
 mod index_access;
+
+#[path = "cts/validation/encoding/cmds/render/dynamic_state.rs"]
+mod render_dynamic_state;
+
+#[path = "cts/validation/encoding/cmds/render/indirect_draw.rs"]
+mod render_indirect_draw;
+
+#[path = "cts/validation/encoding/cmds/render/indirect_multi_draw.rs"]
+mod render_indirect_multi_draw;
