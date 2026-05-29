@@ -381,6 +381,9 @@ impl SubpassRenderPass {
                 self.inner
                     .encoder
                     .record_referenced_buffers(bind_group_buffer_resources(&group));
+                self.inner
+                    .encoder
+                    .record_referenced_textures(bind_group_texture_resources(&group));
                 state.bind_groups.insert(
                     index,
                     BoundBindGroup {

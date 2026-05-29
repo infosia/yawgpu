@@ -1,4 +1,5 @@
 use super::*;
+use crate::conv::map_render_pass_timestamp_writes;
 
 /// Begins a render pass.
 ///
@@ -37,9 +38,27 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginRenderPass(
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderBeginComputePass(
     command_encoder: native::WGPUCommandEncoder,
-    _descriptor: *const native::WGPUComputePassDescriptor,
+    descriptor: *const native::WGPUComputePassDescriptor,
 ) -> native::WGPUComputePassEncoder {
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    if let Some(timestamp_writes) = descriptor
+        .as_ref()
+        .and_then(|descriptor| descriptor.timestampWrites.as_ref())
+    {
+        let timestamp_writes = map_render_pass_timestamp_writes(timestamp_writes);
+        if let Some(index) = timestamp_writes.beginning_index {
+            let error = encoder
+                .core
+                .write_timestamp(Arc::new(timestamp_writes.query_set.clone()), index);
+            dispatch_optional_error(&encoder.device, error);
+        }
+        if let Some(index) = timestamp_writes.end_index {
+            let error = encoder
+                .core
+                .write_timestamp(Arc::new(timestamp_writes.query_set), index);
+            dispatch_optional_error(&encoder.device, error);
+        }
+    }
     let (pass, error) = encoder.core.begin_compute_pass();
     dispatch_optional_error(&encoder.device, error);
     arc_to_handle(Arc::new(WGPUComputePassEncoderImpl {

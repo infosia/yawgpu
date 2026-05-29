@@ -221,7 +221,7 @@ unsafe fn map_render_pass_depth_stencil_attachment(
     }
 }
 
-unsafe fn map_render_pass_timestamp_writes(
+pub(crate) unsafe fn map_render_pass_timestamp_writes(
     value: &native::WGPUPassTimestampWrites,
 ) -> core::RenderPassTimestampWrites {
     let query_set = clone_handle::<WGPUQuerySetImpl>(value.querySet, "WGPUQuerySet");

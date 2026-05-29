@@ -40,6 +40,8 @@ pub(crate) struct CommandEncoderState {
     pub(crate) debug_group_depth: u32,
     pub(crate) has_recorded_command: bool,
     pub(crate) referenced_buffers: Vec<Arc<Buffer>>,
+    pub(crate) referenced_textures: Vec<Texture>,
+    pub(crate) referenced_query_sets: Vec<QuerySet>,
     pub(crate) command_ops: Vec<CommandExecution>,
 }
 
@@ -79,6 +81,8 @@ pub struct CommandBuffer {
 pub(crate) struct CommandBufferInner {
     pub(crate) is_error: bool,
     pub(crate) referenced_buffers: Vec<Arc<Buffer>>,
+    pub(crate) referenced_textures: Vec<Texture>,
+    pub(crate) referenced_query_sets: Vec<QuerySet>,
     pub(crate) command_ops: Vec<CommandExecution>,
     pub(crate) submitted: Mutex<bool>,
 }
@@ -154,6 +158,7 @@ pub(crate) struct ComputePassCommand {
 pub(crate) struct RenderPassCommand {
     pub(crate) pipeline: Option<Arc<RenderPipeline>>,
     pub(crate) color_attachment: RenderPassColorExecution,
+    pub(crate) attachment_textures: Vec<Texture>,
     pub(crate) bind_groups: BTreeMap<u32, BoundBindGroup>,
     pub(crate) vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
     pub(crate) draw: Option<RenderDrawExecution>,
@@ -202,6 +207,8 @@ impl CommandEncoder {
                     debug_group_depth: 0,
                     has_recorded_command: false,
                     referenced_buffers: Vec::new(),
+                    referenced_textures: Vec::new(),
+                    referenced_query_sets: Vec::new(),
                     command_ops: Vec::new(),
                 }),
             }),
@@ -226,6 +233,9 @@ impl CommandEncoder {
         if immediate_error.is_none() {
             if let Err(message) = validate_render_pass_descriptor(descriptor) {
                 self.record_first_error(message);
+            } else {
+                self.record_referenced_textures(render_pass_attachment_textures(descriptor));
+                self.record_referenced_query_sets(render_pass_query_sets(descriptor));
             }
         }
         (
@@ -409,6 +419,7 @@ impl CommandEncoder {
 
     /// Records a timestamp write into the query set at `query_index`.
     pub fn write_timestamp(&self, query_set: Arc<QuerySet>, query_index: u32) -> Option<String> {
+        self.record_referenced_query_set((*query_set).clone());
         self.record_buffer_command(Vec::new(), None, None, || {
             validate_timestamp_query_set(&query_set, "write timestamp")?;
             validate_query_index(&query_set, query_index, "write timestamp query index")
@@ -424,6 +435,7 @@ impl CommandEncoder {
         destination: Arc<Buffer>,
         destination_offset: u64,
     ) -> Option<String> {
+        self.record_referenced_query_set((*query_set).clone());
         self.record_buffer_command(vec![Arc::clone(&destination)], None, None, || {
             validate_resolve_query_set(
                 &query_set,
@@ -623,7 +635,7 @@ impl CommandEncoder {
         let mut state = self.inner.state.lock();
         if state.lifecycle != CommandEncoderLifecycle::Recording {
             return (
-                CommandBuffer::new(true, Vec::new(), Vec::new()),
+                CommandBuffer::new(true, Vec::new(), Vec::new(), Vec::new(), Vec::new()),
                 Some("command encoder cannot be finished more than once".to_owned()),
             );
         }
@@ -647,13 +659,29 @@ impl CommandEncoder {
         } else {
             std::mem::take(&mut state.referenced_buffers)
         };
+        let referenced_textures = if finish_error.is_some() {
+            Vec::new()
+        } else {
+            std::mem::take(&mut state.referenced_textures)
+        };
+        let referenced_query_sets = if finish_error.is_some() {
+            Vec::new()
+        } else {
+            std::mem::take(&mut state.referenced_query_sets)
+        };
         let command_ops = if finish_error.is_some() {
             Vec::new()
         } else {
             std::mem::take(&mut state.command_ops)
         };
         (
-            CommandBuffer::new(finish_error.is_some(), referenced_buffers, command_ops),
+            CommandBuffer::new(
+                finish_error.is_some(),
+                referenced_buffers,
+                referenced_textures,
+                referenced_query_sets,
+                command_ops,
+            ),
             finish_error,
         )
     }
@@ -680,6 +708,29 @@ impl CommandEncoder {
     /// Tracks several buffers referenced by the encoder.
     pub(crate) fn record_referenced_buffers(&self, buffers: Vec<Arc<Buffer>>) {
         self.inner.state.lock().referenced_buffers.extend(buffers);
+    }
+
+    /// Tracks several textures referenced by the encoder.
+    pub(crate) fn record_referenced_textures(&self, textures: Vec<Texture>) {
+        self.inner.state.lock().referenced_textures.extend(textures);
+    }
+
+    /// Tracks a query set referenced by the encoder.
+    pub(crate) fn record_referenced_query_set(&self, query_set: QuerySet) {
+        self.inner
+            .state
+            .lock()
+            .referenced_query_sets
+            .push(query_set);
+    }
+
+    /// Tracks several query sets referenced by the encoder.
+    pub(crate) fn record_referenced_query_sets(&self, query_sets: Vec<QuerySet>) {
+        self.inner
+            .state
+            .lock()
+            .referenced_query_sets
+            .extend(query_sets);
     }
 
     /// Appends a finished compute-pass command to the encoder's command list.
@@ -1016,6 +1067,18 @@ pub(crate) fn render_pass_attachment_textures(descriptor: &RenderPassDescriptor)
         textures.push(attachment.view.texture());
     }
     textures
+}
+
+/// Returns render pass query sets.
+pub(crate) fn render_pass_query_sets(descriptor: &RenderPassDescriptor) -> Vec<QuerySet> {
+    let mut query_sets = Vec::new();
+    if let Some(query_set) = &descriptor.occlusion_query_set {
+        query_sets.push(query_set.clone());
+    }
+    if let Some(timestamp_writes) = &descriptor.timestamp_writes {
+        query_sets.push(timestamp_writes.query_set.clone());
+    }
+    query_sets
 }
 
 /// Returns render pass color execution.
@@ -1498,12 +1561,16 @@ impl CommandBuffer {
     pub(crate) fn new(
         is_error: bool,
         referenced_buffers: Vec<Arc<Buffer>>,
+        referenced_textures: Vec<Texture>,
+        referenced_query_sets: Vec<QuerySet>,
         command_ops: Vec<CommandExecution>,
     ) -> Self {
         Self {
             inner: Arc::new(CommandBufferInner {
                 is_error,
                 referenced_buffers,
+                referenced_textures,
+                referenced_query_sets,
                 command_ops,
                 submitted: Mutex::new(false),
             }),
@@ -1519,6 +1586,16 @@ impl CommandBuffer {
     /// Returns the referenced buffers.
     pub(crate) fn referenced_buffers(&self) -> &[Arc<Buffer>] {
         &self.inner.referenced_buffers
+    }
+
+    /// Returns the referenced textures.
+    pub(crate) fn referenced_textures(&self) -> &[Texture] {
+        &self.inner.referenced_textures
+    }
+
+    /// Returns the referenced query sets.
+    pub(crate) fn referenced_query_sets(&self) -> &[QuerySet] {
+        &self.inner.referenced_query_sets
     }
 
     /// Returns the command ops.

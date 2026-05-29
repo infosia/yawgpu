@@ -79,49 +79,71 @@ impl Queue {
 
     /// Submits command buffers to the queue after validating each is non-error and not already submitted.
     pub fn submit(&self, command_buffers: &[Arc<CommandBuffer>]) -> Option<DeviceError> {
+        let mut validation_error = None;
         for (index, command_buffer) in command_buffers.iter().enumerate() {
             if command_buffer.is_error() {
-                return Some(DeviceError::validation(
-                    "queue submit cannot use an error command buffer",
-                ));
+                validation_error = Some("queue submit cannot use an error command buffer");
+                break;
             }
             if command_buffer.is_submitted() {
-                return Some(DeviceError::validation(
-                    "command buffer cannot be submitted more than once",
-                ));
+                validation_error = Some("command buffer cannot be submitted more than once");
+                break;
             }
             if command_buffers[..index]
                 .iter()
                 .any(|previous| previous.same(command_buffer))
             {
-                return Some(DeviceError::validation(
-                    "command buffer cannot be submitted more than once",
-                ));
+                validation_error = Some("command buffer cannot be submitted more than once");
+                break;
             }
             for buffer in command_buffer.referenced_buffers() {
                 if buffer.map_state() != BufferMapState::Unmapped {
-                    return Some(DeviceError::validation(
-                        "queue submit cannot use a mapped buffer",
-                    ));
+                    validation_error = Some("queue submit cannot use a mapped buffer");
+                    break;
                 }
                 if buffer.is_destroyed() {
-                    return Some(DeviceError::validation(
-                        "queue submit cannot use a destroyed buffer",
-                    ));
+                    validation_error = Some("queue submit cannot use a destroyed buffer");
+                    break;
                 }
+            }
+            if validation_error.is_some() {
+                break;
+            }
+            for texture in command_buffer.referenced_textures() {
+                if texture.is_destroyed() {
+                    validation_error = Some("queue submit cannot use a destroyed texture");
+                    break;
+                }
+            }
+            if validation_error.is_some() {
+                break;
+            }
+            for query_set in command_buffer.referenced_query_sets() {
+                if query_set.is_destroyed() {
+                    validation_error = Some("queue submit cannot use a destroyed query set");
+                    break;
+                }
+            }
+            if validation_error.is_some() {
+                break;
             }
             for texture in command_buffer_referenced_textures(command_buffer) {
                 if texture.is_destroyed() {
-                    return Some(DeviceError::validation(
-                        "queue submit cannot use a destroyed texture",
-                    ));
+                    validation_error = Some("queue submit cannot use a destroyed texture");
+                    break;
                 }
+            }
+            if validation_error.is_some() {
+                break;
             }
         }
         for command_buffer in command_buffers {
             if let Err(message) = command_buffer.mark_submitted() {
                 return Some(DeviceError::validation(message));
             }
+        }
+        if let Some(message) = validation_error {
+            return Some(DeviceError::validation(message));
         }
         if command_buffers.is_empty() {
             if let Err(error) = self.inner.hal.submit_empty() {
@@ -164,9 +186,7 @@ fn command_buffer_referenced_textures(command_buffer: &CommandBuffer) -> Vec<Tex
                     textures.push((*destination.texture).clone());
                 }
             },
-            CommandExecution::RenderPass(pass) => {
-                textures.push(pass.color_attachment.texture.clone());
-            }
+            CommandExecution::RenderPass(pass) => textures.extend(pass.attachment_textures.clone()),
             #[cfg(feature = "tiled")]
             CommandExecution::SubpassRenderPass(pass) => {
                 for attachment in &pass.color_attachments {
