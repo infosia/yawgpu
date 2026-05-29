@@ -35,13 +35,13 @@ never a reason to skip a CTS case.
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
 - Excluded (`N/A`): 4 whole spec files (web/empty).
-- `ported`: 46 (`buffer/`; texture creation; `image_copy/`; `queue/`;
+- `ported`: 49 (`buffer/`; texture creation; `image_copy/`; `queue/`;
   shader_module; compute_pipeline; immediates; layout_shader_compat;
   `render_pipeline/` complete; bind-group family complete;
-  `render_pass/` complete; encoding: encoder_state, encoder_open_state,
-  begin{Render,Compute}Pass). Several `ported*` with subcases `#[ignore]`d
-  behind core gaps — assertions are spec-correct.
-- `todo`: 79 spec files (28 of which have an overlapping legacy Dawn
+  `render_pass/` complete; encoding: encoder state + begin passes +
+  cmds clearBuffer/copyB2B/copyT2T). Several `ported*` with subcases
+  `#[ignore]`d behind core gaps — assertions are spec-correct.
+- `todo`: 76 spec files (28 of which have an overlapping legacy Dawn
   test, listed in the related-test column for reference).
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
@@ -132,10 +132,10 @@ never a reason to skip a CTS case.
 | `queries/resolveQuerySet.spec.ts` | 6 | query_validation.rs | `todo` |
 | `render_bundle.spec.ts` | 6 | render_bundle_validation.rs | `todo` |
 | **encoding/cmds/** | | | |
-| `clearBuffer.spec.ts` | 8 | — | `todo` |
+| `clearBuffer.spec.ts` | 8 | — | `ported*` → `cts/validation/encoding/cmds/clear_buffer.rs` (6 active; 2 `#[ignore]`d: destroyed-buffer submit-timing, device-mismatch) |
 | `compute_pass.spec.ts` | 6 | — | `todo` |
-| `copyBufferToBuffer.spec.ts` | 8 | command_buffer_copy_validation.rs | `todo` |
-| `copyTextureToTexture.spec.ts` | 12 | command_texture_copy_validation.rs | `todo` |
+| `copyBufferToBuffer.spec.ts` | 8 | command_buffer_copy_validation.rs | `ported*` → `cts/validation/encoding/cmds/copy_buffer_to_buffer.rs` (7 active; 1 `#[ignore]`d: destroyed-buffer submit-timing) |
+| `copyTextureToTexture.spec.ts` | 12 | command_texture_copy_validation.rs | `ported*` → `cts/validation/encoding/cmds/copy_texture_to_texture.rs` (8 active; 4 `#[ignore]`d: destroyed-texture submit-timing, device-mismatch, aspect strictness, compressed-format feature) |
 | `debug.spec.ts` | 3 | debug_marker_validation.rs | `todo` |
 | `index_access.spec.ts` | 2 | — | `todo` |
 | `render/draw.spec.ts` | 8 | — | `todo` |
