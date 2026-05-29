@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 #[path = "cts/validation/pipeline_common.rs"]
 mod common;
 
