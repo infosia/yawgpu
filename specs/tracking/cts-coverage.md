@@ -34,16 +34,17 @@ never a reason to skip a CTS case.
 ## Snapshot
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
-- Excluded (`N/A`): 6 whole spec files (web/empty/multiDraw + setImmediates absent).
-- `ported`: 67 (`buffer/`; texture creation; `image_copy/`; `queue/`;
+- Excluded (`N/A`): 7 whole spec files (web/empty/multiDraw + setImmediates/immediate absent).
+- `ported`: 68 (`buffer/`; texture creation; `image_copy/`; `queue/`;
   shader_module; compute_pipeline; immediates; layout_shader_compat;
   `render_pipeline/` complete; bind-group family complete;
   `render_pass/` complete; encoding: encoder state + begin passes +
   cmds copies/clear + cmds render + compute_pass + setBindGroup + debug
   + dispatch + debugMarker + queries + render_bundle +
-  createRenderBundleEncoder). Several `ported*` with subcases `#[ignore]`d
-  behind core gaps — assertions are spec-correct.
-- `todo`: 56 spec files (28 of which have an overlapping legacy Dawn
+  createRenderBundleEncoder + programmable). **`encoding/` complete.**
+  Several `ported*` with subcases `#[ignore]`d behind core gaps —
+  assertions are spec-correct.
+- `todo`: 54 spec files (28 of which have an overlapping legacy Dawn
   test, listed in the related-test column for reference).
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
@@ -127,8 +128,8 @@ never a reason to skip a CTS case.
 | `createRenderBundleEncoder.spec.ts` | 6 | render_bundle_validation.rs | `ported*` → `cts/validation/encoding/create_render_bundle_encoder.rs` (4 active; 2 `#[ignore]`d: maxColorAttachmentBytesPerSample not enforced) |
 | `encoder_open_state.spec.ts` | 4 | command_encoder_lifecycle_validation.rs | `ported` → `cts/validation/encoding/encoder_open_state.rs` (setImmediates/multiDraw* subcommands N/A: absent in C ABI) |
 | `encoder_state.spec.ts` | 6 | command_encoder_lifecycle_validation.rs / pass_state_validation.rs | `ported*` → `cts/validation/encoding/encoder_state.rs` (4 active; 2 `#[ignore]`d: core poisons parent encoder on invalid pass-end, CTS expects finish to still succeed) |
-| `programmable/pipeline_bind_group_compat.spec.ts` | 10 | resource_usage_tracking_validation.rs | `todo` |
-| `programmable/pipeline_immediate.spec.ts` | 4 | — | `todo` |
+| `programmable/pipeline_bind_group_compat.spec.ts` | 10 | resource_usage_tracking_validation.rs | `ported` → `cts/validation/encoding/programmable/pipeline_bind_group_compat.rs` (all 10 active; core fix: skip empty BGL slots + binding-number-keyed BGL compat) |
+| `programmable/pipeline_immediate.spec.ts` | 4 | — | `N/A` — depends on setImmediates (no yawgpu export / core immediate-data command) |
 | `queries/begin_end.spec.ts` | 4 | query_validation.rs | `ported*` → `cts/validation/encoding/queries/begin_end.rs` (3 active; nesting `#[ignore]`d: CTS-unimplemented) |
 | `queries/general.spec.ts` | 3 | query_validation.rs | `ported` → `cts/validation/encoding/queries/general.rs` |
 | `queries/resolveQuerySet.spec.ts` | 6 | query_validation.rs | `ported*` → `cts/validation/encoding/queries/resolve_query_set.rs` (4 active; 2 `#[ignore]`d: destroyed submit-timing, device-mismatch) |

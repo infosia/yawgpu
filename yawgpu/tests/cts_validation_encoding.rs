@@ -83,3 +83,9 @@ mod render_bundle;
 
 #[path = "cts/validation/encoding/create_render_bundle_encoder.rs"]
 mod create_render_bundle_encoder;
+
+#[path = "cts/validation/encoding/programmable/pipeline_bind_group_compat.rs"]
+mod pipeline_bind_group_compat;
+
+#[path = "cts/validation/encoding/programmable/pipeline_immediate.rs"]
+mod pipeline_immediate;
