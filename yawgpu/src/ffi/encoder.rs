@@ -326,6 +326,20 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToTexture(
         .expect("wgpuCommandEncoderCopyBufferToTexture copySize must not be null");
     let source_buffer = clone_handle(source.buffer, "WGPUBuffer");
     let destination_texture = clone_handle(destination.texture, "WGPUTexture");
+    if !source_buffer.device.same(&encoder.device) {
+        encoder.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "copy buffer to texture source buffer must belong to the command encoder device",
+        );
+        return;
+    }
+    if !destination_texture.device.same(&encoder.device) {
+        encoder.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "copy buffer to texture destination texture must belong to the command encoder device",
+        );
+        return;
+    }
     let (destination_mip_level, destination_origin, destination_aspect) =
         map_texel_copy_texture_info_parts(destination);
 
@@ -374,6 +388,20 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToBuffer(
         .expect("wgpuCommandEncoderCopyTextureToBuffer copySize must not be null");
     let source_texture = clone_handle(source.texture, "WGPUTexture");
     let destination_buffer = clone_handle(destination.buffer, "WGPUBuffer");
+    if !source_texture.device.same(&encoder.device) {
+        encoder.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "copy texture to buffer source texture must belong to the command encoder device",
+        );
+        return;
+    }
+    if !destination_buffer.device.same(&encoder.device) {
+        encoder.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "copy texture to buffer destination buffer must belong to the command encoder device",
+        );
+        return;
+    }
     let (source_mip_level, source_origin, source_aspect) =
         map_texel_copy_texture_info_parts(source);
 

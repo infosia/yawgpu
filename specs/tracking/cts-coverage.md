@@ -35,9 +35,9 @@ never a reason to skip a CTS case.
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
 - Excluded (`N/A`): 4 whole spec files (web/empty).
-- `ported`: 7 (`buffer/` complete; texture creation: createTexture,
-  createView, createSampler, texture/destroy).
-- `todo`: 118 spec files (33 of which have an overlapping legacy Dawn
+- `ported`: 11 (`buffer/` complete; texture creation; `image_copy/`
+  complete — compressed / depth32float-stencil8 subcases deferred on Noop).
+- `todo`: 114 spec files (33 of which have an overlapping legacy Dawn
   test, listed in the related-test column for reference).
 
 ## Coverage matrix
@@ -138,10 +138,10 @@ never a reason to skip a CTS case.
 | `setBindGroup.spec.ts` | 6 | — | `todo` |
 | `setImmediates.spec.ts` | 3 | — | `todo` |
 | **image_copy/** | | | |
-| `buffer_related.spec.ts` | 4 | — | `todo` |
-| `buffer_texture_copies.spec.ts` | 7 | — | `todo` |
-| `layout_related.spec.ts` | 7 | — | `todo` |
-| `texture_related.spec.ts` | 9 | — | `todo` |
+| `buffer_related.spec.ts` | 4 | — | `ported` → `cts/validation/image_copy/buffer_related.rs` |
+| `buffer_texture_copies.spec.ts` | 7 | — | `ported*` → `cts/validation/image_copy/buffer_texture_copies.rs` (depth32float-stencil8 subcases deferred: Noop lacks feature) |
+| `layout_related.spec.ts` | 7 | — | `ported*` → `cts/validation/image_copy/layout_related.rs` (compressed-format subcases deferred: Noop lacks feature) |
+| `texture_related.spec.ts` | 9 | — | `ported*` → `cts/validation/image_copy/texture_related.rs` (compressed-format subcases deferred: Noop lacks feature) |
 | **pipeline/** | | | |
 | `immediates.spec.ts` | 1 | — | `todo` |
 | **query_set/** | | | |

@@ -1335,6 +1335,8 @@ pub(crate) fn validate_texture_copy_subresource(
     validate_copy_aspect(format_caps, aspect, label)?;
 
     let subresource = texture.subresource_size(mip_level);
+    let empty_copy =
+        copy_size.width == 0 || copy_size.height == 0 || copy_size.depth_or_array_layers == 0;
     if origin
         .x
         .checked_add(copy_size.width)
@@ -1352,17 +1354,36 @@ pub(crate) fn validate_texture_copy_subresource(
     }
     if require_2d_single_layer
         && texture.dimension() == TextureDimension::D2
+        && !empty_copy
         && copy_size.depth_or_array_layers != 1
     {
         return Err(format!(
             "{label} 2D copies require depthOrArrayLayers to be one"
         ));
     }
+    if !origin.x.is_multiple_of(format_caps.block_w)
+        || !origin.y.is_multiple_of(format_caps.block_h)
+    {
+        return Err(format!("{label} origin must be texel block aligned"));
+    }
+    if !copy_size.width.is_multiple_of(format_caps.block_w)
+        || !copy_size.height.is_multiple_of(format_caps.block_h)
+    {
+        return Err(format!("{label} copy size must be texel block aligned"));
+    }
     if (format_caps.aspects.depth || format_caps.aspects.stencil)
         && (texture.dimension() != TextureDimension::D2 || copy_size.depth_or_array_layers != 1)
     {
         return Err(format!(
             "{label} depth/stencil copies require a single 2D layer"
+        ));
+    }
+    if (format_caps.aspects.depth || format_caps.aspects.stencil)
+        && !empty_copy
+        && (!origin_is_zero(origin) || copy_size != subresource)
+    {
+        return Err(format!(
+            "{label} depth/stencil copies must cover the full subresource"
         ));
     }
 

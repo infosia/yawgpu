@@ -199,6 +199,13 @@ pub unsafe extern "C" fn wgpuQueueWriteTexture(
         }
     };
     let texture = borrow_handle(destination.texture, "WGPUTexture");
+    if !texture.device.same(&queue.device) {
+        queue.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "queue write texture destination texture must belong to the queue device",
+        );
+        return;
+    }
     let aspect = map_texture_aspect(destination.aspect).unwrap_or(core::TextureAspect::All);
 
     if let Err(message) = texture.core.validate_queue_write(
