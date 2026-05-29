@@ -103,6 +103,18 @@ impl BufferUsage {
     pub const INDIRECT: Self = Self(256);
     /// Constant value for query resolve.
     pub const QUERY_RESOLVE: Self = Self(512);
+    const ALL: Self = Self(
+        Self::MAP_READ.0
+            | Self::MAP_WRITE.0
+            | Self::COPY_SRC.0
+            | Self::COPY_DST.0
+            | Self::INDEX.0
+            | Self::VERTEX.0
+            | Self::UNIFORM.0
+            | Self::STORAGE.0
+            | Self::INDIRECT.0
+            | Self::QUERY_RESOLVE.0,
+    );
 
     /// Constructs this object from bits retain.
     #[must_use]
@@ -609,6 +621,9 @@ pub(crate) fn validate_buffer_descriptor(
     if usage.bits() == 0 {
         return Some("buffer usage must be non-zero");
     }
+    if usage.bits() & !BufferUsage::ALL.bits() != 0 {
+        return Some("buffer usage contains unknown bits");
+    }
     if usage.contains(BufferUsage::MAP_READ) {
         let allowed = (BufferUsage::MAP_READ | BufferUsage::COPY_DST).bits();
         if usage.bits() & !allowed != 0 {
@@ -641,6 +656,20 @@ mod tests {
         let usage = BufferUsage::from_bits_retain(raw);
 
         assert_eq!(usage.bits(), raw);
+    }
+
+    #[test]
+    fn validate_buffer_descriptor_rejects_unknown_usage_bits() {
+        let descriptor = BufferDescriptor {
+            usage: BufferUsage::COPY_SRC | BufferUsage::from_bits_retain(1_u64 << 40),
+            size: 4,
+            mapped_at_creation: false,
+        };
+
+        assert_eq!(
+            validate_buffer_descriptor(&descriptor, Limits::DEFAULT),
+            Some("buffer usage contains unknown bits")
+        );
     }
 
     #[test]
