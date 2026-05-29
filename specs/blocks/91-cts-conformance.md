@@ -151,11 +151,22 @@ Harness changes ship with their own inline unit tests (principle 1).
 independently of the legacy Dawn-ported tests.** Every non-excluded
 CTS `g.test()` gets its own Rust `#[test]` under `tests/cts/validation/…`,
 **even when a legacy `yawgpu/tests/*.rs` file already exercises the same
-rule** — duplication across the two layers is allowed and expected. The
-legacy Dawn tests stay as-is; we do not delete, merge, or dedupe against
-them. The "related legacy test" column in the matrix is **informational
-only** (a pointer to prior art a porter may consult for the Rust idiom),
-never a reason to skip a CTS case.
+rule** — duplication across the two layers is allowed and expected
+*during the port*. The legacy Dawn tests stay as-is while porting; do not
+delete, merge, or dedupe against them in a porting slice. The "related
+legacy test" column in the matrix is **informational only** (a pointer to
+prior art a porter may consult for the Rust idiom), never a reason to
+skip a CTS case.
+
+**Planned legacy cleanup (deferred — Phase E).** Once the CTS port has
+superseded a legacy Dawn-derived test's coverage, the redundant legacy
+test is **deleted** in a dedicated later cleanup phase (user decision
+2026-05-29), *not* during a porting slice. The "related legacy test"
+column is the worklist for that phase: for each `ported`/`ported*` row,
+Phase E confirms the CTS file covers everything the listed legacy file
+did (the legacy test may still hold cases the CTS port deferred, e.g.
+feature-gated subcases — those must be retained or re-homed, not lost),
+then removes the legacy file. Until Phase E runs, both layers coexist.
 
 For each area in the matrix:
 
@@ -227,6 +238,14 @@ Each handoff's "Report back" section points here; the reviewer reads
   resource_usages → query_set → capability_checks (features → limits) →
   state/device_lost + error_scope.
   Validation port closes with a mandatory **Phase Review**.
+- **Phase E — legacy Dawn-test cleanup** (deferred; user decision
+  2026-05-29). After the validation port, delete the Dawn-derived
+  `yawgpu/tests/*.rs` tests whose coverage the CTS port has superseded,
+  using the ledger's "related legacy test" column as the worklist.
+  Per row: confirm the CTS file covers everything the legacy file did
+  (retain/re-home any feature-gated or deferred cases the CTS port did
+  not take), then remove the legacy file. Runs as its own phase, not
+  inside a porting slice.
 - **Phase C — operation port** (deferred; real GPU, `OperationTest`).
 - **Phase D — shader/WGSL** (deferred; separate initiative).
 
