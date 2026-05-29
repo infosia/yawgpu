@@ -35,12 +35,13 @@ never a reason to skip a CTS case.
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
 - Excluded (`N/A`): 4 whole spec files (web/empty).
-- `ported`: 42 (`buffer/`; texture creation; `image_copy/`; `queue/`;
+- `ported`: 46 (`buffer/`; texture creation; `image_copy/`; `queue/`;
   shader_module; compute_pipeline; immediates; layout_shader_compat;
   `render_pipeline/` complete; bind-group family complete;
-  **`render_pass/` complete**). Several `ported*` with subcases
-  `#[ignore]`d behind core gaps — assertions are spec-correct.
-- `todo`: 83 spec files (28 of which have an overlapping legacy Dawn
+  `render_pass/` complete; encoding: encoder_state, encoder_open_state,
+  begin{Render,Compute}Pass). Several `ported*` with subcases `#[ignore]`d
+  behind core gaps — assertions are spec-correct.
+- `todo`: 79 spec files (28 of which have an overlapping legacy Dawn
   test, listed in the related-test column for reference).
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
@@ -119,11 +120,11 @@ never a reason to skip a CTS case.
 | `layout_shader_compat.spec.ts` | 1 | — | `ported*` → `cts/validation/layout_shader_compat.rs` (the case is `#[ignore]`d: core does not reject layout/shader resource mismatches — the earlier "active mismatch cases" were false-greens, corrected) |
 | `non_filterable_texture.spec.ts` | 1 | — | `ported*` → `cts/validation/non_filterable_texture.rs` (`#[ignore]`d: core does not reject filtering sampler + non-filterable texture in shader use) |
 | **encoding/** | | | |
-| `beginComputePass.spec.ts` | 4 | — | `todo` |
-| `beginRenderPass.spec.ts` | 4 | — | `todo` |
+| `beginComputePass.spec.ts` | 4 | — | `ported*` → `cts/validation/encoding/begin_compute_pass.rs` (2 active; 2 `#[ignore]`d: timestamp query-set device-mismatch, dup-undefined index) |
+| `beginRenderPass.spec.ts` | 4 | — | `ported*` → `cts/validation/encoding/begin_render_pass.rs` (4 `#[ignore]`d: attachment/query-set device-ownership not validated at finish — core gap) |
 | `createRenderBundleEncoder.spec.ts` | 6 | render_bundle_validation.rs | `todo` |
-| `encoder_open_state.spec.ts` | 4 | command_encoder_lifecycle_validation.rs | `todo` |
-| `encoder_state.spec.ts` | 6 | command_encoder_lifecycle_validation.rs / pass_state_validation.rs | `todo` |
+| `encoder_open_state.spec.ts` | 4 | command_encoder_lifecycle_validation.rs | `ported` → `cts/validation/encoding/encoder_open_state.rs` (setImmediates/multiDraw* subcommands N/A: absent in C ABI) |
+| `encoder_state.spec.ts` | 6 | command_encoder_lifecycle_validation.rs / pass_state_validation.rs | `ported*` → `cts/validation/encoding/encoder_state.rs` (4 active; 2 `#[ignore]`d: core poisons parent encoder on invalid pass-end, CTS expects finish to still succeed) |
 | `programmable/pipeline_bind_group_compat.spec.ts` | 10 | resource_usage_tracking_validation.rs | `todo` |
 | `programmable/pipeline_immediate.spec.ts` | 4 | — | `todo` |
 | `queries/begin_end.spec.ts` | 4 | query_validation.rs | `todo` |
