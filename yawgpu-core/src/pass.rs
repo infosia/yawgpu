@@ -811,6 +811,9 @@ pub(crate) fn validate_pipeline_bind_groups(
     limits: Limits,
 ) -> Result<(), String> {
     for (index, required_layout) in required_layouts.iter().enumerate() {
+        if required_layout.entries().is_empty() {
+            continue;
+        }
         let index = u32::try_from(index)
             .map_err(|_| "pipeline bind group index is too large".to_owned())?;
         let Some(bound) = bound_groups.get(&index) else {
@@ -836,6 +839,9 @@ pub(crate) fn validate_subpass_pipeline_bind_groups(
     limits: Limits,
 ) -> Result<(), String> {
     for (index, required_layout) in required_layouts.iter().enumerate() {
+        if required_layout.entries().is_empty() {
+            continue;
+        }
         let index = u32::try_from(index)
             .map_err(|_| "pipeline bind group index is too large".to_owned())?;
         let Some(bound) = bound_groups.get(&index) else {
@@ -891,7 +897,20 @@ pub(crate) fn bind_group_layouts_compatible(
     if required.is_default() || actual.is_default() {
         return required.same(actual);
     }
-    required.entries() == actual.entries()
+    if required.entries().len() != actual.entries().len() {
+        return false;
+    }
+    let required_entries = required
+        .entries()
+        .iter()
+        .map(|entry| (entry.binding, entry))
+        .collect::<BTreeMap<_, _>>();
+    let actual_entries = actual
+        .entries()
+        .iter()
+        .map(|entry| (entry.binding, entry))
+        .collect::<BTreeMap<_, _>>();
+    required_entries == actual_entries
 }
 
 /// Validates dynamic offsets and returns a descriptive error on failure.
