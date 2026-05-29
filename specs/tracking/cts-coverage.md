@@ -35,17 +35,21 @@ never a reason to skip a CTS case.
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
 - Excluded (`N/A`): 4 whole spec files (web/empty).
-- `ported`: 23 (`buffer/`; texture creation; `image_copy/`; `queue/`;
-  shader_module entry_point + overrides; compute_pipeline; pipeline
-  immediates; layout_shader_compat). Some `ported*` with subcases
-  `#[ignore]`d behind core gaps (compute-pipeline override evaluation,
-  resource/layout compatibility matrix) — assertions are spec-correct.
-- `todo`: 102 spec files (28 of which have an overlapping legacy Dawn
+- `ported`: 29 (`buffer/`; texture creation; `image_copy/`; `queue/`;
+  shader_module; compute_pipeline; immediates; layout_shader_compat;
+  render_pipeline part 1: vertex_state, inter_stage, primitive_state,
+  multisample_state, misc, shader_module). Several `ported*` with
+  subcases `#[ignore]`d behind core gaps — assertions are spec-correct.
+- `todo`: 96 spec files (28 of which have an overlapping legacy Dawn
   test, listed in the related-test column for reference).
 - Known core gaps surfaced (recommended follow-up): evaluate
-  pipeline-overridable constants at createComputePipeline (then apply
-  workgroup-size / storage-size limit + override-expression error checks);
-  complete pipeline-layout/resource compatibility validation.
+  pipeline-overridable constants at createComputePipeline (workgroup-size
+  / storage-size limits + override-expression errors); **inter-stage
+  vertex-output↔fragment-input matching** (location/type/interpolation/
+  max-variables — currently unvalidated, 8/9 inter_stage cases ignored);
+  pipeline-layout/shader resource compatibility (createComputePipeline +
+  createRenderPipeline); depth-clip-control gating of unclippedDepth;
+  storage-texture format/access in render auto-layout.
 
 ## Coverage matrix
 
@@ -100,7 +104,7 @@ never a reason to skip a CTS case.
 | `limits/minStorageBufferOffsetAlignment.spec.ts` | 4 | — | `todo` |
 | `limits/minUniformBufferOffsetAlignment.spec.ts` | 4 | — | `todo` |
 | **(top-level)/** | | | |
-| `compute_pipeline.spec.ts` | 19 | compute_pipeline_validation.rs | `ported*` → `cts/validation/compute_pipeline.rs` (4 override/storage cases `#[ignore]`d: core does not yet evaluate pipeline overrides at createComputePipeline; resource-compat matrix gap `#[ignore]`d) |
+| `compute_pipeline.spec.ts` | 19 | compute_pipeline_validation.rs | `ported*` → `cts/validation/compute_pipeline.rs` (override/storage + resource_compatibility cases `#[ignore]`d: core does not yet evaluate pipeline overrides at createComputePipeline nor reject layout/shader resource mismatches) |
 | `createBindGroup.spec.ts` | 27 | bind_group_validation.rs | `todo` — external_texture,* subcases excluded |
 | `createBindGroupLayout.spec.ts` | 11 | bind_group_layout_validation.rs | `todo` |
 | `createPipelineLayout.spec.ts` | 7 | pipeline_layout_validation.rs | `todo` |
@@ -112,7 +116,7 @@ never a reason to skip a CTS case.
 | `error_scope.spec.ts` | 6 | error_scope_validation.rs | `todo` |
 | `getBindGroupLayout.spec.ts` | 4 | get_bind_group_layout_validation.rs | `todo` |
 | `gpu_external_texture_expiration.spec.ts` | 6 | — | `N/A` — web (WebCodecs external texture) |
-| `layout_shader_compat.spec.ts` | 1 | — | `ported*` → `cts/validation/layout_shader_compat.rs` (full layout/shader matrix `#[ignore]`d: core gap; real missing/visibility/wrong-kind cases active) |
+| `layout_shader_compat.spec.ts` | 1 | — | `ported*` → `cts/validation/layout_shader_compat.rs` (the case is `#[ignore]`d: core does not reject layout/shader resource mismatches — the earlier "active mismatch cases" were false-greens, corrected) |
 | `non_filterable_texture.spec.ts` | 1 | — | `todo` |
 | **encoding/** | | | |
 | `beginComputePass.spec.ts` | 4 | — | `todo` |
@@ -171,14 +175,14 @@ never a reason to skip a CTS case.
 | `depth_stencil_state.spec.ts` | 9 | render_pipeline_validation.rs | `todo` |
 | `float32_blendable.spec.ts` | 1 | — | `todo` |
 | `fragment_state.spec.ts` | 13 | render_pipeline_validation.rs | `todo` |
-| `inter_stage.spec.ts` | 9 | render_pipeline_validation.rs | `todo` |
-| `misc.spec.ts` | 6 | render_pipeline_validation.rs | `todo` |
-| `multisample_state.spec.ts` | 3 | render_pipeline_validation.rs | `todo` |
+| `inter_stage.spec.ts` | 9 | render_pipeline_validation.rs | `ported*` → `cts/validation/render_pipeline/inter_stage.rs` (8/9 `#[ignore]`d: core does not validate inter-stage location/type/interpolation/limits; only location_superset active) |
+| `misc.spec.ts` | 6 | render_pipeline_validation.rs | `ported*` → `cts/validation/render_pipeline/misc.rs` (external_texture N/A: web; storage_texture format `#[ignore]`d: core gap) |
+| `multisample_state.spec.ts` | 3 | render_pipeline_validation.rs | `ported` → `cts/validation/render_pipeline/multisample_state.rs` |
 | `overrides.spec.ts` | 10 | render_pipeline_validation.rs | `todo` |
-| `primitive_state.spec.ts` | 2 | render_pipeline_validation.rs | `todo` |
+| `primitive_state.spec.ts` | 2 | render_pipeline_validation.rs | `ported*` → `cts/validation/render_pipeline/primitive_state.rs` (unclipped_depth `#[ignore]`d: depth-clip-control not enforced) |
 | `resource_compatibility.spec.ts` | 1 | render_pipeline_validation.rs | `todo` |
-| `shader_module.spec.ts` | 3 | render_pipeline_validation.rs / shader_module_validation.rs | `todo` |
-| `vertex_state.spec.ts` | 12 | vertex_state_validation.rs | `todo` |
+| `shader_module.spec.ts` | 3 | render_pipeline_validation.rs / shader_module_validation.rs | `ported` → `cts/validation/render_pipeline/shader_module.rs` |
+| `vertex_state.spec.ts` | 12 | vertex_state_validation.rs | `ported` → `cts/validation/render_pipeline/vertex_state.rs` |
 | **resource_usages/** | | | |
 | `buffer/in_pass_encoder.spec.ts` | 6 | — | `todo` |
 | `buffer/in_pass_misc.spec.ts` | 3 | — | `todo` |

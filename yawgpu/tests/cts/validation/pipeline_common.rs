@@ -249,6 +249,73 @@ pub unsafe fn assert_render_pipeline_error(
     }
 }
 
+pub unsafe fn assert_render_pipeline_descriptor(
+    test: &ValidationTest,
+    is_async: bool,
+    success: bool,
+    descriptor: &native::WGPURenderPipelineDescriptor,
+) {
+    if success {
+        test.clear_errors();
+        let pipeline =
+            unsafe { create_render_pipeline_from_descriptor(test, is_async, descriptor) };
+        assert!(!pipeline.is_null());
+        assert!(
+            test.errors().is_empty(),
+            "unexpected errors: {:?}",
+            test.errors()
+        );
+        unsafe {
+            yawgpu::wgpuRenderPipelineRelease(pipeline);
+        }
+    } else if is_async {
+        let pipeline = unsafe { create_render_pipeline_from_descriptor(test, true, descriptor) };
+        assert!(pipeline.is_null());
+    } else {
+        let mut pipeline = std::ptr::null();
+        assert_device_error!({
+            pipeline = unsafe { create_render_pipeline_from_descriptor(test, false, descriptor) };
+        });
+        assert!(!pipeline.is_null());
+        unsafe {
+            yawgpu::wgpuRenderPipelineRelease(pipeline);
+        }
+    }
+}
+
+unsafe fn create_render_pipeline_from_descriptor(
+    test: &ValidationTest,
+    is_async: bool,
+    descriptor: &native::WGPURenderPipelineDescriptor,
+) -> native::WGPURenderPipeline {
+    if is_async {
+        let mut state = RenderPipelineAsyncState::default();
+        let callback_info = native::WGPUCreateRenderPipelineAsyncCallbackInfo {
+            nextInChain: std::ptr::null_mut(),
+            mode: native::WGPUCallbackMode_AllowProcessEvents,
+            callback: Some(render_pipeline_async_callback),
+            userdata1: (&mut state as *mut RenderPipelineAsyncState).cast(),
+            userdata2: std::ptr::null_mut(),
+        };
+        unsafe {
+            let future = yawgpu::wgpuDeviceCreateRenderPipelineAsync(
+                test.device(),
+                descriptor,
+                callback_info,
+            );
+            wait(test.instance(), future);
+        }
+        assert_eq!(state.calls, 1);
+        match state.status {
+            native::WGPUCreatePipelineAsyncStatus_Success => state.pipeline,
+            native::WGPUCreatePipelineAsyncStatus_ValidationError => std::ptr::null(),
+            status => panic!("unexpected async render pipeline status {status}"),
+        }
+    } else {
+        unsafe { yawgpu::wgpuDeviceCreateRenderPipeline(test.device(), descriptor) }
+    }
+}
+
 unsafe fn create_render_pipeline(
     test: &ValidationTest,
     is_async: bool,
