@@ -9,6 +9,7 @@ use crate::format::*;
 use crate::limits::*;
 use crate::pass::*;
 use crate::render_pipeline::*;
+use crate::texture::*;
 
 /// Describes render bundle encoder descriptor.
 #[derive(Debug, Clone)]
@@ -70,6 +71,8 @@ pub(crate) enum RenderBundleEncoderLifecycle {
 pub(crate) struct RenderBundleInner {
     pub(crate) is_error: bool,
     pub(crate) attachment_signature: AttachmentSignature,
+    pub(crate) referenced_buffers: Vec<Arc<Buffer>>,
+    pub(crate) referenced_textures: Vec<Texture>,
 }
 
 impl RenderBundleEncoder {
@@ -112,13 +115,23 @@ impl RenderBundleEncoder {
             RenderBundleEncoderLifecycle::Errored => {
                 state.lifecycle = RenderBundleEncoderLifecycle::Finished;
                 return (
-                    RenderBundle::new(self.inner.descriptor.attachment_signature(), true),
+                    RenderBundle::new(
+                        self.inner.descriptor.attachment_signature(),
+                        true,
+                        Vec::new(),
+                        Vec::new(),
+                    ),
                     None,
                 );
             }
             RenderBundleEncoderLifecycle::Finished => {
                 return (
-                    RenderBundle::new(self.inner.descriptor.attachment_signature(), true),
+                    RenderBundle::new(
+                        self.inner.descriptor.attachment_signature(),
+                        true,
+                        Vec::new(),
+                        Vec::new(),
+                    ),
                     Some("render bundle encoder cannot be finished more than once".to_owned()),
                 );
             }
@@ -132,10 +145,14 @@ impl RenderBundleEncoder {
             );
         }
         let error = state.first_error.clone();
+        let referenced_buffers = render_bundle_referenced_buffers(&state.pass_state);
+        let referenced_textures = render_bundle_referenced_textures(&state.pass_state);
         (
             RenderBundle::new(
                 self.inner.descriptor.attachment_signature(),
                 error.is_some(),
+                referenced_buffers,
+                referenced_textures,
             ),
             error,
         )
@@ -348,11 +365,18 @@ impl RenderBundleEncoder {
 
 impl RenderBundle {
     /// Creates a new instance.
-    pub(crate) fn new(attachment_signature: AttachmentSignature, is_error: bool) -> Self {
+    pub(crate) fn new(
+        attachment_signature: AttachmentSignature,
+        is_error: bool,
+        referenced_buffers: Vec<Arc<Buffer>>,
+        referenced_textures: Vec<Texture>,
+    ) -> Self {
         Self {
             inner: Arc::new(RenderBundleInner {
                 is_error,
                 attachment_signature,
+                referenced_buffers,
+                referenced_textures,
             }),
         }
     }
@@ -368,6 +392,38 @@ impl RenderBundle {
     pub(crate) fn attachment_signature(&self) -> &AttachmentSignature {
         &self.inner.attachment_signature
     }
+
+    /// Returns buffers referenced by this bundle.
+    pub(crate) fn referenced_buffers(&self) -> &[Arc<Buffer>] {
+        &self.inner.referenced_buffers
+    }
+
+    /// Returns textures referenced by this bundle.
+    pub(crate) fn referenced_textures(&self) -> &[Texture] {
+        &self.inner.referenced_textures
+    }
+}
+
+fn render_bundle_referenced_buffers(state: &PassEncoderState) -> Vec<Arc<Buffer>> {
+    let mut buffers = Vec::new();
+    for bound in state.bind_groups.values() {
+        buffers.extend(bind_group_buffer_resources(&bound.group));
+    }
+    for bound in state.vertex_buffers.values() {
+        buffers.push(Arc::clone(&bound.buffer));
+    }
+    if let Some(bound) = &state.index_buffer {
+        buffers.push(Arc::clone(&bound.buffer));
+    }
+    buffers
+}
+
+fn render_bundle_referenced_textures(state: &PassEncoderState) -> Vec<Texture> {
+    let mut textures = Vec::new();
+    for bound in state.bind_groups.values() {
+        textures.extend(bind_group_texture_resources(&bound.group));
+    }
+    textures
 }
 
 impl RenderBundleEncoderDescriptor {

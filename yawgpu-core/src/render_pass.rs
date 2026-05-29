@@ -156,6 +156,9 @@ impl RenderPassEncoder {
                 self.inner
                     .parent
                     .record_referenced_buffers(bind_group_buffer_resources(&group));
+                self.inner
+                    .parent
+                    .record_referenced_textures(bind_group_texture_resources(&group));
                 state.bind_groups.insert(
                     index,
                     BoundBindGroup {
@@ -257,6 +260,7 @@ impl RenderPassEncoder {
             self.inner.parent.record_render_pass(RenderPassCommand {
                 pipeline: Some(Arc::clone(pipeline)),
                 color_attachment,
+                attachment_textures: state.attachment_textures.clone(),
                 bind_groups: state.bind_groups.clone(),
                 vertex_buffers: state.vertex_buffers.clone(),
                 draw: Some(RenderDrawExecution {
@@ -391,6 +395,12 @@ impl RenderPassEncoder {
                             .to_owned(),
                     );
                 }
+                self.inner
+                    .parent
+                    .record_referenced_buffers(bundle.referenced_buffers().to_vec());
+                self.inner
+                    .parent
+                    .record_referenced_textures(bundle.referenced_textures().to_vec());
             }
             state.clear_render_state();
             Ok(())

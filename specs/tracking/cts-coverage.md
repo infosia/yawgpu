@@ -35,9 +35,10 @@ never a reason to skip a CTS case.
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
 - Excluded (`N/A`): 4 whole spec files (web/empty).
-- `ported`: 11 (`buffer/` complete; texture creation; `image_copy/`
-  complete — compressed / depth32float-stencil8 subcases deferred on Noop).
-- `todo`: 114 spec files (33 of which have an overlapping legacy Dawn
+- `ported`: 18 (`buffer/`; texture creation; `image_copy/`; `queue/`
+  complete except web `copyToTexture` — compressed / depth32float-stencil8
+  subcases deferred on Noop).
+- `todo`: 107 spec files (30 of which have an overlapping legacy Dawn
   test, listed in the related-test column for reference).
 
 ## Coverage matrix
@@ -148,14 +149,14 @@ never a reason to skip a CTS case.
 | `create.spec.ts` | 1 | query_validation.rs | `todo` |
 | `destroy.spec.ts` | 2 | query_validation.rs | `todo` |
 | **queue/** | | | |
-| `buffer_mapped.spec.ts` | 5 | — | `todo` |
+| `buffer_mapped.spec.ts` | 5 | — | `ported` → `cts/validation/queue/buffer_mapped.rs` |
 | `copyToTexture/CopyExternalImageToTexture.spec.ts` | 12 | — | `N/A` — web (ImageBitmap/canvas source) |
-| `destroyed/buffer.spec.ts` | 8 | — | `todo` |
-| `destroyed/query_set.spec.ts` | 4 | — | `todo` |
-| `destroyed/texture.spec.ts` | 6 | — | `todo` |
-| `submit.spec.ts` | 4 | queue_submit_validation.rs | `todo` |
-| `writeBuffer.spec.ts` | 4 | queue_buffer_validation.rs | `todo` |
-| `writeTexture.spec.ts` | 4 | queue_write_texture_validation.rs | `todo` |
+| `destroyed/buffer.spec.ts` | 8 | — | `ported` → `cts/validation/queue/destroyed_buffer.rs` |
+| `destroyed/query_set.spec.ts` | 4 | — | `ported` → `cts/validation/queue/destroyed_query_set.rs` |
+| `destroyed/texture.spec.ts` | 6 | — | `ported` → `cts/validation/queue/destroyed_texture.rs` |
+| `submit.spec.ts` | 4 | queue_submit_validation.rs | `ported` → `cts/validation/queue/submit.rs` |
+| `writeBuffer.spec.ts` | 4 | queue_buffer_validation.rs | `ported` → `cts/validation/queue/write_buffer.rs` |
+| `writeTexture.spec.ts` | 4 | queue_write_texture_validation.rs | `ported` → `cts/validation/queue/write_texture.rs` |
 | **render_pass/** | | | |
 | `attachment_compatibility.spec.ts` | 12 | — | `todo` |
 | `render_pass_descriptor.spec.ts` | 32 | render_pass_descriptor_validation.rs | `todo` |

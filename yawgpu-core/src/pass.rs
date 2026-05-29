@@ -146,6 +146,7 @@ impl PassEncoderInner {
                     RenderPassCommand {
                         pipeline: state.render_pipeline.clone(),
                         color_attachment,
+                        attachment_textures: state.attachment_textures.clone(),
                         bind_groups: state.bind_groups.clone(),
                         vertex_buffers: state.vertex_buffers.clone(),
                         draw: None,
@@ -786,6 +787,18 @@ pub(crate) fn bind_group_buffer_resources(group: &BindGroup) -> Vec<Arc<Buffer>>
         .iter()
         .filter_map(|entry| match &entry.resource {
             BindGroupResource::Buffer { buffer, .. } => Some(Arc::clone(buffer)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Returns bind group texture resources.
+pub(crate) fn bind_group_texture_resources(group: &BindGroup) -> Vec<Texture> {
+    group
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.resource {
+            BindGroupResource::TextureView { texture_view, .. } => Some(texture_view.texture()),
             _ => None,
         })
         .collect()
