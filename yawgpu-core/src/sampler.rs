@@ -262,6 +262,15 @@ pub(crate) fn validate_sampler_descriptor(
     if !descriptor.lod_max_clamp.is_finite() {
         return Some("sampler lodMaxClamp must be finite");
     }
+    if descriptor.lod_min_clamp < 0.0 {
+        return Some("sampler lodMinClamp must be non-negative");
+    }
+    if descriptor.lod_max_clamp < 0.0 {
+        return Some("sampler lodMaxClamp must be non-negative");
+    }
+    if descriptor.lod_min_clamp > descriptor.lod_max_clamp {
+        return Some("sampler lodMinClamp must not exceed lodMaxClamp");
+    }
     if descriptor.max_anisotropy == 0 {
         return Some("sampler maxAnisotropy must be at least one");
     }
@@ -325,6 +334,16 @@ mod tests {
         assert_eq!(
             error.message,
             "anisotropic samplers require all filters to be Linear"
+        );
+
+        let invalid = SamplerDescriptor {
+            lod_min_clamp: -1.0,
+            ..SamplerDescriptor::default()
+        };
+        let resolved = ResolvedSamplerDescriptor::from_descriptor(invalid);
+        assert_eq!(
+            validate_sampler_descriptor(&resolved),
+            Some("sampler lodMinClamp must be non-negative")
         );
     }
 }

@@ -537,6 +537,7 @@ pub fn map_texture_view_descriptor(
             base_array_layer: 0,
             array_layer_count: None,
             aspect: None,
+            usage: None,
         };
     };
     core::TextureViewDescriptor {
@@ -559,6 +560,11 @@ pub fn map_texture_view_descriptor(
             Some(value.arrayLayerCount)
         },
         aspect: map_texture_aspect(value.aspect),
+        usage: if value.usage == native::WGPUTextureUsage_None {
+            None
+        } else {
+            Some(map_texture_usage(value.usage))
+        },
     }
 }
 

@@ -110,6 +110,13 @@ impl Queue {
                     ));
                 }
             }
+            for texture in command_buffer_referenced_textures(command_buffer) {
+                if texture.is_destroyed() {
+                    return Some(DeviceError::validation(
+                        "queue submit cannot use a destroyed texture",
+                    ));
+                }
+            }
         }
         for command_buffer in command_buffers {
             if let Err(message) = command_buffer.mark_submitted() {
@@ -134,6 +141,61 @@ impl Queue {
             return Some(DeviceError::internal(error.to_string()));
         }
         None
+    }
+}
+
+fn command_buffer_referenced_textures(command_buffer: &CommandBuffer) -> Vec<Texture> {
+    let mut textures = Vec::new();
+    for op in command_buffer.command_ops() {
+        match op {
+            CommandExecution::TextureCopy(copy) => match copy {
+                TextureCopyCommand::BufferToTexture { destination, .. } => {
+                    textures.push((*destination.texture).clone())
+                }
+                TextureCopyCommand::TextureToBuffer { source, .. } => {
+                    textures.push((*source.texture).clone());
+                }
+                TextureCopyCommand::TextureToTexture {
+                    source,
+                    destination,
+                    ..
+                } => {
+                    textures.push((*source.texture).clone());
+                    textures.push((*destination.texture).clone());
+                }
+            },
+            CommandExecution::RenderPass(pass) => {
+                textures.push(pass.color_attachment.texture.clone());
+            }
+            #[cfg(feature = "tiled")]
+            CommandExecution::SubpassRenderPass(pass) => {
+                for attachment in &pass.color_attachments {
+                    push_subpass_resource_textures(&mut textures, &attachment.resource);
+                }
+                if let Some(attachment) = &pass.depth_stencil_attachment {
+                    push_subpass_resource_textures(&mut textures, &attachment.resource);
+                }
+            }
+            CommandExecution::BufferCopy(_) | CommandExecution::ComputePass(_) => {}
+        }
+    }
+    textures
+}
+
+// Persistent subpass attachments are backed by user texture views whose
+// textures may be destroyed; transient attachments are not user textures and
+// cannot be destroyed, so they are skipped.
+#[cfg(feature = "tiled")]
+fn push_subpass_resource_textures(textures: &mut Vec<Texture>, resource: &SubpassAttachmentResource) {
+    if let SubpassAttachmentResource::Persistent {
+        view,
+        resolve_target,
+    } = resource
+    {
+        textures.push(view.texture());
+        if let Some(resolve_target) = resolve_target {
+            textures.push(resolve_target.texture());
+        }
     }
 }
 
