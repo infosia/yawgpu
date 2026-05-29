@@ -35,6 +35,43 @@ pub unsafe fn expect_render_pass(
     }
 }
 
+pub unsafe fn expect_render_pass_with_commands<F>(
+    test: &ValidationTest,
+    success: bool,
+    descriptor: &native::WGPURenderPassDescriptor,
+    commands: F,
+) where
+    F: FnOnce(native::WGPURenderPassEncoder),
+{
+    let encoder = unsafe { create_encoder(test.device()) };
+    test.clear_errors();
+    let pass = unsafe { yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, descriptor) };
+    assert!(!pass.is_null());
+    assert!(
+        test.errors().is_empty(),
+        "beginRenderPass should defer descriptor validation to finish: {:?}",
+        test.errors()
+    );
+    commands(pass);
+    assert!(
+        test.errors().is_empty(),
+        "render pass commands should defer validation to finish: {:?}",
+        test.errors()
+    );
+    unsafe {
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+    }
+    if success {
+        unsafe { finish_ok(test, encoder) };
+    } else {
+        unsafe { finish_error(test, encoder) };
+    }
+    unsafe {
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+    }
+}
+
 pub unsafe fn expect_render_passes(
     test: &ValidationTest,
     success: bool,
