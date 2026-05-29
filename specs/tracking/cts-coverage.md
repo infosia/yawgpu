@@ -35,13 +35,12 @@ never a reason to skip a CTS case.
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
 - Excluded (`N/A`): 4 whole spec files (web/empty).
-- `ported`: 39 (`buffer/`; texture creation; `image_copy/`; `queue/`;
+- `ported`: 40 (`buffer/`; texture creation; `image_copy/`; `queue/`;
   shader_module; compute_pipeline; immediates; layout_shader_compat;
-  `render_pipeline/` complete; **bind-group family complete** —
-  createBindGroup(Layout), getBindGroupLayout, createPipelineLayout,
-  non_filterable_texture). Several `ported*` with subcases `#[ignore]`d
-  behind core gaps — assertions are spec-correct.
-- `todo`: 86 spec files (28 of which have an overlapping legacy Dawn
+  `render_pipeline/` complete; bind-group family complete;
+  render_pass/render_pass_descriptor). Several `ported*` with subcases
+  `#[ignore]`d behind core gaps — assertions are spec-correct.
+- `todo`: 85 spec files (28 of which have an overlapping legacy Dawn
   test, listed in the related-test column for reference).
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
@@ -170,7 +169,7 @@ never a reason to skip a CTS case.
 | `writeTexture.spec.ts` | 4 | queue_write_texture_validation.rs | `ported` → `cts/validation/queue/write_texture.rs` |
 | **render_pass/** | | | |
 | `attachment_compatibility.spec.ts` | 12 | — | `todo` |
-| `render_pass_descriptor.spec.ts` | 32 | render_pass_descriptor_validation.rs | `todo` |
+| `render_pass_descriptor.spec.ts` | 32 | render_pass_descriptor_validation.rs | `ported*` → `cts/validation/render_pass/render_pass_descriptor.rs` (21 active; 11 `#[ignore]`d: depthSlice/3D, bytes-per-sample, attachment mip-level-count, transient load/store, depthReadOnly, resolve-format-support core gaps; bindTextureResource subcases N/A) |
 | `resolve.spec.ts` | 1 | — | `todo` |
 | **render_pipeline/** | | | |
 | `depth_stencil_state.spec.ts` | 9 | render_pipeline_validation.rs | `ported*` → `cts/validation/render_pipeline/depth_stencil_state.rs` (6 `#[ignore]`d: core gaps in depth/stencil state rules) |
