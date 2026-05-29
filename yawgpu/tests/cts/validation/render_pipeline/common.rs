@@ -27,16 +27,23 @@ pub unsafe fn expect_render_pipeline(
         (None, None) => None,
     };
     let owned_fragment = case.fragment_module.is_none() && case.fragment_source.is_some();
-    let target = color_target();
+    let default_target = color_target();
+    let targets = case
+        .fragment_targets
+        .unwrap_or(std::slice::from_ref(&default_target));
     let fragment_state = fragment_module.map(|module| native::WGPUFragmentState {
         nextInChain: std::ptr::null_mut(),
         module,
         entryPoint: empty_string_view(),
         constantCount: 0,
         constants: std::ptr::null(),
-        targetCount: if case.fragment_has_target { 1 } else { 0 },
+        targetCount: if case.fragment_has_target {
+            targets.len()
+        } else {
+            0
+        },
         targets: if case.fragment_has_target {
-            &target
+            targets.as_ptr()
         } else {
             std::ptr::null()
         },
@@ -44,8 +51,15 @@ pub unsafe fn expect_render_pipeline(
     let fragment_ptr = fragment_state
         .as_ref()
         .map_or(std::ptr::null(), |state| state as *const _);
-    let depth = case.depth_stencil.then(depth_state);
-    let depth_ptr = depth.as_ref().map_or(std::ptr::null(), |state| state);
+    let default_depth = case.depth_stencil.then(depth_state);
+    let depth_ptr = case.depth_stencil_state.map_or_else(
+        || {
+            default_depth
+                .as_ref()
+                .map_or(std::ptr::null(), |state| state)
+        },
+        |state| state as *const _,
+    );
     let primitive = case.primitive.unwrap_or_else(default_primitive);
     let multisample = case.multisample.unwrap_or_else(default_multisample);
     let descriptor = native::WGPURenderPipelineDescriptor {
@@ -84,10 +98,12 @@ pub struct RenderPipelineCase<'a> {
     pub fragment_source: Option<&'a str>,
     pub fragment_module: Option<native::WGPUShaderModule>,
     pub fragment_has_target: bool,
+    pub fragment_targets: Option<&'a [native::WGPUColorTargetState]>,
     pub buffers: &'a [native::WGPUVertexBufferLayout],
     pub primitive: Option<native::WGPUPrimitiveState>,
     pub multisample: Option<native::WGPUMultisampleState>,
     pub depth_stencil: bool,
+    pub depth_stencil_state: Option<&'a native::WGPUDepthStencilState>,
     pub layout: Option<native::WGPUPipelineLayout>,
 }
 
@@ -99,12 +115,83 @@ impl<'a> Default for RenderPipelineCase<'a> {
             fragment_source: Some(FRAGMENT_COLOR),
             fragment_module: None,
             fragment_has_target: true,
+            fragment_targets: None,
             buffers: &[],
             primitive: None,
             multisample: None,
             depth_stencil: false,
+            depth_stencil_state: None,
             layout: None,
         }
+    }
+}
+
+pub fn color_target_with(
+    format: native::WGPUTextureFormat,
+    blend: Option<&native::WGPUBlendState>,
+    write_mask: native::WGPUColorWriteMask,
+) -> native::WGPUColorTargetState {
+    native::WGPUColorTargetState {
+        nextInChain: std::ptr::null_mut(),
+        format,
+        blend: blend.map_or(std::ptr::null(), |state| state as *const _),
+        writeMask: write_mask,
+    }
+}
+
+pub fn blend_state(
+    color: native::WGPUBlendComponent,
+    alpha: native::WGPUBlendComponent,
+) -> native::WGPUBlendState {
+    native::WGPUBlendState { color, alpha }
+}
+
+pub fn blend_component(
+    operation: native::WGPUBlendOperation,
+    src_factor: native::WGPUBlendFactor,
+    dst_factor: native::WGPUBlendFactor,
+) -> native::WGPUBlendComponent {
+    native::WGPUBlendComponent {
+        operation,
+        srcFactor: src_factor,
+        dstFactor: dst_factor,
+    }
+}
+
+pub fn default_blend_component() -> native::WGPUBlendComponent {
+    blend_component(
+        native::WGPUBlendOperation_Add,
+        native::WGPUBlendFactor_One,
+        native::WGPUBlendFactor_Zero,
+    )
+}
+
+pub fn depth_stencil_state(
+    format: native::WGPUTextureFormat,
+    depth_write_enabled: native::WGPUOptionalBool,
+    depth_compare: native::WGPUCompareFunction,
+) -> native::WGPUDepthStencilState {
+    native::WGPUDepthStencilState {
+        nextInChain: std::ptr::null_mut(),
+        format,
+        depthWriteEnabled: depth_write_enabled,
+        depthCompare: depth_compare,
+        stencilFront: default_stencil_face(),
+        stencilBack: default_stencil_face(),
+        stencilReadMask: 0xFFFF_FFFF,
+        stencilWriteMask: 0xFFFF_FFFF,
+        depthBias: 0,
+        depthBiasSlopeScale: 0.0,
+        depthBiasClamp: 0.0,
+    }
+}
+
+pub fn default_stencil_face() -> native::WGPUStencilFaceState {
+    native::WGPUStencilFaceState {
+        compare: native::WGPUCompareFunction_Undefined,
+        failOp: native::WGPUStencilOperation_Undefined,
+        depthFailOp: native::WGPUStencilOperation_Undefined,
+        passOp: native::WGPUStencilOperation_Undefined,
     }
 }
 

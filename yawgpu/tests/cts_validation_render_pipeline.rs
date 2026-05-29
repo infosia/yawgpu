@@ -23,3 +23,18 @@ mod misc;
 
 #[path = "cts/validation/render_pipeline/shader_module.rs"]
 mod shader_module;
+
+#[path = "cts/validation/render_pipeline/fragment_state.rs"]
+mod fragment_state;
+
+#[path = "cts/validation/render_pipeline/depth_stencil_state.rs"]
+mod depth_stencil_state;
+
+#[path = "cts/validation/render_pipeline/overrides.rs"]
+mod overrides;
+
+#[path = "cts/validation/render_pipeline/float32_blendable.rs"]
+mod float32_blendable;
+
+#[path = "cts/validation/render_pipeline/resource_compatibility.rs"]
+mod resource_compatibility;

@@ -35,12 +35,11 @@ never a reason to skip a CTS case.
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
 - Excluded (`N/A`): 4 whole spec files (web/empty).
-- `ported`: 29 (`buffer/`; texture creation; `image_copy/`; `queue/`;
+- `ported`: 34 (`buffer/`; texture creation; `image_copy/`; `queue/`;
   shader_module; compute_pipeline; immediates; layout_shader_compat;
-  render_pipeline part 1: vertex_state, inter_stage, primitive_state,
-  multisample_state, misc, shader_module). Several `ported*` with
+  **`render_pipeline/` complete** — all 11 specs). Several `ported*` with
   subcases `#[ignore]`d behind core gaps — assertions are spec-correct.
-- `todo`: 96 spec files (28 of which have an overlapping legacy Dawn
+- `todo`: 91 spec files (28 of which have an overlapping legacy Dawn
   test, listed in the related-test column for reference).
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
@@ -172,15 +171,15 @@ never a reason to skip a CTS case.
 | `render_pass_descriptor.spec.ts` | 32 | render_pass_descriptor_validation.rs | `todo` |
 | `resolve.spec.ts` | 1 | — | `todo` |
 | **render_pipeline/** | | | |
-| `depth_stencil_state.spec.ts` | 9 | render_pipeline_validation.rs | `todo` |
-| `float32_blendable.spec.ts` | 1 | — | `todo` |
-| `fragment_state.spec.ts` | 13 | render_pipeline_validation.rs | `todo` |
+| `depth_stencil_state.spec.ts` | 9 | render_pipeline_validation.rs | `ported*` → `cts/validation/render_pipeline/depth_stencil_state.rs` (6 `#[ignore]`d: core gaps in depth/stencil state rules) |
+| `float32_blendable.spec.ts` | 1 | — | `ported` → `cts/validation/render_pipeline/float32_blendable.rs` (no-feature validation active; float32-blendable feature subcase deferred on Noop) |
+| `fragment_state.spec.ts` | 13 | render_pipeline_validation.rs | `ported*` → `cts/validation/render_pipeline/fragment_state.rs` (7 `#[ignore]`d: maxColorAttachments/byte-align/blend/write-mask core gaps; dual-source-blending feature) |
 | `inter_stage.spec.ts` | 9 | render_pipeline_validation.rs | `ported*` → `cts/validation/render_pipeline/inter_stage.rs` (8/9 `#[ignore]`d: core does not validate inter-stage location/type/interpolation/limits; only location_superset active) |
 | `misc.spec.ts` | 6 | render_pipeline_validation.rs | `ported*` → `cts/validation/render_pipeline/misc.rs` (external_texture N/A: web; storage_texture format `#[ignore]`d: core gap) |
 | `multisample_state.spec.ts` | 3 | render_pipeline_validation.rs | `ported` → `cts/validation/render_pipeline/multisample_state.rs` |
-| `overrides.spec.ts` | 10 | render_pipeline_validation.rs | `todo` |
+| `overrides.spec.ts` | 10 | render_pipeline_validation.rs | `ported*` → `cts/validation/render_pipeline/overrides.rs` (2 f16 cases deferred: shader-f16 not on Noop) |
 | `primitive_state.spec.ts` | 2 | render_pipeline_validation.rs | `ported*` → `cts/validation/render_pipeline/primitive_state.rs` (unclipped_depth `#[ignore]`d: depth-clip-control not enforced) |
-| `resource_compatibility.spec.ts` | 1 | render_pipeline_validation.rs | `todo` |
+| `resource_compatibility.spec.ts` | 1 | render_pipeline_validation.rs | `ported*` → `cts/validation/render_pipeline/resource_compatibility.rs` (`#[ignore]`d: layout/shader resource compat core gap) |
 | `shader_module.spec.ts` | 3 | render_pipeline_validation.rs / shader_module_validation.rs | `ported` → `cts/validation/render_pipeline/shader_module.rs` |
 | `vertex_state.spec.ts` | 12 | vertex_state_validation.rs | `ported` → `cts/validation/render_pipeline/vertex_state.rs` |
 | **resource_usages/** | | | |
