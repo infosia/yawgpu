@@ -34,15 +34,15 @@ never a reason to skip a CTS case.
 ## Snapshot
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
-- Excluded (`N/A`): 5 whole spec files (web/empty/multiDraw-absent).
-- `ported`: 57 (`buffer/`; texture creation; `image_copy/`; `queue/`;
+- Excluded (`N/A`): 6 whole spec files (web/empty/multiDraw + setImmediates absent).
+- `ported`: 62 (`buffer/`; texture creation; `image_copy/`; `queue/`;
   shader_module; compute_pipeline; immediates; layout_shader_compat;
   `render_pipeline/` complete; bind-group family complete;
   `render_pass/` complete; encoding: encoder state + begin passes +
-  cmds copies/clear + cmds render (draw, set*, state_tracking,
-  index_access, dynamic_state, indirect_draw)). Several `ported*` with
-  subcases `#[ignore]`d behind core gaps — assertions are spec-correct.
-- `todo`: 67 spec files (28 of which have an overlapping legacy Dawn
+  cmds copies/clear + cmds render + compute_pass + setBindGroup + debug
+  + dispatch + debugMarker). Several `ported*` with subcases `#[ignore]`d
+  behind core gaps — assertions are spec-correct.
+- `todo`: 61 spec files (28 of which have an overlapping legacy Dawn
   test, listed in the related-test column for reference).
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
@@ -113,8 +113,8 @@ never a reason to skip a CTS case.
 | `createSampler.spec.ts` | 2 | sampler_validation.rs | `ported` → `cts/validation/texture/create_sampler.rs` |
 | `createTexture.spec.ts` | 21 | texture_creation_validation.rs | `ported` → `cts/validation/texture/create_texture.rs` |
 | `createView.spec.ts` | 10 | texture_view_validation.rs | `ported` → `cts/validation/texture/create_view.rs` |
-| `debugMarker.spec.ts` | 2 | debug_marker_validation.rs | `todo` |
-| `dispatch.spec.ts` | 2 | — | `todo` |
+| `debugMarker.spec.ts` | 2 | debug_marker_validation.rs | `ported` → `cts/validation/debug_marker.rs` |
+| `dispatch.spec.ts` | 2 | — | `ported*` → `cts/validation/dispatch.rs` (2 `#[ignore]`d: linear_indexing shader-feature/range unvalidated; indirect variant is operation/readback) |
 | `error_scope.spec.ts` | 6 | error_scope_validation.rs | `todo` |
 | `getBindGroupLayout.spec.ts` | 4 | get_bind_group_layout_validation.rs | `ported*` → `cts/validation/get_bind_group_layout.rs` (2 index_range `#[ignore]`d: core rejects index beyond concrete layout count, CTS expects empty layout < maxBindGroups; unique_js_object adapted — JS identity N/A) |
 | `gpu_external_texture_expiration.spec.ts` | 6 | — | `N/A` — web (WebCodecs external texture) |
@@ -134,10 +134,10 @@ never a reason to skip a CTS case.
 | `render_bundle.spec.ts` | 6 | render_bundle_validation.rs | `todo` |
 | **encoding/cmds/** | | | |
 | `clearBuffer.spec.ts` | 8 | — | `ported*` → `cts/validation/encoding/cmds/clear_buffer.rs` (6 active; 2 `#[ignore]`d: destroyed-buffer submit-timing, device-mismatch) |
-| `compute_pass.spec.ts` | 6 | — | `todo` |
+| `compute_pass.spec.ts` | 6 | — | `ported*` → `cts/validation/encoding/cmds/compute_pass.rs` (3 active; 3 `#[ignore]`d: error-pipeline set-time, destroyed indirect submit-timing, indirect device-mismatch) |
 | `copyBufferToBuffer.spec.ts` | 8 | command_buffer_copy_validation.rs | `ported*` → `cts/validation/encoding/cmds/copy_buffer_to_buffer.rs` (7 active; 1 `#[ignore]`d: destroyed-buffer submit-timing) |
 | `copyTextureToTexture.spec.ts` | 12 | command_texture_copy_validation.rs | `ported*` → `cts/validation/encoding/cmds/copy_texture_to_texture.rs` (8 active; 4 `#[ignore]`d: destroyed-texture submit-timing, device-mismatch, aspect strictness, compressed-format feature) |
-| `debug.spec.ts` | 3 | debug_marker_validation.rs | `todo` |
+| `debug.spec.ts` | 3 | debug_marker_validation.rs | `ported` → `cts/validation/encoding/cmds/debug.rs` |
 | `index_access.spec.ts` | 2 | — | `ported` → `cts/validation/encoding/cmds/index_access.rs` |
 | `render/draw.spec.ts` | 8 | — | `ported*` → `cts/validation/encoding/cmds/render/draw.rs` (5 active; 3 `#[ignore]`d: vertex-OOB lastStride, maxDrawCount unmodeled, last_buffer_setting CTS-unimplemented) |
 | `render/dynamic_state.spec.ts` | 8 | — | `ported*` → `cts/validation/encoding/cmds/render/dynamic_state.rs` (5 active; 3 `#[ignore]`d: viewport/scissor attachment-bounds gaps; scissor negative-arg N/A: C unsigned) |
@@ -148,8 +148,8 @@ never a reason to skip a CTS case.
 | `render/setVertexBuffer.spec.ts` | 6 | — | `ported*` → `cts/validation/encoding/cmds/render/set_vertex_buffer.rs` (4 active; 2 `#[ignore]`d: destroyed-buffer submit-timing, bundle device-mismatch) |
 | `render/state_tracking.spec.ts` | 4 | — | `ported*` → `cts/validation/encoding/cmds/render/state_tracking.rs` (2 active; 2 `#[ignore]`d: CTS-unimplemented all_needed_*) |
 | `render_pass.spec.ts` | 0 | — | `N/A` — empty placeholder; 0 cases |
-| `setBindGroup.spec.ts` | 6 | — | `todo` |
-| `setImmediates.spec.ts` | 3 | — | `todo` |
+| `setBindGroup.spec.ts` | 6 | — | `ported*` → `cts/validation/encoding/cmds/set_bind_group.rs` (6 `#[ignore]`d: core defers all setBindGroup validation to draw/dispatch — index/offset/state/compat unchecked at call; u32array start/length N/A) |
+| `setImmediates.spec.ts` | 3 | — | `N/A` — yawgpu has no `wgpu*SetImmediates` export / core immediate-data command (header declares, not implemented) |
 | **image_copy/** | | | |
 | `buffer_related.spec.ts` | 4 | — | `ported` → `cts/validation/image_copy/buffer_related.rs` |
 | `buffer_texture_copies.spec.ts` | 7 | — | `ported*` → `cts/validation/image_copy/buffer_texture_copies.rs` (depth32float-stencil8 subcases deferred: Noop lacks feature) |

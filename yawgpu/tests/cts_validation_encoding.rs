@@ -50,3 +50,21 @@ mod render_indirect_draw;
 
 #[path = "cts/validation/encoding/cmds/render/indirect_multi_draw.rs"]
 mod render_indirect_multi_draw;
+
+#[path = "cts/validation/encoding/cmds/compute_pass.rs"]
+mod compute_pass_cmds;
+
+#[path = "cts/validation/encoding/cmds/set_bind_group.rs"]
+mod set_bind_group;
+
+#[path = "cts/validation/encoding/cmds/set_immediates.rs"]
+mod set_immediates;
+
+#[path = "cts/validation/encoding/cmds/debug.rs"]
+mod debug_cmds;
+
+#[path = "cts/validation/dispatch.rs"]
+mod dispatch;
+
+#[path = "cts/validation/debug_marker.rs"]
+mod debug_marker;
