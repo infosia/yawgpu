@@ -35,17 +35,16 @@ never a reason to skip a CTS case.
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
 - Excluded (`N/A`): 7 whole spec files (web/empty/multiDraw + setImmediates/immediate absent).
-- `ported`: 72 (`buffer/`; texture creation; `image_copy/`; `queue/`;
-  shader_module; compute_pipeline; immediates; layout_shader_compat;
-  `render_pipeline/` complete; bind-group family complete;
-  `render_pass/` complete; encoding: encoder state + begin passes +
-  cmds copies/clear + cmds render + compute_pass + setBindGroup + debug
-  + dispatch + debugMarker + queries + render_bundle +
-  createRenderBundleEncoder + programmable). **`encoding/` complete.**
-  Several `ported*` with subcases `#[ignore]`d behind core gaps —
-  assertions are spec-correct.
-- `todo`: 54 spec files (28 of which have an overlapping legacy Dawn
-  test, listed in the related-test column for reference).
+- `ported`: 77. Complete areas: `buffer/`, texture creation,
+  `image_copy/`, `queue/`, shader_module, compute_pipeline, immediates,
+  layout_shader_compat, `render_pipeline/`, bind-group family,
+  `render_pass/`, `encoding/`, state & lifecycle (error_scope, query_set,
+  device_lost), `resource_usages/`. Several `ported*` with subcases
+  `#[ignore]`d behind core gaps — assertions are spec-correct.
+- `todo`: 45 spec files — remaining: `capability_checks/` (42:
+  features 7 + limits 35) and texture format-capability
+  (`texture/bgra8unorm_storage`, `float32_filterable`,
+  `rg11b10ufloat_renderable`).
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage
@@ -188,11 +187,11 @@ never a reason to skip a CTS case.
 | `shader_module.spec.ts` | 3 | render_pipeline_validation.rs / shader_module_validation.rs | `ported` → `cts/validation/render_pipeline/shader_module.rs` |
 | `vertex_state.spec.ts` | 12 | vertex_state_validation.rs | `ported` → `cts/validation/render_pipeline/vertex_state.rs` |
 | **resource_usages/** | | | |
-| `buffer/in_pass_encoder.spec.ts` | 6 | — | `todo` |
-| `buffer/in_pass_misc.spec.ts` | 3 | — | `todo` |
-| `texture/in_pass_encoder.spec.ts` | 11 | — | `todo` |
-| `texture/in_render_common.spec.ts` | 5 | — | `todo` |
-| `texture/in_render_misc.spec.ts` | 5 | — | `todo` |
+| `buffer/in_pass_encoder.spec.ts` | 6 | — | `ported*` → `cts/validation/resource_usages/buffer/in_pass_encoder.rs` (5 active; 1 `#[ignore]`d: compute dispatch accessibility matrix) |
+| `buffer/in_pass_misc.spec.ts` | 3 | — | `ported*` → `cts/validation/resource_usages/buffer/in_pass_misc.rs` (2 active; 1 `#[ignore]`d: reset-before-draw matrix) |
+| `texture/in_pass_encoder.spec.ts` | 11 | — | `ported*` → `cts/validation/resource_usages/texture/in_pass_encoder.rs` (4 active; 7 `#[ignore]`d: subresource mip/layer/aspect overlap, visibility-independent storage-write, replaced-binding scope, bundle usages, unused-bindings — core tracking coarser than CTS) |
+| `texture/in_render_common.spec.ts` | 5 | — | `ported*` → `cts/validation/resource_usages/texture/in_render_common.rs` (2 active; 3 `#[ignore]`d: attachment-aliasing / depth-stencil+bind-group / multi-bind-group matrices) |
+| `texture/in_render_misc.spec.ts` | 5 | — | `ported*` → `cts/validation/resource_usages/texture/in_render_misc.rs` (1 active; 4 `#[ignore]`d: same-index replacement, unused bind group, per-view usage override) |
 | **shader_module/** | | | |
 | `entry_point.spec.ts` | 6 | shader_module_validation.rs | `ported` → `cts/validation/shader_module/entry_point.rs` |
 | `overrides.spec.ts` | 2 | shader_module_validation.rs | `ported` → `cts/validation/shader_module/overrides.rs` |
