@@ -14,3 +14,9 @@ mod create_pipeline_layout;
 
 #[path = "cts/validation/get_bind_group_layout.rs"]
 mod get_bind_group_layout;
+
+#[path = "cts/validation/create_bind_group.rs"]
+mod create_bind_group;
+
+#[path = "cts/validation/non_filterable_texture.rs"]
+mod non_filterable_texture;
