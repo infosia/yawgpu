@@ -35,7 +35,7 @@ never a reason to skip a CTS case.
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
 - Excluded (`N/A`): 7 whole spec files (web/empty/multiDraw + setImmediates/immediate absent).
-- `ported`: 68 (`buffer/`; texture creation; `image_copy/`; `queue/`;
+- `ported`: 72 (`buffer/`; texture creation; `image_copy/`; `queue/`;
   shader_module; compute_pipeline; immediates; layout_shader_compat;
   `render_pipeline/` complete; bind-group family complete;
   `render_pass/` complete; encoding: encoder state + begin passes +
@@ -117,7 +117,7 @@ never a reason to skip a CTS case.
 | `createView.spec.ts` | 10 | texture_view_validation.rs | `ported` → `cts/validation/texture/create_view.rs` |
 | `debugMarker.spec.ts` | 2 | debug_marker_validation.rs | `ported` → `cts/validation/debug_marker.rs` |
 | `dispatch.spec.ts` | 2 | — | `ported*` → `cts/validation/dispatch.rs` (2 `#[ignore]`d: linear_indexing shader-feature/range unvalidated; indirect variant is operation/readback) |
-| `error_scope.spec.ts` | 6 | error_scope_validation.rs | `todo` |
+| `error_scope.spec.ts` | 6 | error_scope_validation.rs | `ported` → `cts/validation/error_scope.rs` |
 | `getBindGroupLayout.spec.ts` | 4 | get_bind_group_layout_validation.rs | `ported*` → `cts/validation/get_bind_group_layout.rs` (2 index_range `#[ignore]`d: core rejects index beyond concrete layout count, CTS expects empty layout < maxBindGroups; unique_js_object adapted — JS identity N/A) |
 | `gpu_external_texture_expiration.spec.ts` | 6 | — | `N/A` — web (WebCodecs external texture) |
 | `layout_shader_compat.spec.ts` | 1 | — | `ported*` → `cts/validation/layout_shader_compat.rs` (the case is `#[ignore]`d: core does not reject layout/shader resource mismatches — the earlier "active mismatch cases" were false-greens, corrected) |
@@ -160,8 +160,8 @@ never a reason to skip a CTS case.
 | **pipeline/** | | | |
 | `immediates.spec.ts` | 1 | — | `ported*` → `cts/validation/pipeline/immediates.rs` (immediateSize limit only; shader-side immediate mismatch N/A — yawgpu has no shader immediate model) |
 | **query_set/** | | | |
-| `create.spec.ts` | 1 | query_validation.rs | `todo` |
-| `destroy.spec.ts` | 2 | query_validation.rs | `todo` |
+| `create.spec.ts` | 1 | query_validation.rs | `ported*` → `cts/validation/query_set/create.rs` (`#[ignore]`d: core rejects count=0, CTS allows; only >4096 should fail) |
+| `destroy.spec.ts` | 2 | query_validation.rs | `ported` → `cts/validation/query_set/destroy.rs` |
 | **queue/** | | | |
 | `buffer_mapped.spec.ts` | 5 | — | `ported` → `cts/validation/queue/buffer_mapped.rs` |
 | `copyToTexture/CopyExternalImageToTexture.spec.ts` | 12 | — | `N/A` — web (ImageBitmap/canvas source) |
@@ -197,7 +197,7 @@ never a reason to skip a CTS case.
 | `entry_point.spec.ts` | 6 | shader_module_validation.rs | `ported` → `cts/validation/shader_module/entry_point.rs` |
 | `overrides.spec.ts` | 2 | shader_module_validation.rs | `ported` → `cts/validation/shader_module/overrides.rs` |
 | **state/** | | | |
-| `device_lost/destroy.spec.ts` | 32 | device_lost_validation.rs | `todo` — importExternalTexture/copyExternalImageToTexture excluded |
+| `device_lost/destroy.spec.ts` | 32 | device_lost_validation.rs | `ported*` → `cts/validation/state/device_lost/destroy.rs` (24 active; 5 `#[ignore]`d: 3 compressed-format feature, 2 async-pipeline lost-device returns ValidationError; 3 N/A web external-texture) |
 | **texture/** | | | |
 | `bgra8unorm_storage.spec.ts` | 4 | — | `todo` — canvas subcases excluded |
 | `destroy.spec.ts` | 4 | — | `ported` → `cts/validation/texture/destroy.rs` |
