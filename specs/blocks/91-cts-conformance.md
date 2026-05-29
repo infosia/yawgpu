@@ -168,6 +168,19 @@ did (the legacy test may still hold cases the CTS port deferred, e.g.
 feature-gated subcases — those must be retained or re-homed, not lost),
 then removes the legacy file. Until Phase E runs, both layers coexist.
 
+**A CTS test asserts the spec-correct expectation — never the current
+(possibly buggy) behaviour.** If `yawgpu-core` does not yet enforce a
+rule the CTS case checks, you have exactly two honest options: (a) **fix
+the core rule** (minimal, unit-tested, flagged in the report), or (b)
+**mark the case `#[ignore = "core does not yet enforce X; CTS expects
+<error>"]`** and record the spec as `partial` in the ledger with the gap
+enumerated. You must **never invert or weaken the assertion** to make the
+test green (e.g. asserting success where the spec requires a validation
+error, or reducing a case to a trivially-passing stub). A green test that
+encodes non-spec behaviour is worse than no test — it certifies a bug as
+conformant. This is the test-side corollary of "never relax a core rule"
+(CLAUDE.md).
+
 For each area in the matrix:
 
 1. **Read the CTS spec(s)** for the area. Optionally glance at the
