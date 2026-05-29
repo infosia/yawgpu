@@ -7,6 +7,13 @@ pub struct ViewResource {
     pub view: native::WGPUTextureView,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CommandExpectation {
+    Success,
+    FinishError,
+    SubmitError,
+}
+
 pub unsafe fn create_encoder(device: native::WGPUDevice) -> native::WGPUCommandEncoder {
     let encoder = unsafe { yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null()) };
     assert!(!encoder.is_null());
@@ -90,6 +97,79 @@ pub unsafe fn create_buffer(
     let buffer = unsafe { yawgpu::wgpuDeviceCreateBuffer(device, &descriptor) };
     assert!(!buffer.is_null());
     buffer
+}
+
+pub unsafe fn create_error_buffer(test: &ValidationTest) -> native::WGPUBuffer {
+    let descriptor = native::WGPUBufferDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage: 0,
+        size: 4,
+        mappedAtCreation: 0,
+    };
+    let mut buffer = std::ptr::null();
+    test.assert_device_error_after(
+        || {
+            buffer = unsafe { yawgpu::wgpuDeviceCreateBuffer(test.device(), &descriptor) };
+        },
+        None,
+    );
+    assert!(!buffer.is_null());
+    buffer
+}
+
+pub unsafe fn create_texture(
+    device: native::WGPUDevice,
+    descriptor: native::WGPUTextureDescriptor,
+) -> native::WGPUTexture {
+    let texture = unsafe { yawgpu::wgpuDeviceCreateTexture(device, &descriptor) };
+    assert!(!texture.is_null());
+    texture
+}
+
+pub unsafe fn create_error_texture(test: &ValidationTest) -> native::WGPUTexture {
+    let descriptor = native::WGPUTextureDescriptor {
+        usage: native::WGPUTextureUsage_None,
+        ..texture_descriptor(
+            native::WGPUTextureUsage_CopySrc | native::WGPUTextureUsage_CopyDst,
+            native::WGPUTextureFormat_RGBA8Unorm,
+            native::WGPUTextureDimension_2D,
+            extent(4, 4, 1),
+            1,
+            1,
+        )
+    };
+    let mut texture = std::ptr::null();
+    test.assert_device_error_after(
+        || {
+            texture = unsafe { yawgpu::wgpuDeviceCreateTexture(test.device(), &descriptor) };
+        },
+        None,
+    );
+    assert!(!texture.is_null());
+    texture
+}
+
+pub fn texture_descriptor(
+    usage: native::WGPUTextureUsage,
+    format: native::WGPUTextureFormat,
+    dimension: native::WGPUTextureDimension,
+    size: native::WGPUExtent3D,
+    mip_level_count: u32,
+    sample_count: u32,
+) -> native::WGPUTextureDescriptor {
+    native::WGPUTextureDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage,
+        dimension,
+        size,
+        format,
+        mipLevelCount: mip_level_count,
+        sampleCount: sample_count,
+        viewFormatCount: 0,
+        viewFormats: std::ptr::null(),
+    }
 }
 
 pub unsafe fn create_query_set(
@@ -234,10 +314,72 @@ pub fn extent(width: u32, height: u32, depth_or_array_layers: u32) -> native::WG
     }
 }
 
+pub fn origin(x: u32, y: u32, z: u32) -> native::WGPUOrigin3D {
+    native::WGPUOrigin3D { x, y, z }
+}
+
+pub fn texture_info(
+    texture: native::WGPUTexture,
+    mip_level: u32,
+    origin: native::WGPUOrigin3D,
+    aspect: native::WGPUTextureAspect,
+) -> native::WGPUTexelCopyTextureInfo {
+    native::WGPUTexelCopyTextureInfo {
+        texture,
+        mipLevel: mip_level,
+        origin,
+        aspect,
+    }
+}
+
 pub fn empty_string_view() -> native::WGPUStringView {
     native::WGPUStringView {
         data: std::ptr::null(),
         length: 0,
+    }
+}
+
+pub unsafe fn expect_command_buffer(
+    test: &ValidationTest,
+    encoder: native::WGPUCommandEncoder,
+    expectation: CommandExpectation,
+) {
+    match expectation {
+        CommandExpectation::Success => {
+            let command_buffer = unsafe { finish_ok(test, encoder) };
+            unsafe {
+                let queue = yawgpu::wgpuDeviceGetQueue(test.device());
+                test.clear_errors();
+                yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+                assert!(
+                    test.errors().is_empty(),
+                    "unexpected submit errors: {:?}",
+                    test.errors()
+                );
+                yawgpu::wgpuQueueRelease(queue);
+                yawgpu::wgpuCommandBufferRelease(command_buffer);
+            }
+        }
+        CommandExpectation::FinishError => {
+            let command_buffer = unsafe { finish_error(test, encoder) };
+            unsafe {
+                yawgpu::wgpuCommandBufferRelease(command_buffer);
+            }
+        }
+        CommandExpectation::SubmitError => {
+            let command_buffer = unsafe { finish_ok(test, encoder) };
+            let queue = unsafe { yawgpu::wgpuDeviceGetQueue(test.device()) };
+            test.assert_device_error_after(
+                || unsafe {
+                    yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+                },
+                None,
+            );
+            unsafe {
+                yawgpu::wgpuQueueRelease(queue);
+                yawgpu::wgpuCommandBufferRelease(command_buffer);
+            }
+        }
     }
 }
 
