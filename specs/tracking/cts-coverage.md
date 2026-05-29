@@ -35,13 +35,14 @@ never a reason to skip a CTS case.
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
 - Excluded (`N/A`): 4 whole spec files (web/empty).
-- `ported`: 49 (`buffer/`; texture creation; `image_copy/`; `queue/`;
+- `ported`: 55 (`buffer/`; texture creation; `image_copy/`; `queue/`;
   shader_module; compute_pipeline; immediates; layout_shader_compat;
   `render_pipeline/` complete; bind-group family complete;
   `render_pass/` complete; encoding: encoder state + begin passes +
-  cmds clearBuffer/copyB2B/copyT2T). Several `ported*` with subcases
-  `#[ignore]`d behind core gaps — assertions are spec-correct.
-- `todo`: 76 spec files (28 of which have an overlapping legacy Dawn
+  cmds copies/clear + cmds render (draw, set{Vertex,Index}Buffer,
+  setPipeline, state_tracking, index_access)). Several `ported*` with
+  subcases `#[ignore]`d behind core gaps — assertions are spec-correct.
+- `todo`: 70 spec files (28 of which have an overlapping legacy Dawn
   test, listed in the related-test column for reference).
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
@@ -137,15 +138,15 @@ never a reason to skip a CTS case.
 | `copyBufferToBuffer.spec.ts` | 8 | command_buffer_copy_validation.rs | `ported*` → `cts/validation/encoding/cmds/copy_buffer_to_buffer.rs` (7 active; 1 `#[ignore]`d: destroyed-buffer submit-timing) |
 | `copyTextureToTexture.spec.ts` | 12 | command_texture_copy_validation.rs | `ported*` → `cts/validation/encoding/cmds/copy_texture_to_texture.rs` (8 active; 4 `#[ignore]`d: destroyed-texture submit-timing, device-mismatch, aspect strictness, compressed-format feature) |
 | `debug.spec.ts` | 3 | debug_marker_validation.rs | `todo` |
-| `index_access.spec.ts` | 2 | — | `todo` |
-| `render/draw.spec.ts` | 8 | — | `todo` |
+| `index_access.spec.ts` | 2 | — | `ported` → `cts/validation/encoding/cmds/index_access.rs` |
+| `render/draw.spec.ts` | 8 | — | `ported*` → `cts/validation/encoding/cmds/render/draw.rs` (5 active; 3 `#[ignore]`d: vertex-OOB lastStride, maxDrawCount unmodeled, last_buffer_setting CTS-unimplemented) |
 | `render/dynamic_state.spec.ts` | 8 | — | `todo` |
 | `render/indirect_draw.spec.ts` | 5 | — | `todo` |
 | `render/indirect_multi_draw.spec.ts` | 6 | — | `todo` |
-| `render/setIndexBuffer.spec.ts` | 5 | — | `todo` |
-| `render/setPipeline.spec.ts` | 2 | — | `todo` |
-| `render/setVertexBuffer.spec.ts` | 6 | — | `todo` |
-| `render/state_tracking.spec.ts` | 4 | — | `todo` |
+| `render/setIndexBuffer.spec.ts` | 5 | — | `ported*` → `cts/validation/encoding/cmds/render/set_index_buffer.rs` (3 active; 2 `#[ignore]`d: destroyed-buffer submit-timing, bundle device-mismatch) |
+| `render/setPipeline.spec.ts` | 2 | — | `ported*` → `cts/validation/encoding/cmds/render/set_pipeline.rs` (2 `#[ignore]`d: error-pipeline validated at draw-time not setPipeline; bundle device-mismatch) |
+| `render/setVertexBuffer.spec.ts` | 6 | — | `ported*` → `cts/validation/encoding/cmds/render/set_vertex_buffer.rs` (4 active; 2 `#[ignore]`d: destroyed-buffer submit-timing, bundle device-mismatch) |
+| `render/state_tracking.spec.ts` | 4 | — | `ported*` → `cts/validation/encoding/cmds/render/state_tracking.rs` (2 active; 2 `#[ignore]`d: CTS-unimplemented all_needed_*) |
 | `render_pass.spec.ts` | 0 | — | `N/A` — empty placeholder; 0 cases |
 | `setBindGroup.spec.ts` | 6 | — | `todo` |
 | `setImmediates.spec.ts` | 3 | — | `todo` |

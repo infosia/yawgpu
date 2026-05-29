@@ -7,11 +7,28 @@ pub struct ViewResource {
     pub view: native::WGPUTextureView,
 }
 
+#[derive(Clone, Copy)]
+pub struct RenderTarget {
+    pub texture: native::WGPUTexture,
+    pub view: native::WGPUTextureView,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CommandExpectation {
     Success,
     FinishError,
     SubmitError,
+}
+
+#[derive(Clone, Copy)]
+pub enum RenderEncodeType {
+    RenderPass,
+    RenderBundle,
+}
+
+pub enum RenderEncoder {
+    RenderPass(native::WGPURenderPassEncoder),
+    RenderBundle(native::WGPURenderBundleEncoder),
 }
 
 pub unsafe fn create_encoder(device: native::WGPUDevice) -> native::WGPUCommandEncoder {
@@ -125,6 +142,36 @@ pub unsafe fn create_texture(
     let texture = unsafe { yawgpu::wgpuDeviceCreateTexture(device, &descriptor) };
     assert!(!texture.is_null());
     texture
+}
+
+pub unsafe fn create_render_target(
+    device: native::WGPUDevice,
+    format: native::WGPUTextureFormat,
+    sample_count: u32,
+) -> RenderTarget {
+    let texture = unsafe {
+        create_texture(
+            device,
+            texture_descriptor(
+                native::WGPUTextureUsage_RenderAttachment,
+                format,
+                native::WGPUTextureDimension_2D,
+                extent(4, 4, 1),
+                1,
+                sample_count,
+            ),
+        )
+    };
+    let view = unsafe { yawgpu::wgpuTextureCreateView(texture, std::ptr::null()) };
+    assert!(!view.is_null());
+    RenderTarget { texture, view }
+}
+
+pub unsafe fn release_render_target(target: RenderTarget) {
+    unsafe {
+        yawgpu::wgpuTextureViewRelease(target.view);
+        yawgpu::wgpuTextureRelease(target.texture);
+    }
 }
 
 pub unsafe fn create_error_texture(test: &ValidationTest) -> native::WGPUTexture {
@@ -258,6 +305,21 @@ pub fn compute_pass_descriptor(
     }
 }
 
+pub fn bundle_descriptor(
+    formats: &[native::WGPUTextureFormat],
+) -> native::WGPURenderBundleEncoderDescriptor {
+    native::WGPURenderBundleEncoderDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        colorFormatCount: formats.len(),
+        colorFormats: formats.as_ptr(),
+        depthStencilFormat: native::WGPUTextureFormat_Undefined,
+        sampleCount: 1,
+        depthReadOnly: 0,
+        stencilReadOnly: 0,
+    }
+}
+
 pub fn timestamp_writes(
     query_set: native::WGPUQuerySet,
     beginning_index: u32,
@@ -292,6 +354,21 @@ pub unsafe fn begin_compute_pass(
     };
     assert!(!pass.is_null());
     pass
+}
+
+pub unsafe fn create_bundle_encoder(test: &ValidationTest) -> native::WGPURenderBundleEncoder {
+    let formats = [native::WGPUTextureFormat_RGBA8Unorm];
+    let descriptor = bundle_descriptor(&formats);
+    test.clear_errors();
+    let encoder =
+        unsafe { yawgpu::wgpuDeviceCreateRenderBundleEncoder(test.device(), &descriptor) };
+    assert!(!encoder.is_null());
+    assert!(
+        test.errors().is_empty(),
+        "unexpected errors: {:?}",
+        test.errors()
+    );
+    encoder
 }
 
 pub unsafe fn expect_finish(
@@ -380,6 +457,90 @@ pub unsafe fn expect_command_buffer(
                 yawgpu::wgpuCommandBufferRelease(command_buffer);
             }
         }
+    }
+}
+
+pub unsafe fn expect_render_pass_commands<F>(
+    test: &ValidationTest,
+    expectation: CommandExpectation,
+    commands: F,
+) where
+    F: FnOnce(native::WGPURenderPassEncoder),
+{
+    let encoder = unsafe { create_encoder(test.device()) };
+    let target =
+        unsafe { create_render_target(test.device(), native::WGPUTextureFormat_RGBA8Unorm, 1) };
+    let attachment = color_attachment(target.view);
+    let descriptor = render_pass_descriptor(&[attachment], None);
+    let pass = unsafe { begin_render_pass(encoder, &descriptor) };
+    commands(pass);
+    unsafe {
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        expect_command_buffer(test, encoder, expectation);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        release_render_target(target);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+    }
+}
+
+pub unsafe fn expect_render_bundle_commands<F>(
+    test: &ValidationTest,
+    expectation: CommandExpectation,
+    commands: F,
+) where
+    F: FnOnce(native::WGPURenderBundleEncoder),
+{
+    let encoder = unsafe { create_bundle_encoder(test) };
+    commands(encoder);
+    match expectation {
+        CommandExpectation::Success => {
+            test.clear_errors();
+            let bundle =
+                unsafe { yawgpu::wgpuRenderBundleEncoderFinish(encoder, std::ptr::null()) };
+            assert!(!bundle.is_null());
+            assert!(
+                test.errors().is_empty(),
+                "unexpected errors: {:?}",
+                test.errors()
+            );
+            unsafe { yawgpu::wgpuRenderBundleRelease(bundle) };
+        }
+        CommandExpectation::FinishError => {
+            let mut bundle = std::ptr::null();
+            test.assert_device_error_after(
+                || {
+                    bundle =
+                        unsafe { yawgpu::wgpuRenderBundleEncoderFinish(encoder, std::ptr::null()) };
+                },
+                None,
+            );
+            assert!(!bundle.is_null());
+            unsafe { yawgpu::wgpuRenderBundleRelease(bundle) };
+        }
+        CommandExpectation::SubmitError => unreachable!("render bundle is not queue-submitted"),
+    }
+    unsafe { yawgpu::wgpuRenderBundleEncoderRelease(encoder) };
+}
+
+pub unsafe fn expect_render_commands<F>(
+    test: &ValidationTest,
+    encode_type: RenderEncodeType,
+    expectation: CommandExpectation,
+    commands: F,
+) where
+    F: FnOnce(RenderEncoder),
+{
+    match encode_type {
+        RenderEncodeType::RenderPass => unsafe {
+            expect_render_pass_commands(test, expectation, |pass| {
+                commands(RenderEncoder::RenderPass(pass));
+            });
+        },
+        RenderEncodeType::RenderBundle => unsafe {
+            expect_render_bundle_commands(test, expectation, |bundle| {
+                commands(RenderEncoder::RenderBundle(bundle));
+            });
+        },
     }
 }
 
@@ -505,4 +666,314 @@ pub unsafe fn create_render_pipeline(test: &ValidationTest) -> native::WGPURende
         yawgpu::wgpuShaderModuleRelease(vertex);
     }
     pipeline
+}
+
+pub unsafe fn create_render_pipeline_with(
+    test: &ValidationTest,
+    device: native::WGPUDevice,
+    vertex_source: &str,
+    vertex_buffers: &[native::WGPUVertexBufferLayout],
+    primitive: native::WGPUPrimitiveState,
+) -> native::WGPURenderPipeline {
+    let vertex = unsafe { create_wgsl_module(device, vertex_source) };
+    let fragment = unsafe { create_wgsl_module(device, fragment_source()) };
+    let target = native::WGPUColorTargetState {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        blend: std::ptr::null(),
+        writeMask: native::WGPUColorWriteMask_None,
+    };
+    let fragment_state = native::WGPUFragmentState {
+        nextInChain: std::ptr::null_mut(),
+        module: fragment,
+        entryPoint: string_view("fs"),
+        constantCount: 0,
+        constants: std::ptr::null(),
+        targetCount: 1,
+        targets: &target,
+    };
+    let descriptor = native::WGPURenderPipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout: std::ptr::null(),
+        vertex: native::WGPUVertexState {
+            nextInChain: std::ptr::null_mut(),
+            module: vertex,
+            entryPoint: string_view("vs"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            bufferCount: vertex_buffers.len(),
+            buffers: vertex_buffers.as_ptr(),
+        },
+        primitive,
+        depthStencil: std::ptr::null(),
+        multisample: default_multisample(),
+        fragment: &fragment_state,
+    };
+    if device == test.device() {
+        test.clear_errors();
+    }
+    let pipeline = unsafe { yawgpu::wgpuDeviceCreateRenderPipeline(device, &descriptor) };
+    assert!(!pipeline.is_null());
+    if device == test.device() {
+        assert!(
+            test.errors().is_empty(),
+            "unexpected render pipeline errors: {:?}",
+            test.errors()
+        );
+    }
+    unsafe {
+        yawgpu::wgpuShaderModuleRelease(fragment);
+        yawgpu::wgpuShaderModuleRelease(vertex);
+    }
+    pipeline
+}
+
+pub unsafe fn create_error_render_pipeline(test: &ValidationTest) -> native::WGPURenderPipeline {
+    let vertex = unsafe { create_wgsl_module(test.device(), vertex_no_input()) };
+    let descriptor = native::WGPURenderPipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout: std::ptr::null(),
+        vertex: native::WGPUVertexState {
+            nextInChain: std::ptr::null_mut(),
+            module: vertex,
+            entryPoint: string_view("vs"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            bufferCount: 0,
+            buffers: std::ptr::null(),
+        },
+        primitive: invalid_strip_primitive(),
+        depthStencil: std::ptr::null(),
+        multisample: default_multisample(),
+        fragment: std::ptr::null(),
+    };
+    let mut pipeline = std::ptr::null();
+    test.assert_device_error_after(
+        || {
+            pipeline =
+                unsafe { yawgpu::wgpuDeviceCreateRenderPipeline(test.device(), &descriptor) };
+        },
+        None,
+    );
+    assert!(!pipeline.is_null());
+    unsafe { yawgpu::wgpuShaderModuleRelease(vertex) };
+    pipeline
+}
+
+pub fn vertex_no_input() -> &'static str {
+    "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }"
+}
+
+pub fn fragment_source() -> &'static str {
+    "@fragment fn fs() {}"
+}
+
+pub fn vertex_input_shader(location: u32, ty: &str) -> String {
+    format!(
+        "@vertex fn vs(@location({location}) value: {ty}) -> @builtin(position) vec4f {{
+            _ = value;
+            return vec4f();
+        }}"
+    )
+}
+
+pub fn vertex_buffer_layout(
+    step_mode: native::WGPUVertexStepMode,
+    array_stride: u64,
+    attributes: &[native::WGPUVertexAttribute],
+) -> native::WGPUVertexBufferLayout {
+    native::WGPUVertexBufferLayout {
+        nextInChain: std::ptr::null_mut(),
+        stepMode: step_mode,
+        arrayStride: array_stride,
+        attributeCount: attributes.len(),
+        attributes: attributes.as_ptr(),
+    }
+}
+
+pub fn vertex_attribute(
+    format: native::WGPUVertexFormat,
+    offset: u64,
+    shader_location: u32,
+) -> native::WGPUVertexAttribute {
+    native::WGPUVertexAttribute {
+        nextInChain: std::ptr::null_mut(),
+        format,
+        offset,
+        shaderLocation: shader_location,
+    }
+}
+
+pub fn default_primitive() -> native::WGPUPrimitiveState {
+    native::WGPUPrimitiveState {
+        nextInChain: std::ptr::null_mut(),
+        topology: native::WGPUPrimitiveTopology_TriangleList,
+        stripIndexFormat: native::WGPUIndexFormat_Undefined,
+        frontFace: native::WGPUFrontFace_Undefined,
+        cullMode: native::WGPUCullMode_Undefined,
+        unclippedDepth: 0,
+    }
+}
+
+pub fn strip_primitive(
+    topology: native::WGPUPrimitiveTopology,
+    format: native::WGPUIndexFormat,
+) -> native::WGPUPrimitiveState {
+    native::WGPUPrimitiveState {
+        topology,
+        stripIndexFormat: format,
+        ..default_primitive()
+    }
+}
+
+pub fn invalid_strip_primitive() -> native::WGPUPrimitiveState {
+    native::WGPUPrimitiveState {
+        stripIndexFormat: native::WGPUIndexFormat_Uint16,
+        ..default_primitive()
+    }
+}
+
+pub fn default_multisample() -> native::WGPUMultisampleState {
+    native::WGPUMultisampleState {
+        nextInChain: std::ptr::null_mut(),
+        count: 1,
+        mask: 0xFFFF_FFFF,
+        alphaToCoverageEnabled: 0,
+    }
+}
+
+pub unsafe fn set_pipeline(encoder: &RenderEncoder, pipeline: native::WGPURenderPipeline) {
+    unsafe {
+        match *encoder {
+            RenderEncoder::RenderPass(pass) => {
+                yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+            }
+            RenderEncoder::RenderBundle(bundle) => {
+                yawgpu::wgpuRenderBundleEncoderSetPipeline(bundle, pipeline);
+            }
+        }
+    }
+}
+
+pub unsafe fn set_vertex_buffer(
+    encoder: &RenderEncoder,
+    slot: u32,
+    buffer: native::WGPUBuffer,
+    offset: u64,
+    size: u64,
+) {
+    unsafe {
+        match *encoder {
+            RenderEncoder::RenderPass(pass) => {
+                yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, slot, buffer, offset, size);
+            }
+            RenderEncoder::RenderBundle(bundle) => {
+                yawgpu::wgpuRenderBundleEncoderSetVertexBuffer(bundle, slot, buffer, offset, size);
+            }
+        }
+    }
+}
+
+pub unsafe fn set_index_buffer(
+    encoder: &RenderEncoder,
+    buffer: native::WGPUBuffer,
+    format: native::WGPUIndexFormat,
+    offset: u64,
+    size: u64,
+) {
+    unsafe {
+        match *encoder {
+            RenderEncoder::RenderPass(pass) => {
+                yawgpu::wgpuRenderPassEncoderSetIndexBuffer(pass, buffer, format, offset, size);
+            }
+            RenderEncoder::RenderBundle(bundle) => {
+                yawgpu::wgpuRenderBundleEncoderSetIndexBuffer(bundle, buffer, format, offset, size);
+            }
+        }
+    }
+}
+
+pub unsafe fn draw_with_offsets(
+    encoder: &RenderEncoder,
+    vertex_count: u32,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32,
+) {
+    unsafe {
+        match *encoder {
+            RenderEncoder::RenderPass(pass) => yawgpu::wgpuRenderPassEncoderDraw(
+                pass,
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            ),
+            RenderEncoder::RenderBundle(bundle) => yawgpu::wgpuRenderBundleEncoderDraw(
+                bundle,
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            ),
+        }
+    }
+}
+
+pub unsafe fn draw_indexed(
+    encoder: &RenderEncoder,
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    base_vertex: i32,
+    first_instance: u32,
+) {
+    unsafe {
+        match *encoder {
+            RenderEncoder::RenderPass(pass) => yawgpu::wgpuRenderPassEncoderDrawIndexed(
+                pass,
+                index_count,
+                instance_count,
+                first_index,
+                base_vertex,
+                first_instance,
+            ),
+            RenderEncoder::RenderBundle(bundle) => yawgpu::wgpuRenderBundleEncoderDrawIndexed(
+                bundle,
+                index_count,
+                instance_count,
+                first_index,
+                base_vertex,
+                first_instance,
+            ),
+        }
+    }
+}
+
+pub unsafe fn draw_indirect(encoder: &RenderEncoder, indirect: native::WGPUBuffer) {
+    unsafe {
+        match *encoder {
+            RenderEncoder::RenderPass(pass) => {
+                yawgpu::wgpuRenderPassEncoderDrawIndirect(pass, indirect, 0);
+            }
+            RenderEncoder::RenderBundle(bundle) => {
+                yawgpu::wgpuRenderBundleEncoderDrawIndirect(bundle, indirect, 0);
+            }
+        }
+    }
+}
+
+pub unsafe fn draw_indexed_indirect(encoder: &RenderEncoder, indirect: native::WGPUBuffer) {
+    unsafe {
+        match *encoder {
+            RenderEncoder::RenderPass(pass) => {
+                yawgpu::wgpuRenderPassEncoderDrawIndexedIndirect(pass, indirect, 0);
+            }
+            RenderEncoder::RenderBundle(bundle) => {
+                yawgpu::wgpuRenderBundleEncoderDrawIndexedIndirect(bundle, indirect, 0);
+            }
+        }
+    }
 }
