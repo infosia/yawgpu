@@ -175,6 +175,30 @@ A whole CTS area being `ported` means: every non-`N/A` `g.test()` in
 its spec files has a corresponding Rust `#[test]` (subcases covered by
 the in-test table), green on Noop.
 
+## Completion report (`REPORT.md`)
+
+When a slice is finished, the coding agent **writes its completion report
+to `REPORT.md`** at the repo root (a fixed filename, `.gitignore`d like
+`HANDOFF.md` — it is a working artifact, never committed). It does not
+just reply in chat. This lets the reviewer (Claude) read deterministic
+results instead of re-running and polling. The report must contain:
+
+- **Verification** — the exact commands run and their **exit codes**,
+  e.g. `cargo test --workspace` → exit 0, `cargo clippy --workspace
+  --all-targets -- -D warnings` → exit 0, plus any feature-gated runs the
+  slice touches (e.g. `--features tiled`). State pass/fail per command;
+  paste the `test result:` summary lines. Judge by exit code, not by
+  scraping prose.
+- **Files changed** — production vs test, with a one-line why for each
+  non-test file.
+- **Per-spec case accounting** — ported / deferred / `N/A` counts, and
+  which specific cases were deferred or excluded (+ reason).
+- **Core gaps surfaced** — any `yawgpu-core` behaviour added or found
+  missing (flagged, not silently widened).
+
+Each handoff's "Report back" section points here; the reviewer reads
+`REPORT.md` first.
+
 ## Acceptance criteria (per slice)
 
 - [ ] every non-excluded `g.test()` in the area's spec file(s) has a
