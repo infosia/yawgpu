@@ -186,7 +186,10 @@ fn command_buffer_referenced_textures(command_buffer: &CommandBuffer) -> Vec<Tex
 // textures may be destroyed; transient attachments are not user textures and
 // cannot be destroyed, so they are skipped.
 #[cfg(feature = "tiled")]
-fn push_subpass_resource_textures(textures: &mut Vec<Texture>, resource: &SubpassAttachmentResource) {
+fn push_subpass_resource_textures(
+    textures: &mut Vec<Texture>,
+    resource: &SubpassAttachmentResource,
+) {
     if let SubpassAttachmentResource::Persistent {
         view,
         resolve_target,

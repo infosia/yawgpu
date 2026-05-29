@@ -462,6 +462,8 @@ pub(crate) fn validate_queue_write_texture(
     }
 
     let subresource = texture.subresource_size(mip_level);
+    let empty_write =
+        write_size.width == 0 || write_size.height == 0 || write_size.depth_or_array_layers == 0;
     if origin
         .x
         .checked_add(write_size.width)
@@ -477,9 +479,30 @@ pub(crate) fn validate_queue_write_texture(
     {
         return Err("queue texture write range exceeds the texture subresource".to_owned());
     }
-    if texture.dimension() == TextureDimension::D2 && write_size.depth_or_array_layers != 1 {
+    if texture.dimension() == TextureDimension::D2
+        && !empty_write
+        && write_size.depth_or_array_layers != 1
+    {
         return Err(
             "queue texture writes to 2D textures require depthOrArrayLayers to be one".to_owned(),
+        );
+    }
+    if !origin.x.is_multiple_of(format_caps.block_w)
+        || !origin.y.is_multiple_of(format_caps.block_h)
+    {
+        return Err("queue texture write origin must be texel block aligned".to_owned());
+    }
+    if !write_size.width.is_multiple_of(format_caps.block_w)
+        || !write_size.height.is_multiple_of(format_caps.block_h)
+    {
+        return Err("queue texture write size must be texel block aligned".to_owned());
+    }
+    if (format_caps.aspects.depth || format_caps.aspects.stencil)
+        && !empty_write
+        && (!crate::command_encoder::origin_is_zero(origin) || write_size != subresource)
+    {
+        return Err(
+            "queue texture write depth/stencil copies must cover the full subresource".to_owned(),
         );
     }
 
