@@ -205,7 +205,17 @@ fn texture_size_default_value_and_smallest_size_uncompressed_format() {
 
 #[test]
 fn texture_size_default_value_and_smallest_size_compressed_format() {
-    assert_noop_lacks_compression_feature(native::WGPUFeatureName_TextureCompressionBC);
+    let test = ValidationTest::with_features(&[native::WGPUFeatureName_TextureCompressionBC]);
+    unsafe {
+        assert_texture_ok(
+            &test,
+            native::WGPUTextureDescriptor {
+                format: native::WGPUTextureFormat_BC1RGBAUnorm,
+                size: extent(4, 4, 1),
+                ..texture_descriptor()
+            },
+        );
+    }
 }
 
 #[test]
@@ -254,7 +264,17 @@ fn texture_size_2d_texture_uncompressed_format() {
 
 #[test]
 fn texture_size_2d_texture_compressed_format() {
-    assert_noop_lacks_compression_feature(native::WGPUFeatureName_TextureCompressionBC);
+    let test = ValidationTest::with_features(&[native::WGPUFeatureName_TextureCompressionBC]);
+    unsafe {
+        assert_texture_ok(
+            &test,
+            native::WGPUTextureDescriptor {
+                format: native::WGPUTextureFormat_BC1RGBAUnorm,
+                size: extent(4, 4, 1),
+                ..texture_descriptor()
+            },
+        );
+    }
 }
 
 #[test]
@@ -282,7 +302,19 @@ fn texture_size_3d_texture_uncompressed_format() {
 
 #[test]
 fn texture_size_3d_texture_compressed_format() {
-    assert_noop_lacks_compression_feature(native::WGPUFeatureName_TextureCompressionBCSliced3D);
+    let test =
+        ValidationTest::with_features(&[native::WGPUFeatureName_TextureCompressionBCSliced3D]);
+    unsafe {
+        assert_texture_ok(
+            &test,
+            native::WGPUTextureDescriptor {
+                dimension: native::WGPUTextureDimension_3D,
+                format: native::WGPUTextureFormat_BC1RGBAUnorm,
+                size: extent(4, 4, 4),
+                ..texture_descriptor()
+            },
+        );
+    }
 }
 
 #[test]
@@ -402,13 +434,6 @@ unsafe fn assert_texture_error(test: &ValidationTest, descriptor: native::WGPUTe
     });
     assert!(!texture.is_null());
     yawgpu::wgpuTextureRelease(texture);
-}
-
-fn assert_noop_lacks_compression_feature(feature: native::WGPUFeatureName) {
-    let test = ValidationTest::new();
-    unsafe {
-        assert_eq!(yawgpu::wgpuAdapterHasFeature(test.adapter(), feature), 0);
-    }
 }
 
 fn texture_descriptor() -> native::WGPUTextureDescriptor {

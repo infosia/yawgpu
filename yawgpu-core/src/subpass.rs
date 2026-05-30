@@ -9,7 +9,7 @@ use crate::bind_group::*;
 use crate::buffer::*;
 use crate::command_encoder::*;
 use crate::copy::*;
-use crate::device::Device;
+use crate::device::{Device, FeatureSet};
 use crate::error::ErrorKind;
 use crate::extent::*;
 use crate::format::*;
@@ -659,6 +659,7 @@ pub(crate) fn validate_subpass_pipeline_compatible(
 fn validate_subpass_render_pipeline_descriptor(
     descriptor: &SubpassRenderPipelineDescriptor,
     limits: Limits,
+    features: &FeatureSet,
 ) -> Option<String> {
     if let Some(error) = &descriptor.error {
         return Some(error.clone());
@@ -721,6 +722,7 @@ fn validate_subpass_render_pipeline_descriptor(
     crate::render_pipeline::resolve_render_pipeline_descriptor(
         &descriptor.base,
         limits,
+        features,
         Some(&subpass.color_attachment_indices),
     )
     .err()
@@ -930,15 +932,31 @@ impl Device {
         descriptor: SubpassRenderPipelineDescriptor,
     ) -> RenderPipeline {
         if self.is_lost() {
-            return RenderPipeline::new_subpass(descriptor, true, self.limits(), None).0;
+            return RenderPipeline::new_subpass(
+                descriptor,
+                true,
+                self.limits(),
+                &self.inner.features,
+                None,
+            )
+            .0;
         }
-        let error = validate_subpass_render_pipeline_descriptor(&descriptor, self.limits());
+        let error = validate_subpass_render_pipeline_descriptor(
+            &descriptor,
+            self.limits(),
+            &self.inner.features,
+        );
         let is_error = error.is_some();
         if let Some(message) = error {
             self.dispatch_error(ErrorKind::Validation, message);
         }
-        let (pipeline, backend_error) =
-            RenderPipeline::new_subpass(descriptor, is_error, self.limits(), Some(self.hal()));
+        let (pipeline, backend_error) = RenderPipeline::new_subpass(
+            descriptor,
+            is_error,
+            self.limits(),
+            &self.inner.features,
+            Some(self.hal()),
+        );
         if let Some(message) = backend_error {
             self.dispatch_error(ErrorKind::Internal, message);
         }
@@ -952,10 +970,28 @@ impl Device {
         descriptor: SubpassRenderPipelineDescriptor,
     ) -> RenderPipeline {
         if self.is_lost() {
-            return RenderPipeline::new_subpass(descriptor, true, self.limits(), None).0;
+            return RenderPipeline::new_subpass(
+                descriptor,
+                true,
+                self.limits(),
+                &self.inner.features,
+                None,
+            )
+            .0;
         }
-        let error = validate_subpass_render_pipeline_descriptor(&descriptor, self.limits());
-        RenderPipeline::new_subpass(descriptor, error.is_some(), self.limits(), Some(self.hal())).0
+        let error = validate_subpass_render_pipeline_descriptor(
+            &descriptor,
+            self.limits(),
+            &self.inner.features,
+        );
+        RenderPipeline::new_subpass(
+            descriptor,
+            error.is_some(),
+            self.limits(),
+            &self.inner.features,
+            Some(self.hal()),
+        )
+        .0
     }
 }
 

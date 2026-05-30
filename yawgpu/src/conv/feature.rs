@@ -6,7 +6,19 @@ use super::*;
 pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
     match value {
         native::WGPUFeatureName_CoreFeaturesAndLimits => core::Feature::CoreFeaturesAndLimits,
+        native::WGPUFeatureName_TextureCompressionBC => core::Feature::TextureCompressionBc,
+        native::WGPUFeatureName_TextureCompressionBCSliced3D => {
+            core::Feature::TextureCompressionBcSliced3d
+        }
+        native::WGPUFeatureName_TextureCompressionETC2 => core::Feature::TextureCompressionEtc2,
+        native::WGPUFeatureName_TextureCompressionASTC => core::Feature::TextureCompressionAstc,
+        native::WGPUFeatureName_TextureCompressionASTCSliced3D => {
+            core::Feature::TextureCompressionAstcSliced3d
+        }
+        native::WGPUFeatureName_Depth32FloatStencil8 => core::Feature::Depth32FloatStencil8,
         native::WGPUFeatureName_RG11B10UfloatRenderable => core::Feature::Rg11b10UfloatRenderable,
+        native::WGPUFeatureName_BGRA8UnormStorage => core::Feature::Bgra8UnormStorage,
+        native::WGPUFeatureName_Float32Filterable => core::Feature::Float32Filterable,
         native::WGPUFeatureName_TimestampQuery => core::Feature::TimestampQuery,
         native::WGPUFeatureName_TextureFormatsTier1 => core::Feature::TextureFormatsTier1,
         native::WGPUFeatureName_TextureFormatsTier2 => core::Feature::TextureFormatsTier2,
@@ -26,7 +38,19 @@ pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
 pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
     match value {
         core::Feature::CoreFeaturesAndLimits => native::WGPUFeatureName_CoreFeaturesAndLimits,
+        core::Feature::TextureCompressionBc => native::WGPUFeatureName_TextureCompressionBC,
+        core::Feature::TextureCompressionBcSliced3d => {
+            native::WGPUFeatureName_TextureCompressionBCSliced3D
+        }
+        core::Feature::TextureCompressionEtc2 => native::WGPUFeatureName_TextureCompressionETC2,
+        core::Feature::TextureCompressionAstc => native::WGPUFeatureName_TextureCompressionASTC,
+        core::Feature::TextureCompressionAstcSliced3d => {
+            native::WGPUFeatureName_TextureCompressionASTCSliced3D
+        }
+        core::Feature::Depth32FloatStencil8 => native::WGPUFeatureName_Depth32FloatStencil8,
         core::Feature::Rg11b10UfloatRenderable => native::WGPUFeatureName_RG11B10UfloatRenderable,
+        core::Feature::Bgra8UnormStorage => native::WGPUFeatureName_BGRA8UnormStorage,
+        core::Feature::Float32Filterable => native::WGPUFeatureName_Float32Filterable,
         core::Feature::TimestampQuery => native::WGPUFeatureName_TimestampQuery,
         core::Feature::TextureFormatsTier1 => native::WGPUFeatureName_TextureFormatsTier1,
         core::Feature::TextureFormatsTier2 => native::WGPUFeatureName_TextureFormatsTier2,

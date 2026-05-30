@@ -268,7 +268,7 @@ pub(crate) fn validate_texture_view_descriptor(
         return Some("texture view format is not compatible with the texture");
     }
 
-    let Some(format_caps) = format.caps() else {
+    let Some(format_caps) = texture.view_format_caps(format) else {
         return Some("texture view format must not be Undefined");
     };
     if usage.contains(TextureUsage::RENDER_ATTACHMENT) && !format_caps.renderable {

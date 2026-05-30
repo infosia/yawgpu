@@ -362,10 +362,17 @@ pub(crate) fn validate_bind_group_texture(
     if (texture.sample_count() > 1) != multisampled {
         return Some("bind group texture multisampling must match the layout".to_owned());
     }
-    if texture_view.format().caps().is_some_and(|caps| {
-        (caps.aspects.depth || caps.aspects.stencil) && sample_type == TextureSampleType::Float
-    }) {
+    let Some(caps) = texture_view
+        .texture()
+        .view_format_caps(texture_view.format())
+    else {
+        return Some("bind group texture view format must be supported".to_owned());
+    };
+    if (caps.aspects.depth || caps.aspects.stencil) && sample_type == TextureSampleType::Float {
         return Some("depth or stencil texture bindings must not use Float sample type".to_owned());
+    }
+    if sample_type == TextureSampleType::Float && !caps.filterable {
+        return Some("float texture bindings require a filterable texture format".to_owned());
     }
 
     None

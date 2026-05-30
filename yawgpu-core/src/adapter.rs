@@ -150,8 +150,24 @@ pub enum FeatureLevel {
 pub enum Feature {
     /// Core features and limits variant.
     CoreFeaturesAndLimits,
+    /// BC texture compression support.
+    TextureCompressionBc,
+    /// BC compressed 3D texture support.
+    TextureCompressionBcSliced3d,
+    /// ETC2/EAC texture compression support.
+    TextureCompressionEtc2,
+    /// ASTC texture compression support.
+    TextureCompressionAstc,
+    /// ASTC compressed 3D texture support.
+    TextureCompressionAstcSliced3d,
+    /// Depth32FloatStencil8 texture format support.
+    Depth32FloatStencil8,
     /// Rg11b10 ufloat renderable variant.
     Rg11b10UfloatRenderable,
+    /// Bgra8Unorm storage texture support.
+    Bgra8UnormStorage,
+    /// Float32 filterable texture binding support.
+    Float32Filterable,
     /// Timestamp query variant.
     TimestampQuery,
     /// Texture formats tier1 variant.
@@ -190,7 +206,15 @@ pub struct TiledCapabilities {
 pub(crate) fn supported_features() -> FeatureSet {
     [
         Feature::CoreFeaturesAndLimits,
+        Feature::TextureCompressionBc,
+        Feature::TextureCompressionBcSliced3d,
+        Feature::TextureCompressionEtc2,
+        Feature::TextureCompressionAstc,
+        Feature::TextureCompressionAstcSliced3d,
+        Feature::Depth32FloatStencil8,
         Feature::Rg11b10UfloatRenderable,
+        Feature::Bgra8UnormStorage,
+        Feature::Float32Filterable,
         Feature::TimestampQuery,
         Feature::TextureFormatsTier1,
         Feature::TextureFormatsTier2,
@@ -256,6 +280,12 @@ impl Adapter {
 
 /// Returns apply feature implications.
 pub(crate) fn apply_feature_implications(features: &mut FeatureSet) {
+    if features.contains(&Feature::TextureCompressionBcSliced3d) {
+        features.insert(Feature::TextureCompressionBc);
+    }
+    if features.contains(&Feature::TextureCompressionAstcSliced3d) {
+        features.insert(Feature::TextureCompressionAstc);
+    }
     if features.contains(&Feature::TextureFormatsTier2) {
         features.insert(Feature::TextureFormatsTier1);
     }

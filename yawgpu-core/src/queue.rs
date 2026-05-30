@@ -227,7 +227,7 @@ fn hal_buffer_texture_layout(
     texture: &Texture,
     copy_size: Extent3d,
 ) -> Option<HalBufferTextureLayout> {
-    let format_caps = texture.format().caps()?;
+    let format_caps = texture.format_caps()?;
     let width_blocks = crate::copy::div_ceil_u32(copy_size.width, format_caps.block_w);
     let height_blocks = crate::copy::div_ceil_u32(copy_size.height, format_caps.block_h);
     let row_bytes = width_blocks.checked_mul(format_caps.texel_block_size)?;

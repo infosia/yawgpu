@@ -555,8 +555,11 @@ mod tests {
             count: 2,
         });
         assert_eq!(error, None);
-        let (bundle_encoder, error) =
-            RenderBundleEncoder::new(render_bundle_encoder_descriptor(), device.limits());
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
         assert_eq!(error, None);
         let (bundle, error) = bundle_encoder.finish();
         assert_eq!(error, None);

@@ -7,6 +7,7 @@ use yawgpu_hal::{
 };
 
 use crate::bind_group_layout::*;
+use crate::device::FeatureSet;
 use crate::format::*;
 use crate::limits::*;
 use crate::pipeline_layout::*;
@@ -89,12 +90,13 @@ impl ComputePipeline {
         descriptor: ComputePipelineDescriptor,
         is_error: bool,
         limits: Limits,
+        features: &FeatureSet,
         hal_device: Option<&HalDevice>,
     ) -> (Self, Option<String>) {
         let resolved = if is_error {
             None
         } else {
-            resolve_compute_pipeline_descriptor(&descriptor, limits).ok()
+            resolve_compute_pipeline_descriptor(&descriptor, limits, features).ok()
         };
         let (entry_name, bindings, workgroup, bind_group_layouts) = resolved.unwrap_or_else(|| {
             (
@@ -355,14 +357,16 @@ pub(crate) fn metal_buffer_binding_map(
 pub(crate) fn validate_compute_pipeline_descriptor(
     descriptor: &ComputePipelineDescriptor,
     limits: Limits,
+    features: &FeatureSet,
 ) -> Option<String> {
-    resolve_compute_pipeline_descriptor(descriptor, limits).err()
+    resolve_compute_pipeline_descriptor(descriptor, limits, features).err()
 }
 
 /// Records resolve into the command stream.
 pub(crate) fn resolve_compute_pipeline_descriptor(
     descriptor: &ComputePipelineDescriptor,
     limits: Limits,
+    features: &FeatureSet,
 ) -> Result<ResolvedPipelineParts, String> {
     if descriptor.shader_module.is_error() {
         return Err("compute pipeline shader module must not be an error module".to_owned());
@@ -402,7 +406,7 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
     let bindings = module.resource_bindings_for_entry(&entry_name)?;
     validate_compute_pipeline_layout(&descriptor.layout, &bindings)?;
     let bind_group_layouts =
-        effective_compute_bind_group_layouts(&descriptor.layout, &bindings, limits)?;
+        effective_compute_bind_group_layouts(&descriptor.layout, &bindings, limits, features)?;
     Ok((entry_name, bindings, Some(workgroup), bind_group_layouts))
 }
 
@@ -673,6 +677,7 @@ pub(crate) fn effective_compute_bind_group_layouts(
     layout: &ComputePipelineLayout,
     bindings: &[shader_naga::ReflectedResourceBinding],
     limits: Limits,
+    features: &FeatureSet,
 ) -> Result<Vec<Arc<BindGroupLayout>>, String> {
     match layout {
         ComputePipelineLayout::Explicit(layout) => Ok(layout.bind_group_layouts().to_vec()),
@@ -685,6 +690,7 @@ pub(crate) fn effective_compute_bind_group_layouts(
                     binding,
                 }),
             limits,
+            features,
         ),
     }
 }
@@ -747,6 +753,7 @@ pub(crate) fn validate_pipeline_layout_stage_bindings(
 pub(crate) fn derive_bind_group_layouts<I>(
     requirements: I,
     limits: Limits,
+    features: &FeatureSet,
 ) -> Result<Vec<Arc<BindGroupLayout>>, String>
 where
     I: IntoIterator<Item = StageResourceBinding>,
@@ -785,9 +792,9 @@ where
             .remove(&group_index)
             .map(|entries| entries.into_values().collect::<Vec<_>>())
             .unwrap_or_default();
-        if let Some(message) =
-            crate::bind_group_layout::validate_bind_group_layout_descriptor(&entries, limits)
-        {
+        if let Some(message) = crate::bind_group_layout::validate_bind_group_layout_descriptor(
+            &entries, limits, features,
+        ) {
             return Err(message);
         }
         layouts.push(Arc::new(BindGroupLayout::new(entries, false, true)));

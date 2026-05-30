@@ -3569,10 +3569,18 @@ mod tests {
             };
 
             wgpuAdapterGetFeatures(adapter, &mut features);
-            assert_eq!(features.featureCount, 5);
+            assert_eq!(features.featureCount, 13);
             let values = std::slice::from_raw_parts(features.features, features.featureCount);
             assert!(values.contains(&native::WGPUFeatureName_CoreFeaturesAndLimits));
+            assert!(values.contains(&native::WGPUFeatureName_TextureCompressionBC));
+            assert!(values.contains(&native::WGPUFeatureName_TextureCompressionBCSliced3D));
+            assert!(values.contains(&native::WGPUFeatureName_TextureCompressionETC2));
+            assert!(values.contains(&native::WGPUFeatureName_TextureCompressionASTC));
+            assert!(values.contains(&native::WGPUFeatureName_TextureCompressionASTCSliced3D));
+            assert!(values.contains(&native::WGPUFeatureName_Depth32FloatStencil8));
             assert!(values.contains(&native::WGPUFeatureName_RG11B10UfloatRenderable));
+            assert!(values.contains(&native::WGPUFeatureName_BGRA8UnormStorage));
+            assert!(values.contains(&native::WGPUFeatureName_Float32Filterable));
             assert!(values.contains(&native::WGPUFeatureName_TimestampQuery));
             assert!(values.contains(&native::WGPUFeatureName_TextureFormatsTier1));
             assert!(values.contains(&native::WGPUFeatureName_TextureFormatsTier2));

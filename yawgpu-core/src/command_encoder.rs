@@ -7,6 +7,7 @@ use crate::buffer::*;
 use crate::compute_pass::*;
 use crate::compute_pipeline::*;
 use crate::copy::*;
+use crate::device::FeatureSet;
 use crate::extent::*;
 use crate::format::*;
 use crate::pass::*;
@@ -27,6 +28,7 @@ pub struct CommandEncoder {
 /// Holds shared state for the command encoder handle.
 #[derive(Debug)]
 pub(crate) struct CommandEncoderInner {
+    pub(crate) features: FeatureSet,
     pub(crate) state: Mutex<CommandEncoderState>,
 }
 
@@ -196,9 +198,10 @@ pub(crate) struct RenderDrawExecution {
 
 impl CommandEncoder {
     /// Creates a new instance.
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(features: FeatureSet) -> Self {
         Self {
             inner: Arc::new(CommandEncoderInner {
+                features,
                 state: Mutex::new(CommandEncoderState {
                     lifecycle: CommandEncoderLifecycle::Recording,
                     open_pass: None,
@@ -217,7 +220,7 @@ impl CommandEncoder {
 
     /// Creates an error-state instance.
     pub(crate) fn new_error(message: impl Into<String>) -> Self {
-        let encoder = Self::new();
+        let encoder = Self::new(FeatureSet::new());
         encoder.record_first_error(message);
         encoder
     }
@@ -229,9 +232,11 @@ impl CommandEncoder {
         descriptor: &RenderPassDescriptor,
     ) -> (RenderPassEncoder, Option<String>) {
         let (token, immediate_error) = self.begin_pass(PassKind::Render);
-        let attachment_signature = render_pass_attachment_signature(descriptor).ok();
+        let attachment_signature =
+            render_pass_attachment_signature(descriptor, &self.inner.features).ok();
         if immediate_error.is_none() {
-            if let Err(message) = validate_render_pass_descriptor(descriptor) {
+            if let Err(message) = validate_render_pass_descriptor(descriptor, &self.inner.features)
+            {
                 self.record_first_error(message);
             } else {
                 self.record_referenced_textures(render_pass_attachment_textures(descriptor));
@@ -869,8 +874,9 @@ pub(crate) fn validate_encoder_write_buffer(
 /// Validates render pass descriptor and returns a descriptive error on failure.
 pub(crate) fn validate_render_pass_descriptor(
     descriptor: &RenderPassDescriptor,
+    features: &FeatureSet,
 ) -> Result<(), String> {
-    render_pass_attachment_signature(descriptor)?;
+    render_pass_attachment_signature(descriptor, features)?;
     if let Some(query_set) = &descriptor.occlusion_query_set {
         validate_occlusion_query_set(query_set, "render pass occlusion query set")?;
     }
@@ -1002,6 +1008,7 @@ pub(crate) fn validate_resolve_query_set(
 /// Returns render pass attachment signature.
 pub(crate) fn render_pass_attachment_signature(
     descriptor: &RenderPassDescriptor,
+    features: &FeatureSet,
 ) -> Result<AttachmentSignature, String> {
     if descriptor.color_attachments.len() > descriptor.max_color_attachments as usize {
         return Err("render pass colorAttachmentCount exceeds the device limit".to_owned());
@@ -1015,7 +1022,7 @@ pub(crate) fn render_pass_attachment_signature(
     for attachment in &descriptor.color_attachments {
         if let Some(attachment) = attachment {
             has_attachment = true;
-            validate_color_attachment(attachment)?;
+            validate_color_attachment(attachment, features)?;
             validate_render_attachment_common(
                 &attachment.view,
                 &mut render_extent,
@@ -1034,7 +1041,7 @@ pub(crate) fn render_pass_attachment_signature(
     let mut depth_stencil_format = None;
     if let Some(attachment) = &descriptor.depth_stencil_attachment {
         has_attachment = true;
-        validate_depth_stencil_attachment(attachment)?;
+        validate_depth_stencil_attachment(attachment, features)?;
         depth_stencil_format = Some(attachment.view.format());
         validate_render_attachment_common(
             &attachment.view,
@@ -1101,9 +1108,10 @@ pub(crate) fn render_pass_color_execution(
 /// Validates color attachment and returns a descriptive error on failure.
 pub(crate) fn validate_color_attachment(
     attachment: &RenderPassColorAttachment,
+    features: &FeatureSet,
 ) -> Result<(), String> {
     let texture = attachment.view.texture();
-    let Some(format_caps) = attachment.view.format().caps() else {
+    let Some(format_caps) = attachment.view.format().caps(features) else {
         return Err("render pass color attachment format must be supported".to_owned());
     };
     if !texture.usage().contains(TextureUsage::RENDER_ATTACHMENT) {
@@ -1136,9 +1144,10 @@ pub(crate) fn validate_color_attachment(
 /// Validates depth stencil attachment and returns a descriptive error on failure.
 pub(crate) fn validate_depth_stencil_attachment(
     attachment: &RenderPassDepthStencilAttachment,
+    features: &FeatureSet,
 ) -> Result<(), String> {
     let texture = attachment.view.texture();
-    let Some(format_caps) = attachment.view.format().caps() else {
+    let Some(format_caps) = attachment.view.format().caps(features) else {
         return Err("render pass depth-stencil attachment format must be supported".to_owned());
     };
     if !texture.usage().contains(TextureUsage::RENDER_ATTACHMENT) {
@@ -1392,7 +1401,7 @@ pub(crate) fn validate_texture_copy_subresource(
         return Err(format!("{label} mipLevel is out of range"));
     }
 
-    let Some(format_caps) = texture.format().caps() else {
+    let Some(format_caps) = texture.format_caps() else {
         return Err(format!("{label} format must not be Undefined"));
     };
     validate_copy_aspect(format_caps, aspect, label)?;

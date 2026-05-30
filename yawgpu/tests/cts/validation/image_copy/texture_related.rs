@@ -251,7 +251,7 @@ fn format() {
 
 #[test]
 fn origin_alignment() {
-    let test = ValidationTest::new();
+    let test = ValidationTest::with_features(&[native::WGPUFeatureName_TextureCompressionBC]);
     unsafe {
         for method in ALL_METHODS {
             for origin_x in [0, 1, 4] {
@@ -283,7 +283,7 @@ fn origin_alignment() {
 
 #[test]
 fn size_alignment() {
-    let test = ValidationTest::new();
+    let test = ValidationTest::with_features(&[native::WGPUFeatureName_TextureCompressionBC]);
     unsafe {
         for method in ALL_METHODS {
             for width in [0, 1, 4] {

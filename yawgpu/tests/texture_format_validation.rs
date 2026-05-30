@@ -184,8 +184,16 @@ fn populated_format_caps_match_dawn_sanity_checks() {
 }
 
 fn caps(format: native::WGPUTextureFormat) -> yawgpu_core::FormatCaps {
+    let features = [
+        yawgpu_core::Feature::TextureCompressionBc,
+        yawgpu_core::Feature::Depth32FloatStencil8,
+        yawgpu_core::Feature::TextureFormatsTier1,
+        yawgpu_core::Feature::TextureFormatsTier2,
+    ]
+    .into_iter()
+    .collect();
     yawgpu_core::TextureFormat::from(format)
-        .caps()
+        .caps(&features)
         .expect("format is populated")
 }
 

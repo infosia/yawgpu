@@ -3,9 +3,8 @@ use yawgpu::native;
 use crate::{common, feature_common};
 
 #[test]
-#[ignore = "Noop does not advertise float32-filterable"]
 fn create_bind_group() {
-    feature_common::assert_noop_lacks_feature(native::WGPUFeatureName_Float32Filterable);
+    feature_common::assert_noop_advertises_feature(native::WGPUFeatureName_Float32Filterable);
     let test = feature_common::test_with_feature(native::WGPUFeatureName_Float32Filterable);
     unsafe {
         let texture = common::create_texture(

@@ -403,7 +403,15 @@ mod tests {
     fn map_feature_round_trips_defined_and_other_variants() {
         for value in [
             native::WGPUFeatureName_CoreFeaturesAndLimits,
+            native::WGPUFeatureName_TextureCompressionBC,
+            native::WGPUFeatureName_TextureCompressionBCSliced3D,
+            native::WGPUFeatureName_TextureCompressionETC2,
+            native::WGPUFeatureName_TextureCompressionASTC,
+            native::WGPUFeatureName_TextureCompressionASTCSliced3D,
+            native::WGPUFeatureName_Depth32FloatStencil8,
             native::WGPUFeatureName_RG11B10UfloatRenderable,
+            native::WGPUFeatureName_BGRA8UnormStorage,
+            native::WGPUFeatureName_Float32Filterable,
             native::WGPUFeatureName_TimestampQuery,
             native::WGPUFeatureName_TextureFormatsTier1,
             native::WGPUFeatureName_TextureFormatsTier2,
