@@ -710,7 +710,51 @@ pub(crate) fn validate_pipeline_layout_stage_bindings(
         };
         validate_shader_binding_compat(binding, kind)?;
     }
+    validate_non_filterable_gather_bindings(layout, requirements)?;
 
+    Ok(())
+}
+
+fn validate_non_filterable_gather_bindings(
+    layout: &PipelineLayout,
+    requirements: &[StageResourceBinding],
+) -> Result<(), String> {
+    for requirement in requirements {
+        let shader_naga::ReflectedResourceBindingKind::Texture {
+            sampled,
+            sample_kind,
+            sample_usage: shader_naga::ReflectedTextureSampleUsage::Gather,
+            ..
+        } = requirement.binding.kind
+        else {
+            continue;
+        };
+        if reflected_texture_sample_type(
+            sampled,
+            sample_kind,
+            shader_naga::ReflectedTextureSampleUsage::Gather,
+        )? == TextureSampleType::Float
+        {
+            continue;
+        }
+        let visibility = pipeline_stage_visibility_bit(requirement.stage);
+        if layout.bind_group_layouts().iter().any(|group| {
+            group.entries().iter().any(|entry| {
+                entry.visibility & visibility != 0
+                    && matches!(
+                        entry.kind,
+                        Some(BindingLayoutKind::Sampler {
+                            ty: SamplerBindingType::Filtering
+                        })
+                    )
+            })
+        }) {
+            return Err(
+                "textureGather with a filtering sampler requires a filterable texture binding"
+                    .to_owned(),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -847,7 +891,8 @@ pub(crate) fn reflected_texture_sample_type(
     }
     match sample_kind {
         Some(shader_naga::ReflectedTypeScalarClass::Float) => Ok(match sample_usage {
-            shader_naga::ReflectedTextureSampleUsage::Sample => TextureSampleType::Float,
+            shader_naga::ReflectedTextureSampleUsage::Sample
+            | shader_naga::ReflectedTextureSampleUsage::Gather => TextureSampleType::Float,
             shader_naga::ReflectedTextureSampleUsage::Load => TextureSampleType::UnfilterableFloat,
         }),
         Some(shader_naga::ReflectedTypeScalarClass::Sint) => Ok(TextureSampleType::Sint),

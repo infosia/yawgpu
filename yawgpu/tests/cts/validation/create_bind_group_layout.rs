@@ -109,7 +109,6 @@ fn visibility() {
 }
 
 #[test]
-#[ignore = "core does not yet reject storage buffer bindings visible to VERTEX; CTS expects writable storage buffers with VERTEX visibility to fail"]
 fn visibility_vertex_shader_stage_buffer_type() {
     let test = ValidationTest::new();
     unsafe {
@@ -147,7 +146,6 @@ fn visibility_vertex_shader_stage_buffer_type() {
 }
 
 #[test]
-#[ignore = "core does not yet reject write-only/read-write storage textures visible to VERTEX; CTS expects only read-only storage textures to be vertex-visible"]
 fn visibility_vertex_shader_stage_storage_texture_access() {
     let test = ValidationTest::new();
     unsafe {
@@ -181,7 +179,6 @@ fn visibility_vertex_shader_stage_storage_texture_access() {
 }
 
 #[test]
-#[ignore = "core does not yet reject multisampled texture bindings with sampleType=float; CTS expects multisampled float sampleType to fail"]
 fn multisampled_validation() {
     let test = ValidationTest::new();
     unsafe {
@@ -290,7 +287,6 @@ fn max_resources_per_stage_in_bind_group_layout() {
 }
 
 #[test]
-#[ignore = "core does not yet aggregate resource counts across bind group layouts at createPipelineLayout; CTS expects per-stage resource limits across pipeline layouts to fail"]
 fn max_resources_per_stage_in_pipeline_layout() {
     let test = ValidationTest::new();
     unsafe {
@@ -311,7 +307,6 @@ fn max_resources_per_stage_in_pipeline_layout() {
 }
 
 #[test]
-#[ignore = "core does not yet reject cube/cube-array storage texture view dimensions; CTS expects storage texture cube dimensions to fail"]
 fn storage_texture_layout_dimension() {
     let test = ValidationTest::new();
     unsafe {
@@ -335,7 +330,6 @@ fn storage_texture_layout_dimension() {
 }
 
 #[test]
-#[ignore = "core does not yet validate storage texture access mode against the format; CTS expects unsupported storage format/access combinations to fail"]
 fn storage_texture_formats() {
     let test = ValidationTest::new();
     unsafe {

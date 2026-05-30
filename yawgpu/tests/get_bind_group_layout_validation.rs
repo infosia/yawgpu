@@ -12,16 +12,24 @@ fn get_bind_group_layout_index_range_is_validated() {
         assert!(!layout.is_null());
         assert!(test.errors().is_empty());
 
+        let empty_layout = yawgpu::wgpuComputePipelineGetBindGroupLayout(pipeline, 1);
+        assert!(!empty_layout.is_null());
+        assert!(test.errors().is_empty());
+
         let mut error_layout = std::ptr::null();
         test.assert_device_error_after(
             || {
-                error_layout = yawgpu::wgpuComputePipelineGetBindGroupLayout(pipeline, 1);
+                error_layout = yawgpu::wgpuComputePipelineGetBindGroupLayout(
+                    pipeline,
+                    yawgpu_core::Limits::DEFAULT.max_bind_groups,
+                );
             },
             None,
         );
         assert!(!error_layout.is_null());
 
         yawgpu::wgpuBindGroupLayoutRelease(error_layout);
+        yawgpu::wgpuBindGroupLayoutRelease(empty_layout);
         yawgpu::wgpuBindGroupLayoutRelease(layout);
         yawgpu::wgpuComputePipelineRelease(pipeline);
     }
@@ -144,6 +152,13 @@ fn texture_sample_type_is_derived_from_usage() {
             native::WGPUTextureFormat_Depth24Plus,
         );
         let depth_view = yawgpu::wgpuTextureCreateView(depth_texture, std::ptr::null());
+        let unfilterable_float_texture = create_texture(
+            test.device(),
+            native::WGPUTextureUsage_TextureBinding,
+            native::WGPUTextureFormat_RGBA32Float,
+        );
+        let unfilterable_float_view =
+            yawgpu::wgpuTextureCreateView(unfilterable_float_texture, std::ptr::null());
 
         assert_bind_group_error(
             &test,
@@ -155,8 +170,14 @@ fn texture_sample_type_is_derived_from_usage() {
             helper_layout,
             &[sampler_binding(0, sampler), texture_binding(1, depth_view)],
         );
-        assert_bind_group_ok(&test, load_layout, &[texture_binding(0, depth_view)]);
+        assert_bind_group_ok(
+            &test,
+            load_layout,
+            &[texture_binding(0, unfilterable_float_view)],
+        );
 
+        yawgpu::wgpuTextureViewRelease(unfilterable_float_view);
+        yawgpu::wgpuTextureRelease(unfilterable_float_texture);
         yawgpu::wgpuTextureViewRelease(depth_view);
         yawgpu::wgpuTextureRelease(depth_texture);
         yawgpu::wgpuSamplerRelease(sampler);

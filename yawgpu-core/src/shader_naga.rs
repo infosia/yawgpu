@@ -247,6 +247,8 @@ pub(crate) enum ReflectedBufferType {
 pub(crate) enum ReflectedTextureSampleUsage {
     /// Sample variant.
     Sample,
+    /// Gather variant.
+    Gather,
     /// Load variant.
     Load,
 }
@@ -1234,32 +1236,34 @@ fn sampled_texture_usage(
     handle: naga::Handle<naga::GlobalVariable>,
     entry_index: Option<usize>,
 ) -> ReflectedTextureSampleUsage {
-    let sampled = if let Some(entry_index) = entry_index {
-        entry_samples_global(module, entry_index, handle)
+    if let Some(entry_index) = entry_index {
+        entry_texture_sample_usage(module, entry_index, handle)
     } else {
         module
             .entry_points
             .iter()
             .enumerate()
-            .any(|(index, _)| entry_samples_global(module, index, handle))
-    };
-    if sampled {
-        ReflectedTextureSampleUsage::Sample
-    } else {
-        ReflectedTextureSampleUsage::Load
+            .map(|(index, _)| entry_texture_sample_usage(module, index, handle))
+            .max_by_key(|usage| match usage {
+                ReflectedTextureSampleUsage::Load => 0,
+                ReflectedTextureSampleUsage::Sample => 1,
+                ReflectedTextureSampleUsage::Gather => 2,
+            })
+            .unwrap_or(ReflectedTextureSampleUsage::Load)
     }
 }
 
-fn entry_samples_global(
+fn entry_texture_sample_usage(
     module: &naga::Module,
     entry_index: usize,
     handle: naga::Handle<naga::GlobalVariable>,
-) -> bool {
+) -> ReflectedTextureSampleUsage {
     let Some(entry) = module.entry_points.get(entry_index) else {
-        return false;
+        return ReflectedTextureSampleUsage::Load;
     };
-    if function_samples_global(&entry.function, handle) {
-        return true;
+    let mut usage = function_texture_sample_usage(&entry.function, handle);
+    if usage == ReflectedTextureSampleUsage::Gather {
+        return usage;
     }
 
     let mut reachable = std::collections::BTreeSet::new();
@@ -1281,12 +1285,32 @@ fn entry_samples_global(
         }
     }
 
-    reachable.into_iter().any(|function| {
-        module
-            .functions
-            .try_get(function)
-            .is_ok_and(|function| function_samples_global(function, handle))
-    })
+    for function in reachable {
+        let Ok(function) = module.functions.try_get(function) else {
+            continue;
+        };
+        usage = max_texture_sample_usage(usage, function_texture_sample_usage(function, handle));
+        if usage == ReflectedTextureSampleUsage::Gather {
+            break;
+        }
+    }
+
+    usage
+}
+
+fn max_texture_sample_usage(
+    lhs: ReflectedTextureSampleUsage,
+    rhs: ReflectedTextureSampleUsage,
+) -> ReflectedTextureSampleUsage {
+    match (lhs, rhs) {
+        (ReflectedTextureSampleUsage::Gather, _) | (_, ReflectedTextureSampleUsage::Gather) => {
+            ReflectedTextureSampleUsage::Gather
+        }
+        (ReflectedTextureSampleUsage::Sample, _) | (_, ReflectedTextureSampleUsage::Sample) => {
+            ReflectedTextureSampleUsage::Sample
+        }
+        _ => ReflectedTextureSampleUsage::Load,
+    }
 }
 
 fn function_calls_collected(
@@ -1328,17 +1352,24 @@ fn collect_function_calls_from_block(
     }
 }
 
-fn function_samples_global(
+fn function_texture_sample_usage(
     function: &naga::Function,
     handle: naga::Handle<naga::GlobalVariable>,
-) -> bool {
-    function.expressions.iter().any(|(_, expression)| {
-        matches!(
-            expression,
-            naga::Expression::ImageSample { image, .. }
-                if expression_global(function, *image) == Some(handle)
-        )
-    })
+) -> ReflectedTextureSampleUsage {
+    function
+        .expressions
+        .iter()
+        .filter_map(|(_, expression)| {
+            let naga::Expression::ImageSample { image, gather, .. } = expression else {
+                return None;
+            };
+            (expression_global(function, *image) == Some(handle)).then_some(if gather.is_some() {
+                ReflectedTextureSampleUsage::Gather
+            } else {
+                ReflectedTextureSampleUsage::Sample
+            })
+        })
+        .fold(ReflectedTextureSampleUsage::Load, max_texture_sample_usage)
 }
 
 fn expression_global(

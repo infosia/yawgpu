@@ -106,7 +106,7 @@ unsafe fn create_error_query_set(test: &ValidationTest) -> native::WGPUQuerySet 
             nextInChain: std::ptr::null_mut(),
             label: crate::common::empty_string_view(),
             type_: native::WGPUQueryType_Occlusion,
-            count: 0,
+            count: 4097,
         };
         let mut query_set = std::ptr::null();
         test.assert_device_error_after(

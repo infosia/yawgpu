@@ -8,7 +8,6 @@ use crate::common::create_query_set;
 const MAX_QUERY_COUNT: u32 = 4096;
 
 #[test]
-#[ignore = "core currently rejects count=0 query sets; CTS expects only count > 4096 to fail"]
 fn count() {
     for query_type in [
         native::WGPUQueryType_Occlusion,

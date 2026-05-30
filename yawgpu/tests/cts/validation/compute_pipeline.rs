@@ -554,7 +554,6 @@ var<workgroup> vec4_data: array<vec4<f32>, a>;
 }
 
 #[test]
-#[ignore = "core does not yet reject explicit compute pipeline layout/shader resource mismatches for missing bindings, visibility mismatch, or binding type mismatch"]
 fn resource_compatibility() {
     let test = ValidationTest::new();
     unsafe {
@@ -593,7 +592,6 @@ fn resource_compatibility() {
 }
 
 #[test]
-#[ignore = "core does not yet validate the full CTS resource compatibility matrix for sampled textures, storage buffers, and storage textures at createComputePipeline"]
 fn resource_compatibility_full_matrix_gaps() {
     let test = ValidationTest::new();
     unsafe {

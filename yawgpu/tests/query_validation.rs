@@ -42,10 +42,7 @@ fn query_set_count_is_validated() {
         assert!(!query_set.is_null());
         yawgpu::wgpuQuerySetRelease(query_set);
 
-        let mut query_set = std::ptr::null();
-        assert_device_error!({
-            query_set = create_query_set(test.device(), native::WGPUQueryType_Occlusion, 0);
-        });
+        let query_set = create_query_set(test.device(), native::WGPUQueryType_Occlusion, 0);
         assert!(!query_set.is_null());
         assert_eq!(yawgpu::wgpuQuerySetGetCount(query_set), 0);
         yawgpu::wgpuQuerySetRelease(query_set);

@@ -1,7 +1,7 @@
 use std::os::raw::c_void;
 
 use yawgpu::native;
-use yawgpu_test::{assert_device_error, ValidationTest};
+use yawgpu_test::ValidationTest;
 
 #[derive(Clone, Copy)]
 pub struct PipelineConstantInput<'a> {
@@ -81,11 +81,14 @@ pub unsafe fn assert_compute_pipeline_error(
         assert!(pipeline.is_null());
     } else {
         let mut pipeline = std::ptr::null();
-        assert_device_error!({
-            pipeline = unsafe {
-                create_compute_pipeline(test, false, source, entry_point, constants, layout)
-            };
-        });
+        test.assert_device_error_after(
+            || {
+                pipeline = unsafe {
+                    create_compute_pipeline(test, false, source, entry_point, constants, layout)
+                };
+            },
+            None,
+        );
         assert!(!pipeline.is_null());
         unsafe {
             yawgpu::wgpuComputePipelineRelease(pipeline);
@@ -229,19 +232,22 @@ pub unsafe fn assert_render_pipeline_error(
         assert!(pipeline.is_null());
     } else {
         let mut pipeline = std::ptr::null();
-        assert_device_error!({
-            pipeline = unsafe {
-                create_render_pipeline(
-                    test,
-                    false,
-                    vertex_source,
-                    vertex_entry,
-                    fragment,
-                    layout,
-                    depth_stencil,
-                )
-            };
-        });
+        test.assert_device_error_after(
+            || {
+                pipeline = unsafe {
+                    create_render_pipeline(
+                        test,
+                        false,
+                        vertex_source,
+                        vertex_entry,
+                        fragment,
+                        layout,
+                        depth_stencil,
+                    )
+                };
+            },
+            None,
+        );
         assert!(!pipeline.is_null());
         unsafe {
             yawgpu::wgpuRenderPipelineRelease(pipeline);
@@ -273,9 +279,13 @@ pub unsafe fn assert_render_pipeline_descriptor(
         assert!(pipeline.is_null());
     } else {
         let mut pipeline = std::ptr::null();
-        assert_device_error!({
-            pipeline = unsafe { create_render_pipeline_from_descriptor(test, false, descriptor) };
-        });
+        test.assert_device_error_after(
+            || {
+                pipeline =
+                    unsafe { create_render_pipeline_from_descriptor(test, false, descriptor) };
+            },
+            None,
+        );
         assert!(!pipeline.is_null());
         unsafe {
             yawgpu::wgpuRenderPipelineRelease(pipeline);

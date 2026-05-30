@@ -774,7 +774,13 @@ unsafe fn pipeline_layout_cache_key(
         std::slice::from_raw_parts(descriptor.bindGroupLayouts, descriptor.bindGroupLayoutCount)
             .iter()
             .copied()
-            .map(|layout| (!layout.is_null()).then_some(layout as usize))
+            .map(|layout| {
+                (!layout.is_null()).then(|| {
+                    let layout =
+                        borrow_handle::<WGPUBindGroupLayoutImpl>(layout, "WGPUBindGroupLayout");
+                    Arc::as_ptr(&layout._core) as usize
+                })
+            })
             .collect::<Option<Vec<_>>>()?
     };
     Some(PipelineLayoutCacheKey {
@@ -783,11 +789,13 @@ unsafe fn pipeline_layout_cache_key(
     })
 }
 
-fn layout_identity(layout: native::WGPUPipelineLayout) -> PipelineLayoutIdentity {
+unsafe fn layout_identity(layout: native::WGPUPipelineLayout) -> PipelineLayoutIdentity {
     if layout.is_null() {
         PipelineLayoutIdentity::Auto
     } else {
-        PipelineLayoutIdentity::Explicit(layout as usize)
+        let layout =
+            unsafe { borrow_handle::<WGPUPipelineLayoutImpl>(layout, "WGPUPipelineLayout") };
+        PipelineLayoutIdentity::Explicit(Arc::as_ptr(&layout._core) as usize)
     }
 }
 
@@ -804,7 +812,7 @@ unsafe fn compute_pipeline_cache_key(
             descriptor.compute.constantCount,
             descriptor.compute.constants,
         )?,
-        layout: layout_identity(descriptor.layout),
+        layout: unsafe { layout_identity(descriptor.layout) },
     })
 }
 
@@ -815,7 +823,7 @@ unsafe fn render_pipeline_cache_key(
         return None;
     }
     Some(RenderPipelineCacheKey {
-        layout: layout_identity(descriptor.layout),
+        layout: unsafe { layout_identity(descriptor.layout) },
         vertex: RenderStageCacheKey {
             module: descriptor.vertex.module as usize,
             entry_point: cache_string_view(descriptor.vertex.entryPoint),
@@ -1833,13 +1841,17 @@ fn get_pipeline_bind_group_layout(
         );
         return error_bind_group_layout_handle(device, instance);
     };
-    let Some(layout) = layouts.get(index) else {
+    if group_index >= device.limits().max_bind_groups {
         device.dispatch_error(
             core::ErrorKind::Validation,
             "pipeline bind group layout index is out of range",
         );
         return error_bind_group_layout_handle(device, instance);
-    };
+    }
+    let layout = layouts
+        .get(index)
+        .cloned()
+        .unwrap_or_else(|| Arc::new(core::BindGroupLayout::empty_default()));
 
     let mut handles = handles
         .lock()
@@ -1849,7 +1861,7 @@ fn get_pipeline_bind_group_layout(
     }
     let handle = handles[index].get_or_insert_with(|| {
         Arc::new(WGPUBindGroupLayoutImpl {
-            _core: Arc::clone(layout),
+            _core: Arc::clone(&layout),
             _device: Arc::clone(device),
             _instance: Arc::clone(instance),
         })
@@ -3814,7 +3826,7 @@ mod tests {
         unsafe {
             let (instance, adapter, device) = noop_chain();
             wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
-            let bad_query_descriptor = query_set_descriptor(0);
+            let bad_query_descriptor = query_set_descriptor(4097);
             let bad_query = wgpuDeviceCreateQuerySet(device, &bad_query_descriptor);
             assert!(!bad_query.is_null());
 
@@ -3906,7 +3918,7 @@ mod tests {
             let query_set = wgpuDeviceCreateQuerySet(device, &query_desc);
             assert!(!query_set.is_null());
             wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
-            let bad_query_desc = query_set_descriptor(0);
+            let bad_query_desc = query_set_descriptor(4097);
             let bad_query = wgpuDeviceCreateQuerySet(device, &bad_query_desc);
             assert_validation_error_contains(instance, device, "query set count");
 
@@ -4906,11 +4918,17 @@ mod tests {
 
             let layout = wgpuComputePipelineGetBindGroupLayout(pipeline, 0);
             assert!(!layout.is_null());
+            let empty_layout = wgpuComputePipelineGetBindGroupLayout(pipeline, 1);
+            assert!(!empty_layout.is_null());
             wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
-            let bad_layout = wgpuComputePipelineGetBindGroupLayout(pipeline, 1);
+            let bad_layout = wgpuComputePipelineGetBindGroupLayout(
+                pipeline,
+                core::Limits::DEFAULT.max_bind_groups,
+            );
             assert_validation_error_contains(instance, device, "bind group layout index");
 
             wgpuBindGroupLayoutRelease(bad_layout);
+            wgpuBindGroupLayoutRelease(empty_layout);
             wgpuBindGroupLayoutRelease(layout);
             drop(pipeline_arc);
             wgpuComputePipelineRelease(pipeline);
@@ -4937,11 +4955,17 @@ mod tests {
 
             let layout = wgpuRenderPipelineGetBindGroupLayout(pipeline, 0);
             assert!(!layout.is_null());
+            let empty_layout = wgpuRenderPipelineGetBindGroupLayout(pipeline, 1);
+            assert!(!empty_layout.is_null());
             wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
-            let bad_layout = wgpuRenderPipelineGetBindGroupLayout(pipeline, 1);
+            let bad_layout = wgpuRenderPipelineGetBindGroupLayout(
+                pipeline,
+                core::Limits::DEFAULT.max_bind_groups,
+            );
             assert_validation_error_contains(instance, device, "bind group layout index");
 
             wgpuBindGroupLayoutRelease(bad_layout);
+            wgpuBindGroupLayoutRelease(empty_layout);
             wgpuBindGroupLayoutRelease(layout);
             drop(pipeline_arc);
             wgpuRenderPipelineRelease(pipeline);

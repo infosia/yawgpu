@@ -7,7 +7,6 @@ use crate::common::{create_bind_group_layout, create_pipeline_layout, uniform_la
 use crate::render_common::{expect_render_pipeline, RenderPipelineCase, FRAGMENT_COLOR};
 
 #[test]
-#[ignore = "core does not yet reject every CTS render pipeline layout/shader resource mismatch; CTS expects explicit layout resources to match shader resources by binding type, visibility, and binding number"]
 fn resource_compatibility() {
     let test = ValidationTest::new();
     unsafe {
