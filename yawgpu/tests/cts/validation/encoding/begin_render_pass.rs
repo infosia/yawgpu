@@ -10,7 +10,6 @@ use crate::common::{
 };
 
 #[test]
-#[ignore = "core does not yet validate render pass color attachment view/resolveTarget device ownership; CTS expects mismatched-device attachments to fail"]
 fn color_attachments_device_mismatch() {
     let test = ValidationTest::new();
     let foreign = ValidationTest::new();
@@ -85,7 +84,6 @@ fn color_attachments_device_mismatch() {
 }
 
 #[test]
-#[ignore = "core does not yet validate render pass depth-stencil attachment view device ownership; CTS expects mismatched-device attachments to fail"]
 fn depth_stencil_attachment_device_mismatch() {
     let test = ValidationTest::new();
     let foreign = ValidationTest::new();
@@ -112,7 +110,6 @@ fn depth_stencil_attachment_device_mismatch() {
 }
 
 #[test]
-#[ignore = "core does not yet validate render pass occlusionQuerySet device ownership; CTS expects a mismatched-device query set to fail"]
 fn occlusion_query_set_device_mismatch() {
     let test = ValidationTest::new();
     let foreign = ValidationTest::new();
@@ -146,7 +143,6 @@ fn occlusion_query_set_device_mismatch() {
 }
 
 #[test]
-#[ignore = "core does not yet validate render pass timestampWrites querySet device ownership; CTS expects a mismatched-device query set to fail"]
 fn timestamp_query_set_device_mismatch() {
     let test = ValidationTest::with_features(&[native::WGPUFeatureName_TimestampQuery]);
     let foreign = ValidationTest::with_features(&[native::WGPUFeatureName_TimestampQuery]);

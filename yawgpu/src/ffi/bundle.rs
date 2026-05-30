@@ -13,6 +13,15 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetPipeline(
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
     let pipeline = clone_handle(pipeline, "WGPURenderPipeline");
+    if !pipeline._device.same(&encoder.device) {
+        dispatch_optional_error(
+            &encoder.device,
+            encoder.core.record_validation_error(
+                "render pipeline must belong to the render bundle encoder device",
+            ),
+        );
+        return;
+    }
     dispatch_optional_error(
         &encoder.device,
         encoder.core.set_pipeline(Arc::clone(&pipeline._core)),
@@ -38,6 +47,17 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetBindGroup(
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
     let group =
         (!group.is_null()).then(|| clone_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
+    if let Some(group) = group.as_ref() {
+        if !group._device.same(&encoder.device) {
+            dispatch_optional_error(
+                &encoder.device,
+                encoder.core.record_validation_error(
+                    "bind group must belong to the render bundle encoder device",
+                ),
+            );
+            return;
+        }
+    }
     let offsets = dynamic_offsets_slice(dynamic_offset_count, dynamic_offsets);
     dispatch_optional_error(
         &encoder.device,
@@ -66,6 +86,17 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetVertexBuffer(
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
     let buffer = (!buffer.is_null()).then(|| clone_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer"));
+    if let Some(buffer) = buffer.as_ref() {
+        if !buffer.device.same(&encoder.device) {
+            dispatch_optional_error(
+                &encoder.device,
+                encoder.core.record_validation_error(
+                    "vertex buffer must belong to the render bundle encoder device",
+                ),
+            );
+            return;
+        }
+    }
     dispatch_optional_error(
         &encoder.device,
         encoder.core.set_vertex_buffer(
@@ -94,6 +125,15 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetIndexBuffer(
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
     let buffer = clone_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer");
+    if !buffer.device.same(&encoder.device) {
+        dispatch_optional_error(
+            &encoder.device,
+            encoder.core.record_validation_error(
+                "index buffer must belong to the render bundle encoder device",
+            ),
+        );
+        return;
+    }
     dispatch_optional_error(
         &encoder.device,
         encoder.core.set_index_buffer(
@@ -175,6 +215,15 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndirect(
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
     let indirect_buffer = clone_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
+    if !indirect_buffer.device.same(&encoder.device) {
+        dispatch_optional_error(
+            &encoder.device,
+            encoder.core.record_validation_error(
+                "indirect buffer must belong to the render bundle encoder device",
+            ),
+        );
+        return;
+    }
     dispatch_optional_error(
         &encoder.device,
         encoder.core.draw_indirect(
@@ -199,6 +248,15 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndexedIndirect(
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
     let indirect_buffer = clone_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
+    if !indirect_buffer.device.same(&encoder.device) {
+        dispatch_optional_error(
+            &encoder.device,
+            encoder.core.record_validation_error(
+                "indirect buffer must belong to the render bundle encoder device",
+            ),
+        );
+        return;
+    }
     dispatch_optional_error(
         &encoder.device,
         encoder.core.draw_indexed_indirect(

@@ -67,7 +67,6 @@ fn timestamp_writes_query_index() {
 }
 
 #[test]
-#[ignore = "core does not yet validate compute pass timestampWrites querySet device ownership; CTS expects a mismatched-device query set to fail"]
 fn timestamp_query_set_device_mismatch() {
     let test = ValidationTest::with_features(&[native::WGPUFeatureName_TimestampQuery]);
     let foreign = ValidationTest::with_features(&[native::WGPUFeatureName_TimestampQuery]);

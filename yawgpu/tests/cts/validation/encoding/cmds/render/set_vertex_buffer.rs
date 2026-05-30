@@ -78,7 +78,6 @@ fn vertex_buffer_state() {
 }
 
 #[test]
-#[ignore = "render bundle setVertexBuffer does not validate buffer device ownership; CTS expects mismatched-device vertex buffers to fail"]
 fn vertex_buffer_device_mismatch() {
     let test = ValidationTest::new();
     let foreign = ValidationTest::new();

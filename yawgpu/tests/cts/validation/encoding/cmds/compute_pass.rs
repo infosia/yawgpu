@@ -145,7 +145,6 @@ fn indirect_dispatch_buffer_state() {
 }
 
 #[test]
-#[ignore = "compute pass dispatchWorkgroupsIndirect does not validate indirect buffer device ownership; CTS expects mismatched-device indirect buffers to fail"]
 fn indirect_dispatch_buffer_device_mismatch() {
     let test = ValidationTest::new();
     let other = ValidationTest::new();

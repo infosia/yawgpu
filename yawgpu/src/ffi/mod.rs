@@ -4838,6 +4838,50 @@ mod tests {
     }
 
     #[test]
+    fn record_time_entry_points_reject_mismatched_device_resources() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let other = request_noop_device(instance, adapter);
+
+            let foreign_layout_desc = bind_group_layout_descriptor();
+            let foreign_layout = wgpuDeviceCreateBindGroupLayout(other, &foreign_layout_desc);
+            let bind_group_desc = bind_group_descriptor(foreign_layout);
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let bind_group = wgpuDeviceCreateBindGroup(device, &bind_group_desc);
+            assert_validation_error_contains(instance, device, "bind group layout");
+
+            let foreign_buffer_desc = buffer_descriptor(native::WGPUBufferUsage_CopyDst, 4);
+            let foreign_buffer = wgpuDeviceCreateBuffer(other, &foreign_buffer_desc);
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            wgpuCommandEncoderClearBuffer(encoder, foreign_buffer, 0, 4);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert_validation_error_contains(instance, device, "clear buffer");
+
+            let vertex_desc = buffer_descriptor(native::WGPUBufferUsage_Vertex, 16);
+            let foreign_vertex = wgpuDeviceCreateBuffer(other, &vertex_desc);
+            let formats = [native::WGPUTextureFormat_RGBA8Unorm];
+            let bundle_desc = render_bundle_encoder_descriptor(&formats);
+            let bundle_encoder = wgpuDeviceCreateRenderBundleEncoder(device, &bundle_desc);
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            wgpuRenderBundleEncoderSetVertexBuffer(bundle_encoder, 0, foreign_vertex, 0, 16);
+            let bundle = wgpuRenderBundleEncoderFinish(bundle_encoder, std::ptr::null());
+            assert_validation_error_contains(instance, device, "vertex buffer");
+
+            wgpuRenderBundleRelease(bundle);
+            wgpuRenderBundleEncoderRelease(bundle_encoder);
+            wgpuBufferRelease(foreign_vertex);
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuCommandEncoderRelease(encoder);
+            wgpuBufferRelease(foreign_buffer);
+            wgpuBindGroupRelease(bind_group);
+            wgpuBindGroupLayoutRelease(foreign_layout);
+            wgpuDeviceRelease(other);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
     fn wgpuComputePipeline_get_bind_group_layout_release_addref() {
         unsafe {
             let (instance, adapter, device) = noop_chain();

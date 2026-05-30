@@ -494,7 +494,6 @@ fn texture_resource_state() {
 }
 
 #[test]
-#[ignore = "core bind group layouts do not retain their owner device; CTS expects createBindGroup with a layout from another device to fail"]
 fn bind_group_layout_device_mismatch() {
     let test = ValidationTest::new();
     unsafe {

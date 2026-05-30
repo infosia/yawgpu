@@ -36,7 +36,6 @@ fn state_and_binding_index() {
 }
 
 #[test]
-#[ignore = "render bundle setBindGroup does not validate bind group device ownership; CTS expects all programmable encoders to reject mismatched-device bind groups"]
 fn bind_group_device_mismatch() {
     let test = ValidationTest::new();
     let other = ValidationTest::new();
