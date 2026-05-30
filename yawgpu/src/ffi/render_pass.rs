@@ -485,6 +485,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetBindGroup(
             group_index,
             group.map(|group| Arc::clone(&group._core)),
             offsets,
+            pass.device.limits(),
         ),
     );
 }

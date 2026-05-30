@@ -121,6 +121,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderSetBindGroup(
             group_index,
             group.map(|group| Arc::clone(&group._core)),
             offsets,
+            pass.device.limits(),
         ),
     );
 }

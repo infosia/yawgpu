@@ -12,7 +12,6 @@ const ENCODE_TYPES: [RenderEncodeType; 2] =
     [RenderEncodeType::RenderPass, RenderEncodeType::RenderBundle];
 
 #[test]
-#[ignore = "core validates error render pipelines at draw time rather than setPipeline/finish; CTS expects setPipeline with an invalid pipeline to fail"]
 fn invalid_pipeline() {
     let test = ValidationTest::new();
     unsafe {

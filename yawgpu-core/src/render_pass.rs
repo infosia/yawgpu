@@ -134,6 +134,9 @@ impl RenderPassEncoder {
     /// Sets pipeline on this object or encoder.
     pub fn set_pipeline(&self, pipeline: Arc<RenderPipeline>) -> Option<String> {
         self.inner.record_pass_command(|state| {
+            if pipeline.is_error() {
+                return Err("render pass requires a valid render pipeline".to_owned());
+            }
             state.render_pipeline = Some(pipeline);
             Ok(())
         })
@@ -150,8 +153,10 @@ impl RenderPassEncoder {
         index: u32,
         group: Option<Arc<BindGroup>>,
         dynamic_offsets: Vec<u32>,
+        limits: Limits,
     ) -> Option<String> {
         self.inner.record_pass_command(|state| {
+            validate_set_bind_group(index, group.as_deref(), &dynamic_offsets, limits)?;
             if let Some(group) = group {
                 self.inner
                     .parent
@@ -344,17 +349,20 @@ impl RenderPassEncoder {
         min_depth: f32,
         max_depth: f32,
     ) -> Option<String> {
-        self.inner
-            .record_pass_command(|_| validate_viewport(x, y, width, height, min_depth, max_depth))
+        self.inner.record_pass_command(|state| {
+            validate_viewport(x, y, width, height, min_depth, max_depth)?;
+            validate_viewport_bounds(x, y, width, height, state.limits)
+        })
     }
 
     /// Sets scissor rect on this object or encoder.
     pub fn set_scissor_rect(&self, x: u32, y: u32, width: u32, height: u32) -> Option<String> {
-        self.inner.record_pass_command(|_| {
+        self.inner.record_pass_command(|state| {
             x.checked_add(width)
                 .ok_or_else(|| "render pass scissor rectangle width overflows".to_owned())?;
             y.checked_add(height)
                 .ok_or_else(|| "render pass scissor rectangle height overflows".to_owned())?;
+            validate_scissor_rect(state.render_extent, x, y, width, height)?;
             Ok(())
         })
     }
@@ -490,7 +498,10 @@ mod tests {
         assert_eq!(begin_error, None);
 
         assert_eq!(pass.set_pipeline(pipeline), None);
-        assert_eq!(pass.set_bind_group(0, Some(bind_group), Vec::new()), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
         assert_eq!(
             pass.set_vertex_buffer(0, Some(vertex_buffer), 0, 16, device.limits()),
             None
@@ -571,7 +582,10 @@ mod tests {
             encoder.begin_render_pass(&noop_render_pass_descriptor(view, Some(query_set)));
         assert_eq!(begin_error, None);
 
-        assert_eq!(pass.set_viewport(0.0, 0.0, 4.0, 4.0, 0.0, 1.0), None);
+        assert_eq!(
+            pass.set_viewport(0.0, 0.0, 4.0, 4.0, 0.0, 1.0),
+            None
+        );
         assert_eq!(pass.set_scissor_rect(0, 0, 4, 4), None);
         assert_eq!(
             pass.set_blend_constant(Color {
@@ -591,5 +605,100 @@ mod tests {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
+    }
+
+    #[test]
+    fn render_pass_encoder_rejects_error_pipeline_at_set_pipeline() {
+        let device = noop_device();
+        let module = render_shader_module(&device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.error = Some("forced render pipeline error".to_owned());
+        let pipeline = Arc::new(device.create_render_pipeline(descriptor));
+        assert!(pipeline.is_error());
+
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("render pass requires a valid render pipeline".to_owned())
+        );
+    }
+
+    #[test]
+    fn render_pass_encoder_rejects_bind_group_index_at_set_bind_group() {
+        let device = noop_device();
+        let bind_group = empty_bind_group(&device);
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(
+            pass.set_bind_group(
+                device.limits().max_bind_groups,
+                Some(bind_group),
+                Vec::new(),
+                device.limits()
+            ),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("bind group index exceeds the device limit".to_owned())
+        );
+    }
+
+    #[test]
+    fn render_pass_encoder_rejects_viewport_and_scissor_out_of_bounds() {
+        let device = noop_device();
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        let max = device.limits().max_texture_dimension_2d as f32;
+        assert_eq!(
+            pass.set_viewport(max, 0.0, 1.0, 1.0, 0.0, 1.0),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("render pass viewport rectangle exceeds device bounds".to_owned())
+        );
+
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_scissor_rect(1, 0, 4, 4), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("render pass scissor rectangle exceeds attachment size".to_owned())
+        );
     }
 }

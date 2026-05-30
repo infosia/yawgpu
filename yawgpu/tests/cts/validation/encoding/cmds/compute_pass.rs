@@ -9,7 +9,6 @@ use crate::common::{
 };
 
 #[test]
-#[ignore = "core accepts an error compute pipeline in setPipeline and reports it only when dispatch validates pipeline state; CTS expects setPipeline with an invalid pipeline to fail"]
 fn set_pipeline() {
     let test = ValidationTest::new();
     unsafe {

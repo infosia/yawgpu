@@ -37,6 +37,9 @@ impl ComputePassEncoder {
     /// Sets pipeline on this object or encoder.
     pub fn set_pipeline(&self, pipeline: Arc<ComputePipeline>) -> Option<String> {
         self.inner.record_pass_command(|state| {
+            if pipeline.is_error() {
+                return Err("compute pass requires a valid compute pipeline".to_owned());
+            }
             state.compute_pipeline = Some(pipeline);
             Ok(())
         })
@@ -53,8 +56,10 @@ impl ComputePassEncoder {
         index: u32,
         group: Option<Arc<BindGroup>>,
         dynamic_offsets: Vec<u32>,
+        limits: Limits,
     ) -> Option<String> {
         self.inner.record_pass_command(|state| {
+            validate_set_bind_group(index, group.as_deref(), &dynamic_offsets, limits)?;
             if let Some(group) = group {
                 self.inner
                     .parent
@@ -138,7 +143,13 @@ pub(crate) fn validate_compute_dispatch_state(
 #[cfg(test)]
 mod tests {
 
+    use super::*;
+    use crate::shader::SHADER_STAGE_COMPUTE;
     use crate::test_helpers::*;
+    use crate::{
+        BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindGroupResource,
+        BindingLayoutKind, BufferBindingType,
+    };
 
     #[test]
     fn compute_pass_encoder_lifecycle_and_debug_markers() {
@@ -171,7 +182,10 @@ mod tests {
         assert_eq!(begin_error, None);
 
         assert_eq!(pass.set_pipeline(pipeline), None);
-        assert_eq!(pass.set_bind_group(0, Some(bind_group), Vec::new()), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
         assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
         assert_eq!(
             pass.dispatch_workgroups_indirect(indirect, 0, device.limits()),
@@ -183,5 +197,104 @@ mod tests {
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
         assert_eq!(command_buffer.command_ops().len(), 1);
+    }
+
+    #[test]
+    fn compute_pass_encoder_rejects_error_pipeline_at_set_pipeline() {
+        let device = noop_device();
+        let module = compute_shader_module(&device);
+        let mut descriptor = compute_pipeline_descriptor(module);
+        descriptor.error = Some("forced compute pipeline error".to_owned());
+        let pipeline = Arc::new(device.create_compute_pipeline(descriptor));
+        assert!(pipeline.is_error());
+
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("compute pass requires a valid compute pipeline".to_owned())
+        );
+    }
+
+    #[test]
+    fn compute_pass_encoder_rejects_invalid_bind_group_index_and_dynamic_offsets() {
+        let device = noop_device();
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_COMPUTE,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: 4,
+                }),
+            }],
+            error: None,
+        }));
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::UNIFORM,
+            size: 260,
+            mapped_at_creation: false,
+        }));
+        let bind_group = Arc::new(device.create_bind_group(
+            layout,
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::Buffer {
+                    buffer,
+                    device: Arc::new(device.clone()),
+                    offset: 0,
+                    size: 4,
+                },
+            }],
+        ));
+        assert!(!bind_group.is_error());
+
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+
+        assert_eq!(
+            pass.set_bind_group(
+                device.limits().max_bind_groups,
+                Some(Arc::clone(&bind_group)),
+                vec![256],
+                device.limits()
+            ),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("bind group index exceeds the device limit".to_owned())
+        );
+
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), vec![32], device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("bind group dynamic offset is not aligned".to_owned())
+        );
     }
 }

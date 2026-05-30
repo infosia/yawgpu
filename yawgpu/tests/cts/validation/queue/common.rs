@@ -711,7 +711,11 @@ pub unsafe fn create_texture_bind_group(
     let layout_entry = native::WGPUBindGroupLayoutEntry {
         nextInChain: std::ptr::null_mut(),
         binding: 0,
-        visibility: native::WGPUShaderStage_Compute | native::WGPUShaderStage_Vertex,
+        visibility: if storage {
+            native::WGPUShaderStage_Compute | native::WGPUShaderStage_Fragment
+        } else {
+            native::WGPUShaderStage_Compute | native::WGPUShaderStage_Vertex
+        },
         bindingArraySize: 0,
         buffer: native::WGPUBufferBindingLayout {
             nextInChain: std::ptr::null_mut(),

@@ -100,6 +100,8 @@ impl RenderBundleEncoder {
                         first_error: None,
                         pass_state: PassEncoderState::new(
                             Some(attachment_signature),
+                            None,
+                            limits,
                             Vec::new(),
                             None,
                             None,
@@ -207,8 +209,10 @@ impl RenderBundleEncoder {
         index: u32,
         group: Option<Arc<BindGroup>>,
         dynamic_offsets: Vec<u32>,
+        limits: Limits,
     ) -> Option<String> {
         self.record_bundle_command(|state| {
+            validate_set_bind_group(index, group.as_deref(), &dynamic_offsets, limits)?;
             if let Some(group) = group {
                 state.bind_groups.insert(
                     index,
@@ -533,7 +537,7 @@ mod tests {
         assert_eq!(bundle_encoder.pop_debug_group(), None);
         assert_eq!(bundle_encoder.set_pipeline(pipeline), None);
         assert_eq!(
-            bundle_encoder.set_bind_group(0, Some(bind_group), Vec::new()),
+            bundle_encoder.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
             None
         );
         assert_eq!(
@@ -607,5 +611,53 @@ mod tests {
 
         assert_eq!(error.as_deref(), Some("bundle device mismatch"));
         assert!(bundle.is_error());
+    }
+
+    #[test]
+    fn render_bundle_encoder_rejects_invalid_bind_group_state() {
+        let device = noop_device();
+        let bind_group = empty_bind_group(&device);
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
+        assert_eq!(error, None);
+
+        assert_eq!(
+            bundle_encoder.set_bind_group(
+                device.limits().max_bind_groups,
+                Some(bind_group),
+                Vec::new(),
+                device.limits()
+            ),
+            None
+        );
+        let (bundle, error) = bundle_encoder.finish();
+
+        assert!(bundle.is_error());
+        assert_eq!(
+            error,
+            Some("bind group index exceeds the device limit".to_owned())
+        );
+
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
+        assert_eq!(error, None);
+
+        assert_eq!(
+            bundle_encoder.set_bind_group(0, None, vec![0], device.limits()),
+            None
+        );
+        let (bundle, error) = bundle_encoder.finish();
+
+        assert!(bundle.is_error());
+        assert_eq!(
+            error,
+            Some("clearing a bind group must not include dynamic offsets".to_owned())
+        );
     }
 }
