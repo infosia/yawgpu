@@ -13,13 +13,20 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginRenderPass(
     descriptor: *const native::WGPURenderPassDescriptor,
 ) -> native::WGPURenderPassEncoder {
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
-    let descriptor = descriptor
+    let native_descriptor = descriptor
         .as_ref()
         .expect("WGPURenderPassDescriptor must not be null");
-    let descriptor =
-        map_render_pass_descriptor(descriptor, encoder.device.limits().max_color_attachments);
+    let descriptor = map_render_pass_descriptor(
+        native_descriptor,
+        encoder.device.limits().max_color_attachments,
+    );
     let (pass, error) = encoder.core.begin_render_pass(&descriptor);
     dispatch_optional_error(&encoder.device, error);
+    if let Some(message) =
+        validate_render_pass_descriptor_devices(native_descriptor, &encoder.device)
+    {
+        dispatch_optional_error(&encoder.device, pass.record_validation_error(message));
+    }
     arc_to_handle(Arc::new(WGPURenderPassEncoderImpl {
         core: Arc::new(pass),
         device: Arc::clone(&encoder.device),
@@ -45,18 +52,28 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginComputePass(
         .as_ref()
         .and_then(|descriptor| descriptor.timestampWrites.as_ref())
     {
-        let timestamp_writes = map_render_pass_timestamp_writes(timestamp_writes);
-        if let Some(index) = timestamp_writes.beginning_index {
-            let error = encoder
-                .core
-                .write_timestamp(Arc::new(timestamp_writes.query_set.clone()), index);
-            dispatch_optional_error(&encoder.device, error);
-        }
-        if let Some(index) = timestamp_writes.end_index {
-            let error = encoder
-                .core
-                .write_timestamp(Arc::new(timestamp_writes.query_set), index);
-            dispatch_optional_error(&encoder.device, error);
+        let query_set = clone_handle(timestamp_writes.querySet, "WGPUQuerySet");
+        if !query_set._device.same(&encoder.device) {
+            dispatch_optional_error(
+                &encoder.device,
+                encoder.core.record_validation_error(
+                    "compute pass timestamp query set must belong to the command encoder device",
+                ),
+            );
+        } else {
+            let timestamp_writes = map_render_pass_timestamp_writes(timestamp_writes);
+            if let Some(index) = timestamp_writes.beginning_index {
+                let error = encoder
+                    .core
+                    .write_timestamp(Arc::new(timestamp_writes.query_set.clone()), index);
+                dispatch_optional_error(&encoder.device, error);
+            }
+            if let Some(index) = timestamp_writes.end_index {
+                let error = encoder
+                    .core
+                    .write_timestamp(Arc::new(timestamp_writes.query_set), index);
+                dispatch_optional_error(&encoder.device, error);
+            }
         }
     }
     let (pass, error) = encoder.core.begin_compute_pass();
@@ -221,6 +238,15 @@ pub unsafe extern "C" fn wgpuCommandEncoderClearBuffer(
 ) {
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
     let buffer = clone_handle(buffer, "WGPUBuffer");
+    if !buffer.device.same(&encoder.device) {
+        dispatch_optional_error(
+            &encoder.device,
+            encoder
+                .core
+                .record_validation_error("clear buffer must belong to the command encoder device"),
+        );
+        return;
+    }
     dispatch_optional_error(
         &encoder.device,
         encoder
@@ -306,6 +332,15 @@ pub unsafe extern "C" fn wgpuCommandEncoderResolveQuerySet(
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
     let query_set = clone_handle(query_set, "WGPUQuerySet");
     let destination = clone_handle(destination, "WGPUBuffer");
+    if !query_set._device.same(&encoder.device) || !destination.device.same(&encoder.device) {
+        dispatch_optional_error(
+            &encoder.device,
+            encoder.core.record_validation_error(
+                "query set and destination buffer must belong to the command encoder device",
+            ),
+        );
+        return;
+    }
     dispatch_optional_error(
         &encoder.device,
         encoder.core.resolve_query_set(
@@ -468,6 +503,17 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToTexture(
         .expect("wgpuCommandEncoderCopyTextureToTexture copySize must not be null");
     let source_texture = clone_handle(source.texture, "WGPUTexture");
     let destination_texture = clone_handle(destination.texture, "WGPUTexture");
+    if !source_texture.device.same(&encoder.device)
+        || !destination_texture.device.same(&encoder.device)
+    {
+        dispatch_optional_error(
+            &encoder.device,
+            encoder
+                .core
+                .record_validation_error("copy textures must belong to the command encoder device"),
+        );
+        return;
+    }
     let (source_mip_level, source_origin, source_aspect) =
         map_texel_copy_texture_info_parts(source);
     let (destination_mip_level, destination_origin, destination_aspect) =
@@ -513,4 +559,75 @@ pub unsafe extern "C" fn wgpuCommandEncoderRelease(command_encoder: native::WGPU
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderAddRef(command_encoder: native::WGPUCommandEncoder) {
     add_ref_handle(command_encoder, "WGPUCommandEncoder");
+}
+
+fn validate_render_pass_descriptor_devices(
+    descriptor: &native::WGPURenderPassDescriptor,
+    device: &core::Device,
+) -> Option<String> {
+    let attachments = if descriptor.colorAttachmentCount == 0 {
+        &[][..]
+    } else {
+        unsafe {
+            std::slice::from_raw_parts(descriptor.colorAttachments, descriptor.colorAttachmentCount)
+        }
+    };
+    for attachment in attachments {
+        if !attachment.view.is_null() {
+            let view =
+                unsafe { clone_handle::<WGPUTextureViewImpl>(attachment.view, "WGPUTextureView") };
+            if !view._device.same(device) {
+                return Some(
+                    "render pass color attachment view must belong to the command encoder device"
+                        .to_owned(),
+                );
+            }
+        }
+        if !attachment.resolveTarget.is_null() {
+            let target = unsafe {
+                clone_handle::<WGPUTextureViewImpl>(attachment.resolveTarget, "WGPUTextureView")
+            };
+            if !target._device.same(device) {
+                return Some(
+                    "render pass resolve target must belong to the command encoder device"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    if let Some(depth_stencil) = unsafe { descriptor.depthStencilAttachment.as_ref() } {
+        if !depth_stencil.view.is_null() {
+            let view = unsafe {
+                clone_handle::<WGPUTextureViewImpl>(depth_stencil.view, "WGPUTextureView")
+            };
+            if !view._device.same(device) {
+                return Some(
+                    "render pass depth-stencil attachment view must belong to the command encoder device"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    if !descriptor.occlusionQuerySet.is_null() {
+        let query_set = unsafe {
+            clone_handle::<WGPUQuerySetImpl>(descriptor.occlusionQuerySet, "WGPUQuerySet")
+        };
+        if !query_set._device.same(device) {
+            return Some(
+                "render pass occlusion query set must belong to the command encoder device"
+                    .to_owned(),
+            );
+        }
+    }
+    if let Some(timestamp_writes) = unsafe { descriptor.timestampWrites.as_ref() } {
+        let query_set =
+            unsafe { clone_handle::<WGPUQuerySetImpl>(timestamp_writes.querySet, "WGPUQuerySet") };
+        if !query_set._device.same(device) {
+            return Some(
+                "render pass timestamp query set must belong to the command encoder device"
+                    .to_owned(),
+            );
+        }
+    }
+    None
 }

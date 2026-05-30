@@ -396,10 +396,18 @@ pub unsafe extern "C" fn wgpuDeviceCreateBindGroup(
         .as_ref()
         .expect("WGPUBindGroupDescriptor must not be null");
     let layout = clone_handle(descriptor.layout, "WGPUBindGroupLayout");
-    let bind_group = device.core.create_bind_group(
-        Arc::clone(&layout._core),
-        map_bind_group_entries(descriptor),
-    );
+    let mut entries = map_bind_group_entries(descriptor);
+    if !layout._device.same(&device.core) {
+        entries.push(core::BindGroupEntry {
+            binding: u32::MAX,
+            resource: core::BindGroupResource::Invalid(
+                "bind group layout must belong to the bind group device".to_owned(),
+            ),
+        });
+    }
+    let bind_group = device
+        .core
+        .create_bind_group(Arc::clone(&layout._core), entries);
     arc_to_handle(Arc::new(WGPUBindGroupImpl {
         _core: Arc::new(bind_group),
         _layout: Arc::clone(&layout._core),

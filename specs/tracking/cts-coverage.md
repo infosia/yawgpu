@@ -56,6 +56,13 @@ never a reason to skip a CTS case.
   future_modes, gles_context_backend_chain, instance_smoke,
   label_validation, multiple_device_validation, object_caching_validation,
   pipeline_async_validation, surface_validation, unsafe_api_validation.
+- **Core-gap follow-up #1 (device-ownership) — DONE.** yawgpu now
+  validates resource owner-device at the record-time FFI entry points
+  (createBindGroup BGL; begin{Render,Compute}Pass attachments/query-sets;
+  resolveQuerySet; clearBuffer; copyTextureToTexture; indirect
+  dispatch/draw; render-bundle setPipeline/BindGroup/Vertex/IndexBuffer).
+  15 device-mismatch CTS tests un-ignored → active & passing. (Per-row
+  "device-mismatch ignored" sub-notes below are superseded for these.)
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage

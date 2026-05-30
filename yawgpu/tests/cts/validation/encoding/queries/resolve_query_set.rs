@@ -181,7 +181,6 @@ fn resolve_buffer_oob() {
 }
 
 #[test]
-#[ignore = "command encoder resolveQuerySet does not validate query set or destination buffer device ownership; CTS expects mismatched-device resources to fail"]
 fn query_set_buffer_device_mismatch() {
     let test = ValidationTest::new();
     let other = ValidationTest::new();

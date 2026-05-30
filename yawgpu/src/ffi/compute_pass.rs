@@ -164,6 +164,14 @@ pub unsafe extern "C" fn wgpuComputePassEncoderDispatchWorkgroupsIndirect(
 ) {
     let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
     let indirect_buffer = clone_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
+    if !indirect_buffer.device.same(&pass.device) {
+        dispatch_optional_error(
+            &pass.device,
+            pass.core
+                .record_validation_error("indirect buffer must belong to the compute pass device"),
+        );
+        return;
+    }
     dispatch_optional_error(
         &pass.device,
         pass.core.dispatch_workgroups_indirect(

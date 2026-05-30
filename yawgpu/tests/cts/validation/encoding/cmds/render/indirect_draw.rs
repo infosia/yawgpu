@@ -50,7 +50,6 @@ fn indirect_buffer_state() {
 }
 
 #[test]
-#[ignore = "render pass and render bundle indirect draw commands do not validate indirect buffer device ownership; CTS expects mismatched-device indirect buffers to fail"]
 fn indirect_buffer_device_mismatch() {
     let test = ValidationTest::new();
     let foreign = ValidationTest::new();

@@ -192,6 +192,12 @@ impl RenderBundleEncoder {
         })
     }
 
+    /// Records a validation error against this render bundle encoder.
+    pub fn record_validation_error(&self, message: impl Into<String>) -> Option<String> {
+        let message = message.into();
+        self.record_bundle_command(|_| Err(message))
+    }
+
     /// Sets bind group on this object or encoder.
     pub fn set_bind_group(
         &self,
@@ -571,5 +577,22 @@ mod tests {
         let (bundle, error) = bundle_encoder.finish();
         assert_eq!(error, None);
         assert!(!bundle.is_error());
+    }
+
+    #[test]
+    fn render_bundle_encoder_records_validation_error_for_finish() {
+        let device = noop_device();
+        let (bundle_encoder, error) =
+            RenderBundleEncoder::new(render_bundle_encoder_descriptor(), device.limits());
+        assert_eq!(error, None);
+
+        assert_eq!(
+            bundle_encoder.record_validation_error("bundle device mismatch"),
+            None
+        );
+        let (bundle, error) = bundle_encoder.finish();
+
+        assert_eq!(error.as_deref(), Some("bundle device mismatch"));
+        assert!(bundle.is_error());
     }
 }

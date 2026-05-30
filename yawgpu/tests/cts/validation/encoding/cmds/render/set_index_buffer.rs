@@ -54,7 +54,6 @@ fn index_buffer_state() {
 }
 
 #[test]
-#[ignore = "render bundle setIndexBuffer does not validate buffer device ownership; CTS expects mismatched-device index buffers to fail"]
 fn index_buffer_device_mismatch() {
     let test = ValidationTest::new();
     let foreign = ValidationTest::new();

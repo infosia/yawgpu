@@ -39,7 +39,6 @@ fn copy_with_invalid_or_destroyed_texture() {
 }
 
 #[test]
-#[ignore = "core does not yet validate copyTextureToTexture texture device ownership; CTS expects mismatched-device source or destination textures to fail"]
 fn texture_device_mismatch() {
     let test = ValidationTest::new();
     let foreign = ValidationTest::new();

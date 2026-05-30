@@ -633,6 +633,14 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndirect(
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
     let indirect_buffer = clone_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
+    if !indirect_buffer.device.same(&pass.device) {
+        dispatch_optional_error(
+            &pass.device,
+            pass.core
+                .record_validation_error("indirect buffer must belong to the render pass device"),
+        );
+        return;
+    }
     dispatch_optional_error(
         &pass.device,
         pass.core.draw_indirect(
@@ -657,6 +665,14 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndexedIndirect(
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
     let indirect_buffer = clone_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
+    if !indirect_buffer.device.same(&pass.device) {
+        dispatch_optional_error(
+            &pass.device,
+            pass.core
+                .record_validation_error("indirect buffer must belong to the render pass device"),
+        );
+        return;
+    }
     dispatch_optional_error(
         &pass.device,
         pass.core.draw_indexed_indirect(

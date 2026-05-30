@@ -42,7 +42,6 @@ fn invalid_pipeline() {
 }
 
 #[test]
-#[ignore = "render bundle setPipeline does not validate render pipeline device ownership; CTS expects mismatched-device render pipelines to fail"]
 fn pipeline_device_mismatch() {
     let test = ValidationTest::new();
     let foreign = ValidationTest::new();

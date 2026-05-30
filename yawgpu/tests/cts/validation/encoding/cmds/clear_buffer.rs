@@ -41,7 +41,6 @@ fn buffer_state() {
 }
 
 #[test]
-#[ignore = "core does not yet validate clearBuffer buffer device ownership; CTS expects a mismatched-device buffer to fail"]
 fn buffer_device_mismatch() {
     let test = ValidationTest::new();
     let foreign = ValidationTest::new();
