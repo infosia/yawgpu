@@ -15,6 +15,7 @@ use yawgpu_hal::{
 
 use crate::bind_group_layout::*;
 use crate::compute_pipeline::*;
+use crate::device::FeatureSet;
 use crate::format::*;
 use crate::limits::*;
 use crate::pipeline_layout::*;
@@ -408,12 +409,13 @@ impl RenderPipeline {
         descriptor: RenderPipelineDescriptor,
         is_error: bool,
         limits: Limits,
+        features: &FeatureSet,
         hal_device: Option<&HalDevice>,
     ) -> (Self, Option<String>) {
         let resolved = if is_error {
             None
         } else {
-            resolve_render_pipeline_descriptor(&descriptor, limits, None).ok()
+            resolve_render_pipeline_descriptor(&descriptor, limits, features, None).ok()
         };
         let (vertex_entry_name, fragment_entry_name, bind_group_layouts) =
             resolved.unwrap_or_else(|| {
@@ -477,6 +479,7 @@ impl RenderPipeline {
         descriptor: SubpassRenderPipelineDescriptor,
         is_error: bool,
         limits: Limits,
+        features: &FeatureSet,
         hal_device: Option<&HalDevice>,
     ) -> (Self, Option<String>) {
         let compatibility = SubpassPipelineCompatibility {
@@ -489,6 +492,7 @@ impl RenderPipeline {
             resolve_render_pipeline_descriptor(
                 &descriptor.base,
                 limits,
+                features,
                 Some(
                     &descriptor
                         .pass_layout
@@ -648,8 +652,9 @@ impl RenderPipeline {
 pub(crate) fn validate_render_pipeline_descriptor(
     descriptor: &RenderPipelineDescriptor,
     limits: Limits,
+    features: &FeatureSet,
 ) -> Option<String> {
-    resolve_render_pipeline_descriptor(descriptor, limits, None).err()
+    resolve_render_pipeline_descriptor(descriptor, limits, features, None).err()
 }
 
 /// Alias for resolved render pipeline parts.
@@ -1265,6 +1270,7 @@ pub(crate) fn hal_primitive_topology(topology: PrimitiveTopology) -> HalPrimitiv
 pub(crate) fn resolve_render_pipeline_descriptor(
     descriptor: &RenderPipelineDescriptor,
     limits: Limits,
+    features: &FeatureSet,
     subpass_color_attachment_indices: Option<&[u32]>,
 ) -> Result<ResolvedRenderPipelineParts, String> {
     if let RenderPipelineLayout::Explicit(layout) = &descriptor.layout {
@@ -1303,13 +1309,14 @@ pub(crate) fn resolve_render_pipeline_descriptor(
     validate_primitive_state(descriptor.primitive)?;
     if let Some(depth_stencil) = descriptor.depth_stencil {
         validate_depth_bias_state(descriptor.primitive.topology, depth_stencil)?;
-        validate_depth_stencil_aspects(depth_stencil)?;
+        validate_depth_stencil_aspects(depth_stencil, features)?;
     }
-    validate_fragment_depth_output(descriptor, fragment_entry.as_deref())?;
+    validate_fragment_depth_output(descriptor, fragment_entry.as_deref(), features)?;
     validate_color_targets(
         descriptor,
         fragment_entry.as_deref(),
         limits,
+        features,
         subpass_color_attachment_indices,
     )?;
     validate_render_pipeline_layout(descriptor, &vertex_entry, fragment_entry.as_deref())?;
@@ -1319,6 +1326,7 @@ pub(crate) fn resolve_render_pipeline_descriptor(
         &vertex_entry,
         fragment_entry.as_deref(),
         limits,
+        features,
     )?;
 
     Ok((vertex_entry, fragment_entry, bind_group_layouts))
@@ -1579,8 +1587,9 @@ pub(crate) fn validate_depth_bias_state(
 /// Validates depth stencil aspects and returns a descriptive error on failure.
 pub(crate) fn validate_depth_stencil_aspects(
     depth_stencil: DepthStencilState,
+    features: &FeatureSet,
 ) -> Result<(), String> {
-    let caps = depth_stencil.format.caps();
+    let caps = depth_stencil.format.caps(features);
     let has_depth = caps.is_some_and(|caps| caps.aspects.depth);
     let has_stencil = caps.is_some_and(|caps| caps.aspects.stencil);
 
@@ -1625,6 +1634,7 @@ pub(crate) fn stencil_face_uses_stencil(face: StencilFaceState) -> bool {
 pub(crate) fn validate_fragment_depth_output(
     descriptor: &RenderPipelineDescriptor,
     fragment_entry: Option<&str>,
+    features: &FeatureSet,
 ) -> Result<(), String> {
     let Some(fragment) = &descriptor.fragment else {
         return Ok(());
@@ -1646,7 +1656,7 @@ pub(crate) fn validate_fragment_depth_output(
     if outputs_frag_depth
         && !descriptor
             .depth_stencil
-            .and_then(|state| state.format.caps())
+            .and_then(|state| state.format.caps(features))
             .is_some_and(|caps| caps.aspects.depth)
     {
         return Err("render pipeline frag_depth output requires a depth attachment".to_owned());
@@ -1659,6 +1669,7 @@ pub(crate) fn validate_color_targets(
     descriptor: &RenderPipelineDescriptor,
     fragment_entry: Option<&str>,
     limits: Limits,
+    features: &FeatureSet,
     subpass_color_attachment_indices: Option<&[u32]>,
 ) -> Result<(), String> {
     let Some(fragment) = &descriptor.fragment else {
@@ -1695,7 +1706,7 @@ pub(crate) fn validate_color_targets(
 
         let caps = target
             .format
-            .caps()
+            .caps(features)
             .ok_or_else(|| "render pipeline color target format must be defined".to_owned())?;
         if !caps.renderable {
             return Err("render pipeline color target format must be renderable".to_owned());
@@ -1835,6 +1846,7 @@ pub(crate) fn effective_render_bind_group_layouts(
     vertex_entry: &str,
     fragment_entry: Option<&str>,
     limits: Limits,
+    features: &FeatureSet,
 ) -> Result<Vec<Arc<BindGroupLayout>>, String> {
     match &descriptor.layout {
         RenderPipelineLayout::Explicit(layout) => Ok(layout.bind_group_layouts().to_vec()),
@@ -1853,7 +1865,7 @@ pub(crate) fn effective_render_bind_group_layouts(
                     )?);
                 }
             }
-            derive_bind_group_layouts(requirements, limits)
+            derive_bind_group_layouts(requirements, limits, features)
         }
     }
 }
@@ -2446,19 +2458,34 @@ mod tests {
 
         let subpass_local =
             render_pipeline_descriptor(render_shader_module_with_fragment_location(&device, 0));
-        resolve_render_pipeline_descriptor(&subpass_local, limits, Some(&subpass_slot_one))
-            .expect("subpass-local fragment output should be accepted");
+        resolve_render_pipeline_descriptor(
+            &subpass_local,
+            limits,
+            &device.features(),
+            Some(&subpass_slot_one),
+        )
+        .expect("subpass-local fragment output should be accepted");
 
         let flat_slot =
             render_pipeline_descriptor(render_shader_module_with_fragment_location(&device, 1));
-        resolve_render_pipeline_descriptor(&flat_slot, limits, Some(&subpass_slot_one))
-            .expect("flat-slot fragment output should be accepted");
+        resolve_render_pipeline_descriptor(
+            &flat_slot,
+            limits,
+            &device.features(),
+            Some(&subpass_slot_one),
+        )
+        .expect("flat-slot fragment output should be accepted");
 
         let missing_slot =
             render_pipeline_descriptor(render_shader_module_with_fragment_location(&device, 3));
         assert_eq!(
-            resolve_render_pipeline_descriptor(&missing_slot, limits, Some(&[2]))
-                .expect_err("unmatched fragment output should require writeMask 0"),
+            resolve_render_pipeline_descriptor(
+                &missing_slot,
+                limits,
+                &device.features(),
+                Some(&[2])
+            )
+            .expect_err("unmatched fragment output should require writeMask 0"),
             "render pipeline color target without shader output must use writeMask 0"
         );
     }

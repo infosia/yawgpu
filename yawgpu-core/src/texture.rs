@@ -4,6 +4,7 @@ use parking_lot::Mutex;
 use yawgpu_hal::{HalTexture, HalTextureDescriptor, HalTextureFormat, HalTextureUsage};
 
 use crate::copy::*;
+use crate::device::FeatureSet;
 use crate::extent::*;
 use crate::format::*;
 use crate::limits::*;
@@ -110,6 +111,7 @@ pub(crate) struct TextureInner {
     pub(crate) dimension: TextureDimension,
     pub(crate) size: Extent3d,
     pub(crate) format: TextureFormat,
+    pub(crate) features: FeatureSet,
     pub(crate) mip_level_count: u32,
     pub(crate) sample_count: u32,
     pub(crate) view_formats: Vec<TextureFormat>,
@@ -129,6 +131,7 @@ impl Texture {
         descriptor: TextureDescriptor,
         hal: Option<HalTexture>,
         is_error: bool,
+        features: FeatureSet,
     ) -> Self {
         Self {
             inner: Arc::new(TextureInner {
@@ -137,6 +140,7 @@ impl Texture {
                 dimension: descriptor.dimension,
                 size: descriptor.size,
                 format: descriptor.format,
+                features,
                 mip_level_count: descriptor.mip_level_count,
                 sample_count: descriptor.sample_count,
                 view_formats: descriptor.view_formats,
@@ -151,7 +155,7 @@ impl Texture {
     /// Constructs this object from the backend HAL object.
     #[must_use]
     pub fn from_hal(descriptor: TextureDescriptor, hal: HalTexture) -> Self {
-        Self::new(descriptor, Some(hal), false)
+        Self::new(descriptor, Some(hal), false, FeatureSet::new())
     }
 
     /// Returns the usage.
@@ -176,6 +180,18 @@ impl Texture {
     #[must_use]
     pub fn format(&self) -> TextureFormat {
         self.inner.format
+    }
+
+    /// Returns the texture format capabilities for this texture's device features.
+    #[must_use]
+    pub(crate) fn format_caps(&self) -> Option<FormatCaps> {
+        self.inner.format.caps(&self.inner.features)
+    }
+
+    /// Returns capabilities for a view format using this texture's device features.
+    #[must_use]
+    pub(crate) fn view_format_caps(&self, format: TextureFormat) -> Option<FormatCaps> {
+        format.caps(&self.inner.features)
     }
 
     /// Returns mip level count.
@@ -312,6 +328,7 @@ impl Texture {
 pub(crate) fn validate_texture_descriptor(
     descriptor: &TextureDescriptor,
     limits: Limits,
+    features: &FeatureSet,
 ) -> Option<&'static str> {
     let usage = descriptor.usage;
     let size = descriptor.size;
@@ -397,13 +414,25 @@ pub(crate) fn validate_texture_descriptor(
     {
         return Some("RenderAttachment textures must be 2D");
     }
-    let Some(format_caps) = descriptor.format.caps() else {
+    let Some(format_caps) = descriptor.format.caps(features) else {
         return Some("texture format must not be Undefined");
     };
+    if descriptor.dimension == TextureDimension::D3
+        && descriptor.format.is_bc_compressed()
+        && !features.contains(&crate::adapter::Feature::TextureCompressionBcSliced3d)
+    {
+        return Some("3D BC compressed textures require texture-compression-bc-sliced-3d");
+    }
+    if descriptor.dimension == TextureDimension::D3
+        && descriptor.format.is_astc_compressed()
+        && !features.contains(&crate::adapter::Feature::TextureCompressionAstcSliced3d)
+    {
+        return Some("3D ASTC compressed textures require texture-compression-astc-sliced-3d");
+    }
     if descriptor
         .view_formats
         .iter()
-        .any(|view_format| view_format.caps().is_none())
+        .any(|view_format| view_format.caps(features).is_none())
     {
         return Some("texture viewFormats must not contain Undefined");
     }
@@ -447,7 +476,7 @@ pub(crate) fn validate_queue_write_texture(
         return Err("queue texture write mipLevel is out of range".to_owned());
     }
 
-    let Some(format_caps) = texture.format().caps() else {
+    let Some(format_caps) = texture.format_caps() else {
         return Err("queue texture write format must not be Undefined".to_owned());
     };
     match aspect {
@@ -723,7 +752,7 @@ mod tests {
             TextureUsage::from_bits_retain(TextureUsage::TEXTURE_BINDING.bits() | (1_u64 << 40));
 
         assert_eq!(
-            validate_texture_descriptor(&descriptor, Limits::DEFAULT),
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
             Some("texture usage contains unknown bits")
         );
     }

@@ -599,7 +599,8 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderBundleEncoder(
         descriptor,
         device.core.limits().max_color_attachments,
     );
-    let (encoder, error) = core::RenderBundleEncoder::new(descriptor, device.core.limits());
+    let (encoder, error) =
+        core::RenderBundleEncoder::new(descriptor, device.core.limits(), device.core.features());
     dispatch_optional_error(&device.core, error);
     arc_to_handle(Arc::new(WGPURenderBundleEncoderImpl {
         core: Arc::new(encoder),

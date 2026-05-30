@@ -3,7 +3,6 @@ use yawgpu::native;
 use crate::{common, feature_common};
 
 #[test]
-#[ignore = "core texture format capabilities are not yet keyed to rg11b10ufloat-renderable"]
 fn create_texture() {
     feature_common::assert_noop_advertises_feature(native::WGPUFeatureName_RG11B10UfloatRenderable);
     let test = feature_common::test_with_feature(native::WGPUFeatureName_RG11B10UfloatRenderable);
@@ -20,7 +19,6 @@ fn create_texture() {
 }
 
 #[test]
-#[ignore = "core render pass format capabilities are not yet keyed to rg11b10ufloat-renderable"]
 fn begin_render_pass_single_sampled() {
     let test = feature_common::test_with_feature(native::WGPUFeatureName_RG11B10UfloatRenderable);
     unsafe {
@@ -46,7 +44,6 @@ fn begin_render_pass_single_sampled() {
 }
 
 #[test]
-#[ignore = "core multisample/resolve capabilities are not yet keyed to rg11b10ufloat-renderable"]
 fn begin_render_pass_msaa_and_resolve() {
     let test = feature_common::test_with_feature(native::WGPUFeatureName_RG11B10UfloatRenderable);
     unsafe {
@@ -65,7 +62,6 @@ fn begin_render_pass_msaa_and_resolve() {
 }
 
 #[test]
-#[ignore = "core render bundle format capabilities are not yet keyed to rg11b10ufloat-renderable"]
 fn begin_render_bundle_encoder() {
     let test = feature_common::test_with_feature(native::WGPUFeatureName_RG11B10UfloatRenderable);
     unsafe {
@@ -79,7 +75,6 @@ fn begin_render_bundle_encoder() {
 }
 
 #[test]
-#[ignore = "core render pipeline format capabilities are not yet keyed to rg11b10ufloat-renderable"]
 fn create_render_pipeline() {
     let test = feature_common::test_with_feature(native::WGPUFeatureName_RG11B10UfloatRenderable);
     unsafe {

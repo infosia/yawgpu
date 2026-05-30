@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 use crate::bind_group::*;
 use crate::buffer::*;
 use crate::command_encoder::*;
+use crate::device::FeatureSet;
 use crate::format::*;
 use crate::limits::*;
 use crate::pass::*;
@@ -81,8 +82,10 @@ impl RenderBundleEncoder {
     pub fn new(
         descriptor: RenderBundleEncoderDescriptor,
         limits: Limits,
+        features: FeatureSet,
     ) -> (Self, Option<String>) {
-        let descriptor_error = validate_render_bundle_encoder_descriptor(&descriptor, limits).err();
+        let descriptor_error =
+            validate_render_bundle_encoder_descriptor(&descriptor, limits, &features).err();
         let attachment_signature = descriptor.attachment_signature();
         (
             Self {
@@ -447,6 +450,7 @@ impl RenderBundleEncoderDescriptor {
 pub(crate) fn validate_render_bundle_encoder_descriptor(
     descriptor: &RenderBundleEncoderDescriptor,
     _limits: Limits,
+    features: &FeatureSet,
 ) -> Result<(), String> {
     if descriptor.color_formats.len() > descriptor.max_color_attachments as usize {
         return Err("render bundle colorFormatCount exceeds the device limit".to_owned());
@@ -458,7 +462,7 @@ pub(crate) fn validate_render_bundle_encoder_descriptor(
     let mut has_attachment = descriptor.depth_stencil_format.is_some();
     for color_format in descriptor.color_formats.iter().flatten().copied() {
         has_attachment = true;
-        let Some(caps) = color_format.caps() else {
+        let Some(caps) = color_format.caps(features) else {
             return Err("render bundle color format must be defined".to_owned());
         };
         if !caps.aspects.color || !caps.renderable {
@@ -466,7 +470,7 @@ pub(crate) fn validate_render_bundle_encoder_descriptor(
         }
     }
     if let Some(depth_format) = descriptor.depth_stencil_format {
-        let Some(caps) = depth_format.caps() else {
+        let Some(caps) = depth_format.caps(features) else {
             return Err("render bundle depthStencilFormat must be defined".to_owned());
         };
         if !caps.aspects.depth && !caps.aspects.stencil {
@@ -517,8 +521,11 @@ mod tests {
             size: 16,
             mapped_at_creation: false,
         }));
-        let (bundle_encoder, error) =
-            RenderBundleEncoder::new(render_bundle_encoder_descriptor(), device.limits());
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
         assert_eq!(error, None);
 
         assert_eq!(bundle_encoder.insert_debug_marker(), None);
@@ -557,8 +564,11 @@ mod tests {
             mapped_at_creation: false,
         }));
         let indirect = noop_indirect_buffer(&device);
-        let (bundle_encoder, error) =
-            RenderBundleEncoder::new(render_bundle_encoder_descriptor(), device.limits());
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
         assert_eq!(error, None);
 
         assert_eq!(bundle_encoder.set_pipeline(pipeline), None);
@@ -582,8 +592,11 @@ mod tests {
     #[test]
     fn render_bundle_encoder_records_validation_error_for_finish() {
         let device = noop_device();
-        let (bundle_encoder, error) =
-            RenderBundleEncoder::new(render_bundle_encoder_descriptor(), device.limits());
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
         assert_eq!(error, None);
 
         assert_eq!(

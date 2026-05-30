@@ -4,7 +4,6 @@ use yawgpu_test::ValidationTest;
 use crate::feature_common;
 
 #[test]
-#[ignore = "core does not yet gate optional texture formats by device feature"]
 fn texture_descriptor() {
     let test = ValidationTest::new();
     unsafe {
@@ -18,7 +17,6 @@ fn texture_descriptor() {
 }
 
 #[test]
-#[ignore = "core does not yet gate optional texture view formats by device feature"]
 fn texture_descriptor_view_formats() {
     let test = ValidationTest::new();
     unsafe {
@@ -31,7 +29,6 @@ fn texture_descriptor_view_formats() {
 }
 
 #[test]
-#[ignore = "core does not yet gate optional texture view formats by device feature"]
 fn texture_view_descriptor() {
     let test = ValidationTest::new();
     unsafe {
@@ -44,9 +41,10 @@ fn texture_view_descriptor() {
 }
 
 #[test]
-#[ignore = "Noop does not advertise texture-compression-bc-sliced-3d"]
 fn texture_compression_bc_sliced_3d() {
-    feature_common::assert_noop_lacks_feature(native::WGPUFeatureName_TextureCompressionBCSliced3D);
+    feature_common::assert_noop_advertises_feature(
+        native::WGPUFeatureName_TextureCompressionBCSliced3D,
+    );
     let test =
         feature_common::test_with_feature(native::WGPUFeatureName_TextureCompressionBCSliced3D);
     unsafe {
@@ -62,9 +60,8 @@ fn texture_compression_bc_sliced_3d() {
 }
 
 #[test]
-#[ignore = "Noop does not advertise texture-compression-astc-sliced-3d"]
 fn texture_compression_astc_sliced_3d() {
-    feature_common::assert_noop_lacks_feature(
+    feature_common::assert_noop_advertises_feature(
         native::WGPUFeatureName_TextureCompressionASTCSliced3D,
     );
     let test =
@@ -94,7 +91,6 @@ fn canvas_configuration_view_formats() {
 }
 
 #[test]
-#[ignore = "core does not yet gate storage texture formats by device feature"]
 fn storage_texture_binding_layout() {
     let test = ValidationTest::new();
     unsafe {
@@ -107,7 +103,6 @@ fn storage_texture_binding_layout() {
 }
 
 #[test]
-#[ignore = "core does not yet gate color target formats by device feature"]
 fn color_target_state() {
     let test = ValidationTest::new();
     unsafe {
@@ -119,7 +114,6 @@ fn color_target_state() {
 }
 
 #[test]
-#[ignore = "core does not yet gate depth-stencil formats by device feature"]
 fn depth_stencil_state() {
     let test = ValidationTest::new();
     unsafe {
@@ -132,7 +126,6 @@ fn depth_stencil_state() {
 }
 
 #[test]
-#[ignore = "core does not yet gate render bundle color formats by device feature"]
 fn render_bundle_encoder_descriptor_color_format() {
     let test = ValidationTest::new();
     unsafe {
@@ -145,7 +138,6 @@ fn render_bundle_encoder_descriptor_color_format() {
 }
 
 #[test]
-#[ignore = "core does not yet gate render bundle depth-stencil formats by device feature"]
 fn render_bundle_encoder_descriptor_depth_stencil_format() {
     let test = ValidationTest::new();
     unsafe {
@@ -168,13 +160,13 @@ fn check_capability_guarantees() {
     assert!(feature_common::adapter_has_feature(
         native::WGPUFeatureName_RG11B10UfloatRenderable
     ));
-    assert!(!feature_common::adapter_has_feature(
+    assert!(feature_common::adapter_has_feature(
         native::WGPUFeatureName_TextureCompressionBC
     ));
-    assert!(!feature_common::adapter_has_feature(
+    assert!(feature_common::adapter_has_feature(
         native::WGPUFeatureName_TextureCompressionASTC
     ));
-    assert!(!feature_common::adapter_has_feature(
+    assert!(feature_common::adapter_has_feature(
         native::WGPUFeatureName_Depth32FloatStencil8
     ));
 }

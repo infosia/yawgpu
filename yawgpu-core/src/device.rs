@@ -235,9 +235,9 @@ impl Device {
     #[must_use]
     pub fn create_texture(&self, descriptor: TextureDescriptor) -> Texture {
         if self.is_lost() {
-            return Texture::new(descriptor, None, true);
+            return Texture::new(descriptor, None, true, self.features());
         }
-        let error = validate_texture_descriptor(&descriptor, self.limits());
+        let error = validate_texture_descriptor(&descriptor, self.limits(), &self.inner.features);
         let is_error = error.is_some();
         if let Some(message) = error {
             self.dispatch_error(ErrorKind::Validation, message);
@@ -253,7 +253,7 @@ impl Device {
             )
         };
 
-        Texture::new(descriptor, hal, is_error)
+        Texture::new(descriptor, hal, is_error, self.features())
     }
 
     /// Validates the descriptor and creates a transient attachment on this device.
@@ -392,6 +392,7 @@ impl Device {
             crate::bind_group_layout::validate_bind_group_layout_descriptor(
                 &descriptor.entries,
                 self.limits(),
+                &self.inner.features,
             )
         });
         let is_error = error.is_some();
@@ -453,7 +454,7 @@ impl Device {
         if self.is_lost() {
             CommandEncoder::new_error("command encoder device is lost")
         } else {
-            CommandEncoder::new()
+            CommandEncoder::new(self.features())
         }
     }
 
@@ -464,18 +465,29 @@ impl Device {
         descriptor: ComputePipelineDescriptor,
     ) -> ComputePipeline {
         if self.is_lost() {
-            return ComputePipeline::new(descriptor, true, self.limits(), None).0;
+            return ComputePipeline::new(
+                descriptor,
+                true,
+                self.limits(),
+                &self.inner.features,
+                None,
+            )
+            .0;
         }
-        let error = descriptor
-            .error
-            .clone()
-            .or_else(|| validate_compute_pipeline_descriptor(&descriptor, self.limits()));
+        let error = descriptor.error.clone().or_else(|| {
+            validate_compute_pipeline_descriptor(&descriptor, self.limits(), &self.inner.features)
+        });
         let is_error = error.is_some();
         if let Some(message) = error {
             self.dispatch_error(ErrorKind::Validation, message);
         }
-        let (pipeline, backend_error) =
-            ComputePipeline::new(descriptor, is_error, self.limits(), Some(&self.inner.hal));
+        let (pipeline, backend_error) = ComputePipeline::new(
+            descriptor,
+            is_error,
+            self.limits(),
+            &self.inner.features,
+            Some(&self.inner.hal),
+        );
         if let Some(message) = backend_error {
             self.dispatch_error(ErrorKind::Internal, message);
         }
@@ -489,16 +501,23 @@ impl Device {
         descriptor: ComputePipelineDescriptor,
     ) -> ComputePipeline {
         if self.is_lost() {
-            return ComputePipeline::new(descriptor, true, self.limits(), None).0;
+            return ComputePipeline::new(
+                descriptor,
+                true,
+                self.limits(),
+                &self.inner.features,
+                None,
+            )
+            .0;
         }
-        let error = descriptor
-            .error
-            .clone()
-            .or_else(|| validate_compute_pipeline_descriptor(&descriptor, self.limits()));
+        let error = descriptor.error.clone().or_else(|| {
+            validate_compute_pipeline_descriptor(&descriptor, self.limits(), &self.inner.features)
+        });
         ComputePipeline::new(
             descriptor,
             error.is_some(),
             self.limits(),
+            &self.inner.features,
             Some(&self.inner.hal),
         )
         .0
@@ -508,18 +527,29 @@ impl Device {
     #[must_use]
     pub fn create_render_pipeline(&self, descriptor: RenderPipelineDescriptor) -> RenderPipeline {
         if self.is_lost() {
-            return RenderPipeline::new(descriptor, true, self.limits(), None).0;
+            return RenderPipeline::new(
+                descriptor,
+                true,
+                self.limits(),
+                &self.inner.features,
+                None,
+            )
+            .0;
         }
-        let error = descriptor
-            .error
-            .clone()
-            .or_else(|| validate_render_pipeline_descriptor(&descriptor, self.limits()));
+        let error = descriptor.error.clone().or_else(|| {
+            validate_render_pipeline_descriptor(&descriptor, self.limits(), &self.inner.features)
+        });
         let is_error = error.is_some();
         if let Some(message) = error {
             self.dispatch_error(ErrorKind::Validation, message);
         }
-        let (pipeline, backend_error) =
-            RenderPipeline::new(descriptor, is_error, self.limits(), Some(&self.inner.hal));
+        let (pipeline, backend_error) = RenderPipeline::new(
+            descriptor,
+            is_error,
+            self.limits(),
+            &self.inner.features,
+            Some(&self.inner.hal),
+        );
         if let Some(message) = backend_error {
             self.dispatch_error(ErrorKind::Internal, message);
         }
@@ -533,16 +563,23 @@ impl Device {
         descriptor: RenderPipelineDescriptor,
     ) -> RenderPipeline {
         if self.is_lost() {
-            return RenderPipeline::new(descriptor, true, self.limits(), None).0;
+            return RenderPipeline::new(
+                descriptor,
+                true,
+                self.limits(),
+                &self.inner.features,
+                None,
+            )
+            .0;
         }
-        let error = descriptor
-            .error
-            .clone()
-            .or_else(|| validate_render_pipeline_descriptor(&descriptor, self.limits()));
+        let error = descriptor.error.clone().or_else(|| {
+            validate_render_pipeline_descriptor(&descriptor, self.limits(), &self.inner.features)
+        });
         RenderPipeline::new(
             descriptor,
             error.is_some(),
             self.limits(),
+            &self.inner.features,
             Some(&self.inner.hal),
         )
         .0

@@ -14,7 +14,6 @@ fn enables_rg11b10ufloat_renderable() {
 }
 
 #[test]
-#[ignore = "core texture format capabilities are not yet keyed to texture-formats-tier1"]
 fn texture_usage_render_attachment() {
     let test = feature_common::test_with_feature(native::WGPUFeatureName_TextureFormatsTier1);
     unsafe {
@@ -30,7 +29,6 @@ fn texture_usage_render_attachment() {
 }
 
 #[test]
-#[ignore = "core texture format capabilities are not yet keyed to texture-formats-tier1"]
 fn texture_usage_multisample() {
     let test = feature_common::test_with_feature(native::WGPUFeatureName_TextureFormatsTier1);
     unsafe {
@@ -49,7 +47,6 @@ fn texture_usage_multisample() {
 }
 
 #[test]
-#[ignore = "core texture format capabilities are not yet keyed to texture-formats-tier1"]
 fn texture_usage_storage_binding() {
     let test = feature_common::test_with_feature(native::WGPUFeatureName_TextureFormatsTier1);
     unsafe {
@@ -64,7 +61,6 @@ fn texture_usage_storage_binding() {
 }
 
 #[test]
-#[ignore = "core render pipeline format capabilities are not yet keyed to texture-formats-tier1"]
 fn render_pipeline_color_target() {
     let test = feature_common::test_with_feature(native::WGPUFeatureName_TextureFormatsTier1);
     unsafe {
@@ -77,7 +73,6 @@ fn render_pipeline_color_target() {
 }
 
 #[test]
-#[ignore = "core render pass format capabilities are not yet keyed to texture-formats-tier1"]
 fn render_pass_resolvable() {
     let test = feature_common::test_with_feature(native::WGPUFeatureName_TextureFormatsTier1);
     unsafe {
@@ -96,7 +91,6 @@ fn render_pass_resolvable() {
 }
 
 #[test]
-#[ignore = "core bind group layout format capabilities are not yet keyed to texture-formats-tier1"]
 fn bind_group_layout_storage_texture() {
     let test = feature_common::test_with_feature(native::WGPUFeatureName_TextureFormatsTier1);
     unsafe {
@@ -110,7 +104,6 @@ fn bind_group_layout_storage_texture() {
 }
 
 #[test]
-#[ignore = "auto layout storage texture inference is not yet covered for texture-formats-tier1"]
 fn pipeline_auto_layout_storage_texture() {
     let test = feature_common::test_with_feature(native::WGPUFeatureName_TextureFormatsTier1);
     unsafe {

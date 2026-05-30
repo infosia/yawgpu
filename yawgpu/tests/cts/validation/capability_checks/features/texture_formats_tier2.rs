@@ -15,7 +15,6 @@ fn enables_rg11b10ufloat_renderable_and_texture_formats_tier1() {
 }
 
 #[test]
-#[ignore = "core read-write storage texture format capabilities are not yet keyed to texture-formats-tier2"]
 fn bind_group_layout_storage_binding_read_write_access() {
     let test = feature_common::test_with_feature(native::WGPUFeatureName_TextureFormatsTier2);
     unsafe {
@@ -31,7 +30,6 @@ fn bind_group_layout_storage_binding_read_write_access() {
 }
 
 #[test]
-#[ignore = "auto layout storage texture inference is not yet covered for texture-formats-tier2"]
 fn pipeline_auto_layout_storage_texture() {
     let test = feature_common::test_with_feature(native::WGPUFeatureName_TextureFormatsTier2);
     unsafe {

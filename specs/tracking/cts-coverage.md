@@ -63,6 +63,17 @@ never a reason to skip a CTS case.
   dispatch/draw; render-bundle setPipeline/BindGroup/Vertex/IndexBuffer).
   15 device-mismatch CTS tests un-ignored → active & passing. (Per-row
   "device-mismatch ignored" sub-notes below are superseded for these.)
+- **Core-gap follow-up #2 (feature-aware format caps) — DONE.** Added
+  `Feature` variants (BC/ETC2/ASTC[+sliced-3d] compression,
+  depth32float-stencil8, bgra8unorm-storage, float32-filterable) + FFI
+  mapping; Noop advertises them; `TextureFormat::caps` is now feature-keyed
+  and threaded through all texture/view/BGL/pipeline/pass/bundle/queue/copy
+  validation (via `Texture::format_caps()` using stored device features).
+  ~15 format-feature CTS tests un-ignored → active & passing
+  (`capability_checks/features/texture_formats{,_tier1,_tier2}`,
+  `texture/{bgra8unorm_storage,float32_filterable,rg11b10ufloat_renderable}`);
+  only canvas/surface fixture subcases remain ignored. Regressions in
+  compressed-format tests/e2e updated to request the feature.
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage

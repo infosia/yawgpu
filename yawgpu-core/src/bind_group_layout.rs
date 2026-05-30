@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use crate::device::FeatureSet;
 use crate::format::*;
 use crate::limits::*;
 use crate::shader::*;
@@ -10,6 +11,7 @@ use crate::texture_view::*;
 pub(crate) fn validate_bind_group_layout_descriptor(
     entries: &[BindGroupLayoutEntry],
     limits: Limits,
+    features: &FeatureSet,
 ) -> Option<String> {
     if entries.len() > 1000 {
         return Some("bind group layout entry count exceeds 1000".to_owned());
@@ -88,21 +90,27 @@ pub(crate) fn validate_bind_group_layout_descriptor(
                 }
             }
             BindingLayoutKind::StorageTexture {
+                access,
                 format,
                 view_dimension,
-                ..
             } => {
                 if view_dimension == TextureViewDimension::D1 {
                     return Some(
                         "storage texture bindings must not use 1D view dimension".to_owned(),
                     );
                 }
-                let Some(caps) = format.caps() else {
+                let Some(caps) = format.caps(features) else {
                     return Some("storage texture binding format must not be Undefined".to_owned());
                 };
                 if !caps.storage_capable {
                     return Some(
                         "storage texture binding format must support storage usage".to_owned(),
+                    );
+                }
+                if access != StorageTextureAccess::WriteOnly && !caps.read_write_storage_capable {
+                    return Some(
+                        "storage texture binding format must support read-write storage access"
+                            .to_owned(),
                     );
                 }
             }

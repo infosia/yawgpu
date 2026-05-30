@@ -1,3 +1,6 @@
+use crate::adapter::Feature;
+use crate::device::FeatureSet;
+
 /// Enumerates texture format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextureFormat(u32);
@@ -79,6 +82,26 @@ impl TextureFormat {
     pub(crate) const BC1_RGBA_UNORM: u32 = 0x32;
     /// Constant value for bc1 rgba unorm srgb.
     pub(crate) const BC1_RGBA_UNORM_SRGB: u32 = 0x33;
+    /// Constant value for bc2 rgba unorm.
+    pub(crate) const BC2_RGBA_UNORM: u32 = 0x34;
+    /// Constant value for bc2 rgba unorm srgb.
+    pub(crate) const BC2_RGBA_UNORM_SRGB: u32 = 0x35;
+    /// Constant value for bc3 rgba unorm.
+    pub(crate) const BC3_RGBA_UNORM: u32 = 0x36;
+    /// Constant value for bc3 rgba unorm srgb.
+    pub(crate) const BC3_RGBA_UNORM_SRGB: u32 = 0x37;
+    /// Constant value for bc4 r unorm.
+    pub(crate) const BC4_R_UNORM: u32 = 0x38;
+    /// Constant value for bc4 r snorm.
+    pub(crate) const BC4_R_SNORM: u32 = 0x39;
+    /// Constant value for bc5 rg unorm.
+    pub(crate) const BC5_RG_UNORM: u32 = 0x3A;
+    /// Constant value for bc5 rg snorm.
+    pub(crate) const BC5_RG_SNORM: u32 = 0x3B;
+    /// Constant value for bc6h rgb ufloat.
+    pub(crate) const BC6H_RGB_UFLOAT: u32 = 0x3C;
+    /// Constant value for bc6h rgb float.
+    pub(crate) const BC6H_RGB_FLOAT: u32 = 0x3D;
     /// Constant value for bgra8 unorm.
     pub(crate) const BGRA8_UNORM: u32 = 0x1B;
     /// Constant value for bgra8 unorm srgb.
@@ -87,6 +110,82 @@ impl TextureFormat {
     pub(crate) const BC7_RGBA_UNORM: u32 = 0x3E;
     /// Constant value for bc7 rgba unorm srgb.
     pub(crate) const BC7_RGBA_UNORM_SRGB: u32 = 0x3F;
+    /// Constant value for etc2 rgb8 unorm.
+    pub(crate) const ETC2_RGB8_UNORM: u32 = 0x40;
+    /// Constant value for etc2 rgb8 unorm srgb.
+    pub(crate) const ETC2_RGB8_UNORM_SRGB: u32 = 0x41;
+    /// Constant value for etc2 rgb8a1 unorm.
+    pub(crate) const ETC2_RGB8A1_UNORM: u32 = 0x42;
+    /// Constant value for etc2 rgb8a1 unorm srgb.
+    pub(crate) const ETC2_RGB8A1_UNORM_SRGB: u32 = 0x43;
+    /// Constant value for etc2 rgba8 unorm.
+    pub(crate) const ETC2_RGBA8_UNORM: u32 = 0x44;
+    /// Constant value for etc2 rgba8 unorm srgb.
+    pub(crate) const ETC2_RGBA8_UNORM_SRGB: u32 = 0x45;
+    /// Constant value for eac r11 unorm.
+    pub(crate) const EAC_R11_UNORM: u32 = 0x46;
+    /// Constant value for eac r11 snorm.
+    pub(crate) const EAC_R11_SNORM: u32 = 0x47;
+    /// Constant value for eac rg11 unorm.
+    pub(crate) const EAC_RG11_UNORM: u32 = 0x48;
+    /// Constant value for eac rg11 snorm.
+    pub(crate) const EAC_RG11_SNORM: u32 = 0x49;
+    /// Constant value for astc4x4 unorm.
+    pub(crate) const ASTC4X4_UNORM: u32 = 0x4A;
+    /// Constant value for astc4x4 unorm srgb.
+    pub(crate) const ASTC4X4_UNORM_SRGB: u32 = 0x4B;
+    /// Constant value for astc5x4 unorm.
+    pub(crate) const ASTC5X4_UNORM: u32 = 0x4C;
+    /// Constant value for astc5x4 unorm srgb.
+    pub(crate) const ASTC5X4_UNORM_SRGB: u32 = 0x4D;
+    /// Constant value for astc5x5 unorm.
+    pub(crate) const ASTC5X5_UNORM: u32 = 0x4E;
+    /// Constant value for astc5x5 unorm srgb.
+    pub(crate) const ASTC5X5_UNORM_SRGB: u32 = 0x4F;
+    /// Constant value for astc6x5 unorm.
+    pub(crate) const ASTC6X5_UNORM: u32 = 0x50;
+    /// Constant value for astc6x5 unorm srgb.
+    pub(crate) const ASTC6X5_UNORM_SRGB: u32 = 0x51;
+    /// Constant value for astc6x6 unorm.
+    pub(crate) const ASTC6X6_UNORM: u32 = 0x52;
+    /// Constant value for astc6x6 unorm srgb.
+    pub(crate) const ASTC6X6_UNORM_SRGB: u32 = 0x53;
+    /// Constant value for astc8x5 unorm.
+    pub(crate) const ASTC8X5_UNORM: u32 = 0x54;
+    /// Constant value for astc8x5 unorm srgb.
+    pub(crate) const ASTC8X5_UNORM_SRGB: u32 = 0x55;
+    /// Constant value for astc8x6 unorm.
+    pub(crate) const ASTC8X6_UNORM: u32 = 0x56;
+    /// Constant value for astc8x6 unorm srgb.
+    pub(crate) const ASTC8X6_UNORM_SRGB: u32 = 0x57;
+    /// Constant value for astc8x8 unorm.
+    pub(crate) const ASTC8X8_UNORM: u32 = 0x58;
+    /// Constant value for astc8x8 unorm srgb.
+    pub(crate) const ASTC8X8_UNORM_SRGB: u32 = 0x59;
+    /// Constant value for astc10x5 unorm.
+    pub(crate) const ASTC10X5_UNORM: u32 = 0x5A;
+    /// Constant value for astc10x5 unorm srgb.
+    pub(crate) const ASTC10X5_UNORM_SRGB: u32 = 0x5B;
+    /// Constant value for astc10x6 unorm.
+    pub(crate) const ASTC10X6_UNORM: u32 = 0x5C;
+    /// Constant value for astc10x6 unorm srgb.
+    pub(crate) const ASTC10X6_UNORM_SRGB: u32 = 0x5D;
+    /// Constant value for astc10x8 unorm.
+    pub(crate) const ASTC10X8_UNORM: u32 = 0x5E;
+    /// Constant value for astc10x8 unorm srgb.
+    pub(crate) const ASTC10X8_UNORM_SRGB: u32 = 0x5F;
+    /// Constant value for astc10x10 unorm.
+    pub(crate) const ASTC10X10_UNORM: u32 = 0x60;
+    /// Constant value for astc10x10 unorm srgb.
+    pub(crate) const ASTC10X10_UNORM_SRGB: u32 = 0x61;
+    /// Constant value for astc12x10 unorm.
+    pub(crate) const ASTC12X10_UNORM: u32 = 0x62;
+    /// Constant value for astc12x10 unorm srgb.
+    pub(crate) const ASTC12X10_UNORM_SRGB: u32 = 0x63;
+    /// Constant value for astc12x12 unorm.
+    pub(crate) const ASTC12X12_UNORM: u32 = 0x64;
+    /// Constant value for astc12x12 unorm srgb.
+    pub(crate) const ASTC12X12_UNORM_SRGB: u32 = 0x65;
 
     /// Constructs this object from raw.
     #[must_use]
@@ -103,76 +202,84 @@ impl TextureFormat {
     /// Returns true when this object is undefined.
     #[must_use]
     pub(crate) fn is_undefined(self) -> bool {
-        self.0 == Self::UNDEFINED
+        self.0 == TextureFormat::UNDEFINED
     }
 
     /// Returns the caps.
     #[must_use]
-    pub fn caps(self) -> Option<FormatCaps> {
+    pub fn caps(self, features: &FeatureSet) -> Option<FormatCaps> {
         if self.is_undefined() {
             return None;
         }
 
-        let caps = match self.0 {
-            Self::R8_UNORM => FormatCaps::float_color(1, 1)
+        let mut caps = match self.0 {
+            TextureFormat::R8_UNORM => FormatCaps::float_color(1, 1)
                 .blendable()
                 .renderable()
                 .multisample(),
-            Self::R8_SNORM => FormatCaps::float_color(1, 1).blendable(),
-            Self::R8_UINT => FormatCaps::uint_color(1, 1).renderable().multisample(),
-            Self::R8_SINT => FormatCaps::sint_color(1, 1).renderable().multisample(),
-            Self::RG8_UNORM => FormatCaps::float_color(2, 2)
+            TextureFormat::R8_SNORM => FormatCaps::float_color(1, 1).blendable(),
+            TextureFormat::R8_UINT => FormatCaps::uint_color(1, 1).renderable().multisample(),
+            TextureFormat::R8_SINT => FormatCaps::sint_color(1, 1).renderable().multisample(),
+            TextureFormat::RG8_UNORM => FormatCaps::float_color(2, 2)
                 .blendable()
                 .renderable()
                 .multisample(),
-            Self::RG8_SNORM => FormatCaps::float_color(2, 2).blendable(),
-            Self::RG8_UINT => FormatCaps::uint_color(2, 2).renderable().multisample(),
-            Self::RG8_SINT => FormatCaps::sint_color(2, 2).renderable().multisample(),
-            Self::R32_FLOAT => FormatCaps::float_color(4, 1)
+            TextureFormat::RG8_SNORM => FormatCaps::float_color(2, 2).blendable(),
+            TextureFormat::RG8_UINT => FormatCaps::uint_color(2, 2).renderable().multisample(),
+            TextureFormat::RG8_SINT => FormatCaps::sint_color(2, 2).renderable().multisample(),
+            TextureFormat::R32_FLOAT => FormatCaps::float_color(4, 1)
                 .renderable()
                 .multisample()
                 .storage(),
-            Self::R32_UINT => FormatCaps::uint_color(4, 1)
+            TextureFormat::R32_UINT => FormatCaps::uint_color(4, 1)
                 .renderable()
                 .multisample()
                 .storage(),
-            Self::R32_SINT => FormatCaps::sint_color(4, 1)
+            TextureFormat::R32_SINT => FormatCaps::sint_color(4, 1)
                 .renderable()
                 .multisample()
                 .storage(),
-            Self::RGBA8_UNORM => FormatCaps::float_color(4, 4)
+            TextureFormat::RGBA8_UNORM => FormatCaps::float_color(4, 4)
                 .alpha()
                 .blendable()
                 .renderable()
                 .multisample()
                 .storage(),
-            Self::RGBA8_UNORM_SRGB => FormatCaps::float_color(4, 4)
+            TextureFormat::RGBA8_UNORM_SRGB => FormatCaps::float_color(4, 4)
                 .alpha()
                 .blendable()
                 .renderable()
                 .multisample(),
-            Self::BGRA8_UNORM | Self::BGRA8_UNORM_SRGB => FormatCaps::float_color(4, 4)
-                .alpha()
-                .blendable()
-                .renderable()
-                .multisample(),
+            TextureFormat::BGRA8_UNORM | TextureFormat::BGRA8_UNORM_SRGB => {
+                FormatCaps::float_color(4, 4)
+                    .alpha()
+                    .blendable()
+                    .renderable()
+                    .multisample()
+            }
             // snorm formats are NOT storage-capable (Dawn `Format.cpp`).
-            Self::RGBA8_SNORM => FormatCaps::float_color(4, 4).alpha().blendable(),
-            Self::RGBA8_UINT => FormatCaps::uint_color(4, 4)
+            TextureFormat::RGBA8_SNORM => FormatCaps::float_color(4, 4).alpha().blendable(),
+            TextureFormat::RGBA8_UINT => FormatCaps::uint_color(4, 4)
                 .alpha()
                 .renderable()
                 .multisample()
                 .storage(),
-            Self::RGBA8_SINT => FormatCaps::sint_color(4, 4)
+            TextureFormat::RGBA8_SINT => FormatCaps::sint_color(4, 4)
                 .alpha()
                 .renderable()
                 .multisample()
                 .storage(),
-            Self::RG11B10_UFLOAT | Self::RGB9E5_UFLOAT => FormatCaps::float_color(4, 3).blendable(),
-            Self::RG32_FLOAT => FormatCaps::float_color(8, 2).renderable().storage(),
-            Self::RG32_UINT => FormatCaps::uint_color(8, 2).renderable().storage(),
-            Self::RG32_SINT => FormatCaps::sint_color(8, 2).renderable().storage(),
-            Self::RGBA16_UNORM => FormatCaps::float_color(8, 4)
+            TextureFormat::RG11B10_UFLOAT => {
+                if !features.contains(&Feature::Rg11b10UfloatRenderable) {
+                    return None;
+                }
+                FormatCaps::float_color(4, 3).blendable()
+            }
+            TextureFormat::RGB9E5_UFLOAT => FormatCaps::float_color(4, 3).blendable(),
+            TextureFormat::RG32_FLOAT => FormatCaps::float_color(8, 2).renderable().storage(),
+            TextureFormat::RG32_UINT => FormatCaps::uint_color(8, 2).renderable().storage(),
+            TextureFormat::RG32_SINT => FormatCaps::sint_color(8, 2).renderable().storage(),
+            TextureFormat::RGBA16_UNORM => FormatCaps::float_color(8, 4)
                 .alpha()
                 .blendable()
                 .renderable()
@@ -181,63 +288,280 @@ impl TextureFormat {
             // snorm formats are NOT storage-capable (Dawn `Format.cpp`); the
             // remaining `*16` renderable/multisample approximation stays a
             // tracked note (block 20 → P4/P5).
-            Self::RGBA16_SNORM => FormatCaps::float_color(8, 4)
+            TextureFormat::RGBA16_SNORM => FormatCaps::float_color(8, 4)
                 .alpha()
                 .blendable()
                 .renderable()
                 .multisample(),
-            Self::RGBA16_UINT => FormatCaps::uint_color(8, 4)
+            TextureFormat::RGBA16_UINT => FormatCaps::uint_color(8, 4)
                 .alpha()
                 .renderable()
                 .multisample()
                 .storage(),
-            Self::RGBA16_SINT => FormatCaps::sint_color(8, 4)
+            TextureFormat::RGBA16_SINT => FormatCaps::sint_color(8, 4)
                 .alpha()
                 .renderable()
                 .multisample()
                 .storage(),
-            Self::RGBA16_FLOAT => FormatCaps::float_color(8, 4)
+            TextureFormat::RGBA16_FLOAT => FormatCaps::float_color(8, 4)
                 .alpha()
                 .blendable()
                 .renderable()
                 .multisample()
                 .storage(),
-            Self::RGBA32_FLOAT => FormatCaps::float_color(16, 4)
+            TextureFormat::RGBA32_FLOAT => FormatCaps::float_color(16, 4)
                 .alpha()
                 .renderable()
                 .storage(),
-            Self::RGBA32_UINT => FormatCaps::uint_color(16, 4).alpha().renderable().storage(),
-            Self::RGBA32_SINT => FormatCaps::sint_color(16, 4).alpha().renderable().storage(),
-            Self::STENCIL8 => FormatCaps::stencil(1).renderable().multisample(),
-            Self::DEPTH16_UNORM => FormatCaps::depth(2).renderable().multisample(),
-            Self::DEPTH24_PLUS => FormatCaps::depth(4).renderable().multisample(),
-            Self::DEPTH24_PLUS_STENCIL8 => FormatCaps::depth_stencil(4).renderable().multisample(),
-            Self::DEPTH32_FLOAT => FormatCaps::depth(4).renderable().multisample(),
-            Self::DEPTH32_FLOAT_STENCIL8 => FormatCaps::depth_stencil(5).renderable().multisample(),
-            Self::BC1_RGBA_UNORM | Self::BC1_RGBA_UNORM_SRGB => {
+            TextureFormat::RGBA32_UINT => {
+                FormatCaps::uint_color(16, 4).alpha().renderable().storage()
+            }
+            TextureFormat::RGBA32_SINT => {
+                FormatCaps::sint_color(16, 4).alpha().renderable().storage()
+            }
+            TextureFormat::STENCIL8 => FormatCaps::stencil(1).renderable().multisample(),
+            TextureFormat::DEPTH16_UNORM => FormatCaps::depth(2).renderable().multisample(),
+            TextureFormat::DEPTH24_PLUS => FormatCaps::depth(4).renderable().multisample(),
+            TextureFormat::DEPTH24_PLUS_STENCIL8 => {
+                FormatCaps::depth_stencil(4).renderable().multisample()
+            }
+            TextureFormat::DEPTH32_FLOAT => FormatCaps::depth(4).renderable().multisample(),
+            TextureFormat::DEPTH32_FLOAT_STENCIL8 => {
+                if !features.contains(&Feature::Depth32FloatStencil8) {
+                    return None;
+                }
+                FormatCaps::depth_stencil(5).renderable().multisample()
+            }
+            TextureFormat::BC1_RGBA_UNORM | TextureFormat::BC1_RGBA_UNORM_SRGB => {
+                if !features.contains(&Feature::TextureCompressionBc) {
+                    return None;
+                }
                 FormatCaps::compressed_color(8, 4, 4)
             }
-            Self::BC7_RGBA_UNORM | Self::BC7_RGBA_UNORM_SRGB => {
+            TextureFormat::BC2_RGBA_UNORM
+            | TextureFormat::BC2_RGBA_UNORM_SRGB
+            | TextureFormat::BC3_RGBA_UNORM
+            | TextureFormat::BC3_RGBA_UNORM_SRGB
+            | TextureFormat::BC5_RG_UNORM
+            | TextureFormat::BC5_RG_SNORM
+            | TextureFormat::BC6H_RGB_UFLOAT
+            | TextureFormat::BC6H_RGB_FLOAT
+            | TextureFormat::BC7_RGBA_UNORM
+            | TextureFormat::BC7_RGBA_UNORM_SRGB => {
+                if !features.contains(&Feature::TextureCompressionBc) {
+                    return None;
+                }
                 FormatCaps::compressed_color(16, 4, 4)
+            }
+            TextureFormat::BC4_R_UNORM | TextureFormat::BC4_R_SNORM => {
+                if !features.contains(&Feature::TextureCompressionBc) {
+                    return None;
+                }
+                FormatCaps::compressed_color(8, 4, 4)
+            }
+            TextureFormat::ETC2_RGB8_UNORM
+            | TextureFormat::ETC2_RGB8_UNORM_SRGB
+            | TextureFormat::ETC2_RGB8A1_UNORM
+            | TextureFormat::ETC2_RGB8A1_UNORM_SRGB
+            | TextureFormat::EAC_R11_UNORM
+            | TextureFormat::EAC_R11_SNORM => {
+                if !features.contains(&Feature::TextureCompressionEtc2) {
+                    return None;
+                }
+                FormatCaps::compressed_color(8, 4, 4)
+            }
+            TextureFormat::ETC2_RGBA8_UNORM
+            | TextureFormat::ETC2_RGBA8_UNORM_SRGB
+            | TextureFormat::EAC_RG11_UNORM
+            | TextureFormat::EAC_RG11_SNORM => {
+                if !features.contains(&Feature::TextureCompressionEtc2) {
+                    return None;
+                }
+                FormatCaps::compressed_color(16, 4, 4)
+            }
+            TextureFormat::ASTC4X4_UNORM | TextureFormat::ASTC4X4_UNORM_SRGB => {
+                if !features.contains(&Feature::TextureCompressionAstc) {
+                    return None;
+                }
+                FormatCaps::compressed_color(16, 4, 4)
+            }
+            TextureFormat::ASTC5X4_UNORM | TextureFormat::ASTC5X4_UNORM_SRGB => {
+                if !features.contains(&Feature::TextureCompressionAstc) {
+                    return None;
+                }
+                FormatCaps::compressed_color(16, 5, 4)
+            }
+            TextureFormat::ASTC5X5_UNORM | TextureFormat::ASTC5X5_UNORM_SRGB => {
+                if !features.contains(&Feature::TextureCompressionAstc) {
+                    return None;
+                }
+                FormatCaps::compressed_color(16, 5, 5)
+            }
+            TextureFormat::ASTC6X5_UNORM | TextureFormat::ASTC6X5_UNORM_SRGB => {
+                if !features.contains(&Feature::TextureCompressionAstc) {
+                    return None;
+                }
+                FormatCaps::compressed_color(16, 6, 5)
+            }
+            TextureFormat::ASTC6X6_UNORM | TextureFormat::ASTC6X6_UNORM_SRGB => {
+                if !features.contains(&Feature::TextureCompressionAstc) {
+                    return None;
+                }
+                FormatCaps::compressed_color(16, 6, 6)
+            }
+            TextureFormat::ASTC8X5_UNORM | TextureFormat::ASTC8X5_UNORM_SRGB => {
+                if !features.contains(&Feature::TextureCompressionAstc) {
+                    return None;
+                }
+                FormatCaps::compressed_color(16, 8, 5)
+            }
+            TextureFormat::ASTC8X6_UNORM | TextureFormat::ASTC8X6_UNORM_SRGB => {
+                if !features.contains(&Feature::TextureCompressionAstc) {
+                    return None;
+                }
+                FormatCaps::compressed_color(16, 8, 6)
+            }
+            TextureFormat::ASTC8X8_UNORM | TextureFormat::ASTC8X8_UNORM_SRGB => {
+                if !features.contains(&Feature::TextureCompressionAstc) {
+                    return None;
+                }
+                FormatCaps::compressed_color(16, 8, 8)
+            }
+            TextureFormat::ASTC10X5_UNORM | TextureFormat::ASTC10X5_UNORM_SRGB => {
+                if !features.contains(&Feature::TextureCompressionAstc) {
+                    return None;
+                }
+                FormatCaps::compressed_color(16, 10, 5)
+            }
+            TextureFormat::ASTC10X6_UNORM | TextureFormat::ASTC10X6_UNORM_SRGB => {
+                if !features.contains(&Feature::TextureCompressionAstc) {
+                    return None;
+                }
+                FormatCaps::compressed_color(16, 10, 6)
+            }
+            TextureFormat::ASTC10X8_UNORM | TextureFormat::ASTC10X8_UNORM_SRGB => {
+                if !features.contains(&Feature::TextureCompressionAstc) {
+                    return None;
+                }
+                FormatCaps::compressed_color(16, 10, 8)
+            }
+            TextureFormat::ASTC10X10_UNORM | TextureFormat::ASTC10X10_UNORM_SRGB => {
+                if !features.contains(&Feature::TextureCompressionAstc) {
+                    return None;
+                }
+                FormatCaps::compressed_color(16, 10, 10)
+            }
+            TextureFormat::ASTC12X10_UNORM | TextureFormat::ASTC12X10_UNORM_SRGB => {
+                if !features.contains(&Feature::TextureCompressionAstc) {
+                    return None;
+                }
+                FormatCaps::compressed_color(16, 12, 10)
+            }
+            TextureFormat::ASTC12X12_UNORM | TextureFormat::ASTC12X12_UNORM_SRGB => {
+                if !features.contains(&Feature::TextureCompressionAstc) {
+                    return None;
+                }
+                FormatCaps::compressed_color(16, 12, 12)
             }
             // Unknown defined formats are unsupported until explicitly modeled.
             _ => return None,
         };
+        self.apply_feature_upgrades(features, &mut caps);
         Some(caps)
+    }
+
+    fn apply_feature_upgrades(self, features: &FeatureSet, caps: &mut FormatCaps) {
+        if caps.output_class == Some(FormatOutputClass::Float)
+            && !matches!(
+                self.0,
+                TextureFormat::R32_FLOAT | TextureFormat::RG32_FLOAT | TextureFormat::RGBA32_FLOAT
+            )
+        {
+            caps.filterable = true;
+        }
+        if self.0 == TextureFormat::RG11B10_UFLOAT
+            && features.contains(&Feature::Rg11b10UfloatRenderable)
+        {
+            caps.renderable = true;
+            caps.multisample_capable = true;
+        }
+        if features.contains(&Feature::TextureFormatsTier1) {
+            match self.0 {
+                TextureFormat::R8_UNORM
+                | TextureFormat::RG8_UNORM
+                | TextureFormat::RGBA8_UNORM_SRGB
+                | TextureFormat::BGRA8_UNORM
+                | TextureFormat::RGBA16_FLOAT => {
+                    caps.storage_capable = true;
+                }
+                _ => {}
+            }
+        }
+        if self.0 == TextureFormat::BGRA8_UNORM && features.contains(&Feature::Bgra8UnormStorage) {
+            caps.storage_capable = true;
+        }
+        if features.contains(&Feature::TextureFormatsTier2) {
+            match self.0 {
+                TextureFormat::R32_FLOAT
+                | TextureFormat::RGBA16_FLOAT
+                | TextureFormat::RGBA32_FLOAT => {
+                    caps.read_write_storage_capable = true;
+                }
+                _ => {}
+            }
+        }
+        if matches!(
+            self.0,
+            TextureFormat::R32_FLOAT | TextureFormat::RG32_FLOAT | TextureFormat::RGBA32_FLOAT
+        ) && features.contains(&Feature::Float32Filterable)
+        {
+            caps.filterable = true;
+        }
+    }
+
+    /// Returns true when the format belongs to a BC compressed family.
+    #[must_use]
+    pub(crate) fn is_bc_compressed(self) -> bool {
+        matches!(
+            self.0,
+            TextureFormat::BC1_RGBA_UNORM
+                | TextureFormat::BC1_RGBA_UNORM_SRGB
+                | TextureFormat::BC2_RGBA_UNORM
+                | TextureFormat::BC2_RGBA_UNORM_SRGB
+                | TextureFormat::BC3_RGBA_UNORM
+                | TextureFormat::BC3_RGBA_UNORM_SRGB
+                | TextureFormat::BC4_R_UNORM
+                | TextureFormat::BC4_R_SNORM
+                | TextureFormat::BC5_RG_UNORM
+                | TextureFormat::BC5_RG_SNORM
+                | TextureFormat::BC6H_RGB_UFLOAT
+                | TextureFormat::BC6H_RGB_FLOAT
+                | TextureFormat::BC7_RGBA_UNORM
+                | TextureFormat::BC7_RGBA_UNORM_SRGB
+        )
+    }
+
+    /// Returns true when the format belongs to an ASTC compressed family.
+    #[must_use]
+    pub(crate) fn is_astc_compressed(self) -> bool {
+        matches!(
+            self.0,
+            TextureFormat::ASTC4X4_UNORM..=TextureFormat::ASTC12X12_UNORM_SRGB
+        )
     }
 
     /// Returns the sRGB and linear variants for this texture format.
     #[must_use]
     pub(crate) fn srgb_pair(self) -> Option<Self> {
         let pair = match self.0 {
-            Self::RGBA8_UNORM => Self::RGBA8_UNORM_SRGB,
-            Self::RGBA8_UNORM_SRGB => Self::RGBA8_UNORM,
-            Self::BGRA8_UNORM => Self::BGRA8_UNORM_SRGB,
-            Self::BGRA8_UNORM_SRGB => Self::BGRA8_UNORM,
-            Self::BC1_RGBA_UNORM => Self::BC1_RGBA_UNORM_SRGB,
-            Self::BC1_RGBA_UNORM_SRGB => Self::BC1_RGBA_UNORM,
-            Self::BC7_RGBA_UNORM => Self::BC7_RGBA_UNORM_SRGB,
-            Self::BC7_RGBA_UNORM_SRGB => Self::BC7_RGBA_UNORM,
+            TextureFormat::RGBA8_UNORM => TextureFormat::RGBA8_UNORM_SRGB,
+            TextureFormat::RGBA8_UNORM_SRGB => TextureFormat::RGBA8_UNORM,
+            TextureFormat::BGRA8_UNORM => TextureFormat::BGRA8_UNORM_SRGB,
+            TextureFormat::BGRA8_UNORM_SRGB => TextureFormat::BGRA8_UNORM,
+            TextureFormat::BC1_RGBA_UNORM => TextureFormat::BC1_RGBA_UNORM_SRGB,
+            TextureFormat::BC1_RGBA_UNORM_SRGB => TextureFormat::BC1_RGBA_UNORM,
+            TextureFormat::BC7_RGBA_UNORM => TextureFormat::BC7_RGBA_UNORM_SRGB,
+            TextureFormat::BC7_RGBA_UNORM_SRGB => TextureFormat::BC7_RGBA_UNORM,
             _ => return None,
         };
         Some(Self(pair))
@@ -246,13 +570,13 @@ impl TextureFormat {
 
 impl From<u32> for TextureFormat {
     fn from(value: u32) -> Self {
-        Self::from_raw(value)
+        TextureFormat::from_raw(value)
     }
 }
 
 impl From<i32> for TextureFormat {
     fn from(value: i32) -> Self {
-        Self::from_raw(value as u32)
+        TextureFormat::from_raw(value as u32)
     }
 }
 
@@ -290,6 +614,10 @@ pub struct FormatCaps {
     pub multisample_capable: bool,
     /// Storage capable.
     pub storage_capable: bool,
+    /// Read-write storage capable.
+    pub read_write_storage_capable: bool,
+    /// Filterable as a float sampled texture.
+    pub filterable: bool,
     /// Output class.
     pub output_class: Option<FormatOutputClass>,
     /// Color components.
@@ -444,6 +772,8 @@ impl FormatCaps {
             renderable: false,
             multisample_capable: false,
             storage_capable: false,
+            read_write_storage_capable: false,
+            filterable: false,
             output_class,
             color_components,
             is_blendable: false,
@@ -493,6 +823,7 @@ mod tests {
     #[test]
     fn texture_format_from_raw_raw_and_caps_pin_rgba8_unorm_and_undefined() {
         let format = TextureFormat::from_raw(0x0000_0016);
+        let features = FeatureSet::new();
 
         assert_eq!(format.raw(), 0x0000_0016);
         assert_eq!(TextureFormat::from(0x0000_0016_u32), format);
@@ -500,7 +831,7 @@ mod tests {
         assert_eq!(u32::from(format), 0x0000_0016);
         assert_eq!(i32::from(format), 0x0000_0016);
 
-        let caps = format.caps().expect("RGBA8Unorm caps");
+        let caps = format.caps(&features).expect("RGBA8Unorm caps");
         assert_eq!(
             caps.aspects,
             FormatAspects {
@@ -517,10 +848,46 @@ mod tests {
         assert!(caps.renderable);
         assert!(caps.multisample_capable);
         assert!(caps.storage_capable);
+        assert!(!caps.read_write_storage_capable);
+        assert!(caps.filterable);
         assert!(caps.is_blendable);
         assert!(caps.has_alpha);
         assert!(!caps.is_compressed);
 
-        assert_eq!(TextureFormat::from_raw(0).caps(), None);
+        assert_eq!(TextureFormat::from_raw(0).caps(&features), None);
+    }
+
+    #[test]
+    fn texture_format_caps_are_feature_gated() {
+        let no_features = FeatureSet::new();
+        let mut features = FeatureSet::new();
+        features.insert(Feature::TextureCompressionBc);
+        features.insert(Feature::Depth32FloatStencil8);
+        features.insert(Feature::Rg11b10UfloatRenderable);
+        features.insert(Feature::Bgra8UnormStorage);
+        features.insert(Feature::Float32Filterable);
+        features.insert(Feature::TextureFormatsTier1);
+        features.insert(Feature::TextureFormatsTier2);
+
+        assert_eq!(
+            TextureFormat::from_raw(TextureFormat::BC1_RGBA_UNORM).caps(&no_features),
+            None
+        );
+        assert!(TextureFormat::from_raw(TextureFormat::BC1_RGBA_UNORM)
+            .caps(&features)
+            .is_some());
+        assert_eq!(
+            TextureFormat::from_raw(TextureFormat::DEPTH32_FLOAT_STENCIL8).caps(&no_features),
+            None
+        );
+        assert!(TextureFormat::from_raw(TextureFormat::RG11B10_UFLOAT)
+            .caps(&features)
+            .is_some_and(|caps| caps.renderable && caps.multisample_capable));
+        assert!(TextureFormat::from_raw(TextureFormat::BGRA8_UNORM)
+            .caps(&features)
+            .is_some_and(|caps| caps.storage_capable));
+        assert!(TextureFormat::from_raw(TextureFormat::R32_FLOAT)
+            .caps(&features)
+            .is_some_and(|caps| caps.filterable && caps.read_write_storage_capable));
     }
 }
