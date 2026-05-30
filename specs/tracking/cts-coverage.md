@@ -35,16 +35,15 @@ never a reason to skip a CTS case.
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
 - Excluded (`N/A`): 7 whole spec files (web/empty/multiDraw + setImmediates/immediate absent).
-- `ported`: 77. Complete areas: `buffer/`, texture creation,
+- `ported`: 112. Complete areas: `buffer/`, texture creation,
   `image_copy/`, `queue/`, shader_module, compute_pipeline, immediates,
   layout_shader_compat, `render_pipeline/`, bind-group family,
-  `render_pass/`, `encoding/`, state & lifecycle (error_scope, query_set,
-  device_lost), `resource_usages/`. Several `ported*` with subcases
+  `render_pass/`, `encoding/`, state & lifecycle, `resource_usages/`,
+  `capability_checks/limits/` (35). Several `ported*` with subcases
   `#[ignore]`d behind core gaps — assertions are spec-correct.
-- `todo`: 45 spec files — remaining: `capability_checks/` (42:
-  features 7 + limits 35) and texture format-capability
-  (`texture/bgra8unorm_storage`, `float32_filterable`,
-  `rg11b10ufloat_renderable`).
+- `todo`: 10 spec files — only `capability_checks/features/` (7) and
+  texture format-capability (`texture/bgra8unorm_storage`,
+  `float32_filterable`, `rg11b10ufloat_renderable`).
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage
@@ -71,41 +70,41 @@ never a reason to skip a CTS case.
 | `features/texture_formats.spec.ts` | 13 | features_validation.rs / texture_format_validation.rs | `todo` — canvas_configuration* excluded |
 | `features/texture_formats_tier1.spec.ts` | 8 | — | `todo` |
 | `features/texture_formats_tier2.spec.ts` | 3 | — | `todo` |
-| `limits/maxBindGroups.spec.ts` | 4 | — | `todo` |
-| `limits/maxBindGroupsPlusVertexBuffers.spec.ts` | 2 | — | `todo` |
-| `limits/maxBindingsPerBindGroup.spec.ts` | 3 | — | `todo` |
-| `limits/maxBufferSize.spec.ts` | 1 | — | `todo` |
-| `limits/maxColorAttachmentBytesPerSample.spec.ts` | 3 | — | `todo` |
-| `limits/maxColorAttachments.spec.ts` | 5 | — | `todo` |
-| `limits/maxComputeInvocationsPerWorkgroup.spec.ts` | 1 | — | `todo` |
-| `limits/maxComputeWorkgroupSizeX.spec.ts` | 2 | — | `todo` |
-| `limits/maxComputeWorkgroupSizeY.spec.ts` | 2 | — | `todo` |
-| `limits/maxComputeWorkgroupSizeZ.spec.ts` | 2 | — | `todo` |
-| `limits/maxComputeWorkgroupStorageSize.spec.ts` | 1 | — | `todo` |
-| `limits/maxComputeWorkgroupsPerDimension.spec.ts` | 2 | — | `todo` |
-| `limits/maxDynamicStorageBuffersPerPipelineLayout.spec.ts` | 2 | — | `todo` |
-| `limits/maxDynamicUniformBuffersPerPipelineLayout.spec.ts` | 2 | — | `todo` |
-| `limits/maxInterStageShaderVariables.spec.ts` | 1 | — | `todo` |
-| `limits/maxSampledTexturesPerShaderStage.spec.ts` | 3 | — | `todo` |
-| `limits/maxSamplersPerShaderStage.spec.ts` | 3 | — | `todo` |
-| `limits/maxStorageBufferBindingSize.spec.ts` | 3 | — | `todo` |
-| `limits/maxStorageBuffersInFragmentStage.spec.ts` | 3 | — | `todo` |
-| `limits/maxStorageBuffersInVertexStage.spec.ts` | 3 | — | `todo` |
-| `limits/maxStorageBuffersPerShaderStage.spec.ts` | 3 | — | `todo` |
-| `limits/maxStorageTexturesInFragmentStage.spec.ts` | 3 | — | `todo` |
-| `limits/maxStorageTexturesInVertexStage.spec.ts` | 3 | — | `todo` |
-| `limits/maxStorageTexturesPerShaderStage.spec.ts` | 3 | — | `todo` |
-| `limits/maxTextureArrayLayers.spec.ts` | 1 | — | `todo` |
-| `limits/maxTextureDimension1D.spec.ts` | 1 | — | `todo` |
-| `limits/maxTextureDimension2D.spec.ts` | 3 | — | `todo` — configure/getCurrentTexture native-mapped |
-| `limits/maxTextureDimension3D.spec.ts` | 1 | — | `todo` |
-| `limits/maxUniformBufferBindingSize.spec.ts` | 2 | — | `todo` |
-| `limits/maxUniformBuffersPerShaderStage.spec.ts` | 3 | — | `todo` |
-| `limits/maxVertexAttributes.spec.ts` | 1 | — | `todo` |
-| `limits/maxVertexBufferArrayStride.spec.ts` | 2 | — | `todo` |
-| `limits/maxVertexBuffers.spec.ts` | 3 | — | `todo` |
-| `limits/minStorageBufferOffsetAlignment.spec.ts` | 4 | — | `todo` |
-| `limits/minUniformBufferOffsetAlignment.spec.ts` | 4 | — | `todo` |
+| `limits/maxBindGroups.spec.ts` | 4 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxBindGroupsPlusVertexBuffers.spec.ts` | 2 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxBindingsPerBindGroup.spec.ts` | 3 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxBufferSize.spec.ts` | 1 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxColorAttachmentBytesPerSample.spec.ts` | 3 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxColorAttachments.spec.ts` | 5 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxComputeInvocationsPerWorkgroup.spec.ts` | 1 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxComputeWorkgroupSizeX.spec.ts` | 2 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxComputeWorkgroupSizeY.spec.ts` | 2 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxComputeWorkgroupSizeZ.spec.ts` | 2 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxComputeWorkgroupStorageSize.spec.ts` | 1 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxComputeWorkgroupsPerDimension.spec.ts` | 2 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxDynamicStorageBuffersPerPipelineLayout.spec.ts` | 2 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxDynamicUniformBuffersPerPipelineLayout.spec.ts` | 2 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxInterStageShaderVariables.spec.ts` | 1 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxSampledTexturesPerShaderStage.spec.ts` | 3 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxSamplersPerShaderStage.spec.ts` | 3 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxStorageBufferBindingSize.spec.ts` | 3 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxStorageBuffersInFragmentStage.spec.ts` | 3 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxStorageBuffersInVertexStage.spec.ts` | 3 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxStorageBuffersPerShaderStage.spec.ts` | 3 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxStorageTexturesInFragmentStage.spec.ts` | 3 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxStorageTexturesInVertexStage.spec.ts` | 3 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxStorageTexturesPerShaderStage.spec.ts` | 3 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxTextureArrayLayers.spec.ts` | 1 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxTextureDimension1D.spec.ts` | 1 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxTextureDimension2D.spec.ts` | 3 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxTextureDimension3D.spec.ts` | 1 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxUniformBufferBindingSize.spec.ts` | 2 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxUniformBuffersPerShaderStage.spec.ts` | 3 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxVertexAttributes.spec.ts` | 1 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxVertexBufferArrayStride.spec.ts` | 2 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/maxVertexBuffers.spec.ts` | 3 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/minStorageBufferOffsetAlignment.spec.ts` | 4 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
+| `limits/minUniformBufferOffsetAlignment.spec.ts` | 4 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
 | **(top-level)/** | | | |
 | `compute_pipeline.spec.ts` | 19 | compute_pipeline_validation.rs | `ported*` → `cts/validation/compute_pipeline.rs` (override/storage + resource_compatibility cases `#[ignore]`d: core does not yet evaluate pipeline overrides at createComputePipeline nor reject layout/shader resource mismatches) |
 | `createBindGroup.spec.ts` | 27 | bind_group_validation.rs | `ported*` → `cts/validation/create_bind_group.rs` (5 external_texture,* N/A: web; 8 `#[ignore]`d: component-type, destroyed buffer/texture, BGL device-mismatch, storage-texture mip/format, effective-binding-size %4, sampler compare-type core gaps) |
