@@ -41,6 +41,21 @@ never a reason to skip a CTS case.
   with subcases `#[ignore]`d behind core gaps (real spec-correct bodies)
   or feature-gated on Noop — see rows and the core-gap list below.
 - `todo`: 0.
+- **Phase E (legacy cleanup) — partial.** 8 legacy Dawn test files whose
+  rules are fully covered by *active* CTS tests were deleted:
+  `buffer_creation_validation`, `buffer_map_validation`,
+  `buffer_mapped_range_validation`, `debug_marker_validation`,
+  `queue_submit_validation`, `texture_creation_validation`,
+  `texture_view_validation`, `vertex_state_validation` (66 redundant
+  tests). The remaining ~22 legacy `*_validation.rs` were **kept**: each
+  has at least one active rule that the CTS port currently only
+  `#[ignore]`s (a core gap) or covers more broadly — deleting them would
+  drop live coverage. **That kept-list is the worklist for the core-gap
+  follow-up phase** (close the gap in core → un-ignore the CTS test →
+  then delete the legacy test). KEEP-forever (no CTS analog):
+  future_modes, gles_context_backend_chain, instance_smoke,
+  label_validation, multiple_device_validation, object_caching_validation,
+  pipeline_async_validation, surface_validation, unsafe_api_validation.
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage
