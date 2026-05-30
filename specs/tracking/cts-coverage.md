@@ -35,15 +35,12 @@ never a reason to skip a CTS case.
 
 - 129 spec files / 704 `g.test()` cases total in `api/validation`.
 - Excluded (`N/A`): 7 whole spec files (web/empty/multiDraw + setImmediates/immediate absent).
-- `ported`: 112. Complete areas: `buffer/`, texture creation,
-  `image_copy/`, `queue/`, shader_module, compute_pipeline, immediates,
-  layout_shader_compat, `render_pipeline/`, bind-group family,
-  `render_pass/`, `encoding/`, state & lifecycle, `resource_usages/`,
-  `capability_checks/limits/` (35). Several `ported*` with subcases
-  `#[ignore]`d behind core gaps — assertions are spec-correct.
-- `todo`: 10 spec files — only `capability_checks/features/` (7) and
-  texture format-capability (`texture/bgra8unorm_storage`,
-  `float32_filterable`, `rg11b10ufloat_renderable`).
+- `ported`: 122 (all non-`N/A` specs). **The `api/validation` CTS port
+  is COMPLETE** — every non-excluded `g.test()` across all 129 spec files
+  has a Rust `#[test]` under `tests/cts/validation/…`. Many `ported*`
+  with subcases `#[ignore]`d behind core gaps (real spec-correct bodies)
+  or feature-gated on Noop — see rows and the core-gap list below.
+- `todo`: 0.
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage
@@ -63,13 +60,13 @@ never a reason to skip a CTS case.
 | `mapping.spec.ts` | 33 | buffer_map_validation.rs / buffer_mapped_range_validation.rs | `ported*` → `cts/validation/buffer/mapping.rs` (gc_behavior,* N/A: JS GC; earlyRejection timing adapted) |
 | `threading.spec.ts` | 0 | — | `N/A` — web (worker postMessage); 0 cases |
 | **capability_checks/** | | | |
-| `features/clip_distances.spec.ts` | 2 | — | `todo` |
-| `features/query_types.spec.ts` | 2 | — | `todo` |
-| `features/subgroup_size_control.spec.ts` | 1 | — | `todo` |
-| `features/texture_component_swizzle.spec.ts` | 4 | — | `todo` — compatibility_mode deferred |
-| `features/texture_formats.spec.ts` | 13 | features_validation.rs / texture_format_validation.rs | `todo` — canvas_configuration* excluded |
-| `features/texture_formats_tier1.spec.ts` | 8 | — | `todo` |
-| `features/texture_formats_tier2.spec.ts` | 3 | — | `todo` |
+| `features/clip_distances.spec.ts` | 2 | — | `ported*` → `cts/validation/capability_checks/features/clip_distances.rs` (0 active: Noop lacks clip-distances; real bodies) |
+| `features/query_types.spec.ts` | 2 | — | `ported*` → `cts/validation/capability_checks/features/query_types.rs` (2 active: occlusion + timestamp-query + missing-feature rejection) |
+| `features/subgroup_size_control.spec.ts` | 1 | — | `ported*` → `cts/validation/capability_checks/features/subgroup_size_control.rs` (0 active: Noop lacks subgroups) |
+| `features/texture_component_swizzle.spec.ts` | 4 | — | `ported*` → `cts/validation/capability_checks/features/texture_component_swizzle.rs` (1 active (identity); feature/compat-mode ignored) |
+| `features/texture_formats.spec.ts` | 13 | features_validation.rs / texture_format_validation.rs | `ported*` → `cts/validation/capability_checks/features/texture_formats.rs` (1 active (capability-guarantee probe); format matrices ignored — static caps not feature-keyed) |
+| `features/texture_formats_tier1.spec.ts` | 8 | — | `ported*` → `cts/validation/capability_checks/features/texture_formats_tier1.rs` (1 active (implication); format effects ignored) |
+| `features/texture_formats_tier2.spec.ts` | 3 | — | `ported*` → `cts/validation/capability_checks/features/texture_formats_tier2.rs` (1 active (implication); rw-storage effects ignored) |
 | `limits/maxBindGroups.spec.ts` | 4 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
 | `limits/maxBindGroupsPlusVertexBuffers.spec.ts` | 2 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
 | `limits/maxBindingsPerBindGroup.spec.ts` | 3 | — | `ported*` → `cts/validation/capability_checks/limits/` (active where core enforces; rest `#[ignore]`d with real at/over bodies) |
@@ -197,10 +194,10 @@ never a reason to skip a CTS case.
 | **state/** | | | |
 | `device_lost/destroy.spec.ts` | 32 | device_lost_validation.rs | `ported*` → `cts/validation/state/device_lost/destroy.rs` (24 active; 5 `#[ignore]`d: 3 compressed-format feature, 2 async-pipeline lost-device returns ValidationError; 3 N/A web external-texture) |
 | **texture/** | | | |
-| `bgra8unorm_storage.spec.ts` | 4 | — | `todo` — canvas subcases excluded |
+| `bgra8unorm_storage.spec.ts` | 4 | — | `ported*` → `cts/validation/texture/bgra8unorm_storage.rs` (0 active: Noop lacks bgra8unorm-storage; canvas N/A; real bodies) |
 | `destroy.spec.ts` | 4 | — | `ported` → `cts/validation/texture/destroy.rs` |
-| `float32_filterable.spec.ts` | 1 | — | `todo` |
-| `rg11b10ufloat_renderable.spec.ts` | 5 | — | `todo` |
+| `float32_filterable.spec.ts` | 1 | — | `ported*` → `cts/validation/texture/float32_filterable.rs` (0 active: Noop lacks float32-filterable; real body) |
+| `rg11b10ufloat_renderable.spec.ts` | 5 | — | `ported*` → `cts/validation/texture/rg11b10ufloat_renderable.rs` (feature advertised but renderability not feature-applied — ignored, real bodies) |
 
 **Total: 129 spec files / 704 `g.test()` cases.**
 
