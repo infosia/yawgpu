@@ -397,7 +397,6 @@ override cf: f32 = 0.0;
 }
 
 #[test]
-#[ignore = "core does not yet reject override expression arithmetic errors used by the selected entry point at createComputePipeline; CTS expects main_pipe_error to fail"]
 fn overrides_entry_point_validation_error() {
     let test = ValidationTest::new();
     unsafe {
@@ -457,7 +456,6 @@ override cf16: f16 = 0.0h;
 }
 
 #[test]
-#[ignore = "core does not yet reject override-supplied zero or negative workgroup_size components at createComputePipeline; CTS expects validation errors"]
 fn overrides_workgroup_size() {
     let test = ValidationTest::new();
     unsafe {
@@ -525,7 +523,6 @@ override z: u32 = 1u;
 }
 
 #[test]
-#[ignore = "core does not yet apply override-supplied workgroup array sizes to maxComputeWorkgroupStorageSize at createComputePipeline; CTS expects validation errors"]
 fn overrides_workgroup_size_limits_workgroup_storage_size() {
     let test = ValidationTest::new();
     unsafe {

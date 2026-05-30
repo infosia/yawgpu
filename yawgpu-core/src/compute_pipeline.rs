@@ -402,7 +402,7 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
     let entry_name = resolve_compute_entry(module, descriptor.entry_point.as_deref())?;
     let overrides = module.overrides();
     let constants = resolve_pipeline_constants(&overrides, &descriptor.constants)?;
-    let workgroup = resolve_compute_workgroup(module, &entry_name, &overrides, &constants, limits)?;
+    let workgroup = resolve_compute_workgroup(module, &entry_name, &constants, limits)?;
     let bindings = module.resource_bindings_for_entry(&entry_name)?;
     validate_compute_pipeline_layout(&descriptor.layout, &bindings)?;
     let bind_group_layouts =
@@ -472,9 +472,10 @@ pub(crate) fn resolve_compute_entry(
 }
 
 /// Stores resolved override constant data used by validation and backend submission.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct ResolvedOverrideConstant {
     pub(crate) index: usize,
+    pub(crate) key: String,
     pub(crate) value: f64,
 }
 
@@ -494,6 +495,7 @@ pub(crate) fn resolve_pipeline_constants(
         validate_pipeline_constant_value(&overrides[index], constant.value)?;
         resolved.push(ResolvedOverrideConstant {
             index,
+            key: constant.key.clone(),
             value: constant.value,
         });
     }
@@ -574,30 +576,19 @@ pub(crate) fn validate_pipeline_constant_value(
 pub(crate) fn resolve_compute_workgroup(
     module: &shader_naga::ReflectedModule,
     entry_name: &str,
-    overrides: &[shader_naga::ReflectedOverride],
     constants: &[ResolvedOverrideConstant],
     limits: Limits,
 ) -> Result<ResolvedComputeWorkgroup, String> {
-    let workgroup = module
-        .compute_workgroup_size(entry_name)?
-        .ok_or_else(|| "compute entry point workgroup size reflection failed".to_owned())?;
-    let mut size = workgroup.literal_size;
-    for (axis, key) in workgroup.override_keys.iter().enumerate() {
-        if let Some(key) = key {
-            let index = resolve_override_key(overrides, key)?;
-            let value = constants
-                .iter()
-                .find(|constant| constant.index == index)
-                .map(|constant| constant.value)
-                .or_else(|| default_override_number(&overrides[index]))
-                .ok_or_else(|| "workgroup size override has no value".to_owned())?;
-            if value.fract() != 0.0 || value < 0.0 || value > f64::from(u32::MAX) {
-                return Err("workgroup size override must resolve to a u32 value".to_owned());
-            }
-            size[axis] = value as u32;
-        }
-    }
+    let pipeline_constants = constants
+        .iter()
+        .map(|constant| (constant.key.clone(), constant.value))
+        .collect();
+    let workgroup = module.resolved_compute_workgroup_size(entry_name, &pipeline_constants)?;
+    let size = workgroup.literal_size;
 
+    if size.contains(&0) {
+        return Err("compute workgroup size must be at least one".to_owned());
+    }
     if size[0] > limits.max_compute_workgroup_size_x {
         return Err("compute workgroup x size exceeds the device limit".to_owned());
     }
@@ -622,32 +613,6 @@ pub(crate) fn resolve_compute_workgroup(
         size,
         storage_size: workgroup.workgroup_storage_size,
     })
-}
-
-/// Records resolve into the command stream.
-pub(crate) fn resolve_override_key(
-    overrides: &[shader_naga::ReflectedOverride],
-    key: &shader_naga::ReflectedOverrideKey,
-) -> Result<usize, String> {
-    overrides
-        .iter()
-        .position(|override_| {
-            if let Some(id) = key.id {
-                override_.id == Some(id)
-            } else {
-                override_.name == key.name
-            }
-        })
-        .ok_or_else(|| "workgroup size override key does not match a shader override".to_owned())
-}
-
-/// Returns default override number.
-pub(crate) fn default_override_number(override_: &shader_naga::ReflectedOverride) -> Option<f64> {
-    match override_.default_value {
-        Some(shader_naga::ReflectedOverrideValue::Number(value)) => Some(value),
-        Some(shader_naga::ReflectedOverrideValue::Bool(value)) => Some(f64::from(value as u8)),
-        None => None,
-    }
 }
 
 /// Validates compute pipeline layout and returns a descriptive error on failure.
@@ -1360,5 +1325,51 @@ mod tests {
         assert!(!explicit.is_error());
         assert_eq!(explicit.entry_name(), "cs");
         assert_eq!(scoped, None);
+    }
+
+    #[test]
+    fn resolve_compute_workgroup_evaluates_override_expressions() {
+        let module = shader_naga::parse_and_validate_wgsl(
+            "override n: u32 = 4u;
+             var<workgroup> scratch: array<u32, n * 2u>;
+             @compute @workgroup_size(n + 1u, 1, 1)
+             fn cs() { scratch[0] = 1u; }",
+        )
+        .expect("test WGSL should validate");
+        let overrides = module.overrides();
+        let constants = resolve_pipeline_constants(
+            &overrides,
+            &[PipelineConstant {
+                key: "n".to_owned(),
+                value: 8.0,
+            }],
+        )
+        .expect("override should resolve");
+
+        let resolved = resolve_compute_workgroup(&module, "cs", &constants, Limits::DEFAULT)
+            .expect("override expressions should evaluate");
+
+        assert_eq!(resolved.size, [9, 1, 1]);
+        assert_eq!(resolved.storage_size, 64);
+    }
+
+    #[test]
+    fn resolve_compute_workgroup_rejects_override_arithmetic_error() {
+        let module = shader_naga::parse_and_validate_wgsl(
+            "override n: u32;
+             @compute @workgroup_size(1u / n, 1, 1)
+             fn cs() {}",
+        )
+        .expect("override arithmetic is pipeline-time validation");
+        let constants = resolve_pipeline_constants(
+            &module.overrides(),
+            &[PipelineConstant {
+                key: "n".to_owned(),
+                value: 0.0,
+            }],
+        )
+        .expect("override constant should resolve");
+
+        assert!(resolve_compute_workgroup(&module, "cs", &constants, Limits::DEFAULT).is_err());
     }
 }

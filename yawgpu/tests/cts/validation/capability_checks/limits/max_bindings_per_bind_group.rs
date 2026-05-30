@@ -14,7 +14,6 @@ fn create_pipeline_at_over() {
 }
 
 #[test]
-#[ignore = "maxBindingsPerBindGroup required-limit relationship validation is not yet implemented"]
 fn validate() {
     unsafe { common::assert_required_limits_are_not_lowered_to_requested_values() };
 }

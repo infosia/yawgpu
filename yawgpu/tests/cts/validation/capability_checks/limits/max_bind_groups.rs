@@ -20,7 +20,6 @@ fn set_bind_group_at_over() {
 }
 
 #[test]
-#[ignore = "maxBindGroupsPlusVertexBuffers relationship validation is not yet implemented in device creation"]
 fn validate_max_bind_groups_plus_vertex_buffers() {
     unsafe { common::assert_required_limits_are_not_lowered_to_requested_values() };
 }

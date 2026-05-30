@@ -14,7 +14,6 @@ fn set_vertex_buffer_at_over() {
 }
 
 #[test]
-#[ignore = "maxBindGroupsPlusVertexBuffers relationship validation is not yet active"]
 fn validate_max_bind_groups_plus_vertex_buffers() {
     unsafe { common::assert_required_limits_are_not_lowered_to_requested_values() };
 }

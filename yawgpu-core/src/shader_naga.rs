@@ -160,6 +160,38 @@ pub(crate) struct ReflectedIoLocation {
     pub location: u32,
     /// Ty.
     pub ty: ReflectedTypeClass,
+    /// Interpolation.
+    pub interpolation: Option<ReflectedInterpolation>,
+    /// Sampling.
+    pub sampling: Option<ReflectedSampling>,
+}
+
+/// Enumerates reflected interpolation values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReflectedInterpolation {
+    /// Perspective variant.
+    Perspective,
+    /// Linear variant.
+    Linear,
+    /// Flat variant.
+    Flat,
+    /// Per-vertex variant.
+    PerVertex,
+}
+
+/// Enumerates reflected interpolation sampling values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReflectedSampling {
+    /// Center variant.
+    Center,
+    /// Centroid variant.
+    Centroid,
+    /// Sample variant.
+    Sample,
+    /// First variant.
+    First,
+    /// Either variant.
+    Either,
 }
 
 /// Stores entry metadata.
@@ -570,6 +602,22 @@ impl ReflectedModule {
         }))
     }
 
+    /// Returns compute workgroup size after resolving pipeline constants.
+    pub(crate) fn resolved_compute_workgroup_size(
+        &self,
+        entry_point: &str,
+        pipeline_constants: &naga::back::PipelineConstants,
+    ) -> Result<ReflectedWorkgroupSize, String> {
+        let (module, info) = naga::back::pipeline_constants::process_overrides(
+            &self.module,
+            &self.info,
+            Some((naga::ShaderStage::Compute, entry_point)),
+            pipeline_constants,
+        )
+        .map_err(|error| error.to_string())?;
+        resolved_workgroup_size(&module, &info, entry_point)
+    }
+
     /// Returns entry point io reflected by the validated shader module.
     pub(crate) fn entry_point_io(&self) -> Vec<ReflectedEntryPointIo> {
         self.module
@@ -719,6 +767,42 @@ impl ReflectedModule {
         }
         Ok(size)
     }
+}
+
+fn resolved_workgroup_size(
+    module: &naga::Module,
+    info: &naga::valid::ModuleInfo,
+    entry_point: &str,
+) -> Result<ReflectedWorkgroupSize, String> {
+    let Some((entry_index, entry)) =
+        module.entry_points.iter().enumerate().find(|(_, entry)| {
+            entry.name == entry_point && entry.stage == naga::ShaderStage::Compute
+        })
+    else {
+        return Err("compute entry point workgroup size reflection failed".to_owned());
+    };
+
+    let mut layouter = naga::proc::Layouter::default();
+    layouter
+        .update(module.to_ctx())
+        .map_err(|error| error.to_string())?;
+    let mut storage_size = 0u64;
+    for (handle, global) in module.global_variables.iter().filter(|(handle, global)| {
+        global.space == naga::AddressSpace::WorkGroup
+            && !info.get_entry_point(entry_index)[*handle].is_empty()
+    }) {
+        let global_size = u64::from(layouter[global.ty].size);
+        storage_size = storage_size.checked_add(global_size).ok_or_else(|| {
+            format!("compute workgroup storage size overflows at global {handle:?}")
+        })?;
+    }
+
+    Ok(ReflectedWorkgroupSize {
+        entry_point: entry.name.clone(),
+        literal_size: entry.workgroup_size,
+        override_keys: [None, None, None],
+        workgroup_storage_size: storage_size,
+    })
 }
 
 fn msl_resources(binding_map: &MslBindingMap) -> Result<naga::back::msl::BindingMap, String> {
@@ -872,11 +956,19 @@ fn collect_binding_locations(
     binding: Option<&naga::Binding>,
     locations: &mut Vec<ReflectedIoLocation>,
 ) {
-    if let Some(naga::Binding::Location { location, .. }) = binding {
+    if let Some(naga::Binding::Location {
+        location,
+        interpolation,
+        sampling,
+        ..
+    }) = binding
+    {
         if let Some(ty) = type_class(module, ty) {
             locations.push(ReflectedIoLocation {
                 location: *location,
                 ty,
+                interpolation: interpolation.map(map_interpolation),
+                sampling: sampling.map(map_sampling),
             });
         }
         return;
@@ -886,14 +978,41 @@ fn collect_binding_locations(
         return;
     };
     for member in members {
-        if let Some(naga::Binding::Location { location, .. }) = member.binding.as_ref() {
+        if let Some(naga::Binding::Location {
+            location,
+            interpolation,
+            sampling,
+            ..
+        }) = member.binding.as_ref()
+        {
             if let Some(ty) = type_class(module, member.ty) {
                 locations.push(ReflectedIoLocation {
                     location: *location,
                     ty,
+                    interpolation: interpolation.map(map_interpolation),
+                    sampling: sampling.map(map_sampling),
                 });
             }
         }
+    }
+}
+
+fn map_interpolation(value: naga::Interpolation) -> ReflectedInterpolation {
+    match value {
+        naga::Interpolation::Perspective => ReflectedInterpolation::Perspective,
+        naga::Interpolation::Linear => ReflectedInterpolation::Linear,
+        naga::Interpolation::Flat => ReflectedInterpolation::Flat,
+        naga::Interpolation::PerVertex => ReflectedInterpolation::PerVertex,
+    }
+}
+
+fn map_sampling(value: naga::Sampling) -> ReflectedSampling {
+    match value {
+        naga::Sampling::Center => ReflectedSampling::Center,
+        naga::Sampling::Centroid => ReflectedSampling::Centroid,
+        naga::Sampling::Sample => ReflectedSampling::Sample,
+        naga::Sampling::First => ReflectedSampling::First,
+        naga::Sampling::Either => ReflectedSampling::Either,
     }
 }
 

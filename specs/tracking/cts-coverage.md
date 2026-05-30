@@ -74,6 +74,18 @@ never a reason to skip a CTS case.
   `texture/{bgra8unorm_storage,float32_filterable,rg11b10ufloat_renderable}`);
   only canvas/surface fixture subcases remain ignored. Regressions in
   compressed-format tests/e2e updated to request the feature.
+- **Core-gap follow-up #3 (Batch B, create-time validation) — DONE.**
+  +38 CTS tests un-ignored → active: compute pipeline-override evaluation
+  (naga `process_overrides` → workgroup size/storage/arithmetic);
+  render-pipeline inter-stage matching (all 8: location/type/interpolation/
+  maxInterStageShaderVariables); fragment color/blend (maxColorAttachments,
+  bytes-per-sample, blend-factor, writeMask, vec4 source-alpha);
+  depth-stencil `depthCompare=always` inert handling (6); device-limit
+  relationship validation (~16: invocations vs workgroup,
+  maxBindGroupsPlusVertexBuffers, min*Alignment pow2/≥32, binding-size vs
+  maxBufferSize, etc.). Still deferred → Batch C: layout/resource
+  compatibility matrices, dual-source-blending/shader-f16 (feature adds),
+  bytes-per-sample format-selection matrices, draw-time relationship.
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage
