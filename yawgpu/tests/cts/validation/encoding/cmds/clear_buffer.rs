@@ -8,7 +8,6 @@ use crate::common::{
 };
 
 #[test]
-#[ignore = "core reports destroyed buffers at command-buffer finish; CTS expects clearBuffer recorded before submit with a destroyed buffer to fail at queue submit"]
 fn buffer_state() {
     let test = ValidationTest::new();
     unsafe {

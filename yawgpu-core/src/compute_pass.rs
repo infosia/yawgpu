@@ -172,6 +172,23 @@ mod tests {
     }
 
     #[test]
+    fn compute_pass_double_end_does_not_poison_parent_encoder() {
+        let encoder = noop_device().create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.end(), None);
+        assert_eq!(
+            pass.end(),
+            Some("pass encoder cannot be ended more than once".to_owned())
+        );
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+    }
+
+    #[test]
     fn compute_pass_encoder_pipeline_bind_group_and_dispatch() {
         let device = noop_device();
         let pipeline = noop_compute_pipeline(&device);

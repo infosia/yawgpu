@@ -41,6 +41,7 @@ pub(crate) struct PassEncoderState {
     pub(crate) occlusion_query_set: Option<QuerySet>,
     pub(crate) open_occlusion_query: Option<u32>,
     pub(crate) used_occlusion_queries: BTreeSet<u32>,
+    pub(crate) command_referenced_buffers: Vec<Arc<Buffer>>,
 }
 
 impl PassEncoderState {
@@ -70,6 +71,7 @@ impl PassEncoderState {
             occlusion_query_set,
             open_occlusion_query: None,
             used_occlusion_queries: BTreeSet::new(),
+            command_referenced_buffers: Vec::new(),
         }
     }
 
@@ -137,12 +139,14 @@ impl PassEncoderInner {
         let mut state = self.state.lock();
         if state.ended {
             let message = "pass encoder cannot be ended more than once".to_owned();
-            self.parent.record_first_error(message.clone());
             return Some(message);
         }
         if self.parent.is_finished() {
             let message = "pass encoder cannot be used after parent encoder finish".to_owned();
-            self.parent.record_first_error(message.clone());
+            return Some(message);
+        }
+        if !self.parent.is_open_pass(self.token) {
+            let message = "pass encoder is not the active pass".to_owned();
             return Some(message);
         }
         state.ended = true;
@@ -235,12 +239,10 @@ impl PassEncoderInner {
     pub(crate) fn pass_command_guard(&self) -> Result<(), String> {
         if self.parent.is_finished() {
             let message = "pass encoder cannot be used after parent encoder finish".to_owned();
-            self.parent.record_first_error(message.clone());
             return Err(message);
         }
         if self.state.lock().ended {
             let message = "pass encoder cannot be used after end".to_owned();
-            self.parent.record_first_error(message.clone());
             return Err(message);
         }
         Ok(())
@@ -365,9 +367,6 @@ pub(crate) fn validate_set_index_buffer(
     if buffer.is_error() {
         return Err("render pass index buffer must not be an error buffer".to_owned());
     }
-    if buffer.is_destroyed() {
-        return Err("render pass index buffer must not be destroyed".to_owned());
-    }
     if !buffer.usage().contains(BufferUsage::INDEX) {
         return Err("render pass index buffer requires Index usage".to_owned());
     }
@@ -391,9 +390,6 @@ pub(crate) fn validate_set_vertex_buffer(
 ) -> Result<u64, String> {
     if buffer.is_error() {
         return Err("render pass vertex buffer must not be an error buffer".to_owned());
-    }
-    if buffer.is_destroyed() {
-        return Err("render pass vertex buffer must not be destroyed".to_owned());
     }
     if !buffer.usage().contains(BufferUsage::VERTEX) {
         return Err("render pass vertex buffer requires Vertex usage".to_owned());
@@ -565,9 +561,6 @@ pub(crate) fn validate_indirect_buffer(
 ) -> Result<(), String> {
     if buffer.is_error() {
         return Err(format!("{label} buffer must not be an error buffer"));
-    }
-    if buffer.is_destroyed() {
-        return Err(format!("{label} buffer must not be destroyed"));
     }
     if !buffer.usage().contains(BufferUsage::INDIRECT) {
         return Err(format!("{label} buffer requires Indirect usage"));

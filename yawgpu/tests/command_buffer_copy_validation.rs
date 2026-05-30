@@ -43,12 +43,12 @@ fn copy_buffer_to_buffer_usage_and_buffer_state_are_validated() {
         let destroyed_src =
             create_buffer(test.device(), 16, native::WGPUBufferUsage_CopySrc, false);
         yawgpu::wgpuBufferDestroy(destroyed_src);
-        assert_copy_error(&test, destroyed_src, 0, destination, 0, 4);
+        assert_copy_submit_error(&test, destroyed_src, 0, destination, 0, 4);
 
         let destroyed_dst =
             create_buffer(test.device(), 16, native::WGPUBufferUsage_CopyDst, false);
         yawgpu::wgpuBufferDestroy(destroyed_dst);
-        assert_copy_error(&test, source, 0, destroyed_dst, 0, 4);
+        assert_copy_submit_error(&test, source, 0, destroyed_dst, 0, 4);
 
         yawgpu::wgpuBufferRelease(destroyed_dst);
         yawgpu::wgpuBufferRelease(destroyed_src);
@@ -81,7 +81,7 @@ fn copy_buffer_to_buffer_same_buffer_matches_dawn() {
 }
 
 #[test]
-fn clear_buffer_validation_is_deferred_to_finish() {
+fn clear_buffer_validation_defers_destroyed_state_to_submit() {
     let test = ValidationTest::new();
     unsafe {
         let destination = create_buffer(test.device(), 16, native::WGPUBufferUsage_CopyDst, false);
@@ -103,7 +103,7 @@ fn clear_buffer_validation_is_deferred_to_finish() {
 
         let destroyed = create_buffer(test.device(), 16, native::WGPUBufferUsage_CopyDst, false);
         yawgpu::wgpuBufferDestroy(destroyed);
-        assert_clear_error(&test, destroyed, 0, 4);
+        assert_clear_submit_error(&test, destroyed, 0, 4);
 
         yawgpu::wgpuBufferRelease(destroyed);
         yawgpu::wgpuBufferRelease(error);
@@ -113,7 +113,7 @@ fn clear_buffer_validation_is_deferred_to_finish() {
 }
 
 #[test]
-fn command_encoder_write_buffer_validation_is_deferred_to_finish() {
+fn command_encoder_write_buffer_validation_defers_destroyed_state_to_submit() {
     let test = ValidationTest::new();
     unsafe {
         let destination = create_buffer(test.device(), 64, native::WGPUBufferUsage_CopyDst, false);
@@ -136,7 +136,7 @@ fn command_encoder_write_buffer_validation_is_deferred_to_finish() {
 
         let destroyed = create_buffer(test.device(), 64, native::WGPUBufferUsage_CopyDst, false);
         yawgpu::wgpuBufferDestroy(destroyed);
-        assert_write_error(&test, destroyed, 0, data.as_ptr().cast(), 4);
+        assert_write_submit_error(&test, destroyed, 0, data.as_ptr().cast(), 4);
 
         yawgpu::wgpuBufferRelease(destroyed);
         yawgpu::wgpuBufferRelease(error);
@@ -235,6 +235,31 @@ unsafe fn assert_copy_error(
     yawgpu::wgpuCommandEncoderRelease(encoder);
 }
 
+unsafe fn assert_copy_submit_error(
+    test: &ValidationTest,
+    source: native::WGPUBuffer,
+    source_offset: u64,
+    destination: native::WGPUBuffer,
+    destination_offset: u64,
+    size: u64,
+) {
+    let encoder = create_encoder(test);
+    test.clear_errors();
+    yawgpu::wgpuCommandEncoderCopyBufferToBuffer(
+        encoder,
+        source,
+        source_offset,
+        destination,
+        destination_offset,
+        size,
+    );
+    assert!(test.errors().is_empty());
+    let command_buffer = finish_ok(test, encoder);
+    submit_error(test, command_buffer);
+    yawgpu::wgpuCommandBufferRelease(command_buffer);
+    yawgpu::wgpuCommandEncoderRelease(encoder);
+}
+
 unsafe fn assert_clear_ok(
     test: &ValidationTest,
     buffer: native::WGPUBuffer,
@@ -261,6 +286,22 @@ unsafe fn assert_clear_error(
     yawgpu::wgpuCommandEncoderClearBuffer(encoder, buffer, offset, size);
     assert!(test.errors().is_empty());
     let command_buffer = finish_error(test, encoder);
+    yawgpu::wgpuCommandBufferRelease(command_buffer);
+    yawgpu::wgpuCommandEncoderRelease(encoder);
+}
+
+unsafe fn assert_clear_submit_error(
+    test: &ValidationTest,
+    buffer: native::WGPUBuffer,
+    offset: u64,
+    size: u64,
+) {
+    let encoder = create_encoder(test);
+    test.clear_errors();
+    yawgpu::wgpuCommandEncoderClearBuffer(encoder, buffer, offset, size);
+    assert!(test.errors().is_empty());
+    let command_buffer = finish_ok(test, encoder);
+    submit_error(test, command_buffer);
     yawgpu::wgpuCommandBufferRelease(command_buffer);
     yawgpu::wgpuCommandEncoderRelease(encoder);
 }
@@ -293,6 +334,23 @@ unsafe fn assert_write_error(
     yawgpu::wgpuCommandEncoderWriteBuffer(encoder, buffer, offset, data, size);
     assert!(test.errors().is_empty());
     let command_buffer = finish_error(test, encoder);
+    yawgpu::wgpuCommandBufferRelease(command_buffer);
+    yawgpu::wgpuCommandEncoderRelease(encoder);
+}
+
+unsafe fn assert_write_submit_error(
+    test: &ValidationTest,
+    buffer: native::WGPUBuffer,
+    offset: u64,
+    data: *const std::ffi::c_void,
+    size: usize,
+) {
+    let encoder = create_encoder(test);
+    test.clear_errors();
+    yawgpu::wgpuCommandEncoderWriteBuffer(encoder, buffer, offset, data, size);
+    assert!(test.errors().is_empty());
+    let command_buffer = finish_ok(test, encoder);
+    submit_error(test, command_buffer);
     yawgpu::wgpuCommandBufferRelease(command_buffer);
     yawgpu::wgpuCommandEncoderRelease(encoder);
 }
@@ -331,6 +389,17 @@ unsafe fn finish_error(
     );
     assert!(!command_buffer.is_null());
     command_buffer
+}
+
+unsafe fn submit_error(test: &ValidationTest, command_buffer: native::WGPUCommandBuffer) {
+    let queue = yawgpu::wgpuDeviceGetQueue(test.device());
+    test.assert_device_error_after(
+        || {
+            yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        },
+        None,
+    );
+    yawgpu::wgpuQueueRelease(queue);
 }
 
 unsafe fn create_buffer(

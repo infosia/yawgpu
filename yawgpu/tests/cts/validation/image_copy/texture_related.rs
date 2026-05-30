@@ -37,12 +37,11 @@ fn valid() {
                     16,
                     native::WGPUBufferUsage_CopySrc | native::WGPUBufferUsage_CopyDst,
                 );
-                expect_copy(
-                    &test,
-                    *method,
-                    CopyParams::new(texture, buffer, extent(0, 0, 0), 16),
-                    state == "valid",
-                );
+                let mut params = CopyParams::new(texture, buffer, extent(0, 0, 0), 16);
+                if state == "destroyed" && *method != CopyMethod::WriteTexture {
+                    params.submit = true;
+                }
+                expect_copy(&test, *method, params, state == "valid");
                 yawgpu::wgpuBufferRelease(buffer);
                 yawgpu::wgpuTextureRelease(texture);
             }

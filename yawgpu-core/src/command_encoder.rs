@@ -706,6 +706,11 @@ impl CommandEncoder {
         }
     }
 
+    /// Returns true when `token` is the currently open pass.
+    pub(crate) fn is_open_pass(&self, token: PassToken) -> bool {
+        self.inner.state.lock().open_pass == Some(token)
+    }
+
     /// Stores `message` as the encoder's first error if none has been recorded yet.
     pub(crate) fn record_first_error(&self, message: impl Into<String>) {
         let mut state = self.inner.state.lock();
@@ -790,9 +795,6 @@ pub(crate) fn validate_copy_buffer_to_buffer(
     if source.is_error() || destination.is_error() {
         return Err("copy buffer command cannot use an error buffer".to_owned());
     }
-    if source.is_destroyed() || destination.is_destroyed() {
-        return Err("copy buffer command cannot use a destroyed buffer".to_owned());
-    }
     if !source.usage().contains(BufferUsage::COPY_SRC) {
         return Err("copy source buffer must have CopySrc usage".to_owned());
     }
@@ -826,9 +828,6 @@ pub(crate) fn validate_clear_buffer(buffer: &Buffer, offset: u64, size: u64) -> 
     if buffer.is_error() {
         return Err("clear buffer command cannot use an error buffer".to_owned());
     }
-    if buffer.is_destroyed() {
-        return Err("clear buffer command cannot use a destroyed buffer".to_owned());
-    }
     if !buffer.usage().contains(BufferUsage::COPY_DST) {
         return Err("clear buffer requires CopyDst usage".to_owned());
     }
@@ -857,9 +856,6 @@ pub(crate) fn validate_encoder_write_buffer(
 ) -> Result<(), String> {
     if buffer.is_error() {
         return Err("command encoder write buffer cannot use an error buffer".to_owned());
-    }
-    if buffer.is_destroyed() {
-        return Err("command encoder write buffer cannot use a destroyed buffer".to_owned());
     }
     if !buffer.usage().contains(BufferUsage::COPY_DST) {
         return Err("command encoder write buffer requires CopyDst usage".to_owned());
@@ -943,6 +939,9 @@ pub(crate) fn validate_timestamp_query_set(
     usage: &str,
 ) -> Result<(), String> {
     validate_query_set_alive(query_set, usage)?;
+    if query_set.is_destroyed() {
+        return Err(format!("{usage} cannot use a destroyed query set"));
+    }
     if query_set.kind() != QueryType::Timestamp {
         return Err(format!("{usage} requires a timestamp query set"));
     }
@@ -953,9 +952,6 @@ pub(crate) fn validate_timestamp_query_set(
 pub(crate) fn validate_query_set_alive(query_set: &QuerySet, usage: &str) -> Result<(), String> {
     if query_set.is_error() {
         return Err(format!("{usage} cannot use an error query set"));
-    }
-    if query_set.is_destroyed() {
-        return Err(format!("{usage} cannot use a destroyed query set"));
     }
     Ok(())
 }
@@ -992,9 +988,6 @@ pub(crate) fn validate_resolve_query_set(
     }
     if destination.is_error() {
         return Err("resolve query set cannot use an error destination buffer".to_owned());
-    }
-    if destination.is_destroyed() {
-        return Err("resolve query set cannot use a destroyed destination buffer".to_owned());
     }
     if !destination.usage().contains(BufferUsage::QUERY_RESOLVE) {
         return Err("resolve query set destination requires QueryResolve usage".to_owned());
@@ -1439,9 +1432,6 @@ pub(crate) fn validate_buffer_texture_copy(
     if buffer.is_error() || texture.is_error() {
         return Err(format!("{label} cannot use an error resource"));
     }
-    if buffer.is_destroyed() || texture.is_destroyed() {
-        return Err(format!("{label} cannot use a destroyed resource"));
-    }
     if !buffer.usage().contains(required_buffer_usage) {
         return Err(format!("{label} buffer has invalid usage"));
     }
@@ -1490,9 +1480,6 @@ pub(crate) fn validate_texture_to_texture_copy(
     let destination = destination_copy.texture;
     if source.is_error() || destination.is_error() {
         return Err("copy texture to texture cannot use an error texture".to_owned());
-    }
-    if source.is_destroyed() || destination.is_destroyed() {
-        return Err("copy texture to texture cannot use a destroyed texture".to_owned());
     }
     if !source.usage().contains(TextureUsage::COPY_SRC) {
         return Err("copy texture source must have CopySrc usage".to_owned());
@@ -1939,6 +1926,134 @@ mod tests {
             error,
             Some("copy source offset must be 4-byte aligned".to_owned())
         );
+    }
+
+    #[test]
+    fn destroyed_recorded_buffers_fail_at_submit_not_finish() {
+        let device = noop_device();
+        let source = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        destination.destroy();
+        let encoder = device.create_command_encoder();
+
+        assert_eq!(
+            encoder.copy_buffer_to_buffer(source, 0, destination, 0, 16),
+            None
+        );
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+
+        let error = device
+            .queue()
+            .submit(&[Arc::new(command_buffer)])
+            .expect("destroyed buffer should fail at submit");
+        assert_eq!(error.message, "queue submit cannot use a destroyed buffer");
+    }
+
+    #[test]
+    fn error_recorded_buffers_still_fail_at_finish() {
+        let device = noop_device();
+        let source = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::NONE,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        assert!(source.is_error());
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+
+        assert_eq!(
+            encoder.copy_buffer_to_buffer(source, 0, destination, 0, 16),
+            None
+        );
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("copy buffer command cannot use an error buffer".to_owned())
+        );
+    }
+
+    #[test]
+    fn destroyed_query_set_resolve_fails_at_submit_not_finish() {
+        let device = noop_device();
+        let (query_set, error) = device.create_query_set(QuerySetDescriptor {
+            label: "queries".to_owned(),
+            kind: QueryType::Occlusion,
+            count: 2,
+        });
+        assert_eq!(error, None);
+        let query_set = Arc::new(query_set);
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::QUERY_RESOLVE,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        query_set.destroy();
+        let encoder = device.create_command_encoder();
+
+        assert_eq!(
+            encoder.resolve_query_set(query_set, 0, 1, destination, 0),
+            None
+        );
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+
+        let error = device
+            .queue()
+            .submit(&[Arc::new(command_buffer)])
+            .expect("destroyed resolve resources should fail at submit");
+        assert_eq!(
+            error.message,
+            "queue submit cannot use a destroyed query set"
+        );
+    }
+
+    #[test]
+    fn destroyed_resolve_destination_fails_at_submit_not_finish() {
+        let device = noop_device();
+        let (query_set, error) = device.create_query_set(QuerySetDescriptor {
+            label: "queries".to_owned(),
+            kind: QueryType::Occlusion,
+            count: 2,
+        });
+        assert_eq!(error, None);
+        let query_set = Arc::new(query_set);
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::QUERY_RESOLVE,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        destination.destroy();
+        let encoder = device.create_command_encoder();
+
+        assert_eq!(
+            encoder.resolve_query_set(query_set, 0, 1, destination, 0),
+            None
+        );
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+
+        let error = device
+            .queue()
+            .submit(&[Arc::new(command_buffer)])
+            .expect("destroyed resolve resources should fail at submit");
+        assert_eq!(error.message, "queue submit cannot use a destroyed buffer");
     }
 
     #[test]

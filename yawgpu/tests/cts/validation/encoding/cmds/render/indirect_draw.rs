@@ -12,7 +12,6 @@ const ENCODE_TYPES: [RenderEncodeType; 2] =
     [RenderEncodeType::RenderPass, RenderEncodeType::RenderBundle];
 
 #[test]
-#[ignore = "core reports destroyed indirect buffers at finish; CTS expects drawIndirect recorded before submit with destroyed buffers to fail at queue submit"]
 fn indirect_buffer_state() {
     let test = ValidationTest::new();
     unsafe {

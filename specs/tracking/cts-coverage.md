@@ -126,6 +126,17 @@ never a reason to skip a CTS case.
   createRenderBundleEncoder bytes-per-sample, storage_texture format.
   Remaining closeable → Cluster 3 (resource-usage subresource
   granularity) + Cluster 4 (destroyed-resource finish→submit timing).
+- **Core-gap follow-up #7 (Cluster 4, destroyed-resource timing) — DONE.**
+  +10 CTS un-ignored (114→104): destroyed buffers/textures/query-sets
+  referenced by a recorded command now make command-buffer/bundle
+  `finish()` succeed and **queue `submit()` fail** (was: rejected at
+  finish), matching the spec; error/invalid resources still fail at
+  finish; invalid `pass.end()` no longer poisons the parent encoder.
+  Legacy `command_buffer_copy_validation` / `command_texture_copy_validation`
+  and CTS `image_copy` destroyed sub-cases updated to submit-time.
+  (Surfaced a pre-existing release-only test UB — dangling `&[temp]`
+  render-pass descriptors — fixed separately.) Remaining closeable →
+  Cluster 3 (resource-usage subresource granularity).
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage

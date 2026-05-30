@@ -12,7 +12,6 @@ const ENCODE_TYPES: [RenderEncodeType; 2] =
     [RenderEncodeType::RenderPass, RenderEncodeType::RenderBundle];
 
 #[test]
-#[ignore = "core reports destroyed index buffers at finish; CTS expects setIndexBuffer recorded before submit with destroyed buffers to fail at queue submit"]
 fn index_buffer_state() {
     let test = ValidationTest::new();
     unsafe {

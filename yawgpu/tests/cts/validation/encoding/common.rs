@@ -522,6 +522,39 @@ pub unsafe fn expect_render_bundle_commands<F>(
     unsafe { yawgpu::wgpuRenderBundleEncoderRelease(encoder) };
 }
 
+pub unsafe fn expect_render_bundle_submit_error<F>(test: &ValidationTest, commands: F)
+where
+    F: FnOnce(native::WGPURenderBundleEncoder),
+{
+    let bundle_encoder = unsafe { create_bundle_encoder(test) };
+    commands(bundle_encoder);
+    test.clear_errors();
+    let bundle = unsafe { yawgpu::wgpuRenderBundleEncoderFinish(bundle_encoder, std::ptr::null()) };
+    assert!(!bundle.is_null());
+    assert!(
+        test.errors().is_empty(),
+        "unexpected bundle finish errors: {:?}",
+        test.errors()
+    );
+
+    let command_encoder = unsafe { create_encoder(test.device()) };
+    let target =
+        unsafe { create_render_target(test.device(), native::WGPUTextureFormat_RGBA8Unorm, 1) };
+    let attachment = color_attachment(target.view);
+    let descriptor = render_pass_descriptor(&[attachment], None);
+    let pass = unsafe { begin_render_pass(command_encoder, &descriptor) };
+    unsafe {
+        yawgpu::wgpuRenderPassEncoderExecuteBundles(pass, 1, &bundle);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        expect_command_buffer(test, command_encoder, CommandExpectation::SubmitError);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        release_render_target(target);
+        yawgpu::wgpuCommandEncoderRelease(command_encoder);
+        yawgpu::wgpuRenderBundleRelease(bundle);
+        yawgpu::wgpuRenderBundleEncoderRelease(bundle_encoder);
+    }
+}
+
 pub unsafe fn expect_render_commands<F>(
     test: &ValidationTest,
     encode_type: RenderEncodeType,
@@ -537,9 +570,15 @@ pub unsafe fn expect_render_commands<F>(
             });
         },
         RenderEncodeType::RenderBundle => unsafe {
-            expect_render_bundle_commands(test, expectation, |bundle| {
-                commands(RenderEncoder::RenderBundle(bundle));
-            });
+            if expectation == CommandExpectation::SubmitError {
+                expect_render_bundle_submit_error(test, |bundle| {
+                    commands(RenderEncoder::RenderBundle(bundle));
+                });
+            } else {
+                expect_render_bundle_commands(test, expectation, |bundle| {
+                    commands(RenderEncoder::RenderBundle(bundle));
+                });
+            }
         },
     }
 }

@@ -10,7 +10,6 @@ use crate::common::{
 const QUERY_COUNT: u32 = 2;
 
 #[test]
-#[ignore = "core reports destroyed query sets and destination buffers at finish; CTS expects destroyed resources to fail at queue submit"]
 fn queryset_and_destination_buffer_state() {
     let test = ValidationTest::new();
     unsafe {
@@ -264,7 +263,7 @@ unsafe fn create_query_set_with_state(
                 nextInChain: std::ptr::null_mut(),
                 label: crate::common::empty_string_view(),
                 type_: native::WGPUQueryType_Occlusion,
-                count: 0,
+                count: 4097,
             };
             let mut query_set = std::ptr::null();
             test.assert_device_error_after(

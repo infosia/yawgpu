@@ -334,7 +334,9 @@ impl RenderBundleEncoder {
     ) -> Option<String> {
         self.record_bundle_command(|state| {
             validate_render_draw_state(state, RenderDrawKind::Indirect, limits)?;
-            validate_indirect_buffer(&indirect_buffer, indirect_offset, 16, "draw indirect")
+            validate_indirect_buffer(&indirect_buffer, indirect_offset, 16, "draw indirect")?;
+            state.command_referenced_buffers.push(indirect_buffer);
+            Ok(())
         })
     }
 
@@ -352,7 +354,9 @@ impl RenderBundleEncoder {
                 indirect_offset,
                 20,
                 "draw indexed indirect",
-            )
+            )?;
+            state.command_referenced_buffers.push(indirect_buffer);
+            Ok(())
         })
     }
 
@@ -428,6 +432,7 @@ fn render_bundle_referenced_buffers(state: &PassEncoderState) -> Vec<Arc<Buffer>
     if let Some(bound) = &state.index_buffer {
         buffers.push(Arc::clone(&bound.buffer));
     }
+    buffers.extend(state.command_referenced_buffers.iter().cloned());
     buffers
 }
 

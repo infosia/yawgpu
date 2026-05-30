@@ -44,12 +44,9 @@ fn buffer_state() {
                 native::WGPUBufferUsage_CopySrc | native::WGPUBufferUsage_CopyDst,
             );
             yawgpu::wgpuBufferDestroy(destroyed);
-            expect_copy(
-                &test,
-                *method,
-                CopyParams::new(texture, destroyed, extent(0, 0, 0), 16),
-                false,
-            );
+            let mut params = CopyParams::new(texture, destroyed, extent(0, 0, 0), 16);
+            params.submit = true;
+            expect_copy(&test, *method, params, false);
             yawgpu::wgpuBufferRelease(destroyed);
 
             let invalid = create_error_buffer(&test, native::WGPUBufferUsage_CopySrc);

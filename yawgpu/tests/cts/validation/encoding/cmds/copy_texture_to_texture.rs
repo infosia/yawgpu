@@ -9,7 +9,6 @@ use crate::common::{
 };
 
 #[test]
-#[ignore = "core reports destroyed textures at command-buffer finish; CTS expects copies recorded before submit with destroyed textures to fail at queue submit"]
 fn copy_with_invalid_or_destroyed_texture() {
     let test = ValidationTest::new();
     unsafe {
