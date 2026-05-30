@@ -145,13 +145,13 @@ fn buffer_texture_usage_sample_count_and_layout_are_validated() {
         );
         yawgpu::wgpuBufferDestroy(destroyed_buffer);
         yawgpu::wgpuTextureDestroy(destroyed_texture);
-        assert_b2t_error(
+        assert_b2t_submit_error(
             &test,
             destroyed_buffer,
             copy_dst_texture,
             default_b2t_args(),
         );
-        assert_b2t_error(
+        assert_b2t_submit_error(
             &test,
             copy_src_buffer,
             destroyed_texture,
@@ -492,6 +492,22 @@ unsafe fn assert_b2t_error(
     yawgpu::wgpuCommandEncoderRelease(encoder);
 }
 
+unsafe fn assert_b2t_submit_error(
+    test: &ValidationTest,
+    source: native::WGPUBuffer,
+    destination: native::WGPUTexture,
+    args: B2TArgs,
+) {
+    let encoder = create_encoder(test);
+    test.clear_errors();
+    copy_buffer_to_texture(encoder, source, destination, args);
+    assert!(test.errors().is_empty());
+    let command_buffer = finish_ok(test, encoder);
+    submit_error(test, command_buffer);
+    yawgpu::wgpuCommandBufferRelease(command_buffer);
+    yawgpu::wgpuCommandEncoderRelease(encoder);
+}
+
 unsafe fn assert_t2b_ok(
     test: &ValidationTest,
     source: native::WGPUTexture,
@@ -645,6 +661,17 @@ unsafe fn finish_error(
     );
     assert!(!command_buffer.is_null());
     command_buffer
+}
+
+unsafe fn submit_error(test: &ValidationTest, command_buffer: native::WGPUCommandBuffer) {
+    let queue = yawgpu::wgpuDeviceGetQueue(test.device());
+    test.assert_device_error_after(
+        || {
+            yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        },
+        None,
+    );
+    yawgpu::wgpuQueueRelease(queue);
 }
 
 unsafe fn create_buffer(

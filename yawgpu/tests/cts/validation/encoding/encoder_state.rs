@@ -15,7 +15,6 @@ enum PassType {
 }
 
 #[test]
-#[ignore = "core invalidates the parent command encoder after some invalid pass end calls; CTS expects the pass-end validation error to be captured without necessarily poisoning encoder.finish()"]
 fn pass_end_invalid_order() {
     let test = ValidationTest::new();
     unsafe {
@@ -201,7 +200,6 @@ fn pass_end_none() {
 }
 
 #[test]
-#[ignore = "core invalidates the parent command encoder when a pass is ended twice; CTS expects the second end() to fail while a later encoder.finish() still succeeds"]
 fn pass_end_twice_basic() {
     let test = ValidationTest::new();
     unsafe {

@@ -98,9 +98,6 @@ pub(crate) fn validate_query_set_alive(query_set: &QuerySet, usage: &str) -> Res
     if query_set.is_error() {
         return Err(format!("{usage} cannot use an error query set"));
     }
-    if query_set.is_destroyed() {
-        return Err(format!("{usage} cannot use a destroyed query set"));
-    }
     Ok(())
 }
 

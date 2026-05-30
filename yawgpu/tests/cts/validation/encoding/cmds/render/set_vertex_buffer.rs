@@ -42,7 +42,6 @@ fn slot() {
 }
 
 #[test]
-#[ignore = "core reports destroyed vertex buffers at finish; CTS expects setVertexBuffer recorded before submit with destroyed buffers to fail at queue submit"]
 fn vertex_buffer_state() {
     let test = ValidationTest::new();
     unsafe {

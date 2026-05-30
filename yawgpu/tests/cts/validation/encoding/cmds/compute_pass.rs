@@ -102,7 +102,6 @@ fn dispatch_sizes() {
 }
 
 #[test]
-#[ignore = "core reports destroyed indirect dispatch buffers at finish; CTS expects finish success and queue-submit failure for destroyed buffers"]
 fn indirect_dispatch_buffer_state() {
     let test = ValidationTest::new();
     unsafe {
