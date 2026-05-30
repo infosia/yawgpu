@@ -1,5 +1,6 @@
 /target
 /target-*
+.DS_Store
 /examples/build*
 .claude/
 *.transcript

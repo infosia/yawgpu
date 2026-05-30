@@ -207,12 +207,22 @@ to `REPORT.md`** at the repo root (a fixed filename, `.gitignore`d like
 just reply in chat. This lets the reviewer (Claude) read deterministic
 results instead of re-running and polling. The report must contain:
 
-- **Verification** — the exact commands run and their **exit codes**,
-  e.g. `cargo test --workspace` → exit 0, `cargo clippy --workspace
-  --all-targets -- -D warnings` → exit 0, plus any feature-gated runs the
-  slice touches (e.g. `--features tiled`). State pass/fail per command;
-  paste the `test result:` summary lines. Judge by exit code, not by
-  scraping prose.
+- **Verification** — the exact commands run and their **exit codes**.
+  **The coding agent must NOT run `cargo test --workspace`** (it links 59+
+  test binaries against naga and takes ~1 h in the codex sandbox — wasted
+  effort). Instead the agent runs the cheaper, targeted gates:
+  - lib unit tests: `cargo test -p yawgpu --lib` and `cargo test
+    -p yawgpu-core --lib` (fast; catches most regressions — e.g. the FFI
+    `ffi::tests` regressions a workspace run would also catch);
+  - the specific touched integration binaries:
+    `cargo test -p yawgpu --test <cts_validation_area>` (+ any legacy
+    test it had to update);
+  - `cargo clippy --workspace --all-targets -- -D warnings` (default +
+    `--features tiled`), and `cargo build -p yawgpu-core --features tiled`.
+  State pass/fail per command; paste the `test result:` summary lines;
+  judge by exit code, not prose. **Claude runs the full `cargo test
+  --workspace` (default + relevant features) during review** as the
+  backstop — the agent does not.
 - **Files changed** — production vs test, with a one-line why for each
   non-test file.
 - **Per-spec case accounting** — ported / deferred / `N/A` counts, and
