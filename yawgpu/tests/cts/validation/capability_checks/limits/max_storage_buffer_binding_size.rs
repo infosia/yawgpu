@@ -14,7 +14,6 @@ fn validate() {
 }
 
 #[test]
-#[ignore = "maxStorageBufferBindingSize/maxBufferSize relationship validation is not yet active"]
 fn validate_max_buffer_size() {
     unsafe { common::assert_required_limits_are_not_lowered_to_requested_values() };
 }

@@ -237,9 +237,85 @@ pub struct ColorTargetState {
     /// Format.
     pub format: TextureFormat,
     /// Blend.
-    pub blend: bool,
+    pub blend: Option<BlendState>,
     /// Write mask.
     pub write_mask: u64,
+}
+
+/// Stores blend state metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlendState {
+    /// Color component.
+    pub color: BlendComponent,
+    /// Alpha component.
+    pub alpha: BlendComponent,
+}
+
+/// Stores blend component metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlendComponent {
+    /// Operation.
+    pub operation: BlendOperation,
+    /// Source factor.
+    pub src_factor: BlendFactor,
+    /// Destination factor.
+    pub dst_factor: BlendFactor,
+}
+
+/// Enumerates blend operation values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BlendOperation {
+    /// Add variant.
+    Add,
+    /// Subtract variant.
+    Subtract,
+    /// Reverse subtract variant.
+    ReverseSubtract,
+    /// Min variant.
+    Min,
+    /// Max variant.
+    Max,
+}
+
+/// Enumerates blend factor values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BlendFactor {
+    /// Zero variant.
+    Zero,
+    /// One variant.
+    One,
+    /// Source variant.
+    Src,
+    /// One minus source variant.
+    OneMinusSrc,
+    /// Source alpha variant.
+    SrcAlpha,
+    /// One minus source alpha variant.
+    OneMinusSrcAlpha,
+    /// Destination variant.
+    Dst,
+    /// One minus destination variant.
+    OneMinusDst,
+    /// Destination alpha variant.
+    DstAlpha,
+    /// One minus destination alpha variant.
+    OneMinusDstAlpha,
+    /// Source alpha saturated variant.
+    SrcAlphaSaturated,
+    /// Constant variant.
+    Constant,
+    /// One minus constant variant.
+    OneMinusConstant,
+    /// Source one variant.
+    Src1,
+    /// One minus source one variant.
+    OneMinusSrc1,
+    /// Source one alpha variant.
+    Src1Alpha,
+    /// One minus source one alpha variant.
+    OneMinusSrc1Alpha,
 }
 
 /// Tracks the lifecycle state for primitive.
@@ -1312,6 +1388,7 @@ pub(crate) fn resolve_render_pipeline_descriptor(
         validate_depth_stencil_aspects(depth_stencil, features)?;
     }
     validate_fragment_depth_output(descriptor, fragment_entry.as_deref(), features)?;
+    validate_inter_stage_interface(descriptor, &vertex_entry, fragment_entry.as_deref(), limits)?;
     validate_color_targets(
         descriptor,
         fragment_entry.as_deref(),
@@ -1328,8 +1405,33 @@ pub(crate) fn resolve_render_pipeline_descriptor(
         limits,
         features,
     )?;
+    validate_bind_groups_plus_vertex_buffers(
+        &bind_group_layouts,
+        descriptor.vertex.buffer_count,
+        limits,
+    )?;
 
     Ok((vertex_entry, fragment_entry, bind_group_layouts))
+}
+
+fn validate_bind_groups_plus_vertex_buffers(
+    bind_group_layouts: &[Arc<BindGroupLayout>],
+    vertex_buffer_count: usize,
+    limits: Limits,
+) -> Result<(), String> {
+    let total = bind_group_layouts
+        .len()
+        .checked_add(vertex_buffer_count)
+        .ok_or_else(|| {
+            "render pipeline bind group plus vertex buffer count overflows".to_owned()
+        })?;
+    if total > limits.max_bind_groups_plus_vertex_buffers as usize {
+        return Err(
+            "render pipeline bind group plus vertex buffer count exceeds the device limit"
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 /// Validates vertex state and returns a descriptive error on failure.
@@ -1593,9 +1695,16 @@ pub(crate) fn validate_depth_stencil_aspects(
     let has_depth = caps.is_some_and(|caps| caps.aspects.depth);
     let has_stencil = caps.is_some_and(|caps| caps.aspects.stencil);
 
-    if (depth_stencil.depth_compare.is_some() || depth_stencil.depth_write_enabled == Some(true))
-        && !has_depth
-    {
+    if !has_depth && !has_stencil {
+        return Err("render pipeline depthStencil format must have depth or stencil".to_owned());
+    }
+
+    let uses_depth_test = depth_stencil
+        .depth_compare
+        .is_some_and(|compare| compare != CompareFunction::Always);
+    let uses_depth_write = depth_stencil.depth_write_enabled == Some(true);
+
+    if (uses_depth_test || uses_depth_write) && !has_depth {
         return Err("render pipeline depth test or write requires a depth format".to_owned());
     }
 
@@ -1678,6 +1787,9 @@ pub(crate) fn validate_color_targets(
     if fragment.targets.len() != fragment.target_count {
         return Err("render pipeline fragment target array must match targetCount".to_owned());
     }
+    if fragment.target_count > limits.max_color_attachments as usize {
+        return Err("render pipeline color target count exceeds the device limit".to_owned());
+    }
 
     let skip_shader_outputs = {
         #[cfg(feature = "shader-passthrough")]
@@ -1698,12 +1810,15 @@ pub(crate) fn validate_color_targets(
     let mut has_alpha_to_coverage_target = false;
     for (index, target) in fragment.targets.iter().enumerate() {
         if target.format.is_undefined() {
-            if target.blend {
+            if target.blend.is_some() {
                 return Err("render pipeline undefined color target must not have blend".to_owned());
             }
             continue;
         }
 
+        if target.write_mask & !0xF != 0 {
+            return Err("render pipeline color target writeMask has invalid bits".to_owned());
+        }
         let caps = target
             .format
             .caps(features)
@@ -1711,7 +1826,10 @@ pub(crate) fn validate_color_targets(
         if !caps.renderable {
             return Err("render pipeline color target format must be renderable".to_owned());
         }
-        if target.blend && !caps.is_blendable {
+        if let Some(blend) = target.blend {
+            validate_blend_state(blend)?;
+        }
+        if target.blend.is_some() && !caps.is_blendable {
             return Err("render pipeline color target format must be blendable".to_owned());
         }
         if descriptor.multisample.alpha_to_coverage_enabled && caps.is_blendable && caps.has_alpha {
@@ -1730,7 +1848,17 @@ pub(crate) fn validate_color_targets(
                 .unwrap_or(subpass_local);
             let output = outputs.get(&subpass_local).or_else(|| outputs.get(&flat));
             match output {
-                Some(output) => validate_fragment_output_compat(*output, caps)?,
+                Some(output) => {
+                    validate_fragment_output_compat(*output, caps)?;
+                    if target.blend.is_some_and(blend_state_uses_source_alpha)
+                        && output.components < 4
+                    {
+                        return Err(
+                            "render pipeline blend state requires a vec4 fragment output"
+                                .to_owned(),
+                        );
+                    }
+                }
                 None if target.write_mask != 0 => {
                     return Err(
                         "render pipeline color target without shader output must use writeMask 0"
@@ -1742,7 +1870,7 @@ pub(crate) fn validate_color_targets(
         }
 
         color_bytes = color_bytes
-            .checked_add(caps.texel_block_size)
+            .checked_add(color_attachment_byte_cost(caps.texel_block_size))
             .ok_or_else(|| "render pipeline color target byte count overflows".to_owned())?;
     }
 
@@ -1758,6 +1886,43 @@ pub(crate) fn validate_color_targets(
     }
 
     Ok(())
+}
+
+fn color_attachment_byte_cost(byte_size: u32) -> u32 {
+    byte_size.next_power_of_two()
+}
+
+/// Validates blend state and returns a descriptive error on failure.
+pub(crate) fn validate_blend_state(blend: BlendState) -> Result<(), String> {
+    validate_blend_component(blend.color)?;
+    validate_blend_component(blend.alpha)
+}
+
+fn validate_blend_component(component: BlendComponent) -> Result<(), String> {
+    if matches!(
+        component.operation,
+        BlendOperation::Min | BlendOperation::Max
+    ) && (component.src_factor != BlendFactor::One || component.dst_factor != BlendFactor::One)
+    {
+        return Err("render pipeline min/max blend operations require one factors".to_owned());
+    }
+    Ok(())
+}
+
+fn blend_state_uses_source_alpha(blend: BlendState) -> bool {
+    blend_component_uses_source_alpha(blend.color) || blend_component_uses_source_alpha(blend.alpha)
+}
+
+fn blend_component_uses_source_alpha(component: BlendComponent) -> bool {
+    blend_factor_uses_source_alpha(component.src_factor)
+        || blend_factor_uses_source_alpha(component.dst_factor)
+}
+
+fn blend_factor_uses_source_alpha(factor: BlendFactor) -> bool {
+    matches!(
+        factor,
+        BlendFactor::SrcAlpha | BlendFactor::OneMinusSrcAlpha | BlendFactor::SrcAlphaSaturated
+    )
 }
 
 /// Returns fragment outputs.
@@ -1808,6 +1973,121 @@ pub(crate) fn validate_fragment_output_compat(
         return Err("render pipeline fragment output type is incompatible".to_owned());
     }
     Ok(())
+}
+
+/// Validates vertex-output to fragment-input interface.
+pub(crate) fn validate_inter_stage_interface(
+    descriptor: &RenderPipelineDescriptor,
+    vertex_entry: &str,
+    fragment_entry: Option<&str>,
+    limits: Limits,
+) -> Result<(), String> {
+    let Some(fragment) = &descriptor.fragment else {
+        return Ok(());
+    };
+    let Some(fragment_entry) = fragment_entry else {
+        return Ok(());
+    };
+    #[cfg(feature = "shader-passthrough")]
+    if descriptor.vertex.shader.module.msl_passthrough().is_some()
+        || fragment.shader.module.msl_passthrough().is_some()
+    {
+        return Ok(());
+    }
+
+    let outputs = inter_stage_outputs(&descriptor.vertex, vertex_entry)?;
+    let inputs = inter_stage_inputs(fragment, fragment_entry)?;
+    validate_inter_stage_limits(&outputs, limits, "output")?;
+    validate_inter_stage_limits(&inputs, limits, "input")?;
+    if matches!(descriptor.primitive.topology, PrimitiveTopology::PointList)
+        && outputs.len() >= limits.max_inter_stage_shader_variables as usize
+    {
+        return Err(
+            "render pipeline point-list inter-stage output count reaches the device limit"
+                .to_owned(),
+        );
+    }
+
+    for (location, input) in &inputs {
+        let Some(output) = outputs.get(location) else {
+            return Err("render pipeline fragment input has no matching vertex output".to_owned());
+        };
+        if output.ty != input.ty {
+            return Err("render pipeline inter-stage types are incompatible".to_owned());
+        }
+        if output.interpolation != input.interpolation {
+            return Err(
+                "render pipeline inter-stage interpolation types are incompatible".to_owned(),
+            );
+        }
+        if output.sampling != input.sampling {
+            return Err(
+                "render pipeline inter-stage interpolation sampling is incompatible".to_owned(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_inter_stage_limits(
+    locations: &BTreeMap<u32, shader_naga::ReflectedIoLocation>,
+    limits: Limits,
+    label: &str,
+) -> Result<(), String> {
+    if locations.len() > limits.max_inter_stage_shader_variables as usize {
+        return Err(format!(
+            "render pipeline inter-stage {label} count exceeds the device limit"
+        ));
+    }
+    if locations
+        .keys()
+        .any(|location| *location >= limits.max_inter_stage_shader_variables)
+    {
+        return Err(format!(
+            "render pipeline inter-stage {label} location exceeds the device limit"
+        ));
+    }
+    Ok(())
+}
+
+fn inter_stage_outputs(
+    vertex: &RenderPipelineVertexState,
+    vertex_entry: &str,
+) -> Result<BTreeMap<u32, shader_naga::ReflectedIoLocation>, String> {
+    let Some(module) = vertex.shader.module.reflected() else {
+        return Err("vertex module reflection failed".to_owned());
+    };
+    Ok(module
+        .entry_point_io()
+        .into_iter()
+        .find(|io| io.entry_point == vertex_entry)
+        .map(|io| {
+            io.outputs
+                .into_iter()
+                .map(|output| (output.location, output))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn inter_stage_inputs(
+    fragment: &RenderPipelineFragmentState,
+    fragment_entry: &str,
+) -> Result<BTreeMap<u32, shader_naga::ReflectedIoLocation>, String> {
+    let Some(module) = fragment.shader.module.reflected() else {
+        return Err("fragment module reflection failed".to_owned());
+    };
+    Ok(module
+        .entry_point_io()
+        .into_iter()
+        .find(|io| io.entry_point == fragment_entry)
+        .map(|io| {
+            io.inputs
+                .into_iter()
+                .map(|input| (input.location, input))
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 /// Validates render pipeline layout and returns a descriptive error on failure.
@@ -1939,12 +2219,10 @@ mod tests {
         AttachmentLayout, SubpassDependency, SubpassDependencyType, SubpassInputAttachment,
         SubpassLayoutDesc, SubpassPassLayoutDescriptor,
     };
-    #[cfg(any(feature = "gles", feature = "shader-passthrough", feature = "tiled"))]
     use crate::test_helpers::*;
     #[cfg(any(feature = "shader-passthrough", feature = "tiled"))]
     use crate::ErrorFilter;
 
-    #[cfg(any(feature = "gles", feature = "shader-passthrough", feature = "tiled"))]
     use std::sync::Arc;
 
     #[test]
@@ -1968,6 +2246,98 @@ mod tests {
         assert_eq!(unknown.info().byte_size, 16);
         assert_eq!(zero.info().output_class, FormatOutputClass::Float);
         assert_eq!(unknown.info().output_class, FormatOutputClass::Float);
+    }
+
+    #[test]
+    fn validate_depth_stencil_treats_always_as_inert_for_stencil_only_formats() {
+        let mut state = DepthStencilState {
+            format: TextureFormat::from_raw(TextureFormat::STENCIL8),
+            depth_write_enabled: Some(false),
+            depth_compare: Some(CompareFunction::Always),
+            stencil_front: StencilFaceState {
+                compare: CompareFunction::Always,
+                fail_op: StencilOperation::Keep,
+                depth_fail_op: StencilOperation::Keep,
+                pass_op: StencilOperation::Keep,
+            },
+            stencil_back: StencilFaceState {
+                compare: CompareFunction::Always,
+                fail_op: StencilOperation::Keep,
+                depth_fail_op: StencilOperation::Keep,
+                pass_op: StencilOperation::Keep,
+            },
+            stencil_read_mask: u32::MAX,
+            stencil_write_mask: u32::MAX,
+            depth_bias: 0,
+            depth_bias_slope_scale: 0.0,
+            depth_bias_clamp: 0.0,
+        };
+
+        assert_eq!(
+            validate_depth_stencil_aspects(state, &FeatureSet::default()),
+            Ok(())
+        );
+        state.depth_compare = Some(CompareFunction::Less);
+        assert_eq!(
+            validate_depth_stencil_aspects(state, &FeatureSet::default()),
+            Err("render pipeline depth test or write requires a depth format".to_owned())
+        );
+    }
+
+    #[test]
+    fn validate_blend_state_rejects_min_max_non_one_factors() {
+        let valid = BlendState {
+            color: BlendComponent {
+                operation: BlendOperation::Min,
+                src_factor: BlendFactor::One,
+                dst_factor: BlendFactor::One,
+            },
+            alpha: BlendComponent {
+                operation: BlendOperation::Add,
+                src_factor: BlendFactor::One,
+                dst_factor: BlendFactor::Zero,
+            },
+        };
+        let invalid = BlendState {
+            color: BlendComponent {
+                operation: BlendOperation::Max,
+                src_factor: BlendFactor::SrcAlpha,
+                dst_factor: BlendFactor::One,
+            },
+            alpha: valid.alpha,
+        };
+
+        assert_eq!(validate_blend_state(valid), Ok(()));
+        assert_eq!(
+            validate_blend_state(invalid),
+            Err("render pipeline min/max blend operations require one factors".to_owned())
+        );
+    }
+
+    #[test]
+    fn validate_inter_stage_interface_rejects_missing_fragment_input() {
+        let device = noop_device();
+        let vertex = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@vertex fn main() -> @builtin(position) vec4f { return vec4f(); }".to_owned(),
+        )));
+        let fragment = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "struct In { @location(0) value: f32, }
+             @fragment fn main(input: In) -> @location(0) vec4f {
+                 _ = input;
+                 return vec4f();
+             }"
+                .to_owned(),
+            )),
+        );
+        let descriptor = render_pipeline_descriptor(vertex);
+        let mut descriptor = descriptor;
+        descriptor.fragment.as_mut().unwrap().shader.module = fragment;
+
+        assert_eq!(
+            validate_inter_stage_interface(&descriptor, "main", Some("main"), device.limits()),
+            Err("render pipeline fragment input has no matching vertex output".to_owned())
+        );
     }
 
     #[cfg(feature = "shader-passthrough")]
@@ -2370,12 +2740,12 @@ mod tests {
             fragment.targets = vec![
                 ColorTargetState {
                     format: rgba8_unorm(),
-                    blend: false,
+                    blend: None,
                     write_mask: 0xF,
                 },
                 ColorTargetState {
                     format: rgba8_unorm(),
-                    blend: false,
+                    blend: None,
                     write_mask: 0xF,
                 },
             ];

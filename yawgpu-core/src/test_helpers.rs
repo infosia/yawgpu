@@ -285,7 +285,7 @@ pub(crate) fn render_pipeline_descriptor(module: Arc<ShaderModule>) -> RenderPip
             target_count: 1,
             targets: vec![ColorTargetState {
                 format: rgba8_unorm(),
-                blend: false,
+                blend: None,
                 write_mask: 0xF,
             }],
         }),

@@ -21,7 +21,6 @@ struct FragmentOut {
 }";
 
 #[test]
-#[ignore = "core treats depthCompare=always as depth-test use for stencil-only formats; CTS expects stencil-only depthStencil.format to be valid when depth state is otherwise inert"]
 fn format() {
     let test = ValidationTest::new();
     unsafe {
@@ -106,7 +105,6 @@ fn depth_compare_optional() {
 }
 
 #[test]
-#[ignore = "core treats depthCompare=always as depth-test use for stencil-only formats; CTS expects depthWriteEnabled to be optional for stencil-only formats"]
 fn depth_write_enabled_optional() {
     let test = ValidationTest::new();
     unsafe {
@@ -136,7 +134,6 @@ fn depth_write_enabled_optional() {
 }
 
 #[test]
-#[ignore = "core treats depthCompare=always as depth-test use for stencil-only formats; CTS expects compare=always not to enable depth testing on stencil-only formats"]
 fn depth_test() {
     let test = ValidationTest::new();
     unsafe {
@@ -174,7 +171,6 @@ fn depth_test() {
 }
 
 #[test]
-#[ignore = "core treats depthCompare=always as depth-test use for stencil-only formats; CTS expects depthWriteEnabled=false to be valid on stencil-only formats"]
 fn depth_write() {
     let test = ValidationTest::new();
     unsafe {
@@ -298,7 +294,6 @@ fn depth_bias() {
 }
 
 #[test]
-#[ignore = "core treats depthCompare=always as depth-test use for stencil-only formats; CTS expects stencil tests to be valid on stencil-only formats"]
 fn stencil_test() {
     let test = ValidationTest::new();
     unsafe {
@@ -345,7 +340,6 @@ fn stencil_test() {
 }
 
 #[test]
-#[ignore = "core treats depthCompare=always as depth-test use for stencil-only formats; CTS expects stencil writes to be valid on stencil-only formats"]
 fn stencil_write() {
     let test = ValidationTest::new();
     unsafe {

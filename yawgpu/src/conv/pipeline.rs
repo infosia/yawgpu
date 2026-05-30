@@ -311,10 +311,57 @@ fn map_color_targets(
         .iter()
         .map(|target| core::ColorTargetState {
             format: map_texture_format(target.format),
-            blend: !target.blend.is_null(),
+            blend: unsafe { target.blend.as_ref() }.map(map_blend_state),
             write_mask: target.writeMask,
         })
         .collect()
+}
+
+fn map_blend_state(state: &native::WGPUBlendState) -> core::BlendState {
+    core::BlendState {
+        color: map_blend_component(state.color),
+        alpha: map_blend_component(state.alpha),
+    }
+}
+
+fn map_blend_component(component: native::WGPUBlendComponent) -> core::BlendComponent {
+    core::BlendComponent {
+        operation: map_blend_operation(component.operation),
+        src_factor: map_blend_factor(component.srcFactor),
+        dst_factor: map_blend_factor(component.dstFactor),
+    }
+}
+
+fn map_blend_operation(value: native::WGPUBlendOperation) -> core::BlendOperation {
+    match value {
+        native::WGPUBlendOperation_Subtract => core::BlendOperation::Subtract,
+        native::WGPUBlendOperation_ReverseSubtract => core::BlendOperation::ReverseSubtract,
+        native::WGPUBlendOperation_Min => core::BlendOperation::Min,
+        native::WGPUBlendOperation_Max => core::BlendOperation::Max,
+        _ => core::BlendOperation::Add,
+    }
+}
+
+fn map_blend_factor(value: native::WGPUBlendFactor) -> core::BlendFactor {
+    match value {
+        native::WGPUBlendFactor_Zero => core::BlendFactor::Zero,
+        native::WGPUBlendFactor_Src => core::BlendFactor::Src,
+        native::WGPUBlendFactor_OneMinusSrc => core::BlendFactor::OneMinusSrc,
+        native::WGPUBlendFactor_SrcAlpha => core::BlendFactor::SrcAlpha,
+        native::WGPUBlendFactor_OneMinusSrcAlpha => core::BlendFactor::OneMinusSrcAlpha,
+        native::WGPUBlendFactor_Dst => core::BlendFactor::Dst,
+        native::WGPUBlendFactor_OneMinusDst => core::BlendFactor::OneMinusDst,
+        native::WGPUBlendFactor_DstAlpha => core::BlendFactor::DstAlpha,
+        native::WGPUBlendFactor_OneMinusDstAlpha => core::BlendFactor::OneMinusDstAlpha,
+        native::WGPUBlendFactor_SrcAlphaSaturated => core::BlendFactor::SrcAlphaSaturated,
+        native::WGPUBlendFactor_Constant => core::BlendFactor::Constant,
+        native::WGPUBlendFactor_OneMinusConstant => core::BlendFactor::OneMinusConstant,
+        native::WGPUBlendFactor_Src1 => core::BlendFactor::Src1,
+        native::WGPUBlendFactor_OneMinusSrc1 => core::BlendFactor::OneMinusSrc1,
+        native::WGPUBlendFactor_Src1Alpha => core::BlendFactor::Src1Alpha,
+        native::WGPUBlendFactor_OneMinusSrc1Alpha => core::BlendFactor::OneMinusSrc1Alpha,
+        _ => core::BlendFactor::One,
+    }
 }
 
 fn map_optional_bool(value: native::WGPUOptionalBool) -> Option<bool> {

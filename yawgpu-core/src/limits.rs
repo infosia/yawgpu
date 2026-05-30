@@ -174,6 +174,8 @@ impl Limits {
         maximum!(max_compute_workgroup_size_z);
         maximum!(max_compute_workgroups_per_dimension);
 
+        validate_required_limit_relationships(required)?;
+
         if required.max_immediate_size > self.max_immediate_size {
             return Err(format!(
                 "required limit max_immediate_size={} exceeds supported {}",
@@ -183,5 +185,111 @@ impl Limits {
         effective.max_immediate_size = self.max_immediate_size;
 
         Ok(effective)
+    }
+}
+
+fn validate_required_limit_relationships(limits: Limits) -> Result<(), String> {
+    if limits.max_compute_workgroup_size_x > limits.max_compute_invocations_per_workgroup {
+        return Err(
+            "required max_compute_workgroup_size_x exceeds max_compute_invocations_per_workgroup"
+                .to_owned(),
+        );
+    }
+    if limits.max_compute_workgroup_size_y > limits.max_compute_invocations_per_workgroup {
+        return Err(
+            "required max_compute_workgroup_size_y exceeds max_compute_invocations_per_workgroup"
+                .to_owned(),
+        );
+    }
+    if limits.max_compute_workgroup_size_z > limits.max_compute_invocations_per_workgroup {
+        return Err(
+            "required max_compute_workgroup_size_z exceeds max_compute_invocations_per_workgroup"
+                .to_owned(),
+        );
+    }
+    if limits.max_bind_groups > limits.max_bind_groups_plus_vertex_buffers {
+        return Err(
+            "required max_bind_groups exceeds max_bind_groups_plus_vertex_buffers".to_owned(),
+        );
+    }
+    if limits.max_vertex_buffers > limits.max_bind_groups_plus_vertex_buffers {
+        return Err(
+            "required max_vertex_buffers exceeds max_bind_groups_plus_vertex_buffers".to_owned(),
+        );
+    }
+    if !valid_min_buffer_offset_alignment(limits.min_uniform_buffer_offset_alignment) {
+        return Err(
+            "required min_uniform_buffer_offset_alignment must be a power of two and at least 32"
+                .to_owned(),
+        );
+    }
+    if !valid_min_buffer_offset_alignment(limits.min_storage_buffer_offset_alignment) {
+        return Err(
+            "required min_storage_buffer_offset_alignment must be a power of two and at least 32"
+                .to_owned(),
+        );
+    }
+    if limits.max_uniform_buffer_binding_size > limits.max_buffer_size {
+        return Err("required max_uniform_buffer_binding_size exceeds max_buffer_size".to_owned());
+    }
+    if limits.max_storage_buffer_binding_size > limits.max_buffer_size {
+        return Err("required max_storage_buffer_binding_size exceeds max_buffer_size".to_owned());
+    }
+    if limits.max_bindings_per_bind_group == 0 {
+        return Err("required max_bindings_per_bind_group must be at least one".to_owned());
+    }
+    if limits.max_compute_workgroups_per_dimension == 0 {
+        return Err(
+            "required max_compute_workgroups_per_dimension must be at least one".to_owned(),
+        );
+    }
+    if limits.max_color_attachment_bytes_per_sample == 0 {
+        return Err(
+            "required max_color_attachment_bytes_per_sample must be at least one".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn valid_min_buffer_offset_alignment(value: u32) -> bool {
+    value >= 32 && value.is_power_of_two()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_required_limits_rejects_relationship_violations() {
+        let supported = Limits::DEFAULT;
+        let mut required = Limits::DEFAULT;
+        required.max_compute_workgroup_size_x = 128;
+        required.max_compute_invocations_per_workgroup = 64;
+        assert_eq!(
+            supported.validate_required_limits(Some(&required)),
+            Err(
+                "required max_compute_workgroup_size_x exceeds max_compute_invocations_per_workgroup"
+                    .to_owned()
+            )
+        );
+
+        let mut supported = Limits::DEFAULT;
+        supported.min_uniform_buffer_offset_alignment = 32;
+        required = supported;
+        required.min_uniform_buffer_offset_alignment = 48;
+        assert_eq!(
+            supported.validate_required_limits(Some(&required)),
+            Err(
+                "required min_uniform_buffer_offset_alignment must be a power of two and at least 32"
+                    .to_owned()
+            )
+        );
+
+        required = Limits::DEFAULT;
+        required.max_buffer_size = Limits::DEFAULT.max_storage_buffer_binding_size - 1;
+        assert_eq!(
+            supported.validate_required_limits(Some(&required)),
+            Err("required max_storage_buffer_binding_size exceeds max_buffer_size".to_owned())
+        );
     }
 }

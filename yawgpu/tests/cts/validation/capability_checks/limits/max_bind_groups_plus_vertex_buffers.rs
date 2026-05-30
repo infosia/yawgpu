@@ -3,7 +3,6 @@
 use crate::common;
 
 #[test]
-#[ignore = "render pipeline maxBindGroupsPlusVertexBuffers relationship validation is not implemented as an active creator check"]
 fn create_render_pipeline_at_over() {
     unsafe { common::assert_max_vertex_buffers_create_render_pipeline_at_over() };
 }

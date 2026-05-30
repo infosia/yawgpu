@@ -10,7 +10,6 @@ use crate::render_common::{
 };
 
 #[test]
-#[ignore = "core does not yet validate vertex-output/fragment-input location equality at createRenderPipeline; CTS expects missing matching locations to fail"]
 fn location_mismatch() {
     let cases = [
         (
@@ -48,7 +47,6 @@ fn location_superset() {
 }
 
 #[test]
-#[ignore = "core does not yet reject fragment inputs not produced by the vertex stage at createRenderPipeline; CTS expects validation error"]
 fn location_subset() {
     let cases = [(
         vec!["@location(0) __: f32"],
@@ -59,7 +57,6 @@ fn location_subset() {
 }
 
 #[test]
-#[ignore = "core does not yet validate inter-stage type compatibility at createRenderPipeline; CTS expects mismatched types to fail"]
 fn type_() {
     let cases = [
         (
@@ -87,7 +84,6 @@ fn type_() {
 }
 
 #[test]
-#[ignore = "core does not yet validate inter-stage interpolation type compatibility at createRenderPipeline; CTS expects mismatches to fail"]
 fn interpolation_type() {
     let cases = [
         (
@@ -115,7 +111,6 @@ fn interpolation_type() {
 }
 
 #[test]
-#[ignore = "core does not yet validate inter-stage interpolation sampling compatibility at createRenderPipeline; CTS expects mismatches to fail"]
 fn interpolation_sampling() {
     let cases = [
         (
@@ -138,7 +133,6 @@ fn interpolation_sampling() {
 }
 
 #[test]
-#[ignore = "core does not yet enforce maxInterStageShaderVariables location limits at createRenderPipeline; CTS expects location >= limit to fail"]
 fn max_shader_variable_location() {
     let test = ValidationTest::new();
     unsafe {
@@ -156,7 +150,6 @@ fn max_shader_variable_location() {
 }
 
 #[test]
-#[ignore = "core does not yet enforce maxInterStageShaderVariables output-count limits at createRenderPipeline; CTS expects over-limit output counts to fail"]
 fn max_variables_count_output() {
     let test = ValidationTest::new();
     unsafe {
@@ -199,7 +192,6 @@ fn max_variables_count_output() {
 }
 
 #[test]
-#[ignore = "core does not yet enforce maxInterStageShaderVariables input-count limits at createRenderPipeline; CTS expects over-limit input counts to fail"]
 fn max_variables_count_input() {
     let test = ValidationTest::new();
     unsafe {

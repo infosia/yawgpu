@@ -3,7 +3,6 @@
 use crate::common;
 
 #[test]
-#[ignore = "render pipeline color target count over maxColorAttachments is not currently rejected; beginRenderPass coverage is active"]
 fn create_render_pipeline_at_over() {
     unsafe { common::assert_max_color_attachments_render_pipeline_at_over() };
 }
@@ -20,7 +19,6 @@ fn create_render_bundle_at_over() {
 }
 
 #[test]
-#[ignore = "maxColorAttachmentBytesPerSample required-limit relationship validation is not yet implemented"]
 fn validate_max_color_attachment_bytes_per_sample() {
     unsafe { common::assert_required_limits_are_not_lowered_to_requested_values() };
 }

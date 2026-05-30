@@ -88,7 +88,6 @@ fn targets_format_renderable() {
 }
 
 #[test]
-#[ignore = "core does not yet enforce maxColorAttachments for render pipeline fragment targetCount; CTS expects targetCount > maxColorAttachments to fail"]
 fn limits_max_color_attachments() {
     let test = ValidationTest::new();
     unsafe {
@@ -162,7 +161,6 @@ fn limits_max_color_attachment_bytes_per_sample_aligned() {
 }
 
 #[test]
-#[ignore = "core does not yet apply CTS color attachment byte alignment when summing mixed target formats; CTS expects aligned byte cost over the limit to fail"]
 fn limits_max_color_attachment_bytes_per_sample_unaligned() {
     let test = ValidationTest::new();
     unsafe {
@@ -224,7 +222,6 @@ fn targets_format_filterable() {
 }
 
 #[test]
-#[ignore = "core records only whether blending exists and does not yet validate blend factors for min/max operations; CTS expects min/max factors other than one to fail"]
 fn targets_blend() {
     let test = ValidationTest::new();
     unsafe {
@@ -266,7 +263,6 @@ fn targets_blend() {
 }
 
 #[test]
-#[ignore = "core does not yet validate color target writeMask bits; CTS expects writeMask >= 16 to fail"]
 fn targets_write_mask() {
     let test = ValidationTest::new();
     unsafe {
@@ -354,7 +350,6 @@ fn pipeline_output_targets() {
 }
 
 #[test]
-#[ignore = "core does not yet validate the CTS extra vec4 requirement when color blend factors read source alpha; CTS expects shorter fragment outputs to fail"]
 fn pipeline_output_targets_blend() {
     let test = ValidationTest::new();
     unsafe {
