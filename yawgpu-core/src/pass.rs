@@ -8,6 +8,7 @@ use crate::bind_group_layout::*;
 use crate::buffer::*;
 use crate::command_encoder::*;
 use crate::compute_pipeline::*;
+use crate::extent::*;
 use crate::limits::*;
 use crate::query_set::*;
 use crate::render_pipeline::*;
@@ -28,10 +29,12 @@ pub(crate) struct PassEncoderState {
     pub(crate) debug_group_depth: u32,
     pub(crate) render_pipeline: Option<Arc<RenderPipeline>>,
     pub(crate) compute_pipeline: Option<Arc<ComputePipeline>>,
+    pub(crate) limits: Limits,
     pub(crate) bind_groups: BTreeMap<u32, BoundBindGroup>,
     pub(crate) vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
     pub(crate) index_buffer: Option<BoundIndexBuffer>,
     pub(crate) attachment_signature: Option<AttachmentSignature>,
+    pub(crate) render_extent: Option<Extent3d>,
     pub(crate) attachment_textures: Vec<Texture>,
     pub(crate) render_color_attachment: Option<RenderPassColorExecution>,
     pub(crate) render_pass_recorded: bool,
@@ -44,6 +47,8 @@ impl PassEncoderState {
     /// Creates a new instance.
     pub(crate) fn new(
         attachment_signature: Option<AttachmentSignature>,
+        render_extent: Option<Extent3d>,
+        limits: Limits,
         attachment_textures: Vec<Texture>,
         render_color_attachment: Option<RenderPassColorExecution>,
         occlusion_query_set: Option<QuerySet>,
@@ -53,10 +58,12 @@ impl PassEncoderState {
             debug_group_depth: 0,
             render_pipeline: None,
             compute_pipeline: None,
+            limits,
             bind_groups: BTreeMap::new(),
             vertex_buffers: BTreeMap::new(),
             index_buffer: None,
             attachment_signature,
+            render_extent,
             attachment_textures,
             render_color_attachment,
             render_pass_recorded: false,
@@ -105,15 +112,19 @@ impl PassEncoderInner {
         parent: CommandEncoder,
         token: PassToken,
         attachment_signature: Option<AttachmentSignature>,
+        render_extent: Option<Extent3d>,
         attachment_textures: Vec<Texture>,
         render_color_attachment: Option<RenderPassColorExecution>,
         occlusion_query_set: Option<QuerySet>,
     ) -> Self {
+        let limits = parent.inner.limits;
         Self {
             parent,
             token,
             state: Mutex::new(PassEncoderState::new(
                 attachment_signature,
+                render_extent,
+                limits,
                 attachment_textures,
                 render_color_attachment,
                 occlusion_query_set,
@@ -913,6 +924,28 @@ pub(crate) fn bind_group_layouts_compatible(
     required_entries == actual_entries
 }
 
+/// Validates a bind group command before storing it in encoder state.
+pub(crate) fn validate_set_bind_group(
+    index: u32,
+    group: Option<&BindGroup>,
+    dynamic_offsets: &[u32],
+    limits: Limits,
+) -> Result<(), String> {
+    if index >= limits.max_bind_groups {
+        return Err("bind group index exceeds the device limit".to_owned());
+    }
+    let Some(group) = group else {
+        if dynamic_offsets.is_empty() {
+            return Ok(());
+        }
+        return Err("clearing a bind group must not include dynamic offsets".to_owned());
+    };
+    if group.is_error() {
+        return Err("cannot set an error bind group".to_owned());
+    }
+    validate_dynamic_offsets(group.layout(), group, dynamic_offsets, limits)
+}
+
 /// Validates dynamic offsets and returns a descriptive error on failure.
 pub(crate) fn validate_dynamic_offsets(
     layout: &BindGroupLayout,
@@ -973,8 +1006,13 @@ pub(crate) fn validate_dynamic_offsets(
         if base > buffer.size() {
             return Err("bind group dynamic offset exceeds buffer size".to_owned());
         }
-        if *size != u64::MAX && dynamic_offset > *size {
-            return Err("bind group dynamic offset exceeds binding size".to_owned());
+        if *size != u64::MAX {
+            let end = base
+                .checked_add(*size)
+                .ok_or_else(|| "bind group dynamic offset range overflows".to_owned())?;
+            if end > buffer.size() {
+                return Err("bind group dynamic offset exceeds buffer size".to_owned());
+            }
         }
     }
 
@@ -1004,6 +1042,44 @@ pub(crate) fn validate_viewport(
         || min_depth > max_depth
     {
         return Err("render pass viewport depth range is invalid".to_owned());
+    }
+    Ok(())
+}
+
+/// Validates viewport bounds against the device's maximum viewport dimensions.
+pub(crate) fn validate_viewport_bounds(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    limits: Limits,
+) -> Result<(), String> {
+    let max = limits.max_texture_dimension_2d as f32;
+    if x < -max || y < -max || x + width > max || y + height > max {
+        return Err("render pass viewport rectangle exceeds device bounds".to_owned());
+    }
+    Ok(())
+}
+
+/// Validates scissor rectangle containment in the active render attachment.
+pub(crate) fn validate_scissor_rect(
+    render_extent: Option<Extent3d>,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let Some(extent) = render_extent else {
+        return Ok(());
+    };
+    let end_x = x
+        .checked_add(width)
+        .ok_or_else(|| "render pass scissor rectangle width overflows".to_owned())?;
+    let end_y = y
+        .checked_add(height)
+        .ok_or_else(|| "render pass scissor rectangle height overflows".to_owned())?;
+    if end_x > extent.width || end_y > extent.height {
+        return Err("render pass scissor rectangle exceeds attachment size".to_owned());
     }
     Ok(())
 }

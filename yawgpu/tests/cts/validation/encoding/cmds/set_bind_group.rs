@@ -10,7 +10,6 @@ use crate::common::{
 };
 
 #[test]
-#[ignore = "core records setBindGroup without validating bind group state or index until a draw/dispatch validates pipeline state; CTS expects setBindGroup/finish to fail for invalid groups and out-of-range indices"]
 fn state_and_binding_index() {
     let test = ValidationTest::new();
     unsafe {
@@ -73,7 +72,6 @@ fn bind_group_device_mismatch() {
 }
 
 #[test]
-#[ignore = "core validates dynamic-offset count against pipeline layout only at draw/dispatch time; CTS expects unexpected dynamic offsets to fail at setBindGroup/finish without a draw or dispatch"]
 fn dynamic_offsets_passed_but_not_expected() {
     let test = ValidationTest::new();
     unsafe {
@@ -98,7 +96,6 @@ fn dynamic_offsets_passed_but_not_expected() {
 }
 
 #[test]
-#[ignore = "core validates dynamic offset count, alignment, and range only when draw/dispatch validates pipeline bind groups; CTS expects setBindGroup/finish to validate these offsets directly"]
 fn dynamic_offsets_match_expectations_in_pass_encoder() {
     let test = ValidationTest::new();
     unsafe {
@@ -150,7 +147,6 @@ fn u32array_start_and_length() {
 }
 
 #[test]
-#[ignore = "core validates dynamic buffer offset alignment only when draw/dispatch validates pipeline bind groups; CTS expects setBindGroup/finish to reject misaligned dynamic offsets"]
 fn buffer_dynamic_offsets() {
     let test = ValidationTest::new();
     unsafe {

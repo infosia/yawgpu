@@ -454,7 +454,7 @@ impl Device {
         if self.is_lost() {
             CommandEncoder::new_error("command encoder device is lost")
         } else {
-            CommandEncoder::new(self.features())
+            CommandEncoder::new(self.features(), self.limits())
         }
     }
 

@@ -59,7 +59,6 @@ fn set_viewport_exceeds_attachment_size() {
 }
 
 #[test]
-#[ignore = "core does not validate viewport rectangle against maximum viewport bounds; CTS expects out-of-bounds viewport rectangles to fail"]
 fn set_viewport_xy_rect_contained_in_bounds() {
     let test = ValidationTest::new();
     unsafe {
@@ -130,7 +129,6 @@ fn set_viewport_depth_range_and_order() {
 fn set_scissor_rect_x_y_width_height_nonnegative() {}
 
 #[test]
-#[ignore = "core does not validate scissor rectangle against render attachment size; CTS expects rectangles outside the attachment to fail"]
 fn set_scissor_rect_xy_rect_contained_in_attachment() {
     let test = ValidationTest::new();
     unsafe {

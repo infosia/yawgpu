@@ -98,6 +98,22 @@ never a reason to skip a CTS case.
   cache keys now use core Arc identity (not transient FFI handle address).
   Deferred → Batch D: render-pass/bundle attachment-misc matrices,
   resource_usages subresource granularity, destroyed-resource timing.
+- **Core-gap follow-up #5 (Batch D, encoder/command rules) — DONE.**
+  +8 CTS un-ignored (122→114): setBindGroup eager validation (index <
+  maxBindGroups, dynamic-offset count/alignment/range, error bind group —
+  closes the long-standing setBindGroup-deferred gap), setPipeline rejects
+  error pipelines immediately (render + compute), setViewport/setScissorRect
+  bounds validation. Fixed dynamic-offset range semantics
+  (binding_offset+dynamic_offset+binding_size ≤ buffer.size).
+  **Still deferred (each a larger model change, "close all gaps" residue):**
+  Cluster 1 render-pass/bundle attachment-misc (needs attachment-signature/
+  descriptor model expansion: depthSlice 3D, mip-level-count,
+  depthReadOnly/stencilReadOnly, resolve-format, transient, pass↔pipeline
+  compat); Cluster 3 resource-usage subresource granularity (fine-grained
+  mip/layer/aspect usage-scope tracking); Cluster 4 destroyed-resource
+  finish→submit timing (behavior change). Plus feature-adds + native-surface
+  + a few C-ABI-N/A (u32array start/length, scissor negative args,
+  maxDrawCount, vertex-OOB lastStride).
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage

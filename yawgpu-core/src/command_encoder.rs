@@ -10,6 +10,7 @@ use crate::copy::*;
 use crate::device::FeatureSet;
 use crate::extent::*;
 use crate::format::*;
+use crate::limits::*;
 use crate::pass::*;
 use crate::query_set::*;
 use crate::render_pass::*;
@@ -29,6 +30,7 @@ pub struct CommandEncoder {
 #[derive(Debug)]
 pub(crate) struct CommandEncoderInner {
     pub(crate) features: FeatureSet,
+    pub(crate) limits: Limits,
     pub(crate) state: Mutex<CommandEncoderState>,
 }
 
@@ -198,10 +200,11 @@ pub(crate) struct RenderDrawExecution {
 
 impl CommandEncoder {
     /// Creates a new instance.
-    pub(crate) fn new(features: FeatureSet) -> Self {
+    pub(crate) fn new(features: FeatureSet, limits: Limits) -> Self {
         Self {
             inner: Arc::new(CommandEncoderInner {
                 features,
+                limits,
                 state: Mutex::new(CommandEncoderState {
                     lifecycle: CommandEncoderLifecycle::Recording,
                     open_pass: None,
@@ -220,7 +223,7 @@ impl CommandEncoder {
 
     /// Creates an error-state instance.
     pub(crate) fn new_error(message: impl Into<String>) -> Self {
-        let encoder = Self::new(FeatureSet::new());
+        let encoder = Self::new(FeatureSet::new(), Limits::DEFAULT);
         encoder.record_first_error(message);
         encoder
     }
@@ -249,6 +252,7 @@ impl CommandEncoder {
                     self.clone(),
                     token,
                     attachment_signature,
+                    render_pass_extent(descriptor),
                     render_pass_attachment_textures(descriptor),
                     render_pass_color_execution(descriptor),
                     descriptor.occlusion_query_set.clone(),
@@ -267,6 +271,7 @@ impl CommandEncoder {
                 inner: Arc::new(PassEncoderInner::new(
                     self.clone(),
                     token,
+                    None,
                     None,
                     Vec::new(),
                     None,
@@ -1102,6 +1107,22 @@ pub(crate) fn render_pass_color_execution(
             load_op: attachment.load_op,
             store_op: attachment.store_op,
             clear_value: attachment.clear_value,
+        })
+}
+
+/// Returns the render pass attachment extent used by dynamic state validation.
+pub(crate) fn render_pass_extent(descriptor: &RenderPassDescriptor) -> Option<Extent3d> {
+    descriptor
+        .color_attachments
+        .iter()
+        .flatten()
+        .map(|attachment| attachment.view.render_extent())
+        .next()
+        .or_else(|| {
+            descriptor
+                .depth_stencil_attachment
+                .as_ref()
+                .map(|attachment| attachment.view.render_extent())
         })
 }
 

@@ -65,6 +65,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetBindGroup(
             group_index,
             group.map(|group| Arc::clone(&group._core)),
             offsets,
+            encoder.device.limits(),
         ),
     );
 }
