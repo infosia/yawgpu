@@ -81,7 +81,6 @@ fn color_attachments_limits_max_color_attachments() {
 }
 
 #[test]
-#[ignore = "core does not yet validate render pass color attachment bytes-per-sample totals; CTS expects totals over maxColorAttachmentBytesPerSample to fail"]
 fn color_attachments_limits_max_color_attachment_bytes_per_sample_aligned() {
     let test = ValidationTest::new();
     unsafe {
@@ -93,14 +92,17 @@ fn color_attachments_limits_max_color_attachment_bytes_per_sample_aligned() {
             },
             None,
         );
-        let attachments = [color_attachment(color.view), color_attachment(color.view)];
+        let attachments = [
+            color_attachment(color.view),
+            color_attachment(color.view),
+            color_attachment(color.view),
+        ];
         expect_render_pass(&test, false, &render_pass_descriptor(&attachments, None));
         release_view(color);
     }
 }
 
 #[test]
-#[ignore = "core does not yet validate aligned render pass color attachment bytes-per-sample totals; CTS expects unaligned format ordering over the limit to fail"]
 fn color_attachments_limits_max_color_attachment_bytes_per_sample_unaligned() {
     let test = ValidationTest::new();
     unsafe {
@@ -132,6 +134,7 @@ fn color_attachments_limits_max_color_attachment_bytes_per_sample_unaligned() {
             color_attachment(r8.view),
             color_attachment(r32.view),
             color_attachment(rgba32.view),
+            color_attachment(rgba32.view),
             color_attachment(r8.view),
         ];
         expect_render_pass(&test, false, &render_pass_descriptor(&attachments, None));
@@ -142,7 +145,6 @@ fn color_attachments_limits_max_color_attachment_bytes_per_sample_unaligned() {
 }
 
 #[test]
-#[ignore = "core does not model render pass color attachment depthSlice; CTS expects 2D depthSlice to be undefined and 3D depthSlice to be defined/in range"]
 fn color_attachments_depth_slice_definedness() {
     let test = ValidationTest::new();
     unsafe {
@@ -155,7 +157,6 @@ fn color_attachments_depth_slice_definedness() {
 }
 
 #[test]
-#[ignore = "core does not model render pass color attachment depthSlice bounds for 3D textures; CTS expects out-of-range depthSlice to fail"]
 fn color_attachments_depth_slice_bound_check() {
     let test = ValidationTest::new();
     unsafe {
@@ -176,7 +177,6 @@ fn color_attachments_depth_slice_bound_check() {
 }
 
 #[test]
-#[ignore = "core does not track render pass color attachment depthSlice overlap; CTS expects duplicate depth slices from the same 3D subresource in one pass to fail"]
 fn color_attachments_depth_slice_overlaps_same_miplevel() {
     let test = ValidationTest::new();
     unsafe {
@@ -199,7 +199,6 @@ fn color_attachments_depth_slice_overlaps_same_miplevel() {
 }
 
 #[test]
-#[ignore = "core does not track render pass color attachment depthSlice overlap by mip level; CTS expects same depth slice from the same mip level to fail"]
 fn color_attachments_depth_slice_overlaps_diff_miplevel() {
     let test = ValidationTest::new();
     unsafe {
@@ -364,7 +363,6 @@ fn attachments_layer_count() {
 }
 
 #[test]
-#[ignore = "core does not yet require render pass attachment views to cover exactly one mip level; CTS expects mipLevelCount > 1 to fail"]
 fn attachments_mip_level_count() {
     let test = ValidationTest::new();
     unsafe {
@@ -397,7 +395,6 @@ fn attachments_mip_level_count() {
 }
 
 #[test]
-#[ignore = "core does not yet validate TransientAttachment render pass load/store constraints; CTS expects transient color attachments to require loadOp=clear and storeOp=discard"]
 fn color_attachments_load_op_store_op() {
     let test = ValidationTest::new();
     unsafe {
@@ -536,7 +533,6 @@ fn resolve_target_array_layer_count() {
 }
 
 #[test]
-#[ignore = "core does not yet require resolve target views to cover exactly one mip level; CTS expects mipLevelCount > 1 to fail"]
 fn resolve_target_mipmap_level_count() {
     let test = ValidationTest::new();
     unsafe {
@@ -851,7 +847,6 @@ fn depth_stencil_attachment_sample_counts_mismatch() {
 }
 
 #[test]
-#[ignore = "core does not model depthReadOnly/stencilReadOnly or TransientAttachment depth-stencil load/store constraints; CTS expects op presence to match read-only/aspect state"]
 fn depth_stencil_attachment_load_op_store_op_match_depth_read_only_stencil_read_only() {
     let test = ValidationTest::new();
     unsafe {
@@ -897,7 +892,6 @@ fn depth_stencil_attachment_depth_clear_value() {
 }
 
 #[test]
-#[ignore = "core does not yet validate whether a color format supports resolve; CTS expects multisample-capable but non-resolvable formats to fail as resolve targets"]
 fn resolve_target_format_supports_resolve() {
     let test = ValidationTest::new();
     unsafe {

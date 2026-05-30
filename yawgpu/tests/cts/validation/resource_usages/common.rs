@@ -334,7 +334,8 @@ unsafe fn encode_render_with_bind_group(
         let view = attachment_view.unwrap_or_else(|| target.expect("target").1);
         let (layout, bind_group, pipeline_layout) =
             create_bind_group_stack(test, layout_entries, bind_group_entries);
-        let pipeline = create_render_pipeline(test, vertex_source, fragment_source, pipeline_layout);
+        let pipeline =
+            create_render_pipeline(test, vertex_source, fragment_source, pipeline_layout);
         let encoder = create_encoder(test);
         let attachment = color_attachment(view);
         let descriptor = render_pass_descriptor(&[attachment]);

@@ -209,7 +209,6 @@ fn depth_stencil_formats_mismatch() {
 }
 
 #[test]
-#[ignore = "render bundle attachment signatures do not include depthReadOnly/stencilReadOnly; CTS expects executeBundles to validate readonly compatibility"]
 fn depth_stencil_readonly_mismatch() {
     let test = ValidationTest::new();
     unsafe {
@@ -229,7 +228,11 @@ fn depth_stencil_readonly_mismatch() {
                     native::WGPUTextureFormat_Depth24PlusStencil8,
                     1,
                     &[bundle],
-                    CommandExpectation::Success,
+                    if depth_read_only || stencil_read_only {
+                        CommandExpectation::FinishError
+                    } else {
+                        CommandExpectation::Success
+                    },
                 );
                 yawgpu::wgpuRenderBundleRelease(bundle);
             }

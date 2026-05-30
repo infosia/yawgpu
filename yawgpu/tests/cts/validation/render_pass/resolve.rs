@@ -7,7 +7,6 @@ use crate::common::{
 };
 
 #[test]
-#[ignore = "core does not yet reject TransientAttachment resolve targets or resolve target views that cover more than one mip level; CTS expects those resolve attachment cases to fail"]
 fn resolve_attachment() {
     let test = ValidationTest::new();
     unsafe {

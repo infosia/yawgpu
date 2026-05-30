@@ -105,7 +105,6 @@ fn external_texture() {
 }
 
 #[test]
-#[ignore = "core does not yet reject unsupported storage texture format/access combinations in render pipeline auto layout; CTS expects validation error"]
 fn storage_texture_format() {
     let test = ValidationTest::new();
     unsafe {
