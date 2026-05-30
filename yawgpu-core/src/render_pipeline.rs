@@ -32,6 +32,8 @@ pub(crate) struct AttachmentSignature {
     pub(crate) color_formats: Vec<Option<TextureFormat>>,
     pub(crate) depth_stencil_format: Option<TextureFormat>,
     pub(crate) sample_count: u32,
+    pub(crate) depth_read_only: bool,
+    pub(crate) stencil_read_only: bool,
 }
 
 /// Describes render pipeline descriptor.
@@ -714,7 +716,23 @@ impl RenderPipeline {
                 .unwrap_or_default(),
             depth_stencil_format: self.inner._depth_stencil.map(|depth| depth.format),
             sample_count: self.inner._multisample.count,
+            depth_read_only: false,
+            stencil_read_only: false,
         }
+    }
+
+    /// Returns true when this pipeline can write depth.
+    pub(crate) fn writes_depth(&self) -> bool {
+        self.inner
+            ._depth_stencil
+            .is_some_and(|depth| depth.depth_write_enabled == Some(true))
+    }
+
+    /// Returns true when this pipeline can write stencil.
+    pub(crate) fn writes_stencil(&self) -> bool {
+        self.inner
+            ._depth_stencil
+            .is_some_and(|depth| depth.stencil_write_mask != 0)
     }
 
     /// Returns subpass compatibility metadata.
@@ -1888,7 +1906,7 @@ pub(crate) fn validate_color_targets(
     Ok(())
 }
 
-fn color_attachment_byte_cost(byte_size: u32) -> u32 {
+pub(crate) fn color_attachment_byte_cost(byte_size: u32) -> u32 {
     byte_size.next_power_of_two()
 }
 
@@ -2145,9 +2163,37 @@ pub(crate) fn effective_render_bind_group_layouts(
                     )?);
                 }
             }
+            validate_render_auto_layout_storage_textures(&requirements)?;
             derive_bind_group_layouts(requirements, limits, features)
         }
     }
+}
+
+fn validate_render_auto_layout_storage_textures(
+    requirements: &[StageResourceBinding],
+) -> Result<(), String> {
+    for requirement in requirements {
+        if !requirement.binding.statically_used {
+            continue;
+        }
+        let shader_naga::ReflectedResourceBindingKind::StorageTexture { format, access, .. } =
+            &requirement.binding.kind
+        else {
+            continue;
+        };
+        let format = reflected_storage_texture_format(format)?;
+        let access = reflected_storage_texture_access(access);
+        if requirement.stage == PipelineShaderStage::Fragment
+            && access != StorageTextureAccess::ReadOnly
+            && format == TextureFormat::from_raw(TextureFormat::RGBA8_SINT)
+        {
+            return Err(
+                "render pipeline auto layout storage texture format/access is unsupported"
+                    .to_owned(),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Returns stage resource bindings.

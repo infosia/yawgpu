@@ -446,6 +446,8 @@ impl RenderBundleEncoderDescriptor {
             color_formats: self.color_formats.clone(),
             depth_stencil_format: self.depth_stencil_format,
             sample_count: self.sample_count,
+            depth_read_only: self.depth_read_only,
+            stencil_read_only: self.stencil_read_only,
         }
     }
 }
@@ -453,7 +455,7 @@ impl RenderBundleEncoderDescriptor {
 /// Validates render bundle encoder descriptor and returns a descriptive error on failure.
 pub(crate) fn validate_render_bundle_encoder_descriptor(
     descriptor: &RenderBundleEncoderDescriptor,
-    _limits: Limits,
+    limits: Limits,
     features: &FeatureSet,
 ) -> Result<(), String> {
     if descriptor.color_formats.len() > descriptor.max_color_attachments as usize {
@@ -464,6 +466,7 @@ pub(crate) fn validate_render_bundle_encoder_descriptor(
     }
 
     let mut has_attachment = descriptor.depth_stencil_format.is_some();
+    let mut color_bytes = 0_u32;
     for color_format in descriptor.color_formats.iter().flatten().copied() {
         has_attachment = true;
         let Some(caps) = color_format.caps(features) else {
@@ -472,6 +475,14 @@ pub(crate) fn validate_render_bundle_encoder_descriptor(
         if !caps.aspects.color || !caps.renderable {
             return Err("render bundle color format must be color-renderable".to_owned());
         }
+        color_bytes = color_bytes
+            .checked_add(color_attachment_byte_cost(caps.texel_block_size))
+            .ok_or_else(|| "render bundle color format byte count overflows".to_owned())?;
+    }
+    if color_bytes > limits.max_color_attachment_bytes_per_sample {
+        return Err(
+            "render bundle color attachment bytes per sample exceed the device limit".to_owned(),
+        );
     }
     if let Some(depth_format) = descriptor.depth_stencil_format {
         let Some(caps) = depth_format.caps(features) else {
@@ -497,8 +508,24 @@ pub(crate) fn validate_render_bundle_pipeline(
     if pipeline.is_error() {
         return Err("render bundle requires a valid render pipeline".to_owned());
     }
-    if pipeline.attachment_signature() != descriptor.attachment_signature() {
+    let descriptor_signature = descriptor.attachment_signature();
+    let pipeline_signature = pipeline.attachment_signature();
+    if descriptor_signature.color_formats != pipeline_signature.color_formats
+        || descriptor_signature.depth_stencil_format != pipeline_signature.depth_stencil_format
+        || descriptor_signature.sample_count != pipeline_signature.sample_count
+    {
         return Err("render bundle pipeline attachment signature is incompatible".to_owned());
+    }
+    if descriptor.depth_read_only && pipeline.writes_depth() {
+        return Err(
+            "render bundle read-only depth attachment is incompatible with depth writes".to_owned(),
+        );
+    }
+    if descriptor.stencil_read_only && pipeline.writes_stencil() {
+        return Err(
+            "render bundle read-only stencil attachment is incompatible with stencil writes"
+                .to_owned(),
+        );
     }
     Ok(())
 }
@@ -556,6 +583,24 @@ mod tests {
         let (bundle, error) = bundle_encoder.finish();
         assert_eq!(error, None);
         assert!(!bundle.is_error());
+    }
+
+    #[test]
+    fn render_bundle_encoder_rejects_attachment_byte_limit_overflow() {
+        let device = noop_device();
+        let mut descriptor = render_bundle_encoder_descriptor();
+        descriptor.color_formats = vec![Some(TextureFormat::from_raw(TextureFormat::RGBA32_FLOAT))];
+        let mut limits = device.limits();
+        limits.max_color_attachment_bytes_per_sample = 15;
+
+        let (_encoder, error) = RenderBundleEncoder::new(descriptor, limits, device.features());
+        assert_eq!(
+            error,
+            Some(
+                "render bundle color attachment bytes per sample exceed the device limit"
+                    .to_owned()
+            )
+        );
     }
 
     #[test]

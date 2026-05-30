@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -236,9 +236,11 @@ impl CommandEncoder {
     ) -> (RenderPassEncoder, Option<String>) {
         let (token, immediate_error) = self.begin_pass(PassKind::Render);
         let attachment_signature =
-            render_pass_attachment_signature(descriptor, &self.inner.features).ok();
+            render_pass_attachment_signature(descriptor, &self.inner.features, self.inner.limits)
+                .ok();
         if immediate_error.is_none() {
-            if let Err(message) = validate_render_pass_descriptor(descriptor, &self.inner.features)
+            if let Err(message) =
+                validate_render_pass_descriptor(descriptor, &self.inner.features, self.inner.limits)
             {
                 self.record_first_error(message);
             } else {
@@ -880,8 +882,9 @@ pub(crate) fn validate_encoder_write_buffer(
 pub(crate) fn validate_render_pass_descriptor(
     descriptor: &RenderPassDescriptor,
     features: &FeatureSet,
+    limits: Limits,
 ) -> Result<(), String> {
-    render_pass_attachment_signature(descriptor, features)?;
+    render_pass_attachment_signature(descriptor, features, limits)?;
     if let Some(query_set) = &descriptor.occlusion_query_set {
         validate_occlusion_query_set(query_set, "render pass occlusion query set")?;
     }
@@ -1014,6 +1017,7 @@ pub(crate) fn validate_resolve_query_set(
 pub(crate) fn render_pass_attachment_signature(
     descriptor: &RenderPassDescriptor,
     features: &FeatureSet,
+    limits: Limits,
 ) -> Result<AttachmentSignature, String> {
     if descriptor.color_attachments.len() > descriptor.max_color_attachments as usize {
         return Err("render pass colorAttachmentCount exceeds the device limit".to_owned());
@@ -1023,11 +1027,26 @@ pub(crate) fn render_pass_attachment_signature(
     let mut render_extent = None;
     let mut sample_count = None;
     let mut color_formats = Vec::with_capacity(descriptor.color_attachments.len());
+    let mut color_subresources = BTreeSet::new();
+    let mut color_bytes = 0_u32;
 
     for attachment in &descriptor.color_attachments {
         if let Some(attachment) = attachment {
             has_attachment = true;
             validate_color_attachment(attachment, features)?;
+            let caps = attachment
+                .view
+                .texture()
+                .view_format_caps(attachment.view.format())
+                .ok_or_else(|| {
+                    "render pass color attachment format must be supported".to_owned()
+                })?;
+            color_bytes = color_bytes
+                .checked_add(color_attachment_byte_cost(caps.texel_block_size))
+                .ok_or_else(|| "render pass color attachment byte count overflows".to_owned())?;
+            validate_color_attachment_depth_slice(attachment)?;
+            validate_single_mip_attachment_view(&attachment.view, "render pass color attachment")?;
+            validate_color_attachment_overlap(attachment, &mut color_subresources)?;
             validate_render_attachment_common(
                 &attachment.view,
                 &mut render_extent,
@@ -1036,6 +1055,7 @@ pub(crate) fn render_pass_attachment_signature(
             )?;
             if let Some(resolve_target) = &attachment.resolve_target {
                 validate_resolve_target(&attachment.view, resolve_target)?;
+                validate_single_mip_attachment_view(resolve_target, "render pass resolveTarget")?;
             }
             color_formats.push(Some(attachment.view.format()));
         } else {
@@ -1044,10 +1064,18 @@ pub(crate) fn render_pass_attachment_signature(
     }
 
     let mut depth_stencil_format = None;
+    let mut depth_read_only = false;
+    let mut stencil_read_only = false;
     if let Some(attachment) = &descriptor.depth_stencil_attachment {
         has_attachment = true;
         validate_depth_stencil_attachment(attachment, features)?;
+        validate_single_mip_attachment_view(
+            &attachment.view,
+            "render pass depth-stencil attachment",
+        )?;
         depth_stencil_format = Some(attachment.view.format());
+        depth_read_only = attachment.depth_read_only;
+        stencil_read_only = attachment.stencil_read_only;
         validate_render_attachment_common(
             &attachment.view,
             &mut render_extent,
@@ -1059,10 +1087,17 @@ pub(crate) fn render_pass_attachment_signature(
     if !has_attachment {
         return Err("render pass requires at least one attachment".to_owned());
     }
+    if color_bytes > limits.max_color_attachment_bytes_per_sample {
+        return Err(
+            "render pass color attachment bytes per sample exceed the device limit".to_owned(),
+        );
+    }
     Ok(AttachmentSignature {
         color_formats,
         depth_stencil_format,
         sample_count: sample_count.unwrap_or(1),
+        depth_read_only,
+        stencil_read_only,
     })
 }
 
@@ -1147,6 +1182,14 @@ pub(crate) fn validate_color_attachment(
     if attachment.store_op == StoreOp::Undefined {
         return Err("render pass color attachment storeOp must be set".to_owned());
     }
+    if texture.usage().contains(TextureUsage::TRANSIENT_ATTACHMENT)
+        && (attachment.load_op != LoadOp::Clear || attachment.store_op != StoreOp::Discard)
+    {
+        return Err(
+            "render pass transient color attachment requires clear loadOp and discard storeOp"
+                .to_owned(),
+        );
+    }
     if attachment.load_op == LoadOp::Clear
         && ![
             attachment.clear_value.r,
@@ -1158,6 +1201,60 @@ pub(crate) fn validate_color_attachment(
         .all(f64::is_finite)
     {
         return Err("render pass color clearValue components must be finite".to_owned());
+    }
+    Ok(())
+}
+
+/// Validates color attachment depthSlice rules.
+pub(crate) fn validate_color_attachment_depth_slice(
+    attachment: &RenderPassColorAttachment,
+) -> Result<(), String> {
+    let texture = attachment.view.texture();
+    match texture.dimension() {
+        TextureDimension::D3 => {
+            let Some(depth_slice) = attachment.depth_slice else {
+                return Err("render pass 3D color attachment requires depthSlice".to_owned());
+            };
+            let subresource = texture.subresource_size(attachment.view.base_mip_level());
+            if depth_slice >= subresource.depth_or_array_layers {
+                return Err("render pass color attachment depthSlice is out of bounds".to_owned());
+            }
+            Ok(())
+        }
+        TextureDimension::D1 | TextureDimension::D2 => {
+            if attachment.depth_slice.is_some() {
+                return Err(
+                    "render pass non-3D color attachment must not set depthSlice".to_owned(),
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_color_attachment_overlap(
+    attachment: &RenderPassColorAttachment,
+    color_subresources: &mut BTreeSet<(usize, u32, Option<u32>)>,
+) -> Result<(), String> {
+    let texture = attachment.view.texture();
+    if texture.dimension() != TextureDimension::D3 {
+        return Ok(());
+    }
+    let texture_id = Arc::as_ptr(&texture.inner) as usize;
+    let key = (
+        texture_id,
+        attachment.view.base_mip_level(),
+        attachment.depth_slice,
+    );
+    if !color_subresources.insert(key) {
+        return Err("render pass color attachments overlap the same subresource".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_single_mip_attachment_view(view: &TextureView, label: &str) -> Result<(), String> {
+    if view.mip_level_count() != 1 {
+        return Err(format!("{label} view mipLevelCount must be one"));
     }
     Ok(())
 }
@@ -1183,11 +1280,29 @@ pub(crate) fn validate_depth_stencil_attachment(
         );
     }
     if format_caps.aspects.depth {
-        if attachment.depth_load_op == LoadOp::Undefined {
+        if attachment.depth_read_only {
+            if attachment.depth_load_op != LoadOp::Undefined
+                || attachment.depth_store_op != StoreOp::Undefined
+            {
+                return Err(
+                    "render pass read-only depth attachment must not set depth load/store ops"
+                        .to_owned(),
+                );
+            }
+        } else if attachment.depth_load_op == LoadOp::Undefined {
             return Err("render pass depth loadOp must be set".to_owned());
-        }
-        if attachment.depth_store_op == StoreOp::Undefined {
+        } else if attachment.depth_store_op == StoreOp::Undefined {
             return Err("render pass depth storeOp must be set".to_owned());
+        }
+        if texture.usage().contains(TextureUsage::TRANSIENT_ATTACHMENT)
+            && !attachment.depth_read_only
+            && (attachment.depth_load_op != LoadOp::Clear
+                || attachment.depth_store_op != StoreOp::Discard)
+        {
+            return Err(
+                "render pass transient depth attachment requires clear loadOp and discard storeOp"
+                    .to_owned(),
+            );
         }
         if attachment.depth_load_op == LoadOp::Clear
             && (!attachment.depth_clear_value.is_finite()
@@ -1197,11 +1312,29 @@ pub(crate) fn validate_depth_stencil_attachment(
         }
     }
     if format_caps.aspects.stencil {
-        if attachment.stencil_load_op == LoadOp::Undefined {
+        if attachment.stencil_read_only {
+            if attachment.stencil_load_op != LoadOp::Undefined
+                || attachment.stencil_store_op != StoreOp::Undefined
+            {
+                return Err(
+                    "render pass read-only stencil attachment must not set stencil load/store ops"
+                        .to_owned(),
+                );
+            }
+        } else if attachment.stencil_load_op == LoadOp::Undefined {
             return Err("render pass stencil loadOp must be set".to_owned());
-        }
-        if attachment.stencil_store_op == StoreOp::Undefined {
+        } else if attachment.stencil_store_op == StoreOp::Undefined {
             return Err("render pass stencil storeOp must be set".to_owned());
+        }
+        if texture.usage().contains(TextureUsage::TRANSIENT_ATTACHMENT)
+            && !attachment.stencil_read_only
+            && (attachment.stencil_load_op != LoadOp::Clear
+                || attachment.stencil_store_op != StoreOp::Discard)
+        {
+            return Err(
+                "render pass transient stencil attachment requires clear loadOp and discard storeOp"
+                    .to_owned(),
+            );
         }
     }
     Ok(())
@@ -1217,7 +1350,7 @@ pub(crate) fn validate_render_attachment_common(
     if view.is_error() {
         return Err(format!("{label} view must not be an error view"));
     }
-    if view.array_layer_count() != 1 {
+    if view.dimension() != TextureViewDimension::D3 && view.array_layer_count() != 1 {
         return Err(format!("{label} view arrayLayerCount must be one"));
     }
     let extent = view.render_extent();
@@ -1262,11 +1395,26 @@ pub(crate) fn validate_resolve_target(
     {
         return Err("render pass resolveTarget requires RenderAttachment usage".to_owned());
     }
+    if resolve_texture
+        .usage()
+        .contains(TextureUsage::TRANSIENT_ATTACHMENT)
+    {
+        return Err("render pass resolveTarget must not use TransientAttachment usage".to_owned());
+    }
     if resolve_texture.sample_count() != 1 {
         return Err("render pass resolveTarget sampleCount must be one".to_owned());
     }
     if color_view.format() != resolve_target.format() {
         return Err("render pass resolveTarget format must match the color attachment".to_owned());
+    }
+    let Some(caps) = color_texture.view_format_caps(color_view.format()) else {
+        return Err("render pass resolveTarget format must be supported".to_owned());
+    };
+    if !caps
+        .output_class
+        .is_some_and(|class| class == FormatOutputClass::Float)
+    {
+        return Err("render pass resolveTarget format must be resolvable".to_owned());
     }
     if resolve_target.array_layer_count() != 1 {
         return Err("render pass resolveTarget view arrayLayerCount must be one".to_owned());
@@ -1694,6 +1842,64 @@ mod tests {
         let (command_buffer, error) = encoder.finish();
         assert!(command_buffer.is_error());
         assert_eq!(error, Some("forced encoder validation".to_owned()));
+    }
+
+    #[test]
+    fn render_pass_validation_checks_depth_slice_and_attachment_byte_limit() {
+        let device = noop_device();
+        let texture = Texture::new(
+            TextureDescriptor {
+                usage: TextureUsage::RENDER_ATTACHMENT,
+                dimension: TextureDimension::D3,
+                size: Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 4,
+                },
+                format: rgba8_unorm(),
+                mip_level_count: 1,
+                sample_count: 1,
+                view_formats: Vec::new(),
+            },
+            None,
+            false,
+            FeatureSet::new(),
+        );
+        let view = TextureView::new(
+            texture,
+            ResolvedTextureViewDescriptor {
+                format: rgba8_unorm(),
+                dimension: TextureViewDimension::D3,
+                base_mip_level: 0,
+                mip_level_count: 1,
+                base_array_layer: 0,
+                array_layer_count: 1,
+                aspect: TextureAspect::All,
+                usage: TextureUsage::RENDER_ATTACHMENT,
+            },
+            false,
+        );
+        let mut descriptor = noop_render_pass_descriptor(Arc::new(view), None);
+        let features = device.features();
+
+        assert!(validate_render_pass_descriptor(&descriptor, &features, device.limits()).is_err());
+        descriptor.color_attachments[0]
+            .as_mut()
+            .unwrap()
+            .depth_slice = Some(4);
+        assert!(validate_render_pass_descriptor(&descriptor, &features, device.limits()).is_err());
+        descriptor.color_attachments[0]
+            .as_mut()
+            .unwrap()
+            .depth_slice = Some(3);
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &features, device.limits()),
+            Ok(())
+        );
+
+        let mut tight_limits = device.limits();
+        tight_limits.max_color_attachment_bytes_per_sample = 3;
+        assert!(validate_render_pass_descriptor(&descriptor, &features, tight_limits).is_err());
     }
 
     #[test]

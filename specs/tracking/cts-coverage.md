@@ -114,6 +114,18 @@ never a reason to skip a CTS case.
   finish→submit timing (behavior change). Plus feature-adds + native-surface
   + a few C-ABI-N/A (u32array start/length, scissor negative args,
   maxDrawCount, vertex-OOB lastStride).
+- **Core-gap follow-up #6 (Cluster 1, render-pass attachment-misc) — DONE.**
+  +22 CTS un-ignored (114→92); **`render_pass/` now 0 ignores (fully
+  active)**. Expanded attachment model: `RenderPassColorAttachment.depth_slice`,
+  `RenderPassDepthStencilAttachment.depth_read_only/stencil_read_only`,
+  `AttachmentSignature` readonly state (+ FFI conv). New validation:
+  3D-color depthSlice (definedness/bounds/overlap), attachment+resolve
+  mip-level-count==1, depthReadOnly/stencilReadOnly loadOp/storeOp match,
+  resolve-format-support, transient load/store, render-pass↔pipeline
+  attachment compat (color/depth/sample + readonly write-state),
+  createRenderBundleEncoder bytes-per-sample, storage_texture format.
+  Remaining closeable → Cluster 3 (resource-usage subresource
+  granularity) + Cluster 4 (destroyed-resource finish→submit timing).
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage

@@ -155,6 +155,7 @@ pub(crate) fn noop_render_pass_descriptor(
         max_color_attachments: Limits::DEFAULT.max_color_attachments,
         color_attachments: vec![Some(RenderPassColorAttachment {
             view,
+            depth_slice: None,
             resolve_target: None,
             load_op: LoadOp::Clear,
             store_op: StoreOp::Store,

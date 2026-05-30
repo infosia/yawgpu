@@ -31,7 +31,6 @@ fn attachment_state_limits_max_color_attachments() {
 }
 
 #[test]
-#[ignore = "core does not validate maxColorAttachmentBytesPerSample for render bundle encoder descriptors; CTS expects oversized aligned format sets to fail"]
 fn attachment_state_limits_max_color_attachment_bytes_per_sample_aligned() {
     let test = ValidationTest::new();
     unsafe {
@@ -47,7 +46,6 @@ fn attachment_state_limits_max_color_attachment_bytes_per_sample_aligned() {
 }
 
 #[test]
-#[ignore = "core does not validate maxColorAttachmentBytesPerSample or alignment accounting for render bundle encoder descriptors; CTS expects oversized unaligned format sets to fail"]
 fn attachment_state_limits_max_color_attachment_bytes_per_sample_unaligned() {
     let test = ValidationTest::new();
     unsafe {
@@ -55,6 +53,7 @@ fn attachment_state_limits_max_color_attachment_bytes_per_sample_unaligned() {
             native::WGPUTextureFormat_R8Unorm,
             native::WGPUTextureFormat_R32Float,
             native::WGPUTextureFormat_RGBA8Unorm,
+            native::WGPUTextureFormat_RGBA32Float,
             native::WGPUTextureFormat_RGBA32Float,
             native::WGPUTextureFormat_R8Unorm,
         ];

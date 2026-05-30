@@ -42,6 +42,8 @@ pub struct RenderPassTimestampWrites {
 pub struct RenderPassColorAttachment {
     /// View.
     pub view: Arc<TextureView>,
+    /// Depth slice for 3D color attachments.
+    pub depth_slice: Option<u32>,
     /// Resolve target.
     pub resolve_target: Option<Arc<TextureView>>,
     /// Load op.
@@ -63,10 +65,14 @@ pub struct RenderPassDepthStencilAttachment {
     pub depth_store_op: StoreOp,
     /// Depth clear value.
     pub depth_clear_value: f32,
+    /// Depth read only.
+    pub depth_read_only: bool,
     /// Stencil load op.
     pub stencil_load_op: LoadOp,
     /// Stencil store op.
     pub stencil_store_op: StoreOp,
+    /// Stencil read only.
+    pub stencil_read_only: bool,
 }
 
 /// Records commands for the RenderPassEncoder.
@@ -110,6 +116,34 @@ pub(crate) fn validate_query_index(
     Ok(())
 }
 
+fn validate_pipeline_attachment_compatibility(
+    state: &PassEncoderState,
+    pipeline: &RenderPipeline,
+) -> Result<(), String> {
+    let Some(pass_signature) = &state.attachment_signature else {
+        return Ok(());
+    };
+    let pipeline_signature = pipeline.attachment_signature();
+    if pass_signature.color_formats != pipeline_signature.color_formats
+        || pass_signature.depth_stencil_format != pipeline_signature.depth_stencil_format
+        || pass_signature.sample_count != pipeline_signature.sample_count
+    {
+        return Err("render pass pipeline attachment signature is incompatible".to_owned());
+    }
+    if pass_signature.depth_read_only && pipeline.writes_depth() {
+        return Err(
+            "render pass read-only depth attachment is incompatible with depth writes".to_owned(),
+        );
+    }
+    if pass_signature.stencil_read_only && pipeline.writes_stencil() {
+        return Err(
+            "render pass read-only stencil attachment is incompatible with stencil writes"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 impl RenderPassEncoder {
     /// Ends recording for this pass or encoder.
     pub fn end(&self) -> Option<String> {
@@ -137,6 +171,7 @@ impl RenderPassEncoder {
             if pipeline.is_error() {
                 return Err("render pass requires a valid render pipeline".to_owned());
             }
+            validate_pipeline_attachment_compatibility(state, &pipeline)?;
             state.render_pipeline = Some(pipeline);
             Ok(())
         })
@@ -582,10 +617,7 @@ mod tests {
             encoder.begin_render_pass(&noop_render_pass_descriptor(view, Some(query_set)));
         assert_eq!(begin_error, None);
 
-        assert_eq!(
-            pass.set_viewport(0.0, 0.0, 4.0, 4.0, 0.0, 1.0),
-            None
-        );
+        assert_eq!(pass.set_viewport(0.0, 0.0, 4.0, 4.0, 0.0, 1.0), None);
         assert_eq!(pass.set_scissor_rect(0, 0, 4, 4), None);
         assert_eq!(
             pass.set_blend_constant(Color {
@@ -672,10 +704,7 @@ mod tests {
         assert_eq!(begin_error, None);
 
         let max = device.limits().max_texture_dimension_2d as f32;
-        assert_eq!(
-            pass.set_viewport(max, 0.0, 1.0, 1.0, 0.0, 1.0),
-            None
-        );
+        assert_eq!(pass.set_viewport(max, 0.0, 1.0, 1.0, 0.0, 1.0), None);
         assert_eq!(pass.end(), None);
 
         let (command_buffer, error) = encoder.finish();

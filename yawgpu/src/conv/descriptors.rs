@@ -200,6 +200,8 @@ unsafe fn map_render_pass_color_attachment(
 
     Some(core::RenderPassColorAttachment {
         view: Arc::clone(&view._core),
+        depth_slice: (value.depthSlice != native::WGPU_DEPTH_SLICE_UNDEFINED)
+            .then_some(value.depthSlice),
         resolve_target,
         load_op: map_load_op(value.loadOp),
         store_op: map_store_op(value.storeOp),
@@ -216,8 +218,10 @@ unsafe fn map_render_pass_depth_stencil_attachment(
         depth_load_op: map_load_op(value.depthLoadOp),
         depth_store_op: map_store_op(value.depthStoreOp),
         depth_clear_value: value.depthClearValue,
+        depth_read_only: value.depthReadOnly != 0,
         stencil_load_op: map_load_op(value.stencilLoadOp),
         stencil_store_op: map_store_op(value.stencilStoreOp),
+        stencil_read_only: value.stencilReadOnly != 0,
     }
 }
 

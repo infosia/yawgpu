@@ -190,7 +190,6 @@ fn render_pass_and_bundle_device_mismatch() {
 }
 
 #[test]
-#[ignore = "core does not validate render pass pipeline attachment compatibility; CTS expects pass and bundle setPipeline compatibility to match attachment signatures"]
 fn render_pass_or_bundle_and_pipeline_color_format() {
     let test = ValidationTest::new();
     unsafe {
@@ -249,7 +248,6 @@ fn render_pass_or_bundle_and_pipeline_color_format() {
 }
 
 #[test]
-#[ignore = "core does not validate render pass pipeline attachment compatibility; CTS expects pass and bundle setPipeline compatibility to match attachment signatures"]
 fn render_pass_or_bundle_and_pipeline_color_count() {
     let test = ValidationTest::new();
     unsafe {
@@ -311,7 +309,6 @@ fn render_pass_or_bundle_and_pipeline_color_count() {
 }
 
 #[test]
-#[ignore = "core does not validate render pass pipeline attachment compatibility; CTS expects pass and bundle setPipeline compatibility to match sparse attachment signatures"]
 fn render_pass_or_bundle_and_pipeline_color_sparse() {
     let test = ValidationTest::new();
     unsafe {
@@ -377,7 +374,6 @@ fn render_pass_or_bundle_and_pipeline_color_sparse() {
 }
 
 #[test]
-#[ignore = "core does not validate render pass pipeline attachment compatibility; CTS expects pass and bundle setPipeline compatibility to match depth-stencil formats"]
 fn render_pass_or_bundle_and_pipeline_depth_format() {
     let test = ValidationTest::new();
     unsafe {
@@ -435,7 +431,6 @@ fn render_pass_or_bundle_and_pipeline_depth_format() {
 }
 
 #[test]
-#[ignore = "core does not model render pass or render bundle depthReadOnly/stencilReadOnly constraints; CTS expects pipelines that write an aspect to be incompatible with read-only attachments"]
 fn render_pass_or_bundle_and_pipeline_depth_stencil_read_only_write_state() {
     let test = ValidationTest::new();
     unsafe {
@@ -455,7 +450,6 @@ fn render_pass_or_bundle_and_pipeline_depth_stencil_read_only_write_state() {
 }
 
 #[test]
-#[ignore = "core does not validate render pass pipeline attachment compatibility; CTS expects pass and bundle setPipeline compatibility to match sample counts"]
 fn render_pass_or_bundle_and_pipeline_sample_count() {
     let test = ValidationTest::new();
     unsafe {
@@ -566,8 +560,13 @@ unsafe fn expect_bundle_set_pipeline(
     let descriptor = bundle_descriptor(color_formats, depth_format, sample_count, false, false);
     let encoder = yawgpu::wgpuDeviceCreateRenderBundleEncoder(test.device(), &descriptor);
     assert!(!encoder.is_null());
+    test.clear_errors();
     yawgpu::wgpuRenderBundleEncoderSetPipeline(encoder, pipeline);
-    assert!(test.errors().is_empty());
+    if success {
+        assert!(test.errors().is_empty());
+    } else {
+        test.clear_errors();
+    }
     let bundle = finish_bundle(test, encoder, success);
     yawgpu::wgpuRenderBundleRelease(bundle);
     yawgpu::wgpuRenderBundleEncoderRelease(encoder);
@@ -611,8 +610,13 @@ unsafe fn expect_read_only_depth_bundle_pipeline(
     );
     let encoder = yawgpu::wgpuDeviceCreateRenderBundleEncoder(test.device(), &descriptor);
     assert!(!encoder.is_null());
+    test.clear_errors();
     yawgpu::wgpuRenderBundleEncoderSetPipeline(encoder, pipeline);
-    assert!(test.errors().is_empty());
+    if success {
+        assert!(test.errors().is_empty());
+    } else {
+        test.clear_errors();
+    }
     let bundle = finish_bundle(test, encoder, success);
     yawgpu::wgpuRenderBundleRelease(bundle);
     yawgpu::wgpuRenderBundleEncoderRelease(encoder);
@@ -760,7 +764,7 @@ unsafe fn create_pipeline(
             writeMask: native::WGPUColorWriteMask_All,
         })
         .collect();
-    let fragment = native::WGPUFragmentState {
+    let fragment = (!targets.is_empty()).then_some(native::WGPUFragmentState {
         nextInChain: std::ptr::null_mut(),
         module: fragment_module,
         entryPoint: empty_string_view(),
@@ -768,7 +772,7 @@ unsafe fn create_pipeline(
         constants: std::ptr::null(),
         targetCount: targets.len(),
         targets: targets.as_ptr(),
-    };
+    });
     let depth_stencil = (depth_format != native::WGPUTextureFormat_Undefined)
         .then(|| depth_stencil_state(depth_format, depth_write_enabled));
     let descriptor = native::WGPURenderPipelineDescriptor {
@@ -794,7 +798,9 @@ unsafe fn create_pipeline(
             mask: 0xFFFF_FFFF,
             alphaToCoverageEnabled: 0,
         },
-        fragment: &fragment,
+        fragment: fragment
+            .as_ref()
+            .map_or(std::ptr::null(), std::ptr::from_ref),
     };
     test.clear_errors();
     let pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(test.device(), &descriptor);
