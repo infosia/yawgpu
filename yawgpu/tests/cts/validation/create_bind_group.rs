@@ -201,7 +201,6 @@ fn texture_binding_must_have_correct_usage() {
 }
 
 #[test]
-#[ignore = "core does not yet validate texture sample type against color format component type; CTS expects mismatched float/sint/uint formats to fail"]
 fn texture_must_have_correct_component_type() {
     let test = ValidationTest::new();
     unsafe {
@@ -432,7 +431,6 @@ fn min_binding_size() {
 }
 
 #[test]
-#[ignore = "core does not yet reject destroyed buffers during bind group creation; CTS expects invalid buffer state to fail"]
 fn buffer_resource_state() {
     let test = ValidationTest::new();
     unsafe {
@@ -458,7 +456,6 @@ fn buffer_resource_state() {
 }
 
 #[test]
-#[ignore = "core does not yet reject destroyed textures during bind group creation; CTS expects invalid texture state to fail"]
 fn texture_resource_state() {
     let test = ValidationTest::new();
     unsafe {
@@ -802,7 +799,6 @@ fn storage_texture_usage() {
 }
 
 #[test]
-#[ignore = "core does not yet require storage texture views to cover exactly one mip level; CTS expects mipLevelCount != 1 to fail"]
 fn storage_texture_mip_level_count() {
     let test = ValidationTest::new();
     unsafe {
@@ -845,7 +841,6 @@ fn storage_texture_mip_level_count() {
 }
 
 #[test]
-#[ignore = "core does not yet validate storage texture binding format against the texture view format; CTS expects mismatched formats to fail"]
 fn storage_texture_format() {
     let test = ValidationTest::new();
     unsafe {
@@ -997,7 +992,6 @@ fn buffer_resource_binding_size() {
 }
 
 #[test]
-#[ignore = "core does not yet require storage buffer effective binding size to be a multiple of 4; CTS expects non-multiple storage sizes to fail"]
 fn buffer_effective_buffer_binding_size() {
     let test = ValidationTest::new();
     unsafe {
@@ -1069,7 +1063,6 @@ fn sampler_device_mismatch() {
 }
 
 #[test]
-#[ignore = "core does not yet validate sampler compareFunction against sampler binding type; CTS expects comparison samplers to require compare and other sampler bindings to reject compare"]
 fn sampler_compare_function_with_binding_type() {
     let test = ValidationTest::new();
     unsafe {

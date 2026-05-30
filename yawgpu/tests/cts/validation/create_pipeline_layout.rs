@@ -13,7 +13,6 @@ use crate::common::{
 };
 
 #[test]
-#[ignore = "core does not yet aggregate dynamic buffer counts across bind group layouts at createPipelineLayout; CTS expects exceeding dynamic buffer limits across layouts to fail"]
 fn number_of_dynamic_buffers_exceeds_the_maximum_value() {
     let test = ValidationTest::new();
     unsafe {
@@ -90,7 +89,6 @@ fn bind_group_layouts_device_mismatch() {
 }
 
 #[test]
-#[ignore = "core currently rejects null bind group layout slots; CTS expects sparse/null pipeline layout slots to be valid"]
 fn bind_group_layouts_null_bind_group_layouts() {
     let test = ValidationTest::new();
     unsafe {
@@ -118,7 +116,6 @@ fn bind_group_layouts_null_bind_group_layouts() {
 }
 
 #[test]
-#[ignore = "core currently rejects null bind group layout slots; CTS expects pipelines to validate against sparse pipeline layouts"]
 fn bind_group_layouts_create_pipeline_with_null_bind_group_layouts() {
     let test = ValidationTest::new();
     unsafe {
@@ -147,7 +144,6 @@ fn bind_group_layouts_create_pipeline_with_null_bind_group_layouts() {
 }
 
 #[test]
-#[ignore = "core currently rejects null bind group layout slots; CTS expects setting pipelines with sparse pipeline layouts to be valid"]
 fn bind_group_layouts_set_pipeline_with_null_bind_group_layouts() {
     let test = ValidationTest::new();
     unsafe {
@@ -169,7 +165,6 @@ fn bind_group_layouts_set_pipeline_with_null_bind_group_layouts() {
 }
 
 #[test]
-#[ignore = "core validates immediateSize range but not the required multiple-of-4 alignment; CTS expects unaligned immediateSize values to fail"]
 fn immediate_data_size() {
     let test = ValidationTest::new();
     unsafe {

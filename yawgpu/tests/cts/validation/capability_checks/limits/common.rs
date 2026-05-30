@@ -987,13 +987,12 @@ fn storage_buffer_layout(
     binding: u32,
     visibility: native::WGPUShaderStage,
 ) -> native::WGPUBindGroupLayoutEntry {
-    buffer_layout(
-        binding,
-        native::WGPUBufferBindingType_Storage,
-        visibility,
-        false,
-        0,
-    )
+    let ty = if visibility & native::WGPUShaderStage_Vertex != 0 {
+        native::WGPUBufferBindingType_ReadOnlyStorage
+    } else {
+        native::WGPUBufferBindingType_Storage
+    };
+    buffer_layout(binding, ty, visibility, false, 0)
 }
 
 fn sampler_layout(binding: u32) -> native::WGPUBindGroupLayoutEntry {
@@ -1015,7 +1014,11 @@ fn storage_texture_layout(
     visibility: native::WGPUShaderStage,
 ) -> native::WGPUBindGroupLayoutEntry {
     let mut entry = empty_layout(binding, visibility);
-    entry.storageTexture.access = native::WGPUStorageTextureAccess_WriteOnly;
+    entry.storageTexture.access = if visibility & native::WGPUShaderStage_Vertex != 0 {
+        native::WGPUStorageTextureAccess_ReadOnly
+    } else {
+        native::WGPUStorageTextureAccess_WriteOnly
+    };
     entry.storageTexture.format = native::WGPUTextureFormat_RGBA8Unorm;
     entry.storageTexture.viewDimension = native::WGPUTextureViewDimension_2D;
     entry

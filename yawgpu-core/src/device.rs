@@ -655,12 +655,12 @@ mod tests {
         let (error_query_set, error) = device.create_query_set(QuerySetDescriptor {
             label: "bad".to_owned(),
             kind: QueryType::Occlusion,
-            count: 0,
+            count: crate::adapter::MAX_QUERY_COUNT + 1,
         });
         assert!(error_query_set.is_error());
         assert_eq!(
             error,
-            Some("query set count must be greater than zero".to_owned())
+            Some("query set count exceeds the maximum query count".to_owned())
         );
 
         let (query_set, error) = device.create_query_set(QuerySetDescriptor {

@@ -45,6 +45,12 @@ pub(crate) fn validate_bind_group_layout_descriptor(
                 has_dynamic_offset,
                 ..
             } => {
+                if ty == BufferBindingType::Storage && entry.visibility & SHADER_STAGE_VERTEX != 0 {
+                    return Some(
+                        "writable storage buffer bindings must not be visible to vertex shaders"
+                            .to_owned(),
+                    );
+                }
                 match ty {
                     BufferBindingType::Uniform if has_dynamic_offset => {
                         dynamic_uniform_buffers += 1;
@@ -70,13 +76,18 @@ pub(crate) fn validate_bind_group_layout_descriptor(
                 }
             }
             BindingLayoutKind::Texture {
+                sample_type,
                 view_dimension,
                 multisampled,
-                ..
             } => {
                 if multisampled && view_dimension != TextureViewDimension::D2 {
                     return Some(
                         "multisampled texture bindings require 2D view dimension".to_owned(),
+                    );
+                }
+                if multisampled && sample_type == TextureSampleType::Float {
+                    return Some(
+                        "multisampled texture bindings must not use Float sample type".to_owned(),
                     );
                 }
             }
@@ -99,6 +110,22 @@ pub(crate) fn validate_bind_group_layout_descriptor(
                         "storage texture bindings must not use 1D view dimension".to_owned(),
                     );
                 }
+                if matches!(
+                    view_dimension,
+                    TextureViewDimension::Cube | TextureViewDimension::CubeArray
+                ) {
+                    return Some(
+                        "storage texture bindings must not use cube view dimensions".to_owned(),
+                    );
+                }
+                if access != StorageTextureAccess::ReadOnly
+                    && entry.visibility & SHADER_STAGE_VERTEX != 0
+                {
+                    return Some(
+                        "writable storage texture bindings must not be visible to vertex shaders"
+                            .to_owned(),
+                    );
+                }
                 let Some(caps) = format.caps(features) else {
                     return Some("storage texture binding format must not be Undefined".to_owned());
                 };
@@ -107,7 +134,7 @@ pub(crate) fn validate_bind_group_layout_descriptor(
                         "storage texture binding format must support storage usage".to_owned(),
                     );
                 }
-                if access != StorageTextureAccess::WriteOnly && !caps.read_write_storage_capable {
+                if access == StorageTextureAccess::ReadWrite && !caps.read_write_storage_capable {
                     return Some(
                         "storage texture binding format must support read-write storage access"
                             .to_owned(),
@@ -294,6 +321,12 @@ impl BindGroupLayout {
     #[must_use]
     pub fn error() -> Self {
         Self::new(Vec::new(), true, false)
+    }
+
+    /// Creates an empty default bind group layout returned for unused pipeline layout slots.
+    #[must_use]
+    pub fn empty_default() -> Self {
+        Self::new(Vec::new(), false, true)
     }
 
     /// Returns the entries.

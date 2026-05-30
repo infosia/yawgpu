@@ -13,7 +13,6 @@ use crate::common::{
 };
 
 #[test]
-#[ignore = "core does not yet reject textureGather using a non-filterable texture with a filtering sampler; CTS expects depth/sint/uint/unfilterable-float cases to fail"]
 fn non_filterable_texture_with_filtering_sampler() {
     let test = ValidationTest::new();
     unsafe {

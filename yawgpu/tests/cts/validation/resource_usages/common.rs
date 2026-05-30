@@ -144,7 +144,7 @@ pub unsafe fn assert_render_buffer_read_write_alias(expect: Expect) {
             native::WGPUBufferUsage_Uniform | native::WGPUBufferUsage_Storage,
             64,
         );
-        let entries = [uniform_layout(0), vertex_storage_layout(1)];
+        let entries = [uniform_layout(0), fragment_storage_layout(1)];
         let bindings = [
             buffer_binding(0, buffer, 0, 32),
             buffer_binding(1, buffer, 0, 32),
@@ -152,6 +152,7 @@ pub unsafe fn assert_render_buffer_read_write_alias(expect: Expect) {
         encode_render_with_bind_group(
             &test,
             render_uniform_and_storage(),
+            render_storage_fragment(),
             &entries,
             &bindings,
             None,
@@ -198,6 +199,7 @@ pub unsafe fn assert_render_attachment_sampled_alias(expect: Expect) {
         encode_render_with_bind_group(
             &test,
             render_sampled_texture(),
+            fragment_source(),
             &entries,
             &bindings,
             Some(view),
@@ -312,6 +314,7 @@ unsafe fn encode_compute_with_bind_group(
 unsafe fn encode_render_with_bind_group(
     test: &ValidationTest,
     vertex_source: &str,
+    fragment_source: &str,
     layout_entries: &[native::WGPUBindGroupLayoutEntry],
     bind_group_entries: &[native::WGPUBindGroupEntry],
     attachment_view: Option<native::WGPUTextureView>,
@@ -331,7 +334,7 @@ unsafe fn encode_render_with_bind_group(
         let view = attachment_view.unwrap_or_else(|| target.expect("target").1);
         let (layout, bind_group, pipeline_layout) =
             create_bind_group_stack(test, layout_entries, bind_group_entries);
-        let pipeline = create_render_pipeline(test, vertex_source, pipeline_layout);
+        let pipeline = create_render_pipeline(test, vertex_source, fragment_source, pipeline_layout);
         let encoder = create_encoder(test);
         let attachment = color_attachment(view);
         let descriptor = render_pass_descriptor(&[attachment]);
@@ -462,11 +465,12 @@ unsafe fn create_compute_pipeline(
 unsafe fn create_render_pipeline(
     test: &ValidationTest,
     vertex_source: &str,
+    fragment_source: &str,
     layout: native::WGPUPipelineLayout,
 ) -> native::WGPURenderPipeline {
     unsafe {
         let vertex_module = create_wgsl_module(test.device(), vertex_source);
-        let fragment_module = create_wgsl_module(test.device(), fragment_source());
+        let fragment_module = create_wgsl_module(test.device(), fragment_source);
         let color_target = native::WGPUColorTargetState {
             nextInChain: std::ptr::null_mut(),
             format: native::WGPUTextureFormat_RGBA8Unorm,
@@ -573,9 +577,9 @@ fn storage_layout(binding: u32) -> native::WGPUBindGroupLayoutEntry {
     entry
 }
 
-fn vertex_storage_layout(binding: u32) -> native::WGPUBindGroupLayoutEntry {
+fn fragment_storage_layout(binding: u32) -> native::WGPUBindGroupLayoutEntry {
     let mut entry = storage_layout(binding);
-    entry.visibility = native::WGPUShaderStage_Vertex;
+    entry.visibility = native::WGPUShaderStage_Fragment;
     entry
 }
 
@@ -719,10 +723,17 @@ fn compute_two_storage_textures() -> &'static str {
 fn render_uniform_and_storage() -> &'static str {
     "struct Data { value: vec4f }
      @group(0) @binding(0) var<uniform> u: Data;
-     @group(0) @binding(1) var<storage, read_write> s: Data;
      @vertex fn vs() -> @builtin(position) vec4f {
-         s.value = u.value;
          return u.value;
+     }"
+}
+
+fn render_storage_fragment() -> &'static str {
+    "struct Data { value: vec4f }
+     @group(0) @binding(1) var<storage, read_write> s: Data;
+     @fragment fn fs() -> @location(0) vec4f {
+         s.value = vec4f(1.0);
+         return s.value;
      }"
 }
 

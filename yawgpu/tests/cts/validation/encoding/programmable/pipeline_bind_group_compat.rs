@@ -1108,7 +1108,11 @@ fn storage_texture_layout(
     visibility: native::WGPUShaderStage,
 ) -> native::WGPUBindGroupLayoutEntry {
     let mut entry = unused_layout(binding, visibility);
-    entry.storageTexture.access = native::WGPUStorageTextureAccess_WriteOnly;
+    entry.storageTexture.access = if visibility & native::WGPUShaderStage_Vertex != 0 {
+        native::WGPUStorageTextureAccess_ReadOnly
+    } else {
+        native::WGPUStorageTextureAccess_WriteOnly
+    };
     entry.storageTexture.format = native::WGPUTextureFormat_R32Float;
     entry.storageTexture.viewDimension = native::WGPUTextureViewDimension_2D;
     entry

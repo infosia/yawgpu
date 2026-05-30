@@ -144,9 +144,6 @@ pub(crate) fn validate_query_set_descriptor(
     descriptor: &QuerySetDescriptor,
     features: &FeatureSet,
 ) -> Option<&'static str> {
-    if descriptor.count == 0 {
-        return Some("query set count must be greater than zero");
-    }
     if descriptor.count > MAX_QUERY_COUNT {
         return Some("query set count exceeds the maximum query count");
     }
@@ -204,12 +201,12 @@ mod tests {
         let (error_query_set, error) = device.create_query_set(QuerySetDescriptor {
             label: "bad".to_owned(),
             kind: QueryType::Occlusion,
-            count: 0,
+            count: MAX_QUERY_COUNT + 1,
         });
         assert!(error_query_set.is_error());
         assert_eq!(
             error,
-            Some("query set count must be greater than zero".to_owned())
+            Some("query set count exceeds the maximum query count".to_owned())
         );
     }
 }

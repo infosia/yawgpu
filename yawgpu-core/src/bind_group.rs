@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::bind_group_layout::*;
 use crate::buffer::*;
 use crate::device::*;
+use crate::format::*;
 use crate::limits::*;
 use crate::sampler::*;
 use crate::texture::*;
@@ -208,12 +209,20 @@ pub(crate) fn validate_bind_group_entry(
                 sampler,
                 device: resource_device,
             },
-            BindingLayoutKind::Sampler { .. },
+            BindingLayoutKind::Sampler { ty },
         ) => {
             if !device.same(resource_device) {
                 Some("bind group sampler must belong to the same device".to_owned())
             } else if sampler.is_error() {
                 Some("bind group sampler must not be an error sampler".to_owned())
+            } else if ty == SamplerBindingType::Comparison
+                && sampler.descriptor().compare.is_none()
+            {
+                Some("comparison sampler bindings require a compare function".to_owned())
+            } else if ty != SamplerBindingType::Comparison
+                && sampler.descriptor().compare.is_some()
+            {
+                Some("non-comparison sampler bindings must not use a compare function".to_owned())
             } else {
                 None
             }
@@ -241,11 +250,16 @@ pub(crate) fn validate_bind_group_entry(
                 texture_view,
                 device: resource_device,
             },
-            BindingLayoutKind::StorageTexture { view_dimension, .. },
+            BindingLayoutKind::StorageTexture {
+                format,
+                view_dimension,
+                ..
+            },
         ) => validate_bind_group_storage_texture(
             device,
             resource_device,
             texture_view,
+            format,
             view_dimension,
         ),
         #[cfg(feature = "tiled")]
@@ -277,6 +291,9 @@ pub(crate) fn validate_bind_group_buffer(
     } = validation;
     if buffer.is_error() {
         return Some("bind group buffer must not be an error buffer".to_owned());
+    }
+    if buffer.is_destroyed() {
+        return Some("bind group buffer must not be destroyed".to_owned());
     }
 
     let (required_usage, alignment, max_binding_size) = match ty {
@@ -322,6 +339,13 @@ pub(crate) fn validate_bind_group_buffer(
     if effective_size > max_binding_size {
         return Some("bind group buffer binding size exceeds the device limit".to_owned());
     }
+    if matches!(
+        ty,
+        BufferBindingType::Storage | BufferBindingType::ReadOnlyStorage
+    ) && !effective_size.is_multiple_of(4)
+    {
+        return Some("storage buffer binding size must be a multiple of 4".to_owned());
+    }
 
     None
 }
@@ -353,6 +377,9 @@ pub(crate) fn validate_bind_group_texture(
         return Some("bind group texture view must not be an error texture view".to_owned());
     }
     let texture = texture_view.texture();
+    if texture.is_destroyed() {
+        return Some("bind group texture must not be destroyed".to_owned());
+    }
     if !texture.usage().contains(TextureUsage::TEXTURE_BINDING) {
         return Some("bind group texture usage does not satisfy the layout".to_owned());
     }
@@ -368,11 +395,36 @@ pub(crate) fn validate_bind_group_texture(
     else {
         return Some("bind group texture view format must be supported".to_owned());
     };
-    if (caps.aspects.depth || caps.aspects.stencil) && sample_type == TextureSampleType::Float {
-        return Some("depth or stencil texture bindings must not use Float sample type".to_owned());
-    }
-    if sample_type == TextureSampleType::Float && !caps.filterable {
-        return Some("float texture bindings require a filterable texture format".to_owned());
+    match sample_type {
+        TextureSampleType::Float => {
+            if caps.output_class != Some(FormatOutputClass::Float) || !caps.filterable {
+                return Some(
+                    "float texture bindings require a filterable float texture format".to_owned(),
+                );
+            }
+        }
+        TextureSampleType::UnfilterableFloat => {
+            if caps.output_class != Some(FormatOutputClass::Float) {
+                return Some(
+                    "unfilterable-float texture bindings require a float texture format".to_owned(),
+                );
+            }
+        }
+        TextureSampleType::Depth => {
+            if !caps.aspects.depth {
+                return Some("depth texture bindings require a depth texture format".to_owned());
+            }
+        }
+        TextureSampleType::Sint => {
+            if caps.output_class != Some(FormatOutputClass::Sint) {
+                return Some("sint texture bindings require a sint texture format".to_owned());
+            }
+        }
+        TextureSampleType::Uint => {
+            if caps.output_class != Some(FormatOutputClass::Uint) {
+                return Some("uint texture bindings require a uint texture format".to_owned());
+            }
+        }
     }
 
     None
@@ -383,6 +435,7 @@ pub(crate) fn validate_bind_group_storage_texture(
     device: &Device,
     resource_device: &Device,
     texture_view: &TextureView,
+    format: TextureFormat,
     view_dimension: TextureViewDimension,
 ) -> Option<String> {
     if !device.same(resource_device) {
@@ -392,11 +445,20 @@ pub(crate) fn validate_bind_group_storage_texture(
         return Some("bind group texture view must not be an error texture view".to_owned());
     }
     let texture = texture_view.texture();
+    if texture.is_destroyed() {
+        return Some("bind group texture must not be destroyed".to_owned());
+    }
     if !texture.usage().contains(TextureUsage::STORAGE_BINDING) {
         return Some("bind group texture usage does not satisfy the layout".to_owned());
     }
     if texture_view.dimension() != view_dimension {
         return Some("bind group texture view dimension must match the layout".to_owned());
+    }
+    if texture_view.format() != format {
+        return Some("storage texture view format must match the layout".to_owned());
+    }
+    if texture_view.mip_level_count() != 1 {
+        return Some("storage texture bindings require a single mip level".to_owned());
     }
     if texture_view.array_layer_count() != 1 {
         return Some("storage texture bindings require a single array layer".to_owned());

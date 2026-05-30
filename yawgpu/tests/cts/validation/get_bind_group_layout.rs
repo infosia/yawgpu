@@ -15,7 +15,6 @@ use crate::common::{
 };
 
 #[test]
-#[ignore = "core currently rejects getBindGroupLayout indices beyond the concrete layout count; CTS expects every index < maxBindGroups to return an empty/default layout"]
 fn index_range_explicit_layout() {
     let test = ValidationTest::new();
     unsafe {
@@ -38,7 +37,6 @@ fn index_range_explicit_layout() {
 }
 
 #[test]
-#[ignore = "core currently rejects getBindGroupLayout indices beyond the auto-derived layout count; CTS expects every index < maxBindGroups to return an empty/default layout"]
 fn index_range_auto_layout() {
     let test = ValidationTest::new();
     unsafe {

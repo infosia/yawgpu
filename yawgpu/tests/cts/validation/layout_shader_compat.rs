@@ -7,7 +7,6 @@ use crate::common::{
 };
 
 #[test]
-#[ignore = "core does not yet reject explicit pipeline layout/shader resource mismatches for missing bindings, visibility mismatch, or binding number mismatch"]
 fn pipeline_layout_shader_exact_match() {
     let test = ValidationTest::new();
     unsafe {
@@ -57,7 +56,6 @@ unsafe fn compute_resource_cases(test: &ValidationTest) {
 }
 
 #[test]
-#[ignore = "core does not yet validate the full CTS layout/shader resource matrix across texture, storage texture, storage buffer, and render-stage visibility subcases"]
 fn pipeline_layout_shader_exact_match_full_matrix_gaps() {
     let test = ValidationTest::new();
     unsafe {

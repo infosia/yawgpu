@@ -86,6 +86,18 @@ never a reason to skip a CTS case.
   maxBufferSize, etc.). Still deferred → Batch C: layout/resource
   compatibility matrices, dual-source-blending/shader-f16 (feature adds),
   bytes-per-sample format-selection matrices, draw-time relationship.
+- **Core-gap follow-up #4 (Batch C, layout/resource compat + misc) — DONE.**
+  +30 CTS un-ignored (152→122 remaining): BGL validation (vertex-stage
+  writable-storage rejection, multisample float sampleType, cube storage
+  dimension, rw-storage format), pipeline-layout (immediateSize %4,
+  cross-BGL dynamic + per-stage aggregation), bind-group (destroyed
+  resources, effective-size %4, sampler compare-vs-type, component class,
+  storage mip/format), getBindGroupLayout (empty default for unused
+  in-range slot), compute/render resource compatibility, non-filterable
+  gather, query count==0. Also fixed a real bug: explicit pipeline-layout
+  cache keys now use core Arc identity (not transient FFI handle address).
+  Deferred → Batch D: render-pass/bundle attachment-misc matrices,
+  resource_usages subresource granularity, destroyed-resource timing.
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage

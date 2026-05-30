@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::bind_group_layout::*;
 use crate::limits::*;
+use crate::shader::{visible_stages, StageResourceCounts};
 
 /// Describes pipeline layout descriptor.
 #[derive(Debug, Clone)]
@@ -74,6 +75,66 @@ pub(crate) fn validate_pipeline_layout_descriptor(
     }
     if immediate_size > limits.max_immediate_size {
         return Some("pipeline layout immediateSize exceeds the device limit".to_owned());
+    }
+    if !immediate_size.is_multiple_of(4) {
+        return Some("pipeline layout immediateSize must be a multiple of 4".to_owned());
+    }
+
+    let mut dynamic_uniform_buffers = 0_u32;
+    let mut dynamic_storage_buffers = 0_u32;
+    let mut stage_counts = [StageResourceCounts::default(); 3];
+
+    for layout in bind_group_layouts {
+        for entry in layout.entries() {
+            let Some(kind) = entry.kind else {
+                continue;
+            };
+            if let BindingLayoutKind::Buffer {
+                ty,
+                has_dynamic_offset: true,
+                ..
+            } = kind
+            {
+                match ty {
+                    BufferBindingType::Uniform => dynamic_uniform_buffers += 1,
+                    BufferBindingType::Storage | BufferBindingType::ReadOnlyStorage => {
+                        dynamic_storage_buffers += 1;
+                    }
+                }
+            }
+
+            for stage in visible_stages(entry.visibility) {
+                stage_counts[stage].add(kind);
+                if stage_counts[stage].sampled_textures
+                    > limits.max_sampled_textures_per_shader_stage
+                {
+                    return Some("too many sampled textures for one shader stage".to_owned());
+                }
+                if stage_counts[stage].samplers > limits.max_samplers_per_shader_stage {
+                    return Some("too many samplers for one shader stage".to_owned());
+                }
+                if stage_counts[stage].storage_buffers > limits.max_storage_buffers_per_shader_stage
+                {
+                    return Some("too many storage buffers for one shader stage".to_owned());
+                }
+                if stage_counts[stage].storage_textures
+                    > limits.max_storage_textures_per_shader_stage
+                {
+                    return Some("too many storage textures for one shader stage".to_owned());
+                }
+                if stage_counts[stage].uniform_buffers > limits.max_uniform_buffers_per_shader_stage
+                {
+                    return Some("too many uniform buffers for one shader stage".to_owned());
+                }
+            }
+        }
+    }
+
+    if dynamic_uniform_buffers > limits.max_dynamic_uniform_buffers_per_pipeline_layout {
+        return Some("too many dynamic uniform buffers in pipeline layout".to_owned());
+    }
+    if dynamic_storage_buffers > limits.max_dynamic_storage_buffers_per_pipeline_layout {
+        return Some("too many dynamic storage buffers in pipeline layout".to_owned());
     }
 
     None
