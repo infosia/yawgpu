@@ -192,6 +192,14 @@ pub unsafe fn assert_max_dynamic_uniform_bgl_at_over() {
     }
 }
 
+pub unsafe fn assert_max_dynamic_uniform_create_pipeline_layout_at_over() {
+    let test = ValidationTest::new();
+    let limit = device_limits(test.device()).maxDynamicUniformBuffersPerPipelineLayout;
+    unsafe {
+        assert_pipeline_layout_resource_entries_at_over(&test, limit, dynamic_uniform_layout)
+    };
+}
+
 pub unsafe fn assert_max_dynamic_storage_bgl_at_over() {
     let test = ValidationTest::new();
     let limit = device_limits(test.device()).maxDynamicStorageBuffersPerPipelineLayout;
@@ -202,6 +210,14 @@ pub unsafe fn assert_max_dynamic_storage_bgl_at_over() {
             &(0..=limit).map(dynamic_storage_layout).collect::<Vec<_>>(),
         );
     }
+}
+
+pub unsafe fn assert_max_dynamic_storage_create_pipeline_layout_at_over() {
+    let test = ValidationTest::new();
+    let limit = device_limits(test.device()).maxDynamicStorageBuffersPerPipelineLayout;
+    unsafe {
+        assert_pipeline_layout_resource_entries_at_over(&test, limit, dynamic_storage_layout)
+    };
 }
 
 pub unsafe fn assert_max_sampled_textures_bgl_at_over() {
@@ -216,6 +232,12 @@ pub unsafe fn assert_max_sampled_textures_bgl_at_over() {
     }
 }
 
+pub unsafe fn assert_max_sampled_textures_create_pipeline_layout_at_over() {
+    let test = ValidationTest::new();
+    let limit = device_limits(test.device()).maxSampledTexturesPerShaderStage;
+    unsafe { assert_pipeline_layout_resource_entries_at_over(&test, limit, texture_layout) };
+}
+
 pub unsafe fn assert_max_samplers_bgl_at_over() {
     let test = ValidationTest::new();
     let limit = device_limits(test.device()).maxSamplersPerShaderStage;
@@ -228,6 +250,12 @@ pub unsafe fn assert_max_samplers_bgl_at_over() {
     }
 }
 
+pub unsafe fn assert_max_samplers_create_pipeline_layout_at_over() {
+    let test = ValidationTest::new();
+    let limit = device_limits(test.device()).maxSamplersPerShaderStage;
+    unsafe { assert_pipeline_layout_resource_entries_at_over(&test, limit, sampler_layout) };
+}
+
 pub unsafe fn assert_max_uniform_buffers_bgl_at_over() {
     let test = ValidationTest::new();
     let limit = device_limits(test.device()).maxUniformBuffersPerShaderStage;
@@ -238,6 +266,12 @@ pub unsafe fn assert_max_uniform_buffers_bgl_at_over() {
             &(0..=limit).map(uniform_layout).collect::<Vec<_>>(),
         );
     }
+}
+
+pub unsafe fn assert_max_uniform_buffers_create_pipeline_layout_at_over() {
+    let test = ValidationTest::new();
+    let limit = device_limits(test.device()).maxUniformBuffersPerShaderStage;
+    unsafe { assert_pipeline_layout_resource_entries_at_over(&test, limit, uniform_layout) };
 }
 
 pub unsafe fn assert_max_storage_buffers_bgl_at_over(visibility: native::WGPUShaderStage) {
@@ -256,6 +290,18 @@ pub unsafe fn assert_max_storage_buffers_bgl_at_over(visibility: native::WGPUSha
     }
 }
 
+pub unsafe fn assert_max_storage_buffers_create_pipeline_layout_at_over(
+    visibility: native::WGPUShaderStage,
+) {
+    let test = ValidationTest::new();
+    let limit = device_limits(test.device()).maxStorageBuffersPerShaderStage;
+    unsafe {
+        assert_pipeline_layout_resource_entries_at_over(&test, limit, |binding| {
+            storage_buffer_layout(binding, visibility)
+        });
+    }
+}
+
 pub unsafe fn assert_max_storage_textures_bgl_at_over(visibility: native::WGPUShaderStage) {
     let test = ValidationTest::new();
     let limit = device_limits(test.device()).maxStorageTexturesPerShaderStage;
@@ -269,6 +315,18 @@ pub unsafe fn assert_max_storage_textures_bgl_at_over(visibility: native::WGPUSh
                 .map(|binding| storage_texture_layout(binding, visibility))
                 .collect::<Vec<_>>(),
         );
+    }
+}
+
+pub unsafe fn assert_max_storage_textures_create_pipeline_layout_at_over(
+    visibility: native::WGPUShaderStage,
+) {
+    let test = ValidationTest::new();
+    let limit = device_limits(test.device()).maxStorageTexturesPerShaderStage;
+    unsafe {
+        assert_pipeline_layout_resource_entries_at_over(&test, limit, |binding| {
+            storage_texture_layout(binding, visibility)
+        });
     }
 }
 
@@ -406,6 +464,54 @@ unsafe fn assert_pipeline_layout_bind_group_count(test: &ValidationTest, at: u32
         release_layouts(&at_layouts);
         release_layouts(&over_layouts);
     }
+}
+
+unsafe fn assert_pipeline_layout_resource_entries_at_over<F>(
+    test: &ValidationTest,
+    limit: u32,
+    make_entry: F,
+) where
+    F: Fn(u32) -> native::WGPUBindGroupLayoutEntry,
+{
+    let (first, second) = split_pipeline_layout_resource_counts(limit);
+    let at_entries = [entries(first, &make_entry), entries(second, &make_entry)];
+    let over_entries = [
+        entries(first, &make_entry),
+        entries(second + 1, &make_entry),
+    ];
+    let at_layouts = unsafe { create_layouts_with_entries(test.device(), &at_entries) };
+    let over_layouts = unsafe { create_layouts_with_entries(test.device(), &over_entries) };
+
+    test.expect_no_validation_error(|| unsafe {
+        let layout = create_pipeline_layout(test.device(), &at_layouts);
+        assert!(!layout.is_null());
+        yawgpu::wgpuPipelineLayoutRelease(layout);
+    });
+    assert_device_error!({
+        let layout = unsafe { create_pipeline_layout(test.device(), &over_layouts) };
+        assert!(!layout.is_null());
+        unsafe { yawgpu::wgpuPipelineLayoutRelease(layout) };
+    });
+
+    unsafe {
+        release_layouts(&at_layouts);
+        release_layouts(&over_layouts);
+    }
+}
+
+fn split_pipeline_layout_resource_counts(limit: u32) -> (u32, u32) {
+    if limit == 0 {
+        return (0, 0);
+    }
+    let first = (limit / 2).max(1);
+    (first, limit - first)
+}
+
+fn entries<F>(count: u32, make_entry: &F) -> Vec<native::WGPUBindGroupLayoutEntry>
+where
+    F: Fn(u32) -> native::WGPUBindGroupLayoutEntry,
+{
+    (0..count).map(make_entry).collect()
 }
 
 unsafe fn assert_bind_group_layout_entries(
@@ -602,6 +708,16 @@ unsafe fn create_empty_layouts(
 ) -> Vec<native::WGPUBindGroupLayout> {
     (0..count)
         .map(|_| unsafe { create_bind_group_layout(device, &[]) })
+        .collect()
+}
+
+unsafe fn create_layouts_with_entries(
+    device: native::WGPUDevice,
+    entry_sets: &[Vec<native::WGPUBindGroupLayoutEntry>],
+) -> Vec<native::WGPUBindGroupLayout> {
+    entry_sets
+        .iter()
+        .map(|entries| unsafe { create_bind_group_layout(device, entries) })
         .collect()
 }
 

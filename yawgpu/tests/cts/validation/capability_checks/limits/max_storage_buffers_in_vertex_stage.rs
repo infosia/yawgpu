@@ -10,9 +10,12 @@ fn create_bind_group_layout_at_over() {
 }
 
 #[test]
-#[ignore = "pipeline layout resource aggregation for vertex storage buffers is not yet active as a separate CTS creator"]
 fn create_pipeline_layout_at_over() {
-    unsafe { common::assert_max_storage_buffers_bgl_at_over(native::WGPUShaderStage_Vertex) };
+    unsafe {
+        common::assert_max_storage_buffers_create_pipeline_layout_at_over(
+            native::WGPUShaderStage_Vertex,
+        )
+    };
 }
 
 #[test]
