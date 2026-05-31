@@ -371,6 +371,14 @@ fn texture_size_2d_texture_compressed_format() {
                 ..texture_descriptor()
             },
         );
+        assert_texture_error(
+            &test,
+            native::WGPUTextureDescriptor {
+                format: native::WGPUTextureFormat_BC1RGBAUnorm,
+                size: extent(5, 4, 1),
+                ..texture_descriptor()
+            },
+        );
     }
 }
 
@@ -408,6 +416,15 @@ fn texture_size_3d_texture_compressed_format() {
                 dimension: native::WGPUTextureDimension_3D,
                 format: native::WGPUTextureFormat_BC1RGBAUnorm,
                 size: extent(4, 4, 4),
+                ..texture_descriptor()
+            },
+        );
+        assert_texture_error(
+            &test,
+            native::WGPUTextureDescriptor {
+                dimension: native::WGPUTextureDimension_3D,
+                format: native::WGPUTextureFormat_BC1RGBAUnorm,
+                size: extent(4, 5, 4),
                 ..texture_descriptor()
             },
         );
@@ -472,6 +489,33 @@ fn texture_usage() {
                 usage: native::WGPUTextureUsage_RenderAttachment,
                 dimension: native::WGPUTextureDimension_1D,
                 size: extent(4, 1, 1),
+                ..texture_descriptor()
+            },
+        );
+    }
+}
+
+#[test]
+fn texture_usage_rgba8_snorm_storage_binding_requires_tier1() {
+    let test = ValidationTest::new();
+    unsafe {
+        assert_texture_error(
+            &test,
+            native::WGPUTextureDescriptor {
+                usage: native::WGPUTextureUsage_StorageBinding,
+                format: native::WGPUTextureFormat_RGBA8Snorm,
+                ..texture_descriptor()
+            },
+        );
+    }
+
+    let tier1 = ValidationTest::with_features(&[native::WGPUFeatureName_TextureFormatsTier1]);
+    unsafe {
+        assert_texture_ok(
+            &tier1,
+            native::WGPUTextureDescriptor {
+                usage: native::WGPUTextureUsage_StorageBinding,
+                format: native::WGPUTextureFormat_RGBA8Snorm,
                 ..texture_descriptor()
             },
         );

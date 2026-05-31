@@ -117,6 +117,14 @@ fn storage_binding_requires_storage_capable_format() {
             &test,
             native::WGPUTextureDescriptor {
                 usage: native::WGPUTextureUsage_StorageBinding,
+                format: native::WGPUTextureFormat_RGBA8Snorm,
+                ..default_descriptor()
+            },
+        );
+        assert_texture_error(
+            &test,
+            native::WGPUTextureDescriptor {
+                usage: native::WGPUTextureUsage_StorageBinding,
                 format: native::WGPUTextureFormat_RG8Unorm,
                 ..default_descriptor()
             },
@@ -163,8 +171,7 @@ fn populated_format_caps_match_dawn_sanity_checks() {
     assert!(snorm.aspects.color);
     assert!(snorm.renderable);
     assert!(snorm.multisample_capable);
-    // snorm formats are NOT storage-capable (Dawn `Format.cpp`).
-    assert!(!snorm.storage_capable);
+    assert!(snorm.storage_capable);
 
     let rgba8 = caps(native::WGPUTextureFormat_RGBA8Unorm);
     assert!(rgba8.aspects.color);

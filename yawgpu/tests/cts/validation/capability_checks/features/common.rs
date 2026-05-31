@@ -319,6 +319,7 @@ pub fn tier1_storage_formats() -> &'static [native::WGPUTextureFormat] {
         native::WGPUTextureFormat_RGB10A2Uint,
         native::WGPUTextureFormat_RGB10A2Unorm,
         native::WGPUTextureFormat_RG11B10Ufloat,
+        native::WGPUTextureFormat_RGBA8Snorm,
     ]
 }
 
