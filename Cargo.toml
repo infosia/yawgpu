@@ -11,6 +11,15 @@ members = [
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
+# Build-speed: drop debuginfo from dev/test builds. The dominant `cargo test`
+# cost is linking ~59 integration-test binaries against the heavy `naga`
+# dep; debuginfo bloats every link. Tests/CI don't need line tables.
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
 [workspace.dependencies]
 thiserror = "2"
 parking_lot = "0.12"
