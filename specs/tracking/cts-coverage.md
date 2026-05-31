@@ -137,6 +137,20 @@ never a reason to skip a CTS case.
   (Surfaced a pre-existing release-only test UB — dangling `&[temp]`
   render-pass descriptors — fixed separately.) Remaining closeable →
   Cluster 3 (resource-usage subresource granularity).
+- **Core-gap follow-up #8 (Cluster 3, resource-usage subresource
+  granularity) — DONE. Closeable validation gaps now COMPLETE.**
+  +15 CTS un-ignored (82→67); `resource_usages/` now 0 ignored. Extended
+  in-pass usage tracking to mip/layer/aspect subresource ranges, pass-scope
+  usage accumulation (replaced bindings contribute only after use; render
+  bundles import recorded usages on execute), and per-view usage-override
+  enforcement (sampled/storage bind groups + attachments).
+- **Remaining ~67 ignores are the deferred residue** (not core-validation
+  gaps): optional-**feature additions** (shader-f16, dual-source-blending,
+  subgroups, clip-distances, setImmediates, linear_indexing — implementing
+  the feature, not just validating); **native-surface** (canvas/configure/
+  getCurrentTexture — no Noop fixture); and a few **C-ABI-N/A** /
+  CTS-`.unimplemented()` cases. These were explicitly deferred (user
+  2026-05-31: "close the closeable gaps first").
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage

@@ -286,16 +286,21 @@ impl RenderPassEncoder {
                 },
                 limits,
             )?;
-            let pipeline = state
-                .render_pipeline
-                .as_ref()
-                .ok_or_else(|| "render pass requires a render pipeline".to_owned())?;
+            let pipeline = Arc::clone(
+                state
+                    .render_pipeline
+                    .as_ref()
+                    .ok_or_else(|| "render pass requires a render pipeline".to_owned())?,
+            );
+            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
+            let attachment_uses = state.attachment_texture_uses.clone();
+            record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
             let color_attachment = state
                 .render_color_attachment
                 .clone()
                 .ok_or_else(|| "render pass requires a color attachment".to_owned())?;
             self.inner.parent.record_render_pass(RenderPassCommand {
-                pipeline: Some(Arc::clone(pipeline)),
+                pipeline: Some(pipeline),
                 color_attachment,
                 attachment_textures: state.attachment_textures.clone(),
                 bind_groups: state.bind_groups.clone(),
@@ -332,7 +337,16 @@ impl RenderPassEncoder {
                     first_instance,
                 },
                 limits,
-            )
+            )?;
+            let pipeline = Arc::clone(
+                state
+                    .render_pipeline
+                    .as_ref()
+                    .ok_or_else(|| "render pass requires a render pipeline".to_owned())?,
+            );
+            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
+            let attachment_uses = state.attachment_texture_uses.clone();
+            record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)
         })
     }
 
@@ -345,6 +359,15 @@ impl RenderPassEncoder {
     ) -> Option<String> {
         self.inner.record_pass_command(|state| {
             validate_render_draw_state(state, RenderDrawKind::Indirect, limits)?;
+            let pipeline = Arc::clone(
+                state
+                    .render_pipeline
+                    .as_ref()
+                    .ok_or_else(|| "render pass requires a render pipeline".to_owned())?,
+            );
+            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
+            let attachment_uses = state.attachment_texture_uses.clone();
+            record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
             validate_indirect_buffer(&indirect_buffer, indirect_offset, 16, "draw indirect")?;
             self.inner.parent.record_referenced_buffer(indirect_buffer);
             Ok(())
@@ -360,6 +383,15 @@ impl RenderPassEncoder {
     ) -> Option<String> {
         self.inner.record_pass_command(|state| {
             validate_render_draw_state(state, RenderDrawKind::IndexedIndirect, limits)?;
+            let pipeline = Arc::clone(
+                state
+                    .render_pipeline
+                    .as_ref()
+                    .ok_or_else(|| "render pass requires a render pipeline".to_owned())?,
+            );
+            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
+            let attachment_uses = state.attachment_texture_uses.clone();
+            record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
             validate_indirect_buffer(
                 &indirect_buffer,
                 indirect_offset,
@@ -441,6 +473,18 @@ impl RenderPassEncoder {
                 self.inner
                     .parent
                     .record_referenced_textures(bundle.referenced_textures().to_vec());
+                let mut scoped_buffer_uses = state.scope_buffer_uses.clone();
+                scoped_buffer_uses.extend_from_slice(bundle.buffer_uses());
+                let mut scoped_texture_uses = state.scope_texture_uses.clone();
+                scoped_texture_uses.extend_from_slice(bundle.texture_uses());
+                scoped_texture_uses.extend_from_slice(&state.attachment_texture_uses);
+                validate_resource_usage_scope(&scoped_buffer_uses, &scoped_texture_uses)?;
+                state
+                    .scope_buffer_uses
+                    .extend_from_slice(bundle.buffer_uses());
+                state
+                    .scope_texture_uses
+                    .extend_from_slice(bundle.texture_uses());
             }
             state.clear_render_state();
             Ok(())

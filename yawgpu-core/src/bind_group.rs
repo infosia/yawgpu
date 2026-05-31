@@ -380,7 +380,7 @@ pub(crate) fn validate_bind_group_texture(
     if texture.is_destroyed() {
         return Some("bind group texture must not be destroyed".to_owned());
     }
-    if !texture.usage().contains(TextureUsage::TEXTURE_BINDING) {
+    if !texture_view.usage().contains(TextureUsage::TEXTURE_BINDING) {
         return Some("bind group texture usage does not satisfy the layout".to_owned());
     }
     if texture_view.dimension() != view_dimension {
@@ -448,7 +448,7 @@ pub(crate) fn validate_bind_group_storage_texture(
     if texture.is_destroyed() {
         return Some("bind group texture must not be destroyed".to_owned());
     }
-    if !texture.usage().contains(TextureUsage::STORAGE_BINDING) {
+    if !texture_view.usage().contains(TextureUsage::STORAGE_BINDING) {
         return Some("bind group texture usage does not satisfy the layout".to_owned());
     }
     if texture_view.dimension() != view_dimension {
@@ -524,6 +524,57 @@ mod tests {
         assert_eq!(
             error.message,
             "bind group entry count must match bind group layout"
+        );
+    }
+
+    #[test]
+    fn bind_group_texture_validation_uses_view_usage_override() {
+        let device = noop_device();
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::TEXTURE_BINDING | TextureUsage::STORAGE_BINDING,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: Some(TextureUsage::TEXTURE_BINDING),
+        });
+        assert_eq!(error, None);
+
+        assert_eq!(
+            validate_bind_group_texture(
+                &device,
+                &device,
+                &view,
+                TextureSampleType::UnfilterableFloat,
+                TextureViewDimension::D2,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            validate_bind_group_storage_texture(
+                &device,
+                &device,
+                &view,
+                rgba8_unorm(),
+                TextureViewDimension::D2,
+            ),
+            Some("bind group texture usage does not satisfy the layout".to_owned())
         );
     }
 

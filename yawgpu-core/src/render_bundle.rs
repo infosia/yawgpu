@@ -74,6 +74,8 @@ pub(crate) struct RenderBundleInner {
     pub(crate) attachment_signature: AttachmentSignature,
     pub(crate) referenced_buffers: Vec<Arc<Buffer>>,
     pub(crate) referenced_textures: Vec<Texture>,
+    pub(crate) buffer_uses: Vec<BufferScopeUse>,
+    pub(crate) texture_uses: Vec<TextureScopeUse>,
 }
 
 impl RenderBundleEncoder {
@@ -125,6 +127,8 @@ impl RenderBundleEncoder {
                         true,
                         Vec::new(),
                         Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
                     ),
                     None,
                 );
@@ -134,6 +138,8 @@ impl RenderBundleEncoder {
                     RenderBundle::new(
                         self.inner.descriptor.attachment_signature(),
                         true,
+                        Vec::new(),
+                        Vec::new(),
                         Vec::new(),
                         Vec::new(),
                     ),
@@ -152,12 +158,16 @@ impl RenderBundleEncoder {
         let error = state.first_error.clone();
         let referenced_buffers = render_bundle_referenced_buffers(&state.pass_state);
         let referenced_textures = render_bundle_referenced_textures(&state.pass_state);
+        let buffer_uses = state.pass_state.scope_buffer_uses.clone();
+        let texture_uses = state.pass_state.scope_texture_uses.clone();
         (
             RenderBundle::new(
                 self.inner.descriptor.attachment_signature(),
                 error.is_some(),
                 referenced_buffers,
                 referenced_textures,
+                buffer_uses,
+                texture_uses,
             ),
             error,
         )
@@ -297,7 +307,15 @@ impl RenderBundleEncoder {
                     first_instance,
                 },
                 limits,
-            )
+            )?;
+            let pipeline = Arc::clone(
+                state
+                    .render_pipeline
+                    .as_ref()
+                    .ok_or_else(|| "render bundle requires a render pipeline".to_owned())?,
+            );
+            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
+            record_pipeline_usage_scope(state, &bind_group_layouts, &[])
         })
     }
 
@@ -321,7 +339,15 @@ impl RenderBundleEncoder {
                     first_instance,
                 },
                 limits,
-            )
+            )?;
+            let pipeline = Arc::clone(
+                state
+                    .render_pipeline
+                    .as_ref()
+                    .ok_or_else(|| "render bundle requires a render pipeline".to_owned())?,
+            );
+            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
+            record_pipeline_usage_scope(state, &bind_group_layouts, &[])
         })
     }
 
@@ -334,6 +360,14 @@ impl RenderBundleEncoder {
     ) -> Option<String> {
         self.record_bundle_command(|state| {
             validate_render_draw_state(state, RenderDrawKind::Indirect, limits)?;
+            let pipeline = Arc::clone(
+                state
+                    .render_pipeline
+                    .as_ref()
+                    .ok_or_else(|| "render bundle requires a render pipeline".to_owned())?,
+            );
+            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
+            record_pipeline_usage_scope(state, &bind_group_layouts, &[])?;
             validate_indirect_buffer(&indirect_buffer, indirect_offset, 16, "draw indirect")?;
             state.command_referenced_buffers.push(indirect_buffer);
             Ok(())
@@ -349,6 +383,14 @@ impl RenderBundleEncoder {
     ) -> Option<String> {
         self.record_bundle_command(|state| {
             validate_render_draw_state(state, RenderDrawKind::IndexedIndirect, limits)?;
+            let pipeline = Arc::clone(
+                state
+                    .render_pipeline
+                    .as_ref()
+                    .ok_or_else(|| "render bundle requires a render pipeline".to_owned())?,
+            );
+            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
+            record_pipeline_usage_scope(state, &bind_group_layouts, &[])?;
             validate_indirect_buffer(
                 &indirect_buffer,
                 indirect_offset,
@@ -387,6 +429,8 @@ impl RenderBundle {
         is_error: bool,
         referenced_buffers: Vec<Arc<Buffer>>,
         referenced_textures: Vec<Texture>,
+        buffer_uses: Vec<BufferScopeUse>,
+        texture_uses: Vec<TextureScopeUse>,
     ) -> Self {
         Self {
             inner: Arc::new(RenderBundleInner {
@@ -394,6 +438,8 @@ impl RenderBundle {
                 attachment_signature,
                 referenced_buffers,
                 referenced_textures,
+                buffer_uses,
+                texture_uses,
             }),
         }
     }
@@ -418,6 +464,14 @@ impl RenderBundle {
     /// Returns textures referenced by this bundle.
     pub(crate) fn referenced_textures(&self) -> &[Texture] {
         &self.inner.referenced_textures
+    }
+
+    pub(crate) fn buffer_uses(&self) -> &[BufferScopeUse] {
+        &self.inner.buffer_uses
+    }
+
+    pub(crate) fn texture_uses(&self) -> &[TextureScopeUse] {
+        &self.inner.texture_uses
     }
 }
 

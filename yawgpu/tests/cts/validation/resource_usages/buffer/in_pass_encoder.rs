@@ -10,7 +10,6 @@ fn subresources_buffer_usage_in_one_compute_pass_with_no_dispatch() {
 }
 
 #[test]
-#[ignore = "core does not yet validate the full CTS compute dispatch accessibility matrix for buffer usage scopes"]
 fn subresources_buffer_usage_in_one_compute_pass_with_one_dispatch() {
     unsafe {
         common::assert_compute_buffer_alias(Expect::Error);

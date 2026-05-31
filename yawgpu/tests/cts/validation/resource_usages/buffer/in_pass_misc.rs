@@ -10,7 +10,6 @@ fn subresources_reset_buffer_usage_before_dispatch() {
 }
 
 #[test]
-#[ignore = "core does not yet cover the CTS reset-before-draw buffer usage matrix across vertex/index/indirect usages"]
 fn subresources_reset_buffer_usage_before_draw() {
     unsafe {
         common::assert_render_buffer_read_write_alias(Expect::Error);
