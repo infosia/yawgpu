@@ -41,20 +41,38 @@ never a reason to skip a CTS case.
   with subcases `#[ignore]`d behind core gaps (real spec-correct bodies)
   or feature-gated on Noop — see rows and the core-gap list below.
 - `todo`: 0.
-- **Phase E (legacy cleanup) — partial.** 8 legacy Dawn test files whose
-  rules are fully covered by *active* CTS tests were deleted:
-  `buffer_creation_validation`, `buffer_map_validation`,
+- **Phase E (legacy cleanup) — two sweeps, 21 legacy files deleted.**
+  *Sweep 1* removed 8 files fully covered by active CTS (66 redundant
+  tests): `buffer_creation_validation`, `buffer_map_validation`,
   `buffer_mapped_range_validation`, `debug_marker_validation`,
   `queue_submit_validation`, `texture_creation_validation`,
-  `texture_view_validation`, `vertex_state_validation` (66 redundant
-  tests). The remaining ~22 legacy `*_validation.rs` were **kept**: each
-  has at least one active rule that the CTS port currently only
-  `#[ignore]`s (a core gap) or covers more broadly — deleting them would
-  drop live coverage. **That kept-list is the worklist for the core-gap
-  follow-up phase** (close the gap in core → un-ignore the CTS test →
-  then delete the legacy test). KEEP-forever (no CTS analog):
-  future_modes, gles_context_backend_chain, instance_smoke,
-  label_validation, multiple_device_validation, object_caching_validation,
+  `texture_view_validation`, `vertex_state_validation`.
+  *Sweep 2* (after follow-ups #1–#8 + findings F-005..F-011 closed the
+  gaps that had forced subcases to `#[ignore]`) removed 13 more (~84
+  redundant tests), each re-verified per file against the *actual* CTS
+  files (the matrix rows below can lag): `command_buffer_copy_validation`,
+  `command_texture_copy_validation`, `queue_buffer_validation`,
+  `queue_write_texture_validation`, `command_encoder_lifecycle_validation`,
+  `bind_group_validation`, `bind_group_layout_validation`,
+  `get_bind_group_layout_validation`, `pipeline_layout_validation`,
+  `sampler_validation`, `compute_pipeline_validation`,
+  `shader_module_validation`, `resource_usage_tracking_validation`.
+  **Still KEPT** (each has ≥1 rule CTS only `#[ignore]`s or doesn't cover):
+  `render_pipeline_validation` (inter-stage / bytes-per-sample),
+  `render_bundle_validation` (maxColorAttachmentBytesPerSample),
+  `render_pass_descriptor_validation` (resolve-format / depthReadOnly /
+  transient / bytes-per-sample), `pass_state_validation` (eager
+  setBindGroup + viewport/scissor bounds + indirect), `device_lost_validation`
+  (lost-callback ordering/single-fire/getLostFuture), `error_scope_validation`
+  (first-error-kept / uncaptured-callback / destroyed-pop / WaitAnyOnly),
+  `features_validation` (CoreFeaturesAndLimits core-vs-compat + tier
+  implications), `limits_validation` (request_device clamping — CTS only
+  covers the at/over pipeline path), `query_validation` (count==0 allowed —
+  CTS case ignored), `texture_format_validation` (caps-sanity asserts +
+  F-009 storage regression lock). These remain the worklist for the next
+  core-gap closures. KEEP-forever (no CTS analog): future_modes,
+  gles_context_backend_chain, instance_smoke, label_validation,
+  multiple_device_validation, object_caching_validation,
   pipeline_async_validation, surface_validation, unsafe_api_validation.
 - **Core-gap follow-up #1 (device-ownership) — DONE.** yawgpu now
   validates resource owner-device at the record-time FFI entry points
