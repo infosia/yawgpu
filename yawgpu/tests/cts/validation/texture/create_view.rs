@@ -7,6 +7,7 @@ fn format() {
     unsafe {
         let texture = create_texture(test.device(), texture_descriptor_2d(1, 1));
         assert_view_ok(
+            &test,
             texture,
             view_descriptor_with_format(native::WGPUTextureFormat_RGBA8Unorm),
         );
@@ -27,6 +28,7 @@ fn format() {
             },
         );
         assert_view_ok(
+            &test,
             texture,
             view_descriptor_with_format(native::WGPUTextureFormat_RGBA8UnormSrgb),
         );
@@ -52,6 +54,7 @@ fn dimension() {
             },
         );
         assert_view_ok(
+            &test,
             texture_1d,
             view_descriptor_with_dimension(native::WGPUTextureViewDimension_1D, 1),
         );
@@ -74,15 +77,26 @@ fn dimension() {
         ] {
             let descriptor = view_descriptor_with_dimension(dimension, layers);
             if valid {
-                assert_view_ok(texture_2d, descriptor);
+                assert_view_ok(&test, texture_2d, descriptor);
             } else {
                 assert_view_error(&test, texture_2d, descriptor);
             }
         }
+        assert_view_ok(
+            &test,
+            texture_2d,
+            native::WGPUTextureViewDescriptor {
+                dimension: native::WGPUTextureViewDimension_2D,
+                arrayLayerCount: native::WGPU_ARRAY_LAYER_COUNT_UNDEFINED,
+                baseArrayLayer: 3,
+                ..view_descriptor()
+            },
+        );
         yawgpu::wgpuTextureRelease(texture_2d);
 
         let texture_3d = create_texture(test.device(), texture_descriptor_3d());
         assert_view_ok(
+            &test,
             texture_3d,
             view_descriptor_with_dimension(native::WGPUTextureViewDimension_3D, 1),
         );
@@ -101,6 +115,7 @@ fn aspect() {
     unsafe {
         let color = create_texture(test.device(), texture_descriptor_2d(1, 1));
         assert_view_ok(
+            &test,
             color,
             view_descriptor_with_aspect(native::WGPUTextureAspect_All),
         );
@@ -120,6 +135,7 @@ fn aspect() {
             },
         );
         assert_view_ok(
+            &test,
             depth,
             view_descriptor_with_aspect(native::WGPUTextureAspect_DepthOnly),
         );
@@ -138,6 +154,7 @@ fn aspect() {
             },
         );
         assert_view_ok(
+            &test,
             depth_stencil,
             view_descriptor_with_aspect(native::WGPUTextureAspect_StencilOnly),
         );
@@ -165,7 +182,7 @@ fn array_layers() {
                 ..view_descriptor()
             };
             if valid {
-                assert_view_ok(texture, descriptor);
+                assert_view_ok(&test, texture, descriptor);
             } else {
                 assert_view_error(&test, texture, descriptor);
             }
@@ -199,7 +216,7 @@ fn mip_levels() {
                 ..view_descriptor()
             };
             if valid {
-                assert_view_ok(texture, descriptor);
+                assert_view_ok(&test, texture, descriptor);
             } else {
                 assert_view_error(&test, texture, descriptor);
             }
@@ -214,6 +231,7 @@ fn cube_faces_square() {
     unsafe {
         let square = create_texture(test.device(), texture_descriptor_2d(1, 6));
         assert_view_ok(
+            &test,
             square,
             view_descriptor_with_dimension(native::WGPUTextureViewDimension_Cube, 6),
         );
@@ -232,6 +250,20 @@ fn cube_faces_square() {
             view_descriptor_with_dimension(native::WGPUTextureViewDimension_Cube, 6),
         );
         yawgpu::wgpuTextureRelease(non_square);
+
+        let non_square_array = create_texture(
+            test.device(),
+            native::WGPUTextureDescriptor {
+                size: extent(8, 4, 12),
+                ..texture_descriptor_2d(1, 12)
+            },
+        );
+        assert_view_error(
+            &test,
+            non_square_array,
+            view_descriptor_with_dimension(native::WGPUTextureViewDimension_CubeArray, 12),
+        );
+        yawgpu::wgpuTextureRelease(non_square_array);
     }
 }
 
@@ -241,7 +273,7 @@ fn texture_state() {
     unsafe {
         let texture = create_texture(test.device(), texture_descriptor_2d(1, 1));
         yawgpu::wgpuTextureDestroy(texture);
-        assert_view_ok(texture, view_descriptor());
+        assert_view_ok(&test, texture, view_descriptor());
         yawgpu::wgpuTextureRelease(texture);
 
         let mut invalid = std::ptr::null();
@@ -272,6 +304,7 @@ fn texture_view_usage() {
             },
         );
         assert_view_ok(
+            &test,
             texture,
             view_descriptor_with_usage(native::WGPUTextureUsage_TextureBinding),
         );
@@ -297,6 +330,7 @@ fn texture_view_usage_of_multiple_usages() {
             },
         );
         assert_view_ok(
+            &test,
             texture,
             view_descriptor_with_usage(
                 native::WGPUTextureUsage_TextureBinding | native::WGPUTextureUsage_RenderAttachment,
@@ -323,6 +357,7 @@ fn texture_view_usage_with_view_format() {
             },
         );
         assert_view_ok(
+            &test,
             texture,
             native::WGPUTextureViewDescriptor {
                 format: native::WGPUTextureFormat_RGBA8UnormSrgb,
@@ -344,12 +379,15 @@ fn texture_view_usage_with_view_format() {
 }
 
 unsafe fn assert_view_ok(
+    test: &ValidationTest,
     texture: native::WGPUTexture,
     descriptor: native::WGPUTextureViewDescriptor,
 ) {
-    let view = yawgpu::wgpuTextureCreateView(texture, &descriptor);
-    assert!(!view.is_null());
-    yawgpu::wgpuTextureViewRelease(view);
+    test.expect_no_validation_error(|| {
+        let view = yawgpu::wgpuTextureCreateView(texture, &descriptor);
+        assert!(!view.is_null());
+        yawgpu::wgpuTextureViewRelease(view);
+    });
 }
 
 unsafe fn assert_view_error(
