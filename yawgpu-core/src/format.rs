@@ -570,6 +570,7 @@ impl TextureFormat {
                 | TextureFormat::RGB10A2_UINT
                 | TextureFormat::RGB10A2_UNORM
                 | TextureFormat::RG11B10_UFLOAT
+                | TextureFormat::RGBA8_SNORM
                 | TextureFormat::RGBA16_FLOAT => {
                     caps.storage_capable = true;
                 }
@@ -1104,7 +1105,7 @@ mod tests {
                 .multisample_capable
         );
         assert!(
-            !TextureFormat::from_raw(TextureFormat::RGBA8_SNORM)
+            TextureFormat::from_raw(TextureFormat::RGBA8_SNORM)
                 .caps(&tier1)
                 .expect("RGBA8Snorm caps")
                 .storage_capable

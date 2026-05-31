@@ -431,6 +431,11 @@ pub(crate) fn validate_texture_descriptor(
         return Some("texture format must not be Undefined");
     };
     if format_caps.is_compressed {
+        if !size.width.is_multiple_of(format_caps.block_w)
+            || !size.height.is_multiple_of(format_caps.block_h)
+        {
+            return Some("compressed texture size must be block-aligned");
+        }
         if descriptor.dimension == TextureDimension::D1 {
             return Some("compressed textures must not be 1D");
         }
@@ -860,6 +865,25 @@ mod tests {
         assert_eq!(
             validate_texture_descriptor(&descriptor, Limits::DEFAULT, &features),
             Some("ETC2/EAC compressed textures must be 2D")
+        );
+    }
+
+    #[test]
+    fn validate_texture_descriptor_rejects_compressed_block_misaligned_size() {
+        let mut features = FeatureSet::new();
+        features.insert(Feature::TextureCompressionBc);
+
+        let mut descriptor = texture_descriptor_4x4();
+        descriptor.format = TextureFormat::from_raw(TextureFormat::BC1_RGBA_UNORM);
+        descriptor.size = Extent3d {
+            width: 5,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &features),
+            Some("compressed texture size must be block-aligned")
         );
     }
 

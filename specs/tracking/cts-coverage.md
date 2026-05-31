@@ -151,6 +151,21 @@ never a reason to skip a CTS case.
   getCurrentTexture — no Noop fixture); and a few **C-ABI-N/A** /
   CTS-`.unimplemented()` cases. These were explicitly deferred (user
   2026-05-31: "close the closeable gaps first").
+- **External-CTS createTexture findings (webgpu-native-cts 3-way re-test)
+  — RESOLVED.** The external runner (vs real Dawn + wgpu-native) surfaced
+  three gaps the Noop port did not: **F-005b** `Depth24PlusStencil8`
+  aborted on Apple-Silicon Metal — the HAL mapped it to
+  `Depth24Unorm_Stencil8` (Intel-only); now maps to
+  `Depth32Float_Stencil8` (Metal) / `D32_SFLOAT_S8_UINT` (Vulkan, avoids
+  the optional `D24_UNORM_S8_UINT`), verified by a real-M2 Metal e2e
+  (`e2e_metal_texture::metal_depth24_plus_stencil8_texture_creation_has_no_device_error`).
+  **F-009** `RGBA8Snorm` is storage-capable under `texture-formats-tier1`
+  (reversed a prior over-correction that trusted a stale in-tree sanity
+  assertion over the CTS). **F-010** compressed `createTexture` now
+  rejects non-block-aligned width/height. Each has an active in-tree
+  assertion (`cts/validation/texture/create_texture.rs`, `format.rs`
+  caps tests, `texture_format_validation.rs`). External
+  `expectations/yawgpu.txt` rebaseline is the CTS project's job.
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage

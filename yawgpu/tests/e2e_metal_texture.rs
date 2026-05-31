@@ -98,6 +98,43 @@ fn metal_sampler_creation_has_no_device_error() {
 
 #[test]
 #[ignore = "manual real-backend test"]
+#[cfg(feature = "metal")]
+fn metal_depth24_plus_stencil8_texture_creation_has_no_device_error() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+
+        let descriptor = native::WGPUTextureDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            usage: native::WGPUTextureUsage_TextureBinding,
+            dimension: native::WGPUTextureDimension_2D,
+            size: texture_extent(),
+            format: native::WGPUTextureFormat_Depth24PlusStencil8,
+            mipLevelCount: 1,
+            sampleCount: 1,
+            viewFormatCount: 0,
+            viewFormats: std::ptr::null(),
+        };
+        let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+
+        assert!(!texture.is_null());
+        assert!(errors.lock().expect("error lock").is_empty());
+        yawgpu::wgpuTextureRelease(texture);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+#[test]
+#[ignore = "manual real-backend test"]
 fn default_noop_texture_and_sampler_path_has_no_device_error() {
     unsafe {
         let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
