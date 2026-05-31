@@ -8,9 +8,8 @@ fn create_bind_group_layout_at_over() {
 }
 
 #[test]
-#[ignore = "pipeline layout resource aggregation for sampled textures is not yet active as a separate CTS creator"]
 fn create_pipeline_layout_at_over() {
-    unsafe { common::assert_max_sampled_textures_bgl_at_over() };
+    unsafe { common::assert_max_sampled_textures_create_pipeline_layout_at_over() };
 }
 
 #[test]

@@ -162,13 +162,24 @@ never a reason to skip a CTS case.
   usage accumulation (replaced bindings contribute only after use; render
   bundles import recorded usages on execute), and per-view usage-override
   enforcement (sampled/storage bind groups + attachments).
-- **Remaining ~67 ignores are the deferred residue** (not core-validation
-  gaps): optional-**feature additions** (shader-f16, dual-source-blending,
-  subgroups, clip-distances, setImmediates, linear_indexing — implementing
-  the feature, not just validating); **native-surface** (canvas/configure/
-  getCurrentTexture — no Noop fixture); and a few **C-ABI-N/A** /
-  CTS-`.unimplemented()` cases. These were explicitly deferred (user
-  2026-05-31: "close the closeable gaps first").
+- **Remaining CTS ignores: ~56** (was ~67; **P1 closed 11** —
+  `capability_checks/limits/*::create_pipeline_layout_at_over` for the
+  per-stage uniform/storage-buffer/sampled-texture/sampler/storage-texture
+  limits + the per-pipeline-layout dynamic uniform/storage-buffer limits —
+  wired real createPipelineLayout aggregation creators that spread entries
+  across ≥2 BGLs; core already validated, no production change). The rest
+  split into: **(a) test-wiring still pending** — `create_pipeline_at_over`
+  shader-resource matrices, command-encoder matrices (setBindGroup /
+  setVertexBuffer / dynamic-offset alignment), render-bundle
+  maxColorAttachments; **(b) genuine core gaps** — inter-stage
+  output↔input matching + maxInterStageShaderVariables counting, maxDrawCount,
+  draw-time maxBindGroupsPlusVertexBuffers, dual-source-blending validation,
+  storage-texture format/access in render auto-layout (these are P2);
+  **(c) optional-feature additions** (shader-f16, dual-source-blending,
+  subgroups, clip-distances, setImmediates, linear_indexing — implement the
+  feature, not just validate); **(d) native-surface** (canvas/configure/
+  getCurrentTexture — no Noop fixture); and **(e) C-ABI-N/A** /
+  CTS-`.unimplemented()` (permanent).
 - **External-CTS createTexture findings (webgpu-native-cts 3-way re-test)
   — RESOLVED.** The external runner (vs real Dawn + wgpu-native) surfaced
   three gaps the Noop port did not: **F-005b** `Depth24PlusStencil8`
