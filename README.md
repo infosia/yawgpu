@@ -475,21 +475,25 @@ of [**webgpu-native-cts**](https://github.com/infosia/webgpu-native-cts) — a
 separate C++ conformance suite that ports the upstream WebGPU CTS and links
 *directly* against the `webgpu.h` C ABI (no JS engine), running each case in
 its own subprocess against a real GPU. Across its ported `api/validation`
-surface (**2610 cases**), yawgpu's results are **identical to Dawn**, the C++
-reference implementation:
+surface (**3977 cases** across 10 files, including a complete `createTexture`
+and a complete `createView`), yawgpu's results are **identical to Dawn**, the
+C++ reference implementation and conformance oracle:
 
 | Implementation (backend, host) | pass | skip | fail | crash |
 |---|--:|--:|--:|--:|
-| **yawgpu** — Metal, Apple Silicon | 2594 | 16 | 0 | 0 |
-| **yawgpu** — Vulkan, Windows 11 / NVIDIA | 2594 | 16 | 0 | 0 |
-| Dawn (reference) — Metal, Apple Silicon | 2594 | 16 | 0 | 0 |
+| **yawgpu** — Metal, Apple Silicon | 3777 | 200 | 0 | 0 |
+| Dawn (reference) — Metal, Apple Silicon | 3777 | 200 | 0 | 0 |
 
-`skip` covers cases gated on optional adapter features. Every divergence the
-suite surfaced (findings F-005/006/008/009/010 — format rejection, the
-`Depth24PlusStencil8` Metal abort, multisample, transient-attachment usage,
-render-attachment dimension + `RGBA8Snorm` storage, and compressed
-`createTexture` size alignment) was reported there, fixed in yawgpu, and
-confirmed resolved on hardware.
+`skip` covers cases gated on optional adapter features. The same clean
+result was confirmed on **Windows / Vulkan** (NVIDIA) over the earlier
+2610-case surface (`pass=2594 skip=16 fail=0 crash=0`, before the
+`createView` tests were added). Every divergence the suite surfaced against
+yawgpu — findings **F-005/006/008/009/010/011/014** (format rejection, the
+`Depth24PlusStencil8` Metal abort, multisample capability, transient-attachment
+usage, render-attachment dimension + `RGBA8Snorm` storage, compressed
+`createTexture` block alignment, and `createView` view-dimension + 3D
+array-layer ranges) — was reported there, fixed in yawgpu, and confirmed
+resolved on hardware.
 
 ## License
 
