@@ -268,7 +268,8 @@ pub unsafe fn assert_copy_and_render_texture_ok() {
         };
         yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &source, &destination, &size);
         let attachment = color_attachment(view);
-        let descriptor = render_pass_descriptor(&[attachment]);
+        let attachments = [attachment];
+        let descriptor = render_pass_descriptor(&attachments);
         let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
         assert!(!pass.is_null());
         yawgpu::wgpuRenderPassEncoderEnd(pass);
@@ -338,7 +339,8 @@ unsafe fn encode_render_with_bind_group(
             create_render_pipeline(test, vertex_source, fragment_source, pipeline_layout);
         let encoder = create_encoder(test);
         let attachment = color_attachment(view);
-        let descriptor = render_pass_descriptor(&[attachment]);
+        let attachments = [attachment];
+        let descriptor = render_pass_descriptor(&attachments);
         let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
         assert!(!pass.is_null());
         yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);

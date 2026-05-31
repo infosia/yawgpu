@@ -471,7 +471,8 @@ pub unsafe fn expect_render_pass_commands<F>(
     let target =
         unsafe { create_render_target(test.device(), native::WGPUTextureFormat_RGBA8Unorm, 1) };
     let attachment = color_attachment(target.view);
-    let descriptor = render_pass_descriptor(&[attachment], None);
+    let attachments = [attachment];
+    let descriptor = render_pass_descriptor(&attachments, None);
     let pass = unsafe { begin_render_pass(encoder, &descriptor) };
     commands(pass);
     unsafe {
@@ -541,7 +542,8 @@ where
     let target =
         unsafe { create_render_target(test.device(), native::WGPUTextureFormat_RGBA8Unorm, 1) };
     let attachment = color_attachment(target.view);
-    let descriptor = render_pass_descriptor(&[attachment], None);
+    let attachments = [attachment];
+    let descriptor = render_pass_descriptor(&attachments, None);
     let pass = unsafe { begin_render_pass(command_encoder, &descriptor) };
     unsafe {
         yawgpu::wgpuRenderPassEncoderExecuteBundles(pass, 1, &bundle);

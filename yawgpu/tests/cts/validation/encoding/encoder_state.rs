@@ -30,7 +30,8 @@ fn pass_end_invalid_order() {
                             1,
                         );
                         let attachment = color_attachment(view.view);
-                        let descriptor = render_pass_descriptor(&[attachment], None);
+                        let attachments = [attachment];
+                        let descriptor = render_pass_descriptor(&attachments, None);
                         let encoder = create_encoder(test.device());
 
                         let first = begin_pass(encoder, pass0_type, &descriptor);
@@ -90,7 +91,8 @@ fn call_after_successful_finish() {
                         1,
                     );
                     let attachment = color_attachment(view.view);
-                    let descriptor = render_pass_descriptor(&[attachment], None);
+                    let attachments = [attachment];
+                    let descriptor = render_pass_descriptor(&attachments, None);
                     let encoder = create_encoder(test.device());
 
                     if let Some(pass_type) = pre_pass_type {
@@ -183,7 +185,8 @@ fn pass_end_none() {
                     1,
                 );
                 let attachment = color_attachment(view.view);
-                let descriptor = render_pass_descriptor(&[attachment], None);
+                let attachments = [attachment];
+                let descriptor = render_pass_descriptor(&attachments, None);
                 let encoder = create_encoder(test.device());
                 let pass = begin_pass(encoder, pass_type, &descriptor);
                 for _ in 0..end_count {
@@ -218,7 +221,8 @@ fn pass_end_twice_basic() {
                         1,
                     );
                     let attachment = color_attachment(view.view);
-                    let descriptor = render_pass_descriptor(&[attachment], None);
+                    let attachments = [attachment];
+                    let descriptor = render_pass_descriptor(&attachments, None);
                     let encoder = create_encoder(test.device());
                     let pass = begin_pass(encoder, pass_type, &descriptor);
                     end_pass(pass);
@@ -253,7 +257,8 @@ fn pass_end_twice_render_pass_invalid() {
     unsafe {
         for end_twice in [false, true] {
             let encoder = create_encoder(test.device());
-            let descriptor = render_pass_descriptor(&[], None);
+            let attachments = [];
+            let descriptor = render_pass_descriptor(&attachments, None);
             let pass = begin_render_pass(encoder, &descriptor);
 
             yawgpu::wgpuRenderPassEncoderEnd(pass);
@@ -287,7 +292,8 @@ fn pass_begin_invalid_encoder() {
                         1,
                     );
                     let attachment = color_attachment(view.view);
-                    let descriptor = render_pass_descriptor(&[attachment], None);
+                    let attachments = [attachment];
+                    let descriptor = render_pass_descriptor(&attachments, None);
                     let encoder = create_encoder(test.device());
 
                     let first = begin_pass(encoder, pass0_type, &descriptor);

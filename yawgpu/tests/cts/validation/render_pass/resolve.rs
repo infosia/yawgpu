@@ -279,7 +279,8 @@ unsafe fn run_case(
     let color = create_view(test.device(), color_options, color_view_descriptor);
     let resolve = create_view(test.device(), resolve_options, resolve_view_descriptor);
     let attachment = color_attachment_with_resolve(color.view, resolve.view);
-    let descriptor = render_pass_descriptor(&[attachment], None);
+    let attachments = [attachment];
+    let descriptor = render_pass_descriptor(&attachments, None);
 
     expect_render_pass(test, success, &descriptor);
 

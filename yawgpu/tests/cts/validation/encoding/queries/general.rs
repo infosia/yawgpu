@@ -78,7 +78,8 @@ unsafe fn expect_occlusion_index(
         let encoder = create_encoder(test.device());
         let target = create_render_target(test.device(), native::WGPUTextureFormat_RGBA8Unorm, 1);
         let attachment = color_attachment(target.view);
-        let mut descriptor = render_pass_descriptor(&[attachment], None);
+        let attachments = [attachment];
+        let mut descriptor = render_pass_descriptor(&attachments, None);
         descriptor.occlusionQuerySet = query_set;
         let pass = begin_render_pass(encoder, &descriptor);
         yawgpu::wgpuRenderPassEncoderBeginOcclusionQuery(pass, query_index);

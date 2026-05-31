@@ -19,7 +19,8 @@ fn begin_occlusion_query() {
             let color = create_texture(test.device(), native::WGPUTextureUsage_RenderAttachment);
             let color_view = create_texture_view(color);
             let color_attachment = color_attachment(color_view);
-            let descriptor = render_pass_descriptor(&[color_attachment], query_set);
+            let color_attachments = [color_attachment];
+            let descriptor = render_pass_descriptor(&color_attachments, query_set);
             let encoder = create_encoder(test.device());
             let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
             yawgpu::wgpuRenderPassEncoderBeginOcclusionQuery(pass, 0);
@@ -51,7 +52,8 @@ fn unused_occlusion_query() {
             let color = create_texture(test.device(), native::WGPUTextureUsage_RenderAttachment);
             let color_view = create_texture_view(color);
             let color_attachment = color_attachment(color_view);
-            let descriptor = render_pass_descriptor(&[color_attachment], query_set);
+            let color_attachments = [color_attachment];
+            let descriptor = render_pass_descriptor(&color_attachments, query_set);
             let encoder = create_encoder(test.device());
             let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
             yawgpu::wgpuRenderPassEncoderEnd(pass);

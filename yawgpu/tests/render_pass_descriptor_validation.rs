@@ -42,7 +42,8 @@ fn empty_depth_only_color_only_and_occlusion_query_fields_are_validated() {
         };
         let query_set = yawgpu::wgpuDeviceCreateQuerySet(test.device(), &query_set_descriptor);
         assert!(!query_set.is_null());
-        let mut descriptor = render_pass_descriptor(&[make_color_attachment(color.view)], None);
+        let attachments = [make_color_attachment(color.view)];
+        let mut descriptor = render_pass_descriptor(&attachments, None);
         descriptor.occlusionQuerySet = query_set;
         assert_render_pass_ok(&test, &descriptor);
 

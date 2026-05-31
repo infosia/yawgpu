@@ -589,7 +589,8 @@ unsafe fn expect_read_only_depth_pipeline(
     depth_attachment.depthReadOnly = 1;
     depth_attachment.depthLoadOp = native::WGPULoadOp_Undefined;
     depth_attachment.depthStoreOp = native::WGPUStoreOp_Undefined;
-    let descriptor = render_pass_descriptor(&[], Some(&depth_attachment));
+    let attachments = [];
+    let descriptor = render_pass_descriptor(&attachments, Some(&depth_attachment));
     expect_render_pass_with_commands(test, success, &descriptor, |pass| unsafe {
         yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
     });

@@ -96,7 +96,8 @@ unsafe fn expect_pass_debug_balance(
                 let target =
                     create_render_target(test.device(), native::WGPUTextureFormat_RGBA8Unorm, 1);
                 let attachment = color_attachment(target.view);
-                let descriptor = render_pass_descriptor(&[attachment], None);
+                let attachments = [attachment];
+                let descriptor = render_pass_descriptor(&attachments, None);
                 let pass = begin_render_pass(encoder, &descriptor);
                 for _ in 0..push_count {
                     yawgpu::wgpuRenderPassEncoderPushDebugGroup(pass, string_view("EventStart"));

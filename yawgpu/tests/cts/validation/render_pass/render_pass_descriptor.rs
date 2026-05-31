@@ -936,7 +936,8 @@ fn timestamp_writes_query_set_type() {
         ] {
             let query_set = create_query_set(test.device(), query_type, 2);
             let writes = timestamp_writes(query_set, 0, 1);
-            let mut descriptor = render_pass_descriptor(&[color_attachment(color.view)], None);
+            let attachments = [color_attachment(color.view)];
+            let mut descriptor = render_pass_descriptor(&attachments, None);
             descriptor.timestampWrites = &writes;
             expect_render_pass(&test, success, &descriptor);
             yawgpu::wgpuQuerySetRelease(query_set);
@@ -965,7 +966,8 @@ fn timestamp_write_query_index() {
             ),
         ] {
             let writes = timestamp_writes(query_set, beginning, end);
-            let mut descriptor = render_pass_descriptor(&[color_attachment(color.view)], None);
+            let attachments = [color_attachment(color.view)];
+            let mut descriptor = render_pass_descriptor(&attachments, None);
             descriptor.timestampWrites = &writes;
             expect_render_pass(&test, success, &descriptor);
         }
@@ -984,7 +986,8 @@ fn occlusion_query_set_query_set_type() {
             (native::WGPUQueryType_Timestamp, false),
         ] {
             let query_set = create_query_set(test.device(), query_type, 1);
-            let mut descriptor = render_pass_descriptor(&[color_attachment(color.view)], None);
+            let attachments = [color_attachment(color.view)];
+            let mut descriptor = render_pass_descriptor(&attachments, None);
             descriptor.occlusionQuerySet = query_set;
             expect_render_pass(&test, success, &descriptor);
             yawgpu::wgpuQuerySetRelease(query_set);

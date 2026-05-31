@@ -148,7 +148,8 @@ unsafe fn expect_debug_commands<F>(
                 let target =
                     create_render_target(test.device(), native::WGPUTextureFormat_RGBA8Unorm, 1);
                 let attachment = color_attachment(target.view);
-                let descriptor = render_pass_descriptor(&[attachment], None);
+                let attachments = [attachment];
+                let descriptor = render_pass_descriptor(&attachments, None);
                 let pass = begin_render_pass(encoder, &descriptor);
                 commands(DebugEncoder::RenderPass(pass));
                 yawgpu::wgpuRenderPassEncoderEnd(pass);

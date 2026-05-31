@@ -361,7 +361,8 @@ where
     let encoder = create_encoder(test.device());
     let target = create_render_target(test.device());
     let attachment = color_attachment(target.view);
-    let descriptor = render_pass_descriptor(&[attachment]);
+    let attachments = [attachment];
+    let descriptor = render_pass_descriptor(&attachments);
     let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
     commands(pass);
     yawgpu::wgpuRenderPassEncoderEnd(pass);
@@ -377,7 +378,8 @@ where
     let encoder = create_encoder(test.device());
     let target = create_render_target(test.device());
     let attachment = color_attachment(target.view);
-    let descriptor = render_pass_descriptor(&[attachment]);
+    let attachments = [attachment];
+    let descriptor = render_pass_descriptor(&attachments);
     let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
     commands(pass);
     yawgpu::wgpuRenderPassEncoderEnd(pass);
