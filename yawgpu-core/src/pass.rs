@@ -46,6 +46,19 @@ pub(crate) struct PassEncoderState {
     pub(crate) command_referenced_buffers: Vec<Arc<Buffer>>,
     pub(crate) scope_buffer_uses: Vec<BufferScopeUse>,
     pub(crate) scope_texture_uses: Vec<TextureScopeUse>,
+    pub(crate) draw_count: u64,
+    pub(crate) max_draw_count: u64,
+}
+
+/// Groups pass encoder creation metadata.
+#[derive(Debug)]
+pub(crate) struct PassEncoderInit {
+    pub(crate) attachment_signature: Option<AttachmentSignature>,
+    pub(crate) render_extent: Option<Extent3d>,
+    pub(crate) attachment_textures: Vec<Texture>,
+    pub(crate) render_color_attachment: Option<RenderPassColorExecution>,
+    pub(crate) occlusion_query_set: Option<QuerySet>,
+    pub(crate) max_draw_count: u64,
 }
 
 impl PassEncoderState {
@@ -57,6 +70,7 @@ impl PassEncoderState {
         attachment_textures: Vec<Texture>,
         render_color_attachment: Option<RenderPassColorExecution>,
         occlusion_query_set: Option<QuerySet>,
+        max_draw_count: u64,
     ) -> Self {
         Self {
             ended: false,
@@ -79,6 +93,8 @@ impl PassEncoderState {
             command_referenced_buffers: Vec::new(),
             scope_buffer_uses: Vec::new(),
             scope_texture_uses: Vec::new(),
+            draw_count: 0,
+            max_draw_count,
         }
     }
 
@@ -122,26 +138,19 @@ pub(crate) struct BoundIndexBuffer {
 
 impl PassEncoderInner {
     /// Creates a new instance.
-    pub(crate) fn new(
-        parent: CommandEncoder,
-        token: PassToken,
-        attachment_signature: Option<AttachmentSignature>,
-        render_extent: Option<Extent3d>,
-        attachment_textures: Vec<Texture>,
-        render_color_attachment: Option<RenderPassColorExecution>,
-        occlusion_query_set: Option<QuerySet>,
-    ) -> Self {
+    pub(crate) fn new(parent: CommandEncoder, token: PassToken, init: PassEncoderInit) -> Self {
         let limits = parent.inner.limits;
         Self {
             parent,
             token,
             state: Mutex::new(PassEncoderState::new(
-                attachment_signature,
-                render_extent,
+                init.attachment_signature,
+                init.render_extent,
                 limits,
-                attachment_textures,
-                render_color_attachment,
-                occlusion_query_set,
+                init.attachment_textures,
+                init.render_color_attachment,
+                init.occlusion_query_set,
+                init.max_draw_count,
             )),
         }
     }
@@ -164,6 +173,7 @@ impl PassEncoderInner {
         state.ended = true;
         let unbalanced_debug_groups = state.debug_group_depth != 0;
         let open_occlusion_query = state.open_occlusion_query.is_some();
+        let draw_count_exceeded = state.draw_count > state.max_draw_count;
         let render_pass_command = if !state.render_pass_recorded {
             state
                 .render_color_attachment
@@ -195,6 +205,10 @@ impl PassEncoderInner {
         } else if open_occlusion_query {
             self.parent
                 .record_first_error("render pass occlusion query is still open");
+            None
+        } else if draw_count_exceeded {
+            self.parent
+                .record_first_error("render pass draw count exceeds maxDrawCount");
             None
         } else {
             None
@@ -353,6 +367,7 @@ pub(crate) fn validate_render_draw_base_state(
     if pipeline.is_error() {
         return Err("render pass draw requires a valid render pipeline".to_owned());
     }
+    validate_draw_time_bind_groups_plus_vertex_buffers(state, limits)?;
     validate_pipeline_bind_groups(pipeline.bind_group_layouts(), &state.bind_groups, limits)?;
     for slot in 0..pipeline.required_vertex_buffer_count() {
         let slot = u32::try_from(slot)
@@ -367,6 +382,36 @@ pub(crate) fn validate_render_draw_base_state(
         return Err("render pass indexed draw requires an index buffer".to_owned());
     }
     Ok(pipeline)
+}
+
+fn validate_draw_time_bind_groups_plus_vertex_buffers(
+    state: &PassEncoderState,
+    limits: Limits,
+) -> Result<(), String> {
+    let bind_group_count = state
+        .bind_groups
+        .keys()
+        .next_back()
+        .copied()
+        .map_or(0, |index| index + 1);
+    let vertex_buffer_count = state
+        .vertex_buffers
+        .keys()
+        .next_back()
+        .copied()
+        .map_or(0, |slot| slot + 1);
+    let total = bind_group_count
+        .checked_add(vertex_buffer_count)
+        .ok_or_else(|| {
+            "render pass draw bind group plus vertex buffer count overflows".to_owned()
+        })?;
+    if total > limits.max_bind_groups_plus_vertex_buffers {
+        return Err(
+            "render pass draw bind group plus vertex buffer count exceeds the device limit"
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 /// Validates set index buffer and returns a descriptive error on failure.
@@ -1229,7 +1274,9 @@ pub(crate) fn validate_scissor_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::noop_texture;
+    use crate::test_helpers::{empty_bind_group, noop_device, noop_texture};
+
+    use std::sync::Arc;
 
     fn texture_use(
         texture: &Texture,
@@ -1358,6 +1405,55 @@ mod tests {
             validate_texture_usage_scope(&[read_a, write]),
             Err(
                 "usage scope cannot read and write or write the same texture subresource twice"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn draw_time_bind_groups_plus_vertex_buffers_is_checked_at_limit() {
+        let device = noop_device();
+        let mut limits = device.limits();
+        limits.max_bind_groups_plus_vertex_buffers = 3;
+        let bind_group = empty_bind_group(&device);
+        let vertex_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::VERTEX,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let mut state = PassEncoderState::new(None, None, limits, Vec::new(), None, None, u64::MAX);
+        state.bind_groups.insert(
+            1,
+            BoundBindGroup {
+                group: bind_group,
+                dynamic_offsets: Vec::new(),
+            },
+        );
+        state.vertex_buffers.insert(
+            0,
+            BoundVertexBuffer {
+                buffer: vertex_buffer.clone(),
+                offset: 0,
+                size: 16,
+            },
+        );
+        assert_eq!(
+            validate_draw_time_bind_groups_plus_vertex_buffers(&state, limits),
+            Ok(())
+        );
+
+        state.vertex_buffers.insert(
+            1,
+            BoundVertexBuffer {
+                buffer: vertex_buffer,
+                offset: 0,
+                size: 16,
+            },
+        );
+        assert_eq!(
+            validate_draw_time_bind_groups_plus_vertex_buffers(&state, limits),
+            Err(
+                "render pass draw bind group plus vertex buffer count exceeds the device limit"
                     .to_owned()
             )
         );

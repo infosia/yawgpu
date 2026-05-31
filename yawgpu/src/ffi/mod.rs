@@ -1542,7 +1542,15 @@ impl PendingCallback {
                 ..
             } => {
                 if let Some(callback) = callback {
-                    if pipeline._core.is_error() {
+                    if pipeline._device.is_lost() {
+                        callback(
+                            native::WGPUCreatePipelineAsyncStatus_Success,
+                            arc_to_handle(pipeline),
+                            string_view(b""),
+                            userdata1 as *mut c_void,
+                            userdata2 as *mut c_void,
+                        );
+                    } else if pipeline._core.is_error() {
                         callback(
                             native::WGPUCreatePipelineAsyncStatus_ValidationError,
                             std::ptr::null(),
@@ -1569,7 +1577,15 @@ impl PendingCallback {
                 ..
             } => {
                 if let Some(callback) = callback {
-                    if pipeline._core.is_error() {
+                    if pipeline._device.is_lost() {
+                        callback(
+                            native::WGPUCreatePipelineAsyncStatus_Success,
+                            arc_to_handle(pipeline),
+                            string_view(b""),
+                            userdata1 as *mut c_void,
+                            userdata2 as *mut c_void,
+                        );
+                    } else if pipeline._core.is_error() {
                         callback(
                             native::WGPUCreatePipelineAsyncStatus_ValidationError,
                             std::ptr::null(),

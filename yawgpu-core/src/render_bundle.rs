@@ -107,6 +107,7 @@ impl RenderBundleEncoder {
                             Vec::new(),
                             None,
                             None,
+                            u64::MAX,
                         ),
                     }),
                 }),

@@ -223,7 +223,6 @@ fn create_render_pipeline() {
 }
 
 #[test]
-#[ignore = "core currently resolves createComputePipelineAsync with ValidationError; CTS expects device-lost async pipeline creation to complete without validation error"]
 fn create_compute_pipeline_async() {
     for await_lost in [false, true] {
         let test = ValidationTest::new();
@@ -247,7 +246,6 @@ fn create_compute_pipeline_async() {
 }
 
 #[test]
-#[ignore = "core currently resolves createRenderPipelineAsync with ValidationError; CTS expects device-lost async pipeline creation to complete without validation error"]
 fn create_render_pipeline_async() {
     for await_lost in [false, true] {
         let test = ValidationTest::new();

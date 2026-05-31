@@ -24,6 +24,8 @@ pub struct RenderPassDescriptor {
     pub occlusion_query_set: Option<QuerySet>,
     /// Timestamp writes.
     pub timestamp_writes: Option<RenderPassTimestampWrites>,
+    /// Maximum draw calls allowed in this pass.
+    pub max_draw_count: u64,
 }
 
 /// Stores render pass timestamp writes data used by validation and backend submission.
@@ -295,6 +297,7 @@ impl RenderPassEncoder {
             let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
             let attachment_uses = state.attachment_texture_uses.clone();
             record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
+            state.draw_count = state.draw_count.saturating_add(1);
             let color_attachment = state
                 .render_color_attachment
                 .clone()
@@ -346,7 +349,9 @@ impl RenderPassEncoder {
             );
             let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
             let attachment_uses = state.attachment_texture_uses.clone();
-            record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)
+            record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
+            state.draw_count = state.draw_count.saturating_add(1);
+            Ok(())
         })
     }
 
@@ -370,6 +375,7 @@ impl RenderPassEncoder {
             record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
             validate_indirect_buffer(&indirect_buffer, indirect_offset, 16, "draw indirect")?;
             self.inner.parent.record_referenced_buffer(indirect_buffer);
+            state.draw_count = state.draw_count.saturating_add(1);
             Ok(())
         })
     }
@@ -399,6 +405,7 @@ impl RenderPassEncoder {
                 "draw indexed indirect",
             )?;
             self.inner.parent.record_referenced_buffer(indirect_buffer);
+            state.draw_count = state.draw_count.saturating_add(1);
             Ok(())
         })
     }
@@ -593,6 +600,46 @@ mod tests {
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
         assert_eq!(command_buffer.command_ops().len(), 1);
+    }
+
+    #[test]
+    fn render_pass_encoder_enforces_max_draw_count_at_finish() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let view = noop_render_attachment(&device);
+        let mut descriptor = noop_render_pass_descriptor(view, None);
+        descriptor.max_draw_count = 1;
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&descriptor);
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("render pass draw count exceeds maxDrawCount".to_owned())
+        );
+
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let view = noop_render_attachment(&device);
+        let mut descriptor = noop_render_pass_descriptor(view, None);
+        descriptor.max_draw_count = 1;
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&descriptor);
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
     }
 
     #[test]

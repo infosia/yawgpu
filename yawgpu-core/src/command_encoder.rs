@@ -254,11 +254,14 @@ impl CommandEncoder {
                     let inner = Arc::new(PassEncoderInner::new(
                         self.clone(),
                         token,
-                        attachment_signature,
-                        render_pass_extent(descriptor),
-                        render_pass_attachment_textures(descriptor),
-                        render_pass_color_execution(descriptor),
-                        descriptor.occlusion_query_set.clone(),
+                        PassEncoderInit {
+                            attachment_signature,
+                            render_extent: render_pass_extent(descriptor),
+                            attachment_textures: render_pass_attachment_textures(descriptor),
+                            render_color_attachment: render_pass_color_execution(descriptor),
+                            occlusion_query_set: descriptor.occlusion_query_set.clone(),
+                            max_draw_count: descriptor.max_draw_count,
+                        },
                     ));
                     inner
                         .state
@@ -280,11 +283,14 @@ impl CommandEncoder {
                 inner: Arc::new(PassEncoderInner::new(
                     self.clone(),
                     token,
-                    None,
-                    None,
-                    Vec::new(),
-                    None,
-                    None,
+                    PassEncoderInit {
+                        attachment_signature: None,
+                        render_extent: None,
+                        attachment_textures: Vec::new(),
+                        render_color_attachment: None,
+                        occlusion_query_set: None,
+                        max_draw_count: u64::MAX,
+                    },
                 )),
             },
             immediate_error,
@@ -928,6 +934,37 @@ pub(crate) fn validate_render_pass_timestamp_writes(
     Ok(())
 }
 
+/// Validates compute pass timestamp writes and returns a descriptive error on failure.
+pub fn validate_compute_pass_timestamp_writes(
+    timestamp_writes: &RenderPassTimestampWrites,
+) -> Result<(), String> {
+    validate_timestamp_query_set(
+        &timestamp_writes.query_set,
+        "compute pass timestamp writes query set",
+    )?;
+    if timestamp_writes.beginning_index.is_none() && timestamp_writes.end_index.is_none() {
+        return Err("compute pass timestamp writes requires at least one query index".to_owned());
+    }
+    if let Some(index) = timestamp_writes.beginning_index {
+        validate_query_index(
+            &timestamp_writes.query_set,
+            index,
+            "compute pass beginning timestamp query index",
+        )?;
+    }
+    if let Some(index) = timestamp_writes.end_index {
+        validate_query_index(
+            &timestamp_writes.query_set,
+            index,
+            "compute pass end timestamp query index",
+        )?;
+    }
+    if timestamp_writes.beginning_index == timestamp_writes.end_index {
+        return Err("compute pass timestamp write indices must be distinct".to_owned());
+    }
+    Ok(())
+}
+
 /// Validates occlusion query set and returns a descriptive error on failure.
 pub(crate) fn validate_occlusion_query_set(
     query_set: &QuerySet,
@@ -1551,9 +1588,6 @@ pub(crate) fn validate_texture_to_texture_copy(
     if !destination.usage().contains(TextureUsage::COPY_DST) {
         return Err("copy texture destination must have CopyDst usage".to_owned());
     }
-    if source_copy.aspect != destination_copy.aspect {
-        return Err("copy texture aspects must match".to_owned());
-    }
     if !texture_formats_copy_compatible(source.format(), destination.format()) {
         return Err("copy texture formats are not copy-compatible".to_owned());
     }
@@ -1570,7 +1604,7 @@ pub(crate) fn validate_texture_to_texture_copy(
         "copy texture source",
         false,
     )?;
-    validate_texture_copy_subresource(
+    let destination_caps = validate_texture_copy_subresource(
         &destination,
         destination_copy.mip_level,
         destination_copy.origin,
@@ -1579,11 +1613,22 @@ pub(crate) fn validate_texture_to_texture_copy(
         "copy texture destination",
         false,
     )?;
-
-    if (source_caps.aspects.depth || source_caps.aspects.stencil)
+    if source_caps.aspects.depth
+        && source_caps.aspects.stencil
         && source_copy.aspect != TextureAspect::All
     {
-        return Err("copy texture to texture depth/stencil copies require All aspect".to_owned());
+        return Err(
+            "copy texture to texture combined depth-stencil source requires All aspect".to_owned(),
+        );
+    }
+    if destination_caps.aspects.depth
+        && destination_caps.aspects.stencil
+        && destination_copy.aspect != TextureAspect::All
+    {
+        return Err(
+            "copy texture to texture combined depth-stencil destination requires All aspect"
+                .to_owned(),
+        );
     }
     if source.sample_count() > 1
         && (!origin_is_zero(source_copy.origin)
@@ -2210,6 +2255,146 @@ mod tests {
     }
 
     #[test]
+    fn texture_to_texture_copy_validates_aspects_independently() {
+        let device = noop_device();
+        let source = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_SRC,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: TextureFormat::from_raw(TextureFormat::DEPTH32_FLOAT),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+        let destination = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: TextureFormat::from_raw(TextureFormat::DEPTH32_FLOAT),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+        let size = Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+        let source_info = TexelCopyTextureInfo {
+            texture: source.clone(),
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: 0 },
+            aspect: TextureAspect::DepthOnly,
+        };
+        let destination_info = TexelCopyTextureInfo {
+            texture: destination.clone(),
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: 0 },
+            aspect: TextureAspect::All,
+        };
+        assert_eq!(
+            validate_texture_to_texture_copy(source_info, destination_info, size),
+            Ok(())
+        );
+
+        let invalid_source = TexelCopyTextureInfo {
+            texture: source,
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: 0 },
+            aspect: TextureAspect::StencilOnly,
+        };
+        let invalid_destination = TexelCopyTextureInfo {
+            texture: destination,
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: 0 },
+            aspect: TextureAspect::All,
+        };
+        assert_eq!(
+            validate_texture_to_texture_copy(invalid_source, invalid_destination, size),
+            Err("copy texture source StencilOnly aspect requires a stencil format".to_owned())
+        );
+
+        let combined_source = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_SRC,
+            dimension: TextureDimension::D2,
+            size,
+            format: TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+        let combined_destination = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size,
+            format: TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+        let combined_source_info = TexelCopyTextureInfo {
+            texture: combined_source.clone(),
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: 0 },
+            aspect: TextureAspect::All,
+        };
+        let combined_destination_info = TexelCopyTextureInfo {
+            texture: combined_destination.clone(),
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: 0 },
+            aspect: TextureAspect::All,
+        };
+        assert_eq!(
+            validate_texture_to_texture_copy(
+                combined_source_info.clone(),
+                combined_destination_info.clone(),
+                size,
+            ),
+            Ok(())
+        );
+
+        let depth_only_combined_source = TexelCopyTextureInfo {
+            aspect: TextureAspect::DepthOnly,
+            ..combined_source_info.clone()
+        };
+        assert_eq!(
+            validate_texture_to_texture_copy(
+                depth_only_combined_source,
+                combined_destination_info.clone(),
+                size,
+            ),
+            Err(
+                "copy texture to texture combined depth-stencil source requires All aspect"
+                    .to_owned()
+            )
+        );
+
+        let stencil_only_combined_destination = TexelCopyTextureInfo {
+            aspect: TextureAspect::StencilOnly,
+            ..combined_destination_info
+        };
+        assert_eq!(
+            validate_texture_to_texture_copy(
+                combined_source_info,
+                stencil_only_combined_destination,
+                size,
+            ),
+            Err(
+                "copy texture to texture combined depth-stencil destination requires All aspect"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
     fn command_encoder_query_and_timestamps_pin_validation_and_resolve() {
         let device = noop_device();
         let (timestamp_query, _) = device.create_query_set(QuerySetDescriptor {
@@ -2248,5 +2433,44 @@ mod tests {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
+    }
+
+    #[test]
+    fn compute_pass_timestamp_writes_validate_indices() {
+        let mut features = FeatureSet::new();
+        features.insert(crate::Feature::TimestampQuery);
+        let device = crate::Device::from_hal(hal_noop_device(), Limits::DEFAULT, features, "", "");
+        let (query_set, error) = device.create_query_set(QuerySetDescriptor {
+            label: "timestamps".to_owned(),
+            kind: QueryType::Timestamp,
+            count: 2,
+        });
+        assert_eq!(error, None);
+        let writes = |beginning_index, end_index| RenderPassTimestampWrites {
+            query_set: query_set.clone(),
+            beginning_index,
+            end_index,
+        };
+
+        assert_eq!(
+            validate_compute_pass_timestamp_writes(&writes(None, None)),
+            Err("compute pass timestamp writes requires at least one query index".to_owned())
+        );
+        assert_eq!(
+            validate_compute_pass_timestamp_writes(&writes(Some(1), Some(1))),
+            Err("compute pass timestamp write indices must be distinct".to_owned())
+        );
+        assert_eq!(
+            validate_compute_pass_timestamp_writes(&writes(Some(2), None)),
+            Err("compute pass beginning timestamp query index exceeds query set count".to_owned())
+        );
+        assert_eq!(
+            validate_compute_pass_timestamp_writes(&writes(Some(0), None)),
+            Ok(())
+        );
+        assert_eq!(
+            validate_compute_pass_timestamp_writes(&writes(Some(0), Some(1))),
+            Ok(())
+        );
     }
 }
