@@ -161,8 +161,8 @@ fn populated_format_caps_match_dawn_sanity_checks() {
 
     let snorm = caps(native::WGPUTextureFormat_RGBA8Snorm);
     assert!(snorm.aspects.color);
-    assert!(!snorm.renderable);
-    assert!(!snorm.multisample_capable);
+    assert!(snorm.renderable);
+    assert!(snorm.multisample_capable);
     // snorm formats are NOT storage-capable (Dawn `Format.cpp`).
     assert!(!snorm.storage_capable);
 

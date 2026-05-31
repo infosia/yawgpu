@@ -61,6 +61,63 @@ fn dimension_type_and_format_compatibility() {
 }
 
 #[test]
+fn dimension_type_and_format_compatibility_additional_formats() {
+    let test = ValidationTest::new();
+    unsafe {
+        for format in [
+            native::WGPUTextureFormat_R16Uint,
+            native::WGPUTextureFormat_R16Sint,
+            native::WGPUTextureFormat_R16Float,
+            native::WGPUTextureFormat_RG16Uint,
+            native::WGPUTextureFormat_RG16Sint,
+            native::WGPUTextureFormat_RG16Float,
+            native::WGPUTextureFormat_RGB10A2Uint,
+            native::WGPUTextureFormat_RGB10A2Unorm,
+            native::WGPUTextureFormat_Depth24PlusStencil8,
+        ] {
+            assert_texture_ok(
+                &test,
+                native::WGPUTextureDescriptor {
+                    format,
+                    ..texture_descriptor()
+                },
+            );
+        }
+
+        assert_texture_error(
+            &test,
+            native::WGPUTextureDescriptor {
+                dimension: native::WGPUTextureDimension_3D,
+                format: native::WGPUTextureFormat_Depth24PlusStencil8,
+                size: extent(4, 4, 4),
+                ..texture_descriptor()
+            },
+        );
+    }
+}
+
+#[test]
+fn dimension_type_and_format_compatibility_tier1_formats() {
+    let test = ValidationTest::with_features(&[native::WGPUFeatureName_TextureFormatsTier1]);
+    unsafe {
+        for format in [
+            native::WGPUTextureFormat_R16Unorm,
+            native::WGPUTextureFormat_R16Snorm,
+            native::WGPUTextureFormat_RG16Unorm,
+            native::WGPUTextureFormat_RG16Snorm,
+        ] {
+            assert_texture_ok(
+                &test,
+                native::WGPUTextureDescriptor {
+                    format,
+                    ..texture_descriptor()
+                },
+            );
+        }
+    }
+}
+
+#[test]
 fn mip_level_count_format() {
     let test = ValidationTest::new();
     unsafe {
@@ -127,6 +184,46 @@ fn sample_count_various_sample_count_with_all_formats() {
             } else {
                 assert_texture_error(&test, descriptor);
             }
+        }
+    }
+}
+
+#[test]
+fn sample_count_format_specific_multisample_capability() {
+    let tier1 = ValidationTest::with_features(&[native::WGPUFeatureName_TextureFormatsTier1]);
+    unsafe {
+        for format in [
+            native::WGPUTextureFormat_R8Snorm,
+            native::WGPUTextureFormat_RG8Snorm,
+            native::WGPUTextureFormat_RGBA8Snorm,
+        ] {
+            assert_texture_ok(
+                &tier1,
+                native::WGPUTextureDescriptor {
+                    usage: native::WGPUTextureUsage_RenderAttachment,
+                    format,
+                    sampleCount: 4,
+                    ..texture_descriptor()
+                },
+            );
+        }
+    }
+
+    let test = ValidationTest::new();
+    unsafe {
+        for format in [
+            native::WGPUTextureFormat_R32Uint,
+            native::WGPUTextureFormat_R32Sint,
+        ] {
+            assert_texture_error(
+                &test,
+                native::WGPUTextureDescriptor {
+                    usage: native::WGPUTextureUsage_RenderAttachment,
+                    format,
+                    sampleCount: 4,
+                    ..texture_descriptor()
+                },
+            );
         }
     }
 }
@@ -318,6 +415,22 @@ fn texture_size_3d_texture_compressed_format() {
 }
 
 #[test]
+fn texture_size_3d_etc2_texture_is_invalid() {
+    let test = ValidationTest::with_features(&[native::WGPUFeatureName_TextureCompressionETC2]);
+    unsafe {
+        assert_texture_error(
+            &test,
+            native::WGPUTextureDescriptor {
+                dimension: native::WGPUTextureDimension_3D,
+                format: native::WGPUTextureFormat_ETC2RGBA8Unorm,
+                size: extent(4, 4, 4),
+                ..texture_descriptor()
+            },
+        );
+    }
+}
+
+#[test]
 fn texture_usage() {
     let test = ValidationTest::new();
     unsafe {
@@ -344,13 +457,50 @@ fn texture_usage() {
                 ..texture_descriptor()
             },
         );
+        assert_texture_ok(
+            &test,
+            native::WGPUTextureDescriptor {
+                usage: native::WGPUTextureUsage_RenderAttachment,
+                dimension: native::WGPUTextureDimension_3D,
+                size: extent(4, 4, 4),
+                ..texture_descriptor()
+            },
+        );
+        assert_texture_error(
+            &test,
+            native::WGPUTextureDescriptor {
+                usage: native::WGPUTextureUsage_RenderAttachment,
+                dimension: native::WGPUTextureDimension_1D,
+                size: extent(4, 1, 1),
+                ..texture_descriptor()
+            },
+        );
     }
 }
 
 #[test]
 fn depth_or_array_layers_and_mip_level_count_for_transient_attachments() {
-    // N/A: TRANSIENT_ATTACHMENT is yawgpu's vendor tiled feature, not part of
-    // the default Noop CTS port.
+    let test = ValidationTest::new();
+    unsafe {
+        assert_texture_ok(
+            &test,
+            native::WGPUTextureDescriptor {
+                usage: native::WGPUTextureUsage_RenderAttachment
+                    | native::WGPUTextureUsage_TransientAttachment,
+                ..texture_descriptor()
+            },
+        );
+        assert_texture_error(
+            &test,
+            native::WGPUTextureDescriptor {
+                usage: native::WGPUTextureUsage_RenderAttachment
+                    | native::WGPUTextureUsage_TransientAttachment,
+                dimension: native::WGPUTextureDimension_3D,
+                size: extent(4, 4, 4),
+                ..texture_descriptor()
+            },
+        );
+    }
 }
 
 #[test]
@@ -371,6 +521,21 @@ fn usage() {
                 ..texture_descriptor()
             },
         );
+        for usage in [
+            native::WGPUTextureUsage_TransientAttachment,
+            native::WGPUTextureUsage_TransientAttachment | native::WGPUTextureUsage_CopySrc,
+            native::WGPUTextureUsage_TransientAttachment | native::WGPUTextureUsage_CopyDst,
+            native::WGPUTextureUsage_TransientAttachment | native::WGPUTextureUsage_TextureBinding,
+            native::WGPUTextureUsage_TransientAttachment | native::WGPUTextureUsage_StorageBinding,
+        ] {
+            assert_texture_error(
+                &test,
+                native::WGPUTextureDescriptor {
+                    usage,
+                    ..texture_descriptor()
+                },
+            );
+        }
     }
 }
 
@@ -407,6 +572,63 @@ fn view_formats() {
             native::WGPUTextureDescriptor {
                 viewFormatCount: invalid.len(),
                 viewFormats: invalid.as_ptr(),
+                ..texture_descriptor()
+            },
+        );
+        let incompatible = [native::WGPUTextureFormat_R8Unorm];
+        assert_texture_error(
+            &test,
+            native::WGPUTextureDescriptor {
+                viewFormatCount: incompatible.len(),
+                viewFormats: incompatible.as_ptr(),
+                ..texture_descriptor()
+            },
+        );
+    }
+}
+
+#[test]
+fn view_formats_compressed_srgb_pairs_are_compatible() {
+    let bc = ValidationTest::with_features(&[native::WGPUFeatureName_TextureCompressionBC]);
+    unsafe {
+        let view_formats = [native::WGPUTextureFormat_BC3RGBAUnormSrgb];
+        assert_texture_ok(
+            &bc,
+            native::WGPUTextureDescriptor {
+                format: native::WGPUTextureFormat_BC3RGBAUnorm,
+                size: extent(4, 4, 1),
+                viewFormatCount: view_formats.len(),
+                viewFormats: view_formats.as_ptr(),
+                ..texture_descriptor()
+            },
+        );
+    }
+
+    let etc2 = ValidationTest::with_features(&[native::WGPUFeatureName_TextureCompressionETC2]);
+    unsafe {
+        let view_formats = [native::WGPUTextureFormat_ETC2RGBA8UnormSrgb];
+        assert_texture_ok(
+            &etc2,
+            native::WGPUTextureDescriptor {
+                format: native::WGPUTextureFormat_ETC2RGBA8Unorm,
+                size: extent(4, 4, 1),
+                viewFormatCount: view_formats.len(),
+                viewFormats: view_formats.as_ptr(),
+                ..texture_descriptor()
+            },
+        );
+    }
+
+    let astc = ValidationTest::with_features(&[native::WGPUFeatureName_TextureCompressionASTC]);
+    unsafe {
+        let view_formats = [native::WGPUTextureFormat_ASTC4x4UnormSrgb];
+        assert_texture_ok(
+            &astc,
+            native::WGPUTextureDescriptor {
+                format: native::WGPUTextureFormat_ASTC4x4Unorm,
+                size: extent(4, 4, 1),
+                viewFormatCount: view_formats.len(),
+                viewFormats: view_formats.as_ptr(),
                 ..texture_descriptor()
             },
         );

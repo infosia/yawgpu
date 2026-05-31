@@ -303,10 +303,22 @@ pub fn optional_formats() -> &'static [native::WGPUTextureFormat] {
 pub fn tier1_storage_formats() -> &'static [native::WGPUTextureFormat] {
     &[
         native::WGPUTextureFormat_R8Unorm,
+        native::WGPUTextureFormat_R8Snorm,
+        native::WGPUTextureFormat_R8Uint,
+        native::WGPUTextureFormat_R8Sint,
         native::WGPUTextureFormat_RG8Unorm,
-        native::WGPUTextureFormat_RGBA8UnormSrgb,
-        native::WGPUTextureFormat_BGRA8Unorm,
-        native::WGPUTextureFormat_RGBA16Float,
+        native::WGPUTextureFormat_RG8Snorm,
+        native::WGPUTextureFormat_RG8Uint,
+        native::WGPUTextureFormat_RG8Sint,
+        native::WGPUTextureFormat_R16Uint,
+        native::WGPUTextureFormat_R16Sint,
+        native::WGPUTextureFormat_R16Float,
+        native::WGPUTextureFormat_RG16Uint,
+        native::WGPUTextureFormat_RG16Sint,
+        native::WGPUTextureFormat_RG16Float,
+        native::WGPUTextureFormat_RGB10A2Uint,
+        native::WGPUTextureFormat_RGB10A2Unorm,
+        native::WGPUTextureFormat_RG11B10Ufloat,
     ]
 }
 
