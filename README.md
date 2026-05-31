@@ -429,6 +429,14 @@ SPIR-V or MSL straight to the backend; see
 - **Validation-tested**: the WebGPU validation rules are exercised by an
   extensive suite that runs on the Noop backend with no GPU, so correctness
   checks need no hardware.
+- **CTS conformance**: the validation suite includes a case-by-case port of
+  the official [WebGPU Conformance Test Suite](https://github.com/gpuweb/cts)
+  `api/validation` group — 122 of its 129 spec files (704 `g.test()` cases;
+  the remaining 7 are browser/canvas-only), each re-expressed as a native
+  Rust test under `yawgpu/tests/cts/validation/` and run on Noop. A handful
+  of subcases that depend on optional features or as-yet-unimplemented core
+  rules are kept as spec-correct `#[ignore]`d bodies rather than weakened
+  assertions.
 - **Unit-tested public API**: every public function across the three crates
   has a direct unit test.
 - **Real-GPU end-to-end tests**: buffer/texture/compute/render paths are
