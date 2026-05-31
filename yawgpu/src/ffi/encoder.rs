@@ -1,5 +1,6 @@
 use super::*;
 use crate::conv::map_render_pass_timestamp_writes;
+use yawgpu_core::validate_compute_pass_timestamp_writes;
 
 /// Begins a render pass.
 ///
@@ -62,17 +63,24 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginComputePass(
             );
         } else {
             let timestamp_writes = map_render_pass_timestamp_writes(timestamp_writes);
-            if let Some(index) = timestamp_writes.beginning_index {
-                let error = encoder
-                    .core
-                    .write_timestamp(Arc::new(timestamp_writes.query_set.clone()), index);
-                dispatch_optional_error(&encoder.device, error);
-            }
-            if let Some(index) = timestamp_writes.end_index {
-                let error = encoder
-                    .core
-                    .write_timestamp(Arc::new(timestamp_writes.query_set), index);
-                dispatch_optional_error(&encoder.device, error);
+            if let Err(message) = validate_compute_pass_timestamp_writes(&timestamp_writes) {
+                dispatch_optional_error(
+                    &encoder.device,
+                    encoder.core.record_validation_error(message),
+                );
+            } else {
+                if let Some(index) = timestamp_writes.beginning_index {
+                    let error = encoder
+                        .core
+                        .write_timestamp(Arc::new(timestamp_writes.query_set.clone()), index);
+                    dispatch_optional_error(&encoder.device, error);
+                }
+                if let Some(index) = timestamp_writes.end_index {
+                    let error = encoder
+                        .core
+                        .write_timestamp(Arc::new(timestamp_writes.query_set), index);
+                    dispatch_optional_error(&encoder.device, error);
+                }
             }
         }
     }

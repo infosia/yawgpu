@@ -137,6 +137,7 @@ pub unsafe fn map_render_pass_descriptor(
         .timestampWrites
         .as_ref()
         .map(|timestamp_writes| map_render_pass_timestamp_writes(timestamp_writes));
+    let max_draw_count = render_pass_max_draw_count(value.nextInChain);
 
     core::RenderPassDescriptor {
         max_color_attachments,
@@ -144,7 +145,23 @@ pub unsafe fn map_render_pass_descriptor(
         depth_stencil_attachment,
         occlusion_query_set,
         timestamp_writes,
+        max_draw_count,
     }
+}
+
+unsafe fn render_pass_max_draw_count(mut chain: *const native::WGPUChainedStruct) -> u64 {
+    const DEFAULT_MAX_DRAW_COUNT: u64 = 50_000_000;
+    while let Some(node) = unsafe { chain.as_ref() } {
+        if node.sType == native::WGPUSType_RenderPassMaxDrawCount {
+            let max_draw_count = unsafe {
+                &*(node as *const native::WGPUChainedStruct
+                    as *const native::WGPURenderPassMaxDrawCount)
+            };
+            return max_draw_count.maxDrawCount;
+        }
+        chain = node.next;
+    }
+    DEFAULT_MAX_DRAW_COUNT
 }
 
 /// Maps a render bundle encoder descriptor.

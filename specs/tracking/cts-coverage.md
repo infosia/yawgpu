@@ -162,22 +162,32 @@ never a reason to skip a CTS case.
   usage accumulation (replaced bindings contribute only after use; render
   bundles import recorded usages on execute), and per-view usage-override
   enforcement (sampled/storage bind groups + attachments).
-- **Remaining CTS ignores: ~56** (was ~67; **P1 closed 11** —
-  `capability_checks/limits/*::create_pipeline_layout_at_over` for the
-  per-stage uniform/storage-buffer/sampled-texture/sampler/storage-texture
-  limits + the per-pipeline-layout dynamic uniform/storage-buffer limits —
-  wired real createPipelineLayout aggregation creators that spread entries
-  across ≥2 BGLs; core already validated, no production change). The rest
-  split into: **(a) test-wiring still pending** — `create_pipeline_at_over`
-  shader-resource matrices, command-encoder matrices (setBindGroup /
-  setVertexBuffer / dynamic-offset alignment), render-bundle
-  maxColorAttachments; **(b) genuine core gaps** — inter-stage
-  output↔input matching + maxInterStageShaderVariables counting, maxDrawCount,
-  draw-time maxBindGroupsPlusVertexBuffers, dual-source-blending validation,
-  storage-texture format/access in render auto-layout (these are P2);
-  **(c) optional-feature additions** (shader-f16, dual-source-blending,
-  subgroups, clip-distances, setImmediates, linear_indexing — implement the
-  feature, not just validate); **(d) native-surface** (canvas/configure/
+- **Remaining CTS ignores: ~50** (was ~67; **P1 closed 11**, **P2-core
+  closed 6**). P1 wired `capability_checks/limits/*::create_pipeline_layout_at_over`
+  aggregation creators (core already validated; no production change).
+  P2-core fixed 5 genuine core-validation gaps + un-ignored their 6 cases:
+  **maxDrawCount** now parsed from the `WGPURenderPassMaxDrawCount` chain
+  and enforced at render-pass finish; **draw-time
+  maxBindGroupsPlusVertexBuffers** now checked on bound state;
+  **copyTextureToTexture** no longer requires equal src/dst aspect (each
+  validated independently) while **combined** depth-stencil T2T still
+  requires `All`; **compute-pass timestampWrites** now validated (≥1 index,
+  distinct); **device-lost async pipeline** creation now resolves Success
+  (no ValidationError). **NOTE: inter-stage matching + maxInterStageShaderVariables
+  were already implemented** — the prior matrix row claiming "8/9 ignored"
+  was stale (verified: all 9 `render_pipeline/inter_stage.rs` active).
+  The rest split into: **(a) test-wiring still pending** —
+  `create_pipeline_at_over` shader-resource matrices (core enforces the
+  per-stage limits at BGL/pipeline-layout creation; mostly wiring),
+  command-encoder matrices (setBindGroup / setVertexBuffer / dynamic-offset
+  — gated on the deferred eager-setBindGroup gap), render-bundle
+  maxColorAttachments, required-limit `validate`; **(b) remaining genuine
+  core gaps** — vertex-buffer draw OOB lastStride (needs investigation),
+  dual-source-blending validation, storage-texture format/access in render
+  auto-layout; **(c) optional-feature additions** (shader-f16,
+  dual-source-blending, subgroups, clip-distances, setImmediates,
+  linear_indexing — implement the feature, not just validate);
+  **(d) native-surface** (canvas/configure/
   getCurrentTexture — no Noop fixture); and **(e) C-ABI-N/A** /
   CTS-`.unimplemented()` (permanent).
 - **External-CTS createTexture findings (webgpu-native-cts 3-way re-test)

@@ -4,11 +4,12 @@ use yawgpu::native;
 use yawgpu_test::ValidationTest;
 
 use crate::common::{
-    create_buffer, create_render_pipeline, create_render_pipeline_with, default_primitive,
-    draw_indexed, draw_indexed_indirect, draw_indirect, draw_with_offsets, expect_render_commands,
-    set_index_buffer, set_pipeline, set_vertex_buffer, strip_primitive, vertex_attribute,
-    vertex_buffer_layout, vertex_input_shader, vertex_no_input, CommandExpectation,
-    RenderEncodeType,
+    begin_render_pass, color_attachment, create_buffer, create_encoder, create_render_pipeline,
+    create_render_pipeline_with, create_render_target, default_primitive, draw_indexed,
+    draw_indexed_indirect, draw_indirect, draw_with_offsets, expect_command_buffer,
+    expect_render_commands, release_render_target, render_pass_descriptor, set_index_buffer,
+    set_pipeline, set_vertex_buffer, strip_primitive, vertex_attribute, vertex_buffer_layout,
+    vertex_input_shader, vertex_no_input, CommandExpectation, RenderEncodeType, RenderEncoder,
 };
 
 const ENCODE_TYPES: [RenderEncodeType; 2] =
@@ -359,8 +360,98 @@ fn buffer_binding_overlap() {
 fn last_buffer_setting_take_account() {}
 
 #[test]
-#[ignore = "webgpu.h/core render pass descriptor does not expose or enforce maxDrawCount; CTS expects finish error when drawCount exceeds maxDrawCount"]
-fn max_draw_count() {}
+fn max_draw_count() {
+    let test = ValidationTest::new();
+    unsafe {
+        let pipeline = create_render_pipeline(&test);
+        let indirect = create_buffer(test.device(), 20, native::WGPUBufferUsage_Indirect);
+        for draw_type in draw_types() {
+            let index = if matches!(
+                draw_type,
+                DrawType::DrawIndexed | DrawType::DrawIndexedIndirect
+            ) {
+                Some(create_buffer(
+                    test.device(),
+                    16,
+                    native::WGPUBufferUsage_Index,
+                ))
+            } else {
+                None
+            };
+            for draw_count in [2, 3] {
+                expect_max_draw_count_commands(
+                    &test,
+                    2,
+                    if draw_count == 2 {
+                        CommandExpectation::Success
+                    } else {
+                        CommandExpectation::FinishError
+                    },
+                    |encoder| {
+                        set_pipeline(&encoder, pipeline);
+                        if let Some(index) = index {
+                            set_index_buffer(
+                                &encoder,
+                                index,
+                                native::WGPUIndexFormat_Uint16,
+                                0,
+                                16,
+                            );
+                        }
+                        for _ in 0..draw_count {
+                            match draw_type {
+                                DrawType::Draw => draw_with_offsets(&encoder, 3, 1, 0, 0),
+                                DrawType::DrawIndexed => draw_indexed(&encoder, 3, 1, 0, 0, 0),
+                                DrawType::DrawIndirect => draw_indirect(&encoder, indirect),
+                                DrawType::DrawIndexedIndirect => {
+                                    draw_indexed_indirect(&encoder, indirect)
+                                }
+                            }
+                        }
+                    },
+                );
+            }
+            if let Some(index) = index {
+                yawgpu::wgpuBufferRelease(index);
+            }
+        }
+        yawgpu::wgpuBufferRelease(indirect);
+        yawgpu::wgpuRenderPipelineRelease(pipeline);
+    }
+}
+
+unsafe fn expect_max_draw_count_commands<F>(
+    test: &ValidationTest,
+    max_draw_count: u64,
+    expectation: CommandExpectation,
+    commands: F,
+) where
+    F: FnOnce(RenderEncoder),
+{
+    let encoder = unsafe { create_encoder(test.device()) };
+    let target =
+        unsafe { create_render_target(test.device(), native::WGPUTextureFormat_RGBA8Unorm, 1) };
+    let attachment = color_attachment(target.view);
+    let attachments = [attachment];
+    let mut max_draw_count_chain = native::WGPURenderPassMaxDrawCount {
+        chain: native::WGPUChainedStruct {
+            next: std::ptr::null_mut(),
+            sType: native::WGPUSType_RenderPassMaxDrawCount,
+        },
+        maxDrawCount: max_draw_count,
+    };
+    let mut descriptor = render_pass_descriptor(&attachments, None);
+    descriptor.nextInChain = (&mut max_draw_count_chain.chain) as *mut _;
+    let pass = unsafe { begin_render_pass(encoder, &descriptor) };
+    commands(RenderEncoder::RenderPass(pass));
+    unsafe {
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        expect_command_buffer(test, encoder, expectation);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        release_render_target(target);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+    }
+}
 
 fn draw_types() -> [DrawType; 4] {
     [

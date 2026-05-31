@@ -508,7 +508,6 @@ fn copy_within_same_texture() {
 }
 
 #[test]
-#[ignore = "core requires source and destination copy aspects to be equal for copyTextureToTexture; CTS expects independently valid aspects to be accepted"]
 fn copy_aspects() {
     let test = ValidationTest::new();
     unsafe {

@@ -169,6 +169,7 @@ pub(crate) fn noop_render_pass_descriptor(
         depth_stencil_attachment: None,
         occlusion_query_set,
         timestamp_writes: None,
+        max_draw_count: 50_000_000,
     }
 }
 

@@ -47,7 +47,6 @@ fn timestamp_writes_invalid_query_set() {
 }
 
 #[test]
-#[ignore = "core allows compute pass timestampWrites with both query indices undefined; CTS expects duplicate undefined indices to fail"]
 fn timestamp_writes_query_index() {
     let test = ValidationTest::with_features(&[native::WGPUFeatureName_TimestampQuery]);
     unsafe {

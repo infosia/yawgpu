@@ -49,7 +49,7 @@ pub use buffer::{
     Buffer, BufferDescriptor, BufferMapState, BufferUsage, MapAsyncStatus, MapMode,
     QueueWorkDoneStatus,
 };
-pub use command_encoder::{CommandBuffer, CommandEncoder};
+pub use command_encoder::{validate_compute_pass_timestamp_writes, CommandBuffer, CommandEncoder};
 pub use compute_pass::ComputePassEncoder;
 pub use compute_pipeline::{
     ComputePipeline, ComputePipelineDescriptor, ComputePipelineLayout, PipelineConstant,
