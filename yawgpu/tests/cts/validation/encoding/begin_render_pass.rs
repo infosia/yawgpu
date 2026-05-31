@@ -100,7 +100,8 @@ fn depth_stencil_attachment_device_mismatch() {
                 1,
             );
             let depth_attachment = depth_stencil_attachment(depth.view);
-            let descriptor = render_pass_descriptor(&[], Some(&depth_attachment));
+            let attachments = [];
+            let descriptor = render_pass_descriptor(&attachments, Some(&depth_attachment));
 
             finish_render_pass(&test, &descriptor, !mismatched);
 
@@ -131,7 +132,8 @@ fn occlusion_query_set_device_mismatch() {
                 1,
             );
             let attachment = crate::common::color_attachment(color.view);
-            let mut descriptor = render_pass_descriptor(&[attachment], None);
+            let attachments = [attachment];
+            let mut descriptor = render_pass_descriptor(&attachments, None);
             descriptor.occlusionQuerySet = query_set;
 
             finish_render_pass(&test, &descriptor, !mismatched);
@@ -165,7 +167,8 @@ fn timestamp_query_set_device_mismatch() {
                 1,
             );
             let attachment = crate::common::color_attachment(color.view);
-            let mut descriptor = render_pass_descriptor(&[attachment], None);
+            let attachments = [attachment];
+            let mut descriptor = render_pass_descriptor(&attachments, None);
             descriptor.timestampWrites = &writes;
 
             finish_render_pass(&test, &descriptor, !mismatched);

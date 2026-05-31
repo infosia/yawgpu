@@ -497,7 +497,8 @@ pub unsafe fn record_bind_group_use(
                     create_texture(test.device(), native::WGPUTextureUsage_RenderAttachment);
                 let color_view = create_texture_view(color);
                 let color_attachment = color_attachment(color_view);
-                let descriptor = render_pass_descriptor(&[color_attachment], std::ptr::null());
+                let color_attachments = [color_attachment];
+                let descriptor = render_pass_descriptor(&color_attachments, std::ptr::null());
                 let encoder = create_encoder(test.device());
                 let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
                 yawgpu::wgpuRenderPassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
@@ -537,7 +538,8 @@ pub unsafe fn record_bind_group_use(
                     create_texture(test.device(), native::WGPUTextureUsage_RenderAttachment);
                 let color_view = create_texture_view(color);
                 let color_attachment = color_attachment(color_view);
-                let descriptor = render_pass_descriptor(&[color_attachment], std::ptr::null());
+                let color_attachments = [color_attachment];
+                let descriptor = render_pass_descriptor(&color_attachments, std::ptr::null());
                 let command_encoder = create_encoder(test.device());
                 let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(command_encoder, &descriptor);
                 yawgpu::wgpuRenderPassEncoderExecuteBundles(pass, 1, &bundle);
@@ -567,7 +569,8 @@ pub unsafe fn record_vertex_buffer_use(
                     create_texture(test.device(), native::WGPUTextureUsage_RenderAttachment);
                 let color_view = create_texture_view(color);
                 let color_attachment = color_attachment(color_view);
-                let descriptor = render_pass_descriptor(&[color_attachment], std::ptr::null());
+                let color_attachments = [color_attachment];
+                let descriptor = render_pass_descriptor(&color_attachments, std::ptr::null());
                 let encoder = create_encoder(test.device());
                 let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
                 yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 0, buffer, 0, 4);
@@ -606,7 +609,8 @@ pub unsafe fn record_index_buffer_use(
                     create_texture(test.device(), native::WGPUTextureUsage_RenderAttachment);
                 let color_view = create_texture_view(color);
                 let color_attachment = color_attachment(color_view);
-                let descriptor = render_pass_descriptor(&[color_attachment], std::ptr::null());
+                let color_attachments = [color_attachment];
+                let descriptor = render_pass_descriptor(&color_attachments, std::ptr::null());
                 let encoder = create_encoder(test.device());
                 let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
                 yawgpu::wgpuRenderPassEncoderSetIndexBuffer(
@@ -653,7 +657,8 @@ pub unsafe fn render_bundle_to_command_buffer(
         let color = create_texture(test.device(), native::WGPUTextureUsage_RenderAttachment);
         let color_view = create_texture_view(color);
         let color_attachment = color_attachment(color_view);
-        let descriptor = render_pass_descriptor(&[color_attachment], std::ptr::null());
+        let color_attachments = [color_attachment];
+        let descriptor = render_pass_descriptor(&color_attachments, std::ptr::null());
         let encoder = create_encoder(test.device());
         let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
         yawgpu::wgpuRenderPassEncoderExecuteBundles(pass, 1, &bundle);

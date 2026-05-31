@@ -112,7 +112,8 @@ fn render_pass_commands() {
                 );
                 let attachment = color_attachment(color.view);
                 let query_set = create_query_set(test.device(), native::WGPUQueryType_Occlusion, 1);
-                let mut descriptor = render_pass_descriptor(&[attachment], None);
+                let attachments = [attachment];
+                let mut descriptor = render_pass_descriptor(&attachments, None);
                 descriptor.occlusionQuerySet = query_set;
                 let encoder = create_encoder(test.device());
                 let pass = begin_render_pass(encoder, &descriptor);
@@ -284,7 +285,8 @@ unsafe fn run_encoder_command(
             yawgpu::wgpuComputePassEncoderRelease(pass);
         }
         "beginRenderPass" => {
-            let descriptor = render_pass_descriptor(&[], None);
+            let attachments = [];
+            let descriptor = render_pass_descriptor(&attachments, None);
             let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
             yawgpu::wgpuRenderPassEncoderRelease(pass);
         }

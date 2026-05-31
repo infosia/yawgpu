@@ -184,7 +184,8 @@ unsafe fn record_render_pass(
     view: native::WGPUTextureView,
 ) {
     let attachment = color_attachment(view);
-    let descriptor = render_pass_descriptor(&[attachment]);
+    let attachments = [attachment];
+    let descriptor = render_pass_descriptor(&attachments);
     let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
     yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
     if let Some(bind_group) = bind_group {

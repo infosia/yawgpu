@@ -19,7 +19,8 @@ fn render_draw_validates_pipeline_bind_groups_vertex_buffers_and_index_buffer() 
         );
         let pipeline_layout = create_pipeline_layout(test.device(), &[bind_group_layout]);
         let attribute = vertex_attribute(native::WGPUVertexFormat_Float32x2, 0, 0);
-        let vertex_buffer = vertex_buffer(8, &[attribute]);
+        let attributes = [attribute];
+        let vertex_buffer = vertex_buffer(8, &attributes);
         let pipeline = create_render_pipeline(
             &test,
             render_uniform_vertex_input(),
@@ -546,7 +547,8 @@ where
     let encoder = create_encoder(test);
     let target = create_render_target(test.device());
     let color_attachment = color_attachment(target.view);
-    let descriptor = render_pass_descriptor(&[color_attachment]);
+    let attachments = [color_attachment];
+    let descriptor = render_pass_descriptor(&attachments);
     test.clear_errors();
     let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
     assert!(!pass.is_null());
@@ -567,7 +569,8 @@ where
     let encoder = create_encoder(test);
     let target = create_render_target(test.device());
     let color_attachment = color_attachment(target.view);
-    let descriptor = render_pass_descriptor(&[color_attachment]);
+    let attachments = [color_attachment];
+    let descriptor = render_pass_descriptor(&attachments);
     test.clear_errors();
     let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
     assert!(!pass.is_null());

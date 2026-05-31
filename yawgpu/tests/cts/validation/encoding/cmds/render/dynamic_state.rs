@@ -308,7 +308,8 @@ unsafe fn expect_dynamic_command_with_attachment<F>(
         let encoder = create_encoder(test.device());
         let target = create_render_target_with_size(test.device(), attachment_size);
         let attachment = color_attachment(target.view);
-        let descriptor = render_pass_descriptor(&[attachment], None);
+        let attachments = [attachment];
+        let descriptor = render_pass_descriptor(&attachments, None);
         let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
         assert!(!pass.is_null());
         command(pass);

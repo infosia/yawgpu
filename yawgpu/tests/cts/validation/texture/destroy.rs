@@ -53,7 +53,8 @@ fn submit_a_destroyed_texture_as_attachment() {
         assert!(!view.is_null());
 
         let attachment = color_attachment(view);
-        let pass_descriptor = render_pass_descriptor(&[attachment]);
+        let attachments = [attachment];
+        let pass_descriptor = render_pass_descriptor(&attachments);
         let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(test.device(), std::ptr::null());
         let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_descriptor);
         yawgpu::wgpuRenderPassEncoderEnd(pass);

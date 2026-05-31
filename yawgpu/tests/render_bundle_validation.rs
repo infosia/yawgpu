@@ -9,7 +9,9 @@ fn render_bundle_encoder_descriptor_is_validated() {
             &test,
             bundle_descriptor(&[], native::WGPUTextureFormat_Undefined, 1),
         );
-        let invalid_descriptor = bundle_descriptor(&[], native::WGPUTextureFormat_Undefined, 1);
+        let color_formats = [];
+        let invalid_descriptor =
+            bundle_descriptor(&color_formats, native::WGPUTextureFormat_Undefined, 1);
         let mut invalid_encoder = std::ptr::null();
         test.assert_device_error_after(
             || {
@@ -366,7 +368,8 @@ where
         sample_count,
     );
     let attachment = color_attachment(target.view);
-    let descriptor = render_pass_descriptor(&[attachment]);
+    let attachments = [attachment];
+    let descriptor = render_pass_descriptor(&attachments);
     test.clear_errors();
     let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
     assert!(!pass.is_null());
@@ -391,7 +394,8 @@ where
         sample_count,
     );
     let attachment = color_attachment(target.view);
-    let descriptor = render_pass_descriptor(&[attachment]);
+    let attachments = [attachment];
+    let descriptor = render_pass_descriptor(&attachments);
     test.clear_errors();
     let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
     assert!(!pass.is_null());

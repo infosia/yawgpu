@@ -175,7 +175,8 @@ fn render_pass_query_sets_are_validated() {
         let occlusion = create_query_set(fixture.device, native::WGPUQueryType_Occlusion, 2);
         let timestamp = create_query_set(fixture.device, native::WGPUQueryType_Timestamp, 2);
 
-        let mut descriptor = render_pass_descriptor(&[color_attachment]);
+        let attachments = [color_attachment];
+        let mut descriptor = render_pass_descriptor(&attachments);
         descriptor.occlusionQuerySet = timestamp;
         finish_render_pass_error(&fixture, &descriptor);
 

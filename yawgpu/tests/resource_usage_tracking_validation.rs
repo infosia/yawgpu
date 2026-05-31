@@ -253,7 +253,8 @@ unsafe fn assert_render_usage_error_with_attachment(
     let pipeline = create_render_pipeline(test, vertex_source, fragment_source, pipeline_layout);
     let encoder = create_encoder(test);
     let attachment = color_attachment(attachment_view);
-    let descriptor = render_pass_descriptor(&[attachment]);
+    let attachments = [attachment];
+    let descriptor = render_pass_descriptor(&attachments);
     let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
     assert!(!pass.is_null());
     yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
@@ -283,7 +284,8 @@ unsafe fn assert_render_usage_ok_with_attachment(
     let pipeline = create_render_pipeline(test, vertex_source, fragment_source, pipeline_layout);
     let encoder = create_encoder(test);
     let attachment = color_attachment(attachment_view);
-    let descriptor = render_pass_descriptor(&[attachment]);
+    let attachments = [attachment];
+    let descriptor = render_pass_descriptor(&attachments);
     let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
     assert!(!pass.is_null());
     yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
