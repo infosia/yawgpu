@@ -233,6 +233,13 @@ pub(crate) fn validate_texture_view_descriptor(
     if texture.dimension() != TextureDimension::D3 && layer_end > texture_layers {
         return Some("texture view array layer range exceeds texture layers");
     }
+    if matches!(
+        dimension,
+        TextureViewDimension::Cube | TextureViewDimension::CubeArray
+    ) && texture.size().width != texture.size().height
+    {
+        return Some("cube texture views require square faces");
+    }
 
     match texture.dimension() {
         TextureDimension::D1 if dimension != TextureViewDimension::D1 => {
@@ -249,6 +256,7 @@ pub(crate) fn validate_texture_view_descriptor(
             TextureViewDimension::Cube if array_layer_count != 6 => {
                 return Some("cube texture views require exactly six array layers");
             }
+            TextureViewDimension::Cube => {}
             TextureViewDimension::CubeArray if !array_layer_count.is_multiple_of(6) => {
                 return Some(
                     "cube-array texture views require a layer count that is a multiple of six",
@@ -259,7 +267,6 @@ pub(crate) fn validate_texture_view_descriptor(
                 return Some("2D textures require 2D-compatible views");
             }
             TextureViewDimension::D2 => {}
-            _ => return Some("texture view dimension is unsupported"),
         },
         _ => {}
     }
@@ -356,5 +363,60 @@ mod tests {
             )),
         });
         assert_eq!(error, Some("texture view usage contains unknown bits"));
+    }
+
+    #[test]
+    fn cube_views_require_six_layers_and_square_faces() {
+        let square = noop_device().create_texture(TextureDescriptor {
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 12,
+            },
+            ..layered_mipped_texture_descriptor()
+        });
+        let (_, error) = square.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::Cube),
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: Some(6),
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(error, None);
+
+        let non_square = noop_device().create_texture(TextureDescriptor {
+            size: Extent3d {
+                width: 8,
+                height: 4,
+                depth_or_array_layers: 12,
+            },
+            ..layered_mipped_texture_descriptor()
+        });
+        let (_, error) = non_square.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::Cube),
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: Some(6),
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(error, Some("cube texture views require square faces"));
+
+        let (_, error) = non_square.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::CubeArray),
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: Some(12),
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(error, Some("cube texture views require square faces"));
     }
 }

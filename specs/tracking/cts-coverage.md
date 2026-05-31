@@ -166,6 +166,23 @@ never a reason to skip a CTS case.
   assertion (`cts/validation/texture/create_texture.rs`, `format.rs`
   caps tests, `texture_format_validation.rs`). External
   `expectations/yawgpu.txt` rebaseline is the CTS project's job.
+- **External-CTS createView finding F-011 — RESOLVED.** The external
+  `createView` port (Texture T9) surfaced three view-dimension gaps (12
+  failing cases) the in-tree port missed because its `assert_view_ok`
+  only checked the handle was non-null — yawgpu returns a non-null
+  *error-view* on validation failure, so positive cases passed
+  vacuously. Fixed: (1) `resolve_view_descriptor` now resolves view
+  `dimension` before defaulting `arrayLayerCount` *from the resolved
+  dimension* (D1/D2/D3→1, Cube→6, D2Array/CubeArray→layers−base), so a
+  `2d` view of a multi-layer texture no longer over-defaults its layer
+  count; (2) a valid 6-layer `Cube` view is accepted (a missing match
+  arm had dropped it to "unsupported"); (3) `Cube`/`CubeArray` views now
+  require square faces (`width == height`). `assert_view_ok` was hardened
+  to assert an empty error sink, de-vacuuming the whole `create_view.rs`
+  suite; active in-tree assertions in
+  `cts/validation/texture/create_view.rs` + core unit tests. All
+  Noop-verifiable (no real-GPU component). This was the **last open
+  yawgpu finding**; F-001–F-004/F-007/F-012 are wgpu-native defects.
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage

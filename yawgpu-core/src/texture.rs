@@ -276,24 +276,25 @@ impl Texture {
         let mip_level_count = descriptor
             .mip_level_count
             .unwrap_or_else(|| self.mip_level_count().saturating_sub(base_mip_level));
-        let array_layer_count =
-            descriptor
-                .array_layer_count
-                .unwrap_or_else(|| match self.dimension() {
-                    TextureDimension::D1 => 1,
-                    TextureDimension::D2 => self
-                        .size()
-                        .depth_or_array_layers
-                        .saturating_sub(base_array_layer),
-                    TextureDimension::D3 => self.size().depth_or_array_layers,
-                });
         let dimension = descriptor
             .dimension
             .unwrap_or_else(|| match self.dimension() {
                 TextureDimension::D1 => TextureViewDimension::D1,
                 TextureDimension::D3 => TextureViewDimension::D3,
-                TextureDimension::D2 if array_layer_count == 1 => TextureViewDimension::D2,
+                TextureDimension::D2 if self.size().depth_or_array_layers == 1 => {
+                    TextureViewDimension::D2
+                }
                 TextureDimension::D2 => TextureViewDimension::D2Array,
+            });
+        let array_layer_count = descriptor
+            .array_layer_count
+            .unwrap_or_else(|| match dimension {
+                TextureViewDimension::D1 | TextureViewDimension::D2 | TextureViewDimension::D3 => 1,
+                TextureViewDimension::Cube => 6,
+                TextureViewDimension::D2Array | TextureViewDimension::CubeArray => self
+                    .size()
+                    .depth_or_array_layers
+                    .saturating_sub(base_array_layer),
             });
 
         ResolvedTextureViewDescriptor {
@@ -885,6 +886,70 @@ mod tests {
             validate_texture_descriptor(&descriptor, Limits::DEFAULT, &features),
             Some("compressed texture size must be block-aligned")
         );
+    }
+
+    #[test]
+    fn resolve_view_descriptor_defaults_array_layers_from_resolved_view_dimension() {
+        let texture = noop_device().create_texture(TextureDescriptor {
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 12,
+            },
+            ..layered_mipped_texture_descriptor()
+        });
+
+        let resolved = texture.resolve_view_descriptor(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D2),
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 3,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(resolved.dimension, TextureViewDimension::D2);
+        assert_eq!(resolved.array_layer_count, 1);
+
+        let resolved = texture.resolve_view_descriptor(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::Cube),
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(resolved.dimension, TextureViewDimension::Cube);
+        assert_eq!(resolved.array_layer_count, 6);
+
+        let resolved = texture.resolve_view_descriptor(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D2Array),
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 5,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(resolved.dimension, TextureViewDimension::D2Array);
+        assert_eq!(resolved.array_layer_count, 7);
+
+        let resolved = texture.resolve_view_descriptor(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::CubeArray),
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 6,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(resolved.dimension, TextureViewDimension::CubeArray);
+        assert_eq!(resolved.array_layer_count, 6);
     }
 
     #[test]
