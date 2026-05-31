@@ -188,6 +188,22 @@ fn array_layers() {
             }
         }
         yawgpu::wgpuTextureRelease(texture);
+
+        let texture = create_texture(test.device(), texture_descriptor_3d());
+        for (base, count, valid) in [(0, 1, true), (0, 2, false), (1, 1, false)] {
+            let descriptor = native::WGPUTextureViewDescriptor {
+                baseArrayLayer: base,
+                arrayLayerCount: count,
+                dimension: native::WGPUTextureViewDimension_3D,
+                ..view_descriptor()
+            };
+            if valid {
+                assert_view_ok(&test, texture, descriptor);
+            } else {
+                assert_view_error(&test, texture, descriptor);
+            }
+        }
+        yawgpu::wgpuTextureRelease(texture);
     }
 }
 

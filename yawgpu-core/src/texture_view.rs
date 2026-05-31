@@ -230,7 +230,11 @@ pub(crate) fn validate_texture_view_descriptor(
     let Some(layer_end) = descriptor.base_array_layer.checked_add(array_layer_count) else {
         return Some("texture view array layer range overflows");
     };
-    if texture.dimension() != TextureDimension::D3 && layer_end > texture_layers {
+    if texture.dimension() == TextureDimension::D3 {
+        if layer_end > 1 {
+            return Some("3D texture view array layer range exceeds the single layer");
+        }
+    } else if layer_end > texture_layers {
         return Some("texture view array layer range exceeds texture layers");
     }
     if matches!(
@@ -363,6 +367,61 @@ mod tests {
             )),
         });
         assert_eq!(error, Some("texture view usage contains unknown bits"));
+    }
+
+    #[test]
+    fn texture_view_3d_array_layer_range_is_single_layer() {
+        let texture = noop_device().create_texture(TextureDescriptor {
+            dimension: TextureDimension::D3,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 4,
+            },
+            ..layered_mipped_texture_descriptor()
+        });
+
+        let (_, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D3),
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(error, None);
+
+        let (_, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D3),
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: Some(2),
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(
+            error,
+            Some("3D texture view array layer range exceeds the single layer")
+        );
+
+        let (_, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D3),
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 1,
+            array_layer_count: Some(1),
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(
+            error,
+            Some("3D texture view array layer range exceeds the single layer")
+        );
     }
 
     #[test]

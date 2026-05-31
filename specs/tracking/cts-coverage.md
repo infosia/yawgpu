@@ -220,8 +220,20 @@ never a reason to skip a CTS case.
   to assert an empty error sink, de-vacuuming the whole `create_view.rs`
   suite; active in-tree assertions in
   `cts/validation/texture/create_view.rs` + core unit tests. All
-  Noop-verifiable (no real-GPU component). This was the **last open
-  yawgpu finding**; F-001–F-004/F-007/F-012 are wgpu-native defects.
+  Noop-verifiable (no real-GPU component).
+- **External-CTS createView finding F-014 — RESOLVED.** A later
+  `createView:array_layers` slice (Texture T10) found yawgpu under-validated
+  **3D-texture** view array-layer ranges: `validate_texture_view_descriptor`
+  skipped the layer-range check entirely for `D3` (the `!= D3` guard), so a
+  3D view with `arrayLayerCount != 1` or `baseArrayLayer > 0` was wrongly
+  accepted. A 3D texture is one non-arrayed image (`depth_or_array_layers`
+  is depth, not layers), so the fix validates `base_array_layer +
+  array_layer_count <= 1` for `D3` while leaving the 1D/2D `> texture_layers`
+  check unchanged. Active in-tree 3D cases in
+  `cts/validation/texture/create_view.rs::array_layers` + a core unit test.
+  Noop-verifiable. **With F-014 closed, every yawgpu finding this suite has
+  surfaced (F-005/006/008/009/010/011/014) is resolved**; all other open
+  findings (F-001–F-004, F-007, F-012, F-013, F-015) are wgpu-native defects.
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage
