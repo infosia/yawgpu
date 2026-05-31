@@ -340,6 +340,14 @@ pub(crate) fn validate_texture_descriptor(
     if usage.bits() & !TextureUsage::ALL.bits() != 0 {
         return Some("texture usage contains unknown bits");
     }
+    if usage.contains(TextureUsage::TRANSIENT_ATTACHMENT)
+        && usage.bits()
+            != (TextureUsage::RENDER_ATTACHMENT | TextureUsage::TRANSIENT_ATTACHMENT).bits()
+    {
+        return Some(
+            "TransientAttachment texture usage requires exactly RenderAttachment and TransientAttachment",
+        );
+    }
     if descriptor.sample_count != 1 && descriptor.sample_count != 4 {
         return Some("texture sample count must be 1 or 4");
     }
@@ -410,31 +418,49 @@ pub(crate) fn validate_texture_descriptor(
         }
     }
     if usage.contains(TextureUsage::RENDER_ATTACHMENT)
+        && descriptor.dimension == TextureDimension::D1
+    {
+        return Some("RenderAttachment textures must not be 1D");
+    }
+    if usage.contains(TextureUsage::TRANSIENT_ATTACHMENT)
         && descriptor.dimension != TextureDimension::D2
     {
-        return Some("RenderAttachment textures must be 2D");
+        return Some("TransientAttachment textures must be 2D");
     }
     let Some(format_caps) = descriptor.format.caps(features) else {
         return Some("texture format must not be Undefined");
     };
-    if descriptor.dimension == TextureDimension::D3
-        && descriptor.format.is_bc_compressed()
-        && !features.contains(&crate::adapter::Feature::TextureCompressionBcSliced3d)
-    {
-        return Some("3D BC compressed textures require texture-compression-bc-sliced-3d");
+    if format_caps.is_compressed {
+        if descriptor.dimension == TextureDimension::D1 {
+            return Some("compressed textures must not be 1D");
+        }
+        if descriptor.dimension == TextureDimension::D3 {
+            if descriptor.format.is_bc_compressed() {
+                if !features.contains(&crate::adapter::Feature::TextureCompressionBcSliced3d) {
+                    return Some(
+                        "3D BC compressed textures require texture-compression-bc-sliced-3d",
+                    );
+                }
+            } else if descriptor.format.is_astc_compressed() {
+                if !features.contains(&crate::adapter::Feature::TextureCompressionAstcSliced3d) {
+                    return Some(
+                        "3D ASTC compressed textures require texture-compression-astc-sliced-3d",
+                    );
+                }
+            } else if descriptor.format.is_etc2_compressed() {
+                return Some("ETC2/EAC compressed textures must be 2D");
+            } else {
+                return Some("compressed textures must be 2D unless sliced-3d is supported");
+            }
+        }
     }
-    if descriptor.dimension == TextureDimension::D3
-        && descriptor.format.is_astc_compressed()
-        && !features.contains(&crate::adapter::Feature::TextureCompressionAstcSliced3d)
-    {
-        return Some("3D ASTC compressed textures require texture-compression-astc-sliced-3d");
-    }
-    if descriptor
-        .view_formats
-        .iter()
-        .any(|view_format| view_format.caps(features).is_none())
-    {
-        return Some("texture viewFormats must not contain Undefined");
+    for view_format in &descriptor.view_formats {
+        if view_format.caps(features).is_none() {
+            return Some("texture viewFormats must not contain Undefined");
+        }
+        if !texture_view_format_compatible(descriptor.format, *view_format) {
+            return Some("texture viewFormats must be compatible with the texture format");
+        }
     }
     if multisampled && !format_caps.multisample_capable {
         return Some("multisampled texture format must support multisampling");
@@ -451,6 +477,10 @@ pub(crate) fn validate_texture_descriptor(
         return Some("StorageBinding texture format must support storage usage");
     }
     None
+}
+
+fn texture_view_format_compatible(format: TextureFormat, view_format: TextureFormat) -> bool {
+    format == view_format || format.srgb_pair() == Some(view_format)
 }
 
 /// Validates queue write texture and returns a descriptive error on failure.
@@ -754,6 +784,82 @@ mod tests {
         assert_eq!(
             validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
             Some("texture usage contains unknown bits")
+        );
+    }
+
+    #[test]
+    fn validate_texture_descriptor_rejects_invalid_transient_usage_combinations() {
+        let mut descriptor = texture_descriptor_4x4();
+        descriptor.usage = TextureUsage::TRANSIENT_ATTACHMENT;
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
+            Some(
+                "TransientAttachment texture usage requires exactly RenderAttachment and TransientAttachment"
+            )
+        );
+
+        descriptor.usage = TextureUsage::RENDER_ATTACHMENT | TextureUsage::TRANSIENT_ATTACHMENT;
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
+            None
+        );
+
+        descriptor.dimension = TextureDimension::D3;
+        descriptor.size.depth_or_array_layers = 4;
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
+            Some("TransientAttachment textures must be 2D")
+        );
+    }
+
+    #[test]
+    fn validate_texture_descriptor_allows_3d_render_attachments_but_not_1d() {
+        let mut descriptor = texture_descriptor_4x4();
+        descriptor.usage = TextureUsage::RENDER_ATTACHMENT;
+        descriptor.dimension = TextureDimension::D3;
+        descriptor.size.depth_or_array_layers = 4;
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
+            None
+        );
+
+        descriptor.dimension = TextureDimension::D1;
+        descriptor.size.height = 1;
+        descriptor.size.depth_or_array_layers = 1;
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
+            Some("RenderAttachment textures must not be 1D")
+        );
+    }
+
+    #[test]
+    fn validate_texture_descriptor_rejects_incompatible_view_formats_and_etc2_3d() {
+        let mut descriptor = texture_descriptor_4x4();
+        descriptor.view_formats = vec![TextureFormat::from_raw(TextureFormat::RGBA8_UNORM_SRGB)];
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
+            None
+        );
+
+        descriptor.view_formats = vec![TextureFormat::from_raw(TextureFormat::R8_UNORM)];
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
+            Some("texture viewFormats must be compatible with the texture format")
+        );
+
+        let mut features = FeatureSet::new();
+        features.insert(Feature::TextureCompressionEtc2);
+        descriptor = texture_descriptor_4x4();
+        descriptor.format = TextureFormat::from_raw(TextureFormat::ETC2_RGBA8_UNORM);
+        descriptor.dimension = TextureDimension::D3;
+        descriptor.size = Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 4,
+        };
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &features),
+            Some("ETC2/EAC compressed textures must be 2D")
         );
     }
 

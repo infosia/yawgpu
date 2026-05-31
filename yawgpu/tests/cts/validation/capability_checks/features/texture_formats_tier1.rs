@@ -96,7 +96,7 @@ fn bind_group_layout_storage_texture() {
     unsafe {
         let layout = feature_common::assert_storage_texture_bgl_ok(
             &test,
-            native::WGPUTextureFormat_RGBA8UnormSrgb,
+            native::WGPUTextureFormat_R8Unorm,
             native::WGPUStorageTextureAccess_WriteOnly,
         );
         yawgpu::wgpuBindGroupLayoutRelease(layout);
@@ -109,7 +109,7 @@ fn pipeline_auto_layout_storage_texture() {
     unsafe {
         let layout = feature_common::assert_storage_texture_bgl_ok(
             &test,
-            native::WGPUTextureFormat_RGBA8UnormSrgb,
+            native::WGPUTextureFormat_R8Unorm,
             native::WGPUStorageTextureAccess_WriteOnly,
         );
         yawgpu::wgpuBindGroupLayoutRelease(layout);
