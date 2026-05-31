@@ -221,8 +221,12 @@ results instead of re-running and polling. The report must contain:
     `--features tiled`), and `cargo build -p yawgpu-core --features tiled`.
   State pass/fail per command; paste the `test result:` summary lines;
   judge by exit code, not prose. **Claude runs the full `cargo test
-  --workspace` (default + relevant features) during review** as the
-  backstop — the agent does not.
+  --workspace --release` (+ relevant features) during review** as the
+  backstop — the agent does not. The backstop is **release** because
+  optimization exposes UB that debug masks (e.g. a dangling-temporary
+  test descriptor segfaulted only under release); release also builds/
+  runs fast enough here. (Run a debug workspace pass too if a test could
+  depend on debug-only behaviour such as overflow-check panics.)
 - **Files changed** — production vs test, with a one-line why for each
   non-test file.
 - **Per-spec case accounting** — ported / deferred / `N/A` counts, and
