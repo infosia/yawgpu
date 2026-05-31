@@ -468,6 +468,29 @@ SPIR-V or MSL straight to the backend; see
     (see "Cross-building for iOS" above). Real-device runtime
     verification is left to downstream integrators.
 
+### Independent conformance — webgpu-native-cts
+
+Beyond the in-tree Noop port, yawgpu is the **primary conformance subject**
+of [**webgpu-native-cts**](https://github.com/infosia/webgpu-native-cts) — a
+separate C++ conformance suite that ports the upstream WebGPU CTS and links
+*directly* against the `webgpu.h` C ABI (no JS engine), running each case in
+its own subprocess against a real GPU. Across its ported `api/validation`
+surface (**2610 cases**), yawgpu's results are **identical to Dawn**, the C++
+reference implementation:
+
+| Implementation (backend, host) | pass | skip | fail | crash |
+|---|--:|--:|--:|--:|
+| **yawgpu** — Metal, Apple Silicon | 2594 | 16 | 0 | 0 |
+| **yawgpu** — Vulkan, Windows 11 / NVIDIA | 2594 | 16 | 0 | 0 |
+| Dawn (reference) — Metal, Apple Silicon | 2594 | 16 | 0 | 0 |
+
+`skip` covers cases gated on optional adapter features. Every divergence the
+suite surfaced (findings F-005/006/008/009/010 — format rejection, the
+`Depth24PlusStencil8` Metal abort, multisample, transient-attachment usage,
+render-attachment dimension + `RGBA8Snorm` storage, and compressed
+`createTexture` size alignment) was reported there, fixed in yawgpu, and
+confirmed resolved on hardware.
+
 ## License
 
 Licensed under either of
