@@ -91,12 +91,16 @@ impl ComputePassEncoder {
             {
                 return Err("compute dispatch workgroup count exceeds the device limit".to_owned());
             }
-            let pipeline = state
-                .compute_pipeline
-                .as_ref()
-                .ok_or_else(|| "compute dispatch requires a compute pipeline".to_owned())?;
+            let pipeline = Arc::clone(
+                state
+                    .compute_pipeline
+                    .as_ref()
+                    .ok_or_else(|| "compute dispatch requires a compute pipeline".to_owned())?,
+            );
+            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
+            record_pipeline_usage_scope(state, &bind_group_layouts, &[])?;
             self.inner.parent.record_compute_pass(ComputePassCommand {
-                pipeline: Arc::clone(pipeline),
+                pipeline,
                 bind_groups: state.bind_groups.clone(),
                 workgroups: (x, y, z),
             });

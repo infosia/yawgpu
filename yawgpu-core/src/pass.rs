@@ -13,6 +13,7 @@ use crate::limits::*;
 use crate::query_set::*;
 use crate::render_pipeline::*;
 use crate::texture::*;
+use crate::texture_view::{TextureAspect, TextureView};
 
 /// Holds shared state for the pass encoder handle.
 #[derive(Debug)]
@@ -36,12 +37,15 @@ pub(crate) struct PassEncoderState {
     pub(crate) attachment_signature: Option<AttachmentSignature>,
     pub(crate) render_extent: Option<Extent3d>,
     pub(crate) attachment_textures: Vec<Texture>,
+    pub(crate) attachment_texture_uses: Vec<TextureScopeUse>,
     pub(crate) render_color_attachment: Option<RenderPassColorExecution>,
     pub(crate) render_pass_recorded: bool,
     pub(crate) occlusion_query_set: Option<QuerySet>,
     pub(crate) open_occlusion_query: Option<u32>,
     pub(crate) used_occlusion_queries: BTreeSet<u32>,
     pub(crate) command_referenced_buffers: Vec<Arc<Buffer>>,
+    pub(crate) scope_buffer_uses: Vec<BufferScopeUse>,
+    pub(crate) scope_texture_uses: Vec<TextureScopeUse>,
 }
 
 impl PassEncoderState {
@@ -66,12 +70,15 @@ impl PassEncoderState {
             attachment_signature,
             render_extent,
             attachment_textures,
+            attachment_texture_uses: Vec::new(),
             render_color_attachment,
             render_pass_recorded: false,
             occlusion_query_set,
             open_occlusion_query: None,
             used_occlusion_queries: BTreeSet::new(),
             command_referenced_buffers: Vec::new(),
+            scope_buffer_uses: Vec::new(),
+            scope_texture_uses: Vec::new(),
         }
     }
 
@@ -81,6 +88,11 @@ impl PassEncoderState {
         self.bind_groups.clear();
         self.vertex_buffers.clear();
         self.index_buffer = None;
+    }
+
+    /// Sets attachment texture usages for render-pass scope validation.
+    pub(crate) fn set_attachment_texture_uses(&mut self, uses: Vec<TextureScopeUse>) {
+        self.attachment_texture_uses = uses;
     }
 }
 
@@ -290,7 +302,7 @@ pub(crate) fn validate_render_draw_state(
     validate_usage_scope(
         pipeline.bind_group_layouts(),
         &state.bind_groups,
-        Some(&state.attachment_textures),
+        Some(&state.attachment_texture_uses),
     )?;
     validate_strip_index_format(pipeline, state, kind.is_indexed())?;
     match kind {
@@ -588,7 +600,7 @@ pub(crate) enum ResourceAccess {
 }
 
 /// Stores buffer scope use data used by validation and backend submission.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct BufferScopeUse {
     pub(crate) buffer: Arc<Buffer>,
     pub(crate) offset: u64,
@@ -597,17 +609,39 @@ pub(crate) struct BufferScopeUse {
 }
 
 /// Stores texture scope use data used by validation and backend submission.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct TextureScopeUse {
     pub(crate) texture: Texture,
+    pub(crate) base_mip_level: u32,
+    pub(crate) mip_level_count: u32,
+    pub(crate) base_array_layer: u32,
+    pub(crate) array_layer_count: u32,
+    pub(crate) aspects: TextureAspectMask,
     pub(crate) access: ResourceAccess,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextureAspectMask(u8);
+
+impl TextureAspectMask {
+    pub(crate) const COLOR: Self = Self(1);
+    pub(crate) const DEPTH: Self = Self(2);
+    pub(crate) const STENCIL: Self = Self(4);
+
+    fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
 }
 
 /// Validates usage scope and returns a descriptive error on failure.
 pub(crate) fn validate_usage_scope(
     required_layouts: &[Arc<BindGroupLayout>],
     bound_groups: &BTreeMap<u32, BoundBindGroup>,
-    attachment_textures: Option<&[Texture]>,
+    attachment_uses: Option<&[TextureScopeUse]>,
 ) -> Result<(), String> {
     let mut buffer_uses = Vec::new();
     let mut texture_uses = Vec::new();
@@ -621,21 +655,55 @@ pub(crate) fn validate_usage_scope(
         collect_bind_group_usage(layout, bound, &mut buffer_uses, &mut texture_uses)?;
     }
 
-    validate_buffer_usage_scope(&buffer_uses)?;
-    validate_texture_usage_scope(&texture_uses)?;
-    if let Some(attachment_textures) = attachment_textures {
-        for texture_use in &texture_uses {
-            if attachment_textures
-                .iter()
-                .any(|attachment| attachment.same(&texture_use.texture))
-            {
-                return Err(
-                    "render pass attachment texture cannot be used through a bind group".to_owned(),
-                );
-            }
-        }
+    if let Some(attachment_uses) = attachment_uses {
+        texture_uses.extend_from_slice(attachment_uses);
     }
+    validate_resource_usage_scope(&buffer_uses, &texture_uses)
+}
+
+pub(crate) fn collect_pipeline_usage_scope(
+    required_layouts: &[Arc<BindGroupLayout>],
+    bound_groups: &BTreeMap<u32, BoundBindGroup>,
+) -> Result<(Vec<BufferScopeUse>, Vec<TextureScopeUse>), String> {
+    let mut buffer_uses = Vec::new();
+    let mut texture_uses = Vec::new();
+
+    for (index, layout) in required_layouts.iter().enumerate() {
+        let index = u32::try_from(index)
+            .map_err(|_| "pipeline bind group index is too large".to_owned())?;
+        let Some(bound) = bound_groups.get(&index) else {
+            continue;
+        };
+        collect_bind_group_usage(layout, bound, &mut buffer_uses, &mut texture_uses)?;
+    }
+
+    Ok((buffer_uses, texture_uses))
+}
+
+pub(crate) fn record_pipeline_usage_scope(
+    state: &mut PassEncoderState,
+    required_layouts: &[Arc<BindGroupLayout>],
+    attachment_uses: &[TextureScopeUse],
+) -> Result<(), String> {
+    let (buffer_uses, texture_uses) =
+        collect_pipeline_usage_scope(required_layouts, &state.bind_groups)?;
+    let mut scoped_buffer_uses = state.scope_buffer_uses.clone();
+    scoped_buffer_uses.extend(buffer_uses.iter().cloned());
+    let mut scoped_texture_uses = state.scope_texture_uses.clone();
+    scoped_texture_uses.extend(texture_uses.iter().cloned());
+    scoped_texture_uses.extend_from_slice(attachment_uses);
+    validate_resource_usage_scope(&scoped_buffer_uses, &scoped_texture_uses)?;
+    state.scope_buffer_uses.extend(buffer_uses);
+    state.scope_texture_uses.extend(texture_uses);
     Ok(())
+}
+
+pub(crate) fn validate_resource_usage_scope(
+    buffer_uses: &[BufferScopeUse],
+    texture_uses: &[TextureScopeUse],
+) -> Result<(), String> {
+    validate_buffer_usage_scope(buffer_uses)?;
+    validate_texture_usage_scope(texture_uses)
 }
 
 /// Returns collect bind group usage.
@@ -732,10 +800,7 @@ pub(crate) fn collect_bind_group_usage(
             (
                 BindGroupResource::TextureView { texture_view, .. },
                 BindingLayoutKind::Texture { .. } | BindingLayoutKind::StorageTexture { .. },
-            ) => texture_uses.push(TextureScopeUse {
-                texture: texture_view.texture(),
-                access,
-            }),
+            ) => texture_uses.push(texture_scope_use(texture_view, access)),
             _ => {}
         }
     }
@@ -764,17 +829,101 @@ pub(crate) fn validate_buffer_usage_scope(buffer_uses: &[BufferScopeUse]) -> Res
 pub(crate) fn validate_texture_usage_scope(texture_uses: &[TextureScopeUse]) -> Result<(), String> {
     for (index, current) in texture_uses.iter().enumerate() {
         for previous in &texture_uses[..index] {
-            if !current.texture.same(&previous.texture) {
+            if !current.texture.same(&previous.texture)
+                || !texture_subresource_ranges_overlap(current, previous)
+                || !current.aspects.intersects(previous.aspects)
+            {
                 continue;
             }
             if current.access == ResourceAccess::Write || previous.access == ResourceAccess::Write {
                 return Err(
-                    "usage scope cannot read and write or write the same texture twice".to_owned(),
+                    "usage scope cannot read and write or write the same texture subresource twice"
+                        .to_owned(),
                 );
             }
         }
     }
     Ok(())
+}
+
+pub(crate) fn texture_scope_use(
+    texture_view: &TextureView,
+    access: ResourceAccess,
+) -> TextureScopeUse {
+    TextureScopeUse {
+        texture: texture_view.texture(),
+        base_mip_level: texture_view.base_mip_level(),
+        mip_level_count: texture_view.mip_level_count(),
+        base_array_layer: texture_view.base_array_layer(),
+        array_layer_count: texture_view.array_layer_count(),
+        aspects: texture_view_aspect_mask(texture_view),
+        access,
+    }
+}
+
+pub(crate) fn texture_attachment_scope_use(
+    texture_view: &TextureView,
+    access: ResourceAccess,
+    aspects: TextureAspectMask,
+) -> TextureScopeUse {
+    TextureScopeUse {
+        texture: texture_view.texture(),
+        base_mip_level: texture_view.base_mip_level(),
+        mip_level_count: texture_view.mip_level_count(),
+        base_array_layer: texture_view.base_array_layer(),
+        array_layer_count: texture_view.array_layer_count(),
+        aspects,
+        access,
+    }
+}
+
+pub(crate) fn texture_view_aspect_mask(texture_view: &TextureView) -> TextureAspectMask {
+    match texture_view.aspect() {
+        TextureAspect::DepthOnly => TextureAspectMask::DEPTH,
+        TextureAspect::StencilOnly => TextureAspectMask::STENCIL,
+        TextureAspect::All => texture_format_aspect_mask(texture_view),
+    }
+}
+
+fn texture_format_aspect_mask(texture_view: &TextureView) -> TextureAspectMask {
+    let caps = texture_view
+        .texture()
+        .view_format_caps(texture_view.format())
+        .or_else(|| texture_view.texture().format_caps());
+    let Some(caps) = caps else {
+        return TextureAspectMask::COLOR;
+    };
+    let mut mask = TextureAspectMask(0);
+    if caps.aspects.color {
+        mask = mask.union(TextureAspectMask::COLOR);
+    }
+    if caps.aspects.depth {
+        mask = mask.union(TextureAspectMask::DEPTH);
+    }
+    if caps.aspects.stencil {
+        mask = mask.union(TextureAspectMask::STENCIL);
+    }
+    mask
+}
+
+pub(crate) fn texture_subresource_ranges_overlap(a: &TextureScopeUse, b: &TextureScopeUse) -> bool {
+    ranges_overlap(
+        a.base_mip_level,
+        a.mip_level_count,
+        b.base_mip_level,
+        b.mip_level_count,
+    ) && ranges_overlap(
+        a.base_array_layer,
+        a.array_layer_count,
+        b.base_array_layer,
+        b.array_layer_count,
+    )
+}
+
+fn ranges_overlap(a_start: u32, a_count: u32, b_start: u32, b_count: u32) -> bool {
+    let a_end = a_start.saturating_add(a_count);
+    let b_end = b_start.saturating_add(b_count);
+    a_start < b_end && b_start < a_end
 }
 
 /// Returns buffer ranges overlap.
@@ -1075,4 +1224,142 @@ pub(crate) fn validate_scissor_rect(
         return Err("render pass scissor rectangle exceeds attachment size".to_owned());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::noop_texture;
+
+    fn texture_use(
+        texture: &Texture,
+        base_mip_level: u32,
+        mip_level_count: u32,
+        base_array_layer: u32,
+        array_layer_count: u32,
+        aspects: TextureAspectMask,
+        access: ResourceAccess,
+    ) -> TextureScopeUse {
+        TextureScopeUse {
+            texture: texture.clone(),
+            base_mip_level,
+            mip_level_count,
+            base_array_layer,
+            array_layer_count,
+            aspects,
+            access,
+        }
+    }
+
+    #[test]
+    fn texture_usage_scope_tracks_mip_layer_and_aspect_overlap() {
+        let texture = noop_texture();
+        let write_mip0 = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            ResourceAccess::Write,
+        );
+        let read_mip1 = texture_use(
+            &texture,
+            1,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            ResourceAccess::Read,
+        );
+        let read_layer1 = texture_use(
+            &texture,
+            0,
+            1,
+            1,
+            1,
+            TextureAspectMask::COLOR,
+            ResourceAccess::Read,
+        );
+        let read_stencil = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::STENCIL,
+            ResourceAccess::Read,
+        );
+
+        assert_eq!(
+            validate_texture_usage_scope(&[
+                write_mip0.clone(),
+                read_mip1,
+                read_layer1,
+                read_stencil
+            ]),
+            Ok(())
+        );
+
+        let read_same_subresource = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            ResourceAccess::Read,
+        );
+        assert_eq!(
+            validate_texture_usage_scope(&[write_mip0, read_same_subresource]),
+            Err(
+                "usage scope cannot read and write or write the same texture subresource twice"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn texture_usage_scope_allows_read_only_overlap_but_rejects_write_write() {
+        let texture = noop_texture();
+        let read_a = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            ResourceAccess::Read,
+        );
+        let read_b = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            ResourceAccess::Read,
+        );
+        assert_eq!(
+            validate_texture_usage_scope(&[read_a.clone(), read_b]),
+            Ok(())
+        );
+
+        let write = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            ResourceAccess::Write,
+        );
+        assert_eq!(
+            validate_texture_usage_scope(&[read_a, write]),
+            Err(
+                "usage scope cannot read and write or write the same texture subresource twice"
+                    .to_owned()
+            )
+        );
+    }
 }

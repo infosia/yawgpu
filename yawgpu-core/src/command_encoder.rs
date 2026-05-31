@@ -250,15 +250,22 @@ impl CommandEncoder {
         }
         (
             RenderPassEncoder {
-                inner: Arc::new(PassEncoderInner::new(
-                    self.clone(),
-                    token,
-                    attachment_signature,
-                    render_pass_extent(descriptor),
-                    render_pass_attachment_textures(descriptor),
-                    render_pass_color_execution(descriptor),
-                    descriptor.occlusion_query_set.clone(),
-                )),
+                inner: {
+                    let inner = Arc::new(PassEncoderInner::new(
+                        self.clone(),
+                        token,
+                        attachment_signature,
+                        render_pass_extent(descriptor),
+                        render_pass_attachment_textures(descriptor),
+                        render_pass_color_execution(descriptor),
+                        descriptor.occlusion_query_set.clone(),
+                    ));
+                    inner
+                        .state
+                        .lock()
+                        .set_attachment_texture_uses(render_pass_attachment_scope_uses(descriptor));
+                    inner
+                },
             },
             immediate_error,
         )
@@ -1109,6 +1116,55 @@ pub(crate) fn render_pass_attachment_textures(descriptor: &RenderPassDescriptor)
     textures
 }
 
+pub(crate) fn render_pass_attachment_scope_uses(
+    descriptor: &RenderPassDescriptor,
+) -> Vec<TextureScopeUse> {
+    let mut uses = Vec::new();
+    for attachment in descriptor.color_attachments.iter().flatten() {
+        uses.push(texture_attachment_scope_use(
+            &attachment.view,
+            ResourceAccess::Write,
+            TextureAspectMask::COLOR,
+        ));
+        if let Some(resolve_target) = &attachment.resolve_target {
+            uses.push(texture_attachment_scope_use(
+                resolve_target,
+                ResourceAccess::Write,
+                TextureAspectMask::COLOR,
+            ));
+        }
+    }
+    if let Some(attachment) = &descriptor.depth_stencil_attachment {
+        let view = &attachment.view;
+        let Some(caps) = view.texture().view_format_caps(view.format()) else {
+            return uses;
+        };
+        if caps.aspects.depth {
+            uses.push(texture_attachment_scope_use(
+                view,
+                if attachment.depth_read_only {
+                    ResourceAccess::Read
+                } else {
+                    ResourceAccess::Write
+                },
+                TextureAspectMask::DEPTH,
+            ));
+        }
+        if caps.aspects.stencil {
+            uses.push(texture_attachment_scope_use(
+                view,
+                if attachment.stencil_read_only {
+                    ResourceAccess::Read
+                } else {
+                    ResourceAccess::Write
+                },
+                TextureAspectMask::STENCIL,
+            ));
+        }
+    }
+    uses
+}
+
 /// Returns render pass query sets.
 pub(crate) fn render_pass_query_sets(descriptor: &RenderPassDescriptor) -> Vec<QuerySet> {
     let mut query_sets = Vec::new();
@@ -1163,7 +1219,11 @@ pub(crate) fn validate_color_attachment(
     let Some(format_caps) = attachment.view.format().caps(features) else {
         return Err("render pass color attachment format must be supported".to_owned());
     };
-    if !texture.usage().contains(TextureUsage::RENDER_ATTACHMENT) {
+    if !attachment
+        .view
+        .usage()
+        .contains(TextureUsage::RENDER_ATTACHMENT)
+    {
         return Err("render pass color attachment requires RenderAttachment usage".to_owned());
     }
     if !format_caps.aspects.color || !format_caps.renderable {
@@ -1261,7 +1321,11 @@ pub(crate) fn validate_depth_stencil_attachment(
     let Some(format_caps) = attachment.view.format().caps(features) else {
         return Err("render pass depth-stencil attachment format must be supported".to_owned());
     };
-    if !texture.usage().contains(TextureUsage::RENDER_ATTACHMENT) {
+    if !attachment
+        .view
+        .usage()
+        .contains(TextureUsage::RENDER_ATTACHMENT)
+    {
         return Err(
             "render pass depth-stencil attachment requires RenderAttachment usage".to_owned(),
         );
@@ -1887,6 +1951,41 @@ mod tests {
         let mut tight_limits = device.limits();
         tight_limits.max_color_attachment_bytes_per_sample = 3;
         assert!(validate_render_pass_descriptor(&descriptor, &features, tight_limits).is_err());
+    }
+
+    #[test]
+    fn render_attachment_validation_uses_view_usage_override() {
+        let device = noop_device();
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::TEXTURE_BINDING | TextureUsage::RENDER_ATTACHMENT,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: Some(TextureUsage::TEXTURE_BINDING),
+        });
+        assert_eq!(error, None);
+        let descriptor = noop_render_pass_descriptor(Arc::new(view), None);
+
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Err("render pass color attachment requires RenderAttachment usage".to_owned())
+        );
     }
 
     #[test]
