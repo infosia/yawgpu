@@ -101,6 +101,14 @@ pub(crate) struct BufferCopyCommand {
     pub(crate) size: u64,
 }
 
+/// Stores the data needed to replay a BufferClearCommand.
+#[derive(Debug, Clone)]
+pub(crate) struct BufferClearCommand {
+    pub(crate) buffer: Arc<Buffer>,
+    pub(crate) offset: u64,
+    pub(crate) size: u64,
+}
+
 /// Enumerates texture copy command values.
 #[derive(Debug, Clone)]
 pub(crate) enum TextureCopyCommand {
@@ -138,6 +146,8 @@ pub(crate) enum TextureCopyCommand {
 pub(crate) enum CommandExecution {
     /// Buffer copy variant.
     BufferCopy(BufferCopyCommand),
+    /// Buffer clear variant.
+    BufferClear(BufferClearCommand),
     /// Texture copy variant.
     TextureCopy(TextureCopyCommand),
     /// Compute pass variant.
@@ -393,7 +403,7 @@ impl CommandEncoder {
 
     /// Records a validation error against the encoder, marking it unusable.
     pub fn record_validation_error(&self, message: impl Into<String>) -> Option<String> {
-        self.record_buffer_command(Vec::new(), None, None, || Err(message.into()))
+        self.record_buffer_command(Vec::new(), None, None, None, || Err(message.into()))
     }
 
     /// Records a buffer-to-buffer copy after validating the ranges and usages.
@@ -416,6 +426,7 @@ impl CommandEncoder {
             vec![Arc::clone(&source), Arc::clone(&destination)],
             Some(copy),
             None,
+            None,
             || {
                 validate_copy_buffer_to_buffer(
                     &source,
@@ -430,14 +441,19 @@ impl CommandEncoder {
 
     /// Records a buffer clear (zero-fill) over the given range after validation.
     pub fn clear_buffer(&self, buffer: Arc<Buffer>, offset: u64, size: u64) -> Option<String> {
-        self.record_buffer_command(vec![Arc::clone(&buffer)], None, None, || {
+        let clear = BufferClearCommand {
+            buffer: Arc::clone(&buffer),
+            offset,
+            size,
+        };
+        self.record_buffer_command(vec![Arc::clone(&buffer)], None, Some(clear), None, || {
             validate_clear_buffer(&buffer, offset, size)
         })
     }
 
     /// Records an encoder-side buffer write over the given range after validation.
     pub fn write_buffer(&self, buffer: Arc<Buffer>, offset: u64, size: u64) -> Option<String> {
-        self.record_buffer_command(vec![Arc::clone(&buffer)], None, None, || {
+        self.record_buffer_command(vec![Arc::clone(&buffer)], None, None, None, || {
             validate_encoder_write_buffer(&buffer, offset, size)
         })
     }
@@ -445,7 +461,7 @@ impl CommandEncoder {
     /// Records a timestamp write into the query set at `query_index`.
     pub fn write_timestamp(&self, query_set: Arc<QuerySet>, query_index: u32) -> Option<String> {
         self.record_referenced_query_set((*query_set).clone());
-        self.record_buffer_command(Vec::new(), None, None, || {
+        self.record_buffer_command(Vec::new(), None, None, None, || {
             validate_timestamp_query_set(&query_set, "write timestamp")?;
             validate_query_index(&query_set, query_index, "write timestamp query index")
         })
@@ -461,7 +477,7 @@ impl CommandEncoder {
         destination_offset: u64,
     ) -> Option<String> {
         self.record_referenced_query_set((*query_set).clone());
-        self.record_buffer_command(vec![Arc::clone(&destination)], None, None, || {
+        self.record_buffer_command(vec![Arc::clone(&destination)], None, None, None, || {
             validate_resolve_query_set(
                 &query_set,
                 first_query,
@@ -484,16 +500,22 @@ impl CommandEncoder {
             destination: destination.clone(),
             copy_size,
         };
-        self.record_buffer_command(vec![Arc::clone(&source.buffer)], None, Some(copy), || {
-            validate_buffer_texture_copy(
-                source,
-                BufferUsage::COPY_SRC,
-                destination,
-                TextureUsage::COPY_DST,
-                copy_size,
-                "copy buffer to texture",
-            )
-        })
+        self.record_buffer_command(
+            vec![Arc::clone(&source.buffer)],
+            None,
+            None,
+            Some(copy),
+            || {
+                validate_buffer_texture_copy(
+                    source,
+                    BufferUsage::COPY_SRC,
+                    destination,
+                    TextureUsage::COPY_DST,
+                    copy_size,
+                    "copy buffer to texture",
+                )
+            },
+        )
     }
 
     /// Records a texture-to-buffer copy after validating layout, sizes, and usages.
@@ -510,6 +532,7 @@ impl CommandEncoder {
         };
         self.record_buffer_command(
             vec![Arc::clone(&destination.buffer)],
+            None,
             None,
             Some(copy),
             || {
@@ -537,7 +560,7 @@ impl CommandEncoder {
             destination: destination.clone(),
             copy_size,
         };
-        self.record_buffer_command(Vec::new(), None, Some(copy), || {
+        self.record_buffer_command(Vec::new(), None, None, Some(copy), || {
             validate_texture_to_texture_copy(source, destination, copy_size)
         })
     }
@@ -619,6 +642,7 @@ impl CommandEncoder {
         &self,
         referenced_buffers: Vec<Arc<Buffer>>,
         buffer_copy: Option<BufferCopyCommand>,
+        buffer_clear: Option<BufferClearCommand>,
         texture_copy: Option<TextureCopyCommand>,
         validate: F,
     ) -> Option<String>
@@ -644,6 +668,11 @@ impl CommandEncoder {
                 state
                     .command_ops
                     .push(CommandExecution::BufferCopy(copy.clone()));
+            }
+            if let Some(clear) = buffer_clear {
+                state
+                    .command_ops
+                    .push(CommandExecution::BufferClear(clear.clone()));
             }
             if let Some(copy) = texture_copy {
                 state
@@ -2057,7 +2086,21 @@ mod tests {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
-        assert_eq!(command_buffer.command_ops().len(), 1);
+        assert_eq!(command_buffer.command_ops().len(), 2);
+        assert!(matches!(
+            &command_buffer.command_ops()[0],
+            CommandExecution::BufferCopy(copy)
+                if copy.source.same(&source)
+                    && copy.source_offset == 0
+                    && copy.destination.same(&destination)
+                    && copy.destination_offset == 0
+                    && copy.size == 16
+        ));
+        assert!(matches!(
+            &command_buffer.command_ops()[1],
+            CommandExecution::BufferClear(clear)
+                if clear.buffer.same(&destination) && clear.offset == 0 && clear.size == 16
+        ));
 
         let invalid = device.create_command_encoder();
         assert_eq!(
@@ -2069,6 +2112,20 @@ mod tests {
         assert_eq!(
             error,
             Some("copy source offset must be 4-byte aligned".to_owned())
+        );
+
+        let missing_copy_dst = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let invalid = device.create_command_encoder();
+        assert_eq!(invalid.clear_buffer(missing_copy_dst, 0, 4), None);
+        let (command_buffer, error) = invalid.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("clear buffer requires CopyDst usage".to_owned())
         );
     }
 

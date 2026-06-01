@@ -12,7 +12,7 @@ mod present;
 mod shader;
 
 pub use command::{
-    HalBoundBuffer, HalBufferBindingKind, HalBufferCopy, HalBufferTextureCopy,
+    HalBoundBuffer, HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy,
     HalBufferTextureLayout, HalComputePass, HalCopy, HalDescriptorBinding, HalDraw,
     HalRenderColorTarget, HalRenderLoadOp, HalRenderPass, HalTextureCopy,
 };
@@ -1285,6 +1285,7 @@ mod tests {
         let queue = device.queue();
         let source = device.create_buffer(8, HalBufferUsage::default());
         let destination = device.create_buffer(8, HalBufferUsage::default());
+        let clear_buffer = device.create_buffer(8, HalBufferUsage::default());
         let copy = HalCopy::Buffer(HalBufferCopy {
             source,
             source_offset: 0,
@@ -1292,9 +1293,14 @@ mod tests {
             destination_offset: 0,
             size: 8,
         });
+        let clear = HalCopy::BufferClear(HalBufferClear {
+            buffer: clear_buffer,
+            offset: 0,
+            size: 8,
+        });
 
         queue.submit_copies(&[])?;
-        queue.submit_copies(&[copy])
+        queue.submit_copies(&[copy, clear])
     }
 
     #[test]

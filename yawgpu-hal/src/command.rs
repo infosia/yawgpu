@@ -95,11 +95,24 @@ pub struct HalBufferCopy {
     pub size: u64,
 }
 
+/// Wraps buffer clear data for the selected backend.
+#[derive(Debug, Clone)]
+pub struct HalBufferClear {
+    /// Buffer.
+    pub buffer: HalBuffer,
+    /// Offset.
+    pub offset: u64,
+    /// Size.
+    pub size: u64,
+}
+
 /// Enumerates HAL copy values.
 #[derive(Debug, Clone)]
 pub enum HalCopy {
     /// Buffer variant.
     Buffer(HalBufferCopy),
+    /// Buffer clear variant.
+    BufferClear(HalBufferClear),
     /// Buffer to texture variant.
     BufferToTexture(HalBufferTextureCopy),
     /// Texture to buffer variant.

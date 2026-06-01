@@ -96,6 +96,42 @@ fn metal_zero_size_buffer_copy_and_clear_submit_without_error() {
 
 #[test]
 #[ignore = "manual real-backend test"]
+#[cfg(feature = "metal")]
+fn metal_clear_buffer_zeroes_full_and_partial_ranges() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+
+        let data = [1, 2, 3, 4, 9, 8, 7, 6, 10, 11, 12, 13, 14, 15, 16, 17];
+
+        let full = run_clear_submit(device, &data, 0, data.len() as u64);
+        assert_eq!(
+            read_buffer(instance, full, 0, data.len()),
+            vec![0; data.len()]
+        );
+        yawgpu::wgpuBufferRelease(full);
+
+        let partial = run_clear_submit(device, &data, 4, 8);
+        let mut expected = data.to_vec();
+        expected[4..12].fill(0);
+        assert_eq!(read_buffer(instance, partial, 0, data.len()), expected);
+        yawgpu::wgpuBufferRelease(partial);
+
+        assert!(errors.lock().expect("error lock").is_empty());
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+#[test]
+#[ignore = "manual real-backend test"]
 fn default_noop_write_copy_readback_path_has_no_device_error() {
     unsafe {
         let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
@@ -124,6 +160,32 @@ unsafe fn round_trip(
     let actual = read_buffer(instance, destination, destination_offset, data.len());
     assert_eq!(actual, data);
     yawgpu::wgpuBufferRelease(destination);
+}
+
+#[cfg(feature = "metal")]
+unsafe fn run_clear_submit(
+    device: native::WGPUDevice,
+    data: &[u8],
+    clear_offset: u64,
+    clear_size: u64,
+) -> native::WGPUBuffer {
+    let queue = yawgpu::wgpuDeviceGetQueue(device);
+    let buffer = create_buffer(
+        device,
+        u64::try_from(data.len()).expect("test data length fits in u64"),
+        native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+    );
+    yawgpu::wgpuQueueWriteBuffer(queue, buffer, 0, data.as_ptr().cast(), data.len());
+
+    let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+    yawgpu::wgpuCommandEncoderClearBuffer(encoder, buffer, clear_offset, clear_size);
+    let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+    yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+
+    yawgpu::wgpuCommandBufferRelease(command_buffer);
+    yawgpu::wgpuCommandEncoderRelease(encoder);
+    yawgpu::wgpuQueueRelease(queue);
+    buffer
 }
 
 unsafe fn run_write_copy_submit(
