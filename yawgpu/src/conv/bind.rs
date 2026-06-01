@@ -132,17 +132,13 @@ pub unsafe fn map_pipeline_layout_descriptor(
     } else {
         std::slice::from_raw_parts(descriptor.bindGroupLayouts, descriptor.bindGroupLayoutCount)
             .iter()
-            .filter_map(|layout| {
+            .map(|layout| {
                 if layout.is_null() {
-                    set_first_error(
-                        &mut error,
-                        "pipeline layout bindGroupLayouts elements must not be null",
-                    );
-                    None
+                    Arc::new(core::BindGroupLayout::empty_unused())
                 } else {
                     let layout =
                         clone_handle::<WGPUBindGroupLayoutImpl>(*layout, "WGPUBindGroupLayout");
-                    Some(Arc::clone(&layout._core))
+                    Arc::clone(&layout._core)
                 }
             })
             .collect()

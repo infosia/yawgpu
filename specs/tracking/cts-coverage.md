@@ -256,11 +256,22 @@ never a reason to skip a CTS case.
   from the tier1 storage block; rgba8snorm's renderable/multisample stays
   tier1 (F-006, unchanged). Corrected the three F-009 tests that asserted
   "rgba8snorm storage requires tier1" + added 1D / rgba8snorm-storage CTS
-  cases and a base-storage unit test. Noop-verifiable. **With F-018 closed,
-  every yawgpu finding this suite has surfaced
-  (F-005/006/008/009/010/011/014/016/018) is resolved**; all other open
-  findings (F-001–F-004, F-007, F-012, F-013, F-015, F-017, F-019) are
-  wgpu-native defects.
+  cases and a base-storage unit test. Noop-verifiable.
+- **External-CTS createPipelineLayout finding F-020 — RESOLVED.** The
+  createPipelineLayout slice (T18) found yawgpu rejected **null
+  bind-group-layout slots** — a null slot is a valid unused bind-group
+  index (Dawn models it as an empty BGL). `conv/bind.rs::map_pipeline_layout_descriptor`
+  both errored on a null element AND `filter_map`-dropped it (which would
+  shift later groups' indices). Fixed by `map`ping a null element to a new
+  `BindGroupLayout::empty_unused()` (empty, non-default, non-error) so the
+  slot is preserved in place; removed the per-element null error (the
+  whole-array-null error stays). Flipped the three in-tree null-BGL tests
+  to expect success + added a `[bgl0, null, bgl2]` / `@group(2)`
+  slot-preservation case and a conv unit test. Noop-verifiable. **With
+  F-020 closed, every yawgpu finding this suite has surfaced
+  (F-005/006/008/009/010/011/014/016/018/020) is resolved**; all other open
+  findings (F-001–F-004, F-007, F-012, F-013, F-015, F-017, F-019, F-021)
+  are wgpu-native defects.
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage
