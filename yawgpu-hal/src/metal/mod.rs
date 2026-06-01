@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::ProtocolObject;
 use objc2_core_foundation::CGSize;
-use objc2_foundation::{NSArray, NSString};
+use objc2_foundation::{NSArray, NSRange, NSString};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer as MTLBufferTrait, MTLClearColor, MTLCommandBuffer,
     MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction, MTLComputeCommandEncoder,
@@ -21,13 +21,13 @@ use objc2_metal::{
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use crate::{
-    HalAddressMode, HalBoundBuffer, HalBuffer, HalBufferTextureCopy, HalBufferUsage,
-    HalCompareFunction, HalComputePass, HalCopy, HalDepthStencilState, HalDescriptorBinding,
-    HalDraw, HalError, HalExtent3d, HalFilterMode, HalMipmapFilterMode, HalPrimitiveTopology,
-    HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor, HalSamplerDescriptor,
-    HalShaderSource, HalStencilFaceState, HalStencilOperation, HalSurfaceConfiguration, HalTexture,
-    HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat,
-    HalVertexStepMode,
+    HalAddressMode, HalBoundBuffer, HalBuffer, HalBufferClear, HalBufferTextureCopy,
+    HalBufferUsage, HalCompareFunction, HalComputePass, HalCopy, HalDepthStencilState,
+    HalDescriptorBinding, HalDraw, HalError, HalExtent3d, HalFilterMode, HalMipmapFilterMode,
+    HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor,
+    HalSamplerDescriptor, HalShaderSource, HalStencilFaceState, HalStencilOperation,
+    HalSurfaceConfiguration, HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
+    HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
 #[cfg(feature = "tiled")]
 use crate::{

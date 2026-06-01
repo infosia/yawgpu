@@ -293,9 +293,19 @@ never a reason to skip a CTS case.
   validated no-op — backend-agnostic, also avoids Vulkan 0-size VUIDs);
   plus `yawgpu-hal/src/metal/queue.rs` now always calls `endEncoding()`
   even when an `encode_*` helper errors (defensive against the un-ended
-  encoder class). Noop unit tests + an `#[ignore]` Metal e2e
-  (`e2e_metal_buffer::metal_zero_size_buffer_copy_and_clear_submit_without_error`)
-  that **Claude ran on the M2** (4/4 green, abort gone). **With F-023
+  encoder class). **Second part (CTS re-test):** removing the abort
+  unmasked a deeper bug — yawgpu's `clearBuffer` was validation-only and
+  never zeroed the buffer (it recorded no `CommandExecution`, and no HAL
+  backend had a fill primitive). Implemented `clearBuffer` execution
+  end-to-end: a `CommandExecution::BufferClear` → `HalCopy::BufferClear`
+  with a backend fill (Metal `fillBuffer:range:value:0`, Vulkan
+  `vkCmdFillBuffer(…,0)`, GLES chunked zero `bufferSubData`, Noop no-op —
+  Noop has no byte storage); the 0-size clear stays a no-op. Noop unit
+  tests + a **data-readback** Metal e2e
+  (`e2e_metal_buffer::metal_clear_buffer_zeroes_full_and_partial_ranges`,
+  plus the 0-size no-op case) that **Claude ran on the M2** (5/5 green;
+  the cleared range reads back all-zero and partial-range bytes outside
+  are unchanged — the abort is gone *and* the data is correct). **With F-023
   closed, every yawgpu finding this suite has surfaced
   (F-005/006/008/009/010/011/014/016/018/020/022/023) is resolved**; all
   other open findings (F-001–F-004, F-007, F-012, F-013, F-015, F-017,

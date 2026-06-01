@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use yawgpu_hal::{
-    HalBoundBuffer, HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout, HalComputePass,
-    HalCopy, HalDraw, HalQueue, HalRenderColorTarget, HalRenderLoadOp, HalRenderPass,
-    HalTextureCopy,
+    HalBoundBuffer, HalBufferClear, HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout,
+    HalComputePass, HalCopy, HalDraw, HalQueue, HalRenderColorTarget, HalRenderLoadOp,
+    HalRenderPass, HalTextureCopy,
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
@@ -196,7 +196,9 @@ fn command_buffer_referenced_textures(command_buffer: &CommandBuffer) -> Vec<Tex
                     push_subpass_resource_textures(&mut textures, &attachment.resource);
                 }
             }
-            CommandExecution::BufferCopy(_) | CommandExecution::ComputePass(_) => {}
+            CommandExecution::BufferCopy(_)
+            | CommandExecution::BufferClear(_)
+            | CommandExecution::ComputePass(_) => {}
         }
     }
     textures
@@ -253,6 +255,17 @@ pub(crate) fn hal_command_execution(op: &CommandExecution) -> Option<HalCopy> {
                 destination,
                 destination_offset: copy.destination_offset,
                 size: copy.size,
+            }))
+        }
+        CommandExecution::BufferClear(clear) => {
+            if clear.size == 0 {
+                return None;
+            }
+            let buffer = clear.buffer.hal()?;
+            Some(HalCopy::BufferClear(HalBufferClear {
+                buffer,
+                offset: clear.offset,
+                size: clear.size,
             }))
         }
         CommandExecution::TextureCopy(copy) => hal_texture_copy_execution(copy),
@@ -752,9 +765,34 @@ mod tests {
         }));
 
         let encoder = device.create_command_encoder();
-        assert_eq!(encoder.clear_buffer(buffer, 0, 0), None);
+        assert_eq!(encoder.clear_buffer(Arc::clone(&buffer), 0, 0), None);
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
+        assert!(matches!(
+            command_buffer.command_ops(),
+            [CommandExecution::BufferClear(clear)] if clear.buffer.same(&buffer) && clear.size == 0
+        ));
+        assert!(hal_command_execution(&command_buffer.command_ops()[0]).is_none());
         assert_eq!(queue.submit(&[Arc::new(command_buffer)]), None);
+    }
+
+    #[test]
+    fn clear_buffer_execution_maps_to_hal_buffer_clear() {
+        let device = noop_device();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let clear = BufferClearCommand {
+            buffer,
+            offset: 4,
+            size: 8,
+        };
+
+        assert!(matches!(
+            hal_command_execution(&CommandExecution::BufferClear(clear)),
+            Some(HalCopy::BufferClear(clear)) if clear.offset == 4 && clear.size == 8
+        ));
     }
 }

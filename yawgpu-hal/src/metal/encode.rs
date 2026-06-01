@@ -27,6 +27,23 @@ pub(super) fn encode_buffer_copy(
     Ok(())
 }
 
+/// Records buffer clear encode into the command stream.
+pub(super) fn encode_buffer_clear(
+    blit: &ProtocolObject<dyn MTLBlitCommandEncoder>,
+    clear: &HalBufferClear,
+) -> Result<(), HalError> {
+    let HalBuffer::Metal(buffer) = &clear.buffer else {
+        return Err(buffer_error("buffer is not Metal-backed"));
+    };
+    buffer.validate_range(clear.offset, clear.size)?;
+    blit.fillBuffer_range_value(
+        buffer.inner()?,
+        NSRange::new(to_ns(clear.offset)?, to_ns(clear.size)?),
+        0,
+    );
+    Ok(())
+}
+
 /// Records encode into the command stream.
 pub(super) fn encode_buffer_to_texture(
     blit: &ProtocolObject<dyn MTLBlitCommandEncoder>,

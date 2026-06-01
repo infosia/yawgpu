@@ -6,9 +6,9 @@ use super::device::GlesDeviceInner;
 use super::format::{map_primitive_topology, map_vertex_format};
 use super::BACKEND;
 use crate::{
-    HalBuffer, HalBufferBindingKind, HalBufferCopy, HalBufferTextureCopy, HalComputePass,
-    HalComputePipeline, HalCopy, HalDescriptorBinding, HalError, HalRenderLoadOp, HalRenderPass,
-    HalRenderPipeline, HalTexture, HalTextureCopy, HalVertexStepMode,
+    HalBuffer, HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy,
+    HalComputePass, HalComputePipeline, HalCopy, HalDescriptorBinding, HalError, HalRenderLoadOp,
+    HalRenderPass, HalRenderPipeline, HalTexture, HalTextureCopy, HalVertexStepMode,
 };
 
 /// Stores GLES queue data used by validation and backend submission.
@@ -53,6 +53,7 @@ impl GlesQueue {
                 for copy in copies {
                     match copy {
                         HalCopy::Buffer(copy) => submit_buffer_copy(gl, copy)?,
+                        HalCopy::BufferClear(clear) => submit_buffer_clear(gl, clear)?,
                         HalCopy::BufferToTexture(copy) => submit_buffer_to_texture(gl, copy)?,
                         HalCopy::TextureToBuffer(copy) => submit_texture_to_buffer(gl, copy)?,
                         HalCopy::TextureToTexture(copy) => submit_texture_to_texture(gl, copy)?,
@@ -121,6 +122,65 @@ fn submit_buffer_copy(gl: &glow::Context, copy: &HalBufferCopy) -> Result<(), Ha
         gl.bind_buffer(glow::COPY_WRITE_BUFFER, None);
     }
 
+    Ok(())
+}
+
+fn submit_buffer_clear(gl: &glow::Context, clear: &HalBufferClear) -> Result<(), HalError> {
+    let HalBuffer::Gles(buffer) = &clear.buffer else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "buffer clear target is not a GLES buffer",
+        });
+    };
+    let end = clear
+        .offset
+        .checked_add(clear.size)
+        .ok_or(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "buffer clear range overflow",
+        })?;
+    if end > buffer.size() {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "buffer clear range exceeds buffer size",
+        });
+    }
+    if clear.size == 0 {
+        return Ok(());
+    }
+
+    let raw = buffer.raw_or_err()?;
+    let base_offset = i32::try_from(clear.offset).map_err(|_| HalError::BufferOperationFailed {
+        backend: BACKEND,
+        message: "buffer clear offset exceeds GLES limit",
+    })?;
+    let size = usize::try_from(clear.size).map_err(|_| HalError::BufferOperationFailed {
+        backend: BACKEND,
+        message: "buffer clear size exceeds host limit",
+    })?;
+    const ZERO_CHUNK: usize = 4096;
+    let zeros = [0_u8; ZERO_CHUNK];
+    unsafe {
+        gl.bind_buffer(glow::COPY_WRITE_BUFFER, Some(raw));
+        let mut written = 0_usize;
+        while written < size {
+            let chunk = (size - written).min(ZERO_CHUNK);
+            let offset = base_offset
+                .checked_add(i32::try_from(written).map_err(|_| {
+                    HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message: "buffer clear offset exceeds GLES limit",
+                    }
+                })?)
+                .ok_or(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "buffer clear offset exceeds GLES limit",
+                })?;
+            gl.buffer_sub_data_u8_slice(glow::COPY_WRITE_BUFFER, offset, &zeros[..chunk]);
+            written += chunk;
+        }
+        gl.bind_buffer(glow::COPY_WRITE_BUFFER, None);
+    }
     Ok(())
 }
 

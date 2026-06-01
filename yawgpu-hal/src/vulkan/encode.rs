@@ -54,6 +54,9 @@ pub(super) fn record_and_submit_copies(
                 HalCopy::Buffer(copy) => {
                     encode_buffer_copy(&queue.device.device, command_buffer, copy)?;
                 }
+                HalCopy::BufferClear(clear) => {
+                    encode_buffer_clear(&queue.device.device, command_buffer, clear)?;
+                }
                 HalCopy::BufferToTexture(copy) => {
                     encode_buffer_to_texture(&queue.device.device, command_buffer, copy)?;
                 }
@@ -299,7 +302,7 @@ fn find_surface_pending(copies: &[HalCopy]) -> Option<Arc<Mutex<SurfacePendingSt
 
 fn surface_pending_from_copy(copy: &HalCopy) -> Option<Arc<Mutex<SurfacePendingState>>> {
     match copy {
-        HalCopy::Buffer(_) | HalCopy::ComputePass(_) => None,
+        HalCopy::Buffer(_) | HalCopy::BufferClear(_) | HalCopy::ComputePass(_) => None,
         HalCopy::BufferToTexture(copy) | HalCopy::TextureToBuffer(copy) => {
             surface_pending_from_hal_texture(&copy.texture)
         }
@@ -378,6 +381,27 @@ pub(super) fn encode_buffer_copy(
         .size(copy.size);
     unsafe {
         device.cmd_copy_buffer(command_buffer, source.buffer, destination.buffer, &[region]);
+    }
+    transfer_to_compute_barrier(device, command_buffer);
+    Ok(())
+}
+
+/// Records buffer clear encode into the command stream.
+pub(super) fn encode_buffer_clear(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    clear: &HalBufferClear,
+) -> Result<(), HalError> {
+    let crate::HalBuffer::Vulkan(buffer) = &clear.buffer else {
+        return Err(buffer_error("buffer is not Vulkan-backed"));
+    };
+    buffer.validate_range(clear.offset, clear.size)?;
+    if clear.size == 0 {
+        return Ok(());
+    }
+    let buffer = buffer.inner()?;
+    unsafe {
+        device.cmd_fill_buffer(command_buffer, buffer.buffer, clear.offset, clear.size, 0);
     }
     transfer_to_compute_barrier(device, command_buffer);
     Ok(())
