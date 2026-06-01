@@ -311,6 +311,7 @@ fn storage_texture_layout_dimension() {
     let test = ValidationTest::new();
     unsafe {
         for (dimension, success) in [
+            (native::WGPUTextureViewDimension_1D, true),
             (native::WGPUTextureViewDimension_2D, true),
             (native::WGPUTextureViewDimension_2DArray, true),
             (native::WGPUTextureViewDimension_Cube, false),
@@ -337,6 +338,16 @@ fn storage_texture_formats() {
             (
                 native::WGPUTextureFormat_RGBA8Unorm,
                 native::WGPUStorageTextureAccess_WriteOnly,
+                true,
+            ),
+            (
+                native::WGPUTextureFormat_RGBA8Snorm,
+                native::WGPUStorageTextureAccess_WriteOnly,
+                true,
+            ),
+            (
+                native::WGPUTextureFormat_RGBA8Snorm,
+                native::WGPUStorageTextureAccess_ReadOnly,
                 true,
             ),
             (

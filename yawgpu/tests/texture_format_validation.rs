@@ -117,14 +117,6 @@ fn storage_binding_requires_storage_capable_format() {
             &test,
             native::WGPUTextureDescriptor {
                 usage: native::WGPUTextureUsage_StorageBinding,
-                format: native::WGPUTextureFormat_RGBA8Snorm,
-                ..default_descriptor()
-            },
-        );
-        assert_texture_error(
-            &test,
-            native::WGPUTextureDescriptor {
-                usage: native::WGPUTextureUsage_StorageBinding,
                 format: native::WGPUTextureFormat_RG8Unorm,
                 ..default_descriptor()
             },
