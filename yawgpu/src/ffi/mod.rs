@@ -4480,6 +4480,27 @@ mod tests {
             wgpuCommandBufferRelease(command_buffer);
             wgpuCommandEncoderRelease(encoder);
 
+            let whole_size_clear = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            wgpuCommandEncoderClearBuffer(
+                whole_size_clear,
+                destination,
+                8,
+                native::WGPU_WHOLE_SIZE,
+            );
+            let whole_size_buffer = wgpuCommandEncoderFinish(whole_size_clear, std::ptr::null());
+            let mut whole_size_scope = PopErrorScopeState::default();
+            let future = pop_error_scope(instance, device, &mut whole_size_scope);
+            assert_ne!(future.id, 0);
+            assert_eq!(whole_size_scope.fired, 1);
+            assert_eq!(
+                whole_size_scope.status,
+                native::WGPUPopErrorScopeStatus_Success
+            );
+            assert_eq!(whole_size_scope.error_type, native::WGPUErrorType_NoError);
+            wgpuCommandBufferRelease(whole_size_buffer);
+            wgpuCommandEncoderRelease(whole_size_clear);
+
             let invalid_copy = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
             wgpuCommandEncoderCopyBufferToBuffer(invalid_copy, source, 2, destination, 0, 4);
             wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
