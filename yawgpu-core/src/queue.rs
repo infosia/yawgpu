@@ -242,6 +242,9 @@ fn hal_buffer_texture_layout(
 pub(crate) fn hal_command_execution(op: &CommandExecution) -> Option<HalCopy> {
     match op {
         CommandExecution::BufferCopy(copy) => {
+            if copy.size == 0 {
+                return None;
+            }
             let source = copy.source.hal()?;
             let destination = copy.destination.hal()?;
             Some(HalCopy::Buffer(HalBufferCopy {
@@ -438,6 +441,9 @@ pub(crate) fn hal_texture_copy_execution(copy: &TextureCopyCommand) -> Option<Ha
             destination,
             copy_size,
         } => {
+            if extent_is_empty(*copy_size) {
+                return None;
+            }
             let buffer = source.buffer.hal()?;
             let texture = destination.texture.hal()?;
             let buffer_layout =
@@ -456,6 +462,9 @@ pub(crate) fn hal_texture_copy_execution(copy: &TextureCopyCommand) -> Option<Ha
             destination,
             copy_size,
         } => {
+            if extent_is_empty(*copy_size) {
+                return None;
+            }
             let buffer = destination.buffer.hal()?;
             let texture = source.texture.hal()?;
             let buffer_layout =
@@ -474,6 +483,9 @@ pub(crate) fn hal_texture_copy_execution(copy: &TextureCopyCommand) -> Option<Ha
             destination,
             copy_size,
         } => {
+            if extent_is_empty(*copy_size) {
+                return None;
+            }
             let source_texture = source.texture.hal()?;
             let destination_texture = destination.texture.hal()?;
             Some(HalCopy::TextureToTexture(HalTextureCopy {
@@ -487,6 +499,10 @@ pub(crate) fn hal_texture_copy_execution(copy: &TextureCopyCommand) -> Option<Ha
             }))
         }
     }
+}
+
+fn extent_is_empty(extent: Extent3d) -> bool {
+    extent.width == 0 || extent.height == 0 || extent.depth_or_array_layers == 0
 }
 
 /// Returns HAL compute pass execution.
@@ -689,5 +705,56 @@ mod tests {
 
         assert_eq!(queue.write_buffer(&buffer, 0, &[1, 2, 3, 4]), None);
         assert_eq!(queue.submit(&[]), None);
+    }
+
+    #[test]
+    fn zero_size_buffer_copy_is_not_emitted_to_hal_and_submits_as_noop() {
+        let device = noop_device();
+        let queue = device.queue();
+        let source = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC,
+            size: 4,
+            mapped_at_creation: false,
+        }));
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        }));
+        let copy = BufferCopyCommand {
+            source: Arc::clone(&source),
+            source_offset: 0,
+            destination: Arc::clone(&destination),
+            destination_offset: 0,
+            size: 0,
+        };
+
+        assert!(hal_command_execution(&CommandExecution::BufferCopy(copy)).is_none());
+
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.copy_buffer_to_buffer(Arc::clone(&source), 0, Arc::clone(&destination), 0, 0),
+            None
+        );
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(queue.submit(&[Arc::new(command_buffer)]), None);
+    }
+
+    #[test]
+    fn zero_size_clear_buffer_submits_as_noop() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        }));
+
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.clear_buffer(buffer, 0, 0), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(queue.submit(&[Arc::new(command_buffer)]), None);
     }
 }
