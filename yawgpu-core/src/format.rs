@@ -300,9 +300,16 @@ impl TextureFormat {
             TextureFormat::R32_FLOAT => FormatCaps::float_color(4, 1)
                 .renderable()
                 .multisample()
-                .storage(),
-            TextureFormat::R32_UINT => FormatCaps::uint_color(4, 1).renderable().storage(),
-            TextureFormat::R32_SINT => FormatCaps::sint_color(4, 1).renderable().storage(),
+                .storage()
+                .read_write_storage(),
+            TextureFormat::R32_UINT => FormatCaps::uint_color(4, 1)
+                .renderable()
+                .storage()
+                .read_write_storage(),
+            TextureFormat::R32_SINT => FormatCaps::sint_color(4, 1)
+                .renderable()
+                .storage()
+                .read_write_storage(),
             TextureFormat::RGBA8_UNORM => FormatCaps::float_color(4, 4)
                 .alpha()
                 .blendable()
@@ -591,9 +598,7 @@ impl TextureFormat {
         }
         if features.contains(&Feature::TextureFormatsTier2) {
             match self.0 {
-                TextureFormat::R32_FLOAT
-                | TextureFormat::RGBA16_FLOAT
-                | TextureFormat::RGBA32_FLOAT => {
+                TextureFormat::RGBA16_FLOAT | TextureFormat::RGBA32_FLOAT => {
                     caps.read_write_storage_capable = true;
                 }
                 _ => {}
@@ -949,6 +954,12 @@ impl FormatCaps {
     }
 
     /// Constant value for fn.
+    pub(crate) const fn read_write_storage(mut self) -> Self {
+        self.read_write_storage_capable = true;
+        self
+    }
+
+    /// Constant value for fn.
     pub(crate) const fn blendable(mut self) -> Self {
         self.is_blendable = true;
         self
@@ -1000,6 +1011,28 @@ mod tests {
         assert!(!caps.is_compressed);
 
         assert_eq!(TextureFormat::from_raw(0).caps(&features), None);
+    }
+
+    #[test]
+    fn r32_storage_formats_are_read_write_without_features() {
+        let no_features = FeatureSet::new();
+
+        for raw in [
+            TextureFormat::R32_UINT,
+            TextureFormat::R32_SINT,
+            TextureFormat::R32_FLOAT,
+        ] {
+            assert!(
+                TextureFormat::from_raw(raw)
+                    .caps(&no_features)
+                    .is_some_and(|caps| caps.read_write_storage_capable),
+                "{raw:#x} must support read-write storage without feature gates"
+            );
+        }
+
+        assert!(!TextureFormat::from_raw(TextureFormat::RGBA8_UNORM)
+            .caps(&no_features)
+            .is_some_and(|caps| caps.read_write_storage_capable));
     }
 
     #[test]

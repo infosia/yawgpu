@@ -349,6 +349,21 @@ fn storage_texture_formats() {
                 native::WGPUStorageTextureAccess_ReadWrite,
                 false,
             ),
+            (
+                native::WGPUTextureFormat_R32Uint,
+                native::WGPUStorageTextureAccess_ReadWrite,
+                true,
+            ),
+            (
+                native::WGPUTextureFormat_R32Sint,
+                native::WGPUStorageTextureAccess_ReadWrite,
+                true,
+            ),
+            (
+                native::WGPUTextureFormat_R32Float,
+                native::WGPUStorageTextureAccess_ReadWrite,
+                true,
+            ),
         ];
         for (format, access, success) in cases {
             let entry = storage_texture_layout(

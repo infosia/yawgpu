@@ -231,9 +231,20 @@ never a reason to skip a CTS case.
   array_layer_count <= 1` for `D3` while leaving the 1D/2D `> texture_layers`
   check unchanged. Active in-tree 3D cases in
   `cts/validation/texture/create_view.rs::array_layers` + a core unit test.
-  Noop-verifiable. **With F-014 closed, every yawgpu finding this suite has
-  surfaced (F-005/006/008/009/010/011/014) is resolved**; all other open
-  findings (F-001–F-004, F-007, F-012, F-013, F-015) are wgpu-native defects.
+  Noop-verifiable.
+- **External-CTS createBindGroupLayout finding F-016 — RESOLVED.** The BGL
+  storage-texture slice (T13) found yawgpu rejected `read-write` storage
+  access on `r32uint`/`r32sint`/`r32float`: `read_write_storage_capable`
+  was set only inside the `TextureFormatsTier2` block, but per spec those
+  three formats support read-write storage with **no feature gate**. Fixed
+  by marking the r32 trio read-write-capable in their base `FormatCaps`
+  (new `read_write_storage()` builder; the redundant tier2 `R32_FLOAT`
+  entry dropped). Active in-tree r32 read-write cases in
+  `cts/validation/create_bind_group_layout.rs::storage_texture_formats` +
+  a core unit test. Noop-verifiable. **With F-016 closed, every yawgpu
+  finding this suite has surfaced (F-005/006/008/009/010/011/014/016) is
+  resolved**; all other open findings (F-001–F-004, F-007, F-012, F-013,
+  F-015, F-017) are wgpu-native defects.
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage
