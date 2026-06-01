@@ -328,7 +328,9 @@ impl TextureFormat {
                     .renderable()
                     .multisample()
             }
-            TextureFormat::RGBA8_SNORM => FormatCaps::float_color(4, 4).alpha().blendable(),
+            TextureFormat::RGBA8_SNORM => {
+                FormatCaps::float_color(4, 4).alpha().blendable().storage()
+            }
             TextureFormat::RGBA8_UINT => FormatCaps::uint_color(4, 4)
                 .alpha()
                 .renderable()
@@ -576,9 +578,7 @@ impl TextureFormat {
                 | TextureFormat::RG16_FLOAT
                 | TextureFormat::RGB10A2_UINT
                 | TextureFormat::RGB10A2_UNORM
-                | TextureFormat::RG11B10_UFLOAT
-                | TextureFormat::RGBA8_SNORM
-                | TextureFormat::RGBA16_FLOAT => {
+                | TextureFormat::RG11B10_UFLOAT => {
                     caps.storage_capable = true;
                 }
                 _ => {}
@@ -1124,6 +1124,12 @@ mod tests {
                 .caps(&no_features)
                 .expect("RGBA8Snorm caps")
                 .renderable
+        );
+        assert!(
+            TextureFormat::from_raw(TextureFormat::RGBA8_SNORM)
+                .caps(&no_features)
+                .expect("RGBA8Snorm caps")
+                .storage_capable
         );
         assert!(
             TextureFormat::from_raw(TextureFormat::RGBA8_SNORM)

@@ -241,10 +241,26 @@ never a reason to skip a CTS case.
   (new `read_write_storage()` builder; the redundant tier2 `R32_FLOAT`
   entry dropped). Active in-tree r32 read-write cases in
   `cts/validation/create_bind_group_layout.rs::storage_texture_formats` +
-  a core unit test. Noop-verifiable. **With F-016 closed, every yawgpu
-  finding this suite has surfaced (F-005/006/008/009/010/011/014/016) is
-  resolved**; all other open findings (F-001–F-004, F-007, F-012, F-013,
-  F-015, F-017) are wgpu-native defects.
+  a core unit test. Noop-verifiable.
+- **External-CTS createBindGroupLayout finding F-018 — RESOLVED.** The BGL
+  storage-texture slice (T14) found two over-restrictions: (1) yawgpu
+  rejected a **1D** storage-texture view dimension — `1d` is a valid
+  storage view (only cube/cube-array are disallowed), removed the
+  `bind_group_layout.rs` D1 rejection; (2) yawgpu gated **rgba8snorm
+  storage** behind `texture-formats-tier1`, but per the CTS
+  `kStorageTextureFormats` table rgba8snorm is a **base** (no-feature)
+  storage format — **this reverses part of F-009**, which over-narrowed it
+  (the F-009 createTexture test ran with a tier1-on fixture and couldn't
+  tell base from tier1). Fixed by adding `.storage()` to the base
+  `RGBA8_SNORM` caps and removing it (and the redundant `RGBA16_FLOAT`)
+  from the tier1 storage block; rgba8snorm's renderable/multisample stays
+  tier1 (F-006, unchanged). Corrected the three F-009 tests that asserted
+  "rgba8snorm storage requires tier1" + added 1D / rgba8snorm-storage CTS
+  cases and a base-storage unit test. Noop-verifiable. **With F-018 closed,
+  every yawgpu finding this suite has surfaced
+  (F-005/006/008/009/010/011/014/016/018) is resolved**; all other open
+  findings (F-001–F-004, F-007, F-012, F-013, F-015, F-017, F-019) are
+  wgpu-native defects.
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage

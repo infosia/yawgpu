@@ -496,23 +496,11 @@ fn texture_usage() {
 }
 
 #[test]
-fn texture_usage_rgba8_snorm_storage_binding_requires_tier1() {
+fn texture_usage_rgba8_snorm_storage_binding_is_base() {
     let test = ValidationTest::new();
     unsafe {
-        assert_texture_error(
-            &test,
-            native::WGPUTextureDescriptor {
-                usage: native::WGPUTextureUsage_StorageBinding,
-                format: native::WGPUTextureFormat_RGBA8Snorm,
-                ..texture_descriptor()
-            },
-        );
-    }
-
-    let tier1 = ValidationTest::with_features(&[native::WGPUFeatureName_TextureFormatsTier1]);
-    unsafe {
         assert_texture_ok(
-            &tier1,
+            &test,
             native::WGPUTextureDescriptor {
                 usage: native::WGPUTextureUsage_StorageBinding,
                 format: native::WGPUTextureFormat_RGBA8Snorm,

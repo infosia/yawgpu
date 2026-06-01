@@ -105,11 +105,6 @@ pub(crate) fn validate_bind_group_layout_descriptor(
                 format,
                 view_dimension,
             } => {
-                if view_dimension == TextureViewDimension::D1 {
-                    return Some(
-                        "storage texture bindings must not use 1D view dimension".to_owned(),
-                    );
-                }
                 if matches!(
                     view_dimension,
                     TextureViewDimension::Cube | TextureViewDimension::CubeArray
