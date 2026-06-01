@@ -1041,7 +1041,7 @@ pub(crate) fn validate_shader_binding_compat(
                     "compute pipeline layout buffer binding type is incompatible".to_owned(),
                 );
             }
-            if min_binding_size < binding.min_binding_size {
+            if min_binding_size != 0 && min_binding_size < binding.min_binding_size {
                 return Err("compute pipeline layout buffer minBindingSize is too small".to_owned());
             }
             Ok(())
@@ -1205,6 +1205,38 @@ mod tests {
         assert_eq!(
             scoped.message,
             "compute pipeline shader module must not be an error module"
+        );
+    }
+
+    #[test]
+    fn shader_binding_compat_defers_unspecified_min_binding_size() {
+        let binding = shader_naga::ReflectedResourceBinding {
+            group: 0,
+            binding: 0,
+            kind: shader_naga::ReflectedResourceBindingKind::Buffer(
+                shader_naga::ReflectedBufferType::Uniform,
+            ),
+            min_binding_size: 4,
+            statically_used: true,
+        };
+
+        let layout_kind = |min_binding_size| BindingLayoutKind::Buffer {
+            ty: BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size,
+        };
+
+        assert_eq!(
+            validate_shader_binding_compat(&binding, layout_kind(0)),
+            Ok(())
+        );
+        assert_eq!(
+            validate_shader_binding_compat(&binding, layout_kind(8)),
+            Ok(())
+        );
+        assert_eq!(
+            validate_shader_binding_compat(&binding, layout_kind(2)),
+            Err("compute pipeline layout buffer minBindingSize is too small".to_owned())
         );
     }
 

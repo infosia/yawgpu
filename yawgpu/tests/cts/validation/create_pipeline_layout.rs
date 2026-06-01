@@ -94,7 +94,7 @@ fn bind_group_layouts_null_bind_group_layouts() {
         let non_empty = expect_bind_group_layout(
             &test,
             true,
-            &[compute_uniform_buffer_layout(
+            &[buffer_layout(
                 0,
                 native::WGPUShaderStage_Compute,
                 native::WGPUBufferBindingType_Uniform,
@@ -121,7 +121,7 @@ fn bind_group_layouts_create_pipeline_with_null_bind_group_layouts() {
         let non_empty = expect_bind_group_layout(
             &test,
             true,
-            &[compute_uniform_buffer_layout(
+            &[buffer_layout(
                 0,
                 native::WGPUShaderStage_Compute,
                 native::WGPUBufferBindingType_Uniform,
@@ -149,7 +149,7 @@ fn bind_group_layouts_set_pipeline_with_null_bind_group_layouts() {
         let non_empty = expect_bind_group_layout(
             &test,
             true,
-            &[compute_uniform_buffer_layout(
+            &[buffer_layout(
                 0,
                 native::WGPUShaderStage_Compute,
                 native::WGPUBufferBindingType_Uniform,
@@ -178,7 +178,7 @@ fn bind_group_layouts_null_slot_preserves_later_group_indices() {
         let group0 = expect_bind_group_layout(
             &test,
             true,
-            &[compute_uniform_buffer_layout(
+            &[buffer_layout(
                 0,
                 native::WGPUShaderStage_Compute,
                 native::WGPUBufferBindingType_Uniform,
@@ -187,7 +187,7 @@ fn bind_group_layouts_null_slot_preserves_later_group_indices() {
         let group2 = expect_bind_group_layout(
             &test,
             true,
-            &[compute_uniform_buffer_layout(
+            &[buffer_layout(
                 0,
                 native::WGPUShaderStage_Compute,
                 native::WGPUBufferBindingType_Uniform,
@@ -238,16 +238,6 @@ unsafe fn create_empty_bind_group_layout(
         entries: std::ptr::null(),
     };
     unsafe { yawgpu::wgpuDeviceCreateBindGroupLayout(device, &descriptor) }
-}
-
-fn compute_uniform_buffer_layout(
-    binding: u32,
-    visibility: native::WGPUShaderStage,
-    ty: native::WGPUBufferBindingType,
-) -> native::WGPUBindGroupLayoutEntry {
-    let mut entry = buffer_layout(binding, visibility, ty);
-    entry.buffer.minBindingSize = 16;
-    entry
 }
 
 #[allow(dead_code)]

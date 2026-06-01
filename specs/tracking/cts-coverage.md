@@ -267,11 +267,23 @@ never a reason to skip a CTS case.
   slot is preserved in place; removed the per-element null error (the
   whole-array-null error stays). Flipped the three in-tree null-BGL tests
   to expect success + added a `[bgl0, null, bgl2]` / `@group(2)`
-  slot-preservation case and a conv unit test. Noop-verifiable. **With
-  F-020 closed, every yawgpu finding this suite has surfaced
-  (F-005/006/008/009/010/011/014/016/018/020) is resolved**; all other open
-  findings (F-001–F-004, F-007, F-012, F-013, F-015, F-017, F-019, F-021)
-  are wgpu-native defects.
+  slot-preservation case and a conv unit test. Noop-verifiable.
+- **External-CTS createPipelineLayout finding F-022 — RESOLVED.** The
+  completed `createPipelineLayout` slice (T21) found yawgpu rejected a BGL
+  buffer entry with `minBindingSize = 0` at pipeline creation. `0` means
+  *unspecified* — the size check defers to bind time — so pipeline creation
+  must not reject it (Dawn defers). `compute_pipeline.rs::validate_shader_binding_compat`
+  compared the layout's `minBindingSize` (0) against the shader's required
+  size and errored; fixed by guarding the check with `min_binding_size != 0`
+  (non-zero-but-too-small still errors), mirroring the existing bind-time
+  rule in `bind_group.rs`. render-pipeline has no analogous check (no change
+  needed). Reverted the F-020 test workaround (those null-BGL tests had used
+  `minBindingSize = 16` to dodge this bug; now back to the default 0, so
+  they exercise the deferral) + a core unit test. Noop-verifiable. **With
+  F-022 closed, every yawgpu finding this suite has surfaced
+  (F-005/006/008/009/010/011/014/016/018/020/022) is resolved**; all other
+  open findings (F-001–F-004, F-007, F-012, F-013, F-015, F-017, F-019,
+  F-021) are wgpu-native defects.
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage
