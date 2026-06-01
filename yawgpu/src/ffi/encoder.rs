@@ -255,6 +255,11 @@ pub unsafe extern "C" fn wgpuCommandEncoderClearBuffer(
         );
         return;
     }
+    let size = if size == native::WGPU_WHOLE_SIZE {
+        buffer.core.size().saturating_sub(offset)
+    } else {
+        size
+    };
     dispatch_optional_error(
         &encoder.device,
         encoder

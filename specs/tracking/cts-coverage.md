@@ -305,8 +305,20 @@ never a reason to skip a CTS case.
   (`e2e_metal_buffer::metal_clear_buffer_zeroes_full_and_partial_ranges`,
   plus the 0-size no-op case) that **Claude ran on the M2** (5/5 green;
   the cleared range reads back all-zero and partial-range bytes outside
-  are unchanged — the abort is gone *and* the data is correct). **With F-023
-  closed, every yawgpu finding this suite has surfaced
+  are unchanged). **Third part (CTS re-test):** the data-readback case
+  passed on the M2 but the real CTS still failed 10/50 — the
+  `size = undefined` subcases — because the clearBuffer C FFI did not
+  resolve `WGPU_WHOLE_SIZE` (it passed `u64::MAX` to core, which rejected
+  the range). This was a pre-existing FFI gap, unmasked once clearBuffer
+  executed (and missed by the hand-written e2e, which only used explicit
+  sizes — lesson: the real gate is the CTS sequence, not a bespoke e2e).
+  Fixed in `yawgpu/src/ffi/encoder.rs::wgpuCommandEncoderClearBuffer`
+  (`size == WGPU_WHOLE_SIZE` → `buffer.size − offset`). **Verified by
+  running the real webgpu-native-cts binary directly** (rebuilt the
+  `--features metal` staticlib + relinked cts):
+  `api,operation,command_buffer,clearBuffer:clear` now **pass=50 / fail=0**
+  (was 40/10), `copyBufferToBuffer` + `createPipelineLayout` slices clean.
+  **With F-023 closed, every yawgpu finding this suite has surfaced
   (F-005/006/008/009/010/011/014/016/018/020/022/023) is resolved**; all
   other open findings (F-001–F-004, F-007, F-012, F-013, F-015, F-017,
   F-019, F-021) are wgpu-native defects.

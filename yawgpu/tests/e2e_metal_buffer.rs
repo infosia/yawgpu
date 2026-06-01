@@ -123,6 +123,22 @@ fn metal_clear_buffer_zeroes_full_and_partial_ranges() {
         assert_eq!(read_buffer(instance, partial, 0, data.len()), expected);
         yawgpu::wgpuBufferRelease(partial);
 
+        let whole = run_clear_submit(device, &data, 0, native::WGPU_WHOLE_SIZE);
+        assert_eq!(
+            read_buffer(instance, whole, 0, data.len()),
+            vec![0; data.len()]
+        );
+        yawgpu::wgpuBufferRelease(whole);
+
+        let whole_from_offset = run_clear_submit(device, &data, 4, native::WGPU_WHOLE_SIZE);
+        let mut expected = data.to_vec();
+        expected[4..].fill(0);
+        assert_eq!(
+            read_buffer(instance, whole_from_offset, 0, data.len()),
+            expected
+        );
+        yawgpu::wgpuBufferRelease(whole_from_offset);
+
         assert!(errors.lock().expect("error lock").is_empty());
         yawgpu::wgpuDeviceRelease(device);
         yawgpu::wgpuAdapterRelease(adapter);
