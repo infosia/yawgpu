@@ -279,11 +279,27 @@ never a reason to skip a CTS case.
   rule in `bind_group.rs`. render-pipeline has no analogous check (no change
   needed). Reverted the F-020 test workaround (those null-BGL tests had used
   `minBindingSize = 16` to dodge this bug; now back to the default 0, so
-  they exercise the deferral) + a core unit test. Noop-verifiable. **With
-  F-022 closed, every yawgpu finding this suite has surfaced
-  (F-005/006/008/009/010/011/014/016/018/020/022) is resolved**; all other
-  open findings (F-001–F-004, F-007, F-012, F-013, F-015, F-017, F-019,
-  F-021) are wgpu-native defects.
+  they exercise the deferral) + a core unit test. Noop-verifiable.
+- **External-CTS api/operation finding F-023 — RESOLVED.** The first
+  `api/operation` slice (T22, command_buffer) found that a **0-byte**
+  `copyBufferToBuffer`/`clearBuffer` (a valid no-op) aborted the **Metal**
+  validation layer ("Command encoder released without endEncoding"): the
+  Metal blit encoder issued a 0-length `copyFromBuffer` and was torn down
+  un-ended. (Both failing tests reduce to a 0-size copy — `copyBufferToBuffer`
+  directly, `clearBuffer` via its readback copy.) **First operation-area
+  finding, and a real-Metal-only defect (Noop cannot catch it).** Fixed in
+  `yawgpu-core/src/queue.rs::hal_command_execution`: a 0-size buffer copy
+  (and a 0-extent texture copy) now translates to no HAL command (a
+  validated no-op — backend-agnostic, also avoids Vulkan 0-size VUIDs);
+  plus `yawgpu-hal/src/metal/queue.rs` now always calls `endEncoding()`
+  even when an `encode_*` helper errors (defensive against the un-ended
+  encoder class). Noop unit tests + an `#[ignore]` Metal e2e
+  (`e2e_metal_buffer::metal_zero_size_buffer_copy_and_clear_submit_without_error`)
+  that **Claude ran on the M2** (4/4 green, abort gone). **With F-023
+  closed, every yawgpu finding this suite has surfaced
+  (F-005/006/008/009/010/011/014/016/018/020/022/023) is resolved**; all
+  other open findings (F-001–F-004, F-007, F-012, F-013, F-015, F-017,
+  F-019, F-021) are wgpu-native defects.
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage

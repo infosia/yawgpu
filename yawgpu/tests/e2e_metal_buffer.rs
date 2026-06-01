@@ -73,6 +73,29 @@ fn metal_partial_buffer_copy_round_trip() {
 
 #[test]
 #[ignore = "manual real-backend test"]
+#[cfg(feature = "metal")]
+fn metal_zero_size_buffer_copy_and_clear_submit_without_error() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+
+        run_zero_size_copy_and_clear_submit(device);
+
+        assert!(errors.lock().expect("error lock").is_empty());
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+#[test]
+#[ignore = "manual real-backend test"]
 fn default_noop_write_copy_readback_path_has_no_device_error() {
     unsafe {
         let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
@@ -146,6 +169,29 @@ unsafe fn run_write_copy_submit(
     yawgpu::wgpuBufferRelease(source);
     yawgpu::wgpuQueueRelease(queue);
     destination
+}
+
+#[cfg(feature = "metal")]
+unsafe fn run_zero_size_copy_and_clear_submit(device: native::WGPUDevice) {
+    let queue = yawgpu::wgpuDeviceGetQueue(device);
+    let source = create_buffer(device, 4, native::WGPUBufferUsage_CopySrc);
+    let destination = create_buffer(
+        device,
+        4,
+        native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_CopySrc,
+    );
+
+    let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+    yawgpu::wgpuCommandEncoderClearBuffer(encoder, destination, 0, 0);
+    yawgpu::wgpuCommandEncoderCopyBufferToBuffer(encoder, source, 0, destination, 0, 0);
+    let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+    yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+
+    yawgpu::wgpuCommandBufferRelease(command_buffer);
+    yawgpu::wgpuCommandEncoderRelease(encoder);
+    yawgpu::wgpuBufferRelease(destination);
+    yawgpu::wgpuBufferRelease(source);
+    yawgpu::wgpuQueueRelease(queue);
 }
 
 #[cfg(feature = "metal")]

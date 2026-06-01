@@ -46,44 +46,50 @@ impl MetalQueue {
                         let blit = command_buffer
                             .blitCommandEncoder()
                             .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
-                        encode_buffer_copy(&blit, copy)?;
+                        let result = encode_buffer_copy(&blit, copy);
                         blit.endEncoding();
+                        result?;
                     }
                     HalCopy::BufferToTexture(copy) => {
                         let blit = command_buffer
                             .blitCommandEncoder()
                             .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
-                        encode_buffer_to_texture(&blit, copy)?;
+                        let result = encode_buffer_to_texture(&blit, copy);
                         blit.endEncoding();
+                        result?;
                     }
                     HalCopy::TextureToBuffer(copy) => {
                         let blit = command_buffer
                             .blitCommandEncoder()
                             .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
-                        encode_texture_to_buffer(&blit, copy)?;
+                        let result = encode_texture_to_buffer(&blit, copy);
                         blit.endEncoding();
+                        result?;
                     }
                     HalCopy::TextureToTexture(copy) => {
                         let blit = command_buffer
                             .blitCommandEncoder()
                             .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
-                        encode_texture_to_texture(&blit, copy)?;
+                        let result = encode_texture_to_texture(&blit, copy);
                         blit.endEncoding();
+                        result?;
                     }
                     HalCopy::ComputePass(pass) => {
                         let encoder = command_buffer
                             .computeCommandEncoder()
                             .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
-                        encode_compute_pass(&encoder, pass)?;
+                        let result = encode_compute_pass(&encoder, pass);
                         encoder.endEncoding();
+                        result?;
                     }
                     HalCopy::RenderPass(pass) => {
                         let descriptor = render_pass_descriptor(pass)?;
                         let encoder = command_buffer
                             .renderCommandEncoderWithDescriptor(&descriptor)
                             .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
-                        encode_render_pass(&encoder, pass)?;
+                        let result = encode_render_pass(&encoder, pass);
                         encoder.endEncoding();
+                        result?;
                     }
                     #[cfg(feature = "tiled")]
                     HalCopy::SubpassRenderPass(pass) => {
@@ -91,8 +97,9 @@ impl MetalQueue {
                         let encoder = command_buffer
                             .renderCommandEncoderWithDescriptor(&descriptor)
                             .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
-                        encode_subpass_render_pass(&encoder, pass)?;
+                        let result = encode_subpass_render_pass(&encoder, pass);
                         encoder.endEncoding();
+                        result?;
                     }
                 }
             }
