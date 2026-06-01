@@ -8,8 +8,7 @@ use crate::bind_group_common::{
     expect_pipeline_layout, release_bind_group_layouts, release_pipeline_layout,
 };
 use crate::common::{
-    assert_compute_pipeline_error, assert_compute_pipeline_ok, create_pipeline_layout,
-    device_limits, request_device,
+    assert_compute_pipeline_ok, create_pipeline_layout, device_limits, request_device,
 };
 
 #[test]
@@ -95,21 +94,21 @@ fn bind_group_layouts_null_bind_group_layouts() {
         let non_empty = expect_bind_group_layout(
             &test,
             true,
-            &[buffer_layout(
+            &[compute_uniform_buffer_layout(
                 0,
                 native::WGPUShaderStage_Compute,
                 native::WGPUBufferBindingType_Uniform,
             )],
         );
         let slots = [non_empty, std::ptr::null()];
-        let mut layout = std::ptr::null();
-        test.assert_device_error_after(
-            || {
-                layout = create_pipeline_layout_raw(test.device(), slots.len(), slots.as_ptr(), 0);
-            },
-            None,
-        );
+        test.clear_errors();
+        let layout = create_pipeline_layout_raw(test.device(), slots.len(), slots.as_ptr(), 0);
         assert!(!layout.is_null());
+        assert!(
+            test.errors().is_empty(),
+            "unexpected errors: {:?}",
+            test.errors()
+        );
         yawgpu::wgpuPipelineLayoutRelease(layout);
         yawgpu::wgpuBindGroupLayoutRelease(non_empty);
     }
@@ -122,7 +121,7 @@ fn bind_group_layouts_create_pipeline_with_null_bind_group_layouts() {
         let non_empty = expect_bind_group_layout(
             &test,
             true,
-            &[buffer_layout(
+            &[compute_uniform_buffer_layout(
                 0,
                 native::WGPUShaderStage_Compute,
                 native::WGPUBufferBindingType_Uniform,
@@ -130,7 +129,7 @@ fn bind_group_layouts_create_pipeline_with_null_bind_group_layouts() {
         );
         let slots = [std::ptr::null(), non_empty];
         let layout = create_pipeline_layout_raw(test.device(), slots.len(), slots.as_ptr(), 0);
-        assert_compute_pipeline_error(
+        assert_compute_pipeline_ok(
             &test,
             false,
             "@group(1) @binding(0) var<uniform> u: u32; @compute @workgroup_size(1) fn main() { _ = u; }",
@@ -150,7 +149,7 @@ fn bind_group_layouts_set_pipeline_with_null_bind_group_layouts() {
         let non_empty = expect_bind_group_layout(
             &test,
             true,
-            &[buffer_layout(
+            &[compute_uniform_buffer_layout(
                 0,
                 native::WGPUShaderStage_Compute,
                 native::WGPUBufferBindingType_Uniform,
@@ -159,8 +158,54 @@ fn bind_group_layouts_set_pipeline_with_null_bind_group_layouts() {
         let slots = [std::ptr::null(), non_empty];
         let layout = create_pipeline_layout_raw(test.device(), slots.len(), slots.as_ptr(), 0);
         assert!(!layout.is_null());
+        assert_compute_pipeline_ok(
+            &test,
+            false,
+            "@group(1) @binding(0) var<uniform> u: u32; @compute @workgroup_size(1) fn main() { _ = u; }",
+            Some("main"),
+            &[],
+            Some(layout),
+        );
         yawgpu::wgpuPipelineLayoutRelease(layout);
         yawgpu::wgpuBindGroupLayoutRelease(non_empty);
+    }
+}
+
+#[test]
+fn bind_group_layouts_null_slot_preserves_later_group_indices() {
+    let test = ValidationTest::new();
+    unsafe {
+        let group0 = expect_bind_group_layout(
+            &test,
+            true,
+            &[compute_uniform_buffer_layout(
+                0,
+                native::WGPUShaderStage_Compute,
+                native::WGPUBufferBindingType_Uniform,
+            )],
+        );
+        let group2 = expect_bind_group_layout(
+            &test,
+            true,
+            &[compute_uniform_buffer_layout(
+                0,
+                native::WGPUShaderStage_Compute,
+                native::WGPUBufferBindingType_Uniform,
+            )],
+        );
+        let slots = [group0, std::ptr::null(), group2];
+        let layout = create_pipeline_layout_raw(test.device(), slots.len(), slots.as_ptr(), 0);
+        assert!(!layout.is_null());
+        assert_compute_pipeline_ok(
+            &test,
+            false,
+            "@group(2) @binding(0) var<uniform> u: u32; @compute @workgroup_size(1) fn main() { _ = u; }",
+            Some("main"),
+            &[],
+            Some(layout),
+        );
+        yawgpu::wgpuPipelineLayoutRelease(layout);
+        release_bind_group_layouts(&[group2, group0]);
     }
 }
 
@@ -193,6 +238,16 @@ unsafe fn create_empty_bind_group_layout(
         entries: std::ptr::null(),
     };
     unsafe { yawgpu::wgpuDeviceCreateBindGroupLayout(device, &descriptor) }
+}
+
+fn compute_uniform_buffer_layout(
+    binding: u32,
+    visibility: native::WGPUShaderStage,
+    ty: native::WGPUBufferBindingType,
+) -> native::WGPUBindGroupLayoutEntry {
+    let mut entry = buffer_layout(binding, visibility, ty);
+    entry.buffer.minBindingSize = 16;
+    entry
 }
 
 #[allow(dead_code)]

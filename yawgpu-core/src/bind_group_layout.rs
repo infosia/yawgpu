@@ -324,6 +324,12 @@ impl BindGroupLayout {
         Self::new(Vec::new(), false, true)
     }
 
+    /// Creates an empty non-default bind group layout for explicit unused pipeline layout slots.
+    #[must_use]
+    pub fn empty_unused() -> Self {
+        Self::new(Vec::new(), false, false)
+    }
+
     /// Returns the entries.
     #[must_use]
     pub fn entries(&self) -> &[BindGroupLayoutEntry] {
@@ -386,6 +392,11 @@ mod tests {
         assert!(!layout.same(&other));
         assert!(static_error.is_error());
         assert!(static_error.entries().is_empty());
+
+        let unused = BindGroupLayout::empty_unused();
+        assert!(!unused.is_error());
+        assert!(!unused.is_default());
+        assert!(unused.entries().is_empty());
 
         device.push_error_scope(ErrorFilter::Validation);
         let invalid = device.create_bind_group_layout(BindGroupLayoutDescriptor {

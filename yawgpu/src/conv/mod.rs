@@ -1393,6 +1393,37 @@ mod tests {
     }
 
     #[test]
+    fn map_pipeline_layout_descriptor_preserves_null_slots_as_empty_layouts() {
+        let device = device_impl();
+        let first = bind_group_layout_handle(&device);
+        let third = bind_group_layout_handle(&device);
+        let layouts = [first, std::ptr::null(), third];
+        let descriptor = native::WGPUPipelineLayoutDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            bindGroupLayoutCount: layouts.len(),
+            bindGroupLayouts: layouts.as_ptr(),
+            immediateSize: 0,
+        };
+
+        let mapped = unsafe { map_pipeline_layout_descriptor(&descriptor) };
+        assert_eq!(mapped.error, None);
+        assert_eq!(mapped.bind_group_layouts.len(), 3);
+        assert_eq!(mapped.bind_group_layouts[1].entries().len(), 0);
+        assert!(!mapped.bind_group_layouts[1].is_error());
+
+        let pipeline_layout = device.core.create_pipeline_layout(mapped);
+        assert!(!pipeline_layout.is_error());
+        assert_eq!(pipeline_layout.bind_group_layouts().len(), 3);
+        assert_eq!(pipeline_layout.bind_group_layouts()[1].entries().len(), 0);
+
+        unsafe {
+            release_handle(third, "WGPUBindGroupLayout");
+            release_handle(first, "WGPUBindGroupLayout");
+        }
+    }
+
+    #[test]
     #[should_panic(expected = "WGPUShaderModule must not be null")]
     fn map_compute_pipeline_descriptor_null_module_panics() {
         let descriptor = native::WGPUComputePipelineDescriptor {
