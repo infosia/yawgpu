@@ -97,6 +97,7 @@ pub(super) fn map_texture_format(
     match format {
         HalTextureFormat::R8Unorm => Ok((MTLPixelFormat::R8Unorm, 1)),
         HalTextureFormat::Rgba8Unorm => Ok((MTLPixelFormat::RGBA8Unorm, 4)),
+        HalTextureFormat::Rgba8Uint => Ok((MTLPixelFormat::RGBA8Uint, 4)),
         HalTextureFormat::Bgra8Unorm => Ok((MTLPixelFormat::BGRA8Unorm, 4)),
         HalTextureFormat::Rgba16Float => Ok((MTLPixelFormat::RGBA16Float, 8)),
         HalTextureFormat::Stencil8 => Ok((MTLPixelFormat::Stencil8, 1)),
@@ -106,6 +107,20 @@ pub(super) fn map_texture_format(
         HalTextureFormat::Depth32Float => Ok((MTLPixelFormat::Depth32Float, 4)),
         HalTextureFormat::Depth32FloatStencil8 => Ok((MTLPixelFormat::Depth32Float_Stencil8, 5)),
         HalTextureFormat::Unsupported => Err(texture_error("unsupported texture format")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(feature = "metal")]
+    fn map_texture_format_maps_rgba8_uint() {
+        assert_eq!(
+            map_texture_format(HalTextureFormat::Rgba8Uint).expect("rgba8uint supported"),
+            (MTLPixelFormat::RGBA8Uint, 4)
+        );
     }
 }
 

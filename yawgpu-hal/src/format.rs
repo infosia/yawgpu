@@ -44,6 +44,8 @@ pub enum HalTextureFormat {
     R8Unorm,
     /// Rgba8 unorm variant.
     Rgba8Unorm,
+    /// Rgba8 uint variant.
+    Rgba8Uint,
     /// Bgra8 unorm variant.
     Bgra8Unorm,
     /// Rgba16 float variant.
@@ -252,6 +254,7 @@ mod tests {
             HalTextureFormat::Depth32FloatStencil8
         ));
         assert!(!format_has_depth_aspect(HalTextureFormat::Stencil8));
+        assert!(!format_has_depth_aspect(HalTextureFormat::Rgba8Uint));
         assert!(!format_has_depth_aspect(HalTextureFormat::Rgba16Float));
     }
 
@@ -267,6 +270,7 @@ mod tests {
         assert!(!format_has_stencil_aspect(HalTextureFormat::Depth16Unorm));
         assert!(!format_has_stencil_aspect(HalTextureFormat::Depth24Plus));
         assert!(!format_has_stencil_aspect(HalTextureFormat::Depth32Float));
+        assert!(!format_has_stencil_aspect(HalTextureFormat::Rgba8Uint));
         assert!(!format_has_stencil_aspect(HalTextureFormat::Rgba16Float));
     }
 }

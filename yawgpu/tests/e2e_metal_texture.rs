@@ -75,6 +75,36 @@ fn metal_texture_texture_round_trip() {
 #[test]
 #[ignore = "manual real-backend test"]
 #[cfg(feature = "metal")]
+fn metal_rgba8uint_texture_copy_round_trips_data() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let texel = [1_u8, 2, 3, 4];
+
+        let b2t2b = run_rgba8uint_buffer_texture_buffer_submit(device, &texel);
+        assert_eq!(read_buffer(instance, b2t2b, 0, texel.len()), texel);
+        yawgpu::wgpuBufferRelease(b2t2b);
+
+        let b2t2t2b = run_rgba8uint_texture_texture_submit(device, &texel);
+        assert_eq!(read_buffer(instance, b2t2t2b, 0, texel.len()), texel);
+        yawgpu::wgpuBufferRelease(b2t2t2b);
+
+        assert!(errors.lock().expect("error lock").is_empty());
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "metal")]
 fn metal_sampler_creation_has_no_device_error() {
     if real_backend_skip_reason(RealBackend::Metal).is_some() {
         return;
@@ -223,6 +253,74 @@ unsafe fn run_texture_texture_submit(
     destination
 }
 
+#[cfg(feature = "metal")]
+unsafe fn run_rgba8uint_buffer_texture_buffer_submit(
+    device: native::WGPUDevice,
+    texel: &[u8; 4],
+) -> native::WGPUBuffer {
+    let queue = yawgpu::wgpuDeviceGetQueue(device);
+    let source = create_buffer(
+        device,
+        native::WGPUBufferUsage_CopySrc | native::WGPUBufferUsage_CopyDst,
+    );
+    let destination = create_buffer(
+        device,
+        native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+    );
+    let texture = create_rgba8uint_texture(
+        device,
+        native::WGPUTextureUsage_CopySrc | native::WGPUTextureUsage_CopyDst,
+    );
+    yawgpu::wgpuQueueWriteBuffer(queue, source, 0, texel.as_ptr().cast(), texel.len());
+
+    let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+    record_rgba8uint_b2t(encoder, source, texture);
+    record_rgba8uint_t2b(encoder, texture, destination);
+    submit_encoder(queue, encoder);
+
+    yawgpu::wgpuTextureRelease(texture);
+    yawgpu::wgpuBufferRelease(source);
+    yawgpu::wgpuQueueRelease(queue);
+    destination
+}
+
+#[cfg(feature = "metal")]
+unsafe fn run_rgba8uint_texture_texture_submit(
+    device: native::WGPUDevice,
+    texel: &[u8; 4],
+) -> native::WGPUBuffer {
+    let queue = yawgpu::wgpuDeviceGetQueue(device);
+    let source = create_buffer(
+        device,
+        native::WGPUBufferUsage_CopySrc | native::WGPUBufferUsage_CopyDst,
+    );
+    let destination = create_buffer(
+        device,
+        native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+    );
+    let texture_a = create_rgba8uint_texture(
+        device,
+        native::WGPUTextureUsage_CopySrc | native::WGPUTextureUsage_CopyDst,
+    );
+    let texture_b = create_rgba8uint_texture(
+        device,
+        native::WGPUTextureUsage_CopySrc | native::WGPUTextureUsage_CopyDst,
+    );
+    yawgpu::wgpuQueueWriteBuffer(queue, source, 0, texel.as_ptr().cast(), texel.len());
+
+    let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+    record_rgba8uint_b2t(encoder, source, texture_a);
+    record_rgba8uint_t2t(encoder, texture_a, texture_b);
+    record_rgba8uint_t2b(encoder, texture_b, destination);
+    submit_encoder(queue, encoder);
+
+    yawgpu::wgpuTextureRelease(texture_b);
+    yawgpu::wgpuTextureRelease(texture_a);
+    yawgpu::wgpuBufferRelease(source);
+    yawgpu::wgpuQueueRelease(queue);
+    destination
+}
+
 unsafe fn record_b2t(
     encoder: native::WGPUCommandEncoder,
     source: native::WGPUBuffer,
@@ -253,6 +351,42 @@ unsafe fn record_t2t(
     let source = texture_copy_info(source);
     let destination = texture_copy_info(destination);
     let size = texture_extent();
+    yawgpu::wgpuCommandEncoderCopyTextureToTexture(encoder, &source, &destination, &size);
+}
+
+#[cfg(feature = "metal")]
+unsafe fn record_rgba8uint_b2t(
+    encoder: native::WGPUCommandEncoder,
+    source: native::WGPUBuffer,
+    destination: native::WGPUTexture,
+) {
+    let source = rgba8uint_buffer_copy_info(source);
+    let destination = texture_copy_info(destination);
+    let size = rgba8uint_extent();
+    yawgpu::wgpuCommandEncoderCopyBufferToTexture(encoder, &source, &destination, &size);
+}
+
+#[cfg(feature = "metal")]
+unsafe fn record_rgba8uint_t2b(
+    encoder: native::WGPUCommandEncoder,
+    source: native::WGPUTexture,
+    destination: native::WGPUBuffer,
+) {
+    let source = texture_copy_info(source);
+    let destination = rgba8uint_buffer_copy_info(destination);
+    let size = rgba8uint_extent();
+    yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &source, &destination, &size);
+}
+
+#[cfg(feature = "metal")]
+unsafe fn record_rgba8uint_t2t(
+    encoder: native::WGPUCommandEncoder,
+    source: native::WGPUTexture,
+    destination: native::WGPUTexture,
+) {
+    let source = texture_copy_info(source);
+    let destination = texture_copy_info(destination);
+    let size = rgba8uint_extent();
     yawgpu::wgpuCommandEncoderCopyTextureToTexture(encoder, &source, &destination, &size);
 }
 
@@ -363,6 +497,28 @@ unsafe fn create_texture(
     texture
 }
 
+#[cfg(feature = "metal")]
+unsafe fn create_rgba8uint_texture(
+    device: native::WGPUDevice,
+    usage: native::WGPUTextureUsage,
+) -> native::WGPUTexture {
+    let descriptor = native::WGPUTextureDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage,
+        dimension: native::WGPUTextureDimension_2D,
+        size: rgba8uint_extent(),
+        format: native::WGPUTextureFormat_RGBA8Uint,
+        mipLevelCount: 1,
+        sampleCount: 1,
+        viewFormatCount: 0,
+        viewFormats: std::ptr::null(),
+    };
+    let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+    assert!(!texture.is_null());
+    texture
+}
+
 unsafe fn create_sampler(device: native::WGPUDevice) -> native::WGPUSampler {
     let descriptor = native::WGPUSamplerDescriptor {
         nextInChain: std::ptr::null_mut(),
@@ -383,6 +539,18 @@ unsafe fn create_sampler(device: native::WGPUDevice) -> native::WGPUSampler {
     sampler
 }
 
+#[cfg(feature = "metal")]
+fn rgba8uint_buffer_copy_info(buffer: native::WGPUBuffer) -> native::WGPUTexelCopyBufferInfo {
+    native::WGPUTexelCopyBufferInfo {
+        layout: native::WGPUTexelCopyBufferLayout {
+            offset: 0,
+            bytesPerRow: BYTES_PER_ROW,
+            rowsPerImage: 1,
+        },
+        buffer,
+    }
+}
+
 fn buffer_copy_info(buffer: native::WGPUBuffer) -> native::WGPUTexelCopyBufferInfo {
     native::WGPUTexelCopyBufferInfo {
         layout: native::WGPUTexelCopyBufferLayout {
@@ -400,6 +568,15 @@ fn texture_copy_info(texture: native::WGPUTexture) -> native::WGPUTexelCopyTextu
         mipLevel: 0,
         origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
         aspect: native::WGPUTextureAspect_All,
+    }
+}
+
+#[cfg(feature = "metal")]
+fn rgba8uint_extent() -> native::WGPUExtent3D {
+    native::WGPUExtent3D {
+        width: 1,
+        height: 1,
+        depthOrArrayLayers: 1,
     }
 }
 

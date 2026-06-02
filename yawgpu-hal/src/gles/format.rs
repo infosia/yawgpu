@@ -19,6 +19,7 @@ pub(super) struct GlesVertexFormat {
 pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<GlesFormat, HalError> {
     match format {
         HalTextureFormat::Rgba8Unorm | HalTextureFormat::Bgra8Unorm => Ok(rgba8_unorm()),
+        HalTextureFormat::Rgba8Uint => Ok(rgba8_uint()),
         _ => Err(HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "texture format not supported on GLES (P15.3)",
@@ -78,6 +79,15 @@ fn rgba8_unorm() -> GlesFormat {
     }
 }
 
+fn rgba8_uint() -> GlesFormat {
+    GlesFormat {
+        internal: glow::RGBA8UI,
+        format: glow::RGBA_INTEGER,
+        ty: glow::UNSIGNED_BYTE,
+        bytes_per_pixel: 4,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,6 +116,16 @@ mod tests {
                 message: "texture format not supported on GLES (P15.3)",
             }
         ));
+    }
+
+    #[test]
+    fn map_texture_format_rgba8_uint_returns_integer_triplet() {
+        let format = map_texture_format(HalTextureFormat::Rgba8Uint).expect("RGBA8Uint supported");
+
+        assert_eq!(format.internal, glow::RGBA8UI);
+        assert_eq!(format.format, glow::RGBA_INTEGER);
+        assert_eq!(format.ty, glow::UNSIGNED_BYTE);
+        assert_eq!(format.bytes_per_pixel, 4);
     }
 
     #[test]

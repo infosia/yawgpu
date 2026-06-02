@@ -5,6 +5,7 @@ pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<(vk::Format
     match format {
         HalTextureFormat::R8Unorm => Ok((vk::Format::R8_UNORM, 1)),
         HalTextureFormat::Rgba8Unorm => Ok((vk::Format::R8G8B8A8_UNORM, 4)),
+        HalTextureFormat::Rgba8Uint => Ok((vk::Format::R8G8B8A8_UINT, 4)),
         HalTextureFormat::Bgra8Unorm => Ok((vk::Format::B8G8R8A8_UNORM, 4)),
         HalTextureFormat::Rgba16Float => Ok((vk::Format::R16G16B16A16_SFLOAT, 8)),
         HalTextureFormat::Stencil8 => Ok((vk::Format::S8_UINT, 1)),
@@ -136,6 +137,14 @@ mod tests {
 
         assert!(flags.contains(vk::BufferUsageFlags::TRANSFER_SRC));
         assert!(flags.contains(vk::BufferUsageFlags::TRANSFER_DST));
+    }
+
+    #[test]
+    fn map_texture_format_maps_rgba8_uint() {
+        assert_eq!(
+            map_texture_format(HalTextureFormat::Rgba8Uint).expect("rgba8uint supported"),
+            (vk::Format::R8G8B8A8_UINT, 4)
+        );
     }
 
     #[test]
