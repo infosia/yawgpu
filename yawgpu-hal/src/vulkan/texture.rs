@@ -1,4 +1,5 @@
 use super::*;
+use crate::HalTextureDimension;
 
 /// Constant value for image layout undefined.
 pub(super) const IMAGE_LAYOUT_UNDEFINED: u8 = 0;
@@ -17,6 +18,7 @@ pub struct VulkanTexture {
     pub(super) inner: Option<Arc<VulkanTextureInner>>,
     pub(super) swapchain: Option<Arc<VulkanSwapchainInner>>,
     pub(super) surface_pending: Option<Arc<Mutex<SurfacePendingState>>>,
+    pub(super) dimension: HalTextureDimension,
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) depth_or_array_layers: u32,
@@ -77,6 +79,8 @@ pub(super) struct VulkanTextureInner {
     pub(super) view: vk::ImageView,
     pub(super) memory: Option<vk::DeviceMemory>,
     pub(super) owns_image: bool,
+    pub(super) mip_level_count: u32,
+    pub(super) array_layers: u32,
     pub(super) layout: AtomicU8,
 }
 
@@ -130,23 +134,36 @@ pub(super) fn create_texture(
     device: Arc<VulkanDeviceInner>,
     descriptor: &HalTextureDescriptor,
 ) -> Result<(VulkanTextureInner, u32), HalError> {
-    if descriptor.depth_or_array_layers != 1
-        || descriptor.mip_level_count != 1
-        || descriptor.sample_count != 1
-    {
+    if descriptor.sample_count != 1 {
         return Err(texture_error("unsupported texture descriptor"));
     }
     let (format, bytes_per_pixel) = map_texture_format(descriptor.format)?;
+    let image_type = match descriptor.dimension {
+        HalTextureDimension::D1 => vk::ImageType::TYPE_1D,
+        HalTextureDimension::D2 => vk::ImageType::TYPE_2D,
+        HalTextureDimension::D3 => vk::ImageType::TYPE_3D,
+    };
+    let extent = vk::Extent3D {
+        width: descriptor.width,
+        height: match descriptor.dimension {
+            HalTextureDimension::D1 => 1,
+            HalTextureDimension::D2 | HalTextureDimension::D3 => descriptor.height,
+        },
+        depth: match descriptor.dimension {
+            HalTextureDimension::D3 => descriptor.depth_or_array_layers,
+            HalTextureDimension::D1 | HalTextureDimension::D2 => 1,
+        },
+    };
+    let array_layers = match descriptor.dimension {
+        HalTextureDimension::D2 => descriptor.depth_or_array_layers,
+        HalTextureDimension::D1 | HalTextureDimension::D3 => 1,
+    };
     let image_info = vk::ImageCreateInfo::default()
-        .image_type(vk::ImageType::TYPE_2D)
+        .image_type(image_type)
         .format(format)
-        .extent(vk::Extent3D {
-            width: descriptor.width,
-            height: descriptor.height,
-            depth: 1,
-        })
-        .mip_levels(1)
-        .array_layers(1)
+        .extent(extent)
+        .mip_levels(descriptor.mip_level_count)
+        .array_layers(array_layers)
         .samples(vk::SampleCountFlags::TYPE_1)
         .tiling(vk::ImageTiling::OPTIMAL)
         .usage(map_texture_usage(descriptor.usage))
@@ -183,11 +200,22 @@ pub(super) fn create_texture(
         return Err(map_texture_error(error, "image memory bind failed"));
     }
     let view = if texture_usage_needs_view(descriptor.usage) {
+        let view_type = match descriptor.dimension {
+            HalTextureDimension::D1 => vk::ImageViewType::TYPE_1D,
+            HalTextureDimension::D2 if descriptor.depth_or_array_layers > 1 => {
+                vk::ImageViewType::TYPE_2D_ARRAY
+            }
+            HalTextureDimension::D2 => vk::ImageViewType::TYPE_2D,
+            HalTextureDimension::D3 => vk::ImageViewType::TYPE_3D,
+        };
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
+            .view_type(view_type)
             .format(format)
-            .subresource_range(color_subresource_range());
+            .subresource_range(color_subresource_range(
+                descriptor.mip_level_count,
+                array_layers,
+            ));
         unsafe { device.device.create_image_view(&view_info, None) }.map_err(|_| {
             unsafe {
                 device.device.destroy_image(image, None);
@@ -205,6 +233,8 @@ pub(super) fn create_texture(
             view,
             memory: Some(memory),
             owns_image: true,
+            mip_level_count: descriptor.mip_level_count,
+            array_layers,
             layout: AtomicU8::new(IMAGE_LAYOUT_UNDEFINED),
         },
         bytes_per_pixel,
@@ -305,6 +335,8 @@ pub(super) fn create_transient_attachment(
             view,
             memory: Some(memory),
             owns_image: true,
+            mip_level_count: 1,
+            array_layers: 1,
             layout: AtomicU8::new(IMAGE_LAYOUT_UNDEFINED),
         }),
         _format: descriptor.format,
@@ -397,7 +429,10 @@ pub(super) fn transition_image(
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .image(texture.image)
-        .subresource_range(color_subresource_range())
+        .subresource_range(color_subresource_range(
+            texture.mip_level_count,
+            texture.array_layers,
+        ))
         .src_access_mask(access_mask_for_layout(old_layout))
         .dst_access_mask(access_mask_for_layout(new_layout));
     unsafe {
@@ -491,22 +526,29 @@ pub(super) fn stage_mask_for_layout(layout: vk::ImageLayout) -> vk::PipelineStag
 }
 
 /// Returns image subresource layers.
-pub(super) fn image_subresource_layers() -> vk::ImageSubresourceLayers {
+pub(super) fn image_subresource_layers(
+    mip_level: u32,
+    base_array_layer: u32,
+    layer_count: u32,
+) -> vk::ImageSubresourceLayers {
     vk::ImageSubresourceLayers::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
-        .mip_level(0)
-        .base_array_layer(0)
-        .layer_count(1)
+        .mip_level(mip_level)
+        .base_array_layer(base_array_layer)
+        .layer_count(layer_count)
 }
 
 /// Returns color subresource range.
-pub(super) fn color_subresource_range() -> vk::ImageSubresourceRange {
+pub(super) fn color_subresource_range(
+    level_count: u32,
+    layer_count: u32,
+) -> vk::ImageSubresourceRange {
     vk::ImageSubresourceRange::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
         .base_mip_level(0)
-        .level_count(1)
+        .level_count(level_count)
         .base_array_layer(0)
-        .layer_count(1)
+        .layer_count(layer_count)
 }
 
 #[cfg(test)]

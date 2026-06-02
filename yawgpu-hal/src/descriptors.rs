@@ -139,9 +139,23 @@ pub struct HalExtent3d {
     pub depth_or_array_layers: u32,
 }
 
+/// Enumerates HAL texture dimension values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HalTextureDimension {
+    /// One-dimensional texture.
+    D1,
+    /// Two-dimensional texture or two-dimensional texture array.
+    D2,
+    /// Three-dimensional texture.
+    D3,
+}
+
 /// Describes HAL texture descriptor.
 #[derive(Debug, Clone, Copy)]
 pub struct HalTextureDescriptor {
+    /// Dimension.
+    pub dimension: HalTextureDimension,
     /// Format.
     pub format: HalTextureFormat,
     /// Width.

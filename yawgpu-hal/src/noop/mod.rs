@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
-use crate::{HalBufferUsage, HalError};
+use crate::{HalBufferUsage, HalCopy, HalError, HalTextureDescriptor, HalTextureDimension};
 
 /// Stores noop instance data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -91,9 +92,15 @@ impl NoopDevice {
 
     /// Creates a texture matching the given descriptor.
     #[must_use]
-    pub fn create_texture(&self) -> NoopTexture {
+    pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> NoopTexture {
         self.allocations.fetch_add(1, Ordering::Relaxed);
-        NoopTexture
+        NoopTexture {
+            dimension: descriptor.dimension,
+            width: descriptor.width,
+            height: descriptor.height,
+            depth_or_array_layers: descriptor.depth_or_array_layers,
+            mip_level_count: descriptor.mip_level_count,
+        }
     }
 
     /// Creates a transient attachment matching the given descriptor.
@@ -120,13 +127,35 @@ impl Default for NoopDevice {
 
 /// Stores noop queue data used by validation and backend submission.
 #[derive(Debug, Clone)]
-pub struct NoopQueue;
+pub struct NoopQueue {
+    submitted_copies: Arc<Mutex<Vec<HalCopy>>>,
+}
 
 impl NoopQueue {
     /// Creates a new instance.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            submitted_copies: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Records submitted copy commands for Noop unit-test inspection.
+    pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
+        self.submitted_copies
+            .lock()
+            .map_err(|_| HalError::QueueSubmissionFailed { backend: "noop" })?
+            .extend(copies.iter().cloned());
+        Ok(())
+    }
+
+    /// Returns submitted copy commands recorded by this queue.
+    #[must_use]
+    pub fn submitted_copies(&self) -> Vec<HalCopy> {
+        self.submitted_copies
+            .lock()
+            .map(|copies| copies.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -158,7 +187,45 @@ impl NoopBuffer {
 
 /// Stores noop texture data used by validation and backend submission.
 #[derive(Debug, Clone)]
-pub struct NoopTexture;
+pub struct NoopTexture {
+    dimension: HalTextureDimension,
+    width: u32,
+    height: u32,
+    depth_or_array_layers: u32,
+    mip_level_count: u32,
+}
+
+impl NoopTexture {
+    /// Returns the texture dimension.
+    #[must_use]
+    pub fn dimension(&self) -> HalTextureDimension {
+        self.dimension
+    }
+
+    /// Returns the texture width.
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Returns the texture height.
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Returns the texture depth or array layer count.
+    #[must_use]
+    pub fn depth_or_array_layers(&self) -> u32 {
+        self.depth_or_array_layers
+    }
+
+    /// Returns the mip level count.
+    #[must_use]
+    pub fn mip_level_count(&self) -> u32 {
+        self.mip_level_count
+    }
+}
 
 /// Stores noop transient attachment data used by validation and backend submission.
 #[cfg(feature = "tiled")]
@@ -172,6 +239,26 @@ pub struct NoopSampler;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{HalTextureFormat, HalTextureUsage};
+
+    fn texture_descriptor() -> HalTextureDescriptor {
+        HalTextureDescriptor {
+            dimension: HalTextureDimension::D2,
+            format: HalTextureFormat::Rgba8Unorm,
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+            mip_level_count: 1,
+            sample_count: 1,
+            usage: HalTextureUsage {
+                copy_src: true,
+                copy_dst: true,
+                texture_binding: false,
+                storage_binding: false,
+                render_attachment: true,
+            },
+        }
+    }
 
     #[test]
     fn noop_instance_new_constructs() {
@@ -227,7 +314,7 @@ mod tests {
         assert_eq!(device.allocation_count(), 0);
         let _buffer = device.create_buffer(4, HalBufferUsage::default());
         assert_eq!(device.allocation_count(), 1);
-        let _texture = device.create_texture();
+        let _texture = device.create_texture(&texture_descriptor());
         assert_eq!(device.allocation_count(), 2);
         let _sampler = device.create_sampler();
         assert_eq!(device.allocation_count(), 3);
@@ -252,8 +339,28 @@ mod tests {
     #[test]
     fn noop_device_create_texture_increments_allocation_count() {
         let device = NoopDevice::new();
-        let _texture = device.create_texture();
+        let _texture = device.create_texture(&texture_descriptor());
 
+        assert_eq!(device.allocation_count(), 1);
+    }
+
+    #[test]
+    fn noop_device_create_texture_records_array_3d_and_mip_shape() {
+        let device = NoopDevice::new();
+        let mut descriptor = texture_descriptor();
+        descriptor.dimension = HalTextureDimension::D3;
+        descriptor.width = 8;
+        descriptor.height = 4;
+        descriptor.depth_or_array_layers = 3;
+        descriptor.mip_level_count = 4;
+
+        let texture = device.create_texture(&descriptor);
+
+        assert_eq!(texture.dimension(), HalTextureDimension::D3);
+        assert_eq!(texture.width(), 8);
+        assert_eq!(texture.height(), 4);
+        assert_eq!(texture.depth_or_array_layers(), 3);
+        assert_eq!(texture.mip_level_count(), 4);
         assert_eq!(device.allocation_count(), 1);
     }
 

@@ -339,7 +339,7 @@ fn create_render_fbo(
         gl.framebuffer_texture_2d(
             glow::DRAW_FRAMEBUFFER,
             glow::COLOR_ATTACHMENT0,
-            glow::TEXTURE_2D,
+            meta.target,
             Some(color_texture),
             0,
         );
@@ -551,11 +551,11 @@ fn submit_buffer_to_texture(
 
     unsafe {
         gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(buffer));
-        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.bind_texture(meta.target, Some(texture));
         gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, row_pixels);
         gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
         gl.tex_sub_image_2d(
-            glow::TEXTURE_2D,
+            meta.target,
             mip_level,
             x,
             y,
@@ -567,7 +567,7 @@ fn submit_buffer_to_texture(
         );
         gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
         gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
-        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.bind_texture(meta.target, None);
         gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
     }
 
@@ -620,7 +620,7 @@ fn submit_texture_to_buffer(
         gl.framebuffer_texture_2d(
             glow::READ_FRAMEBUFFER,
             glow::COLOR_ATTACHMENT0,
-            glow::TEXTURE_2D,
+            meta.target,
             Some(texture),
             mip_level,
         );
@@ -710,13 +710,13 @@ fn submit_texture_to_texture(gl: &glow::Context, copy: &HalTextureCopy) -> Resul
     unsafe {
         gl.copy_image_sub_data(
             source_texture,
-            glow::TEXTURE_2D,
+            source.meta().target,
             source_mip_level,
             source_x,
             source_y,
             0,
             destination_texture,
-            glow::TEXTURE_2D,
+            destination.meta().target,
             destination_mip_level,
             destination_x,
             destination_y,

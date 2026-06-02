@@ -348,6 +348,57 @@ never a reason to skip a CTS case.
   (F-005/006/008/009/010/011/014/016/018/020/022/023/024) is resolved**; all
   other open findings (F-001–F-004, F-007, F-012, F-013, F-015, F-017,
   F-019, F-021) are wgpu-native defects.
+- **External-CTS api/operation findings F-025 + F-026 — RESOLVED.**
+  The `image_copy` slice (T24b) surfaced two yawgpu findings on real-GPU Metal.
+  Claude reproduced both on the M2 and **root-caused them with instrumented
+  `submit_copies`** (the findings doc's "over-strict bytesPerRow" guess is
+  wrong). Three distinct defects, two sharing a foundation:
+  - **Defect 1 (bulk of F-026): the HAL backends cannot create array / 3D /
+    mipmapped textures.** Metal *and* Vulkan `create_texture` reject
+    `depth_or_array_layers != 1 || mip_level_count != 1 || sample_count != 1`
+    and always build a single-layer single-mip 2D image; `MetalDevice::
+    create_texture` swallows the `Err` into a null `MetalTexture {inner:None,
+    bytes_per_pixel:0}` with **no device error surfaced**. So `createTexture`
+    "succeeds" (validation CTS green) but the texture is a husk; any later copy
+    fails in the encode (`bytes_per_pixel == 0`) and aborts the **whole**
+    `submit_copies`, so the readback buffer keeps its initial bytes (the
+    constant `got 0.705882` = `generateData(0,17)[0]` = 180 proves the buffer
+    was never written). image_copy uses `baseTextureSize` 256×16×4 (4-layer
+    2D-array), 256×16×8 (3D), and `mipLevelCount>1`; only `undefined_params`
+    (8×1×1) passes today. `HalTextureDescriptor` doesn't even carry the texture
+    dimension, and core's `hal_texture_descriptor` drops `descriptor.dimension`.
+  - **Defect 2 (all of F-025): `wgpuQueueWriteTexture` ignores its `data`
+    pointer** (`_data`) — validation-only, uploads nothing → `got 0` even on the
+    createable 8×1×1 texture. Same class as the old F-023 "validation-only
+    clearBuffer".
+  - **Defect 3: the Metal copy encode hard-codes array-slice semantics**
+    (`destinationSlice = origin.z`, `z-origin = 0`) — correct for a 2D-array
+    single layer, wrong for 3D (z is depth) and for multi-layer 2D-array copies
+    (Metal copies one slice/call → needs a slice loop). Blocks 3D once Defect 1
+    is fixed.
+  Handed off to the coding agent (HANDOFF.md): add `HalTextureDimension` +
+  thread it into `HalTextureDescriptor` + every backend texture handle; Metal &
+  Vulkan `create_texture` full 1D/2D/2D-array/3D/mip support; Metal copy encode
+  branch (3D single-call vs 2D-array slice loop) + `validate_buffer_texture_range`
+  multi-image extension; GLES Tier-2 best-effort; `queueWriteTexture` upload via
+  staging-buffer→B2T (reuses the fixed copy path, so array/3D/mip come for free).
+  The fix landed: `HalTextureDimension::{D1,D2,D3}` threaded through
+  `HalTextureDescriptor` + each backend texture handle; Metal & Vulkan
+  `create_texture` now map 1D/2D/2D-array/3D + mip/array length; the copy encode
+  branches on dimension (Metal: 3D single blit vs 1D/2D per-slice loop advancing
+  the buffer by `bytes_per_image`; Vulkan: `baseArrayLayer`/`layerCount` vs 3D
+  depth); `validate_buffer_texture_range` accounts for all images;
+  `wgpuQueueWriteTexture` stages the real data into a Shared CopySrc buffer and
+  submits a `HalCopy::BufferToTexture`. GLES (Tier 2) compiles + allocates the new
+  shapes but still returns `HalError` for array/3D copy execution (catalogued in
+  `specs/blocks/67-gles-backend.md`). **Verified on real-GPU Metal (sandbox off):
+  the full `api,operation,command_buffer,image_copy` suite is `pass=137256 fail=0
+  crash=0` (Dawn-equal — up from `pass=21860 fail=115396`), `command_buffer,basic`
+  still `pass=3`, and `createTexture`/`createView` validation unchanged
+  (`48343`/`26619`, `fail=0`).** In-tree regression:
+  `e2e_metal_texture::metal_queue_write_texture_uploads_color_data_round_trips`
+  (new) + the existing 6 e2e all pass on the M2; workspace release backstop green.
+  3-way confirmed throughout (Dawn + wgpu-native always passed).
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage

@@ -1,6 +1,7 @@
 use super::*;
 #[cfg(feature = "tiled")]
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
+use crate::HalTextureDimension;
 #[cfg(feature = "tiled")]
 use crate::{HalSubpassAttachmentLayout, HalSubpassDepthStencilAttachment};
 
@@ -419,7 +420,7 @@ pub(super) fn encode_buffer_to_texture(
     let crate::HalTexture::Vulkan(texture) = &copy.texture else {
         return Err(texture_error("texture is not Vulkan-backed"));
     };
-    validate_mip_level(copy.mip_level)?;
+    validate_mip_level(texture, copy.mip_level)?;
     texture.validate_origin_extent(copy.origin, copy.extent)?;
     validate_buffer_texture_range(buffer, copy)?;
     let buffer = buffer.inner()?;
@@ -431,7 +432,7 @@ pub(super) fn encode_buffer_to_texture(
         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_DST,
     );
-    let region = buffer_image_copy(copy, texture.bytes_per_pixel)?;
+    let region = buffer_image_copy(copy, texture, texture.bytes_per_pixel)?;
     unsafe {
         device.cmd_copy_buffer_to_image(
             command_buffer,
@@ -456,7 +457,7 @@ pub(super) fn encode_texture_to_buffer(
     let crate::HalTexture::Vulkan(texture) = &copy.texture else {
         return Err(texture_error("texture is not Vulkan-backed"));
     };
-    validate_mip_level(copy.mip_level)?;
+    validate_mip_level(texture, copy.mip_level)?;
     texture.validate_origin_extent(copy.origin, copy.extent)?;
     validate_buffer_texture_range(buffer, copy)?;
     let buffer = buffer.inner()?;
@@ -468,7 +469,7 @@ pub(super) fn encode_texture_to_buffer(
         vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_SRC,
     );
-    let region = buffer_image_copy(copy, texture.bytes_per_pixel)?;
+    let region = buffer_image_copy(copy, texture, texture.bytes_per_pixel)?;
     unsafe {
         device.cmd_copy_image_to_buffer(
             command_buffer,
@@ -493,8 +494,8 @@ pub(super) fn encode_texture_to_texture(
     let crate::HalTexture::Vulkan(destination) = &copy.destination else {
         return Err(texture_error("destination texture is not Vulkan-backed"));
     };
-    validate_mip_level(copy.source_mip_level)?;
-    validate_mip_level(copy.destination_mip_level)?;
+    validate_mip_level(source, copy.source_mip_level)?;
+    validate_mip_level(destination, copy.destination_mip_level)?;
     source.validate_origin_extent(copy.source_origin, copy.extent)?;
     destination.validate_origin_extent(copy.destination_origin, copy.extent)?;
     let source_inner = source.inner()?;
@@ -514,19 +515,31 @@ pub(super) fn encode_texture_to_texture(
         IMAGE_LAYOUT_TRANSFER_DST,
     );
     let region = vk::ImageCopy::default()
-        .src_subresource(image_subresource_layers())
-        .src_offset(to_image_offset(
+        .src_subresource(texture_copy_subresource_layers(
+            source.dimension,
+            copy.source_mip_level,
+            copy.source_origin.z,
+            copy.extent.depth_or_array_layers,
+        ))
+        .src_offset(texture_copy_offset(
+            source.dimension,
             copy.source_origin.x,
             copy.source_origin.y,
             copy.source_origin.z,
         )?)
-        .dst_subresource(image_subresource_layers())
-        .dst_offset(to_image_offset(
+        .dst_subresource(texture_copy_subresource_layers(
+            destination.dimension,
+            copy.destination_mip_level,
+            copy.destination_origin.z,
+            copy.extent.depth_or_array_layers,
+        ))
+        .dst_offset(texture_copy_offset(
+            destination.dimension,
             copy.destination_origin.x,
             copy.destination_origin.y,
             copy.destination_origin.z,
         )?)
-        .extent(to_image_extent(copy.extent));
+        .extent(texture_copy_extent(source.dimension, copy.extent));
     unsafe {
         device.cmd_copy_image(
             command_buffer,
@@ -1426,13 +1439,19 @@ pub(super) fn validate_buffer_texture_range(
     let last_row = rows
         .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
         .ok_or_else(|| buffer_error("buffer texture row range overflows"))?;
+    let images = u64::from(copy.extent.depth_or_array_layers.saturating_sub(1));
+    let last_image = images
+        .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
+        .and_then(|bytes| bytes.checked_mul(u64::from(copy.buffer_layout.rows_per_image)))
+        .ok_or_else(|| buffer_error("buffer texture image range overflows"))?;
     let row_bytes = u64::from(copy.extent.width)
         .checked_mul(u64::from(texture_bytes_per_pixel(copy)?))
         .ok_or_else(|| buffer_error("buffer texture row bytes overflow"))?;
     let required = copy
         .buffer_layout
         .offset
-        .checked_add(last_row)
+        .checked_add(last_image)
+        .and_then(|offset| offset.checked_add(last_row))
         .and_then(|offset| offset.checked_add(row_bytes))
         .ok_or_else(|| buffer_error("buffer texture range overflows"))?;
     if required > buffer.size() {
@@ -1455,6 +1474,7 @@ pub(super) fn texture_bytes_per_pixel(copy: &HalBufferTextureCopy) -> Result<u32
 /// Returns buffer image copy.
 pub(super) fn buffer_image_copy(
     copy: &HalBufferTextureCopy,
+    texture: &VulkanTexture,
     bytes_per_pixel: u32,
 ) -> Result<vk::BufferImageCopy, HalError> {
     let buffer_row_length = buffer_row_length(copy.buffer_layout.bytes_per_row, bytes_per_pixel)?;
@@ -1462,21 +1482,63 @@ pub(super) fn buffer_image_copy(
         .buffer_offset(copy.buffer_layout.offset)
         .buffer_row_length(buffer_row_length)
         .buffer_image_height(copy.buffer_layout.rows_per_image)
-        .image_subresource(image_subresource_layers())
-        .image_offset(to_image_offset(
+        .image_subresource(texture_copy_subresource_layers(
+            texture.dimension,
+            copy.mip_level,
+            copy.origin.z,
+            copy.extent.depth_or_array_layers,
+        ))
+        .image_offset(texture_copy_offset(
+            texture.dimension,
             copy.origin.x,
             copy.origin.y,
             copy.origin.z,
         )?)
-        .image_extent(to_image_extent(copy.extent)))
+        .image_extent(texture_copy_extent(texture.dimension, copy.extent)))
 }
 
 /// Validates mip level and returns a descriptive error on failure.
-pub(super) fn validate_mip_level(mip_level: u32) -> Result<(), HalError> {
-    if mip_level != 0 {
-        return Err(texture_error("unsupported texture mip level"));
+pub(super) fn validate_mip_level(texture: &VulkanTexture, mip_level: u32) -> Result<(), HalError> {
+    if mip_level >= texture.inner()?.mip_level_count {
+        return Err(texture_error("texture mip level exceeds texture mip count"));
     }
     Ok(())
+}
+
+fn texture_copy_subresource_layers(
+    dimension: HalTextureDimension,
+    mip_level: u32,
+    z: u32,
+    depth_or_array_layers: u32,
+) -> vk::ImageSubresourceLayers {
+    match dimension {
+        HalTextureDimension::D3 => image_subresource_layers(mip_level, 0, 1),
+        HalTextureDimension::D1 | HalTextureDimension::D2 => {
+            image_subresource_layers(mip_level, z, depth_or_array_layers)
+        }
+    }
+}
+
+fn texture_copy_offset(
+    dimension: HalTextureDimension,
+    x: u32,
+    y: u32,
+    z: u32,
+) -> Result<vk::Offset3D, HalError> {
+    match dimension {
+        HalTextureDimension::D3 => to_image_offset(x, y, z),
+        HalTextureDimension::D1 | HalTextureDimension::D2 => to_image_offset(x, y, 0),
+    }
+}
+
+fn texture_copy_extent(dimension: HalTextureDimension, extent: HalExtent3d) -> vk::Extent3D {
+    match dimension {
+        HalTextureDimension::D3 => to_image_extent(extent),
+        HalTextureDimension::D1 | HalTextureDimension::D2 => to_image_extent(HalExtent3d {
+            depth_or_array_layers: 1,
+            ..extent
+        }),
+    }
 }
 
 /// Returns buffer row length.

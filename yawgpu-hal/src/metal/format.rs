@@ -22,13 +22,19 @@ pub(super) fn validate_buffer_texture_range(
     let last_row = rows
         .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
         .ok_or_else(|| buffer_error("buffer texture row range overflows"))?;
+    let images = u64::from(copy.extent.depth_or_array_layers.saturating_sub(1));
+    let last_image = images
+        .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
+        .and_then(|bytes| bytes.checked_mul(u64::from(copy.buffer_layout.rows_per_image)))
+        .ok_or_else(|| buffer_error("buffer texture image range overflows"))?;
     let row_bytes = u64::from(copy.extent.width)
         .checked_mul(u64::from(texture_bytes_per_pixel(copy)?))
         .ok_or_else(|| buffer_error("buffer texture row bytes overflow"))?;
     let required = copy
         .buffer_layout
         .offset
-        .checked_add(last_row)
+        .checked_add(last_image)
+        .and_then(|offset| offset.checked_add(last_row))
         .and_then(|offset| offset.checked_add(row_bytes))
         .ok_or_else(|| buffer_error("buffer texture range overflows"))?;
     if required > buffer.size() {

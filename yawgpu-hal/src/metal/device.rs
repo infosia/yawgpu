@@ -63,6 +63,7 @@ impl MetalDevice {
         match create_texture(&self.device, descriptor) {
             Ok((inner, bytes_per_pixel)) => MetalTexture {
                 inner: Some(inner),
+                dimension: descriptor.dimension,
                 width: descriptor.width,
                 height: descriptor.height,
                 depth_or_array_layers: descriptor.depth_or_array_layers,
@@ -70,6 +71,7 @@ impl MetalDevice {
             },
             Err(_) => MetalTexture {
                 inner: None,
+                dimension: descriptor.dimension,
                 width: descriptor.width,
                 height: descriptor.height,
                 depth_or_array_layers: descriptor.depth_or_array_layers,

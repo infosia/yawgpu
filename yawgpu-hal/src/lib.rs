@@ -27,8 +27,8 @@ pub use command::{
 pub use descriptors::HalTransientAttachmentDescriptor;
 pub use descriptors::{
     HalDepthStencilState, HalExtent3d, HalOrigin3d, HalRenderPipelineDescriptor,
-    HalSamplerDescriptor, HalStencilFaceState, HalTextureDescriptor, HalVertexAttribute,
-    HalVertexBufferLayout,
+    HalSamplerDescriptor, HalStencilFaceState, HalTextureDescriptor, HalTextureDimension,
+    HalVertexAttribute, HalVertexBufferLayout,
 };
 pub use error::HalError;
 pub use format::{
@@ -436,11 +436,11 @@ impl HalDevice {
     /// Creates a texture matching the given descriptor.
     #[must_use]
     pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> HalTexture {
-        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+        #[cfg(not(any(feature = "metal", feature = "vulkan", feature = "gles")))]
         let _ = descriptor;
         match self {
             #[cfg(feature = "noop")]
-            Self::Noop(device) => HalTexture::Noop(device.create_texture()),
+            Self::Noop(device) => HalTexture::Noop(device.create_texture(descriptor)),
             #[cfg(feature = "vulkan")]
             Self::Vulkan(device) => HalTexture::Vulkan(device.create_texture(descriptor)),
             #[cfg(feature = "metal")]
@@ -818,11 +818,11 @@ impl HalQueue {
 
     /// Records and submits the given buffer/texture copy operations.
     pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
-        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+        #[cfg(not(any(feature = "noop", feature = "metal", feature = "vulkan")))]
         let _ = copies;
         match self {
             #[cfg(feature = "noop")]
-            Self::Noop(_) => Ok(()),
+            Self::Noop(queue) => queue.submit_copies(copies),
             #[cfg(feature = "vulkan")]
             Self::Vulkan(queue) => queue.submit_copies(copies),
             #[cfg(feature = "metal")]
@@ -1027,6 +1027,7 @@ mod tests {
 
     fn texture_descriptor() -> HalTextureDescriptor {
         HalTextureDescriptor {
+            dimension: HalTextureDimension::D2,
             format: HalTextureFormat::Rgba8Unorm,
             width: 1,
             height: 1,
