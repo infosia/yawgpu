@@ -9,8 +9,8 @@ use super::instance::{EglInstanceState, GlesInstanceInner};
 use super::texture::GlesTexture;
 use super::BACKEND;
 use crate::{
-    HalError, HalPresentMode, HalSurfaceConfiguration, HalTextureDescriptor, HalTextureFormat,
-    HalTextureUsage,
+    HalError, HalPresentMode, HalSurfaceConfiguration, HalTextureDescriptor, HalTextureDimension,
+    HalTextureFormat, HalTextureUsage,
 };
 
 pub(super) struct GlesSurfaceInner {
@@ -224,6 +224,7 @@ fn validate_config(config: HalSurfaceConfiguration) -> Result<(), HalError> {
 
 fn back_buffer_descriptor(config: HalSurfaceConfiguration) -> HalTextureDescriptor {
     HalTextureDescriptor {
+        dimension: HalTextureDimension::D2,
         format: config.format,
         width: config.width,
         height: config.height,

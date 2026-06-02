@@ -201,14 +201,14 @@ Entries are filled in / refined as P15.x slices land. Anything left as
 | Buffer-to-buffer copy | `glCopyBufferSubData` via `GL_COPY_READ_BUFFER` / `GL_COPY_WRITE_BUFFER` | ☑ (P15.2; ANGLE round-trip verified, full + partial offsets) |
 | Buffer clear | `glBufferSubData` zero-fill chunks via `GL_COPY_WRITE_BUFFER` | ☑ (F-023 follow-up; shares the existing GLES buffer write path) |
 | `mappedAtCreation` | Allocate + map immediately; flush on unmap | ☑ (P15.2; transparent via HostBuffer path) |
-| Texture: 1D | `GL_TEXTURE_2D` with height=1 (no native 1D in GLES) | ✗ Deferred — `allocate_texture` rejects `depth_or_array_layers != 1`; needs distinct 1D path |
+| Texture: 1D | `GL_TEXTURE_2D` with height=1 (no native 1D in GLES) | ◐ Allocation supported (F-026 follow-up); copy execution remains restricted by the 2D-only GLES copy path where unsupported shapes return `HalError` |
 | Texture: 2D | `GL_TEXTURE_2D` + `glTexStorage2D` (non-multisample; uncompressed color formats known by core map to GLES internal/external/type triplets, including integer, signed-normalized, sRGB, 16/32-bit, and packed formats) | ☑ (P15.3; ANGLE verified; format coverage pass expands uncompressed color mappings) |
-| Texture: 2D array | `GL_TEXTURE_2D_ARRAY` + `glTexStorage3D` | ✗ Deferred (P15.3 rejects layers > 1) |
-| Texture: 3D | `GL_TEXTURE_3D` + `glTexStorage3D` | ✗ Deferred |
+| Texture: 2D array | `GL_TEXTURE_2D_ARRAY` + `glTexStorage3D` | ◐ Allocation supported with layers and mips (F-026 follow-up); B2T / T2B / T2T remain unsupported for array copies and return `HalError` |
+| Texture: 3D | `GL_TEXTURE_3D` + `glTexStorage3D` | ◐ Allocation supported with depth and mips (F-026 follow-up); B2T / T2B / T2T remain unsupported for 3D copies and return `HalError` |
 | Texture: cube | `GL_TEXTURE_CUBE_MAP` + `glTexStorage2D` | ✗ Deferred |
 | Texture views | Subrange metadata resolved by core; HAL receives `HalTexture` + mip/origin in copy descriptors | ☑ (P15.3; degenerate — no HAL-level view object) |
 | Storage textures (read/write) | `glBindImageTexture`; restricted format set | ? (P15.4) |
-| B2T / T2B / T2T copies | `glTexSubImage2D` (PBO unpack + `UNPACK_ROW_LENGTH`) / transient FBO + `glReadPixels` (PBO pack + `PACK_ROW_LENGTH` + `read_buffer(COLOR_ATTACHMENT0)`) / `glCopyImageSubData` (GLES 3.2 or `GL_EXT_copy_image`) | ☑ (P15.3; ANGLE verified; 2D only) |
+| B2T / T2B / T2T copies | `glTexSubImage2D` (PBO unpack + `UNPACK_ROW_LENGTH`) / transient FBO + `glReadPixels` (PBO pack + `PACK_ROW_LENGTH` + `read_buffer(COLOR_ATTACHMENT0)`) / `glCopyImageSubData` (GLES 3.2 or `GL_EXT_copy_image`) | ◐ (P15.3; ANGLE verified for 2D only; array / 3D copy execution remains `HalError`) |
 | Sampler creation | `glGenSamplers` + `glSamplerParameteri/f` (filter / address / mipmap / compare / anisotropy via `GL_EXT_texture_filter_anisotropic`) | ☑ (P15.3; `ClampToBorder` not supported) |
 | Compute shader | naga WGSL → GLSL ES 3.10 (`use_framebuffer_fetch=false`, `zero_initialize_workgroup_memory=true`) compiled via `glCreateShader(COMPUTE_SHADER)` + `glLinkProgram`; bind-group bindings honored via `bind_buffer_range(SHADER_STORAGE_BUFFER \| UNIFORM_BUFFER)` against the WGSL `@binding(N)` emitted as `layout(binding=N)`. Single bind group (`@group(0)`) only. | ☑ (P15.4; ANGLE verified) |
 | Compute dispatch (direct) | `glDispatchCompute(x, y, z)` + `glMemoryBarrier(ALL_BARRIER_BITS)` | ☑ (P15.4) |

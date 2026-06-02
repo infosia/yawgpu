@@ -237,6 +237,37 @@ fn metal_added_uncompressed_color_texture_copy_round_trips_data() {
 #[test]
 #[ignore = "manual real-backend test"]
 #[cfg(feature = "metal")]
+fn metal_queue_write_texture_uploads_color_data_round_trips() {
+    // Regression for CTS F-025: wgpuQueueWriteTexture must actually upload the
+    // supplied bytes (it used to ignore the data pointer and write zeros). Upload
+    // via writeTexture, read back via copyTextureToBuffer, and require an exact
+    // round-trip.
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+
+        let pixels = source_pixels();
+        let destination = run_write_texture_buffer_submit(device, &pixels);
+        let actual = read_unpacked_texture_buffer(instance, destination);
+
+        assert_eq!(actual, pixels);
+        assert!(errors.lock().expect("error lock").is_empty());
+        yawgpu::wgpuBufferRelease(destination);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "metal")]
 fn metal_sampler_creation_has_no_device_error() {
     if real_backend_skip_reason(RealBackend::Metal).is_some() {
         return;
@@ -345,6 +376,55 @@ unsafe fn run_buffer_texture_buffer_submit(
 
     yawgpu::wgpuTextureRelease(texture);
     yawgpu::wgpuBufferRelease(source);
+    yawgpu::wgpuQueueRelease(queue);
+    destination
+}
+
+#[cfg(feature = "metal")]
+unsafe fn run_write_texture_buffer_submit(
+    device: native::WGPUDevice,
+    pixels: &[u8],
+) -> native::WGPUBuffer {
+    let queue = yawgpu::wgpuDeviceGetQueue(device);
+    let destination = create_buffer(
+        device,
+        native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+    );
+    let texture = create_texture(
+        device,
+        native::WGPUTextureUsage_CopySrc | native::WGPUTextureUsage_CopyDst,
+    );
+
+    // Lay the pixels out at bytesPerRow = 256 (the upload stride) and upload
+    // straight to the texture with wgpuQueueWriteTexture.
+    let mut padded = vec![0u8; BUFFER_SIZE];
+    for row in 0..HEIGHT as usize {
+        let pixel_offset = row * ROW_PIXELS_BYTES;
+        let padded_offset = row * BYTES_PER_ROW as usize;
+        padded[padded_offset..padded_offset + ROW_PIXELS_BYTES]
+            .copy_from_slice(&pixels[pixel_offset..pixel_offset + ROW_PIXELS_BYTES]);
+    }
+    let dest_info = texture_copy_info(texture);
+    let layout = native::WGPUTexelCopyBufferLayout {
+        offset: 0,
+        bytesPerRow: BYTES_PER_ROW,
+        rowsPerImage: HEIGHT,
+    };
+    let size = texture_extent();
+    yawgpu::wgpuQueueWriteTexture(
+        queue,
+        &dest_info,
+        padded.as_ptr().cast(),
+        padded.len(),
+        &layout,
+        &size,
+    );
+
+    let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+    record_t2b(encoder, texture, destination);
+    submit_encoder(queue, encoder);
+
+    yawgpu::wgpuTextureRelease(texture);
     yawgpu::wgpuQueueRelease(queue);
     destination
 }

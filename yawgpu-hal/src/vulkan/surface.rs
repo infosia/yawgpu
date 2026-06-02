@@ -1,4 +1,5 @@
 use super::*;
+use crate::HalTextureDimension;
 
 pub(super) const RETIRE_RING_SIZE: usize = 3;
 
@@ -627,7 +628,7 @@ pub(super) fn create_swapchain_texture(
         .image(image)
         .view_type(vk::ImageViewType::TYPE_2D)
         .format(vk_format)
-        .subresource_range(color_subresource_range());
+        .subresource_range(color_subresource_range(1, 1));
     let view = unsafe { device.device.create_image_view(&view_info, None) }.map_err(|_| {
         HalError::SwapchainCreationFailed {
             backend: BACKEND,
@@ -641,10 +642,13 @@ pub(super) fn create_swapchain_texture(
             view,
             memory: None,
             owns_image: false,
+            mip_level_count: 1,
+            array_layers: 1,
             layout: AtomicU8::new(IMAGE_LAYOUT_UNDEFINED),
         })),
         swapchain: None,
         surface_pending: Some(pending_state),
+        dimension: HalTextureDimension::D2,
         width: extent.width,
         height: extent.height,
         depth_or_array_layers: 1,

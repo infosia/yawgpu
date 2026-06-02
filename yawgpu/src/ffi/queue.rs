@@ -161,12 +161,20 @@ pub unsafe extern "C" fn wgpuQueueWriteBuffer(
 pub unsafe extern "C" fn wgpuQueueWriteTexture(
     queue: native::WGPUQueue,
     destination: *const native::WGPUTexelCopyTextureInfo,
-    _data: *const c_void,
+    data: *const c_void,
     data_size: usize,
     data_layout: *const native::WGPUTexelCopyBufferLayout,
     write_size: *const native::WGPUExtent3D,
 ) {
     let queue = borrow_handle(queue, "WGPUQueue");
+    let data_size_usize = data_size;
+    if data_size > 0 && data.is_null() {
+        queue.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "queue write texture data must not be null when dataSize is non-zero",
+        );
+        return;
+    }
     let Some(destination) = destination.as_ref() else {
         queue.device.dispatch_error(
             core::ErrorKind::Validation,
@@ -188,16 +196,13 @@ pub unsafe extern "C" fn wgpuQueueWriteTexture(
         );
         return;
     };
-    let data_size = match u64::try_from(data_size) {
-        Ok(size) => size,
-        Err(_) => {
-            queue.device.dispatch_error(
-                core::ErrorKind::Validation,
-                "queue write texture dataSize is too large",
-            );
-            return;
-        }
-    };
+    if u64::try_from(data_size).is_err() {
+        queue.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "queue write texture dataSize is too large",
+        );
+        return;
+    }
     let texture = borrow_handle(destination.texture, "WGPUTexture");
     if !texture.device.same(&queue.device) {
         queue.device.dispatch_error(
@@ -208,16 +213,22 @@ pub unsafe extern "C" fn wgpuQueueWriteTexture(
     }
     let aspect = map_texture_aspect(destination.aspect).unwrap_or(core::TextureAspect::All);
 
-    if let Err(message) = texture.core.validate_queue_write(
-        destination.mipLevel,
-        map_origin_3d(destination.origin),
-        map_extent_3d(*write_size),
-        aspect,
-        map_texel_copy_buffer_layout(*data_layout),
-        data_size,
-    ) {
-        queue
-            .device
-            .dispatch_error(core::ErrorKind::Validation, message);
-    }
+    let data = if data_size_usize == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(data.cast::<u8>(), data_size_usize)
+    };
+    dispatch_optional_device_error(
+        &queue.device,
+        queue.core.write_texture(core::QueueTextureWrite {
+            device: queue.device.hal(),
+            texture: &texture.core,
+            mip_level: destination.mipLevel,
+            origin: map_origin_3d(destination.origin),
+            write_size: map_extent_3d(*write_size),
+            aspect,
+            layout: map_texel_copy_buffer_layout(*data_layout),
+            data,
+        }),
+    );
 }

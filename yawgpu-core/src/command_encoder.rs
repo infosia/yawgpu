@@ -1720,6 +1720,7 @@ pub(crate) fn validate_texture_copy_subresource(
     }
     if require_2d_single_layer
         && texture.dimension() == TextureDimension::D2
+        && texture.size().depth_or_array_layers == 1
         && !empty_copy
         && copy_size.depth_or_array_layers != 1
     {

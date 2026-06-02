@@ -1,4 +1,5 @@
 use super::*;
+use crate::HalTextureDimension;
 
 /// Stores metal surface data used by validation and backend submission.
 #[derive(Debug)]
@@ -87,6 +88,7 @@ impl MetalSurface {
         let (_, bytes_per_pixel) = map_texture_format(config.format)?;
         Ok(MetalTexture {
             inner: Some(texture),
+            dimension: HalTextureDimension::D2,
             width: config.width,
             height: config.height,
             depth_or_array_layers: 1,

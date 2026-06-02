@@ -4,8 +4,8 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use yawgpu_hal::{
     HalBoundBuffer, HalBufferClear, HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout,
-    HalComputePass, HalCopy, HalDraw, HalQueue, HalRenderColorTarget, HalRenderLoadOp,
-    HalRenderPass, HalTextureCopy,
+    HalBufferUsage, HalComputePass, HalCopy, HalDevice, HalDraw, HalQueue, HalRenderColorTarget,
+    HalRenderLoadOp, HalRenderPass, HalTextureCopy,
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
@@ -29,6 +29,7 @@ use crate::subpass::*;
 #[cfg(feature = "tiled")]
 use crate::texture::hal_texture_format;
 use crate::texture::*;
+use crate::texture_view::TextureAspect;
 
 /// Stores queue data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -41,6 +42,27 @@ pub struct Queue {
 pub(crate) struct QueueInner {
     pub(crate) hal: HalQueue,
     pub(crate) label: Mutex<String>,
+}
+
+/// Describes a queue texture write operation.
+#[derive(Debug, Clone, Copy)]
+pub struct QueueTextureWrite<'a> {
+    /// Device used to allocate the temporary staging buffer.
+    pub device: &'a HalDevice,
+    /// Destination texture.
+    pub texture: &'a Texture,
+    /// Destination mip level.
+    pub mip_level: u32,
+    /// Destination origin.
+    pub origin: Origin3d,
+    /// Write extent.
+    pub write_size: Extent3d,
+    /// Destination aspect.
+    pub aspect: TextureAspect,
+    /// Source data layout.
+    pub layout: TexelCopyBufferLayout,
+    /// Source bytes.
+    pub data: &'a [u8],
 }
 
 impl Queue {
@@ -75,6 +97,69 @@ impl Queue {
     /// Writes `data` into the buffer at `offset` directly from the queue.
     pub fn write_buffer(&self, buffer: &Buffer, offset: u64, data: &[u8]) -> Option<DeviceError> {
         buffer.write_from_queue(offset, data)
+    }
+
+    /// Writes `data` into the texture through the backend copy path.
+    pub fn write_texture(&self, write: QueueTextureWrite<'_>) -> Option<DeviceError> {
+        let QueueTextureWrite {
+            device,
+            texture,
+            mip_level,
+            origin,
+            write_size,
+            aspect,
+            layout,
+            data,
+        } = write;
+        let data_size = match u64::try_from(data.len()) {
+            Ok(size) => size,
+            Err(_) => {
+                return Some(DeviceError::validation(
+                    "queue write texture dataSize is too large",
+                ))
+            }
+        };
+        if let Err(message) =
+            texture.validate_queue_write(mip_level, origin, write_size, aspect, layout, data_size)
+        {
+            return Some(DeviceError::validation(message));
+        }
+        if extent_is_empty(write_size) {
+            return None;
+        }
+        let staging = device.create_buffer(
+            data_size,
+            HalBufferUsage {
+                copy_src: true,
+                ..HalBufferUsage::default()
+            },
+        );
+        if let Err(error) = staging.write(0, data) {
+            return Some(DeviceError::internal(error.to_string()));
+        }
+        let Some(buffer_layout) = hal_buffer_texture_layout(layout, texture, write_size) else {
+            return Some(DeviceError::internal(
+                "queue write texture format is unsupported",
+            ));
+        };
+        let Some(texture) = texture.hal() else {
+            return Some(DeviceError::internal(
+                "queue write texture has no HAL texture",
+            ));
+        };
+        let copy = HalCopy::BufferToTexture(HalBufferTextureCopy {
+            buffer: staging,
+            buffer_layout,
+            texture,
+            mip_level,
+            origin: hal_origin(origin),
+            extent: hal_extent(write_size),
+        });
+        self.inner
+            .hal
+            .submit_copies(&[copy])
+            .err()
+            .map(|error| DeviceError::internal(error.to_string()))
     }
 
     /// Submits command buffers to the queue after validating each is non-error and not already submitted.
@@ -718,6 +803,114 @@ mod tests {
 
         assert_eq!(queue.write_buffer(&buffer, 0, &[1, 2, 3, 4]), None);
         assert_eq!(queue.submit(&[]), None);
+    }
+
+    #[test]
+    fn queue_write_texture_valid_call_submits_buffer_to_texture_copy() {
+        let device = noop_device();
+        let queue = device.queue();
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let layout = TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(16),
+            rows_per_image: Some(4),
+        };
+        let data = [7_u8; 64];
+
+        assert_eq!(
+            queue.write_texture(QueueTextureWrite {
+                device: device.hal(),
+                texture: &texture,
+                mip_level: 0,
+                origin: Origin3d { x: 0, y: 0, z: 0 },
+                write_size: Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                aspect: TextureAspect::All,
+                layout,
+                data: &data,
+            }),
+            None
+        );
+
+        let submitted = match queue.hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => panic!("expected Noop queue"),
+        };
+        assert!(matches!(
+            submitted.as_slice(),
+            [HalCopy::BufferToTexture(copy)]
+                if copy.mip_level == 0
+                    && copy.origin.x == 0
+                    && copy.origin.y == 0
+                    && copy.origin.z == 0
+                    && copy.extent.width == 4
+                    && copy.extent.height == 4
+                    && copy.extent.depth_or_array_layers == 1
+                    && copy.buffer_layout.offset == 0
+                    && copy.buffer_layout.bytes_per_row == 16
+                    && copy.buffer_layout.rows_per_image == 4
+        ));
+    }
+
+    #[test]
+    fn queue_write_texture_invalid_call_returns_validation_error() {
+        let device = noop_device();
+        let queue = device.queue();
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_SRC,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let error = queue
+            .write_texture(QueueTextureWrite {
+                device: device.hal(),
+                texture: &texture,
+                mip_level: 0,
+                origin: Origin3d { x: 0, y: 0, z: 0 },
+                write_size: Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                aspect: TextureAspect::All,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(16),
+                    rows_per_image: Some(4),
+                },
+                data: &[0_u8; 64],
+            })
+            .expect("missing validation error");
+
+        assert_eq!(error.kind, ErrorKind::Validation);
+        let submitted = match queue.hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => panic!("expected Noop queue"),
+        };
+        assert!(submitted.is_empty());
     }
 
     #[test]

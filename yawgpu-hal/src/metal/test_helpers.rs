@@ -15,6 +15,7 @@ pub(crate) fn metal_device() -> MetalDevice {
 /// Returns texture descriptor.
 pub(crate) fn texture_descriptor() -> HalTextureDescriptor {
     HalTextureDescriptor {
+        dimension: HalTextureDimension::D2,
         format: HalTextureFormat::Rgba8Unorm,
         width: 4,
         height: 4,

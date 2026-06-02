@@ -66,7 +66,7 @@ pub use instance::Instance;
 pub use limits::Limits;
 pub use pipeline_layout::{PipelineLayout, PipelineLayoutDescriptor};
 pub use query_set::{QuerySet, QuerySetDescriptor, QueryType};
-pub use queue::Queue;
+pub use queue::{Queue, QueueTextureWrite};
 pub use render_bundle::{RenderBundle, RenderBundleEncoder, RenderBundleEncoderDescriptor};
 pub use render_pass::{
     RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor,

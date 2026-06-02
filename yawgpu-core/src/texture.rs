@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use yawgpu_hal::{HalTexture, HalTextureDescriptor, HalTextureFormat, HalTextureUsage};
+use yawgpu_hal::{
+    HalTexture, HalTextureDescriptor, HalTextureDimension, HalTextureFormat, HalTextureUsage,
+};
 
 use crate::copy::*;
 use crate::device::FeatureSet;
@@ -545,6 +547,7 @@ pub(crate) fn validate_queue_write_texture(
         return Err("queue texture write range exceeds the texture subresource".to_owned());
     }
     if texture.dimension() == TextureDimension::D2
+        && texture.size().depth_or_array_layers == 1
         && !empty_write
         && write_size.depth_or_array_layers != 1
     {
@@ -711,6 +714,7 @@ pub(crate) fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
 /// Returns HAL texture descriptor.
 pub(crate) fn hal_texture_descriptor(descriptor: &TextureDescriptor) -> HalTextureDescriptor {
     HalTextureDescriptor {
+        dimension: hal_texture_dimension(descriptor.dimension),
         format: hal_texture_format(descriptor.format),
         width: descriptor.size.width,
         height: descriptor.size.height,
@@ -718,6 +722,14 @@ pub(crate) fn hal_texture_descriptor(descriptor: &TextureDescriptor) -> HalTextu
         mip_level_count: descriptor.mip_level_count,
         sample_count: descriptor.sample_count,
         usage: hal_texture_usage(descriptor.usage),
+    }
+}
+
+pub(crate) fn hal_texture_dimension(dimension: TextureDimension) -> HalTextureDimension {
+    match dimension {
+        TextureDimension::D1 => HalTextureDimension::D1,
+        TextureDimension::D2 => HalTextureDimension::D2,
+        TextureDimension::D3 => HalTextureDimension::D3,
     }
 }
 
@@ -880,6 +892,34 @@ mod tests {
         for (raw, expected) in cases {
             assert_eq!(hal_texture_format(TextureFormat::from_raw(raw)), expected);
         }
+    }
+
+    #[test]
+    fn hal_texture_dimension_maps_each_dimension() {
+        assert_eq!(
+            hal_texture_dimension(TextureDimension::D1),
+            HalTextureDimension::D1
+        );
+        assert_eq!(
+            hal_texture_dimension(TextureDimension::D2),
+            HalTextureDimension::D2
+        );
+        assert_eq!(
+            hal_texture_dimension(TextureDimension::D3),
+            HalTextureDimension::D3
+        );
+    }
+
+    #[test]
+    fn hal_texture_descriptor_carries_dimension() {
+        let mut descriptor = texture_descriptor_4x4();
+        descriptor.dimension = TextureDimension::D3;
+        descriptor.size.depth_or_array_layers = 4;
+
+        let hal = hal_texture_descriptor(&descriptor);
+
+        assert_eq!(hal.dimension, HalTextureDimension::D3);
+        assert_eq!(hal.depth_or_array_layers, 4);
     }
 
     #[test]
@@ -1056,9 +1096,11 @@ mod tests {
     #[test]
     fn texture_from_hal_and_descriptor_accessors_round_trip() {
         let descriptor = texture_descriptor_4x4();
+        let hal_descriptor = hal_texture_descriptor(&descriptor);
+        let hal_device = hal_noop_device();
         let texture = Texture::from_hal(
             descriptor.clone(),
-            yawgpu_hal::HalTexture::Noop(yawgpu_hal::noop::NoopTexture),
+            hal_device.create_texture(&hal_descriptor),
         );
 
         assert_eq!(texture.usage(), descriptor.usage);

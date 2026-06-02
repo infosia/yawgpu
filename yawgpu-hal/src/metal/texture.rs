@@ -1,9 +1,11 @@
 use super::*;
+use crate::HalTextureDimension;
 
 /// Stores metal texture data used by validation and backend submission.
 #[derive(Clone)]
 pub struct MetalTexture {
     pub(super) inner: Option<Retained<ProtocolObject<dyn MTLTextureTrait>>>,
+    pub(super) dimension: HalTextureDimension,
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) depth_or_array_layers: u32,
@@ -105,22 +107,35 @@ pub(super) fn create_texture(
     device: &ProtocolObject<dyn MTLDevice>,
     descriptor: &HalTextureDescriptor,
 ) -> Result<(Retained<ProtocolObject<dyn MTLTextureTrait>>, u32), HalError> {
-    if descriptor.depth_or_array_layers != 1
-        || descriptor.mip_level_count != 1
-        || descriptor.sample_count != 1
-    {
+    if descriptor.sample_count != 1 {
         return Err(texture_error("unsupported texture descriptor"));
     }
     let (pixel_format, bytes_per_pixel) = map_texture_format(descriptor.format)?;
     let texture_descriptor = MTLTextureDescriptor::new();
-    texture_descriptor.setTextureType(MTLTextureType::Type2D);
+    texture_descriptor.setTextureType(match descriptor.dimension {
+        HalTextureDimension::D1 => MTLTextureType::Type1D,
+        HalTextureDimension::D2 if descriptor.depth_or_array_layers > 1 => {
+            MTLTextureType::Type2DArray
+        }
+        HalTextureDimension::D2 => MTLTextureType::Type2D,
+        HalTextureDimension::D3 => MTLTextureType::Type3D,
+    });
     texture_descriptor.setPixelFormat(pixel_format);
     unsafe {
         texture_descriptor.setWidth(to_ns(u64::from(descriptor.width))?);
-        texture_descriptor.setHeight(to_ns(u64::from(descriptor.height))?);
-        texture_descriptor.setDepth(1);
-        texture_descriptor.setArrayLength(1);
-        texture_descriptor.setMipmapLevelCount(1);
+        texture_descriptor.setHeight(to_ns(u64::from(match descriptor.dimension {
+            HalTextureDimension::D1 => 1,
+            HalTextureDimension::D2 | HalTextureDimension::D3 => descriptor.height,
+        }))?);
+        texture_descriptor.setDepth(to_ns(u64::from(match descriptor.dimension {
+            HalTextureDimension::D3 => descriptor.depth_or_array_layers,
+            HalTextureDimension::D1 | HalTextureDimension::D2 => 1,
+        }))?);
+        texture_descriptor.setArrayLength(to_ns(u64::from(match descriptor.dimension {
+            HalTextureDimension::D2 => descriptor.depth_or_array_layers,
+            HalTextureDimension::D1 | HalTextureDimension::D3 => 1,
+        }))?);
+        texture_descriptor.setMipmapLevelCount(to_ns(u64::from(descriptor.mip_level_count))?);
         texture_descriptor.setSampleCount(1);
     }
     texture_descriptor.setStorageMode(MTLStorageMode::Shared);
