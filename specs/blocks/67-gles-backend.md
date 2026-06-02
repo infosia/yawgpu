@@ -202,7 +202,7 @@ Entries are filled in / refined as P15.x slices land. Anything left as
 | Buffer clear | `glBufferSubData` zero-fill chunks via `GL_COPY_WRITE_BUFFER` | ☑ (F-023 follow-up; shares the existing GLES buffer write path) |
 | `mappedAtCreation` | Allocate + map immediately; flush on unmap | ☑ (P15.2; transparent via HostBuffer path) |
 | Texture: 1D | `GL_TEXTURE_2D` with height=1 (no native 1D in GLES) | ✗ Deferred — `allocate_texture` rejects `depth_or_array_layers != 1`; needs distinct 1D path |
-| Texture: 2D | `GL_TEXTURE_2D` + `glTexStorage2D` (non-multisample, RGBA8Unorm baseline) | ☑ (P15.3; ANGLE verified) |
+| Texture: 2D | `GL_TEXTURE_2D` + `glTexStorage2D` (non-multisample, RGBA8Unorm baseline; `RGBA8Uint` maps to `GL_RGBA8UI` / `GL_RGBA_INTEGER` / `GL_UNSIGNED_BYTE`) | ☑ (P15.3; ANGLE verified; F-024 adds RGBA8Uint mapping) |
 | Texture: 2D array | `GL_TEXTURE_2D_ARRAY` + `glTexStorage3D` | ✗ Deferred (P15.3 rejects layers > 1) |
 | Texture: 3D | `GL_TEXTURE_3D` + `glTexStorage3D` | ✗ Deferred |
 | Texture: cube | `GL_TEXTURE_CUBE_MAP` + `glTexStorage2D` | ✗ Deferred |

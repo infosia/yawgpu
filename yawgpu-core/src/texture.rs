@@ -726,6 +726,7 @@ pub(crate) fn hal_texture_format(format: TextureFormat) -> HalTextureFormat {
     match format.raw() {
         TextureFormat::R8_UNORM => HalTextureFormat::R8Unorm,
         TextureFormat::RGBA8_UNORM => HalTextureFormat::Rgba8Unorm,
+        TextureFormat::RGBA8_UINT => HalTextureFormat::Rgba8Uint,
         TextureFormat::BGRA8_UNORM => HalTextureFormat::Bgra8Unorm,
         TextureFormat::RGBA16_FLOAT => HalTextureFormat::Rgba16Float,
         TextureFormat::STENCIL8 => HalTextureFormat::Stencil8,
@@ -779,6 +780,14 @@ mod tests {
         let usage = TextureUsage::from_bits_retain(raw);
 
         assert_eq!(usage.bits(), raw);
+    }
+
+    #[test]
+    fn hal_texture_format_maps_rgba8_uint() {
+        assert_eq!(
+            hal_texture_format(TextureFormat::from_raw(TextureFormat::RGBA8_UINT)),
+            HalTextureFormat::Rgba8Uint
+        );
     }
 
     #[test]

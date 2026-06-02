@@ -318,8 +318,28 @@ never a reason to skip a CTS case.
   `--features metal` staticlib + relinked cts):
   `api,operation,command_buffer,clearBuffer:clear` now **pass=50 / fail=0**
   (was 40/10), `copyBufferToBuffer` + `createPipelineLayout` slices clean.
-  **With F-023 closed, every yawgpu finding this suite has surfaced
-  (F-005/006/008/009/010/011/014/016/018/020/022/023) is resolved**; all
+  **With F-023 closed, every yawgpu finding this suite had surfaced
+  through T22 is resolved.**
+- **External-CTS api/operation finding F-024 — RESOLVED.** The first
+  buffer↔texture operation slice (T23, `command_buffer,basic:{b2t2b,b2t2t2b}`)
+  found a `rgba8uint` `copyBufferToTexture`→`copyTextureToBuffer` roundtrip
+  read back all zeros. Root cause: the HAL `HalTextureFormat` enum is a
+  minimal ~10-format subset, and core's `hal_texture_format` mapped
+  `RGBA8_UINT` via the `_ => Unsupported` catch-all → the rgba8uint texture
+  had no real GPU backing → `hal_texture_copy_execution`'s `texture.hal()?`
+  short-circuited and the copy was silently dropped (Noop validation passes
+  rgba8uint, so it only surfaced on a real backend in an operation test).
+  Fixed by adding `HalTextureFormat::Rgba8Uint` + the core mapping +
+  per-backend formats (Metal `RGBA8Uint`, Vulkan `R8G8B8A8_UINT`, GLES
+  `RGBA8UI`/`RGBA_INTEGER`). **Verified by running the real CTS**
+  (`command_buffer,basic` `b2t2b`/`b2t2t2b` now pass) + a data-readback
+  Metal e2e on the M2. **NOTE — broader gap:** `HalTextureFormat` still
+  covers only a subset; many color formats (rgba8sint, rg8*, r8uint/sint,
+  r16*, r32*, rgba16*, rgba32*, …) remain `Unsupported` with no GPU
+  backing and will surface one-by-one as operation coverage grows — a
+  systematic per-backend HAL format-table pass is the real follow-up.
+  **With F-024 closed, every yawgpu finding this suite has surfaced
+  (F-005/006/008/009/010/011/014/016/018/020/022/023/024) is resolved**; all
   other open findings (F-001–F-004, F-007, F-012, F-013, F-015, F-017,
   F-019, F-021) are wgpu-native defects.
 - Known core gaps surfaced (recommended follow-up): evaluate
