@@ -4,10 +4,48 @@ use super::*;
 pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<(vk::Format, u32), HalError> {
     match format {
         HalTextureFormat::R8Unorm => Ok((vk::Format::R8_UNORM, 1)),
+        HalTextureFormat::R8Snorm => Ok((vk::Format::R8_SNORM, 1)),
+        HalTextureFormat::R8Uint => Ok((vk::Format::R8_UINT, 1)),
+        HalTextureFormat::R8Sint => Ok((vk::Format::R8_SINT, 1)),
+        HalTextureFormat::R16Unorm => Ok((vk::Format::R16_UNORM, 2)),
+        HalTextureFormat::R16Snorm => Ok((vk::Format::R16_SNORM, 2)),
+        HalTextureFormat::R16Uint => Ok((vk::Format::R16_UINT, 2)),
+        HalTextureFormat::R16Sint => Ok((vk::Format::R16_SINT, 2)),
+        HalTextureFormat::R16Float => Ok((vk::Format::R16_SFLOAT, 2)),
+        HalTextureFormat::Rg8Unorm => Ok((vk::Format::R8G8_UNORM, 2)),
+        HalTextureFormat::Rg8Snorm => Ok((vk::Format::R8G8_SNORM, 2)),
+        HalTextureFormat::Rg8Uint => Ok((vk::Format::R8G8_UINT, 2)),
+        HalTextureFormat::Rg8Sint => Ok((vk::Format::R8G8_SINT, 2)),
+        HalTextureFormat::Rg16Unorm => Ok((vk::Format::R16G16_UNORM, 4)),
+        HalTextureFormat::Rg16Snorm => Ok((vk::Format::R16G16_SNORM, 4)),
+        HalTextureFormat::Rg16Uint => Ok((vk::Format::R16G16_UINT, 4)),
+        HalTextureFormat::Rg16Sint => Ok((vk::Format::R16G16_SINT, 4)),
+        HalTextureFormat::Rg16Float => Ok((vk::Format::R16G16_SFLOAT, 4)),
+        HalTextureFormat::R32Uint => Ok((vk::Format::R32_UINT, 4)),
+        HalTextureFormat::R32Sint => Ok((vk::Format::R32_SINT, 4)),
+        HalTextureFormat::R32Float => Ok((vk::Format::R32_SFLOAT, 4)),
+        HalTextureFormat::Rg32Uint => Ok((vk::Format::R32G32_UINT, 8)),
+        HalTextureFormat::Rg32Sint => Ok((vk::Format::R32G32_SINT, 8)),
+        HalTextureFormat::Rg32Float => Ok((vk::Format::R32G32_SFLOAT, 8)),
         HalTextureFormat::Rgba8Unorm => Ok((vk::Format::R8G8B8A8_UNORM, 4)),
+        HalTextureFormat::Rgba8UnormSrgb => Ok((vk::Format::R8G8B8A8_SRGB, 4)),
+        HalTextureFormat::Rgba8Snorm => Ok((vk::Format::R8G8B8A8_SNORM, 4)),
         HalTextureFormat::Rgba8Uint => Ok((vk::Format::R8G8B8A8_UINT, 4)),
+        HalTextureFormat::Rgba8Sint => Ok((vk::Format::R8G8B8A8_SINT, 4)),
         HalTextureFormat::Bgra8Unorm => Ok((vk::Format::B8G8R8A8_UNORM, 4)),
+        HalTextureFormat::Bgra8UnormSrgb => Ok((vk::Format::B8G8R8A8_SRGB, 4)),
+        HalTextureFormat::Rgb10a2Uint => Ok((vk::Format::A2B10G10R10_UINT_PACK32, 4)),
+        HalTextureFormat::Rgb10a2Unorm => Ok((vk::Format::A2B10G10R10_UNORM_PACK32, 4)),
+        HalTextureFormat::Rg11b10Ufloat => Ok((vk::Format::B10G11R11_UFLOAT_PACK32, 4)),
+        HalTextureFormat::Rgb9e5Ufloat => Ok((vk::Format::E5B9G9R9_UFLOAT_PACK32, 4)),
+        HalTextureFormat::Rgba16Unorm => Ok((vk::Format::R16G16B16A16_UNORM, 8)),
+        HalTextureFormat::Rgba16Snorm => Ok((vk::Format::R16G16B16A16_SNORM, 8)),
+        HalTextureFormat::Rgba16Uint => Ok((vk::Format::R16G16B16A16_UINT, 8)),
+        HalTextureFormat::Rgba16Sint => Ok((vk::Format::R16G16B16A16_SINT, 8)),
         HalTextureFormat::Rgba16Float => Ok((vk::Format::R16G16B16A16_SFLOAT, 8)),
+        HalTextureFormat::Rgba32Uint => Ok((vk::Format::R32G32B32A32_UINT, 16)),
+        HalTextureFormat::Rgba32Sint => Ok((vk::Format::R32G32B32A32_SINT, 16)),
+        HalTextureFormat::Rgba32Float => Ok((vk::Format::R32G32B32A32_SFLOAT, 16)),
         HalTextureFormat::Stencil8 => Ok((vk::Format::S8_UINT, 1)),
         HalTextureFormat::Depth16Unorm => Ok((vk::Format::D16_UNORM, 2)),
         HalTextureFormat::Depth24Plus => Ok((vk::Format::D32_SFLOAT, 4)),
@@ -140,11 +178,116 @@ mod tests {
     }
 
     #[test]
-    fn map_texture_format_maps_rgba8_uint() {
-        assert_eq!(
-            map_texture_format(HalTextureFormat::Rgba8Uint).expect("rgba8uint supported"),
-            (vk::Format::R8G8B8A8_UINT, 4)
-        );
+    fn map_texture_format_maps_uncompressed_color_formats() {
+        let cases = [
+            (HalTextureFormat::R8Unorm, vk::Format::R8_UNORM, 1),
+            (HalTextureFormat::R8Snorm, vk::Format::R8_SNORM, 1),
+            (HalTextureFormat::R8Uint, vk::Format::R8_UINT, 1),
+            (HalTextureFormat::R8Sint, vk::Format::R8_SINT, 1),
+            (HalTextureFormat::R16Unorm, vk::Format::R16_UNORM, 2),
+            (HalTextureFormat::R16Snorm, vk::Format::R16_SNORM, 2),
+            (HalTextureFormat::R16Uint, vk::Format::R16_UINT, 2),
+            (HalTextureFormat::R16Sint, vk::Format::R16_SINT, 2),
+            (HalTextureFormat::R16Float, vk::Format::R16_SFLOAT, 2),
+            (HalTextureFormat::Rg8Unorm, vk::Format::R8G8_UNORM, 2),
+            (HalTextureFormat::Rg8Snorm, vk::Format::R8G8_SNORM, 2),
+            (HalTextureFormat::Rg8Uint, vk::Format::R8G8_UINT, 2),
+            (HalTextureFormat::Rg8Sint, vk::Format::R8G8_SINT, 2),
+            (HalTextureFormat::Rg16Unorm, vk::Format::R16G16_UNORM, 4),
+            (HalTextureFormat::Rg16Snorm, vk::Format::R16G16_SNORM, 4),
+            (HalTextureFormat::Rg16Uint, vk::Format::R16G16_UINT, 4),
+            (HalTextureFormat::Rg16Sint, vk::Format::R16G16_SINT, 4),
+            (HalTextureFormat::Rg16Float, vk::Format::R16G16_SFLOAT, 4),
+            (HalTextureFormat::R32Uint, vk::Format::R32_UINT, 4),
+            (HalTextureFormat::R32Sint, vk::Format::R32_SINT, 4),
+            (HalTextureFormat::R32Float, vk::Format::R32_SFLOAT, 4),
+            (HalTextureFormat::Rg32Uint, vk::Format::R32G32_UINT, 8),
+            (HalTextureFormat::Rg32Sint, vk::Format::R32G32_SINT, 8),
+            (HalTextureFormat::Rg32Float, vk::Format::R32G32_SFLOAT, 8),
+            (HalTextureFormat::Rgba8Unorm, vk::Format::R8G8B8A8_UNORM, 4),
+            (
+                HalTextureFormat::Rgba8UnormSrgb,
+                vk::Format::R8G8B8A8_SRGB,
+                4,
+            ),
+            (HalTextureFormat::Rgba8Snorm, vk::Format::R8G8B8A8_SNORM, 4),
+            (HalTextureFormat::Rgba8Uint, vk::Format::R8G8B8A8_UINT, 4),
+            (HalTextureFormat::Rgba8Sint, vk::Format::R8G8B8A8_SINT, 4),
+            (HalTextureFormat::Bgra8Unorm, vk::Format::B8G8R8A8_UNORM, 4),
+            (
+                HalTextureFormat::Bgra8UnormSrgb,
+                vk::Format::B8G8R8A8_SRGB,
+                4,
+            ),
+            (
+                HalTextureFormat::Rgb10a2Uint,
+                vk::Format::A2B10G10R10_UINT_PACK32,
+                4,
+            ),
+            (
+                HalTextureFormat::Rgb10a2Unorm,
+                vk::Format::A2B10G10R10_UNORM_PACK32,
+                4,
+            ),
+            (
+                HalTextureFormat::Rg11b10Ufloat,
+                vk::Format::B10G11R11_UFLOAT_PACK32,
+                4,
+            ),
+            (
+                HalTextureFormat::Rgb9e5Ufloat,
+                vk::Format::E5B9G9R9_UFLOAT_PACK32,
+                4,
+            ),
+            (
+                HalTextureFormat::Rgba16Unorm,
+                vk::Format::R16G16B16A16_UNORM,
+                8,
+            ),
+            (
+                HalTextureFormat::Rgba16Snorm,
+                vk::Format::R16G16B16A16_SNORM,
+                8,
+            ),
+            (
+                HalTextureFormat::Rgba16Uint,
+                vk::Format::R16G16B16A16_UINT,
+                8,
+            ),
+            (
+                HalTextureFormat::Rgba16Sint,
+                vk::Format::R16G16B16A16_SINT,
+                8,
+            ),
+            (
+                HalTextureFormat::Rgba16Float,
+                vk::Format::R16G16B16A16_SFLOAT,
+                8,
+            ),
+            (
+                HalTextureFormat::Rgba32Uint,
+                vk::Format::R32G32B32A32_UINT,
+                16,
+            ),
+            (
+                HalTextureFormat::Rgba32Sint,
+                vk::Format::R32G32B32A32_SINT,
+                16,
+            ),
+            (
+                HalTextureFormat::Rgba32Float,
+                vk::Format::R32G32B32A32_SFLOAT,
+                16,
+            ),
+        ];
+
+        for (hal, vk, bytes_per_pixel) in cases {
+            assert_eq!(
+                map_texture_format(hal).expect("format supported"),
+                (vk, bytes_per_pixel),
+                "{hal:?}"
+            );
+        }
     }
 
     #[test]

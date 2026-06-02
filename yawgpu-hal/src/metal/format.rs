@@ -96,10 +96,48 @@ pub(super) fn map_texture_format(
 ) -> Result<(MTLPixelFormat, u32), HalError> {
     match format {
         HalTextureFormat::R8Unorm => Ok((MTLPixelFormat::R8Unorm, 1)),
+        HalTextureFormat::R8Snorm => Ok((MTLPixelFormat::R8Snorm, 1)),
+        HalTextureFormat::R8Uint => Ok((MTLPixelFormat::R8Uint, 1)),
+        HalTextureFormat::R8Sint => Ok((MTLPixelFormat::R8Sint, 1)),
+        HalTextureFormat::R16Unorm => Ok((MTLPixelFormat::R16Unorm, 2)),
+        HalTextureFormat::R16Snorm => Ok((MTLPixelFormat::R16Snorm, 2)),
+        HalTextureFormat::R16Uint => Ok((MTLPixelFormat::R16Uint, 2)),
+        HalTextureFormat::R16Sint => Ok((MTLPixelFormat::R16Sint, 2)),
+        HalTextureFormat::R16Float => Ok((MTLPixelFormat::R16Float, 2)),
+        HalTextureFormat::Rg8Unorm => Ok((MTLPixelFormat::RG8Unorm, 2)),
+        HalTextureFormat::Rg8Snorm => Ok((MTLPixelFormat::RG8Snorm, 2)),
+        HalTextureFormat::Rg8Uint => Ok((MTLPixelFormat::RG8Uint, 2)),
+        HalTextureFormat::Rg8Sint => Ok((MTLPixelFormat::RG8Sint, 2)),
+        HalTextureFormat::Rg16Unorm => Ok((MTLPixelFormat::RG16Unorm, 4)),
+        HalTextureFormat::Rg16Snorm => Ok((MTLPixelFormat::RG16Snorm, 4)),
+        HalTextureFormat::Rg16Uint => Ok((MTLPixelFormat::RG16Uint, 4)),
+        HalTextureFormat::Rg16Sint => Ok((MTLPixelFormat::RG16Sint, 4)),
+        HalTextureFormat::Rg16Float => Ok((MTLPixelFormat::RG16Float, 4)),
+        HalTextureFormat::R32Uint => Ok((MTLPixelFormat::R32Uint, 4)),
+        HalTextureFormat::R32Sint => Ok((MTLPixelFormat::R32Sint, 4)),
+        HalTextureFormat::R32Float => Ok((MTLPixelFormat::R32Float, 4)),
+        HalTextureFormat::Rg32Uint => Ok((MTLPixelFormat::RG32Uint, 8)),
+        HalTextureFormat::Rg32Sint => Ok((MTLPixelFormat::RG32Sint, 8)),
+        HalTextureFormat::Rg32Float => Ok((MTLPixelFormat::RG32Float, 8)),
         HalTextureFormat::Rgba8Unorm => Ok((MTLPixelFormat::RGBA8Unorm, 4)),
+        HalTextureFormat::Rgba8UnormSrgb => Ok((MTLPixelFormat::RGBA8Unorm_sRGB, 4)),
+        HalTextureFormat::Rgba8Snorm => Ok((MTLPixelFormat::RGBA8Snorm, 4)),
         HalTextureFormat::Rgba8Uint => Ok((MTLPixelFormat::RGBA8Uint, 4)),
+        HalTextureFormat::Rgba8Sint => Ok((MTLPixelFormat::RGBA8Sint, 4)),
         HalTextureFormat::Bgra8Unorm => Ok((MTLPixelFormat::BGRA8Unorm, 4)),
+        HalTextureFormat::Bgra8UnormSrgb => Ok((MTLPixelFormat::BGRA8Unorm_sRGB, 4)),
+        HalTextureFormat::Rgb10a2Uint => Ok((MTLPixelFormat::RGB10A2Uint, 4)),
+        HalTextureFormat::Rgb10a2Unorm => Ok((MTLPixelFormat::RGB10A2Unorm, 4)),
+        HalTextureFormat::Rg11b10Ufloat => Ok((MTLPixelFormat::RG11B10Float, 4)),
+        HalTextureFormat::Rgb9e5Ufloat => Ok((MTLPixelFormat::RGB9E5Float, 4)),
+        HalTextureFormat::Rgba16Unorm => Ok((MTLPixelFormat::RGBA16Unorm, 8)),
+        HalTextureFormat::Rgba16Snorm => Ok((MTLPixelFormat::RGBA16Snorm, 8)),
+        HalTextureFormat::Rgba16Uint => Ok((MTLPixelFormat::RGBA16Uint, 8)),
+        HalTextureFormat::Rgba16Sint => Ok((MTLPixelFormat::RGBA16Sint, 8)),
         HalTextureFormat::Rgba16Float => Ok((MTLPixelFormat::RGBA16Float, 8)),
+        HalTextureFormat::Rgba32Uint => Ok((MTLPixelFormat::RGBA32Uint, 16)),
+        HalTextureFormat::Rgba32Sint => Ok((MTLPixelFormat::RGBA32Sint, 16)),
+        HalTextureFormat::Rgba32Float => Ok((MTLPixelFormat::RGBA32Float, 16)),
         HalTextureFormat::Stencil8 => Ok((MTLPixelFormat::Stencil8, 1)),
         HalTextureFormat::Depth16Unorm => Ok((MTLPixelFormat::Depth16Unorm, 2)),
         HalTextureFormat::Depth24Plus => Ok((MTLPixelFormat::Depth32Float, 4)),
@@ -107,20 +145,6 @@ pub(super) fn map_texture_format(
         HalTextureFormat::Depth32Float => Ok((MTLPixelFormat::Depth32Float, 4)),
         HalTextureFormat::Depth32FloatStencil8 => Ok((MTLPixelFormat::Depth32Float_Stencil8, 5)),
         HalTextureFormat::Unsupported => Err(texture_error("unsupported texture format")),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[cfg(feature = "metal")]
-    fn map_texture_format_maps_rgba8_uint() {
-        assert_eq!(
-            map_texture_format(HalTextureFormat::Rgba8Uint).expect("rgba8uint supported"),
-            (MTLPixelFormat::RGBA8Uint, 4)
-        );
     }
 }
 
@@ -215,5 +239,108 @@ pub(super) fn shader_error(message: String) -> HalError {
     HalError::ShaderCompilationFailed {
         backend: BACKEND,
         message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(feature = "metal")]
+    fn map_texture_format_maps_uncompressed_color_formats() {
+        let cases = [
+            (HalTextureFormat::R8Unorm, MTLPixelFormat::R8Unorm, 1),
+            (HalTextureFormat::R8Snorm, MTLPixelFormat::R8Snorm, 1),
+            (HalTextureFormat::R8Uint, MTLPixelFormat::R8Uint, 1),
+            (HalTextureFormat::R8Sint, MTLPixelFormat::R8Sint, 1),
+            (HalTextureFormat::R16Unorm, MTLPixelFormat::R16Unorm, 2),
+            (HalTextureFormat::R16Snorm, MTLPixelFormat::R16Snorm, 2),
+            (HalTextureFormat::R16Uint, MTLPixelFormat::R16Uint, 2),
+            (HalTextureFormat::R16Sint, MTLPixelFormat::R16Sint, 2),
+            (HalTextureFormat::R16Float, MTLPixelFormat::R16Float, 2),
+            (HalTextureFormat::Rg8Unorm, MTLPixelFormat::RG8Unorm, 2),
+            (HalTextureFormat::Rg8Snorm, MTLPixelFormat::RG8Snorm, 2),
+            (HalTextureFormat::Rg8Uint, MTLPixelFormat::RG8Uint, 2),
+            (HalTextureFormat::Rg8Sint, MTLPixelFormat::RG8Sint, 2),
+            (HalTextureFormat::Rg16Unorm, MTLPixelFormat::RG16Unorm, 4),
+            (HalTextureFormat::Rg16Snorm, MTLPixelFormat::RG16Snorm, 4),
+            (HalTextureFormat::Rg16Uint, MTLPixelFormat::RG16Uint, 4),
+            (HalTextureFormat::Rg16Sint, MTLPixelFormat::RG16Sint, 4),
+            (HalTextureFormat::Rg16Float, MTLPixelFormat::RG16Float, 4),
+            (HalTextureFormat::R32Uint, MTLPixelFormat::R32Uint, 4),
+            (HalTextureFormat::R32Sint, MTLPixelFormat::R32Sint, 4),
+            (HalTextureFormat::R32Float, MTLPixelFormat::R32Float, 4),
+            (HalTextureFormat::Rg32Uint, MTLPixelFormat::RG32Uint, 8),
+            (HalTextureFormat::Rg32Sint, MTLPixelFormat::RG32Sint, 8),
+            (HalTextureFormat::Rg32Float, MTLPixelFormat::RG32Float, 8),
+            (HalTextureFormat::Rgba8Unorm, MTLPixelFormat::RGBA8Unorm, 4),
+            (
+                HalTextureFormat::Rgba8UnormSrgb,
+                MTLPixelFormat::RGBA8Unorm_sRGB,
+                4,
+            ),
+            (HalTextureFormat::Rgba8Snorm, MTLPixelFormat::RGBA8Snorm, 4),
+            (HalTextureFormat::Rgba8Uint, MTLPixelFormat::RGBA8Uint, 4),
+            (HalTextureFormat::Rgba8Sint, MTLPixelFormat::RGBA8Sint, 4),
+            (HalTextureFormat::Bgra8Unorm, MTLPixelFormat::BGRA8Unorm, 4),
+            (
+                HalTextureFormat::Bgra8UnormSrgb,
+                MTLPixelFormat::BGRA8Unorm_sRGB,
+                4,
+            ),
+            (
+                HalTextureFormat::Rgb10a2Uint,
+                MTLPixelFormat::RGB10A2Uint,
+                4,
+            ),
+            (
+                HalTextureFormat::Rgb10a2Unorm,
+                MTLPixelFormat::RGB10A2Unorm,
+                4,
+            ),
+            (
+                HalTextureFormat::Rg11b10Ufloat,
+                MTLPixelFormat::RG11B10Float,
+                4,
+            ),
+            (
+                HalTextureFormat::Rgb9e5Ufloat,
+                MTLPixelFormat::RGB9E5Float,
+                4,
+            ),
+            (
+                HalTextureFormat::Rgba16Unorm,
+                MTLPixelFormat::RGBA16Unorm,
+                8,
+            ),
+            (
+                HalTextureFormat::Rgba16Snorm,
+                MTLPixelFormat::RGBA16Snorm,
+                8,
+            ),
+            (HalTextureFormat::Rgba16Uint, MTLPixelFormat::RGBA16Uint, 8),
+            (HalTextureFormat::Rgba16Sint, MTLPixelFormat::RGBA16Sint, 8),
+            (
+                HalTextureFormat::Rgba16Float,
+                MTLPixelFormat::RGBA16Float,
+                8,
+            ),
+            (HalTextureFormat::Rgba32Uint, MTLPixelFormat::RGBA32Uint, 16),
+            (HalTextureFormat::Rgba32Sint, MTLPixelFormat::RGBA32Sint, 16),
+            (
+                HalTextureFormat::Rgba32Float,
+                MTLPixelFormat::RGBA32Float,
+                16,
+            ),
+        ];
+
+        for (hal, metal, bytes_per_pixel) in cases {
+            assert_eq!(
+                map_texture_format(hal).expect("format supported"),
+                (metal, bytes_per_pixel),
+                "{hal:?}"
+            );
+        }
     }
 }

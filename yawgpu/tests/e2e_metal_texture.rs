@@ -17,6 +17,131 @@ const BYTES_PER_PIXEL: usize = 4;
 const BYTES_PER_ROW: u32 = 256;
 const ROW_PIXELS_BYTES: usize = WIDTH as usize * BYTES_PER_PIXEL;
 const BUFFER_SIZE: usize = BYTES_PER_ROW as usize * HEIGHT as usize;
+#[cfg(feature = "metal")]
+const TEXEL_PATTERN: [u8; 16] = [1, 2, 3, 4, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43];
+#[cfg(feature = "metal")]
+const F16_ONE: [u8; 2] = [0x00, 0x3c];
+#[cfg(feature = "metal")]
+const F32_ONE: [u8; 4] = [0x00, 0x00, 0x80, 0x3f];
+#[cfg(feature = "metal")]
+const RG11B10_ONE: [u8; 4] = rg11b10_ufloat_one().to_le_bytes();
+#[cfg(feature = "metal")]
+const RGB9E5_ONE: [u8; 4] = rgb9e5_ufloat_one().to_le_bytes();
+
+#[cfg(feature = "metal")]
+#[derive(Clone, Copy, Debug)]
+enum FormatExpectation {
+    ByteExact,
+    NonZero,
+}
+
+#[cfg(feature = "metal")]
+#[derive(Clone, Copy, Debug)]
+struct FormatCase {
+    format: native::WGPUTextureFormat,
+    bytes_per_pixel: usize,
+    source: &'static [u8],
+    expectation: FormatExpectation,
+}
+
+#[cfg(feature = "metal")]
+const ADDED_UNCOMPRESSED_COLOR_FORMATS: &[FormatCase] = &[
+    format_case_exact(native::WGPUTextureFormat_R8Snorm, 1),
+    format_case_exact(native::WGPUTextureFormat_R8Uint, 1),
+    format_case_exact(native::WGPUTextureFormat_R8Sint, 1),
+    format_case_exact(native::WGPUTextureFormat_RG8Unorm, 2),
+    format_case_exact(native::WGPUTextureFormat_RG8Snorm, 2),
+    format_case_exact(native::WGPUTextureFormat_RG8Uint, 2),
+    format_case_exact(native::WGPUTextureFormat_RG8Sint, 2),
+    format_case_exact(native::WGPUTextureFormat_RGBA8UnormSrgb, 4),
+    format_case_exact(native::WGPUTextureFormat_RGBA8Snorm, 4),
+    format_case_exact(native::WGPUTextureFormat_RGBA8Sint, 4),
+    format_case_exact(native::WGPUTextureFormat_BGRA8UnormSrgb, 4),
+    format_case_exact(native::WGPUTextureFormat_R16Unorm, 2),
+    format_case_exact(native::WGPUTextureFormat_R16Snorm, 2),
+    format_case_exact(native::WGPUTextureFormat_R16Uint, 2),
+    format_case_exact(native::WGPUTextureFormat_R16Sint, 2),
+    format_case_non_zero(native::WGPUTextureFormat_R16Float, 2, &F16_ONE),
+    format_case_exact(native::WGPUTextureFormat_RG16Unorm, 4),
+    format_case_exact(native::WGPUTextureFormat_RG16Snorm, 4),
+    format_case_exact(native::WGPUTextureFormat_RG16Uint, 4),
+    format_case_exact(native::WGPUTextureFormat_RG16Sint, 4),
+    format_case_non_zero(
+        native::WGPUTextureFormat_RG16Float,
+        4,
+        &[0x00, 0x3c, 0x00, 0x3c],
+    ),
+    format_case_exact(native::WGPUTextureFormat_RGBA16Unorm, 8),
+    format_case_exact(native::WGPUTextureFormat_RGBA16Snorm, 8),
+    format_case_exact(native::WGPUTextureFormat_RGBA16Uint, 8),
+    format_case_exact(native::WGPUTextureFormat_RGBA16Sint, 8),
+    format_case_exact(native::WGPUTextureFormat_R32Uint, 4),
+    format_case_exact(native::WGPUTextureFormat_R32Sint, 4),
+    format_case_non_zero(native::WGPUTextureFormat_R32Float, 4, &F32_ONE),
+    format_case_exact(native::WGPUTextureFormat_RG32Uint, 8),
+    format_case_exact(native::WGPUTextureFormat_RG32Sint, 8),
+    format_case_non_zero(
+        native::WGPUTextureFormat_RG32Float,
+        8,
+        &[0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0x3f],
+    ),
+    format_case_exact(native::WGPUTextureFormat_RGBA32Uint, 16),
+    format_case_exact(native::WGPUTextureFormat_RGBA32Sint, 16),
+    format_case_non_zero(
+        native::WGPUTextureFormat_RGBA32Float,
+        16,
+        &[
+            0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00,
+            0x80, 0x3f,
+        ],
+    ),
+    format_case_exact(native::WGPUTextureFormat_RGB10A2Uint, 4),
+    format_case_exact(native::WGPUTextureFormat_RGB10A2Unorm, 4),
+    format_case_non_zero(native::WGPUTextureFormat_RG11B10Ufloat, 4, &RG11B10_ONE),
+    format_case_non_zero(native::WGPUTextureFormat_RGB9E5Ufloat, 4, &RGB9E5_ONE),
+];
+
+#[cfg(feature = "metal")]
+const fn format_case_exact(
+    format: native::WGPUTextureFormat,
+    bytes_per_pixel: usize,
+) -> FormatCase {
+    FormatCase {
+        format,
+        bytes_per_pixel,
+        source: &TEXEL_PATTERN,
+        expectation: FormatExpectation::ByteExact,
+    }
+}
+
+#[cfg(feature = "metal")]
+const fn format_case_non_zero(
+    format: native::WGPUTextureFormat,
+    bytes_per_pixel: usize,
+    source: &'static [u8],
+) -> FormatCase {
+    FormatCase {
+        format,
+        bytes_per_pixel,
+        source,
+        expectation: FormatExpectation::NonZero,
+    }
+}
+
+#[cfg(feature = "metal")]
+const fn rg11b10_ufloat_one() -> u32 {
+    let r = 15_u32 << 6;
+    let g = 15_u32 << 6;
+    let b = 15_u32 << 5;
+    r | (g << 11) | (b << 22)
+}
+
+#[cfg(feature = "metal")]
+const fn rgb9e5_ufloat_one() -> u32 {
+    let mantissa = 256_u32;
+    let exponent = 24_u32;
+    mantissa | (mantissa << 9) | (mantissa << 18) | (exponent << 27)
+}
 
 #[test]
 #[ignore = "manual real-backend test"]
@@ -75,7 +200,7 @@ fn metal_texture_texture_round_trip() {
 #[test]
 #[ignore = "manual real-backend test"]
 #[cfg(feature = "metal")]
-fn metal_rgba8uint_texture_copy_round_trips_data() {
+fn metal_added_uncompressed_color_texture_copy_round_trips_data() {
     if real_backend_skip_reason(RealBackend::Metal).is_some() {
         return;
     }
@@ -83,17 +208,24 @@ fn metal_rgba8uint_texture_copy_round_trips_data() {
     unsafe {
         let instance = create_metal_instance();
         let adapter = request_adapter(instance);
-        let device = request_device(instance, adapter);
+        let required_features = [
+            native::WGPUFeatureName_TextureFormatsTier1,
+            native::WGPUFeatureName_RG11B10UfloatRenderable,
+        ];
+        let device = request_device_with_features(instance, adapter, &required_features);
         let errors = install_error_capture(device);
-        let texel = [1_u8, 2, 3, 4];
 
-        let b2t2b = run_rgba8uint_buffer_texture_buffer_submit(device, &texel);
-        assert_eq!(read_buffer(instance, b2t2b, 0, texel.len()), texel);
-        yawgpu::wgpuBufferRelease(b2t2b);
+        for case in ADDED_UNCOMPRESSED_COLOR_FORMATS {
+            let texel = &case.source[..case.bytes_per_pixel];
 
-        let b2t2t2b = run_rgba8uint_texture_texture_submit(device, &texel);
-        assert_eq!(read_buffer(instance, b2t2t2b, 0, texel.len()), texel);
-        yawgpu::wgpuBufferRelease(b2t2t2b);
+            let b2t2b = run_format_buffer_texture_buffer_submit(device, *case, texel);
+            assert_format_readback(instance, b2t2b, texel, *case, "B2T/T2B");
+            yawgpu::wgpuBufferRelease(b2t2b);
+
+            let b2t2t2b = run_format_texture_texture_submit(device, *case, texel);
+            assert_format_readback(instance, b2t2t2b, texel, *case, "B2T/T2T/T2B");
+            yawgpu::wgpuBufferRelease(b2t2t2b);
+        }
 
         assert!(errors.lock().expect("error lock").is_empty());
         yawgpu::wgpuDeviceRelease(device);
@@ -254,9 +386,10 @@ unsafe fn run_texture_texture_submit(
 }
 
 #[cfg(feature = "metal")]
-unsafe fn run_rgba8uint_buffer_texture_buffer_submit(
+unsafe fn run_format_buffer_texture_buffer_submit(
     device: native::WGPUDevice,
-    texel: &[u8; 4],
+    case: FormatCase,
+    texel: &[u8],
 ) -> native::WGPUBuffer {
     let queue = yawgpu::wgpuDeviceGetQueue(device);
     let source = create_buffer(
@@ -267,15 +400,16 @@ unsafe fn run_rgba8uint_buffer_texture_buffer_submit(
         device,
         native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
     );
-    let texture = create_rgba8uint_texture(
+    let texture = create_format_texture(
         device,
+        case.format,
         native::WGPUTextureUsage_CopySrc | native::WGPUTextureUsage_CopyDst,
     );
-    yawgpu::wgpuQueueWriteBuffer(queue, source, 0, texel.as_ptr().cast(), texel.len());
+    write_aligned_texel(queue, source, texel);
 
     let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
-    record_rgba8uint_b2t(encoder, source, texture);
-    record_rgba8uint_t2b(encoder, texture, destination);
+    record_format_b2t(encoder, source, texture);
+    record_format_t2b(encoder, texture, destination);
     submit_encoder(queue, encoder);
 
     yawgpu::wgpuTextureRelease(texture);
@@ -285,9 +419,10 @@ unsafe fn run_rgba8uint_buffer_texture_buffer_submit(
 }
 
 #[cfg(feature = "metal")]
-unsafe fn run_rgba8uint_texture_texture_submit(
+unsafe fn run_format_texture_texture_submit(
     device: native::WGPUDevice,
-    texel: &[u8; 4],
+    case: FormatCase,
+    texel: &[u8],
 ) -> native::WGPUBuffer {
     let queue = yawgpu::wgpuDeviceGetQueue(device);
     let source = create_buffer(
@@ -298,20 +433,22 @@ unsafe fn run_rgba8uint_texture_texture_submit(
         device,
         native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
     );
-    let texture_a = create_rgba8uint_texture(
+    let texture_a = create_format_texture(
         device,
+        case.format,
         native::WGPUTextureUsage_CopySrc | native::WGPUTextureUsage_CopyDst,
     );
-    let texture_b = create_rgba8uint_texture(
+    let texture_b = create_format_texture(
         device,
+        case.format,
         native::WGPUTextureUsage_CopySrc | native::WGPUTextureUsage_CopyDst,
     );
-    yawgpu::wgpuQueueWriteBuffer(queue, source, 0, texel.as_ptr().cast(), texel.len());
+    write_aligned_texel(queue, source, texel);
 
     let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
-    record_rgba8uint_b2t(encoder, source, texture_a);
-    record_rgba8uint_t2t(encoder, texture_a, texture_b);
-    record_rgba8uint_t2b(encoder, texture_b, destination);
+    record_format_b2t(encoder, source, texture_a);
+    record_format_t2t(encoder, texture_a, texture_b);
+    record_format_t2b(encoder, texture_b, destination);
     submit_encoder(queue, encoder);
 
     yawgpu::wgpuTextureRelease(texture_b);
@@ -355,38 +492,38 @@ unsafe fn record_t2t(
 }
 
 #[cfg(feature = "metal")]
-unsafe fn record_rgba8uint_b2t(
+unsafe fn record_format_b2t(
     encoder: native::WGPUCommandEncoder,
     source: native::WGPUBuffer,
     destination: native::WGPUTexture,
 ) {
-    let source = rgba8uint_buffer_copy_info(source);
+    let source = format_buffer_copy_info(source);
     let destination = texture_copy_info(destination);
-    let size = rgba8uint_extent();
+    let size = format_extent();
     yawgpu::wgpuCommandEncoderCopyBufferToTexture(encoder, &source, &destination, &size);
 }
 
 #[cfg(feature = "metal")]
-unsafe fn record_rgba8uint_t2b(
+unsafe fn record_format_t2b(
     encoder: native::WGPUCommandEncoder,
     source: native::WGPUTexture,
     destination: native::WGPUBuffer,
 ) {
     let source = texture_copy_info(source);
-    let destination = rgba8uint_buffer_copy_info(destination);
-    let size = rgba8uint_extent();
+    let destination = format_buffer_copy_info(destination);
+    let size = format_extent();
     yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &source, &destination, &size);
 }
 
 #[cfg(feature = "metal")]
-unsafe fn record_rgba8uint_t2t(
+unsafe fn record_format_t2t(
     encoder: native::WGPUCommandEncoder,
     source: native::WGPUTexture,
     destination: native::WGPUTexture,
 ) {
     let source = texture_copy_info(source);
     let destination = texture_copy_info(destination);
-    let size = rgba8uint_extent();
+    let size = format_extent();
     yawgpu::wgpuCommandEncoderCopyTextureToTexture(encoder, &source, &destination, &size);
 }
 
@@ -406,6 +543,37 @@ unsafe fn write_padded_pixels(queue: native::WGPUQueue, buffer: native::WGPUBuff
             .copy_from_slice(&pixels[pixel_offset..pixel_offset + ROW_PIXELS_BYTES]);
     }
     yawgpu::wgpuQueueWriteBuffer(queue, buffer, 0, padded.as_ptr().cast(), padded.len());
+}
+
+#[cfg(feature = "metal")]
+unsafe fn write_aligned_texel(queue: native::WGPUQueue, buffer: native::WGPUBuffer, texel: &[u8]) {
+    let len = texel.len().next_multiple_of(4);
+    let mut aligned = [0_u8; 16];
+    aligned[..texel.len()].copy_from_slice(texel);
+    yawgpu::wgpuQueueWriteBuffer(queue, buffer, 0, aligned.as_ptr().cast(), len);
+}
+
+#[cfg(feature = "metal")]
+unsafe fn assert_format_readback(
+    instance: native::WGPUInstance,
+    buffer: native::WGPUBuffer,
+    texel: &[u8],
+    case: FormatCase,
+    label: &str,
+) {
+    // mapAsync requires a 4-byte-aligned size, so map a padded range and
+    // compare only the texel's bytes (1- and 2-byte formats would otherwise
+    // fail the map with a validation error).
+    let mapped = read_buffer(instance, buffer, 0, texel.len().next_multiple_of(4));
+    let actual = &mapped[..texel.len()];
+    match case.expectation {
+        FormatExpectation::ByteExact => assert_eq!(actual, texel, "{label} {:?}", case.format),
+        FormatExpectation::NonZero => assert!(
+            actual.iter().any(|byte| *byte != 0),
+            "{label} {:?} read back all zero",
+            case.format
+        ),
+    }
 }
 
 #[cfg(feature = "metal")]
@@ -431,6 +599,7 @@ unsafe fn read_buffer(
     offset: u64,
     len: usize,
 ) -> Vec<u8> {
+    let mapped_len = len.next_multiple_of(4);
     let mut status = native::WGPUMapAsyncStatus_Error;
     let callback_info = native::WGPUBufferMapCallbackInfo {
         nextInChain: std::ptr::null_mut(),
@@ -443,7 +612,7 @@ unsafe fn read_buffer(
         buffer,
         native::WGPUMapMode_Read,
         usize::try_from(offset).expect("test offset fits in usize"),
-        len,
+        mapped_len,
         callback_info,
     );
     wait(instance, future);
@@ -452,10 +621,10 @@ unsafe fn read_buffer(
     let ptr = yawgpu::wgpuBufferGetConstMappedRange(
         buffer,
         usize::try_from(offset).expect("test offset fits in usize"),
-        len,
+        mapped_len,
     );
     assert!(!ptr.is_null());
-    let bytes = std::slice::from_raw_parts(ptr.cast::<u8>(), len).to_vec();
+    let bytes = std::slice::from_raw_parts(ptr.cast::<u8>(), mapped_len)[..len].to_vec();
     yawgpu::wgpuBufferUnmap(buffer);
     bytes
 }
@@ -498,8 +667,9 @@ unsafe fn create_texture(
 }
 
 #[cfg(feature = "metal")]
-unsafe fn create_rgba8uint_texture(
+unsafe fn create_format_texture(
     device: native::WGPUDevice,
+    format: native::WGPUTextureFormat,
     usage: native::WGPUTextureUsage,
 ) -> native::WGPUTexture {
     let descriptor = native::WGPUTextureDescriptor {
@@ -507,8 +677,8 @@ unsafe fn create_rgba8uint_texture(
         label: empty_string_view(),
         usage,
         dimension: native::WGPUTextureDimension_2D,
-        size: rgba8uint_extent(),
-        format: native::WGPUTextureFormat_RGBA8Uint,
+        size: format_extent(),
+        format,
         mipLevelCount: 1,
         sampleCount: 1,
         viewFormatCount: 0,
@@ -540,7 +710,7 @@ unsafe fn create_sampler(device: native::WGPUDevice) -> native::WGPUSampler {
 }
 
 #[cfg(feature = "metal")]
-fn rgba8uint_buffer_copy_info(buffer: native::WGPUBuffer) -> native::WGPUTexelCopyBufferInfo {
+fn format_buffer_copy_info(buffer: native::WGPUBuffer) -> native::WGPUTexelCopyBufferInfo {
     native::WGPUTexelCopyBufferInfo {
         layout: native::WGPUTexelCopyBufferLayout {
             offset: 0,
@@ -572,7 +742,7 @@ fn texture_copy_info(texture: native::WGPUTexture) -> native::WGPUTexelCopyTextu
 }
 
 #[cfg(feature = "metal")]
-fn rgba8uint_extent() -> native::WGPUExtent3D {
+fn format_extent() -> native::WGPUExtent3D {
     native::WGPUExtent3D {
         width: 1,
         height: 1,
@@ -633,7 +803,28 @@ unsafe fn request_device(
     instance: native::WGPUInstance,
     adapter: native::WGPUAdapter,
 ) -> native::WGPUDevice {
+    request_device_with_features(instance, adapter, &[])
+}
+
+unsafe fn request_device_with_features(
+    instance: native::WGPUInstance,
+    adapter: native::WGPUAdapter,
+    required_features: &[native::WGPUFeatureName],
+) -> native::WGPUDevice {
     let mut device: native::WGPUDevice = std::ptr::null();
+    let descriptor = native::WGPUDeviceDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        requiredFeatureCount: required_features.len(),
+        requiredFeatures: required_features.as_ptr(),
+        requiredLimits: std::ptr::null(),
+        defaultQueue: native::WGPUQueueDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+        },
+        deviceLostCallbackInfo: unsafe { std::mem::zeroed() },
+        uncapturedErrorCallbackInfo: unsafe { std::mem::zeroed() },
+    };
     let callback_info = native::WGPURequestDeviceCallbackInfo {
         nextInChain: std::ptr::null_mut(),
         mode: native::WGPUCallbackMode_AllowProcessEvents,
@@ -641,7 +832,7 @@ unsafe fn request_device(
         userdata1: (&mut device as *mut native::WGPUDevice).cast(),
         userdata2: std::ptr::null_mut(),
     };
-    let future = yawgpu::wgpuAdapterRequestDevice(adapter, std::ptr::null(), callback_info);
+    let future = yawgpu::wgpuAdapterRequestDevice(adapter, &descriptor, callback_info);
     wait(instance, future);
     assert!(!device.is_null());
     device

@@ -333,11 +333,17 @@ never a reason to skip a CTS case.
   per-backend formats (Metal `RGBA8Uint`, Vulkan `R8G8B8A8_UINT`, GLES
   `RGBA8UI`/`RGBA_INTEGER`). **Verified by running the real CTS**
   (`command_buffer,basic` `b2t2b`/`b2t2t2b` now pass) + a data-readback
-  Metal e2e on the M2. **NOTE — broader gap:** `HalTextureFormat` still
-  covers only a subset; many color formats (rgba8sint, rg8*, r8uint/sint,
-  r16*, r32*, rgba16*, rgba32*, …) remain `Unsupported` with no GPU
-  backing and will surface one-by-one as operation coverage grows — a
-  systematic per-backend HAL format-table pass is the real follow-up.
+  Metal e2e on the M2. **Follow-up — HAL format-table expansion (DONE).**
+  Rather than chase formats one finding at a time, `HalTextureFormat` was
+  expanded to cover **all uncompressed color formats** (~40: r8/rg8/rgba8,
+  r16/rg16/rgba16, r32/rg32/rgba32 × unorm/snorm/uint/sint/float, bgra8±srgb,
+  rgba8-srgb, rgb10a2 uint/unorm, rg11b10ufloat, rgb9e5ufloat) across core +
+  Metal/Vulkan/GLES (mappings cross-checked against wgpu-hal). Verified: CTS
+  `createTexture` validation (48343 pass) + a parameterized real-M2 e2e that
+  byte-roundtrips every integer format and asserts non-zero readback for the
+  float/packed ones (`e2e_metal_texture::metal_added_uncompressed_color_texture_copy_round_trips_data`).
+  Compressed formats (BC/ETC2/EAC/ASTC) remain `Unsupported` — deferred
+  (feature-gated + block-size handling).
   **With F-024 closed, every yawgpu finding this suite has surfaced
   (F-005/006/008/009/010/011/014/016/018/020/022/023/024) is resolved**; all
   other open findings (F-001–F-004, F-007, F-012, F-013, F-015, F-017,
