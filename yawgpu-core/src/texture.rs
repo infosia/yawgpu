@@ -565,12 +565,19 @@ pub(crate) fn validate_queue_write_texture(
     {
         return Err("queue texture write size must be texel block aligned".to_owned());
     }
+    // The depth or stencil aspect can only be written as a whole 2D subresource:
+    // full mip width/height at a zero x/y origin. A range of array layers
+    // (non-zero `origin.z` / `write_size.depth_or_array_layers > 1`) is allowed —
+    // each layer is its own 2D subresource — and is bounds-checked above.
     if (format_caps.aspects.depth || format_caps.aspects.stencil)
         && !empty_write
-        && (!crate::command_encoder::origin_is_zero(origin) || write_size != subresource)
+        && (origin.x != 0
+            || origin.y != 0
+            || write_size.width != subresource.width
+            || write_size.height != subresource.height)
     {
         return Err(
-            "queue texture write depth/stencil copies must cover the full subresource".to_owned(),
+            "queue texture write depth/stencil copies must cover the full 2D subresource".to_owned(),
         );
     }
 

@@ -57,8 +57,8 @@ pub(crate) struct GeneratedRenderMsl {
     pub source: String,
     /// Vertex entry point.
     pub vertex_entry_point: String,
-    /// Fragment entry point.
-    pub fragment_entry_point: String,
+    /// Optional fragment entry point.
+    pub fragment_entry_point: Option<String>,
 }
 
 /// Stores binding metadata.
@@ -494,11 +494,77 @@ impl ReflectedModule {
         })
     }
 
+    /// Generates render vertex MSL for a validated shader module.
+    pub(crate) fn generate_render_vertex_msl(
+        &self,
+        entry_name: &str,
+        binding_map: &MslBindingMap,
+        vertex_buffers: &[MslVertexBufferBinding],
+    ) -> Result<GeneratedMsl, String> {
+        self.generate_render_stage_msl(
+            entry_name,
+            naga::ShaderStage::Vertex,
+            binding_map,
+            msl_vertex_buffer_mappings(vertex_buffers)?,
+        )
+    }
+
+    /// Generates render fragment MSL for a validated shader module.
+    pub(crate) fn generate_render_fragment_msl(
+        &self,
+        entry_name: &str,
+        binding_map: &MslBindingMap,
+    ) -> Result<GeneratedMsl, String> {
+        self.generate_render_stage_msl(
+            entry_name,
+            naga::ShaderStage::Fragment,
+            binding_map,
+            Vec::new(),
+        )
+    }
+
+    fn generate_render_stage_msl(
+        &self,
+        entry_name: &str,
+        stage: naga::ShaderStage,
+        binding_map: &MslBindingMap,
+        vertex_buffer_mappings: Vec<naga::back::msl::VertexBufferMapping>,
+    ) -> Result<GeneratedMsl, String> {
+        let resources = msl_resources(binding_map)?;
+        let mut per_entry_point_map = BTreeMap::new();
+        per_entry_point_map.insert(
+            entry_name.to_owned(),
+            naga::back::msl::EntryPointResources {
+                resources,
+                ..Default::default()
+            },
+        );
+        let options = naga::back::msl::Options {
+            lang_version: (2, 4),
+            per_entry_point_map,
+            fake_missing_bindings: false,
+            ..Default::default()
+        };
+        let pipeline_options = naga::back::msl::PipelineOptions {
+            entry_point: Some((stage, entry_name.to_owned())),
+            vertex_buffer_mappings,
+            ..Default::default()
+        };
+        let (source, info) =
+            naga::back::msl::write_string(&self.module, &self.info, &options, &pipeline_options)
+                .map_err(|error| error.to_string())?;
+        let entry_point = emitted_entry_point_name(&self.module, &info, stage, entry_name)?;
+        Ok(GeneratedMsl {
+            source,
+            entry_point,
+        })
+    }
+
     /// Generates render msl for the validated shader module.
     pub(crate) fn generate_render_msl(
         &self,
         vertex_entry_name: &str,
-        fragment_entry_name: &str,
+        fragment_entry_name: Option<&str>,
         binding_map: &MslBindingMap,
         vertex_buffers: &[MslVertexBufferBinding],
         subpass_color_slots: &[((u32, u32), u32)],
@@ -512,13 +578,15 @@ impl ReflectedModule {
                 ..Default::default()
             },
         );
-        per_entry_point_map.insert(
-            fragment_entry_name.to_owned(),
-            naga::back::msl::EntryPointResources {
-                resources,
-                ..Default::default()
-            },
-        );
+        if let Some(fragment_entry_name) = fragment_entry_name {
+            per_entry_point_map.insert(
+                fragment_entry_name.to_owned(),
+                naga::back::msl::EntryPointResources {
+                    resources,
+                    ..Default::default()
+                },
+            );
+        }
         let mut color_slot_map = naga::FastHashMap::default();
         for &(key, slot) in subpass_color_slots {
             color_slot_map.insert(key, slot);
@@ -544,12 +612,16 @@ impl ReflectedModule {
             naga::ShaderStage::Vertex,
             vertex_entry_name,
         )?;
-        let fragment_entry_point = emitted_entry_point_name(
-            &self.module,
-            &info,
-            naga::ShaderStage::Fragment,
-            fragment_entry_name,
-        )?;
+        let fragment_entry_point = fragment_entry_name
+            .map(|fragment_entry_name| {
+                emitted_entry_point_name(
+                    &self.module,
+                    &info,
+                    naga::ShaderStage::Fragment,
+                    fragment_entry_name,
+                )
+            })
+            .transpose()?;
         Ok(GeneratedRenderMsl {
             source,
             vertex_entry_point,
@@ -1388,11 +1460,10 @@ fn expression_global(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_and_validate_wgsl, ReflectedBufferType, ReflectedResourceBindingKind,
+        parse_and_validate_wgsl, MslBindingMap, ReflectedBufferType, ReflectedResourceBindingKind,
         ReflectedShaderStage, ReflectedTextureSampleUsage, ReflectedTextureViewDimension,
         ReflectedTypeScalarClass,
     };
-    #[cfg(feature = "gles")]
     use naga::ShaderStage;
 
     #[test]
@@ -1599,6 +1670,93 @@ mod tests {
             .unwrap();
         assert_eq!(int.ty.scalar, ReflectedTypeScalarClass::Sint);
         assert!(int.has_default);
+    }
+
+    #[test]
+    fn generate_render_msl_accepts_vertex_only_entry() {
+        let module = parse_and_validate_wgsl(
+            "@vertex fn vs() -> @builtin(position) vec4<f32> {
+                return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+            }",
+        )
+        .unwrap();
+
+        let generated = module
+            .generate_render_msl(
+                "vs",
+                None,
+                &MslBindingMap {
+                    buffers: Vec::new(),
+                },
+                &[],
+                &[],
+            )
+            .expect("vertex-only render MSL should generate");
+
+        assert!(generated.source.contains("vertex"));
+        assert!(!generated.vertex_entry_point.is_empty());
+        assert_eq!(generated.fragment_entry_point, None);
+    }
+
+    #[test]
+    fn generate_render_vertex_msl_emits_single_vertex_stage() {
+        let module = parse_and_validate_wgsl(
+            "@vertex fn vs() -> @builtin(position) vec4<f32> {
+                return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+            }",
+        )
+        .unwrap();
+
+        let generated = module
+            .generate_render_vertex_msl(
+                "vs",
+                &MslBindingMap {
+                    buffers: Vec::new(),
+                },
+                &[],
+            )
+            .expect("render vertex MSL should generate");
+
+        assert!(generated.source.contains("vertex"));
+        assert!(!generated.entry_point.is_empty());
+    }
+
+    #[test]
+    fn generate_render_fragment_msl_emits_single_fragment_stage() {
+        let module = parse_and_validate_wgsl(
+            "@fragment fn fs() -> @location(0) vec4<f32> {
+                return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+            }",
+        )
+        .unwrap();
+
+        let generated = module
+            .generate_render_fragment_msl(
+                "fs",
+                &MslBindingMap {
+                    buffers: Vec::new(),
+                },
+            )
+            .expect("render fragment MSL should generate");
+
+        assert!(generated.source.contains("fragment"));
+        assert!(!generated.entry_point.is_empty());
+    }
+
+    #[test]
+    fn generate_spirv_accepts_vertex_only_entry() {
+        let module = parse_and_validate_wgsl(
+            "@vertex fn vs() -> @builtin(position) vec4<f32> {
+                return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+            }",
+        )
+        .unwrap();
+
+        let spirv = module
+            .generate_spirv("vs", ShaderStage::Vertex)
+            .expect("vertex-only SPIR-V should generate");
+
+        assert!(!spirv.is_empty());
     }
 
     #[cfg(feature = "gles")]

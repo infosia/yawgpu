@@ -1,5 +1,4 @@
 use super::*;
-#[cfg(feature = "tiled")]
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::HalTextureDimension;
 #[cfg(feature = "tiled")]
@@ -342,7 +341,12 @@ fn retain_copy_resources(copy: &HalCopy, retained: &mut Vec<RetainedResource>) {
             }
         }
         HalCopy::RenderPass(pass) => {
-            retain_hal_texture(&pass.color_target.texture, retained);
+            if let Some(color_target) = &pass.color_target {
+                retain_hal_texture(&color_target.texture, retained);
+            }
+            if let Some(depth_stencil_attachment) = &pass.depth_stencil_attachment {
+                retain_hal_texture(&depth_stencil_attachment.texture, retained);
+            }
             for bound in &pass.bind_buffers {
                 retain_hal_buffer(&bound.buffer, retained);
             }
@@ -436,7 +440,10 @@ fn surface_pending_from_copy(copy: &HalCopy) -> Option<Arc<Mutex<SurfacePendingS
         }
         HalCopy::TextureToTexture(copy) => surface_pending_from_hal_texture(&copy.source)
             .or_else(|| surface_pending_from_hal_texture(&copy.destination)),
-        HalCopy::RenderPass(pass) => surface_pending_from_hal_texture(&pass.color_target.texture),
+        HalCopy::RenderPass(pass) => pass
+            .color_target
+            .as_ref()
+            .and_then(|target| surface_pending_from_hal_texture(&target.texture)),
         #[cfg(feature = "tiled")]
         HalCopy::SubpassRenderPass(pass) => surface_pending_from_subpass(pass),
     }
@@ -1408,32 +1415,76 @@ pub(super) fn encode_render_pass(
     command_buffer: vk::CommandBuffer,
     pass: &HalRenderPass,
 ) -> Result<RenderPassTemps, HalError> {
-    let crate::HalTexture::Vulkan(texture) = &pass.color_target.texture else {
-        return Err(texture_error("render target is not Vulkan-backed"));
-    };
-    if !matches!(pass.color_target.load_op, HalRenderLoadOp::Clear) {
-        return Err(shader_error("Vulkan render pass load op is unsupported"));
+    let color_texture = vulkan_render_color_texture(pass)?;
+    let depth_stencil_texture = vulkan_render_depth_stencil_texture(pass)?;
+    if color_texture.is_none() && depth_stencil_texture.is_none() {
+        return Err(shader_error("Vulkan render pass requires an attachment"));
     }
-    if !pass.color_target.store {
+    if pass
+        .color_target
+        .as_ref()
+        .is_some_and(|target| !matches!(target.load_op, HalRenderLoadOp::Clear))
+    {
+        return Err(shader_error(
+            "Vulkan render pass color load op is unsupported",
+        ));
+    }
+    if pass
+        .depth_stencil_attachment
+        .as_ref()
+        .is_some_and(|attachment| {
+            !matches!(attachment.depth_load_op, HalRenderLoadOp::Clear)
+                || !matches!(attachment.stencil_load_op, HalRenderLoadOp::Clear)
+        })
+    {
+        return Err(shader_error(
+            "Vulkan render pass depth-stencil load op is unsupported",
+        ));
+    }
+    if pass
+        .color_target
+        .as_ref()
+        .is_some_and(|target| !target.store)
+    {
         return Err(shader_error(
             "Vulkan render pass discard store op is unsupported",
         ));
     }
-    let texture_inner = texture.inner()?;
-    transition_image(
-        device,
-        command_buffer,
-        texture_inner,
-        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        IMAGE_LAYOUT_COLOR_ATTACHMENT,
-    );
+    if let Some(texture) = color_texture {
+        transition_image(
+            device,
+            command_buffer,
+            texture.inner()?,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            IMAGE_LAYOUT_COLOR_ATTACHMENT,
+        );
+    }
+    if let (Some(texture), Some(attachment)) =
+        (depth_stencil_texture, &pass.depth_stencil_attachment)
+    {
+        transition_image_aspect(
+            device,
+            command_buffer,
+            texture.inner()?,
+            depth_stencil_aspect_flags(attachment.format),
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT,
+        );
+    }
     let render_pass = match &pass.pipeline {
         Some(crate::HalRenderPipeline::Vulkan(pipeline)) => pipeline.inner.render_pass,
         Some(_) => return Err(shader_error("render pipeline is not Vulkan-backed")),
-        None => create_render_pass_for_format(device, texture.format)?,
+        None => create_render_pass_for_targets(
+            device,
+            render_pass_color_format(pass, color_texture)?,
+            pass.depth_stencil_attachment
+                .as_ref()
+                .map(|attachment| attachment.format),
+        )?,
     };
     let temporary_render_pass = pass.pipeline.is_none().then_some(render_pass);
-    let framebuffer = create_framebuffer(device, render_pass, texture)?;
+    let framebuffer =
+        create_framebuffer(device, render_pass, color_texture, depth_stencil_texture)?;
     let mut descriptor_pool = None;
     let mut descriptor_sets = Vec::new();
     if let Some(crate::HalRenderPipeline::Vulkan(pipeline)) = &pass.pipeline {
@@ -1469,22 +1520,11 @@ pub(super) fn encode_render_pass(
             return Err(error);
         }
     }
-    let clear_values = [vk::ClearValue {
-        color: vk::ClearColorValue {
-            float32: [
-                pass.color_target.clear_color[0] as f32,
-                pass.color_target.clear_color[1] as f32,
-                pass.color_target.clear_color[2] as f32,
-                pass.color_target.clear_color[3] as f32,
-            ],
-        },
-    }];
+    let clear_values = render_pass_clear_values(pass);
+    let (width, height) = render_pass_extent_from_targets(color_texture, depth_stencil_texture)?;
     let render_area = vk::Rect2D {
         offset: vk::Offset2D { x: 0, y: 0 },
-        extent: vk::Extent2D {
-            width: texture.width,
-            height: texture.height,
-        },
+        extent: vk::Extent2D { width, height },
     };
     let begin_info = vk::RenderPassBeginInfo::default()
         .render_pass(render_pass)
@@ -1506,8 +1546,8 @@ pub(super) fn encode_render_pass(
             let viewport = vk::Viewport {
                 x: 0.0,
                 y: 0.0,
-                width: texture.width as f32,
-                height: texture.height as f32,
+                width: width as f32,
+                height: height as f32,
                 min_depth: 0.0,
                 max_depth: 1.0,
             };
@@ -1529,9 +1569,12 @@ pub(super) fn encode_render_pass(
     unsafe {
         device.cmd_end_render_pass(command_buffer);
     }
-    texture_inner
-        .layout
-        .store(IMAGE_LAYOUT_TRANSFER_SRC, AtomicOrdering::Relaxed);
+    if let Some(texture) = color_texture {
+        texture
+            .inner()?
+            .layout
+            .store(IMAGE_LAYOUT_TRANSFER_SRC, AtomicOrdering::Relaxed);
+    }
     Ok(RenderPassTemps {
         descriptor_pools: descriptor_pool.into_iter().collect(),
         framebuffer,
@@ -1539,19 +1582,229 @@ pub(super) fn encode_render_pass(
     })
 }
 
+fn vulkan_render_color_texture(pass: &HalRenderPass) -> Result<Option<&VulkanTexture>, HalError> {
+    pass.color_target
+        .as_ref()
+        .map(|target| match &target.texture {
+            crate::HalTexture::Vulkan(texture) => Ok(texture),
+            _ => Err(texture_error("render target is not Vulkan-backed")),
+        })
+        .transpose()
+}
+
+fn vulkan_render_depth_stencil_texture(
+    pass: &HalRenderPass,
+) -> Result<Option<&VulkanTexture>, HalError> {
+    pass.depth_stencil_attachment
+        .as_ref()
+        .map(|attachment| match &attachment.texture {
+            crate::HalTexture::Vulkan(texture) => Ok(texture),
+            _ => Err(texture_error(
+                "depth-stencil attachment is not Vulkan-backed",
+            )),
+        })
+        .transpose()
+}
+
+fn render_pass_color_format(
+    pass: &HalRenderPass,
+    color_texture: Option<&VulkanTexture>,
+) -> Result<Option<HalTextureFormat>, HalError> {
+    if pass.color_target.is_some() {
+        color_texture
+            .map(|texture| Some(texture.format))
+            .ok_or_else(|| texture_error("render target is missing"))
+    } else {
+        Ok(None)
+    }
+}
+
+fn render_pass_clear_values(pass: &HalRenderPass) -> Vec<vk::ClearValue> {
+    let mut clear_values = Vec::new();
+    if let Some(color) = &pass.color_target {
+        clear_values.push(vk::ClearValue {
+            color: vk::ClearColorValue {
+                float32: [
+                    color.clear_color[0] as f32,
+                    color.clear_color[1] as f32,
+                    color.clear_color[2] as f32,
+                    color.clear_color[3] as f32,
+                ],
+            },
+        });
+    }
+    if let Some(depth_stencil) = &pass.depth_stencil_attachment {
+        clear_values.push(vk::ClearValue {
+            depth_stencil: vk::ClearDepthStencilValue {
+                depth: depth_stencil.depth_clear_value,
+                stencil: depth_stencil.stencil_clear_value,
+            },
+        });
+    }
+    clear_values
+}
+
+fn render_pass_extent_from_targets(
+    color_texture: Option<&VulkanTexture>,
+    depth_stencil_texture: Option<&VulkanTexture>,
+) -> Result<(u32, u32), HalError> {
+    color_texture
+        .or(depth_stencil_texture)
+        .map(|texture| (texture.width, texture.height))
+        .ok_or_else(|| shader_error("render pass requires an attachment"))
+}
+
+fn depth_stencil_aspect_flags(format: HalTextureFormat) -> vk::ImageAspectFlags {
+    let mut flags = vk::ImageAspectFlags::empty();
+    if format_has_depth_aspect(format) {
+        flags |= vk::ImageAspectFlags::DEPTH;
+    }
+    if format_has_stencil_aspect(format) {
+        flags |= vk::ImageAspectFlags::STENCIL;
+    }
+    flags
+}
+
+fn create_render_pass_for_targets(
+    device: &ash::Device,
+    color_format: Option<HalTextureFormat>,
+    depth_stencil_format: Option<HalTextureFormat>,
+) -> Result<vk::RenderPass, HalError> {
+    if color_format.is_none() && depth_stencil_format.is_none() {
+        return Err(shader_error("render pass requires an attachment"));
+    }
+    let mut attachments = Vec::new();
+    let mut color_references = Vec::new();
+    if let Some(color_format) = color_format {
+        let (format, _) = map_texture_format(color_format)?;
+        attachments.push(
+            vk::AttachmentDescription::default()
+                .format(format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+        );
+        color_references.push(
+            vk::AttachmentReference::default()
+                .attachment(0)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+        );
+    }
+    let depth_reference = if let Some(depth_stencil_format) = depth_stencil_format {
+        let (format, _) = map_texture_format(depth_stencil_format)?;
+        let index = u32::try_from(attachments.len())
+            .map_err(|_| shader_error("depth attachment index is too large"))?;
+        let has_depth = format_has_depth_aspect(depth_stencil_format);
+        let has_stencil = format_has_stencil_aspect(depth_stencil_format);
+        attachments.push(
+            vk::AttachmentDescription::default()
+                .format(format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(if has_depth {
+                    vk::AttachmentLoadOp::CLEAR
+                } else {
+                    vk::AttachmentLoadOp::DONT_CARE
+                })
+                .store_op(if has_depth {
+                    vk::AttachmentStoreOp::STORE
+                } else {
+                    vk::AttachmentStoreOp::DONT_CARE
+                })
+                .stencil_load_op(if has_stencil {
+                    vk::AttachmentLoadOp::CLEAR
+                } else {
+                    vk::AttachmentLoadOp::DONT_CARE
+                })
+                .stencil_store_op(if has_stencil {
+                    vk::AttachmentStoreOp::STORE
+                } else {
+                    vk::AttachmentStoreOp::DONT_CARE
+                })
+                .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+        );
+        Some(
+            vk::AttachmentReference::default()
+                .attachment(index)
+                .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+        )
+    } else {
+        None
+    };
+    let subpass = vk::SubpassDescription::default()
+        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+        .color_attachments(&color_references);
+    let subpass = if let Some(depth_reference) = depth_reference.as_ref() {
+        subpass.depth_stencil_attachment(depth_reference)
+    } else {
+        subpass
+    };
+    let dependency_in = vk::SubpassDependency::default()
+        .src_subpass(vk::SUBPASS_EXTERNAL)
+        .dst_subpass(0)
+        .src_stage_mask(
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+        )
+        .dst_stage_mask(
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+        )
+        .src_access_mask(vk::AccessFlags::empty())
+        .dst_access_mask(
+            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        );
+    let dependency_out = vk::SubpassDependency::default()
+        .src_subpass(0)
+        .dst_subpass(vk::SUBPASS_EXTERNAL)
+        .src_stage_mask(
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+        )
+        .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
+        .src_access_mask(
+            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        )
+        .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
+    let subpasses = [subpass];
+    let dependencies = [dependency_in, dependency_out];
+    let render_pass_info = vk::RenderPassCreateInfo::default()
+        .attachments(&attachments)
+        .subpasses(&subpasses)
+        .dependencies(&dependencies);
+    unsafe { device.create_render_pass(&render_pass_info, None) }
+        .map_err(|_| shader_error("render pass creation failed"))
+}
+
 /// Creates framebuffer and reports validation errors through the owning device.
 pub(super) fn create_framebuffer(
     device: &ash::Device,
     render_pass: vk::RenderPass,
-    texture: &VulkanTexture,
+    color_texture: Option<&VulkanTexture>,
+    depth_stencil_texture: Option<&VulkanTexture>,
 ) -> Result<vk::Framebuffer, HalError> {
-    let inner = texture.inner()?;
-    let attachments = [inner.view];
+    let mut attachments = Vec::new();
+    if let Some(texture) = color_texture {
+        attachments.push(texture.inner()?.view);
+    }
+    if let Some(texture) = depth_stencil_texture {
+        attachments.push(texture.inner()?.view);
+    }
+    let (width, height) = render_pass_extent_from_targets(color_texture, depth_stencil_texture)?;
     let framebuffer_info = vk::FramebufferCreateInfo::default()
         .render_pass(render_pass)
         .attachments(&attachments)
-        .width(texture.width)
-        .height(texture.height)
+        .width(width)
+        .height(height)
         .layers(1);
     unsafe { device.create_framebuffer(&framebuffer_info, None) }
         .map_err(|_| shader_error("framebuffer creation failed"))

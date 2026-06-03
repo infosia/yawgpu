@@ -39,6 +39,7 @@ pub(crate) struct PassEncoderState {
     pub(crate) attachment_textures: Vec<Texture>,
     pub(crate) attachment_texture_uses: Vec<TextureScopeUse>,
     pub(crate) render_color_attachment: Option<RenderPassColorExecution>,
+    pub(crate) render_depth_stencil_attachment: Option<RenderPassDepthStencilExecution>,
     pub(crate) render_pass_recorded: bool,
     pub(crate) occlusion_query_set: Option<QuerySet>,
     pub(crate) open_occlusion_query: Option<u32>,
@@ -57,21 +58,14 @@ pub(crate) struct PassEncoderInit {
     pub(crate) render_extent: Option<Extent3d>,
     pub(crate) attachment_textures: Vec<Texture>,
     pub(crate) render_color_attachment: Option<RenderPassColorExecution>,
+    pub(crate) render_depth_stencil_attachment: Option<RenderPassDepthStencilExecution>,
     pub(crate) occlusion_query_set: Option<QuerySet>,
     pub(crate) max_draw_count: u64,
 }
 
 impl PassEncoderState {
     /// Creates a new instance.
-    pub(crate) fn new(
-        attachment_signature: Option<AttachmentSignature>,
-        render_extent: Option<Extent3d>,
-        limits: Limits,
-        attachment_textures: Vec<Texture>,
-        render_color_attachment: Option<RenderPassColorExecution>,
-        occlusion_query_set: Option<QuerySet>,
-        max_draw_count: u64,
-    ) -> Self {
+    pub(crate) fn new(limits: Limits, init: PassEncoderInit) -> Self {
         Self {
             ended: false,
             debug_group_depth: 0,
@@ -81,20 +75,21 @@ impl PassEncoderState {
             bind_groups: BTreeMap::new(),
             vertex_buffers: BTreeMap::new(),
             index_buffer: None,
-            attachment_signature,
-            render_extent,
-            attachment_textures,
+            attachment_signature: init.attachment_signature,
+            render_extent: init.render_extent,
+            attachment_textures: init.attachment_textures,
             attachment_texture_uses: Vec::new(),
-            render_color_attachment,
+            render_color_attachment: init.render_color_attachment,
+            render_depth_stencil_attachment: init.render_depth_stencil_attachment,
             render_pass_recorded: false,
-            occlusion_query_set,
+            occlusion_query_set: init.occlusion_query_set,
             open_occlusion_query: None,
             used_occlusion_queries: BTreeSet::new(),
             command_referenced_buffers: Vec::new(),
             scope_buffer_uses: Vec::new(),
             scope_texture_uses: Vec::new(),
             draw_count: 0,
-            max_draw_count,
+            max_draw_count: init.max_draw_count,
         }
     }
 
@@ -143,15 +138,7 @@ impl PassEncoderInner {
         Self {
             parent,
             token,
-            state: Mutex::new(PassEncoderState::new(
-                init.attachment_signature,
-                init.render_extent,
-                limits,
-                init.attachment_textures,
-                init.render_color_attachment,
-                init.occlusion_query_set,
-                init.max_draw_count,
-            )),
+            state: Mutex::new(PassEncoderState::new(limits, init)),
         }
     }
 
@@ -174,21 +161,20 @@ impl PassEncoderInner {
         let unbalanced_debug_groups = state.debug_group_depth != 0;
         let open_occlusion_query = state.open_occlusion_query.is_some();
         let draw_count_exceeded = state.draw_count > state.max_draw_count;
-        let render_pass_command = if !state.render_pass_recorded {
-            state
-                .render_color_attachment
-                .clone()
-                .map(|color_attachment| {
-                    state.render_pass_recorded = true;
-                    RenderPassCommand {
-                        pipeline: state.render_pipeline.clone(),
-                        color_attachment,
-                        attachment_textures: state.attachment_textures.clone(),
-                        bind_groups: state.bind_groups.clone(),
-                        vertex_buffers: state.vertex_buffers.clone(),
-                        draw: None,
-                    }
-                })
+        let render_pass_command = if !state.render_pass_recorded
+            && (state.render_color_attachment.is_some()
+                || state.render_depth_stencil_attachment.is_some())
+        {
+            state.render_pass_recorded = true;
+            Some(RenderPassCommand {
+                pipeline: state.render_pipeline.clone(),
+                color_attachment: state.render_color_attachment.clone(),
+                depth_stencil_attachment: state.render_depth_stencil_attachment.clone(),
+                attachment_textures: state.attachment_textures.clone(),
+                bind_groups: state.bind_groups.clone(),
+                vertex_buffers: state.vertex_buffers.clone(),
+                draw: None,
+            })
         } else {
             None
         };
@@ -1421,7 +1407,18 @@ mod tests {
             size: 16,
             mapped_at_creation: false,
         }));
-        let mut state = PassEncoderState::new(None, None, limits, Vec::new(), None, None, u64::MAX);
+        let mut state = PassEncoderState::new(
+            limits,
+            PassEncoderInit {
+                attachment_signature: None,
+                render_extent: None,
+                attachment_textures: Vec::new(),
+                render_color_attachment: None,
+                render_depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                max_draw_count: u64::MAX,
+            },
+        );
         state.bind_groups.insert(
             1,
             BoundBindGroup {

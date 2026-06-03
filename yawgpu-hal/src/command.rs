@@ -1,10 +1,11 @@
 #[cfg(feature = "tiled")]
 use crate::HalError;
+#[cfg(feature = "tiled")]
+use crate::HalTransientAttachment;
 use crate::{
     HalBuffer, HalComputePipeline, HalExtent3d, HalOrigin3d, HalRenderPipeline, HalTexture,
+    HalTextureFormat,
 };
-#[cfg(feature = "tiled")]
-use crate::{HalTextureFormat, HalTransientAttachment};
 
 /// Stores Noop subpass render pass state.
 #[cfg(all(feature = "noop", feature = "tiled"))]
@@ -186,7 +187,9 @@ pub struct HalRenderPass {
     /// Pipeline.
     pub pipeline: Option<HalRenderPipeline>,
     /// Color target.
-    pub color_target: HalRenderColorTarget,
+    pub color_target: Option<HalRenderColorTarget>,
+    /// Optional depth-stencil attachment.
+    pub depth_stencil_attachment: Option<HalRenderDepthStencilAttachment>,
     /// Bind buffers.
     pub bind_buffers: Vec<HalBoundBuffer>,
     /// Vertex buffers.
@@ -216,12 +219,45 @@ pub struct HalSubpassDraw {
 pub struct HalRenderColorTarget {
     /// Texture.
     pub texture: HalTexture,
+    /// Mip level the attachment view targets.
+    pub mip_level: u32,
+    /// Array layer the attachment view targets.
+    pub array_layer: u32,
     /// Load op.
     pub load_op: HalRenderLoadOp,
     /// Store.
     pub store: bool,
     /// Clear color.
     pub clear_color: [f64; 4],
+}
+
+/// Stores one regular render pass depth-stencil attachment binding.
+#[derive(Debug, Clone)]
+pub struct HalRenderDepthStencilAttachment {
+    /// Texture.
+    pub texture: HalTexture,
+    /// Texture format.
+    pub format: HalTextureFormat,
+    /// Mip level the attachment view targets.
+    pub mip_level: u32,
+    /// Array layer the attachment view targets.
+    pub array_layer: u32,
+    /// Depth load op.
+    pub depth_load_op: HalRenderLoadOp,
+    /// Depth store.
+    pub depth_store: bool,
+    /// Depth clear value.
+    pub depth_clear_value: f32,
+    /// Depth read-only flag.
+    pub depth_read_only: bool,
+    /// Stencil load op.
+    pub stencil_load_op: HalRenderLoadOp,
+    /// Stencil store.
+    pub stencil_store: bool,
+    /// Stencil clear value.
+    pub stencil_clear_value: u32,
+    /// Stencil read-only flag.
+    pub stencil_read_only: bool,
 }
 
 /// Stores one subpass attachment layout.
@@ -432,4 +468,62 @@ pub struct HalTextureCopy {
     pub destination_origin: HalOrigin3d,
     /// Extent.
     pub extent: HalExtent3d,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        noop, HalTextureDescriptor, HalTextureDimension, HalTextureFormat, HalTextureUsage,
+    };
+
+    fn depth_texture() -> HalTexture {
+        let device = noop::NoopDevice::new();
+        HalTexture::Noop(device.create_texture(&HalTextureDescriptor {
+            dimension: HalTextureDimension::D2,
+            format: HalTextureFormat::Depth32Float,
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+            mip_level_count: 1,
+            sample_count: 1,
+            usage: HalTextureUsage {
+                copy_src: false,
+                copy_dst: false,
+                texture_binding: false,
+                storage_binding: false,
+                render_attachment: true,
+            },
+        }))
+    }
+
+    #[test]
+    fn hal_render_depth_stencil_attachment_constructs_and_round_trips_fields() {
+        let texture = depth_texture();
+        let attachment = HalRenderDepthStencilAttachment {
+            texture,
+            format: HalTextureFormat::Depth32Float,
+            mip_level: 0,
+            array_layer: 0,
+            depth_load_op: HalRenderLoadOp::Clear,
+            depth_store: true,
+            depth_clear_value: 0.5,
+            depth_read_only: false,
+            stencil_load_op: HalRenderLoadOp::Load,
+            stencil_store: false,
+            stencil_clear_value: 7,
+            stencil_read_only: true,
+        };
+
+        assert!(matches!(attachment.texture, HalTexture::Noop(_)));
+        assert_eq!(attachment.format, HalTextureFormat::Depth32Float);
+        assert!(matches!(attachment.depth_load_op, HalRenderLoadOp::Clear));
+        assert!(attachment.depth_store);
+        assert_eq!(attachment.depth_clear_value, 0.5);
+        assert!(!attachment.depth_read_only);
+        assert!(matches!(attachment.stencil_load_op, HalRenderLoadOp::Load));
+        assert!(!attachment.stencil_store);
+        assert_eq!(attachment.stencil_clear_value, 7);
+        assert!(attachment.stencil_read_only);
+    }
 }

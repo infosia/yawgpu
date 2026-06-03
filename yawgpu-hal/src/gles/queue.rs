@@ -5,6 +5,7 @@ use glow::HasContext;
 use super::device::GlesDeviceInner;
 use super::format::{map_primitive_topology, map_vertex_format};
 use super::BACKEND;
+use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::{
     HalBuffer, HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy,
     HalComputePass, HalComputePipeline, HalCopy, HalDescriptorBinding, HalError, HalRenderLoadOp,
@@ -324,16 +325,43 @@ fn create_render_fbo(
     gl: &glow::Context,
     pass: &HalRenderPass,
 ) -> Result<glow::Framebuffer, HalError> {
-    let HalTexture::Gles(target_texture) = &pass.color_target.texture else {
-        return Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "render pass color target is not a GLES texture",
-        });
-    };
-    let color_texture = target_texture.raw_or_err()?;
-    let meta = target_texture.meta();
-    let width = i32_from_u32(meta.width, "render target width exceeds GLES limit")?;
-    let height = i32_from_u32(meta.height, "render target height exceeds GLES limit")?;
+    let color_target = pass
+        .color_target
+        .as_ref()
+        .map(|target| match &target.texture {
+            HalTexture::Gles(texture) => Ok(texture),
+            _ => Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "render pass color target is not a GLES texture",
+            }),
+        })
+        .transpose()?;
+    let depth_stencil_target = pass
+        .depth_stencil_attachment
+        .as_ref()
+        .map(|attachment| match &attachment.texture {
+            HalTexture::Gles(texture) => Ok(texture),
+            _ => Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "render pass depth-stencil attachment is not a GLES texture",
+            }),
+        })
+        .transpose()?;
+    let size_texture =
+        color_target
+            .or(depth_stencil_target)
+            .ok_or_else(|| HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "render pass requires an attachment",
+            })?;
+    let width = i32_from_u32(
+        size_texture.meta().width,
+        "render target width exceeds GLES limit",
+    )?;
+    let height = i32_from_u32(
+        size_texture.meta().height,
+        "render target height exceeds GLES limit",
+    )?;
 
     unsafe {
         let fbo = gl
@@ -343,14 +371,65 @@ fn create_render_fbo(
                 message: "glCreateFramebuffer failed (render)",
             })?;
         gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
-        gl.framebuffer_texture_2d(
-            glow::DRAW_FRAMEBUFFER,
-            glow::COLOR_ATTACHMENT0,
-            meta.target,
-            Some(color_texture),
-            0,
-        );
-        gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+        if let Some(target_texture) = color_target {
+            let color_texture = target_texture.raw_or_err()?;
+            let meta = target_texture.meta();
+            if meta.target != glow::TEXTURE_2D {
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+                gl.delete_framebuffer(fbo);
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "GLES render pass supports only 2D color attachments",
+                });
+            }
+            gl.framebuffer_texture_2d(
+                glow::DRAW_FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(color_texture),
+                0,
+            );
+            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+        } else {
+            gl.draw_buffers(&[]);
+        }
+        if let (Some(attachment), Some(target_texture)) =
+            (&pass.depth_stencil_attachment, depth_stencil_target)
+        {
+            let depth_stencil_texture = target_texture.raw_or_err()?;
+            let meta = target_texture.meta();
+            if meta.target != glow::TEXTURE_2D {
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+                gl.delete_framebuffer(fbo);
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "GLES render pass supports only 2D depth-stencil attachments",
+                });
+            }
+            let attachment_point = match (
+                format_has_depth_aspect(attachment.format),
+                format_has_stencil_aspect(attachment.format),
+            ) {
+                (true, true) => glow::DEPTH_STENCIL_ATTACHMENT,
+                (true, false) => glow::DEPTH_ATTACHMENT,
+                (false, true) => glow::STENCIL_ATTACHMENT,
+                (false, false) => {
+                    gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+                    gl.delete_framebuffer(fbo);
+                    return Err(HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message: "GLES render pass depth-stencil format has no supported aspect",
+                    });
+                }
+            };
+            gl.framebuffer_texture_2d(
+                glow::DRAW_FRAMEBUFFER,
+                attachment_point,
+                glow::TEXTURE_2D,
+                Some(depth_stencil_texture),
+                0,
+            );
+        }
         if gl.check_framebuffer_status(glow::DRAW_FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
             gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
             gl.delete_framebuffer(fbo);
@@ -360,10 +439,34 @@ fn create_render_fbo(
             });
         }
         gl.viewport(0, 0, width, height);
-        if matches!(pass.color_target.load_op, HalRenderLoadOp::Clear) {
-            let [r, g, b, a] = pass.color_target.clear_color;
+        let mut clear_mask = 0;
+        if let Some(color) = &pass.color_target {
+            let [r, g, b, a] = color.clear_color;
             gl.clear_color(r as f32, g as f32, b as f32, a as f32);
-            gl.clear(glow::COLOR_BUFFER_BIT);
+            if matches!(color.load_op, HalRenderLoadOp::Clear) {
+                clear_mask |= glow::COLOR_BUFFER_BIT;
+            }
+        }
+        if let Some(depth_stencil) = &pass.depth_stencil_attachment {
+            if !depth_stencil.depth_read_only
+                && matches!(depth_stencil.depth_load_op, HalRenderLoadOp::Clear)
+            {
+                gl.clear_depth_f32(depth_stencil.depth_clear_value);
+                clear_mask |= glow::DEPTH_BUFFER_BIT;
+            }
+            if !depth_stencil.stencil_read_only
+                && matches!(depth_stencil.stencil_load_op, HalRenderLoadOp::Clear)
+            {
+                let stencil = i32_from_u32(
+                    depth_stencil.stencil_clear_value,
+                    "stencil clear value exceeds GLES limit",
+                )?;
+                gl.clear_stencil(stencil);
+                clear_mask |= glow::STENCIL_BUFFER_BIT;
+            }
+        }
+        if clear_mask != 0 {
+            gl.clear(clear_mask);
         }
         Ok(fbo)
     }

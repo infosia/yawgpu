@@ -72,33 +72,21 @@ pub(super) fn create_compute_pipeline(
 /// Creates render pipeline and reports validation errors through the owning device.
 pub(super) fn create_render_pipeline(
     device: &ProtocolObject<dyn MTLDevice>,
-    msl_source: &str,
+    shader: HalShaderSource,
     vertex_entry_point: &str,
-    fragment_entry_point: &str,
+    fragment_entry_point: Option<&str>,
     descriptor: &HalRenderPipelineDescriptor,
 ) -> Result<MetalRenderPipeline, HalError> {
-    if descriptor.color_formats.is_empty() {
+    if descriptor.color_formats.is_empty() && descriptor.depth_stencil.is_none() {
         return Err(shader_error(
-            "render pipeline requires a color target".to_owned(),
+            "render pipeline requires a color target or depth-stencil state".to_owned(),
         ));
     }
-    let source = NSString::from_str(msl_source);
-    let library = device
-        .newLibraryWithSource_options_error(&source, None)
-        .map_err(|error| shader_error(error.localizedDescription().to_string()))?;
-    let vertex_function = library
-        .newFunctionWithName(&NSString::from_str(vertex_entry_point))
-        .ok_or_else(|| shader_error(format!("vertex function '{vertex_entry_point}' not found")))?;
-    let fragment_function = library
-        .newFunctionWithName(&NSString::from_str(fragment_entry_point))
-        .ok_or_else(|| {
-            shader_error(format!(
-                "fragment function '{fragment_entry_point}' not found"
-            ))
-        })?;
+    let (vertex_function, fragment_function) =
+        create_render_functions(device, shader, vertex_entry_point, fragment_entry_point)?;
     let pipeline_descriptor = MTLRenderPipelineDescriptor::new();
     pipeline_descriptor.setVertexFunction(Some(&vertex_function));
-    pipeline_descriptor.setFragmentFunction(Some(&fragment_function));
+    pipeline_descriptor.setFragmentFunction(fragment_function.as_deref());
     // Each `color_formats[i]` populates `MTLRenderPipelineDescriptor.colorAttachments[i].pixelFormat`,
     // so the MTL pipeline's color-attachment layout matches the encoder slot-for-slot.
     // For subpass pipelines this carries every layout slot's format (including
@@ -183,6 +171,77 @@ pub(super) fn create_render_pipeline(
         depth_bias_slope_scale,
         depth_bias_clamp,
     })
+}
+
+fn create_render_functions(
+    device: &ProtocolObject<dyn MTLDevice>,
+    shader: HalShaderSource,
+    vertex_entry_point: &str,
+    fragment_entry_point: Option<&str>,
+) -> Result<
+    (
+        Retained<ProtocolObject<dyn MTLFunction>>,
+        Option<Retained<ProtocolObject<dyn MTLFunction>>>,
+    ),
+    HalError,
+> {
+    match shader {
+        HalShaderSource::Msl(source) => {
+            let library = create_render_library(device, &source)?;
+            let vertex_function = render_function(&library, vertex_entry_point, "vertex")?;
+            let fragment_function = fragment_entry_point
+                .map(|entry| render_function(&library, entry, "fragment"))
+                .transpose()?;
+            Ok((vertex_function, fragment_function))
+        }
+        HalShaderSource::MslStages { vertex, fragment } => {
+            let vertex_library = create_render_library(device, &vertex)?;
+            let vertex_function = render_function(&vertex_library, vertex_entry_point, "vertex")?;
+            let fragment_function = match (fragment, fragment_entry_point) {
+                (Some(fragment), Some(fragment_entry_point)) => {
+                    let fragment_library = create_render_library(device, &fragment)?;
+                    Some(render_function(
+                        &fragment_library,
+                        fragment_entry_point,
+                        "fragment",
+                    )?)
+                }
+                (None, None) => None,
+                _ => {
+                    return Err(shader_error(
+                        "Metal render pipeline fragment source and entry point must match"
+                            .to_owned(),
+                    ));
+                }
+            };
+            Ok((vertex_function, fragment_function))
+        }
+        _ => Err(shader_error(
+            "Metal render pipeline requires MSL render shader source".to_owned(),
+        )),
+    }
+}
+
+fn render_function(
+    library: &ProtocolObject<dyn MTLLibrary>,
+    entry_point: &str,
+    stage: &str,
+) -> Result<Retained<ProtocolObject<dyn MTLFunction>>, HalError> {
+    library
+        .newFunctionWithName(&NSString::from_str(entry_point))
+        .ok_or_else(|| shader_error(format!("{stage} function '{entry_point}' not found")))
+}
+
+fn create_render_library(
+    device: &ProtocolObject<dyn MTLDevice>,
+    msl_source: &str,
+) -> Result<Retained<ProtocolObject<dyn MTLLibrary>>, HalError> {
+    let source = NSString::from_str(msl_source);
+    let options = MTLCompileOptions::new();
+    options.setPreserveInvariance(true);
+    device
+        .newLibraryWithSource_options_error(&source, Some(&options))
+        .map_err(|error| shader_error(error.localizedDescription().to_string()))
 }
 
 fn create_noop_depth_stencil_state(

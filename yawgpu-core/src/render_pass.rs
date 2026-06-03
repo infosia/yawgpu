@@ -73,6 +73,8 @@ pub struct RenderPassDepthStencilAttachment {
     pub stencil_load_op: LoadOp,
     /// Stencil store op.
     pub stencil_store_op: StoreOp,
+    /// Stencil clear value.
+    pub stencil_clear_value: u32,
     /// Stencil read only.
     pub stencil_read_only: bool,
 }
@@ -298,13 +300,15 @@ impl RenderPassEncoder {
             let attachment_uses = state.attachment_texture_uses.clone();
             record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
             state.draw_count = state.draw_count.saturating_add(1);
-            let color_attachment = state
-                .render_color_attachment
-                .clone()
-                .ok_or_else(|| "render pass requires a color attachment".to_owned())?;
+            let color_attachment = state.render_color_attachment.clone();
+            let depth_stencil_attachment = state.render_depth_stencil_attachment.clone();
+            if color_attachment.is_none() && depth_stencil_attachment.is_none() {
+                return Err("render pass requires at least one attachment".to_owned());
+            }
             self.inner.parent.record_render_pass(RenderPassCommand {
                 pipeline: Some(pipeline),
                 color_attachment,
+                depth_stencil_attachment,
                 attachment_textures: state.attachment_textures.clone(),
                 bind_groups: state.bind_groups.clone(),
                 vertex_buffers: state.vertex_buffers.clone(),

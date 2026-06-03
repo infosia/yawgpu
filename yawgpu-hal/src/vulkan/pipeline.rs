@@ -54,7 +54,7 @@ pub(super) struct VulkanRenderPipelineInner {
     pub(super) descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
     pub(super) descriptor_bindings: Vec<HalDescriptorBinding>,
     pub(super) vertex_shader_module: vk::ShaderModule,
-    pub(super) fragment_shader_module: vk::ShaderModule,
+    pub(super) fragment_shader_module: Option<vk::ShaderModule>,
 }
 
 impl Drop for VulkanRenderPipelineInner {
@@ -74,9 +74,11 @@ impl Drop for VulkanRenderPipelineInner {
                     .device
                     .destroy_descriptor_set_layout(*layout, None);
             }
-            self.device
-                .device
-                .destroy_shader_module(self.fragment_shader_module, None);
+            if let Some(fragment_shader_module) = self.fragment_shader_module {
+                self.device
+                    .device
+                    .destroy_shader_module(fragment_shader_module, None);
+            }
             self.device
                 .device
                 .destroy_shader_module(self.vertex_shader_module, None);
@@ -177,21 +179,27 @@ pub(super) fn create_render_pipeline(
     device: Arc<VulkanDeviceInner>,
     shader: HalShaderSource,
     vertex_entry_point: &str,
-    fragment_entry_point: &str,
+    fragment_entry_point: Option<&str>,
     descriptor: &HalRenderPipelineDescriptor,
     bindings: &[HalDescriptorBinding],
 ) -> Result<VulkanRenderPipeline, HalError> {
     let HalShaderSource::SpirVStages { vertex, fragment } = shader else {
         return Err(shader_error(
-            "Vulkan render pipeline requires vertex and fragment SPIR-V",
+            "Vulkan render pipeline requires render SPIR-V stages",
         ));
     };
     let vertex_entry = CString::new(vertex_entry_point)
         .map_err(|_| shader_error("vertex entry point contains NUL"))?;
-    let fragment_entry = CString::new(fragment_entry_point)
+    let fragment_entry = fragment_entry_point
+        .map(CString::new)
+        .transpose()
         .map_err(|_| shader_error("fragment entry point contains NUL"))?;
     let vertex_shader_module = create_shader_module(&device, &vertex)?;
-    let fragment_shader_module = match create_shader_module(&device, &fragment) {
+    let fragment_shader_module = match fragment
+        .as_deref()
+        .map(|code| create_shader_module(&device, code))
+        .transpose()
+    {
         Ok(module) => module,
         Err(error) => {
             unsafe {
@@ -202,24 +210,43 @@ pub(super) fn create_render_pipeline(
             return Err(error);
         }
     };
-    let descriptor_set_layouts = match create_descriptor_set_layouts(
-        &device,
-        bindings,
-        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-    ) {
-        Ok(layouts) => layouts,
-        Err(error) => {
-            unsafe {
+    if fragment_entry.is_some() != fragment_shader_module.is_some() {
+        unsafe {
+            if let Some(fragment_shader_module) = fragment_shader_module {
                 device
                     .device
                     .destroy_shader_module(fragment_shader_module, None);
-                device
-                    .device
-                    .destroy_shader_module(vertex_shader_module, None);
             }
-            return Err(error);
+            device
+                .device
+                .destroy_shader_module(vertex_shader_module, None);
         }
+        return Err(shader_error(
+            "Vulkan render pipeline fragment entry and SPIR-V stage must match",
+        ));
+    }
+    let shader_stage_flags = if fragment_shader_module.is_some() {
+        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT
+    } else {
+        vk::ShaderStageFlags::VERTEX
     };
+    let descriptor_set_layouts =
+        match create_descriptor_set_layouts(&device, bindings, shader_stage_flags) {
+            Ok(layouts) => layouts,
+            Err(error) => {
+                unsafe {
+                    if let Some(fragment_shader_module) = fragment_shader_module {
+                        device
+                            .device
+                            .destroy_shader_module(fragment_shader_module, None);
+                    }
+                    device
+                        .device
+                        .destroy_shader_module(vertex_shader_module, None);
+                }
+                return Err(error);
+            }
+        };
     let pipeline_layout_info =
         vk::PipelineLayoutCreateInfo::default().set_layouts(&descriptor_set_layouts);
     let pipeline_layout = match unsafe {
@@ -231,9 +258,11 @@ pub(super) fn create_render_pipeline(
         Err(_) => {
             unsafe {
                 destroy_descriptor_set_layouts(&device.device, &descriptor_set_layouts);
-                device
-                    .device
-                    .destroy_shader_module(fragment_shader_module, None);
+                if let Some(fragment_shader_module) = fragment_shader_module {
+                    device
+                        .device
+                        .destroy_shader_module(fragment_shader_module, None);
+                }
                 device
                     .device
                     .destroy_shader_module(vertex_shader_module, None);
@@ -247,9 +276,11 @@ pub(super) fn create_render_pipeline(
             unsafe {
                 device.device.destroy_pipeline_layout(pipeline_layout, None);
                 destroy_descriptor_set_layouts(&device.device, &descriptor_set_layouts);
-                device
-                    .device
-                    .destroy_shader_module(fragment_shader_module, None);
+                if let Some(fragment_shader_module) = fragment_shader_module {
+                    device
+                        .device
+                        .destroy_shader_module(fragment_shader_module, None);
+                }
                 device
                     .device
                     .destroy_shader_module(vertex_shader_module, None);
@@ -266,7 +297,7 @@ pub(super) fn create_render_pipeline(
         vertex_shader_module,
         fragment_shader_module,
         &vertex_entry,
-        &fragment_entry,
+        fragment_entry.as_deref(),
     ) {
         Ok(pipeline) => pipeline,
         Err(error) => {
@@ -274,9 +305,11 @@ pub(super) fn create_render_pipeline(
                 device.device.destroy_render_pass(render_pass, None);
                 device.device.destroy_pipeline_layout(pipeline_layout, None);
                 destroy_descriptor_set_layouts(&device.device, &descriptor_set_layouts);
-                device
-                    .device
-                    .destroy_shader_module(fragment_shader_module, None);
+                if let Some(fragment_shader_module) = fragment_shader_module {
+                    device
+                        .device
+                        .destroy_shader_module(fragment_shader_module, None);
+                }
                 device
                     .device
                     .destroy_shader_module(vertex_shader_module, None);
@@ -395,9 +428,9 @@ pub(super) fn create_subpass_render_pipeline(
         render_pass,
         subpass_index,
         vertex_shader_module,
-        fragment_shader_module,
+        Some(fragment_shader_module),
         &vertex_entry,
-        &fragment_entry,
+        Some(&fragment_entry),
     ) {
         Ok(pipeline) => pipeline,
         Err(error) => {
@@ -447,28 +480,14 @@ pub(super) fn create_render_pass(
     create_render_pass_for_descriptor(&device.device, descriptor)
 }
 
-/// Creates render pass for format and reports validation errors through the owning device.
-pub(super) fn create_render_pass_for_format(
-    device: &ash::Device,
-    color_format: HalTextureFormat,
-) -> Result<vk::RenderPass, HalError> {
-    create_render_pass_for_descriptor(
-        device,
-        &HalRenderPipelineDescriptor {
-            color_formats: vec![color_format],
-            depth_stencil: None,
-            vertex_buffers: Vec::new(),
-            primitive_topology: HalPrimitiveTopology::TriangleList,
-        },
-    )
-}
-
 fn create_render_pass_for_descriptor(
     device: &ash::Device,
     descriptor: &HalRenderPipelineDescriptor,
 ) -> Result<vk::RenderPass, HalError> {
-    if descriptor.color_formats.is_empty() {
-        return Err(shader_error("render pipeline requires a color target"));
+    if descriptor.color_formats.is_empty() && descriptor.depth_stencil.is_none() {
+        return Err(shader_error(
+            "render pipeline requires a color target or depth-stencil state",
+        ));
     }
     let mut attachments = Vec::new();
     let mut color_references = Vec::new();
@@ -543,19 +562,23 @@ fn create_render_pass_for_descriptor(
     } else {
         subpass
     };
+    let has_color = !descriptor.color_formats.is_empty();
+    let has_depth_stencil = descriptor.depth_stencil.is_some();
+    let attachment_stage = attachment_pipeline_stages(has_color, has_depth_stencil);
+    let attachment_access = attachment_access_flags(has_color, has_depth_stencil);
     let dependency_in = vk::SubpassDependency::default()
         .src_subpass(vk::SUBPASS_EXTERNAL)
         .dst_subpass(0)
-        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .src_stage_mask(attachment_stage)
+        .dst_stage_mask(attachment_stage)
         .src_access_mask(vk::AccessFlags::empty())
-        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+        .dst_access_mask(attachment_access);
     let dependency_out = vk::SubpassDependency::default()
         .src_subpass(0)
         .dst_subpass(vk::SUBPASS_EXTERNAL)
-        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .src_stage_mask(attachment_stage)
         .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
-        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+        .src_access_mask(attachment_access)
         .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
     let subpasses = [subpass];
     let dependencies = [dependency_in, dependency_out];
@@ -565,6 +588,29 @@ fn create_render_pass_for_descriptor(
         .dependencies(&dependencies);
     unsafe { device.create_render_pass(&render_pass_info, None) }
         .map_err(|_| shader_error("render pass creation failed"))
+}
+
+fn attachment_pipeline_stages(has_color: bool, has_depth_stencil: bool) -> vk::PipelineStageFlags {
+    let mut stages = vk::PipelineStageFlags::empty();
+    if has_color {
+        stages |= vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT;
+    }
+    if has_depth_stencil {
+        stages |= vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+            | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS;
+    }
+    stages
+}
+
+fn attachment_access_flags(has_color: bool, has_depth_stencil: bool) -> vk::AccessFlags {
+    let mut access = vk::AccessFlags::empty();
+    if has_color {
+        access |= vk::AccessFlags::COLOR_ATTACHMENT_WRITE;
+    }
+    if has_depth_stencil {
+        access |= vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;
+    }
+    access
 }
 
 #[cfg(feature = "tiled")]
@@ -775,20 +821,24 @@ pub(super) fn create_graphics_pipeline(
     render_pass: vk::RenderPass,
     subpass_index: u32,
     vertex_shader_module: vk::ShaderModule,
-    fragment_shader_module: vk::ShaderModule,
+    fragment_shader_module: Option<vk::ShaderModule>,
     vertex_entry: &CStr,
-    fragment_entry: &CStr,
+    fragment_entry: Option<&CStr>,
 ) -> Result<vk::Pipeline, HalError> {
-    let shader_stages = [
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vertex_shader_module)
-            .name(vertex_entry),
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(fragment_shader_module)
-            .name(fragment_entry),
-    ];
+    let mut shader_stages = vec![vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::VERTEX)
+        .module(vertex_shader_module)
+        .name(vertex_entry)];
+    if let (Some(fragment_shader_module), Some(fragment_entry)) =
+        (fragment_shader_module, fragment_entry)
+    {
+        shader_stages.push(
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(fragment_shader_module)
+                .name(fragment_entry),
+        );
+    }
     let binding_descriptions = descriptor
         .vertex_buffers
         .iter()

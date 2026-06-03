@@ -778,34 +778,30 @@ pub(crate) fn create_hal_render_pipeline(
     if matches!(hal_device.backend(), HalBackend::Noop) {
         return (None, None);
     }
-    if descriptor.depth_stencil.is_some()
-        || descriptor.multisample.count != 1
-        || descriptor
-            .fragment
-            .as_ref()
-            .map_or(0, |fragment| fragment.target_count)
-            != 1
+    if descriptor.multisample.count != 1 {
+        return (
+            None,
+            Some("real render pipeline does not yet support multisample > 1".to_owned()),
+        );
+    }
+    if descriptor
+        .fragment
+        .as_ref()
+        .is_some_and(|fragment| fragment.target_count > 1)
     {
         return (
             None,
+            Some("real render pipeline currently supports at most one color target".to_owned()),
+        );
+    }
+    if descriptor.fragment.is_none() && descriptor.depth_stencil.is_none() {
+        return (
+            None,
             Some(
-                "real render pipeline currently supports one single-sampled color target only"
-                    .to_owned(),
+                "real render pipeline requires a fragment stage or depth-stencil state".to_owned(),
             ),
         );
     }
-    if descriptor.fragment.is_none() {
-        return (
-            None,
-            Some("Metal render pipeline requires a fragment stage".to_owned()),
-        );
-    }
-    let Some(fragment_entry_name) = fragment_entry_name else {
-        return (
-            None,
-            Some("real render pipeline requires a fragment entry point".to_owned()),
-        );
-    };
     let (shader, vertex_entry_point, fragment_entry_point, descriptor_bindings) =
         match select_render_shader_source(
             hal_device.backend(),
@@ -826,7 +822,7 @@ pub(crate) fn create_hal_render_pipeline(
     match hal_device.create_render_pipeline(
         shader,
         &vertex_entry_point,
-        &fragment_entry_point,
+        fragment_entry_point.as_deref(),
         &hal_descriptor,
         &descriptor_bindings,
     ) {
@@ -894,7 +890,7 @@ pub(crate) fn create_hal_subpass_render_pipeline(
             hal_device.backend(),
             &descriptor.base,
             vertex_entry_name,
-            fragment_entry_name,
+            Some(fragment_entry_name),
             metal_bindings,
             vertex_buffer_bindings,
             &subpass_color_slots,
@@ -902,6 +898,12 @@ pub(crate) fn create_hal_subpass_render_pipeline(
             Ok(selection) => selection,
             Err(message) => return (None, Some(message)),
         };
+    let Some(fragment_entry_point) = fragment_entry_point else {
+        return (
+            None,
+            Some("subpass render pipeline requires a fragment entry point".to_owned()),
+        );
+    };
     // Vulkan reads subpass inputs through `INPUT_ATTACHMENT` descriptors wired
     // from the pass layout's input-source mapping; the Metal backend reads them
     // via the color-slot map supplied above, so it takes no extra descriptors here.
@@ -1017,19 +1019,29 @@ pub(crate) fn select_render_shader_source(
     backend: HalBackend,
     descriptor: &RenderPipelineDescriptor,
     vertex_entry_name: &str,
-    fragment_entry_name: &str,
+    fragment_entry_name: Option<&str>,
     metal_bindings: &[MetalBufferBinding],
     vertex_buffer_bindings: &[MetalVertexBufferBinding],
     subpass_color_slots: &[((u32, u32), u32)],
-) -> Result<(HalShaderSource, String, String, Vec<HalDescriptorBinding>), String> {
-    let fragment = descriptor
-        .fragment
-        .as_ref()
-        .ok_or_else(|| "real render pipeline requires a fragment stage".to_owned())?;
+) -> Result<
+    (
+        HalShaderSource,
+        String,
+        Option<String>,
+        Vec<HalDescriptorBinding>,
+    ),
+    String,
+> {
+    let fragment = descriptor.fragment.as_ref();
     match backend {
         HalBackend::Metal => {
             #[cfg(feature = "shader-passthrough")]
             if let Some((source, _)) = descriptor.vertex.shader.module.msl_passthrough() {
+                let Some(fragment) = fragment else {
+                    return Err(
+                        "Metal passthrough render pipeline requires a fragment stage".to_owned(),
+                    );
+                };
                 if !Arc::ptr_eq(&descriptor.vertex.shader.module, &fragment.shader.module) {
                     return Err(
                         "Metal render pipeline requires vertex and fragment entries in the same MSL module"
@@ -1039,7 +1051,7 @@ pub(crate) fn select_render_shader_source(
                 return Ok((
                     HalShaderSource::Msl(source.to_owned()),
                     vertex_entry_name.to_owned(),
-                    fragment_entry_name.to_owned(),
+                    fragment_entry_name.map(str::to_owned),
                     Vec::new(),
                 ));
             }
@@ -1050,15 +1062,10 @@ pub(crate) fn select_render_shader_source(
                 .module
                 .spirv_passthrough()
                 .is_some()
-                || fragment.shader.module.spirv_passthrough().is_some()
+                || fragment
+                    .is_some_and(|fragment| fragment.shader.module.spirv_passthrough().is_some())
             {
                 return Err("SPIR-V shader module cannot be used on the Metal backend".to_owned());
-            }
-            if !Arc::ptr_eq(&descriptor.vertex.shader.module, &fragment.shader.module) {
-                return Err(
-                    "Metal render pipeline requires vertex and fragment entries in the same WGSL module"
-                        .to_owned(),
-                );
             }
             let module =
                 descriptor.vertex.shader.module.reflected().ok_or_else(|| {
@@ -1076,6 +1083,35 @@ pub(crate) fn select_render_shader_source(
             };
             let msl_vertex_buffers =
                 msl_vertex_buffer_bindings(&descriptor.vertex.buffers, vertex_buffer_bindings)?;
+            if let Some(fragment) = fragment {
+                if !Arc::ptr_eq(&descriptor.vertex.shader.module, &fragment.shader.module) {
+                    let Some(fragment_entry_name) = fragment_entry_name else {
+                        return Err(
+                            "Metal render pipeline fragment state requires a fragment entry point"
+                                .to_owned(),
+                        );
+                    };
+                    let fragment_module = fragment.shader.module.reflected().ok_or_else(|| {
+                        "render pipeline requires a reflected fragment shader module".to_owned()
+                    })?;
+                    let vertex = module.generate_render_vertex_msl(
+                        vertex_entry_name,
+                        &msl_binding_map,
+                        &msl_vertex_buffers,
+                    )?;
+                    let fragment = fragment_module
+                        .generate_render_fragment_msl(fragment_entry_name, &msl_binding_map)?;
+                    return Ok((
+                        HalShaderSource::MslStages {
+                            vertex: vertex.source,
+                            fragment: Some(fragment.source),
+                        },
+                        vertex.entry_point,
+                        Some(fragment.entry_point),
+                        Vec::new(),
+                    ));
+                }
+            }
             let generated = module.generate_render_msl(
                 vertex_entry_name,
                 fragment_entry_name,
@@ -1093,22 +1129,31 @@ pub(crate) fn select_render_shader_source(
         HalBackend::Vulkan => {
             #[cfg(feature = "shader-passthrough")]
             if descriptor.vertex.shader.module.msl_passthrough().is_some()
-                || fragment.shader.module.msl_passthrough().is_some()
+                || fragment
+                    .is_some_and(|fragment| fragment.shader.module.msl_passthrough().is_some())
             {
                 return Err("MSL shader module cannot be used on the Vulkan backend".to_owned());
             }
             #[cfg(feature = "shader-passthrough")]
-            if let (Some((vertex_words, _)), Some((fragment_words, _))) = (
-                descriptor.vertex.shader.module.spirv_passthrough(),
-                fragment.shader.module.spirv_passthrough(),
-            ) {
+            if let Some((vertex_words, _)) = descriptor.vertex.shader.module.spirv_passthrough() {
+                let Some(fragment) = fragment else {
+                    return Err(
+                        "SPIR-V passthrough render pipeline requires a fragment stage".to_owned(),
+                    );
+                };
+                let Some((fragment_words, _)) = fragment.shader.module.spirv_passthrough() else {
+                    return Err(
+                        "render pipeline cannot mix a SPIR-V passthrough module with a non-SPIR-V module"
+                            .to_owned(),
+                    );
+                };
                 return Ok((
                     HalShaderSource::SpirVStages {
                         vertex: vertex_words.to_vec(),
-                        fragment: fragment_words.to_vec(),
+                        fragment: Some(fragment_words.to_vec()),
                     },
                     vertex_entry_name.to_owned(),
-                    fragment_entry_name.to_owned(),
+                    fragment_entry_name.map(str::to_owned),
                     hal_descriptor_bindings(metal_bindings),
                 ));
             }
@@ -1119,7 +1164,8 @@ pub(crate) fn select_render_shader_source(
                 .module
                 .spirv_passthrough()
                 .is_some()
-                || fragment.shader.module.spirv_passthrough().is_some()
+                || fragment
+                    .is_some_and(|fragment| fragment.shader.module.spirv_passthrough().is_some())
             {
                 return Err(
                     "render pipeline cannot mix a SPIR-V passthrough module with a non-SPIR-V module"
@@ -1129,17 +1175,29 @@ pub(crate) fn select_render_shader_source(
             let vertex_module = descriptor.vertex.shader.module.reflected().ok_or_else(|| {
                 "render pipeline requires a reflected vertex shader module".to_owned()
             })?;
-            let fragment_module = fragment.shader.module.reflected().ok_or_else(|| {
-                "render pipeline requires a reflected fragment shader module".to_owned()
-            })?;
             let vertex =
                 vertex_module.generate_spirv(vertex_entry_name, naga::ShaderStage::Vertex)?;
-            let fragment =
-                fragment_module.generate_spirv(fragment_entry_name, naga::ShaderStage::Fragment)?;
+            let fragment = match (fragment, fragment_entry_name) {
+                (Some(fragment), Some(fragment_entry_name)) => {
+                    let fragment_module = fragment.shader.module.reflected().ok_or_else(|| {
+                        "render pipeline requires a reflected fragment shader module".to_owned()
+                    })?;
+                    Some(
+                        fragment_module
+                            .generate_spirv(fragment_entry_name, naga::ShaderStage::Fragment)?,
+                    )
+                }
+                (None, None) => None,
+                _ => {
+                    return Err(
+                        "real render pipeline fragment state and entry point must match".to_owned(),
+                    );
+                }
+            };
             Ok((
                 HalShaderSource::SpirVStages { vertex, fragment },
                 vertex_entry_name.to_owned(),
-                fragment_entry_name.to_owned(),
+                fragment_entry_name.map(str::to_owned),
                 hal_descriptor_bindings(metal_bindings),
             ))
         }
@@ -1154,7 +1212,8 @@ pub(crate) fn select_render_shader_source(
                     .module
                     .spirv_passthrough()
                     .is_some()
-                || fragment.shader.module.spirv_passthrough().is_some()
+                || fragment
+                    .is_some_and(|fragment| fragment.shader.module.spirv_passthrough().is_some())
             {
                 return Err(
                     "passthrough shader modules cannot be used on the GLES backend".to_owned(),
@@ -1163,20 +1222,33 @@ pub(crate) fn select_render_shader_source(
             let vertex_module = descriptor.vertex.shader.module.reflected().ok_or_else(|| {
                 "render pipeline requires a reflected vertex shader module".to_owned()
             })?;
-            let fragment_module = fragment.shader.module.reflected().ok_or_else(|| {
-                "render pipeline requires a reflected fragment shader module".to_owned()
-            })?;
             let vertex_glsl =
                 vertex_module.generate_glsl(vertex_entry_name, naga::ShaderStage::Vertex)?;
-            let fragment_glsl =
-                fragment_module.generate_glsl(fragment_entry_name, naga::ShaderStage::Fragment)?;
+            let fragment_glsl = match (fragment, fragment_entry_name) {
+                (Some(fragment), Some(fragment_entry_name)) => {
+                    let fragment_module = fragment.shader.module.reflected().ok_or_else(|| {
+                        "render pipeline requires a reflected fragment shader module".to_owned()
+                    })?;
+                    Some(
+                        fragment_module
+                            .generate_glsl(fragment_entry_name, naga::ShaderStage::Fragment)?
+                            .source,
+                    )
+                }
+                (None, None) => None,
+                _ => {
+                    return Err(
+                        "real render pipeline fragment state and entry point must match".to_owned(),
+                    );
+                }
+            };
             Ok((
                 HalShaderSource::GlslStages {
                     vertex: vertex_glsl.source,
-                    fragment: fragment_glsl.source,
+                    fragment: fragment_glsl,
                 },
                 vertex_entry_name.to_owned(),
-                fragment_entry_name.to_owned(),
+                fragment_entry_name.map(str::to_owned),
                 hal_descriptor_bindings(metal_bindings),
             ))
         }
@@ -2330,6 +2402,71 @@ mod tests {
         );
     }
 
+    fn depth_stencil_state() -> DepthStencilState {
+        DepthStencilState {
+            format: depth32_float(),
+            depth_write_enabled: Some(true),
+            depth_compare: Some(CompareFunction::Always),
+            stencil_front: StencilFaceState {
+                compare: CompareFunction::Always,
+                fail_op: StencilOperation::Keep,
+                depth_fail_op: StencilOperation::Keep,
+                pass_op: StencilOperation::Keep,
+            },
+            stencil_back: StencilFaceState {
+                compare: CompareFunction::Always,
+                fail_op: StencilOperation::Keep,
+                depth_fail_op: StencilOperation::Keep,
+                pass_op: StencilOperation::Keep,
+            },
+            stencil_read_mask: u32::MAX,
+            stencil_write_mask: u32::MAX,
+            depth_bias: 0,
+            depth_bias_slope_scale: 0.0,
+            depth_bias_clamp: 0.0,
+        }
+    }
+
+    #[test]
+    fn render_pipeline_validation_accepts_color_depth_and_vertex_only_depth_only() {
+        let device = noop_device();
+        let limits = device.limits();
+        let features = device.features();
+        let module = render_shader_module(&device);
+        let mut color_depth = render_pipeline_descriptor(Arc::clone(&module));
+        color_depth.depth_stencil = Some(depth_stencil_state());
+        assert_eq!(
+            validate_render_pipeline_descriptor(&color_depth, limits, &features),
+            None
+        );
+        assert!(!device.create_render_pipeline(color_depth).is_error());
+
+        let vertex_only = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@vertex fn vs() -> @builtin(position) vec4<f32> {
+                return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+            }"
+                .to_owned(),
+            )),
+        );
+        let mut depth_only = render_pipeline_descriptor(vertex_only);
+        depth_only.fragment = None;
+        depth_only.depth_stencil = Some(depth_stencil_state());
+        assert_eq!(
+            validate_render_pipeline_descriptor(&depth_only, limits, &features),
+            None
+        );
+        assert!(!device.create_render_pipeline(depth_only).is_error());
+
+        let mut invalid = render_pipeline_descriptor(module);
+        invalid.fragment = None;
+        invalid.depth_stencil = None;
+        assert_eq!(
+            validate_render_pipeline_descriptor(&invalid, limits, &features),
+            Some("render pipeline requires a fragment state or depthStencil state".to_owned())
+        );
+    }
+
     #[test]
     fn validate_blend_state_rejects_min_max_non_one_factors() {
         let valid = BlendState {
@@ -2384,6 +2521,55 @@ mod tests {
             validate_inter_stage_interface(&descriptor, "main", Some("main"), device.limits()),
             Err("render pipeline fragment input has no matching vertex output".to_owned())
         );
+    }
+
+    #[test]
+    fn select_render_shader_source_metal_generates_per_stage_msl_for_separate_modules() {
+        let device = noop_device();
+        let vertex = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@vertex fn vs() -> @builtin(position) vec4<f32> {
+                    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+                }"
+                .to_owned(),
+            )),
+        );
+        let fragment = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@fragment fn fs() -> @location(0) vec4<f32> {
+                    return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+                }"
+                .to_owned(),
+            )),
+        );
+        let mut descriptor = render_pipeline_descriptor(vertex);
+        descriptor
+            .fragment
+            .as_mut()
+            .expect("fragment should exist")
+            .shader
+            .module = fragment;
+
+        let (source, vertex_entry, fragment_entry, bindings) = select_render_shader_source(
+            HalBackend::Metal,
+            &descriptor,
+            "vs",
+            Some("fs"),
+            &[],
+            &[],
+            &[],
+        )
+        .expect("separate WGSL modules should generate per-stage MSL");
+
+        assert!(matches!(
+            source,
+            HalShaderSource::MslStages { vertex, fragment }
+                if vertex.contains("vertex")
+                    && fragment.as_ref().is_some_and(|fragment| fragment.contains("fragment"))
+        ));
+        assert_eq!(vertex_entry, "vs");
+        assert_eq!(fragment_entry.as_deref(), Some("fs"));
+        assert!(bindings.is_empty());
     }
 
     #[cfg(feature = "shader-passthrough")]
@@ -2459,24 +2645,24 @@ mod tests {
             HalBackend::Vulkan,
             &wgsl_descriptor,
             "vs",
-            "fs",
+            Some("fs"),
             &[],
             &[],
             &[],
         )
         .expect("WGSL should generate Vulkan SPIR-V stages");
         assert!(
-            matches!(source, HalShaderSource::SpirVStages { vertex, fragment } if !vertex.is_empty() && !fragment.is_empty())
+            matches!(source, HalShaderSource::SpirVStages { vertex, fragment } if !vertex.is_empty() && fragment.as_ref().is_some_and(|fragment| !fragment.is_empty()))
         );
         assert_eq!(vertex_entry, "vs");
-        assert_eq!(fragment_entry, "fs");
+        assert_eq!(fragment_entry.as_deref(), Some("fs"));
         assert!(bindings.is_empty());
 
         let (source, _, _, _) = select_render_shader_source(
             HalBackend::Vulkan,
             &spirv_descriptor,
             "vs",
-            "fs",
+            Some("fs"),
             &[],
             &[],
             &[],
@@ -2485,14 +2671,14 @@ mod tests {
         assert!(matches!(
             source,
             HalShaderSource::SpirVStages { vertex, fragment }
-                if vertex == vertex_words && fragment == fragment_words
+                if vertex == vertex_words && fragment.as_deref() == Some(fragment_words.as_slice())
         ));
         assert_eq!(
             select_render_shader_source(
                 HalBackend::Vulkan,
                 &mixed_vertex_spirv,
                 "vs",
-                "fs",
+                Some("fs"),
                 &[],
                 &[],
                 &[],
@@ -2505,7 +2691,7 @@ mod tests {
                 HalBackend::Vulkan,
                 &mixed_fragment_spirv,
                 "vs",
-                "fs",
+                Some("fs"),
                 &[],
                 &[],
                 &[],
@@ -2518,7 +2704,7 @@ mod tests {
             HalBackend::Metal,
             &msl_descriptor,
             "vs",
-            "fs",
+            Some("fs"),
             &[],
             &[],
             &[],
@@ -2526,14 +2712,14 @@ mod tests {
         .expect("MSL passthrough should select Metal MSL");
         assert!(matches!(source, HalShaderSource::Msl(selected) if selected == msl_source));
         assert_eq!(vertex_entry, "vs");
-        assert_eq!(fragment_entry, "fs");
+        assert_eq!(fragment_entry.as_deref(), Some("fs"));
 
         assert_eq!(
             select_render_shader_source(
                 HalBackend::Metal,
                 &spirv_descriptor,
                 "vs",
-                "fs",
+                Some("fs"),
                 &[],
                 &[],
                 &[]
@@ -2546,7 +2732,7 @@ mod tests {
                 HalBackend::Vulkan,
                 &msl_descriptor,
                 "vs",
-                "fs",
+                Some("fs"),
                 &[],
                 &[],
                 &[]
@@ -2582,19 +2768,26 @@ mod tests {
         );
         let descriptor = render_pipeline_descriptor(module);
 
-        let (source, vertex_entry, fragment_entry, bindings) =
-            select_render_shader_source(HalBackend::Gles, &descriptor, "vs", "fs", &[], &[], &[])
-                .expect("WGSL should generate GLES GLSL stages");
+        let (source, vertex_entry, fragment_entry, bindings) = select_render_shader_source(
+            HalBackend::Gles,
+            &descriptor,
+            "vs",
+            Some("fs"),
+            &[],
+            &[],
+            &[],
+        )
+        .expect("WGSL should generate GLES GLSL stages");
 
         assert!(
             matches!(source, HalShaderSource::GlslStages { vertex, fragment }
                 if vertex.contains("#version 310 es")
-                    && fragment.contains("#version 310 es")
+                    && fragment.as_ref().is_some_and(|fragment| fragment.contains("#version 310 es"))
                     && vertex.contains("void main()")
-                    && fragment.contains("void main()"))
+                    && fragment.as_ref().is_some_and(|fragment| fragment.contains("void main()")))
         );
         assert_eq!(vertex_entry, "vs");
-        assert_eq!(fragment_entry, "fs");
+        assert_eq!(fragment_entry.as_deref(), Some("fs"));
         assert!(bindings.is_empty());
     }
 
@@ -2677,7 +2870,6 @@ mod tests {
         )
     }
 
-    #[cfg(feature = "tiled")]
     fn depth32_float() -> TextureFormat {
         TextureFormat::from_raw(0x30)
     }
@@ -2920,7 +3112,7 @@ mod tests {
         let msl = module
             .generate_render_msl(
                 "vs",
-                "fs",
+                Some("fs"),
                 &shader_naga::MslBindingMap {
                     buffers: Vec::new(),
                 },

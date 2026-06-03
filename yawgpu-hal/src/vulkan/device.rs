@@ -153,7 +153,7 @@ impl VulkanDevice {
         &self,
         shader: HalShaderSource,
         vertex_entry_point: &str,
-        fragment_entry_point: &str,
+        fragment_entry_point: Option<&str>,
         descriptor: &HalRenderPipelineDescriptor,
         bindings: &[HalDescriptorBinding],
     ) -> Result<VulkanRenderPipeline, HalError> {
@@ -287,10 +287,10 @@ mod tests {
             .create_render_pipeline(
                 HalShaderSource::SpirVStages {
                     vertex: vertex_spirv(),
-                    fragment: fragment_spirv(),
+                    fragment: Some(fragment_spirv()),
                 },
                 "main",
-                "main",
+                Some("main"),
                 &render_descriptor(),
                 &[],
             )

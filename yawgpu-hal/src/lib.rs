@@ -14,7 +14,8 @@ mod shader;
 pub use command::{
     HalBoundBuffer, HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy,
     HalBufferTextureLayout, HalComputePass, HalCopy, HalDescriptorBinding, HalDraw,
-    HalRenderColorTarget, HalRenderLoadOp, HalRenderPass, HalTextureCopy,
+    HalRenderColorTarget, HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass,
+    HalTextureCopy,
 };
 #[cfg(feature = "tiled")]
 pub use command::{
@@ -585,7 +586,7 @@ impl HalDevice {
         &self,
         shader: HalShaderSource,
         vertex_entry_point: &str,
-        fragment_entry_point: &str,
+        fragment_entry_point: Option<&str>,
         descriptor: &HalRenderPipelineDescriptor,
         bindings: &[HalDescriptorBinding],
     ) -> Result<HalRenderPipeline, HalError> {
@@ -1058,6 +1059,25 @@ mod tests {
         }
     }
 
+    fn depth_texture_descriptor() -> HalTextureDescriptor {
+        HalTextureDescriptor {
+            dimension: HalTextureDimension::D2,
+            format: HalTextureFormat::Depth32Float,
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+            mip_level_count: 1,
+            sample_count: 1,
+            usage: HalTextureUsage {
+                copy_src: true,
+                copy_dst: true,
+                texture_binding: false,
+                storage_binding: false,
+                render_attachment: true,
+            },
+        }
+    }
+
     fn sampler_descriptor() -> HalSamplerDescriptor {
         HalSamplerDescriptor {
             address_mode_u: HalAddressMode::ClampToEdge,
@@ -1239,7 +1259,7 @@ mod tests {
         let pipeline = device.create_render_pipeline(
             HalShaderSource::Msl(String::new()),
             "vs_main",
-            "fs_main",
+            Some("fs_main"),
             &render_pipeline_descriptor(),
             &[],
         )?;
@@ -1324,6 +1344,52 @@ mod tests {
 
         queue.submit_copies(&[])?;
         queue.submit_copies(&[copy, clear])
+    }
+
+    #[test]
+    fn hal_queue_submit_copies_noop_records_depth_only_render_pass() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let queue = device.queue();
+        let depth = device.create_texture(&depth_texture_descriptor());
+
+        queue.submit_copies(&[HalCopy::RenderPass(HalRenderPass {
+            pipeline: None,
+            color_target: None,
+            depth_stencil_attachment: Some(HalRenderDepthStencilAttachment {
+                texture: depth,
+                format: HalTextureFormat::Depth32Float,
+                mip_level: 0,
+                array_layer: 0,
+                depth_load_op: HalRenderLoadOp::Clear,
+                depth_store: true,
+                depth_clear_value: 0.25,
+                depth_read_only: false,
+                stencil_load_op: HalRenderLoadOp::Clear,
+                stencil_store: false,
+                stencil_clear_value: 3,
+                stencil_read_only: true,
+            }),
+            bind_buffers: Vec::new(),
+            vertex_buffers: Vec::new(),
+            draw: None,
+        })])?;
+
+        let submitted = match &queue {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            #[cfg(any(feature = "vulkan", feature = "metal", feature = "gles"))]
+            _ => Vec::new(),
+        };
+        assert!(matches!(
+            submitted.as_slice(),
+            [HalCopy::RenderPass(pass)]
+                if pass.color_target.is_none()
+                    && pass.depth_stencil_attachment.as_ref().is_some_and(|attachment|
+                        attachment.format == HalTextureFormat::Depth32Float
+                            && (attachment.depth_clear_value - 0.25).abs() < f32::EPSILON
+                            && attachment.stencil_clear_value == 3
+                    )
+        ));
+        Ok(())
     }
 
     #[test]
