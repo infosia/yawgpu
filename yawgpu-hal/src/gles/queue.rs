@@ -42,6 +42,13 @@ impl GlesQueue {
         })
     }
 
+    /// Waits until all submitted queue work has completed.
+    pub fn wait_idle(&self) -> Result<(), HalError> {
+        self.inner.with_current_context(|gl| unsafe {
+            gl.finish();
+        })
+    }
+
     /// Records and submits the given buffer/texture copy operations.
     pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
         if copies.is_empty() {

@@ -70,6 +70,11 @@ impl Device {
         self.inner.queue.clone()
     }
 
+    /// Waits until all submitted default-queue work has completed.
+    pub fn wait_idle(&self) -> Option<DeviceError> {
+        self.inner.queue.wait_idle()
+    }
+
     /// Returns the allocation count.
     #[must_use]
     pub fn allocation_count(&self) -> u64 {
@@ -646,6 +651,13 @@ mod tests {
         assert!(device.features().contains(&Feature::CoreFeaturesAndLimits));
         assert!(device.has_feature(Feature::CoreFeaturesAndLimits));
         assert!(!device.has_feature(Feature::Other(99)));
+    }
+
+    #[test]
+    fn device_wait_idle_noop_returns_ok() {
+        let device = noop_device();
+
+        assert_eq!(device.wait_idle(), None);
     }
 
     #[test]

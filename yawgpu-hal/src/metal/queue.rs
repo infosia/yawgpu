@@ -20,6 +20,11 @@ impl MetalQueue {
 
     /// Submits an empty command buffer to flush the queue.
     pub fn submit_empty(&self) -> Result<(), HalError> {
+        self.wait_idle()
+    }
+
+    /// Waits until all submitted queue work has completed.
+    pub fn wait_idle(&self) -> Result<(), HalError> {
         let command_buffer = self
             .inner
             .commandBuffer()

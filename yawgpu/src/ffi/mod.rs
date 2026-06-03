@@ -1467,6 +1467,7 @@ impl PendingCallback {
             }
             Self::BufferMap {
                 callback,
+                device,
                 buffer,
                 status,
                 userdata1,
@@ -1474,10 +1475,23 @@ impl PendingCallback {
                 ..
             } => {
                 if let Some(callback) = callback {
+                    let wait_error = std::cell::RefCell::new(None);
                     let status = buffer
                         .as_ref()
-                        .map(core::Buffer::resolve_pending_map)
+                        .map(|buffer| {
+                            buffer.resolve_pending_map_with_gpu_completion(|| {
+                                if let Some(error) = device.wait_idle() {
+                                    *wait_error.borrow_mut() = Some(error);
+                                    false
+                                } else {
+                                    true
+                                }
+                            })
+                        })
                         .unwrap_or(status);
+                    if let Some(error) = wait_error.into_inner() {
+                        device.dispatch_error(error.kind, error.message);
+                    }
                     callback(
                         map_map_async_status(status),
                         string_view(map_async_message(status).as_bytes()),

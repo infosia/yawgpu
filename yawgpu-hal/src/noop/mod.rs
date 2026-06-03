@@ -149,6 +149,11 @@ impl NoopQueue {
         Ok(())
     }
 
+    /// Waits until all submitted queue work has completed.
+    pub fn wait_idle(&self) -> Result<(), HalError> {
+        Ok(())
+    }
+
     /// Returns submitted copy commands recorded by this queue.
     #[must_use]
     pub fn submitted_copies(&self) -> Vec<HalCopy> {
