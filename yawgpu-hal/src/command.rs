@@ -3,8 +3,8 @@ use crate::HalError;
 #[cfg(feature = "tiled")]
 use crate::HalTransientAttachment;
 use crate::{
-    HalBuffer, HalComputePipeline, HalExtent3d, HalOrigin3d, HalRenderPipeline, HalTexture,
-    HalTextureFormat,
+    HalBuffer, HalComputePipeline, HalExtent3d, HalOrigin3d, HalRenderPipeline, HalSampler,
+    HalTexture, HalTextureFormat,
 };
 
 /// Stores Noop subpass render pass state.
@@ -136,6 +136,10 @@ pub struct HalComputePass {
     pub pipeline: HalComputePipeline,
     /// Bind buffers.
     pub bind_buffers: Vec<HalBoundBuffer>,
+    /// Bind textures.
+    pub bind_textures: Vec<HalBoundTexture>,
+    /// Bind samplers.
+    pub bind_samplers: Vec<HalBoundSampler>,
     /// Workgroups.
     pub workgroups: (u32, u32, u32),
 }
@@ -148,11 +152,24 @@ pub struct HalDescriptorBinding {
     /// Binding.
     pub binding: u32,
     /// Kind.
-    pub kind: HalBufferBindingKind,
+    pub kind: HalDescriptorBindingKind,
+}
+
+/// Enumerates HAL descriptor binding kind values.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum HalDescriptorBindingKind {
+    /// Buffer variant.
+    Buffer(HalBufferBindingKind),
+    /// Sampled texture variant.
+    Texture,
+    /// Sampler variant.
+    Sampler,
 }
 
 /// Enumerates HAL buffer binding kind values.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum HalBufferBindingKind {
     /// Uniform variant.
     Uniform,
@@ -181,6 +198,64 @@ pub struct HalBoundBuffer {
     pub size: u64,
 }
 
+/// Enumerates HAL texture view dimension values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HalTextureViewDimension {
+    /// One-dimensional texture view.
+    D1,
+    /// Two-dimensional texture view.
+    D2,
+    /// Two-dimensional array texture view.
+    D2Array,
+    /// Cube texture view.
+    Cube,
+    /// Cube array texture view.
+    CubeArray,
+    /// Three-dimensional texture view.
+    D3,
+}
+
+/// Wraps a bound texture for the selected backend.
+#[derive(Debug, Clone)]
+pub struct HalBoundTexture {
+    /// Group.
+    pub group: u32,
+    /// Binding.
+    pub binding: u32,
+    /// Metal index.
+    pub metal_index: u32,
+    /// Texture.
+    pub texture: HalTexture,
+    /// View format.
+    pub format: HalTextureFormat,
+    /// View dimension.
+    pub dimension: HalTextureViewDimension,
+    /// First mip level exposed by the view.
+    pub base_mip_level: u32,
+    /// Number of mip levels exposed by the view.
+    pub mip_level_count: u32,
+    /// First array layer exposed by the view.
+    pub base_array_layer: u32,
+    /// Number of array layers exposed by the view.
+    pub array_layer_count: u32,
+    /// Texture aspect exposed by the view.
+    pub aspect: HalTextureAspect,
+}
+
+/// Wraps a bound sampler for the selected backend.
+#[derive(Debug, Clone)]
+pub struct HalBoundSampler {
+    /// Group.
+    pub group: u32,
+    /// Binding.
+    pub binding: u32,
+    /// Metal index.
+    pub metal_index: u32,
+    /// Sampler.
+    pub sampler: HalSampler,
+}
+
 /// Wraps  for the selected backend.
 #[derive(Debug, Clone)]
 pub struct HalRenderPass {
@@ -192,6 +267,10 @@ pub struct HalRenderPass {
     pub depth_stencil_attachment: Option<HalRenderDepthStencilAttachment>,
     /// Bind buffers.
     pub bind_buffers: Vec<HalBoundBuffer>,
+    /// Bind textures.
+    pub bind_textures: Vec<HalBoundTexture>,
+    /// Bind samplers.
+    pub bind_samplers: Vec<HalBoundSampler>,
     /// Vertex buffers.
     pub vertex_buffers: Vec<HalBoundBuffer>,
     /// Draw.
@@ -208,6 +287,10 @@ pub struct HalSubpassDraw {
     pub pipeline: HalRenderPipeline,
     /// Bind buffers.
     pub bind_buffers: Vec<HalBoundBuffer>,
+    /// Bind textures.
+    pub bind_textures: Vec<HalBoundTexture>,
+    /// Bind samplers.
+    pub bind_samplers: Vec<HalBoundSampler>,
     /// Vertex buffers.
     pub vertex_buffers: Vec<HalBoundBuffer>,
     /// Draw.
@@ -443,12 +526,28 @@ pub struct HalBufferTextureCopy {
     pub buffer_layout: HalBufferTextureLayout,
     /// Texture.
     pub texture: HalTexture,
+    /// Texture format (so backends can select the depth/stencil plane).
+    pub format: HalTextureFormat,
+    /// Aspect of the texture this copy targets.
+    pub aspect: HalTextureAspect,
     /// Mip level.
     pub mip_level: u32,
     /// Origin.
     pub origin: HalOrigin3d,
     /// Extent.
     pub extent: HalExtent3d,
+}
+
+/// Selects which aspect of a texture a buffer⇄texture copy targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HalTextureAspect {
+    /// All aspects (color, or the single plane of a single-aspect format).
+    All,
+    /// Depth plane only.
+    DepthOnly,
+    /// Stencil plane only.
+    StencilOnly,
 }
 
 /// Wraps  for the selected backend.
@@ -525,5 +624,35 @@ mod tests {
         assert!(!attachment.stencil_store);
         assert_eq!(attachment.stencil_clear_value, 7);
         assert!(attachment.stencil_read_only);
+    }
+
+    #[test]
+    fn hal_bound_texture_constructs_and_round_trips_view_fields() {
+        let texture = depth_texture();
+        let binding = HalBoundTexture {
+            group: 1,
+            binding: 2,
+            metal_index: 3,
+            texture,
+            format: HalTextureFormat::Depth32Float,
+            dimension: HalTextureViewDimension::D2,
+            base_mip_level: 4,
+            mip_level_count: 5,
+            base_array_layer: 6,
+            array_layer_count: 7,
+            aspect: HalTextureAspect::DepthOnly,
+        };
+
+        assert_eq!(binding.group, 1);
+        assert_eq!(binding.binding, 2);
+        assert_eq!(binding.metal_index, 3);
+        assert!(matches!(binding.texture, HalTexture::Noop(_)));
+        assert_eq!(binding.format, HalTextureFormat::Depth32Float);
+        assert_eq!(binding.dimension, HalTextureViewDimension::D2);
+        assert_eq!(binding.base_mip_level, 4);
+        assert_eq!(binding.mip_level_count, 5);
+        assert_eq!(binding.base_array_layer, 6);
+        assert_eq!(binding.array_layer_count, 7);
+        assert_eq!(binding.aspect, HalTextureAspect::DepthOnly);
     }
 }

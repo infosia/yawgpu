@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use yawgpu_hal::{
-    HalBackend, HalBufferBindingKind, HalComputePipeline, HalDescriptorBinding, HalDevice,
-    HalShaderSource,
+    HalBackend, HalBufferBindingKind, HalComputePipeline, HalDescriptorBinding,
+    HalDescriptorBindingKind, HalDevice, HalShaderSource,
 };
 
 use crate::bind_group_layout::*;
@@ -81,7 +81,18 @@ pub(crate) struct MetalBufferBinding {
     pub(crate) group: u32,
     pub(crate) binding: u32,
     pub(crate) metal_index: u32,
-    pub(crate) ty: BufferBindingType,
+    pub(crate) kind: MetalBindingKind,
+}
+
+/// Stores the shader resource kind for a resolved Metal binding slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MetalBindingKind {
+    /// Buffer binding.
+    Buffer(BufferBindingType),
+    /// Sampled texture binding.
+    Texture,
+    /// Sampler binding.
+    Sampler,
 }
 
 impl ComputePipeline {
@@ -185,7 +196,7 @@ pub(crate) fn create_hal_compute_pipeline(
         return (None, None);
     };
     if matches!(hal_device.backend(), HalBackend::Noop) {
-        return (None, None);
+        return (Some(HalComputePipeline::Noop), None);
     }
     let Some(workgroup) = workgroup else {
         return (
@@ -238,14 +249,7 @@ pub(crate) fn select_compute_shader_source(
                 .reflected()
                 .ok_or_else(|| "compute pipeline requires a reflected shader module".to_owned())?;
             let msl_binding_map = shader_naga::MslBindingMap {
-                buffers: metal_bindings
-                    .iter()
-                    .map(|binding| shader_naga::MslBufferBinding {
-                        group: binding.group,
-                        binding: binding.binding,
-                        metal_index: binding.metal_index,
-                    })
-                    .collect(),
+                resources: msl_resource_bindings(metal_bindings),
             };
             let generated = module.generate_msl(entry_name, &msl_binding_map)?;
             Ok((
@@ -314,11 +318,34 @@ pub(crate) fn hal_descriptor_bindings(
         .map(|binding| HalDescriptorBinding {
             group: binding.group,
             binding: binding.binding,
-            kind: match binding.ty {
-                BufferBindingType::Uniform => HalBufferBindingKind::Uniform,
-                BufferBindingType::Storage | BufferBindingType::ReadOnlyStorage => {
-                    HalBufferBindingKind::Storage
+            kind: match binding.kind {
+                MetalBindingKind::Buffer(BufferBindingType::Uniform) => {
+                    HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform)
                 }
+                MetalBindingKind::Buffer(
+                    BufferBindingType::Storage | BufferBindingType::ReadOnlyStorage,
+                ) => HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage),
+                MetalBindingKind::Texture => HalDescriptorBindingKind::Texture,
+                MetalBindingKind::Sampler => HalDescriptorBindingKind::Sampler,
+            },
+        })
+        .collect()
+}
+
+/// Returns MSL resource bindings.
+pub(crate) fn msl_resource_bindings(
+    bindings: &[MetalBufferBinding],
+) -> Vec<shader_naga::MslResourceBinding> {
+    bindings
+        .iter()
+        .map(|binding| shader_naga::MslResourceBinding {
+            group: binding.group,
+            binding: binding.binding,
+            metal_index: binding.metal_index,
+            kind: match binding.kind {
+                MetalBindingKind::Buffer(_) => shader_naga::MslResourceBindingKind::Buffer,
+                MetalBindingKind::Texture => shader_naga::MslResourceBindingKind::Texture,
+                MetalBindingKind::Sampler => shader_naga::MslResourceBindingKind::Sampler,
             },
         })
         .collect()
@@ -335,15 +362,19 @@ pub(crate) fn metal_buffer_binding_map(
             break;
         };
         for entry in layout.entries() {
-            if let Some(BindingLayoutKind::Buffer { ty, .. }) = entry.kind {
-                bindings.push(MetalBufferBinding {
-                    group,
-                    binding: entry.binding,
-                    metal_index,
-                    ty,
-                });
-                metal_index = metal_index.saturating_add(1);
-            }
+            let kind = match entry.kind {
+                Some(BindingLayoutKind::Buffer { ty, .. }) => MetalBindingKind::Buffer(ty),
+                Some(BindingLayoutKind::Texture { .. }) => MetalBindingKind::Texture,
+                Some(BindingLayoutKind::Sampler { .. }) => MetalBindingKind::Sampler,
+                _ => continue,
+            };
+            bindings.push(MetalBufferBinding {
+                group,
+                binding: entry.binding,
+                metal_index,
+                kind,
+            });
+            metal_index = metal_index.saturating_add(1);
         }
     }
     bindings.sort_by_key(|binding| (binding.group, binding.binding));

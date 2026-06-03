@@ -1,5 +1,8 @@
 use super::*;
-use crate::{HalPresentMode, HalRenderPipelineDescriptor, HalSamplerDescriptor, HalTextureUsage};
+use crate::{
+    HalPresentMode, HalRenderPipelineDescriptor, HalSamplerDescriptor, HalTextureDimension,
+    HalTextureUsage,
+};
 
 /// Returns metal device.
 pub(crate) fn metal_device() -> MetalDevice {

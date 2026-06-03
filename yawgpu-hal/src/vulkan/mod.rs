@@ -16,13 +16,13 @@ use crate::{
     HalTransientAttachment, HalTransientAttachmentDescriptor,
 };
 use crate::{
-    HalAddressMode, HalBoundBuffer, HalBufferBindingKind, HalBufferClear, HalBufferCopy,
-    HalBufferTextureCopy, HalBufferUsage, HalCompareFunction, HalComputePass, HalCopy,
-    HalDepthStencilState, HalDescriptorBinding, HalError, HalExtent3d, HalFilterMode,
-    HalMipmapFilterMode, HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass,
-    HalRenderPipelineDescriptor, HalSamplerDescriptor, HalShaderSource, HalStencilOperation,
-    HalSurfaceConfiguration, HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
-    HalTextureUsage, HalVertexFormat, HalVertexStepMode,
+    HalAddressMode, HalBoundBuffer, HalBoundSampler, HalBoundTexture, HalBufferBindingKind,
+    HalBufferClear, HalBufferCopy, HalBufferTextureCopy, HalBufferUsage, HalCompareFunction,
+    HalComputePass, HalCopy, HalDepthStencilState, HalDescriptorBinding, HalDescriptorBindingKind,
+    HalError, HalExtent3d, HalFilterMode, HalMipmapFilterMode, HalPrimitiveTopology,
+    HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor, HalSampler, HalSamplerDescriptor,
+    HalShaderSource, HalStencilOperation, HalSurfaceConfiguration, HalTexture, HalTextureCopy,
+    HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
 
 const BACKEND: &str = "vulkan";

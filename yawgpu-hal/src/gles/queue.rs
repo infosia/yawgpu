@@ -8,8 +8,9 @@ use super::BACKEND;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::{
     HalBuffer, HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy,
-    HalComputePass, HalComputePipeline, HalCopy, HalDescriptorBinding, HalError, HalRenderLoadOp,
-    HalRenderPass, HalRenderPipeline, HalTexture, HalTextureCopy, HalVertexStepMode,
+    HalComputePass, HalComputePipeline, HalCopy, HalDescriptorBinding, HalDescriptorBindingKind,
+    HalError, HalRenderLoadOp, HalRenderPass, HalRenderPipeline, HalTexture, HalTextureCopy,
+    HalVertexStepMode,
 };
 
 /// Stores GLES queue data used by validation and backend submission.
@@ -252,13 +253,23 @@ fn binding_target(bindings: &[HalDescriptorBinding], binding: u32) -> Result<u32
             message: "buffer binding is missing from pipeline layout",
         })?;
     match descriptor.kind {
-        HalBufferBindingKind::Uniform => Ok(glow::UNIFORM_BUFFER),
-        HalBufferBindingKind::Storage => Ok(glow::SHADER_STORAGE_BUFFER),
+        HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform) => Ok(glow::UNIFORM_BUFFER),
+        HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage) => {
+            Ok(glow::SHADER_STORAGE_BUFFER)
+        }
         #[cfg(feature = "tiled")]
-        HalBufferBindingKind::InputAttachment => Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "input attachments are not valid buffer bindings",
-        }),
+        HalDescriptorBindingKind::Buffer(HalBufferBindingKind::InputAttachment) => {
+            Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "input attachments are not valid buffer bindings",
+            })
+        }
+        HalDescriptorBindingKind::Texture | HalDescriptorBindingKind::Sampler => {
+            Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "texture and sampler descriptors are not valid buffer bindings",
+            })
+        }
     }
 }
 
@@ -1002,12 +1013,12 @@ mod tests {
             HalDescriptorBinding {
                 group: 0,
                 binding: 0,
-                kind: HalBufferBindingKind::Uniform,
+                kind: HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform),
             },
             HalDescriptorBinding {
                 group: 0,
                 binding: 1,
-                kind: HalBufferBindingKind::Storage,
+                kind: HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage),
             },
         ];
 

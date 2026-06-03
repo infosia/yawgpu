@@ -173,18 +173,19 @@ pub(super) fn create_render_pipeline(
     })
 }
 
+/// A compiled vertex function plus an optional fragment function (absent for a
+/// vertex-only / depth-only pipeline).
+type RenderFunctions = (
+    Retained<ProtocolObject<dyn MTLFunction>>,
+    Option<Retained<ProtocolObject<dyn MTLFunction>>>,
+);
+
 fn create_render_functions(
     device: &ProtocolObject<dyn MTLDevice>,
     shader: HalShaderSource,
     vertex_entry_point: &str,
     fragment_entry_point: Option<&str>,
-) -> Result<
-    (
-        Retained<ProtocolObject<dyn MTLFunction>>,
-        Option<Retained<ProtocolObject<dyn MTLFunction>>>,
-    ),
-    HalError,
-> {
+) -> Result<RenderFunctions, HalError> {
     match shader {
         HalShaderSource::Msl(source) => {
             let library = create_render_library(device, &source)?;

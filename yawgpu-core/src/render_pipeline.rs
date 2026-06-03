@@ -9,8 +9,9 @@ use yawgpu_hal::{
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
-    HalBufferBindingKind, HalSubpassAttachmentLayout, HalSubpassDependency,
-    HalSubpassDependencyType, HalSubpassInputAttachment, HalSubpassLayout, HalSubpassPassLayout,
+    HalBufferBindingKind, HalDescriptorBindingKind, HalSubpassAttachmentLayout,
+    HalSubpassDependency, HalSubpassDependencyType, HalSubpassInputAttachment, HalSubpassLayout,
+    HalSubpassPassLayout,
 };
 
 use crate::bind_group_layout::*;
@@ -776,7 +777,7 @@ pub(crate) fn create_hal_render_pipeline(
         return (None, None);
     };
     if matches!(hal_device.backend(), HalBackend::Noop) {
-        return (None, None);
+        return (Some(HalRenderPipeline::Noop), None);
     }
     if descriptor.multisample.count != 1 {
         return (
@@ -852,7 +853,7 @@ pub(crate) fn create_hal_subpass_render_pipeline(
         );
     }
     if matches!(hal_device.backend(), HalBackend::Noop) {
-        return (None, None);
+        return (Some(HalRenderPipeline::Noop), None);
     }
     if descriptor.base.fragment.is_none() {
         return (
@@ -946,7 +947,7 @@ fn input_attachment_hal_bindings(
                 bindings.push(HalDescriptorBinding {
                     group,
                     binding: entry.binding,
-                    kind: HalBufferBindingKind::InputAttachment,
+                    kind: HalDescriptorBindingKind::Buffer(HalBufferBindingKind::InputAttachment),
                 });
             }
         }
@@ -1072,14 +1073,7 @@ pub(crate) fn select_render_shader_source(
                     "render pipeline requires a reflected shader module".to_owned()
                 })?;
             let msl_binding_map = shader_naga::MslBindingMap {
-                buffers: metal_bindings
-                    .iter()
-                    .map(|binding| shader_naga::MslBufferBinding {
-                        group: binding.group,
-                        binding: binding.binding,
-                        metal_index: binding.metal_index,
-                    })
-                    .collect(),
+                resources: msl_resource_bindings(metal_bindings),
             };
             let msl_vertex_buffers =
                 msl_vertex_buffer_bindings(&descriptor.vertex.buffers, vertex_buffer_bindings)?;
@@ -1710,13 +1704,9 @@ pub(crate) fn validate_render_presence(
     if descriptor.fragment.is_none() && descriptor.depth_stencil.is_none() {
         return Err("render pipeline requires a fragment state or depthStencil state".to_owned());
     }
-    if descriptor
-        .fragment
-        .as_ref()
-        .is_some_and(|fragment| fragment.target_count == 0)
-    {
-        return Err("render pipeline fragment targetCount must be at least one".to_owned());
-    }
+    // A fragment state with zero colour targets is allowed here (a frag-depth-only
+    // fragment is valid); `validate_color_targets` separately rejects a fragment
+    // that writes a colour output with no matching target.
     Ok(())
 }
 
@@ -1962,6 +1952,22 @@ pub(crate) fn validate_color_targets(
         color_bytes = color_bytes
             .checked_add(color_attachment_byte_cost(caps.texel_block_size))
             .ok_or_else(|| "render pipeline color target byte count overflows".to_owned())?;
+    }
+
+    // Every fragment colour output (`@location(N)`) must have a colour target.
+    // The loop above only checks targets→outputs, so a fragment that writes a
+    // colour with too few (or zero) targets — e.g. a colour fragment paired with
+    // an empty `targets` list — would otherwise slip through. A frag-depth-only
+    // fragment has no colour outputs, so zero targets stays valid. (Subpass
+    // pipelines remap output locations through the pass layout, so skip them.)
+    if !skip_shader_outputs && subpass_color_attachment_indices.is_none() {
+        for &location in outputs.keys() {
+            if location as usize >= fragment.target_count {
+                return Err(
+                    "render pipeline fragment color output requires a color target".to_owned(),
+                );
+            }
+        }
     }
 
     if descriptor.multisample.alpha_to_coverage_enabled && !has_alpha_to_coverage_target {
@@ -3114,7 +3120,7 @@ mod tests {
                 "vs",
                 Some("fs"),
                 &shader_naga::MslBindingMap {
-                    buffers: Vec::new(),
+                    resources: Vec::new(),
                 },
                 &[],
                 &[((0, 0), 0)],
@@ -3242,7 +3248,7 @@ mod tests {
         assert_eq!(bindings[0].binding, 0);
         assert!(matches!(
             bindings[0].kind,
-            HalBufferBindingKind::InputAttachment
+            HalDescriptorBindingKind::Buffer(HalBufferBindingKind::InputAttachment)
         ));
     }
 }

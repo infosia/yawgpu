@@ -1092,12 +1092,20 @@ unsafe fn destroy_descriptor_set_layouts(
 }
 
 /// Returns descriptor type.
-pub(super) fn descriptor_type(kind: HalBufferBindingKind) -> vk::DescriptorType {
+pub(super) fn descriptor_type(kind: HalDescriptorBindingKind) -> vk::DescriptorType {
     match kind {
-        HalBufferBindingKind::Uniform => vk::DescriptorType::UNIFORM_BUFFER,
-        HalBufferBindingKind::Storage => vk::DescriptorType::STORAGE_BUFFER,
+        HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform) => {
+            vk::DescriptorType::UNIFORM_BUFFER
+        }
+        HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage) => {
+            vk::DescriptorType::STORAGE_BUFFER
+        }
         #[cfg(feature = "tiled")]
-        HalBufferBindingKind::InputAttachment => vk::DescriptorType::INPUT_ATTACHMENT,
+        HalDescriptorBindingKind::Buffer(HalBufferBindingKind::InputAttachment) => {
+            vk::DescriptorType::INPUT_ATTACHMENT
+        }
+        HalDescriptorBindingKind::Texture => vk::DescriptorType::SAMPLED_IMAGE,
+        HalDescriptorBindingKind::Sampler => vk::DescriptorType::SAMPLER,
     }
 }
 
@@ -1107,13 +1115,18 @@ pub(super) fn descriptor_type(kind: HalBufferBindingKind) -> vk::DescriptorType 
 /// (`VUID-VkDescriptorSetLayoutBinding-descriptorType-01510`), so they take
 /// `FRAGMENT` regardless of the pipeline-wide default; other bindings use it.
 fn binding_stage_flags(
-    kind: HalBufferBindingKind,
+    kind: HalDescriptorBindingKind,
     default: vk::ShaderStageFlags,
 ) -> vk::ShaderStageFlags {
     match kind {
-        HalBufferBindingKind::Uniform | HalBufferBindingKind::Storage => default,
+        HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform)
+        | HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage)
+        | HalDescriptorBindingKind::Texture
+        | HalDescriptorBindingKind::Sampler => default,
         #[cfg(feature = "tiled")]
-        HalBufferBindingKind::InputAttachment => vk::ShaderStageFlags::FRAGMENT,
+        HalDescriptorBindingKind::Buffer(HalBufferBindingKind::InputAttachment) => {
+            vk::ShaderStageFlags::FRAGMENT
+        }
     }
 }
 
@@ -1129,13 +1142,35 @@ pub(super) fn create_compute_descriptor_pool(
         .inner
         .descriptor_bindings
         .iter()
-        .filter(|binding| matches!(binding.kind, HalBufferBindingKind::Uniform))
+        .filter(|binding| {
+            matches!(
+                binding.kind,
+                HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform)
+            )
+        })
         .count();
     let storage_count = pipeline
         .inner
         .descriptor_bindings
         .iter()
-        .filter(|binding| matches!(binding.kind, HalBufferBindingKind::Storage))
+        .filter(|binding| {
+            matches!(
+                binding.kind,
+                HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage)
+            )
+        })
+        .count();
+    let texture_count = pipeline
+        .inner
+        .descriptor_bindings
+        .iter()
+        .filter(|binding| matches!(binding.kind, HalDescriptorBindingKind::Texture))
+        .count();
+    let sampler_count = pipeline
+        .inner
+        .descriptor_bindings
+        .iter()
+        .filter(|binding| matches!(binding.kind, HalDescriptorBindingKind::Sampler))
         .count();
     let mut pool_sizes = Vec::new();
     if uniform_count > 0 {
@@ -1155,6 +1190,26 @@ pub(super) fn create_compute_descriptor_pool(
                 .descriptor_count(
                     u32::try_from(storage_count)
                         .map_err(|_| shader_error("storage descriptor count is too large"))?,
+                ),
+        );
+    }
+    if texture_count > 0 {
+        pool_sizes.push(
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(
+                    u32::try_from(texture_count)
+                        .map_err(|_| shader_error("texture descriptor count is too large"))?,
+                ),
+        );
+    }
+    if sampler_count > 0 {
+        pool_sizes.push(
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLER)
+                .descriptor_count(
+                    u32::try_from(sampler_count)
+                        .map_err(|_| shader_error("sampler descriptor count is too large"))?,
                 ),
         );
     }
@@ -1193,17 +1248,20 @@ pub(super) fn update_compute_descriptor_sets(
         return Ok(());
     }
     let mut buffer_infos = Vec::new();
+    let mut image_infos = Vec::new();
     let mut write_specs = Vec::new();
     for descriptor in &pipeline.inner.descriptor_bindings {
-        let bound = pass
-            .bind_buffers
-            .iter()
-            .find(|bound| bound.group == descriptor.group && bound.binding == descriptor.binding)
-            .ok_or_else(|| shader_error("compute descriptor binding is missing"))?;
-        let buffer_info = descriptor_buffer_info(bound)?;
-        buffer_infos.push(buffer_info);
+        let info = descriptor_info(
+            descriptor,
+            &pass.bind_buffers,
+            &pass.bind_textures,
+            &pass.bind_samplers,
+            &mut buffer_infos,
+            &mut image_infos,
+            "compute",
+        )?;
         write_specs.push((
-            buffer_infos.len() - 1,
+            info,
             descriptor.group,
             descriptor.binding,
             descriptor_type(descriptor.kind),
@@ -1211,18 +1269,25 @@ pub(super) fn update_compute_descriptor_sets(
     }
     let writes = write_specs
         .iter()
-        .map(|(info_index, group, binding, descriptor_type)| {
+        .map(|(info, group, binding, descriptor_type)| {
             let group = usize::try_from(*group)
                 .map_err(|_| shader_error("descriptor group index is too large"))?;
             let descriptor_set = descriptor_sets
                 .get(group)
                 .copied()
                 .ok_or_else(|| shader_error("descriptor set is missing"))?;
-            Ok(vk::WriteDescriptorSet::default()
+            let write = vk::WriteDescriptorSet::default()
                 .dst_set(descriptor_set)
                 .dst_binding(*binding)
-                .descriptor_type(*descriptor_type)
-                .buffer_info(std::slice::from_ref(&buffer_infos[*info_index])))
+                .descriptor_type(*descriptor_type);
+            Ok(match info {
+                DescriptorInfo::Buffer(index) => {
+                    write.buffer_info(std::slice::from_ref(&buffer_infos[*index]))
+                }
+                DescriptorInfo::Image(index) => {
+                    write.image_info(std::slice::from_ref(&image_infos[*index]))
+                }
+            })
         })
         .collect::<Result<Vec<_>, HalError>>()?;
     unsafe {
@@ -1270,17 +1335,20 @@ pub(super) fn update_render_descriptor_sets(
         return Ok(());
     }
     let mut buffer_infos = Vec::new();
+    let mut image_infos = Vec::new();
     let mut write_specs = Vec::new();
     for descriptor in &pipeline.inner.descriptor_bindings {
-        let bound = pass
-            .bind_buffers
-            .iter()
-            .find(|bound| bound.group == descriptor.group && bound.binding == descriptor.binding)
-            .ok_or_else(|| shader_error("render descriptor binding is missing"))?;
-        let buffer_info = descriptor_buffer_info(bound)?;
-        buffer_infos.push(buffer_info);
+        let info = descriptor_info(
+            descriptor,
+            &pass.bind_buffers,
+            &pass.bind_textures,
+            &pass.bind_samplers,
+            &mut buffer_infos,
+            &mut image_infos,
+            "render",
+        )?;
         write_specs.push((
-            buffer_infos.len() - 1,
+            info,
             descriptor.group,
             descriptor.binding,
             descriptor_type(descriptor.kind),
@@ -1288,24 +1356,106 @@ pub(super) fn update_render_descriptor_sets(
     }
     let writes = write_specs
         .iter()
-        .map(|(info_index, group, binding, descriptor_type)| {
+        .map(|(info, group, binding, descriptor_type)| {
             let group = usize::try_from(*group)
                 .map_err(|_| shader_error("descriptor group index is too large"))?;
             let descriptor_set = descriptor_sets
                 .get(group)
                 .copied()
                 .ok_or_else(|| shader_error("descriptor set is missing"))?;
-            Ok(vk::WriteDescriptorSet::default()
+            let write = vk::WriteDescriptorSet::default()
                 .dst_set(descriptor_set)
                 .dst_binding(*binding)
-                .descriptor_type(*descriptor_type)
-                .buffer_info(std::slice::from_ref(&buffer_infos[*info_index])))
+                .descriptor_type(*descriptor_type);
+            Ok(match info {
+                DescriptorInfo::Buffer(index) => {
+                    write.buffer_info(std::slice::from_ref(&buffer_infos[*index]))
+                }
+                DescriptorInfo::Image(index) => {
+                    write.image_info(std::slice::from_ref(&image_infos[*index]))
+                }
+            })
         })
         .collect::<Result<Vec<_>, HalError>>()?;
     unsafe {
         device.update_descriptor_sets(&writes, &[]);
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DescriptorInfo {
+    Buffer(usize),
+    Image(usize),
+}
+
+fn descriptor_info(
+    descriptor: &HalDescriptorBinding,
+    buffers: &[HalBoundBuffer],
+    textures: &[HalBoundTexture],
+    samplers: &[HalBoundSampler],
+    buffer_infos: &mut Vec<vk::DescriptorBufferInfo>,
+    image_infos: &mut Vec<vk::DescriptorImageInfo>,
+    pass_name: &'static str,
+) -> Result<DescriptorInfo, HalError> {
+    match descriptor.kind {
+        HalDescriptorBindingKind::Buffer(_) => {
+            let bound = buffers
+                .iter()
+                .find(|bound| {
+                    bound.group == descriptor.group && bound.binding == descriptor.binding
+                })
+                .ok_or_else(|| descriptor_missing_error(pass_name, "buffer"))?;
+            buffer_infos.push(descriptor_buffer_info(bound)?);
+            Ok(DescriptorInfo::Buffer(buffer_infos.len() - 1))
+        }
+        HalDescriptorBindingKind::Texture => {
+            let bound = textures
+                .iter()
+                .find(|bound| {
+                    bound.group == descriptor.group && bound.binding == descriptor.binding
+                })
+                .ok_or_else(|| descriptor_missing_error(pass_name, "texture"))?;
+            let HalTexture::Vulkan(texture) = &bound.texture else {
+                return Err(shader_error("descriptor texture is not Vulkan-backed"));
+            };
+            image_infos.push(
+                vk::DescriptorImageInfo::default()
+                    .image_view(texture.inner()?.view)
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+            );
+            Ok(DescriptorInfo::Image(image_infos.len() - 1))
+        }
+        HalDescriptorBindingKind::Sampler => {
+            let bound = samplers
+                .iter()
+                .find(|bound| {
+                    bound.group == descriptor.group && bound.binding == descriptor.binding
+                })
+                .ok_or_else(|| descriptor_missing_error(pass_name, "sampler"))?;
+            let HalSampler::Vulkan(sampler) = &bound.sampler else {
+                return Err(shader_error("descriptor sampler is not Vulkan-backed"));
+            };
+            let sampler = sampler
+                ._inner
+                .as_ref()
+                .ok_or_else(|| shader_error("sampler allocation failed"))?;
+            image_infos.push(vk::DescriptorImageInfo::default().sampler(sampler.sampler));
+            Ok(DescriptorInfo::Image(image_infos.len() - 1))
+        }
+    }
+}
+
+fn descriptor_missing_error(pass_name: &'static str, resource: &'static str) -> HalError {
+    match (pass_name, resource) {
+        ("compute", "buffer") => shader_error("compute buffer descriptor binding is missing"),
+        ("compute", "texture") => shader_error("compute texture descriptor binding is missing"),
+        ("compute", "sampler") => shader_error("compute sampler descriptor binding is missing"),
+        ("render", "buffer") => shader_error("render buffer descriptor binding is missing"),
+        ("render", "texture") => shader_error("render texture descriptor binding is missing"),
+        ("render", "sampler") => shader_error("render sampler descriptor binding is missing"),
+        _ => shader_error("descriptor binding is missing"),
+    }
 }
 
 /// Returns bind render descriptor sets.
@@ -1395,11 +1545,29 @@ pub(super) fn create_descriptor_pool(
     }
     let uniform_count = bindings
         .iter()
-        .filter(|binding| matches!(binding.kind, HalBufferBindingKind::Uniform))
+        .filter(|binding| {
+            matches!(
+                binding.kind,
+                HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform)
+            )
+        })
         .count();
     let storage_count = bindings
         .iter()
-        .filter(|binding| matches!(binding.kind, HalBufferBindingKind::Storage))
+        .filter(|binding| {
+            matches!(
+                binding.kind,
+                HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage)
+            )
+        })
+        .count();
+    let texture_count = bindings
+        .iter()
+        .filter(|binding| matches!(binding.kind, HalDescriptorBindingKind::Texture))
+        .count();
+    let sampler_count = bindings
+        .iter()
+        .filter(|binding| matches!(binding.kind, HalDescriptorBindingKind::Sampler))
         .count();
     let mut pool_sizes = Vec::new();
     if uniform_count > 0 {
@@ -1422,11 +1590,36 @@ pub(super) fn create_descriptor_pool(
                 ),
         );
     }
+    if texture_count > 0 {
+        pool_sizes.push(
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(
+                    u32::try_from(texture_count)
+                        .map_err(|_| shader_error("texture descriptor count is too large"))?,
+                ),
+        );
+    }
+    if sampler_count > 0 {
+        pool_sizes.push(
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLER)
+                .descriptor_count(
+                    u32::try_from(sampler_count)
+                        .map_err(|_| shader_error("sampler descriptor count is too large"))?,
+                ),
+        );
+    }
     #[cfg(feature = "tiled")]
     {
         let input_attachment_count = bindings
             .iter()
-            .filter(|binding| matches!(binding.kind, HalBufferBindingKind::InputAttachment))
+            .filter(|binding| {
+                matches!(
+                    binding.kind,
+                    HalDescriptorBindingKind::Buffer(HalBufferBindingKind::InputAttachment)
+                )
+            })
             .count();
         if input_attachment_count > 0 {
             pool_sizes.push(

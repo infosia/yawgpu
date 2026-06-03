@@ -1,6 +1,6 @@
 use super::*;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
-use crate::HalTextureDimension;
+use crate::{HalTextureAspect, HalTextureDimension, HalTextureViewDimension};
 
 /// Records encode into the command stream.
 pub(super) fn encode_buffer_copy(
@@ -78,18 +78,40 @@ pub(super) fn encode_buffer_to_texture(
                     depth_or_array_layers: 1,
                     ..copy.extent
                 })?;
+                let option = packed_depth_stencil_blit_option(copy.format, copy.aspect);
+                let bytes_per_row = to_ns(u64::from(copy.buffer_layout.bytes_per_row))?;
+                let level = to_ns(u64::from(copy.mip_level))?;
+                let origin = to_mtl_origin(copy.origin.x, copy.origin.y, 0)?;
                 for layer in 0..copy.extent.depth_or_array_layers {
-                    blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
-                        buffer.inner()?,
-                        layer_buffer_offset(copy.buffer_layout.offset, bytes_per_image, layer)?,
-                        to_ns(u64::from(copy.buffer_layout.bytes_per_row))?,
-                        bytes_per_image,
-                        size,
-                        texture.inner()?,
-                        to_ns(u64::from(copy.origin.z + layer))?,
-                        to_ns(u64::from(copy.mip_level))?,
-                        to_mtl_origin(copy.origin.x, copy.origin.y, 0)?,
-                    );
+                    let source_offset =
+                        layer_buffer_offset(copy.buffer_layout.offset, bytes_per_image, layer)?;
+                    let dst_slice = to_ns(u64::from(copy.origin.z + layer))?;
+                    if option == MTLBlitOption::empty() {
+                        blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
+                            buffer.inner()?,
+                            source_offset,
+                            bytes_per_row,
+                            bytes_per_image,
+                            size,
+                            texture.inner()?,
+                            dst_slice,
+                            level,
+                            origin,
+                        );
+                    } else {
+                        blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin_options(
+                            buffer.inner()?,
+                            source_offset,
+                            bytes_per_row,
+                            bytes_per_image,
+                            size,
+                            texture.inner()?,
+                            dst_slice,
+                            level,
+                            origin,
+                            option,
+                        );
+                    }
                 }
             }
         }
@@ -131,18 +153,40 @@ pub(super) fn encode_texture_to_buffer(
                     depth_or_array_layers: 1,
                     ..copy.extent
                 })?;
+                let option = packed_depth_stencil_blit_option(copy.format, copy.aspect);
+                let bytes_per_row = to_ns(u64::from(copy.buffer_layout.bytes_per_row))?;
+                let level = to_ns(u64::from(copy.mip_level))?;
+                let origin = to_mtl_origin(copy.origin.x, copy.origin.y, 0)?;
                 for layer in 0..copy.extent.depth_or_array_layers {
-                    blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage(
-                        texture.inner()?,
-                        to_ns(u64::from(copy.origin.z + layer))?,
-                        to_ns(u64::from(copy.mip_level))?,
-                        to_mtl_origin(copy.origin.x, copy.origin.y, 0)?,
-                        size,
-                        buffer.inner()?,
-                        layer_buffer_offset(copy.buffer_layout.offset, bytes_per_image, layer)?,
-                        to_ns(u64::from(copy.buffer_layout.bytes_per_row))?,
-                        bytes_per_image,
-                    );
+                    let dst_offset =
+                        layer_buffer_offset(copy.buffer_layout.offset, bytes_per_image, layer)?;
+                    let src_slice = to_ns(u64::from(copy.origin.z + layer))?;
+                    if option == MTLBlitOption::empty() {
+                        blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage(
+                            texture.inner()?,
+                            src_slice,
+                            level,
+                            origin,
+                            size,
+                            buffer.inner()?,
+                            dst_offset,
+                            bytes_per_row,
+                            bytes_per_image,
+                        );
+                    } else {
+                        blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage_options(
+                            texture.inner()?,
+                            src_slice,
+                            level,
+                            origin,
+                            size,
+                            buffer.inner()?,
+                            dst_offset,
+                            bytes_per_row,
+                            bytes_per_image,
+                            option,
+                        );
+                    }
                 }
             }
         }
@@ -205,6 +249,24 @@ pub(super) fn encode_texture_to_texture(
     Ok(())
 }
 
+/// Returns the `MTLBlitOption` needed to extract a single plane of a *packed*
+/// depth+stencil texture in a buffer⇄texture copy. Single-aspect formats (pure
+/// depth, pure stencil, colour) need no option — Metal copies their only plane.
+fn packed_depth_stencil_blit_option(
+    format: HalTextureFormat,
+    aspect: HalTextureAspect,
+) -> MTLBlitOption {
+    if format_has_depth_aspect(format) && format_has_stencil_aspect(format) {
+        match aspect {
+            HalTextureAspect::DepthOnly => MTLBlitOption::DepthFromDepthStencil,
+            HalTextureAspect::StencilOnly => MTLBlitOption::StencilFromDepthStencil,
+            HalTextureAspect::All => MTLBlitOption::empty(),
+        }
+    } else {
+        MTLBlitOption::empty()
+    }
+}
+
 fn layer_buffer_offset(
     base_offset: u64,
     bytes_per_image: usize,
@@ -233,10 +295,47 @@ pub(super) fn encode_compute_pass(
     for binding in &pass.bind_buffers {
         encode_compute_buffer(encoder, binding)?;
     }
+    for binding in &pass.bind_textures {
+        encode_compute_texture(encoder, binding)?;
+    }
+    for binding in &pass.bind_samplers {
+        encode_compute_sampler(encoder, binding)?;
+    }
     encoder.dispatchThreadgroups_threadsPerThreadgroup(
         to_mtl_dispatch_size(pass.workgroups)?,
         to_mtl_workgroup_size(pipeline.workgroup_size)?,
     );
+    Ok(())
+}
+
+fn encode_compute_texture(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    binding: &HalBoundTexture,
+) -> Result<(), HalError> {
+    let HalTexture::Metal(texture) = &binding.texture else {
+        return Err(texture_error("compute texture is not Metal-backed"));
+    };
+    let view = metal_texture_view(texture, binding)?;
+    unsafe {
+        encoder.setTexture_atIndex(Some(view.as_ref()), to_ns(u64::from(binding.metal_index))?);
+    }
+    Ok(())
+}
+
+fn encode_compute_sampler(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    binding: &HalBoundSampler,
+) -> Result<(), HalError> {
+    let HalSampler::Metal(sampler) = &binding.sampler else {
+        return Err(texture_error("compute sampler is not Metal-backed"));
+    };
+    let sampler = sampler
+        ._inner
+        .as_deref()
+        .ok_or_else(|| texture_error("sampler allocation failed"))?;
+    unsafe {
+        encoder.setSamplerState_atIndex(Some(sampler), to_ns(u64::from(binding.metal_index))?);
+    }
     Ok(())
 }
 
@@ -542,6 +641,12 @@ pub(super) fn encode_render_pass(
     for binding in &pass.bind_buffers {
         encode_render_bind_buffer(encoder, binding)?;
     }
+    for binding in &pass.bind_textures {
+        encode_render_bind_texture(encoder, binding)?;
+    }
+    for binding in &pass.bind_samplers {
+        encode_render_bind_sampler(encoder, binding)?;
+    }
     for binding in &pass.vertex_buffers {
         encode_render_vertex_buffer(encoder, binding)?;
     }
@@ -580,6 +685,12 @@ fn encode_subpass_draw(
     );
     for binding in &draw.bind_buffers {
         encode_render_bind_buffer(encoder, binding)?;
+    }
+    for binding in &draw.bind_textures {
+        encode_render_bind_texture(encoder, binding)?;
+    }
+    for binding in &draw.bind_samplers {
+        encode_render_bind_sampler(encoder, binding)?;
     }
     for binding in &draw.vertex_buffers {
         encode_render_vertex_buffer(encoder, binding)?;
@@ -650,6 +761,79 @@ fn encode_render_bind_buffer(
     unsafe {
         encoder.setVertexBuffer_offset_atIndex(Some(buffer.inner()?), offset, index);
         encoder.setFragmentBuffer_offset_atIndex(Some(buffer.inner()?), offset, index);
+    }
+    Ok(())
+}
+
+fn encode_render_bind_texture(
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    binding: &HalBoundTexture,
+) -> Result<(), HalError> {
+    let HalTexture::Metal(texture) = &binding.texture else {
+        return Err(texture_error("render bind texture is not Metal-backed"));
+    };
+    let view = metal_texture_view(texture, binding)?;
+    let index = to_ns(u64::from(binding.metal_index))?;
+    unsafe {
+        encoder.setVertexTexture_atIndex(Some(view.as_ref()), index);
+        encoder.setFragmentTexture_atIndex(Some(view.as_ref()), index);
+    }
+    Ok(())
+}
+
+fn metal_texture_view(
+    texture: &MetalTexture,
+    binding: &HalBoundTexture,
+) -> Result<Retained<ProtocolObject<dyn MTLTextureTrait>>, HalError> {
+    let (pixel_format, _) = map_texture_format(binding.format)?;
+    let texture_type = metal_texture_view_type(binding.dimension);
+    let level_range = NSRange::new(
+        to_ns(u64::from(binding.base_mip_level))?,
+        to_ns(u64::from(binding.mip_level_count))?,
+    );
+    let slice_range = NSRange::new(
+        to_ns(u64::from(binding.base_array_layer))?,
+        to_ns(u64::from(binding.array_layer_count))?,
+    );
+    unsafe {
+        texture
+            .inner()?
+            .newTextureViewWithPixelFormat_textureType_levels_slices(
+                pixel_format,
+                texture_type,
+                level_range,
+                slice_range,
+            )
+            .ok_or_else(|| texture_error("texture view allocation failed"))
+    }
+}
+
+fn metal_texture_view_type(dimension: HalTextureViewDimension) -> MTLTextureType {
+    match dimension {
+        HalTextureViewDimension::D1 => MTLTextureType::Type1D,
+        HalTextureViewDimension::D2 => MTLTextureType::Type2D,
+        HalTextureViewDimension::D2Array => MTLTextureType::Type2DArray,
+        HalTextureViewDimension::Cube => MTLTextureType::TypeCube,
+        HalTextureViewDimension::CubeArray => MTLTextureType::TypeCubeArray,
+        HalTextureViewDimension::D3 => MTLTextureType::Type3D,
+    }
+}
+
+fn encode_render_bind_sampler(
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    binding: &HalBoundSampler,
+) -> Result<(), HalError> {
+    let HalSampler::Metal(sampler) = &binding.sampler else {
+        return Err(texture_error("render bind sampler is not Metal-backed"));
+    };
+    let sampler = sampler
+        ._inner
+        .as_deref()
+        .ok_or_else(|| texture_error("sampler allocation failed"))?;
+    let index = to_ns(u64::from(binding.metal_index))?;
+    unsafe {
+        encoder.setVertexSamplerState_atIndex(Some(sampler), index);
+        encoder.setFragmentSamplerState_atIndex(Some(sampler), index);
     }
     Ok(())
 }

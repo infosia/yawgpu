@@ -193,6 +193,11 @@ impl Sampler {
     pub fn is_error(&self) -> bool {
         self.inner.is_error
     }
+
+    /// Returns the HAL sampler.
+    pub(crate) fn hal(&self) -> Option<HalSampler> {
+        self.inner._hal.clone()
+    }
 }
 
 /// Returns HAL sampler descriptor.

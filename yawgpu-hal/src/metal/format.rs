@@ -43,11 +43,27 @@ pub(super) fn validate_buffer_texture_range(
     Ok(())
 }
 
-/// Returns texture bytes per pixel.
+/// Returns the per-texel byte size of the *aspect* being copied. For a single
+/// aspect of a depth/stencil format this is the plane's size (stencil = 1 byte;
+/// depth = 2 or 4) rather than the whole texel — buffer⇄texture copies move one
+/// plane at a time, so the buffer is laid out at the aspect's stride.
 pub(super) fn texture_bytes_per_pixel(copy: &HalBufferTextureCopy) -> Result<u32, HalError> {
     let HalTexture::Metal(texture) = &copy.texture else {
         return Err(texture_error("texture is not Metal-backed"));
     };
+    match copy.aspect {
+        crate::HalTextureAspect::StencilOnly => Ok(1),
+        crate::HalTextureAspect::DepthOnly => Ok(match copy.format {
+            crate::HalTextureFormat::Depth16Unorm => 2,
+            crate::HalTextureFormat::Depth32Float
+            | crate::HalTextureFormat::Depth32FloatStencil8 => 4,
+            _ => full_bytes_per_pixel(texture)?,
+        }),
+        crate::HalTextureAspect::All => full_bytes_per_pixel(texture),
+    }
+}
+
+fn full_bytes_per_pixel(texture: &MetalTexture) -> Result<u32, HalError> {
     if texture.bytes_per_pixel == 0 {
         return Err(texture_error("unsupported texture format"));
     }
