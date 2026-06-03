@@ -99,6 +99,15 @@ impl Queue {
         buffer.write_from_queue(offset, data)
     }
 
+    /// Waits until all submitted queue work has completed.
+    pub fn wait_idle(&self) -> Option<DeviceError> {
+        self.inner
+            .hal
+            .wait_idle()
+            .err()
+            .map(|error| DeviceError::internal(error.to_string()))
+    }
+
     /// Writes `data` into the texture through the backend copy path.
     pub fn write_texture(&self, write: QueueTextureWrite<'_>) -> Option<DeviceError> {
         let QueueTextureWrite {
@@ -803,6 +812,33 @@ mod tests {
 
         assert_eq!(queue.write_buffer(&buffer, 0, &[1, 2, 3, 4]), None);
         assert_eq!(queue.submit(&[]), None);
+    }
+
+    #[test]
+    fn queue_wait_idle_noop_returns_ok() {
+        let device = noop_device();
+        let queue = device.queue();
+
+        assert_eq!(queue.wait_idle(), None);
+    }
+
+    #[test]
+    fn queue_write_buffer_then_map_read_resolves_after_wait_idle() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::MAP_READ | BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+
+        assert_eq!(queue.write_buffer(&buffer, 0, &[1, 2, 3, 4]), None);
+        assert_eq!(buffer.begin_map(MapMode::Read, 0, 4), Ok(()));
+        assert_eq!(queue.wait_idle(), None);
+        assert_eq!(
+            buffer.resolve_pending_map_with_gpu_completion(|| true),
+            MapAsyncStatus::Success
+        );
     }
 
     #[test]

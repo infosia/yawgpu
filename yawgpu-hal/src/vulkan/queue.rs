@@ -31,13 +31,19 @@ impl VulkanQueue {
                 .device
                 .queue_submit(self.inner.queue, &[], vk::Fence::null())
                 .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+        }
+        self.wait_idle()
+    }
+
+    /// Waits until all submitted queue work has completed.
+    pub fn wait_idle(&self) -> Result<(), HalError> {
+        unsafe {
             self.inner
                 .device
                 .device
                 .queue_wait_idle(self.inner.queue)
-                .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })
         }
-        Ok(())
     }
 
     /// Records and submits the given buffer/texture copy operations.

@@ -487,6 +487,15 @@ impl Buffer {
     /// Completes the pending map, transitioning the buffer to the mapped state.
     #[must_use]
     pub fn resolve_pending_map(&self) -> MapAsyncStatus {
+        self.resolve_pending_map_with_gpu_completion(|| true)
+    }
+
+    /// Completes the pending map after ensuring GPU work has completed for read maps.
+    #[must_use]
+    pub fn resolve_pending_map_with_gpu_completion(
+        &self,
+        ensure_gpu_complete: impl FnOnce() -> bool,
+    ) -> MapAsyncStatus {
         let mut state = self.inner.state.lock();
         let pending = state.pending_map.take();
         let mut outcome = pending
@@ -497,15 +506,23 @@ impl Buffer {
             if let Some(pending) = pending.as_ref() {
                 if pending.mode == MapMode::Read {
                     if let Some(hal) = &self.inner.hal {
-                        if hal.mapped_ptr().is_none() {
-                            outcome = match hal.read(pending.offset, pending.size) {
-                                Ok(bytes)
-                                    if self.inner.host.write(pending.offset, &bytes).is_ok() =>
-                                {
-                                    MapAsyncStatus::Success
-                                }
-                                _ => MapAsyncStatus::Error,
-                            };
+                        if should_wait_for_read_map(outcome, pending, true) {
+                            if !ensure_gpu_complete() {
+                                outcome = MapAsyncStatus::Error;
+                            } else if hal.mapped_ptr().is_none() {
+                                outcome = match hal.read(pending.offset, pending.size) {
+                                    Ok(bytes)
+                                        if self
+                                            .inner
+                                            .host
+                                            .write(pending.offset, &bytes)
+                                            .is_ok() =>
+                                    {
+                                        MapAsyncStatus::Success
+                                    }
+                                    _ => MapAsyncStatus::Error,
+                                };
+                            }
                         }
                     }
                 }
@@ -658,6 +675,14 @@ fn ranges_overlap(a: MappedRange, b: MappedRange) -> bool {
     !(a.offset >= b_end || b.offset >= a_end)
 }
 
+fn should_wait_for_read_map(
+    outcome: MapAsyncStatus,
+    pending: &PendingMap,
+    has_live_hal_buffer: bool,
+) -> bool {
+    outcome == MapAsyncStatus::Success && pending.mode == MapMode::Read && has_live_hal_buffer
+}
+
 /// Validates buffer descriptor and returns a descriptive error on failure.
 pub(crate) fn validate_buffer_descriptor(
     descriptor: &BufferDescriptor,
@@ -695,6 +720,8 @@ pub(crate) fn validate_buffer_descriptor(
 mod tests {
     use super::*;
     use crate::test_helpers::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn buffer_usage_from_bits_retain_round_trips_known_and_unknown_bits() {
@@ -847,6 +874,101 @@ mod tests {
         assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
         assert_eq!(buffer.resolve_pending_map(), MapAsyncStatus::Aborted);
         assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
+    }
+
+    #[test]
+    fn resolve_pending_map_gpu_completion_hook_runs_only_for_successful_read() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let read_buffer = noop_buffer(8, BufferUsage::MAP_READ);
+        assert_eq!(read_buffer.begin_map(MapMode::Read, 0, 8), Ok(()));
+        let read_calls = Arc::clone(&calls);
+        assert_eq!(
+            read_buffer.resolve_pending_map_with_gpu_completion(|| {
+                read_calls.fetch_add(1, Ordering::Relaxed);
+                true
+            }),
+            MapAsyncStatus::Success
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        let write_buffer = noop_buffer(8, BufferUsage::MAP_WRITE);
+        assert_eq!(write_buffer.begin_map(MapMode::Write, 0, 8), Ok(()));
+        let write_calls = Arc::clone(&calls);
+        assert_eq!(
+            write_buffer.resolve_pending_map_with_gpu_completion(|| {
+                write_calls.fetch_add(1, Ordering::Relaxed);
+                true
+            }),
+            MapAsyncStatus::Success
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        let aborted_buffer = noop_buffer(8, BufferUsage::MAP_READ);
+        assert_eq!(aborted_buffer.begin_map(MapMode::Read, 0, 8), Ok(()));
+        aborted_buffer.abort_pending_map();
+        let aborted_calls = Arc::clone(&calls);
+        assert_eq!(
+            aborted_buffer.resolve_pending_map_with_gpu_completion(|| {
+                aborted_calls.fetch_add(1, Ordering::Relaxed);
+                true
+            }),
+            MapAsyncStatus::Aborted
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn resolve_pending_map_gpu_completion_failure_returns_error() {
+        let buffer = noop_buffer(8, BufferUsage::MAP_READ);
+
+        assert_eq!(buffer.begin_map(MapMode::Read, 0, 8), Ok(()));
+        assert_eq!(
+            buffer.resolve_pending_map_with_gpu_completion(|| false),
+            MapAsyncStatus::Error
+        );
+        assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
+    }
+
+    #[test]
+    fn read_map_wait_decision_depends_on_mode_outcome_and_live_hal_only() {
+        let read = PendingMap {
+            mode: MapMode::Read,
+            offset: 0,
+            size: 4,
+            outcome: MapAsyncStatus::Success,
+        };
+        let write = PendingMap {
+            mode: MapMode::Write,
+            offset: 0,
+            size: 4,
+            outcome: MapAsyncStatus::Success,
+        };
+
+        assert!(should_wait_for_read_map(
+            MapAsyncStatus::Success,
+            &read,
+            true
+        ));
+        assert!(!should_wait_for_read_map(
+            MapAsyncStatus::Success,
+            &write,
+            true
+        ));
+        assert!(!should_wait_for_read_map(
+            MapAsyncStatus::Aborted,
+            &read,
+            true
+        ));
+        assert!(!should_wait_for_read_map(
+            MapAsyncStatus::Error,
+            &read,
+            true
+        ));
+        assert!(!should_wait_for_read_map(
+            MapAsyncStatus::Success,
+            &read,
+            false
+        ));
     }
 
     #[test]

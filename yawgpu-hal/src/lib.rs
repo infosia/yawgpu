@@ -816,6 +816,20 @@ impl HalQueue {
         }
     }
 
+    /// Waits until all submitted queue work has completed.
+    pub fn wait_idle(&self) -> Result<(), HalError> {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(queue) => queue.wait_idle(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(queue) => queue.wait_idle(),
+            #[cfg(feature = "metal")]
+            Self::Metal(queue) => queue.wait_idle(),
+            #[cfg(feature = "gles")]
+            Self::Gles(queue) => queue.wait_idle(),
+        }
+    }
+
     /// Records and submits the given buffer/texture copy operations.
     pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
         #[cfg(not(any(feature = "noop", feature = "metal", feature = "vulkan")))]
@@ -1278,6 +1292,14 @@ mod tests {
         let queue = device.queue();
 
         queue.submit_empty()
+    }
+
+    #[test]
+    fn hal_queue_wait_idle_noop_returns_ok() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let queue = device.queue();
+
+        queue.wait_idle()
     }
 
     #[test]
