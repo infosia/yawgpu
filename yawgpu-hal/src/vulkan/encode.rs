@@ -131,19 +131,34 @@ pub(super) fn record_and_submit_copies(
                 .device
                 .queue_submit(queue.queue, &[submit_info], fence)
                 .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+            let retained = collect_retained_resources(copies);
             let cleanup = retire_ops(command_pool, descriptor_pools, framebuffers, render_passes);
             if let Some(pending_state) = surface_retire {
-                pending_state
-                    .lock()
-                    .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?
-                    .retire
-                    .retire(&queue.device.device, fence, cleanup, true)?;
+                let mut pending_state = match pending_state.lock() {
+                    Ok(pending_state) => pending_state,
+                    Err(_) => {
+                        std::mem::forget(cleanup);
+                        std::mem::forget(retained);
+                        return Err(HalError::QueueSubmissionFailed { backend: BACKEND });
+                    }
+                };
+                pending_state.retire.retire(
+                    &queue.device.device,
+                    fence,
+                    cleanup,
+                    retained,
+                    true,
+                )?;
             } else {
-                queue
-                    .retire
-                    .lock()
-                    .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?
-                    .retire(&queue.device.device, fence, cleanup, true)?;
+                let mut retire = match queue.retire.lock() {
+                    Ok(retire) => retire,
+                    Err(_) => {
+                        std::mem::forget(cleanup);
+                        std::mem::forget(retained);
+                        return Err(HalError::QueueSubmissionFailed { backend: BACKEND });
+                    }
+                };
+                retire.retire(&queue.device.device, fence, cleanup, retained, true)?;
             }
         }
         Ok(())
@@ -271,6 +286,7 @@ pub(super) fn transition_swapchain_image_to_present(
                         pool: command_pool,
                         buffer: command_buffer,
                     }],
+                    Vec::new(),
                     false,
                 )
                 .map_err(|_| HalError::PresentFailed {
@@ -295,6 +311,117 @@ fn retire_ops(
     cleanup.extend(framebuffers.into_iter().map(RetireOp::Framebuffer));
     cleanup.extend(render_passes.into_iter().map(RetireOp::RenderPass));
     cleanup
+}
+
+fn collect_retained_resources(copies: &[HalCopy]) -> Vec<RetainedResource> {
+    let mut retained = Vec::new();
+    for copy in copies {
+        retain_copy_resources(copy, &mut retained);
+    }
+    retained
+}
+
+fn retain_copy_resources(copy: &HalCopy, retained: &mut Vec<RetainedResource>) {
+    match copy {
+        HalCopy::Buffer(copy) => {
+            retain_hal_buffer(&copy.source, retained);
+            retain_hal_buffer(&copy.destination, retained);
+        }
+        HalCopy::BufferClear(clear) => retain_hal_buffer(&clear.buffer, retained),
+        HalCopy::BufferToTexture(copy) | HalCopy::TextureToBuffer(copy) => {
+            retain_hal_buffer(&copy.buffer, retained);
+            retain_hal_texture(&copy.texture, retained);
+        }
+        HalCopy::TextureToTexture(copy) => {
+            retain_hal_texture(&copy.source, retained);
+            retain_hal_texture(&copy.destination, retained);
+        }
+        HalCopy::ComputePass(pass) => {
+            for bound in &pass.bind_buffers {
+                retain_hal_buffer(&bound.buffer, retained);
+            }
+        }
+        HalCopy::RenderPass(pass) => {
+            retain_hal_texture(&pass.color_target.texture, retained);
+            for bound in &pass.bind_buffers {
+                retain_hal_buffer(&bound.buffer, retained);
+            }
+            for bound in &pass.vertex_buffers {
+                retain_hal_buffer(&bound.buffer, retained);
+            }
+        }
+        #[cfg(feature = "tiled")]
+        HalCopy::SubpassRenderPass(pass) => retain_subpass_resources(pass, retained),
+    }
+}
+
+fn retain_hal_buffer(buffer: &crate::HalBuffer, retained: &mut Vec<RetainedResource>) {
+    let crate::HalBuffer::Vulkan(buffer) = buffer else {
+        return;
+    };
+    if let Some(inner) = &buffer.inner {
+        retained.push(RetainedResource::Buffer {
+            _inner: Arc::clone(inner),
+        });
+    }
+}
+
+fn retain_hal_texture(texture: &HalTexture, retained: &mut Vec<RetainedResource>) {
+    let HalTexture::Vulkan(texture) = texture else {
+        return;
+    };
+    if let Some(inner) = &texture.inner {
+        retained.push(RetainedResource::Texture {
+            _inner: Arc::clone(inner),
+        });
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn retain_subpass_resources(
+    pass: &HalSubpassRenderPassCommand,
+    retained: &mut Vec<RetainedResource>,
+) {
+    for attachment in &pass.color_attachments {
+        retain_subpass_attachment_resource(&attachment.resource, retained);
+    }
+    if let Some(attachment) = &pass.depth_stencil_attachment {
+        retain_subpass_attachment_resource(&attachment.resource, retained);
+    }
+    for draw in &pass.draws {
+        for bound in &draw.bind_buffers {
+            retain_hal_buffer(&bound.buffer, retained);
+        }
+        for bound in &draw.vertex_buffers {
+            retain_hal_buffer(&bound.buffer, retained);
+        }
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn retain_subpass_attachment_resource(
+    resource: &HalSubpassAttachmentResource,
+    retained: &mut Vec<RetainedResource>,
+) {
+    match resource {
+        HalSubpassAttachmentResource::Persistent {
+            texture,
+            resolve_target,
+        } => {
+            retain_hal_texture(texture, retained);
+            if let Some(resolve_target) = resolve_target {
+                retain_hal_texture(resolve_target, retained);
+            }
+        }
+        HalSubpassAttachmentResource::Transient(attachment) => {
+            let HalTransientAttachment::Vulkan(attachment) = attachment else {
+                return;
+            };
+            retained.push(RetainedResource::Texture {
+                _inner: Arc::clone(&attachment._inner),
+            });
+        }
+    }
 }
 
 fn find_surface_pending(copies: &[HalCopy]) -> Option<Arc<Mutex<SurfacePendingState>>> {

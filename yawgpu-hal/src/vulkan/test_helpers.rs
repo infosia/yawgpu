@@ -1,5 +1,8 @@
 use super::*;
-use crate::{HalPresentMode, HalRenderPipelineDescriptor, HalSamplerDescriptor, HalTextureUsage};
+use crate::{
+    HalPresentMode, HalRenderPipelineDescriptor, HalSamplerDescriptor, HalTextureDimension,
+    HalTextureUsage,
+};
 
 /// Returns vulkan device.
 pub(crate) fn vulkan_device() -> VulkanDevice {

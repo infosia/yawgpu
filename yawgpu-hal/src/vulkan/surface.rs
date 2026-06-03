@@ -68,9 +68,16 @@ pub(super) enum RetireOp {
 }
 
 #[derive(Debug)]
+pub(super) enum RetainedResource {
+    Buffer { _inner: Arc<VulkanBufferInner> },
+    Texture { _inner: Arc<VulkanTextureInner> },
+}
+
+#[derive(Debug)]
 pub(super) struct InFlightFrame {
     fence: vk::Fence,
     cleanup: Vec<RetireOp>,
+    retained: Vec<RetainedResource>,
     destroy_fence: bool,
 }
 
@@ -93,27 +100,26 @@ impl RetireRing {
         device: &ash::Device,
         fence: vk::Fence,
         cleanup: Vec<RetireOp>,
+        retained: Vec<RetainedResource>,
         destroy_fence: bool,
     ) -> Result<(), HalError> {
+        let new_frame = InFlightFrame {
+            fence,
+            cleanup,
+            retained,
+            destroy_fence,
+        };
         if self.frames.is_empty() {
-            wait_and_cleanup_frame(
-                device,
-                InFlightFrame {
-                    fence,
-                    cleanup,
-                    destroy_fence,
-                },
-            )?;
+            wait_and_cleanup_frame(device, new_frame)?;
             return Ok(());
         }
         if let Some(frame) = self.frames[self.next].take() {
-            wait_and_cleanup_frame(device, frame)?;
+            if let Err(error) = wait_and_cleanup_frame(device, frame) {
+                std::mem::forget(new_frame);
+                return Err(error);
+            }
         }
-        self.frames[self.next] = Some(InFlightFrame {
-            fence,
-            cleanup,
-            destroy_fence,
-        });
+        self.frames[self.next] = Some(new_frame);
         self.next = (self.next + 1) % self.frames.len();
         Ok(())
     }
@@ -129,13 +135,22 @@ impl RetireRing {
 }
 
 fn wait_and_cleanup_frame(device: &ash::Device, frame: InFlightFrame) -> Result<(), HalError> {
+    let fence = frame.fence;
     unsafe {
-        device
-            .wait_for_fences(&[frame.fence], true, u64::MAX)
-            .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
-        cleanup_retire_ops(device, frame.cleanup);
-        if frame.destroy_fence {
-            device.destroy_fence(frame.fence, None);
+        if device.wait_for_fences(&[fence], true, u64::MAX).is_err() {
+            std::mem::forget(frame);
+            return Err(HalError::QueueSubmissionFailed { backend: BACKEND });
+        }
+        let InFlightFrame {
+            fence,
+            cleanup,
+            retained,
+            destroy_fence,
+        } = frame;
+        cleanup_retire_ops(device, cleanup);
+        drop(retained);
+        if destroy_fence {
+            device.destroy_fence(fence, None);
         }
     }
     Ok(())
@@ -717,22 +732,95 @@ mod tests {
     #[cfg(feature = "vulkan")]
     fn vulkan_retire_ring_wait_all_retires_signaled_fence() {
         let device = vulkan_device();
-        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-        let fence = unsafe {
-            device
-                .inner
-                .device
-                .create_fence(&fence_info, None)
-                .expect("create signaled fence")
-        };
+        let fence = signaled_fence(&device);
         let mut retire = RetireRing::new(1);
         retire
-            .retire(&device.inner.device, fence, Vec::new(), true)
+            .retire(&device.inner.device, fence, Vec::new(), Vec::new(), true)
             .expect("retire signaled fence");
         retire
             .wait_all(&device.inner.device)
             .expect("wait all retired frames");
         assert!(retire.frames.iter().all(Option::is_none));
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_retire_ring_wait_all_releases_retained_buffer() {
+        let device = vulkan_device();
+        let buffer = device.create_buffer(16, HalBufferUsage::default());
+        let inner = Arc::clone(buffer.inner.as_ref().expect("buffer allocation"));
+        let fence = signaled_fence(&device);
+        let mut retire = RetireRing::new(1);
+        retire
+            .retire(
+                &device.inner.device,
+                fence,
+                Vec::new(),
+                vec![RetainedResource::Buffer {
+                    _inner: Arc::clone(&inner),
+                }],
+                true,
+            )
+            .expect("retire signaled fence");
+        assert_eq!(Arc::strong_count(&inner), 3);
+        drop(buffer);
+        assert_eq!(Arc::strong_count(&inner), 2);
+        retire
+            .wait_all(&device.inner.device)
+            .expect("wait all retired frames");
+        assert_eq!(Arc::strong_count(&inner), 1);
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_retire_ring_slot_reuse_releases_retained_texture() {
+        let device = vulkan_device();
+        let texture = device.create_texture(&texture_descriptor());
+        let inner = Arc::clone(texture.inner.as_ref().expect("texture allocation"));
+        let first_fence = signaled_fence(&device);
+        let second_fence = signaled_fence(&device);
+        let mut retire = RetireRing::new(1);
+        retire
+            .retire(
+                &device.inner.device,
+                first_fence,
+                Vec::new(),
+                vec![RetainedResource::Texture {
+                    _inner: Arc::clone(&inner),
+                }],
+                true,
+            )
+            .expect("retire first fence");
+        assert_eq!(Arc::strong_count(&inner), 3);
+        drop(texture);
+        assert_eq!(Arc::strong_count(&inner), 2);
+        retire
+            .retire(
+                &device.inner.device,
+                second_fence,
+                Vec::new(),
+                Vec::new(),
+                true,
+            )
+            .expect("reuse retire slot");
+        assert_eq!(Arc::strong_count(&inner), 1);
+        retire
+            .wait_all(&device.inner.device)
+            .expect("wait remaining retired frame");
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn signaled_fence(device: &VulkanDevice) -> vk::Fence {
+        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        unsafe {
+            device
+                .inner
+                .device
+                .create_fence(&fence_info, None)
+                .expect("create signaled fence")
+        }
     }
 
     #[test]
