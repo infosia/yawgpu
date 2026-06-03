@@ -459,7 +459,7 @@ never a reason to skip a CTS case.
   `1080 passed / 0 failed`. 3-way confirmed (Dawn + wgpu-native pass all 216).
   Verification + the gap-6/gap-7 fixes were done by Claude directly (per request);
   Rounds 1–4 lib work was the coding agent's.
-- **External-CTS api/operation finding F-032 — MOSTLY RESOLVED (one sub-case open).**
+- **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.
   Root-caused on real-GPU Metal into several sub-gaps, fixed in sequence:
@@ -468,7 +468,7 @@ never a reason to skip a CTS case.
   - **(b)** the Metal buffer⇄texture copy ignored the copy **aspect**: added
     `aspect`/`format` to `HalBufferTextureCopy`, used
     `MTLBlitOption::{depth,stencil}FromDepthStencil` for packed formats, and made the
-    byte-size aspect-aware (stencil = 1, depth = 2/4) so tight aspect-sized buffers
+    HAL byte-size aspect-aware (stencil = 1, depth = 2/4) so tight aspect-sized buffers
     pass `validate_buffer_texture_range`. Fixes packed-stencil fully.
   - **(a2)** sampled-texture/sampler bind-group execution was entirely unimplemented
     (only buffers were bound at draw/dispatch); the depth staging samples an `r32float`
@@ -476,13 +476,22 @@ never a reason to skip a CTS case.
     (+ Vulkan/GLES), incl. preserving `TextureView` metadata so Metal binds an actual
     single-layer view (`newTextureViewWithPixelFormat:textureType:levels:slices:`)
     instead of the parent array texture. Fixes depth-only (all sizes/mips).
-  **Verified real-GPU Metal:** `image_copy` depth/stencil is `pass=1056 fail=96`
-  (from `288/864`); colour `image_copy` unchanged (`137256/0`); `copyTextureToTexture`
-  `31126/0` (no F-031 regression). In-tree `e2e_metal_depth.rs` grew to 15 probes (all
-  pass). **Open sub-case:** the **depth aspect of the packed `Depth32FloatStencil8`**
-  (`format=49;aspect=0`, 96 cases) still reads 0 — the `frag_depth` render into a
-  packed depth plane and/or `DepthFromDepthStencil` extraction; Claude's follow-up.
-  a1/b by Claude; a2 + the view-binding fix by the coding agent.
+  - **(c)** the **core** copy-layout helper `texel_copy_block_size` returned the
+    *whole-format* `texel_block_size` for the **depth aspect of a packed format**
+    (`Depth32FloatStencil8` = 5) instead of the 4-byte depth plane, over-reporting the
+    required buffer size (a 3×3 copy needs `(3-1)*256 + 3*4 = 524` bytes, not `527`).
+    `validate_buffer_texture_copy` then *rejected* the CTS's tightly-sized buffers, so
+    no HAL copy was emitted and the zero-initialised output stayed zero. Fixed to return
+    the depth-plane size (`texel_block_size − 1`; the stencil plane is always 1 byte) for
+    `DepthOnly` of a packed format. This is what kept the **packed depth** sub-case open.
+  **Verified real-GPU Metal:** `image_copy` depth/stencil is now `pass=1152 fail=0`
+  (Dawn-equal, from `288/864`); colour `image_copy` regression-checked
+  (`undefined_params 2064/0`); `copyTextureToTexture` `copy_depth_stencil 216/0` (no
+  F-031 regression); workspace test green. In-tree `e2e_metal_depth.rs` grew to 18 probes
+  (all pass), incl. `metal_sampled_frag_depth_packed_3x3` with a deliberately **tight**
+  readback buffer that reproduces the (c) rejection. The (c) core fix carries a Noop unit
+  test in `yawgpu-core/src/copy.rs`. a1/b/c by Claude; a2 + the view-binding fix by the
+  coding agent.
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage
