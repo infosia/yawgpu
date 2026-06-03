@@ -1495,6 +1495,580 @@ fn metal_depth_copy_texture_to_texture_preserves_depth() {
     }
 }
 
+/// Isolation — render a constant `frag_depth` into the **depth plane of a packed
+/// `Depth32FloatStencil8`** texture, then read the depth aspect back via
+/// `copyTextureToBuffer(DepthOnly)` (needs `MTLBlitOption::DepthFromDepthStencil`).
+/// Constant frag_depth isolates the packed depth render + extract from sampling.
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "metal")]
+fn metal_packed_depth_buffer_roundtrips() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device_with_features(
+            instance,
+            adapter,
+            &[native::WGPUFeatureName_Depth32FloatStencil8],
+        );
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let descriptor = native::WGPUTextureDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            usage: native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+            dimension: native::WGPUTextureDimension_2D,
+            size: texture_extent(),
+            format: native::WGPUTextureFormat_Depth32FloatStencil8,
+            mipLevelCount: 1,
+            sampleCount: 1,
+            viewFormatCount: 0,
+            viewFormats: std::ptr::null(),
+        };
+        let depth = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+        assert!(!depth.is_null());
+        let readback = create_buffer(
+            device,
+            READBACK_SIZE as u64,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+
+        let vs_module = create_wgsl_module(device, FRAG_DEPTH_VS);
+        let fs_module = create_wgsl_module(device, FRAG_DEPTH_FS);
+        let pipeline = create_packed_depth_pipeline(device, vs_module, fs_module);
+        let view = yawgpu::wgpuTextureCreateView(depth, std::ptr::null());
+        let depth_attachment = native::WGPURenderPassDepthStencilAttachment {
+            nextInChain: std::ptr::null_mut(),
+            view,
+            depthLoadOp: native::WGPULoadOp_Clear,
+            depthStoreOp: native::WGPUStoreOp_Store,
+            depthClearValue: 0.0,
+            depthReadOnly: false.into(),
+            stencilLoadOp: native::WGPULoadOp_Clear,
+            stencilStoreOp: native::WGPUStoreOp_Store,
+            stencilClearValue: 0,
+            stencilReadOnly: false.into(),
+        };
+        let pass_descriptor = native::WGPURenderPassDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            colorAttachmentCount: 0,
+            colorAttachments: std::ptr::null(),
+            depthStencilAttachment: &depth_attachment,
+            occlusionQuerySet: std::ptr::null(),
+            timestampWrites: std::ptr::null(),
+        };
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_descriptor);
+        yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuRenderPassEncoderDraw(pass, 6, 1, 0, 0);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        record_depth_t2b(encoder, depth, readback);
+        submit_encoder(queue, encoder);
+
+        let depths = read_depth_buffer(instance, readback);
+        assert!(
+            depths.iter().all(|d| (d - 0.7).abs() < 1e-5),
+            "packed depth aspect not read back: {depths:?}"
+        );
+        assert!(errors.lock().expect("error lock").is_empty());
+
+        yawgpu::wgpuRenderPipelineRelease(pipeline);
+        yawgpu::wgpuShaderModuleRelease(fs_module);
+        yawgpu::wgpuShaderModuleRelease(vs_module);
+        yawgpu::wgpuTextureViewRelease(view);
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuTextureRelease(depth);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+/// Isolation — the exact CTS packed-depth staging: SAMPLE an `r32float` per
+/// fragment and write it as `frag_depth` into a **packed `Depth32FloatStencil8`**
+/// texture, then read the depth aspect back PER TEXEL via
+/// `copyTextureToBuffer(DepthOnly)`. Unlike the constant packed probe (uniform
+/// value can't catch a per-texel layout bug), this writes distinct per-texel
+/// depths — mirroring `offsets_and_sizes_copy_depth_stencil` format=49 aspect=0.
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "metal")]
+fn metal_sampled_frag_depth_packed_per_texel() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device_with_features(
+            instance,
+            adapter,
+            &[native::WGPUFeatureName_Depth32FloatStencil8],
+        );
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let input = create_r32float_input(device);
+        let mut floats = vec![0u8; READBACK_SIZE];
+        // Mirror the CTS depthValues: index 0 → 1.0, else fmod(0.05*i, 1.0).
+        let expected_depth = |col: usize, row: usize| {
+            let i = col + row * WIDTH as usize;
+            if i.is_multiple_of(40) {
+                1.0_f32
+            } else {
+                (0.05_f32 * i as f32) % 1.0
+            }
+        };
+        for row in 0..HEIGHT as usize {
+            for col in 0..WIDTH as usize {
+                let off = row * BYTES_PER_ROW as usize + col * 4;
+                floats[off..off + 4].copy_from_slice(&expected_depth(col, row).to_le_bytes());
+            }
+        }
+        let input_dst = native::WGPUTexelCopyTextureInfo {
+            texture: input,
+            mipLevel: 0,
+            origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+            aspect: native::WGPUTextureAspect_All,
+        };
+        let input_layout = native::WGPUTexelCopyBufferLayout {
+            offset: 0,
+            bytesPerRow: BYTES_PER_ROW,
+            rowsPerImage: HEIGHT,
+        };
+        yawgpu::wgpuQueueWriteTexture(
+            queue,
+            &input_dst,
+            floats.as_ptr().cast(),
+            floats.len(),
+            &input_layout,
+            &texture_extent(),
+        );
+
+        let descriptor = native::WGPUTextureDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            usage: native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+            dimension: native::WGPUTextureDimension_2D,
+            size: texture_extent(),
+            format: native::WGPUTextureFormat_Depth32FloatStencil8,
+            mipLevelCount: 1,
+            sampleCount: 1,
+            viewFormatCount: 0,
+            viewFormats: std::ptr::null(),
+        };
+        let depth = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+        assert!(!depth.is_null());
+        let readback = create_buffer(
+            device,
+            READBACK_SIZE as u64,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        let vs_module = create_wgsl_module(device, FRAG_DEPTH_VS);
+        let fs_module = create_wgsl_module(device, SAMPLE_FRAG_DEPTH_FS);
+        let pipeline = create_packed_depth_pipeline(device, vs_module, fs_module);
+        let input_view = yawgpu::wgpuTextureCreateView(input, std::ptr::null());
+        let bind_group = create_texture_bind_group(device, pipeline, input_view);
+        let depth_view = yawgpu::wgpuTextureCreateView(depth, std::ptr::null());
+
+        // Mirror the CTS staging exactly: a packed format uses stencilLoadOp=Load
+        // (the stencil plane is left untouched while frag_depth writes depth).
+        let depth_attachment = native::WGPURenderPassDepthStencilAttachment {
+            nextInChain: std::ptr::null_mut(),
+            view: depth_view,
+            depthLoadOp: native::WGPULoadOp_Clear,
+            depthStoreOp: native::WGPUStoreOp_Store,
+            depthClearValue: 0.0,
+            depthReadOnly: false.into(),
+            stencilLoadOp: native::WGPULoadOp_Load,
+            stencilStoreOp: native::WGPUStoreOp_Store,
+            stencilClearValue: 0,
+            stencilReadOnly: false.into(),
+        };
+        let pass_descriptor = native::WGPURenderPassDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            colorAttachmentCount: 0,
+            colorAttachments: std::ptr::null(),
+            depthStencilAttachment: &depth_attachment,
+            occlusionQuerySet: std::ptr::null(),
+            timestampWrites: std::ptr::null(),
+        };
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_descriptor);
+        yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuRenderPassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+        yawgpu::wgpuRenderPassEncoderDraw(pass, 6, 1, 0, 0);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        record_depth_t2b(encoder, depth, readback);
+        submit_encoder(queue, encoder);
+
+        let depths = read_depth_buffer(instance, readback);
+        let mut mismatches = Vec::new();
+        for row in 0..HEIGHT as usize {
+            for col in 0..WIDTH as usize {
+                let got = depths[row * WIDTH as usize + col];
+                let want = expected_depth(col, row);
+                if (got - want).abs() > 1e-5 {
+                    mismatches.push((col, row, want, got));
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "packed sampled frag_depth not written per texel (col,row,want,got): {mismatches:?}"
+        );
+        assert!(errors.lock().expect("error lock").is_empty());
+
+        yawgpu::wgpuBindGroupRelease(bind_group);
+        yawgpu::wgpuTextureViewRelease(depth_view);
+        yawgpu::wgpuTextureViewRelease(input_view);
+        yawgpu::wgpuRenderPipelineRelease(pipeline);
+        yawgpu::wgpuShaderModuleRelease(fs_module);
+        yawgpu::wgpuShaderModuleRelease(vs_module);
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuTextureRelease(depth);
+        yawgpu::wgpuTextureRelease(input);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+/// Isolation — the EXACT failing CTS subcase
+/// (`offsets_and_sizes_copy_depth_stencil` format=49 aspect=0 copyDepth=1
+/// mip=0): a **3×3** packed `Depth32FloatStencil8`, sampled per-texel frag_depth,
+/// then a `copyTextureToBuffer(DepthOnly)` of copySize {3,3,1} with a **tight**
+/// readback buffer. The depth aspect is 4 bytes/texel; if the copy buffer-size
+/// validation sizes it at the whole-format block (5), the tight buffer is
+/// wrongly rejected and the copy never runs — leaving the buffer zeroed. The
+/// tight buffer is load-bearing: an oversized one masks the bug.
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "metal")]
+fn metal_sampled_frag_depth_packed_3x3() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+    const W: u32 = 3;
+    const H: u32 = 3;
+    const BPR: u32 = 256;
+
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device_with_features(
+            instance,
+            adapter,
+            &[native::WGPUFeatureName_Depth32FloatStencil8],
+        );
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let extent = native::WGPUExtent3D {
+            width: W,
+            height: H,
+            depthOrArrayLayers: 1,
+        };
+        let expected_depth = |col: usize, row: usize| {
+            let i = col + row * W as usize;
+            if i.is_multiple_of(40) {
+                1.0_f32
+            } else {
+                (0.05_f32 * i as f32) % 1.0
+            }
+        };
+
+        // r32float 3x3 input, written tightly (bytesPerRow = 3*4 = 12).
+        let input_desc = native::WGPUTextureDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            usage: native::WGPUTextureUsage_TextureBinding | native::WGPUTextureUsage_CopyDst,
+            dimension: native::WGPUTextureDimension_2D,
+            size: extent,
+            format: native::WGPUTextureFormat_R32Float,
+            mipLevelCount: 1,
+            sampleCount: 1,
+            viewFormatCount: 0,
+            viewFormats: std::ptr::null(),
+        };
+        let input = yawgpu::wgpuDeviceCreateTexture(device, &input_desc);
+        assert!(!input.is_null());
+        let mut floats = vec![0u8; (W * H * 4) as usize];
+        for row in 0..H as usize {
+            for col in 0..W as usize {
+                let off = (row * W as usize + col) * 4;
+                floats[off..off + 4].copy_from_slice(&expected_depth(col, row).to_le_bytes());
+            }
+        }
+        let input_dst = native::WGPUTexelCopyTextureInfo {
+            texture: input,
+            mipLevel: 0,
+            origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+            aspect: native::WGPUTextureAspect_All,
+        };
+        let input_layout = native::WGPUTexelCopyBufferLayout {
+            offset: 0,
+            bytesPerRow: W * 4,
+            rowsPerImage: H,
+        };
+        yawgpu::wgpuQueueWriteTexture(
+            queue,
+            &input_dst,
+            floats.as_ptr().cast(),
+            floats.len(),
+            &input_layout,
+            &extent,
+        );
+
+        // Match the CTS createDepthStencilCopyTexture usage exactly.
+        let depth_desc = native::WGPUTextureDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            usage: native::WGPUTextureUsage_RenderAttachment
+                | native::WGPUTextureUsage_CopySrc
+                | native::WGPUTextureUsage_CopyDst,
+            dimension: native::WGPUTextureDimension_2D,
+            size: extent,
+            format: native::WGPUTextureFormat_Depth32FloatStencil8,
+            mipLevelCount: 1,
+            sampleCount: 1,
+            viewFormatCount: 0,
+            viewFormats: std::ptr::null(),
+        };
+        let depth = yawgpu::wgpuDeviceCreateTexture(device, &depth_desc);
+        assert!(!depth.is_null());
+        // TIGHT readback buffer (exactly the CTS size): the depth aspect of a
+        // packed format is 4 bytes/texel, so the buffer needs only
+        // (H-1)*bytesPerRow + W*4 bytes. An oversized buffer would mask the core
+        // bug where the depth aspect was sized at the whole-format block (5).
+        const READBACK_LEN: usize = (H as usize - 1) * BPR as usize + W as usize * 4;
+        let readback = create_buffer(
+            device,
+            READBACK_LEN as u64,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+
+        let vs_module = create_wgsl_module(device, FRAG_DEPTH_VS);
+        let fs_module = create_wgsl_module(device, SAMPLE_FRAG_DEPTH_FS);
+        // Match the CTS staging exactly: an EXPLICIT pipeline layout (bind group
+        // layout with UnfilterableFloat 2D texture) rather than an auto layout.
+        let bgl = create_fragment_texture_bgl(device);
+        let pipeline_layout_desc = native::WGPUPipelineLayoutDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            bindGroupLayoutCount: 1,
+            bindGroupLayouts: &bgl,
+            immediateSize: 0,
+        };
+        let pipeline_layout =
+            yawgpu::wgpuDeviceCreatePipelineLayout(device, &pipeline_layout_desc);
+        assert!(!pipeline_layout.is_null());
+        let pipeline =
+            create_packed_depth_pipeline_with_layout(device, vs_module, fs_module, pipeline_layout);
+        let input_view = yawgpu::wgpuTextureCreateView(input, std::ptr::null());
+        let bind_group = create_texture_bind_group(device, pipeline, input_view);
+        let depth_view = yawgpu::wgpuTextureCreateView(depth, std::ptr::null());
+
+        let depth_attachment = native::WGPURenderPassDepthStencilAttachment {
+            nextInChain: std::ptr::null_mut(),
+            view: depth_view,
+            depthLoadOp: native::WGPULoadOp_Clear,
+            depthStoreOp: native::WGPUStoreOp_Store,
+            depthClearValue: 0.0,
+            depthReadOnly: false.into(),
+            stencilLoadOp: native::WGPULoadOp_Load,
+            stencilStoreOp: native::WGPUStoreOp_Store,
+            stencilClearValue: 0,
+            stencilReadOnly: false.into(),
+        };
+        let pass_descriptor = native::WGPURenderPassDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            colorAttachmentCount: 0,
+            colorAttachments: std::ptr::null(),
+            depthStencilAttachment: &depth_attachment,
+            occlusionQuerySet: std::ptr::null(),
+            timestampWrites: std::ptr::null(),
+        };
+        // Mirror the CTS exactly: the staging render is submitted in its OWN
+        // command buffer, THEN the t2b runs in a SEPARATE command buffer.
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_descriptor);
+        yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuRenderPassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+        yawgpu::wgpuRenderPassEncoderDraw(pass, 6, 1, 0, 0);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        submit_encoder(queue, encoder);
+
+        let mut src = depth_texture_copy_info(depth);
+        src.aspect = native::WGPUTextureAspect_DepthOnly;
+        let dst = native::WGPUTexelCopyBufferInfo {
+            layout: native::WGPUTexelCopyBufferLayout {
+                offset: 0,
+                bytesPerRow: BPR,
+                rowsPerImage: H,
+            },
+            buffer: readback,
+        };
+        let copy_encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        yawgpu::wgpuCommandEncoderCopyTextureToBuffer(copy_encoder, &src, &dst, &extent);
+        submit_encoder(queue, copy_encoder);
+
+        let mapped = read_buffer(instance, readback, 0, READBACK_LEN);
+        let mut mismatches = Vec::new();
+        for row in 0..H as usize {
+            for col in 0..W as usize {
+                let off = row * BPR as usize + col * 4;
+                let got = f32::from_le_bytes([
+                    mapped[off],
+                    mapped[off + 1],
+                    mapped[off + 2],
+                    mapped[off + 3],
+                ]);
+                let want = expected_depth(col, row);
+                if (got - want).abs() > 1e-5 {
+                    mismatches.push((col, row, want, got));
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "3x3 packed depth wrong (col,row,want,got): {mismatches:?}"
+        );
+        assert!(errors.lock().expect("error lock").is_empty());
+
+        yawgpu::wgpuBindGroupRelease(bind_group);
+        yawgpu::wgpuTextureViewRelease(depth_view);
+        yawgpu::wgpuTextureViewRelease(input_view);
+        yawgpu::wgpuRenderPipelineRelease(pipeline);
+        yawgpu::wgpuShaderModuleRelease(fs_module);
+        yawgpu::wgpuShaderModuleRelease(vs_module);
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuTextureRelease(depth);
+        yawgpu::wgpuTextureRelease(input);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+#[cfg(feature = "metal")]
+unsafe fn create_packed_depth_pipeline(
+    device: native::WGPUDevice,
+    vs_module: native::WGPUShaderModule,
+    fs_module: native::WGPUShaderModule,
+) -> native::WGPURenderPipeline {
+    let depth_stencil = native::WGPUDepthStencilState {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUTextureFormat_Depth32FloatStencil8,
+        depthWriteEnabled: native::WGPUOptionalBool_True,
+        depthCompare: native::WGPUCompareFunction_Always,
+        stencilFront: stencil_face(),
+        stencilBack: stencil_face(),
+        stencilReadMask: 0xFFFF_FFFF,
+        stencilWriteMask: 0xFFFF_FFFF,
+        depthBias: 0,
+        depthBiasSlopeScale: 0.0,
+        depthBiasClamp: 0.0,
+    };
+    let fragment = native::WGPUFragmentState {
+        nextInChain: std::ptr::null_mut(),
+        module: fs_module,
+        entryPoint: string_view("fs"),
+        constantCount: 0,
+        constants: std::ptr::null(),
+        targetCount: 0,
+        targets: std::ptr::null(),
+    };
+    let descriptor = native::WGPURenderPipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout: std::ptr::null(),
+        vertex: native::WGPUVertexState {
+            nextInChain: std::ptr::null_mut(),
+            module: vs_module,
+            entryPoint: string_view("vs"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            bufferCount: 0,
+            buffers: std::ptr::null(),
+        },
+        primitive: primitive_state(),
+        depthStencil: &depth_stencil,
+        multisample: multisample_state(),
+        fragment: &fragment,
+    };
+    let pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(device, &descriptor);
+    assert!(!pipeline.is_null());
+    pipeline
+}
+
+#[cfg(feature = "metal")]
+unsafe fn create_packed_depth_pipeline_with_layout(
+    device: native::WGPUDevice,
+    vs_module: native::WGPUShaderModule,
+    fs_module: native::WGPUShaderModule,
+    layout: native::WGPUPipelineLayout,
+) -> native::WGPURenderPipeline {
+    let depth_stencil = native::WGPUDepthStencilState {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUTextureFormat_Depth32FloatStencil8,
+        depthWriteEnabled: native::WGPUOptionalBool_True,
+        depthCompare: native::WGPUCompareFunction_Always,
+        stencilFront: stencil_face(),
+        stencilBack: stencil_face(),
+        stencilReadMask: 0xFFFF_FFFF,
+        stencilWriteMask: 0xFFFF_FFFF,
+        depthBias: 0,
+        depthBiasSlopeScale: 0.0,
+        depthBiasClamp: 0.0,
+    };
+    let fragment = native::WGPUFragmentState {
+        nextInChain: std::ptr::null_mut(),
+        module: fs_module,
+        entryPoint: string_view("fs"),
+        constantCount: 0,
+        constants: std::ptr::null(),
+        targetCount: 0,
+        targets: std::ptr::null(),
+    };
+    let descriptor = native::WGPURenderPipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout,
+        vertex: native::WGPUVertexState {
+            nextInChain: std::ptr::null_mut(),
+            module: vs_module,
+            entryPoint: string_view("vs"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            bufferCount: 0,
+            buffers: std::ptr::null(),
+        },
+        primitive: primitive_state(),
+        depthStencil: &depth_stencil,
+        multisample: multisample_state(),
+        fragment: &fragment,
+    };
+    let pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(device, &descriptor);
+    assert!(!pipeline.is_null());
+    pipeline
+}
+
 // Color shader pair for the color+depth isolation test: writes red so the
 // colour attachment proves the pass executed, while the depth-stencil state
 // writes the constant depth.
@@ -2681,7 +3255,29 @@ unsafe fn request_device(
     instance: native::WGPUInstance,
     adapter: native::WGPUAdapter,
 ) -> native::WGPUDevice {
+    request_device_with_features(instance, adapter, &[])
+}
+
+#[cfg(feature = "metal")]
+unsafe fn request_device_with_features(
+    instance: native::WGPUInstance,
+    adapter: native::WGPUAdapter,
+    required_features: &[native::WGPUFeatureName],
+) -> native::WGPUDevice {
     let mut device: native::WGPUDevice = std::ptr::null();
+    let descriptor = native::WGPUDeviceDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        requiredFeatureCount: required_features.len(),
+        requiredFeatures: required_features.as_ptr(),
+        requiredLimits: std::ptr::null(),
+        defaultQueue: native::WGPUQueueDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+        },
+        deviceLostCallbackInfo: unsafe { std::mem::zeroed() },
+        uncapturedErrorCallbackInfo: unsafe { std::mem::zeroed() },
+    };
     let callback_info = native::WGPURequestDeviceCallbackInfo {
         nextInChain: std::ptr::null_mut(),
         mode: native::WGPUCallbackMode_AllowProcessEvents,
@@ -2689,7 +3285,7 @@ unsafe fn request_device(
         userdata1: (&mut device as *mut native::WGPUDevice).cast(),
         userdata2: std::ptr::null_mut(),
     };
-    let future = yawgpu::wgpuAdapterRequestDevice(adapter, std::ptr::null(), callback_info);
+    let future = yawgpu::wgpuAdapterRequestDevice(adapter, &descriptor, callback_info);
     wait(instance, future);
     assert!(!device.is_null());
     device
