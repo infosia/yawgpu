@@ -171,7 +171,8 @@ pub(crate) struct ComputePassCommand {
 #[derive(Debug, Clone)]
 pub(crate) struct RenderPassCommand {
     pub(crate) pipeline: Option<Arc<RenderPipeline>>,
-    pub(crate) color_attachment: RenderPassColorExecution,
+    pub(crate) color_attachment: Option<RenderPassColorExecution>,
+    pub(crate) depth_stencil_attachment: Option<RenderPassDepthStencilExecution>,
     pub(crate) attachment_textures: Vec<Texture>,
     pub(crate) bind_groups: BTreeMap<u32, BoundBindGroup>,
     pub(crate) vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
@@ -194,9 +195,28 @@ pub(crate) struct SubpassRenderPassCommand {
 #[derive(Debug, Clone)]
 pub(crate) struct RenderPassColorExecution {
     pub(crate) texture: Texture,
+    pub(crate) mip_level: u32,
+    pub(crate) array_layer: u32,
     pub(crate) load_op: LoadOp,
     pub(crate) store_op: StoreOp,
     pub(crate) clear_value: Color,
+}
+
+/// Stores depth-stencil metadata.
+#[derive(Debug, Clone)]
+pub(crate) struct RenderPassDepthStencilExecution {
+    pub(crate) texture: Texture,
+    pub(crate) format: TextureFormat,
+    pub(crate) mip_level: u32,
+    pub(crate) array_layer: u32,
+    pub(crate) depth_load_op: LoadOp,
+    pub(crate) depth_store_op: StoreOp,
+    pub(crate) depth_clear_value: f32,
+    pub(crate) depth_read_only: bool,
+    pub(crate) stencil_load_op: LoadOp,
+    pub(crate) stencil_store_op: StoreOp,
+    pub(crate) stencil_clear_value: u32,
+    pub(crate) stencil_read_only: bool,
 }
 
 /// Stores render draw execution data used by validation and backend submission.
@@ -269,6 +289,9 @@ impl CommandEncoder {
                             render_extent: render_pass_extent(descriptor),
                             attachment_textures: render_pass_attachment_textures(descriptor),
                             render_color_attachment: render_pass_color_execution(descriptor),
+                            render_depth_stencil_attachment: render_pass_depth_stencil_execution(
+                                descriptor,
+                            ),
                             occlusion_query_set: descriptor.occlusion_query_set.clone(),
                             max_draw_count: descriptor.max_draw_count,
                         },
@@ -298,6 +321,7 @@ impl CommandEncoder {
                         render_extent: None,
                         attachment_textures: Vec::new(),
                         render_color_attachment: None,
+                        render_depth_stencil_attachment: None,
                         occlusion_query_set: None,
                         max_draw_count: u64::MAX,
                     },
@@ -1254,9 +1278,34 @@ pub(crate) fn render_pass_color_execution(
         .next()
         .map(|attachment| RenderPassColorExecution {
             texture: attachment.view.texture(),
+            mip_level: attachment.view.base_mip_level(),
+            array_layer: attachment.view.base_array_layer(),
             load_op: attachment.load_op,
             store_op: attachment.store_op,
             clear_value: attachment.clear_value,
+        })
+}
+
+/// Returns render pass depth-stencil execution.
+pub(crate) fn render_pass_depth_stencil_execution(
+    descriptor: &RenderPassDescriptor,
+) -> Option<RenderPassDepthStencilExecution> {
+    descriptor
+        .depth_stencil_attachment
+        .as_ref()
+        .map(|attachment| RenderPassDepthStencilExecution {
+            texture: attachment.view.texture(),
+            format: attachment.view.format(),
+            mip_level: attachment.view.base_mip_level(),
+            array_layer: attachment.view.base_array_layer(),
+            depth_load_op: attachment.depth_load_op,
+            depth_store_op: attachment.depth_store_op,
+            depth_clear_value: attachment.depth_clear_value,
+            depth_read_only: attachment.depth_read_only,
+            stencil_load_op: attachment.stencil_load_op,
+            stencil_store_op: attachment.stencil_store_op,
+            stencil_clear_value: attachment.stencil_clear_value,
+            stencil_read_only: attachment.stencil_read_only,
         })
 }
 
@@ -1738,19 +1787,20 @@ pub(crate) fn validate_texture_copy_subresource(
     {
         return Err(format!("{label} copy size must be texel block aligned"));
     }
-    if (format_caps.aspects.depth || format_caps.aspects.stencil)
-        && (texture.dimension() != TextureDimension::D2 || copy_size.depth_or_array_layers != 1)
-    {
-        return Err(format!(
-            "{label} depth/stencil copies require a single 2D layer"
-        ));
-    }
+    // The depth or stencil aspect can only be copied as a whole 2D subresource:
+    // full mip width/height at a zero x/y origin. A range of array layers
+    // (non-zero `origin.z` / `copy_size.depth_or_array_layers > 1`) is allowed —
+    // each layer is its own 2D subresource — and is bounds-checked above. This
+    // matches WebGPU for buffer copies and texture-to-texture copies alike.
     if (format_caps.aspects.depth || format_caps.aspects.stencil)
         && !empty_copy
-        && (!origin_is_zero(origin) || copy_size != subresource)
+        && (origin.x != 0
+            || origin.y != 0
+            || copy_size.width != subresource.width
+            || copy_size.height != subresource.height)
     {
         return Err(format!(
-            "{label} depth/stencil copies must cover the full subresource"
+            "{label} depth/stencil copies must cover the full 2D subresource"
         ));
     }
 

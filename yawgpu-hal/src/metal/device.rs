@@ -120,18 +120,13 @@ impl MetalDevice {
         &self,
         shader: HalShaderSource,
         vertex_entry_point: &str,
-        fragment_entry_point: &str,
+        fragment_entry_point: Option<&str>,
         descriptor: &HalRenderPipelineDescriptor,
         _bindings: &[HalDescriptorBinding],
     ) -> Result<MetalRenderPipeline, HalError> {
-        let HalShaderSource::Msl(msl_source) = shader else {
-            return Err(shader_error(
-                "Metal render pipeline requires MSL".to_owned(),
-            ));
-        };
         create_render_pipeline(
             &self.device,
-            &msl_source,
+            shader,
             vertex_entry_point,
             fragment_entry_point,
             descriptor,
@@ -301,7 +296,7 @@ mod tests {
             .create_render_pipeline(
                 render_msl(),
                 "vs_main",
-                "fs_main",
+                Some("fs_main"),
                 &render_descriptor(),
                 &[],
             )

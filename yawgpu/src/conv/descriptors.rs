@@ -238,6 +238,7 @@ unsafe fn map_render_pass_depth_stencil_attachment(
         depth_read_only: value.depthReadOnly != 0,
         stencil_load_op: map_load_op(value.stencilLoadOp),
         stencil_store_op: map_store_op(value.stencilStoreOp),
+        stencil_clear_value: value.stencilClearValue,
         stencil_read_only: value.stencilReadOnly != 0,
     }
 }

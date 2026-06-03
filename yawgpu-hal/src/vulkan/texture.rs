@@ -11,6 +11,8 @@ pub(super) const IMAGE_LAYOUT_TRANSFER_SRC: u8 = 2;
 pub(super) const IMAGE_LAYOUT_COLOR_ATTACHMENT: u8 = 3;
 /// Constant value for image layout present.
 pub(super) const IMAGE_LAYOUT_PRESENT: u8 = 4;
+/// Constant value for image layout depth-stencil attachment.
+pub(super) const IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT: u8 = 5;
 
 /// Stores vulkan texture data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -448,6 +450,49 @@ pub(super) fn transition_image(
     }
 }
 
+/// Returns transition image for the requested aspect range.
+pub(super) fn transition_image_aspect(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    texture: &VulkanTextureInner,
+    aspect: vk::ImageAspectFlags,
+    new_layout: vk::ImageLayout,
+    new_state: u8,
+) {
+    let old_state = texture.layout.swap(new_state, AtomicOrdering::Relaxed);
+    let old_layout = image_layout(old_state);
+    if old_layout == new_layout {
+        return;
+    }
+    let barrier = vk::ImageMemoryBarrier::default()
+        .old_layout(old_layout)
+        .new_layout(new_layout)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(texture.image)
+        .subresource_range(
+            vk::ImageSubresourceRange::default()
+                .aspect_mask(aspect)
+                .base_mip_level(0)
+                .level_count(texture.mip_level_count)
+                .base_array_layer(0)
+                .layer_count(texture.array_layers),
+        )
+        .src_access_mask(access_mask_for_layout(old_layout))
+        .dst_access_mask(access_mask_for_layout(new_layout));
+    unsafe {
+        device.cmd_pipeline_barrier(
+            command_buffer,
+            stage_mask_for_layout(old_layout),
+            stage_mask_for_layout(new_layout),
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[barrier],
+        );
+    }
+}
+
 /// Returns transfer to compute barrier.
 pub(super) fn transfer_to_compute_barrier(device: &ash::Device, command_buffer: vk::CommandBuffer) {
     let barrier = vk::MemoryBarrier::default()
@@ -495,6 +540,7 @@ pub(super) fn image_layout(state: u8) -> vk::ImageLayout {
         IMAGE_LAYOUT_TRANSFER_DST => vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_SRC => vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
         IMAGE_LAYOUT_COLOR_ATTACHMENT => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT => vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         IMAGE_LAYOUT_PRESENT => vk::ImageLayout::PRESENT_SRC_KHR,
         _ => vk::ImageLayout::UNDEFINED,
     }
@@ -506,6 +552,10 @@ pub(super) fn access_mask_for_layout(layout: vk::ImageLayout) -> vk::AccessFlags
         vk::ImageLayout::TRANSFER_DST_OPTIMAL => vk::AccessFlags::TRANSFER_WRITE,
         vk::ImageLayout::TRANSFER_SRC_OPTIMAL => vk::AccessFlags::TRANSFER_READ,
         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+        vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => {
+            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+        }
         vk::ImageLayout::PRESENT_SRC_KHR => vk::AccessFlags::empty(),
         _ => vk::AccessFlags::empty(),
     }
@@ -519,6 +569,10 @@ pub(super) fn stage_mask_for_layout(layout: vk::ImageLayout) -> vk::PipelineStag
         }
         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => {
             vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+        }
+        vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => {
+            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS
         }
         vk::ImageLayout::PRESENT_SRC_KHR => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
         _ => vk::PipelineStageFlags::TOP_OF_PIPE,

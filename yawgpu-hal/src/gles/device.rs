@@ -239,7 +239,7 @@ impl GlesDevice {
         &self,
         shader: HalShaderSource,
         _vertex_entry_point: &str,
-        _fragment_entry_point: &str,
+        _fragment_entry_point: Option<&str>,
         descriptor: &HalRenderPipelineDescriptor,
         bindings: &[HalDescriptorBinding],
     ) -> Result<GlesRenderPipeline, HalError> {

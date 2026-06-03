@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use yawgpu_hal::{
     HalBoundBuffer, HalBufferClear, HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout,
     HalBufferUsage, HalComputePass, HalCopy, HalDevice, HalDraw, HalQueue, HalRenderColorTarget,
-    HalRenderLoadOp, HalRenderPass, HalTextureCopy,
+    HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalTextureCopy,
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
@@ -26,7 +26,6 @@ use crate::extent::*;
 use crate::pass::*;
 #[cfg(feature = "tiled")]
 use crate::subpass::*;
-#[cfg(feature = "tiled")]
 use crate::texture::hal_texture_format;
 use crate::texture::*;
 use crate::texture_view::TextureAspect;
@@ -692,24 +691,64 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
         };
     Some(HalCopy::RenderPass(HalRenderPass {
         pipeline,
-        color_target: HalRenderColorTarget {
-            texture: pass.color_attachment.texture.hal()?,
-            load_op: match pass.color_attachment.load_op {
-                LoadOp::Load => HalRenderLoadOp::Load,
-                LoadOp::Clear | LoadOp::Undefined => HalRenderLoadOp::Clear,
-            },
-            store: matches!(pass.color_attachment.store_op, StoreOp::Store),
-            clear_color: [
-                pass.color_attachment.clear_value.r,
-                pass.color_attachment.clear_value.g,
-                pass.color_attachment.clear_value.b,
-                pass.color_attachment.clear_value.a,
-            ],
-        },
+        color_target: hal_render_color_target(pass.color_attachment.as_ref())?,
+        depth_stencil_attachment: hal_render_depth_stencil_attachment(
+            pass.depth_stencil_attachment.as_ref(),
+        )?,
         bind_buffers,
         vertex_buffers,
         draw,
     }))
+}
+
+fn hal_render_color_target(
+    attachment: Option<&RenderPassColorExecution>,
+) -> Option<Option<HalRenderColorTarget>> {
+    match attachment {
+        None => Some(None),
+        Some(attachment) => Some(Some(HalRenderColorTarget {
+            texture: attachment.texture.hal()?,
+            mip_level: attachment.mip_level,
+            array_layer: attachment.array_layer,
+            load_op: hal_render_load_op(attachment.load_op),
+            store: matches!(attachment.store_op, StoreOp::Store),
+            clear_color: [
+                attachment.clear_value.r,
+                attachment.clear_value.g,
+                attachment.clear_value.b,
+                attachment.clear_value.a,
+            ],
+        })),
+    }
+}
+
+fn hal_render_depth_stencil_attachment(
+    attachment: Option<&RenderPassDepthStencilExecution>,
+) -> Option<Option<HalRenderDepthStencilAttachment>> {
+    match attachment {
+        None => Some(None),
+        Some(attachment) => Some(Some(HalRenderDepthStencilAttachment {
+            texture: attachment.texture.hal()?,
+            format: hal_texture_format(attachment.format),
+            mip_level: attachment.mip_level,
+            array_layer: attachment.array_layer,
+            depth_load_op: hal_render_load_op(attachment.depth_load_op),
+            depth_store: matches!(attachment.depth_store_op, StoreOp::Store),
+            depth_clear_value: attachment.depth_clear_value,
+            depth_read_only: attachment.depth_read_only,
+            stencil_load_op: hal_render_load_op(attachment.stencil_load_op),
+            stencil_store: matches!(attachment.stencil_store_op, StoreOp::Store),
+            stencil_clear_value: attachment.stencil_clear_value,
+            stencil_read_only: attachment.stencil_read_only,
+        })),
+    }
+}
+
+fn hal_render_load_op(load_op: LoadOp) -> HalRenderLoadOp {
+    match load_op {
+        LoadOp::Load => HalRenderLoadOp::Load,
+        LoadOp::Clear | LoadOp::Undefined => HalRenderLoadOp::Clear,
+    }
 }
 
 /// Returns HAL bind buffers.
@@ -789,6 +828,112 @@ pub(crate) fn dynamic_offset_for_binding(
 mod tests {
     use super::*;
     use crate::test_helpers::*;
+    use crate::*;
+
+    fn depth32_float() -> TextureFormat {
+        TextureFormat::from_raw(0x30)
+    }
+
+    fn noop_depth_view(device: &Device) -> Arc<TextureView> {
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: depth32_float(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(error, None);
+        Arc::new(view)
+    }
+
+    fn depth_only_render_pass_descriptor(view: Arc<TextureView>) -> RenderPassDescriptor {
+        RenderPassDescriptor {
+            max_color_attachments: Limits::DEFAULT.max_color_attachments,
+            color_attachments: Vec::new(),
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view,
+                depth_load_op: LoadOp::Clear,
+                depth_store_op: StoreOp::Store,
+                depth_clear_value: 0.5,
+                depth_read_only: false,
+                stencil_load_op: LoadOp::Undefined,
+                stencil_store_op: StoreOp::Undefined,
+                stencil_clear_value: 0,
+                stencil_read_only: false,
+            }),
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            max_draw_count: 50_000_000,
+        }
+    }
+
+    fn depth_only_pipeline(device: &Device) -> Arc<RenderPipeline> {
+        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }"
+                .to_owned(),
+        )));
+        Arc::new(device.create_render_pipeline(RenderPipelineDescriptor {
+            layout: RenderPipelineLayout::Auto,
+            vertex: RenderPipelineVertexState {
+                shader: RenderPipelineShaderStage {
+                    module,
+                    entry_point: Some("vs".to_owned()),
+                    constants: Vec::new(),
+                },
+                buffer_count: 0,
+                buffers: Vec::new(),
+            },
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+            },
+            depth_stencil: Some(DepthStencilState {
+                format: depth32_float(),
+                depth_write_enabled: Some(true),
+                depth_compare: Some(CompareFunction::Always),
+                stencil_front: StencilFaceState {
+                    compare: CompareFunction::Always,
+                    fail_op: StencilOperation::Keep,
+                    depth_fail_op: StencilOperation::Keep,
+                    pass_op: StencilOperation::Keep,
+                },
+                stencil_back: StencilFaceState {
+                    compare: CompareFunction::Always,
+                    fail_op: StencilOperation::Keep,
+                    depth_fail_op: StencilOperation::Keep,
+                    pass_op: StencilOperation::Keep,
+                },
+                stencil_read_mask: u32::MAX,
+                stencil_write_mask: u32::MAX,
+                depth_bias: 0,
+                depth_bias_slope_scale: 0.0,
+                depth_bias_clamp: 0.0,
+            }),
+            multisample: MultisampleState {
+                count: 1,
+                mask: u32::MAX,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: None,
+            error: None,
+        }))
+    }
 
     #[test]
     fn queue_from_hal_hal_label_and_set_label_round_trip() {
@@ -812,6 +957,69 @@ mod tests {
 
         assert_eq!(queue.write_buffer(&buffer, 0, &[1, 2, 3, 4]), None);
         assert_eq!(queue.submit(&[]), None);
+    }
+
+    #[test]
+    fn depth_only_render_pass_draw_records_render_pass_command() {
+        let device = noop_device();
+        let depth_view = noop_depth_view(&device);
+        let pipeline = depth_only_pipeline(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, error) =
+            encoder.begin_render_pass(&depth_only_render_pass_descriptor(depth_view));
+        assert_eq!(error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+
+        assert!(matches!(
+            command_buffer.command_ops(),
+            [CommandExecution::RenderPass(pass)]
+                if pass.color_attachment.is_none()
+                    && pass.depth_stencil_attachment.is_some()
+                    && pass.draw.is_some()
+        ));
+    }
+
+    #[test]
+    fn depth_only_render_pass_submit_records_depth_stencil_hal_attachment() {
+        let device = noop_device();
+        let queue = device.queue();
+        let depth_view = noop_depth_view(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, error) =
+            encoder.begin_render_pass(&depth_only_render_pass_descriptor(depth_view));
+        assert_eq!(error, None);
+        assert_eq!(pass.end(), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+
+        assert_eq!(queue.submit(&[Arc::new(command_buffer)]), None);
+
+        let submitted = match queue.hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => Vec::new(),
+        };
+        let pass = submitted
+            .iter()
+            .find_map(|copy| match copy {
+                HalCopy::RenderPass(pass) => Some(pass),
+                _ => None,
+            })
+            .expect("depth-only pass should submit a render pass");
+        assert!(pass.color_target.is_none());
+        let attachment = pass
+            .depth_stencil_attachment
+            .as_ref()
+            .expect("render pass should carry depth-stencil attachment");
+        assert_eq!(
+            attachment.format,
+            yawgpu_hal::HalTextureFormat::Depth32Float
+        );
+        assert!((attachment.depth_clear_value - 0.5).abs() < f32::EPSILON);
+        assert!(pass.draw.is_none());
     }
 
     #[test]

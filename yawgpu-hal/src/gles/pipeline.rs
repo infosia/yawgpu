@@ -127,13 +127,13 @@ impl GlesRenderPipeline {
     pub(super) fn new(
         device: Arc<GlesDeviceInner>,
         vertex_source: String,
-        fragment_source: String,
+        fragment_source: Option<String>,
         descriptor: HalRenderPipelineDescriptor,
         bindings: &[HalDescriptorBinding],
     ) -> Result<Self, HalError> {
         validate_render_pipeline_descriptor(&descriptor)?;
         let (program, first_instance_location) =
-            build_render_program(&device, &vertex_source, &fragment_source)?;
+            build_render_program(&device, &vertex_source, fragment_source.as_deref())?;
         Ok(Self {
             inner: Arc::new(GlesRenderPipelineInner {
                 device,
@@ -229,21 +229,28 @@ fn build_compute_program(
 fn validate_render_pipeline_descriptor(
     descriptor: &HalRenderPipelineDescriptor,
 ) -> Result<(), HalError> {
-    if descriptor.color_formats.len() != 1
-        || !matches!(
-            descriptor.color_formats[0],
-            HalTextureFormat::Rgba8Unorm | HalTextureFormat::Bgra8Unorm
-        )
-    {
+    if descriptor.color_formats.len() > 1 {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
-            message: "GLES P15.5 render pipeline supports exactly one RGBA8Unorm or BGRA8Unorm color target",
+            message: "GLES render pipeline supports at most one color target",
         });
     }
-    if descriptor.depth_stencil.is_some() {
+    if let Some(&format) = descriptor.color_formats.first() {
+        if !matches!(
+            format,
+            HalTextureFormat::Rgba8Unorm | HalTextureFormat::Bgra8Unorm
+        ) {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message:
+                    "GLES render pipeline supports only RGBA8Unorm or BGRA8Unorm color targets",
+            });
+        }
+    }
+    if descriptor.color_formats.is_empty() && descriptor.depth_stencil.is_none() {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
-            message: "GLES P15.5 render pipeline does not support depth/stencil",
+            message: "GLES render pipeline requires a color target or depth-stencil state",
         });
     }
     for layout in &descriptor.vertex_buffers {
@@ -257,24 +264,28 @@ fn validate_render_pipeline_descriptor(
 fn build_render_program(
     device: &Arc<GlesDeviceInner>,
     vertex_source: &str,
-    fragment_source: &str,
+    fragment_source: Option<&str>,
 ) -> Result<(glow::Program, Option<glow::UniformLocation>), HalError> {
     device
         .with_current_context(|gl| unsafe {
             let vertex = compile_shader(gl, glow::VERTEX_SHADER, vertex_source, "vertex")?;
-            let fragment =
-                match compile_shader(gl, glow::FRAGMENT_SHADER, fragment_source, "fragment") {
-                    Ok(fragment) => fragment,
-                    Err(error) => {
-                        gl.delete_shader(vertex);
-                        return Err(error);
-                    }
-                };
+            let fragment = match fragment_source
+                .map(|source| compile_shader(gl, glow::FRAGMENT_SHADER, source, "fragment"))
+                .transpose()
+            {
+                Ok(fragment) => fragment,
+                Err(error) => {
+                    gl.delete_shader(vertex);
+                    return Err(error);
+                }
+            };
             let program = match gl.create_program() {
                 Ok(program) => program,
                 Err(_) => {
                     gl.delete_shader(vertex);
-                    gl.delete_shader(fragment);
+                    if let Some(fragment) = fragment {
+                        gl.delete_shader(fragment);
+                    }
                     return Err(HalError::ShaderCompilationFailed {
                         backend: BACKEND,
                         message: "glCreateProgram failed".to_owned(),
@@ -282,12 +293,18 @@ fn build_render_program(
                 }
             };
             gl.attach_shader(program, vertex);
-            gl.attach_shader(program, fragment);
+            if let Some(fragment) = fragment {
+                gl.attach_shader(program, fragment);
+            }
             gl.link_program(program);
             gl.detach_shader(program, vertex);
-            gl.detach_shader(program, fragment);
+            if let Some(fragment) = fragment {
+                gl.detach_shader(program, fragment);
+            }
             gl.delete_shader(vertex);
-            gl.delete_shader(fragment);
+            if let Some(fragment) = fragment {
+                gl.delete_shader(fragment);
+            }
             if !gl.get_program_link_status(program) {
                 let log = gl.get_program_info_log(program);
                 gl.delete_program(program);
@@ -297,7 +314,9 @@ fn build_render_program(
                 });
             }
             bind_program_blocks_from_source(gl, program, vertex_source);
-            bind_program_blocks_from_source(gl, program, fragment_source);
+            if let Some(fragment_source) = fragment_source {
+                bind_program_blocks_from_source(gl, program, fragment_source);
+            }
             let first_instance_location =
                 gl.get_uniform_location(program, "naga_vs_first_instance");
             Ok((program, first_instance_location))

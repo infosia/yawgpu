@@ -8,15 +8,16 @@ use objc2_core_foundation::CGSize;
 use objc2_foundation::{NSArray, NSRange, NSString};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer as MTLBufferTrait, MTLClearColor, MTLCommandBuffer,
-    MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction, MTLComputeCommandEncoder,
-    MTLComputePipelineState, MTLCopyAllDevices, MTLCreateSystemDefaultDevice,
-    MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice, MTLDrawable, MTLLibrary,
-    MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder,
-    MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
-    MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerDescriptor, MTLSamplerMinMagFilter,
-    MTLSamplerMipFilter, MTLSamplerState, MTLSize, MTLStencilDescriptor, MTLStencilOperation,
-    MTLStorageMode, MTLStoreAction, MTLTexture as MTLTextureTrait, MTLTextureDescriptor,
-    MTLTextureType, MTLTextureUsage, MTLVertexDescriptor, MTLVertexFormat, MTLVertexStepFunction,
+    MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction, MTLCompileOptions,
+    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCopyAllDevices,
+    MTLCreateSystemDefaultDevice, MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice,
+    MTLDrawable, MTLFunction, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat,
+    MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerAddressMode,
+    MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerMipFilter, MTLSamplerState, MTLSize,
+    MTLStencilDescriptor, MTLStencilOperation, MTLStorageMode, MTLStoreAction,
+    MTLTexture as MTLTextureTrait, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage,
+    MTLVertexDescriptor, MTLVertexFormat, MTLVertexStepFunction,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 

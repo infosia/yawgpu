@@ -1,5 +1,4 @@
 use super::*;
-#[cfg(feature = "tiled")]
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::HalTextureDimension;
 
@@ -265,30 +264,67 @@ fn encode_compute_buffer(
 pub(super) fn render_pass_descriptor(
     pass: &HalRenderPass,
 ) -> Result<Retained<MTLRenderPassDescriptor>, HalError> {
-    let HalTexture::Metal(texture) = &pass.color_target.texture else {
-        return Err(texture_error("render target is not Metal-backed"));
-    };
     let descriptor = MTLRenderPassDescriptor::renderPassDescriptor();
-    let color_attachments = descriptor.colorAttachments();
-    let color = unsafe { color_attachments.objectAtIndexedSubscript(0) };
-    color.setTexture(Some(texture.inner()?));
-    color.setLoadAction(match pass.color_target.load_op {
+    if let Some(color_target) = &pass.color_target {
+        let HalTexture::Metal(texture) = &color_target.texture else {
+            return Err(texture_error("render target is not Metal-backed"));
+        };
+        let color_attachments = descriptor.colorAttachments();
+        let color = unsafe { color_attachments.objectAtIndexedSubscript(0) };
+        color.setTexture(Some(texture.inner()?));
+        color.setLevel(to_ns(u64::from(color_target.mip_level))?);
+        color.setSlice(to_ns(u64::from(color_target.array_layer))?);
+        color.setLoadAction(mtl_load_action(color_target.load_op));
+        color.setStoreAction(mtl_store_action(color_target.store));
+        let [r, g, b, a] = color_target.clear_color;
+        color.setClearColor(MTLClearColor {
+            red: r,
+            green: g,
+            blue: b,
+            alpha: a,
+        });
+    }
+    if let Some(depth_stencil) = &pass.depth_stencil_attachment {
+        let HalTexture::Metal(texture) = &depth_stencil.texture else {
+            return Err(texture_error(
+                "depth-stencil attachment is not Metal-backed",
+            ));
+        };
+        if format_has_depth_aspect(depth_stencil.format) {
+            let depth_attachment = descriptor.depthAttachment();
+            depth_attachment.setTexture(Some(texture.inner()?));
+            depth_attachment.setLevel(to_ns(u64::from(depth_stencil.mip_level))?);
+            depth_attachment.setSlice(to_ns(u64::from(depth_stencil.array_layer))?);
+            depth_attachment.setLoadAction(mtl_load_action(depth_stencil.depth_load_op));
+            depth_attachment.setStoreAction(mtl_store_action(depth_stencil.depth_store));
+            depth_attachment.setClearDepth(f64::from(depth_stencil.depth_clear_value));
+        }
+        if format_has_stencil_aspect(depth_stencil.format) {
+            let stencil_attachment = descriptor.stencilAttachment();
+            stencil_attachment.setTexture(Some(texture.inner()?));
+            stencil_attachment.setLevel(to_ns(u64::from(depth_stencil.mip_level))?);
+            stencil_attachment.setSlice(to_ns(u64::from(depth_stencil.array_layer))?);
+            stencil_attachment.setLoadAction(mtl_load_action(depth_stencil.stencil_load_op));
+            stencil_attachment.setStoreAction(mtl_store_action(depth_stencil.stencil_store));
+            stencil_attachment.setClearStencil(depth_stencil.stencil_clear_value);
+        }
+    }
+    Ok(descriptor)
+}
+
+fn mtl_load_action(load_op: HalRenderLoadOp) -> MTLLoadAction {
+    match load_op {
         HalRenderLoadOp::Load => MTLLoadAction::Load,
         HalRenderLoadOp::Clear => MTLLoadAction::Clear,
-    });
-    color.setStoreAction(if pass.color_target.store {
+    }
+}
+
+fn mtl_store_action(store: bool) -> MTLStoreAction {
+    if store {
         MTLStoreAction::Store
     } else {
         MTLStoreAction::DontCare
-    });
-    let [r, g, b, a] = pass.color_target.clear_color;
-    color.setClearColor(MTLClearColor {
-        red: r,
-        green: g,
-        blue: b,
-        alpha: a,
-    });
-    Ok(descriptor)
+    }
 }
 
 /// Returns whether a memoryless footprint fits within a tile memory budget.
@@ -481,14 +517,6 @@ fn metal_tile_memory_budget_bytes() -> u64 {
 #[cfg(feature = "tiled")]
 fn format_bytes_per_pixel(format: HalTextureFormat) -> Result<u32, HalError> {
     map_texture_format(format).map(|(_, bytes)| bytes)
-}
-
-#[cfg(feature = "tiled")]
-fn mtl_load_action(load_op: HalRenderLoadOp) -> MTLLoadAction {
-    match load_op {
-        HalRenderLoadOp::Load => MTLLoadAction::Load,
-        HalRenderLoadOp::Clear => MTLLoadAction::Clear,
-    }
 }
 
 /// Records encode into the command stream.

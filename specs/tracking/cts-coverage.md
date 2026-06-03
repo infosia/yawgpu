@@ -399,6 +399,66 @@ never a reason to skip a CTS case.
   `e2e_metal_texture::metal_queue_write_texture_uploads_color_data_round_trips`
   (new) + the existing 6 e2e all pass on the M2; workspace release backstop green.
   3-way confirmed throughout (Dawn + wgpu-native always passed).
+- **External-CTS api/operation finding F-031 — RESOLVED.** The
+  `copyTextureToTexture:copy_depth_stencil` port (T26) surfaced that yawgpu's
+  **depth** aspect failed (every depth format `fail=36/36`; stencil-only
+  `Stencil8` passed). **It was NOT the texture-to-texture copy.** The stencil
+  path uses `writeTexture` + `copyTextureToBuffer` (no rendering); the depth path
+  uses *render passes* (`initializeDepthAspect` renders depth,
+  `verifyDepthAspect` re-renders with `depthCompare=equal`). Real-GPU-Metal
+  isolation (new `yawgpu/tests/e2e_metal_depth.rs`, plus device-error tracing)
+  localised **seven** distinct gaps in the regular (non-`tiled`) real-backend
+  render path, fixed in sequence:
+  1. **Render-pass depth-stencil attachment dropped.** `HalRenderPass` carried
+     only a mandatory `color_target`; the regular `render_pass_descriptor` bound
+     no depth attachment. Added `HalRenderDepthStencilAttachment`, made
+     `color_target` optional, threaded the (already-parsed/validated)
+     depth-stencil attachment core→HAL, and bound it in Metal/Vulkan/GLES.
+  2. **No-colour (depth-only) render passes rejected.** `draw` required a colour
+     attachment; relaxed to require ≥1 attachment.
+  3. **Render pipeline rejected depth-stencil + vertex-only.**
+     `create_hal_render_pipeline` bailed on `depth_stencil.is_some()` and
+     required exactly one colour target + a fragment. Now accepts colour+depth
+     and vertex-only (no-fragment) pipelines; `select_render_shader_source` +
+     `HalDevice::create_render_pipeline` carry an optional fragment entry;
+     vertex-only MSL/SPIR-V/GLSL generation added; Metal allows empty colour
+     formats + nil fragment function.
+  4. **Cross-pipeline vertex-position invariance.** Metal render MSL now compiles
+     with `MTLCompileOptions.preserveInvariance = true` (Dawn parity).
+  5. **Separate vertex & fragment shader modules rejected on Metal.** The CTS
+     verify pipeline uses two distinct WGSL modules; Metal combined them into one
+     MSL and required a single module. Added `HalShaderSource::MslStages` +
+     per-stage MSL generation + a two-library Metal pipeline (Vulkan/GLES already
+     did per-stage). Broad fix — separate vs/fs modules are common WebGPU usage.
+  6. **Render-attachment mip-level / array-layer dropped.** The core
+     `RenderPass{Color,DepthStencil}Execution` captured only the view's texture,
+     not its `base_mip_level`/`base_array_layer`, so every attachment rendered to
+     mip 0 / layer 0. Threaded the view subresource core→HAL
+     (`HalRender{ColorTarget,DepthStencilAttachment}.{mip_level,array_layer}`) and
+     Metal sets the attachment `level`/`slice`. **Implemented for Metal; Vulkan &
+     GLES still target the base mip/layer for non-default attachment views — a
+     follow-up to implement + verify on Windows/Vulkan + Android GLES.**
+  7. **Depth/stencil copy validation over-strict.**
+     `validate_texture_copy_subresource` (and the `queueWriteTexture` analogue)
+     applied the texture-*buffer* "single 2D layer" + "origin-zero full
+     subresource" rules to **all** copies, rejecting multi-layer / layer-ranged
+     depth-stencil `copyTextureToTexture` (and multi-layer stencil
+     write/`copyTextureToBuffer`). Corrected to require only a full-width/height
+     2D subresource at a zero x/y origin while allowing a range of array layers —
+     matching WebGPU/Dawn for buffer and texture-to-texture copies alike. (This
+     un-masked the real multi-layer stencil read; the prior `Stencil8` "pass" was
+     a false pass — its readback copy was also being rejected, leaving the compare
+     buffer at its expected seed.)
+  **Verified on real-GPU Metal (sandbox off):
+  `copyTextureToTexture:copy_depth_stencil` is `pass=216 fail=0` (Dawn-equal — up
+  from `pass=36 fail=180`); full `copyTextureToTexture` `pass=31126 fail=0`;
+  `image_copy` regression `pass=137256 fail=0`; `command_buffer,basic` `pass=3`.**
+  In-tree: `e2e_metal_depth.rs` (7 tests — depth render+readback, color+depth,
+  depthCompare=Equal+Load, gradient-Equal, separate vs/fs modules, multi-layer
+  depth t2t, t2t-preserves-depth) all pass on the M2; workspace release backstop
+  `1080 passed / 0 failed`. 3-way confirmed (Dawn + wgpu-native pass all 216).
+  Verification + the gap-6/gap-7 fixes were done by Claude directly (per request);
+  Rounds 1–4 lib work was the coding agent's.
 - Known core gaps surfaced (recommended follow-up): evaluate
   pipeline-overridable constants at createComputePipeline (workgroup-size
   / storage-size limits + override-expression errors); **inter-stage
