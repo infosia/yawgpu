@@ -7,8 +7,8 @@ use objc2::runtime::ProtocolObject;
 use objc2_core_foundation::CGSize;
 use objc2_foundation::{NSArray, NSRange, NSString};
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBuffer as MTLBufferTrait, MTLClearColor, MTLCommandBuffer,
-    MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction, MTLCompileOptions,
+    MTLBlitCommandEncoder, MTLBlitOption, MTLBuffer as MTLBufferTrait, MTLClearColor,
+    MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction, MTLCompileOptions,
     MTLComputeCommandEncoder, MTLComputePipelineState, MTLCopyAllDevices,
     MTLCreateSystemDefaultDevice, MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice,
     MTLDrawable, MTLFunction, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat,
@@ -22,13 +22,13 @@ use objc2_metal::{
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use crate::{
-    HalAddressMode, HalBoundBuffer, HalBuffer, HalBufferClear, HalBufferTextureCopy,
-    HalBufferUsage, HalCompareFunction, HalComputePass, HalCopy, HalDepthStencilState,
-    HalDescriptorBinding, HalDraw, HalError, HalExtent3d, HalFilterMode, HalMipmapFilterMode,
-    HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor,
-    HalSamplerDescriptor, HalShaderSource, HalStencilFaceState, HalStencilOperation,
-    HalSurfaceConfiguration, HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
-    HalTextureUsage, HalVertexFormat, HalVertexStepMode,
+    HalAddressMode, HalBoundBuffer, HalBoundSampler, HalBoundTexture, HalBuffer, HalBufferClear,
+    HalBufferTextureCopy, HalBufferUsage, HalCompareFunction, HalComputePass, HalCopy,
+    HalDepthStencilState, HalDescriptorBinding, HalDraw, HalError, HalExtent3d, HalFilterMode,
+    HalMipmapFilterMode, HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass,
+    HalRenderPipelineDescriptor, HalSampler, HalSamplerDescriptor, HalShaderSource,
+    HalStencilFaceState, HalStencilOperation, HalSurfaceConfiguration, HalTexture, HalTextureCopy,
+    HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
 #[cfg(feature = "tiled")]
 use crate::{

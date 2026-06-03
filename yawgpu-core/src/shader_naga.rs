@@ -16,19 +16,32 @@ pub struct ReflectedModule {
 /// Stores binding metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MslBindingMap {
-    /// Buffers.
-    pub buffers: Vec<MslBufferBinding>,
+    /// Resources.
+    pub resources: Vec<MslResourceBinding>,
 }
 
-/// Stores binding metadata.
+/// Stores MSL resource binding metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MslBufferBinding {
+pub(crate) struct MslResourceBinding {
     /// Group.
     pub group: u32,
     /// Binding.
     pub binding: u32,
     /// Metal index.
     pub metal_index: u32,
+    /// Kind.
+    pub kind: MslResourceBindingKind,
+}
+
+/// Enumerates MSL resource binding kind values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MslResourceBindingKind {
+    /// Buffer variant.
+    Buffer,
+    /// Texture variant.
+    Texture,
+    /// Sampler variant.
+    Sampler,
 }
 
 /// Stores generated shader source for generated MSL.
@@ -881,19 +894,29 @@ fn resolved_workgroup_size(
 
 fn msl_resources(binding_map: &MslBindingMap) -> Result<naga::back::msl::BindingMap, String> {
     binding_map
-        .buffers
+        .resources
         .iter()
         .map(|binding| {
             let slot = u8::try_from(binding.metal_index)
-                .map_err(|_| "MSL buffer index exceeds the supported slot range".to_owned())?;
+                .map_err(|_| "MSL resource index exceeds the supported slot range".to_owned())?;
             Ok((
                 naga::ResourceBinding {
                     group: binding.group,
                     binding: binding.binding,
                 },
-                naga::back::msl::BindTarget {
-                    buffer: Some(slot),
-                    ..Default::default()
+                match binding.kind {
+                    MslResourceBindingKind::Buffer => naga::back::msl::BindTarget {
+                        buffer: Some(slot),
+                        ..Default::default()
+                    },
+                    MslResourceBindingKind::Texture => naga::back::msl::BindTarget {
+                        texture: Some(slot),
+                        ..Default::default()
+                    },
+                    MslResourceBindingKind::Sampler => naga::back::msl::BindTarget {
+                        sampler: Some(naga::back::msl::BindSamplerTarget::Resource(slot)),
+                        ..Default::default()
+                    },
                 },
             ))
         })
@@ -1686,7 +1709,7 @@ mod tests {
                 "vs",
                 None,
                 &MslBindingMap {
-                    buffers: Vec::new(),
+                    resources: Vec::new(),
                 },
                 &[],
                 &[],
@@ -1711,7 +1734,7 @@ mod tests {
             .generate_render_vertex_msl(
                 "vs",
                 &MslBindingMap {
-                    buffers: Vec::new(),
+                    resources: Vec::new(),
                 },
                 &[],
             )
@@ -1734,7 +1757,7 @@ mod tests {
             .generate_render_fragment_msl(
                 "fs",
                 &MslBindingMap {
-                    buffers: Vec::new(),
+                    resources: Vec::new(),
                 },
             )
             .expect("render fragment MSL should generate");

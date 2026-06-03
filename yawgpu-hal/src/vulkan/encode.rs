@@ -963,7 +963,9 @@ fn update_subpass_descriptor_sets(
     let mut write_specs = Vec::new();
     for descriptor in &pipeline.inner.descriptor_bindings {
         match descriptor.kind {
-            HalBufferBindingKind::Uniform | HalBufferBindingKind::Storage => {
+            HalDescriptorBindingKind::Buffer(
+                HalBufferBindingKind::Uniform | HalBufferBindingKind::Storage,
+            ) => {
                 let bound = draw
                     .bind_buffers
                     .iter()
@@ -979,7 +981,7 @@ fn update_subpass_descriptor_sets(
                     descriptor_type(descriptor.kind),
                 ));
             }
-            HalBufferBindingKind::InputAttachment => {
+            HalDescriptorBindingKind::Buffer(HalBufferBindingKind::InputAttachment) => {
                 let input = subpass_inputs
                     .iter()
                     .find(|input| {
@@ -1011,6 +1013,11 @@ fn update_subpass_descriptor_sets(
                     descriptor.group,
                     descriptor.binding,
                     vk::DescriptorType::INPUT_ATTACHMENT,
+                ));
+            }
+            HalDescriptorBindingKind::Texture | HalDescriptorBindingKind::Sampler => {
+                return Err(shader_error(
+                    "subpass sampled textures and samplers are not implemented",
                 ));
             }
         }

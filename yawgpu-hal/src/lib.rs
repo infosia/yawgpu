@@ -12,10 +12,11 @@ mod present;
 mod shader;
 
 pub use command::{
-    HalBoundBuffer, HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy,
-    HalBufferTextureLayout, HalComputePass, HalCopy, HalDescriptorBinding, HalDraw,
-    HalRenderColorTarget, HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass,
-    HalTextureCopy,
+    HalBoundBuffer, HalBoundSampler, HalBoundTexture, HalBufferBindingKind, HalBufferClear,
+    HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout, HalComputePass, HalCopy,
+    HalDescriptorBinding, HalDescriptorBindingKind, HalDraw, HalRenderColorTarget,
+    HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalTextureAspect,
+    HalTextureCopy, HalTextureViewDimension,
 };
 #[cfg(feature = "tiled")]
 pub use command::{
@@ -1370,6 +1371,8 @@ mod tests {
                 stencil_read_only: true,
             }),
             bind_buffers: Vec::new(),
+            bind_textures: Vec::new(),
+            bind_samplers: Vec::new(),
             vertex_buffers: Vec::new(),
             draw: None,
         })])?;

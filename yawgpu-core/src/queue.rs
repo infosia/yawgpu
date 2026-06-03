@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use yawgpu_hal::{
-    HalBoundBuffer, HalBufferClear, HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout,
-    HalBufferUsage, HalComputePass, HalCopy, HalDevice, HalDraw, HalQueue, HalRenderColorTarget,
-    HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalTextureCopy,
+    HalBoundBuffer, HalBoundSampler, HalBoundTexture, HalBufferClear, HalBufferCopy,
+    HalBufferTextureCopy, HalBufferTextureLayout, HalBufferUsage, HalComputePass, HalCopy,
+    HalDevice, HalDraw, HalQueue, HalRenderColorTarget, HalRenderDepthStencilAttachment,
+    HalRenderLoadOp, HalRenderPass, HalTextureAspect, HalTextureCopy, HalTextureViewDimension,
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
@@ -28,7 +29,7 @@ use crate::pass::*;
 use crate::subpass::*;
 use crate::texture::hal_texture_format;
 use crate::texture::*;
-use crate::texture_view::TextureAspect;
+use crate::texture_view::{TextureAspect, TextureViewDimension};
 
 /// Stores queue data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -150,6 +151,7 @@ impl Queue {
                 "queue write texture format is unsupported",
             ));
         };
+        let format = hal_texture_format(texture.format());
         let Some(texture) = texture.hal() else {
             return Some(DeviceError::internal(
                 "queue write texture has no HAL texture",
@@ -159,6 +161,8 @@ impl Queue {
             buffer: staging,
             buffer_layout,
             texture,
+            format,
+            aspect: hal_texture_aspect(aspect),
             mip_level,
             origin: hal_origin(origin),
             extent: hal_extent(write_size),
@@ -393,7 +397,7 @@ fn hal_subpass_render_pass_execution(pass: &SubpassRenderPassCommand) -> Option<
 
 #[cfg(feature = "tiled")]
 fn hal_subpass_draw_execution(draw: &SubpassDrawExecution) -> Option<HalSubpassDraw> {
-    let bind_buffers = hal_bind_buffers(
+    let bindings = hal_bind_resources(
         draw.pipeline.bind_group_layouts(),
         draw.pipeline.metal_bindings(),
         &draw.bind_groups,
@@ -413,7 +417,9 @@ fn hal_subpass_draw_execution(draw: &SubpassDrawExecution) -> Option<HalSubpassD
     Some(HalSubpassDraw {
         subpass_index: draw.subpass_index,
         pipeline: draw.pipeline.hal()?,
-        bind_buffers,
+        bind_buffers: bindings.buffers,
+        bind_textures: bindings.textures,
+        bind_samplers: bindings.samplers,
         vertex_buffers,
         draw: HalDraw {
             vertex_count: draw.draw.vertex_count,
@@ -558,6 +564,8 @@ pub(crate) fn hal_texture_copy_execution(copy: &TextureCopyCommand) -> Option<Ha
                 buffer,
                 buffer_layout,
                 texture,
+                format: hal_texture_format(destination.texture.format()),
+                aspect: hal_texture_aspect(destination.aspect),
                 mip_level: destination.mip_level,
                 origin: hal_origin(destination.origin),
                 extent: hal_extent(*copy_size),
@@ -579,6 +587,8 @@ pub(crate) fn hal_texture_copy_execution(copy: &TextureCopyCommand) -> Option<Ha
                 buffer,
                 buffer_layout,
                 texture,
+                format: hal_texture_format(source.texture.format()),
+                aspect: hal_texture_aspect(source.aspect),
                 mip_level: source.mip_level,
                 origin: hal_origin(source.origin),
                 extent: hal_extent(*copy_size),
@@ -614,51 +624,25 @@ fn extent_is_empty(extent: Extent3d) -> bool {
 /// Returns HAL compute pass execution.
 pub(crate) fn hal_compute_pass_execution(pass: &ComputePassCommand) -> Option<HalCopy> {
     let pipeline = pass.pipeline.hal()?;
-    let mut bind_buffers = Vec::new();
-    for binding in pass.pipeline.metal_bindings() {
-        let bound = pass.bind_groups.get(&binding.group)?;
-        let entry = bound
-            .group
-            .entries()
-            .iter()
-            .find(|entry| entry.binding == binding.binding)?;
-        let BindGroupResource::Buffer {
-            buffer,
-            offset,
-            size,
-            ..
-        } = &entry.resource
-        else {
-            return None;
-        };
-        let dynamic_offset = dynamic_offset_for_binding(
-            pass.pipeline.bind_group_layouts(),
-            binding.group,
-            binding.binding,
-            &bound.dynamic_offsets,
-        )?;
-        let offset = offset.checked_add(dynamic_offset)?;
-        bind_buffers.push(HalBoundBuffer {
-            group: binding.group,
-            binding: binding.binding,
-            metal_index: binding.metal_index,
-            buffer: buffer.hal()?,
-            offset,
-            size: *size,
-        });
-    }
+    let bindings = hal_bind_resources(
+        pass.pipeline.bind_group_layouts(),
+        pass.pipeline.metal_bindings(),
+        &pass.bind_groups,
+    )?;
     Some(HalCopy::ComputePass(HalComputePass {
         pipeline,
-        bind_buffers,
+        bind_buffers: bindings.buffers,
+        bind_textures: bindings.textures,
+        bind_samplers: bindings.samplers,
         workgroups: pass.workgroups,
     }))
 }
 
 /// Returns HAL render pass execution.
 pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalCopy> {
-    let (pipeline, bind_buffers, vertex_buffers, draw) =
+    let (pipeline, bind_buffers, bind_textures, bind_samplers, vertex_buffers, draw) =
         if let (Some(pipeline), Some(draw)) = (&pass.pipeline, pass.draw) {
-            let bind_buffers = hal_bind_buffers(
+            let bindings = hal_bind_resources(
                 pipeline.bind_group_layouts(),
                 pipeline.metal_bindings(),
                 &pass.bind_groups,
@@ -677,7 +661,9 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
             }
             (
                 Some(pipeline.hal()?),
-                bind_buffers,
+                bindings.buffers,
+                bindings.textures,
+                bindings.samplers,
                 vertex_buffers,
                 Some(HalDraw {
                     vertex_count: draw.vertex_count,
@@ -687,7 +673,7 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
                 }),
             )
         } else {
-            (None, Vec::new(), Vec::new(), None)
+            (None, Vec::new(), Vec::new(), Vec::new(), Vec::new(), None)
         };
     Some(HalCopy::RenderPass(HalRenderPass {
         pipeline,
@@ -696,6 +682,8 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
             pass.depth_stencil_attachment.as_ref(),
         )?,
         bind_buffers,
+        bind_textures,
+        bind_samplers,
         vertex_buffers,
         draw,
     }))
@@ -751,13 +739,39 @@ fn hal_render_load_op(load_op: LoadOp) -> HalRenderLoadOp {
     }
 }
 
-/// Returns HAL bind buffers.
-pub(crate) fn hal_bind_buffers(
+fn hal_texture_aspect(aspect: TextureAspect) -> HalTextureAspect {
+    match aspect {
+        TextureAspect::All => HalTextureAspect::All,
+        TextureAspect::DepthOnly => HalTextureAspect::DepthOnly,
+        TextureAspect::StencilOnly => HalTextureAspect::StencilOnly,
+    }
+}
+
+fn hal_texture_view_dimension(dimension: TextureViewDimension) -> HalTextureViewDimension {
+    match dimension {
+        TextureViewDimension::D1 => HalTextureViewDimension::D1,
+        TextureViewDimension::D2 => HalTextureViewDimension::D2,
+        TextureViewDimension::D2Array => HalTextureViewDimension::D2Array,
+        TextureViewDimension::Cube => HalTextureViewDimension::Cube,
+        TextureViewDimension::CubeArray => HalTextureViewDimension::CubeArray,
+        TextureViewDimension::D3 => HalTextureViewDimension::D3,
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct HalBoundResources {
+    pub(crate) buffers: Vec<HalBoundBuffer>,
+    pub(crate) textures: Vec<HalBoundTexture>,
+    pub(crate) samplers: Vec<HalBoundSampler>,
+}
+
+/// Returns HAL bound shader resources.
+pub(crate) fn hal_bind_resources(
     layouts: &[Arc<BindGroupLayout>],
     metal_bindings: &[MetalBufferBinding],
     bind_groups: &BTreeMap<u32, BoundBindGroup>,
-) -> Option<Vec<HalBoundBuffer>> {
-    let mut bind_buffers = Vec::new();
+) -> Option<HalBoundResources> {
+    let mut resources = HalBoundResources::default();
     for binding in metal_bindings {
         let bound = bind_groups.get(&binding.group)?;
         let entry = bound
@@ -765,32 +779,59 @@ pub(crate) fn hal_bind_buffers(
             .entries()
             .iter()
             .find(|entry| entry.binding == binding.binding)?;
-        let BindGroupResource::Buffer {
-            buffer,
-            offset,
-            size,
-            ..
-        } = &entry.resource
-        else {
-            return None;
-        };
-        let dynamic_offset = dynamic_offset_for_binding(
-            layouts,
-            binding.group,
-            binding.binding,
-            &bound.dynamic_offsets,
-        )?;
-        let offset = offset.checked_add(dynamic_offset)?;
-        bind_buffers.push(HalBoundBuffer {
-            group: binding.group,
-            binding: binding.binding,
-            metal_index: binding.metal_index,
-            buffer: buffer.hal()?,
-            offset,
-            size: *size,
-        });
+        match (binding.kind, &entry.resource) {
+            (
+                MetalBindingKind::Buffer(_),
+                BindGroupResource::Buffer {
+                    buffer,
+                    offset,
+                    size,
+                    ..
+                },
+            ) => {
+                let dynamic_offset = dynamic_offset_for_binding(
+                    layouts,
+                    binding.group,
+                    binding.binding,
+                    &bound.dynamic_offsets,
+                )?;
+                let offset = offset.checked_add(dynamic_offset)?;
+                resources.buffers.push(HalBoundBuffer {
+                    group: binding.group,
+                    binding: binding.binding,
+                    metal_index: binding.metal_index,
+                    buffer: buffer.hal()?,
+                    offset,
+                    size: *size,
+                });
+            }
+            (MetalBindingKind::Texture, BindGroupResource::TextureView { texture_view, .. }) => {
+                resources.textures.push(HalBoundTexture {
+                    group: binding.group,
+                    binding: binding.binding,
+                    metal_index: binding.metal_index,
+                    texture: texture_view.texture().hal()?,
+                    format: hal_texture_format(texture_view.format()),
+                    dimension: hal_texture_view_dimension(texture_view.dimension()),
+                    base_mip_level: texture_view.base_mip_level(),
+                    mip_level_count: texture_view.mip_level_count(),
+                    base_array_layer: texture_view.base_array_layer(),
+                    array_layer_count: texture_view.array_layer_count(),
+                    aspect: hal_texture_aspect(texture_view.aspect()),
+                });
+            }
+            (MetalBindingKind::Sampler, BindGroupResource::Sampler { sampler, .. }) => {
+                resources.samplers.push(HalBoundSampler {
+                    group: binding.group,
+                    binding: binding.binding,
+                    metal_index: binding.metal_index,
+                    sampler: sampler.hal()?,
+                });
+            }
+            _ => return None,
+        }
     }
-    Some(bind_buffers)
+    Some(resources)
 }
 
 /// Returns dynamic offset for binding.
@@ -827,6 +868,7 @@ pub(crate) fn dynamic_offset_for_binding(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shader::{SHADER_STAGE_COMPUTE, SHADER_STAGE_FRAGMENT, SHADER_STAGE_VERTEX};
     use crate::test_helpers::*;
     use crate::*;
 
@@ -935,6 +977,176 @@ mod tests {
         }))
     }
 
+    fn sampled_texture_bind_group_layout(device: &Device, visibility: u64) -> Arc<BindGroupLayout> {
+        Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Texture {
+                        sample_type: TextureSampleType::Float,
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    }),
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Sampler {
+                        ty: SamplerBindingType::Filtering,
+                    }),
+                },
+            ],
+            error: None,
+        }))
+    }
+
+    fn sampled_texture_bind_group(device: &Device, layout: Arc<BindGroupLayout>) -> Arc<BindGroup> {
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 3,
+            },
+            ..valid_texture_descriptor()
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D2),
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 1,
+            array_layer_count: Some(1),
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(error, None);
+        let sampler = device.create_sampler(SamplerDescriptor::default());
+        Arc::new(device.create_bind_group(
+            layout,
+            vec![
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindGroupResource::TextureView {
+                        texture_view: Arc::new(view),
+                        device: Arc::new(device.clone()),
+                    },
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindGroupResource::Sampler {
+                        sampler: Arc::new(sampler),
+                        device: Arc::new(device.clone()),
+                    },
+                },
+            ],
+        ))
+    }
+
+    fn explicit_pipeline_layout(
+        device: &Device,
+        layout: Arc<BindGroupLayout>,
+    ) -> Arc<PipelineLayout> {
+        Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![layout],
+            immediate_size: 0,
+            error: None,
+        }))
+    }
+
+    fn sampled_compute_pipeline(
+        device: &Device,
+        layout: Arc<PipelineLayout>,
+    ) -> Arc<ComputePipeline> {
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r"
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+
+@compute @workgroup_size(1)
+fn cs() {
+    let loaded = textureLoad(tex, vec2<i32>(0, 0), 0);
+    let sampled = textureSampleLevel(tex, samp, vec2<f32>(0.5, 0.5), 0.0);
+    _ = loaded + sampled;
+}
+"
+                .to_owned(),
+            )),
+        );
+        Arc::new(device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(layout),
+            shader_module: module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        }))
+    }
+
+    fn sampled_render_pipeline(
+        device: &Device,
+        layout: Arc<PipelineLayout>,
+    ) -> Arc<RenderPipeline> {
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r"
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+
+@vertex
+fn vs() -> @builtin(position) vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+    return textureSample(tex, samp, vec2<f32>(0.5, 0.5));
+}
+"
+                .to_owned(),
+            )),
+        );
+        Arc::new(device.create_render_pipeline(RenderPipelineDescriptor {
+            layout: RenderPipelineLayout::Explicit(layout),
+            vertex: RenderPipelineVertexState {
+                shader: RenderPipelineShaderStage {
+                    module: module.clone(),
+                    entry_point: Some("vs".to_owned()),
+                    constants: Vec::new(),
+                },
+                buffer_count: 0,
+                buffers: Vec::new(),
+            },
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+            },
+            depth_stencil: None,
+            multisample: MultisampleState {
+                count: 1,
+                mask: u32::MAX,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(RenderPipelineFragmentState {
+                shader: RenderPipelineShaderStage {
+                    module,
+                    entry_point: Some("fs".to_owned()),
+                    constants: Vec::new(),
+                },
+                target_count: 1,
+                targets: vec![ColorTargetState {
+                    format: rgba8_unorm(),
+                    blend: None,
+                    write_mask: 0xF,
+                }],
+            }),
+            error: None,
+        }))
+    }
+
     #[test]
     fn queue_from_hal_hal_label_and_set_label_round_trip() {
         let queue = Queue::from_hal(hal_noop_queue(), "initial");
@@ -957,6 +1169,101 @@ mod tests {
 
         assert_eq!(queue.write_buffer(&buffer, 0, &[1, 2, 3, 4]), None);
         assert_eq!(queue.submit(&[]), None);
+    }
+
+    #[test]
+    fn noop_compute_pass_records_texture_and_sampler_bindings() {
+        let device = noop_device();
+        let layout = sampled_texture_bind_group_layout(&device, SHADER_STAGE_COMPUTE);
+        let bind_group = sampled_texture_bind_group(&device, layout.clone());
+        let pipeline_layout = explicit_pipeline_layout(&device, layout);
+        let pipeline = sampled_compute_pipeline(&device, pipeline_layout);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+        assert_eq!(pass.end(), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(device.queue().submit(&[Arc::new(command_buffer)]), None);
+
+        let submitted = match device.queue().hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => Vec::new(),
+        };
+        assert!(matches!(
+            submitted.as_slice(),
+            [HalCopy::ComputePass(pass)]
+                if pass.bind_textures.len() == 1
+                    && pass.bind_textures[0].group == 0
+                    && pass.bind_textures[0].binding == 0
+                    && pass.bind_textures[0].metal_index == 0
+                    && pass.bind_textures[0].format == yawgpu_hal::HalTextureFormat::Rgba8Unorm
+                    && pass.bind_textures[0].dimension == HalTextureViewDimension::D2
+                    && pass.bind_textures[0].base_mip_level == 0
+                    && pass.bind_textures[0].mip_level_count == 1
+                    && pass.bind_textures[0].base_array_layer == 1
+                    && pass.bind_textures[0].array_layer_count == 1
+                    && pass.bind_textures[0].aspect == HalTextureAspect::All
+                    && pass.bind_samplers.len() == 1
+                    && pass.bind_samplers[0].group == 0
+                    && pass.bind_samplers[0].binding == 1
+                    && pass.bind_samplers[0].metal_index == 1
+        ));
+    }
+
+    #[test]
+    fn noop_render_pass_records_texture_and_sampler_bindings() {
+        let device = noop_device();
+        let layout =
+            sampled_texture_bind_group_layout(&device, SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT);
+        let bind_group = sampled_texture_bind_group(&device, layout.clone());
+        let pipeline_layout = explicit_pipeline_layout(&device, layout);
+        let pipeline = sampled_render_pipeline(&device, pipeline_layout);
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(device.queue().submit(&[Arc::new(command_buffer)]), None);
+
+        let submitted = match device.queue().hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => Vec::new(),
+        };
+        assert!(matches!(
+            submitted.as_slice(),
+            [HalCopy::RenderPass(pass)]
+                if pass.bind_textures.len() == 1
+                    && pass.bind_textures[0].group == 0
+                    && pass.bind_textures[0].binding == 0
+                    && pass.bind_textures[0].metal_index == 0
+                    && pass.bind_textures[0].format == yawgpu_hal::HalTextureFormat::Rgba8Unorm
+                    && pass.bind_textures[0].dimension == HalTextureViewDimension::D2
+                    && pass.bind_textures[0].base_mip_level == 0
+                    && pass.bind_textures[0].mip_level_count == 1
+                    && pass.bind_textures[0].base_array_layer == 1
+                    && pass.bind_textures[0].array_layer_count == 1
+                    && pass.bind_textures[0].aspect == HalTextureAspect::All
+                    && pass.bind_samplers.len() == 1
+                    && pass.bind_samplers[0].group == 0
+                    && pass.bind_samplers[0].binding == 1
+                    && pass.bind_samplers[0].metal_index == 1
+        ));
     }
 
     #[test]
