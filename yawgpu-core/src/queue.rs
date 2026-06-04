@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use yawgpu_hal::{
-    HalBoundBuffer, HalBoundSampler, HalBoundTexture, HalBufferClear, HalBufferCopy,
-    HalBufferTextureCopy, HalBufferTextureLayout, HalBufferUsage, HalComputePass, HalCopy,
-    HalDevice, HalDraw, HalQueue, HalRenderColorTarget, HalRenderDepthStencilAttachment,
-    HalRenderLoadOp, HalRenderPass, HalTextureAspect, HalTextureCopy, HalTextureViewDimension,
+    HalBoundBuffer, HalBoundIndexBuffer, HalBoundIndirectBuffer, HalBoundSampler, HalBoundTexture,
+    HalBufferClear, HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout, HalBufferUsage,
+    HalComputePass, HalCopy, HalDevice, HalDraw, HalIndexFormat, HalQueue, HalRenderColorTarget,
+    HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalTextureAspect,
+    HalTextureCopy, HalTextureViewDimension,
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
@@ -25,6 +26,7 @@ use crate::copy::*;
 use crate::error::*;
 use crate::extent::*;
 use crate::pass::*;
+use crate::render_pipeline::*;
 #[cfg(feature = "tiled")]
 use crate::subpass::*;
 use crate::texture::hal_texture_format;
@@ -414,6 +416,15 @@ fn hal_subpass_draw_execution(draw: &SubpassDrawExecution) -> Option<HalSubpassD
             size: bound.size,
         });
     }
+    let RenderDrawExecution::Direct {
+        vertex_count,
+        instance_count,
+        first_vertex,
+        first_instance,
+    } = draw.draw
+    else {
+        return None;
+    };
     Some(HalSubpassDraw {
         subpass_index: draw.subpass_index,
         pipeline: draw.pipeline.hal()?,
@@ -421,11 +432,11 @@ fn hal_subpass_draw_execution(draw: &SubpassDrawExecution) -> Option<HalSubpassD
         bind_textures: bindings.textures,
         bind_samplers: bindings.samplers,
         vertex_buffers,
-        draw: HalDraw {
-            vertex_count: draw.draw.vertex_count,
-            instance_count: draw.draw.instance_count,
-            first_vertex: draw.draw.first_vertex,
-            first_instance: draw.draw.first_instance,
+        draw: HalDraw::Direct {
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
         },
     })
 }
@@ -640,41 +651,63 @@ pub(crate) fn hal_compute_pass_execution(pass: &ComputePassCommand) -> Option<Ha
 
 /// Returns HAL render pass execution.
 pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalCopy> {
-    let (pipeline, bind_buffers, bind_textures, bind_samplers, vertex_buffers, draw) =
-        if let (Some(pipeline), Some(draw)) = (&pass.pipeline, pass.draw) {
-            let bindings = hal_bind_resources(
-                pipeline.bind_group_layouts(),
-                pipeline.metal_bindings(),
-                &pass.bind_groups,
-            )?;
-            let mut vertex_buffers = Vec::new();
-            for binding in pipeline.vertex_buffer_bindings() {
-                let bound = pass.vertex_buffers.get(&binding.slot)?;
-                vertex_buffers.push(HalBoundBuffer {
-                    group: 0,
-                    binding: binding.slot,
-                    metal_index: binding.metal_index,
-                    buffer: bound.buffer.hal()?,
-                    offset: bound.offset,
-                    size: bound.size,
-                });
-            }
-            (
-                Some(pipeline.hal()?),
-                bindings.buffers,
-                bindings.textures,
-                bindings.samplers,
-                vertex_buffers,
-                Some(HalDraw {
-                    vertex_count: draw.vertex_count,
-                    instance_count: draw.instance_count,
-                    first_vertex: draw.first_vertex,
-                    first_instance: draw.first_instance,
-                }),
-            )
-        } else {
-            (None, Vec::new(), Vec::new(), Vec::new(), Vec::new(), None)
+    let (
+        pipeline,
+        bind_buffers,
+        bind_textures,
+        bind_samplers,
+        vertex_buffers,
+        index_buffer,
+        indirect_buffer,
+        draw,
+    ) = if let (Some(pipeline), Some(draw)) = (&pass.pipeline, pass.draw) {
+        let bindings = hal_bind_resources(
+            pipeline.bind_group_layouts(),
+            pipeline.metal_bindings(),
+            &pass.bind_groups,
+        )?;
+        let mut vertex_buffers = Vec::new();
+        for binding in pipeline.vertex_buffer_bindings() {
+            let bound = pass.vertex_buffers.get(&binding.slot)?;
+            vertex_buffers.push(HalBoundBuffer {
+                group: 0,
+                binding: binding.slot,
+                metal_index: binding.metal_index,
+                buffer: bound.buffer.hal()?,
+                offset: bound.offset,
+                size: bound.size,
+            });
+        }
+        let index_buffer = match &pass.index_buffer {
+            Some(bound) => Some(Box::new(hal_bound_index_buffer(bound)?)),
+            None => None,
         };
+        let indirect_buffer = match &pass.indirect_buffer {
+            Some(bound) => Some(Box::new(hal_bound_indirect_buffer(bound)?)),
+            None => None,
+        };
+        (
+            Some(pipeline.hal()?),
+            bindings.buffers,
+            bindings.textures,
+            bindings.samplers,
+            vertex_buffers,
+            index_buffer,
+            indirect_buffer,
+            Some(hal_draw(draw)),
+        )
+    } else {
+        (
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+    };
     Some(HalCopy::RenderPass(HalRenderPass {
         pipeline,
         color_target: hal_render_color_target(pass.color_attachment.as_ref())?,
@@ -685,8 +718,64 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
         bind_textures,
         bind_samplers,
         vertex_buffers,
+        index_buffer,
+        indirect_buffer,
         draw,
     }))
+}
+
+fn hal_draw(draw: RenderDrawExecution) -> HalDraw {
+    match draw {
+        RenderDrawExecution::Direct {
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
+        } => HalDraw::Direct {
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
+        },
+        RenderDrawExecution::Indexed {
+            index_count,
+            instance_count,
+            first_index,
+            base_vertex,
+            first_instance,
+        } => HalDraw::Indexed {
+            index_count,
+            instance_count,
+            first_index,
+            base_vertex,
+            first_instance,
+        },
+        RenderDrawExecution::Indirect { offset } => HalDraw::Indirect { offset },
+        RenderDrawExecution::IndexedIndirect { offset } => HalDraw::IndexedIndirect { offset },
+    }
+}
+
+fn hal_bound_index_buffer(bound: &BoundIndexBuffer) -> Option<HalBoundIndexBuffer> {
+    Some(HalBoundIndexBuffer {
+        buffer: bound.buffer.hal()?,
+        format: hal_index_format(bound.format),
+        offset: bound.offset,
+        size: bound.size,
+    })
+}
+
+fn hal_bound_indirect_buffer(bound: &BoundIndirectBuffer) -> Option<HalBoundIndirectBuffer> {
+    Some(HalBoundIndirectBuffer {
+        buffer: bound.buffer.hal()?,
+        offset: bound.offset,
+    })
+}
+
+fn hal_index_format(format: IndexFormat) -> HalIndexFormat {
+    match format {
+        IndexFormat::Uint16 => HalIndexFormat::Uint16,
+        IndexFormat::Uint32 => HalIndexFormat::Uint32,
+    }
 }
 
 fn hal_render_color_target(

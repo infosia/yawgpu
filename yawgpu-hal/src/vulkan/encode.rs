@@ -959,13 +959,22 @@ fn encode_subpass_draw(
         bind_render_descriptor_sets(device, command_buffer, pipeline, &descriptor_sets);
     }
     bind_subpass_vertex_buffers(device, command_buffer, draw)?;
+    let HalDraw::Direct {
+        vertex_count,
+        instance_count,
+        first_vertex,
+        first_instance,
+    } = draw.draw
+    else {
+        return Err(shader_error("subpass draw supports only direct draws"));
+    };
     unsafe {
         device.cmd_draw(
             command_buffer,
-            draw.draw.vertex_count,
-            draw.draw.instance_count,
-            draw.draw.first_vertex,
-            draw.draw.first_instance,
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
         );
     }
     Ok(descriptor_pool)
@@ -1587,15 +1596,7 @@ pub(super) fn encode_render_pass(
             bind_render_descriptor_sets(device, command_buffer, pipeline, &descriptor_sets);
         }
         bind_vertex_buffers(device, command_buffer, pass)?;
-        unsafe {
-            device.cmd_draw(
-                command_buffer,
-                draw.vertex_count,
-                draw.instance_count,
-                draw.first_vertex,
-                draw.first_instance,
-            );
-        }
+        encode_render_draw(device, command_buffer, pass, draw)?;
     }
     unsafe {
         device.cmd_end_render_pass(command_buffer);
@@ -1612,6 +1613,114 @@ pub(super) fn encode_render_pass(
         image_views,
         render_pass: temporary_render_pass,
     })
+}
+
+fn encode_render_draw(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    pass: &HalRenderPass,
+    draw: HalDraw,
+) -> Result<(), HalError> {
+    match draw {
+        HalDraw::Direct {
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
+        } => unsafe {
+            device.cmd_draw(
+                command_buffer,
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            );
+            Ok(())
+        },
+        HalDraw::Indexed {
+            index_count,
+            instance_count,
+            first_index,
+            base_vertex,
+            first_instance,
+        } => {
+            bind_render_index_buffer(device, command_buffer, pass)?;
+            unsafe {
+                device.cmd_draw_indexed(
+                    command_buffer,
+                    index_count,
+                    instance_count,
+                    first_index,
+                    base_vertex,
+                    first_instance,
+                );
+            }
+            Ok(())
+        }
+        HalDraw::Indirect { offset } => {
+            let buffer = vulkan_indirect_buffer(pass)?;
+            unsafe {
+                device.cmd_draw_indirect(command_buffer, buffer.inner()?.buffer, offset, 1, 16);
+            }
+            Ok(())
+        }
+        HalDraw::IndexedIndirect { offset } => {
+            bind_render_index_buffer(device, command_buffer, pass)?;
+            let buffer = vulkan_indirect_buffer(pass)?;
+            unsafe {
+                device.cmd_draw_indexed_indirect(
+                    command_buffer,
+                    buffer.inner()?.buffer,
+                    offset,
+                    1,
+                    20,
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn bind_render_index_buffer(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    pass: &HalRenderPass,
+) -> Result<(), HalError> {
+    let bound = pass
+        .index_buffer
+        .as_ref()
+        .ok_or_else(|| buffer_error("render index buffer is missing"))?;
+    let crate::HalBuffer::Vulkan(buffer) = &bound.buffer else {
+        return Err(buffer_error("render index buffer is not Vulkan-backed"));
+    };
+    buffer.validate_range(bound.offset, bound.size)?;
+    unsafe {
+        device.cmd_bind_index_buffer(
+            command_buffer,
+            buffer.inner()?.buffer,
+            bound.offset,
+            vk_index_type(bound.format),
+        );
+    }
+    Ok(())
+}
+
+fn vulkan_indirect_buffer(pass: &HalRenderPass) -> Result<&VulkanBuffer, HalError> {
+    let bound = pass
+        .indirect_buffer
+        .as_ref()
+        .ok_or_else(|| buffer_error("render indirect buffer is missing"))?;
+    let crate::HalBuffer::Vulkan(buffer) = &bound.buffer else {
+        return Err(buffer_error("render indirect buffer is not Vulkan-backed"));
+    };
+    Ok(buffer)
+}
+
+fn vk_index_type(format: HalIndexFormat) -> vk::IndexType {
+    match format {
+        HalIndexFormat::Uint16 => vk::IndexType::UINT16,
+        HalIndexFormat::Uint32 => vk::IndexType::UINT32,
+    }
 }
 
 fn vulkan_render_color_texture(pass: &HalRenderPass) -> Result<Option<&VulkanTexture>, HalError> {

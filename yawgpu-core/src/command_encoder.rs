@@ -176,6 +176,8 @@ pub(crate) struct RenderPassCommand {
     pub(crate) attachment_textures: Vec<Texture>,
     pub(crate) bind_groups: BTreeMap<u32, BoundBindGroup>,
     pub(crate) vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
+    pub(crate) index_buffer: Option<BoundIndexBuffer>,
+    pub(crate) indirect_buffer: Option<BoundIndirectBuffer>,
     pub(crate) draw: Option<RenderDrawExecution>,
 }
 
@@ -220,12 +222,34 @@ pub(crate) struct RenderPassDepthStencilExecution {
 }
 
 /// Stores render draw execution data used by validation and backend submission.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct RenderDrawExecution {
-    pub(crate) vertex_count: u32,
-    pub(crate) instance_count: u32,
-    pub(crate) first_vertex: u32,
-    pub(crate) first_instance: u32,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RenderDrawExecution {
+    Direct {
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    },
+    Indexed {
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        base_vertex: i32,
+        first_instance: u32,
+    },
+    Indirect {
+        offset: u64,
+    },
+    IndexedIndirect {
+        offset: u64,
+    },
+}
+
+/// Stores an indirect draw buffer binding.
+#[derive(Debug, Clone)]
+pub(crate) struct BoundIndirectBuffer {
+    pub(crate) buffer: Arc<Buffer>,
+    pub(crate) offset: u64,
 }
 
 impl CommandEncoder {

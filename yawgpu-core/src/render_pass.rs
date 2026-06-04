@@ -312,7 +312,9 @@ impl RenderPassEncoder {
                 attachment_textures: state.attachment_textures.clone(),
                 bind_groups: state.bind_groups.clone(),
                 vertex_buffers: state.vertex_buffers.clone(),
-                draw: Some(RenderDrawExecution {
+                index_buffer: state.index_buffer.clone(),
+                indirect_buffer: None,
+                draw: Some(RenderDrawExecution::Direct {
                     vertex_count,
                     instance_count,
                     first_vertex,
@@ -330,7 +332,7 @@ impl RenderPassEncoder {
         index_count: u32,
         instance_count: u32,
         first_index: u32,
-        _base_vertex: i32,
+        base_vertex: i32,
         first_instance: u32,
         limits: Limits,
     ) -> Option<String> {
@@ -355,6 +357,33 @@ impl RenderPassEncoder {
             let attachment_uses = state.attachment_texture_uses.clone();
             record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
             state.draw_count = state.draw_count.saturating_add(1);
+            let color_attachment = state.render_color_attachment.clone();
+            let depth_stencil_attachment = state.render_depth_stencil_attachment.clone();
+            if color_attachment.is_none() && depth_stencil_attachment.is_none() {
+                return Err("render pass requires at least one attachment".to_owned());
+            }
+            let index_buffer = state
+                .index_buffer
+                .clone()
+                .ok_or_else(|| "render pass requires an index buffer".to_owned())?;
+            self.inner.parent.record_render_pass(RenderPassCommand {
+                pipeline: Some(pipeline),
+                color_attachment,
+                depth_stencil_attachment,
+                attachment_textures: state.attachment_textures.clone(),
+                bind_groups: state.bind_groups.clone(),
+                vertex_buffers: state.vertex_buffers.clone(),
+                index_buffer: Some(index_buffer),
+                indirect_buffer: None,
+                draw: Some(RenderDrawExecution::Indexed {
+                    index_count,
+                    instance_count,
+                    first_index,
+                    base_vertex,
+                    first_instance,
+                }),
+            });
+            state.render_pass_recorded = true;
             Ok(())
         })
     }
@@ -378,8 +407,32 @@ impl RenderPassEncoder {
             let attachment_uses = state.attachment_texture_uses.clone();
             record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
             validate_indirect_buffer(&indirect_buffer, indirect_offset, 16, "draw indirect")?;
-            self.inner.parent.record_referenced_buffer(indirect_buffer);
+            self.inner
+                .parent
+                .record_referenced_buffer(Arc::clone(&indirect_buffer));
             state.draw_count = state.draw_count.saturating_add(1);
+            let color_attachment = state.render_color_attachment.clone();
+            let depth_stencil_attachment = state.render_depth_stencil_attachment.clone();
+            if color_attachment.is_none() && depth_stencil_attachment.is_none() {
+                return Err("render pass requires at least one attachment".to_owned());
+            }
+            self.inner.parent.record_render_pass(RenderPassCommand {
+                pipeline: Some(pipeline),
+                color_attachment,
+                depth_stencil_attachment,
+                attachment_textures: state.attachment_textures.clone(),
+                bind_groups: state.bind_groups.clone(),
+                vertex_buffers: state.vertex_buffers.clone(),
+                index_buffer: state.index_buffer.clone(),
+                indirect_buffer: Some(BoundIndirectBuffer {
+                    buffer: indirect_buffer,
+                    offset: indirect_offset,
+                }),
+                draw: Some(RenderDrawExecution::Indirect {
+                    offset: indirect_offset,
+                }),
+            });
+            state.render_pass_recorded = true;
             Ok(())
         })
     }
@@ -408,8 +461,36 @@ impl RenderPassEncoder {
                 20,
                 "draw indexed indirect",
             )?;
-            self.inner.parent.record_referenced_buffer(indirect_buffer);
+            self.inner
+                .parent
+                .record_referenced_buffer(Arc::clone(&indirect_buffer));
             state.draw_count = state.draw_count.saturating_add(1);
+            let color_attachment = state.render_color_attachment.clone();
+            let depth_stencil_attachment = state.render_depth_stencil_attachment.clone();
+            if color_attachment.is_none() && depth_stencil_attachment.is_none() {
+                return Err("render pass requires at least one attachment".to_owned());
+            }
+            let index_buffer = state
+                .index_buffer
+                .clone()
+                .ok_or_else(|| "render pass requires an index buffer".to_owned())?;
+            self.inner.parent.record_render_pass(RenderPassCommand {
+                pipeline: Some(pipeline),
+                color_attachment,
+                depth_stencil_attachment,
+                attachment_textures: state.attachment_textures.clone(),
+                bind_groups: state.bind_groups.clone(),
+                vertex_buffers: state.vertex_buffers.clone(),
+                index_buffer: Some(index_buffer),
+                indirect_buffer: Some(BoundIndirectBuffer {
+                    buffer: indirect_buffer,
+                    offset: indirect_offset,
+                }),
+                draw: Some(RenderDrawExecution::IndexedIndirect {
+                    offset: indirect_offset,
+                }),
+            });
+            state.render_pass_recorded = true;
             Ok(())
         })
     }
@@ -604,6 +685,18 @@ mod tests {
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
         assert_eq!(command_buffer.command_ops().len(), 1);
+        let CommandExecution::RenderPass(command) = &command_buffer.command_ops()[0] else {
+            panic!("expected render pass command");
+        };
+        assert!(matches!(
+            command.draw,
+            Some(RenderDrawExecution::Direct {
+                vertex_count: 3,
+                instance_count: 1,
+                first_vertex: 0,
+                first_instance: 0,
+            })
+        ));
     }
 
     #[test]
@@ -644,6 +737,29 @@ mod tests {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 1);
+    }
+
+    #[test]
+    fn render_pass_encoder_indexed_draw_requires_index_buffer() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.draw_indexed(3, 1, 0, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(
+            error,
+            Some("render pass indexed draw requires an index buffer".to_owned())
+        );
+        assert!(command_buffer.is_error());
     }
 
     #[test]
@@ -667,7 +783,7 @@ mod tests {
             pass.set_index_buffer(index_buffer, Some(IndexFormat::Uint16), 0, 16),
             None
         );
-        assert_eq!(pass.draw_indexed(3, 1, 0, 0, 0, device.limits()), None);
+        assert_eq!(pass.draw_indexed(3, 1, 0, -2, 0, device.limits()), None);
         assert_eq!(
             pass.draw_indirect(indirect.clone(), 0, device.limits()),
             None
@@ -681,6 +797,40 @@ mod tests {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 3);
+        let CommandExecution::RenderPass(indexed) = &command_buffer.command_ops()[0] else {
+            panic!("expected indexed render pass command");
+        };
+        assert!(indexed.index_buffer.is_some());
+        assert!(indexed.indirect_buffer.is_none());
+        assert!(matches!(
+            indexed.draw,
+            Some(RenderDrawExecution::Indexed {
+                index_count: 3,
+                instance_count: 1,
+                first_index: 0,
+                base_vertex: -2,
+                first_instance: 0,
+            })
+        ));
+        let CommandExecution::RenderPass(indirect_draw) = &command_buffer.command_ops()[1] else {
+            panic!("expected indirect render pass command");
+        };
+        assert!(indirect_draw.indirect_buffer.is_some());
+        assert!(matches!(
+            indirect_draw.draw,
+            Some(RenderDrawExecution::Indirect { offset: 0 })
+        ));
+        let CommandExecution::RenderPass(indexed_indirect) = &command_buffer.command_ops()[2]
+        else {
+            panic!("expected indexed indirect render pass command");
+        };
+        assert!(indexed_indirect.index_buffer.is_some());
+        assert!(indexed_indirect.indirect_buffer.is_some());
+        assert!(matches!(
+            indexed_indirect.draw,
+            Some(RenderDrawExecution::IndexedIndirect { offset: 0 })
+        ));
     }
 
     #[test]

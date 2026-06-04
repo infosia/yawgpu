@@ -471,7 +471,7 @@ impl SubpassRenderPass {
                 first_vertex,
                 first_instance,
             },
-            RenderDrawExecution {
+            RenderDrawExecution::Direct {
                 vertex_count,
                 instance_count,
                 first_vertex,
@@ -498,7 +498,7 @@ impl SubpassRenderPass {
                 first_index,
                 first_instance,
             },
-            RenderDrawExecution {
+            RenderDrawExecution::Direct {
                 vertex_count: index_count,
                 instance_count,
                 first_vertex: first_index,
@@ -1503,7 +1503,10 @@ mod tests {
         };
         assert_eq!(command.draws.len(), 1);
         assert_eq!(command.draws[0].subpass_index, 0);
-        assert_eq!(command.draws[0].draw.vertex_count, 3);
+        let RenderDrawExecution::Direct { vertex_count, .. } = command.draws[0].draw else {
+            panic!("expected direct subpass draw");
+        };
+        assert_eq!(vertex_count, 3);
     }
 
     #[test]

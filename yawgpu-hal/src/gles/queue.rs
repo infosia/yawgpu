@@ -9,8 +9,8 @@ use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::{
     HalBuffer, HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy,
     HalComputePass, HalComputePipeline, HalCopy, HalDescriptorBinding, HalDescriptorBindingKind,
-    HalError, HalRenderLoadOp, HalRenderPass, HalRenderPipeline, HalTexture, HalTextureCopy,
-    HalVertexStepMode,
+    HalDraw, HalError, HalIndexFormat, HalRenderLoadOp, HalRenderPass, HalRenderPipeline,
+    HalTexture, HalTextureCopy, HalVertexStepMode,
 };
 
 /// Stores GLES queue data used by validation and backend submission.
@@ -361,7 +361,7 @@ fn create_render_fbo(
     let size_texture =
         color_target
             .or(depth_stencil_target)
-            .ok_or_else(|| HalError::BufferOperationFailed {
+            .ok_or(HalError::BufferOperationFailed {
                 backend: BACKEND,
                 message: "render pass requires an attachment",
             })?;
@@ -497,24 +497,172 @@ fn run_render_draw(
     bind_vertex_buffers(gl, pass, pipeline, vao)?;
     if let Some(draw) = pass.draw {
         if let Some(location) = pipeline.first_instance_location() {
-            unsafe {
-                gl.uniform_1_u32(Some(location), draw.first_instance);
-            }
+            set_first_instance_uniform(gl, location, draw);
         }
         let topology = map_primitive_topology(pipeline.primitive_topology());
-        let first_vertex = i32_from_u32(draw.first_vertex, "draw firstVertex exceeds GLES limit")?;
-        let vertex_count = i32_from_u32(draw.vertex_count, "draw vertexCount exceeds GLES limit")?;
-        unsafe {
-            if draw.instance_count == 1 && draw.first_instance == 0 {
-                gl.draw_arrays(topology, first_vertex, vertex_count);
-            } else {
-                let instance_count =
-                    i32_from_u32(draw.instance_count, "draw instanceCount exceeds GLES limit")?;
-                gl.draw_arrays_instanced(topology, first_vertex, vertex_count, instance_count);
+        run_gles_draw(gl, pass, topology, draw)?;
+    }
+    Ok(())
+}
+
+fn set_first_instance_uniform(gl: &glow::Context, location: &glow::UniformLocation, draw: HalDraw) {
+    let first_instance = match draw {
+        HalDraw::Direct { first_instance, .. } | HalDraw::Indexed { first_instance, .. } => {
+            first_instance
+        }
+        HalDraw::Indirect { .. } | HalDraw::IndexedIndirect { .. } => 0,
+    };
+    unsafe {
+        gl.uniform_1_u32(Some(location), first_instance);
+    }
+}
+
+fn run_gles_draw(
+    gl: &glow::Context,
+    pass: &HalRenderPass,
+    topology: u32,
+    draw: HalDraw,
+) -> Result<(), HalError> {
+    match draw {
+        HalDraw::Direct {
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
+        } => {
+            let first_vertex = i32_from_u32(first_vertex, "draw firstVertex exceeds GLES limit")?;
+            let vertex_count = i32_from_u32(vertex_count, "draw vertexCount exceeds GLES limit")?;
+            unsafe {
+                if instance_count == 1 && first_instance == 0 {
+                    gl.draw_arrays(topology, first_vertex, vertex_count);
+                } else {
+                    let instance_count =
+                        i32_from_u32(instance_count, "draw instanceCount exceeds GLES limit")?;
+                    gl.draw_arrays_instanced(topology, first_vertex, vertex_count, instance_count);
+                }
+            }
+        }
+        HalDraw::Indexed {
+            index_count,
+            instance_count,
+            first_index,
+            base_vertex,
+            first_instance,
+        } => {
+            if base_vertex != 0 {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "GLES indexed draw requires baseVertex 0",
+                });
+            }
+            let (index_type, index_offset) = bind_gles_index_buffer(gl, pass, first_index)?;
+            let index_count = i32_from_u32(index_count, "draw indexCount exceeds GLES limit")?;
+            let instance_count =
+                i32_from_u32(instance_count, "draw instanceCount exceeds GLES limit")?;
+            unsafe {
+                if instance_count == 1 && first_instance == 0 {
+                    gl.draw_elements(topology, index_count, index_type, index_offset);
+                } else {
+                    gl.draw_elements_instanced(
+                        topology,
+                        index_count,
+                        index_type,
+                        index_offset,
+                        instance_count,
+                    );
+                }
+            }
+        }
+        HalDraw::Indirect { offset } => {
+            bind_gles_indirect_buffer(gl, pass)?;
+            let offset = i32_from_u64(offset, "draw indirect offset exceeds GLES limit")?;
+            unsafe {
+                gl.draw_arrays_indirect_offset(topology, offset);
+            }
+        }
+        HalDraw::IndexedIndirect { offset } => {
+            if pass
+                .index_buffer
+                .as_ref()
+                .is_some_and(|bound| bound.offset != 0)
+            {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "GLES indexed indirect draw requires index buffer offset 0",
+                });
+            }
+            let (index_type, _) = bind_gles_index_buffer(gl, pass, 0)?;
+            bind_gles_indirect_buffer(gl, pass)?;
+            let offset = i32_from_u64(offset, "draw indexed indirect offset exceeds GLES limit")?;
+            unsafe {
+                gl.draw_elements_indirect_offset(topology, index_type, offset);
             }
         }
     }
     Ok(())
+}
+
+fn bind_gles_index_buffer(
+    gl: &glow::Context,
+    pass: &HalRenderPass,
+    first_index: u32,
+) -> Result<(u32, i32), HalError> {
+    let bound = pass
+        .index_buffer
+        .as_ref()
+        .ok_or(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "render index buffer is missing",
+        })?;
+    let HalBuffer::Gles(buffer) = &bound.buffer else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "render index buffer is not GLES-backed",
+        });
+    };
+    let index_size = match bound.format {
+        HalIndexFormat::Uint16 => 2,
+        HalIndexFormat::Uint32 => 4,
+    };
+    let offset = bound
+        .offset
+        .checked_add(u64::from(first_index) * index_size)
+        .ok_or(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "render index buffer offset overflows",
+        })?;
+    let offset = i32_from_u64(offset, "render index buffer offset exceeds GLES limit")?;
+    unsafe {
+        gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(buffer.raw_or_err()?));
+    }
+    Ok((gles_index_type(bound.format), offset))
+}
+
+fn bind_gles_indirect_buffer(gl: &glow::Context, pass: &HalRenderPass) -> Result<(), HalError> {
+    let bound = pass
+        .indirect_buffer
+        .as_ref()
+        .ok_or(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "render indirect buffer is missing",
+        })?;
+    let HalBuffer::Gles(buffer) = &bound.buffer else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "render indirect buffer is not GLES-backed",
+        });
+    };
+    unsafe {
+        gl.bind_buffer(glow::DRAW_INDIRECT_BUFFER, Some(buffer.raw_or_err()?));
+    }
+    Ok(())
+}
+
+fn gles_index_type(format: HalIndexFormat) -> u32 {
+    match format {
+        HalIndexFormat::Uint16 => glow::UNSIGNED_SHORT,
+        HalIndexFormat::Uint32 => glow::UNSIGNED_INT,
+    }
 }
 
 fn bind_render_buffers(
@@ -893,6 +1041,13 @@ fn pixels_per_row(bytes_per_row: u32, bytes_per_pixel: u32) -> Result<i32, HalEr
 }
 
 fn i32_from_u32(value: u32, message: &'static str) -> Result<i32, HalError> {
+    i32::try_from(value).map_err(|_| HalError::BufferOperationFailed {
+        backend: BACKEND,
+        message,
+    })
+}
+
+fn i32_from_u64(value: u64, message: &'static str) -> Result<i32, HalError> {
     i32::try_from(value).map_err(|_| HalError::BufferOperationFailed {
         backend: BACKEND,
         message,

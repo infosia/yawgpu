@@ -650,7 +650,7 @@ pub(super) fn encode_render_pass(
     for binding in &pass.vertex_buffers {
         encode_render_vertex_buffer(encoder, binding)?;
     }
-    draw_primitives(encoder, pipeline.primitive_topology, draw)?;
+    encode_render_draw(encoder, pass, pipeline.primitive_topology, draw)?;
     Ok(())
 }
 
@@ -860,19 +860,118 @@ fn encode_render_vertex_buffer(
     Ok(())
 }
 
-fn draw_primitives(
+fn encode_render_draw(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    pass: &HalRenderPass,
     topology: HalPrimitiveTopology,
     draw: HalDraw,
 ) -> Result<(), HalError> {
-    unsafe {
-        encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
-            map_primitive_topology(topology),
-            to_ns(u64::from(draw.first_vertex))?,
-            to_ns(u64::from(draw.vertex_count))?,
-            to_ns(u64::from(draw.instance_count))?,
-            to_ns(u64::from(draw.first_instance))?,
-        );
+    match draw {
+        HalDraw::Direct {
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
+        } => unsafe {
+            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
+                map_primitive_topology(topology),
+                to_ns(u64::from(first_vertex))?,
+                to_ns(u64::from(vertex_count))?,
+                to_ns(u64::from(instance_count))?,
+                to_ns(u64::from(first_instance))?,
+            );
+        },
+        HalDraw::Indexed {
+            index_count,
+            instance_count,
+            first_index,
+            base_vertex,
+            first_instance,
+        } => {
+            let (buffer, index_type, index_offset) = metal_index_buffer(pass, first_index)?;
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount_baseVertex_baseInstance(
+                    map_primitive_topology(topology),
+                    to_ns(u64::from(index_count))?,
+                    index_type,
+                    buffer,
+                    to_ns(index_offset)?,
+                    to_ns(u64::from(instance_count))?,
+                    base_vertex as isize,
+                    to_ns(u64::from(first_instance))?,
+                );
+            }
+        }
+        HalDraw::Indirect { offset } => {
+            let buffer = metal_indirect_buffer(pass)?;
+            unsafe {
+                encoder.drawPrimitives_indirectBuffer_indirectBufferOffset(
+                    map_primitive_topology(topology),
+                    buffer,
+                    to_ns(offset)?,
+                );
+            }
+        }
+        HalDraw::IndexedIndirect { offset } => {
+            let (index_buffer, index_type, index_offset) = metal_index_buffer(pass, 0)?;
+            let indirect_buffer = metal_indirect_buffer(pass)?;
+            unsafe {
+                encoder.drawIndexedPrimitives_indexType_indexBuffer_indexBufferOffset_indirectBuffer_indirectBufferOffset(
+                    map_primitive_topology(topology),
+                    index_type,
+                    index_buffer,
+                    to_ns(index_offset)?,
+                    indirect_buffer,
+                    to_ns(offset)?,
+                );
+            }
+        }
     }
     Ok(())
+}
+
+fn metal_index_buffer(
+    pass: &HalRenderPass,
+    first_index: u32,
+) -> Result<(&ProtocolObject<dyn MTLBufferTrait>, MTLIndexType, u64), HalError> {
+    let bound = pass
+        .index_buffer
+        .as_ref()
+        .ok_or_else(|| buffer_error("render index buffer is missing"))?;
+    let HalBuffer::Metal(buffer) = &bound.buffer else {
+        return Err(buffer_error("render index buffer is not Metal-backed"));
+    };
+    let index_size = match bound.format {
+        HalIndexFormat::Uint16 => 2,
+        HalIndexFormat::Uint32 => 4,
+    };
+    let index_offset = bound
+        .offset
+        .checked_add(u64::from(first_index) * index_size)
+        .ok_or_else(|| buffer_error("render index buffer offset overflows"))?;
+    Ok((
+        buffer.inner()?,
+        metal_index_type(bound.format),
+        index_offset,
+    ))
+}
+
+fn metal_indirect_buffer(
+    pass: &HalRenderPass,
+) -> Result<&ProtocolObject<dyn MTLBufferTrait>, HalError> {
+    let bound = pass
+        .indirect_buffer
+        .as_ref()
+        .ok_or_else(|| buffer_error("render indirect buffer is missing"))?;
+    let HalBuffer::Metal(buffer) = &bound.buffer else {
+        return Err(buffer_error("render indirect buffer is not Metal-backed"));
+    };
+    buffer.inner()
+}
+
+fn metal_index_type(format: HalIndexFormat) -> MTLIndexType {
+    match format {
+        HalIndexFormat::Uint16 => MTLIndexType::UInt16,
+        HalIndexFormat::Uint32 => MTLIndexType::UInt32,
+    }
 }
