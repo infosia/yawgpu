@@ -1872,8 +1872,7 @@ fn metal_sampled_frag_depth_packed_3x3() {
             bindGroupLayouts: &bgl,
             immediateSize: 0,
         };
-        let pipeline_layout =
-            yawgpu::wgpuDeviceCreatePipelineLayout(device, &pipeline_layout_desc);
+        let pipeline_layout = yawgpu::wgpuDeviceCreatePipelineLayout(device, &pipeline_layout_desc);
         assert!(!pipeline_layout.is_null());
         let pipeline =
             create_packed_depth_pipeline_with_layout(device, vs_module, fs_module, pipeline_layout);
