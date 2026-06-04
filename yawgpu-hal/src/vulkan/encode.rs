@@ -1593,6 +1593,7 @@ pub(super) fn encode_render_pass(
             };
             device.cmd_set_viewport(command_buffer, 0, &[viewport]);
             device.cmd_set_scissor(command_buffer, 0, &[render_area]);
+            device.cmd_set_blend_constants(command_buffer, &pass.blend_constant);
             bind_render_descriptor_sets(device, command_buffer, pipeline, &descriptor_sets);
         }
         bind_vertex_buffers(device, command_buffer, pass)?;

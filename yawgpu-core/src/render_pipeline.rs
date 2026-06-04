@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use yawgpu_hal::{
-    HalBackend, HalCompareFunction, HalDepthStencilState, HalDescriptorBinding, HalDevice,
+    HalBackend, HalBlendComponent, HalBlendFactor, HalBlendOperation, HalBlendState,
+    HalColorTargetState, HalCompareFunction, HalDepthStencilState, HalDescriptorBinding, HalDevice,
     HalPrimitiveTopology, HalRenderPipeline, HalRenderPipelineDescriptor, HalShaderSource,
     HalStencilFaceState, HalStencilOperation, HalVertexAttribute, HalVertexBufferLayout,
     HalVertexFormat, HalVertexStepMode,
@@ -1305,16 +1306,17 @@ pub(crate) fn hal_render_pipeline_descriptor(
     descriptor: &RenderPipelineDescriptor,
     bindings: &[MetalVertexBufferBinding],
 ) -> Result<HalRenderPipelineDescriptor, String> {
-    let color_formats = descriptor
+    let color_targets = descriptor
         .fragment
         .as_ref()
         .map(|fragment| {
             fragment
                 .targets
                 .iter()
-                .map(|target| hal_texture_format(target.format))
-                .collect()
+                .map(hal_color_target_state)
+                .collect::<Result<Vec<_>, String>>()
         })
+        .transpose()?
         .unwrap_or_default();
     let vertex_buffers = descriptor
         .vertex
@@ -1344,11 +1346,67 @@ pub(crate) fn hal_render_pipeline_descriptor(
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(HalRenderPipelineDescriptor {
-        color_formats,
+        color_targets,
         depth_stencil: descriptor.depth_stencil.map(hal_depth_stencil_state),
         vertex_buffers,
         primitive_topology: hal_primitive_topology(descriptor.primitive.topology),
     })
+}
+
+fn hal_color_target_state(target: &ColorTargetState) -> Result<HalColorTargetState, String> {
+    Ok(HalColorTargetState {
+        format: hal_texture_format(target.format),
+        blend: target.blend.map(hal_blend_state),
+        write_mask: u32::try_from(target.write_mask)
+            .map_err(|_| "color target write mask is too large for HAL".to_owned())?,
+    })
+}
+
+fn hal_blend_state(state: BlendState) -> HalBlendState {
+    HalBlendState {
+        color: hal_blend_component(state.color),
+        alpha: hal_blend_component(state.alpha),
+    }
+}
+
+fn hal_blend_component(component: BlendComponent) -> HalBlendComponent {
+    HalBlendComponent {
+        operation: hal_blend_operation(component.operation),
+        src_factor: hal_blend_factor(component.src_factor),
+        dst_factor: hal_blend_factor(component.dst_factor),
+    }
+}
+
+fn hal_blend_operation(operation: BlendOperation) -> HalBlendOperation {
+    match operation {
+        BlendOperation::Add => HalBlendOperation::Add,
+        BlendOperation::Subtract => HalBlendOperation::Subtract,
+        BlendOperation::ReverseSubtract => HalBlendOperation::ReverseSubtract,
+        BlendOperation::Min => HalBlendOperation::Min,
+        BlendOperation::Max => HalBlendOperation::Max,
+    }
+}
+
+fn hal_blend_factor(factor: BlendFactor) -> HalBlendFactor {
+    match factor {
+        BlendFactor::Zero => HalBlendFactor::Zero,
+        BlendFactor::One => HalBlendFactor::One,
+        BlendFactor::Src => HalBlendFactor::Src,
+        BlendFactor::OneMinusSrc => HalBlendFactor::OneMinusSrc,
+        BlendFactor::SrcAlpha => HalBlendFactor::SrcAlpha,
+        BlendFactor::OneMinusSrcAlpha => HalBlendFactor::OneMinusSrcAlpha,
+        BlendFactor::Dst => HalBlendFactor::Dst,
+        BlendFactor::OneMinusDst => HalBlendFactor::OneMinusDst,
+        BlendFactor::DstAlpha => HalBlendFactor::DstAlpha,
+        BlendFactor::OneMinusDstAlpha => HalBlendFactor::OneMinusDstAlpha,
+        BlendFactor::SrcAlphaSaturated => HalBlendFactor::SrcAlphaSaturated,
+        BlendFactor::Constant => HalBlendFactor::Constant,
+        BlendFactor::OneMinusConstant => HalBlendFactor::OneMinusConstant,
+        BlendFactor::Src1 => HalBlendFactor::Src1,
+        BlendFactor::OneMinusSrc1 => HalBlendFactor::OneMinusSrc1,
+        BlendFactor::Src1Alpha => HalBlendFactor::Src1Alpha,
+        BlendFactor::OneMinusSrc1Alpha => HalBlendFactor::OneMinusSrc1Alpha,
+    }
 }
 
 fn hal_depth_stencil_state(depth_stencil: DepthStencilState) -> HalDepthStencilState {
@@ -2501,6 +2559,43 @@ mod tests {
             validate_blend_state(invalid),
             Err("render pipeline min/max blend operations require one factors".to_owned())
         );
+    }
+
+    #[test]
+    fn hal_render_pipeline_descriptor_maps_color_target_blend_and_write_mask() {
+        let device = noop_device();
+        let module = render_shader_module(&device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        let blend = BlendState {
+            color: BlendComponent {
+                operation: BlendOperation::ReverseSubtract,
+                src_factor: BlendFactor::SrcAlpha,
+                dst_factor: BlendFactor::OneMinusConstant,
+            },
+            alpha: BlendComponent {
+                operation: BlendOperation::Add,
+                src_factor: BlendFactor::Constant,
+                dst_factor: BlendFactor::OneMinusDstAlpha,
+            },
+        };
+        descriptor.fragment.as_mut().expect("fragment").targets[0] = ColorTargetState {
+            format: rgba8_unorm(),
+            blend: Some(blend),
+            write_mask: 0b0101,
+        };
+
+        let hal = hal_render_pipeline_descriptor(&descriptor, &[]).expect("HAL render descriptor");
+
+        assert_eq!(hal.color_targets.len(), 1);
+        let target = hal.color_targets[0];
+        assert_eq!(target.format, hal_texture_format(rgba8_unorm()));
+        assert_eq!(target.write_mask, 0b0101);
+        let blend = target.blend.expect("blend");
+        assert_eq!(blend.color.operation, HalBlendOperation::ReverseSubtract);
+        assert_eq!(blend.color.src_factor, HalBlendFactor::SrcAlpha);
+        assert_eq!(blend.color.dst_factor, HalBlendFactor::OneMinusConstant);
+        assert_eq!(blend.alpha.src_factor, HalBlendFactor::Constant);
+        assert_eq!(blend.alpha.dst_factor, HalBlendFactor::OneMinusDstAlpha);
     }
 
     #[test]

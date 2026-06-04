@@ -314,6 +314,7 @@ impl RenderPassEncoder {
                 vertex_buffers: state.vertex_buffers.clone(),
                 index_buffer: state.index_buffer.clone(),
                 indirect_buffer: None,
+                blend_constant: state.blend_constant,
                 draw: Some(RenderDrawExecution::Direct {
                     vertex_count,
                     instance_count,
@@ -375,6 +376,7 @@ impl RenderPassEncoder {
                 vertex_buffers: state.vertex_buffers.clone(),
                 index_buffer: Some(index_buffer),
                 indirect_buffer: None,
+                blend_constant: state.blend_constant,
                 draw: Some(RenderDrawExecution::Indexed {
                     index_count,
                     instance_count,
@@ -428,6 +430,7 @@ impl RenderPassEncoder {
                     buffer: indirect_buffer,
                     offset: indirect_offset,
                 }),
+                blend_constant: state.blend_constant,
                 draw: Some(RenderDrawExecution::Indirect {
                     offset: indirect_offset,
                 }),
@@ -486,6 +489,7 @@ impl RenderPassEncoder {
                     buffer: indirect_buffer,
                     offset: indirect_offset,
                 }),
+                blend_constant: state.blend_constant,
                 draw: Some(RenderDrawExecution::IndexedIndirect {
                     offset: indirect_offset,
                 }),
@@ -525,15 +529,13 @@ impl RenderPassEncoder {
 
     /// Sets blend constant on this object or encoder.
     pub fn set_blend_constant(&self, color: Color) -> Option<String> {
-        self.inner.record_pass_command(|_| {
-            if [color.r, color.g, color.b, color.a]
-                .into_iter()
-                .all(f64::is_finite)
-            {
-                Ok(())
-            } else {
-                Err("render pass blend constant components must be finite".to_owned())
+        self.inner.record_pass_command(|state| {
+            let components = [color.r, color.g, color.b, color.a];
+            if !components.into_iter().all(f64::is_finite) {
+                return Err("render pass blend constant components must be finite".to_owned());
             }
+            state.blend_constant = components.map(|component| component as f32);
+            Ok(())
         })
     }
 
@@ -697,6 +699,38 @@ mod tests {
                 first_instance: 0,
             })
         ));
+        assert_eq!(command.blend_constant, [0.0; 4]);
+    }
+
+    #[test]
+    fn render_pass_encoder_set_blend_constant_records_draw_constant() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_blend_constant(Color {
+                r: 0.25,
+                g: 0.5,
+                b: 0.75,
+                a: 1.0,
+            }),
+            None
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        let CommandExecution::RenderPass(command) = &command_buffer.command_ops()[0] else {
+            panic!("expected render pass command");
+        };
+        assert_eq!(command.blend_constant, [0.25, 0.5, 0.75, 1.0]);
     }
 
     #[test]

@@ -539,6 +539,38 @@ never a reason to skip a CTS case.
     (ii) the GLES `Indirect`/`IndexedIndirect` `first_instance→0` mapping
     (`gles/queue.rs`) lacks an explanatory comment. Neither blocks COMPLETE; both logged here for a
     follow-up cleanup. Gate: **no open CRITICAL/MAJOR → F-034 COMPLETE.**
+- **External-CTS finding F-035 — RESOLVED (treated as a phase, with Clean Review).** The T31
+  `rendering/color_target_state` ports surfaced that yawgpu ignored `GPUColorTargetState`
+  **`writeMask`** and **`blend`** (and `setBlendConstant`): core parsed + validated
+  `ColorTargetState{format, blend, write_mask}` but `HalRenderPipelineDescriptor` carried only
+  `color_formats`, and `set_blend_constant` was a validation-only stub — so the raw clamped fragment
+  output was written to every channel. HAL-agnostic (Metal + Vulkan byte-identical, `pass=2 fail=21`).
+  - **Fix (coding agent):** `HalRenderPipelineDescriptor.color_formats` → `color_targets:
+    Vec<HalColorTargetState{format, blend: Option<HalBlendState>, write_mask}>` with new
+    `HalBlendState`/`HalBlendComponent`/`HalBlendOperation`/`HalBlendFactor`; core maps every
+    `ColorTargetState`; `set_blend_constant` records the constant into pass state, every draw site
+    snapshots it into `RenderPassCommand`, and it threads through `queue.rs` to
+    `HalRenderPass.blend_constant`. Backends apply write_mask + blend in the pipeline color attachment
+    and the blend constant at draw (Metal `setBlendColor…`; Vulkan dynamic `cmd_set_blend_constants`;
+    GLES `glColorMask`/`glBlendFuncSeparate`/`glBlendEquationSeparate`/`glBlendColor`). GLES rejects
+    dual-source blend factors with `HalError` (catalogued in `specs/blocks/67-gles-backend.md`).
+  - **Verified real-GPU (Claude):** `rendering/color_target_state:*` = `23/0` (3 skips) on **Metal and
+    Vulkan/MoltenVK**, up from `2/21`; Noop+metal+vulkan+gles clippy clean; workspace test green.
+    Claude authored `yawgpu/tests/e2e_metal_color_target.rs` (2 probes: `writeMask=Red` gates G/B
+    → `[255,0,0,255]`; `blend src*constant` with `setBlendConstant 0.5` → `[128,128,128,255]`);
+    both pass on the M2.
+  - **Phase Review (Clean Review, fresh no-context subagent on the cumulative diff):** **0 CRITICAL**,
+    **1 MAJOR**, 2 MINOR. The MAJOR — the GLES dual-source-blend `HalError` was not catalogued in
+    `67-gles-backend.md` — is a **spec fix (Claude's)** and was applied (the "Render pipeline state"
+    row now lists writeMask + blend + blend constant + the dual-source Tier-2 `HalError`). The
+    reviewer separately verified soundness (the `write_mask: u64→u32` `try_from` is unreachable-fail
+    because core validation rejects `&!0xF` bits before pipeline creation; no panic), the blend
+    factor/op mappings on all three backends (color/alpha not swapped, Constant vs OneMinusConstant
+    correct), the per-pass blend-constant plumbing, and the e2e logic. 2 MINOR **deferred with
+    rationale**: (i) `subpass.rs` `SubpassRenderPassCommand` has no `blend_constant` field — harmless,
+    the subpass encoder exposes no `setBlendConstant`; (ii) the GLES `Src1*` `gles_blend_factor` arms
+    are unreachable at runtime (the pipeline rejects dual-source first) but kept for `match`
+    exhaustiveness. Neither blocks COMPLETE. Gate: **no open CRITICAL/MAJOR → F-035 COMPLETE.**
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.

@@ -29,6 +29,7 @@ pub use command::{
 #[cfg(feature = "tiled")]
 pub use descriptors::HalTransientAttachmentDescriptor;
 pub use descriptors::{
+    HalBlendComponent, HalBlendFactor, HalBlendOperation, HalBlendState, HalColorTargetState,
     HalDepthStencilState, HalExtent3d, HalOrigin3d, HalRenderPipelineDescriptor,
     HalSamplerDescriptor, HalStencilFaceState, HalTextureDescriptor, HalTextureDimension,
     HalVertexAttribute, HalVertexBufferLayout,
@@ -1113,7 +1114,11 @@ mod tests {
 
     fn render_pipeline_descriptor() -> HalRenderPipelineDescriptor {
         HalRenderPipelineDescriptor {
-            color_formats: vec![HalTextureFormat::Rgba8Unorm],
+            color_targets: vec![HalColorTargetState {
+                format: HalTextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: 0xf,
+            }],
             depth_stencil: None,
             vertex_buffers: Vec::new(),
             primitive_topology: HalPrimitiveTopology::TriangleList,
@@ -1377,6 +1382,7 @@ mod tests {
             vertex_buffers: Vec::new(),
             index_buffer: None,
             indirect_buffer: None,
+            blend_constant: [0.0; 4],
             draw: None,
         })])?;
 

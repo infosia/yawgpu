@@ -178,6 +178,7 @@ pub(crate) struct RenderPassCommand {
     pub(crate) vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
     pub(crate) index_buffer: Option<BoundIndexBuffer>,
     pub(crate) indirect_buffer: Option<BoundIndirectBuffer>,
+    pub(crate) blend_constant: [f32; 4],
     pub(crate) draw: Option<RenderDrawExecution>,
 }
 

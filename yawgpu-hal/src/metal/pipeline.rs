@@ -77,7 +77,7 @@ pub(super) fn create_render_pipeline(
     fragment_entry_point: Option<&str>,
     descriptor: &HalRenderPipelineDescriptor,
 ) -> Result<MetalRenderPipeline, HalError> {
-    if descriptor.color_formats.is_empty() && descriptor.depth_stencil.is_none() {
+    if descriptor.color_targets.is_empty() && descriptor.depth_stencil.is_none() {
         return Err(shader_error(
             "render pipeline requires a color target or depth-stencil state".to_owned(),
         ));
@@ -87,16 +87,17 @@ pub(super) fn create_render_pipeline(
     let pipeline_descriptor = MTLRenderPipelineDescriptor::new();
     pipeline_descriptor.setVertexFunction(Some(&vertex_function));
     pipeline_descriptor.setFragmentFunction(fragment_function.as_deref());
-    // Each `color_formats[i]` populates `MTLRenderPipelineDescriptor.colorAttachments[i].pixelFormat`,
+    // Each color target populates `MTLRenderPipelineDescriptor.colorAttachments[i]`,
     // so the MTL pipeline's color-attachment layout matches the encoder slot-for-slot.
     // For subpass pipelines this carries every layout slot's format (including
     // ones the current subpass doesn't write to) — the fragment shader's
     // `[[color(N)]]` outputs naturally land in the right MTL slot.
     let color_attachments = pipeline_descriptor.colorAttachments();
-    for (i, &color_format) in descriptor.color_formats.iter().enumerate() {
-        let (pixel_format, _) = map_texture_format(color_format)?;
+    for (i, color_target) in descriptor.color_targets.iter().copied().enumerate() {
+        let (pixel_format, _) = map_texture_format(color_target.format)?;
         let attach = unsafe { color_attachments.objectAtIndexedSubscript(i) };
         attach.setPixelFormat(pixel_format);
+        set_color_attachment_state(&attach, color_target);
     }
     if let Some(depth_stencil) = descriptor.depth_stencil {
         let (pixel_format, _) = map_texture_format(depth_stencil.format)?;
@@ -171,6 +172,121 @@ pub(super) fn create_render_pipeline(
         depth_bias_slope_scale,
         depth_bias_clamp,
     })
+}
+
+fn set_color_attachment_state(
+    attachment: &MTLRenderPipelineColorAttachmentDescriptor,
+    target: HalColorTargetState,
+) {
+    attachment.setWriteMask(mtl_color_write_mask(target.write_mask));
+    if let Some(blend) = target.blend {
+        attachment.setBlendingEnabled(true);
+        attachment.setSourceRGBBlendFactor(mtl_blend_factor(blend.color.src_factor, false));
+        attachment.setDestinationRGBBlendFactor(mtl_blend_factor(blend.color.dst_factor, false));
+        attachment.setRgbBlendOperation(mtl_blend_operation(blend.color.operation));
+        attachment.setSourceAlphaBlendFactor(mtl_blend_factor(blend.alpha.src_factor, true));
+        attachment.setDestinationAlphaBlendFactor(mtl_blend_factor(blend.alpha.dst_factor, true));
+        attachment.setAlphaBlendOperation(mtl_blend_operation(blend.alpha.operation));
+    } else {
+        attachment.setBlendingEnabled(false);
+    }
+}
+
+fn mtl_color_write_mask(write_mask: u32) -> MTLColorWriteMask {
+    let mut mask = MTLColorWriteMask::empty();
+    if write_mask & 0x1 != 0 {
+        mask |= MTLColorWriteMask::Red;
+    }
+    if write_mask & 0x2 != 0 {
+        mask |= MTLColorWriteMask::Green;
+    }
+    if write_mask & 0x4 != 0 {
+        mask |= MTLColorWriteMask::Blue;
+    }
+    if write_mask & 0x8 != 0 {
+        mask |= MTLColorWriteMask::Alpha;
+    }
+    mask
+}
+
+fn mtl_blend_operation(operation: HalBlendOperation) -> MTLBlendOperation {
+    match operation {
+        HalBlendOperation::Add => MTLBlendOperation::Add,
+        HalBlendOperation::Subtract => MTLBlendOperation::Subtract,
+        HalBlendOperation::ReverseSubtract => MTLBlendOperation::ReverseSubtract,
+        HalBlendOperation::Min => MTLBlendOperation::Min,
+        HalBlendOperation::Max => MTLBlendOperation::Max,
+    }
+}
+
+fn mtl_blend_factor(factor: HalBlendFactor, alpha: bool) -> MTLBlendFactor {
+    match factor {
+        HalBlendFactor::Zero => MTLBlendFactor::Zero,
+        HalBlendFactor::One => MTLBlendFactor::One,
+        HalBlendFactor::Src => {
+            if alpha {
+                MTLBlendFactor::SourceAlpha
+            } else {
+                MTLBlendFactor::SourceColor
+            }
+        }
+        HalBlendFactor::OneMinusSrc => {
+            if alpha {
+                MTLBlendFactor::OneMinusSourceAlpha
+            } else {
+                MTLBlendFactor::OneMinusSourceColor
+            }
+        }
+        HalBlendFactor::SrcAlpha => MTLBlendFactor::SourceAlpha,
+        HalBlendFactor::OneMinusSrcAlpha => MTLBlendFactor::OneMinusSourceAlpha,
+        HalBlendFactor::Dst => {
+            if alpha {
+                MTLBlendFactor::DestinationAlpha
+            } else {
+                MTLBlendFactor::DestinationColor
+            }
+        }
+        HalBlendFactor::OneMinusDst => {
+            if alpha {
+                MTLBlendFactor::OneMinusDestinationAlpha
+            } else {
+                MTLBlendFactor::OneMinusDestinationColor
+            }
+        }
+        HalBlendFactor::DstAlpha => MTLBlendFactor::DestinationAlpha,
+        HalBlendFactor::OneMinusDstAlpha => MTLBlendFactor::OneMinusDestinationAlpha,
+        HalBlendFactor::SrcAlphaSaturated => MTLBlendFactor::SourceAlphaSaturated,
+        HalBlendFactor::Constant => {
+            if alpha {
+                MTLBlendFactor::BlendAlpha
+            } else {
+                MTLBlendFactor::BlendColor
+            }
+        }
+        HalBlendFactor::OneMinusConstant => {
+            if alpha {
+                MTLBlendFactor::OneMinusBlendAlpha
+            } else {
+                MTLBlendFactor::OneMinusBlendColor
+            }
+        }
+        HalBlendFactor::Src1 => {
+            if alpha {
+                MTLBlendFactor::Source1Alpha
+            } else {
+                MTLBlendFactor::Source1Color
+            }
+        }
+        HalBlendFactor::OneMinusSrc1 => {
+            if alpha {
+                MTLBlendFactor::OneMinusSource1Alpha
+            } else {
+                MTLBlendFactor::OneMinusSource1Color
+            }
+        }
+        HalBlendFactor::Src1Alpha => MTLBlendFactor::Source1Alpha,
+        HalBlendFactor::OneMinusSrc1Alpha => MTLBlendFactor::OneMinusSource1Alpha,
+    }
 }
 
 /// A compiled vertex function plus an optional fragment function (absent for a

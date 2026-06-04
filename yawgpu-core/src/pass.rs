@@ -41,6 +41,7 @@ pub(crate) struct PassEncoderState {
     pub(crate) render_color_attachment: Option<RenderPassColorExecution>,
     pub(crate) render_depth_stencil_attachment: Option<RenderPassDepthStencilExecution>,
     pub(crate) render_pass_recorded: bool,
+    pub(crate) blend_constant: [f32; 4],
     pub(crate) occlusion_query_set: Option<QuerySet>,
     pub(crate) open_occlusion_query: Option<u32>,
     pub(crate) used_occlusion_queries: BTreeSet<u32>,
@@ -82,6 +83,7 @@ impl PassEncoderState {
             render_color_attachment: init.render_color_attachment,
             render_depth_stencil_attachment: init.render_depth_stencil_attachment,
             render_pass_recorded: false,
+            blend_constant: [0.0; 4],
             occlusion_query_set: init.occlusion_query_set,
             open_occlusion_query: None,
             used_occlusion_queries: BTreeSet::new(),
@@ -175,6 +177,7 @@ impl PassEncoderInner {
                 vertex_buffers: state.vertex_buffers.clone(),
                 index_buffer: state.index_buffer.clone(),
                 indirect_buffer: None,
+                blend_constant: state.blend_constant,
                 draw: None,
             })
         } else {

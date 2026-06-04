@@ -7,10 +7,11 @@ use super::format::{map_primitive_topology, map_vertex_format};
 use super::BACKEND;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::{
-    HalBuffer, HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy,
-    HalComputePass, HalComputePipeline, HalCopy, HalDescriptorBinding, HalDescriptorBindingKind,
-    HalDraw, HalError, HalIndexFormat, HalRenderLoadOp, HalRenderPass, HalRenderPipeline,
-    HalTexture, HalTextureCopy, HalVertexStepMode,
+    HalBlendFactor, HalBlendOperation, HalBuffer, HalBufferBindingKind, HalBufferClear,
+    HalBufferCopy, HalBufferTextureCopy, HalColorTargetState, HalComputePass, HalComputePipeline,
+    HalCopy, HalDescriptorBinding, HalDescriptorBindingKind, HalDraw, HalError, HalIndexFormat,
+    HalRenderLoadOp, HalRenderPass, HalRenderPipeline, HalTexture, HalTextureCopy,
+    HalVertexStepMode,
 };
 
 /// Stores GLES queue data used by validation and backend submission.
@@ -327,6 +328,8 @@ impl Drop for RenderPassCleanup<'_> {
             self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
             self.gl.delete_framebuffer(self.fbo);
             self.gl.use_program(None);
+            self.gl.color_mask(true, true, true, true);
+            self.gl.disable(glow::BLEND);
             self.gl.memory_barrier(glow::ALL_BARRIER_BITS);
         }
     }
@@ -496,6 +499,7 @@ fn run_render_draw(
     bind_render_buffers(gl, pass, pipeline)?;
     bind_vertex_buffers(gl, pass, pipeline, vao)?;
     if let Some(draw) = pass.draw {
+        apply_color_target_state(gl, pipeline.color_target(), pass.blend_constant);
         if let Some(location) = pipeline.first_instance_location() {
             set_first_instance_uniform(gl, location, draw);
         }
@@ -503,6 +507,125 @@ fn run_render_draw(
         run_gles_draw(gl, pass, topology, draw)?;
     }
     Ok(())
+}
+
+fn apply_color_target_state(
+    gl: &glow::Context,
+    color_target: Option<HalColorTargetState>,
+    blend_constant: [f32; 4],
+) {
+    let Some(color_target) = color_target else {
+        return;
+    };
+    unsafe {
+        gl.color_mask(
+            color_target.write_mask & 0x1 != 0,
+            color_target.write_mask & 0x2 != 0,
+            color_target.write_mask & 0x4 != 0,
+            color_target.write_mask & 0x8 != 0,
+        );
+        if let Some(blend) = color_target.blend {
+            gl.enable(glow::BLEND);
+            gl.blend_color(
+                blend_constant[0],
+                blend_constant[1],
+                blend_constant[2],
+                blend_constant[3],
+            );
+            gl.blend_func_separate(
+                gles_blend_factor(blend.color.src_factor, false),
+                gles_blend_factor(blend.color.dst_factor, false),
+                gles_blend_factor(blend.alpha.src_factor, true),
+                gles_blend_factor(blend.alpha.dst_factor, true),
+            );
+            gl.blend_equation_separate(
+                gles_blend_operation(blend.color.operation),
+                gles_blend_operation(blend.alpha.operation),
+            );
+        } else {
+            gl.disable(glow::BLEND);
+        }
+    }
+}
+
+fn gles_blend_operation(operation: HalBlendOperation) -> u32 {
+    match operation {
+        HalBlendOperation::Add => glow::FUNC_ADD,
+        HalBlendOperation::Subtract => glow::FUNC_SUBTRACT,
+        HalBlendOperation::ReverseSubtract => glow::FUNC_REVERSE_SUBTRACT,
+        HalBlendOperation::Min => glow::MIN,
+        HalBlendOperation::Max => glow::MAX,
+    }
+}
+
+fn gles_blend_factor(factor: HalBlendFactor, alpha: bool) -> u32 {
+    match factor {
+        HalBlendFactor::Zero => glow::ZERO,
+        HalBlendFactor::One => glow::ONE,
+        HalBlendFactor::Src => {
+            if alpha {
+                glow::SRC_ALPHA
+            } else {
+                glow::SRC_COLOR
+            }
+        }
+        HalBlendFactor::OneMinusSrc => {
+            if alpha {
+                glow::ONE_MINUS_SRC_ALPHA
+            } else {
+                glow::ONE_MINUS_SRC_COLOR
+            }
+        }
+        HalBlendFactor::SrcAlpha => glow::SRC_ALPHA,
+        HalBlendFactor::OneMinusSrcAlpha => glow::ONE_MINUS_SRC_ALPHA,
+        HalBlendFactor::Dst => {
+            if alpha {
+                glow::DST_ALPHA
+            } else {
+                glow::DST_COLOR
+            }
+        }
+        HalBlendFactor::OneMinusDst => {
+            if alpha {
+                glow::ONE_MINUS_DST_ALPHA
+            } else {
+                glow::ONE_MINUS_DST_COLOR
+            }
+        }
+        HalBlendFactor::DstAlpha => glow::DST_ALPHA,
+        HalBlendFactor::OneMinusDstAlpha => glow::ONE_MINUS_DST_ALPHA,
+        HalBlendFactor::SrcAlphaSaturated => glow::SRC_ALPHA_SATURATE,
+        HalBlendFactor::Constant => {
+            if alpha {
+                glow::CONSTANT_ALPHA
+            } else {
+                glow::CONSTANT_COLOR
+            }
+        }
+        HalBlendFactor::OneMinusConstant => {
+            if alpha {
+                glow::ONE_MINUS_CONSTANT_ALPHA
+            } else {
+                glow::ONE_MINUS_CONSTANT_COLOR
+            }
+        }
+        HalBlendFactor::Src1 => {
+            if alpha {
+                glow::SRC1_ALPHA
+            } else {
+                glow::SRC1_COLOR
+            }
+        }
+        HalBlendFactor::OneMinusSrc1 => {
+            if alpha {
+                glow::ONE_MINUS_SRC1_ALPHA
+            } else {
+                glow::ONE_MINUS_SRC1_COLOR
+            }
+        }
+        HalBlendFactor::Src1Alpha => glow::SRC1_ALPHA,
+        HalBlendFactor::OneMinusSrc1Alpha => glow::ONE_MINUS_SRC1_ALPHA,
+    }
 }
 
 fn set_first_instance_uniform(gl: &glow::Context, location: &glow::UniformLocation, draw: HalDraw) {
