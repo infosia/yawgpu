@@ -173,6 +173,8 @@ impl PassEncoderInner {
                 attachment_textures: state.attachment_textures.clone(),
                 bind_groups: state.bind_groups.clone(),
                 vertex_buffers: state.vertex_buffers.clone(),
+                index_buffer: state.index_buffer.clone(),
+                indirect_buffer: None,
                 draw: None,
             })
         } else {

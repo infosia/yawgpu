@@ -511,6 +511,34 @@ never a reason to skip a CTS case.
   Noop + `--features vulkan` clippy clean; workspace test green. `e2e_vulkan_depth.rs` grew to 12
   Claude-authored probes (incl. `vulkan_packed_stencil_buffer_roundtrips`,
   `vulkan_sampled_frag_depth_layer1`). With this, **F-032 is fully resolved on Metal *and* Vulkan.**
+- **External-CTS finding F-034 — RESOLVED (treated as a phase, with Clean Review).** The T30
+  `rendering/draw:{arguments,default_arguments}` ports surfaced that `drawIndexed`, `drawIndirect`,
+  and `drawIndexedIndirect` were **validation-only stubs** in `render_pass.rs` — they validated +
+  bumped `draw_count` but never called `record_render_pass`, so (unlike plain `draw`) **no HAL
+  command was emitted**: the draws never rasterized and their `@fragment` `read_write` storage write
+  never ran (`result==0`). HAL-agnostic — byte-identical on Metal and Vulkan (`pass=340 fail=224`).
+  - **Fix (coding agent):** added shared draw-execution variants (`Direct`/`Indexed`/`Indirect`/
+    `IndexedIndirect`) through core (`RenderDrawExecution`/`RenderPassCommand` now carry the bound
+    index buffer + indirect buffer; `draw_indexed`/`draw_indirect`/`draw_indexed_indirect` record a
+    command like `draw`; `base_vertex` wired), the HAL (`HalDraw` enum + `HalIndexFormat` +
+    index/indirect buffers on `HalRenderPass`), and execution in Noop/Metal/Vulkan
+    (`drawIndexedPrimitives…`/`cmd_draw_indexed`/`…indirect`); GLES maps GLES-3.1 paths and returns
+    `HalError` for `baseVertex != 0` and indexed-indirect nonzero index offset (catalogued in
+    `specs/blocks/67-gles-backend.md`).
+  - **Verified real-GPU (Claude):** `rendering/draw:{arguments,default_arguments}` = `564/0`
+    (180 `indirect-first-instance` feature-skips) on **Metal and Vulkan/MoltenVK**, up from `340/224`;
+    Noop + metal + vulkan + gles clippy clean; workspace test green. Claude authored
+    `yawgpu/tests/e2e_metal_draw.rs` (3 probes — indexed / indirect / indexed-indirect, each asserts
+    the fragment storage write `==1` AND green raster); all pass on the M2.
+  - **Phase Review (Clean Review, fresh no-context subagent on the cumulative diff):** **0 CRITICAL**,
+    **1 MAJOR**, 2 MINOR. The MAJOR — "no in-tree e2e exercises the new variants + reads back" — was
+    fixed by the `e2e_metal_draw.rs` probes above (GPU tests are Claude-owned). The 2 MINOR are
+    **deferred with rationale**: (i) `render_pass.rs:368/476` keep a defensive `ok_or_else("…requires
+    an index buffer")` that is unreachable because `validate_render_draw_state` errors first with a
+    different message — harmless (no panic, returns a `Result`); only the dead message string differs.
+    (ii) the GLES `Indirect`/`IndexedIndirect` `first_instance→0` mapping
+    (`gles/queue.rs`) lacks an explanatory comment. Neither blocks COMPLETE; both logged here for a
+    follow-up cleanup. Gate: **no open CRITICAL/MAJOR → F-034 COMPLETE.**
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.

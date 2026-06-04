@@ -12,9 +12,10 @@ mod present;
 mod shader;
 
 pub use command::{
-    HalBoundBuffer, HalBoundSampler, HalBoundTexture, HalBufferBindingKind, HalBufferClear,
-    HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout, HalComputePass, HalCopy,
-    HalDescriptorBinding, HalDescriptorBindingKind, HalDraw, HalRenderColorTarget,
+    HalBoundBuffer, HalBoundIndexBuffer, HalBoundIndirectBuffer, HalBoundSampler, HalBoundTexture,
+    HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy,
+    HalBufferTextureLayout, HalComputePass, HalCopy, HalDescriptorBinding,
+    HalDescriptorBindingKind, HalDraw, HalIndexFormat, HalRenderColorTarget,
     HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalTextureAspect,
     HalTextureCopy, HalTextureViewDimension,
 };
@@ -1374,6 +1375,8 @@ mod tests {
             bind_textures: Vec::new(),
             bind_samplers: Vec::new(),
             vertex_buffers: Vec::new(),
+            index_buffer: None,
+            indirect_buffer: None,
             draw: None,
         })])?;
 

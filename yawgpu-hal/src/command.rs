@@ -273,6 +273,10 @@ pub struct HalRenderPass {
     pub bind_samplers: Vec<HalBoundSampler>,
     /// Vertex buffers.
     pub vertex_buffers: Vec<HalBoundBuffer>,
+    /// Optional index buffer.
+    pub index_buffer: Option<Box<HalBoundIndexBuffer>>,
+    /// Optional indirect draw buffer.
+    pub indirect_buffer: Option<Box<HalBoundIndirectBuffer>>,
     /// Draw.
     pub draw: Option<HalDraw>,
 }
@@ -494,16 +498,75 @@ pub enum HalRenderLoadOp {
 }
 
 /// Wraps  for the selected backend.
-#[derive(Debug, Clone, Copy)]
-pub struct HalDraw {
-    /// Vertex count.
-    pub vertex_count: u32,
-    /// Instance count.
-    pub instance_count: u32,
-    /// First vertex.
-    pub first_vertex: u32,
-    /// First instance.
-    pub first_instance: u32,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HalIndexFormat {
+    /// Unsigned 16-bit indices.
+    Uint16,
+    /// Unsigned 32-bit indices.
+    Uint32,
+}
+
+/// Stores a bound index buffer for render draw execution.
+#[derive(Debug, Clone)]
+pub struct HalBoundIndexBuffer {
+    /// Buffer.
+    pub buffer: HalBuffer,
+    /// Index format.
+    pub format: HalIndexFormat,
+    /// Offset.
+    pub offset: u64,
+    /// Size.
+    pub size: u64,
+}
+
+/// Stores a bound indirect draw buffer for render draw execution.
+#[derive(Debug, Clone)]
+pub struct HalBoundIndirectBuffer {
+    /// Buffer.
+    pub buffer: HalBuffer,
+    /// Offset.
+    pub offset: u64,
+}
+
+/// Enumerates render draw execution values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HalDraw {
+    /// Direct non-indexed draw.
+    Direct {
+        /// Vertex count.
+        vertex_count: u32,
+        /// Instance count.
+        instance_count: u32,
+        /// First vertex.
+        first_vertex: u32,
+        /// First instance.
+        first_instance: u32,
+    },
+    /// Direct indexed draw.
+    Indexed {
+        /// Index count.
+        index_count: u32,
+        /// Instance count.
+        instance_count: u32,
+        /// First index.
+        first_index: u32,
+        /// Base vertex.
+        base_vertex: i32,
+        /// First instance.
+        first_instance: u32,
+    },
+    /// Indirect non-indexed draw.
+    Indirect {
+        /// Offset into the indirect buffer.
+        offset: u64,
+    },
+    /// Indirect indexed draw.
+    IndexedIndirect {
+        /// Offset into the indirect buffer.
+        offset: u64,
+    },
 }
 
 /// Stores layout metadata.
@@ -573,7 +636,8 @@ pub struct HalTextureCopy {
 mod tests {
     use super::*;
     use crate::{
-        noop, HalTextureDescriptor, HalTextureDimension, HalTextureFormat, HalTextureUsage,
+        noop, HalBufferUsage, HalTextureDescriptor, HalTextureDimension, HalTextureFormat,
+        HalTextureUsage,
     };
 
     fn depth_texture() -> HalTexture {
@@ -594,6 +658,11 @@ mod tests {
                 render_attachment: true,
             },
         }))
+    }
+
+    fn noop_buffer(size: u64) -> HalBuffer {
+        let device = noop::NoopDevice::new();
+        HalBuffer::Noop(device.create_buffer(size, HalBufferUsage::default()))
     }
 
     #[test]
@@ -654,5 +723,45 @@ mod tests {
         assert_eq!(binding.base_array_layer, 6);
         assert_eq!(binding.array_layer_count, 7);
         assert_eq!(binding.aspect, HalTextureAspect::DepthOnly);
+    }
+
+    #[test]
+    fn hal_draw_index_and_indirect_bindings_round_trip() {
+        let index_buffer = HalBoundIndexBuffer {
+            buffer: noop_buffer(32),
+            format: HalIndexFormat::Uint16,
+            offset: 4,
+            size: 16,
+        };
+        let indirect_buffer = HalBoundIndirectBuffer {
+            buffer: noop_buffer(32),
+            offset: 8,
+        };
+        let indexed = HalDraw::Indexed {
+            index_count: 3,
+            instance_count: 2,
+            first_index: 1,
+            base_vertex: -1,
+            first_instance: 4,
+        };
+        let indirect = HalDraw::IndexedIndirect { offset: 8 };
+
+        assert!(matches!(index_buffer.buffer, HalBuffer::Noop(_)));
+        assert_eq!(index_buffer.format, HalIndexFormat::Uint16);
+        assert_eq!(index_buffer.offset, 4);
+        assert_eq!(index_buffer.size, 16);
+        assert!(matches!(indirect_buffer.buffer, HalBuffer::Noop(_)));
+        assert_eq!(indirect_buffer.offset, 8);
+        assert!(matches!(
+            indexed,
+            HalDraw::Indexed {
+                index_count: 3,
+                instance_count: 2,
+                first_index: 1,
+                base_vertex: -1,
+                first_instance: 4,
+            }
+        ));
+        assert!(matches!(indirect, HalDraw::IndexedIndirect { offset: 8 }));
     }
 }
