@@ -70,11 +70,11 @@ pub(super) fn record_and_submit_copies(
                     encode_texture_to_texture(&queue.device.device, command_buffer, copy)?;
                 }
                 HalCopy::ComputePass(pass) => {
-                    if let Some(pool) =
-                        encode_compute_pass(&queue.device.device, command_buffer, pass)?
-                    {
+                    let temps = encode_compute_pass(&queue.device.device, command_buffer, pass)?;
+                    if let Some(pool) = temps.descriptor_pool {
                         descriptor_pools.push(pool);
                     }
+                    image_views.extend(temps.image_views);
                 }
                 HalCopy::RenderPass(pass) => {
                     let temps = encode_render_pass(&queue.device.device, command_buffer, pass)?;
@@ -581,7 +581,7 @@ pub(super) fn encode_buffer_to_texture(
         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_DST,
     );
-    let region = buffer_image_copy(copy, texture, texture.bytes_per_pixel, aspect)?;
+    let region = buffer_image_copy(copy, texture, texture_bytes_per_pixel(copy)?, aspect)?;
     unsafe {
         device.cmd_copy_buffer_to_image(
             command_buffer,
@@ -620,7 +620,7 @@ pub(super) fn encode_texture_to_buffer(
         vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_SRC,
     );
-    let region = buffer_image_copy(copy, texture, texture.bytes_per_pixel, aspect)?;
+    let region = buffer_image_copy(copy, texture, texture_bytes_per_pixel(copy)?, aspect)?;
     unsafe {
         device.cmd_copy_image_to_buffer(
             command_buffer,
@@ -714,7 +714,7 @@ pub(super) fn encode_compute_pass(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     pass: &HalComputePass,
-) -> Result<Option<vk::DescriptorPool>, HalError> {
+) -> Result<ComputePassTemps, HalError> {
     let crate::HalComputePipeline::Vulkan(pipeline) = &pass.pipeline else {
         return Err(shader_error("compute pipeline is not Vulkan-backed"));
     };
@@ -732,14 +732,18 @@ pub(super) fn encode_compute_pass(
     } else {
         Vec::new()
     };
-    if let Err(error) = update_compute_descriptor_sets(device, pipeline, pass, &descriptor_sets) {
-        if let Some(pool) = descriptor_pool {
-            unsafe {
-                device.destroy_descriptor_pool(pool, None);
+    let image_views = match update_compute_descriptor_sets(device, pipeline, pass, &descriptor_sets)
+    {
+        Ok(image_views) => image_views,
+        Err(error) => {
+            if let Some(pool) = descriptor_pool {
+                unsafe {
+                    device.destroy_descriptor_pool(pool, None);
+                }
             }
+            return Err(error);
         }
-        return Err(error);
-    }
+    };
     unsafe {
         device.cmd_bind_pipeline(
             command_buffer,
@@ -764,7 +768,16 @@ pub(super) fn encode_compute_pass(
         );
     }
     compute_to_transfer_barrier(device, command_buffer);
-    Ok(descriptor_pool)
+    Ok(ComputePassTemps {
+        descriptor_pool,
+        image_views,
+    })
+}
+
+/// Stores compute pass temps data used by backend submission cleanup.
+pub(super) struct ComputePassTemps {
+    descriptor_pool: Option<vk::DescriptorPool>,
+    image_views: Vec<vk::ImageView>,
 }
 
 /// Stores render pass temps data used by validation and backend submission.
@@ -1492,7 +1505,7 @@ pub(super) fn encode_render_pass(
     let color_attachment = color_texture.zip(pass.color_target.as_ref());
     let depth_stencil_attachment =
         depth_stencil_texture.zip(pass.depth_stencil_attachment.as_ref());
-    let (framebuffer, image_views) = create_framebuffer(
+    let (framebuffer, mut image_views) = create_framebuffer(
         device,
         render_pass,
         color_attachment,
@@ -1520,19 +1533,21 @@ pub(super) fn encode_render_pass(
         } else {
             Vec::new()
         };
-        if let Err(error) = update_render_descriptor_sets(device, pipeline, pass, &descriptor_sets)
-        {
-            unsafe {
-                if let Some(pool) = descriptor_pool {
-                    device.destroy_descriptor_pool(pool, None);
+        match update_render_descriptor_sets(device, pipeline, pass, &descriptor_sets) {
+            Ok(descriptor_image_views) => image_views.extend(descriptor_image_views),
+            Err(error) => {
+                unsafe {
+                    if let Some(pool) = descriptor_pool {
+                        device.destroy_descriptor_pool(pool, None);
+                    }
+                    device.destroy_framebuffer(framebuffer, None);
+                    destroy_image_views(device, &image_views);
+                    if let Some(render_pass) = temporary_render_pass {
+                        device.destroy_render_pass(render_pass, None);
+                    }
                 }
-                device.destroy_framebuffer(framebuffer, None);
-                destroy_image_views(device, &image_views);
-                if let Some(render_pass) = temporary_render_pass {
-                    device.destroy_render_pass(render_pass, None);
-                }
+                return Err(error);
             }
-            return Err(error);
         }
     }
     let clear_values = render_pass_clear_values(pass);
@@ -2006,10 +2021,31 @@ pub(super) fn texture_bytes_per_pixel(copy: &HalBufferTextureCopy) -> Result<u32
     let crate::HalTexture::Vulkan(texture) = &copy.texture else {
         return Err(texture_error("texture is not Vulkan-backed"));
     };
-    if texture.bytes_per_pixel == 0 {
-        return Err(texture_error("unsupported texture format"));
+    aspect_bytes_per_pixel(copy.format, copy.aspect, texture.bytes_per_pixel)
+}
+
+fn aspect_bytes_per_pixel(
+    format: HalTextureFormat,
+    aspect: HalTextureAspect,
+    full_bytes_per_pixel: u32,
+) -> Result<u32, HalError> {
+    match aspect {
+        HalTextureAspect::StencilOnly => Ok(1),
+        HalTextureAspect::DepthOnly => match format {
+            HalTextureFormat::Depth16Unorm => Ok(2),
+            HalTextureFormat::Depth32Float | HalTextureFormat::Depth32FloatStencil8 => Ok(4),
+            _ => full_texture_bytes_per_pixel(full_bytes_per_pixel),
+        },
+        HalTextureAspect::All => full_texture_bytes_per_pixel(full_bytes_per_pixel),
     }
-    Ok(texture.bytes_per_pixel)
+}
+
+fn full_texture_bytes_per_pixel(bytes_per_pixel: u32) -> Result<u32, HalError> {
+    if bytes_per_pixel == 0 {
+        Err(texture_error("unsupported texture format"))
+    } else {
+        Ok(bytes_per_pixel)
+    }
 }
 
 /// Returns buffer image copy.
@@ -2191,6 +2227,68 @@ mod tests {
         assert_eq!(
             buffer_texture_copy_aspect_flags(HalTextureFormat::Rgba8Unorm, HalTextureAspect::All),
             vk::ImageAspectFlags::COLOR
+        );
+    }
+
+    #[test]
+    fn aspect_bytes_per_pixel_uses_copied_depth_stencil_plane_size() {
+        assert_eq!(
+            aspect_bytes_per_pixel(
+                HalTextureFormat::Depth24PlusStencil8,
+                HalTextureAspect::StencilOnly,
+                5,
+            )
+            .expect("packed stencil byte size"),
+            1
+        );
+        assert_eq!(
+            aspect_bytes_per_pixel(
+                HalTextureFormat::Depth32FloatStencil8,
+                HalTextureAspect::StencilOnly,
+                5,
+            )
+            .expect("packed stencil byte size"),
+            1
+        );
+        assert_eq!(
+            aspect_bytes_per_pixel(
+                HalTextureFormat::Depth16Unorm,
+                HalTextureAspect::DepthOnly,
+                2,
+            )
+            .expect("depth16 byte size"),
+            2
+        );
+        assert_eq!(
+            aspect_bytes_per_pixel(
+                HalTextureFormat::Depth32Float,
+                HalTextureAspect::DepthOnly,
+                4,
+            )
+            .expect("depth32 byte size"),
+            4
+        );
+        assert_eq!(
+            aspect_bytes_per_pixel(
+                HalTextureFormat::Depth32FloatStencil8,
+                HalTextureAspect::DepthOnly,
+                5,
+            )
+            .expect("packed depth byte size"),
+            4
+        );
+        assert_eq!(
+            aspect_bytes_per_pixel(
+                HalTextureFormat::Depth32FloatStencil8,
+                HalTextureAspect::All,
+                5
+            )
+            .expect("whole-format byte size"),
+            5
+        );
+        assert!(
+            aspect_bytes_per_pixel(HalTextureFormat::Unsupported, HalTextureAspect::All, 0)
+                .is_err()
         );
     }
 
