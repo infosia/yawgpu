@@ -1,5 +1,6 @@
 use super::*;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
+use crate::{HalTextureAspect, HalTextureViewDimension};
 
 /// Stores vulkan compute pipeline data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -1243,57 +1244,72 @@ pub(super) fn update_compute_descriptor_sets(
     pipeline: &VulkanComputePipeline,
     pass: &HalComputePass,
     descriptor_sets: &[vk::DescriptorSet],
-) -> Result<(), HalError> {
+) -> Result<Vec<vk::ImageView>, HalError> {
     if pipeline.inner.descriptor_bindings.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let mut buffer_infos = Vec::new();
     let mut image_infos = Vec::new();
+    let mut image_views = Vec::new();
     let mut write_specs = Vec::new();
-    for descriptor in &pipeline.inner.descriptor_bindings {
-        let info = descriptor_info(
-            descriptor,
-            &pass.bind_buffers,
-            &pass.bind_textures,
-            &pass.bind_samplers,
-            &mut buffer_infos,
-            &mut image_infos,
-            "compute",
-        )?;
-        write_specs.push((
-            info,
-            descriptor.group,
-            descriptor.binding,
-            descriptor_type(descriptor.kind),
-        ));
-    }
-    let writes = write_specs
-        .iter()
-        .map(|(info, group, binding, descriptor_type)| {
-            let group = usize::try_from(*group)
-                .map_err(|_| shader_error("descriptor group index is too large"))?;
-            let descriptor_set = descriptor_sets
-                .get(group)
-                .copied()
-                .ok_or_else(|| shader_error("descriptor set is missing"))?;
-            let write = vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
-                .dst_binding(*binding)
-                .descriptor_type(*descriptor_type);
-            Ok(match info {
-                DescriptorInfo::Buffer(index) => {
-                    write.buffer_info(std::slice::from_ref(&buffer_infos[*index]))
-                }
-                DescriptorInfo::Image(index) => {
-                    write.image_info(std::slice::from_ref(&image_infos[*index]))
-                }
+    let result = (|| {
+        {
+            let mut scratch = DescriptorUpdateScratch {
+                device,
+                buffer_infos: &mut buffer_infos,
+                image_infos: &mut image_infos,
+                image_views: &mut image_views,
+            };
+            for descriptor in &pipeline.inner.descriptor_bindings {
+                let info = descriptor_info(
+                    descriptor,
+                    &pass.bind_buffers,
+                    &pass.bind_textures,
+                    &pass.bind_samplers,
+                    &mut scratch,
+                    "compute",
+                )?;
+                write_specs.push((
+                    info,
+                    descriptor.group,
+                    descriptor.binding,
+                    descriptor_type(descriptor.kind),
+                ));
+            }
+        }
+        let writes = write_specs
+            .iter()
+            .map(|(info, group, binding, descriptor_type)| {
+                let group = usize::try_from(*group)
+                    .map_err(|_| shader_error("descriptor group index is too large"))?;
+                let descriptor_set = descriptor_sets
+                    .get(group)
+                    .copied()
+                    .ok_or_else(|| shader_error("descriptor set is missing"))?;
+                let write = vk::WriteDescriptorSet::default()
+                    .dst_set(descriptor_set)
+                    .dst_binding(*binding)
+                    .descriptor_type(*descriptor_type);
+                Ok(match info {
+                    DescriptorInfo::Buffer(index) => {
+                        write.buffer_info(std::slice::from_ref(&buffer_infos[*index]))
+                    }
+                    DescriptorInfo::Image(index) => {
+                        write.image_info(std::slice::from_ref(&image_infos[*index]))
+                    }
+                })
             })
-        })
-        .collect::<Result<Vec<_>, HalError>>()?;
-    unsafe {
-        device.update_descriptor_sets(&writes, &[]);
+            .collect::<Result<Vec<_>, HalError>>()?;
+        unsafe {
+            device.update_descriptor_sets(&writes, &[]);
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        destroy_descriptor_image_views(device, &image_views);
+        return Err(error);
     }
-    Ok(())
+    Ok(image_views)
 }
 
 /// Creates render descriptor pool and reports validation errors through the owning device.
@@ -1330,57 +1346,72 @@ pub(super) fn update_render_descriptor_sets(
     pipeline: &VulkanRenderPipeline,
     pass: &HalRenderPass,
     descriptor_sets: &[vk::DescriptorSet],
-) -> Result<(), HalError> {
+) -> Result<Vec<vk::ImageView>, HalError> {
     if pipeline.inner.descriptor_bindings.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let mut buffer_infos = Vec::new();
     let mut image_infos = Vec::new();
+    let mut image_views = Vec::new();
     let mut write_specs = Vec::new();
-    for descriptor in &pipeline.inner.descriptor_bindings {
-        let info = descriptor_info(
-            descriptor,
-            &pass.bind_buffers,
-            &pass.bind_textures,
-            &pass.bind_samplers,
-            &mut buffer_infos,
-            &mut image_infos,
-            "render",
-        )?;
-        write_specs.push((
-            info,
-            descriptor.group,
-            descriptor.binding,
-            descriptor_type(descriptor.kind),
-        ));
-    }
-    let writes = write_specs
-        .iter()
-        .map(|(info, group, binding, descriptor_type)| {
-            let group = usize::try_from(*group)
-                .map_err(|_| shader_error("descriptor group index is too large"))?;
-            let descriptor_set = descriptor_sets
-                .get(group)
-                .copied()
-                .ok_or_else(|| shader_error("descriptor set is missing"))?;
-            let write = vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
-                .dst_binding(*binding)
-                .descriptor_type(*descriptor_type);
-            Ok(match info {
-                DescriptorInfo::Buffer(index) => {
-                    write.buffer_info(std::slice::from_ref(&buffer_infos[*index]))
-                }
-                DescriptorInfo::Image(index) => {
-                    write.image_info(std::slice::from_ref(&image_infos[*index]))
-                }
+    let result = (|| {
+        {
+            let mut scratch = DescriptorUpdateScratch {
+                device,
+                buffer_infos: &mut buffer_infos,
+                image_infos: &mut image_infos,
+                image_views: &mut image_views,
+            };
+            for descriptor in &pipeline.inner.descriptor_bindings {
+                let info = descriptor_info(
+                    descriptor,
+                    &pass.bind_buffers,
+                    &pass.bind_textures,
+                    &pass.bind_samplers,
+                    &mut scratch,
+                    "render",
+                )?;
+                write_specs.push((
+                    info,
+                    descriptor.group,
+                    descriptor.binding,
+                    descriptor_type(descriptor.kind),
+                ));
+            }
+        }
+        let writes = write_specs
+            .iter()
+            .map(|(info, group, binding, descriptor_type)| {
+                let group = usize::try_from(*group)
+                    .map_err(|_| shader_error("descriptor group index is too large"))?;
+                let descriptor_set = descriptor_sets
+                    .get(group)
+                    .copied()
+                    .ok_or_else(|| shader_error("descriptor set is missing"))?;
+                let write = vk::WriteDescriptorSet::default()
+                    .dst_set(descriptor_set)
+                    .dst_binding(*binding)
+                    .descriptor_type(*descriptor_type);
+                Ok(match info {
+                    DescriptorInfo::Buffer(index) => {
+                        write.buffer_info(std::slice::from_ref(&buffer_infos[*index]))
+                    }
+                    DescriptorInfo::Image(index) => {
+                        write.image_info(std::slice::from_ref(&image_infos[*index]))
+                    }
+                })
             })
-        })
-        .collect::<Result<Vec<_>, HalError>>()?;
-    unsafe {
-        device.update_descriptor_sets(&writes, &[]);
+            .collect::<Result<Vec<_>, HalError>>()?;
+        unsafe {
+            device.update_descriptor_sets(&writes, &[]);
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        destroy_descriptor_image_views(device, &image_views);
+        return Err(error);
     }
-    Ok(())
+    Ok(image_views)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1389,13 +1420,19 @@ enum DescriptorInfo {
     Image(usize),
 }
 
+struct DescriptorUpdateScratch<'a> {
+    device: &'a ash::Device,
+    buffer_infos: &'a mut Vec<vk::DescriptorBufferInfo>,
+    image_infos: &'a mut Vec<vk::DescriptorImageInfo>,
+    image_views: &'a mut Vec<vk::ImageView>,
+}
+
 fn descriptor_info(
     descriptor: &HalDescriptorBinding,
     buffers: &[HalBoundBuffer],
     textures: &[HalBoundTexture],
     samplers: &[HalBoundSampler],
-    buffer_infos: &mut Vec<vk::DescriptorBufferInfo>,
-    image_infos: &mut Vec<vk::DescriptorImageInfo>,
+    scratch: &mut DescriptorUpdateScratch<'_>,
     pass_name: &'static str,
 ) -> Result<DescriptorInfo, HalError> {
     match descriptor.kind {
@@ -1406,8 +1443,8 @@ fn descriptor_info(
                     bound.group == descriptor.group && bound.binding == descriptor.binding
                 })
                 .ok_or_else(|| descriptor_missing_error(pass_name, "buffer"))?;
-            buffer_infos.push(descriptor_buffer_info(bound)?);
-            Ok(DescriptorInfo::Buffer(buffer_infos.len() - 1))
+            scratch.buffer_infos.push(descriptor_buffer_info(bound)?);
+            Ok(DescriptorInfo::Buffer(scratch.buffer_infos.len() - 1))
         }
         HalDescriptorBindingKind::Texture => {
             let bound = textures
@@ -1419,12 +1456,14 @@ fn descriptor_info(
             let HalTexture::Vulkan(texture) = &bound.texture else {
                 return Err(shader_error("descriptor texture is not Vulkan-backed"));
             };
-            image_infos.push(
+            let image_view = create_sampled_texture_image_view(scratch.device, texture, bound)?;
+            scratch.image_views.push(image_view);
+            scratch.image_infos.push(
                 vk::DescriptorImageInfo::default()
-                    .image_view(texture.inner()?.view)
+                    .image_view(image_view)
                     .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
             );
-            Ok(DescriptorInfo::Image(image_infos.len() - 1))
+            Ok(DescriptorInfo::Image(scratch.image_infos.len() - 1))
         }
         HalDescriptorBindingKind::Sampler => {
             let bound = samplers
@@ -1440,8 +1479,77 @@ fn descriptor_info(
                 ._inner
                 .as_ref()
                 .ok_or_else(|| shader_error("sampler allocation failed"))?;
-            image_infos.push(vk::DescriptorImageInfo::default().sampler(sampler.sampler));
-            Ok(DescriptorInfo::Image(image_infos.len() - 1))
+            scratch
+                .image_infos
+                .push(vk::DescriptorImageInfo::default().sampler(sampler.sampler));
+            Ok(DescriptorInfo::Image(scratch.image_infos.len() - 1))
+        }
+    }
+}
+
+fn create_sampled_texture_image_view(
+    device: &ash::Device,
+    texture: &VulkanTexture,
+    bound: &HalBoundTexture,
+) -> Result<vk::ImageView, HalError> {
+    let (format, _) = map_texture_format(bound.format)?;
+    let view_info = vk::ImageViewCreateInfo::default()
+        .image(texture.inner()?.image)
+        .view_type(sampled_texture_view_type(bound.dimension))
+        .format(format)
+        .subresource_range(sampled_texture_subresource_range(bound));
+    unsafe { device.create_image_view(&view_info, None) }
+        .map_err(|_| texture_error("sampled texture view creation failed"))
+}
+
+fn sampled_texture_view_type(dimension: HalTextureViewDimension) -> vk::ImageViewType {
+    match dimension {
+        HalTextureViewDimension::D1 => vk::ImageViewType::TYPE_1D,
+        HalTextureViewDimension::D2 => vk::ImageViewType::TYPE_2D,
+        HalTextureViewDimension::D2Array => vk::ImageViewType::TYPE_2D_ARRAY,
+        HalTextureViewDimension::Cube => vk::ImageViewType::CUBE,
+        HalTextureViewDimension::CubeArray => vk::ImageViewType::CUBE_ARRAY,
+        HalTextureViewDimension::D3 => vk::ImageViewType::TYPE_3D,
+    }
+}
+
+fn sampled_texture_subresource_range(bound: &HalBoundTexture) -> vk::ImageSubresourceRange {
+    vk::ImageSubresourceRange::default()
+        .aspect_mask(sampled_texture_aspect_flags(bound.format, bound.aspect))
+        .base_mip_level(bound.base_mip_level)
+        .level_count(bound.mip_level_count)
+        .base_array_layer(bound.base_array_layer)
+        .layer_count(bound.array_layer_count)
+}
+
+fn sampled_texture_aspect_flags(
+    format: HalTextureFormat,
+    aspect: HalTextureAspect,
+) -> vk::ImageAspectFlags {
+    match aspect {
+        HalTextureAspect::All => {
+            let mut flags = vk::ImageAspectFlags::empty();
+            if format_has_depth_aspect(format) {
+                flags |= vk::ImageAspectFlags::DEPTH;
+            }
+            if format_has_stencil_aspect(format) {
+                flags |= vk::ImageAspectFlags::STENCIL;
+            }
+            if flags.is_empty() {
+                vk::ImageAspectFlags::COLOR
+            } else {
+                flags
+            }
+        }
+        HalTextureAspect::DepthOnly => vk::ImageAspectFlags::DEPTH,
+        HalTextureAspect::StencilOnly => vk::ImageAspectFlags::STENCIL,
+    }
+}
+
+fn destroy_descriptor_image_views(device: &ash::Device, views: &[vk::ImageView]) {
+    unsafe {
+        for &view in views {
+            device.destroy_image_view(view, None);
         }
     }
 }
@@ -1655,4 +1763,71 @@ pub(super) fn descriptor_buffer_info(
         .buffer(inner.buffer)
         .offset(bound.offset)
         .range(range))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{noop, HalTextureDescriptor, HalTextureDimension, HalTextureUsage};
+
+    fn dummy_bound_texture(format: HalTextureFormat, aspect: HalTextureAspect) -> HalBoundTexture {
+        let device = noop::NoopDevice::new();
+        HalBoundTexture {
+            group: 0,
+            binding: 1,
+            metal_index: 0,
+            texture: HalTexture::Noop(device.create_texture(&HalTextureDescriptor {
+                dimension: HalTextureDimension::D2,
+                format,
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 3,
+                mip_level_count: 5,
+                sample_count: 1,
+                usage: HalTextureUsage {
+                    copy_src: false,
+                    copy_dst: false,
+                    texture_binding: true,
+                    storage_binding: false,
+                    render_attachment: false,
+                },
+            })),
+            format,
+            dimension: HalTextureViewDimension::D2,
+            base_mip_level: 2,
+            mip_level_count: 3,
+            base_array_layer: 1,
+            array_layer_count: 1,
+            aspect,
+        }
+    }
+
+    #[test]
+    fn sampled_texture_view_uses_bound_subresource_range() {
+        let bound = dummy_bound_texture(HalTextureFormat::Depth32Float, HalTextureAspect::All);
+
+        let range = sampled_texture_subresource_range(&bound);
+
+        assert_eq!(
+            sampled_texture_view_type(bound.dimension),
+            vk::ImageViewType::TYPE_2D
+        );
+        assert_eq!(range.aspect_mask, vk::ImageAspectFlags::DEPTH);
+        assert_eq!(range.base_mip_level, 2);
+        assert_eq!(range.level_count, 3);
+        assert_eq!(range.base_array_layer, 1);
+        assert_eq!(range.layer_count, 1);
+    }
+
+    #[test]
+    fn sampled_texture_aspect_flags_respect_explicit_stencil_view() {
+        let bound = dummy_bound_texture(
+            HalTextureFormat::Depth32FloatStencil8,
+            HalTextureAspect::StencilOnly,
+        );
+
+        let range = sampled_texture_subresource_range(&bound);
+
+        assert_eq!(range.aspect_mask, vk::ImageAspectFlags::STENCIL);
+    }
 }

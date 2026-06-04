@@ -486,10 +486,31 @@ never a reason to skip a CTS case.
   **Verified real-GPU Vulkan/MoltenVK:** `copyTextureToTexture:copy_depth_stencil`
   `pass=216 fail=0` (Dawn-equal, from `36/180`); `e2e_vulkan_render` 2/2 + `e2e_vulkan_depth`
   10/10 (no regression); Noop clippy + `--features vulkan` clippy clean; workspace test green.
-  In-tree `e2e_vulkan_depth.rs` (10 probes) is Claude-authored. **Out of scope / follow-up:**
-  the Vulkan `image_copy` depth aspect (`rowsPerImage…_depth_stencil` `264/600`,
-  `offsets…` `88/200`) — the sampled per-layer view binding for the staging render (the
-  Metal-only F-032 view-binding fix) + multi-layer, still pending on Vulkan.
+  In-tree `e2e_vulkan_depth.rs` (Claude-authored) — see the F-032 Vulkan note below for the
+  grown probe set.
+- **External-CTS finding F-032 on the Vulkan backend — RESOLVED.** The Metal F-032 fix left the
+  Vulkan `image_copy` depth/stencil aspect buffer copies at `pass=352 fail=800` (confirmed on
+  **native Windows/Vulkan**, NVIDIA, byte-identical to MoltenVK — a genuine yawgpu Vulkan-HAL gap,
+  not a MoltenVK artifact). Claude localised two Vulkan-only gaps with `e2e_vulkan_depth.rs` probes
+  and handed each to the coding agent:
+  1. **Buffer-copy byte size was whole-format.** `texture_bytes_per_pixel` returned
+     `texture.bytes_per_pixel` for every copy, so the *aspect's* row stride was wrong (stencil =
+     1 byte, packed-depth = 4 not 5) and the copy produced zeros. Made it aspect-aware (mirroring
+     the Metal `metal/format.rs` version) and threaded it into `buffer_image_copy`. Fixed packed
+     stencil (576) + packed depth (96): `352 → 960`.
+  2. **Sampled-texture binding ignored the view subresource.** `descriptor_info`
+     (`vulkan/pipeline.rs`) bound the texture's default full-image `.view`, so the CTS depth
+     staging (which samples a per-layer `r32float` view) sampled layer 0 — every multi-layer depth
+     stage wrote the wrong depth. Bind a transient `vk::ImageView` scoped to `HalBoundTexture`'s
+     `{format,dimension,base_mip_level,mip_level_count,base_array_layer,array_layer_count,aspect}`
+     (the Vulkan analog of the Metal "a2" view fix), tracked via `RetireOp::ImageView` for both the
+     render and compute descriptor paths. Fixed the depth-aspect staging (192): `960 → 1152`.
+  **Verified real-GPU Vulkan/MoltenVK:** `image_copy` depth/stencil
+  `rowsPerImage…_depth_stencil` `864/0` + `offsets…` `288/0` = **`1152/0`** (Dawn-equal, from
+  `352/800`); `e2e_vulkan_{depth 12/12, compute 3/3, texture 4/4, render 2/2}` (no regression);
+  Noop + `--features vulkan` clippy clean; workspace test green. `e2e_vulkan_depth.rs` grew to 12
+  Claude-authored probes (incl. `vulkan_packed_stencil_buffer_roundtrips`,
+  `vulkan_sampled_frag_depth_layer1`). With this, **F-032 is fully resolved on Metal *and* Vulkan.**
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.
