@@ -1,6 +1,8 @@
 use super::*;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
-use crate::HalTextureDimension;
+use crate::{
+    HalRenderColorTarget, HalRenderDepthStencilAttachment, HalTextureAspect, HalTextureDimension,
+};
 #[cfg(feature = "tiled")]
 use crate::{HalSubpassAttachmentLayout, HalSubpassDepthStencilAttachment};
 
@@ -27,6 +29,7 @@ pub(super) fn record_and_submit_copies(
 ) -> Result<(), HalError> {
     let mut descriptor_pools = Vec::new();
     let mut framebuffers = Vec::new();
+    let mut image_views = Vec::new();
     let mut render_passes = Vec::new();
     let surface_pending = find_surface_pending(copies);
     let result = (|| {
@@ -77,6 +80,7 @@ pub(super) fn record_and_submit_copies(
                     let temps = encode_render_pass(&queue.device.device, command_buffer, pass)?;
                     descriptor_pools.extend(temps.descriptor_pools);
                     framebuffers.push(temps.framebuffer);
+                    image_views.extend(temps.image_views);
                     if let Some(render_pass) = temps.render_pass {
                         render_passes.push(render_pass);
                     }
@@ -86,6 +90,7 @@ pub(super) fn record_and_submit_copies(
                     let temps = encode_subpass_render_pass(&queue.device, command_buffer, pass)?;
                     descriptor_pools.extend(temps.descriptor_pools);
                     framebuffers.push(temps.framebuffer);
+                    image_views.extend(temps.image_views);
                 }
             }
         }
@@ -131,7 +136,13 @@ pub(super) fn record_and_submit_copies(
                 .queue_submit(queue.queue, &[submit_info], fence)
                 .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
             let retained = collect_retained_resources(copies);
-            let cleanup = retire_ops(command_pool, descriptor_pools, framebuffers, render_passes);
+            let cleanup = retire_ops(
+                command_pool,
+                descriptor_pools,
+                framebuffers,
+                image_views,
+                render_passes,
+            );
             if let Some(pending_state) = surface_retire {
                 let mut pending_state = match pending_state.lock() {
                     Ok(pending_state) => pending_state,
@@ -302,12 +313,14 @@ fn retire_ops(
     command_pool: vk::CommandPool,
     descriptor_pools: Vec<vk::DescriptorPool>,
     framebuffers: Vec<vk::Framebuffer>,
+    image_views: Vec<vk::ImageView>,
     render_passes: Vec<vk::RenderPass>,
 ) -> Vec<RetireOp> {
     let mut cleanup = Vec::new();
     cleanup.push(RetireOp::CommandPool(command_pool));
     cleanup.extend(descriptor_pools.into_iter().map(RetireOp::DescriptorPool));
     cleanup.extend(framebuffers.into_iter().map(RetireOp::Framebuffer));
+    cleanup.extend(image_views.into_iter().map(RetireOp::ImageView));
     cleanup.extend(render_passes.into_iter().map(RetireOp::RenderPass));
     cleanup
 }
@@ -559,14 +572,16 @@ pub(super) fn encode_buffer_to_texture(
     validate_buffer_texture_range(buffer, copy)?;
     let buffer = buffer.inner()?;
     let texture_inner = texture.inner()?;
-    transition_image(
+    let aspect = buffer_texture_copy_aspect_flags(copy.format, copy.aspect);
+    transition_image_aspect(
         device,
         command_buffer,
         texture_inner,
+        aspect,
         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_DST,
     );
-    let region = buffer_image_copy(copy, texture, texture.bytes_per_pixel)?;
+    let region = buffer_image_copy(copy, texture, texture.bytes_per_pixel, aspect)?;
     unsafe {
         device.cmd_copy_buffer_to_image(
             command_buffer,
@@ -596,14 +611,16 @@ pub(super) fn encode_texture_to_buffer(
     validate_buffer_texture_range(buffer, copy)?;
     let buffer = buffer.inner()?;
     let texture_inner = texture.inner()?;
-    transition_image(
+    let aspect = buffer_texture_copy_aspect_flags(copy.format, copy.aspect);
+    transition_image_aspect(
         device,
         command_buffer,
         texture_inner,
+        aspect,
         vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_SRC,
     );
-    let region = buffer_image_copy(copy, texture, texture.bytes_per_pixel)?;
+    let region = buffer_image_copy(copy, texture, texture.bytes_per_pixel, aspect)?;
     unsafe {
         device.cmd_copy_image_to_buffer(
             command_buffer,
@@ -634,22 +651,26 @@ pub(super) fn encode_texture_to_texture(
     destination.validate_origin_extent(copy.destination_origin, copy.extent)?;
     let source_inner = source.inner()?;
     let destination_inner = destination.inner()?;
-    transition_image(
+    let aspect = copy_format_aspect_flags(source.format);
+    transition_image_aspect(
         device,
         command_buffer,
         source_inner,
+        aspect,
         vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_SRC,
     );
-    transition_image(
+    transition_image_aspect(
         device,
         command_buffer,
         destination_inner,
+        aspect,
         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_DST,
     );
     let region = vk::ImageCopy::default()
         .src_subresource(texture_copy_subresource_layers(
+            aspect,
             source.dimension,
             copy.source_mip_level,
             copy.source_origin.z,
@@ -662,6 +683,7 @@ pub(super) fn encode_texture_to_texture(
             copy.source_origin.z,
         )?)
         .dst_subresource(texture_copy_subresource_layers(
+            aspect,
             destination.dimension,
             copy.destination_mip_level,
             copy.destination_origin.z,
@@ -749,6 +771,7 @@ pub(super) fn encode_compute_pass(
 pub(super) struct RenderPassTemps {
     descriptor_pools: Vec<vk::DescriptorPool>,
     framebuffer: vk::Framebuffer,
+    image_views: Vec<vk::ImageView>,
     render_pass: Option<vk::RenderPass>,
 }
 
@@ -831,6 +854,7 @@ pub(super) fn encode_subpass_render_pass(
     Ok(RenderPassTemps {
         descriptor_pools,
         framebuffer,
+        image_views: Vec::new(),
         render_pass: None,
     })
 }
@@ -1312,11 +1336,18 @@ fn subpass_clear_values(pass: &HalSubpassRenderPassCommand) -> Vec<vk::ClearValu
     values
 }
 
-#[cfg(feature = "tiled")]
 fn vk_load_op(load_op: HalRenderLoadOp) -> vk::AttachmentLoadOp {
     match load_op {
         HalRenderLoadOp::Load => vk::AttachmentLoadOp::LOAD,
         HalRenderLoadOp::Clear => vk::AttachmentLoadOp::CLEAR,
+    }
+}
+
+fn vk_store_op(store: bool) -> vk::AttachmentStoreOp {
+    if store {
+        vk::AttachmentStoreOp::STORE
+    } else {
+        vk::AttachmentStoreOp::DONT_CARE
     }
 }
 
@@ -1427,36 +1458,6 @@ pub(super) fn encode_render_pass(
     if color_texture.is_none() && depth_stencil_texture.is_none() {
         return Err(shader_error("Vulkan render pass requires an attachment"));
     }
-    if pass
-        .color_target
-        .as_ref()
-        .is_some_and(|target| !matches!(target.load_op, HalRenderLoadOp::Clear))
-    {
-        return Err(shader_error(
-            "Vulkan render pass color load op is unsupported",
-        ));
-    }
-    if pass
-        .depth_stencil_attachment
-        .as_ref()
-        .is_some_and(|attachment| {
-            !matches!(attachment.depth_load_op, HalRenderLoadOp::Clear)
-                || !matches!(attachment.stencil_load_op, HalRenderLoadOp::Clear)
-        })
-    {
-        return Err(shader_error(
-            "Vulkan render pass depth-stencil load op is unsupported",
-        ));
-    }
-    if pass
-        .color_target
-        .as_ref()
-        .is_some_and(|target| !target.store)
-    {
-        return Err(shader_error(
-            "Vulkan render pass discard store op is unsupported",
-        ));
-    }
     if let Some(texture) = color_texture {
         transition_image(
             device,
@@ -1479,19 +1480,24 @@ pub(super) fn encode_render_pass(
         );
     }
     let render_pass = match &pass.pipeline {
-        Some(crate::HalRenderPipeline::Vulkan(pipeline)) => pipeline.inner.render_pass,
-        Some(_) => return Err(shader_error("render pipeline is not Vulkan-backed")),
-        None => create_render_pass_for_targets(
+        Some(crate::HalRenderPipeline::Vulkan(_)) | None => create_render_pass_for_targets(
             device,
             render_pass_color_format(pass, color_texture)?,
-            pass.depth_stencil_attachment
-                .as_ref()
-                .map(|attachment| attachment.format),
+            pass.color_target.as_ref(),
+            pass.depth_stencil_attachment.as_ref(),
         )?,
+        Some(_) => return Err(shader_error("render pipeline is not Vulkan-backed")),
     };
-    let temporary_render_pass = pass.pipeline.is_none().then_some(render_pass);
-    let framebuffer =
-        create_framebuffer(device, render_pass, color_texture, depth_stencil_texture)?;
+    let temporary_render_pass = Some(render_pass);
+    let color_attachment = color_texture.zip(pass.color_target.as_ref());
+    let depth_stencil_attachment =
+        depth_stencil_texture.zip(pass.depth_stencil_attachment.as_ref());
+    let (framebuffer, image_views) = create_framebuffer(
+        device,
+        render_pass,
+        color_attachment,
+        depth_stencil_attachment,
+    )?;
     let mut descriptor_pool = None;
     let mut descriptor_sets = Vec::new();
     if let Some(crate::HalRenderPipeline::Vulkan(pipeline)) = &pass.pipeline {
@@ -1503,6 +1509,7 @@ pub(super) fn encode_render_pass(
                     unsafe {
                         device.destroy_descriptor_pool(pool, None);
                         device.destroy_framebuffer(framebuffer, None);
+                        destroy_image_views(device, &image_views);
                         if let Some(render_pass) = temporary_render_pass {
                             device.destroy_render_pass(render_pass, None);
                         }
@@ -1520,6 +1527,7 @@ pub(super) fn encode_render_pass(
                     device.destroy_descriptor_pool(pool, None);
                 }
                 device.destroy_framebuffer(framebuffer, None);
+                destroy_image_views(device, &image_views);
                 if let Some(render_pass) = temporary_render_pass {
                     device.destroy_render_pass(render_pass, None);
                 }
@@ -1528,7 +1536,8 @@ pub(super) fn encode_render_pass(
         }
     }
     let clear_values = render_pass_clear_values(pass);
-    let (width, height) = render_pass_extent_from_targets(color_texture, depth_stencil_texture)?;
+    let (width, height) =
+        render_pass_extent_from_targets(color_attachment, depth_stencil_attachment)?;
     let render_area = vk::Rect2D {
         offset: vk::Offset2D { x: 0, y: 0 },
         extent: vk::Extent2D { width, height },
@@ -1585,6 +1594,7 @@ pub(super) fn encode_render_pass(
     Ok(RenderPassTemps {
         descriptor_pools: descriptor_pool.into_iter().collect(),
         framebuffer,
+        image_views,
         render_pass: temporary_render_pass,
     })
 }
@@ -1652,13 +1662,27 @@ fn render_pass_clear_values(pass: &HalRenderPass) -> Vec<vk::ClearValue> {
 }
 
 fn render_pass_extent_from_targets(
-    color_texture: Option<&VulkanTexture>,
-    depth_stencil_texture: Option<&VulkanTexture>,
+    color_attachment: Option<(&VulkanTexture, &HalRenderColorTarget)>,
+    depth_stencil_attachment: Option<(&VulkanTexture, &HalRenderDepthStencilAttachment)>,
 ) -> Result<(u32, u32), HalError> {
-    color_texture
-        .or(depth_stencil_texture)
-        .map(|texture| (texture.width, texture.height))
-        .ok_or_else(|| shader_error("render pass requires an attachment"))
+    if let Some((texture, target)) = color_attachment {
+        return Ok(mip_extent(texture.width, texture.height, target.mip_level));
+    }
+    if let Some((texture, attachment)) = depth_stencil_attachment {
+        return Ok(mip_extent(
+            texture.width,
+            texture.height,
+            attachment.mip_level,
+        ));
+    }
+    Err(shader_error("render pass requires an attachment"))
+}
+
+fn mip_extent(width: u32, height: u32, mip_level: u32) -> (u32, u32) {
+    (
+        width.checked_shr(mip_level).unwrap_or(0).max(1),
+        height.checked_shr(mip_level).unwrap_or(0).max(1),
+    )
 }
 
 fn depth_stencil_aspect_flags(format: HalTextureFormat) -> vk::ImageAspectFlags {
@@ -1672,68 +1696,51 @@ fn depth_stencil_aspect_flags(format: HalTextureFormat) -> vk::ImageAspectFlags 
     flags
 }
 
+fn copy_format_aspect_flags(format: HalTextureFormat) -> vk::ImageAspectFlags {
+    let depth_stencil = depth_stencil_aspect_flags(format);
+    if depth_stencil.is_empty() {
+        vk::ImageAspectFlags::COLOR
+    } else {
+        depth_stencil
+    }
+}
+
+fn buffer_texture_copy_aspect_flags(
+    format: HalTextureFormat,
+    aspect: HalTextureAspect,
+) -> vk::ImageAspectFlags {
+    match aspect {
+        HalTextureAspect::All => copy_format_aspect_flags(format),
+        HalTextureAspect::DepthOnly => vk::ImageAspectFlags::DEPTH,
+        HalTextureAspect::StencilOnly => vk::ImageAspectFlags::STENCIL,
+    }
+}
+
 fn create_render_pass_for_targets(
     device: &ash::Device,
     color_format: Option<HalTextureFormat>,
-    depth_stencil_format: Option<HalTextureFormat>,
+    color_target: Option<&HalRenderColorTarget>,
+    depth_stencil: Option<&HalRenderDepthStencilAttachment>,
 ) -> Result<vk::RenderPass, HalError> {
-    if color_format.is_none() && depth_stencil_format.is_none() {
+    if color_format.is_none() && depth_stencil.is_none() {
         return Err(shader_error("render pass requires an attachment"));
     }
     let mut attachments = Vec::new();
     let mut color_references = Vec::new();
-    if let Some(color_format) = color_format {
-        let (format, _) = map_texture_format(color_format)?;
-        attachments.push(
-            vk::AttachmentDescription::default()
-                .format(format)
-                .samples(vk::SampleCountFlags::TYPE_1)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
-        );
+    if let (Some(color_format), Some(color_target)) = (color_format, color_target) {
+        attachments.push(vk_color_attachment_description(color_format, color_target)?);
         color_references.push(
             vk::AttachmentReference::default()
                 .attachment(0)
                 .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
         );
     }
-    let depth_reference = if let Some(depth_stencil_format) = depth_stencil_format {
-        let (format, _) = map_texture_format(depth_stencil_format)?;
+    let depth_reference = if let Some(depth_stencil) = depth_stencil {
         let index = u32::try_from(attachments.len())
             .map_err(|_| shader_error("depth attachment index is too large"))?;
-        let has_depth = format_has_depth_aspect(depth_stencil_format);
-        let has_stencil = format_has_stencil_aspect(depth_stencil_format);
-        attachments.push(
-            vk::AttachmentDescription::default()
-                .format(format)
-                .samples(vk::SampleCountFlags::TYPE_1)
-                .load_op(if has_depth {
-                    vk::AttachmentLoadOp::CLEAR
-                } else {
-                    vk::AttachmentLoadOp::DONT_CARE
-                })
-                .store_op(if has_depth {
-                    vk::AttachmentStoreOp::STORE
-                } else {
-                    vk::AttachmentStoreOp::DONT_CARE
-                })
-                .stencil_load_op(if has_stencil {
-                    vk::AttachmentLoadOp::CLEAR
-                } else {
-                    vk::AttachmentLoadOp::DONT_CARE
-                })
-                .stencil_store_op(if has_stencil {
-                    vk::AttachmentStoreOp::STORE
-                } else {
-                    vk::AttachmentStoreOp::DONT_CARE
-                })
-                .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
-        );
+        attachments.push(vk_render_depth_stencil_attachment_description(
+            depth_stencil,
+        )?);
         Some(
             vk::AttachmentReference::default()
                 .attachment(index)
@@ -1792,29 +1799,176 @@ fn create_render_pass_for_targets(
         .map_err(|_| shader_error("render pass creation failed"))
 }
 
+fn vk_color_attachment_description(
+    format: HalTextureFormat,
+    target: &HalRenderColorTarget,
+) -> Result<vk::AttachmentDescription, HalError> {
+    let (format, _) = map_texture_format(format)?;
+    Ok(vk::AttachmentDescription::default()
+        .format(format)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .load_op(vk_load_op(target.load_op))
+        .store_op(vk_store_op(target.store))
+        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+        .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL))
+}
+
+fn vk_render_depth_stencil_attachment_description(
+    attachment: &HalRenderDepthStencilAttachment,
+) -> Result<vk::AttachmentDescription, HalError> {
+    let (format, _) = map_texture_format(attachment.format)?;
+    let has_depth = format_has_depth_aspect(attachment.format);
+    let has_stencil = format_has_stencil_aspect(attachment.format);
+    Ok(vk::AttachmentDescription::default()
+        .format(format)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .load_op(if has_depth {
+            vk_load_op(attachment.depth_load_op)
+        } else {
+            vk::AttachmentLoadOp::DONT_CARE
+        })
+        .store_op(if has_depth {
+            vk_store_op(attachment.depth_store)
+        } else {
+            vk::AttachmentStoreOp::DONT_CARE
+        })
+        .stencil_load_op(if has_stencil {
+            vk_load_op(attachment.stencil_load_op)
+        } else {
+            vk::AttachmentLoadOp::DONT_CARE
+        })
+        .stencil_store_op(if has_stencil {
+            vk_store_op(attachment.stencil_store)
+        } else {
+            vk::AttachmentStoreOp::DONT_CARE
+        })
+        .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+        .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL))
+}
+
 /// Creates framebuffer and reports validation errors through the owning device.
 pub(super) fn create_framebuffer(
     device: &ash::Device,
     render_pass: vk::RenderPass,
-    color_texture: Option<&VulkanTexture>,
-    depth_stencil_texture: Option<&VulkanTexture>,
-) -> Result<vk::Framebuffer, HalError> {
+    color_attachment: Option<(&VulkanTexture, &HalRenderColorTarget)>,
+    depth_stencil_attachment: Option<(&VulkanTexture, &HalRenderDepthStencilAttachment)>,
+) -> Result<(vk::Framebuffer, Vec<vk::ImageView>), HalError> {
     let mut attachments = Vec::new();
-    if let Some(texture) = color_texture {
-        attachments.push(texture.inner()?.view);
+    if let Some((texture, target)) = color_attachment {
+        match create_color_attachment_image_view(device, texture, target) {
+            Ok(view) => attachments.push(view),
+            Err(error) => return Err(error),
+        }
     }
-    if let Some(texture) = depth_stencil_texture {
-        attachments.push(texture.inner()?.view);
+    if let Some((texture, attachment)) = depth_stencil_attachment {
+        match create_depth_stencil_attachment_image_view(device, texture, attachment) {
+            Ok(view) => attachments.push(view),
+            Err(error) => {
+                destroy_image_views(device, &attachments);
+                return Err(error);
+            }
+        }
     }
-    let (width, height) = render_pass_extent_from_targets(color_texture, depth_stencil_texture)?;
+    let (width, height) =
+        render_pass_extent_from_targets(color_attachment, depth_stencil_attachment)?;
     let framebuffer_info = vk::FramebufferCreateInfo::default()
         .render_pass(render_pass)
         .attachments(&attachments)
         .width(width)
         .height(height)
         .layers(1);
-    unsafe { device.create_framebuffer(&framebuffer_info, None) }
-        .map_err(|_| shader_error("framebuffer creation failed"))
+    let framebuffer = match unsafe { device.create_framebuffer(&framebuffer_info, None) } {
+        Ok(framebuffer) => framebuffer,
+        Err(_) => {
+            destroy_image_views(device, &attachments);
+            return Err(shader_error("framebuffer creation failed"));
+        }
+    };
+    Ok((framebuffer, attachments))
+}
+
+fn create_color_attachment_image_view(
+    device: &ash::Device,
+    texture: &VulkanTexture,
+    target: &HalRenderColorTarget,
+) -> Result<vk::ImageView, HalError> {
+    let (format, _) = map_texture_format(texture.format)?;
+    create_attachment_image_view(
+        device,
+        texture.inner()?.image,
+        format,
+        color_attachment_subresource_range(target),
+    )
+}
+
+fn create_depth_stencil_attachment_image_view(
+    device: &ash::Device,
+    texture: &VulkanTexture,
+    attachment: &HalRenderDepthStencilAttachment,
+) -> Result<vk::ImageView, HalError> {
+    let (format, _) = map_texture_format(attachment.format)?;
+    create_attachment_image_view(
+        device,
+        texture.inner()?.image,
+        format,
+        depth_stencil_attachment_subresource_range(attachment),
+    )
+}
+
+fn create_attachment_image_view(
+    device: &ash::Device,
+    image: vk::Image,
+    format: vk::Format,
+    subresource_range: vk::ImageSubresourceRange,
+) -> Result<vk::ImageView, HalError> {
+    let view_info = vk::ImageViewCreateInfo::default()
+        .image(image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(format)
+        .subresource_range(subresource_range);
+    unsafe { device.create_image_view(&view_info, None) }
+        .map_err(|_| shader_error("attachment image view creation failed"))
+}
+
+fn color_attachment_subresource_range(target: &HalRenderColorTarget) -> vk::ImageSubresourceRange {
+    attachment_subresource_range(
+        vk::ImageAspectFlags::COLOR,
+        target.mip_level,
+        target.array_layer,
+    )
+}
+
+fn depth_stencil_attachment_subresource_range(
+    attachment: &HalRenderDepthStencilAttachment,
+) -> vk::ImageSubresourceRange {
+    attachment_subresource_range(
+        depth_stencil_aspect_flags(attachment.format),
+        attachment.mip_level,
+        attachment.array_layer,
+    )
+}
+
+fn attachment_subresource_range(
+    aspect: vk::ImageAspectFlags,
+    mip_level: u32,
+    array_layer: u32,
+) -> vk::ImageSubresourceRange {
+    vk::ImageSubresourceRange::default()
+        .aspect_mask(aspect)
+        .base_mip_level(mip_level)
+        .level_count(1)
+        .base_array_layer(array_layer)
+        .layer_count(1)
+}
+
+fn destroy_image_views(device: &ash::Device, views: &[vk::ImageView]) {
+    unsafe {
+        for &view in views {
+            device.destroy_image_view(view, None);
+        }
+    }
 }
 
 /// Validates buffer texture range and returns a descriptive error on failure.
@@ -1863,6 +2017,7 @@ pub(super) fn buffer_image_copy(
     copy: &HalBufferTextureCopy,
     texture: &VulkanTexture,
     bytes_per_pixel: u32,
+    aspect: vk::ImageAspectFlags,
 ) -> Result<vk::BufferImageCopy, HalError> {
     let buffer_row_length = buffer_row_length(copy.buffer_layout.bytes_per_row, bytes_per_pixel)?;
     Ok(vk::BufferImageCopy::default()
@@ -1870,6 +2025,7 @@ pub(super) fn buffer_image_copy(
         .buffer_row_length(buffer_row_length)
         .buffer_image_height(copy.buffer_layout.rows_per_image)
         .image_subresource(texture_copy_subresource_layers(
+            aspect,
             texture.dimension,
             copy.mip_level,
             copy.origin.z,
@@ -1893,15 +2049,16 @@ pub(super) fn validate_mip_level(texture: &VulkanTexture, mip_level: u32) -> Res
 }
 
 fn texture_copy_subresource_layers(
+    aspect: vk::ImageAspectFlags,
     dimension: HalTextureDimension,
     mip_level: u32,
     z: u32,
     depth_or_array_layers: u32,
 ) -> vk::ImageSubresourceLayers {
     match dimension {
-        HalTextureDimension::D3 => image_subresource_layers(mip_level, 0, 1),
+        HalTextureDimension::D3 => image_subresource_layers(aspect, mip_level, 0, 1),
         HalTextureDimension::D1 | HalTextureDimension::D2 => {
-            image_subresource_layers(mip_level, z, depth_or_array_layers)
+            image_subresource_layers(aspect, mip_level, z, depth_or_array_layers)
         }
     }
 }
@@ -1956,5 +2113,200 @@ pub(super) fn to_image_extent(extent: HalExtent3d) -> vk::Extent3D {
         width: extent.width,
         height: extent.height,
         depth: extent.depth_or_array_layers,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{noop, HalTextureDescriptor, HalTextureUsage};
+
+    fn dummy_texture(format: HalTextureFormat) -> HalTexture {
+        let device = noop::NoopDevice::new();
+        HalTexture::Noop(device.create_texture(&HalTextureDescriptor {
+            dimension: HalTextureDimension::D2,
+            format,
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+            mip_level_count: 1,
+            sample_count: 1,
+            usage: HalTextureUsage {
+                copy_src: false,
+                copy_dst: false,
+                texture_binding: false,
+                storage_binding: false,
+                render_attachment: true,
+            },
+        }))
+    }
+
+    #[test]
+    fn copy_format_aspect_flags_uses_color_fallback_and_depth_stencil_planes() {
+        assert_eq!(
+            copy_format_aspect_flags(HalTextureFormat::Rgba8Unorm),
+            vk::ImageAspectFlags::COLOR
+        );
+        assert_eq!(
+            copy_format_aspect_flags(HalTextureFormat::Depth32Float),
+            vk::ImageAspectFlags::DEPTH
+        );
+        assert_eq!(
+            copy_format_aspect_flags(HalTextureFormat::Stencil8),
+            vk::ImageAspectFlags::STENCIL
+        );
+        assert_eq!(
+            copy_format_aspect_flags(HalTextureFormat::Depth24PlusStencil8),
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        );
+        assert_eq!(
+            copy_format_aspect_flags(HalTextureFormat::Depth32FloatStencil8),
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        );
+    }
+
+    #[test]
+    fn buffer_texture_copy_aspect_flags_honors_requested_aspect() {
+        assert_eq!(
+            buffer_texture_copy_aspect_flags(
+                HalTextureFormat::Depth32FloatStencil8,
+                HalTextureAspect::All
+            ),
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        );
+        assert_eq!(
+            buffer_texture_copy_aspect_flags(
+                HalTextureFormat::Depth32FloatStencil8,
+                HalTextureAspect::DepthOnly,
+            ),
+            vk::ImageAspectFlags::DEPTH
+        );
+        assert_eq!(
+            buffer_texture_copy_aspect_flags(
+                HalTextureFormat::Depth32FloatStencil8,
+                HalTextureAspect::StencilOnly,
+            ),
+            vk::ImageAspectFlags::STENCIL
+        );
+        assert_eq!(
+            buffer_texture_copy_aspect_flags(HalTextureFormat::Rgba8Unorm, HalTextureAspect::All),
+            vk::ImageAspectFlags::COLOR
+        );
+    }
+
+    #[test]
+    fn render_attachment_descriptions_preserve_contents_for_load_ops() {
+        let color_target = HalRenderColorTarget {
+            texture: dummy_texture(HalTextureFormat::Rgba8Unorm),
+            mip_level: 0,
+            array_layer: 0,
+            load_op: HalRenderLoadOp::Load,
+            store: false,
+            clear_color: [0.0, 0.0, 0.0, 1.0],
+        };
+        let color = vk_color_attachment_description(HalTextureFormat::Rgba8Unorm, &color_target)
+            .expect("color attachment description");
+        assert_eq!(color.load_op, vk::AttachmentLoadOp::LOAD);
+        assert_eq!(color.store_op, vk::AttachmentStoreOp::DONT_CARE);
+        assert_eq!(
+            color.initial_layout,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+        );
+
+        let depth_stencil = HalRenderDepthStencilAttachment {
+            texture: dummy_texture(HalTextureFormat::Depth32FloatStencil8),
+            format: HalTextureFormat::Depth32FloatStencil8,
+            mip_level: 0,
+            array_layer: 0,
+            depth_load_op: HalRenderLoadOp::Load,
+            depth_store: true,
+            depth_clear_value: 0.5,
+            depth_read_only: false,
+            stencil_load_op: HalRenderLoadOp::Load,
+            stencil_store: false,
+            stencil_clear_value: 0,
+            stencil_read_only: false,
+        };
+        let depth =
+            vk_render_depth_stencil_attachment_description(&depth_stencil).expect("depth desc");
+        assert_eq!(depth.load_op, vk::AttachmentLoadOp::LOAD);
+        assert_eq!(depth.store_op, vk::AttachmentStoreOp::STORE);
+        assert_eq!(depth.stencil_load_op, vk::AttachmentLoadOp::LOAD);
+        assert_eq!(depth.stencil_store_op, vk::AttachmentStoreOp::DONT_CARE);
+        assert_eq!(
+            depth.initial_layout,
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        );
+    }
+
+    #[test]
+    fn render_attachment_subresource_ranges_scope_mip_layer_and_aspect() {
+        let color_target = HalRenderColorTarget {
+            texture: dummy_texture(HalTextureFormat::Rgba8Unorm),
+            mip_level: 2,
+            array_layer: 1,
+            load_op: HalRenderLoadOp::Clear,
+            store: true,
+            clear_color: [0.0, 0.0, 0.0, 1.0],
+        };
+        let color = color_attachment_subresource_range(&color_target);
+        assert_eq!(color.aspect_mask, vk::ImageAspectFlags::COLOR);
+        assert_eq!(color.base_mip_level, 2);
+        assert_eq!(color.level_count, 1);
+        assert_eq!(color.base_array_layer, 1);
+        assert_eq!(color.layer_count, 1);
+
+        let depth = HalRenderDepthStencilAttachment {
+            texture: dummy_texture(HalTextureFormat::Depth32Float),
+            format: HalTextureFormat::Depth32Float,
+            mip_level: 3,
+            array_layer: 4,
+            depth_load_op: HalRenderLoadOp::Clear,
+            depth_store: true,
+            depth_clear_value: 0.5,
+            depth_read_only: false,
+            stencil_load_op: HalRenderLoadOp::Clear,
+            stencil_store: false,
+            stencil_clear_value: 0,
+            stencil_read_only: false,
+        };
+        let depth_range = depth_stencil_attachment_subresource_range(&depth);
+        assert_eq!(depth_range.aspect_mask, vk::ImageAspectFlags::DEPTH);
+        assert_eq!(depth_range.base_mip_level, 3);
+        assert_eq!(depth_range.level_count, 1);
+        assert_eq!(depth_range.base_array_layer, 4);
+        assert_eq!(depth_range.layer_count, 1);
+
+        let packed = HalRenderDepthStencilAttachment {
+            texture: dummy_texture(HalTextureFormat::Depth32FloatStencil8),
+            format: HalTextureFormat::Depth32FloatStencil8,
+            mip_level: 1,
+            array_layer: 2,
+            depth_load_op: HalRenderLoadOp::Clear,
+            depth_store: true,
+            depth_clear_value: 0.5,
+            depth_read_only: false,
+            stencil_load_op: HalRenderLoadOp::Clear,
+            stencil_store: true,
+            stencil_clear_value: 0,
+            stencil_read_only: false,
+        };
+        let packed_range = depth_stencil_attachment_subresource_range(&packed);
+        assert_eq!(
+            packed_range.aspect_mask,
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        );
+        assert_eq!(packed_range.base_mip_level, 1);
+        assert_eq!(packed_range.level_count, 1);
+        assert_eq!(packed_range.base_array_layer, 2);
+        assert_eq!(packed_range.layer_count, 1);
+    }
+
+    #[test]
+    fn mip_extent_uses_attachment_mip_level_size_with_floor() {
+        assert_eq!(mip_extent(16, 16, 0), (16, 16));
+        assert_eq!(mip_extent(16, 16, 2), (4, 4));
+        assert_eq!(mip_extent(24, 10, 2), (6, 2));
+        assert_eq!(mip_extent(1, 1, 8), (1, 1));
     }
 }

@@ -581,12 +581,13 @@ pub(super) fn stage_mask_for_layout(layout: vk::ImageLayout) -> vk::PipelineStag
 
 /// Returns image subresource layers.
 pub(super) fn image_subresource_layers(
+    aspect: vk::ImageAspectFlags,
     mip_level: u32,
     base_array_layer: u32,
     layer_count: u32,
 ) -> vk::ImageSubresourceLayers {
     vk::ImageSubresourceLayers::default()
-        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .aspect_mask(aspect)
         .mip_level(mip_level)
         .base_array_layer(base_array_layer)
         .layer_count(layer_count)

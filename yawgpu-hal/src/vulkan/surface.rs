@@ -60,6 +60,7 @@ pub(super) enum RetireOp {
     DescriptorPool(vk::DescriptorPool),
     RenderPass(vk::RenderPass),
     Framebuffer(vk::Framebuffer),
+    ImageView(vk::ImageView),
     CommandPool(vk::CommandPool),
     CommandBuffer {
         pool: vk::CommandPool,
@@ -162,6 +163,7 @@ unsafe fn cleanup_retire_ops(device: &ash::Device, cleanup: Vec<RetireOp>) {
             RetireOp::DescriptorPool(pool) => device.destroy_descriptor_pool(pool, None),
             RetireOp::RenderPass(render_pass) => device.destroy_render_pass(render_pass, None),
             RetireOp::Framebuffer(framebuffer) => device.destroy_framebuffer(framebuffer, None),
+            RetireOp::ImageView(view) => device.destroy_image_view(view, None),
             RetireOp::CommandPool(command_pool) => device.destroy_command_pool(command_pool, None),
             RetireOp::CommandBuffer { pool, buffer } => {
                 device.free_command_buffers(pool, &[buffer]);

@@ -459,6 +459,37 @@ never a reason to skip a CTS case.
   `1080 passed / 0 failed`. 3-way confirmed (Dawn + wgpu-native pass all 216).
   Verification + the gap-6/gap-7 fixes were done by Claude directly (per request);
   Rounds 1–4 lib work was the coding agent's.
+- **External-CTS finding F-031 on the Vulkan backend — RESOLVED.** The Metal F-031
+  fix left `copyTextureToTexture:copy_depth_stencil` at `pass=36 fail=180` on yawgpu's
+  Vulkan HAL (verified real-GPU via MoltenVK; `Stencil8` passed, all depth formats
+  failed). Claude localised four independent Vulkan-only gaps with `e2e_vulkan_depth.rs`
+  isolation probes and handed each to the coding agent:
+  1. **Copy aspect hardcoded COLOR.** `image_subresource_layers` /
+     `color_subresource_range` forced `VK_IMAGE_ASPECT_COLOR` for every copy, so the
+     depth/stencil aspect of `copyTextureToTexture` (and buffer⇄texture copies) copied the
+     wrong plane. Derive the aspect from the format (`copy_format_aspect_flags`) / the
+     copy's `HalTextureAspect`; use aspect-aware subresources + `transition_image_aspect`.
+  2. **`LoadOp::Load` rejected.** The non-tiled render path errored on any load op except
+     `Clear`. The CTS `verifyDepthAspect` re-renders with `depthLoadOp=Load`; without it the
+     verify never ran. Build the execution render pass from the pass's actual load/store ops
+     with a contents-preserving `initial_layout`.
+  3. **Attachment views ignored mip/array layer** (the Vulkan half of the Metal-only gap 6
+     above). `create_framebuffer` used the texture's default full-image view, so a
+     `baseArrayLayer`/`baseMipLevel` attachment rendered to layer 0 / mip 0. Create transient
+     2D views scoped to `HalRender*Attachment.{mip_level,array_layer}`, freed via
+     `RetireOp::ImageView`.
+  4. **Render extent used the base size.** `render_pass_extent_from_targets` returned the
+     base texture size, so a depth-only mip-2 staging pass rasterised the gradient over the
+     base extent (only the top-left mip-sized corner landed in the mip region). Compute
+     `max(1, dim >> mip_level)` for the chosen attachment (`mip_extent`), feeding render-area,
+     viewport, and framebuffer. (A constant depth masked this; the CTS uses a depth gradient.)
+  **Verified real-GPU Vulkan/MoltenVK:** `copyTextureToTexture:copy_depth_stencil`
+  `pass=216 fail=0` (Dawn-equal, from `36/180`); `e2e_vulkan_render` 2/2 + `e2e_vulkan_depth`
+  10/10 (no regression); Noop clippy + `--features vulkan` clippy clean; workspace test green.
+  In-tree `e2e_vulkan_depth.rs` (10 probes) is Claude-authored. **Out of scope / follow-up:**
+  the Vulkan `image_copy` depth aspect (`rowsPerImage…_depth_stencil` `264/600`,
+  `offsets…` `88/200`) — the sampled per-layer view binding for the staging render (the
+  Metal-only F-032 view-binding fix) + multi-layer, still pending on Vulkan.
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.
