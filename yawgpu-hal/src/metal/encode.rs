@@ -638,6 +638,12 @@ pub(super) fn encode_render_pass(
         pipeline.depth_bias_slope_scale,
         pipeline.depth_bias_clamp,
     );
+    encoder.setBlendColorRed_green_blue_alpha(
+        pass.blend_constant[0],
+        pass.blend_constant[1],
+        pass.blend_constant[2],
+        pass.blend_constant[3],
+    );
     for binding in &pass.bind_buffers {
         encode_render_bind_buffer(encoder, binding)?;
     }

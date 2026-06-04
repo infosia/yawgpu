@@ -720,6 +720,7 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
         vertex_buffers,
         index_buffer,
         indirect_buffer,
+        blend_constant: pass.blend_constant,
         draw,
     }))
 }

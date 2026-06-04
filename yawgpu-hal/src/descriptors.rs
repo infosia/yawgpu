@@ -6,14 +6,101 @@ use crate::{
 /// Describes HAL render pipeline descriptor.
 #[derive(Debug, Clone)]
 pub struct HalRenderPipelineDescriptor {
-    /// Color formats.
-    pub color_formats: Vec<HalTextureFormat>,
+    /// Color target states.
+    pub color_targets: Vec<HalColorTargetState>,
     /// Depth stencil state.
     pub depth_stencil: Option<HalDepthStencilState>,
     /// Vertex buffers.
     pub vertex_buffers: Vec<HalVertexBufferLayout>,
     /// Primitive topology.
     pub primitive_topology: HalPrimitiveTopology,
+}
+
+/// Describes one HAL color target state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HalColorTargetState {
+    /// Texture format.
+    pub format: HalTextureFormat,
+    /// Optional blend state.
+    pub blend: Option<HalBlendState>,
+    /// RGBA channel write mask bits.
+    pub write_mask: u32,
+}
+
+/// Describes HAL color and alpha blend state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HalBlendState {
+    /// Color blend component.
+    pub color: HalBlendComponent,
+    /// Alpha blend component.
+    pub alpha: HalBlendComponent,
+}
+
+/// Describes one HAL blend component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HalBlendComponent {
+    /// Blend operation.
+    pub operation: HalBlendOperation,
+    /// Source blend factor.
+    pub src_factor: HalBlendFactor,
+    /// Destination blend factor.
+    pub dst_factor: HalBlendFactor,
+}
+
+/// Enumerates HAL blend operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HalBlendOperation {
+    /// Add source and destination terms.
+    Add,
+    /// Subtract destination from source.
+    Subtract,
+    /// Subtract source from destination.
+    ReverseSubtract,
+    /// Take the component-wise minimum.
+    Min,
+    /// Take the component-wise maximum.
+    Max,
+}
+
+/// Enumerates HAL blend factors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HalBlendFactor {
+    /// Zero factor.
+    Zero,
+    /// One factor.
+    One,
+    /// Source color factor.
+    Src,
+    /// One minus source color factor.
+    OneMinusSrc,
+    /// Source alpha factor.
+    SrcAlpha,
+    /// One minus source alpha factor.
+    OneMinusSrcAlpha,
+    /// Destination color factor.
+    Dst,
+    /// One minus destination color factor.
+    OneMinusDst,
+    /// Destination alpha factor.
+    DstAlpha,
+    /// One minus destination alpha factor.
+    OneMinusDstAlpha,
+    /// Saturated source alpha factor.
+    SrcAlphaSaturated,
+    /// Blend constant factor.
+    Constant,
+    /// One minus blend constant factor.
+    OneMinusConstant,
+    /// Source one color factor.
+    Src1,
+    /// One minus source one color factor.
+    OneMinusSrc1,
+    /// Source one alpha factor.
+    Src1Alpha,
+    /// One minus source one alpha factor.
+    OneMinusSrc1Alpha,
 }
 
 /// Describes HAL depth stencil state.
@@ -114,6 +201,27 @@ mod tests {
         let state = stencil_face_state();
 
         assert!(format!("{state:?}").contains("HalStencilFaceState"));
+    }
+
+    #[test]
+    fn hal_color_target_state_carries_blend_and_write_mask() {
+        let component = HalBlendComponent {
+            operation: HalBlendOperation::ReverseSubtract,
+            src_factor: HalBlendFactor::SrcAlpha,
+            dst_factor: HalBlendFactor::OneMinusConstant,
+        };
+        let state = HalColorTargetState {
+            format: HalTextureFormat::Rgba8Unorm,
+            blend: Some(HalBlendState {
+                color: component,
+                alpha: component,
+            }),
+            write_mask: 0b0101,
+        };
+
+        assert_eq!(state.write_mask, 0b0101);
+        assert_eq!(state.blend.expect("blend state").color, component);
+        assert!(format!("{state:?}").contains("HalColorTargetState"));
     }
 }
 

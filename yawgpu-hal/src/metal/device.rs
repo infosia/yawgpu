@@ -173,10 +173,18 @@ impl MetalDevice {
     ) -> Result<MetalRenderPipeline, HalError> {
         let _ = bindings; // Metal subpass inputs use the color-slot map, not descriptors.
         let mut adjusted = descriptor.clone();
-        adjusted.color_formats = pass_layout
+        adjusted.color_targets = pass_layout
             .color_attachments
             .iter()
-            .map(|a| a.format)
+            .enumerate()
+            .map(|(index, attachment)| {
+                let state = descriptor.color_targets.get(index).copied();
+                HalColorTargetState {
+                    format: attachment.format,
+                    blend: state.and_then(|state| state.blend),
+                    write_mask: state.map_or(0xf, |state| state.write_mask),
+                }
+            })
             .collect();
         if adjusted.depth_stencil.is_none() {
             if let Some(layout_ds) = pass_layout.depth_stencil_attachment.as_ref() {

@@ -485,15 +485,15 @@ fn create_render_pass_for_descriptor(
     device: &ash::Device,
     descriptor: &HalRenderPipelineDescriptor,
 ) -> Result<vk::RenderPass, HalError> {
-    if descriptor.color_formats.is_empty() && descriptor.depth_stencil.is_none() {
+    if descriptor.color_targets.is_empty() && descriptor.depth_stencil.is_none() {
         return Err(shader_error(
             "render pipeline requires a color target or depth-stencil state",
         ));
     }
     let mut attachments = Vec::new();
     let mut color_references = Vec::new();
-    for (index, color_format) in descriptor.color_formats.iter().copied().enumerate() {
-        let (format, _) = map_texture_format(color_format)?;
+    for (index, color_target) in descriptor.color_targets.iter().enumerate() {
+        let (format, _) = map_texture_format(color_target.format)?;
         attachments.push(
             vk::AttachmentDescription::default()
                 .format(format)
@@ -563,7 +563,7 @@ fn create_render_pass_for_descriptor(
     } else {
         subpass
     };
-    let has_color = !descriptor.color_formats.is_empty();
+    let has_color = !descriptor.color_targets.is_empty();
     let has_depth_stencil = descriptor.depth_stencil.is_some();
     let attachment_stage = attachment_pipeline_stages(has_color, has_depth_stencil);
     let attachment_access = attachment_access_flags(has_color, has_depth_stencil);
@@ -916,12 +916,10 @@ pub(super) fn create_graphics_pipeline(
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(vk::SampleCountFlags::TYPE_1)
         .sample_shading_enable(false);
-    // `PipelineColorBlendStateCreateInfo.attachmentCount` must equal the
-    // subpass's color-attachment count. We size to `descriptor.color_formats.len()`
-    // — the pipeline carries one entry per attachment the subpass writes,
-    // each with default "no blend, write all" state.
-    let color_attachments = (0..descriptor.color_formats.len())
-        .map(|_| color_blend_attachment_default())
+    let color_attachments = descriptor
+        .color_targets
+        .iter()
+        .map(|target| color_blend_attachment(*target))
         .collect::<Vec<_>>();
     let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
         .logic_op_enable(false)
@@ -929,7 +927,11 @@ pub(super) fn create_graphics_pipeline(
     let depth_stencil = descriptor
         .depth_stencil
         .map(vk_pipeline_depth_stencil_state);
-    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic_states = [
+        vk::DynamicState::VIEWPORT,
+        vk::DynamicState::SCISSOR,
+        vk::DynamicState::BLEND_CONSTANTS,
+    ];
     let dynamic_state =
         vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
     let mut pipeline_info = vk::GraphicsPipelineCreateInfo::default()
@@ -968,15 +970,118 @@ pub(super) fn create_graphics_pipeline(
     }
 }
 
-fn color_blend_attachment_default() -> vk::PipelineColorBlendAttachmentState {
-    vk::PipelineColorBlendAttachmentState::default()
+fn color_blend_attachment(target: HalColorTargetState) -> vk::PipelineColorBlendAttachmentState {
+    let mut attachment = vk::PipelineColorBlendAttachmentState::default()
         .blend_enable(false)
-        .color_write_mask(
-            vk::ColorComponentFlags::R
-                | vk::ColorComponentFlags::G
-                | vk::ColorComponentFlags::B
-                | vk::ColorComponentFlags::A,
-        )
+        .color_write_mask(vk_color_write_mask(target.write_mask));
+    if let Some(blend) = target.blend {
+        attachment = attachment
+            .blend_enable(true)
+            .src_color_blend_factor(vk_blend_factor(blend.color.src_factor, false))
+            .dst_color_blend_factor(vk_blend_factor(blend.color.dst_factor, false))
+            .color_blend_op(vk_blend_operation(blend.color.operation))
+            .src_alpha_blend_factor(vk_blend_factor(blend.alpha.src_factor, true))
+            .dst_alpha_blend_factor(vk_blend_factor(blend.alpha.dst_factor, true))
+            .alpha_blend_op(vk_blend_operation(blend.alpha.operation));
+    }
+    attachment
+}
+
+fn vk_color_write_mask(write_mask: u32) -> vk::ColorComponentFlags {
+    let mut mask = vk::ColorComponentFlags::empty();
+    if write_mask & 0x1 != 0 {
+        mask |= vk::ColorComponentFlags::R;
+    }
+    if write_mask & 0x2 != 0 {
+        mask |= vk::ColorComponentFlags::G;
+    }
+    if write_mask & 0x4 != 0 {
+        mask |= vk::ColorComponentFlags::B;
+    }
+    if write_mask & 0x8 != 0 {
+        mask |= vk::ColorComponentFlags::A;
+    }
+    mask
+}
+
+fn vk_blend_operation(operation: HalBlendOperation) -> vk::BlendOp {
+    match operation {
+        HalBlendOperation::Add => vk::BlendOp::ADD,
+        HalBlendOperation::Subtract => vk::BlendOp::SUBTRACT,
+        HalBlendOperation::ReverseSubtract => vk::BlendOp::REVERSE_SUBTRACT,
+        HalBlendOperation::Min => vk::BlendOp::MIN,
+        HalBlendOperation::Max => vk::BlendOp::MAX,
+    }
+}
+
+fn vk_blend_factor(factor: HalBlendFactor, alpha: bool) -> vk::BlendFactor {
+    match factor {
+        HalBlendFactor::Zero => vk::BlendFactor::ZERO,
+        HalBlendFactor::One => vk::BlendFactor::ONE,
+        HalBlendFactor::Src => {
+            if alpha {
+                vk::BlendFactor::SRC_ALPHA
+            } else {
+                vk::BlendFactor::SRC_COLOR
+            }
+        }
+        HalBlendFactor::OneMinusSrc => {
+            if alpha {
+                vk::BlendFactor::ONE_MINUS_SRC_ALPHA
+            } else {
+                vk::BlendFactor::ONE_MINUS_SRC_COLOR
+            }
+        }
+        HalBlendFactor::SrcAlpha => vk::BlendFactor::SRC_ALPHA,
+        HalBlendFactor::OneMinusSrcAlpha => vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+        HalBlendFactor::Dst => {
+            if alpha {
+                vk::BlendFactor::DST_ALPHA
+            } else {
+                vk::BlendFactor::DST_COLOR
+            }
+        }
+        HalBlendFactor::OneMinusDst => {
+            if alpha {
+                vk::BlendFactor::ONE_MINUS_DST_ALPHA
+            } else {
+                vk::BlendFactor::ONE_MINUS_DST_COLOR
+            }
+        }
+        HalBlendFactor::DstAlpha => vk::BlendFactor::DST_ALPHA,
+        HalBlendFactor::OneMinusDstAlpha => vk::BlendFactor::ONE_MINUS_DST_ALPHA,
+        HalBlendFactor::SrcAlphaSaturated => vk::BlendFactor::SRC_ALPHA_SATURATE,
+        HalBlendFactor::Constant => {
+            if alpha {
+                vk::BlendFactor::CONSTANT_ALPHA
+            } else {
+                vk::BlendFactor::CONSTANT_COLOR
+            }
+        }
+        HalBlendFactor::OneMinusConstant => {
+            if alpha {
+                vk::BlendFactor::ONE_MINUS_CONSTANT_ALPHA
+            } else {
+                vk::BlendFactor::ONE_MINUS_CONSTANT_COLOR
+            }
+        }
+        HalBlendFactor::Src1 => {
+            if alpha {
+                vk::BlendFactor::SRC1_ALPHA
+            } else {
+                vk::BlendFactor::SRC1_COLOR
+            }
+        }
+        HalBlendFactor::OneMinusSrc1 => {
+            if alpha {
+                vk::BlendFactor::ONE_MINUS_SRC1_ALPHA
+            } else {
+                vk::BlendFactor::ONE_MINUS_SRC1_COLOR
+            }
+        }
+        HalBlendFactor::Src1Alpha => vk::BlendFactor::SRC1_ALPHA,
+        HalBlendFactor::OneMinusSrc1Alpha => vk::BlendFactor::ONE_MINUS_SRC1_ALPHA,
+    }
 }
 
 fn vk_pipeline_depth_stencil_state(

@@ -7,25 +7,28 @@ use objc2::runtime::ProtocolObject;
 use objc2_core_foundation::CGSize;
 use objc2_foundation::{NSArray, NSRange, NSString};
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBlitOption, MTLBuffer as MTLBufferTrait, MTLClearColor,
-    MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction, MTLCompileOptions,
+    MTLBlendFactor, MTLBlendOperation, MTLBlitCommandEncoder, MTLBlitOption,
+    MTLBuffer as MTLBufferTrait, MTLClearColor, MTLColorWriteMask, MTLCommandBuffer,
+    MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction, MTLCompileOptions,
     MTLComputeCommandEncoder, MTLComputePipelineState, MTLCopyAllDevices,
     MTLCreateSystemDefaultDevice, MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice,
     MTLDrawable, MTLFunction, MTLIndexType, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat,
     MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerAddressMode,
-    MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerMipFilter, MTLSamplerState, MTLSize,
-    MTLStencilDescriptor, MTLStencilOperation, MTLStorageMode, MTLStoreAction,
-    MTLTexture as MTLTextureTrait, MTLTextureDescriptor, MTLTextureType, MTLTextureUsage,
-    MTLVertexDescriptor, MTLVertexFormat, MTLVertexStepFunction,
+    MTLRenderPipelineColorAttachmentDescriptor, MTLRenderPipelineDescriptor,
+    MTLRenderPipelineState, MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerDescriptor,
+    MTLSamplerMinMagFilter, MTLSamplerMipFilter, MTLSamplerState, MTLSize, MTLStencilDescriptor,
+    MTLStencilOperation, MTLStorageMode, MTLStoreAction, MTLTexture as MTLTextureTrait,
+    MTLTextureDescriptor, MTLTextureType, MTLTextureUsage, MTLVertexDescriptor, MTLVertexFormat,
+    MTLVertexStepFunction,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use crate::{
-    HalAddressMode, HalBoundBuffer, HalBoundSampler, HalBoundTexture, HalBuffer, HalBufferClear,
-    HalBufferTextureCopy, HalBufferUsage, HalCompareFunction, HalComputePass, HalCopy,
-    HalDepthStencilState, HalDescriptorBinding, HalDraw, HalError, HalExtent3d, HalFilterMode,
-    HalIndexFormat, HalMipmapFilterMode, HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass,
+    HalAddressMode, HalBlendFactor, HalBlendOperation, HalBoundBuffer, HalBoundSampler,
+    HalBoundTexture, HalBuffer, HalBufferClear, HalBufferTextureCopy, HalBufferUsage,
+    HalColorTargetState, HalCompareFunction, HalComputePass, HalCopy, HalDepthStencilState,
+    HalDescriptorBinding, HalDraw, HalError, HalExtent3d, HalFilterMode, HalIndexFormat,
+    HalMipmapFilterMode, HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass,
     HalRenderPipelineDescriptor, HalSampler, HalSamplerDescriptor, HalShaderSource,
     HalStencilFaceState, HalStencilOperation, HalSurfaceConfiguration, HalTexture, HalTextureCopy,
     HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,

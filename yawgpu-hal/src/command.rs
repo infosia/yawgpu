@@ -109,6 +109,7 @@ pub struct HalBufferClear {
 
 /// Enumerates HAL copy values.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum HalCopy {
     /// Buffer variant.
     Buffer(HalBufferCopy),
@@ -277,6 +278,8 @@ pub struct HalRenderPass {
     pub index_buffer: Option<Box<HalBoundIndexBuffer>>,
     /// Optional indirect draw buffer.
     pub indirect_buffer: Option<Box<HalBoundIndirectBuffer>>,
+    /// Render pass blend constant.
+    pub blend_constant: [f32; 4],
     /// Draw.
     pub draw: Option<HalDraw>,
 }

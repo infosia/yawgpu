@@ -6,8 +6,8 @@ use super::device::GlesDeviceInner;
 use super::format::map_vertex_format;
 use super::{rebuild_hal_error, BACKEND};
 use crate::{
-    HalDescriptorBinding, HalError, HalPrimitiveTopology, HalRenderPipelineDescriptor,
-    HalTextureFormat, HalVertexBufferLayout,
+    HalColorTargetState, HalDescriptorBinding, HalError, HalPrimitiveTopology,
+    HalRenderPipelineDescriptor, HalTextureFormat, HalVertexBufferLayout,
 };
 
 struct GlesComputePipelineInner {
@@ -85,6 +85,7 @@ struct GlesRenderPipelineInner {
     device: Arc<GlesDeviceInner>,
     program: Result<glow::Program, HalError>,
     vertex_buffers: Vec<HalVertexBufferLayout>,
+    color_target: Option<HalColorTargetState>,
     primitive_topology: HalPrimitiveTopology,
     bindings: Vec<HalDescriptorBinding>,
     first_instance_location: Option<glow::UniformLocation>,
@@ -139,6 +140,7 @@ impl GlesRenderPipeline {
                 device,
                 program: Ok(program),
                 vertex_buffers: descriptor.vertex_buffers,
+                color_target: descriptor.color_targets.first().copied(),
                 primitive_topology: descriptor.primitive_topology,
                 bindings: bindings.to_vec(),
                 first_instance_location,
@@ -157,6 +159,11 @@ impl GlesRenderPipeline {
     #[must_use]
     pub(super) fn vertex_buffers(&self) -> &[HalVertexBufferLayout] {
         &self.inner.vertex_buffers
+    }
+
+    #[must_use]
+    pub(super) fn color_target(&self) -> Option<HalColorTargetState> {
+        self.inner.color_target
     }
 
     #[must_use]
@@ -229,15 +236,15 @@ fn build_compute_program(
 fn validate_render_pipeline_descriptor(
     descriptor: &HalRenderPipelineDescriptor,
 ) -> Result<(), HalError> {
-    if descriptor.color_formats.len() > 1 {
+    if descriptor.color_targets.len() > 1 {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "GLES render pipeline supports at most one color target",
         });
     }
-    if let Some(&format) = descriptor.color_formats.first() {
+    if let Some(target) = descriptor.color_targets.first() {
         if !matches!(
-            format,
+            target.format,
             HalTextureFormat::Rgba8Unorm | HalTextureFormat::Bgra8Unorm
         ) {
             return Err(HalError::BufferOperationFailed {
@@ -246,8 +253,14 @@ fn validate_render_pipeline_descriptor(
                     "GLES render pipeline supports only RGBA8Unorm or BGRA8Unorm color targets",
             });
         }
+        if target.blend.is_some_and(gles_blend_uses_dual_source) {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES render pipeline does not support dual-source blend factors",
+            });
+        }
     }
-    if descriptor.color_formats.is_empty() && descriptor.depth_stencil.is_none() {
+    if descriptor.color_targets.is_empty() && descriptor.depth_stencil.is_none() {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "GLES render pipeline requires a color target or depth-stencil state",
@@ -259,6 +272,26 @@ fn validate_render_pipeline_descriptor(
         }
     }
     Ok(())
+}
+
+fn gles_blend_uses_dual_source(blend: crate::HalBlendState) -> bool {
+    gles_blend_component_uses_dual_source(blend.color)
+        || gles_blend_component_uses_dual_source(blend.alpha)
+}
+
+fn gles_blend_component_uses_dual_source(component: crate::HalBlendComponent) -> bool {
+    gles_blend_factor_is_dual_source(component.src_factor)
+        || gles_blend_factor_is_dual_source(component.dst_factor)
+}
+
+fn gles_blend_factor_is_dual_source(factor: crate::HalBlendFactor) -> bool {
+    matches!(
+        factor,
+        crate::HalBlendFactor::Src1
+            | crate::HalBlendFactor::OneMinusSrc1
+            | crate::HalBlendFactor::Src1Alpha
+            | crate::HalBlendFactor::OneMinusSrc1Alpha
+    )
 }
 
 fn build_render_program(
