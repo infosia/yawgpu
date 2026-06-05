@@ -107,12 +107,27 @@ impl MetalDevice {
         workgroup_size: (u32, u32, u32),
         _bindings: &[HalDescriptorBinding],
     ) -> Result<MetalComputePipeline, HalError> {
-        let HalShaderSource::Msl(msl_source) = shader else {
-            return Err(shader_error(
-                "Metal compute pipeline requires MSL".to_owned(),
-            ));
+        let (msl_source, buffer_sizes_slot, buffer_size_bindings) = match shader {
+            HalShaderSource::Msl(source) => (source, None, Vec::new()),
+            HalShaderSource::MslWithBufferSizes {
+                source,
+                buffer_sizes_slot,
+                buffer_size_bindings,
+            } => (source, buffer_sizes_slot, buffer_size_bindings),
+            _ => {
+                return Err(shader_error(
+                    "Metal compute pipeline requires MSL".to_owned(),
+                ));
+            }
         };
-        create_compute_pipeline(&self.device, &msl_source, entry_point, workgroup_size)
+        create_compute_pipeline(
+            &self.device,
+            &msl_source,
+            entry_point,
+            workgroup_size,
+            buffer_sizes_slot,
+            buffer_size_bindings,
+        )
     }
 
     /// Creates a render pipeline from the given shaders, vertex layout, and color targets.

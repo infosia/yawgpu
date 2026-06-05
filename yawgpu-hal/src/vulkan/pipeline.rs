@@ -1211,6 +1211,7 @@ pub(super) fn descriptor_type(kind: HalDescriptorBindingKind) -> vk::DescriptorT
             vk::DescriptorType::INPUT_ATTACHMENT
         }
         HalDescriptorBindingKind::Texture => vk::DescriptorType::SAMPLED_IMAGE,
+        HalDescriptorBindingKind::StorageTexture { .. } => vk::DescriptorType::STORAGE_IMAGE,
         HalDescriptorBindingKind::Sampler => vk::DescriptorType::SAMPLER,
     }
 }
@@ -1228,6 +1229,7 @@ fn binding_stage_flags(
         HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform)
         | HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage)
         | HalDescriptorBindingKind::Texture
+        | HalDescriptorBindingKind::StorageTexture { .. }
         | HalDescriptorBindingKind::Sampler => default,
         #[cfg(feature = "tiled")]
         HalDescriptorBindingKind::Buffer(HalBufferBindingKind::InputAttachment) => {
@@ -1272,6 +1274,17 @@ pub(super) fn create_compute_descriptor_pool(
         .iter()
         .filter(|binding| matches!(binding.kind, HalDescriptorBindingKind::Texture))
         .count();
+    let storage_texture_count = pipeline
+        .inner
+        .descriptor_bindings
+        .iter()
+        .filter(|binding| {
+            matches!(
+                binding.kind,
+                HalDescriptorBindingKind::StorageTexture { .. }
+            )
+        })
+        .count();
     let sampler_count = pipeline
         .inner
         .descriptor_bindings
@@ -1306,6 +1319,17 @@ pub(super) fn create_compute_descriptor_pool(
                 .descriptor_count(
                     u32::try_from(texture_count)
                         .map_err(|_| shader_error("texture descriptor count is too large"))?,
+                ),
+        );
+    }
+    if storage_texture_count > 0 {
+        pool_sizes.push(
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_IMAGE)
+                .descriptor_count(
+                    u32::try_from(storage_texture_count).map_err(|_| {
+                        shader_error("storage texture descriptor count is too large")
+                    })?,
                 ),
         );
     }
@@ -1570,6 +1594,25 @@ fn descriptor_info(
             );
             Ok(DescriptorInfo::Image(scratch.image_infos.len() - 1))
         }
+        HalDescriptorBindingKind::StorageTexture { .. } => {
+            let bound = textures
+                .iter()
+                .find(|bound| {
+                    bound.group == descriptor.group && bound.binding == descriptor.binding
+                })
+                .ok_or_else(|| descriptor_missing_error(pass_name, "texture"))?;
+            let HalTexture::Vulkan(texture) = &bound.texture else {
+                return Err(shader_error("descriptor texture is not Vulkan-backed"));
+            };
+            let image_view = create_sampled_texture_image_view(scratch.device, texture, bound)?;
+            scratch.image_views.push(image_view);
+            scratch.image_infos.push(
+                vk::DescriptorImageInfo::default()
+                    .image_view(image_view)
+                    .image_layout(vk::ImageLayout::GENERAL),
+            );
+            Ok(DescriptorInfo::Image(scratch.image_infos.len() - 1))
+        }
         HalDescriptorBindingKind::Sampler => {
             let bound = samplers
                 .iter()
@@ -1778,6 +1821,15 @@ pub(super) fn create_descriptor_pool(
         .iter()
         .filter(|binding| matches!(binding.kind, HalDescriptorBindingKind::Texture))
         .count();
+    let storage_texture_count = bindings
+        .iter()
+        .filter(|binding| {
+            matches!(
+                binding.kind,
+                HalDescriptorBindingKind::StorageTexture { .. }
+            )
+        })
+        .count();
     let sampler_count = bindings
         .iter()
         .filter(|binding| matches!(binding.kind, HalDescriptorBindingKind::Sampler))
@@ -1810,6 +1862,17 @@ pub(super) fn create_descriptor_pool(
                 .descriptor_count(
                     u32::try_from(texture_count)
                         .map_err(|_| shader_error("texture descriptor count is too large"))?,
+                ),
+        );
+    }
+    if storage_texture_count > 0 {
+        pool_sizes.push(
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_IMAGE)
+                .descriptor_count(
+                    u32::try_from(storage_texture_count).map_err(|_| {
+                        shader_error("storage texture descriptor count is too large")
+                    })?,
                 ),
         );
     }
@@ -1904,6 +1967,7 @@ mod tests {
             base_array_layer: 1,
             array_layer_count: 1,
             aspect,
+            storage_access: None,
         }
     }
 

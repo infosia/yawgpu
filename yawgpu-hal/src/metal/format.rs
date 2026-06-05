@@ -173,7 +173,7 @@ pub(super) fn map_texture_format(
 /// Converts texture usage into the corresponding yawgpu representation.
 pub(super) fn map_texture_usage(usage: HalTextureUsage) -> MTLTextureUsage {
     let mut metal_usage = MTLTextureUsage::Unknown;
-    if usage.copy_src || usage.texture_binding {
+    if usage.copy_src || usage.texture_binding || usage.storage_binding {
         metal_usage |= MTLTextureUsage::ShaderRead;
     }
     if usage.copy_dst || usage.storage_binding {

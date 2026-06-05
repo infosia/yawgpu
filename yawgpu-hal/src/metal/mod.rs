@@ -28,8 +28,8 @@ use crate::{
     HalBoundTexture, HalBuffer, HalBufferClear, HalBufferTextureCopy, HalBufferUsage,
     HalColorTargetState, HalCompareFunction, HalComputePass, HalCopy, HalDepthStencilState,
     HalDescriptorBinding, HalDraw, HalError, HalExtent3d, HalFilterMode, HalIndexFormat,
-    HalMipmapFilterMode, HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass,
-    HalRenderPipelineDescriptor, HalSampler, HalSamplerDescriptor, HalShaderSource,
+    HalMipmapFilterMode, HalMslBufferSizeBinding, HalPrimitiveTopology, HalRenderLoadOp,
+    HalRenderPass, HalRenderPipelineDescriptor, HalSampler, HalSamplerDescriptor, HalShaderSource,
     HalStencilFaceState, HalStencilOperation, HalSurfaceConfiguration, HalTexture, HalTextureCopy,
     HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };

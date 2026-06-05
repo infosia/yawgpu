@@ -6,6 +6,8 @@ use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 pub struct MetalComputePipeline {
     pub(super) inner: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     pub(super) workgroup_size: (u32, u32, u32),
+    pub(super) buffer_sizes_slot: Option<u32>,
+    pub(super) buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
 }
 
 unsafe impl Send for MetalComputePipeline {}
@@ -15,6 +17,7 @@ impl std::fmt::Debug for MetalComputePipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MetalComputePipeline")
             .field("workgroup_size", &self.workgroup_size)
+            .field("buffer_sizes_slot", &self.buffer_sizes_slot)
             .finish()
     }
 }
@@ -33,6 +36,10 @@ pub struct MetalRenderPipeline {
     pub(super) depth_bias: i32,
     pub(super) depth_bias_slope_scale: f32,
     pub(super) depth_bias_clamp: f32,
+    pub(super) vertex_buffer_sizes_slot: Option<u32>,
+    pub(super) vertex_buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
+    pub(super) fragment_buffer_sizes_slot: Option<u32>,
+    pub(super) fragment_buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
 }
 
 unsafe impl Send for MetalRenderPipeline {}
@@ -52,6 +59,8 @@ pub(super) fn create_compute_pipeline(
     msl_source: &str,
     entry_point: &str,
     workgroup_size: (u32, u32, u32),
+    buffer_sizes_slot: Option<u32>,
+    buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
 ) -> Result<MetalComputePipeline, HalError> {
     let source = NSString::from_str(msl_source);
     let library = device
@@ -66,6 +75,8 @@ pub(super) fn create_compute_pipeline(
     Ok(MetalComputePipeline {
         inner,
         workgroup_size,
+        buffer_sizes_slot,
+        buffer_size_bindings,
     })
 }
 
@@ -82,6 +93,7 @@ pub(super) fn create_render_pipeline(
             "render pipeline requires a color target or depth-stencil state".to_owned(),
         ));
     }
+    let size_metadata = render_size_metadata(&shader);
     let (vertex_function, fragment_function) =
         create_render_functions(device, shader, vertex_entry_point, fragment_entry_point)?;
     let pipeline_descriptor = MTLRenderPipelineDescriptor::new();
@@ -172,6 +184,10 @@ pub(super) fn create_render_pipeline(
         depth_bias,
         depth_bias_slope_scale,
         depth_bias_clamp,
+        vertex_buffer_sizes_slot: size_metadata.vertex_slot,
+        vertex_buffer_size_bindings: size_metadata.vertex_bindings,
+        fragment_buffer_sizes_slot: size_metadata.fragment_slot,
+        fragment_buffer_size_bindings: size_metadata.fragment_bindings,
     })
 }
 
@@ -297,6 +313,36 @@ type RenderFunctions = (
     Option<Retained<ProtocolObject<dyn MTLFunction>>>,
 );
 
+struct RenderSizeMetadata {
+    vertex_slot: Option<u32>,
+    vertex_bindings: Vec<HalMslBufferSizeBinding>,
+    fragment_slot: Option<u32>,
+    fragment_bindings: Vec<HalMslBufferSizeBinding>,
+}
+
+fn render_size_metadata(shader: &HalShaderSource) -> RenderSizeMetadata {
+    match shader {
+        HalShaderSource::MslStagesWithBufferSizes {
+            vertex_buffer_sizes_slot,
+            vertex_buffer_size_bindings,
+            fragment_buffer_sizes_slot,
+            fragment_buffer_size_bindings,
+            ..
+        } => RenderSizeMetadata {
+            vertex_slot: *vertex_buffer_sizes_slot,
+            vertex_bindings: vertex_buffer_size_bindings.clone(),
+            fragment_slot: *fragment_buffer_sizes_slot,
+            fragment_bindings: fragment_buffer_size_bindings.clone(),
+        },
+        _ => RenderSizeMetadata {
+            vertex_slot: None,
+            vertex_bindings: Vec::new(),
+            fragment_slot: None,
+            fragment_bindings: Vec::new(),
+        },
+    }
+}
+
 fn create_render_functions(
     device: &ProtocolObject<dyn MTLDevice>,
     shader: HalShaderSource,
@@ -313,6 +359,38 @@ fn create_render_functions(
             Ok((vertex_function, fragment_function))
         }
         HalShaderSource::MslStages { vertex, fragment } => {
+            let vertex_library = create_render_library(device, &vertex)?;
+            let vertex_function = render_function(&vertex_library, vertex_entry_point, "vertex")?;
+            let fragment_function = match (fragment, fragment_entry_point) {
+                (Some(fragment), Some(fragment_entry_point)) => {
+                    let fragment_library = create_render_library(device, &fragment)?;
+                    Some(render_function(
+                        &fragment_library,
+                        fragment_entry_point,
+                        "fragment",
+                    )?)
+                }
+                (None, None) => None,
+                _ => {
+                    return Err(shader_error(
+                        "Metal render pipeline fragment source and entry point must match"
+                            .to_owned(),
+                    ));
+                }
+            };
+            Ok((vertex_function, fragment_function))
+        }
+        HalShaderSource::MslWithBufferSizes { source, .. } => {
+            let library = create_render_library(device, &source)?;
+            let vertex_function = render_function(&library, vertex_entry_point, "vertex")?;
+            let fragment_function = fragment_entry_point
+                .map(|entry| render_function(&library, entry, "fragment"))
+                .transpose()?;
+            Ok((vertex_function, fragment_function))
+        }
+        HalShaderSource::MslStagesWithBufferSizes {
+            vertex, fragment, ..
+        } => {
             let vertex_library = create_render_library(device, &vertex)?;
             let vertex_function = render_function(&vertex_library, vertex_entry_point, "vertex")?;
             let fragment_function = match (fragment, fragment_entry_point) {

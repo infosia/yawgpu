@@ -751,6 +751,8 @@ pub(super) fn encode_compute_pass(
             return Err(error);
         }
     };
+    transition_storage_textures(device, command_buffer, &pass.bind_textures)?;
+    transfer_to_compute_barrier(device, command_buffer);
     unsafe {
         device.cmd_bind_pipeline(
             command_buffer,
@@ -779,6 +781,30 @@ pub(super) fn encode_compute_pass(
         descriptor_pool,
         image_views,
     })
+}
+
+fn transition_storage_textures(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    textures: &[HalBoundTexture],
+) -> Result<(), HalError> {
+    for bound in textures
+        .iter()
+        .filter(|bound| bound.storage_access.is_some())
+    {
+        let crate::HalTexture::Vulkan(texture) = &bound.texture else {
+            return Err(texture_error("storage texture is not Vulkan-backed"));
+        };
+        transition_image_aspect(
+            device,
+            command_buffer,
+            texture.inner()?,
+            buffer_texture_copy_aspect_flags(bound.format, bound.aspect),
+            vk::ImageLayout::GENERAL,
+            IMAGE_LAYOUT_GENERAL,
+        );
+    }
+    Ok(())
 }
 
 /// Stores compute pass temps data used by backend submission cleanup.
@@ -1068,7 +1094,9 @@ fn update_subpass_descriptor_sets(
                     vk::DescriptorType::INPUT_ATTACHMENT,
                 ));
             }
-            HalDescriptorBindingKind::Texture | HalDescriptorBindingKind::Sampler => {
+            HalDescriptorBindingKind::Texture
+            | HalDescriptorBindingKind::StorageTexture { .. }
+            | HalDescriptorBindingKind::Sampler => {
                 return Err(shader_error(
                     "subpass sampled textures and samplers are not implemented",
                 ));

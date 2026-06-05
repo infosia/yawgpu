@@ -20,6 +20,15 @@ pub(crate) struct MslBindingMap {
     pub resources: Vec<MslResourceBinding>,
 }
 
+/// Stores one MSL buffer-size entry binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MslBufferSizeBinding {
+    /// Group.
+    pub group: u32,
+    /// Binding.
+    pub binding: u32,
+}
+
 /// Stores MSL resource binding metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MslResourceBinding {
@@ -51,6 +60,10 @@ pub(crate) struct GeneratedMsl {
     pub source: String,
     /// Entry point.
     pub entry_point: String,
+    /// Reserved MSL buffer slot for `_mslBufferSizes`.
+    pub buffer_sizes_slot: Option<u32>,
+    /// Bindings whose byte lengths populate `_mslBufferSizes`.
+    pub buffer_size_bindings: Vec<MslBufferSizeBinding>,
 }
 
 /// Stores generated shader source for generated GLSL.
@@ -72,6 +85,14 @@ pub(crate) struct GeneratedRenderMsl {
     pub vertex_entry_point: String,
     /// Optional fragment entry point.
     pub fragment_entry_point: Option<String>,
+    /// Reserved vertex-stage MSL buffer slot for `_mslBufferSizes`.
+    pub vertex_buffer_sizes_slot: Option<u32>,
+    /// Vertex-stage bindings whose byte lengths populate `_mslBufferSizes`.
+    pub vertex_buffer_size_bindings: Vec<MslBufferSizeBinding>,
+    /// Reserved fragment-stage MSL buffer slot for `_mslBufferSizes`.
+    pub fragment_buffer_sizes_slot: Option<u32>,
+    /// Fragment-stage bindings whose byte lengths populate `_mslBufferSizes`.
+    pub fragment_buffer_size_bindings: Vec<MslBufferSizeBinding>,
 }
 
 /// Stores binding metadata.
@@ -478,11 +499,14 @@ impl ReflectedModule {
         binding_map: &MslBindingMap,
     ) -> Result<GeneratedMsl, String> {
         let resources = msl_resources(binding_map)?;
+        let buffer_size_bindings = self.msl_buffer_size_bindings_for_entry(entry_name)?;
+        let buffer_sizes_slot = msl_buffer_sizes_slot(binding_map, &buffer_size_bindings, &[])?;
         let mut per_entry_point_map = BTreeMap::new();
         per_entry_point_map.insert(
             entry_name.to_owned(),
             naga::back::msl::EntryPointResources {
                 resources,
+                sizes_buffer: buffer_sizes_slot,
                 ..Default::default()
             },
         );
@@ -490,6 +514,7 @@ impl ReflectedModule {
             lang_version: (2, 4),
             per_entry_point_map,
             fake_missing_bindings: false,
+            bounds_check_policies: msl_bounds_check_policies(),
             ..Default::default()
         };
         let pipeline_options = naga::back::msl::PipelineOptions {
@@ -504,6 +529,8 @@ impl ReflectedModule {
         Ok(GeneratedMsl {
             source,
             entry_point,
+            buffer_sizes_slot: buffer_sizes_slot.map(u32::from),
+            buffer_size_bindings,
         })
     }
 
@@ -548,11 +575,19 @@ impl ReflectedModule {
         force_point_size: bool,
     ) -> Result<GeneratedMsl, String> {
         let resources = msl_resources(binding_map)?;
+        let buffer_size_bindings = self.msl_buffer_size_bindings_for_entry(entry_name)?;
+        let vertex_buffer_indices = vertex_buffer_mappings
+            .iter()
+            .map(|mapping| mapping.id)
+            .collect::<Vec<_>>();
+        let buffer_sizes_slot =
+            msl_buffer_sizes_slot(binding_map, &buffer_size_bindings, &vertex_buffer_indices)?;
         let mut per_entry_point_map = BTreeMap::new();
         per_entry_point_map.insert(
             entry_name.to_owned(),
             naga::back::msl::EntryPointResources {
                 resources,
+                sizes_buffer: buffer_sizes_slot,
                 ..Default::default()
             },
         );
@@ -560,6 +595,7 @@ impl ReflectedModule {
             lang_version: (2, 4),
             per_entry_point_map,
             fake_missing_bindings: false,
+            bounds_check_policies: msl_bounds_check_policies(),
             ..Default::default()
         };
         let pipeline_options = naga::back::msl::PipelineOptions {
@@ -575,6 +611,8 @@ impl ReflectedModule {
         Ok(GeneratedMsl {
             source,
             entry_point,
+            buffer_sizes_slot: buffer_sizes_slot.map(u32::from),
+            buffer_size_bindings,
         })
     }
 
@@ -589,11 +627,30 @@ impl ReflectedModule {
         force_point_size: bool,
     ) -> Result<GeneratedRenderMsl, String> {
         let resources = msl_resources(binding_map)?;
+        let vertex_buffer_mappings = msl_vertex_buffer_mappings(vertex_buffers)?;
+        let vertex_buffer_indices = vertex_buffer_mappings
+            .iter()
+            .map(|mapping| mapping.id)
+            .collect::<Vec<_>>();
+        let vertex_buffer_size_bindings =
+            self.msl_buffer_size_bindings_for_entry(vertex_entry_name)?;
+        let vertex_buffer_sizes_slot = msl_buffer_sizes_slot(
+            binding_map,
+            &vertex_buffer_size_bindings,
+            &vertex_buffer_indices,
+        )?;
+        let fragment_buffer_size_bindings = fragment_entry_name
+            .map(|entry| self.msl_buffer_size_bindings_for_entry(entry))
+            .transpose()?
+            .unwrap_or_default();
+        let fragment_buffer_sizes_slot =
+            msl_buffer_sizes_slot(binding_map, &fragment_buffer_size_bindings, &[])?;
         let mut per_entry_point_map = BTreeMap::new();
         per_entry_point_map.insert(
             vertex_entry_name.to_owned(),
             naga::back::msl::EntryPointResources {
                 resources: resources.clone(),
+                sizes_buffer: vertex_buffer_sizes_slot,
                 ..Default::default()
             },
         );
@@ -602,6 +659,7 @@ impl ReflectedModule {
                 fragment_entry_name.to_owned(),
                 naga::back::msl::EntryPointResources {
                     resources,
+                    sizes_buffer: fragment_buffer_sizes_slot,
                     ..Default::default()
                 },
             );
@@ -615,11 +673,12 @@ impl ReflectedModule {
             per_entry_point_map,
             fake_missing_bindings: false,
             subpass_color_slots: color_slot_map,
+            bounds_check_policies: msl_bounds_check_policies(),
             ..Default::default()
         };
         let pipeline_options = naga::back::msl::PipelineOptions {
             entry_point: None,
-            vertex_buffer_mappings: msl_vertex_buffer_mappings(vertex_buffers)?,
+            vertex_buffer_mappings,
             allow_and_force_point_size: force_point_size,
             ..Default::default()
         };
@@ -646,6 +705,10 @@ impl ReflectedModule {
             source,
             vertex_entry_point,
             fragment_entry_point,
+            vertex_buffer_sizes_slot: vertex_buffer_sizes_slot.map(u32::from),
+            vertex_buffer_size_bindings,
+            fragment_buffer_sizes_slot: fragment_buffer_sizes_slot.map(u32::from),
+            fragment_buffer_size_bindings,
         })
     }
 
@@ -802,6 +865,40 @@ impl ReflectedModule {
             .collect())
     }
 
+    /// Returns storage buffer bindings that populate MSL `_mslBufferSizes`.
+    pub(crate) fn msl_buffer_size_bindings_for_entry(
+        &self,
+        entry_point: &str,
+    ) -> Result<Vec<MslBufferSizeBinding>, String> {
+        if !self
+            .module
+            .entry_points
+            .iter()
+            .any(|entry| entry.name == entry_point)
+        {
+            return Err(
+                "shader entry point was not found for MSL buffer-size reflection".to_owned(),
+            );
+        }
+        Ok(self
+            .module
+            .global_variables
+            .iter()
+            .filter_map(|(_, global)| {
+                let binding = global.binding?;
+                if !matches!(global.space, naga::AddressSpace::Storage { .. })
+                    || !msl_needs_array_length(global.ty, &self.module.types)
+                {
+                    return None;
+                }
+                Some(MslBufferSizeBinding {
+                    group: binding.group,
+                    binding: binding.binding,
+                })
+            })
+            .collect())
+    }
+
     /// Returns fragment builtins reflected by the validated shader module.
     pub(crate) fn fragment_builtins(&self) -> Vec<ReflectedFragmentBuiltins> {
         self.module
@@ -928,6 +1025,65 @@ fn msl_resources(binding_map: &MslBindingMap) -> Result<naga::back::msl::Binding
             ))
         })
         .collect()
+}
+
+fn msl_buffer_sizes_slot(
+    binding_map: &MslBindingMap,
+    buffer_size_bindings: &[MslBufferSizeBinding],
+    extra_buffer_indices: &[u32],
+) -> Result<Option<naga::back::msl::Slot>, String> {
+    if buffer_size_bindings.is_empty() {
+        return Ok(None);
+    }
+    let resource_max = binding_map
+        .resources
+        .iter()
+        .filter(|binding| binding.kind == MslResourceBindingKind::Buffer)
+        .map(|binding| binding.metal_index)
+        .max()
+        .unwrap_or(0);
+    let next_slot = extra_buffer_indices
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .max(resource_max)
+        .saturating_add(1);
+    u8::try_from(next_slot)
+        .map(Some)
+        .map_err(|_| "MSL buffer-sizes slot exceeds the supported slot range".to_owned())
+}
+
+fn msl_bounds_check_policies() -> naga::proc::BoundsCheckPolicies {
+    let bounds_check_policy = naga::proc::BoundsCheckPolicy::Restrict;
+    naga::proc::BoundsCheckPolicies {
+        index: bounds_check_policy,
+        buffer: bounds_check_policy,
+        image_load: bounds_check_policy,
+        binding_array: naga::proc::BoundsCheckPolicy::Unchecked,
+    }
+}
+
+fn msl_needs_array_length(
+    ty: naga::Handle<naga::Type>,
+    arena: &naga::UniqueArena<naga::Type>,
+) -> bool {
+    match arena[ty].inner {
+        naga::TypeInner::Struct { ref members, .. } => members.last().is_some_and(|member| {
+            matches!(
+                arena[member.ty].inner,
+                naga::TypeInner::Array {
+                    size: naga::ArraySize::Dynamic,
+                    ..
+                }
+            )
+        }),
+        naga::TypeInner::Array {
+            size: naga::ArraySize::Dynamic,
+            ..
+        } => true,
+        _ => false,
+    }
 }
 
 fn msl_vertex_buffer_mappings(
@@ -1490,9 +1646,10 @@ fn expression_global(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_and_validate_wgsl, MslBindingMap, ReflectedBufferType, ReflectedResourceBindingKind,
-        ReflectedShaderStage, ReflectedTextureSampleUsage, ReflectedTextureViewDimension,
-        ReflectedTypeScalarClass,
+        parse_and_validate_wgsl, MslBindingMap, MslResourceBinding, MslResourceBindingKind,
+        MslVertexAttribute, MslVertexBufferBinding, MslVertexFormat, MslVertexStepMode,
+        ReflectedBufferType, ReflectedResourceBindingKind, ReflectedShaderStage,
+        ReflectedTextureSampleUsage, ReflectedTextureViewDimension, ReflectedTypeScalarClass,
     };
     use naga::ShaderStage;
 
@@ -1500,6 +1657,135 @@ mod tests {
     fn parses_and_validates_trivial_wgsl() {
         let source = "@vertex fn main() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }";
         assert!(parse_and_validate_wgsl(source).is_ok());
+    }
+
+    #[test]
+    fn generate_msl_carries_buffer_sizes_for_runtime_storage_array() {
+        let module = parse_and_validate_wgsl(
+            r"
+@group(0) @binding(0) var tex: texture_storage_2d<rgba8unorm, read>;
+@group(0) @binding(1) var<storage, read_write> outputBuffer: array<u32>;
+
+@compute @workgroup_size(1)
+fn cs() {
+    let value = textureLoad(tex, vec2<i32>(0, 0));
+    outputBuffer[0] = u32(value.r * 255.0);
+}
+",
+        )
+        .expect("runtime-array storage texture shader should validate");
+        let generated = module
+            .generate_msl(
+                "cs",
+                &MslBindingMap {
+                    resources: vec![
+                        MslResourceBinding {
+                            group: 0,
+                            binding: 0,
+                            metal_index: 0,
+                            kind: MslResourceBindingKind::Texture,
+                        },
+                        MslResourceBinding {
+                            group: 0,
+                            binding: 1,
+                            metal_index: 1,
+                            kind: MslResourceBindingKind::Buffer,
+                        },
+                    ],
+                },
+            )
+            .expect("MSL generation should provide a sizes buffer slot");
+
+        assert_eq!(generated.buffer_sizes_slot, Some(2));
+        assert_eq!(
+            generated.buffer_size_bindings,
+            [super::MslBufferSizeBinding {
+                group: 0,
+                binding: 1
+            }]
+        );
+        assert!(generated.source.contains("_mslBufferSizes"));
+    }
+
+    #[test]
+    fn msl_buffer_sizes_cover_all_runtime_arrays_in_module_order() {
+        let module = parse_and_validate_wgsl(
+            r"
+@group(0) @binding(0) var<storage, read_write> unusedFirst: array<u32>;
+@group(0) @binding(1) var<storage, read_write> usedSecond: array<u32>;
+
+@compute @workgroup_size(1)
+fn uses_second() {
+    usedSecond[0] = 1u;
+}
+
+@compute @workgroup_size(1)
+fn uses_first() {
+    unusedFirst[0] = 1u;
+}
+",
+        )
+        .expect("multi-entry runtime-array shader should validate");
+
+        let bindings = module
+            .msl_buffer_size_bindings_for_entry("uses_second")
+            .expect("entry should reflect MSL buffer sizes");
+
+        assert_eq!(
+            bindings,
+            [
+                super::MslBufferSizeBinding {
+                    group: 0,
+                    binding: 0
+                },
+                super::MslBufferSizeBinding {
+                    group: 0,
+                    binding: 1
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn render_msl_buffer_sizes_slot_avoids_vertex_buffer_slots() {
+        let module = parse_and_validate_wgsl(
+            r"
+@group(0) @binding(0) var<storage, read> data: array<vec4<f32>>;
+
+@vertex
+fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
+    return data[0] + pos;
+}
+",
+        )
+        .expect("vertex runtime-array shader should validate");
+        let generated = module
+            .generate_render_vertex_msl(
+                "vs",
+                &MslBindingMap {
+                    resources: vec![MslResourceBinding {
+                        group: 0,
+                        binding: 0,
+                        metal_index: 0,
+                        kind: MslResourceBindingKind::Buffer,
+                    }],
+                },
+                &[MslVertexBufferBinding {
+                    slot: 0,
+                    metal_index: 2,
+                    array_stride: 16,
+                    step_mode: MslVertexStepMode::Vertex,
+                    attributes: vec![MslVertexAttribute {
+                        shader_location: 0,
+                        offset: 0,
+                        format: MslVertexFormat::Float32x4,
+                    }],
+                }],
+                false,
+            )
+            .expect("MSL vertex generation should provide a non-colliding sizes slot");
+
+        assert_eq!(generated.buffer_sizes_slot, Some(3));
     }
 
     #[test]
