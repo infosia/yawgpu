@@ -639,6 +639,45 @@ never a reason to skip a CTS case.
     four draw sites thread the reference, default 0, Vulkan dynamic-state added unconditionally beside
     `BLEND_CONSTANTS`, Metal once-per-pass, GLES no-panic `?`-based, and the e2e is a sound guard. Gate:
     **no open CRITICAL/MAJOR → F-038 COMPLETE.**
+- **External-CTS finding F-039 — RESOLVED (treated as a phase, with Clean Review).** The T35 (V7)
+  `memory_sync/buffer/single_buffer:two_dispatches_in_the_same_compute_pass` port: two compute dispatches
+  in ONE pass write `1` then `2` to one storage buffer (spec-ordered ⇒ expect `2`); Dawn + wgpu-native
+  pass, **yawgpu read back `0`** (the initial value — neither write visible), **deterministic and
+  byte-identical on Metal and Vulkan/MoltenVK** → a shared-core bug. (Reported batch-only, but reproduced
+  standalone on `40f5d7f`.)
+  - **Diagnosis (Claude, source-conclusive + real-GPU confirmed):** `dispatch_workgroups`
+    (`compute_pass.rs`) called `record_pipeline_usage_scope`, which accumulates a **pass-wide** resource
+    usage scope into `PassEncoderState.scope_buffer_uses`/`scope_texture_uses` and re-validates the running
+    union. Per WebGPU **each compute dispatch is its own usage scope** (a render pass, by contrast, is one
+    scope across all draws). So dispatch 2's storage write collided with dispatch 1's in the accumulator →
+    `validate_buffer_usage_scope` returned `Err("usage scope cannot … write the same buffer range twice")`
+    → the `?` aborted before `record_compute_pass`, and `record_first_error` poisoned the encoder →
+    `finish()` yielded an error command buffer → `submit` rejected it wholesale → **neither dispatch
+    executed** → buffer stayed `0`. Confirmed by HAL instrumentation (the compute submit produced **zero**
+    `HalCopy`) and a throwaway revert experiment (removing the two lines → 2 `ComputePass` reach the HAL →
+    readback `2`). Corroboration: `dispatch_workgroups_indirect` already omitted the accumulation — only
+    direct dispatch called it, erroneously.
+  - **Fix (coding agent):** remove the two `record_pipeline_usage_scope` lines from `dispatch_workgroups`;
+    each dispatch is now validated as its own usage scope by the existing `validate_compute_dispatch_state`
+    (→ `validate_usage_scope` over the current bind groups). Render-pass / render-bundle accumulation
+    untouched (correct there). +Noop unit test
+    (`compute_pass_direct_dispatches_have_separate_usage_scopes`): two distinct pipelines writing the same
+    storage buffer in one pass ⇒ no error + two recorded `ComputePass` ops. Pure `yawgpu-core` fix; no HAL
+    change (the bug never reached a backend).
+  - **Verified real-GPU (Claude):** `single_buffer:*` reaches **`pass=25 fail=0` on Metal and
+    Vulkan/MoltenVK** (from `pass=24 fail=1`); no memory_sync/compute regression; Noop + metal + vulkan +
+    gles clippy clean; workspace test green (67 groups, 0 fail). Claude authored the Metal e2e
+    `metal_two_dispatches_in_one_pass_second_write_wins` (`e2e_metal_compute.rs`) — clears a storage buffer
+    to 0, two dispatches write `1` then `2` in one pass through distinct pipelines, separate readback
+    submit asserts `2` (a stuck pre-fix path reads `0`). Passes on the M2.
+  - **Phase Review (Clean Review, fresh no-context subagent on the cumulative diff):** **0 CRITICAL,
+    0 MAJOR, 1 MINOR (deferred).** MINOR — the Noop unit test's two pipelines are functionally identical
+    (same WGSL); deferred — the test is still a sound guard (the subagent empirically reintroduced the
+    pre-fix lines and confirmed it FAILS, 1 op + poisoned encoder), and the GPU e2e uses genuinely distinct
+    `1`/`2` shaders with readback. Subagent independently confirmed: the per-dispatch within-dispatch alias
+    check is preserved by `validate_compute_dispatch_state`; `scope_*` fields are read only by render
+    paths, so removal is clean (no latent submit-sync bug); direct/indirect dispatch now consistent; no
+    panics; core rule tightened, not relaxed. Gate: **no open CRITICAL/MAJOR → F-039 COMPLETE.**
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.
