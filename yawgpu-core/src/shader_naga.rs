@@ -513,12 +513,14 @@ impl ReflectedModule {
         entry_name: &str,
         binding_map: &MslBindingMap,
         vertex_buffers: &[MslVertexBufferBinding],
+        force_point_size: bool,
     ) -> Result<GeneratedMsl, String> {
         self.generate_render_stage_msl(
             entry_name,
             naga::ShaderStage::Vertex,
             binding_map,
             msl_vertex_buffer_mappings(vertex_buffers)?,
+            force_point_size,
         )
     }
 
@@ -533,6 +535,7 @@ impl ReflectedModule {
             naga::ShaderStage::Fragment,
             binding_map,
             Vec::new(),
+            false,
         )
     }
 
@@ -542,6 +545,7 @@ impl ReflectedModule {
         stage: naga::ShaderStage,
         binding_map: &MslBindingMap,
         vertex_buffer_mappings: Vec<naga::back::msl::VertexBufferMapping>,
+        force_point_size: bool,
     ) -> Result<GeneratedMsl, String> {
         let resources = msl_resources(binding_map)?;
         let mut per_entry_point_map = BTreeMap::new();
@@ -561,6 +565,7 @@ impl ReflectedModule {
         let pipeline_options = naga::back::msl::PipelineOptions {
             entry_point: Some((stage, entry_name.to_owned())),
             vertex_buffer_mappings,
+            allow_and_force_point_size: force_point_size,
             ..Default::default()
         };
         let (source, info) =
@@ -581,6 +586,7 @@ impl ReflectedModule {
         binding_map: &MslBindingMap,
         vertex_buffers: &[MslVertexBufferBinding],
         subpass_color_slots: &[((u32, u32), u32)],
+        force_point_size: bool,
     ) -> Result<GeneratedRenderMsl, String> {
         let resources = msl_resources(binding_map)?;
         let mut per_entry_point_map = BTreeMap::new();
@@ -614,6 +620,7 @@ impl ReflectedModule {
         let pipeline_options = naga::back::msl::PipelineOptions {
             entry_point: None,
             vertex_buffer_mappings: msl_vertex_buffer_mappings(vertex_buffers)?,
+            allow_and_force_point_size: force_point_size,
             ..Default::default()
         };
         let (source, info) =
@@ -1713,6 +1720,7 @@ mod tests {
                 },
                 &[],
                 &[],
+                false,
             )
             .expect("vertex-only render MSL should generate");
 
@@ -1737,11 +1745,35 @@ mod tests {
                     resources: Vec::new(),
                 },
                 &[],
+                false,
             )
             .expect("render vertex MSL should generate");
 
         assert!(generated.source.contains("vertex"));
         assert!(!generated.entry_point.is_empty());
+    }
+
+    #[test]
+    fn generate_render_msl_forces_point_size_only_when_requested() {
+        let module = parse_and_validate_wgsl(
+            "@vertex fn vs() -> @builtin(position) vec4<f32> {
+                return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+            }",
+        )
+        .unwrap();
+        let binding_map = MslBindingMap {
+            resources: Vec::new(),
+        };
+
+        let point = module
+            .generate_render_msl("vs", None, &binding_map, &[], &[], true)
+            .expect("point render MSL should generate");
+        let triangle = module
+            .generate_render_msl("vs", None, &binding_map, &[], &[], false)
+            .expect("triangle render MSL should generate");
+
+        assert!(point.source.contains("point_size"));
+        assert!(!triangle.source.contains("point_size"));
     }
 
     #[test]

@@ -1078,6 +1078,8 @@ pub(crate) fn select_render_shader_source(
             };
             let msl_vertex_buffers =
                 msl_vertex_buffer_bindings(&descriptor.vertex.buffers, vertex_buffer_bindings)?;
+            let force_point_size =
+                matches!(descriptor.primitive.topology, PrimitiveTopology::PointList);
             if let Some(fragment) = fragment {
                 if !Arc::ptr_eq(&descriptor.vertex.shader.module, &fragment.shader.module) {
                     let Some(fragment_entry_name) = fragment_entry_name else {
@@ -1093,6 +1095,7 @@ pub(crate) fn select_render_shader_source(
                         vertex_entry_name,
                         &msl_binding_map,
                         &msl_vertex_buffers,
+                        force_point_size,
                     )?;
                     let fragment = fragment_module
                         .generate_render_fragment_msl(fragment_entry_name, &msl_binding_map)?;
@@ -1113,6 +1116,7 @@ pub(crate) fn select_render_shader_source(
                 &msl_binding_map,
                 &msl_vertex_buffers,
                 subpass_color_slots,
+                force_point_size,
             )?;
             Ok((
                 HalShaderSource::Msl(generated.source),
@@ -3219,6 +3223,7 @@ mod tests {
                 },
                 &[],
                 &[((0, 0), 0)],
+                false,
             )
             .expect("naga must lower subpass_input when subpass_color_slots is populated");
         assert!(msl.source.contains("[[color("));

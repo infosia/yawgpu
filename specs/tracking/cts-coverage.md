@@ -571,6 +571,35 @@ never a reason to skip a CTS case.
     the subpass encoder exposes no `setBlendConstant`; (ii) the GLES `Src1*` `gles_blend_factor` arms
     are unreachable at runtime (the pipeline rejects dual-source first) but kept for `match`
     exhaustiveness. Neither blocks COMPLETE. Gate: **no open CRITICAL/MAJOR → F-035 COMPLETE.**
+- **External-CTS finding F-037 — RESOLVED (treated as a phase, with Clean Review).** The T32
+  `rendering/depth` ports flaked non-deterministically on yawgpu's **Metal** HAL (~35-44/130 fail,
+  varying run to run; the drawn point read back as the clear value), while Vulkan/MoltenVK + Dawn +
+  wgpu-native passed 130/130. Despite the "race" framing, it was **point-primitive-specific**, not a
+  sync/depth race.
+  - **Diagnosis (Claude, real-GPU experiments):** ruled out — missing render→readback sync (render /
+    t2b / buffer-copy are three separate `wgpuQueueSubmit`s, each its own command buffer with
+    `waitUntilCompleted`), texture storage mode (Shared→Private stayed flaky), explicit `setViewport`
+    (Metal's default viewport is already znear=0/zfar=1; stayed flaky), and depth-stencil-state lifetime
+    (retained via the pipeline `Arc`). Found it's flaky even for a SINGLE case alone (~30%). Root cause:
+    the depth tests draw **points** (`PointList`), and yawgpu's naga→MSL generation never set
+    `allow_and_force_point_size`, so the Metal vertex shader emitted no `[[point_size]]` → Metal point
+    size is **undefined** → the point intermittently rasterized at size 0 (not drawn). Confirmed: forcing
+    the flag made `rendering/depth` deterministically 130/130.
+  - **Fix (coding agent):** thread `force_point_size = (topology == PrimitiveTopology::PointList)` from
+    the render pipeline descriptor into the render MSL generators (`render_pipeline.rs`), setting
+    `naga::back::msl::PipelineOptions::allow_and_force_point_size` in both the combined and
+    separate-vertex paths (`shader_naga.rs`); NOT for non-point topologies (naga: Metal dislikes it
+    there), nor compute/fragment-only/Vulkan/GLES.
+  - **Verified real-GPU (Claude):** `rendering/depth:*` deterministically **`130/130` across 12
+    consecutive Metal runs** (from ~35-44 flaky); `rendering/draw` `540/0` + `color_target_state` `23/0`
+    no regression; Vulkan/MoltenVK `rendering/depth` stays `130/130`; Noop + metal + vulkan + gles clippy
+    clean; workspace test green. Claude authored `yawgpu/tests/e2e_metal_point.rs` (a point-list draw
+    into a colour+depth attachment that asserts the point rasterizes; passes on the M2).
+  - **Phase Review (Clean Review, fresh no-context subagent on the cumulative diff):** **0 CRITICAL,
+    0 MAJOR, 0 MINOR** — the conditional is exactly `topology == PointList`, threaded to both render MSL
+    paths, not applied to compute/fragment/Vulkan/GLES; no panic; Noop unit test
+    (`generate_render_msl_forces_point_size_only_when_requested`) + the e2e present. Gate: **no open
+    CRITICAL/MAJOR → F-037 COMPLETE.**
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.
