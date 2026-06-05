@@ -374,7 +374,21 @@ pub(super) fn render_pass_descriptor(
         color.setLevel(to_ns(u64::from(color_target.mip_level))?);
         color.setSlice(to_ns(u64::from(color_target.array_layer))?);
         color.setLoadAction(mtl_load_action(color_target.load_op));
-        color.setStoreAction(mtl_store_action(color_target.store));
+        if let Some(resolve_target) = &color_target.resolve_target {
+            let HalTexture::Metal(resolve_texture) = resolve_target else {
+                return Err(texture_error("resolve target is not Metal-backed"));
+            };
+            color.setResolveTexture(Some(resolve_texture.inner()?));
+            color.setResolveLevel(to_ns(u64::from(color_target.resolve_mip_level))?);
+            color.setResolveSlice(to_ns(u64::from(color_target.resolve_array_layer))?);
+            color.setStoreAction(if color_target.store {
+                MTLStoreAction::StoreAndMultisampleResolve
+            } else {
+                MTLStoreAction::MultisampleResolve
+            });
+        } else {
+            color.setStoreAction(mtl_store_action(color_target.store));
+        }
         let [r, g, b, a] = color_target.clear_color;
         color.setClearColor(MTLClearColor {
             red: r,

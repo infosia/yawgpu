@@ -661,6 +661,7 @@ pub(super) fn create_swapchain_texture(
             owns_image: false,
             mip_level_count: 1,
             array_layers: 1,
+            sample_count: 1,
             layout: AtomicU8::new(IMAGE_LAYOUT_UNDEFINED),
         })),
         swapchain: None,

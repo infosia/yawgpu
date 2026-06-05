@@ -356,6 +356,9 @@ fn retain_copy_resources(copy: &HalCopy, retained: &mut Vec<RetainedResource>) {
         HalCopy::RenderPass(pass) => {
             for color_target in &pass.color_targets {
                 retain_hal_texture(&color_target.texture, retained);
+                if let Some(resolve_target) = &color_target.resolve_target {
+                    retain_hal_texture(resolve_target, retained);
+                }
             }
             if let Some(depth_stencil_attachment) = &pass.depth_stencil_attachment {
                 retain_hal_texture(&depth_stencil_attachment.texture, retained);
@@ -453,10 +456,14 @@ fn surface_pending_from_copy(copy: &HalCopy) -> Option<Arc<Mutex<SurfacePendingS
         }
         HalCopy::TextureToTexture(copy) => surface_pending_from_hal_texture(&copy.source)
             .or_else(|| surface_pending_from_hal_texture(&copy.destination)),
-        HalCopy::RenderPass(pass) => pass
-            .color_targets
-            .iter()
-            .find_map(|target| surface_pending_from_hal_texture(&target.texture)),
+        HalCopy::RenderPass(pass) => pass.color_targets.iter().find_map(|target| {
+            surface_pending_from_hal_texture(&target.texture).or_else(|| {
+                target
+                    .resolve_target
+                    .as_ref()
+                    .and_then(surface_pending_from_hal_texture)
+            })
+        }),
         #[cfg(feature = "tiled")]
         HalCopy::SubpassRenderPass(pass) => surface_pending_from_subpass(pass),
     }
@@ -1460,12 +1467,11 @@ mod tiled_tests {
     }
 }
 
-#[cfg(feature = "tiled")]
 fn vk_sample_count(sample_count: u32) -> Result<vk::SampleCountFlags, HalError> {
     match sample_count {
         1 => Ok(vk::SampleCountFlags::TYPE_1),
         4 => Ok(vk::SampleCountFlags::TYPE_4),
-        _ => Err(texture_error("unsupported subpass sample count")),
+        _ => Err(texture_error("unsupported render pass sample count")),
     }
 }
 
@@ -1476,11 +1482,21 @@ pub(super) fn encode_render_pass(
     pass: &HalRenderPass,
 ) -> Result<RenderPassTemps, HalError> {
     let color_textures = vulkan_render_color_textures(pass)?;
+    let resolve_textures = vulkan_render_resolve_textures(pass)?;
     let depth_stencil_texture = vulkan_render_depth_stencil_texture(pass)?;
     if color_textures.is_empty() && depth_stencil_texture.is_none() {
         return Err(shader_error("Vulkan render pass requires an attachment"));
     }
     for texture in &color_textures {
+        transition_image(
+            device,
+            command_buffer,
+            texture.inner()?,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            IMAGE_LAYOUT_COLOR_ATTACHMENT,
+        );
+    }
+    for texture in resolve_textures.iter().flatten() {
         transition_image(
             device,
             command_buffer,
@@ -1505,6 +1521,7 @@ pub(super) fn encode_render_pass(
         Some(crate::HalRenderPipeline::Vulkan(_)) | None => create_render_pass_for_targets(
             device,
             &render_pass_color_formats(&color_textures),
+            &render_pass_resolve_formats(&resolve_textures),
             &pass.color_targets,
             pass.depth_stencil_attachment.as_ref(),
         )?,
@@ -1516,12 +1533,18 @@ pub(super) fn encode_render_pass(
         .copied()
         .zip(pass.color_targets.iter())
         .collect();
+    let resolve_attachments: Vec<_> = resolve_textures
+        .iter()
+        .zip(pass.color_targets.iter())
+        .filter_map(|(texture, target)| texture.map(|texture| (texture, target)))
+        .collect();
     let depth_stencil_attachment =
         depth_stencil_texture.zip(pass.depth_stencil_attachment.as_ref());
     let (framebuffer, mut image_views) = create_framebuffer(
         device,
         render_pass,
         &color_attachments,
+        &resolve_attachments,
         depth_stencil_attachment,
     )?;
     let mut descriptor_pool = None;
@@ -1612,6 +1635,12 @@ pub(super) fn encode_render_pass(
         device.cmd_end_render_pass(command_buffer);
     }
     for texture in &color_textures {
+        texture
+            .inner()?
+            .layout
+            .store(IMAGE_LAYOUT_TRANSFER_SRC, AtomicOrdering::Relaxed);
+    }
+    for texture in resolve_textures.iter().flatten() {
         texture
             .inner()?
             .layout
@@ -1743,6 +1772,24 @@ fn vulkan_render_color_textures(pass: &HalRenderPass) -> Result<Vec<&VulkanTextu
         .collect()
 }
 
+fn vulkan_render_resolve_textures(
+    pass: &HalRenderPass,
+) -> Result<Vec<Option<&VulkanTexture>>, HalError> {
+    pass.color_targets
+        .iter()
+        .map(|target| {
+            target
+                .resolve_target
+                .as_ref()
+                .map(|texture| match texture {
+                    crate::HalTexture::Vulkan(texture) => Ok(texture),
+                    _ => Err(texture_error("resolve target is not Vulkan-backed")),
+                })
+                .transpose()
+        })
+        .collect()
+}
+
 fn vulkan_render_depth_stencil_texture(
     pass: &HalRenderPass,
 ) -> Result<Option<&VulkanTexture>, HalError> {
@@ -1764,6 +1811,15 @@ fn render_pass_color_formats(color_textures: &[&VulkanTexture]) -> Vec<HalTextur
         .collect()
 }
 
+fn render_pass_resolve_formats(
+    resolve_textures: &[Option<&VulkanTexture>],
+) -> Vec<Option<HalTextureFormat>> {
+    resolve_textures
+        .iter()
+        .map(|texture| texture.map(|texture| texture.format))
+        .collect()
+}
+
 fn render_pass_clear_values(pass: &HalRenderPass) -> Vec<vk::ClearValue> {
     let mut clear_values = Vec::new();
     for color in &pass.color_targets {
@@ -1776,6 +1832,15 @@ fn render_pass_clear_values(pass: &HalRenderPass) -> Vec<vk::ClearValue> {
                     color.clear_color[3] as f32,
                 ],
             },
+        });
+    }
+    for _ in pass
+        .color_targets
+        .iter()
+        .filter(|target| target.resolve_target.is_some())
+    {
+        clear_values.push(vk::ClearValue {
+            color: vk::ClearColorValue { float32: [0.0; 4] },
         });
     }
     if let Some(depth_stencil) = &pass.depth_stencil_attachment {
@@ -1847,11 +1912,15 @@ fn buffer_texture_copy_aspect_flags(
 fn create_render_pass_for_targets(
     device: &ash::Device,
     color_formats: &[HalTextureFormat],
+    resolve_formats: &[Option<HalTextureFormat>],
     color_targets: &[HalRenderColorTarget],
     depth_stencil: Option<&HalRenderDepthStencilAttachment>,
 ) -> Result<vk::RenderPass, HalError> {
     if color_formats.len() != color_targets.len() {
         return Err(shader_error("render pass color target count mismatch"));
+    }
+    if resolve_formats.len() != color_targets.len() {
+        return Err(shader_error("render pass resolve target count mismatch"));
     }
     if color_formats.is_empty() && depth_stencil.is_none() {
         return Err(shader_error("render pass requires an attachment"));
@@ -1867,6 +1936,28 @@ fn create_render_pass_for_targets(
                 .attachment(index)
                 .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
         );
+    }
+    let mut resolve_references = Vec::new();
+    for (resolve_format, color_target) in resolve_formats.iter().copied().zip(color_targets) {
+        if let Some(resolve_format) = resolve_format {
+            let index = u32::try_from(attachments.len())
+                .map_err(|_| shader_error("resolve attachment index is too large"))?;
+            attachments.push(vk_resolve_attachment_description(
+                resolve_format,
+                color_target,
+            )?);
+            resolve_references.push(
+                vk::AttachmentReference::default()
+                    .attachment(index)
+                    .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+            );
+        } else {
+            resolve_references.push(
+                vk::AttachmentReference::default()
+                    .attachment(vk::ATTACHMENT_UNUSED)
+                    .layout(vk::ImageLayout::UNDEFINED),
+            );
+        }
     }
     let depth_reference = if let Some(depth_stencil) = depth_stencil {
         let index = u32::try_from(attachments.len())
@@ -1885,6 +1976,14 @@ fn create_render_pass_for_targets(
     let subpass = vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
         .color_attachments(&color_references);
+    let subpass = if resolve_references
+        .iter()
+        .any(|reference| reference.attachment != vk::ATTACHMENT_UNUSED)
+    {
+        subpass.resolve_attachments(&resolve_references)
+    } else {
+        subpass
+    };
     let subpass = if let Some(depth_reference) = depth_reference.as_ref() {
         subpass.depth_stencil_attachment(depth_reference)
     } else {
@@ -1937,11 +2036,30 @@ fn vk_color_attachment_description(
     target: &HalRenderColorTarget,
 ) -> Result<vk::AttachmentDescription, HalError> {
     let (format, _) = map_texture_format(format)?;
+    let crate::HalTexture::Vulkan(texture) = &target.texture else {
+        return Err(texture_error("render target is not Vulkan-backed"));
+    };
+    Ok(vk::AttachmentDescription::default()
+        .format(format)
+        .samples(vk_sample_count(texture.inner()?.sample_count)?)
+        .load_op(vk_load_op(target.load_op))
+        .store_op(vk_store_op(target.store))
+        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+        .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL))
+}
+
+fn vk_resolve_attachment_description(
+    format: HalTextureFormat,
+    target: &HalRenderColorTarget,
+) -> Result<vk::AttachmentDescription, HalError> {
+    let (format, _) = map_texture_format(format)?;
     Ok(vk::AttachmentDescription::default()
         .format(format)
         .samples(vk::SampleCountFlags::TYPE_1)
-        .load_op(vk_load_op(target.load_op))
-        .store_op(vk_store_op(target.store))
+        .load_op(vk::AttachmentLoadOp::DONT_CARE)
+        .store_op(vk_store_op(target.store || target.resolve_target.is_some()))
         .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
         .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
         .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
@@ -1952,11 +2070,16 @@ fn vk_render_depth_stencil_attachment_description(
     attachment: &HalRenderDepthStencilAttachment,
 ) -> Result<vk::AttachmentDescription, HalError> {
     let (format, _) = map_texture_format(attachment.format)?;
+    let crate::HalTexture::Vulkan(texture) = &attachment.texture else {
+        return Err(texture_error(
+            "depth-stencil attachment is not Vulkan-backed",
+        ));
+    };
     let has_depth = format_has_depth_aspect(attachment.format);
     let has_stencil = format_has_stencil_aspect(attachment.format);
     Ok(vk::AttachmentDescription::default()
         .format(format)
-        .samples(vk::SampleCountFlags::TYPE_1)
+        .samples(vk_sample_count(texture.inner()?.sample_count)?)
         .load_op(if has_depth {
             vk_load_op(attachment.depth_load_op)
         } else {
@@ -1986,11 +2109,21 @@ pub(super) fn create_framebuffer(
     device: &ash::Device,
     render_pass: vk::RenderPass,
     color_attachments: &[(&VulkanTexture, &HalRenderColorTarget)],
+    resolve_attachments: &[(&VulkanTexture, &HalRenderColorTarget)],
     depth_stencil_attachment: Option<(&VulkanTexture, &HalRenderDepthStencilAttachment)>,
 ) -> Result<(vk::Framebuffer, Vec<vk::ImageView>), HalError> {
     let mut attachments = Vec::new();
     for (texture, target) in color_attachments {
         match create_color_attachment_image_view(device, texture, target) {
+            Ok(view) => attachments.push(view),
+            Err(error) => {
+                destroy_image_views(device, &attachments);
+                return Err(error);
+            }
+        }
+    }
+    for (texture, target) in resolve_attachments {
+        match create_resolve_attachment_image_view(device, texture, target) {
             Ok(view) => attachments.push(view),
             Err(error) => {
                 destroy_image_views(device, &attachments);
@@ -2039,6 +2172,20 @@ fn create_color_attachment_image_view(
     )
 }
 
+fn create_resolve_attachment_image_view(
+    device: &ash::Device,
+    texture: &VulkanTexture,
+    target: &HalRenderColorTarget,
+) -> Result<vk::ImageView, HalError> {
+    let (format, _) = map_texture_format(texture.format)?;
+    create_attachment_image_view(
+        device,
+        texture.inner()?.image,
+        format,
+        resolve_attachment_subresource_range(target),
+    )
+}
+
 fn create_depth_stencil_attachment_image_view(
     device: &ash::Device,
     texture: &VulkanTexture,
@@ -2074,6 +2221,17 @@ fn color_attachment_subresource_range(target: &HalRenderColorTarget) -> vk::Imag
         target.mip_level,
         target.array_layer,
     )
+}
+
+fn resolve_attachment_subresource_range(
+    target: &HalRenderColorTarget,
+) -> vk::ImageSubresourceRange {
+    vk::ImageSubresourceRange::default()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .base_mip_level(target.resolve_mip_level)
+        .level_count(1)
+        .base_array_layer(target.resolve_array_layer)
+        .layer_count(1)
 }
 
 fn depth_stencil_attachment_subresource_range(
@@ -2417,8 +2575,11 @@ mod tests {
     fn render_attachment_descriptions_preserve_contents_for_load_ops() {
         let color_target = HalRenderColorTarget {
             texture: dummy_texture(HalTextureFormat::Rgba8Unorm),
+            resolve_target: None,
             mip_level: 0,
             array_layer: 0,
+            resolve_mip_level: 0,
+            resolve_array_layer: 0,
             load_op: HalRenderLoadOp::Load,
             store: false,
             clear_color: [0.0, 0.0, 0.0, 1.0],
@@ -2462,8 +2623,11 @@ mod tests {
     fn render_attachment_subresource_ranges_scope_mip_layer_and_aspect() {
         let color_target = HalRenderColorTarget {
             texture: dummy_texture(HalTextureFormat::Rgba8Unorm),
+            resolve_target: None,
             mip_level: 2,
             array_layer: 1,
+            resolve_mip_level: 0,
+            resolve_array_layer: 0,
             load_op: HalRenderLoadOp::Clear,
             store: true,
             clear_color: [0.0, 0.0, 0.0, 1.0],

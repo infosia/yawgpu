@@ -628,9 +628,10 @@ mod tests {
     use super::*;
     use crate::test_helpers::*;
     use crate::{
-        ColorTargetState, MultisampleState, PrimitiveState, PrimitiveTopology,
+        ColorTargetState, Extent3d, MultisampleState, PrimitiveState, PrimitiveTopology,
         RenderPipelineDescriptor, RenderPipelineFragmentState, RenderPipelineLayout,
         RenderPipelineShaderStage, RenderPipelineVertexState, ShaderModuleSource,
+        TextureDescriptor, TextureDimension, TextureUsage,
     };
 
     use std::sync::Arc;
@@ -765,6 +766,78 @@ mod tests {
             error,
             Some("render pass pipeline attachment signature is incompatible".to_owned())
         );
+    }
+
+    #[test]
+    fn render_pass_encoder_records_resolve_target() {
+        let device = noop_device();
+        let pipeline = one_color_render_pipeline(&device, 4);
+        let color = render_attachment_view(&device, 4);
+        let resolve = render_attachment_view(&device, 1);
+        let mut descriptor = noop_render_pass_descriptor(color, None);
+        descriptor.color_attachments[0]
+            .as_mut()
+            .expect("color attachment")
+            .resolve_target = Some(resolve);
+
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&descriptor);
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        let CommandExecution::RenderPass(command) = &command_buffer.command_ops()[0] else {
+            panic!("expected render pass command");
+        };
+        assert_eq!(command.color_attachments.len(), 1);
+        let color = &command.color_attachments[0];
+        assert!(color.resolve_target.is_some());
+        assert_eq!(color.resolve_mip_level, 0);
+        assert_eq!(color.resolve_array_layer, 0);
+    }
+
+    fn render_attachment_view(
+        device: &crate::device::Device,
+        sample_count: u32,
+    ) -> Arc<TextureView> {
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(error, None);
+        Arc::new(view)
+    }
+
+    fn one_color_render_pipeline(
+        device: &crate::device::Device,
+        sample_count: u32,
+    ) -> Arc<RenderPipeline> {
+        let mut descriptor = render_pipeline_descriptor(render_shader_module(device));
+        descriptor.multisample.count = sample_count;
+        Arc::new(device.create_render_pipeline(descriptor))
     }
 
     fn two_color_render_pipeline(device: &crate::device::Device) -> Arc<RenderPipeline> {

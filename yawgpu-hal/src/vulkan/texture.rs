@@ -83,6 +83,7 @@ pub(super) struct VulkanTextureInner {
     pub(super) owns_image: bool,
     pub(super) mip_level_count: u32,
     pub(super) array_layers: u32,
+    pub(super) sample_count: u32,
     pub(super) layout: AtomicU8,
 }
 
@@ -136,10 +137,8 @@ pub(super) fn create_texture(
     device: Arc<VulkanDeviceInner>,
     descriptor: &HalTextureDescriptor,
 ) -> Result<(VulkanTextureInner, u32), HalError> {
-    if descriptor.sample_count != 1 {
-        return Err(texture_error("unsupported texture descriptor"));
-    }
     let (format, bytes_per_pixel) = map_texture_format(descriptor.format)?;
+    let samples = sample_count_flags(descriptor.sample_count)?;
     let image_type = match descriptor.dimension {
         HalTextureDimension::D1 => vk::ImageType::TYPE_1D,
         HalTextureDimension::D2 => vk::ImageType::TYPE_2D,
@@ -166,7 +165,7 @@ pub(super) fn create_texture(
         .extent(extent)
         .mip_levels(descriptor.mip_level_count)
         .array_layers(array_layers)
-        .samples(vk::SampleCountFlags::TYPE_1)
+        .samples(samples)
         .tiling(vk::ImageTiling::OPTIMAL)
         .usage(map_texture_usage(descriptor.usage))
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -237,6 +236,7 @@ pub(super) fn create_texture(
             owns_image: true,
             mip_level_count: descriptor.mip_level_count,
             array_layers,
+            sample_count: descriptor.sample_count,
             layout: AtomicU8::new(IMAGE_LAYOUT_UNDEFINED),
         },
         bytes_per_pixel,
@@ -339,6 +339,7 @@ pub(super) fn create_transient_attachment(
             owns_image: true,
             mip_level_count: 1,
             array_layers: 1,
+            sample_count: descriptor.sample_count,
             layout: AtomicU8::new(IMAGE_LAYOUT_UNDEFINED),
         }),
         _format: descriptor.format,
@@ -403,12 +404,11 @@ pub(super) fn create_sampler(
     Ok(VulkanSamplerInner { device, sampler })
 }
 
-#[cfg(feature = "tiled")]
 fn sample_count_flags(sample_count: u32) -> Result<vk::SampleCountFlags, HalError> {
     match sample_count {
         1 => Ok(vk::SampleCountFlags::TYPE_1),
         4 => Ok(vk::SampleCountFlags::TYPE_4),
-        _ => Err(texture_error("unsupported transient sample count")),
+        _ => Err(texture_error("unsupported texture sample count")),
     }
 }
 

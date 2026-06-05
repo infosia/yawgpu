@@ -249,6 +249,12 @@ fn validate_render_pipeline_descriptor(
             message: "GLES render pipeline supports at most one color target",
         });
     }
+    if descriptor.sample_count > 1 {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES render pass does not support multisample/resolve",
+        });
+    }
     if let Some(target) = descriptor.color_targets.first() {
         if !matches!(
             target.format,

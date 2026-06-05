@@ -100,6 +100,7 @@ impl NoopDevice {
             height: descriptor.height,
             depth_or_array_layers: descriptor.depth_or_array_layers,
             mip_level_count: descriptor.mip_level_count,
+            sample_count: descriptor.sample_count,
         }
     }
 
@@ -198,6 +199,7 @@ pub struct NoopTexture {
     height: u32,
     depth_or_array_layers: u32,
     mip_level_count: u32,
+    sample_count: u32,
 }
 
 impl NoopTexture {
@@ -229,6 +231,12 @@ impl NoopTexture {
     #[must_use]
     pub fn mip_level_count(&self) -> u32 {
         self.mip_level_count
+    }
+
+    /// Returns the texture sample count.
+    #[must_use]
+    pub fn sample_count(&self) -> u32 {
+        self.sample_count
     }
 }
 
@@ -366,6 +374,18 @@ mod tests {
         assert_eq!(texture.height(), 4);
         assert_eq!(texture.depth_or_array_layers(), 3);
         assert_eq!(texture.mip_level_count(), 4);
+        assert_eq!(device.allocation_count(), 1);
+    }
+
+    #[test]
+    fn noop_device_create_texture_accepts_multisample_descriptor() {
+        let device = NoopDevice::new();
+        let mut descriptor = texture_descriptor();
+        descriptor.sample_count = 4;
+
+        let texture = device.create_texture(&descriptor);
+
+        assert_eq!(texture.sample_count(), 4);
         assert_eq!(device.allocation_count(), 1);
     }
 

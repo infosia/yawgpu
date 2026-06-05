@@ -6,6 +6,8 @@ use crate::{
 /// Describes HAL render pipeline descriptor.
 #[derive(Debug, Clone)]
 pub struct HalRenderPipelineDescriptor {
+    /// Multisample count.
+    pub sample_count: u32,
     /// Color target states.
     pub color_targets: Vec<HalColorTargetState>,
     /// Depth stencil state.

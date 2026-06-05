@@ -497,7 +497,7 @@ fn create_render_pass_for_descriptor(
         attachments.push(
             vk::AttachmentDescription::default()
                 .format(format)
-                .samples(vk::SampleCountFlags::TYPE_1)
+                .samples(vk_sample_count(descriptor.sample_count)?)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
@@ -523,7 +523,7 @@ fn create_render_pass_for_descriptor(
         attachments.push(
             vk::AttachmentDescription::default()
                 .format(format)
-                .samples(vk::SampleCountFlags::TYPE_1)
+                .samples(vk_sample_count(descriptor.sample_count)?)
                 .load_op(if has_depth {
                     vk::AttachmentLoadOp::CLEAR
                 } else {
@@ -804,12 +804,11 @@ fn subpass_dependencies_for_layout(layout: &HalSubpassPassLayout) -> Vec<vk::Sub
     dependencies
 }
 
-#[cfg(feature = "tiled")]
 fn vk_sample_count(sample_count: u32) -> Result<vk::SampleCountFlags, HalError> {
     match sample_count {
         1 => Ok(vk::SampleCountFlags::TYPE_1),
         4 => Ok(vk::SampleCountFlags::TYPE_4),
-        _ => Err(shader_error("unsupported subpass sample count")),
+        _ => Err(shader_error("unsupported render pipeline sample count")),
     }
 }
 
@@ -914,7 +913,7 @@ pub(super) fn create_graphics_pipeline(
         )
         .line_width(1.0);
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1)
+        .rasterization_samples(vk_sample_count(descriptor.sample_count)?)
         .sample_shading_enable(false);
     let color_attachments = descriptor
         .color_targets

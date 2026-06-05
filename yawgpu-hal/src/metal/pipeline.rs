@@ -87,6 +87,7 @@ pub(super) fn create_render_pipeline(
     let pipeline_descriptor = MTLRenderPipelineDescriptor::new();
     pipeline_descriptor.setVertexFunction(Some(&vertex_function));
     pipeline_descriptor.setFragmentFunction(fragment_function.as_deref());
+    pipeline_descriptor.setRasterSampleCount(to_ns(u64::from(descriptor.sample_count))?);
     // Each color target populates `MTLRenderPipelineDescriptor.colorAttachments[i]`,
     // so the MTL pipeline's color-attachment layout matches the encoder slot-for-slot.
     // For subpass pipelines this carries every layout slot's format (including
