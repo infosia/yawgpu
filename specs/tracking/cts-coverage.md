@@ -678,6 +678,36 @@ never a reason to skip a CTS case.
     check is preserved by `validate_compute_dispatch_state`; `scope_*` fields are read only by render
     paths, so removal is clean (no latent submit-sync bug); direct/indirect dispatch now consistent; no
     panics; core rule tightened, not relaxed. Gate: **no open CRITICAL/MAJOR → F-039 COMPLETE.**
+- **External-CTS finding F-040 — IN PROGRESS (3-slice feature; slice 1 of 3 COMPLETE, treated as a
+  phase).** F-040 (`render_pass,resolve` T36, V8): yawgpu's multisample resolve never writes the
+  `resolveTarget` — `pass=0 fail=12` on Metal and Vulkan/MoltenVK ("expected 1, got 0"), Dawn/wgpu-native
+  pass. Root cause is a **feature gap**, not a bug: the regular render path supported only one
+  single-sample color attachment with no resolve, and two intentional gates blocked it
+  (`render_pipeline.rs:783` multisample > 1, `:789` at-most-one-color-target). User approved a **3-slice**
+  implementation (each a phase): **(1) multiple color attachments**, (2) MSAA pipeline + attachment, (3)
+  per-attachment resolve → CTS green.
+  - **Slice 1 — multiple color attachments (non-MSAA), COMPLETE.** Relaxed the `target_count > 1` gate;
+    `HalRenderPass.color_target: Option<…>` → `color_targets: Vec<HalRenderColorTarget>`; threaded N color
+    attachments in slot order through core pass state / command recording / queue submission; Metal sets
+    `colorAttachments[i]` per target; Vulkan emits N `VkAttachmentDescription`/references + framebuffer
+    views (+ a partial-view cleanup-on-error fix); GLES (Tier 2) returns a catalogued `HalError` for `> 1`
+    color attachment (single still works) — catalogued in `specs/blocks/67-gles-backend.md`. +2 Noop unit
+    tests (records two color attachments; rejects pipeline/pass count mismatch via the existing
+    `AttachmentSignature` compatibility check).
+  - **Verified real-GPU (Claude):** Metal `metal_two_color_attachments_write_distinct_targets` and Vulkan
+    `vulkan_render_two_color_attachments_write_distinct_targets` (e2e probes — attachment 0 reads red,
+    attachment 1 reads green) pass on the M2; no regression: `rendering/color_target_state` 23/0,
+    `rendering/draw` 564/0, `rendering/depth` 130/0 on Metal; Noop workspace test green (67 groups); all
+    four clippy gates clean. `render_pass,resolve` still `fail=12` (expected — resolve is slice 3).
+  - **Phase Review (Clean Review, fresh no-context subagent):** **0 CRITICAL, 0 MAJOR, 2 MINOR
+    (deferred).** Subagent independently ran the Noop tests + clippy + compiled both probes. MINOR-1: a
+    sparse "hole" color array (`[Some, None, Some]`) would compact in the execution `Vec` (`.flatten()`)
+    but not in the `AttachmentSignature`, a latent slot-misalignment — **currently unreachable** (an
+    undefined-format pipeline target maps to `Unsupported` and fails pipeline creation in both backends).
+    **Dense-only assumption recorded: slices 2/3 must not build on sparse color arrays without carrying
+    slot indices or rejecting `None`-gap arrays in core.** MINOR-2: a pre-existing garbled doc comment on
+    `HalRenderPass` (not introduced here). Both deferred. Gate: **no open CRITICAL/MAJOR → F-040 slice 1
+    COMPLETE.** (Slices 2 & 3 pending.)
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.

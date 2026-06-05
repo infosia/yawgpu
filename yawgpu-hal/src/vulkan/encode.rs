@@ -354,7 +354,7 @@ fn retain_copy_resources(copy: &HalCopy, retained: &mut Vec<RetainedResource>) {
             }
         }
         HalCopy::RenderPass(pass) => {
-            if let Some(color_target) = &pass.color_target {
+            for color_target in &pass.color_targets {
                 retain_hal_texture(&color_target.texture, retained);
             }
             if let Some(depth_stencil_attachment) = &pass.depth_stencil_attachment {
@@ -454,9 +454,9 @@ fn surface_pending_from_copy(copy: &HalCopy) -> Option<Arc<Mutex<SurfacePendingS
         HalCopy::TextureToTexture(copy) => surface_pending_from_hal_texture(&copy.source)
             .or_else(|| surface_pending_from_hal_texture(&copy.destination)),
         HalCopy::RenderPass(pass) => pass
-            .color_target
-            .as_ref()
-            .and_then(|target| surface_pending_from_hal_texture(&target.texture)),
+            .color_targets
+            .iter()
+            .find_map(|target| surface_pending_from_hal_texture(&target.texture)),
         #[cfg(feature = "tiled")]
         HalCopy::SubpassRenderPass(pass) => surface_pending_from_subpass(pass),
     }
@@ -1475,12 +1475,12 @@ pub(super) fn encode_render_pass(
     command_buffer: vk::CommandBuffer,
     pass: &HalRenderPass,
 ) -> Result<RenderPassTemps, HalError> {
-    let color_texture = vulkan_render_color_texture(pass)?;
+    let color_textures = vulkan_render_color_textures(pass)?;
     let depth_stencil_texture = vulkan_render_depth_stencil_texture(pass)?;
-    if color_texture.is_none() && depth_stencil_texture.is_none() {
+    if color_textures.is_empty() && depth_stencil_texture.is_none() {
         return Err(shader_error("Vulkan render pass requires an attachment"));
     }
-    if let Some(texture) = color_texture {
+    for texture in &color_textures {
         transition_image(
             device,
             command_buffer,
@@ -1504,20 +1504,24 @@ pub(super) fn encode_render_pass(
     let render_pass = match &pass.pipeline {
         Some(crate::HalRenderPipeline::Vulkan(_)) | None => create_render_pass_for_targets(
             device,
-            render_pass_color_format(pass, color_texture)?,
-            pass.color_target.as_ref(),
+            &render_pass_color_formats(&color_textures),
+            &pass.color_targets,
             pass.depth_stencil_attachment.as_ref(),
         )?,
         Some(_) => return Err(shader_error("render pipeline is not Vulkan-backed")),
     };
     let temporary_render_pass = Some(render_pass);
-    let color_attachment = color_texture.zip(pass.color_target.as_ref());
+    let color_attachments: Vec<_> = color_textures
+        .iter()
+        .copied()
+        .zip(pass.color_targets.iter())
+        .collect();
     let depth_stencil_attachment =
         depth_stencil_texture.zip(pass.depth_stencil_attachment.as_ref());
     let (framebuffer, mut image_views) = create_framebuffer(
         device,
         render_pass,
-        color_attachment,
+        &color_attachments,
         depth_stencil_attachment,
     )?;
     let mut descriptor_pool = None;
@@ -1561,7 +1565,7 @@ pub(super) fn encode_render_pass(
     }
     let clear_values = render_pass_clear_values(pass);
     let (width, height) =
-        render_pass_extent_from_targets(color_attachment, depth_stencil_attachment)?;
+        render_pass_extent_from_targets(&color_attachments, depth_stencil_attachment)?;
     let render_area = vk::Rect2D {
         offset: vk::Offset2D { x: 0, y: 0 },
         extent: vk::Extent2D { width, height },
@@ -1607,7 +1611,7 @@ pub(super) fn encode_render_pass(
     unsafe {
         device.cmd_end_render_pass(command_buffer);
     }
-    if let Some(texture) = color_texture {
+    for texture in &color_textures {
         texture
             .inner()?
             .layout
@@ -1729,14 +1733,14 @@ fn vk_index_type(format: HalIndexFormat) -> vk::IndexType {
     }
 }
 
-fn vulkan_render_color_texture(pass: &HalRenderPass) -> Result<Option<&VulkanTexture>, HalError> {
-    pass.color_target
-        .as_ref()
+fn vulkan_render_color_textures(pass: &HalRenderPass) -> Result<Vec<&VulkanTexture>, HalError> {
+    pass.color_targets
+        .iter()
         .map(|target| match &target.texture {
             crate::HalTexture::Vulkan(texture) => Ok(texture),
             _ => Err(texture_error("render target is not Vulkan-backed")),
         })
-        .transpose()
+        .collect()
 }
 
 fn vulkan_render_depth_stencil_texture(
@@ -1753,22 +1757,16 @@ fn vulkan_render_depth_stencil_texture(
         .transpose()
 }
 
-fn render_pass_color_format(
-    pass: &HalRenderPass,
-    color_texture: Option<&VulkanTexture>,
-) -> Result<Option<HalTextureFormat>, HalError> {
-    if pass.color_target.is_some() {
-        color_texture
-            .map(|texture| Some(texture.format))
-            .ok_or_else(|| texture_error("render target is missing"))
-    } else {
-        Ok(None)
-    }
+fn render_pass_color_formats(color_textures: &[&VulkanTexture]) -> Vec<HalTextureFormat> {
+    color_textures
+        .iter()
+        .map(|texture| texture.format)
+        .collect()
 }
 
 fn render_pass_clear_values(pass: &HalRenderPass) -> Vec<vk::ClearValue> {
     let mut clear_values = Vec::new();
-    if let Some(color) = &pass.color_target {
+    for color in &pass.color_targets {
         clear_values.push(vk::ClearValue {
             color: vk::ClearColorValue {
                 float32: [
@@ -1792,10 +1790,10 @@ fn render_pass_clear_values(pass: &HalRenderPass) -> Vec<vk::ClearValue> {
 }
 
 fn render_pass_extent_from_targets(
-    color_attachment: Option<(&VulkanTexture, &HalRenderColorTarget)>,
+    color_attachments: &[(&VulkanTexture, &HalRenderColorTarget)],
     depth_stencil_attachment: Option<(&VulkanTexture, &HalRenderDepthStencilAttachment)>,
 ) -> Result<(u32, u32), HalError> {
-    if let Some((texture, target)) = color_attachment {
+    if let Some((texture, target)) = color_attachments.first() {
         return Ok(mip_extent(texture.width, texture.height, target.mip_level));
     }
     if let Some((texture, attachment)) = depth_stencil_attachment {
@@ -1848,20 +1846,25 @@ fn buffer_texture_copy_aspect_flags(
 
 fn create_render_pass_for_targets(
     device: &ash::Device,
-    color_format: Option<HalTextureFormat>,
-    color_target: Option<&HalRenderColorTarget>,
+    color_formats: &[HalTextureFormat],
+    color_targets: &[HalRenderColorTarget],
     depth_stencil: Option<&HalRenderDepthStencilAttachment>,
 ) -> Result<vk::RenderPass, HalError> {
-    if color_format.is_none() && depth_stencil.is_none() {
+    if color_formats.len() != color_targets.len() {
+        return Err(shader_error("render pass color target count mismatch"));
+    }
+    if color_formats.is_empty() && depth_stencil.is_none() {
         return Err(shader_error("render pass requires an attachment"));
     }
     let mut attachments = Vec::new();
     let mut color_references = Vec::new();
-    if let (Some(color_format), Some(color_target)) = (color_format, color_target) {
+    for (color_format, color_target) in color_formats.iter().copied().zip(color_targets) {
+        let index = u32::try_from(attachments.len())
+            .map_err(|_| shader_error("color attachment index is too large"))?;
         attachments.push(vk_color_attachment_description(color_format, color_target)?);
         color_references.push(
             vk::AttachmentReference::default()
-                .attachment(0)
+                .attachment(index)
                 .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
         );
     }
@@ -1982,14 +1985,17 @@ fn vk_render_depth_stencil_attachment_description(
 pub(super) fn create_framebuffer(
     device: &ash::Device,
     render_pass: vk::RenderPass,
-    color_attachment: Option<(&VulkanTexture, &HalRenderColorTarget)>,
+    color_attachments: &[(&VulkanTexture, &HalRenderColorTarget)],
     depth_stencil_attachment: Option<(&VulkanTexture, &HalRenderDepthStencilAttachment)>,
 ) -> Result<(vk::Framebuffer, Vec<vk::ImageView>), HalError> {
     let mut attachments = Vec::new();
-    if let Some((texture, target)) = color_attachment {
+    for (texture, target) in color_attachments {
         match create_color_attachment_image_view(device, texture, target) {
             Ok(view) => attachments.push(view),
-            Err(error) => return Err(error),
+            Err(error) => {
+                destroy_image_views(device, &attachments);
+                return Err(error);
+            }
         }
     }
     if let Some((texture, attachment)) = depth_stencil_attachment {
@@ -2002,7 +2008,7 @@ pub(super) fn create_framebuffer(
         }
     }
     let (width, height) =
-        render_pass_extent_from_targets(color_attachment, depth_stencil_attachment)?;
+        render_pass_extent_from_targets(color_attachments, depth_stencil_attachment)?;
     let framebuffer_info = vk::FramebufferCreateInfo::default()
         .render_pass(render_pass)
         .attachments(&attachments)

@@ -341,8 +341,15 @@ fn create_render_fbo(
     gl: &glow::Context,
     pass: &HalRenderPass,
 ) -> Result<glow::Framebuffer, HalError> {
+    if pass.color_targets.len() > 1 {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES render pass supports at most one color attachment",
+        });
+    }
     let color_target = pass
-        .color_target
+        .color_targets
+        .first()
         .as_ref()
         .map(|target| match &target.texture {
             HalTexture::Gles(texture) => Ok(texture),
@@ -456,7 +463,7 @@ fn create_render_fbo(
         }
         gl.viewport(0, 0, width, height);
         let mut clear_mask = 0;
-        if let Some(color) = &pass.color_target {
+        if let Some(color) = pass.color_targets.first() {
             let [r, g, b, a] = color.clear_color;
             gl.clear_color(r as f32, g as f32, b as f32, a as f32);
             if matches!(color.load_op, HalRenderLoadOp::Clear) {

@@ -1361,7 +1361,7 @@ mod tests {
 
         queue.submit_copies(&[HalCopy::RenderPass(HalRenderPass {
             pipeline: None,
-            color_target: None,
+            color_targets: Vec::new(),
             depth_stencil_attachment: Some(HalRenderDepthStencilAttachment {
                 texture: depth,
                 format: HalTextureFormat::Depth32Float,
@@ -1395,7 +1395,7 @@ mod tests {
         assert!(matches!(
             submitted.as_slice(),
             [HalCopy::RenderPass(pass)]
-                if pass.color_target.is_none()
+                if pass.color_targets.is_empty()
                     && pass.depth_stencil_attachment.as_ref().is_some_and(|attachment|
                         attachment.format == HalTextureFormat::Depth32Float
                             && (attachment.depth_clear_value - 0.25).abs() < f32::EPSILON

@@ -38,7 +38,7 @@ pub(crate) struct PassEncoderState {
     pub(crate) render_extent: Option<Extent3d>,
     pub(crate) attachment_textures: Vec<Texture>,
     pub(crate) attachment_texture_uses: Vec<TextureScopeUse>,
-    pub(crate) render_color_attachment: Option<RenderPassColorExecution>,
+    pub(crate) render_color_attachments: Vec<RenderPassColorExecution>,
     pub(crate) render_depth_stencil_attachment: Option<RenderPassDepthStencilExecution>,
     pub(crate) render_pass_recorded: bool,
     pub(crate) blend_constant: [f32; 4],
@@ -59,7 +59,7 @@ pub(crate) struct PassEncoderInit {
     pub(crate) attachment_signature: Option<AttachmentSignature>,
     pub(crate) render_extent: Option<Extent3d>,
     pub(crate) attachment_textures: Vec<Texture>,
-    pub(crate) render_color_attachment: Option<RenderPassColorExecution>,
+    pub(crate) render_color_attachments: Vec<RenderPassColorExecution>,
     pub(crate) render_depth_stencil_attachment: Option<RenderPassDepthStencilExecution>,
     pub(crate) occlusion_query_set: Option<QuerySet>,
     pub(crate) max_draw_count: u64,
@@ -81,7 +81,7 @@ impl PassEncoderState {
             render_extent: init.render_extent,
             attachment_textures: init.attachment_textures,
             attachment_texture_uses: Vec::new(),
-            render_color_attachment: init.render_color_attachment,
+            render_color_attachments: init.render_color_attachments,
             render_depth_stencil_attachment: init.render_depth_stencil_attachment,
             render_pass_recorded: false,
             blend_constant: [0.0; 4],
@@ -166,13 +166,13 @@ impl PassEncoderInner {
         let open_occlusion_query = state.open_occlusion_query.is_some();
         let draw_count_exceeded = state.draw_count > state.max_draw_count;
         let render_pass_command = if !state.render_pass_recorded
-            && (state.render_color_attachment.is_some()
+            && (!state.render_color_attachments.is_empty()
                 || state.render_depth_stencil_attachment.is_some())
         {
             state.render_pass_recorded = true;
             Some(RenderPassCommand {
                 pipeline: state.render_pipeline.clone(),
-                color_attachment: state.render_color_attachment.clone(),
+                color_attachments: state.render_color_attachments.clone(),
                 depth_stencil_attachment: state.render_depth_stencil_attachment.clone(),
                 attachment_textures: state.attachment_textures.clone(),
                 bind_groups: state.bind_groups.clone(),
@@ -1421,7 +1421,7 @@ mod tests {
                 attachment_signature: None,
                 render_extent: None,
                 attachment_textures: Vec::new(),
-                render_color_attachment: None,
+                render_color_attachments: Vec::new(),
                 render_depth_stencil_attachment: None,
                 occlusion_query_set: None,
                 max_draw_count: u64::MAX,

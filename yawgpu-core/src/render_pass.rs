@@ -300,14 +300,14 @@ impl RenderPassEncoder {
             let attachment_uses = state.attachment_texture_uses.clone();
             record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
             state.draw_count = state.draw_count.saturating_add(1);
-            let color_attachment = state.render_color_attachment.clone();
+            let color_attachments = state.render_color_attachments.clone();
             let depth_stencil_attachment = state.render_depth_stencil_attachment.clone();
-            if color_attachment.is_none() && depth_stencil_attachment.is_none() {
+            if color_attachments.is_empty() && depth_stencil_attachment.is_none() {
                 return Err("render pass requires at least one attachment".to_owned());
             }
             self.inner.parent.record_render_pass(RenderPassCommand {
                 pipeline: Some(pipeline),
-                color_attachment,
+                color_attachments,
                 depth_stencil_attachment,
                 attachment_textures: state.attachment_textures.clone(),
                 bind_groups: state.bind_groups.clone(),
@@ -359,9 +359,9 @@ impl RenderPassEncoder {
             let attachment_uses = state.attachment_texture_uses.clone();
             record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
             state.draw_count = state.draw_count.saturating_add(1);
-            let color_attachment = state.render_color_attachment.clone();
+            let color_attachments = state.render_color_attachments.clone();
             let depth_stencil_attachment = state.render_depth_stencil_attachment.clone();
-            if color_attachment.is_none() && depth_stencil_attachment.is_none() {
+            if color_attachments.is_empty() && depth_stencil_attachment.is_none() {
                 return Err("render pass requires at least one attachment".to_owned());
             }
             let index_buffer = state
@@ -370,7 +370,7 @@ impl RenderPassEncoder {
                 .ok_or_else(|| "render pass requires an index buffer".to_owned())?;
             self.inner.parent.record_render_pass(RenderPassCommand {
                 pipeline: Some(pipeline),
-                color_attachment,
+                color_attachments,
                 depth_stencil_attachment,
                 attachment_textures: state.attachment_textures.clone(),
                 bind_groups: state.bind_groups.clone(),
@@ -415,14 +415,14 @@ impl RenderPassEncoder {
                 .parent
                 .record_referenced_buffer(Arc::clone(&indirect_buffer));
             state.draw_count = state.draw_count.saturating_add(1);
-            let color_attachment = state.render_color_attachment.clone();
+            let color_attachments = state.render_color_attachments.clone();
             let depth_stencil_attachment = state.render_depth_stencil_attachment.clone();
-            if color_attachment.is_none() && depth_stencil_attachment.is_none() {
+            if color_attachments.is_empty() && depth_stencil_attachment.is_none() {
                 return Err("render pass requires at least one attachment".to_owned());
             }
             self.inner.parent.record_render_pass(RenderPassCommand {
                 pipeline: Some(pipeline),
-                color_attachment,
+                color_attachments,
                 depth_stencil_attachment,
                 attachment_textures: state.attachment_textures.clone(),
                 bind_groups: state.bind_groups.clone(),
@@ -471,9 +471,9 @@ impl RenderPassEncoder {
                 .parent
                 .record_referenced_buffer(Arc::clone(&indirect_buffer));
             state.draw_count = state.draw_count.saturating_add(1);
-            let color_attachment = state.render_color_attachment.clone();
+            let color_attachments = state.render_color_attachments.clone();
             let depth_stencil_attachment = state.render_depth_stencil_attachment.clone();
-            if color_attachment.is_none() && depth_stencil_attachment.is_none() {
+            if color_attachments.is_empty() && depth_stencil_attachment.is_none() {
                 return Err("render pass requires at least one attachment".to_owned());
             }
             let index_buffer = state
@@ -482,7 +482,7 @@ impl RenderPassEncoder {
                 .ok_or_else(|| "render pass requires an index buffer".to_owned())?;
             self.inner.parent.record_render_pass(RenderPassCommand {
                 pipeline: Some(pipeline),
-                color_attachment,
+                color_attachments,
                 depth_stencil_attachment,
                 attachment_textures: state.attachment_textures.clone(),
                 bind_groups: state.bind_groups.clone(),
@@ -627,6 +627,11 @@ impl RenderPassEncoder {
 mod tests {
     use super::*;
     use crate::test_helpers::*;
+    use crate::{
+        ColorTargetState, MultisampleState, PrimitiveState, PrimitiveTopology,
+        RenderPipelineDescriptor, RenderPipelineFragmentState, RenderPipelineLayout,
+        RenderPipelineShaderStage, RenderPipelineVertexState, ShaderModuleSource,
+    };
 
     use std::sync::Arc;
 
@@ -708,6 +713,132 @@ mod tests {
         ));
         assert_eq!(command.blend_constant, [0.0; 4]);
         assert_eq!(command.stencil_reference, 0);
+    }
+
+    #[test]
+    fn render_pass_encoder_records_two_color_attachments() {
+        let device = noop_device();
+        let pipeline = two_color_render_pipeline(&device);
+        let view_a = noop_render_attachment(&device);
+        let view_b = noop_render_attachment(&device);
+        let mut descriptor = noop_render_pass_descriptor(view_a, None);
+        let mut attachment_b = descriptor.color_attachments[0]
+            .clone()
+            .expect("base descriptor should have a color attachment");
+        attachment_b.view = view_b;
+        descriptor.color_attachments.push(Some(attachment_b));
+
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&descriptor);
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 1);
+        let CommandExecution::RenderPass(command) = &command_buffer.command_ops()[0] else {
+            panic!("expected render pass command");
+        };
+        assert_eq!(command.color_attachments.len(), 2);
+        assert!(command.depth_stencil_attachment.is_none());
+        assert!(command.draw.is_some());
+    }
+
+    #[test]
+    fn render_pass_encoder_rejects_color_attachment_count_mismatch() {
+        let device = noop_device();
+        let pipeline = two_color_render_pipeline(&device);
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.end(), None);
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("render pass pipeline attachment signature is incompatible".to_owned())
+        );
+    }
+
+    fn two_color_render_pipeline(device: &crate::device::Device) -> Arc<RenderPipeline> {
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r"
+@vertex
+fn vs() -> @builtin(position) vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+struct FragmentOutput {
+    @location(0) a: vec4<f32>,
+    @location(1) b: vec4<f32>,
+}
+
+@fragment
+fn fs() -> FragmentOutput {
+    var output: FragmentOutput;
+    output.a = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    output.b = vec4<f32>(0.0, 1.0, 0.0, 1.0);
+    return output;
+}
+"
+                .to_owned(),
+            )),
+        );
+        let mut descriptor = RenderPipelineDescriptor {
+            layout: RenderPipelineLayout::Auto,
+            vertex: RenderPipelineVertexState {
+                shader: RenderPipelineShaderStage {
+                    module: Arc::clone(&module),
+                    entry_point: Some("vs".to_owned()),
+                    constants: Vec::new(),
+                },
+                buffer_count: 0,
+                buffers: Vec::new(),
+            },
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+            },
+            depth_stencil: None,
+            multisample: MultisampleState {
+                count: 1,
+                mask: u32::MAX,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(RenderPipelineFragmentState {
+                shader: RenderPipelineShaderStage {
+                    module,
+                    entry_point: Some("fs".to_owned()),
+                    constants: Vec::new(),
+                },
+                target_count: 2,
+                targets: Vec::new(),
+            }),
+            error: None,
+        };
+        if let Some(fragment) = &mut descriptor.fragment {
+            fragment.targets = vec![
+                ColorTargetState {
+                    format: rgba8_unorm(),
+                    blend: None,
+                    write_mask: 0xF,
+                },
+                ColorTargetState {
+                    format: rgba8_unorm(),
+                    blend: None,
+                    write_mask: 0xF,
+                },
+            ];
+        }
+        Arc::new(device.create_render_pipeline(descriptor))
     }
 
     #[test]
