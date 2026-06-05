@@ -721,6 +721,7 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
         index_buffer,
         indirect_buffer,
         blend_constant: pass.blend_constant,
+        stencil_reference: pass.stencil_reference,
         draw,
     }))
 }

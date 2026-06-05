@@ -931,6 +931,7 @@ pub(super) fn create_graphics_pipeline(
         vk::DynamicState::VIEWPORT,
         vk::DynamicState::SCISSOR,
         vk::DynamicState::BLEND_CONSTANTS,
+        vk::DynamicState::STENCIL_REFERENCE,
     ];
     let dynamic_state =
         vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);

@@ -6,8 +6,8 @@ use super::device::GlesDeviceInner;
 use super::format::map_vertex_format;
 use super::{rebuild_hal_error, BACKEND};
 use crate::{
-    HalColorTargetState, HalDescriptorBinding, HalError, HalPrimitiveTopology,
-    HalRenderPipelineDescriptor, HalTextureFormat, HalVertexBufferLayout,
+    HalColorTargetState, HalDepthStencilState, HalDescriptorBinding, HalError,
+    HalPrimitiveTopology, HalRenderPipelineDescriptor, HalTextureFormat, HalVertexBufferLayout,
 };
 
 struct GlesComputePipelineInner {
@@ -86,6 +86,7 @@ struct GlesRenderPipelineInner {
     program: Result<glow::Program, HalError>,
     vertex_buffers: Vec<HalVertexBufferLayout>,
     color_target: Option<HalColorTargetState>,
+    depth_stencil: Option<HalDepthStencilState>,
     primitive_topology: HalPrimitiveTopology,
     bindings: Vec<HalDescriptorBinding>,
     first_instance_location: Option<glow::UniformLocation>,
@@ -141,6 +142,7 @@ impl GlesRenderPipeline {
                 program: Ok(program),
                 vertex_buffers: descriptor.vertex_buffers,
                 color_target: descriptor.color_targets.first().copied(),
+                depth_stencil: descriptor.depth_stencil,
                 primitive_topology: descriptor.primitive_topology,
                 bindings: bindings.to_vec(),
                 first_instance_location,
@@ -164,6 +166,11 @@ impl GlesRenderPipeline {
     #[must_use]
     pub(super) fn color_target(&self) -> Option<HalColorTargetState> {
         self.inner.color_target
+    }
+
+    #[must_use]
+    pub(super) fn depth_stencil(&self) -> Option<HalDepthStencilState> {
+        self.inner.depth_stencil
     }
 
     #[must_use]
