@@ -138,6 +138,208 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 }
 
+/// F-039 regression: two compute dispatches in the SAME pass that write `1`
+/// then `2` to one storage buffer must leave `2` (the second write wins and is
+/// visible to a subsequent copy readback). yawgpu read back `0` (the initial
+/// value — neither write visible) deterministically, cross-HAL.
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "metal")]
+fn metal_two_dispatches_in_one_pass_second_write_wins() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let buffer = create_buffer_sized(
+            device,
+            4,
+            native::WGPUBufferUsage_Storage
+                | native::WGPUBufferUsage_CopySrc
+                | native::WGPUBufferUsage_CopyDst,
+        );
+        write_u32_buffer(queue, buffer, &[0]);
+
+        let bgl = create_storage_bgl(device);
+        let pipeline_layout = create_pipeline_layout(device, bgl);
+        let module1 = create_wgsl_module(device, &storage_write_shader(1));
+        let module2 = create_wgsl_module(device, &storage_write_shader(2));
+        let pipeline1 = create_compute_pipeline_with_layout(device, module1, pipeline_layout);
+        let pipeline2 = create_compute_pipeline_with_layout(device, module2, pipeline_layout);
+        let bind_group = create_single_storage_bind_group(device, bgl, buffer);
+
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderSetPipeline(pass, pipeline1);
+        yawgpu::wgpuComputePassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
+        yawgpu::wgpuComputePassEncoderSetPipeline(pass, pipeline2);
+        yawgpu::wgpuComputePassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
+        yawgpu::wgpuComputePassEncoderEnd(pass);
+        let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        yawgpu::wgpuCommandBufferRelease(command_buffer);
+        yawgpu::wgpuComputePassEncoderRelease(pass);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+
+        // Separate readback submit (mirrors the CTS verifyData boundary).
+        let readback = create_buffer_sized(
+            device,
+            4,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        let copy_encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        yawgpu::wgpuCommandEncoderCopyBufferToBuffer(copy_encoder, buffer, 0, readback, 0, 4);
+        let copy_cb = yawgpu::wgpuCommandEncoderFinish(copy_encoder, std::ptr::null());
+        yawgpu::wgpuQueueSubmit(queue, 1, &copy_cb);
+        yawgpu::wgpuCommandBufferRelease(copy_cb);
+        yawgpu::wgpuCommandEncoderRelease(copy_encoder);
+
+        let bytes = read_buffer(instance, readback, 0, 4);
+        let value = u32::from_ne_bytes(bytes[0..4].try_into().expect("four bytes"));
+        assert_eq!(
+            value, 2,
+            "two dispatches in one pass: second write must win (got {value})"
+        );
+        assert!(errors.lock().expect("error lock").is_empty());
+
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuBindGroupRelease(bind_group);
+        yawgpu::wgpuComputePipelineRelease(pipeline2);
+        yawgpu::wgpuComputePipelineRelease(pipeline1);
+        yawgpu::wgpuShaderModuleRelease(module2);
+        yawgpu::wgpuShaderModuleRelease(module1);
+        yawgpu::wgpuPipelineLayoutRelease(pipeline_layout);
+        yawgpu::wgpuBindGroupLayoutRelease(bgl);
+        yawgpu::wgpuBufferRelease(buffer);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+#[cfg(feature = "metal")]
+fn storage_write_shader(value: u32) -> String {
+    format!(
+        r#"
+struct Data {{ a: u32 }}
+@group(0) @binding(0) var<storage, read_write> data: Data;
+@compute @workgroup_size(1)
+fn main() {{ data.a = {value}u; }}
+"#
+    )
+}
+
+#[cfg(feature = "metal")]
+unsafe fn create_buffer_sized(
+    device: native::WGPUDevice,
+    size: u64,
+    usage: native::WGPUBufferUsage,
+) -> native::WGPUBuffer {
+    let descriptor = native::WGPUBufferDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage,
+        size,
+        mappedAtCreation: 0,
+    };
+    let buffer = yawgpu::wgpuDeviceCreateBuffer(device, &descriptor);
+    assert!(!buffer.is_null());
+    buffer
+}
+
+#[cfg(feature = "metal")]
+unsafe fn create_storage_bgl(device: native::WGPUDevice) -> native::WGPUBindGroupLayout {
+    let mut entry: native::WGPUBindGroupLayoutEntry = std::mem::zeroed();
+    entry.binding = 0;
+    entry.visibility = native::WGPUShaderStage_Compute;
+    entry.buffer.type_ = native::WGPUBufferBindingType_Storage;
+    let descriptor = native::WGPUBindGroupLayoutDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        entryCount: 1,
+        entries: &entry,
+    };
+    let bgl = yawgpu::wgpuDeviceCreateBindGroupLayout(device, &descriptor);
+    assert!(!bgl.is_null());
+    bgl
+}
+
+#[cfg(feature = "metal")]
+unsafe fn create_pipeline_layout(
+    device: native::WGPUDevice,
+    bgl: native::WGPUBindGroupLayout,
+) -> native::WGPUPipelineLayout {
+    let descriptor = native::WGPUPipelineLayoutDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        bindGroupLayoutCount: 1,
+        bindGroupLayouts: &bgl,
+        immediateSize: 0,
+    };
+    let layout = yawgpu::wgpuDeviceCreatePipelineLayout(device, &descriptor);
+    assert!(!layout.is_null());
+    layout
+}
+
+#[cfg(feature = "metal")]
+unsafe fn create_compute_pipeline_with_layout(
+    device: native::WGPUDevice,
+    module: native::WGPUShaderModule,
+    layout: native::WGPUPipelineLayout,
+) -> native::WGPUComputePipeline {
+    let descriptor = native::WGPUComputePipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout,
+        compute: native::WGPUComputeState {
+            nextInChain: std::ptr::null_mut(),
+            module,
+            entryPoint: string_view("main"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+        },
+    };
+    let pipeline = yawgpu::wgpuDeviceCreateComputePipeline(device, &descriptor);
+    assert!(!pipeline.is_null());
+    pipeline
+}
+
+#[cfg(feature = "metal")]
+unsafe fn create_single_storage_bind_group(
+    device: native::WGPUDevice,
+    layout: native::WGPUBindGroupLayout,
+    buffer: native::WGPUBuffer,
+) -> native::WGPUBindGroup {
+    let entry = native::WGPUBindGroupEntry {
+        nextInChain: std::ptr::null_mut(),
+        binding: 0,
+        buffer,
+        offset: 0,
+        size: 4,
+        sampler: std::ptr::null(),
+        textureView: std::ptr::null(),
+    };
+    let descriptor = native::WGPUBindGroupDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout,
+        entryCount: 1,
+        entries: &entry,
+    };
+    let bind_group = yawgpu::wgpuDeviceCreateBindGroup(device, &descriptor);
+    assert!(!bind_group.is_null());
+    bind_group
+}
+
 unsafe fn run_compute_submit(
     device: native::WGPUDevice,
     shader: &str,
