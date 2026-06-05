@@ -202,6 +202,12 @@ fn submit_compute_pass(gl: &glow::Context, pass: &HalComputePass) -> Result<(), 
             message: "compute pass pipeline is not a GLES pipeline",
         });
     };
+    if !pass.bind_textures.is_empty() {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES compute does not support texture bindings",
+        });
+    }
     let program = pipeline.raw_or_err()?;
     let bindings = pass
         .bind_buffers
@@ -266,12 +272,12 @@ fn binding_target(bindings: &[HalDescriptorBinding], binding: u32) -> Result<u32
                 message: "input attachments are not valid buffer bindings",
             })
         }
-        HalDescriptorBindingKind::Texture | HalDescriptorBindingKind::Sampler => {
-            Err(HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "texture and sampler descriptors are not valid buffer bindings",
-            })
-        }
+        HalDescriptorBindingKind::Texture
+        | HalDescriptorBindingKind::StorageTexture { .. }
+        | HalDescriptorBindingKind::Sampler => Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture and sampler descriptors are not valid buffer bindings",
+        }),
     }
 }
 

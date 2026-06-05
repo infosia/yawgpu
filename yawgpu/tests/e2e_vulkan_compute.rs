@@ -138,6 +138,258 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 }
 
+/// F-041 regression (cross-HAL companion to the Metal probe): `textureLoad` on a
+/// read-only storage texture returns the uploaded texel; the runtime-sized output
+/// array compiles. Writes texel `7`, reads it back.
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "vulkan")]
+fn vulkan_read_only_storage_texture_reads_texel() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let texture = create_r32uint_storage_texture(device);
+        write_r32uint_texel(queue, texture, 7);
+        let view = yawgpu::wgpuTextureCreateView(texture, std::ptr::null());
+        let output = create_buffer_sized(
+            device,
+            4,
+            native::WGPUBufferUsage_Storage | native::WGPUBufferUsage_CopySrc,
+        );
+        let readback = create_buffer_sized(
+            device,
+            4,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+
+        let shader = r#"
+@group(0) @binding(0) var tex: texture_storage_2d<r32uint, read>;
+@group(0) @binding(1) var<storage, read_write> out_data: array<u32>;
+@compute @workgroup_size(1)
+fn main() { out_data[0] = textureLoad(tex, vec2<i32>(0, 0)).r; }
+"#;
+        let bgl = create_storage_texture_bgl(device);
+        let pipeline_layout = create_pipeline_layout(device, bgl);
+        let module = create_wgsl_module(device, shader);
+        let pipeline = create_compute_pipeline_with_layout(device, module, pipeline_layout);
+        let bind_group = create_storage_texture_bind_group(device, bgl, view, output);
+
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuComputePassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
+        yawgpu::wgpuComputePassEncoderEnd(pass);
+        yawgpu::wgpuCommandEncoderCopyBufferToBuffer(encoder, output, 0, readback, 0, 4);
+        let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        yawgpu::wgpuCommandBufferRelease(command_buffer);
+        yawgpu::wgpuComputePassEncoderRelease(pass);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+
+        let bytes = read_buffer(instance, readback, 0, 4);
+        let value = u32::from_ne_bytes(bytes[0..4].try_into().expect("four bytes"));
+        assert_eq!(
+            value, 7,
+            "read-only storage texture textureLoad did not return the uploaded texel (got {value})"
+        );
+        assert!(errors.lock().expect("error lock").is_empty());
+
+        yawgpu::wgpuBindGroupRelease(bind_group);
+        yawgpu::wgpuComputePipelineRelease(pipeline);
+        yawgpu::wgpuShaderModuleRelease(module);
+        yawgpu::wgpuPipelineLayoutRelease(pipeline_layout);
+        yawgpu::wgpuBindGroupLayoutRelease(bgl);
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuBufferRelease(output);
+        yawgpu::wgpuTextureViewRelease(view);
+        yawgpu::wgpuTextureRelease(texture);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+#[cfg(feature = "vulkan")]
+unsafe fn create_r32uint_storage_texture(device: native::WGPUDevice) -> native::WGPUTexture {
+    let descriptor = native::WGPUTextureDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage: native::WGPUTextureUsage_StorageBinding | native::WGPUTextureUsage_CopyDst,
+        dimension: native::WGPUTextureDimension_2D,
+        size: native::WGPUExtent3D {
+            width: 1,
+            height: 1,
+            depthOrArrayLayers: 1,
+        },
+        format: native::WGPUTextureFormat_R32Uint,
+        mipLevelCount: 1,
+        sampleCount: 1,
+        viewFormatCount: 0,
+        viewFormats: std::ptr::null(),
+    };
+    let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+    assert!(!texture.is_null());
+    texture
+}
+
+#[cfg(feature = "vulkan")]
+unsafe fn write_r32uint_texel(queue: native::WGPUQueue, texture: native::WGPUTexture, value: u32) {
+    let data = value.to_ne_bytes();
+    let dest = native::WGPUTexelCopyTextureInfo {
+        texture,
+        mipLevel: 0,
+        origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+        aspect: native::WGPUTextureAspect_All,
+    };
+    let layout = native::WGPUTexelCopyBufferLayout {
+        offset: 0,
+        bytesPerRow: 4,
+        rowsPerImage: 1,
+    };
+    let extent = native::WGPUExtent3D {
+        width: 1,
+        height: 1,
+        depthOrArrayLayers: 1,
+    };
+    yawgpu::wgpuQueueWriteTexture(
+        queue,
+        &dest,
+        data.as_ptr().cast(),
+        data.len(),
+        &layout,
+        &extent,
+    );
+}
+
+#[cfg(feature = "vulkan")]
+unsafe fn create_buffer_sized(
+    device: native::WGPUDevice,
+    size: u64,
+    usage: native::WGPUBufferUsage,
+) -> native::WGPUBuffer {
+    let descriptor = native::WGPUBufferDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage,
+        size,
+        mappedAtCreation: 0,
+    };
+    let buffer = yawgpu::wgpuDeviceCreateBuffer(device, &descriptor);
+    assert!(!buffer.is_null());
+    buffer
+}
+
+#[cfg(feature = "vulkan")]
+unsafe fn create_storage_texture_bgl(device: native::WGPUDevice) -> native::WGPUBindGroupLayout {
+    let mut texture_entry: native::WGPUBindGroupLayoutEntry = std::mem::zeroed();
+    texture_entry.binding = 0;
+    texture_entry.visibility = native::WGPUShaderStage_Compute;
+    texture_entry.storageTexture.access = native::WGPUStorageTextureAccess_ReadOnly;
+    texture_entry.storageTexture.format = native::WGPUTextureFormat_R32Uint;
+    texture_entry.storageTexture.viewDimension = native::WGPUTextureViewDimension_2D;
+    let mut buffer_entry: native::WGPUBindGroupLayoutEntry = std::mem::zeroed();
+    buffer_entry.binding = 1;
+    buffer_entry.visibility = native::WGPUShaderStage_Compute;
+    buffer_entry.buffer.type_ = native::WGPUBufferBindingType_Storage;
+    let entries = [texture_entry, buffer_entry];
+    let descriptor = native::WGPUBindGroupLayoutDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        entryCount: entries.len(),
+        entries: entries.as_ptr(),
+    };
+    let bgl = yawgpu::wgpuDeviceCreateBindGroupLayout(device, &descriptor);
+    assert!(!bgl.is_null());
+    bgl
+}
+
+#[cfg(feature = "vulkan")]
+unsafe fn create_pipeline_layout(
+    device: native::WGPUDevice,
+    bgl: native::WGPUBindGroupLayout,
+) -> native::WGPUPipelineLayout {
+    let descriptor = native::WGPUPipelineLayoutDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        bindGroupLayoutCount: 1,
+        bindGroupLayouts: &bgl,
+        immediateSize: 0,
+    };
+    let layout = yawgpu::wgpuDeviceCreatePipelineLayout(device, &descriptor);
+    assert!(!layout.is_null());
+    layout
+}
+
+#[cfg(feature = "vulkan")]
+unsafe fn create_compute_pipeline_with_layout(
+    device: native::WGPUDevice,
+    module: native::WGPUShaderModule,
+    layout: native::WGPUPipelineLayout,
+) -> native::WGPUComputePipeline {
+    let descriptor = native::WGPUComputePipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout,
+        compute: native::WGPUComputeState {
+            nextInChain: std::ptr::null_mut(),
+            module,
+            entryPoint: string_view("main"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+        },
+    };
+    let pipeline = yawgpu::wgpuDeviceCreateComputePipeline(device, &descriptor);
+    assert!(!pipeline.is_null());
+    pipeline
+}
+
+#[cfg(feature = "vulkan")]
+unsafe fn create_storage_texture_bind_group(
+    device: native::WGPUDevice,
+    layout: native::WGPUBindGroupLayout,
+    view: native::WGPUTextureView,
+    output: native::WGPUBuffer,
+) -> native::WGPUBindGroup {
+    let texture_entry = native::WGPUBindGroupEntry {
+        nextInChain: std::ptr::null_mut(),
+        binding: 0,
+        buffer: std::ptr::null(),
+        offset: 0,
+        size: 0,
+        sampler: std::ptr::null(),
+        textureView: view,
+    };
+    let buffer_entry = native::WGPUBindGroupEntry {
+        nextInChain: std::ptr::null_mut(),
+        binding: 1,
+        buffer: output,
+        offset: 0,
+        size: 4,
+        sampler: std::ptr::null(),
+        textureView: std::ptr::null(),
+    };
+    let entries = [texture_entry, buffer_entry];
+    let descriptor = native::WGPUBindGroupDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout,
+        entryCount: entries.len(),
+        entries: entries.as_ptr(),
+    };
+    let bind_group = yawgpu::wgpuDeviceCreateBindGroup(device, &descriptor);
+    assert!(!bind_group.is_null());
+    bind_group
+}
+
 unsafe fn run_compute_submit(
     device: native::WGPUDevice,
     shader: &str,

@@ -917,6 +917,26 @@ pub(crate) fn hal_bind_resources(
                     base_array_layer: texture_view.base_array_layer(),
                     array_layer_count: texture_view.array_layer_count(),
                     aspect: hal_texture_aspect(texture_view.aspect()),
+                    storage_access: None,
+                });
+            }
+            (
+                MetalBindingKind::StorageTexture { access },
+                BindGroupResource::TextureView { texture_view, .. },
+            ) => {
+                resources.textures.push(HalBoundTexture {
+                    group: binding.group,
+                    binding: binding.binding,
+                    metal_index: binding.metal_index,
+                    texture: texture_view.texture().hal()?,
+                    format: hal_texture_format(texture_view.format()),
+                    dimension: hal_texture_view_dimension(texture_view.dimension()),
+                    base_mip_level: texture_view.base_mip_level(),
+                    mip_level_count: texture_view.mip_level_count(),
+                    base_array_layer: texture_view.base_array_layer(),
+                    array_layer_count: texture_view.array_layer_count(),
+                    aspect: hal_texture_aspect(texture_view.aspect()),
+                    storage_access: Some(hal_storage_texture_access(access)),
                 });
             }
             (MetalBindingKind::Sampler, BindGroupResource::Sampler { sampler, .. }) => {
@@ -970,6 +990,7 @@ mod tests {
     use crate::shader::{SHADER_STAGE_COMPUTE, SHADER_STAGE_FRAGMENT, SHADER_STAGE_VERTEX};
     use crate::test_helpers::*;
     use crate::*;
+    use yawgpu_hal::HalStorageTextureAccess;
 
     fn depth32_float() -> TextureFormat {
         TextureFormat::from_raw(0x30)
@@ -1145,6 +1166,55 @@ mod tests {
         ))
     }
 
+    fn storage_texture_bind_group_layout(device: &Device) -> Arc<BindGroupLayout> {
+        Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_COMPUTE,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::StorageTexture {
+                    access: StorageTextureAccess::ReadOnly,
+                    format: rgba8_unorm(),
+                    view_dimension: TextureViewDimension::D2,
+                }),
+            }],
+            error: None,
+        }))
+    }
+
+    fn storage_texture_bind_group(device: &Device, layout: Arc<BindGroupLayout>) -> Arc<BindGroup> {
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::STORAGE_BINDING | TextureUsage::COPY_DST,
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            ..valid_texture_descriptor()
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D2),
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(error, None);
+        Arc::new(device.create_bind_group(
+            layout,
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::TextureView {
+                    texture_view: Arc::new(view),
+                    device: Arc::new(device.clone()),
+                },
+            }],
+        ))
+    }
+
     fn explicit_pipeline_layout(
         device: &Device,
         layout: Arc<BindGroupLayout>,
@@ -1171,6 +1241,32 @@ fn cs() {
     let loaded = textureLoad(tex, vec2<i32>(0, 0), 0);
     let sampled = textureSampleLevel(tex, samp, vec2<f32>(0.5, 0.5), 0.0);
     _ = loaded + sampled;
+}
+"
+                .to_owned(),
+            )),
+        );
+        Arc::new(device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(layout),
+            shader_module: module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        }))
+    }
+
+    fn storage_texture_compute_pipeline(
+        device: &Device,
+        layout: Arc<PipelineLayout>,
+    ) -> Arc<ComputePipeline> {
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r"
+@group(0) @binding(0) var tex: texture_storage_2d<rgba8unorm, read>;
+
+@compute @workgroup_size(1)
+fn cs() {
+    _ = textureLoad(tex, vec2<i32>(0, 0));
 }
 "
                 .to_owned(),
@@ -1309,10 +1405,50 @@ fn fs() -> @location(0) vec4<f32> {
                     && pass.bind_textures[0].base_array_layer == 1
                     && pass.bind_textures[0].array_layer_count == 1
                     && pass.bind_textures[0].aspect == HalTextureAspect::All
+                    && pass.bind_textures[0].storage_access.is_none()
                     && pass.bind_samplers.len() == 1
                     && pass.bind_samplers[0].group == 0
                     && pass.bind_samplers[0].binding == 1
                     && pass.bind_samplers[0].metal_index == 1
+        ));
+    }
+
+    #[test]
+    fn noop_compute_pass_records_storage_texture_binding() {
+        let device = noop_device();
+        let layout = storage_texture_bind_group_layout(&device);
+        let bind_group = storage_texture_bind_group(&device, layout.clone());
+        let pipeline_layout = explicit_pipeline_layout(&device, layout);
+        let pipeline = storage_texture_compute_pipeline(&device, pipeline_layout);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+        assert_eq!(pass.end(), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(device.queue().submit(&[Arc::new(command_buffer)]), None);
+
+        let submitted = match device.queue().hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => Vec::new(),
+        };
+        assert!(matches!(
+            submitted.as_slice(),
+            [HalCopy::ComputePass(pass)]
+                if pass.bind_textures.len() == 1
+                    && pass.bind_textures[0].group == 0
+                    && pass.bind_textures[0].binding == 0
+                    && pass.bind_textures[0].metal_index == 0
+                    && pass.bind_textures[0].format == yawgpu_hal::HalTextureFormat::Rgba8Unorm
+                    && pass.bind_textures[0].dimension == HalTextureViewDimension::D2
+                    && pass.bind_textures[0].storage_access == Some(HalStorageTextureAccess::ReadOnly)
+                    && pass.bind_samplers.is_empty()
         ));
     }
 
@@ -1358,6 +1494,7 @@ fn fs() -> @location(0) vec4<f32> {
                     && pass.bind_textures[0].base_array_layer == 1
                     && pass.bind_textures[0].array_layer_count == 1
                     && pass.bind_textures[0].aspect == HalTextureAspect::All
+                    && pass.bind_textures[0].storage_access.is_none()
                     && pass.bind_samplers.len() == 1
                     && pass.bind_samplers[0].group == 0
                     && pass.bind_samplers[0].binding == 1

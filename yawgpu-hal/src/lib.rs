@@ -16,8 +16,8 @@ pub use command::{
     HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy,
     HalBufferTextureLayout, HalComputePass, HalCopy, HalDescriptorBinding,
     HalDescriptorBindingKind, HalDraw, HalIndexFormat, HalRenderColorTarget,
-    HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalTextureAspect,
-    HalTextureCopy, HalTextureViewDimension,
+    HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalStorageTextureAccess,
+    HalTextureAspect, HalTextureCopy, HalTextureViewDimension,
 };
 #[cfg(feature = "tiled")]
 pub use command::{
@@ -41,7 +41,7 @@ pub use format::{
     HalVertexStepMode,
 };
 pub use present::{HalPresentMode, HalSurfaceConfiguration};
-pub use shader::{HalShaderSource, HalShaderStage};
+pub use shader::{HalMslBufferSizeBinding, HalShaderSource, HalShaderStage};
 
 /// Enumerates backend paths for shader framebuffer fetch.
 #[cfg(feature = "tiled")]

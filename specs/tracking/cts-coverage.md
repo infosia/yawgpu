@@ -739,6 +739,50 @@ never a reason to skip a CTS case.
     MINOR-2: a redundant `|| target.resolve_target.is_some()` in Vulkan `vk_resolve_attachment_description`
     (always true in context → always `STORE`, correct but misleading). Both deferred. Gate: **no open
     CRITICAL/MAJOR → F-040 slice 2 COMPLETE → F-040 RESOLVED** (CTS resolve green on both Tier-1 backends).
+- **External-CTS finding F-041 — RESOLVED (treated as a phase, with Clean Review).** The T37 (V9)
+  `storage_texture/read_only` port: `textureLoad` on a `texture_storage_2d<format, read>` read back `0`
+  (`pass=0 fail=3`, byte-identical on Metal and Vulkan/MoltenVK), Dawn/wgpu-native pass. **Two root causes**
+  (Claude, source-conclusive + real-GPU + wgpu cross-check):
+  - **(1) Storage-texture bindings were dropped from the pipeline binding map.** `compute_pipeline.rs
+    metal_buffer_binding_map` (shared by compute AND render) skipped `BindingLayoutKind::StorageTexture` via
+    `_ => continue` → the texture was never bound → `textureLoad` read an unbound texture → 0. (First
+    storage-texture *operation* coverage; the binding path was never exercised.)
+  - **(2) Metal: runtime-sized output array needed naga's MSL buffer-sizes buffer.** The shader's output is
+    `array<u32>` (runtime-sized); naga MSL then needs a `_mslBufferSizes` buffer, but
+    `EntryPointResources.sizes_buffer` was `None` → naga returned `Internal: "mapping for sizes buffer is
+    missing"` → the compute pipeline became an error pipeline → nothing ran → 0. **Not a naga bug** —
+    Claude confirmed **wgpu-native passes this test 3/3 on Metal** (same naga→MSL); wgpu provides the sizes
+    buffer, yawgpu did not. SPIR-V has native `OpArrayLength`, so Vulkan was unaffected by (2) — once (1)
+    landed, Vulkan already passed 3/3.
+  - **Fix (coding agent):** (1) `MetalBindingKind::StorageTexture { access }` + `HalDescriptorBindingKind::
+    StorageTexture { access }` (+ `HalStorageTextureAccess`) + `HalBoundTexture.storage_access`, threaded to
+    the HAL; Metal `map_texture_usage` adds `ShaderRead` for `storage_binding`; Vulkan binds `STORAGE_IMAGE`
+    in `GENERAL` layout (descriptor type + pool + pre-dispatch transition). (2) `shader_naga.rs` reflects
+    runtime-sized storage globals, reserves a non-colliding `_mslBufferSizes` slot, sets
+    `bounds_check_policies = Restrict`, threads slot+bindings via `HalShaderSource::{MslWithBufferSizes,
+    MslStagesWithBufferSizes}`; the Metal HAL fills a `uint` byte-length array and binds it via
+    `setBytes`/`setVertex/FragmentBytes`. GLES (Tier 2): `submit_compute_pass` returns a catalogued
+    `HalError` for any texture binding (was silently ignoring `bind_textures`) — `67-gles-backend.md`.
+  - **Verified real-GPU (Claude):** `storage_texture,read_only:* = 3/3` on Metal AND Vulkan/MoltenVK (from
+    `0/3`); no regression (compute/basic 1/0, draw 564/0, color_target 23/0, single_buffer 25/0); Noop
+    workspace green (67 groups); all four clippy gates clean. e2e `metal_read_only_storage_texture_reads_texel`
+    + `vulkan_read_only_storage_texture_reads_texel` (upload texel 7 → `textureLoad` → runtime-sized output →
+    read 7; pre-fix read 0) pass on the M2.
+  - **Phase Review (Clean Review, fresh no-context subagent, read naga 29.0.3 `back/msl/writer.rs` + ran the
+    Metal probe):** **0 CRITICAL, 2 MAJOR (both fixed + re-verified), 3 MINOR (1 fixed, 2 deferred).**
+    MAJOR-1 — `_mslBufferSizes` was filled from the per-entry-point subset, but naga lays the struct over
+    **all** module runtime-array globals (handle order, positional offsets); a multi-entry-point module
+    would misalign → garbage (single-entry, the tested case, coincided). Fixed: reflect all module globals
+    in `global_variables` order; the Metal fill writes `0` for unbound entries. MAJOR-2 — the reserved sizes
+    slot was `max(buffer-resource idx)+1`, colliding with vertex-buffer `[[buffer(n)]]` slots on the render
+    path. Fixed: reserve above resource + vertex-buffer indices. Both got Noop guard tests
+    (`msl_buffer_sizes_cover_all_runtime_arrays_in_module_order`,
+    `render_msl_buffer_sizes_slot_avoids_vertex_buffer_slots`). MINOR-1 (dead `MslWithBufferSizes` render
+    arm) removed; MINOR-2 (Vulkan error wording) + MINOR-3 (unconditional transfer→compute barrier) deferred.
+    Subagent confirmed storage-texture binding, Vulkan STORAGE_IMAGE/GENERAL, `Restrict` policy (safety
+    improvement, no regression), GLES `HalError`, no panics, and sound e2e guards. Gate: **no open
+    CRITICAL/MAJOR → F-041 COMPLETE.** Reinforces [[feedback-claude-owns-gpu-tests]] (Noop+clippy passed
+    while real-GPU exposed the MSL gap) and [[feedback-gpu-probe-false-signals]].
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.

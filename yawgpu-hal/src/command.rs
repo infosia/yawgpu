@@ -164,8 +164,25 @@ pub enum HalDescriptorBindingKind {
     Buffer(HalBufferBindingKind),
     /// Sampled texture variant.
     Texture,
+    /// Storage texture variant.
+    StorageTexture {
+        /// Storage texture access mode.
+        access: HalStorageTextureAccess,
+    },
     /// Sampler variant.
     Sampler,
+}
+
+/// Enumerates HAL storage texture access values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HalStorageTextureAccess {
+    /// Read-only storage texture access.
+    ReadOnly,
+    /// Write-only storage texture access.
+    WriteOnly,
+    /// Read-write storage texture access.
+    ReadWrite,
 }
 
 /// Enumerates HAL buffer binding kind values.
@@ -242,6 +259,8 @@ pub struct HalBoundTexture {
     pub array_layer_count: u32,
     /// Texture aspect exposed by the view.
     pub aspect: HalTextureAspect,
+    /// Storage texture access mode when this binding is a storage texture.
+    pub storage_access: Option<HalStorageTextureAccess>,
 }
 
 /// Wraps a bound sampler for the selected backend.
@@ -721,6 +740,7 @@ mod tests {
             base_array_layer: 6,
             array_layer_count: 7,
             aspect: HalTextureAspect::DepthOnly,
+            storage_access: Some(HalStorageTextureAccess::ReadOnly),
         };
 
         assert_eq!(binding.group, 1);
@@ -734,6 +754,10 @@ mod tests {
         assert_eq!(binding.base_array_layer, 6);
         assert_eq!(binding.array_layer_count, 7);
         assert_eq!(binding.aspect, HalTextureAspect::DepthOnly);
+        assert_eq!(
+            binding.storage_access,
+            Some(HalStorageTextureAccess::ReadOnly)
+        );
     }
 
     #[test]

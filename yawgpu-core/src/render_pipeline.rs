@@ -4,9 +4,9 @@ use std::sync::Arc;
 use yawgpu_hal::{
     HalBackend, HalBlendComponent, HalBlendFactor, HalBlendOperation, HalBlendState,
     HalColorTargetState, HalCompareFunction, HalDepthStencilState, HalDescriptorBinding, HalDevice,
-    HalPrimitiveTopology, HalRenderPipeline, HalRenderPipelineDescriptor, HalShaderSource,
-    HalStencilFaceState, HalStencilOperation, HalVertexAttribute, HalVertexBufferLayout,
-    HalVertexFormat, HalVertexStepMode,
+    HalMslBufferSizeBinding, HalPrimitiveTopology, HalRenderPipeline, HalRenderPipelineDescriptor,
+    HalShaderSource, HalStencilFaceState, HalStencilOperation, HalVertexAttribute,
+    HalVertexBufferLayout, HalVertexFormat, HalVertexStepMode,
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
@@ -1084,9 +1084,17 @@ pub(crate) fn select_render_shader_source(
                     let fragment = fragment_module
                         .generate_render_fragment_msl(fragment_entry_name, &msl_binding_map)?;
                     return Ok((
-                        HalShaderSource::MslStages {
+                        HalShaderSource::MslStagesWithBufferSizes {
                             vertex: vertex.source,
                             fragment: Some(fragment.source),
+                            vertex_buffer_sizes_slot: vertex.buffer_sizes_slot,
+                            vertex_buffer_size_bindings: hal_msl_buffer_size_bindings(
+                                &vertex.buffer_size_bindings,
+                            ),
+                            fragment_buffer_sizes_slot: fragment.buffer_sizes_slot,
+                            fragment_buffer_size_bindings: hal_msl_buffer_size_bindings(
+                                &fragment.buffer_size_bindings,
+                            ),
                         },
                         vertex.entry_point,
                         Some(fragment.entry_point),
@@ -1102,8 +1110,23 @@ pub(crate) fn select_render_shader_source(
                 subpass_color_slots,
                 force_point_size,
             )?;
+            let fragment_source = generated
+                .fragment_entry_point
+                .as_ref()
+                .map(|_| generated.source.clone());
             Ok((
-                HalShaderSource::Msl(generated.source),
+                HalShaderSource::MslStagesWithBufferSizes {
+                    vertex: generated.source,
+                    fragment: fragment_source,
+                    vertex_buffer_sizes_slot: generated.vertex_buffer_sizes_slot,
+                    vertex_buffer_size_bindings: hal_msl_buffer_size_bindings(
+                        &generated.vertex_buffer_size_bindings,
+                    ),
+                    fragment_buffer_sizes_slot: generated.fragment_buffer_sizes_slot,
+                    fragment_buffer_size_bindings: hal_msl_buffer_size_bindings(
+                        &generated.fragment_buffer_size_bindings,
+                    ),
+                },
                 generated.vertex_entry_point,
                 generated.fragment_entry_point,
                 Vec::new(),
@@ -1238,6 +1261,15 @@ pub(crate) fn select_render_shader_source(
         HalBackend::Noop => Err("Noop backend does not create HAL shader sources".to_owned()),
         _ => Err("unsupported backend does not create HAL shader sources".to_owned()),
     }
+}
+
+fn hal_msl_buffer_size_bindings(
+    bindings: &[shader_naga::MslBufferSizeBinding],
+) -> Vec<HalMslBufferSizeBinding> {
+    bindings
+        .iter()
+        .map(|binding| HalMslBufferSizeBinding::new(binding.group, binding.binding))
+        .collect()
 }
 
 /// Returns metal vertex buffer binding map.
@@ -2668,7 +2700,7 @@ mod tests {
 
         assert!(matches!(
             source,
-            HalShaderSource::MslStages { vertex, fragment }
+            HalShaderSource::MslStagesWithBufferSizes { vertex, fragment, .. }
                 if vertex.contains("vertex")
                     && fragment.as_ref().is_some_and(|fragment| fragment.contains("fragment"))
         ));

@@ -13,6 +13,8 @@ pub(super) const IMAGE_LAYOUT_COLOR_ATTACHMENT: u8 = 3;
 pub(super) const IMAGE_LAYOUT_PRESENT: u8 = 4;
 /// Constant value for image layout depth-stencil attachment.
 pub(super) const IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT: u8 = 5;
+/// Constant value for image layout general.
+pub(super) const IMAGE_LAYOUT_GENERAL: u8 = 6;
 
 /// Stores vulkan texture data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -541,6 +543,7 @@ pub(super) fn image_layout(state: u8) -> vk::ImageLayout {
         IMAGE_LAYOUT_TRANSFER_SRC => vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
         IMAGE_LAYOUT_COLOR_ATTACHMENT => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT => vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        IMAGE_LAYOUT_GENERAL => vk::ImageLayout::GENERAL,
         IMAGE_LAYOUT_PRESENT => vk::ImageLayout::PRESENT_SRC_KHR,
         _ => vk::ImageLayout::UNDEFINED,
     }
@@ -556,6 +559,7 @@ pub(super) fn access_mask_for_layout(layout: vk::ImageLayout) -> vk::AccessFlags
             vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
                 | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
         }
+        vk::ImageLayout::GENERAL => vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
         vk::ImageLayout::PRESENT_SRC_KHR => vk::AccessFlags::empty(),
         _ => vk::AccessFlags::empty(),
     }
@@ -573,6 +577,9 @@ pub(super) fn stage_mask_for_layout(layout: vk::ImageLayout) -> vk::PipelineStag
         vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => {
             vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
                 | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS
+        }
+        vk::ImageLayout::GENERAL => {
+            vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::FRAGMENT_SHADER
         }
         vk::ImageLayout::PRESENT_SRC_KHR => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
         _ => vk::PipelineStageFlags::TOP_OF_PIPE,

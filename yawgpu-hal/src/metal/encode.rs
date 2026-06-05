@@ -295,6 +295,7 @@ pub(super) fn encode_compute_pass(
     for binding in &pass.bind_buffers {
         encode_compute_buffer(encoder, binding)?;
     }
+    encode_compute_buffer_sizes(encoder, pipeline, &pass.bind_buffers)?;
     for binding in &pass.bind_textures {
         encode_compute_texture(encoder, binding)?;
     }
@@ -305,6 +306,29 @@ pub(super) fn encode_compute_pass(
         to_mtl_dispatch_size(pass.workgroups)?,
         to_mtl_workgroup_size(pipeline.workgroup_size)?,
     );
+    Ok(())
+}
+
+fn encode_compute_buffer_sizes(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &MetalComputePipeline,
+    buffers: &[HalBoundBuffer],
+) -> Result<(), HalError> {
+    let Some(slot) = pipeline.buffer_sizes_slot else {
+        return Ok(());
+    };
+    let sizes = msl_buffer_sizes(&pipeline.buffer_size_bindings, buffers)?;
+    if sizes.is_empty() {
+        return Ok(());
+    }
+    unsafe {
+        encoder.setBytes_length_atIndex(
+            NonNull::new(sizes.as_ptr().cast_mut().cast())
+                .ok_or_else(|| buffer_error("MSL buffer sizes data is missing"))?,
+            sizes.len() * std::mem::size_of::<u32>(),
+            to_ns(u64::from(slot))?,
+        );
+    }
     Ok(())
 }
 
@@ -357,6 +381,43 @@ fn encode_compute_buffer(
         );
     }
     Ok(())
+}
+
+fn msl_buffer_sizes(
+    size_bindings: &[HalMslBufferSizeBinding],
+    buffers: &[HalBoundBuffer],
+) -> Result<Vec<u32>, HalError> {
+    size_bindings
+        .iter()
+        .map(|size_binding| {
+            let Some(bound) = buffers.iter().find(|bound| {
+                bound.group == size_binding.group && bound.binding == size_binding.binding
+            }) else {
+                return Ok(0);
+            };
+            let size = bound_buffer_size(bound)?;
+            Ok(u32::try_from(size).unwrap_or(u32::MAX))
+        })
+        .collect()
+}
+
+fn bound_buffer_size(bound: &HalBoundBuffer) -> Result<u64, HalError> {
+    let HalBuffer::Metal(buffer) = &bound.buffer else {
+        return Err(buffer_error("MSL buffer-size binding is not Metal-backed"));
+    };
+    if bound.offset > buffer.size() {
+        return Err(buffer_error(
+            "MSL buffer-size binding offset exceeds buffer size",
+        ));
+    }
+    if bound.size == u64::MAX {
+        buffer
+            .size()
+            .checked_sub(bound.offset)
+            .ok_or_else(|| buffer_error("MSL buffer-size binding range exceeds buffer size"))
+    } else {
+        Ok(bound.size)
+    }
 }
 
 /// Returns render pass descriptor.
@@ -662,6 +723,7 @@ pub(super) fn encode_render_pass(
     for binding in &pass.bind_buffers {
         encode_render_bind_buffer(encoder, binding)?;
     }
+    encode_render_buffer_sizes(encoder, pipeline, &pass.bind_buffers)?;
     for binding in &pass.bind_textures {
         encode_render_bind_texture(encoder, binding)?;
     }
@@ -672,6 +734,40 @@ pub(super) fn encode_render_pass(
         encode_render_vertex_buffer(encoder, binding)?;
     }
     encode_render_draw(encoder, pass, pipeline.primitive_topology, draw)?;
+    Ok(())
+}
+
+fn encode_render_buffer_sizes(
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    pipeline: &MetalRenderPipeline,
+    buffers: &[HalBoundBuffer],
+) -> Result<(), HalError> {
+    if let Some(slot) = pipeline.vertex_buffer_sizes_slot {
+        let sizes = msl_buffer_sizes(&pipeline.vertex_buffer_size_bindings, buffers)?;
+        if !sizes.is_empty() {
+            unsafe {
+                encoder.setVertexBytes_length_atIndex(
+                    NonNull::new(sizes.as_ptr().cast_mut().cast())
+                        .ok_or_else(|| buffer_error("MSL vertex buffer sizes data is missing"))?,
+                    sizes.len() * std::mem::size_of::<u32>(),
+                    to_ns(u64::from(slot))?,
+                );
+            }
+        }
+    }
+    if let Some(slot) = pipeline.fragment_buffer_sizes_slot {
+        let sizes = msl_buffer_sizes(&pipeline.fragment_buffer_size_bindings, buffers)?;
+        if !sizes.is_empty() {
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(
+                    NonNull::new(sizes.as_ptr().cast_mut().cast())
+                        .ok_or_else(|| buffer_error("MSL fragment buffer sizes data is missing"))?,
+                    sizes.len() * std::mem::size_of::<u32>(),
+                    to_ns(u64::from(slot))?,
+                );
+            }
+        }
+    }
     Ok(())
 }
 

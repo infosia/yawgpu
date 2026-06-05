@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use yawgpu_hal::{
     HalBackend, HalBufferBindingKind, HalComputePipeline, HalDescriptorBinding,
-    HalDescriptorBindingKind, HalDevice, HalShaderSource,
+    HalDescriptorBindingKind, HalDevice, HalMslBufferSizeBinding, HalShaderSource,
+    HalStorageTextureAccess,
 };
 
 use crate::bind_group_layout::*;
@@ -91,6 +92,8 @@ pub(crate) enum MetalBindingKind {
     Buffer(BufferBindingType),
     /// Sampled texture binding.
     Texture,
+    /// Storage texture binding.
+    StorageTexture { access: StorageTextureAccess },
     /// Sampler binding.
     Sampler,
 }
@@ -253,7 +256,13 @@ pub(crate) fn select_compute_shader_source(
             };
             let generated = module.generate_msl(entry_name, &msl_binding_map)?;
             Ok((
-                HalShaderSource::Msl(generated.source),
+                HalShaderSource::MslWithBufferSizes {
+                    source: generated.source,
+                    buffer_sizes_slot: generated.buffer_sizes_slot,
+                    buffer_size_bindings: hal_msl_buffer_size_bindings(
+                        &generated.buffer_size_bindings,
+                    ),
+                },
                 generated.entry_point,
                 Vec::new(),
             ))
@@ -309,6 +318,15 @@ pub(crate) fn select_compute_shader_source(
     }
 }
 
+fn hal_msl_buffer_size_bindings(
+    bindings: &[shader_naga::MslBufferSizeBinding],
+) -> Vec<HalMslBufferSizeBinding> {
+    bindings
+        .iter()
+        .map(|binding| HalMslBufferSizeBinding::new(binding.group, binding.binding))
+        .collect()
+}
+
 /// Returns HAL descriptor bindings.
 pub(crate) fn hal_descriptor_bindings(
     bindings: &[MetalBufferBinding],
@@ -326,10 +344,24 @@ pub(crate) fn hal_descriptor_bindings(
                     BufferBindingType::Storage | BufferBindingType::ReadOnlyStorage,
                 ) => HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage),
                 MetalBindingKind::Texture => HalDescriptorBindingKind::Texture,
+                MetalBindingKind::StorageTexture { access } => {
+                    HalDescriptorBindingKind::StorageTexture {
+                        access: hal_storage_texture_access(access),
+                    }
+                }
                 MetalBindingKind::Sampler => HalDescriptorBindingKind::Sampler,
             },
         })
         .collect()
+}
+
+/// Converts a storage texture access mode into the corresponding HAL value.
+pub(crate) fn hal_storage_texture_access(access: StorageTextureAccess) -> HalStorageTextureAccess {
+    match access {
+        StorageTextureAccess::ReadOnly => HalStorageTextureAccess::ReadOnly,
+        StorageTextureAccess::WriteOnly => HalStorageTextureAccess::WriteOnly,
+        StorageTextureAccess::ReadWrite => HalStorageTextureAccess::ReadWrite,
+    }
 }
 
 /// Returns MSL resource bindings.
@@ -344,7 +376,9 @@ pub(crate) fn msl_resource_bindings(
             metal_index: binding.metal_index,
             kind: match binding.kind {
                 MetalBindingKind::Buffer(_) => shader_naga::MslResourceBindingKind::Buffer,
-                MetalBindingKind::Texture => shader_naga::MslResourceBindingKind::Texture,
+                MetalBindingKind::Texture | MetalBindingKind::StorageTexture { .. } => {
+                    shader_naga::MslResourceBindingKind::Texture
+                }
                 MetalBindingKind::Sampler => shader_naga::MslResourceBindingKind::Sampler,
             },
         })
@@ -365,6 +399,9 @@ pub(crate) fn metal_buffer_binding_map(
             let kind = match entry.kind {
                 Some(BindingLayoutKind::Buffer { ty, .. }) => MetalBindingKind::Buffer(ty),
                 Some(BindingLayoutKind::Texture { .. }) => MetalBindingKind::Texture,
+                Some(BindingLayoutKind::StorageTexture { access, .. }) => {
+                    MetalBindingKind::StorageTexture { access }
+                }
                 Some(BindingLayoutKind::Sampler { .. }) => MetalBindingKind::Sampler,
                 _ => continue,
             };
