@@ -347,6 +347,16 @@ fn create_render_fbo(
             message: "GLES render pass supports at most one color attachment",
         });
     }
+    if pass
+        .color_targets
+        .iter()
+        .any(|target| target.resolve_target.is_some())
+    {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES render pass does not support multisample/resolve",
+        });
+    }
     let color_target = pass
         .color_targets
         .first()

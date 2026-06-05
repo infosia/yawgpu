@@ -59,6 +59,7 @@ pub(crate) fn sampler_descriptor() -> HalSamplerDescriptor {
 /// Returns render descriptor.
 pub(crate) fn render_descriptor() -> HalRenderPipelineDescriptor {
     HalRenderPipelineDescriptor {
+        sample_count: 1,
         color_targets: vec![HalColorTargetState {
             format: HalTextureFormat::Rgba8Unorm,
             blend: None,

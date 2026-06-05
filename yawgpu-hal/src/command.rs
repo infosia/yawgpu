@@ -311,10 +311,16 @@ pub struct HalSubpassDraw {
 pub struct HalRenderColorTarget {
     /// Texture.
     pub texture: HalTexture,
+    /// Optional resolve target texture.
+    pub resolve_target: Option<HalTexture>,
     /// Mip level the attachment view targets.
     pub mip_level: u32,
     /// Array layer the attachment view targets.
     pub array_layer: u32,
+    /// Mip level the resolve target view targets.
+    pub resolve_mip_level: u32,
+    /// Array layer the resolve target view targets.
+    pub resolve_array_layer: u32,
     /// Load op.
     pub load_op: HalRenderLoadOp,
     /// Store.

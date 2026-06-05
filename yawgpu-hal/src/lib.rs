@@ -1114,6 +1114,7 @@ mod tests {
 
     fn render_pipeline_descriptor() -> HalRenderPipelineDescriptor {
         HalRenderPipelineDescriptor {
+            sample_count: 1,
             color_targets: vec![HalColorTargetState {
                 format: HalTextureFormat::Rgba8Unorm,
                 blend: None,

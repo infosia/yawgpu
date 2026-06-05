@@ -278,6 +278,186 @@ unsafe fn create_two_target_render_pipeline(
     pipeline
 }
 
+/// F-040 slice 2: a `sampleCount=4` MSAA color attachment with a single-sample
+/// `resolveTarget` must resolve into the resolve target (cross-HAL companion to
+/// the Metal MSAA-resolve probe). The triangle's covered pixels resolve to red.
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "vulkan")]
+fn vulkan_msaa_resolve_writes_resolve_target() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let shader = r#"
+struct VertexOut { @builtin(position) position: vec4<f32> }
+@vertex
+fn vs(@location(0) position: vec2<f32>) -> VertexOut {
+    var out: VertexOut;
+    out.position = vec4<f32>(position, 0.0, 1.0);
+    return out;
+}
+@fragment
+fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0, 0.0, 0.0, 1.0); }
+"#;
+        let vertex = create_buffer(
+            device,
+            vertex_buffer_size(),
+            native::WGPUBufferUsage_Vertex | native::WGPUBufferUsage_CopyDst,
+        );
+        write_f32_buffer(queue, vertex, &TRIANGLE_VERTICES);
+        let msaa = create_msaa_texture(device, 4);
+        let resolve = create_texture(
+            device,
+            native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+        );
+        let msaa_view = yawgpu::wgpuTextureCreateView(msaa, std::ptr::null());
+        let resolve_view = yawgpu::wgpuTextureCreateView(resolve, std::ptr::null());
+        let readback = create_buffer(
+            device,
+            READBACK_SIZE as u64,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        let module = create_wgsl_module(device, shader);
+        let pipeline = create_msaa_render_pipeline(device, module, 4);
+
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let attachment = native::WGPURenderPassColorAttachment {
+            nextInChain: std::ptr::null_mut(),
+            view: msaa_view,
+            depthSlice: native::WGPU_DEPTH_SLICE_UNDEFINED,
+            resolveTarget: resolve_view,
+            loadOp: native::WGPULoadOp_Clear,
+            storeOp: native::WGPUStoreOp_Store,
+            clearValue: native::WGPUColor {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        };
+        let attachments = [attachment];
+        let descriptor = render_pass_descriptor(&attachments);
+        let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+        yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertex, 0, vertex_buffer_size());
+        yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        record_t2b(encoder, resolve, readback);
+        submit_encoder(queue, encoder);
+
+        let pixels = read_unpacked_texture_buffer(instance, readback);
+        assert!(
+            contains_pixel(&pixels, [255, 0, 0, 255]),
+            "MSAA resolve did not write a red pixel into the resolve target"
+        );
+        assert!(errors.lock().expect("error lock").is_empty());
+
+        yawgpu::wgpuRenderPipelineRelease(pipeline);
+        yawgpu::wgpuShaderModuleRelease(module);
+        yawgpu::wgpuTextureViewRelease(resolve_view);
+        yawgpu::wgpuTextureViewRelease(msaa_view);
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuTextureRelease(resolve);
+        yawgpu::wgpuTextureRelease(msaa);
+        yawgpu::wgpuBufferRelease(vertex);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+unsafe fn create_msaa_texture(
+    device: native::WGPUDevice,
+    sample_count: u32,
+) -> native::WGPUTexture {
+    let descriptor = native::WGPUTextureDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage: native::WGPUTextureUsage_RenderAttachment,
+        dimension: native::WGPUTextureDimension_2D,
+        size: texture_extent(),
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        mipLevelCount: 1,
+        sampleCount: sample_count,
+        viewFormatCount: 0,
+        viewFormats: std::ptr::null(),
+    };
+    let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+    assert!(!texture.is_null());
+    texture
+}
+
+unsafe fn create_msaa_render_pipeline(
+    device: native::WGPUDevice,
+    module: native::WGPUShaderModule,
+    sample_count: u32,
+) -> native::WGPURenderPipeline {
+    let attribute = native::WGPUVertexAttribute {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUVertexFormat_Float32x2,
+        offset: 0,
+        shaderLocation: 0,
+    };
+    let vertex_buffer = native::WGPUVertexBufferLayout {
+        nextInChain: std::ptr::null_mut(),
+        arrayStride: 8,
+        stepMode: native::WGPUVertexStepMode_Vertex,
+        attributeCount: 1,
+        attributes: &attribute,
+    };
+    let color_target = native::WGPUColorTargetState {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        blend: std::ptr::null(),
+        writeMask: native::WGPUColorWriteMask_All,
+    };
+    let fragment = native::WGPUFragmentState {
+        nextInChain: std::ptr::null_mut(),
+        module,
+        entryPoint: string_view("fs"),
+        constantCount: 0,
+        constants: std::ptr::null(),
+        targetCount: 1,
+        targets: &color_target,
+    };
+    let descriptor = native::WGPURenderPipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout: std::ptr::null(),
+        vertex: native::WGPUVertexState {
+            nextInChain: std::ptr::null_mut(),
+            module,
+            entryPoint: string_view("vs"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            bufferCount: 1,
+            buffers: &vertex_buffer,
+        },
+        primitive: primitive_state(),
+        depthStencil: std::ptr::null(),
+        multisample: native::WGPUMultisampleState {
+            nextInChain: std::ptr::null_mut(),
+            count: sample_count,
+            mask: 0xFFFF_FFFF,
+            alphaToCoverageEnabled: 0,
+        },
+        fragment: &fragment,
+    };
+    let pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(device, &descriptor);
+    assert!(!pipeline.is_null());
+    pipeline
+}
+
 unsafe fn run_render_submit(
     device: native::WGPUDevice,
     shader: &str,

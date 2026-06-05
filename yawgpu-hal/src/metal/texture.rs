@@ -107,12 +107,21 @@ pub(super) fn create_texture(
     device: &ProtocolObject<dyn MTLDevice>,
     descriptor: &HalTextureDescriptor,
 ) -> Result<(Retained<ProtocolObject<dyn MTLTextureTrait>>, u32), HalError> {
-    if descriptor.sample_count != 1 {
-        return Err(texture_error("unsupported texture descriptor"));
+    if descriptor.sample_count != 1 && descriptor.sample_count != 4 {
+        return Err(texture_error("unsupported texture sample count"));
+    }
+    if descriptor.sample_count > 1
+        && (descriptor.dimension != HalTextureDimension::D2
+            || descriptor.depth_or_array_layers != 1)
+    {
+        return Err(texture_error(
+            "multisample texture must be a single-layer 2D texture",
+        ));
     }
     let (pixel_format, bytes_per_pixel) = map_texture_format(descriptor.format)?;
     let texture_descriptor = MTLTextureDescriptor::new();
     texture_descriptor.setTextureType(match descriptor.dimension {
+        HalTextureDimension::D2 if descriptor.sample_count > 1 => MTLTextureType::Type2DMultisample,
         HalTextureDimension::D1 => MTLTextureType::Type1D,
         HalTextureDimension::D2 if descriptor.depth_or_array_layers > 1 => {
             MTLTextureType::Type2DArray
@@ -132,13 +141,20 @@ pub(super) fn create_texture(
             HalTextureDimension::D1 | HalTextureDimension::D2 => 1,
         }))?);
         texture_descriptor.setArrayLength(to_ns(u64::from(match descriptor.dimension {
-            HalTextureDimension::D2 => descriptor.depth_or_array_layers,
+            HalTextureDimension::D2 if descriptor.sample_count == 1 => {
+                descriptor.depth_or_array_layers
+            }
             HalTextureDimension::D1 | HalTextureDimension::D3 => 1,
+            HalTextureDimension::D2 => 1,
         }))?);
         texture_descriptor.setMipmapLevelCount(to_ns(u64::from(descriptor.mip_level_count))?);
-        texture_descriptor.setSampleCount(1);
+        texture_descriptor.setSampleCount(to_ns(u64::from(descriptor.sample_count))?);
     }
-    texture_descriptor.setStorageMode(MTLStorageMode::Shared);
+    texture_descriptor.setStorageMode(if descriptor.sample_count > 1 {
+        MTLStorageMode::Private
+    } else {
+        MTLStorageMode::Shared
+    });
     texture_descriptor.setUsage(map_texture_usage(descriptor.usage));
     let texture = device
         .newTextureWithDescriptor(&texture_descriptor)

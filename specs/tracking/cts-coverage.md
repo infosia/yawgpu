@@ -678,8 +678,8 @@ never a reason to skip a CTS case.
     check is preserved by `validate_compute_dispatch_state`; `scope_*` fields are read only by render
     paths, so removal is clean (no latent submit-sync bug); direct/indirect dispatch now consistent; no
     panics; core rule tightened, not relaxed. Gate: **no open CRITICAL/MAJOR → F-039 COMPLETE.**
-- **External-CTS finding F-040 — IN PROGRESS (3-slice feature; slice 1 of 3 COMPLETE, treated as a
-  phase).** F-040 (`render_pass,resolve` T36, V8): yawgpu's multisample resolve never writes the
+- **External-CTS finding F-040 — RESOLVED (3-slice feature; slices 1 & 2 done, slice 3 subsumed).**
+  F-040 (`render_pass,resolve` T36, V8): yawgpu's multisample resolve never writes the
   `resolveTarget` — `pass=0 fail=12` on Metal and Vulkan/MoltenVK ("expected 1, got 0"), Dawn/wgpu-native
   pass. Root cause is a **feature gap**, not a bug: the regular render path supported only one
   single-sample color attachment with no resolve, and two intentional gates blocked it
@@ -707,7 +707,38 @@ never a reason to skip a CTS case.
     **Dense-only assumption recorded: slices 2/3 must not build on sparse color arrays without carrying
     slot indices or rejecting `None`-gap arrays in core.** MINOR-2: a pre-existing garbled doc comment on
     `HalRenderPass` (not introduced here). Both deferred. Gate: **no open CRITICAL/MAJOR → F-040 slice 1
-    COMPLETE.** (Slices 2 & 3 pending.)
+    COMPLETE.**
+  - **Slice 2 — MSAA pipeline + multisample resolve, COMPLETE (and completed F-040).** Removed the
+    `multisample.count > 1` gate; added `sample_count` to `HalRenderPipelineDescriptor` (from
+    `multisample.count`); added per-color `resolve_target` (+ resolve mip/layer) to
+    `RenderPassColorExecution` and `HalRenderColorTarget`. Metal: pipeline `setRasterSampleCount`;
+    attachment `setResolveTexture`/level/slice + `StoreAndMultisampleResolve`/`MultisampleResolve`; regular
+    `create_texture` now allocates `sampleCount=4` single-layer 2D textures as `Type2DMultisample` with
+    `Private` storage. Vulkan: pipeline `rasterizationSamples` + render-pass color samples from the
+    texture's count; per-target resolve `VkAttachmentDescription` + subpass `p_resolve_attachments`
+    (`VK_ATTACHMENT_UNUSED` for non-resolve) + resolve framebuffer views; regular `create_texture` removed
+    the `sample_count != 1` rejection. GLES (Tier 2): MSAA pipelines + `resolveTarget` return a catalogued
+    `HalError` (`67-gles-backend.md`). Resolve was implemented **generically per color target**
+    (subset-safe), so the CTS's two-attachment resolve-subset shape works — **slice 3 is subsumed**, no
+    separate code needed. +3 Noop unit tests (MSAA pipeline `sample_count` threading; resolve target
+    recorded; Noop HAL accepts a `sample_count=4` descriptor).
+  - **Diagnosis note (Claude, real-GPU):** the agent's first slice-2 pass threaded sample count + resolve
+    but the Metal e2e read back `[0,0,0,0]` — the regular `create_texture` in BOTH backends still rejected
+    `sample_count != 1` (MSAA texture allocation existed only in the `tiled` transient path). The HANDOFF
+    had wrongly said "MSAA textures already work". Claude caught it on real-GPU (Noop+clippy could not),
+    amended the handoff, and the agent added MSAA texture creation. Reinforces [[feedback-claude-owns-gpu-tests]].
+  - **Verified real-GPU (Claude):** **`render_pass,resolve:* = 12/0` on Metal AND Vulkan/MoltenVK** (from
+    `0/12`). e2e probes `metal_msaa_resolve_writes_resolve_target` + `vulkan_msaa_resolve_writes_resolve_target`
+    (single `sampleCount=4` attachment + single-sample resolve target; the resolved pixel reads the drawn
+    colour — a stuck pre-fix path read `0`) pass on the M2. No regression: `color_target_state` 23/0,
+    `draw` 564/0, `depth` 130/0; Noop workspace green (67 groups); all four clippy gates clean.
+  - **Phase Review (Clean Review, fresh no-context subagent):** **0 CRITICAL, 0 MAJOR, 2 MINOR
+    (deferred).** Subagent built default/metal/vulkan/gles, ran clippy + Noop tests, and traced the
+    subset-resolve attachment/framebuffer/clear-value ordering (consistent; `p_resolve_attachments` one
+    entry per color target). MINOR-1: rustfmt churn on 3 pre-existing call sites in the Metal e2e file.
+    MINOR-2: a redundant `|| target.resolve_target.is_some()` in Vulkan `vk_resolve_attachment_description`
+    (always true in context → always `STORE`, correct but misleading). Both deferred. Gate: **no open
+    CRITICAL/MAJOR → F-040 slice 2 COMPLETE → F-040 RESOLVED** (CTS resolve green on both Tier-1 backends).
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.

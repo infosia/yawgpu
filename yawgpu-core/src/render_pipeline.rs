@@ -780,12 +780,6 @@ pub(crate) fn create_hal_render_pipeline(
     if matches!(hal_device.backend(), HalBackend::Noop) {
         return (Some(HalRenderPipeline::Noop), None);
     }
-    if descriptor.multisample.count != 1 {
-        return (
-            None,
-            Some("real render pipeline does not yet support multisample > 1".to_owned()),
-        );
-    }
     if descriptor.fragment.is_none() && descriptor.depth_stencil.is_none() {
         return (
             None,
@@ -1340,6 +1334,7 @@ pub(crate) fn hal_render_pipeline_descriptor(
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(HalRenderPipelineDescriptor {
+        sample_count: descriptor.multisample.count,
         color_targets,
         depth_stencil: descriptor.depth_stencil.map(hal_depth_stencil_state),
         vertex_buffers,
@@ -2580,6 +2575,7 @@ mod tests {
 
         let hal = hal_render_pipeline_descriptor(&descriptor, &[]).expect("HAL render descriptor");
 
+        assert_eq!(hal.sample_count, 1);
         assert_eq!(hal.color_targets.len(), 1);
         let target = hal.color_targets[0];
         assert_eq!(target.format, hal_texture_format(rgba8_unorm()));
@@ -2590,6 +2586,20 @@ mod tests {
         assert_eq!(blend.color.dst_factor, HalBlendFactor::OneMinusConstant);
         assert_eq!(blend.alpha.src_factor, HalBlendFactor::Constant);
         assert_eq!(blend.alpha.dst_factor, HalBlendFactor::OneMinusDstAlpha);
+    }
+
+    #[test]
+    fn hal_render_pipeline_descriptor_carries_multisample_count() {
+        let device = noop_device();
+        let module = render_shader_module(&device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.multisample.count = 4;
+
+        let pipeline = device.create_render_pipeline(descriptor.clone());
+        assert!(!pipeline.is_error());
+
+        let hal = hal_render_pipeline_descriptor(&descriptor, &[]).expect("HAL render descriptor");
+        assert_eq!(hal.sample_count, 4);
     }
 
     #[test]

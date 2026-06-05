@@ -199,8 +199,11 @@ pub(crate) struct SubpassRenderPassCommand {
 #[derive(Debug, Clone)]
 pub(crate) struct RenderPassColorExecution {
     pub(crate) texture: Texture,
+    pub(crate) resolve_target: Option<Texture>,
     pub(crate) mip_level: u32,
     pub(crate) array_layer: u32,
+    pub(crate) resolve_mip_level: u32,
+    pub(crate) resolve_array_layer: u32,
     pub(crate) load_op: LoadOp,
     pub(crate) store_op: StoreOp,
     pub(crate) clear_value: Color,
@@ -1301,13 +1304,19 @@ pub(crate) fn render_pass_color_executions(
         .color_attachments
         .iter()
         .flatten()
-        .map(|attachment| RenderPassColorExecution {
-            texture: attachment.view.texture(),
-            mip_level: attachment.view.base_mip_level(),
-            array_layer: attachment.view.base_array_layer(),
-            load_op: attachment.load_op,
-            store_op: attachment.store_op,
-            clear_value: attachment.clear_value,
+        .map(|attachment| {
+            let resolve_target = attachment.resolve_target.as_ref();
+            RenderPassColorExecution {
+                texture: attachment.view.texture(),
+                resolve_target: resolve_target.map(|view| view.texture()),
+                mip_level: attachment.view.base_mip_level(),
+                array_layer: attachment.view.base_array_layer(),
+                resolve_mip_level: resolve_target.map_or(0, |view| view.base_mip_level()),
+                resolve_array_layer: resolve_target.map_or(0, |view| view.base_array_layer()),
+                load_op: attachment.load_op,
+                store_op: attachment.store_op,
+                clear_value: attachment.clear_value,
+            }
         })
         .collect()
 }
