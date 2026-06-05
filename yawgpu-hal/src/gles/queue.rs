@@ -8,9 +8,10 @@ use super::BACKEND;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::{
     HalBlendFactor, HalBlendOperation, HalBuffer, HalBufferBindingKind, HalBufferClear,
-    HalBufferCopy, HalBufferTextureCopy, HalColorTargetState, HalComputePass, HalComputePipeline,
-    HalCopy, HalDescriptorBinding, HalDescriptorBindingKind, HalDraw, HalError, HalIndexFormat,
-    HalRenderLoadOp, HalRenderPass, HalRenderPipeline, HalTexture, HalTextureCopy,
+    HalBufferCopy, HalBufferTextureCopy, HalColorTargetState, HalCompareFunction, HalComputePass,
+    HalComputePipeline, HalCopy, HalDepthStencilState, HalDescriptorBinding,
+    HalDescriptorBindingKind, HalDraw, HalError, HalIndexFormat, HalRenderLoadOp, HalRenderPass,
+    HalRenderPipeline, HalStencilFaceState, HalStencilOperation, HalTexture, HalTextureCopy,
     HalVertexStepMode,
 };
 
@@ -330,6 +331,7 @@ impl Drop for RenderPassCleanup<'_> {
             self.gl.use_program(None);
             self.gl.color_mask(true, true, true, true);
             self.gl.disable(glow::BLEND);
+            self.gl.disable(glow::STENCIL_TEST);
             self.gl.memory_barrier(glow::ALL_BARRIER_BITS);
         }
     }
@@ -500,6 +502,7 @@ fn run_render_draw(
     bind_vertex_buffers(gl, pass, pipeline, vao)?;
     if let Some(draw) = pass.draw {
         apply_color_target_state(gl, pipeline.color_target(), pass.blend_constant);
+        apply_stencil_state(gl, pipeline.depth_stencil(), pass.stencil_reference)?;
         if let Some(location) = pipeline.first_instance_location() {
             set_first_instance_uniform(gl, location, draw);
         }
@@ -507,6 +510,94 @@ fn run_render_draw(
         run_gles_draw(gl, pass, topology, draw)?;
     }
     Ok(())
+}
+
+fn apply_stencil_state(
+    gl: &glow::Context,
+    depth_stencil: Option<HalDepthStencilState>,
+    stencil_reference: u32,
+) -> Result<(), HalError> {
+    let Some(depth_stencil) = depth_stencil else {
+        unsafe {
+            gl.disable(glow::STENCIL_TEST);
+        }
+        return Ok(());
+    };
+    let reference = i32_from_u32(
+        stencil_reference,
+        "stencil reference value exceeds GLES limit",
+    )?;
+    unsafe {
+        gl.enable(glow::STENCIL_TEST);
+        apply_stencil_face_state(
+            gl,
+            glow::FRONT,
+            depth_stencil.stencil_front,
+            depth_stencil.stencil_read_mask,
+            depth_stencil.stencil_write_mask,
+            reference,
+        );
+        apply_stencil_face_state(
+            gl,
+            glow::BACK,
+            depth_stencil.stencil_back,
+            depth_stencil.stencil_read_mask,
+            depth_stencil.stencil_write_mask,
+            reference,
+        );
+    }
+    Ok(())
+}
+
+unsafe fn apply_stencil_face_state(
+    gl: &glow::Context,
+    face: u32,
+    state: HalStencilFaceState,
+    read_mask: u32,
+    write_mask: u32,
+    reference: i32,
+) {
+    unsafe {
+        gl.stencil_func_separate(
+            face,
+            gles_compare_function(state.compare),
+            reference,
+            read_mask,
+        );
+        gl.stencil_op_separate(
+            face,
+            gles_stencil_operation(state.fail_op),
+            gles_stencil_operation(state.depth_fail_op),
+            gles_stencil_operation(state.pass_op),
+        );
+        gl.stencil_mask_separate(face, write_mask);
+    }
+}
+
+fn gles_compare_function(compare: HalCompareFunction) -> u32 {
+    match compare {
+        HalCompareFunction::Never => glow::NEVER,
+        HalCompareFunction::Less => glow::LESS,
+        HalCompareFunction::Equal => glow::EQUAL,
+        HalCompareFunction::LessEqual => glow::LEQUAL,
+        HalCompareFunction::Greater => glow::GREATER,
+        HalCompareFunction::NotEqual => glow::NOTEQUAL,
+        HalCompareFunction::GreaterEqual => glow::GEQUAL,
+        HalCompareFunction::Always => glow::ALWAYS,
+    }
+}
+
+fn gles_stencil_operation(operation: HalStencilOperation) -> u32 {
+    match operation {
+        HalStencilOperation::Keep => glow::KEEP,
+        HalStencilOperation::Zero => glow::ZERO,
+        HalStencilOperation::Replace => glow::REPLACE,
+        HalStencilOperation::Invert => glow::INVERT,
+        HalStencilOperation::IncrementClamp => glow::INCR,
+        HalStencilOperation::DecrementClamp => glow::DECR,
+        HalStencilOperation::IncrementWrap => glow::INCR_WRAP,
+        HalStencilOperation::DecrementWrap => glow::DECR_WRAP,
+    }
 }
 
 fn apply_color_target_state(

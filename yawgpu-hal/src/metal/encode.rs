@@ -644,6 +644,7 @@ pub(super) fn encode_render_pass(
         pass.blend_constant[2],
         pass.blend_constant[3],
     );
+    encoder.setStencilReferenceValue(pass.stencil_reference);
     for binding in &pass.bind_buffers {
         encode_render_bind_buffer(encoder, binding)?;
     }

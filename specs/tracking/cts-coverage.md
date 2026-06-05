@@ -600,6 +600,45 @@ never a reason to skip a CTS case.
     paths, not applied to compute/fragment/Vulkan/GLES; no panic; Noop unit test
     (`generate_render_msl_forces_point_size_only_when_requested`) + the e2e present. Gate: **no open
     CRITICAL/MAJOR → F-037 COMPLETE.**
+- **External-CTS finding F-038 — RESOLVED (treated as a phase, with Clean Review).** The
+  `rendering/stencil` ports failed `pass=97 fail=91`, **deterministically and byte-identically on Metal
+  and Vulkan/MoltenVK** (so a shared-core bug, not a per-HAL stencil enum mapping), while Dawn +
+  wgpu-native passed 188/188. The failing compares showed the "reflexive" pattern (pass for
+  equal/LE/GE/always, fail for less/greater/not-equal/never regardless of the requested reference) — the
+  hallmark of the stencil **reference** never being applied.
+  - **Diagnosis (Claude, source-conclusive):** `wgpuRenderPassEncoderSetStencilReference` was a
+    **validation-only stub** — `render_pass.rs` `set_stencil_reference(&self, _reference: u32)` discarded
+    the value; there was no `stencil_reference` field on `HalRenderPass` and no
+    `setStencilReference`/`cmd_set_stencil_reference`/`glStencilFunc` reference anywhere in the HAL, so
+    every backend used a default reference of 0. The stencil pipeline state (compare/failOp/depthFailOp/
+    passOp + read/write masks) was already mapped correctly; only the dynamic reference was missing. This
+    is the **stencil analog of the F-035 `blend_constant` fix** — and was the deferred-MINOR observation
+    the F-035 Clean Review had flagged.
+  - **Fix (coding agent):** mirror the `blend_constant` plumbing — `HalRenderPass.stencil_reference: u32`;
+    core `set_stencil_reference` records `state.stencil_reference` (default 0); all four render draw sites
+    (`draw`/`draw_indexed`/`draw_indirect`/`draw_indexed_indirect`) plus the clear-only-pass path snapshot
+    it; `queue.rs` threads it into `HalRenderPass`. Backends: Metal `setStencilReferenceValue`; Vulkan
+    `VK_DYNAMIC_STATE_STENCIL_REFERENCE` in the pipeline dynamic-state list + `cmd_set_stencil_reference
+    (FRONT_AND_BACK, …)`; GLES (Tier 2) per-draw `glStencilFuncSeparate/OpSeparate/MaskSeparate` from the
+    pipeline depth-stencil state + dynamic reference (a reference `> i32::MAX` returns a catalogued Tier-2
+    `HalError`); Noop records. +Noop unit test
+    (`render_pass_encoder_set_stencil_reference_records_draw_reference`).
+  - **Verified real-GPU (Claude):** `rendering/stencil:*` reaches **`188/0` on Metal and `188/0` (skip=1)
+    on Vulkan/MoltenVK** (from `97/91`); `rendering/depth` `130/0` + `color_target_state` `23/0` no
+    regression on both backends. Noop + metal + vulkan + gles clippy clean; workspace test green (67
+    groups, 0 fail). Claude authored `yawgpu/tests/e2e_metal_stencil.rs` — clears stencil to 1 via
+    `stencilClearValue` (independent of the reference), draws with `compare=Equal` + `setStencilReference
+    (1)`; green only if the reference reached the GPU (a stuck 0 → `Equal(0,1)` → black → fail, no
+    reflexive escape). Passes on the M2.
+  - **Phase Review (Clean Review, fresh no-context subagent on the cumulative diff):** **0 CRITICAL, 1
+    MAJOR (resolved), 1 MINOR (deferred).** MAJOR — the GLES `> i32::MAX` `HalError` was shipping
+    uncatalogued; resolved by extending the `67-gles-backend.md` mapping matrix (render-pass row) with the
+    F-038 stencil-test application + the catalogued `HalError`. MINOR — the GLES error message
+    `"stencil reference value exceeds GLES limit"` wording; deferred — it matches the existing in-tree
+    convention (`"draw firstVertex exceeds GLES limit"` etc.) and is defensible. Subagent confirmed: all
+    four draw sites thread the reference, default 0, Vulkan dynamic-state added unconditionally beside
+    `BLEND_CONSTANTS`, Metal once-per-pass, GLES no-panic `?`-based, and the e2e is a sound guard. Gate:
+    **no open CRITICAL/MAJOR → F-038 COMPLETE.**
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.

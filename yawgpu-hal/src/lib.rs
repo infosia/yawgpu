@@ -1383,6 +1383,7 @@ mod tests {
             index_buffer: None,
             indirect_buffer: None,
             blend_constant: [0.0; 4],
+            stencil_reference: 0,
             draw: None,
         })])?;
 

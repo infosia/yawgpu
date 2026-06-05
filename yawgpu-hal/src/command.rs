@@ -280,6 +280,8 @@ pub struct HalRenderPass {
     pub indirect_buffer: Option<Box<HalBoundIndirectBuffer>>,
     /// Render pass blend constant.
     pub blend_constant: [f32; 4],
+    /// Render pass stencil reference.
+    pub stencil_reference: u32,
     /// Draw.
     pub draw: Option<HalDraw>,
 }

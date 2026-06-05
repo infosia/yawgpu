@@ -315,6 +315,7 @@ impl RenderPassEncoder {
                 index_buffer: state.index_buffer.clone(),
                 indirect_buffer: None,
                 blend_constant: state.blend_constant,
+                stencil_reference: state.stencil_reference,
                 draw: Some(RenderDrawExecution::Direct {
                     vertex_count,
                     instance_count,
@@ -377,6 +378,7 @@ impl RenderPassEncoder {
                 index_buffer: Some(index_buffer),
                 indirect_buffer: None,
                 blend_constant: state.blend_constant,
+                stencil_reference: state.stencil_reference,
                 draw: Some(RenderDrawExecution::Indexed {
                     index_count,
                     instance_count,
@@ -431,6 +433,7 @@ impl RenderPassEncoder {
                     offset: indirect_offset,
                 }),
                 blend_constant: state.blend_constant,
+                stencil_reference: state.stencil_reference,
                 draw: Some(RenderDrawExecution::Indirect {
                     offset: indirect_offset,
                 }),
@@ -490,6 +493,7 @@ impl RenderPassEncoder {
                     offset: indirect_offset,
                 }),
                 blend_constant: state.blend_constant,
+                stencil_reference: state.stencil_reference,
                 draw: Some(RenderDrawExecution::IndexedIndirect {
                     offset: indirect_offset,
                 }),
@@ -540,8 +544,11 @@ impl RenderPassEncoder {
     }
 
     /// Sets stencil reference on this object or encoder.
-    pub fn set_stencil_reference(&self, _reference: u32) -> Option<String> {
-        self.inner.record_pass_command(|_| Ok(()))
+    pub fn set_stencil_reference(&self, reference: u32) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            state.stencil_reference = reference;
+            Ok(())
+        })
     }
 
     /// Replays the given render bundles into this pass after validation.
@@ -700,6 +707,7 @@ mod tests {
             })
         ));
         assert_eq!(command.blend_constant, [0.0; 4]);
+        assert_eq!(command.stencil_reference, 0);
     }
 
     #[test]
@@ -731,6 +739,29 @@ mod tests {
             panic!("expected render pass command");
         };
         assert_eq!(command.blend_constant, [0.25, 0.5, 0.75, 1.0]);
+    }
+
+    #[test]
+    fn render_pass_encoder_set_stencil_reference_records_draw_reference() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.set_stencil_reference(37), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        let CommandExecution::RenderPass(command) = &command_buffer.command_ops()[0] else {
+            panic!("expected render pass command");
+        };
+        assert_eq!(command.stencil_reference, 37);
     }
 
     #[test]
