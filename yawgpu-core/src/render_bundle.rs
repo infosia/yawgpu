@@ -106,7 +106,7 @@ impl RenderBundleEncoder {
                                 attachment_signature: Some(attachment_signature),
                                 render_extent: None,
                                 attachment_textures: Vec::new(),
-                                render_color_attachment: None,
+                                render_color_attachments: Vec::new(),
                                 render_depth_stencil_attachment: None,
                                 occlusion_query_set: None,
                                 max_draw_count: u64::MAX,

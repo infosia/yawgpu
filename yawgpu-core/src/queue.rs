@@ -710,7 +710,7 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
     };
     Some(HalCopy::RenderPass(HalRenderPass {
         pipeline,
-        color_target: hal_render_color_target(pass.color_attachment.as_ref())?,
+        color_targets: hal_render_color_targets(&pass.color_attachments)?,
         depth_stencil_attachment: hal_render_depth_stencil_attachment(
             pass.depth_stencil_attachment.as_ref(),
         )?,
@@ -780,25 +780,27 @@ fn hal_index_format(format: IndexFormat) -> HalIndexFormat {
     }
 }
 
-fn hal_render_color_target(
-    attachment: Option<&RenderPassColorExecution>,
-) -> Option<Option<HalRenderColorTarget>> {
-    match attachment {
-        None => Some(None),
-        Some(attachment) => Some(Some(HalRenderColorTarget {
-            texture: attachment.texture.hal()?,
-            mip_level: attachment.mip_level,
-            array_layer: attachment.array_layer,
-            load_op: hal_render_load_op(attachment.load_op),
-            store: matches!(attachment.store_op, StoreOp::Store),
-            clear_color: [
-                attachment.clear_value.r,
-                attachment.clear_value.g,
-                attachment.clear_value.b,
-                attachment.clear_value.a,
-            ],
-        })),
-    }
+fn hal_render_color_targets(
+    attachments: &[RenderPassColorExecution],
+) -> Option<Vec<HalRenderColorTarget>> {
+    attachments
+        .iter()
+        .map(|attachment| {
+            Some(HalRenderColorTarget {
+                texture: attachment.texture.hal()?,
+                mip_level: attachment.mip_level,
+                array_layer: attachment.array_layer,
+                load_op: hal_render_load_op(attachment.load_op),
+                store: matches!(attachment.store_op, StoreOp::Store),
+                clear_color: [
+                    attachment.clear_value.r,
+                    attachment.clear_value.g,
+                    attachment.clear_value.b,
+                    attachment.clear_value.a,
+                ],
+            })
+        })
+        .collect()
 }
 
 fn hal_render_depth_stencil_attachment(
@@ -1375,7 +1377,7 @@ fn fs() -> @location(0) vec4<f32> {
         assert!(matches!(
             command_buffer.command_ops(),
             [CommandExecution::RenderPass(pass)]
-                if pass.color_attachment.is_none()
+                if pass.color_attachments.is_empty()
                     && pass.depth_stencil_attachment.is_some()
                     && pass.draw.is_some()
         ));
@@ -1407,7 +1409,7 @@ fn fs() -> @location(0) vec4<f32> {
                 _ => None,
             })
             .expect("depth-only pass should submit a render pass");
-        assert!(pass.color_target.is_none());
+        assert!(pass.color_targets.is_empty());
         let attachment = pass
             .depth_stencil_attachment
             .as_ref()

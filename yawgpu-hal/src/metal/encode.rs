@@ -364,12 +364,12 @@ pub(super) fn render_pass_descriptor(
     pass: &HalRenderPass,
 ) -> Result<Retained<MTLRenderPassDescriptor>, HalError> {
     let descriptor = MTLRenderPassDescriptor::renderPassDescriptor();
-    if let Some(color_target) = &pass.color_target {
+    for (index, color_target) in pass.color_targets.iter().enumerate() {
         let HalTexture::Metal(texture) = &color_target.texture else {
             return Err(texture_error("render target is not Metal-backed"));
         };
         let color_attachments = descriptor.colorAttachments();
-        let color = unsafe { color_attachments.objectAtIndexedSubscript(0) };
+        let color = unsafe { color_attachments.objectAtIndexedSubscript(to_ns(index as u64)?) };
         color.setTexture(Some(texture.inner()?));
         color.setLevel(to_ns(u64::from(color_target.mip_level))?);
         color.setSlice(to_ns(u64::from(color_target.array_layer))?);

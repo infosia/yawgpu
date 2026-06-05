@@ -171,7 +171,7 @@ pub(crate) struct ComputePassCommand {
 #[derive(Debug, Clone)]
 pub(crate) struct RenderPassCommand {
     pub(crate) pipeline: Option<Arc<RenderPipeline>>,
-    pub(crate) color_attachment: Option<RenderPassColorExecution>,
+    pub(crate) color_attachments: Vec<RenderPassColorExecution>,
     pub(crate) depth_stencil_attachment: Option<RenderPassDepthStencilExecution>,
     pub(crate) attachment_textures: Vec<Texture>,
     pub(crate) bind_groups: BTreeMap<u32, BoundBindGroup>,
@@ -314,7 +314,7 @@ impl CommandEncoder {
                             attachment_signature,
                             render_extent: render_pass_extent(descriptor),
                             attachment_textures: render_pass_attachment_textures(descriptor),
-                            render_color_attachment: render_pass_color_execution(descriptor),
+                            render_color_attachments: render_pass_color_executions(descriptor),
                             render_depth_stencil_attachment: render_pass_depth_stencil_execution(
                                 descriptor,
                             ),
@@ -346,7 +346,7 @@ impl CommandEncoder {
                         attachment_signature: None,
                         render_extent: None,
                         attachment_textures: Vec::new(),
-                        render_color_attachment: None,
+                        render_color_attachments: Vec::new(),
                         render_depth_stencil_attachment: None,
                         occlusion_query_set: None,
                         max_draw_count: u64::MAX,
@@ -1293,15 +1293,14 @@ pub(crate) fn render_pass_query_sets(descriptor: &RenderPassDescriptor) -> Vec<Q
     query_sets
 }
 
-/// Returns render pass color execution.
-pub(crate) fn render_pass_color_execution(
+/// Returns render pass color executions.
+pub(crate) fn render_pass_color_executions(
     descriptor: &RenderPassDescriptor,
-) -> Option<RenderPassColorExecution> {
+) -> Vec<RenderPassColorExecution> {
     descriptor
         .color_attachments
         .iter()
         .flatten()
-        .next()
         .map(|attachment| RenderPassColorExecution {
             texture: attachment.view.texture(),
             mip_level: attachment.view.base_mip_level(),
@@ -1310,6 +1309,7 @@ pub(crate) fn render_pass_color_execution(
             store_op: attachment.store_op,
             clear_value: attachment.clear_value,
         })
+        .collect()
 }
 
 /// Returns render pass depth-stencil execution.

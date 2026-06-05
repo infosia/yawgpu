@@ -786,16 +786,6 @@ pub(crate) fn create_hal_render_pipeline(
             Some("real render pipeline does not yet support multisample > 1".to_owned()),
         );
     }
-    if descriptor
-        .fragment
-        .as_ref()
-        .is_some_and(|fragment| fragment.target_count > 1)
-    {
-        return (
-            None,
-            Some("real render pipeline currently supports at most one color target".to_owned()),
-        );
-    }
     if descriptor.fragment.is_none() && descriptor.depth_stencil.is_none() {
         return (
             None,

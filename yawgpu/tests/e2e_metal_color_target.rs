@@ -41,6 +41,26 @@ fn fs() -> @location(0) vec4<f32> {
 }
 "#;
 
+// F-040 slice 1: two color attachments; fragment writes distinct colors to
+// each — location 0 red, location 1 green.
+const MRT_SHADER: &str = r#"
+@vertex
+fn vs(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4<f32> {
+    var pos = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0, -1.0), vec2<f32>(-1.0,  1.0),
+        vec2<f32>(-1.0,  1.0), vec2<f32>( 1.0, -1.0), vec2<f32>( 1.0,  1.0));
+    return vec4<f32>(pos[idx], 0.0, 1.0);
+}
+struct FragmentOut {
+    @location(0) a: vec4<f32>,
+    @location(1) b: vec4<f32>,
+}
+@fragment
+fn fs() -> FragmentOut {
+    return FragmentOut(vec4<f32>(1.0, 0.0, 0.0, 1.0), vec4<f32>(0.0, 1.0, 0.0, 1.0));
+}
+"#;
+
 /// `writeMask = Red`: clear to black-opaque, draw white — only the red channel is
 /// written, so the pixel reads `[255, 0, 0, 255]` (not `[255,255,255,255]`).
 #[test]
@@ -133,6 +153,172 @@ fn metal_blend_constant_scales_output() {
         assert!(errors.lock().expect("error lock").is_empty());
         teardown(module, pipeline, queue, device, adapter, instance);
     }
+}
+
+/// F-040 slice 1: a render pass with TWO color attachments and a two-target
+/// pipeline must write each attachment independently — attachment 0 reads red,
+/// attachment 1 reads green. Before slice 1 only one color target was supported.
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "metal")]
+fn metal_two_color_attachments_write_distinct_targets() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+    unsafe {
+        let (instance, adapter, device, queue, errors) = setup();
+        let module = create_wgsl_module(device, MRT_SHADER);
+        let pipeline = create_two_target_pipeline(device, module);
+        let (pixel_a, pixel_b) = render_two_color_attachments(instance, device, queue, pipeline);
+        assert_eq!(pixel_a, [255, 0, 0, 255], "attachment 0 should be red");
+        assert_eq!(pixel_b, [0, 255, 0, 255], "attachment 1 should be green");
+        assert!(errors.lock().expect("error lock").is_empty());
+        teardown(module, pipeline, queue, device, adapter, instance);
+    }
+}
+
+#[cfg(feature = "metal")]
+unsafe fn render_two_color_attachments(
+    instance: native::WGPUInstance,
+    device: native::WGPUDevice,
+    queue: native::WGPUQueue,
+    pipeline: native::WGPURenderPipeline,
+) -> ([u8; 4], [u8; 4]) {
+    let color_a = create_color_texture(device);
+    let color_b = create_color_texture(device);
+    let readback_a = create_buffer(
+        device,
+        READBACK_SIZE as u64,
+        native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+    );
+    let readback_b = create_buffer(
+        device,
+        READBACK_SIZE as u64,
+        native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+    );
+    let view_a = yawgpu::wgpuTextureCreateView(color_a, std::ptr::null());
+    let view_b = yawgpu::wgpuTextureCreateView(color_b, std::ptr::null());
+    let make_attachment = |view| native::WGPURenderPassColorAttachment {
+        nextInChain: std::ptr::null_mut(),
+        view,
+        depthSlice: native::WGPU_DEPTH_SLICE_UNDEFINED,
+        resolveTarget: std::ptr::null(),
+        loadOp: native::WGPULoadOp_Clear,
+        storeOp: native::WGPUStoreOp_Store,
+        clearValue: native::WGPUColor {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        },
+    };
+    let attachments = [make_attachment(view_a), make_attachment(view_b)];
+    let pass_descriptor = native::WGPURenderPassDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        colorAttachmentCount: attachments.len(),
+        colorAttachments: attachments.as_ptr(),
+        depthStencilAttachment: std::ptr::null(),
+        occlusionQuerySet: std::ptr::null(),
+        timestampWrites: std::ptr::null(),
+    };
+    let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+    let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_descriptor);
+    yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+    yawgpu::wgpuRenderPassEncoderDraw(pass, 6, 1, 0, 0);
+    yawgpu::wgpuRenderPassEncoderEnd(pass);
+    yawgpu::wgpuRenderPassEncoderRelease(pass);
+    for (texture, buffer) in [(color_a, readback_a), (color_b, readback_b)] {
+        let src = native::WGPUTexelCopyTextureInfo {
+            texture,
+            mipLevel: 0,
+            origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+            aspect: native::WGPUTextureAspect_All,
+        };
+        let dst = native::WGPUTexelCopyBufferInfo {
+            layout: native::WGPUTexelCopyBufferLayout {
+                offset: 0,
+                bytesPerRow: BYTES_PER_ROW,
+                rowsPerImage: HEIGHT,
+            },
+            buffer,
+        };
+        yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &src, &dst, &texture_extent());
+    }
+    let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+    yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+    yawgpu::wgpuCommandBufferRelease(command_buffer);
+    yawgpu::wgpuCommandEncoderRelease(encoder);
+
+    let pixels_a = read_buffer(instance, readback_a, 0, READBACK_SIZE);
+    let pixels_b = read_buffer(instance, readback_b, 0, READBACK_SIZE);
+    let result = (
+        [pixels_a[0], pixels_a[1], pixels_a[2], pixels_a[3]],
+        [pixels_b[0], pixels_b[1], pixels_b[2], pixels_b[3]],
+    );
+    yawgpu::wgpuTextureViewRelease(view_b);
+    yawgpu::wgpuTextureViewRelease(view_a);
+    yawgpu::wgpuBufferRelease(readback_b);
+    yawgpu::wgpuBufferRelease(readback_a);
+    yawgpu::wgpuTextureRelease(color_b);
+    yawgpu::wgpuTextureRelease(color_a);
+    result
+}
+
+#[cfg(feature = "metal")]
+unsafe fn create_two_target_pipeline(
+    device: native::WGPUDevice,
+    module: native::WGPUShaderModule,
+) -> native::WGPURenderPipeline {
+    let color_target = native::WGPUColorTargetState {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        blend: std::ptr::null(),
+        writeMask: native::WGPUColorWriteMask_All,
+    };
+    let targets = [color_target, color_target];
+    let fragment = native::WGPUFragmentState {
+        nextInChain: std::ptr::null_mut(),
+        module,
+        entryPoint: string_view("fs"),
+        constantCount: 0,
+        constants: std::ptr::null(),
+        targetCount: targets.len(),
+        targets: targets.as_ptr(),
+    };
+    let descriptor = native::WGPURenderPipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout: std::ptr::null(),
+        vertex: native::WGPUVertexState {
+            nextInChain: std::ptr::null_mut(),
+            module,
+            entryPoint: string_view("vs"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            bufferCount: 0,
+            buffers: std::ptr::null(),
+        },
+        primitive: native::WGPUPrimitiveState {
+            nextInChain: std::ptr::null_mut(),
+            topology: native::WGPUPrimitiveTopology_TriangleList,
+            stripIndexFormat: native::WGPUIndexFormat_Undefined,
+            frontFace: native::WGPUFrontFace_Undefined,
+            cullMode: native::WGPUCullMode_Undefined,
+            unclippedDepth: 0,
+        },
+        depthStencil: std::ptr::null(),
+        multisample: native::WGPUMultisampleState {
+            nextInChain: std::ptr::null_mut(),
+            count: 1,
+            mask: 0xFFFF_FFFF,
+            alphaToCoverageEnabled: 0,
+        },
+        fragment: &fragment,
+    };
+    let pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(device, &descriptor);
+    assert!(!pipeline.is_null());
+    pipeline
 }
 
 #[cfg(feature = "metal")]

@@ -116,6 +116,168 @@ fn fs() -> @location(0) vec4<f32> {
     }
 }
 
+/// F-040 slice 1: a render pass with TWO color attachments + a two-target
+/// pipeline must write each attachment independently — drawn pixels read red in
+/// attachment 0 and green in attachment 1 (cross-HAL companion to the Metal MRT
+/// probe).
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "vulkan")]
+fn vulkan_render_two_color_attachments_write_distinct_targets() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let shader = r#"
+struct VertexOut { @builtin(position) position: vec4<f32> }
+@vertex
+fn vs(@location(0) position: vec2<f32>) -> VertexOut {
+    var out: VertexOut;
+    out.position = vec4<f32>(position, 0.0, 1.0);
+    return out;
+}
+struct FragmentOut {
+    @location(0) a: vec4<f32>,
+    @location(1) b: vec4<f32>,
+}
+@fragment
+fn fs() -> FragmentOut {
+    return FragmentOut(vec4<f32>(1.0, 0.0, 0.0, 1.0), vec4<f32>(0.0, 1.0, 0.0, 1.0));
+}
+"#;
+        let vertex = create_buffer(
+            device,
+            vertex_buffer_size(),
+            native::WGPUBufferUsage_Vertex | native::WGPUBufferUsage_CopyDst,
+        );
+        write_f32_buffer(queue, vertex, &TRIANGLE_VERTICES);
+        let texture_a = create_texture(
+            device,
+            native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+        );
+        let texture_b = create_texture(
+            device,
+            native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+        );
+        let view_a = yawgpu::wgpuTextureCreateView(texture_a, std::ptr::null());
+        let view_b = yawgpu::wgpuTextureCreateView(texture_b, std::ptr::null());
+        let readback_a = create_buffer(
+            device,
+            READBACK_SIZE as u64,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        let readback_b = create_buffer(
+            device,
+            READBACK_SIZE as u64,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        let module = create_wgsl_module(device, shader);
+        let pipeline = create_two_target_render_pipeline(device, module);
+
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let attachments = [color_attachment(view_a), color_attachment(view_b)];
+        let descriptor = render_pass_descriptor(&attachments);
+        let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+        yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertex, 0, vertex_buffer_size());
+        yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        record_t2b(encoder, texture_a, readback_a);
+        record_t2b(encoder, texture_b, readback_b);
+        submit_encoder(queue, encoder);
+
+        let pixels_a = read_unpacked_texture_buffer(instance, readback_a);
+        let pixels_b = read_unpacked_texture_buffer(instance, readback_b);
+        assert!(
+            contains_pixel(&pixels_a, [255, 0, 0, 255]),
+            "attachment 0 should contain a red drawn pixel"
+        );
+        assert!(
+            contains_pixel(&pixels_b, [0, 255, 0, 255]),
+            "attachment 1 should contain a green drawn pixel"
+        );
+        assert!(errors.lock().expect("error lock").is_empty());
+
+        yawgpu::wgpuRenderPipelineRelease(pipeline);
+        yawgpu::wgpuShaderModuleRelease(module);
+        yawgpu::wgpuTextureViewRelease(view_b);
+        yawgpu::wgpuTextureViewRelease(view_a);
+        yawgpu::wgpuBufferRelease(readback_b);
+        yawgpu::wgpuBufferRelease(readback_a);
+        yawgpu::wgpuTextureRelease(texture_b);
+        yawgpu::wgpuTextureRelease(texture_a);
+        yawgpu::wgpuBufferRelease(vertex);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+unsafe fn create_two_target_render_pipeline(
+    device: native::WGPUDevice,
+    module: native::WGPUShaderModule,
+) -> native::WGPURenderPipeline {
+    let attribute = native::WGPUVertexAttribute {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUVertexFormat_Float32x2,
+        offset: 0,
+        shaderLocation: 0,
+    };
+    let vertex_buffer = native::WGPUVertexBufferLayout {
+        nextInChain: std::ptr::null_mut(),
+        arrayStride: 8,
+        stepMode: native::WGPUVertexStepMode_Vertex,
+        attributeCount: 1,
+        attributes: &attribute,
+    };
+    let color_target = native::WGPUColorTargetState {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        blend: std::ptr::null(),
+        writeMask: native::WGPUColorWriteMask_All,
+    };
+    let targets = [color_target, color_target];
+    let fragment = native::WGPUFragmentState {
+        nextInChain: std::ptr::null_mut(),
+        module,
+        entryPoint: string_view("fs"),
+        constantCount: 0,
+        constants: std::ptr::null(),
+        targetCount: targets.len(),
+        targets: targets.as_ptr(),
+    };
+    let descriptor = native::WGPURenderPipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout: std::ptr::null(),
+        vertex: native::WGPUVertexState {
+            nextInChain: std::ptr::null_mut(),
+            module,
+            entryPoint: string_view("vs"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            bufferCount: 1,
+            buffers: &vertex_buffer,
+        },
+        primitive: primitive_state(),
+        depthStencil: std::ptr::null(),
+        multisample: multisample_state(),
+        fragment: &fragment,
+    };
+    let pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(device, &descriptor);
+    assert!(!pipeline.is_null());
+    pipeline
+}
+
 unsafe fn run_render_submit(
     device: native::WGPUDevice,
     shader: &str,
