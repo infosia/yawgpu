@@ -209,6 +209,8 @@ pub(crate) struct SubpassDrawExecution {
     pub(crate) bind_groups: std::collections::BTreeMap<u32, BoundBindGroup>,
     pub(crate) vertex_buffers: std::collections::BTreeMap<u32, BoundVertexBuffer>,
     pub(crate) index_buffer: Option<BoundIndexBuffer>,
+    pub(crate) viewport: Option<Viewport>,
+    pub(crate) scissor_rect: Option<ScissorRect>,
     pub(crate) draw: RenderDrawExecution,
 }
 
@@ -218,6 +220,8 @@ struct SubpassDrawState {
     bind_groups: std::collections::BTreeMap<u32, BoundBindGroup>,
     vertex_buffers: std::collections::BTreeMap<u32, BoundVertexBuffer>,
     index_buffer: Option<BoundIndexBuffer>,
+    viewport: Option<Viewport>,
+    scissor_rect: Option<ScissorRect>,
     draws: Vec<SubpassDrawExecution>,
 }
 
@@ -518,20 +522,35 @@ impl SubpassRenderPass {
         min_depth: f32,
         max_depth: f32,
     ) -> Option<String> {
-        self.record_draw_command(|_, _| {
-            validate_viewport(x, y, width, height, min_depth, max_depth)
+        self.record_draw_command(|state, _| {
+            validate_viewport(x, y, width, height, min_depth, max_depth)?;
+            state.viewport = Some(Viewport {
+                x,
+                y,
+                width,
+                height,
+                min_depth,
+                max_depth,
+            });
+            Ok(())
         })
     }
 
     /// Sets scissor rect on this subpass render pass.
     pub fn set_scissor_rect(&self, x: u32, y: u32, width: u32, height: u32) -> Option<String> {
-        self.record_draw_command(|_, _| {
+        self.record_draw_command(|state, _| {
             x.checked_add(width).ok_or_else(|| {
                 "subpass render pass scissor rectangle width overflows".to_owned()
             })?;
             y.checked_add(height).ok_or_else(|| {
                 "subpass render pass scissor rectangle height overflows".to_owned()
             })?;
+            state.scissor_rect = Some(ScissorRect {
+                x,
+                y,
+                width,
+                height,
+            });
             Ok(())
         })
     }
@@ -560,6 +579,8 @@ impl SubpassRenderPass {
                 bind_groups: state.bind_groups.clone(),
                 vertex_buffers: state.vertex_buffers.clone(),
                 index_buffer: state.index_buffer.clone(),
+                viewport: state.viewport,
+                scissor_rect: state.scissor_rect,
                 draw,
             });
             Ok(())
@@ -1507,6 +1528,73 @@ mod tests {
             panic!("expected direct subpass draw");
         };
         assert_eq!(vertex_count, 3);
+    }
+
+    #[test]
+    fn subpass_render_pass_draw_threads_viewport_and_scissor_to_hal() {
+        let device = noop_device();
+        let layout = Arc::new(device.create_subpass_pass_layout(two_subpass_layout_descriptor()));
+        let pipeline = Arc::new(device.create_subpass_render_pipeline(
+            subpass_pipeline_descriptor(&device, Arc::clone(&layout), 0),
+        ));
+        assert!(!pipeline.is_error());
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::VERTEX,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_subpass_render_pass(
+            &device,
+            SubpassRenderPassDescriptor {
+                pass_layout: layout,
+                extent: Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                color_attachments: vec![persistent_color(&device), persistent_color(&device)],
+                depth_stencil_attachment: None,
+                error: None,
+            },
+        );
+        assert_eq!(error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_vertex_buffer(0, Some(Arc::clone(&buffer)), 0, 16, device.limits()),
+            None
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.set_viewport(1.0, 2.0, 3.0, 4.0, 0.25, 0.75), None);
+        assert_eq!(pass.set_scissor_rect(1, 1, 2, 2), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        let hal_copy = crate::queue::hal_command_execution(&command_buffer.command_ops()[0])
+            .expect("subpass command should map to HAL");
+        let yawgpu_hal::HalCopy::SubpassRenderPass(pass) = hal_copy else {
+            panic!("expected HAL subpass render pass");
+        };
+        assert_eq!(pass.draws.len(), 2);
+        assert_eq!(pass.draws[0].viewport, None);
+        assert_eq!(pass.draws[0].scissor_rect, None);
+        let viewport = pass.draws[1].viewport.expect("viewport should be threaded");
+        assert_eq!(viewport.x, 1.0);
+        assert_eq!(viewport.y, 2.0);
+        assert_eq!(viewport.width, 3.0);
+        assert_eq!(viewport.height, 4.0);
+        assert_eq!(viewport.min_depth, 0.25);
+        assert_eq!(viewport.max_depth, 0.75);
+        let scissor = pass.draws[1]
+            .scissor_rect
+            .expect("scissor rect should be threaded");
+        assert_eq!(scissor.x, 1);
+        assert_eq!(scissor.y, 1);
+        assert_eq!(scissor.width, 2);
+        assert_eq!(scissor.height, 2);
     }
 
     #[test]

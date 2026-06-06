@@ -18,3 +18,13 @@ jobs:
         run: cargo test --workspace
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # Compile-gate the `tiled` feature so its Noop-buildable code can't rot
+      # unnoticed (it is never in `default`). Backend-specific tiled code
+      # (`tiled,metal` / `tiled,vulkan`) only compiles on a GPU host and is
+      # gated in the local review workflow, not here.
+      - name: Build (tiled)
+        run: cargo build --workspace --features tiled
+      - name: Test (tiled)
+        run: cargo test --workspace --features tiled
+      - name: Clippy (tiled)
+        run: cargo clippy --workspace --features tiled --all-targets -- -D warnings

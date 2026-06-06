@@ -345,7 +345,6 @@ pub(super) fn create_transient_attachment(
             owns_image: true,
             mip_level_count: 1,
             array_layers: 1,
-            sample_count: descriptor.sample_count,
             layout: AtomicU8::new(IMAGE_LAYOUT_UNDEFINED),
         }),
         _format: descriptor.format,

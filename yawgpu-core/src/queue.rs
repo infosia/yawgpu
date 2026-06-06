@@ -432,6 +432,8 @@ fn hal_subpass_draw_execution(draw: &SubpassDrawExecution) -> Option<HalSubpassD
         bind_textures: bindings.textures,
         bind_samplers: bindings.samplers,
         vertex_buffers,
+        viewport: draw.viewport.map(hal_viewport),
+        scissor_rect: draw.scissor_rect.map(hal_scissor_rect),
         draw: HalDraw::Direct {
             vertex_count,
             instance_count,

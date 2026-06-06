@@ -226,7 +226,7 @@ impl MetalDevice {
         self.create_render_pipeline(
             shader,
             vertex_entry_point,
-            fragment_entry_point,
+            Some(fragment_entry_point),
             &adjusted,
             &[],
         )
