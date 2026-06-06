@@ -314,6 +314,8 @@ impl RenderPassEncoder {
                 vertex_buffers: state.vertex_buffers.clone(),
                 index_buffer: state.index_buffer.clone(),
                 indirect_buffer: None,
+                viewport: state.viewport,
+                scissor_rect: state.scissor_rect,
                 blend_constant: state.blend_constant,
                 stencil_reference: state.stencil_reference,
                 draw: Some(RenderDrawExecution::Direct {
@@ -377,6 +379,8 @@ impl RenderPassEncoder {
                 vertex_buffers: state.vertex_buffers.clone(),
                 index_buffer: Some(index_buffer),
                 indirect_buffer: None,
+                viewport: state.viewport,
+                scissor_rect: state.scissor_rect,
                 blend_constant: state.blend_constant,
                 stencil_reference: state.stencil_reference,
                 draw: Some(RenderDrawExecution::Indexed {
@@ -432,6 +436,8 @@ impl RenderPassEncoder {
                     buffer: indirect_buffer,
                     offset: indirect_offset,
                 }),
+                viewport: state.viewport,
+                scissor_rect: state.scissor_rect,
                 blend_constant: state.blend_constant,
                 stencil_reference: state.stencil_reference,
                 draw: Some(RenderDrawExecution::Indirect {
@@ -492,6 +498,8 @@ impl RenderPassEncoder {
                     buffer: indirect_buffer,
                     offset: indirect_offset,
                 }),
+                viewport: state.viewport,
+                scissor_rect: state.scissor_rect,
                 blend_constant: state.blend_constant,
                 stencil_reference: state.stencil_reference,
                 draw: Some(RenderDrawExecution::IndexedIndirect {
@@ -515,7 +523,16 @@ impl RenderPassEncoder {
     ) -> Option<String> {
         self.inner.record_pass_command(|state| {
             validate_viewport(x, y, width, height, min_depth, max_depth)?;
-            validate_viewport_bounds(x, y, width, height, state.limits)
+            validate_viewport_bounds(x, y, width, height, state.limits)?;
+            state.viewport = Some(Viewport {
+                x,
+                y,
+                width,
+                height,
+                min_depth,
+                max_depth,
+            });
+            Ok(())
         })
     }
 
@@ -527,6 +544,12 @@ impl RenderPassEncoder {
             y.checked_add(height)
                 .ok_or_else(|| "render pass scissor rectangle height overflows".to_owned())?;
             validate_scissor_rect(state.render_extent, x, y, width, height)?;
+            state.scissor_rect = Some(ScissorRect {
+                x,
+                y,
+                width,
+                height,
+            });
             Ok(())
         })
     }
@@ -597,6 +620,8 @@ impl RenderPassEncoder {
                         vertex_buffers: draw.vertex_buffers.clone(),
                         index_buffer: draw.index_buffer.clone(),
                         indirect_buffer: draw.indirect_buffer.clone(),
+                        viewport: state.viewport,
+                        scissor_rect: state.scissor_rect,
                         blend_constant: state.blend_constant,
                         stencil_reference: state.stencil_reference,
                         draw: Some(draw.draw),
@@ -1300,6 +1325,9 @@ fn fs() -> FragmentOutput {
             primitive: PrimitiveState {
                 topology: PrimitiveTopology::TriangleList,
                 strip_index_format: None,
+                front_face: FrontFace::Ccw,
+                cull_mode: CullMode::None,
+                unclipped_depth: false,
             },
             depth_stencil: None,
             multisample: MultisampleState {

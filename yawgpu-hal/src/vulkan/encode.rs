@@ -769,12 +769,21 @@ pub(super) fn encode_compute_pass(
                 &[],
             );
         }
-        device.cmd_dispatch(
-            command_buffer,
-            pass.workgroups.0,
-            pass.workgroups.1,
-            pass.workgroups.2,
-        );
+        match &pass.dispatch {
+            HalComputeDispatch::Direct { workgroups } => {
+                device.cmd_dispatch(command_buffer, workgroups.0, workgroups.1, workgroups.2);
+            }
+            HalComputeDispatch::Indirect { buffer } => {
+                let HalBuffer::Vulkan(indirect_buffer) = &buffer.buffer else {
+                    return Err(buffer_error("compute indirect buffer is not Vulkan-backed"));
+                };
+                device.cmd_dispatch_indirect(
+                    command_buffer,
+                    indirect_buffer.inner()?.buffer,
+                    buffer.offset,
+                );
+            }
+        }
     }
     compute_to_transfer_barrier(device, command_buffer);
     Ok(ComputePassTemps {
@@ -1638,16 +1647,36 @@ pub(super) fn encode_render_pass(
                 vk::PipelineBindPoint::GRAPHICS,
                 pipeline.inner.pipeline,
             );
-            let viewport = vk::Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: width as f32,
-                height: height as f32,
-                min_depth: 0.0,
-                max_depth: 1.0,
-            };
+            let viewport = pass.viewport.map_or(
+                vk::Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: width as f32,
+                    height: height as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                },
+                |viewport| vk::Viewport {
+                    x: viewport.x,
+                    y: viewport.y,
+                    width: viewport.width,
+                    height: viewport.height,
+                    min_depth: viewport.min_depth,
+                    max_depth: viewport.max_depth,
+                },
+            );
+            let scissor = pass.scissor_rect.map_or(render_area, |rect| vk::Rect2D {
+                offset: vk::Offset2D {
+                    x: rect.x as i32,
+                    y: rect.y as i32,
+                },
+                extent: vk::Extent2D {
+                    width: rect.width,
+                    height: rect.height,
+                },
+            });
             device.cmd_set_viewport(command_buffer, 0, &[viewport]);
-            device.cmd_set_scissor(command_buffer, 0, &[render_area]);
+            device.cmd_set_scissor(command_buffer, 0, &[scissor]);
             device.cmd_set_blend_constants(command_buffer, &pass.blend_constant);
             device.cmd_set_stencil_reference(
                 command_buffer,

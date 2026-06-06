@@ -271,6 +271,9 @@ pub(crate) fn render_pipeline_descriptor(module: Arc<ShaderModule>) -> RenderPip
         primitive: PrimitiveState {
             topology: PrimitiveTopology::TriangleList,
             strip_index_format: None,
+            front_face: FrontFace::Ccw,
+            cull_mode: CullMode::None,
+            unclipped_depth: false,
         },
         depth_stencil: None,
         multisample: MultisampleState {

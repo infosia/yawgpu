@@ -8,6 +8,10 @@ use crate::{
 pub struct HalRenderPipelineDescriptor {
     /// Multisample count.
     pub sample_count: u32,
+    /// Multisample coverage mask.
+    pub sample_mask: u32,
+    /// Enables alpha-to-coverage.
+    pub alpha_to_coverage_enabled: bool,
     /// Color target states.
     pub color_targets: Vec<HalColorTargetState>,
     /// Depth stencil state.
@@ -16,6 +20,34 @@ pub struct HalRenderPipelineDescriptor {
     pub vertex_buffers: Vec<HalVertexBufferLayout>,
     /// Primitive topology.
     pub primitive_topology: HalPrimitiveTopology,
+    /// Front-facing winding.
+    pub front_face: HalFrontFace,
+    /// Face culling mode.
+    pub cull_mode: HalCullMode,
+    /// Enables unclipped depth.
+    pub unclipped_depth: bool,
+}
+
+/// Enumerates HAL front-facing winding values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HalFrontFace {
+    /// Counter-clockwise winding.
+    Ccw,
+    /// Clockwise winding.
+    Cw,
+}
+
+/// Enumerates HAL primitive culling values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HalCullMode {
+    /// Disable face culling.
+    None,
+    /// Cull front-facing primitives.
+    Front,
+    /// Cull back-facing primitives.
+    Back,
 }
 
 /// Describes one HAL color target state.

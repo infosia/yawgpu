@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
-    HalColorTargetState, HalPresentMode, HalRenderPipelineDescriptor, HalSamplerDescriptor,
-    HalTextureDimension, HalTextureUsage,
+    HalColorTargetState, HalCullMode, HalFrontFace, HalPresentMode, HalRenderPipelineDescriptor,
+    HalSamplerDescriptor, HalTextureDimension, HalTextureUsage,
 };
 
 /// Returns vulkan device.
@@ -60,6 +60,8 @@ pub(crate) fn sampler_descriptor() -> HalSamplerDescriptor {
 pub(crate) fn render_descriptor() -> HalRenderPipelineDescriptor {
     HalRenderPipelineDescriptor {
         sample_count: 1,
+        sample_mask: u32::MAX,
+        alpha_to_coverage_enabled: false,
         color_targets: vec![HalColorTargetState {
             format: HalTextureFormat::Rgba8Unorm,
             blend: None,
@@ -68,6 +70,9 @@ pub(crate) fn render_descriptor() -> HalRenderPipelineDescriptor {
         depth_stencil: None,
         vertex_buffers: Vec::new(),
         primitive_topology: HalPrimitiveTopology::TriangleList,
+        front_face: HalFrontFace::Ccw,
+        cull_mode: HalCullMode::None,
+        unclipped_depth: false,
     }
 }
 

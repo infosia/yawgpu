@@ -890,11 +890,11 @@ pub(super) fn create_graphics_pipeline(
             || depth_stencil.depth_bias_clamp != 0.0
     });
     let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
-        .depth_clamp_enable(false)
+        .depth_clamp_enable(descriptor.unclipped_depth)
         .rasterizer_discard_enable(false)
         .polygon_mode(vk::PolygonMode::FILL)
-        .cull_mode(vk::CullModeFlags::NONE)
-        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .cull_mode(vk_cull_mode(descriptor.cull_mode))
+        .front_face(vk_front_face(descriptor.front_face))
         .depth_bias_enable(has_depth_bias)
         .depth_bias_constant_factor(
             descriptor
@@ -912,9 +912,12 @@ pub(super) fn create_graphics_pipeline(
                 .map_or(0.0, |depth_stencil| depth_stencil.depth_bias_clamp),
         )
         .line_width(1.0);
+    let sample_mask = [descriptor.sample_mask];
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(vk_sample_count(descriptor.sample_count)?)
-        .sample_shading_enable(false);
+        .sample_shading_enable(false)
+        .sample_mask(&sample_mask)
+        .alpha_to_coverage_enable(descriptor.alpha_to_coverage_enabled);
     let color_attachments = descriptor
         .color_targets
         .iter()
@@ -967,6 +970,21 @@ pub(super) fn create_graphics_pipeline(
             }
             Err(shader_error("graphics pipeline creation failed"))
         }
+    }
+}
+
+fn vk_front_face(front_face: HalFrontFace) -> vk::FrontFace {
+    match front_face {
+        HalFrontFace::Ccw => vk::FrontFace::COUNTER_CLOCKWISE,
+        HalFrontFace::Cw => vk::FrontFace::CLOCKWISE,
+    }
+}
+
+fn vk_cull_mode(cull_mode: HalCullMode) -> vk::CullModeFlags {
+    match cull_mode {
+        HalCullMode::None => vk::CullModeFlags::NONE,
+        HalCullMode::Front => vk::CullModeFlags::FRONT,
+        HalCullMode::Back => vk::CullModeFlags::BACK,
     }
 }
 

@@ -143,6 +143,7 @@ pub(crate) enum TextureCopyCommand {
 
 /// Enumerates command execution values.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum CommandExecution {
     /// Buffer copy variant.
     BufferCopy(BufferCopyCommand),
@@ -164,7 +165,24 @@ pub(crate) enum CommandExecution {
 pub(crate) struct ComputePassCommand {
     pub(crate) pipeline: Arc<ComputePipeline>,
     pub(crate) bind_groups: BTreeMap<u32, BoundBindGroup>,
-    pub(crate) workgroups: (u32, u32, u32),
+    pub(crate) dispatch: ComputeDispatch,
+}
+
+/// Enumerates compute dispatch execution values.
+#[derive(Debug, Clone)]
+pub(crate) enum ComputeDispatch {
+    /// Direct dispatch variant.
+    Direct {
+        /// Workgroup counts.
+        workgroups: (u32, u32, u32),
+    },
+    /// Indirect dispatch variant.
+    Indirect {
+        /// Buffer containing dispatch arguments.
+        buffer: Arc<Buffer>,
+        /// Byte offset of dispatch arguments.
+        offset: u64,
+    },
 }
 
 /// Stores the data needed to replay a RenderPassCommand.
@@ -178,9 +196,31 @@ pub(crate) struct RenderPassCommand {
     pub(crate) vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
     pub(crate) index_buffer: Option<BoundIndexBuffer>,
     pub(crate) indirect_buffer: Option<BoundIndirectBuffer>,
+    pub(crate) viewport: Option<Viewport>,
+    pub(crate) scissor_rect: Option<ScissorRect>,
     pub(crate) blend_constant: [f32; 4],
     pub(crate) stencil_reference: u32,
     pub(crate) draw: Option<RenderDrawExecution>,
+}
+
+/// Stores viewport state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Viewport {
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+    pub(crate) min_depth: f32,
+    pub(crate) max_depth: f32,
+}
+
+/// Stores scissor rectangle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScissorRect {
+    pub(crate) x: u32,
+    pub(crate) y: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 /// Stores the data needed to replay a SubpassRenderPassCommand.

@@ -5,9 +5,9 @@ use parking_lot::Mutex;
 use yawgpu_hal::{
     HalBoundBuffer, HalBoundIndexBuffer, HalBoundIndirectBuffer, HalBoundSampler, HalBoundTexture,
     HalBufferClear, HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout, HalBufferUsage,
-    HalComputePass, HalCopy, HalDevice, HalDraw, HalIndexFormat, HalQueue, HalRenderColorTarget,
-    HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalTextureAspect,
-    HalTextureCopy, HalTextureViewDimension,
+    HalComputeDispatch, HalComputePass, HalCopy, HalDevice, HalDraw, HalIndexFormat, HalQueue,
+    HalRenderColorTarget, HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass,
+    HalScissorRect, HalTextureAspect, HalTextureCopy, HalTextureViewDimension, HalViewport,
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
@@ -645,8 +645,22 @@ pub(crate) fn hal_compute_pass_execution(pass: &ComputePassCommand) -> Option<Ha
         bind_buffers: bindings.buffers,
         bind_textures: bindings.textures,
         bind_samplers: bindings.samplers,
-        workgroups: pass.workgroups,
+        dispatch: hal_compute_dispatch(&pass.dispatch)?,
     }))
+}
+
+fn hal_compute_dispatch(dispatch: &ComputeDispatch) -> Option<HalComputeDispatch> {
+    match dispatch {
+        ComputeDispatch::Direct { workgroups } => Some(HalComputeDispatch::Direct {
+            workgroups: *workgroups,
+        }),
+        ComputeDispatch::Indirect { buffer, offset } => Some(HalComputeDispatch::Indirect {
+            buffer: Box::new(HalBoundIndirectBuffer {
+                buffer: buffer.hal()?,
+                offset: *offset,
+            }),
+        }),
+    }
 }
 
 /// Returns HAL render pass execution.
@@ -720,10 +734,32 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
         vertex_buffers,
         index_buffer,
         indirect_buffer,
+        viewport: pass.viewport.map(hal_viewport),
+        scissor_rect: pass.scissor_rect.map(hal_scissor_rect),
         blend_constant: pass.blend_constant,
         stencil_reference: pass.stencil_reference,
         draw,
     }))
+}
+
+fn hal_viewport(viewport: Viewport) -> HalViewport {
+    HalViewport {
+        x: viewport.x,
+        y: viewport.y,
+        width: viewport.width,
+        height: viewport.height,
+        min_depth: viewport.min_depth,
+        max_depth: viewport.max_depth,
+    }
+}
+
+fn hal_scissor_rect(rect: ScissorRect) -> HalScissorRect {
+    HalScissorRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    }
 }
 
 fn hal_draw(draw: RenderDrawExecution) -> HalDraw {
@@ -820,12 +856,22 @@ fn hal_render_depth_stencil_attachment(
             format: hal_texture_format(attachment.format),
             mip_level: attachment.mip_level,
             array_layer: attachment.array_layer,
-            depth_load_op: hal_render_load_op(attachment.depth_load_op),
-            depth_store: matches!(attachment.depth_store_op, StoreOp::Store),
+            depth_load_op: if attachment.depth_read_only {
+                HalRenderLoadOp::Load
+            } else {
+                hal_render_load_op(attachment.depth_load_op)
+            },
+            depth_store: attachment.depth_read_only
+                || matches!(attachment.depth_store_op, StoreOp::Store),
             depth_clear_value: attachment.depth_clear_value,
             depth_read_only: attachment.depth_read_only,
-            stencil_load_op: hal_render_load_op(attachment.stencil_load_op),
-            stencil_store: matches!(attachment.stencil_store_op, StoreOp::Store),
+            stencil_load_op: if attachment.stencil_read_only {
+                HalRenderLoadOp::Load
+            } else {
+                hal_render_load_op(attachment.stencil_load_op)
+            },
+            stencil_store: attachment.stencil_read_only
+                || matches!(attachment.stencil_store_op, StoreOp::Store),
             stencil_clear_value: attachment.stencil_clear_value,
             stencil_read_only: attachment.stencil_read_only,
         })),
@@ -1065,6 +1111,9 @@ mod tests {
             primitive: PrimitiveState {
                 topology: PrimitiveTopology::TriangleList,
                 strip_index_format: None,
+                front_face: FrontFace::Ccw,
+                cull_mode: CullMode::None,
+                unclipped_depth: false,
             },
             depth_stencil: Some(DepthStencilState {
                 format: depth32_float(),
@@ -1319,6 +1368,9 @@ fn fs() -> @location(0) vec4<f32> {
             primitive: PrimitiveState {
                 topology: PrimitiveTopology::TriangleList,
                 strip_index_format: None,
+                front_face: FrontFace::Ccw,
+                cull_mode: CullMode::None,
+                unclipped_depth: false,
             },
             depth_stencil: None,
             multisample: MultisampleState {
