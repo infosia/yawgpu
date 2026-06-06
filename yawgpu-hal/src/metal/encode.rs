@@ -433,7 +433,13 @@ pub(super) fn render_pass_descriptor(
         let color = unsafe { color_attachments.objectAtIndexedSubscript(to_ns(index as u64)?) };
         color.setTexture(Some(texture.inner()?));
         color.setLevel(to_ns(u64::from(color_target.mip_level))?);
-        color.setSlice(to_ns(u64::from(color_target.array_layer))?);
+        if texture.dimension == HalTextureDimension::D3 {
+            color.setSlice(0);
+            color.setDepthPlane(to_ns(u64::from(color_target.depth_slice))?);
+        } else {
+            color.setSlice(to_ns(u64::from(color_target.array_layer))?);
+            color.setDepthPlane(0);
+        }
         color.setLoadAction(mtl_load_action(color_target.load_op));
         if let Some(resolve_target) = &color_target.resolve_target {
             let HalTexture::Metal(resolve_texture) = resolve_target else {

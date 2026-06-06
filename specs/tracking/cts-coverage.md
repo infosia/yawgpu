@@ -838,6 +838,36 @@ never a reason to skip a CTS case.
     — unreachable (a pass can't begin with zero attachments and the bundle signature must match). Gate:
     **no open CRITICAL/MAJOR → F-042 slice 2 COMPLETE → F-042 RESOLVED** (`two_draws_*` 5/5 on both Tier-1
     backends).
+- **External-CTS finding F-043 — RESOLVED (treated as a phase, with Clean Review).** T43 (V13)
+  `rendering/3d_texture_slices:one_color_attachment,mip_levels`: `WGPURenderPassColorAttachment.depthSlice`
+  (which z-slice of a 3D render target a draw hits) was ignored — yawgpu always rendered to slice 0
+  (`pass=3 fail=3`, byte-identical Metal + Vulkan/MoltenVK; `depthSlice=1` cases got slice-0's pattern).
+  Root cause (same shape as F-038/F-041): `validate_color_attachment_depth_slice` validated `depthSlice`
+  but `RenderPassColorExecution` had no `depth_slice` field, so it was dropped before the HAL. Fix (coding
+  agent): `RenderPassColorExecution.depth_slice` (from `attachment.depth_slice.unwrap_or(0)`) →
+  `HalRenderColorTarget.depth_slice` → Metal `setDepthPlane(depth_slice)` + `setSlice(0)` for 3D targets
+  (non-3D keep `setSlice(array_layer)`); Vulkan `baseArrayLayer = depth_slice` for a `TYPE_2D` view of the
+  3D slice + 3D images created with `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT`. GLES already rejects non-2D
+  color attachments with `HalError` (catalogued), so no silent mis-render. +Noop unit test.
+  - **Diagnosis note (Claude):** the CTS query path was initially mis-typed (group `3d_texture_slices`,
+    test `one_color_attachment,mip_levels` are colon-separated); the CTS runner also needed a rebuild to
+    compile the new T43 spec.
+  - **Verified real-GPU (Claude):** `3d_texture_slices:one_color_attachment,mip_levels:* = 6/6` on Metal
+    AND Vulkan/MoltenVK (from `3/3`); no regression (`draw` 564/0, `depth` 130/0, `render_pass,resolve`
+    12/12 on Vulkan — re-checked after the addendum). Claude authored e2e
+    `metal_render_pass_depth_slice_targets_requested_3d_slice` (init 3D slice0=10/slice1=20, clear-only pass
+    `depthSlice=1` clears 255 → slice0 stays 10, slice1=255; pre-fix slice0 was cleared instead).
+  - **Phase Review (Clean Review, fresh no-context subagent):** **0 CRITICAL, 0 MAJOR, 0 MINOR.** Subagent
+    empirically reverted the fix to confirm the e2e fails pre-fix, and determined GLES errors cleanly on 3D
+    color attachments (no silent wrong). It also surfaced a **pre-existing broken Vulkan-feature HAL test**
+    (`render_attachment_descriptions_preserve_contents_for_load_ops` — a Noop `dummy_texture` used where
+    `vk_color_attachment_description` has required `HalTexture::Vulkan` since F-040 slice 2; latent because
+    the gates never ran `cargo test -p yawgpu-hal --features vulkan --lib` — only the default + clippy
+    compile). Fixed in this phase (the test now uses a Vulkan-backed dummy; `sample_count` moved from
+    `VulkanTextureInner` to the outer `VulkanTexture` so attachment-description tests don't need an
+    allocated image). Both feature-gated HAL suites now pass (vulkan 76/0, metal 55/0); added
+    [[feedback-run-feature-gated-hal-tests]] so reviews run them. Gate: **no open CRITICAL/MAJOR → F-043
+    COMPLETE.**
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.
