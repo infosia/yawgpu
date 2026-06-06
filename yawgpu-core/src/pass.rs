@@ -8,6 +8,7 @@ use crate::bind_group_layout::*;
 use crate::buffer::*;
 use crate::command_encoder::*;
 use crate::compute_pipeline::*;
+use crate::copy::{LoadOp, StoreOp};
 use crate::extent::*;
 use crate::limits::*;
 use crate::query_set::*;
@@ -112,6 +113,34 @@ impl PassEncoderState {
     /// Sets attachment texture usages for render-pass scope validation.
     pub(crate) fn set_attachment_texture_uses(&mut self, uses: Vec<TextureScopeUse>) {
         self.attachment_texture_uses = uses;
+    }
+
+    pub(crate) fn load_attachments_for_draw(
+        &mut self,
+    ) -> (
+        Vec<RenderPassColorExecution>,
+        Option<RenderPassDepthStencilExecution>,
+    ) {
+        let mut color_attachments = self.render_color_attachments.clone();
+        let mut depth_stencil_attachment = self.render_depth_stencil_attachment.clone();
+        for attachment in &mut color_attachments {
+            attachment.store_op = StoreOp::Store;
+        }
+        if let Some(attachment) = &mut depth_stencil_attachment {
+            attachment.depth_store_op = StoreOp::Store;
+            attachment.stencil_store_op = StoreOp::Store;
+        }
+        if self.render_pass_recorded {
+            for attachment in &mut color_attachments {
+                attachment.load_op = LoadOp::Load;
+            }
+            if let Some(attachment) = &mut depth_stencil_attachment {
+                attachment.depth_load_op = LoadOp::Load;
+                attachment.stencil_load_op = LoadOp::Load;
+            }
+        }
+        self.render_pass_recorded = true;
+        (color_attachments, depth_stencil_attachment)
     }
 }
 

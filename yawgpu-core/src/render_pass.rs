@@ -300,8 +300,7 @@ impl RenderPassEncoder {
             let attachment_uses = state.attachment_texture_uses.clone();
             record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
             state.draw_count = state.draw_count.saturating_add(1);
-            let color_attachments = state.render_color_attachments.clone();
-            let depth_stencil_attachment = state.render_depth_stencil_attachment.clone();
+            let (color_attachments, depth_stencil_attachment) = state.load_attachments_for_draw();
             if color_attachments.is_empty() && depth_stencil_attachment.is_none() {
                 return Err("render pass requires at least one attachment".to_owned());
             }
@@ -325,7 +324,6 @@ impl RenderPassEncoder {
                     first_instance,
                 }),
             });
-            state.render_pass_recorded = true;
             Ok(())
         })
     }
@@ -361,8 +359,7 @@ impl RenderPassEncoder {
             let attachment_uses = state.attachment_texture_uses.clone();
             record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
             state.draw_count = state.draw_count.saturating_add(1);
-            let color_attachments = state.render_color_attachments.clone();
-            let depth_stencil_attachment = state.render_depth_stencil_attachment.clone();
+            let (color_attachments, depth_stencil_attachment) = state.load_attachments_for_draw();
             if color_attachments.is_empty() && depth_stencil_attachment.is_none() {
                 return Err("render pass requires at least one attachment".to_owned());
             }
@@ -391,7 +388,6 @@ impl RenderPassEncoder {
                     first_instance,
                 }),
             });
-            state.render_pass_recorded = true;
             Ok(())
         })
     }
@@ -419,8 +415,7 @@ impl RenderPassEncoder {
                 .parent
                 .record_referenced_buffer(Arc::clone(&indirect_buffer));
             state.draw_count = state.draw_count.saturating_add(1);
-            let color_attachments = state.render_color_attachments.clone();
-            let depth_stencil_attachment = state.render_depth_stencil_attachment.clone();
+            let (color_attachments, depth_stencil_attachment) = state.load_attachments_for_draw();
             if color_attachments.is_empty() && depth_stencil_attachment.is_none() {
                 return Err("render pass requires at least one attachment".to_owned());
             }
@@ -444,7 +439,6 @@ impl RenderPassEncoder {
                     offset: indirect_offset,
                 }),
             });
-            state.render_pass_recorded = true;
             Ok(())
         })
     }
@@ -477,8 +471,7 @@ impl RenderPassEncoder {
                 .parent
                 .record_referenced_buffer(Arc::clone(&indirect_buffer));
             state.draw_count = state.draw_count.saturating_add(1);
-            let color_attachments = state.render_color_attachments.clone();
-            let depth_stencil_attachment = state.render_depth_stencil_attachment.clone();
+            let (color_attachments, depth_stencil_attachment) = state.load_attachments_for_draw();
             if color_attachments.is_empty() && depth_stencil_attachment.is_none() {
                 return Err("render pass requires at least one attachment".to_owned());
             }
@@ -506,7 +499,6 @@ impl RenderPassEncoder {
                     offset: indirect_offset,
                 }),
             });
-            state.render_pass_recorded = true;
             Ok(())
         })
     }
@@ -580,12 +572,13 @@ impl RenderPassEncoder {
             let pass_signature = state
                 .attachment_signature
                 .as_ref()
-                .ok_or_else(|| "render pass has no attachment signature".to_owned())?;
+                .ok_or_else(|| "render pass has no attachment signature".to_owned())?
+                .clone();
             for bundle in bundles {
                 if bundle.is_error() {
                     return Err("render pass cannot execute an error render bundle".to_owned());
                 }
-                if bundle.attachment_signature() != pass_signature {
+                if bundle.attachment_signature() != &pass_signature {
                     return Err(
                         "render bundle attachment signature is incompatible with the render pass"
                             .to_owned(),
@@ -611,10 +604,12 @@ impl RenderPassEncoder {
                     .extend_from_slice(bundle.texture_uses());
                 for draw in bundle.draws() {
                     state.draw_count = state.draw_count.saturating_add(1);
+                    let (color_attachments, depth_stencil_attachment) =
+                        state.load_attachments_for_draw();
                     self.inner.parent.record_render_pass(RenderPassCommand {
                         pipeline: Some(Arc::clone(&draw.pipeline)),
-                        color_attachments: state.render_color_attachments.clone(),
-                        depth_stencil_attachment: state.render_depth_stencil_attachment.clone(),
+                        color_attachments,
+                        depth_stencil_attachment,
                         attachment_textures: state.attachment_textures.clone(),
                         bind_groups: draw.bind_groups.clone(),
                         vertex_buffers: draw.vertex_buffers.clone(),
@@ -626,7 +621,6 @@ impl RenderPassEncoder {
                         stencil_reference: state.stencil_reference,
                         draw: Some(draw.draw),
                     });
-                    state.render_pass_recorded = true;
                 }
             }
             state.clear_render_state();
@@ -670,10 +664,10 @@ mod tests {
     use super::*;
     use crate::test_helpers::*;
     use crate::{
-        BindGroupLayout, ColorTargetState, Extent3d, MultisampleState, PrimitiveState,
-        PrimitiveTopology, RenderPipelineDescriptor, RenderPipelineFragmentState,
+        BindGroupLayout, ColorTargetState, CompareFunction, Device, Extent3d, MultisampleState,
+        PrimitiveState, PrimitiveTopology, RenderPipelineDescriptor, RenderPipelineFragmentState,
         RenderPipelineLayout, RenderPipelineShaderStage, RenderPipelineVertexState,
-        ShaderModuleSource, TextureDescriptor, TextureDimension, TextureUsage,
+        ShaderModuleSource, TextureDescriptor, TextureDimension, TextureFormat, TextureUsage,
     };
 
     use std::sync::Arc;
@@ -969,6 +963,70 @@ mod tests {
         for command in command_buffer.command_ops() {
             assert_direct_render_pass_command(command, [0.0; 4], 0);
         }
+    }
+
+    #[test]
+    fn render_pass_encoder_loads_after_first_draw_and_clear_only_keeps_clear() {
+        let device = noop_device();
+        let pipeline = depth_stencil_render_pipeline(&device);
+        let view_a = noop_render_attachment(&device);
+        let view_b = noop_render_attachment(&device);
+        let depth_stencil_view = depth24_plus_stencil8_attachment(&device);
+        let mut descriptor = noop_render_pass_descriptor(view_a, None);
+        let mut attachment_b = descriptor.color_attachments[0]
+            .clone()
+            .expect("base descriptor should have a color attachment");
+        attachment_b.view = view_b;
+        descriptor.color_attachments.push(Some(attachment_b));
+        for attachment in descriptor.color_attachments.iter_mut().flatten() {
+            attachment.store_op = StoreOp::Discard;
+        }
+        descriptor.depth_stencil_attachment = Some(RenderPassDepthStencilAttachment {
+            view: depth_stencil_view,
+            depth_load_op: LoadOp::Clear,
+            depth_store_op: StoreOp::Discard,
+            depth_clear_value: 1.0,
+            depth_read_only: false,
+            stencil_load_op: LoadOp::Clear,
+            stencil_store_op: StoreOp::Discard,
+            stencil_clear_value: 7,
+            stencil_read_only: false,
+        });
+
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&descriptor);
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 2);
+        let CommandExecution::RenderPass(first) = &command_buffer.command_ops()[0] else {
+            panic!("expected first render pass command");
+        };
+        let CommandExecution::RenderPass(second) = &command_buffer.command_ops()[1] else {
+            panic!("expected second render pass command");
+        };
+        assert_render_pass_attachment_ops(first, LoadOp::Clear, StoreOp::Store);
+        assert_render_pass_attachment_ops(second, LoadOp::Load, StoreOp::Store);
+
+        let clear_encoder = device.create_command_encoder();
+        let (clear_pass, begin_error) = clear_encoder.begin_render_pass(&descriptor);
+        assert_eq!(begin_error, None);
+        assert_eq!(clear_pass.end(), None);
+        let (clear_command_buffer, error) = clear_encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(clear_command_buffer.command_ops().len(), 1);
+        let CommandExecution::RenderPass(clear_only) = &clear_command_buffer.command_ops()[0]
+        else {
+            panic!("expected clear-only render pass command");
+        };
+        assert!(clear_only.draw.is_none());
+        assert_render_pass_attachment_ops(clear_only, LoadOp::Clear, StoreOp::Discard);
     }
 
     #[test]
@@ -1769,5 +1827,153 @@ fn fs() -> @location(0) vec4<f32> {
             error,
             Some("render pass scissor rectangle exceeds attachment size".to_owned())
         );
+    }
+
+    fn depth24_plus_stencil8() -> TextureFormat {
+        TextureFormat::from_raw(0x0000_002F)
+    }
+
+    fn depth24_plus_stencil8_attachment(device: &Device) -> Arc<TextureView> {
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: depth24_plus_stencil8(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(error, None);
+        Arc::new(view)
+    }
+
+    fn depth_stencil_render_pipeline(device: &Device) -> Arc<RenderPipeline> {
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r"
+@vertex
+fn vs() -> @builtin(position) vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+struct FragmentOutput {
+    @location(0) a: vec4<f32>,
+    @location(1) b: vec4<f32>,
+}
+
+@fragment
+fn fs() -> FragmentOutput {
+    var output: FragmentOutput;
+    output.a = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    output.b = vec4<f32>(0.0, 1.0, 0.0, 1.0);
+    return output;
+}
+"
+                .to_owned(),
+            )),
+        );
+        let mut descriptor = RenderPipelineDescriptor {
+            layout: RenderPipelineLayout::Auto,
+            vertex: RenderPipelineVertexState {
+                shader: RenderPipelineShaderStage {
+                    module: Arc::clone(&module),
+                    entry_point: Some("vs".to_owned()),
+                    constants: Vec::new(),
+                },
+                buffer_count: 0,
+                buffers: Vec::new(),
+            },
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: FrontFace::Ccw,
+                cull_mode: CullMode::None,
+                unclipped_depth: false,
+            },
+            depth_stencil: None,
+            multisample: MultisampleState {
+                count: 1,
+                mask: u32::MAX,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(RenderPipelineFragmentState {
+                shader: RenderPipelineShaderStage {
+                    module,
+                    entry_point: Some("fs".to_owned()),
+                    constants: Vec::new(),
+                },
+                target_count: 2,
+                targets: vec![
+                    ColorTargetState {
+                        format: rgba8_unorm(),
+                        blend: None,
+                        write_mask: 0xF,
+                    },
+                    ColorTargetState {
+                        format: rgba8_unorm(),
+                        blend: None,
+                        write_mask: 0xF,
+                    },
+                ],
+            }),
+            error: None,
+        };
+        descriptor.depth_stencil = Some(DepthStencilState {
+            format: depth24_plus_stencil8(),
+            depth_write_enabled: Some(true),
+            depth_compare: Some(CompareFunction::Always),
+            stencil_front: StencilFaceState {
+                compare: CompareFunction::Always,
+                fail_op: StencilOperation::Keep,
+                depth_fail_op: StencilOperation::Keep,
+                pass_op: StencilOperation::Keep,
+            },
+            stencil_back: StencilFaceState {
+                compare: CompareFunction::Always,
+                fail_op: StencilOperation::Keep,
+                depth_fail_op: StencilOperation::Keep,
+                pass_op: StencilOperation::Keep,
+            },
+            stencil_read_mask: u32::MAX,
+            stencil_write_mask: u32::MAX,
+            depth_bias: 0,
+            depth_bias_slope_scale: 0.0,
+            depth_bias_clamp: 0.0,
+        });
+        Arc::new(device.create_render_pipeline(descriptor))
+    }
+
+    fn assert_render_pass_attachment_ops(
+        command: &RenderPassCommand,
+        load_op: LoadOp,
+        store_op: StoreOp,
+    ) {
+        assert_eq!(command.color_attachments.len(), 2);
+        for color_attachment in &command.color_attachments {
+            assert_eq!(color_attachment.load_op, load_op);
+            assert_eq!(color_attachment.store_op, store_op);
+        }
+        let depth_stencil = command
+            .depth_stencil_attachment
+            .as_ref()
+            .expect("depth-stencil attachment");
+        assert_eq!(depth_stencil.depth_load_op, load_op);
+        assert_eq!(depth_stencil.depth_store_op, store_op);
+        assert_eq!(depth_stencil.stencil_load_op, load_op);
+        assert_eq!(depth_stencil.stencil_store_op, store_op);
     }
 }

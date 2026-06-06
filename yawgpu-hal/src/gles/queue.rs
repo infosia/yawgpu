@@ -305,6 +305,7 @@ fn binding_target(bindings: &[HalDescriptorBinding], binding: u32) -> Result<u32
 }
 
 fn submit_render_pass(gl: &glow::Context, pass: &HalRenderPass) -> Result<(), HalError> {
+    reject_render_texture_sampler_bindings(pass)?;
     let fbo = create_render_fbo(gl, pass)?;
     let pipeline = match &pass.pipeline {
         None => {
@@ -340,6 +341,23 @@ fn submit_render_pass(gl: &glow::Context, pass: &HalRenderPass) -> Result<(), Ha
         vao: Some(vao),
     };
     run_render_draw(gl, pass, pipeline, vao)
+}
+
+fn reject_render_texture_sampler_bindings(pass: &HalRenderPass) -> Result<(), HalError> {
+    reject_render_texture_sampler_binding_counts(pass.bind_textures.len(), pass.bind_samplers.len())
+}
+
+fn reject_render_texture_sampler_binding_counts(
+    texture_count: usize,
+    sampler_count: usize,
+) -> Result<(), HalError> {
+    if texture_count != 0 || sampler_count != 0 {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES render pass does not support texture/sampler bindings",
+        });
+    }
+    Ok(())
 }
 
 struct RenderPassCleanup<'a> {
@@ -1494,6 +1512,29 @@ mod tests {
             HalError::BufferOperationFailed {
                 backend: "gles",
                 message: "buffer binding is missing from pipeline layout",
+            }
+        ));
+    }
+
+    #[test]
+    fn reject_render_texture_sampler_bindings_rejects_texture_or_sampler_counts() {
+        assert!(reject_render_texture_sampler_binding_counts(0, 0).is_ok());
+        let texture = reject_render_texture_sampler_binding_counts(1, 0)
+            .expect_err("texture binding must be rejected");
+        assert!(matches!(
+            texture,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message: "GLES render pass does not support texture/sampler bindings",
+            }
+        ));
+        let sampler = reject_render_texture_sampler_binding_counts(0, 1)
+            .expect_err("sampler binding must be rejected");
+        assert!(matches!(
+            sampler,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message: "GLES render pass does not support texture/sampler bindings",
             }
         ));
     }

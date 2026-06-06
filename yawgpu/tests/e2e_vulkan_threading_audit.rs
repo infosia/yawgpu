@@ -178,6 +178,21 @@ fn vulkan_integer_render_target_clear_is_exact() {
     );
 }
 
+/// Two draws in ONE render pass (loadOp=Clear) must ACCUMULATE: clear red, draw1
+/// scissored to the left half (green), draw2 to the right half (green) — both
+/// halves must end green. If the per-draw replay re-clears between draws, the left
+/// half reverts to red. Audit A execution-model check.
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_two_draws_one_pass_accumulate() {
+    let (left, right) = run_two_draws_one_pass();
+    assert_eq!(right, GREEN, "second draw did not render");
+    assert_eq!(
+        left, GREEN,
+        "first draw was wiped by the second draw's pass (render pass re-cleared between draws)"
+    );
+}
+
 // ---- runners ----------------------------------------------------------------
 
 fn run_cull(front_face: native::WGPUFrontFace) -> (u32, [u8; 4]) {
@@ -214,6 +229,50 @@ fn run_cull(front_face: native::WGPUFrontFace) -> (u32, [u8; 4]) {
 
         yawgpu::wgpuBufferRelease(color_readback);
         yawgpu::wgpuBufferRelease(storage_readback);
+        yawgpu::wgpuBindGroupRelease(bind_group);
+        yawgpu::wgpuRenderPipelineRelease(pipeline);
+        yawgpu::wgpuShaderModuleRelease(module);
+        yawgpu::wgpuTextureViewRelease(color_view);
+        yawgpu::wgpuTextureRelease(color);
+        yawgpu::wgpuBufferRelease(storage);
+    });
+    out
+}
+
+fn run_two_draws_one_pass() -> ([u8; 4], [u8; 4]) {
+    let mut out = (RED, RED);
+    with_device(|ctx| unsafe {
+        let storage = ctx.storage_buffer();
+        let color = ctx.color_texture();
+        let color_view = yawgpu::wgpuTextureCreateView(color, std::ptr::null());
+        let module = create_wgsl_module(ctx.device, TRI_SHADER);
+        let pipeline = create_raster_pipeline(
+            ctx.device,
+            module,
+            native::WGPUFrontFace_CCW,
+            native::WGPUCullMode_None,
+        );
+        let bind_group = create_storage_bind_group(ctx.device, pipeline, storage);
+
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(ctx.device, std::ptr::null());
+        let pass = begin_color_pass(encoder, color_view);
+        yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuRenderPassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+        // Draw 1: left half. Draw 2: right half. Same pass, loadOp=Clear(red).
+        yawgpu::wgpuRenderPassEncoderSetScissorRect(pass, 0, 0, 2, HEIGHT);
+        yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        yawgpu::wgpuRenderPassEncoderSetScissorRect(pass, 2, 0, 2, HEIGHT);
+        yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+
+        let color_readback = ctx.readback_buffer(READBACK_SIZE as u64);
+        copy_color(encoder, color, color_readback);
+        ctx.submit(encoder);
+        let pixels = read_buffer(ctx.instance, color_readback, READBACK_SIZE);
+        out = (read_pixel(&pixels, 0, 0), read_pixel(&pixels, 3, 3));
+
+        yawgpu::wgpuBufferRelease(color_readback);
         yawgpu::wgpuBindGroupRelease(bind_group);
         yawgpu::wgpuRenderPipelineRelease(pipeline);
         yawgpu::wgpuShaderModuleRelease(module);
