@@ -577,7 +577,8 @@ pub(crate) fn validate_queue_write_texture(
             || write_size.height != subresource.height)
     {
         return Err(
-            "queue texture write depth/stencil copies must cover the full 2D subresource".to_owned(),
+            "queue texture write depth/stencil copies must cover the full 2D subresource"
+                .to_owned(),
         );
     }
 
