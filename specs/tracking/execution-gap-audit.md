@@ -8,8 +8,24 @@ so it is a silent no-op / clobber on real hardware. Part of [[cts-failure-patter
 
 | # | Site | Issue | Severity | Status |
 |---|---|---|---|---|
-| **1** | `yawgpu-core` regular render path (`render_pass.rs` records one `RenderPassCommand` per draw, each cloning the pass's original `load_op`; `queue.rs` replays each as a SEPARATE HAL render pass; both backends open a fresh encoder with `loadAction`/`loadOp` from `load_op`) | **A render pass with ≥2 draws and `loadOp=Clear` re-clears the attachment before every draw → only the LAST draw survives.** Confirmed on real-GPU Metal (`metal_two_draws_one_pass_accumulate`: left half drawn first reads back RED, wiped by draw 2's pass). Masked because tests use single draws or full-screen overdraw. The `tiled` subpass path is NOT affected (it records all draws into one HAL pass). | **Tier-1 correctness (severe)** | OPEN |
-| **2** | `yawgpu-hal/src/gles/queue.rs` `run_render_draw`/`submit_render_pass` | GLES render path binds `bind_buffers`+`vertex_buffers` but **never reads `pass.bind_textures`/`bind_samplers`** — a fragment shader sampling a texture draws with it unbound (garbage), no error. The compute path already rejects texture bindings with `HalError`; the render path neither binds nor rejects, and `67-gles-backend.md` has no entry. | Tier-2, uncatalogued silent skip | OPEN |
+| **1** | `yawgpu-core` regular render path (`render_pass.rs` records one `RenderPassCommand` per draw, each cloning the pass's original `load_op`/`store_op`; `queue.rs` replays each as a SEPARATE HAL render pass; both backends open a fresh encoder with `loadAction`/`storeAction` from those ops) | **A render pass with ≥2 draws re-cleared the attachment before every draw (`loadOp=Clear` → only the LAST draw survived) and/or discarded earlier output (`storeOp=Discard` → later draw loaded undefined; the common multi-draw + depth-discard case).** | **Tier-1 correctness (severe)** | **RESOLVED** |
+| **2** | `yawgpu-hal/src/gles/queue.rs` `submit_render_pass` | GLES render path binds `bind_buffers`+`vertex_buffers` but never read `pass.bind_textures`/`bind_samplers` — a fragment shader sampling a texture drew with it unbound (garbage), no error. | Tier-2, uncatalogued silent skip | **RESOLVED** |
+
+**Fix (commit pending push).** #1: `PassEncoderState::load_attachments_for_draw` forces `store_op = Store`
+on every split pass (color + depth + stencil) so each pass's output persists, and downgrades
+`load_op → Load` only after the first draw; the first draw keeps the user's `load_op` (Clear), the clear-only
+`end()` path keeps the user's original ops. All draw sites + `execute_bundles` route through it. Forcing
+`Store` is a safe superset (`Discard` only permits not-storing; yawgpu copies attachments back) AND is
+load-bearing for MSAA resolve (intermediate passes must store the MSAA target so the final resolve
+accumulates). The `tiled` subpass path was already correct (one HAL pass, many draws). #2: reject a render
+pass carrying texture/sampler bindings with a catalogued `HalError` (mirrors the compute path).
+
+**Verified real-GPU Metal + Vulkan/MoltenVK:** `*_two_draws_one_pass_accumulate` (clear red → draw left-half
+green → draw right-half green → BOTH halves green) passes on both; round-1 of the fix (which kept the user's
+`store_op` on the first pass) was caught in review for the `storeOp=Discard` case and corrected. No
+regression in MRT / MSAA resolve / two-draws-same-storage / render-bundle / depthSlice / multi-pass-depth
+e2e. Noop unit test asserts first command = Clear/Store, second = Load/Store, clear-only = Clear/Discard.
+Clean Review: no CRITICAL/MAJOR.
 
 ## Deferred / documented (NOT new findings — noted for completeness)
 - `wgpuCommandEncoderWriteBuffer` (`ffi/encoder.rs:280`) is a documented "P6.2 validation-only" stub that
