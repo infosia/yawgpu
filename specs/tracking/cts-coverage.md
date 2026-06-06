@@ -783,6 +783,35 @@ never a reason to skip a CTS case.
     improvement, no regression), GLES `HalError`, no panics, and sound e2e guards. Gate: **no open
     CRITICAL/MAJOR → F-041 COMPLETE.** Reinforces [[feedback-claude-owns-gpu-tests]] (Noop+clippy passed
     while real-GPU exposed the MSL gap) and [[feedback-gpu-probe-false-signals]].
+- **External-CTS finding F-042 — IN PROGRESS (2-slice; slice 1 of 2 COMPLETE, treated as a phase).**
+  F-042 (T39/V7b `memory_sync/buffer/single_buffer:two_draws_*`): a fragment-stage storage write from a
+  point draw read back `0` (`pass=0 fail=5`, cross-HAL), Dawn/wgpu pass. **Two independent root causes**
+  (Claude, real-GPU + experiment); user approved a **2-slice** plan: **(1) usage-scope write+write false
+  rejection**, (2) render bundle execution.
+  - **Slice 1 — render usage-scope allows write+write across draws, COMPLETE.** The two draws write the
+    same storage buffer via separate bind groups; `validate_buffer_usage_scope` errored whenever *either*
+    overlapping use was a Write, but WebGPU allows write+write of the same buffer in a render-pass usage
+    scope (content-undefined but valid). A throwaway experiment confirmed it: relaxing the rule took
+    `two_draws_in_the_same_render_pass` from `0/5` to `3/5` (the non-bundle subcases). **Subtlety:** compute
+    *within-dispatch* two-binding write+write must still error (`assert_compute_buffer_alias`), and render
+    *within-draw* write+read must still error. Fix (coding agent): `record_pipeline_usage_scope` now does a
+    **strict per-draw** check (the draw's own uses incl. attachments — catches within-draw two-binding
+    aliasing) + a **lenient cross-draw** accumulated check (`validate_*_usage_scope_lenient`: error only on
+    `access != access` = read↔write, allowing write+write/read+read). Compute path
+    (`validate_compute_dispatch_state` → `validate_usage_scope`, strict, per-dispatch) unchanged. +3 Noop
+    render-pass unit tests.
+  - **Verified real-GPU (Claude):** `two_draws_in_the_same_render_pass:*` reaches `pass=3` on Metal and
+    Vulkan/MoltenVK (the 3 non-bundle subcases; the both-via-bundle subcase + `two_draws_in_the_same_render_bundle`
+    remain for slice 2); no regression (`rw`/`ww` 8/0, `draw` 564/0, `compute` 1/0). Noop workspace green
+    (67 groups); all four clippy gates clean. Claude authored e2e
+    `metal_two_draws_write_same_storage_buffer` (two point draws, separate bind groups, same storage buffer
+    via an explicit shared layout → buffer reads 1 or 2; pre-fix the usage-scope error left it 0).
+  - **Phase Review (Clean Review, fresh no-context subagent):** **0 CRITICAL, 0 MAJOR, 0 MINOR.** Subagent
+    independently verified all four anchors (A1 render cross-draw write+write OK; A2 compute within-dispatch
+    write+write errors; A3 render within-draw write+read errors; A4 render cross-draw write+read errors),
+    ran the Noop tests + 30 CTS `resource_usages` tests + clippy + the Metal e2e on the M2. Render
+    within-draw write+write is still rejected (matches compute). Gate: **no open CRITICAL/MAJOR → F-042
+    slice 1 COMPLETE.** (Slice 2 — render bundle execution — pending; the bundle subcases still read 0.)
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.
