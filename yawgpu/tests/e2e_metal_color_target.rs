@@ -498,6 +498,246 @@ unsafe fn create_msaa_pipeline(
     pipeline
 }
 
+/// F-042 slice 1: two point draws in one render pass that write the SAME storage
+/// buffer (separate bind groups) must be allowed — yawgpu wrongly rejected the
+/// render-pass usage scope ("write the same buffer range twice"), poisoning the
+/// command buffer so nothing ran (read back 0). After the fix the buffer holds
+/// `1` or `2` (a valid race).
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "metal")]
+fn metal_two_draws_write_same_storage_buffer() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+    unsafe {
+        let (instance, adapter, device, queue, errors) = setup();
+        let storage = create_buffer(
+            device,
+            4,
+            native::WGPUBufferUsage_Storage
+                | native::WGPUBufferUsage_CopySrc
+                | native::WGPUBufferUsage_CopyDst,
+        );
+        write_u32(queue, storage, 0);
+        let module1 = create_wgsl_module(device, &point_storage_write_shader(1));
+        let module2 = create_wgsl_module(device, &point_storage_write_shader(2));
+        let bgl = create_fragment_storage_bgl(device);
+        let pipeline_layout = create_fragment_storage_pipeline_layout(device, bgl);
+        let pipeline1 = create_point_storage_pipeline(device, module1, pipeline_layout);
+        let pipeline2 = create_point_storage_pipeline(device, module2, pipeline_layout);
+        let bind_group1 = create_storage_buffer_bind_group(device, bgl, storage);
+        let bind_group2 = create_storage_buffer_bind_group(device, bgl, storage);
+
+        let color = create_color_texture(device);
+        let color_view = yawgpu::wgpuTextureCreateView(color, std::ptr::null());
+        let color_attachment = native::WGPURenderPassColorAttachment {
+            nextInChain: std::ptr::null_mut(),
+            view: color_view,
+            depthSlice: native::WGPU_DEPTH_SLICE_UNDEFINED,
+            resolveTarget: std::ptr::null(),
+            loadOp: native::WGPULoadOp_Clear,
+            storeOp: native::WGPUStoreOp_Store,
+            clearValue: native::WGPUColor {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        };
+        let attachments = [color_attachment];
+        let pass_descriptor = native::WGPURenderPassDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            colorAttachmentCount: attachments.len(),
+            colorAttachments: attachments.as_ptr(),
+            depthStencilAttachment: std::ptr::null(),
+            occlusionQuerySet: std::ptr::null(),
+            timestampWrites: std::ptr::null(),
+        };
+        let readback = create_buffer(
+            device,
+            4,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_descriptor);
+        yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline1);
+        yawgpu::wgpuRenderPassEncoderSetBindGroup(pass, 0, bind_group1, 0, std::ptr::null());
+        yawgpu::wgpuRenderPassEncoderDraw(pass, 1, 1, 0, 0);
+        yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline2);
+        yawgpu::wgpuRenderPassEncoderSetBindGroup(pass, 0, bind_group2, 0, std::ptr::null());
+        yawgpu::wgpuRenderPassEncoderDraw(pass, 1, 1, 0, 0);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        yawgpu::wgpuCommandEncoderCopyBufferToBuffer(encoder, storage, 0, readback, 0, 4);
+        let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        yawgpu::wgpuCommandBufferRelease(command_buffer);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+
+        let bytes = read_buffer(instance, readback, 0, 4);
+        let value = u32::from_ne_bytes(bytes[0..4].try_into().expect("four bytes"));
+        assert!(
+            value == 1 || value == 2,
+            "two draws writing the same storage buffer: expected 1 or 2, got {value}"
+        );
+        assert!(errors.lock().expect("error lock").is_empty());
+
+        yawgpu::wgpuTextureViewRelease(color_view);
+        yawgpu::wgpuTextureRelease(color);
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuBindGroupRelease(bind_group2);
+        yawgpu::wgpuBindGroupRelease(bind_group1);
+        yawgpu::wgpuRenderPipelineRelease(pipeline2);
+        yawgpu::wgpuRenderPipelineRelease(pipeline1);
+        yawgpu::wgpuPipelineLayoutRelease(pipeline_layout);
+        yawgpu::wgpuBindGroupLayoutRelease(bgl);
+        yawgpu::wgpuShaderModuleRelease(module2);
+        yawgpu::wgpuShaderModuleRelease(module1);
+        yawgpu::wgpuBufferRelease(storage);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+#[cfg(feature = "metal")]
+fn point_storage_write_shader(value: u32) -> String {
+    format!(
+        r#"
+@vertex fn vs() -> @builtin(position) vec4<f32> {{ return vec4<f32>(0.0, 0.0, 0.0, 1.0); }}
+struct Data {{ a: u32 }}
+@group(0) @binding(0) var<storage, read_write> data: Data;
+@fragment fn fs() -> @location(0) vec4<f32> {{ data.a = {value}u; return vec4<f32>(); }}
+"#
+    )
+}
+
+#[cfg(feature = "metal")]
+unsafe fn write_u32(queue: native::WGPUQueue, buffer: native::WGPUBuffer, value: u32) {
+    let data = value.to_ne_bytes();
+    yawgpu::wgpuQueueWriteBuffer(queue, buffer, 0, data.as_ptr().cast(), data.len());
+}
+
+#[cfg(feature = "metal")]
+unsafe fn create_storage_buffer_bind_group(
+    device: native::WGPUDevice,
+    layout: native::WGPUBindGroupLayout,
+    buffer: native::WGPUBuffer,
+) -> native::WGPUBindGroup {
+    let entry = native::WGPUBindGroupEntry {
+        nextInChain: std::ptr::null_mut(),
+        binding: 0,
+        buffer,
+        offset: 0,
+        size: 4,
+        sampler: std::ptr::null(),
+        textureView: std::ptr::null(),
+    };
+    let descriptor = native::WGPUBindGroupDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout,
+        entryCount: 1,
+        entries: &entry,
+    };
+    let bind_group = yawgpu::wgpuDeviceCreateBindGroup(device, &descriptor);
+    assert!(!bind_group.is_null());
+    bind_group
+}
+
+#[cfg(feature = "metal")]
+unsafe fn create_fragment_storage_bgl(device: native::WGPUDevice) -> native::WGPUBindGroupLayout {
+    let mut entry: native::WGPUBindGroupLayoutEntry = std::mem::zeroed();
+    entry.binding = 0;
+    entry.visibility = native::WGPUShaderStage_Fragment;
+    entry.buffer.type_ = native::WGPUBufferBindingType_Storage;
+    let descriptor = native::WGPUBindGroupLayoutDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        entryCount: 1,
+        entries: &entry,
+    };
+    let bgl = yawgpu::wgpuDeviceCreateBindGroupLayout(device, &descriptor);
+    assert!(!bgl.is_null());
+    bgl
+}
+
+#[cfg(feature = "metal")]
+unsafe fn create_fragment_storage_pipeline_layout(
+    device: native::WGPUDevice,
+    bgl: native::WGPUBindGroupLayout,
+) -> native::WGPUPipelineLayout {
+    let descriptor = native::WGPUPipelineLayoutDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        bindGroupLayoutCount: 1,
+        bindGroupLayouts: &bgl,
+        immediateSize: 0,
+    };
+    let layout = yawgpu::wgpuDeviceCreatePipelineLayout(device, &descriptor);
+    assert!(!layout.is_null());
+    layout
+}
+
+#[cfg(feature = "metal")]
+unsafe fn create_point_storage_pipeline(
+    device: native::WGPUDevice,
+    module: native::WGPUShaderModule,
+    layout: native::WGPUPipelineLayout,
+) -> native::WGPURenderPipeline {
+    let color_target = native::WGPUColorTargetState {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        blend: std::ptr::null(),
+        writeMask: native::WGPUColorWriteMask_All,
+    };
+    let fragment = native::WGPUFragmentState {
+        nextInChain: std::ptr::null_mut(),
+        module,
+        entryPoint: string_view("fs"),
+        constantCount: 0,
+        constants: std::ptr::null(),
+        targetCount: 1,
+        targets: &color_target,
+    };
+    let descriptor = native::WGPURenderPipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout,
+        vertex: native::WGPUVertexState {
+            nextInChain: std::ptr::null_mut(),
+            module,
+            entryPoint: string_view("vs"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            bufferCount: 0,
+            buffers: std::ptr::null(),
+        },
+        primitive: native::WGPUPrimitiveState {
+            nextInChain: std::ptr::null_mut(),
+            topology: native::WGPUPrimitiveTopology_PointList,
+            stripIndexFormat: native::WGPUIndexFormat_Undefined,
+            frontFace: native::WGPUFrontFace_Undefined,
+            cullMode: native::WGPUCullMode_Undefined,
+            unclippedDepth: 0,
+        },
+        depthStencil: std::ptr::null(),
+        multisample: native::WGPUMultisampleState {
+            nextInChain: std::ptr::null_mut(),
+            count: 1,
+            mask: 0xFFFF_FFFF,
+            alphaToCoverageEnabled: 0,
+        },
+        fragment: &fragment,
+    };
+    let pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(device, &descriptor);
+    assert!(!pipeline.is_null());
+    pipeline
+}
+
 #[cfg(feature = "metal")]
 unsafe fn render_first_pixel(
     instance: native::WGPUInstance,

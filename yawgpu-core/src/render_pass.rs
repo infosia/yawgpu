@@ -579,7 +579,7 @@ impl RenderPassEncoder {
                 let mut scoped_texture_uses = state.scope_texture_uses.clone();
                 scoped_texture_uses.extend_from_slice(bundle.texture_uses());
                 scoped_texture_uses.extend_from_slice(&state.attachment_texture_uses);
-                validate_resource_usage_scope(&scoped_buffer_uses, &scoped_texture_uses)?;
+                validate_resource_usage_scope_lenient(&scoped_buffer_uses, &scoped_texture_uses)?;
                 state
                     .scope_buffer_uses
                     .extend_from_slice(bundle.buffer_uses());
@@ -628,10 +628,10 @@ mod tests {
     use super::*;
     use crate::test_helpers::*;
     use crate::{
-        ColorTargetState, Extent3d, MultisampleState, PrimitiveState, PrimitiveTopology,
-        RenderPipelineDescriptor, RenderPipelineFragmentState, RenderPipelineLayout,
-        RenderPipelineShaderStage, RenderPipelineVertexState, ShaderModuleSource,
-        TextureDescriptor, TextureDimension, TextureUsage,
+        BindGroupLayout, ColorTargetState, Extent3d, MultisampleState, PrimitiveState,
+        PrimitiveTopology, RenderPipelineDescriptor, RenderPipelineFragmentState,
+        RenderPipelineLayout, RenderPipelineShaderStage, RenderPipelineVertexState,
+        ShaderModuleSource, TextureDescriptor, TextureDimension, TextureUsage,
     };
 
     use std::sync::Arc;
@@ -717,6 +717,144 @@ mod tests {
     }
 
     #[test]
+    fn render_pass_encoder_allows_storage_buffer_write_write_across_draws() {
+        let device = noop_device();
+        let pipeline = storage_write_render_pipeline(&device);
+        let layout = pipeline.bind_group_layouts()[0].clone();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let bind_group_a = buffer_bind_group(&device, layout.clone(), buffer.clone(), 0);
+        let bind_group_b = buffer_bind_group(&device, layout, buffer, 0);
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group_a), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group_b), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 2);
+        for command in command_buffer.command_ops() {
+            let CommandExecution::RenderPass(command) = command else {
+                panic!("expected render pass command");
+            };
+            assert!(matches!(
+                command.draw,
+                Some(RenderDrawExecution::Direct {
+                    vertex_count: 3,
+                    instance_count: 1,
+                    first_vertex: 0,
+                    first_instance: 0,
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn render_pass_encoder_rejects_cross_draw_storage_write_uniform_read_alias() {
+        let device = noop_device();
+        let write_pipeline = storage_write_render_pipeline(&device);
+        let read_pipeline = uniform_read_render_pipeline(&device);
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::UNIFORM,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let write_bind_group = buffer_bind_group(
+            &device,
+            write_pipeline.bind_group_layouts()[0].clone(),
+            buffer.clone(),
+            0,
+        );
+        let read_bind_group = buffer_bind_group(
+            &device,
+            read_pipeline.bind_group_layouts()[0].clone(),
+            buffer,
+            0,
+        );
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(write_pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(write_bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.set_pipeline(read_pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(read_bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some(
+                "usage scope cannot read and write or write the same buffer range twice".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn render_pass_encoder_rejects_same_draw_storage_write_uniform_read_alias() {
+        let device = noop_device();
+        let pipeline = storage_write_uniform_read_render_pipeline(&device);
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::UNIFORM,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let bind_group =
+            aliasing_buffer_bind_group(&device, pipeline.bind_group_layouts()[0].clone(), buffer);
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some(
+                "usage scope cannot read and write or write the same buffer range twice".to_owned()
+            )
+        );
+    }
+
+    #[test]
     fn render_pass_encoder_records_two_color_attachments() {
         let device = noop_device();
         let pipeline = two_color_render_pipeline(&device);
@@ -746,6 +884,56 @@ mod tests {
         assert_eq!(command.color_attachments.len(), 2);
         assert!(command.depth_stencil_attachment.is_none());
         assert!(command.draw.is_some());
+    }
+
+    fn buffer_bind_group(
+        device: &crate::device::Device,
+        layout: Arc<BindGroupLayout>,
+        buffer: Arc<Buffer>,
+        binding: u32,
+    ) -> Arc<BindGroup> {
+        Arc::new(device.create_bind_group(
+            layout,
+            vec![BindGroupEntry {
+                binding,
+                resource: BindGroupResource::Buffer {
+                    buffer,
+                    device: Arc::new(device.clone()),
+                    offset: 0,
+                    size: 16,
+                },
+            }],
+        ))
+    }
+
+    fn aliasing_buffer_bind_group(
+        device: &crate::device::Device,
+        layout: Arc<BindGroupLayout>,
+        buffer: Arc<Buffer>,
+    ) -> Arc<BindGroup> {
+        Arc::new(device.create_bind_group(
+            layout,
+            vec![
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindGroupResource::Buffer {
+                        buffer: buffer.clone(),
+                        device: Arc::new(device.clone()),
+                        offset: 0,
+                        size: 16,
+                    },
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindGroupResource::Buffer {
+                        buffer,
+                        device: Arc::new(device.clone()),
+                        offset: 0,
+                        size: 16,
+                    },
+                },
+            ],
+        ))
     }
 
     #[test]
@@ -912,6 +1100,86 @@ fn fs() -> FragmentOutput {
             ];
         }
         Arc::new(device.create_render_pipeline(descriptor))
+    }
+
+    fn storage_write_render_pipeline(device: &crate::device::Device) -> Arc<RenderPipeline> {
+        render_pipeline_from_shader(
+            device,
+            r"
+@group(0) @binding(0) var<storage, read_write> output_buffer: array<u32>;
+
+@vertex
+fn vs() -> @builtin(position) vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+    output_buffer[0] = 1u;
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+}
+",
+        )
+    }
+
+    fn uniform_read_render_pipeline(device: &crate::device::Device) -> Arc<RenderPipeline> {
+        render_pipeline_from_shader(
+            device,
+            r"
+struct Params {
+    value: vec4<u32>,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+
+@vertex
+fn vs() -> @builtin(position) vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+    let value = f32(params.value.x);
+    return vec4<f32>(value, 0.0, 0.0, 1.0);
+}
+",
+        )
+    }
+
+    fn storage_write_uniform_read_render_pipeline(
+        device: &crate::device::Device,
+    ) -> Arc<RenderPipeline> {
+        render_pipeline_from_shader(
+            device,
+            r"
+struct Params {
+    value: vec4<u32>,
+}
+
+@group(0) @binding(0) var<storage, read_write> output_buffer: array<u32>;
+@group(0) @binding(1) var<uniform> params: Params;
+
+@vertex
+fn vs() -> @builtin(position) vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+    output_buffer[0] = params.value.x;
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+}
+",
+        )
+    }
+
+    fn render_pipeline_from_shader(
+        device: &crate::device::Device,
+        source: &str,
+    ) -> Arc<RenderPipeline> {
+        let module =
+            Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(source.to_owned())));
+        Arc::new(device.create_render_pipeline(render_pipeline_descriptor(module)))
     }
 
     #[test]

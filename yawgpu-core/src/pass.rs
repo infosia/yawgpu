@@ -726,12 +726,15 @@ pub(crate) fn record_pipeline_usage_scope(
 ) -> Result<(), String> {
     let (buffer_uses, texture_uses) =
         collect_pipeline_usage_scope(required_layouts, &state.bind_groups)?;
+    let mut current_texture_uses = texture_uses.clone();
+    current_texture_uses.extend_from_slice(attachment_uses);
+    validate_resource_usage_scope(&buffer_uses, &current_texture_uses)?;
     let mut scoped_buffer_uses = state.scope_buffer_uses.clone();
     scoped_buffer_uses.extend(buffer_uses.iter().cloned());
     let mut scoped_texture_uses = state.scope_texture_uses.clone();
     scoped_texture_uses.extend(texture_uses.iter().cloned());
     scoped_texture_uses.extend_from_slice(attachment_uses);
-    validate_resource_usage_scope(&scoped_buffer_uses, &scoped_texture_uses)?;
+    validate_resource_usage_scope_lenient(&scoped_buffer_uses, &scoped_texture_uses)?;
     state.scope_buffer_uses.extend(buffer_uses);
     state.scope_texture_uses.extend(texture_uses);
     Ok(())
@@ -743,6 +746,14 @@ pub(crate) fn validate_resource_usage_scope(
 ) -> Result<(), String> {
     validate_buffer_usage_scope(buffer_uses)?;
     validate_texture_usage_scope(texture_uses)
+}
+
+pub(crate) fn validate_resource_usage_scope_lenient(
+    buffer_uses: &[BufferScopeUse],
+    texture_uses: &[TextureScopeUse],
+) -> Result<(), String> {
+    validate_buffer_usage_scope_lenient(buffer_uses)?;
+    validate_texture_usage_scope_lenient(texture_uses)
 }
 
 /// Returns collect bind group usage.
@@ -864,6 +875,26 @@ pub(crate) fn validate_buffer_usage_scope(buffer_uses: &[BufferScopeUse]) -> Res
     Ok(())
 }
 
+/// Validates buffer usage scope allowing write/write overlap across render draws.
+pub(crate) fn validate_buffer_usage_scope_lenient(
+    buffer_uses: &[BufferScopeUse],
+) -> Result<(), String> {
+    for (index, current) in buffer_uses.iter().enumerate() {
+        for previous in &buffer_uses[..index] {
+            if !current.buffer.same(&previous.buffer) || !buffer_ranges_overlap(current, previous) {
+                continue;
+            }
+            if current.access != previous.access {
+                return Err(
+                    "usage scope cannot read and write or write the same buffer range twice"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validates texture usage scope and returns a descriptive error on failure.
 pub(crate) fn validate_texture_usage_scope(texture_uses: &[TextureScopeUse]) -> Result<(), String> {
     for (index, current) in texture_uses.iter().enumerate() {
@@ -875,6 +906,29 @@ pub(crate) fn validate_texture_usage_scope(texture_uses: &[TextureScopeUse]) -> 
                 continue;
             }
             if current.access == ResourceAccess::Write || previous.access == ResourceAccess::Write {
+                return Err(
+                    "usage scope cannot read and write or write the same texture subresource twice"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validates texture usage scope allowing write/write overlap across render draws.
+pub(crate) fn validate_texture_usage_scope_lenient(
+    texture_uses: &[TextureScopeUse],
+) -> Result<(), String> {
+    for (index, current) in texture_uses.iter().enumerate() {
+        for previous in &texture_uses[..index] {
+            if !current.texture.same(&previous.texture)
+                || !texture_subresource_ranges_overlap(current, previous)
+                || !current.aspects.intersects(previous.aspects)
+            {
+                continue;
+            }
+            if current.access != previous.access {
                 return Err(
                     "usage scope cannot read and write or write the same texture subresource twice"
                         .to_owned(),
