@@ -37,9 +37,9 @@ pub use descriptors::{
 };
 pub use error::HalError;
 pub use format::{
-    HalAddressMode, HalBufferUsage, HalCompareFunction, HalFilterMode, HalMipmapFilterMode,
-    HalPrimitiveTopology, HalStencilOperation, HalTextureFormat, HalTextureUsage, HalVertexFormat,
-    HalVertexStepMode,
+    HalAddressMode, HalBufferUsage, HalColorClearKind, HalCompareFunction, HalFilterMode,
+    HalMipmapFilterMode, HalPrimitiveTopology, HalStencilOperation, HalTextureFormat,
+    HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
 pub use present::{HalPresentMode, HalSurfaceConfiguration};
 pub use shader::{HalMslBufferSizeBinding, HalShaderSource, HalShaderStage};

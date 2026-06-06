@@ -243,7 +243,7 @@ fn back_buffer_descriptor(config: HalSurfaceConfiguration) -> HalTextureDescript
 
 fn swap_interval_for_present_mode(mode: HalPresentMode) -> i32 {
     match mode {
-        HalPresentMode::Fifo => 1,
+        HalPresentMode::Fifo | HalPresentMode::FifoRelaxed => 1,
         HalPresentMode::Immediate | HalPresentMode::Mailbox => 0,
     }
 }
@@ -465,6 +465,10 @@ mod tests {
     #[test]
     fn swap_interval_maps_present_modes() {
         assert_eq!(swap_interval_for_present_mode(HalPresentMode::Fifo), 1);
+        assert_eq!(
+            swap_interval_for_present_mode(HalPresentMode::FifoRelaxed),
+            1
+        );
         assert_eq!(swap_interval_for_present_mode(HalPresentMode::Immediate), 0);
         assert_eq!(swap_interval_for_present_mode(HalPresentMode::Mailbox), 0);
     }

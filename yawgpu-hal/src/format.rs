@@ -142,6 +142,47 @@ pub enum HalTextureFormat {
     Unsupported,
 }
 
+/// Enumerates the clear-value numeric class for color attachments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HalColorClearKind {
+    /// Floating-point or normalized color clear.
+    Float,
+    /// Unsigned integer color clear.
+    Uint,
+    /// Signed integer color clear.
+    Sint,
+}
+
+impl HalTextureFormat {
+    /// Returns the color clear-value numeric class for this texture format.
+    #[must_use]
+    pub fn color_clear_kind(self) -> HalColorClearKind {
+        match self {
+            Self::R8Uint
+            | Self::R16Uint
+            | Self::Rg8Uint
+            | Self::Rg16Uint
+            | Self::R32Uint
+            | Self::Rg32Uint
+            | Self::Rgba8Uint
+            | Self::Rgb10a2Uint
+            | Self::Rgba16Uint
+            | Self::Rgba32Uint => HalColorClearKind::Uint,
+            Self::R8Sint
+            | Self::R16Sint
+            | Self::Rg8Sint
+            | Self::Rg16Sint
+            | Self::R32Sint
+            | Self::Rg32Sint
+            | Self::Rgba8Sint
+            | Self::Rgba16Sint
+            | Self::Rgba32Sint => HalColorClearKind::Sint,
+            _ => HalColorClearKind::Float,
+        }
+    }
+}
+
 /// Enumerates HAL texture usage.
 #[derive(Debug, Clone, Copy)]
 pub struct HalTextureUsage {
@@ -339,6 +380,34 @@ mod tests {
         assert!(!usage.storage);
         assert!(!usage.indirect);
         assert!(!usage.query_resolve);
+    }
+
+    #[test]
+    fn color_clear_kind_classifies_integer_formats() {
+        assert_eq!(
+            HalTextureFormat::R32Uint.color_clear_kind(),
+            HalColorClearKind::Uint
+        );
+        assert_eq!(
+            HalTextureFormat::Rgba8Uint.color_clear_kind(),
+            HalColorClearKind::Uint
+        );
+        assert_eq!(
+            HalTextureFormat::R32Sint.color_clear_kind(),
+            HalColorClearKind::Sint
+        );
+        assert_eq!(
+            HalTextureFormat::Rgba16Sint.color_clear_kind(),
+            HalColorClearKind::Sint
+        );
+        assert_eq!(
+            HalTextureFormat::Rgba8Unorm.color_clear_kind(),
+            HalColorClearKind::Float
+        );
+        assert_eq!(
+            HalTextureFormat::Rgba32Float.color_clear_kind(),
+            HalColorClearKind::Float
+        );
     }
 
     #[test]

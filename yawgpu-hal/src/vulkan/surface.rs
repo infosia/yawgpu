@@ -570,11 +570,12 @@ pub(super) fn create_swapchain(
     } else {
         capabilities.current_extent
     };
-    let present_mode = match config.present_mode {
-        crate::HalPresentMode::Immediate => vk::PresentModeKHR::IMMEDIATE,
-        crate::HalPresentMode::Mailbox => vk::PresentModeKHR::MAILBOX,
-        crate::HalPresentMode::Fifo => vk::PresentModeKHR::FIFO,
-    };
+    let present_modes = unsafe {
+        surface_loader
+            .get_physical_device_surface_present_modes(device.physical_device, surface.surface)
+    }
+    .unwrap_or_else(|_| vec![vk::PresentModeKHR::FIFO]);
+    let present_mode = select_present_mode(config.present_mode, &present_modes);
     let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC;
     let create_info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface.surface)
@@ -631,6 +632,23 @@ pub(super) fn create_swapchain(
     }))
 }
 
+fn select_present_mode(
+    requested: crate::HalPresentMode,
+    supported: &[vk::PresentModeKHR],
+) -> vk::PresentModeKHR {
+    let preferred = match requested {
+        crate::HalPresentMode::Immediate => vk::PresentModeKHR::IMMEDIATE,
+        crate::HalPresentMode::Mailbox => vk::PresentModeKHR::MAILBOX,
+        crate::HalPresentMode::Fifo => vk::PresentModeKHR::FIFO,
+        crate::HalPresentMode::FifoRelaxed => vk::PresentModeKHR::FIFO_RELAXED,
+    };
+    if supported.contains(&preferred) {
+        preferred
+    } else {
+        vk::PresentModeKHR::FIFO
+    }
+}
+
 /// Creates swapchain texture and reports validation errors through the owning device.
 pub(super) fn create_swapchain_texture(
     device: Arc<VulkanDeviceInner>,
@@ -679,6 +697,24 @@ pub(super) fn create_swapchain_texture(
 mod tests {
     use super::super::test_helpers::*;
     use super::*;
+
+    #[test]
+    fn select_present_mode_honors_fifo_relaxed_when_supported() {
+        assert_eq!(
+            select_present_mode(
+                crate::HalPresentMode::FifoRelaxed,
+                &[vk::PresentModeKHR::FIFO_RELAXED]
+            ),
+            vk::PresentModeKHR::FIFO_RELAXED
+        );
+        assert_eq!(
+            select_present_mode(
+                crate::HalPresentMode::FifoRelaxed,
+                &[vk::PresentModeKHR::FIFO]
+            ),
+            vk::PresentModeKHR::FIFO
+        );
+    }
 
     #[test]
     #[ignore = "manual real Vulkan backend test"]

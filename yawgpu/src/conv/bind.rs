@@ -306,8 +306,7 @@ fn map_texture_binding_layout(
     };
     Some(core::BindingLayoutKind::Texture {
         sample_type,
-        view_dimension: map_texture_view_dimension(layout.viewDimension)
-            .unwrap_or(core::TextureViewDimension::D2),
+        view_dimension: map_bgl_texture_view_dimension(layout.viewDimension, error)?,
         multisampled: layout.multisampled != 0,
     })
 }
@@ -330,9 +329,27 @@ fn map_storage_texture_binding_layout(
     Some(core::BindingLayoutKind::StorageTexture {
         access,
         format: map_texture_format(layout.format),
-        view_dimension: map_texture_view_dimension(layout.viewDimension)
-            .unwrap_or(core::TextureViewDimension::D2),
+        view_dimension: map_bgl_texture_view_dimension(layout.viewDimension, error)?,
     })
+}
+
+fn map_bgl_texture_view_dimension(
+    value: native::WGPUTextureViewDimension,
+    error: &mut Option<String>,
+) -> Option<core::TextureViewDimension> {
+    match value {
+        native::WGPUTextureViewDimension_Undefined => Some(core::TextureViewDimension::D2),
+        native::WGPUTextureViewDimension_1D => Some(core::TextureViewDimension::D1),
+        native::WGPUTextureViewDimension_2D => Some(core::TextureViewDimension::D2),
+        native::WGPUTextureViewDimension_2DArray => Some(core::TextureViewDimension::D2Array),
+        native::WGPUTextureViewDimension_Cube => Some(core::TextureViewDimension::Cube),
+        native::WGPUTextureViewDimension_CubeArray => Some(core::TextureViewDimension::CubeArray),
+        native::WGPUTextureViewDimension_3D => Some(core::TextureViewDimension::D3),
+        _ => {
+            set_first_error(error, "invalid texture view dimension");
+            None
+        }
+    }
 }
 
 // `as u32` / `as native::WGPUFeatureName` are required on Windows MSVC where

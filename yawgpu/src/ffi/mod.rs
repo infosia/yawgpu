@@ -1032,6 +1032,8 @@ fn hal_present_mode(mode: native::WGPUPresentMode) -> HalPresentMode {
     match mode {
         native::WGPUPresentMode_Immediate => HalPresentMode::Immediate,
         native::WGPUPresentMode_Mailbox => HalPresentMode::Mailbox,
+        native::WGPUPresentMode_FifoRelaxed => HalPresentMode::FifoRelaxed,
+        native::WGPUPresentMode_Undefined | native::WGPUPresentMode_Fifo => HalPresentMode::Fifo,
         _ => HalPresentMode::Fifo,
     }
 }
@@ -3202,6 +3204,18 @@ mod tests {
             texture: std::ptr::null(),
             status: native::WGPUSurfaceGetCurrentTextureStatus_Error,
         }
+    }
+
+    #[test]
+    fn hal_present_mode_maps_fifo_relaxed_without_collapsing() {
+        assert!(matches!(
+            hal_present_mode(native::WGPUPresentMode_FifoRelaxed),
+            HalPresentMode::FifoRelaxed
+        ));
+        assert!(matches!(
+            hal_present_mode(native::WGPUPresentMode_Undefined),
+            HalPresentMode::Fifo
+        ));
     }
 
     #[test]

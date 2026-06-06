@@ -12,16 +12,27 @@ target range (0 reachable truncation bugs). Most enum mappings are 1:1; unsuppor
 `HalTextureFormat::Unsupported`/`HalVertexFormat::Unsupported` which every backend turns into a `HalError`
 (not a silent wrong-GPU result); `*_Undefined → documented default` is spec-correct.
 
-**Findings — fixed in a single combined slice (user-approved 2026-06-06):**
+**Findings — RESOLVED in a single combined slice (user-approved 2026-06-06). Real-GPU verified on
+Metal + Vulkan/MoltenVK; Clean Review clean (no CRITICAL/MAJOR):**
 
-| # | Site | Pattern | Severity | Status |
+| # | Site | Fix | Severity | Status |
 |---|---|---|---|---|
-| 1 | `vulkan/encode.rs` `render_pass_clear_values` (~1902) + `subpass_clear_values` (~1400) | color `clearValue` always written to the `float32` member of `VkClearColorValue` regardless of the attachment's numeric class; integer formats (`*_UINT`/`*_SINT`, all `.renderable()`) need the `uint32`/`int32` member + `as u32`/`as i32` (not `as f32`) → **garbage clear of integer render targets**. Metal is correct. | **Tier-1 correctness** | OPEN |
-| 2 | `yawgpu/src/ffi/mod.rs:1031` `hal_present_mode` | `WGPUPresentMode_FifoRelaxed` silently collapses to `Fifo` (`HalPresentMode` has no `FifoRelaxed` variant; `_ => Fifo` swallows it) | minor | OPEN |
-| 3 | `yawgpu/src/conv/bind.rs:309, 333` | `map_texture_view_dimension(...).unwrap_or(D2)` maps BOTH `Undefined` (correct default) AND an out-of-range/invalid value to `D2` → invalid `viewDimension` on a BGL entry silently accepted instead of erroring (sibling `access` field + the texture-view path correctly error on invalid) | minor (validation strictness) | OPEN |
-| 4 | `yawgpu-hal/src/metal/encode.rs:415` | MSL buffer-size `u32::try_from(size).unwrap_or(u32::MAX)` saturates instead of erroring; unreachable today only because `Adapter::limits()` pins `max_buffer_size` to 256 MiB — would silently report a wrong runtime-array length if real adapter limits are ever wired in | latent (defensive) | OPEN |
-| 5 | `yawgpu-core/src/subpass.rs:540` `set_scissor_rect` | (adjacent, not narrowing) subpass scissor checks only `checked_add` overflow, NOT containment in the attachment extent like the main `render_pass.rs` path (`validate_scissor_rect(render_extent, …)`) — strictness asymmetry | minor (validation) | OPEN |
+| 1 | `vulkan/encode.rs` `render_pass_clear_values` + `subpass_clear_values` | new `HalColorClearKind` + `HalTextureFormat::color_clear_kind()` classifier (`hal/format.rs`); `vulkan_color_clear_value(format, [f64;4])` picks the `float32`/`uint32`/`int32` `VkClearColorValue` member with `as f32`/`as u32`/`as i32`. Integer render targets now clear to the exact value. Metal untouched (was correct). | **Tier-1 correctness** | RESOLVED |
+| 2 | `ffi/mod.rs` `hal_present_mode` | `HalPresentMode::FifoRelaxed` added; FFI maps it explicitly; Vulkan `create_swapchain` now queries supported present modes + `select_present_mode` picks `FIFO_RELAXED` if supported else `FIFO` (for ALL modes — also fixes the prior unconditional Immediate/Mailbox use); Metal/GLES map to vsync/Fifo explicitly | minor | RESOLVED |
+| 3 | `conv/bind.rs` | `map_bgl_texture_view_dimension` distinguishes `Undefined`(→D2) from out-of-range(→`set_first_error`+reject); applied to texture + storage-texture BGL entries | minor (validation) | RESOLVED |
+| 4 | `metal/encode.rs` MSL buffer-size | checked `u32::try_from(...).map_err(... HalError)` instead of `unwrap_or(u32::MAX)` saturation | latent (defensive) | RESOLVED |
+| 5 | `subpass.rs` `set_scissor_rect` | now calls `validate_scissor_rect(Some(self.inner.extent), …)` to match the regular render-pass path | minor (validation) | RESOLVED |
 
-All five fixed in one HANDOFF / one diff, then one cycle: review → real-GPU verify (Vulkan integer-clear +
-Metal parity) → Clean Review → commit. GLES (Tier 2) applies where mappable or returns a catalogued
-`HalError` (`specs/blocks/67-gles-backend.md`); never relax core.
+Verification: `e2e_{metal,vulkan}_threading_audit.rs` gained `*_integer_render_target_clear_is_exact`
+(clear an `R32Uint` target to `0xDEADBEEF`, read back exact) — green on Metal + Vulkan/MoltenVK
+(non-tautological: the pre-fix float-union path would read a bit-reinterpreted value); the other 6 probes in
+each file still pass. Noop/feature-gated unit tests for all 5 items; all clippy gates + fmt clean.
+
+**Follow-up (Clean Review MINOR, forward-safety, not a current defect):** `HalTextureFormat::color_clear_kind`
+classifies integer formats by explicit listing with a `_ => Float` catch-all, and `HalTextureFormat` is not
+`#[non_exhaustive]` — a FUTURE integer color format added without updating the classifier would silently fall
+into `Float` and re-introduce the integer-clear bug with no compile error. All current `*Uint`/`*Sint`
+variants (incl. `Rgb10a2Uint`) are covered. Harden later by classifying the float formats explicitly (so a
+new unlisted variant fails to compile) or a warning comment at the `_` arm.
+
+GLES (Tier 2) unaffected (no integer-clear/present-mode regressions); core rules unchanged.

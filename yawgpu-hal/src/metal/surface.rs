@@ -61,7 +61,10 @@ impl MetalSurface {
             height: f64::from(config.height),
         });
         let _ = config.usage;
-        let _ = config.present_mode;
+        match config.present_mode {
+            HalPresentMode::Fifo | HalPresentMode::FifoRelaxed => {}
+            HalPresentMode::Immediate | HalPresentMode::Mailbox => {}
+        }
         self.current_drawable = None;
         self.config = Some(config);
         Ok(())
