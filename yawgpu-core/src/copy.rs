@@ -169,9 +169,7 @@ pub(crate) fn required_bytes_in_texel_copy(
 pub(crate) fn texel_copy_block_size(format_caps: FormatCaps, aspect: TextureAspect) -> u32 {
     match aspect {
         TextureAspect::StencilOnly => 1,
-        TextureAspect::DepthOnly
-            if format_caps.aspects.depth && format_caps.aspects.stencil =>
-        {
+        TextureAspect::DepthOnly if format_caps.aspects.depth && format_caps.aspects.stencil => {
             format_caps.texel_block_size.saturating_sub(1)
         }
         _ => format_caps.texel_block_size,

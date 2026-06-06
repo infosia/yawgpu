@@ -235,8 +235,12 @@ fn run_draw_variant(variant: DrawVariant) {
         yawgpu::wgpuCommandEncoderRelease(encoder);
 
         let storage_bytes = read_buffer(instance, storage_readback, 0, 4);
-        let storage_value =
-            u32::from_le_bytes([storage_bytes[0], storage_bytes[1], storage_bytes[2], storage_bytes[3]]);
+        let storage_value = u32::from_le_bytes([
+            storage_bytes[0],
+            storage_bytes[1],
+            storage_bytes[2],
+            storage_bytes[3],
+        ]);
         assert_eq!(
             storage_value, 1,
             "fragment storage write did not take effect on the draw variant"
