@@ -12,7 +12,8 @@ clamp, stencil ops/compare/masks, format) and the full `WGPUSamplerDescriptor` (
 (firstVertex/firstInstance/baseVertex/firstIndex, dynamic offsets, vertex/index offsets, copy
 offset/bytesPerRow/rowsPerImage/origin.z) are applied on both backends.
 
-**Open findings — fixed as 6 grouped phases (user-approved 2026-06-06):**
+**Open findings — fixed in a single combined slice (user revised 2026-06-04; the groups below
+are the per-group structure of that one HANDOFF, not separate phases):**
 
 | Group | Field(s) | Symptom | Status |
 |---|---|---|---|
@@ -23,6 +24,6 @@ offset/bytesPerRow/rowsPerImage/origin.z) are applied on both backends.
 | E | `primitive.unclippedDepth` | Vulkan hardcodes `depth_clamp_enable(false)`, Metal no `setDepthClipMode`; also not feature-gate-rejected (`depth-clip-control`) | OPEN |
 | F | `dispatchWorkgroupsIndirect` | validates + records the referenced buffer but records NO executable command → silent no-op (compute analog of the resolved F-034 indirect-draw gap) | OPEN |
 
-Each group is treated as a phase: HANDOFF → review → real-GPU verify (Metal + Vulkan/MoltenVK) → Clean
-Review → commit. GLES (Tier 2) applies the field or returns a catalogued `HalError`
-(`specs/blocks/67-gles-backend.md`); never relax core.
+All six groups are implemented in one HANDOFF / one diff, then one cycle: review → real-GPU verify (Metal
++ Vulkan/MoltenVK) → Clean Review → commit. GLES (Tier 2) applies the field or returns a catalogued
+`HalError` (`specs/blocks/67-gles-backend.md`); never relax core.
