@@ -545,6 +545,7 @@ impl SubpassRenderPass {
             y.checked_add(height).ok_or_else(|| {
                 "subpass render pass scissor rectangle height overflows".to_owned()
             })?;
+            validate_scissor_rect(Some(self.inner.extent), x, y, width, height)?;
             state.scissor_rect = Some(ScissorRect {
                 x,
                 y,
@@ -1595,6 +1596,39 @@ mod tests {
         assert_eq!(scissor.y, 1);
         assert_eq!(scissor.width, 2);
         assert_eq!(scissor.height, 2);
+    }
+
+    #[test]
+    fn subpass_render_pass_rejects_scissor_outside_extent() {
+        let device = noop_device();
+        let layout = Arc::new(device.create_subpass_pass_layout(two_subpass_layout_descriptor()));
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_subpass_render_pass(
+            &device,
+            SubpassRenderPassDescriptor {
+                pass_layout: layout,
+                extent: Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                color_attachments: vec![persistent_color(&device), persistent_color(&device)],
+                depth_stencil_attachment: None,
+                error: None,
+            },
+        );
+        assert_eq!(error, None);
+        assert_eq!(
+            pass.set_scissor_rect(3, 0, 2, 1),
+            Some("render pass scissor rectangle exceeds attachment size".to_owned())
+        );
+        assert_eq!(pass.end(), None);
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("render pass scissor rectangle exceeds attachment size".to_owned())
+        );
     }
 
     #[test]

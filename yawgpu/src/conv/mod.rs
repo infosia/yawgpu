@@ -1189,7 +1189,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "tiled")]
     fn unused_buffer_layout() -> native::WGPUBufferBindingLayout {
         native::WGPUBufferBindingLayout {
             nextInChain: std::ptr::null_mut(),
@@ -1265,6 +1264,91 @@ mod tests {
             .error
             .expect("error")
             .contains("must not be null"));
+    }
+
+    #[test]
+    fn map_bind_group_layout_descriptor_rejects_invalid_texture_view_dimension() {
+        let mut texture_layout = unused_texture_layout();
+        texture_layout.sampleType = native::WGPUTextureSampleType_Float;
+        let entry = native::WGPUBindGroupLayoutEntry {
+            nextInChain: std::ptr::null_mut(),
+            binding: 0,
+            visibility: native::WGPUShaderStage_Fragment,
+            bindingArraySize: 0,
+            buffer: unused_buffer_layout(),
+            sampler: unused_sampler_layout(),
+            texture: texture_layout,
+            storageTexture: unused_storage_texture_layout(),
+        };
+        let descriptor = native::WGPUBindGroupLayoutDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            entryCount: 1,
+            entries: &entry,
+        };
+        let mapped = unsafe { map_bind_group_layout_descriptor(&descriptor) };
+        assert_eq!(mapped.error, None);
+        assert!(matches!(
+            mapped.entries[0].kind,
+            Some(core::BindingLayoutKind::Texture {
+                view_dimension: core::TextureViewDimension::D2,
+                ..
+            })
+        ));
+
+        let mut invalid_entry = entry;
+        invalid_entry.texture.viewDimension = 0xCAFE;
+        let invalid = native::WGPUBindGroupLayoutDescriptor {
+            entries: &invalid_entry,
+            ..descriptor
+        };
+        assert_eq!(
+            unsafe { map_bind_group_layout_descriptor(&invalid) }.error,
+            Some("invalid texture view dimension".to_owned())
+        );
+    }
+
+    #[test]
+    fn map_bind_group_layout_descriptor_rejects_invalid_storage_texture_view_dimension() {
+        let mut storage_layout = unused_storage_texture_layout();
+        storage_layout.access = native::WGPUStorageTextureAccess_WriteOnly;
+        storage_layout.format = native::WGPUTextureFormat_RGBA8Unorm;
+        let entry = native::WGPUBindGroupLayoutEntry {
+            nextInChain: std::ptr::null_mut(),
+            binding: 0,
+            visibility: native::WGPUShaderStage_Fragment,
+            bindingArraySize: 0,
+            buffer: unused_buffer_layout(),
+            sampler: unused_sampler_layout(),
+            texture: unused_texture_layout(),
+            storageTexture: storage_layout,
+        };
+        let descriptor = native::WGPUBindGroupLayoutDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            entryCount: 1,
+            entries: &entry,
+        };
+        let mapped = unsafe { map_bind_group_layout_descriptor(&descriptor) };
+        assert_eq!(mapped.error, None);
+        assert!(matches!(
+            mapped.entries[0].kind,
+            Some(core::BindingLayoutKind::StorageTexture {
+                view_dimension: core::TextureViewDimension::D2,
+                ..
+            })
+        ));
+
+        let mut invalid_entry = entry;
+        invalid_entry.storageTexture.viewDimension = 0xCAFE;
+        let invalid = native::WGPUBindGroupLayoutDescriptor {
+            entries: &invalid_entry,
+            ..descriptor
+        };
+        assert_eq!(
+            unsafe { map_bind_group_layout_descriptor(&invalid) }.error,
+            Some("invalid texture view dimension".to_owned())
+        );
     }
 
     #[cfg(feature = "tiled")]

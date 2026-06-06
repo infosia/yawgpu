@@ -1402,15 +1402,14 @@ fn subpass_clear_values(pass: &HalSubpassRenderPassCommand) -> Vec<vk::ClearValu
     let mut values = pass
         .color_attachments
         .iter()
-        .map(|attachment| vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: [
-                    attachment.clear_color[0] as f32,
-                    attachment.clear_color[1] as f32,
-                    attachment.clear_color[2] as f32,
-                    attachment.clear_color[3] as f32,
-                ],
-            },
+        .enumerate()
+        .map(|(index, attachment)| {
+            let format = pass
+                .layout
+                .color_attachments
+                .get(index)
+                .map_or(HalTextureFormat::Unsupported, |layout| layout.format);
+            vulkan_color_clear_value(format, attachment.clear_color)
         })
         .collect::<Vec<_>>();
     if let Some(depth) = &pass.depth_stencil_attachment {
@@ -1902,16 +1901,11 @@ fn render_pass_resolve_formats(
 fn render_pass_clear_values(pass: &HalRenderPass) -> Vec<vk::ClearValue> {
     let mut clear_values = Vec::new();
     for color in &pass.color_targets {
-        clear_values.push(vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: [
-                    color.clear_color[0] as f32,
-                    color.clear_color[1] as f32,
-                    color.clear_color[2] as f32,
-                    color.clear_color[3] as f32,
-                ],
-            },
-        });
+        let format = match &color.texture {
+            HalTexture::Vulkan(texture) => texture.format,
+            _ => HalTextureFormat::Unsupported,
+        };
+        clear_values.push(vulkan_color_clear_value(format, color.clear_color));
     }
     for _ in pass
         .color_targets
@@ -1931,6 +1925,41 @@ fn render_pass_clear_values(pass: &HalRenderPass) -> Vec<vk::ClearValue> {
         });
     }
     clear_values
+}
+
+fn vulkan_color_clear_value(format: HalTextureFormat, color: [f64; 4]) -> vk::ClearValue {
+    match format.color_clear_kind() {
+        HalColorClearKind::Float => vk::ClearValue {
+            color: vk::ClearColorValue {
+                float32: [
+                    color[0] as f32,
+                    color[1] as f32,
+                    color[2] as f32,
+                    color[3] as f32,
+                ],
+            },
+        },
+        HalColorClearKind::Uint => vk::ClearValue {
+            color: vk::ClearColorValue {
+                uint32: [
+                    color[0] as u32,
+                    color[1] as u32,
+                    color[2] as u32,
+                    color[3] as u32,
+                ],
+            },
+        },
+        HalColorClearKind::Sint => vk::ClearValue {
+            color: vk::ClearColorValue {
+                int32: [
+                    color[0] as i32,
+                    color[1] as i32,
+                    color[2] as i32,
+                    color[3] as i32,
+                ],
+            },
+        },
+    }
 }
 
 fn render_pass_extent_from_targets(
@@ -2553,6 +2582,22 @@ mod tests {
             sample_count: 1,
             bytes_per_pixel: 4,
             format,
+        }
+    }
+
+    #[test]
+    fn color_clear_value_uses_format_numeric_class() {
+        let float_clear =
+            vulkan_color_clear_value(HalTextureFormat::Rgba8Unorm, [1.25, 2.5, 3.75, 4.0]);
+        let uint_clear =
+            vulkan_color_clear_value(HalTextureFormat::R32Uint, [1.0, 255.0, 65_535.0, 7.0]);
+        let sint_clear =
+            vulkan_color_clear_value(HalTextureFormat::R32Sint, [-1.0, 2.0, -3.0, 4.0]);
+
+        unsafe {
+            assert_eq!(float_clear.color.float32, [1.25, 2.5, 3.75, 4.0]);
+            assert_eq!(uint_clear.color.uint32, [1, 255, 65_535, 7]);
+            assert_eq!(sint_clear.color.int32, [-1, 2, -3, 4]);
         }
     }
 

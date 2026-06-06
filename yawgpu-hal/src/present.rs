@@ -42,6 +42,8 @@ impl HalSurfaceConfiguration {
 pub enum HalPresentMode {
     /// Fifo variant.
     Fifo,
+    /// Fifo relaxed variant.
+    FifoRelaxed,
     /// Immediate variant.
     Immediate,
     /// Mailbox variant.

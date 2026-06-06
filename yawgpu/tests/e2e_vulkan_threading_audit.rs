@@ -37,6 +37,9 @@ const BYTES_PER_ROW: u32 = 256;
 const READBACK_SIZE: usize = BYTES_PER_ROW as usize * HEIGHT as usize;
 const GREEN: [u8; 4] = [0, 255, 0, 255];
 const RED: [u8; 4] = [255, 0, 0, 255];
+// A value whose f32-bit reinterpretation differs from the integer, so the pre-fix
+// (float-union) clear path would read back a different number.
+const INT_CLEAR: u32 = 0xDEAD_BEEF;
 
 // Oversized triangle covering the whole framebuffer. In WebGPU NDC (Y up) the
 // vertex order (-1,-1),(3,-1),(-1,3) is counter-clockwise, so frontFace=CCW makes
@@ -157,6 +160,21 @@ fn vulkan_dispatch_workgroups_indirect_executes() {
     assert_eq!(
         value, 1,
         "indirect dispatch did not run (no HAL command recorded)"
+    );
+}
+
+/// Narrowing audit (the FIX): `loadOp=Clear` of an integer (R32Uint) render target
+/// must store the EXACT integer clear value. The pre-fix Vulkan path wrote the
+/// `float32` member of `VkClearColorValue` regardless of format, so an integer
+/// target got a float-bit-reinterpreted garbage value instead of the requested
+/// integer.
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_integer_render_target_clear_is_exact() {
+    let value = run_integer_clear();
+    assert_eq!(
+        value, INT_CLEAR,
+        "integer render-target clear value was narrowed/reinterpreted"
     );
 }
 
@@ -340,6 +358,57 @@ fn run_indirect_dispatch() -> u32 {
         yawgpu::wgpuShaderModuleRelease(module);
         yawgpu::wgpuBufferRelease(indirect);
         yawgpu::wgpuBufferRelease(storage);
+    });
+    out
+}
+
+fn run_integer_clear() -> u32 {
+    let mut out = 0u32;
+    with_device(|ctx| unsafe {
+        let texture = create_texture(
+            ctx.device,
+            native::WGPUTextureFormat_R32Uint,
+            native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+        );
+        let view = yawgpu::wgpuTextureCreateView(texture, std::ptr::null());
+        let color_attachment = native::WGPURenderPassColorAttachment {
+            nextInChain: std::ptr::null_mut(),
+            view,
+            depthSlice: native::WGPU_DEPTH_SLICE_UNDEFINED,
+            resolveTarget: std::ptr::null(),
+            loadOp: native::WGPULoadOp_Clear,
+            storeOp: native::WGPUStoreOp_Store,
+            clearValue: native::WGPUColor {
+                r: f64::from(INT_CLEAR),
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            },
+        };
+        let attachments = [color_attachment];
+        let descriptor = native::WGPURenderPassDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            colorAttachmentCount: attachments.len(),
+            colorAttachments: attachments.as_ptr(),
+            depthStencilAttachment: std::ptr::null(),
+            occlusionQuerySet: std::ptr::null(),
+            timestampWrites: std::ptr::null(),
+        };
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(ctx.device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+
+        let readback = ctx.readback_buffer(READBACK_SIZE as u64);
+        copy_color(encoder, texture, readback);
+        ctx.submit(encoder);
+        let bytes = read_buffer(ctx.instance, readback, READBACK_SIZE);
+        out = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuTextureViewRelease(view);
+        yawgpu::wgpuTextureRelease(texture);
     });
     out
 }

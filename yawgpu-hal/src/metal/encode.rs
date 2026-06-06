@@ -412,9 +412,13 @@ fn msl_buffer_sizes(
                 return Ok(0);
             };
             let size = bound_buffer_size(bound)?;
-            Ok(u32::try_from(size).unwrap_or(u32::MAX))
+            msl_buffer_size_u32(size)
         })
         .collect()
+}
+
+fn msl_buffer_size_u32(size: u64) -> Result<u32, HalError> {
+    u32::try_from(size).map_err(|_| buffer_error("MSL buffer size exceeds u32"))
 }
 
 fn bound_buffer_size(bound: &HalBoundBuffer) -> Result<u64, HalError> {
@@ -922,51 +926,6 @@ fn encode_subpass_draw(
     Ok(())
 }
 
-#[cfg(all(test, feature = "tiled"))]
-mod tiled_tests {
-    use super::*;
-    use crate::HalSubpassLayout;
-
-    #[test]
-    fn tile_memory_budget_check_accepts_equal_and_rejects_over_budget() {
-        assert!(tile_memory_fits_budget(1024, 4, 4096));
-        assert!(!tile_memory_fits_budget(1025, 4, 4096));
-    }
-
-    #[test]
-    fn subpass_color_attachment_indices_returns_union_across_subpasses() {
-        let pass = HalSubpassRenderPassCommand {
-            layout: HalSubpassPassLayout {
-                color_attachments: Vec::new(),
-                depth_stencil_attachment: None,
-                subpasses: vec![
-                    HalSubpassLayout {
-                        color_attachment_indices: vec![1, 0],
-                        uses_depth_stencil: false,
-                        input_attachments: Vec::new(),
-                    },
-                    HalSubpassLayout {
-                        color_attachment_indices: vec![2, 1],
-                        uses_depth_stencil: true,
-                        input_attachments: Vec::new(),
-                    },
-                ],
-                dependencies: Vec::new(),
-            },
-            extent: HalExtent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            color_attachments: Vec::new(),
-            depth_stencil_attachment: None,
-            draws: Vec::new(),
-        };
-
-        assert_eq!(subpass_color_attachment_indices(&pass), vec![0, 1, 2]);
-    }
-}
-
 fn encode_render_bind_buffer(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     binding: &HalBoundBuffer,
@@ -1196,5 +1155,72 @@ fn metal_index_type(format: HalIndexFormat) -> MTLIndexType {
     match format {
         HalIndexFormat::Uint16 => MTLIndexType::UInt16,
         HalIndexFormat::Uint32 => MTLIndexType::UInt32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn msl_buffer_size_u32_rejects_overflow() {
+        assert_eq!(
+            msl_buffer_size_u32(u32::MAX as u64).expect("u32 max should fit"),
+            u32::MAX
+        );
+        let error =
+            msl_buffer_size_u32(u64::from(u32::MAX) + 1).expect_err("overflow must be rejected");
+        assert!(matches!(
+            error,
+            HalError::BufferOperationFailed {
+                backend: "metal",
+                message: "MSL buffer size exceeds u32"
+            }
+        ));
+    }
+}
+
+#[cfg(all(test, feature = "tiled"))]
+mod tiled_tests {
+    use super::*;
+    use crate::HalSubpassLayout;
+
+    #[test]
+    fn tile_memory_budget_check_accepts_equal_and_rejects_over_budget() {
+        assert!(tile_memory_fits_budget(1024, 4, 4096));
+        assert!(!tile_memory_fits_budget(1025, 4, 4096));
+    }
+
+    #[test]
+    fn subpass_color_attachment_indices_returns_union_across_subpasses() {
+        let pass = HalSubpassRenderPassCommand {
+            layout: HalSubpassPassLayout {
+                color_attachments: Vec::new(),
+                depth_stencil_attachment: None,
+                subpasses: vec![
+                    HalSubpassLayout {
+                        color_attachment_indices: vec![1, 0],
+                        uses_depth_stencil: false,
+                        input_attachments: Vec::new(),
+                    },
+                    HalSubpassLayout {
+                        color_attachment_indices: vec![2, 1],
+                        uses_depth_stencil: true,
+                        input_attachments: Vec::new(),
+                    },
+                ],
+                dependencies: Vec::new(),
+            },
+            extent: HalExtent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            color_attachments: Vec::new(),
+            depth_stencil_attachment: None,
+            draws: Vec::new(),
+        };
+
+        assert_eq!(subpass_color_attachment_indices(&pass), vec![0, 1, 2]);
     }
 }
