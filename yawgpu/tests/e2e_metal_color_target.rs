@@ -498,6 +498,189 @@ unsafe fn create_msaa_pipeline(
     pipeline
 }
 
+/// F-043: a render pass with `depthSlice = 1` on a 3D color attachment must clear
+/// slice 1 and leave slice 0 untouched. yawgpu ignored `depthSlice` and always
+/// targeted slice 0. The texture is initialised (slice 0 = 10, slice 1 = 20), a
+/// clear-only pass with `depthSlice = 1` clears slice 1 to 255, then both slices
+/// are read back.
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "metal")]
+fn metal_render_pass_depth_slice_targets_requested_3d_slice() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+    unsafe {
+        let (instance, adapter, device, queue, errors) = setup();
+        let texture = create_3d_texture(device, 2);
+        write_3d_slice(queue, texture, 0, 10);
+        write_3d_slice(queue, texture, 1, 20);
+        let view = yawgpu::wgpuTextureCreateView(texture, std::ptr::null());
+
+        let color_attachment = native::WGPURenderPassColorAttachment {
+            nextInChain: std::ptr::null_mut(),
+            view,
+            depthSlice: 1,
+            resolveTarget: std::ptr::null(),
+            loadOp: native::WGPULoadOp_Clear,
+            storeOp: native::WGPUStoreOp_Store,
+            clearValue: native::WGPUColor {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+        };
+        let attachments = [color_attachment];
+        let pass_descriptor = native::WGPURenderPassDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            colorAttachmentCount: attachments.len(),
+            colorAttachments: attachments.as_ptr(),
+            depthStencilAttachment: std::ptr::null(),
+            occlusionQuerySet: std::ptr::null(),
+            timestampWrites: std::ptr::null(),
+        };
+        let readback0 = create_buffer(
+            device,
+            256,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        let readback1 = create_buffer(
+            device,
+            256,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_descriptor);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        copy_3d_slice_to_buffer(encoder, texture, 0, readback0);
+        copy_3d_slice_to_buffer(encoder, texture, 1, readback1);
+        let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        yawgpu::wgpuCommandBufferRelease(command_buffer);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+        let s0 = read_buffer(instance, readback0, 0, 4);
+        let s1 = read_buffer(instance, readback1, 0, 4);
+        let slice0 = [s0[0], s0[1], s0[2], s0[3]];
+        let slice1 = [s1[0], s1[1], s1[2], s1[3]];
+        yawgpu::wgpuBufferRelease(readback1);
+        yawgpu::wgpuBufferRelease(readback0);
+
+        assert_eq!(slice0, [10, 10, 10, 10], "slice 0 must be untouched");
+        assert_eq!(
+            slice1,
+            [255, 255, 255, 255],
+            "slice 1 must be cleared via depthSlice=1"
+        );
+        assert!(errors.lock().expect("error lock").is_empty());
+
+        yawgpu::wgpuTextureViewRelease(view);
+        yawgpu::wgpuTextureRelease(texture);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+#[cfg(feature = "metal")]
+unsafe fn create_3d_texture(device: native::WGPUDevice, depth: u32) -> native::WGPUTexture {
+    let descriptor = native::WGPUTextureDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage: native::WGPUTextureUsage_RenderAttachment
+            | native::WGPUTextureUsage_CopySrc
+            | native::WGPUTextureUsage_CopyDst,
+        dimension: native::WGPUTextureDimension_3D,
+        size: native::WGPUExtent3D {
+            width: 1,
+            height: 1,
+            depthOrArrayLayers: depth,
+        },
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        mipLevelCount: 1,
+        sampleCount: 1,
+        viewFormatCount: 0,
+        viewFormats: std::ptr::null(),
+    };
+    let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+    assert!(!texture.is_null());
+    texture
+}
+
+#[cfg(feature = "metal")]
+unsafe fn write_3d_slice(
+    queue: native::WGPUQueue,
+    texture: native::WGPUTexture,
+    slice: u32,
+    v: u8,
+) {
+    let data = [v, v, v, v];
+    let dest = native::WGPUTexelCopyTextureInfo {
+        texture,
+        mipLevel: 0,
+        origin: native::WGPUOrigin3D {
+            x: 0,
+            y: 0,
+            z: slice,
+        },
+        aspect: native::WGPUTextureAspect_All,
+    };
+    let layout = native::WGPUTexelCopyBufferLayout {
+        offset: 0,
+        bytesPerRow: 4,
+        rowsPerImage: 1,
+    };
+    let extent = native::WGPUExtent3D {
+        width: 1,
+        height: 1,
+        depthOrArrayLayers: 1,
+    };
+    yawgpu::wgpuQueueWriteTexture(
+        queue,
+        &dest,
+        data.as_ptr().cast(),
+        data.len(),
+        &layout,
+        &extent,
+    );
+}
+
+#[cfg(feature = "metal")]
+unsafe fn copy_3d_slice_to_buffer(
+    encoder: native::WGPUCommandEncoder,
+    texture: native::WGPUTexture,
+    slice: u32,
+    readback: native::WGPUBuffer,
+) {
+    let src = native::WGPUTexelCopyTextureInfo {
+        texture,
+        mipLevel: 0,
+        origin: native::WGPUOrigin3D {
+            x: 0,
+            y: 0,
+            z: slice,
+        },
+        aspect: native::WGPUTextureAspect_All,
+    };
+    let dst = native::WGPUTexelCopyBufferInfo {
+        layout: native::WGPUTexelCopyBufferLayout {
+            offset: 0,
+            bytesPerRow: 256,
+            rowsPerImage: 1,
+        },
+        buffer: readback,
+    };
+    let extent = native::WGPUExtent3D {
+        width: 1,
+        height: 1,
+        depthOrArrayLayers: 1,
+    };
+    yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &src, &dst, &extent);
+}
+
 /// F-042 slice 1: two point draws in one render pass that write the SAME storage
 /// buffer (separate bind groups) must be allowed — yawgpu wrongly rejected the
 /// render-pass usage scope ("write the same buffer range twice"), poisoning the
@@ -648,10 +831,22 @@ fn metal_render_bundle_two_draws_write_storage_buffer() {
             yawgpu::wgpuDeviceCreateRenderBundleEncoder(device, &bundle_descriptor);
         assert!(!bundle_encoder.is_null());
         yawgpu::wgpuRenderBundleEncoderSetPipeline(bundle_encoder, pipeline1);
-        yawgpu::wgpuRenderBundleEncoderSetBindGroup(bundle_encoder, 0, bind_group1, 0, std::ptr::null());
+        yawgpu::wgpuRenderBundleEncoderSetBindGroup(
+            bundle_encoder,
+            0,
+            bind_group1,
+            0,
+            std::ptr::null(),
+        );
         yawgpu::wgpuRenderBundleEncoderDraw(bundle_encoder, 1, 1, 0, 0);
         yawgpu::wgpuRenderBundleEncoderSetPipeline(bundle_encoder, pipeline2);
-        yawgpu::wgpuRenderBundleEncoderSetBindGroup(bundle_encoder, 0, bind_group2, 0, std::ptr::null());
+        yawgpu::wgpuRenderBundleEncoderSetBindGroup(
+            bundle_encoder,
+            0,
+            bind_group2,
+            0,
+            std::ptr::null(),
+        );
         yawgpu::wgpuRenderBundleEncoderDraw(bundle_encoder, 1, 1, 0, 0);
         let bundle = yawgpu::wgpuRenderBundleEncoderFinish(bundle_encoder, std::ptr::null());
         assert!(!bundle.is_null());

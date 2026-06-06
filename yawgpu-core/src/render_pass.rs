@@ -731,6 +731,7 @@ mod tests {
         ));
         assert_eq!(command.blend_constant, [0.0; 4]);
         assert_eq!(command.stencil_reference, 0);
+        assert_eq!(command.color_attachments[0].depth_slice, 0);
     }
 
     #[test]
@@ -1012,6 +1013,33 @@ mod tests {
         assert!(command.draw.is_some());
     }
 
+    #[test]
+    fn render_pass_encoder_records_3d_color_attachment_depth_slice() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let view = render_attachment_3d_view(&device);
+        let mut descriptor = noop_render_pass_descriptor(view, None);
+        descriptor.color_attachments[0]
+            .as_mut()
+            .expect("color attachment")
+            .depth_slice = Some(1);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&descriptor);
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        let CommandExecution::RenderPass(command) = &command_buffer.command_ops()[0] else {
+            panic!("expected render pass command");
+        };
+        assert_eq!(command.color_attachments[0].depth_slice, 1);
+    }
+
     fn buffer_bind_group(
         device: &crate::device::Device,
         layout: Arc<BindGroupLayout>,
@@ -1180,6 +1208,34 @@ mod tests {
             format: rgba8_unorm(),
             mip_level_count: 1,
             sample_count,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(error, None);
+        Arc::new(view)
+    }
+
+    fn render_attachment_3d_view(device: &crate::device::Device) -> Arc<TextureView> {
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+            dimension: TextureDimension::D3,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 2,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
             view_formats: Vec::new(),
         });
         let (view, error) = texture.create_view(TextureViewDescriptor {

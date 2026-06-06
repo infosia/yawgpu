@@ -2069,7 +2069,7 @@ fn vk_color_attachment_description(
     };
     Ok(vk::AttachmentDescription::default()
         .format(format)
-        .samples(vk_sample_count(texture.inner()?.sample_count)?)
+        .samples(vk_sample_count(texture.sample_count)?)
         .load_op(vk_load_op(target.load_op))
         .store_op(vk_store_op(target.store))
         .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
@@ -2107,7 +2107,7 @@ fn vk_render_depth_stencil_attachment_description(
     let has_stencil = format_has_stencil_aspect(attachment.format);
     Ok(vk::AttachmentDescription::default()
         .format(format)
-        .samples(vk_sample_count(texture.inner()?.sample_count)?)
+        .samples(vk_sample_count(texture.sample_count)?)
         .load_op(if has_depth {
             vk_load_op(attachment.depth_load_op)
         } else {
@@ -2196,7 +2196,7 @@ fn create_color_attachment_image_view(
         device,
         texture.inner()?.image,
         format,
-        color_attachment_subresource_range(target),
+        color_attachment_subresource_range(texture, target),
     )
 }
 
@@ -2243,12 +2243,15 @@ fn create_attachment_image_view(
         .map_err(|_| shader_error("attachment image view creation failed"))
 }
 
-fn color_attachment_subresource_range(target: &HalRenderColorTarget) -> vk::ImageSubresourceRange {
-    attachment_subresource_range(
-        vk::ImageAspectFlags::COLOR,
-        target.mip_level,
-        target.array_layer,
-    )
+fn color_attachment_subresource_range(
+    texture: &VulkanTexture,
+    target: &HalRenderColorTarget,
+) -> vk::ImageSubresourceRange {
+    let layer = match texture.dimension {
+        HalTextureDimension::D3 => target.depth_slice,
+        HalTextureDimension::D1 | HalTextureDimension::D2 => target.array_layer,
+    };
+    attachment_subresource_range(vk::ImageAspectFlags::COLOR, target.mip_level, layer)
 }
 
 fn resolve_attachment_subresource_range(
@@ -2484,6 +2487,24 @@ mod tests {
         }))
     }
 
+    fn dummy_vulkan_texture(
+        dimension: HalTextureDimension,
+        format: HalTextureFormat,
+    ) -> VulkanTexture {
+        VulkanTexture {
+            inner: None,
+            swapchain: None,
+            surface_pending: None,
+            dimension,
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 8,
+            sample_count: 1,
+            bytes_per_pixel: 4,
+            format,
+        }
+    }
+
     #[test]
     fn copy_format_aspect_flags_uses_color_fallback_and_depth_stencil_planes() {
         assert_eq!(
@@ -2602,10 +2623,14 @@ mod tests {
     #[test]
     fn render_attachment_descriptions_preserve_contents_for_load_ops() {
         let color_target = HalRenderColorTarget {
-            texture: dummy_texture(HalTextureFormat::Rgba8Unorm),
+            texture: HalTexture::Vulkan(dummy_vulkan_texture(
+                HalTextureDimension::D2,
+                HalTextureFormat::Rgba8Unorm,
+            )),
             resolve_target: None,
             mip_level: 0,
             array_layer: 0,
+            depth_slice: 0,
             resolve_mip_level: 0,
             resolve_array_layer: 0,
             load_op: HalRenderLoadOp::Load,
@@ -2622,7 +2647,10 @@ mod tests {
         );
 
         let depth_stencil = HalRenderDepthStencilAttachment {
-            texture: dummy_texture(HalTextureFormat::Depth32FloatStencil8),
+            texture: HalTexture::Vulkan(dummy_vulkan_texture(
+                HalTextureDimension::D2,
+                HalTextureFormat::Depth32FloatStencil8,
+            )),
             format: HalTextureFormat::Depth32FloatStencil8,
             mip_level: 0,
             array_layer: 0,
@@ -2654,18 +2682,32 @@ mod tests {
             resolve_target: None,
             mip_level: 2,
             array_layer: 1,
+            depth_slice: 0,
             resolve_mip_level: 0,
             resolve_array_layer: 0,
             load_op: HalRenderLoadOp::Clear,
             store: true,
             clear_color: [0.0, 0.0, 0.0, 1.0],
         };
-        let color = color_attachment_subresource_range(&color_target);
+        let color_texture =
+            dummy_vulkan_texture(HalTextureDimension::D2, HalTextureFormat::Rgba8Unorm);
+        let color = color_attachment_subresource_range(&color_texture, &color_target);
         assert_eq!(color.aspect_mask, vk::ImageAspectFlags::COLOR);
         assert_eq!(color.base_mip_level, 2);
         assert_eq!(color.level_count, 1);
         assert_eq!(color.base_array_layer, 1);
         assert_eq!(color.layer_count, 1);
+
+        let color_3d_texture =
+            dummy_vulkan_texture(HalTextureDimension::D3, HalTextureFormat::Rgba8Unorm);
+        let color_3d = color_attachment_subresource_range(
+            &color_3d_texture,
+            &HalRenderColorTarget {
+                depth_slice: 7,
+                ..color_target.clone()
+            },
+        );
+        assert_eq!(color_3d.base_array_layer, 7);
 
         let depth = HalRenderDepthStencilAttachment {
             texture: dummy_texture(HalTextureFormat::Depth32Float),

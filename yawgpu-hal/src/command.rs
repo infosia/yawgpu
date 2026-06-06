@@ -336,6 +336,8 @@ pub struct HalRenderColorTarget {
     pub mip_level: u32,
     /// Array layer the attachment view targets.
     pub array_layer: u32,
+    /// Depth slice selected for 3D color attachments; zero for non-3D targets.
+    pub depth_slice: u32,
     /// Mip level the resolve target view targets.
     pub resolve_mip_level: u32,
     /// Array layer the resolve target view targets.

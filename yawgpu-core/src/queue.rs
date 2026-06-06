@@ -794,6 +794,7 @@ fn hal_render_color_targets(
                 },
                 mip_level: attachment.mip_level,
                 array_layer: attachment.array_layer,
+                depth_slice: attachment.depth_slice,
                 resolve_mip_level: attachment.resolve_mip_level,
                 resolve_array_layer: attachment.resolve_array_layer,
                 load_op: hal_render_load_op(attachment.load_op),

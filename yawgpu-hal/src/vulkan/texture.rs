@@ -26,6 +26,7 @@ pub struct VulkanTexture {
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) depth_or_array_layers: u32,
+    pub(super) sample_count: u32,
     pub(super) bytes_per_pixel: u32,
     pub(super) format: HalTextureFormat,
 }
@@ -85,7 +86,6 @@ pub(super) struct VulkanTextureInner {
     pub(super) owns_image: bool,
     pub(super) mip_level_count: u32,
     pub(super) array_layers: u32,
-    pub(super) sample_count: u32,
     pub(super) layout: AtomicU8,
 }
 
@@ -161,7 +161,12 @@ pub(super) fn create_texture(
         HalTextureDimension::D2 => descriptor.depth_or_array_layers,
         HalTextureDimension::D1 | HalTextureDimension::D3 => 1,
     };
+    let image_flags = match descriptor.dimension {
+        HalTextureDimension::D3 => vk::ImageCreateFlags::TYPE_2D_ARRAY_COMPATIBLE,
+        HalTextureDimension::D1 | HalTextureDimension::D2 => vk::ImageCreateFlags::empty(),
+    };
     let image_info = vk::ImageCreateInfo::default()
+        .flags(image_flags)
         .image_type(image_type)
         .format(format)
         .extent(extent)
@@ -238,7 +243,6 @@ pub(super) fn create_texture(
             owns_image: true,
             mip_level_count: descriptor.mip_level_count,
             array_layers,
-            sample_count: descriptor.sample_count,
             layout: AtomicU8::new(IMAGE_LAYOUT_UNDEFINED),
         },
         bytes_per_pixel,
