@@ -603,6 +603,129 @@ fn metal_two_draws_write_same_storage_buffer() {
     }
 }
 
+/// F-042 slice 2: two point draws recorded in a render BUNDLE, executed via
+/// `executeBundles`, must perform their fragment storage writes (bundles were
+/// validation-only stubs that recorded no draw command → read back 0).
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "metal")]
+fn metal_render_bundle_two_draws_write_storage_buffer() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+    unsafe {
+        let (instance, adapter, device, queue, errors) = setup();
+        let storage = create_buffer(
+            device,
+            4,
+            native::WGPUBufferUsage_Storage
+                | native::WGPUBufferUsage_CopySrc
+                | native::WGPUBufferUsage_CopyDst,
+        );
+        write_u32(queue, storage, 0);
+        let module1 = create_wgsl_module(device, &point_storage_write_shader(1));
+        let module2 = create_wgsl_module(device, &point_storage_write_shader(2));
+        let bgl = create_fragment_storage_bgl(device);
+        let pipeline_layout = create_fragment_storage_pipeline_layout(device, bgl);
+        let pipeline1 = create_point_storage_pipeline(device, module1, pipeline_layout);
+        let pipeline2 = create_point_storage_pipeline(device, module2, pipeline_layout);
+        let bind_group1 = create_storage_buffer_bind_group(device, bgl, storage);
+        let bind_group2 = create_storage_buffer_bind_group(device, bgl, storage);
+
+        // Record two draws into a render bundle.
+        let color_format = native::WGPUTextureFormat_RGBA8Unorm;
+        let bundle_descriptor = native::WGPURenderBundleEncoderDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            colorFormatCount: 1,
+            colorFormats: &color_format,
+            depthStencilFormat: native::WGPUTextureFormat_Undefined,
+            sampleCount: 1,
+            depthReadOnly: 0,
+            stencilReadOnly: 0,
+        };
+        let bundle_encoder =
+            yawgpu::wgpuDeviceCreateRenderBundleEncoder(device, &bundle_descriptor);
+        assert!(!bundle_encoder.is_null());
+        yawgpu::wgpuRenderBundleEncoderSetPipeline(bundle_encoder, pipeline1);
+        yawgpu::wgpuRenderBundleEncoderSetBindGroup(bundle_encoder, 0, bind_group1, 0, std::ptr::null());
+        yawgpu::wgpuRenderBundleEncoderDraw(bundle_encoder, 1, 1, 0, 0);
+        yawgpu::wgpuRenderBundleEncoderSetPipeline(bundle_encoder, pipeline2);
+        yawgpu::wgpuRenderBundleEncoderSetBindGroup(bundle_encoder, 0, bind_group2, 0, std::ptr::null());
+        yawgpu::wgpuRenderBundleEncoderDraw(bundle_encoder, 1, 1, 0, 0);
+        let bundle = yawgpu::wgpuRenderBundleEncoderFinish(bundle_encoder, std::ptr::null());
+        assert!(!bundle.is_null());
+
+        let color = create_color_texture(device);
+        let color_view = yawgpu::wgpuTextureCreateView(color, std::ptr::null());
+        let color_attachment = native::WGPURenderPassColorAttachment {
+            nextInChain: std::ptr::null_mut(),
+            view: color_view,
+            depthSlice: native::WGPU_DEPTH_SLICE_UNDEFINED,
+            resolveTarget: std::ptr::null(),
+            loadOp: native::WGPULoadOp_Clear,
+            storeOp: native::WGPUStoreOp_Store,
+            clearValue: native::WGPUColor {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        };
+        let attachments = [color_attachment];
+        let pass_descriptor = native::WGPURenderPassDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            colorAttachmentCount: attachments.len(),
+            colorAttachments: attachments.as_ptr(),
+            depthStencilAttachment: std::ptr::null(),
+            occlusionQuerySet: std::ptr::null(),
+            timestampWrites: std::ptr::null(),
+        };
+        let readback = create_buffer(
+            device,
+            4,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_descriptor);
+        yawgpu::wgpuRenderPassEncoderExecuteBundles(pass, 1, &bundle);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        yawgpu::wgpuCommandEncoderCopyBufferToBuffer(encoder, storage, 0, readback, 0, 4);
+        let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        yawgpu::wgpuCommandBufferRelease(command_buffer);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+
+        let bytes = read_buffer(instance, readback, 0, 4);
+        let value = u32::from_ne_bytes(bytes[0..4].try_into().expect("four bytes"));
+        assert!(
+            value == 1 || value == 2,
+            "render bundle two draws storage write: expected 1 or 2, got {value}"
+        );
+        assert!(errors.lock().expect("error lock").is_empty());
+
+        yawgpu::wgpuRenderBundleRelease(bundle);
+        yawgpu::wgpuTextureViewRelease(color_view);
+        yawgpu::wgpuTextureRelease(color);
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuBindGroupRelease(bind_group2);
+        yawgpu::wgpuBindGroupRelease(bind_group1);
+        yawgpu::wgpuRenderPipelineRelease(pipeline2);
+        yawgpu::wgpuRenderPipelineRelease(pipeline1);
+        yawgpu::wgpuPipelineLayoutRelease(pipeline_layout);
+        yawgpu::wgpuBindGroupLayoutRelease(bgl);
+        yawgpu::wgpuShaderModuleRelease(module2);
+        yawgpu::wgpuShaderModuleRelease(module1);
+        yawgpu::wgpuBufferRelease(storage);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
 #[cfg(feature = "metal")]
 fn point_storage_write_shader(value: u32) -> String {
     format!(
