@@ -857,6 +857,31 @@ fn encode_subpass_draw(
     };
     encoder.setRenderPipelineState(&pipeline.inner);
     encoder.setDepthStencilState(Some(&pipeline.depth_stencil_state));
+    encoder.setFrontFacingWinding(mtl_front_face(pipeline.front_face));
+    encoder.setCullMode(mtl_cull_mode(pipeline.cull_mode));
+    encoder.setDepthClipMode(if pipeline.unclipped_depth {
+        MTLDepthClipMode::Clamp
+    } else {
+        MTLDepthClipMode::Clip
+    });
+    if let Some(viewport) = draw.viewport {
+        encoder.setViewport(MTLViewport {
+            originX: f64::from(viewport.x),
+            originY: f64::from(viewport.y),
+            width: f64::from(viewport.width),
+            height: f64::from(viewport.height),
+            znear: f64::from(viewport.min_depth),
+            zfar: f64::from(viewport.max_depth),
+        });
+    }
+    if let Some(rect) = draw.scissor_rect {
+        encoder.setScissorRect(MTLScissorRect {
+            x: to_ns(u64::from(rect.x))?,
+            y: to_ns(u64::from(rect.y))?,
+            width: to_ns(u64::from(rect.width))?,
+            height: to_ns(u64::from(rect.height))?,
+        });
+    }
     encoder.setDepthBias_slopeScale_clamp(
         pipeline.depth_bias as f32,
         pipeline.depth_bias_slope_scale,
@@ -874,7 +899,26 @@ fn encode_subpass_draw(
     for binding in &draw.vertex_buffers {
         encode_render_vertex_buffer(encoder, binding)?;
     }
-    draw_primitives(encoder, pipeline.primitive_topology, draw.draw)?;
+    let HalDraw::Direct {
+        vertex_count,
+        instance_count,
+        first_vertex,
+        first_instance,
+    } = draw.draw
+    else {
+        return Err(shader_error(
+            "subpass draw supports only direct draws".to_owned(),
+        ));
+    };
+    unsafe {
+        encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
+            map_primitive_topology(pipeline.primitive_topology),
+            to_ns(u64::from(first_vertex))?,
+            to_ns(u64::from(vertex_count))?,
+            to_ns(u64::from(instance_count))?,
+            to_ns(u64::from(first_instance))?,
+        );
+    }
     Ok(())
 }
 

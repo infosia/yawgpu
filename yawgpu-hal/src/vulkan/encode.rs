@@ -981,21 +981,43 @@ fn encode_subpass_draw(
             vk::PipelineBindPoint::GRAPHICS,
             pipeline.inner.pipeline,
         );
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: pass.extent.width as f32,
-            height: pass.extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-        let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: vk::Extent2D {
-                width: pass.extent.width,
-                height: pass.extent.height,
+        let viewport = draw.viewport.map_or(
+            vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: pass.extent.width as f32,
+                height: pass.extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
             },
-        };
+            |viewport| vk::Viewport {
+                x: viewport.x,
+                y: viewport.y,
+                width: viewport.width,
+                height: viewport.height,
+                min_depth: viewport.min_depth,
+                max_depth: viewport.max_depth,
+            },
+        );
+        let scissor = draw.scissor_rect.map_or(
+            vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: vk::Extent2D {
+                    width: pass.extent.width,
+                    height: pass.extent.height,
+                },
+            },
+            |rect| vk::Rect2D {
+                offset: vk::Offset2D {
+                    x: rect.x as i32,
+                    y: rect.y as i32,
+                },
+                extent: vk::Extent2D {
+                    width: rect.width,
+                    height: rect.height,
+                },
+            },
+        );
         device.cmd_set_viewport(command_buffer, 0, &[viewport]);
         device.cmd_set_scissor(command_buffer, 0, &[scissor]);
         bind_render_descriptor_sets(device, command_buffer, pipeline, &descriptor_sets);

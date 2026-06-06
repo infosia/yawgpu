@@ -35,8 +35,19 @@ keep/discard pair is **identical across Metal and Vulkan**, pinning WebGPU↔Vul
 expose `MTLRenderPipelineDescriptor.sampleMask`. Default mask is honored; only non-default masks error on
 Metal (Vulkan applies them).
 
-**Follow-up (Clean Review MINOR, pre-existing, NOT a regression):** the `tiled`-feature subpass path
-(`SubpassRenderPassEncoder::set_viewport`/`set_scissor_rect` in `subpass.rs`, `HalSubpassDraw`) still drops
-viewport/scissor — group B was scoped to the regular `HalRenderPass`. Groups A/D/E DO reach subpass
-pipelines (shared `HalRenderPipelineDescriptor`); only dynamic group-B state is missing there. Track as a
-future tiled slice.
+**Follow-up — RESOLVED (tiled subpass slice):** the `tiled`-feature subpass path
+(`SubpassRenderPassEncoder`) now threads group B (`setViewport`/`setScissorRect` → `SubpassDrawState` →
+`SubpassDrawExecution` → `HalSubpassDraw.{viewport,scissor_rect}` → both backends; None = full-attachment)
+and applies group A on the **Metal** subpass encode (`setCullMode`/`setFrontFacingWinding`/`setDepthClipMode`
+in `encode_subpass_draw` — previously skipped, so tiled subpass draws used the encoder defaults; Vulkan bakes
+cull/frontFace into the subpass `VkPipeline` at creation, so it was already correct). Verified on real-GPU
+Metal + Vulkan/MoltenVK: `e2e_{metal,vulkan}_tiled` gained 4 probes each (scissor, viewport, cull keep CCW,
+cull discard CW), all green, with the existing tiled e2e (deferred two-subpass) still passing. Clean Review:
+no CRITICAL/MAJOR.
+
+While doing this, found the `tiled` feature had **not compiled since ~F-034/F-040/F-043** — no gate builds
+it (CI was Noop-default only; the per-backend review gates omitted `tiled`). Accumulated compile rot fixed
+(`metal/device.rs` fragment-entry `Option`, `vulkan/pipeline.rs` fragment `Option`, `vulkan/texture.rs`
+removed inner `sample_count`, Metal `draw_primitives`→inline). Gate gap closed: CI now compile-gates the
+Noop-buildable tiled code (`.github/workflows/ci.yml`); backend-tiled gates added to the review workflow
+(see memory `feedback-run-feature-gated-hal-tests`).

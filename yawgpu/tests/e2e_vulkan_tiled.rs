@@ -842,3 +842,251 @@ fn fs() -> @location(0) vec4<f32> {
     return vec4<f32>(loaded.g, loaded.r, loaded.b, 1.0);
 }
 "#;
+
+// ---- threading-audit follow-up: tiled subpass viewport/scissor + cull ----
+//
+// Mirror of e2e_metal_tiled. The subpass path previously dropped setViewport/
+// setScissorRect (group B); each probe clears the persistent color target to RED
+// then draws an oversized CCW green triangle and checks the read-back center
+// (8,8) / corner (0,0). On Vulkan cull/frontFace are baked into the subpass
+// graphics pipeline, so the cull probes also confirm that the pipeline-baked
+// raster state reaches the tiled subpass path.
+
+const SUBPASS_GREEN_SHADER: &str = r#"
+@vertex
+fn vs(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4<f32> {
+    var pos = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+    return vec4<f32>(pos[idx], 0.0, 1.0);
+}
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+}
+"#;
+
+#[derive(Clone, Copy)]
+enum SubpassRegion {
+    None,
+    Scissor,
+    Viewport,
+}
+
+/// `setScissorRect` must clip a tiled subpass draw to the rectangle.
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_tiled_subpass_scissor_restricts_rendering() {
+    run_subpass_region_check(SubpassRegion::Scissor);
+}
+
+/// `setViewport` must remap a tiled subpass draw into the sub-rectangle.
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_tiled_subpass_viewport_restricts_rendering() {
+    run_subpass_region_check(SubpassRegion::Viewport);
+}
+
+/// Vulkan tiled subpass: `cull=Back, frontFace=CCW` keeps the front-facing draw.
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_tiled_subpass_cull_back_keeps_front_facing_ccw() {
+    let pixels = run_tiled_subpass(
+        native::WGPUFrontFace_CCW,
+        native::WGPUCullMode_Back,
+        SubpassRegion::None,
+    );
+    assert_center_pixel_approx(&pixels, [0, 255, 0, 255], 1);
+}
+
+/// Vulkan tiled subpass: `cull=Back, frontFace=CW` culls the (now back-facing) draw.
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_tiled_subpass_cull_back_discards_back_facing_cw() {
+    let pixels = run_tiled_subpass(
+        native::WGPUFrontFace_CW,
+        native::WGPUCullMode_Back,
+        SubpassRegion::None,
+    );
+    assert_center_pixel_approx(&pixels, [255, 0, 0, 255], 1);
+}
+
+fn run_subpass_region_check(region: SubpassRegion) {
+    let pixels = run_tiled_subpass(native::WGPUFrontFace_CCW, native::WGPUCullMode_None, region);
+    // Restricted to the bottom-right 8x8 quadrant: center (8,8) drawn, corner red.
+    assert_eq!(
+        pixel_at(&pixels, 0, 0),
+        [255, 0, 0, 255],
+        "corner was drawn"
+    );
+    assert_center_pixel_approx(&pixels, [0, 255, 0, 255], 1);
+}
+
+fn run_tiled_subpass(
+    front_face: native::WGPUFrontFace,
+    cull_mode: native::WGPUCullMode,
+    region: SubpassRegion,
+) -> Vec<u8> {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return vec![0; ROW_BYTES * HEIGHT as usize];
+    }
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&errors);
+        yawgpu::testing_set_uncaptured_error_callback(
+            device,
+            Some(move |error| captured.lock().expect("error lock").push(error)),
+        );
+        let readback = record_tiled_subpass(device, front_face, cull_mode, region);
+        let out = read_unpacked_texture_buffer(instance, readback);
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "device errors: {:?}",
+            errors.lock().expect("error lock")
+        );
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+        out
+    }
+}
+
+unsafe fn record_tiled_subpass(
+    device: native::WGPUDevice,
+    front_face: native::WGPUFrontFace,
+    cull_mode: native::WGPUCullMode,
+    region: SubpassRegion,
+) -> native::WGPUBuffer {
+    let queue = yawgpu::wgpuDeviceGetQueue(device);
+    let output = create_texture(
+        device,
+        native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+    );
+    let output_view = yawgpu::wgpuTextureCreateView(output, std::ptr::null());
+    let readback = create_buffer(
+        device,
+        READBACK_SIZE as u64,
+        native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+    );
+    let layout = create_single_color_subpass_layout(device);
+    let module = create_wgsl_module(device, SUBPASS_GREEN_SHADER);
+    let pipeline = create_subpass_raster_pipeline(device, layout, module, front_face, cull_mode);
+
+    let binding = yawgpu::YaWGPUColorAttachmentBinding {
+        kind: yawgpu::YaWGPUSubpassAttachmentKind_Persistent,
+        view: output_view,
+        resolveTarget: std::ptr::null(),
+        transient: std::ptr::null(),
+        loadOp: native::WGPULoadOp_Clear,
+        storeOp: native::WGPUStoreOp_Store,
+        clearValue: native::WGPUColor {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        },
+    };
+    let attachments = [binding];
+    let descriptor = yawgpu::YaWGPUSubpassRenderPassDescriptor {
+        nextInChain: std::ptr::null(),
+        label: empty_string_view(),
+        passLayout: layout,
+        extent: texture_extent(),
+        colorAttachments: attachments.as_ptr(),
+        colorAttachmentCount: attachments.len(),
+        depthStencilAttachment: std::ptr::null(),
+    };
+    let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+    let pass = yawgpu::yawgpuCommandEncoderBeginSubpassRenderPass(encoder, &descriptor);
+    assert!(!pass.is_null());
+    yawgpu::yawgpuSubpassRenderPassEncoderSetPipeline(pass, pipeline);
+    match region {
+        SubpassRegion::None => {}
+        SubpassRegion::Scissor => {
+            yawgpu::yawgpuSubpassRenderPassEncoderSetScissorRect(pass, 8, 8, 8, 8);
+        }
+        SubpassRegion::Viewport => {
+            yawgpu::yawgpuSubpassRenderPassEncoderSetViewport(pass, 8.0, 8.0, 8.0, 8.0, 0.0, 1.0);
+        }
+    }
+    yawgpu::yawgpuSubpassRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+    yawgpu::yawgpuSubpassRenderPassEncoderEnd(pass);
+    yawgpu::yawgpuSubpassRenderPassEncoderRelease(pass);
+    record_t2b(encoder, output, readback);
+    submit_encoder(queue, encoder);
+
+    yawgpu::wgpuRenderPipelineRelease(pipeline);
+    yawgpu::wgpuShaderModuleRelease(module);
+    yawgpu::yawgpuSubpassPassLayoutRelease(layout);
+    yawgpu::wgpuTextureViewRelease(output_view);
+    yawgpu::wgpuTextureRelease(output);
+    yawgpu::wgpuQueueRelease(queue);
+    readback
+}
+
+unsafe fn create_subpass_raster_pipeline(
+    device: native::WGPUDevice,
+    pass_layout: yawgpu::YaWGPUSubpassPassLayout,
+    module: native::WGPUShaderModule,
+    front_face: native::WGPUFrontFace,
+    cull_mode: native::WGPUCullMode,
+) -> native::WGPURenderPipeline {
+    let target = native::WGPUColorTargetState {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        blend: std::ptr::null(),
+        writeMask: native::WGPUColorWriteMask_All,
+    };
+    let targets = [target];
+    let fragment = native::WGPUFragmentState {
+        nextInChain: std::ptr::null_mut(),
+        module,
+        entryPoint: string_view("fs"),
+        constantCount: 0,
+        constants: std::ptr::null(),
+        targetCount: targets.len(),
+        targets: targets.as_ptr(),
+    };
+    let base = native::WGPURenderPipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout: std::ptr::null(),
+        vertex: native::WGPUVertexState {
+            nextInChain: std::ptr::null_mut(),
+            module,
+            entryPoint: string_view("vs"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            bufferCount: 0,
+            buffers: std::ptr::null(),
+        },
+        primitive: native::WGPUPrimitiveState {
+            nextInChain: std::ptr::null_mut(),
+            topology: native::WGPUPrimitiveTopology_TriangleList,
+            stripIndexFormat: native::WGPUIndexFormat_Undefined,
+            frontFace: front_face,
+            cullMode: cull_mode,
+            unclippedDepth: 0,
+        },
+        depthStencil: std::ptr::null(),
+        multisample: multisample_state(),
+        fragment: &fragment,
+    };
+    let descriptor = yawgpu::YaWGPUSubpassRenderPipelineDescriptor {
+        nextInChain: std::ptr::null(),
+        base,
+        passLayout: pass_layout,
+        subpassIndex: 0,
+    };
+    let pipeline = yawgpu::yawgpuDeviceCreateSubpassRenderPipeline(device, &descriptor);
+    assert!(!pipeline.is_null());
+    pipeline
+}
+
+fn pixel_at(pixels: &[u8], x: usize, y: usize) -> [u8; 4] {
+    let o = y * ROW_BYTES + x * BYTES_PER_PIXEL;
+    [pixels[o], pixels[o + 1], pixels[o + 2], pixels[o + 3]]
+}

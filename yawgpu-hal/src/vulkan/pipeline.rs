@@ -351,6 +351,11 @@ pub(super) fn create_subpass_render_pipeline(
             "Vulkan subpass render pipeline requires vertex and fragment SPIR-V",
         ));
     };
+    let Some(fragment) = fragment else {
+        return Err(shader_error(
+            "Vulkan subpass render pipeline requires fragment SPIR-V",
+        ));
+    };
     let vertex_entry = CString::new(vertex_entry_point)
         .map_err(|_| shader_error("vertex entry point contains NUL"))?;
     let fragment_entry = CString::new(fragment_entry_point)
@@ -458,7 +463,7 @@ pub(super) fn create_subpass_render_pipeline(
             descriptor_set_layouts,
             descriptor_bindings: bindings.to_vec(),
             vertex_shader_module,
-            fragment_shader_module,
+            fragment_shader_module: Some(fragment_shader_module),
         }),
     })
 }

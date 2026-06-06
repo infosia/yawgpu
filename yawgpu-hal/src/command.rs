@@ -371,6 +371,10 @@ pub struct HalSubpassDraw {
     pub bind_samplers: Vec<HalBoundSampler>,
     /// Vertex buffers.
     pub vertex_buffers: Vec<HalBoundBuffer>,
+    /// Optional viewport override.
+    pub viewport: Option<HalViewport>,
+    /// Optional scissor rectangle override.
+    pub scissor_rect: Option<HalScissorRect>,
     /// Draw.
     pub draw: HalDraw,
 }
