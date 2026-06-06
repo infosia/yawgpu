@@ -586,6 +586,23 @@ impl RenderPassEncoder {
                 state
                     .scope_texture_uses
                     .extend_from_slice(bundle.texture_uses());
+                for draw in bundle.draws() {
+                    state.draw_count = state.draw_count.saturating_add(1);
+                    self.inner.parent.record_render_pass(RenderPassCommand {
+                        pipeline: Some(Arc::clone(&draw.pipeline)),
+                        color_attachments: state.render_color_attachments.clone(),
+                        depth_stencil_attachment: state.render_depth_stencil_attachment.clone(),
+                        attachment_textures: state.attachment_textures.clone(),
+                        bind_groups: draw.bind_groups.clone(),
+                        vertex_buffers: draw.vertex_buffers.clone(),
+                        index_buffer: draw.index_buffer.clone(),
+                        indirect_buffer: draw.indirect_buffer.clone(),
+                        blend_constant: state.blend_constant,
+                        stencil_reference: state.stencil_reference,
+                        draw: Some(draw.draw),
+                    });
+                    state.render_pass_recorded = true;
+                }
             }
             state.clear_render_state();
             Ok(())
@@ -855,6 +872,115 @@ mod tests {
     }
 
     #[test]
+    fn render_pass_encoder_execute_bundles_replays_bundle_draws() {
+        let device = noop_device();
+        let pipeline = storage_write_render_pipeline(&device);
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let bundle = storage_write_render_bundle(&device, pipeline, buffer, 2);
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(
+            pass.set_blend_constant(Color {
+                r: 0.25,
+                g: 0.5,
+                b: 0.75,
+                a: 1.0,
+            }),
+            None
+        );
+        assert_eq!(pass.set_stencil_reference(13), None);
+        assert_eq!(pass.execute_bundles(&[bundle]), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 2);
+        for command in command_buffer.command_ops() {
+            assert_direct_render_pass_command(command, [0.25, 0.5, 0.75, 1.0], 13);
+        }
+    }
+
+    #[test]
+    fn render_pass_encoder_records_inline_draw_and_bundle_draw() {
+        let device = noop_device();
+        let pipeline = storage_write_render_pipeline(&device);
+        let layout = pipeline.bind_group_layouts()[0].clone();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let inline_bind_group = buffer_bind_group(&device, layout, buffer.clone(), 0);
+        let bundle = storage_write_render_bundle(&device, pipeline.clone(), buffer, 1);
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(inline_bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.execute_bundles(&[bundle]), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 2);
+        for command in command_buffer.command_ops() {
+            assert_direct_render_pass_command(command, [0.0; 4], 0);
+        }
+    }
+
+    #[test]
+    fn render_pass_encoder_execute_bundles_clears_render_state() {
+        let device = noop_device();
+        let pipeline = storage_write_render_pipeline(&device);
+        let layout = pipeline.bind_group_layouts()[0].clone();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let bind_group = buffer_bind_group(&device, layout, buffer.clone(), 0);
+        let bundle = storage_write_render_bundle(&device, pipeline.clone(), buffer, 1);
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.execute_bundles(&[bundle]), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("render pass draw requires a render pipeline".to_owned())
+        );
+    }
+
+    #[test]
     fn render_pass_encoder_records_two_color_attachments() {
         let device = noop_device();
         let pipeline = two_color_render_pipeline(&device);
@@ -934,6 +1060,57 @@ mod tests {
                 },
             ],
         ))
+    }
+
+    fn storage_write_render_bundle(
+        device: &crate::device::Device,
+        pipeline: Arc<RenderPipeline>,
+        buffer: Arc<Buffer>,
+        draw_count: usize,
+    ) -> Arc<RenderBundle> {
+        let layout = pipeline.bind_group_layouts()[0].clone();
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
+        assert_eq!(error, None);
+        assert_eq!(bundle_encoder.set_pipeline(pipeline), None);
+        for _ in 0..draw_count {
+            let bind_group = buffer_bind_group(device, layout.clone(), buffer.clone(), 0);
+            assert_eq!(
+                bundle_encoder.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+                None
+            );
+            assert_eq!(bundle_encoder.draw(3, 1, 0, 0, device.limits()), None);
+        }
+        let (bundle, error) = bundle_encoder.finish();
+        assert_eq!(error, None);
+        assert!(!bundle.is_error());
+        Arc::new(bundle)
+    }
+
+    fn assert_direct_render_pass_command(
+        command: &CommandExecution,
+        blend_constant: [f32; 4],
+        stencil_reference: u32,
+    ) {
+        let CommandExecution::RenderPass(command) = command else {
+            panic!("expected render pass command");
+        };
+        assert_eq!(command.color_attachments.len(), 1);
+        assert!(command.depth_stencil_attachment.is_none());
+        assert_eq!(command.blend_constant, blend_constant);
+        assert_eq!(command.stencil_reference, stencil_reference);
+        assert!(matches!(
+            command.draw,
+            Some(RenderDrawExecution::Direct {
+                vertex_count: 3,
+                instance_count: 1,
+                first_vertex: 0,
+                first_instance: 0,
+            })
+        ));
     }
 
     #[test]

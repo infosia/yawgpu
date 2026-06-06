@@ -783,7 +783,7 @@ never a reason to skip a CTS case.
     improvement, no regression), GLES `HalError`, no panics, and sound e2e guards. Gate: **no open
     CRITICAL/MAJOR → F-041 COMPLETE.** Reinforces [[feedback-claude-owns-gpu-tests]] (Noop+clippy passed
     while real-GPU exposed the MSL gap) and [[feedback-gpu-probe-false-signals]].
-- **External-CTS finding F-042 — IN PROGRESS (2-slice; slice 1 of 2 COMPLETE, treated as a phase).**
+- **External-CTS finding F-042 — RESOLVED (2-slice; both slices COMPLETE).**
   F-042 (T39/V7b `memory_sync/buffer/single_buffer:two_draws_*`): a fragment-stage storage write from a
   point draw read back `0` (`pass=0 fail=5`, cross-HAL), Dawn/wgpu pass. **Two independent root causes**
   (Claude, real-GPU + experiment); user approved a **2-slice** plan: **(1) usage-scope write+write false
@@ -811,7 +811,33 @@ never a reason to skip a CTS case.
     write+write errors; A3 render within-draw write+read errors; A4 render cross-draw write+read errors),
     ran the Noop tests + 30 CTS `resource_usages` tests + clippy + the Metal e2e on the M2. Render
     within-draw write+write is still rejected (matches compute). Gate: **no open CRITICAL/MAJOR → F-042
-    slice 1 COMPLETE.** (Slice 2 — render bundle execution — pending; the bundle subcases still read 0.)
+    slice 1 COMPLETE.**
+  - **Slice 2 — render bundle execution, COMPLETE (and completed F-042).** Render bundles were
+    validation-only: `RenderBundleEncoder` draw methods validated + recorded usage scope but recorded **no
+    draw command**, and `execute_bundles` replayed **none** → bundle draws were GPU no-ops (the bundle
+    subcases read 0, unmasked once slice 1 landed — [[feedback-crash-masks-behavior]]). Fix (coding agent,
+    core-only — the HAL already does one-draw-per-`RenderPassCommand`): a `RenderBundleDraw` snapshot
+    (pipeline + bind_groups + vertex_buffers + index_buffer + indirect_buffer + `RenderDrawExecution`) is
+    recorded per bundle draw (all 4 kinds) into `RenderBundleInner.draws`; `execute_bundles` replays each as
+    a `RenderPassCommand` combining the bundle draw with the executing pass's attachments + `blend_constant`
+    + `stencil_reference`, increments `draw_count`, sets `render_pass_recorded`, and `clear_render_state()`
+    after (WebGPU resets pass render state post-ExecuteBundles). Bundle-draw resources are added to the
+    bundle's referenced set (destroy-at-submit validation). +3 Noop unit tests.
+  - **Verified real-GPU (Claude):** `two_draws_in_the_same_render_pass:* = 4/4` and
+    `two_draws_in_the_same_render_bundle:* = 1/1` on Metal AND Vulkan/MoltenVK (F-042 → `two_draws_*` 5/5;
+    `single_buffer:*` whole group `30/0`); no regression (`rendering/draw` 564/0). Noop workspace green (67
+    groups); all four clippy gates clean. Claude authored e2e
+    `metal_render_bundle_two_draws_write_storage_buffer` (two draws recorded in a bundle, executed via
+    `executeBundles`, fragment storage write → 1 or 2; pre-fix the bundle no-op left it 0).
+  - **Phase Review (Clean Review, fresh no-context subagent):** **0 CRITICAL, 0 MAJOR, 2 MINOR (1 fixed, 1
+    deferred).** Subagent built yawgpu-core, ran clippy + the Metal e2e on the M2, and verified replay
+    field-sourcing, snapshot isolation, post-ExecuteBundles state reset, validation order, and
+    referenced-resource/destroy coverage. MINOR-1 (`render_bundle_draw_snapshot` used `.expect` for the
+    pipeline — CLAUDE.md principle 3 no-panics-in-core) **fixed** (the resolved `Arc<RenderPipeline>` is now
+    passed in). MINOR-2 (the inline draw's empty-attachment guard not mirrored in the replay loop) deferred
+    — unreachable (a pass can't begin with zero attachments and the bundle signature must match). Gate:
+    **no open CRITICAL/MAJOR → F-042 slice 2 COMPLETE → F-042 RESOLVED** (`two_draws_*` 5/5 on both Tier-1
+    backends).
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.
