@@ -75,9 +75,9 @@ pub use render_pass::{
 #[cfg(feature = "tiled")]
 pub use render_pipeline::SubpassRenderPipelineDescriptor;
 pub use render_pipeline::{
-    BlendComponent, BlendFactor, BlendOperation, BlendState, ColorTargetState, DepthStencilState,
-    IndexFormat, MultisampleState, PrimitiveState, PrimitiveTopology, RenderPipeline,
-    RenderPipelineDescriptor, RenderPipelineFragmentState, RenderPipelineLayout,
+    BlendComponent, BlendFactor, BlendOperation, BlendState, ColorTargetState, CullMode,
+    DepthStencilState, FrontFace, IndexFormat, MultisampleState, PrimitiveState, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDescriptor, RenderPipelineFragmentState, RenderPipelineLayout,
     RenderPipelineShaderStage, RenderPipelineVertexState, StencilFaceState, StencilOperation,
     VertexAttribute, VertexBufferLayout, VertexFormat, VertexStepMode,
 };

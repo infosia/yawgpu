@@ -71,6 +71,8 @@ pub(crate) fn surface_config() -> HalSurfaceConfiguration {
 pub(crate) fn render_descriptor() -> HalRenderPipelineDescriptor {
     HalRenderPipelineDescriptor {
         sample_count: 1,
+        sample_mask: u32::MAX,
+        alpha_to_coverage_enabled: false,
         color_targets: vec![HalColorTargetState {
             format: HalTextureFormat::Rgba8Unorm,
             blend: None,
@@ -79,6 +81,9 @@ pub(crate) fn render_descriptor() -> HalRenderPipelineDescriptor {
         depth_stencil: None,
         vertex_buffers: Vec::new(),
         primitive_topology: HalPrimitiveTopology::TriangleList,
+        front_face: HalFrontFace::Ccw,
+        cull_mode: HalCullMode::None,
+        unclipped_depth: false,
     }
 }
 

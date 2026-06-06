@@ -33,6 +33,9 @@ pub struct MetalRenderPipeline {
     pub(super) inner: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     pub(super) depth_stencil_state: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     pub(super) primitive_topology: HalPrimitiveTopology,
+    pub(super) front_face: HalFrontFace,
+    pub(super) cull_mode: HalCullMode,
+    pub(super) unclipped_depth: bool,
     pub(super) depth_bias: i32,
     pub(super) depth_bias_slope_scale: f32,
     pub(super) depth_bias_clamp: f32,
@@ -93,6 +96,11 @@ pub(super) fn create_render_pipeline(
             "render pipeline requires a color target or depth-stencil state".to_owned(),
         ));
     }
+    if descriptor.sample_mask != u32::MAX {
+        return Err(shader_error(
+            "Metal render pipeline does not support non-default multisample mask".to_owned(),
+        ));
+    }
     let size_metadata = render_size_metadata(&shader);
     let (vertex_function, fragment_function) =
         create_render_functions(device, shader, vertex_entry_point, fragment_entry_point)?;
@@ -100,6 +108,7 @@ pub(super) fn create_render_pipeline(
     pipeline_descriptor.setVertexFunction(Some(&vertex_function));
     pipeline_descriptor.setFragmentFunction(fragment_function.as_deref());
     pipeline_descriptor.setRasterSampleCount(to_ns(u64::from(descriptor.sample_count))?);
+    pipeline_descriptor.setAlphaToCoverageEnabled(descriptor.alpha_to_coverage_enabled);
     // Each color target populates `MTLRenderPipelineDescriptor.colorAttachments[i]`,
     // so the MTL pipeline's color-attachment layout matches the encoder slot-for-slot.
     // For subpass pipelines this carries every layout slot's format (including
@@ -181,6 +190,9 @@ pub(super) fn create_render_pipeline(
         inner,
         depth_stencil_state,
         primitive_topology: descriptor.primitive_topology,
+        front_face: descriptor.front_face,
+        cull_mode: descriptor.cull_mode,
+        unclipped_depth: descriptor.unclipped_depth,
         depth_bias,
         depth_bias_slope_scale,
         depth_bias_clamp,

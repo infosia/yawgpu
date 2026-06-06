@@ -100,7 +100,9 @@ impl ComputePassEncoder {
             self.inner.parent.record_compute_pass(ComputePassCommand {
                 pipeline,
                 bind_groups: state.bind_groups.clone(),
-                workgroups: (x, y, z),
+                dispatch: ComputeDispatch::Direct {
+                    workgroups: (x, y, z),
+                },
             });
             Ok(())
         })
@@ -121,7 +123,23 @@ impl ComputePassEncoder {
                 12,
                 "dispatch workgroups indirect",
             )?;
-            self.inner.parent.record_referenced_buffer(indirect_buffer);
+            self.inner
+                .parent
+                .record_referenced_buffer(Arc::clone(&indirect_buffer));
+            let pipeline = Arc::clone(
+                state
+                    .compute_pipeline
+                    .as_ref()
+                    .ok_or_else(|| "compute dispatch requires a compute pipeline".to_owned())?,
+            );
+            self.inner.parent.record_compute_pass(ComputePassCommand {
+                pipeline,
+                bind_groups: state.bind_groups.clone(),
+                dispatch: ComputeDispatch::Indirect {
+                    buffer: indirect_buffer,
+                    offset: indirect_offset,
+                },
+            });
             Ok(())
         })
     }
@@ -197,6 +215,7 @@ mod tests {
         let pipeline = noop_compute_pipeline(&device);
         let bind_group = empty_bind_group(&device);
         let indirect = noop_indirect_buffer(&device);
+        let indirect_for_dispatch = Arc::clone(&indirect);
         let encoder = device.create_command_encoder();
         let (pass, begin_error) = encoder.begin_compute_pass();
         assert_eq!(begin_error, None);
@@ -216,7 +235,26 @@ mod tests {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
-        assert_eq!(command_buffer.command_ops().len(), 1);
+        assert_eq!(command_buffer.command_ops().len(), 2);
+        let CommandExecution::ComputePass(command) = &command_buffer.command_ops()[0] else {
+            panic!("expected direct compute pass command");
+        };
+        assert!(matches!(
+            command.dispatch,
+            ComputeDispatch::Direct {
+                workgroups: (1, 1, 1)
+            }
+        ));
+        let CommandExecution::ComputePass(command) = &command_buffer.command_ops()[1] else {
+            panic!("expected indirect compute pass command");
+        };
+        match &command.dispatch {
+            ComputeDispatch::Indirect { buffer, offset } => {
+                assert!(Arc::ptr_eq(buffer, &indirect_for_dispatch));
+                assert_eq!(*offset, 0);
+            }
+            ComputeDispatch::Direct { .. } => panic!("expected indirect dispatch"),
+        }
     }
 
     #[test]

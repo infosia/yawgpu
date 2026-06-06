@@ -6,8 +6,9 @@ use super::device::GlesDeviceInner;
 use super::format::map_vertex_format;
 use super::{rebuild_hal_error, BACKEND};
 use crate::{
-    HalColorTargetState, HalDepthStencilState, HalDescriptorBinding, HalError,
-    HalPrimitiveTopology, HalRenderPipelineDescriptor, HalTextureFormat, HalVertexBufferLayout,
+    HalColorTargetState, HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalError,
+    HalFrontFace, HalPrimitiveTopology, HalRenderPipelineDescriptor, HalTextureFormat,
+    HalVertexBufferLayout,
 };
 
 struct GlesComputePipelineInner {
@@ -88,6 +89,8 @@ struct GlesRenderPipelineInner {
     color_target: Option<HalColorTargetState>,
     depth_stencil: Option<HalDepthStencilState>,
     primitive_topology: HalPrimitiveTopology,
+    front_face: HalFrontFace,
+    cull_mode: HalCullMode,
     bindings: Vec<HalDescriptorBinding>,
     first_instance_location: Option<glow::UniformLocation>,
 }
@@ -144,6 +147,8 @@ impl GlesRenderPipeline {
                 color_target: descriptor.color_targets.first().copied(),
                 depth_stencil: descriptor.depth_stencil,
                 primitive_topology: descriptor.primitive_topology,
+                front_face: descriptor.front_face,
+                cull_mode: descriptor.cull_mode,
                 bindings: bindings.to_vec(),
                 first_instance_location,
             }),
@@ -176,6 +181,16 @@ impl GlesRenderPipeline {
     #[must_use]
     pub(super) fn primitive_topology(&self) -> HalPrimitiveTopology {
         self.inner.primitive_topology
+    }
+
+    #[must_use]
+    pub(super) fn front_face(&self) -> HalFrontFace {
+        self.inner.front_face
+    }
+
+    #[must_use]
+    pub(super) fn cull_mode(&self) -> HalCullMode {
+        self.inner.cull_mode
     }
 
     #[must_use]
@@ -253,6 +268,24 @@ fn validate_render_pipeline_descriptor(
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "GLES render pass does not support multisample/resolve",
+        });
+    }
+    if descriptor.sample_mask != u32::MAX {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES render pipeline does not support non-default multisample mask",
+        });
+    }
+    if descriptor.alpha_to_coverage_enabled {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES render pipeline does not support alpha-to-coverage",
+        });
+    }
+    if descriptor.unclipped_depth {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES render pipeline does not support unclipped depth",
         });
     }
     if let Some(target) = descriptor.color_targets.first() {

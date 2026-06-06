@@ -8,11 +8,11 @@ use super::BACKEND;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::{
     HalBlendFactor, HalBlendOperation, HalBuffer, HalBufferBindingKind, HalBufferClear,
-    HalBufferCopy, HalBufferTextureCopy, HalColorTargetState, HalCompareFunction, HalComputePass,
-    HalComputePipeline, HalCopy, HalDepthStencilState, HalDescriptorBinding,
-    HalDescriptorBindingKind, HalDraw, HalError, HalIndexFormat, HalRenderLoadOp, HalRenderPass,
-    HalRenderPipeline, HalStencilFaceState, HalStencilOperation, HalTexture, HalTextureCopy,
-    HalVertexStepMode,
+    HalBufferCopy, HalBufferTextureCopy, HalColorTargetState, HalCompareFunction,
+    HalComputeDispatch, HalComputePass, HalComputePipeline, HalCopy, HalCullMode,
+    HalDepthStencilState, HalDescriptorBinding, HalDescriptorBindingKind, HalDraw, HalError,
+    HalFrontFace, HalIndexFormat, HalRenderLoadOp, HalRenderPass, HalRenderPipeline,
+    HalStencilFaceState, HalStencilOperation, HalTexture, HalTextureCopy, HalVertexStepMode,
 };
 
 /// Stores GLES queue data used by validation and backend submission.
@@ -244,7 +244,30 @@ fn submit_compute_pass(gl: &glow::Context, pass: &HalComputePass) -> Result<(), 
         for (target, binding, buffer, offset, size) in bindings {
             gl.bind_buffer_range(target, binding, Some(buffer), offset, size);
         }
-        gl.dispatch_compute(pass.workgroups.0, pass.workgroups.1, pass.workgroups.2);
+        match &pass.dispatch {
+            HalComputeDispatch::Direct { workgroups } => {
+                gl.dispatch_compute(workgroups.0, workgroups.1, workgroups.2);
+            }
+            HalComputeDispatch::Indirect { buffer } => {
+                let HalBuffer::Gles(indirect_buffer) = &buffer.buffer else {
+                    return Err(HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message: "compute indirect buffer is not a GLES buffer",
+                    });
+                };
+                let offset =
+                    i32::try_from(buffer.offset).map_err(|_| HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message: "compute indirect buffer offset exceeds GLES limit",
+                    })?;
+                gl.bind_buffer(
+                    glow::DISPATCH_INDIRECT_BUFFER,
+                    Some(indirect_buffer.raw_or_err()?),
+                );
+                gl.dispatch_compute_indirect(offset);
+                gl.bind_buffer(glow::DISPATCH_INDIRECT_BUFFER, None);
+            }
+        }
         gl.memory_barrier(glow::ALL_BARRIER_BITS);
         gl.use_program(None);
     }
@@ -477,7 +500,29 @@ fn create_render_fbo(
                 message: "framebuffer incomplete for render pass",
             });
         }
-        gl.viewport(0, 0, width, height);
+        if let Some(viewport) = pass.viewport {
+            gl.viewport(
+                viewport.x as i32,
+                viewport.y as i32,
+                viewport.width as i32,
+                viewport.height as i32,
+            );
+            gl.depth_range_f32(viewport.min_depth, viewport.max_depth);
+        } else {
+            gl.viewport(0, 0, width, height);
+            gl.depth_range_f32(0.0, 1.0);
+        }
+        if let Some(rect) = pass.scissor_rect {
+            gl.enable(glow::SCISSOR_TEST);
+            gl.scissor(
+                rect.x as i32,
+                rect.y as i32,
+                rect.width as i32,
+                rect.height as i32,
+            );
+        } else {
+            gl.disable(glow::SCISSOR_TEST);
+        }
         let mut clear_mask = 0;
         if let Some(color) = pass.color_targets.first() {
             let [r, g, b, a] = color.clear_color;
@@ -524,6 +569,7 @@ fn run_render_draw(
     bind_render_buffers(gl, pass, pipeline)?;
     bind_vertex_buffers(gl, pass, pipeline, vao)?;
     if let Some(draw) = pass.draw {
+        apply_raster_state(gl, pipeline.front_face(), pipeline.cull_mode());
         apply_color_target_state(gl, pipeline.color_target(), pass.blend_constant);
         apply_stencil_state(gl, pipeline.depth_stencil(), pass.stencil_reference)?;
         if let Some(location) = pipeline.first_instance_location() {
@@ -533,6 +579,26 @@ fn run_render_draw(
         run_gles_draw(gl, pass, topology, draw)?;
     }
     Ok(())
+}
+
+fn apply_raster_state(gl: &glow::Context, front_face: HalFrontFace, cull_mode: HalCullMode) {
+    unsafe {
+        gl.front_face(match front_face {
+            HalFrontFace::Ccw => glow::CCW,
+            HalFrontFace::Cw => glow::CW,
+        });
+        match cull_mode {
+            HalCullMode::None => gl.disable(glow::CULL_FACE),
+            HalCullMode::Front => {
+                gl.enable(glow::CULL_FACE);
+                gl.cull_face(glow::FRONT);
+            }
+            HalCullMode::Back => {
+                gl.enable(glow::CULL_FACE);
+                gl.cull_face(glow::BACK);
+            }
+        }
+    }
 }
 
 fn apply_stencil_state(

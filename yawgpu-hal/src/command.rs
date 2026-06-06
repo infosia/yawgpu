@@ -141,8 +141,24 @@ pub struct HalComputePass {
     pub bind_textures: Vec<HalBoundTexture>,
     /// Bind samplers.
     pub bind_samplers: Vec<HalBoundSampler>,
-    /// Workgroups.
-    pub workgroups: (u32, u32, u32),
+    /// Dispatch command.
+    pub dispatch: HalComputeDispatch,
+}
+
+/// Enumerates HAL compute dispatch execution values.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum HalComputeDispatch {
+    /// Direct dispatch.
+    Direct {
+        /// Workgroup counts.
+        workgroups: (u32, u32, u32),
+    },
+    /// Indirect dispatch.
+    Indirect {
+        /// Buffer containing dispatch arguments.
+        buffer: Box<HalBoundIndirectBuffer>,
+    },
 }
 
 /// Stores binding metadata.
@@ -297,12 +313,46 @@ pub struct HalRenderPass {
     pub index_buffer: Option<Box<HalBoundIndexBuffer>>,
     /// Optional indirect draw buffer.
     pub indirect_buffer: Option<Box<HalBoundIndirectBuffer>>,
+    /// Optional viewport override.
+    pub viewport: Option<HalViewport>,
+    /// Optional scissor rectangle override.
+    pub scissor_rect: Option<HalScissorRect>,
     /// Render pass blend constant.
     pub blend_constant: [f32; 4],
     /// Render pass stencil reference.
     pub stencil_reference: u32,
     /// Draw.
     pub draw: Option<HalDraw>,
+}
+
+/// Stores HAL viewport state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HalViewport {
+    /// X origin.
+    pub x: f32,
+    /// Y origin.
+    pub y: f32,
+    /// Width.
+    pub width: f32,
+    /// Height.
+    pub height: f32,
+    /// Minimum depth.
+    pub min_depth: f32,
+    /// Maximum depth.
+    pub max_depth: f32,
+}
+
+/// Stores HAL scissor rectangle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HalScissorRect {
+    /// X origin.
+    pub x: u32,
+    /// Y origin.
+    pub y: u32,
+    /// Width.
+    pub width: u32,
+    /// Height.
+    pub height: u32,
 }
 
 /// Stores one subpass draw command for backend execution.

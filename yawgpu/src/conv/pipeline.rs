@@ -267,6 +267,24 @@ fn map_primitive_state(
                 None
             }
         },
+        front_face: match state.frontFace {
+            native::WGPUFrontFace_Undefined | native::WGPUFrontFace_CCW => core::FrontFace::Ccw,
+            native::WGPUFrontFace_CW => core::FrontFace::Cw,
+            _ => {
+                set_first_error(error, "invalid front face");
+                core::FrontFace::Ccw
+            }
+        },
+        cull_mode: match state.cullMode {
+            native::WGPUCullMode_Undefined | native::WGPUCullMode_None => core::CullMode::None,
+            native::WGPUCullMode_Front => core::CullMode::Front,
+            native::WGPUCullMode_Back => core::CullMode::Back,
+            _ => {
+                set_first_error(error, "invalid cull mode");
+                core::CullMode::None
+            }
+        },
+        unclipped_depth: state.unclippedDepth != 0,
     }
 }
 

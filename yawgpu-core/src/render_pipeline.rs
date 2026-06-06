@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use yawgpu_hal::{
     HalBackend, HalBlendComponent, HalBlendFactor, HalBlendOperation, HalBlendState,
-    HalColorTargetState, HalCompareFunction, HalDepthStencilState, HalDescriptorBinding, HalDevice,
-    HalMslBufferSizeBinding, HalPrimitiveTopology, HalRenderPipeline, HalRenderPipelineDescriptor,
-    HalShaderSource, HalStencilFaceState, HalStencilOperation, HalVertexAttribute,
-    HalVertexBufferLayout, HalVertexFormat, HalVertexStepMode,
+    HalColorTargetState, HalCompareFunction, HalCullMode, HalDepthStencilState,
+    HalDescriptorBinding, HalDevice, HalFrontFace, HalMslBufferSizeBinding, HalPrimitiveTopology,
+    HalRenderPipeline, HalRenderPipelineDescriptor, HalShaderSource, HalStencilFaceState,
+    HalStencilOperation, HalVertexAttribute, HalVertexBufferLayout, HalVertexFormat,
+    HalVertexStepMode,
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
@@ -329,6 +330,34 @@ pub struct PrimitiveState {
     pub topology: PrimitiveTopology,
     /// Strip index format.
     pub strip_index_format: Option<IndexFormat>,
+    /// Front-facing winding.
+    pub front_face: FrontFace,
+    /// Face culling mode.
+    pub cull_mode: CullMode,
+    /// Whether clip-space depth is unclipped.
+    pub unclipped_depth: bool,
+}
+
+/// Enumerates front-facing winding values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FrontFace {
+    /// Counter-clockwise winding.
+    Ccw,
+    /// Clockwise winding.
+    Cw,
+}
+
+/// Enumerates primitive culling values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CullMode {
+    /// Disable face culling.
+    None,
+    /// Cull front-facing primitives.
+    Front,
+    /// Cull back-facing primitives.
+    Back,
 }
 
 /// Enumerates primitive topology values.
@@ -1367,11 +1396,31 @@ pub(crate) fn hal_render_pipeline_descriptor(
         .collect::<Result<Vec<_>, String>>()?;
     Ok(HalRenderPipelineDescriptor {
         sample_count: descriptor.multisample.count,
+        sample_mask: descriptor.multisample.mask,
+        alpha_to_coverage_enabled: descriptor.multisample.alpha_to_coverage_enabled,
         color_targets,
         depth_stencil: descriptor.depth_stencil.map(hal_depth_stencil_state),
         vertex_buffers,
         primitive_topology: hal_primitive_topology(descriptor.primitive.topology),
+        front_face: hal_front_face(descriptor.primitive.front_face),
+        cull_mode: hal_cull_mode(descriptor.primitive.cull_mode),
+        unclipped_depth: descriptor.primitive.unclipped_depth,
     })
+}
+
+fn hal_front_face(front_face: FrontFace) -> HalFrontFace {
+    match front_face {
+        FrontFace::Ccw => HalFrontFace::Ccw,
+        FrontFace::Cw => HalFrontFace::Cw,
+    }
+}
+
+fn hal_cull_mode(cull_mode: CullMode) -> HalCullMode {
+    match cull_mode {
+        CullMode::None => HalCullMode::None,
+        CullMode::Front => HalCullMode::Front,
+        CullMode::Back => HalCullMode::Back,
+    }
 }
 
 fn hal_color_target_state(target: &ColorTargetState) -> Result<HalColorTargetState, String> {
@@ -1807,6 +1856,9 @@ pub(crate) fn validate_render_constants(stage: &RenderPipelineShaderStage) -> Re
 
 /// Validates primitive state and returns a descriptive error on failure.
 pub(crate) fn validate_primitive_state(primitive: PrimitiveState) -> Result<(), String> {
+    if primitive.unclipped_depth {
+        return Err("render pipeline unclippedDepth is not supported".to_owned());
+    }
     if primitive.strip_index_format.is_some()
         && !matches!(
             primitive.topology,

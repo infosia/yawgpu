@@ -302,10 +302,26 @@ pub(super) fn encode_compute_pass(
     for binding in &pass.bind_samplers {
         encode_compute_sampler(encoder, binding)?;
     }
-    encoder.dispatchThreadgroups_threadsPerThreadgroup(
-        to_mtl_dispatch_size(pass.workgroups)?,
-        to_mtl_workgroup_size(pipeline.workgroup_size)?,
-    );
+    match &pass.dispatch {
+        HalComputeDispatch::Direct { workgroups } => {
+            encoder.dispatchThreadgroups_threadsPerThreadgroup(
+                to_mtl_dispatch_size(*workgroups)?,
+                to_mtl_workgroup_size(pipeline.workgroup_size)?,
+            );
+        }
+        HalComputeDispatch::Indirect { buffer } => {
+            let HalBuffer::Metal(indirect_buffer) = &buffer.buffer else {
+                return Err(buffer_error("compute indirect buffer is not Metal-backed"));
+            };
+            unsafe {
+                encoder.dispatchThreadgroupsWithIndirectBuffer_indirectBufferOffset_threadsPerThreadgroup(
+                    indirect_buffer.inner()?,
+                    to_ns(buffer.offset)?,
+                    to_mtl_workgroup_size(pipeline.workgroup_size)?,
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -714,6 +730,31 @@ pub(super) fn encode_render_pass(
     };
     encoder.setRenderPipelineState(&pipeline.inner);
     encoder.setDepthStencilState(Some(&pipeline.depth_stencil_state));
+    encoder.setFrontFacingWinding(mtl_front_face(pipeline.front_face));
+    encoder.setCullMode(mtl_cull_mode(pipeline.cull_mode));
+    encoder.setDepthClipMode(if pipeline.unclipped_depth {
+        MTLDepthClipMode::Clamp
+    } else {
+        MTLDepthClipMode::Clip
+    });
+    if let Some(viewport) = pass.viewport {
+        encoder.setViewport(MTLViewport {
+            originX: f64::from(viewport.x),
+            originY: f64::from(viewport.y),
+            width: f64::from(viewport.width),
+            height: f64::from(viewport.height),
+            znear: f64::from(viewport.min_depth),
+            zfar: f64::from(viewport.max_depth),
+        });
+    }
+    if let Some(rect) = pass.scissor_rect {
+        encoder.setScissorRect(MTLScissorRect {
+            x: to_ns(u64::from(rect.x))?,
+            y: to_ns(u64::from(rect.y))?,
+            width: to_ns(u64::from(rect.width))?,
+            height: to_ns(u64::from(rect.height))?,
+        });
+    }
     encoder.setDepthBias_slopeScale_clamp(
         pipeline.depth_bias as f32,
         pipeline.depth_bias_slope_scale,
@@ -741,6 +782,21 @@ pub(super) fn encode_render_pass(
     }
     encode_render_draw(encoder, pass, pipeline.primitive_topology, draw)?;
     Ok(())
+}
+
+fn mtl_front_face(front_face: HalFrontFace) -> MTLWinding {
+    match front_face {
+        HalFrontFace::Ccw => MTLWinding::CounterClockwise,
+        HalFrontFace::Cw => MTLWinding::Clockwise,
+    }
+}
+
+fn mtl_cull_mode(cull_mode: HalCullMode) -> MTLCullMode {
+    match cull_mode {
+        HalCullMode::None => MTLCullMode::None,
+        HalCullMode::Front => MTLCullMode::Front,
+        HalCullMode::Back => MTLCullMode::Back,
+    }
 }
 
 fn encode_render_buffer_sizes(

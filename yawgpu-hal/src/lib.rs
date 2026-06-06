@@ -14,10 +14,11 @@ mod shader;
 pub use command::{
     HalBoundBuffer, HalBoundIndexBuffer, HalBoundIndirectBuffer, HalBoundSampler, HalBoundTexture,
     HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy,
-    HalBufferTextureLayout, HalComputePass, HalCopy, HalDescriptorBinding,
+    HalBufferTextureLayout, HalComputeDispatch, HalComputePass, HalCopy, HalDescriptorBinding,
     HalDescriptorBindingKind, HalDraw, HalIndexFormat, HalRenderColorTarget,
-    HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalStorageTextureAccess,
-    HalTextureAspect, HalTextureCopy, HalTextureViewDimension,
+    HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalScissorRect,
+    HalStorageTextureAccess, HalTextureAspect, HalTextureCopy, HalTextureViewDimension,
+    HalViewport,
 };
 #[cfg(feature = "tiled")]
 pub use command::{
@@ -30,9 +31,9 @@ pub use command::{
 pub use descriptors::HalTransientAttachmentDescriptor;
 pub use descriptors::{
     HalBlendComponent, HalBlendFactor, HalBlendOperation, HalBlendState, HalColorTargetState,
-    HalDepthStencilState, HalExtent3d, HalOrigin3d, HalRenderPipelineDescriptor,
-    HalSamplerDescriptor, HalStencilFaceState, HalTextureDescriptor, HalTextureDimension,
-    HalVertexAttribute, HalVertexBufferLayout,
+    HalCullMode, HalDepthStencilState, HalExtent3d, HalFrontFace, HalOrigin3d,
+    HalRenderPipelineDescriptor, HalSamplerDescriptor, HalStencilFaceState, HalTextureDescriptor,
+    HalTextureDimension, HalVertexAttribute, HalVertexBufferLayout,
 };
 pub use error::HalError;
 pub use format::{
@@ -1115,6 +1116,8 @@ mod tests {
     fn render_pipeline_descriptor() -> HalRenderPipelineDescriptor {
         HalRenderPipelineDescriptor {
             sample_count: 1,
+            sample_mask: u32::MAX,
+            alpha_to_coverage_enabled: false,
             color_targets: vec![HalColorTargetState {
                 format: HalTextureFormat::Rgba8Unorm,
                 blend: None,
@@ -1123,6 +1126,9 @@ mod tests {
             depth_stencil: None,
             vertex_buffers: Vec::new(),
             primitive_topology: HalPrimitiveTopology::TriangleList,
+            front_face: HalFrontFace::Ccw,
+            cull_mode: HalCullMode::None,
+            unclipped_depth: false,
         }
     }
 
@@ -1383,6 +1389,8 @@ mod tests {
             vertex_buffers: Vec::new(),
             index_buffer: None,
             indirect_buffer: None,
+            viewport: None,
+            scissor_rect: None,
             blend_constant: [0.0; 4],
             stencil_reference: 0,
             draw: None,
