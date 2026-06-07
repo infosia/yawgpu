@@ -34,6 +34,8 @@ pub enum HalShaderSource {
         fragment_buffer_sizes_slot: Option<u32>,
         /// Fragment-stage bindings whose byte lengths populate `_mslBufferSizes`.
         fragment_buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
+        /// Reserved fragment-stage immediate slot for frag-depth clamp range.
+        fragment_frag_depth_clamp_slot: Option<u32>,
     },
     /// Spir v variant.
     SpirV(Vec<u32>),
