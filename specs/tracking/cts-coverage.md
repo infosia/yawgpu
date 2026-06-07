@@ -868,6 +868,18 @@ never a reason to skip a CTS case.
     allocated image). Both feature-gated HAL suites now pass (vulkan 76/0, metal 55/0); added
     [[feedback-run-feature-gated-hal-tests]] so reviews run them. Gate: **no open CRITICAL/MAJOR → F-043
     COMPLETE.**
+- **External-CTS finding F-048 — RESOLVED.** T51 (V22) `render_pass/clear_value:stencil_clear_value`: the
+  stencil **reference** value was not masked to the stencil aspect's 8-bit width before the `equal` compare
+  (`pass=24 fail=6`, Metal == Vulkan/MoltenVK; also affects wgpu-native), so `stencilReference ∈ {258, 65539}`
+  with `applyAsReference=true` mismatched the correctly-masked cleared stencil (2 / 3). Fix (coding agent):
+  mask `stencil_reference & 0xFF` in core `queue.rs` when building `HalRenderPass` (backend-independent;
+  every WebGPU stencil format is 8-bit). + Noop unit test (258→2, 7→7). **Verified real-GPU (Claude):**
+  `clear_value:stencil_clear_value = 30/30` on Metal AND Vulkan/MoltenVK (from `24/6`); `rendering,stencil`
+  188/0 (no regression). 1-line prescribed fix, fully CTS-verified on both backends → self-reviewed.
+  **Re-verified via CTS re-run against current yawgpu: F-046 (culling/winding) `12/12` and F-049
+  (render_bundle) `4/4` are already resolved by the threading audit (`de4a99f`) — stale in FINDINGS.** Open
+  CTS findings remaining: F-044 (vertex formats), F-045 (frag_depth viewport clamp), F-047 (override
+  constants), F-050 (occlusion query).
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.
