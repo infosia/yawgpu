@@ -1618,10 +1618,10 @@ mod tests {
             },
         );
         assert_eq!(error, None);
-        assert_eq!(
-            pass.set_scissor_rect(3, 0, 2, 1),
-            Some("render pass scissor rectangle exceeds attachment size".to_owned())
-        );
+        // Like the regular render pass, an out-of-extent scissor is deferred to the
+        // encoder error sink: `set_scissor_rect` returns `None` and the error surfaces
+        // at `finish()` (see `record_draw_command` / the `render_pass` OOB-scissor test).
+        assert_eq!(pass.set_scissor_rect(3, 0, 2, 1), None);
         assert_eq!(pass.end(), None);
         let (command_buffer, error) = encoder.finish();
         assert!(command_buffer.is_error());
