@@ -22,10 +22,10 @@ use crate::{
     HalCompareFunction, HalComputeDispatch, HalComputePass, HalCopy, HalCullMode,
     HalDepthStencilState, HalDescriptorBinding, HalDescriptorBindingKind, HalDraw, HalError,
     HalExtent3d, HalFilterMode, HalFrontFace, HalIndexFormat, HalMipmapFilterMode,
-    HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor, HalSampler,
-    HalSamplerDescriptor, HalShaderSource, HalStencilOperation, HalSurfaceConfiguration,
-    HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage,
-    HalVertexFormat, HalVertexStepMode,
+    HalPrimitiveTopology, HalQueryKind, HalQuerySet, HalRenderLoadOp, HalRenderPass,
+    HalRenderPipelineDescriptor, HalResolveQuerySet, HalSampler, HalSamplerDescriptor,
+    HalShaderSource, HalStencilOperation, HalSurfaceConfiguration, HalTexture, HalTextureCopy,
+    HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
 
 const BACKEND: &str = "vulkan";
@@ -359,9 +359,20 @@ impl VulkanAdapter {
         {
             extension_names.push(extension_name.as_ptr());
         }
+        let supported_features = unsafe {
+            self.instance
+                .instance
+                .get_physical_device_features(self.physical_device)
+        };
+        let occlusion_query_precise = supported_features.occlusion_query_precise == vk::TRUE;
+        let mut enabled_features = vk::PhysicalDeviceFeatures::default();
+        if occlusion_query_precise {
+            enabled_features.occlusion_query_precise = vk::TRUE;
+        }
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
-            .enabled_extension_names(&extension_names);
+            .enabled_extension_names(&extension_names)
+            .enabled_features(&enabled_features);
         let device = unsafe {
             self.instance
                 .instance
@@ -380,6 +391,7 @@ impl VulkanAdapter {
             physical_device: self.physical_device,
             memory_properties,
             queue_family_index,
+            occlusion_query_precise,
             allocations: AtomicU64::new(0),
             #[cfg(feature = "tiled")]
             framebuffer_fetch_path: self.framebuffer_fetch_path,
@@ -478,6 +490,7 @@ mod encode;
 mod error;
 mod format;
 mod pipeline;
+mod query_set;
 mod queue;
 mod surface;
 use self::buffer::*;
@@ -486,6 +499,7 @@ use self::encode::*;
 use self::error::*;
 use self::format::*;
 use self::pipeline::*;
+use self::query_set::*;
 use self::queue::*;
 use self::surface::*;
 use self::texture::*;
@@ -496,6 +510,7 @@ mod texture;
 pub use buffer::VulkanBuffer;
 pub use device::VulkanDevice;
 pub use pipeline::{VulkanComputePipeline, VulkanRenderPipeline};
+pub use query_set::VulkanQuerySet;
 pub use queue::VulkanQueue;
 pub use surface::VulkanSurface;
 #[cfg(feature = "tiled")]

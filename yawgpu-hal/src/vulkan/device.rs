@@ -7,6 +7,7 @@ pub(super) struct VulkanDeviceInner {
     pub(super) physical_device: vk::PhysicalDevice,
     pub(super) memory_properties: vk::PhysicalDeviceMemoryProperties,
     pub(super) queue_family_index: u32,
+    pub(super) occlusion_query_precise: bool,
     pub(super) allocations: AtomicU64,
     #[cfg(feature = "tiled")]
     pub(super) framebuffer_fetch_path: FramebufferFetchPath,
@@ -115,6 +116,20 @@ impl VulkanDevice {
                 bytes_per_pixel: 0,
                 format: descriptor.format,
             },
+        }
+    }
+
+    /// Creates a query set matching the given kind and count.
+    pub fn create_query_set(
+        &self,
+        kind: HalQueryKind,
+        count: u32,
+    ) -> Result<VulkanQuerySet, HalError> {
+        match kind {
+            HalQueryKind::Occlusion => {
+                self.inner.allocations.fetch_add(1, Ordering::Relaxed);
+                VulkanQuerySet::new(Arc::clone(&self.inner), count)
+            }
         }
     }
 

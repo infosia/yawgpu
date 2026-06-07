@@ -61,16 +61,7 @@ pub(super) fn record_and_submit_copies(
                     encode_buffer_clear(&queue.device.device, command_buffer, clear)?;
                 }
                 HalCopy::ResolveQuerySet(resolve) => {
-                    let byte_count =
-                        usize::try_from(u64::from(resolve.query_count) * 8).map_err(|_| {
-                            HalError::BufferOperationFailed {
-                                backend: BACKEND,
-                                message: "query resolve byte count is too large",
-                            }
-                        })?;
-                    resolve
-                        .destination
-                        .write(resolve.destination_offset, &vec![0; byte_count])?;
+                    encode_resolve_query_set(&queue.device.device, command_buffer, resolve)?;
                 }
                 HalCopy::BufferToTexture(copy) => {
                     encode_buffer_to_texture(&queue.device.device, command_buffer, copy)?;
@@ -89,7 +80,7 @@ pub(super) fn record_and_submit_copies(
                     image_views.extend(temps.image_views);
                 }
                 HalCopy::RenderPass(pass) => {
-                    let temps = encode_render_pass(&queue.device.device, command_buffer, pass)?;
+                    let temps = encode_render_pass(&queue.device, command_buffer, pass)?;
                     descriptor_pools.extend(temps.descriptor_pools);
                     framebuffers.push(temps.framebuffer);
                     image_views.extend(temps.image_views);
@@ -352,7 +343,10 @@ fn retain_copy_resources(copy: &HalCopy, retained: &mut Vec<RetainedResource>) {
             retain_hal_buffer(&copy.destination, retained);
         }
         HalCopy::BufferClear(clear) => retain_hal_buffer(&clear.buffer, retained),
-        HalCopy::ResolveQuerySet(resolve) => retain_hal_buffer(&resolve.destination, retained),
+        HalCopy::ResolveQuerySet(resolve) => {
+            retain_hal_query_set(&resolve.query_set, retained);
+            retain_hal_buffer(&resolve.destination, retained);
+        }
         HalCopy::BufferToTexture(copy) | HalCopy::TextureToBuffer(copy) => {
             retain_hal_buffer(&copy.buffer, retained);
             retain_hal_texture(&copy.texture, retained);
@@ -367,6 +361,9 @@ fn retain_copy_resources(copy: &HalCopy, retained: &mut Vec<RetainedResource>) {
             }
         }
         HalCopy::RenderPass(pass) => {
+            if let Some(query_set) = &pass.occlusion_query_set {
+                retain_hal_query_set(query_set, retained);
+            }
             for color_target in &pass.color_targets {
                 retain_hal_texture(&color_target.texture, retained);
                 if let Some(resolve_target) = &color_target.resolve_target {
@@ -408,6 +405,15 @@ fn retain_hal_texture(texture: &HalTexture, retained: &mut Vec<RetainedResource>
             _inner: Arc::clone(inner),
         });
     }
+}
+
+fn retain_hal_query_set(query_set: &HalQuerySet, retained: &mut Vec<RetainedResource>) {
+    let HalQuerySet::Vulkan(query_set) = query_set else {
+        return;
+    };
+    retained.push(RetainedResource::QuerySet {
+        _inner: Arc::clone(&query_set.inner),
+    });
 }
 
 #[cfg(feature = "tiled")]
@@ -576,6 +582,102 @@ pub(super) fn encode_buffer_clear(
     }
     transfer_to_compute_barrier(device, command_buffer);
     Ok(())
+}
+
+/// Records query-set resolve encode into the command stream.
+pub(super) fn encode_resolve_query_set(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    resolve: &HalResolveQuerySet,
+) -> Result<(), HalError> {
+    let HalQuerySet::Vulkan(query_set) = &resolve.query_set else {
+        return Err(buffer_error("query set is not Vulkan-backed"));
+    };
+    let HalBuffer::Vulkan(destination) = &resolve.destination else {
+        return Err(buffer_error(
+            "query resolve destination is not Vulkan-backed",
+        ));
+    };
+    let byte_count = u64::from(resolve.query_count)
+        .checked_mul(8)
+        .ok_or_else(|| buffer_error("query resolve byte count overflows"))?;
+    destination.validate_range(resolve.destination_offset, byte_count)?;
+    query_set.validate_range(resolve.first_query, resolve.query_count)?;
+    for &query_index in &resolve.written_queries {
+        if query_index < resolve.first_query {
+            return Err(buffer_error("written query precedes resolve range"));
+        }
+        let relative_index = query_index - resolve.first_query;
+        if relative_index >= resolve.query_count {
+            return Err(buffer_error("written query exceeds resolve range"));
+        }
+        query_set.validate_query(query_index)?;
+    }
+    if byte_count == 0 {
+        return Ok(());
+    }
+    let destination_buffer = destination.inner()?.buffer;
+    unsafe {
+        device.cmd_fill_buffer(
+            command_buffer,
+            destination_buffer,
+            resolve.destination_offset,
+            byte_count,
+            0,
+        );
+        query_resolve_fill_to_copy_barrier(
+            device,
+            command_buffer,
+            destination_buffer,
+            resolve.destination_offset,
+            byte_count,
+        );
+        for &query_index in &resolve.written_queries {
+            let destination_offset = resolve
+                .destination_offset
+                .checked_add(u64::from(query_index - resolve.first_query) * 8)
+                .ok_or_else(|| buffer_error("query resolve destination offset overflows"))?;
+            device.cmd_copy_query_pool_results(
+                command_buffer,
+                query_set.pool(),
+                query_index,
+                1,
+                destination_buffer,
+                destination_offset,
+                8,
+                vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn query_resolve_fill_to_copy_barrier(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    buffer: vk::Buffer,
+    offset: u64,
+    size: u64,
+) {
+    let barrier = vk::BufferMemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .buffer(buffer)
+        .offset(offset)
+        .size(size);
+    unsafe {
+        device.cmd_pipeline_barrier(
+            command_buffer,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[barrier],
+            &[],
+        );
+    }
 }
 
 /// Records encode into the command stream.
@@ -1551,19 +1653,26 @@ fn vk_sample_count(sample_count: u32) -> Result<vk::SampleCountFlags, HalError> 
 
 /// Records encode into the command stream.
 pub(super) fn encode_render_pass(
-    device: &ash::Device,
+    device: &VulkanDeviceInner,
     command_buffer: vk::CommandBuffer,
     pass: &HalRenderPass,
 ) -> Result<RenderPassTemps, HalError> {
+    let vk_device = &device.device;
     let color_textures = vulkan_render_color_textures(pass)?;
     let resolve_textures = vulkan_render_resolve_textures(pass)?;
     let depth_stencil_texture = vulkan_render_depth_stencil_texture(pass)?;
     if color_textures.is_empty() && depth_stencil_texture.is_none() {
         return Err(shader_error("Vulkan render pass requires an attachment"));
     }
+    let active_query = vulkan_active_occlusion_query(pass)?;
+    if let Some((query_set, query_index)) = active_query {
+        unsafe {
+            vk_device.cmd_reset_query_pool(command_buffer, query_set.pool(), query_index, 1);
+        }
+    }
     for texture in &color_textures {
         transition_image(
-            device,
+            vk_device,
             command_buffer,
             texture.inner()?,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
@@ -1572,7 +1681,7 @@ pub(super) fn encode_render_pass(
     }
     for texture in resolve_textures.iter().flatten() {
         transition_image(
-            device,
+            vk_device,
             command_buffer,
             texture.inner()?,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
@@ -1583,7 +1692,7 @@ pub(super) fn encode_render_pass(
         (depth_stencil_texture, &pass.depth_stencil_attachment)
     {
         transition_image_aspect(
-            device,
+            vk_device,
             command_buffer,
             texture.inner()?,
             depth_stencil_aspect_flags(attachment.format),
@@ -1593,7 +1702,7 @@ pub(super) fn encode_render_pass(
     }
     let render_pass = match &pass.pipeline {
         Some(crate::HalRenderPipeline::Vulkan(_)) | None => create_render_pass_for_targets(
-            device,
+            vk_device,
             &render_pass_color_formats(&color_textures),
             &render_pass_resolve_formats(&resolve_textures),
             &pass.color_targets,
@@ -1615,7 +1724,7 @@ pub(super) fn encode_render_pass(
     let depth_stencil_attachment =
         depth_stencil_texture.zip(pass.depth_stencil_attachment.as_ref());
     let (framebuffer, mut image_views) = create_framebuffer(
-        device,
+        vk_device,
         render_pass,
         &color_attachments,
         &resolve_attachments,
@@ -1624,17 +1733,17 @@ pub(super) fn encode_render_pass(
     let mut descriptor_pool = None;
     let mut descriptor_sets = Vec::new();
     if let Some(crate::HalRenderPipeline::Vulkan(pipeline)) = &pass.pipeline {
-        descriptor_pool = create_render_descriptor_pool(device, pipeline)?;
+        descriptor_pool = create_render_descriptor_pool(vk_device, pipeline)?;
         descriptor_sets = if let Some(pool) = descriptor_pool {
-            match allocate_render_descriptor_sets(device, pool, pipeline) {
+            match allocate_render_descriptor_sets(vk_device, pool, pipeline) {
                 Ok(sets) => sets,
                 Err(error) => {
                     unsafe {
-                        device.destroy_descriptor_pool(pool, None);
-                        device.destroy_framebuffer(framebuffer, None);
-                        destroy_image_views(device, &image_views);
+                        vk_device.destroy_descriptor_pool(pool, None);
+                        vk_device.destroy_framebuffer(framebuffer, None);
+                        destroy_image_views(vk_device, &image_views);
                         if let Some(render_pass) = temporary_render_pass {
-                            device.destroy_render_pass(render_pass, None);
+                            vk_device.destroy_render_pass(render_pass, None);
                         }
                     }
                     return Err(error);
@@ -1643,17 +1752,17 @@ pub(super) fn encode_render_pass(
         } else {
             Vec::new()
         };
-        match update_render_descriptor_sets(device, pipeline, pass, &descriptor_sets) {
+        match update_render_descriptor_sets(vk_device, pipeline, pass, &descriptor_sets) {
             Ok(descriptor_image_views) => image_views.extend(descriptor_image_views),
             Err(error) => {
                 unsafe {
                     if let Some(pool) = descriptor_pool {
-                        device.destroy_descriptor_pool(pool, None);
+                        vk_device.destroy_descriptor_pool(pool, None);
                     }
-                    device.destroy_framebuffer(framebuffer, None);
-                    destroy_image_views(device, &image_views);
+                    vk_device.destroy_framebuffer(framebuffer, None);
+                    destroy_image_views(vk_device, &image_views);
                     if let Some(render_pass) = temporary_render_pass {
-                        device.destroy_render_pass(render_pass, None);
+                        vk_device.destroy_render_pass(render_pass, None);
                     }
                 }
                 return Err(error);
@@ -1673,13 +1782,25 @@ pub(super) fn encode_render_pass(
         .render_area(render_area)
         .clear_values(&clear_values);
     unsafe {
-        device.cmd_begin_render_pass(command_buffer, &begin_info, vk::SubpassContents::INLINE);
+        vk_device.cmd_begin_render_pass(command_buffer, &begin_info, vk::SubpassContents::INLINE);
+        if let Some((query_set, query_index)) = active_query {
+            vk_device.cmd_begin_query(
+                command_buffer,
+                query_set.pool(),
+                query_index,
+                if device.occlusion_query_precise {
+                    vk::QueryControlFlags::PRECISE
+                } else {
+                    vk::QueryControlFlags::empty()
+                },
+            );
+        }
     }
     if let (Some(crate::HalRenderPipeline::Vulkan(pipeline)), Some(draw)) =
         (&pass.pipeline, pass.draw)
     {
         unsafe {
-            device.cmd_bind_pipeline(
+            vk_device.cmd_bind_pipeline(
                 command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
                 pipeline.inner.pipeline,
@@ -1712,21 +1833,24 @@ pub(super) fn encode_render_pass(
                     height: rect.height,
                 },
             });
-            device.cmd_set_viewport(command_buffer, 0, &[viewport]);
-            device.cmd_set_scissor(command_buffer, 0, &[scissor]);
-            device.cmd_set_blend_constants(command_buffer, &pass.blend_constant);
-            device.cmd_set_stencil_reference(
+            vk_device.cmd_set_viewport(command_buffer, 0, &[viewport]);
+            vk_device.cmd_set_scissor(command_buffer, 0, &[scissor]);
+            vk_device.cmd_set_blend_constants(command_buffer, &pass.blend_constant);
+            vk_device.cmd_set_stencil_reference(
                 command_buffer,
                 vk::StencilFaceFlags::FRONT_AND_BACK,
                 pass.stencil_reference,
             );
-            bind_render_descriptor_sets(device, command_buffer, pipeline, &descriptor_sets);
+            bind_render_descriptor_sets(vk_device, command_buffer, pipeline, &descriptor_sets);
         }
-        bind_vertex_buffers(device, command_buffer, pass)?;
-        encode_render_draw(device, command_buffer, pass, draw)?;
+        bind_vertex_buffers(vk_device, command_buffer, pass)?;
+        encode_render_draw(vk_device, command_buffer, pass, draw)?;
     }
     unsafe {
-        device.cmd_end_render_pass(command_buffer);
+        if let Some((query_set, query_index)) = active_query {
+            vk_device.cmd_end_query(command_buffer, query_set.pool(), query_index);
+        }
+        vk_device.cmd_end_render_pass(command_buffer);
     }
     for texture in &color_textures {
         texture
@@ -1812,6 +1936,22 @@ fn encode_render_draw(
             Ok(())
         }
     }
+}
+
+fn vulkan_active_occlusion_query(
+    pass: &HalRenderPass,
+) -> Result<Option<(&VulkanQuerySet, u32)>, HalError> {
+    let Some(query_index) = pass.occlusion_query_index else {
+        return Ok(None);
+    };
+    let Some(query_set) = &pass.occlusion_query_set else {
+        return Err(buffer_error("active occlusion query has no query set"));
+    };
+    let HalQuerySet::Vulkan(query_set) = query_set else {
+        return Err(buffer_error("occlusion query set is not Vulkan-backed"));
+    };
+    query_set.validate_query(query_index)?;
+    Ok(Some((query_set, query_index)))
 }
 
 fn bind_render_index_buffer(
