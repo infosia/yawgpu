@@ -102,16 +102,23 @@ Status: ☐ ◐ ☑ ✗(N/A).
   (`MTLDevice.newBufferWithLength` returns nil for length 0). (F-050)
 - **QS-OCC** Occlusion-query EXECUTION (F-050): an occlusion `QuerySet`
   owns a backend `HalQuerySet` (Metal = a private visibility-result
-  `MTLBuffer` of `count*8` bytes; Noop = count; Vulkan/GLES = placeholder
-  pending slice 2). `begin/endOcclusionQuery` thread the active query
-  index onto each draw's HAL render pass (Metal:
-  `setVisibilityResultMode(Counting, index*8)`); `resolveQuerySet`
-  records a real `HalCopy::ResolveQuerySet` (Metal blit; Noop/Vulkan/GLES
-  zero-fill). **Limitation:** because each draw replays as its own HAL
-  render pass, a single occlusion query spanning multiple draws records
-  the per-draw visibility result (last writer wins, not summed); the
-  conformant single-draw case is correct. Multi-draw-in-one-query is a
-  known gap of the render-pass-per-draw model.
+  `MTLBuffer` `max(count*8,8)`; Vulkan = a `VkQueryPool(OCCLUSION,
+  count.max(1))`; Noop/GLES = count). `begin/endOcclusionQuery` thread the
+  active query index onto each draw's HAL render pass (Metal:
+  `setVisibilityResultMode(Counting, index*8)`; Vulkan: `cmdResetQueryPool`
+  before the pass + `cmdBeginQuery`/`cmdEndQuery`, precise when
+  `occlusionQueryPrecise` is supported). `resolveQuerySet` records a
+  `HalCopy::ResolveQuerySet`; the resolve **zero-fills the destination then
+  copies only the queries an actual draw wrote** (the written indices are
+  found at submit by scanning render passes across the submit) — so an
+  unwritten query resolves to 0 without relying on driver leniency (Metal
+  `fillBuffer`+blit; Vulkan `cmdFillBuffer`+barrier+`cmdCopyQueryPoolResults`
+  WAIT over written only; Noop/GLES zero-fill). **Limitations:** (a) a
+  single occlusion query spanning multiple draws records the per-draw
+  visibility result (render-pass-per-draw model; last writer wins, not
+  summed) — the conformant single-draw case is correct; (b) cross-*submit*
+  write-then-resolve (write and resolve in separate `Queue::submit` calls)
+  is not represented by the submit-wide scan.
 - **QS2** Timestamp type requires the `timestamp-query` feature
   (HasFeature); absent ⇒ error + error QuerySet. ☑ (P8.1)
 - **QS3** `GetType`/`GetCount` reflect the descriptor; `Destroy`

@@ -550,7 +550,9 @@ impl HalDevice {
                 count: device.create_query_set(kind, count),
             }),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => Ok(HalQuerySet::Vulkan { count }),
+            Self::Vulkan(device) => device
+                .create_query_set(kind, count)
+                .map(HalQuerySet::Vulkan),
             #[cfg(feature = "metal")]
             Self::Metal(device) => device.create_query_set(kind, count).map(HalQuerySet::Metal),
             #[cfg(feature = "gles")]
@@ -1066,11 +1068,8 @@ pub enum HalQuerySet {
         count: u32,
     },
     #[cfg(feature = "vulkan")]
-    /// Vulkan placeholder query-set variant.
-    Vulkan {
-        /// Number of queries in the set.
-        count: u32,
-    },
+    /// Vulkan query-set variant.
+    Vulkan(vulkan::VulkanQuerySet),
     #[cfg(feature = "metal")]
     /// Metal query-set variant.
     Metal(metal::MetalQuerySet),
@@ -1090,7 +1089,7 @@ impl HalQuerySet {
             #[cfg(feature = "noop")]
             Self::Noop { count } => *count,
             #[cfg(feature = "vulkan")]
-            Self::Vulkan { count } => *count,
+            Self::Vulkan(query_set) => query_set.count(),
             #[cfg(feature = "metal")]
             Self::Metal(query_set) => query_set.count(),
             #[cfg(feature = "gles")]
@@ -1512,6 +1511,7 @@ mod tests {
             query_set,
             first_query: 0,
             query_count: 2,
+            written_queries: Vec::new(),
             destination: destination.clone(),
             destination_offset: 0,
         })])?;

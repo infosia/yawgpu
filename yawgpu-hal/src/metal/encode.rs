@@ -63,16 +63,49 @@ pub(super) fn encode_resolve_query_set(
     let size = u64::from(resolve.query_count)
         .checked_mul(8)
         .ok_or_else(|| buffer_error("query resolve byte count overflows"))?;
-    query_set.buffer.validate_range(source_offset, size)?;
     destination.validate_range(resolve.destination_offset, size)?;
+    query_set.buffer.validate_range(source_offset, size)?;
+    for &query_index in &resolve.written_queries {
+        if query_index < resolve.first_query {
+            return Err(buffer_error("written query precedes resolve range"));
+        }
+        let relative_index = query_index - resolve.first_query;
+        if relative_index >= resolve.query_count {
+            return Err(buffer_error("written query exceeds resolve range"));
+        }
+        let source_offset = u64::from(query_index)
+            .checked_mul(8)
+            .ok_or_else(|| buffer_error("query resolve source offset overflows"))?;
+        query_set.buffer.validate_range(source_offset, 8)?;
+    }
+    if size == 0 {
+        return Ok(());
+    }
     unsafe {
-        blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-            query_set.buffer()?,
-            to_ns(source_offset)?,
-            destination.inner()?,
-            to_ns(resolve.destination_offset)?,
-            to_ns(size)?,
+        let destination_buffer = destination.inner()?;
+        // MTLBlitCommandEncoder preserves command order here: the zero-fill
+        // completes before the overlapping per-query blit copies.
+        blit.fillBuffer_range_value(
+            destination_buffer,
+            NSRange::new(to_ns(resolve.destination_offset)?, to_ns(size)?),
+            0,
         );
+        for &query_index in &resolve.written_queries {
+            let source_offset = u64::from(query_index)
+                .checked_mul(8)
+                .ok_or_else(|| buffer_error("query resolve source offset overflows"))?;
+            let destination_offset = resolve
+                .destination_offset
+                .checked_add(u64::from(query_index - resolve.first_query) * 8)
+                .ok_or_else(|| buffer_error("query resolve destination offset overflows"))?;
+            blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                query_set.buffer()?,
+                to_ns(source_offset)?,
+                destination_buffer,
+                to_ns(destination_offset)?,
+                8,
+            );
+        }
     }
     Ok(())
 }

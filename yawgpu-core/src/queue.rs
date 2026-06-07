@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -253,11 +253,13 @@ impl Queue {
             return None;
         }
         let mut copies = Vec::new();
-        for command_buffer in command_buffers {
-            for op in command_buffer.command_ops() {
-                if let Some(copy) = hal_command_execution(op) {
-                    copies.push(copy);
-                }
+        let all_ops: Vec<_> = command_buffers
+            .iter()
+            .flat_map(|command_buffer| command_buffer.command_ops().iter())
+            .collect();
+        for (op_index, op) in all_ops.iter().enumerate() {
+            if let Some(copy) = hal_command_execution_with_ops(op, &all_ops[..=op_index]) {
+                copies.push(copy);
             }
         }
         if let Err(error) = self.inner.hal.submit_copies(&copies) {
@@ -343,7 +345,15 @@ fn hal_buffer_texture_layout(
 }
 
 /// Returns HAL command execution.
+#[cfg(test)]
 pub(crate) fn hal_command_execution(op: &CommandExecution) -> Option<HalCopy> {
+    hal_command_execution_with_ops(op, &[op])
+}
+
+fn hal_command_execution_with_ops(
+    op: &CommandExecution,
+    command_ops: &[&CommandExecution],
+) -> Option<HalCopy> {
     match op {
         CommandExecution::BufferCopy(copy) => {
             if copy.size == 0 {
@@ -377,6 +387,7 @@ pub(crate) fn hal_command_execution(op: &CommandExecution) -> Option<HalCopy> {
                 query_set,
                 first_query: resolve.first_query,
                 query_count: resolve.query_count,
+                written_queries: resolve_written_occlusion_queries(resolve, command_ops),
                 destination,
                 destination_offset: resolve.destination_offset,
             }))
@@ -387,6 +398,33 @@ pub(crate) fn hal_command_execution(op: &CommandExecution) -> Option<HalCopy> {
         #[cfg(feature = "tiled")]
         CommandExecution::SubpassRenderPass(pass) => hal_subpass_render_pass_execution(pass),
     }
+}
+
+fn resolve_written_occlusion_queries(
+    resolve: &ResolveQuerySetCommand,
+    command_ops: &[&CommandExecution],
+) -> Vec<u32> {
+    let Some(end_query) = resolve.first_query.checked_add(resolve.query_count) else {
+        return Vec::new();
+    };
+    command_ops
+        .iter()
+        .filter_map(|op| {
+            let CommandExecution::RenderPass(pass) = *op else {
+                return None;
+            };
+            let Some(query_set) = &pass.occlusion_query_set else {
+                return None;
+            };
+            if !query_set.same(&resolve.query_set) {
+                return None;
+            }
+            let query_index = pass.occlusion_query_index?;
+            (resolve.first_query <= query_index && query_index < end_query).then_some(query_index)
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 #[cfg(feature = "tiled")]
@@ -1667,6 +1705,7 @@ fn fs() -> @location(0) vec4<f32> {
         };
         let mut saw_render_query_index = false;
         let mut resolve_destination = None;
+        let mut written_queries = None;
         for copy in submitted {
             match copy {
                 HalCopy::RenderPass(pass) => {
@@ -1674,14 +1713,139 @@ fn fs() -> @location(0) vec4<f32> {
                         pass.occlusion_query_index == Some(0) && pass.occlusion_query_set.is_some();
                 }
                 HalCopy::ResolveQuerySet(resolve) => {
+                    written_queries = Some(resolve.written_queries);
                     resolve_destination = Some(resolve.destination);
                 }
                 _ => {}
             }
         }
         assert!(saw_render_query_index);
+        assert_eq!(written_queries.as_deref(), Some(&[0][..]));
         let destination = resolve_destination.expect("query resolve should be submitted");
         assert_eq!(destination.read(0, 8).expect("read resolved bytes"), [0; 8]);
+    }
+
+    #[test]
+    fn empty_occlusion_query_resolve_records_no_written_queries() {
+        let device = noop_device();
+        let view = noop_render_attachment(&device);
+        let (query_set, error) = device.create_query_set(QuerySetDescriptor {
+            label: "occlusion".to_owned(),
+            kind: QueryType::Occlusion,
+            count: 1,
+        });
+        assert_eq!(error, None);
+        let query_set = Arc::new(query_set);
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::QUERY_RESOLVE,
+            size: 256,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&noop_render_pass_descriptor(
+            view,
+            Some((*query_set).clone()),
+        ));
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.begin_occlusion_query(0), None);
+        assert_eq!(pass.end_occlusion_query(), None);
+        assert_eq!(pass.end(), None);
+        assert_eq!(
+            encoder.resolve_query_set(Arc::clone(&query_set), 0, 1, Arc::clone(&destination), 0),
+            None
+        );
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(finish_error, None);
+        assert!(matches!(
+            command_buffer.command_ops(),
+            [CommandExecution::RenderPass(pass), CommandExecution::ResolveQuerySet(resolve)]
+                if pass.occlusion_query_set.is_none()
+                    && pass.occlusion_query_index.is_none()
+                    && pass.draw.is_none()
+                    && resolve.query_set.same(&query_set)
+                    && resolve.destination.same(&destination)
+                    && resolve.first_query == 0
+                    && resolve.query_count == 1
+                    && resolve.destination_offset == 0
+        ));
+
+        assert_eq!(device.queue().submit(&[Arc::new(command_buffer)]), None);
+        let submitted = match device.queue().hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => Vec::new(),
+        };
+        let written_queries = submitted.into_iter().find_map(|copy| match copy {
+            HalCopy::ResolveQuerySet(resolve) => Some(resolve.written_queries),
+            _ => None,
+        });
+        assert_eq!(written_queries, Some(Vec::new()));
+    }
+
+    #[test]
+    fn cross_command_buffer_occlusion_resolve_records_written_query() {
+        let device = noop_device();
+        let view = noop_render_attachment(&device);
+        let pipeline = Arc::new(
+            device
+                .create_render_pipeline(render_pipeline_descriptor(render_shader_module(&device))),
+        );
+        let (query_set, error) = device.create_query_set(QuerySetDescriptor {
+            label: "occlusion".to_owned(),
+            kind: QueryType::Occlusion,
+            count: 1,
+        });
+        assert_eq!(error, None);
+        let query_set = Arc::new(query_set);
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::QUERY_RESOLVE,
+            size: 256,
+            mapped_at_creation: false,
+        }));
+
+        let render_encoder = device.create_command_encoder();
+        let (pass, begin_error) = render_encoder.begin_render_pass(&noop_render_pass_descriptor(
+            view,
+            Some((*query_set).clone()),
+        ));
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.begin_occlusion_query(0), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end_occlusion_query(), None);
+        assert_eq!(pass.end(), None);
+        let (render_command_buffer, render_finish_error) = render_encoder.finish();
+        assert_eq!(render_finish_error, None);
+
+        let resolve_encoder = device.create_command_encoder();
+        assert_eq!(
+            resolve_encoder.resolve_query_set(
+                Arc::clone(&query_set),
+                0,
+                1,
+                Arc::clone(&destination),
+                0,
+            ),
+            None
+        );
+        let (resolve_command_buffer, resolve_finish_error) = resolve_encoder.finish();
+        assert_eq!(resolve_finish_error, None);
+
+        assert_eq!(
+            device.queue().submit(&[
+                Arc::new(render_command_buffer),
+                Arc::new(resolve_command_buffer),
+            ]),
+            None
+        );
+        let submitted = match device.queue().hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => Vec::new(),
+        };
+        let written_queries = submitted.into_iter().find_map(|copy| match copy {
+            HalCopy::ResolveQuerySet(resolve) => Some(resolve.written_queries),
+            _ => None,
+        });
+        assert_eq!(written_queries.as_deref(), Some(&[0][..]));
     }
 
     #[test]

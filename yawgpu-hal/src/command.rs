@@ -117,6 +117,8 @@ pub struct HalResolveQuerySet {
     pub first_query: u32,
     /// Number of query results to resolve.
     pub query_count: u32,
+    /// Absolute query indices that were written by actual draws in this submission.
+    pub written_queries: Vec<u32>,
     /// Destination buffer.
     pub destination: HalBuffer,
     /// Destination byte offset.
