@@ -128,6 +128,7 @@ impl ComputePipeline {
                 hal_device,
                 &descriptor.shader_module,
                 &entry_name,
+                &descriptor.constants,
                 workgroup,
                 &metal_bindings,
             )
@@ -192,6 +193,7 @@ pub(crate) fn create_hal_compute_pipeline(
     hal_device: Option<&HalDevice>,
     shader_module: &ShaderModule,
     entry_name: &str,
+    constants: &[PipelineConstant],
     workgroup: Option<ResolvedComputeWorkgroup>,
     metal_bindings: &[MetalBufferBinding],
 ) -> (Option<HalComputePipeline>, Option<String>) {
@@ -211,6 +213,7 @@ pub(crate) fn create_hal_compute_pipeline(
         hal_device.backend(),
         shader_module,
         entry_name,
+        constants,
         metal_bindings,
     ) {
         Ok(selection) => selection,
@@ -232,8 +235,10 @@ pub(crate) fn select_compute_shader_source(
     backend: HalBackend,
     shader_module: &ShaderModule,
     entry_name: &str,
+    constants: &[PipelineConstant],
     metal_bindings: &[MetalBufferBinding],
 ) -> Result<(HalShaderSource, String, Vec<HalDescriptorBinding>), String> {
+    let pipeline_constants = pipeline_constant_map(constants);
     match backend {
         HalBackend::Metal => {
             #[cfg(feature = "shader-passthrough")]
@@ -254,7 +259,8 @@ pub(crate) fn select_compute_shader_source(
             let msl_binding_map = shader_naga::MslBindingMap {
                 resources: msl_resource_bindings(metal_bindings),
             };
-            let generated = module.generate_msl(entry_name, &msl_binding_map)?;
+            let generated =
+                module.generate_msl(entry_name, &msl_binding_map, &pipeline_constants)?;
             Ok((
                 HalShaderSource::MslWithBufferSizes {
                     source: generated.source,
@@ -283,7 +289,11 @@ pub(crate) fn select_compute_shader_source(
             let module = shader_module
                 .reflected()
                 .ok_or_else(|| "compute pipeline requires a reflected shader module".to_owned())?;
-            let spirv = module.generate_spirv(entry_name, naga::ShaderStage::Compute)?;
+            let spirv = module.generate_spirv(
+                entry_name,
+                naga::ShaderStage::Compute,
+                &pipeline_constants,
+            )?;
             Ok((
                 HalShaderSource::SpirV(spirv),
                 entry_name.to_owned(),
@@ -303,7 +313,11 @@ pub(crate) fn select_compute_shader_source(
             let module = shader_module
                 .reflected()
                 .ok_or_else(|| "compute pipeline requires a reflected shader module".to_owned())?;
-            let generated = module.generate_glsl(entry_name, naga::ShaderStage::Compute)?;
+            let generated = module.generate_glsl(
+                entry_name,
+                naga::ShaderStage::Compute,
+                &pipeline_constants,
+            )?;
             Ok((
                 HalShaderSource::Glsl {
                     source: generated.source,
@@ -316,6 +330,16 @@ pub(crate) fn select_compute_shader_source(
         HalBackend::Noop => Err("Noop backend does not create HAL shader sources".to_owned()),
         _ => Err("unsupported backend does not create HAL shader sources".to_owned()),
     }
+}
+
+/// Returns Naga pipeline constants keyed the same way as WebGPU constant entries.
+pub(crate) fn pipeline_constant_map(
+    constants: &[PipelineConstant],
+) -> naga::back::PipelineConstants {
+    constants
+        .iter()
+        .map(|constant| (constant.key.clone(), constant.value))
+        .collect()
 }
 
 fn hal_msl_buffer_size_bindings(
@@ -647,10 +671,7 @@ pub(crate) fn resolve_compute_workgroup(
     constants: &[ResolvedOverrideConstant],
     limits: Limits,
 ) -> Result<ResolvedComputeWorkgroup, String> {
-    let pipeline_constants = constants
-        .iter()
-        .map(|constant| (constant.key.clone(), constant.value))
-        .collect();
+    let pipeline_constants = resolved_pipeline_constant_map(constants);
     let workgroup = module.resolved_compute_workgroup_size(entry_name, &pipeline_constants)?;
     let size = workgroup.literal_size;
 
@@ -681,6 +702,15 @@ pub(crate) fn resolve_compute_workgroup(
         size,
         storage_size: workgroup.workgroup_storage_size,
     })
+}
+
+fn resolved_pipeline_constant_map(
+    constants: &[ResolvedOverrideConstant],
+) -> naga::back::PipelineConstants {
+    constants
+        .iter()
+        .map(|constant| (constant.key.clone(), constant.value))
+        .collect()
 }
 
 /// Validates compute pipeline layout and returns a descriptive error on failure.
@@ -1312,7 +1342,11 @@ mod tests {
     fn spirv_words(source: &str, entry_point: &str, stage: naga::ShaderStage) -> Vec<u32> {
         shader_naga::parse_and_validate_wgsl(source)
             .expect("test WGSL should validate")
-            .generate_spirv(entry_point, stage)
+            .generate_spirv(
+                entry_point,
+                stage,
+                &naga::back::PipelineConstants::default(),
+            )
             .expect("test WGSL should generate SPIR-V")
     }
 
@@ -1344,30 +1378,31 @@ mod tests {
         let msl = device.create_shader_module_msl(msl_source.clone(), msl_compute_reflection());
 
         let (source, entry, bindings) =
-            select_compute_shader_source(HalBackend::Vulkan, &wgsl, "cs", &[])
+            select_compute_shader_source(HalBackend::Vulkan, &wgsl, "cs", &[], &[])
                 .expect("WGSL should generate Vulkan SPIR-V");
         assert!(matches!(source, HalShaderSource::SpirV(words) if !words.is_empty()));
         assert_eq!(entry, "cs");
         assert!(bindings.is_empty());
 
         let (source, entry, _) =
-            select_compute_shader_source(HalBackend::Vulkan, &spirv, "cs", &[])
+            select_compute_shader_source(HalBackend::Vulkan, &spirv, "cs", &[], &[])
                 .expect("SPIR-V passthrough should select Vulkan SPIR-V");
         assert!(matches!(source, HalShaderSource::SpirV(selected) if selected == words));
         assert_eq!(entry, "cs");
 
-        let (source, entry, _) = select_compute_shader_source(HalBackend::Metal, &msl, "cs", &[])
-            .expect("MSL passthrough should select Metal MSL");
+        let (source, entry, _) =
+            select_compute_shader_source(HalBackend::Metal, &msl, "cs", &[], &[])
+                .expect("MSL passthrough should select Metal MSL");
         assert!(matches!(source, HalShaderSource::Msl(selected) if selected == msl_source));
         assert_eq!(entry, "cs");
 
         assert_eq!(
-            select_compute_shader_source(HalBackend::Metal, &spirv, "cs", &[])
+            select_compute_shader_source(HalBackend::Metal, &spirv, "cs", &[], &[])
                 .expect_err("SPIR-V must not run on Metal"),
             "SPIR-V shader module cannot be used on the Metal backend"
         );
         assert_eq!(
-            select_compute_shader_source(HalBackend::Vulkan, &msl, "cs", &[])
+            select_compute_shader_source(HalBackend::Vulkan, &msl, "cs", &[], &[])
                 .expect_err("MSL must not run on Vulkan"),
             "MSL shader module cannot be used on the Vulkan backend"
         );
@@ -1382,7 +1417,7 @@ mod tests {
         ));
 
         let (source, entry, bindings) =
-            select_compute_shader_source(HalBackend::Gles, &wgsl, "cs", &[])
+            select_compute_shader_source(HalBackend::Gles, &wgsl, "cs", &[], &[])
                 .expect("WGSL should generate GLES GLSL");
 
         let HalShaderSource::Glsl {

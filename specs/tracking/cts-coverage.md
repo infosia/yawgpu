@@ -878,8 +878,8 @@ never a reason to skip a CTS case.
   188/0 (no regression). 1-line prescribed fix, fully CTS-verified on both backends → self-reviewed.
   **Re-verified via CTS re-run against current yawgpu: F-046 (culling/winding) `12/12` and F-049
   (render_bundle) `4/4` are already resolved by the threading audit (`de4a99f`) — stale in FINDINGS.** Open
-  CTS findings remaining: F-044 (vertex formats), F-045 (frag_depth viewport clamp), F-047 (override
-  constants), F-050 (occlusion query).
+  CTS findings remaining (F-044 + F-047 since RESOLVED below): F-045 (frag_depth viewport clamp),
+  F-050 (occlusion query).
 - **External-CTS finding F-044 — RESOLVED.** T46 (V16) `vertex_state/correctness:
   vertex_format_to_shader_format_conversion`: yawgpu implemented ONLY the 4 `float32` vertex formats; every
   other `GPUVertexFormat` decoded to **zero** (`pass=1 fail=8`, Metal == Vulkan/MoltenVK). Root cause:
@@ -893,6 +893,25 @@ never a reason to skip a CTS case.
   real-GPU (Claude):** `vertex_state,correctness = 9/9` on Metal AND Vulkan/MoltenVK (from `1/8`);
   `rendering,draw` 564/0 (no regression). **Clean Review: 0 CRITICAL/MAJOR** (verified all 41 formats handled
   consistently across all 4 mappers + raw values match webgpu.h; 1 MINOR = the GLES catalogue entry, added).
+- **External-CTS finding F-047 — RESOLVED.** `render_pipeline/overrides:basic`: WGSL `override` constants —
+  both their WGSL defaults (`override R = 1.0;`) and pipeline-provided `WGPUConstantEntry` values — were
+  **ignored, emitted as 0** (`pass=1 fail=5`, Metal == Vulkan/MoltenVK; also affects wgpu-native). Same
+  "validate but don't act" shape: yawgpu PARSED + VALIDATED the constants (`resolve_pipeline_constants` vs
+  `module.overrides()`) but `generate_msl`/`generate_glsl`/`generate_spirv` codegen'd from the RAW
+  `self.module`/`self.info` and never ran `naga::back::pipeline_constants::process_overrides` (that helper
+  existed but was used only to resolve `@workgroup_size`). Fix (coding agent): add a
+  `pipeline_constants: &naga::back::PipelineConstants` param to each `generate_*`, run `process_overrides`
+  (per-stage, `Some((stage, entry))`) first and codegen from the PROCESSED `(module, info)` — naga applies
+  provided values AND fills WGSL defaults; thread the per-stage map (keyed exactly like
+  `resolve_pipeline_constant_key`: numeric `@id` string / name) from `render_pipeline.rs` (vertex+fragment) +
+  `compute_pipeline.rs`; reflection/buffer-sizes now computed from the processed module. The Metal render
+  path was unified to always split vertex/fragment generation (the combined `generate_render_msl` became
+  test-only). + Noop unit tests (MSL/GLSL/SPIR-V: empty map → default `1.0`; `{R:0.6}` → `0.6`). **Verified
+  real-GPU (Claude):** `render_pipeline,overrides:basic = 6/6` on Metal AND Vulkan/MoltenVK (from `1/5`);
+  `compute_pipeline,overrides` 1/1; `rendering,draw` 564/0, `primitive_topology`/`pipeline_output_targets`/
+  `culling_tests` clean (no regression from the Metal split). **Clean Review: 0 CRITICAL/MAJOR** (override
+  keying matches naga's contract; all reflection uses the processed module; inter-stage IO intact across the
+  split; 3 MINOR — chief: the now-test-only `generate_render_msl` is a drift hazard, candidate for removal).
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.

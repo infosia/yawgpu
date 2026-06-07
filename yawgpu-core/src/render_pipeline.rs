@@ -1048,6 +1048,9 @@ pub(crate) fn select_render_shader_source(
     String,
 > {
     let fragment = descriptor.fragment.as_ref();
+    let vertex_pipeline_constants = pipeline_constant_map(&descriptor.vertex.shader.constants);
+    let fragment_pipeline_constants =
+        fragment.map(|fragment| pipeline_constant_map(&fragment.shader.constants));
     match backend {
         HalBackend::Metal => {
             #[cfg(feature = "shader-passthrough")]
@@ -1093,71 +1096,62 @@ pub(crate) fn select_render_shader_source(
                 msl_vertex_buffer_bindings(&descriptor.vertex.buffers, vertex_buffer_bindings)?;
             let force_point_size =
                 matches!(descriptor.primitive.topology, PrimitiveTopology::PointList);
-            if let Some(fragment) = fragment {
-                if !Arc::ptr_eq(&descriptor.vertex.shader.module, &fragment.shader.module) {
-                    let Some(fragment_entry_name) = fragment_entry_name else {
-                        return Err(
-                            "Metal render pipeline fragment state requires a fragment entry point"
-                                .to_owned(),
-                        );
-                    };
-                    let fragment_module = fragment.shader.module.reflected().ok_or_else(|| {
-                        "render pipeline requires a reflected fragment shader module".to_owned()
-                    })?;
-                    let vertex = module.generate_render_vertex_msl(
-                        vertex_entry_name,
-                        &msl_binding_map,
-                        &msl_vertex_buffers,
-                        force_point_size,
-                    )?;
-                    let fragment = fragment_module
-                        .generate_render_fragment_msl(fragment_entry_name, &msl_binding_map)?;
-                    return Ok((
-                        HalShaderSource::MslStagesWithBufferSizes {
-                            vertex: vertex.source,
-                            fragment: Some(fragment.source),
-                            vertex_buffer_sizes_slot: vertex.buffer_sizes_slot,
-                            vertex_buffer_size_bindings: hal_msl_buffer_size_bindings(
-                                &vertex.buffer_size_bindings,
-                            ),
-                            fragment_buffer_sizes_slot: fragment.buffer_sizes_slot,
-                            fragment_buffer_size_bindings: hal_msl_buffer_size_bindings(
-                                &fragment.buffer_size_bindings,
-                            ),
-                        },
-                        vertex.entry_point,
-                        Some(fragment.entry_point),
-                        Vec::new(),
-                    ));
-                }
-            }
-            let generated = module.generate_render_msl(
+            let vertex = module.generate_render_vertex_msl(
                 vertex_entry_name,
-                fragment_entry_name,
                 &msl_binding_map,
                 &msl_vertex_buffers,
-                subpass_color_slots,
                 force_point_size,
+                &vertex_pipeline_constants,
             )?;
-            let fragment_source = generated
-                .fragment_entry_point
-                .as_ref()
-                .map(|_| generated.source.clone());
+            let fragment = match (
+                fragment,
+                fragment_entry_name,
+                fragment_pipeline_constants.as_ref(),
+            ) {
+                (Some(fragment), Some(fragment_entry_name), Some(fragment_pipeline_constants)) => {
+                    let fragment_module =
+                        if Arc::ptr_eq(&descriptor.vertex.shader.module, &fragment.shader.module) {
+                            module
+                        } else {
+                            fragment.shader.module.reflected().ok_or_else(|| {
+                                "render pipeline requires a reflected fragment shader module"
+                                    .to_owned()
+                            })?
+                        };
+                    Some(fragment_module.generate_render_fragment_msl(
+                        fragment_entry_name,
+                        &msl_binding_map,
+                        subpass_color_slots,
+                        fragment_pipeline_constants,
+                    )?)
+                }
+                (None, None, None) => None,
+                _ => {
+                    return Err(
+                        "real render pipeline fragment state and entry point must match".to_owned(),
+                    );
+                }
+            };
             Ok((
                 HalShaderSource::MslStagesWithBufferSizes {
-                    vertex: generated.source,
-                    fragment: fragment_source,
-                    vertex_buffer_sizes_slot: generated.vertex_buffer_sizes_slot,
+                    vertex: vertex.source,
+                    fragment: fragment.as_ref().map(|fragment| fragment.source.clone()),
+                    vertex_buffer_sizes_slot: vertex.buffer_sizes_slot,
                     vertex_buffer_size_bindings: hal_msl_buffer_size_bindings(
-                        &generated.vertex_buffer_size_bindings,
+                        &vertex.buffer_size_bindings,
                     ),
-                    fragment_buffer_sizes_slot: generated.fragment_buffer_sizes_slot,
+                    fragment_buffer_sizes_slot: fragment
+                        .as_ref()
+                        .and_then(|fragment| fragment.buffer_sizes_slot),
                     fragment_buffer_size_bindings: hal_msl_buffer_size_bindings(
-                        &generated.fragment_buffer_size_bindings,
+                        fragment
+                            .as_ref()
+                            .map(|fragment| fragment.buffer_size_bindings.as_slice())
+                            .unwrap_or(&[]),
                     ),
                 },
-                generated.vertex_entry_point,
-                generated.fragment_entry_point,
+                vertex.entry_point,
+                fragment.map(|fragment| fragment.entry_point),
                 Vec::new(),
             ))
         }
@@ -1210,17 +1204,23 @@ pub(crate) fn select_render_shader_source(
             let vertex_module = descriptor.vertex.shader.module.reflected().ok_or_else(|| {
                 "render pipeline requires a reflected vertex shader module".to_owned()
             })?;
-            let vertex =
-                vertex_module.generate_spirv(vertex_entry_name, naga::ShaderStage::Vertex)?;
+            let vertex = vertex_module.generate_spirv(
+                vertex_entry_name,
+                naga::ShaderStage::Vertex,
+                &vertex_pipeline_constants,
+            )?;
             let fragment = match (fragment, fragment_entry_name) {
                 (Some(fragment), Some(fragment_entry_name)) => {
                     let fragment_module = fragment.shader.module.reflected().ok_or_else(|| {
                         "render pipeline requires a reflected fragment shader module".to_owned()
                     })?;
-                    Some(
-                        fragment_module
-                            .generate_spirv(fragment_entry_name, naga::ShaderStage::Fragment)?,
-                    )
+                    Some(fragment_module.generate_spirv(
+                        fragment_entry_name,
+                        naga::ShaderStage::Fragment,
+                        fragment_pipeline_constants.as_ref().ok_or_else(|| {
+                            "render pipeline fragment constants were not resolved".to_owned()
+                        })?,
+                    )?)
                 }
                 (None, None) => None,
                 _ => {
@@ -1257,8 +1257,11 @@ pub(crate) fn select_render_shader_source(
             let vertex_module = descriptor.vertex.shader.module.reflected().ok_or_else(|| {
                 "render pipeline requires a reflected vertex shader module".to_owned()
             })?;
-            let vertex_glsl =
-                vertex_module.generate_glsl(vertex_entry_name, naga::ShaderStage::Vertex)?;
+            let vertex_glsl = vertex_module.generate_glsl(
+                vertex_entry_name,
+                naga::ShaderStage::Vertex,
+                &vertex_pipeline_constants,
+            )?;
             let fragment_glsl = match (fragment, fragment_entry_name) {
                 (Some(fragment), Some(fragment_entry_name)) => {
                     let fragment_module = fragment.shader.module.reflected().ok_or_else(|| {
@@ -1266,7 +1269,14 @@ pub(crate) fn select_render_shader_source(
                     })?;
                     Some(
                         fragment_module
-                            .generate_glsl(fragment_entry_name, naga::ShaderStage::Fragment)?
+                            .generate_glsl(
+                                fragment_entry_name,
+                                naga::ShaderStage::Fragment,
+                                fragment_pipeline_constants.as_ref().ok_or_else(|| {
+                                    "render pipeline fragment constants were not resolved"
+                                        .to_owned()
+                                })?,
+                            )?
                             .source,
                     )
                 }
@@ -2876,7 +2886,11 @@ mod tests {
     fn spirv_words(source: &str, entry_point: &str, stage: naga::ShaderStage) -> Vec<u32> {
         shader_naga::parse_and_validate_wgsl(source)
             .expect("test WGSL should validate")
-            .generate_spirv(entry_point, stage)
+            .generate_spirv(
+                entry_point,
+                stage,
+                &naga::back::PipelineConstants::default(),
+            )
             .expect("test WGSL should generate SPIR-V")
     }
 
@@ -3405,7 +3419,11 @@ mod tests {
             .expect("subpass input WGSL should validate");
 
         let spirv = module
-            .generate_spirv("fs", naga::ShaderStage::Fragment)
+            .generate_spirv(
+                "fs",
+                naga::ShaderStage::Fragment,
+                &naga::back::PipelineConstants::default(),
+            )
             .expect("subpass input fragment shader should generate SPIR-V");
         assert!(!spirv.is_empty());
 
