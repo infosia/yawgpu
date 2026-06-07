@@ -133,6 +133,60 @@ pub(crate) struct MslVertexAttribute {
 /// Enumerates msl vertex format values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MslVertexFormat {
+    /// Uint8 variant.
+    Uint8,
+    /// Uint8x2 variant.
+    Uint8x2,
+    /// Uint8x4 variant.
+    Uint8x4,
+    /// Sint8 variant.
+    Sint8,
+    /// Sint8x2 variant.
+    Sint8x2,
+    /// Sint8x4 variant.
+    Sint8x4,
+    /// Unorm8 variant.
+    Unorm8,
+    /// Unorm8x2 variant.
+    Unorm8x2,
+    /// Unorm8x4 variant.
+    Unorm8x4,
+    /// Snorm8 variant.
+    Snorm8,
+    /// Snorm8x2 variant.
+    Snorm8x2,
+    /// Snorm8x4 variant.
+    Snorm8x4,
+    /// Uint16 variant.
+    Uint16,
+    /// Uint16x2 variant.
+    Uint16x2,
+    /// Uint16x4 variant.
+    Uint16x4,
+    /// Sint16 variant.
+    Sint16,
+    /// Sint16x2 variant.
+    Sint16x2,
+    /// Sint16x4 variant.
+    Sint16x4,
+    /// Unorm16 variant.
+    Unorm16,
+    /// Unorm16x2 variant.
+    Unorm16x2,
+    /// Unorm16x4 variant.
+    Unorm16x4,
+    /// Snorm16 variant.
+    Snorm16,
+    /// Snorm16x2 variant.
+    Snorm16x2,
+    /// Snorm16x4 variant.
+    Snorm16x4,
+    /// Float16 variant.
+    Float16,
+    /// Float16x2 variant.
+    Float16x2,
+    /// Float16x4 variant.
+    Float16x4,
     /// Float32 variant.
     Float32,
     /// Float32x2 variant.
@@ -141,6 +195,26 @@ pub(crate) enum MslVertexFormat {
     Float32x3,
     /// Float32x4 variant.
     Float32x4,
+    /// Uint32 variant.
+    Uint32,
+    /// Uint32x2 variant.
+    Uint32x2,
+    /// Uint32x3 variant.
+    Uint32x3,
+    /// Uint32x4 variant.
+    Uint32x4,
+    /// Sint32 variant.
+    Sint32,
+    /// Sint32x2 variant.
+    Sint32x2,
+    /// Sint32x3 variant.
+    Sint32x3,
+    /// Sint32x4 variant.
+    Sint32x4,
+    /// Unorm10_10_10_2 variant.
+    Unorm10_10_10_2,
+    /// Unorm8x4 BGRA variant.
+    Unorm8x4Bgra,
 }
 
 /// Enumerates reflected shader stage values.
@@ -1122,10 +1196,47 @@ fn msl_vertex_buffer_mappings(
 
 fn msl_vertex_format(format: MslVertexFormat) -> naga::back::msl::VertexFormat {
     match format {
+        MslVertexFormat::Uint8 => naga::back::msl::VertexFormat::Uint8,
+        MslVertexFormat::Uint8x2 => naga::back::msl::VertexFormat::Uint8x2,
+        MslVertexFormat::Uint8x4 => naga::back::msl::VertexFormat::Uint8x4,
+        MslVertexFormat::Sint8 => naga::back::msl::VertexFormat::Sint8,
+        MslVertexFormat::Sint8x2 => naga::back::msl::VertexFormat::Sint8x2,
+        MslVertexFormat::Sint8x4 => naga::back::msl::VertexFormat::Sint8x4,
+        MslVertexFormat::Unorm8 => naga::back::msl::VertexFormat::Unorm8,
+        MslVertexFormat::Unorm8x2 => naga::back::msl::VertexFormat::Unorm8x2,
+        MslVertexFormat::Unorm8x4 => naga::back::msl::VertexFormat::Unorm8x4,
+        MslVertexFormat::Snorm8 => naga::back::msl::VertexFormat::Snorm8,
+        MslVertexFormat::Snorm8x2 => naga::back::msl::VertexFormat::Snorm8x2,
+        MslVertexFormat::Snorm8x4 => naga::back::msl::VertexFormat::Snorm8x4,
+        MslVertexFormat::Uint16 => naga::back::msl::VertexFormat::Uint16,
+        MslVertexFormat::Uint16x2 => naga::back::msl::VertexFormat::Uint16x2,
+        MslVertexFormat::Uint16x4 => naga::back::msl::VertexFormat::Uint16x4,
+        MslVertexFormat::Sint16 => naga::back::msl::VertexFormat::Sint16,
+        MslVertexFormat::Sint16x2 => naga::back::msl::VertexFormat::Sint16x2,
+        MslVertexFormat::Sint16x4 => naga::back::msl::VertexFormat::Sint16x4,
+        MslVertexFormat::Unorm16 => naga::back::msl::VertexFormat::Unorm16,
+        MslVertexFormat::Unorm16x2 => naga::back::msl::VertexFormat::Unorm16x2,
+        MslVertexFormat::Unorm16x4 => naga::back::msl::VertexFormat::Unorm16x4,
+        MslVertexFormat::Snorm16 => naga::back::msl::VertexFormat::Snorm16,
+        MslVertexFormat::Snorm16x2 => naga::back::msl::VertexFormat::Snorm16x2,
+        MslVertexFormat::Snorm16x4 => naga::back::msl::VertexFormat::Snorm16x4,
+        MslVertexFormat::Float16 => naga::back::msl::VertexFormat::Float16,
+        MslVertexFormat::Float16x2 => naga::back::msl::VertexFormat::Float16x2,
+        MslVertexFormat::Float16x4 => naga::back::msl::VertexFormat::Float16x4,
         MslVertexFormat::Float32 => naga::back::msl::VertexFormat::Float32,
         MslVertexFormat::Float32x2 => naga::back::msl::VertexFormat::Float32x2,
         MslVertexFormat::Float32x3 => naga::back::msl::VertexFormat::Float32x3,
         MslVertexFormat::Float32x4 => naga::back::msl::VertexFormat::Float32x4,
+        MslVertexFormat::Uint32 => naga::back::msl::VertexFormat::Uint32,
+        MslVertexFormat::Uint32x2 => naga::back::msl::VertexFormat::Uint32x2,
+        MslVertexFormat::Uint32x3 => naga::back::msl::VertexFormat::Uint32x3,
+        MslVertexFormat::Uint32x4 => naga::back::msl::VertexFormat::Uint32x4,
+        MslVertexFormat::Sint32 => naga::back::msl::VertexFormat::Sint32,
+        MslVertexFormat::Sint32x2 => naga::back::msl::VertexFormat::Sint32x2,
+        MslVertexFormat::Sint32x3 => naga::back::msl::VertexFormat::Sint32x3,
+        MslVertexFormat::Sint32x4 => naga::back::msl::VertexFormat::Sint32x4,
+        MslVertexFormat::Unorm10_10_10_2 => naga::back::msl::VertexFormat::Unorm10_10_10_2,
+        MslVertexFormat::Unorm8x4Bgra => naga::back::msl::VertexFormat::Unorm8x4Bgra,
     }
 }
 

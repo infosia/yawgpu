@@ -1524,21 +1524,95 @@ pub(crate) fn msl_vertex_format(
     format: VertexFormat,
 ) -> Result<shader_naga::MslVertexFormat, String> {
     match format.0 {
+        0x0000_0001 => Ok(shader_naga::MslVertexFormat::Uint8),
+        0x0000_0002 => Ok(shader_naga::MslVertexFormat::Uint8x2),
+        0x0000_0003 => Ok(shader_naga::MslVertexFormat::Uint8x4),
+        0x0000_0004 => Ok(shader_naga::MslVertexFormat::Sint8),
+        0x0000_0005 => Ok(shader_naga::MslVertexFormat::Sint8x2),
+        0x0000_0006 => Ok(shader_naga::MslVertexFormat::Sint8x4),
+        0x0000_0007 => Ok(shader_naga::MslVertexFormat::Unorm8),
+        0x0000_0008 => Ok(shader_naga::MslVertexFormat::Unorm8x2),
+        0x0000_0009 => Ok(shader_naga::MslVertexFormat::Unorm8x4),
+        0x0000_000A => Ok(shader_naga::MslVertexFormat::Snorm8),
+        0x0000_000B => Ok(shader_naga::MslVertexFormat::Snorm8x2),
+        0x0000_000C => Ok(shader_naga::MslVertexFormat::Snorm8x4),
+        0x0000_000D => Ok(shader_naga::MslVertexFormat::Uint16),
+        0x0000_000E => Ok(shader_naga::MslVertexFormat::Uint16x2),
+        0x0000_000F => Ok(shader_naga::MslVertexFormat::Uint16x4),
+        0x0000_0010 => Ok(shader_naga::MslVertexFormat::Sint16),
+        0x0000_0011 => Ok(shader_naga::MslVertexFormat::Sint16x2),
+        0x0000_0012 => Ok(shader_naga::MslVertexFormat::Sint16x4),
+        0x0000_0013 => Ok(shader_naga::MslVertexFormat::Unorm16),
+        0x0000_0014 => Ok(shader_naga::MslVertexFormat::Unorm16x2),
+        0x0000_0015 => Ok(shader_naga::MslVertexFormat::Unorm16x4),
+        0x0000_0016 => Ok(shader_naga::MslVertexFormat::Snorm16),
+        0x0000_0017 => Ok(shader_naga::MslVertexFormat::Snorm16x2),
+        0x0000_0018 => Ok(shader_naga::MslVertexFormat::Snorm16x4),
+        0x0000_0019 => Ok(shader_naga::MslVertexFormat::Float16),
+        0x0000_001A => Ok(shader_naga::MslVertexFormat::Float16x2),
+        0x0000_001B => Ok(shader_naga::MslVertexFormat::Float16x4),
         0x0000_001C => Ok(shader_naga::MslVertexFormat::Float32),
         0x0000_001D => Ok(shader_naga::MslVertexFormat::Float32x2),
         0x0000_001E => Ok(shader_naga::MslVertexFormat::Float32x3),
         0x0000_001F => Ok(shader_naga::MslVertexFormat::Float32x4),
-        _ => Err("Metal render pipeline currently supports Float32 vertex formats only".to_owned()),
+        0x0000_0020 => Ok(shader_naga::MslVertexFormat::Uint32),
+        0x0000_0021 => Ok(shader_naga::MslVertexFormat::Uint32x2),
+        0x0000_0022 => Ok(shader_naga::MslVertexFormat::Uint32x3),
+        0x0000_0023 => Ok(shader_naga::MslVertexFormat::Uint32x4),
+        0x0000_0024 => Ok(shader_naga::MslVertexFormat::Sint32),
+        0x0000_0025 => Ok(shader_naga::MslVertexFormat::Sint32x2),
+        0x0000_0026 => Ok(shader_naga::MslVertexFormat::Sint32x3),
+        0x0000_0027 => Ok(shader_naga::MslVertexFormat::Sint32x4),
+        0x0000_0028 => Ok(shader_naga::MslVertexFormat::Unorm10_10_10_2),
+        0x0000_0029 => Ok(shader_naga::MslVertexFormat::Unorm8x4Bgra),
+        _ => Err("unsupported Metal vertex format".to_owned()),
     }
 }
 
 /// Returns HAL vertex format.
 pub(crate) fn hal_vertex_format(format: VertexFormat) -> HalVertexFormat {
     match format.0 {
+        0x0000_0001 => HalVertexFormat::Uint8,
+        0x0000_0002 => HalVertexFormat::Uint8x2,
+        0x0000_0003 => HalVertexFormat::Uint8x4,
+        0x0000_0004 => HalVertexFormat::Sint8,
+        0x0000_0005 => HalVertexFormat::Sint8x2,
+        0x0000_0006 => HalVertexFormat::Sint8x4,
+        0x0000_0007 => HalVertexFormat::Unorm8,
+        0x0000_0008 => HalVertexFormat::Unorm8x2,
+        0x0000_0009 => HalVertexFormat::Unorm8x4,
+        0x0000_000A => HalVertexFormat::Snorm8,
+        0x0000_000B => HalVertexFormat::Snorm8x2,
+        0x0000_000C => HalVertexFormat::Snorm8x4,
+        0x0000_000D => HalVertexFormat::Uint16,
+        0x0000_000E => HalVertexFormat::Uint16x2,
+        0x0000_000F => HalVertexFormat::Uint16x4,
+        0x0000_0010 => HalVertexFormat::Sint16,
+        0x0000_0011 => HalVertexFormat::Sint16x2,
+        0x0000_0012 => HalVertexFormat::Sint16x4,
+        0x0000_0013 => HalVertexFormat::Unorm16,
+        0x0000_0014 => HalVertexFormat::Unorm16x2,
+        0x0000_0015 => HalVertexFormat::Unorm16x4,
+        0x0000_0016 => HalVertexFormat::Snorm16,
+        0x0000_0017 => HalVertexFormat::Snorm16x2,
+        0x0000_0018 => HalVertexFormat::Snorm16x4,
+        0x0000_0019 => HalVertexFormat::Float16,
+        0x0000_001A => HalVertexFormat::Float16x2,
+        0x0000_001B => HalVertexFormat::Float16x4,
         0x0000_001C => HalVertexFormat::Float32,
         0x0000_001D => HalVertexFormat::Float32x2,
         0x0000_001E => HalVertexFormat::Float32x3,
         0x0000_001F => HalVertexFormat::Float32x4,
+        0x0000_0020 => HalVertexFormat::Uint32,
+        0x0000_0021 => HalVertexFormat::Uint32x2,
+        0x0000_0022 => HalVertexFormat::Uint32x3,
+        0x0000_0023 => HalVertexFormat::Uint32x4,
+        0x0000_0024 => HalVertexFormat::Sint32,
+        0x0000_0025 => HalVertexFormat::Sint32x2,
+        0x0000_0026 => HalVertexFormat::Sint32x3,
+        0x0000_0027 => HalVertexFormat::Sint32x4,
+        0x0000_0028 => HalVertexFormat::Unorm10_10_10_2,
+        0x0000_0029 => HalVertexFormat::Unorm8x4Bgra,
         _ => HalVertexFormat::Unsupported,
     }
 }
@@ -2501,6 +2575,26 @@ mod tests {
         assert_eq!(unknown.info().byte_size, 16);
         assert_eq!(zero.info().output_class, FormatOutputClass::Float);
         assert_eq!(unknown.info().output_class, FormatOutputClass::Float);
+    }
+
+    #[test]
+    fn hal_vertex_format_maps_representative_full_set_formats() {
+        let cases = [
+            (0x0000_0003, HalVertexFormat::Uint8x4),
+            (0x0000_0009, HalVertexFormat::Unorm8x4),
+            (0x0000_001B, HalVertexFormat::Float16x4),
+            (0x0000_0023, HalVertexFormat::Uint32x4),
+            (0x0000_0028, HalVertexFormat::Unorm10_10_10_2),
+            (0x0000_0029, HalVertexFormat::Unorm8x4Bgra),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(hal_vertex_format(VertexFormat::from_raw(raw)), expected);
+        }
+        assert_eq!(
+            hal_vertex_format(VertexFormat::from_raw(0xFFFF)),
+            HalVertexFormat::Unsupported
+        );
     }
 
     #[test]

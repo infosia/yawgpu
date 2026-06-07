@@ -880,6 +880,19 @@ never a reason to skip a CTS case.
   (render_bundle) `4/4` are already resolved by the threading audit (`de4a99f`) — stale in FINDINGS.** Open
   CTS findings remaining: F-044 (vertex formats), F-045 (frag_depth viewport clamp), F-047 (override
   constants), F-050 (occlusion query).
+- **External-CTS finding F-044 — RESOLVED.** T46 (V16) `vertex_state/correctness:
+  vertex_format_to_shader_format_conversion`: yawgpu implemented ONLY the 4 `float32` vertex formats; every
+  other `GPUVertexFormat` decoded to **zero** (`pass=1 fail=8`, Metal == Vulkan/MoltenVK). Root cause:
+  `hal_vertex_format` mapped only `0x1C..0x1F` → `Float32*`, else `Unsupported` (which the backends error on),
+  and the naga MSL metadata (`MslVertexFormat`) was likewise float32-only. Fix (coding agent): expand
+  `HalVertexFormat` + `MslVertexFormat` to the full set (0x01..=0x29), map every raw value in
+  `hal_vertex_format` (core), map each to `vk::Format` / `MTLVertexFormat` / `naga::back::msl::VertexFormat`,
+  and GLES attrib metadata (`glVertexAttribIPointer` for int formats, normalized for unorm/snorm,
+  `UNSIGNED_INT_2_10_10_10_REV` for packed); `unorm8x4-bgra` is a catalogued Tier-2 `HalError` on GLES
+  (`67-gles-backend.md`). The GPU/naga does the conversion — no shader/core-validation change. **Verified
+  real-GPU (Claude):** `vertex_state,correctness = 9/9` on Metal AND Vulkan/MoltenVK (from `1/8`);
+  `rendering,draw` 564/0 (no regression). **Clean Review: 0 CRITICAL/MAJOR** (verified all 41 formats handled
+  consistently across all 4 mappers + raw values match webgpu.h; 1 MINOR = the GLES catalogue entry, added).
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.

@@ -14,6 +14,7 @@ pub(super) struct GlesVertexFormat {
     pub(super) components: i32,
     pub(super) ty: u32,
     pub(super) normalized: bool,
+    pub(super) integer: bool,
 }
 
 pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<GlesFormat, HalError> {
@@ -461,30 +462,73 @@ pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<GlesFormat,
 
 pub(super) fn map_vertex_format(format: HalVertexFormat) -> Result<GlesVertexFormat, HalError> {
     match format {
-        HalVertexFormat::Float32 => Ok(GlesVertexFormat {
-            components: 1,
-            ty: glow::FLOAT,
-            normalized: false,
-        }),
-        HalVertexFormat::Float32x2 => Ok(GlesVertexFormat {
-            components: 2,
-            ty: glow::FLOAT,
-            normalized: false,
-        }),
-        HalVertexFormat::Float32x3 => Ok(GlesVertexFormat {
-            components: 3,
-            ty: glow::FLOAT,
-            normalized: false,
-        }),
-        HalVertexFormat::Float32x4 => Ok(GlesVertexFormat {
-            components: 4,
-            ty: glow::FLOAT,
-            normalized: false,
+        HalVertexFormat::Uint8 => Ok(gles_vertex_format(1, glow::UNSIGNED_BYTE, false, true)),
+        HalVertexFormat::Uint8x2 => Ok(gles_vertex_format(2, glow::UNSIGNED_BYTE, false, true)),
+        HalVertexFormat::Uint8x4 => Ok(gles_vertex_format(4, glow::UNSIGNED_BYTE, false, true)),
+        HalVertexFormat::Sint8 => Ok(gles_vertex_format(1, glow::BYTE, false, true)),
+        HalVertexFormat::Sint8x2 => Ok(gles_vertex_format(2, glow::BYTE, false, true)),
+        HalVertexFormat::Sint8x4 => Ok(gles_vertex_format(4, glow::BYTE, false, true)),
+        HalVertexFormat::Unorm8 => Ok(gles_vertex_format(1, glow::UNSIGNED_BYTE, true, false)),
+        HalVertexFormat::Unorm8x2 => Ok(gles_vertex_format(2, glow::UNSIGNED_BYTE, true, false)),
+        HalVertexFormat::Unorm8x4 => Ok(gles_vertex_format(4, glow::UNSIGNED_BYTE, true, false)),
+        HalVertexFormat::Snorm8 => Ok(gles_vertex_format(1, glow::BYTE, true, false)),
+        HalVertexFormat::Snorm8x2 => Ok(gles_vertex_format(2, glow::BYTE, true, false)),
+        HalVertexFormat::Snorm8x4 => Ok(gles_vertex_format(4, glow::BYTE, true, false)),
+        HalVertexFormat::Uint16 => Ok(gles_vertex_format(1, glow::UNSIGNED_SHORT, false, true)),
+        HalVertexFormat::Uint16x2 => Ok(gles_vertex_format(2, glow::UNSIGNED_SHORT, false, true)),
+        HalVertexFormat::Uint16x4 => Ok(gles_vertex_format(4, glow::UNSIGNED_SHORT, false, true)),
+        HalVertexFormat::Sint16 => Ok(gles_vertex_format(1, glow::SHORT, false, true)),
+        HalVertexFormat::Sint16x2 => Ok(gles_vertex_format(2, glow::SHORT, false, true)),
+        HalVertexFormat::Sint16x4 => Ok(gles_vertex_format(4, glow::SHORT, false, true)),
+        HalVertexFormat::Unorm16 => Ok(gles_vertex_format(1, glow::UNSIGNED_SHORT, true, false)),
+        HalVertexFormat::Unorm16x2 => Ok(gles_vertex_format(2, glow::UNSIGNED_SHORT, true, false)),
+        HalVertexFormat::Unorm16x4 => Ok(gles_vertex_format(4, glow::UNSIGNED_SHORT, true, false)),
+        HalVertexFormat::Snorm16 => Ok(gles_vertex_format(1, glow::SHORT, true, false)),
+        HalVertexFormat::Snorm16x2 => Ok(gles_vertex_format(2, glow::SHORT, true, false)),
+        HalVertexFormat::Snorm16x4 => Ok(gles_vertex_format(4, glow::SHORT, true, false)),
+        HalVertexFormat::Float16 => Ok(gles_vertex_format(1, glow::HALF_FLOAT, false, false)),
+        HalVertexFormat::Float16x2 => Ok(gles_vertex_format(2, glow::HALF_FLOAT, false, false)),
+        HalVertexFormat::Float16x4 => Ok(gles_vertex_format(4, glow::HALF_FLOAT, false, false)),
+        HalVertexFormat::Float32 => Ok(gles_vertex_format(1, glow::FLOAT, false, false)),
+        HalVertexFormat::Float32x2 => Ok(gles_vertex_format(2, glow::FLOAT, false, false)),
+        HalVertexFormat::Float32x3 => Ok(gles_vertex_format(3, glow::FLOAT, false, false)),
+        HalVertexFormat::Float32x4 => Ok(gles_vertex_format(4, glow::FLOAT, false, false)),
+        HalVertexFormat::Uint32 => Ok(gles_vertex_format(1, glow::UNSIGNED_INT, false, true)),
+        HalVertexFormat::Uint32x2 => Ok(gles_vertex_format(2, glow::UNSIGNED_INT, false, true)),
+        HalVertexFormat::Uint32x3 => Ok(gles_vertex_format(3, glow::UNSIGNED_INT, false, true)),
+        HalVertexFormat::Uint32x4 => Ok(gles_vertex_format(4, glow::UNSIGNED_INT, false, true)),
+        HalVertexFormat::Sint32 => Ok(gles_vertex_format(1, glow::INT, false, true)),
+        HalVertexFormat::Sint32x2 => Ok(gles_vertex_format(2, glow::INT, false, true)),
+        HalVertexFormat::Sint32x3 => Ok(gles_vertex_format(3, glow::INT, false, true)),
+        HalVertexFormat::Sint32x4 => Ok(gles_vertex_format(4, glow::INT, false, true)),
+        HalVertexFormat::Unorm10_10_10_2 => Ok(gles_vertex_format(
+            4,
+            glow::UNSIGNED_INT_2_10_10_10_REV,
+            true,
+            false,
+        )),
+        HalVertexFormat::Unorm8x4Bgra => Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "Unorm8x4Bgra vertex format is not supported on GLES",
         }),
         HalVertexFormat::Unsupported => Err(HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "Unsupported vertex format requested",
         }),
+    }
+}
+
+fn gles_vertex_format(
+    components: i32,
+    ty: u32,
+    normalized: bool,
+    integer: bool,
+) -> GlesVertexFormat {
+    GlesVertexFormat {
+        components,
+        ty,
+        normalized,
+        integer,
     }
 }
 
@@ -861,6 +905,7 @@ mod tests {
         assert_eq!(float.components, 1);
         assert_eq!(float.ty, glow::FLOAT);
         assert!(!float.normalized);
+        assert!(!float.integer);
 
         assert_eq!(
             map_vertex_format(HalVertexFormat::Float32x2)
@@ -880,6 +925,41 @@ mod tests {
                 .components,
             4
         );
+
+        let uint = map_vertex_format(HalVertexFormat::Uint8x4).expect("Uint8x4 supported");
+        assert_eq!(uint.components, 4);
+        assert_eq!(uint.ty, glow::UNSIGNED_BYTE);
+        assert!(!uint.normalized);
+        assert!(uint.integer);
+
+        let unorm = map_vertex_format(HalVertexFormat::Unorm8x4).expect("Unorm8x4 supported");
+        assert_eq!(unorm.components, 4);
+        assert_eq!(unorm.ty, glow::UNSIGNED_BYTE);
+        assert!(unorm.normalized);
+        assert!(!unorm.integer);
+
+        let half = map_vertex_format(HalVertexFormat::Float16x4).expect("Float16x4 supported");
+        assert_eq!(half.components, 4);
+        assert_eq!(half.ty, glow::HALF_FLOAT);
+        assert!(!half.normalized);
+        assert!(!half.integer);
+
+        let packed =
+            map_vertex_format(HalVertexFormat::Unorm10_10_10_2).expect("Unorm10_10_10_2 supported");
+        assert_eq!(packed.components, 4);
+        assert_eq!(packed.ty, glow::UNSIGNED_INT_2_10_10_10_REV);
+        assert!(packed.normalized);
+        assert!(!packed.integer);
+
+        let bgra_error = map_vertex_format(HalVertexFormat::Unorm8x4Bgra)
+            .expect_err("BGRA vertex format must error on GLES");
+        assert!(matches!(
+            bgra_error,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message: "Unorm8x4Bgra vertex format is not supported on GLES",
+            }
+        ));
 
         let error = map_vertex_format(HalVertexFormat::Unsupported)
             .expect_err("unsupported vertex format must error");
