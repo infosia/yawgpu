@@ -22,6 +22,14 @@ sampleType reject, `unclippedDepth` reject (no `depth-clip-control` feature), de
 depthCompare/depthWrite requirement, MapRead/MapWrite usage exclusivity, buffer-range OOB, indexed/indirect
 OOB skips — all match the spec / passing CTS.
 
+**ALL 3 RESOLVED (commit pending push).** Verified: #1 via the un-ignored CTS `vertex_buffer_oob` +
+Noop unit (40-byte accepted / 39-byte rejected); #2 + #3 real-GPU on Metal + Vulkan/MoltenVK
+(`e2e_{metal,vulkan}_threading_audit.rs`: a 2-layer 2d-array r32uint storage texture written per layer reads
+back 7 / 107; a 3D `R32Uint` texture z=0→z=1 same-texture disjoint copy reads back `0xABCD`). Clean Review:
+no CRITICAL/MAJOR (one latent, currently-unreachable nit: `validate_vertex_buffer_oob`'s `.max()` over
+`Result<u64,_>` could rank `Ok` above an overflow `Err`, but pipeline validation already bounds
+`offset+size ≤ arrayStride`, so it's unreachable).
+
 ## Fix (this slice): all 3 (user greenlit doing them together; all core-only — backends already support 2+3)
 1. `validate_vertex_buffer_oob`: `last_stride = max over layout.attributes of (attribute.offset +
    vertex_format_byte_size(attribute.format))` (0 if none), `required = (stride_count-1)*array_stride +

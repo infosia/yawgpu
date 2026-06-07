@@ -668,6 +668,7 @@ mod tests {
         PrimitiveState, PrimitiveTopology, RenderPipelineDescriptor, RenderPipelineFragmentState,
         RenderPipelineLayout, RenderPipelineShaderStage, RenderPipelineVertexState,
         ShaderModuleSource, TextureDescriptor, TextureDimension, TextureFormat, TextureUsage,
+        VertexAttribute, VertexBufferLayout, VertexFormat, VertexStepMode,
     };
 
     use std::sync::Arc;
@@ -751,6 +752,21 @@ mod tests {
         assert_eq!(command.blend_constant, [0.0; 4]);
         assert_eq!(command.stencil_reference, 0);
         assert_eq!(command.color_attachments[0].depth_slice, 0);
+    }
+
+    #[test]
+    fn render_pass_vertex_buffer_oob_uses_last_stride() {
+        let device = noop_device();
+        let pipeline = padded_vertex_render_pipeline(&device);
+
+        let error = draw_with_padded_vertex_buffer_size(&device, pipeline.clone(), 40);
+        assert_eq!(error, None);
+
+        let error = draw_with_padded_vertex_buffer_size(&device, pipeline, 39);
+        assert_eq!(
+            error,
+            Some("render pass draw vertex buffer range exceeds the bound buffer".to_owned())
+        );
     }
 
     #[test]
@@ -1342,6 +1358,70 @@ mod tests {
         let mut descriptor = render_pipeline_descriptor(render_shader_module(device));
         descriptor.multisample.count = sample_count;
         Arc::new(device.create_render_pipeline(descriptor))
+    }
+
+    fn padded_vertex_render_pipeline(device: &Device) -> Arc<RenderPipeline> {
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r"
+@vertex
+fn vs(@location(0) position: vec2f) -> @builtin(position) vec4f {
+    return vec4f(position, 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> @location(0) vec4f {
+    return vec4f(1.0, 0.0, 0.0, 1.0);
+}
+"
+                .to_owned(),
+            )),
+        );
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.vertex.buffer_count = 1;
+        descriptor.vertex.buffers = vec![VertexBufferLayout {
+            array_stride: 32,
+            step_mode: VertexStepMode::Vertex,
+            attributes: vec![VertexAttribute {
+                format: VertexFormat::from_raw(0x0000_001D),
+                offset: 0,
+                shader_location: 0,
+            }],
+        }];
+        Arc::new(device.create_render_pipeline(descriptor))
+    }
+
+    fn draw_with_padded_vertex_buffer_size(
+        device: &Device,
+        pipeline: Arc<RenderPipeline>,
+        vertex_buffer_size: u64,
+    ) -> Option<String> {
+        let vertex_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::VERTEX,
+            size: vertex_buffer_size,
+            mapped_at_creation: false,
+        }));
+        let view = noop_render_attachment(device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_vertex_buffer(
+                0,
+                Some(vertex_buffer),
+                0,
+                vertex_buffer_size,
+                device.limits()
+            ),
+            None
+        );
+        assert_eq!(pass.draw(2, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(command_buffer.is_error(), error.is_some());
+        error
     }
 
     fn two_color_render_pipeline(device: &crate::device::Device) -> Arc<RenderPipeline> {

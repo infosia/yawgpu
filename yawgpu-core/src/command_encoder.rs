@@ -1931,18 +1931,21 @@ pub(crate) fn validate_same_texture_copy(
     if source_mip_level != destination_mip_level {
         return Ok(());
     }
-    if texture.dimension() == TextureDimension::D3 {
-        return Err(
-            "copy texture to texture cannot copy within the same 3D texture mip".to_owned(),
-        );
-    }
-
     let source_end = source_origin
         .z
         .saturating_add(copy_size.depth_or_array_layers);
     let destination_end = destination_origin
         .z
         .saturating_add(copy_size.depth_or_array_layers);
+    if texture.dimension() == TextureDimension::D3 {
+        if source_origin.z < destination_end && destination_origin.z < source_end {
+            return Err(
+                "copy texture to texture same-texture 3D z ranges must not overlap".to_owned(),
+            );
+        }
+        return Ok(());
+    }
+
     if source_origin.z < destination_end && destination_origin.z < source_end {
         return Err(
             "copy texture to texture same-texture array layers must not overlap".to_owned(),
@@ -2437,6 +2440,105 @@ mod tests {
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
         assert_eq!(command_buffer.command_ops().len(), 3);
+    }
+
+    #[test]
+    fn copy_texture_to_texture_allows_same_3d_texture_disjoint_z_ranges_only() {
+        let device = noop_device();
+        let texture_3d = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
+            dimension: TextureDimension::D3,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 2,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+        let copy_size = Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.copy_texture_to_texture(
+                TexelCopyTextureInfo {
+                    texture: texture_3d.clone(),
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    aspect: TextureAspect::All,
+                },
+                TexelCopyTextureInfo {
+                    texture: texture_3d.clone(),
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 1 },
+                    aspect: TextureAspect::All,
+                },
+                copy_size,
+            ),
+            None
+        );
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.copy_texture_to_texture(
+                TexelCopyTextureInfo {
+                    texture: texture_3d.clone(),
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    aspect: TextureAspect::All,
+                },
+                TexelCopyTextureInfo {
+                    texture: texture_3d,
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    aspect: TextureAspect::All,
+                },
+                copy_size,
+            ),
+            None
+        );
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("copy texture to texture same-texture 3D z ranges must not overlap".to_owned())
+        );
+
+        let texture_2d = Arc::new(device.create_texture(texture_descriptor_4x4()));
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.copy_texture_to_texture(
+                TexelCopyTextureInfo {
+                    texture: texture_2d.clone(),
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    aspect: TextureAspect::All,
+                },
+                TexelCopyTextureInfo {
+                    texture: texture_2d,
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    aspect: TextureAspect::All,
+                },
+                copy_size,
+            ),
+            None
+        );
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("copy texture to texture same-texture array layers must not overlap".to_owned())
+        );
     }
 
     #[test]
