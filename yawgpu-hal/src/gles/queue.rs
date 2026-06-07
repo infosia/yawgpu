@@ -1082,14 +1082,24 @@ fn bind_vertex_buffers(
                 })?;
             unsafe {
                 gl.enable_vertex_attrib_array(attribute.shader_location);
-                gl.vertex_attrib_pointer_f32(
-                    attribute.shader_location,
-                    format.components,
-                    format.ty,
-                    format.normalized,
-                    stride,
-                    attribute_offset,
-                );
+                if format.integer {
+                    gl.vertex_attrib_pointer_i32(
+                        attribute.shader_location,
+                        format.components,
+                        format.ty,
+                        stride,
+                        attribute_offset,
+                    );
+                } else {
+                    gl.vertex_attrib_pointer_f32(
+                        attribute.shader_location,
+                        format.components,
+                        format.ty,
+                        format.normalized,
+                        stride,
+                        attribute_offset,
+                    );
+                }
                 gl.vertex_attrib_divisor(
                     attribute.shader_location,
                     if matches!(layout.step_mode, HalVertexStepMode::Instance) {

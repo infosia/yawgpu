@@ -282,10 +282,47 @@ pub(super) fn map_compare_function(compare: HalCompareFunction) -> MTLCompareFun
 /// Converts vertex format into the corresponding yawgpu representation.
 pub(super) fn map_vertex_format(format: HalVertexFormat) -> Result<MTLVertexFormat, HalError> {
     match format {
+        HalVertexFormat::Uint8 => Ok(MTLVertexFormat::UChar),
+        HalVertexFormat::Uint8x2 => Ok(MTLVertexFormat::UChar2),
+        HalVertexFormat::Uint8x4 => Ok(MTLVertexFormat::UChar4),
+        HalVertexFormat::Sint8 => Ok(MTLVertexFormat::Char),
+        HalVertexFormat::Sint8x2 => Ok(MTLVertexFormat::Char2),
+        HalVertexFormat::Sint8x4 => Ok(MTLVertexFormat::Char4),
+        HalVertexFormat::Unorm8 => Ok(MTLVertexFormat::UCharNormalized),
+        HalVertexFormat::Unorm8x2 => Ok(MTLVertexFormat::UChar2Normalized),
+        HalVertexFormat::Unorm8x4 => Ok(MTLVertexFormat::UChar4Normalized),
+        HalVertexFormat::Snorm8 => Ok(MTLVertexFormat::CharNormalized),
+        HalVertexFormat::Snorm8x2 => Ok(MTLVertexFormat::Char2Normalized),
+        HalVertexFormat::Snorm8x4 => Ok(MTLVertexFormat::Char4Normalized),
+        HalVertexFormat::Uint16 => Ok(MTLVertexFormat::UShort),
+        HalVertexFormat::Uint16x2 => Ok(MTLVertexFormat::UShort2),
+        HalVertexFormat::Uint16x4 => Ok(MTLVertexFormat::UShort4),
+        HalVertexFormat::Sint16 => Ok(MTLVertexFormat::Short),
+        HalVertexFormat::Sint16x2 => Ok(MTLVertexFormat::Short2),
+        HalVertexFormat::Sint16x4 => Ok(MTLVertexFormat::Short4),
+        HalVertexFormat::Unorm16 => Ok(MTLVertexFormat::UShortNormalized),
+        HalVertexFormat::Unorm16x2 => Ok(MTLVertexFormat::UShort2Normalized),
+        HalVertexFormat::Unorm16x4 => Ok(MTLVertexFormat::UShort4Normalized),
+        HalVertexFormat::Snorm16 => Ok(MTLVertexFormat::ShortNormalized),
+        HalVertexFormat::Snorm16x2 => Ok(MTLVertexFormat::Short2Normalized),
+        HalVertexFormat::Snorm16x4 => Ok(MTLVertexFormat::Short4Normalized),
+        HalVertexFormat::Float16 => Ok(MTLVertexFormat::Half),
+        HalVertexFormat::Float16x2 => Ok(MTLVertexFormat::Half2),
+        HalVertexFormat::Float16x4 => Ok(MTLVertexFormat::Half4),
         HalVertexFormat::Float32 => Ok(MTLVertexFormat::Float),
         HalVertexFormat::Float32x2 => Ok(MTLVertexFormat::Float2),
         HalVertexFormat::Float32x3 => Ok(MTLVertexFormat::Float3),
         HalVertexFormat::Float32x4 => Ok(MTLVertexFormat::Float4),
+        HalVertexFormat::Uint32 => Ok(MTLVertexFormat::UInt),
+        HalVertexFormat::Uint32x2 => Ok(MTLVertexFormat::UInt2),
+        HalVertexFormat::Uint32x3 => Ok(MTLVertexFormat::UInt3),
+        HalVertexFormat::Uint32x4 => Ok(MTLVertexFormat::UInt4),
+        HalVertexFormat::Sint32 => Ok(MTLVertexFormat::Int),
+        HalVertexFormat::Sint32x2 => Ok(MTLVertexFormat::Int2),
+        HalVertexFormat::Sint32x3 => Ok(MTLVertexFormat::Int3),
+        HalVertexFormat::Sint32x4 => Ok(MTLVertexFormat::Int4),
+        HalVertexFormat::Unorm10_10_10_2 => Ok(MTLVertexFormat::UInt1010102Normalized),
+        HalVertexFormat::Unorm8x4Bgra => Ok(MTLVertexFormat::UChar4Normalized_BGRA),
         HalVertexFormat::Unsupported => Err(shader_error(
             "unsupported vertex format for Metal".to_owned(),
         )),
@@ -418,6 +455,29 @@ mod tests {
                 (metal, bytes_per_pixel),
                 "{hal:?}"
             );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "metal")]
+    fn map_vertex_format_maps_representative_full_set_formats() {
+        let cases = [
+            (HalVertexFormat::Uint8x4, MTLVertexFormat::UChar4),
+            (HalVertexFormat::Unorm8x4, MTLVertexFormat::UChar4Normalized),
+            (HalVertexFormat::Float16x4, MTLVertexFormat::Half4),
+            (HalVertexFormat::Uint32x4, MTLVertexFormat::UInt4),
+            (
+                HalVertexFormat::Unorm10_10_10_2,
+                MTLVertexFormat::UInt1010102Normalized,
+            ),
+            (
+                HalVertexFormat::Unorm8x4Bgra,
+                MTLVertexFormat::UChar4Normalized_BGRA,
+            ),
+        ];
+
+        for (hal, metal) in cases {
+            assert_eq!(map_vertex_format(hal).expect("format supported"), metal);
         }
     }
 }

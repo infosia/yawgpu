@@ -159,10 +159,47 @@ pub(super) fn map_buffer_usage(usage: HalBufferUsage) -> vk::BufferUsageFlags {
 /// Converts vertex format into the corresponding yawgpu representation.
 pub(super) fn map_vertex_format(format: HalVertexFormat) -> Result<vk::Format, HalError> {
     match format {
+        HalVertexFormat::Uint8 => Ok(vk::Format::R8_UINT),
+        HalVertexFormat::Uint8x2 => Ok(vk::Format::R8G8_UINT),
+        HalVertexFormat::Uint8x4 => Ok(vk::Format::R8G8B8A8_UINT),
+        HalVertexFormat::Sint8 => Ok(vk::Format::R8_SINT),
+        HalVertexFormat::Sint8x2 => Ok(vk::Format::R8G8_SINT),
+        HalVertexFormat::Sint8x4 => Ok(vk::Format::R8G8B8A8_SINT),
+        HalVertexFormat::Unorm8 => Ok(vk::Format::R8_UNORM),
+        HalVertexFormat::Unorm8x2 => Ok(vk::Format::R8G8_UNORM),
+        HalVertexFormat::Unorm8x4 => Ok(vk::Format::R8G8B8A8_UNORM),
+        HalVertexFormat::Snorm8 => Ok(vk::Format::R8_SNORM),
+        HalVertexFormat::Snorm8x2 => Ok(vk::Format::R8G8_SNORM),
+        HalVertexFormat::Snorm8x4 => Ok(vk::Format::R8G8B8A8_SNORM),
+        HalVertexFormat::Uint16 => Ok(vk::Format::R16_UINT),
+        HalVertexFormat::Uint16x2 => Ok(vk::Format::R16G16_UINT),
+        HalVertexFormat::Uint16x4 => Ok(vk::Format::R16G16B16A16_UINT),
+        HalVertexFormat::Sint16 => Ok(vk::Format::R16_SINT),
+        HalVertexFormat::Sint16x2 => Ok(vk::Format::R16G16_SINT),
+        HalVertexFormat::Sint16x4 => Ok(vk::Format::R16G16B16A16_SINT),
+        HalVertexFormat::Unorm16 => Ok(vk::Format::R16_UNORM),
+        HalVertexFormat::Unorm16x2 => Ok(vk::Format::R16G16_UNORM),
+        HalVertexFormat::Unorm16x4 => Ok(vk::Format::R16G16B16A16_UNORM),
+        HalVertexFormat::Snorm16 => Ok(vk::Format::R16_SNORM),
+        HalVertexFormat::Snorm16x2 => Ok(vk::Format::R16G16_SNORM),
+        HalVertexFormat::Snorm16x4 => Ok(vk::Format::R16G16B16A16_SNORM),
+        HalVertexFormat::Float16 => Ok(vk::Format::R16_SFLOAT),
+        HalVertexFormat::Float16x2 => Ok(vk::Format::R16G16_SFLOAT),
+        HalVertexFormat::Float16x4 => Ok(vk::Format::R16G16B16A16_SFLOAT),
         HalVertexFormat::Float32 => Ok(vk::Format::R32_SFLOAT),
         HalVertexFormat::Float32x2 => Ok(vk::Format::R32G32_SFLOAT),
         HalVertexFormat::Float32x3 => Ok(vk::Format::R32G32B32_SFLOAT),
         HalVertexFormat::Float32x4 => Ok(vk::Format::R32G32B32A32_SFLOAT),
+        HalVertexFormat::Uint32 => Ok(vk::Format::R32_UINT),
+        HalVertexFormat::Uint32x2 => Ok(vk::Format::R32G32_UINT),
+        HalVertexFormat::Uint32x3 => Ok(vk::Format::R32G32B32_UINT),
+        HalVertexFormat::Uint32x4 => Ok(vk::Format::R32G32B32A32_UINT),
+        HalVertexFormat::Sint32 => Ok(vk::Format::R32_SINT),
+        HalVertexFormat::Sint32x2 => Ok(vk::Format::R32G32_SINT),
+        HalVertexFormat::Sint32x3 => Ok(vk::Format::R32G32B32_SINT),
+        HalVertexFormat::Sint32x4 => Ok(vk::Format::R32G32B32A32_SINT),
+        HalVertexFormat::Unorm10_10_10_2 => Ok(vk::Format::A2B10G10R10_UNORM_PACK32),
+        HalVertexFormat::Unorm8x4Bgra => Ok(vk::Format::B8G8R8A8_UNORM),
         HalVertexFormat::Unsupported => Err(shader_error("unsupported vertex format")),
     }
 }
@@ -339,6 +376,25 @@ mod tests {
                 (vk, bytes_per_pixel),
                 "{hal:?}"
             );
+        }
+    }
+
+    #[test]
+    fn map_vertex_format_maps_representative_full_set_formats() {
+        let cases = [
+            (HalVertexFormat::Uint8x4, vk::Format::R8G8B8A8_UINT),
+            (HalVertexFormat::Unorm8x4, vk::Format::R8G8B8A8_UNORM),
+            (HalVertexFormat::Float16x4, vk::Format::R16G16B16A16_SFLOAT),
+            (HalVertexFormat::Uint32x4, vk::Format::R32G32B32A32_UINT),
+            (
+                HalVertexFormat::Unorm10_10_10_2,
+                vk::Format::A2B10G10R10_UNORM_PACK32,
+            ),
+            (HalVertexFormat::Unorm8x4Bgra, vk::Format::B8G8R8A8_UNORM),
+        ];
+
+        for (hal, vk) in cases {
+            assert_eq!(map_vertex_format(hal).expect("format supported"), vk);
         }
     }
 
