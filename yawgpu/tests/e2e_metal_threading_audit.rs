@@ -53,6 +53,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 "#;
 const COPY3D_VALUE: u32 = 0x0000_ABCD;
 
+// F-046: a clip-space CCW triangle (top-left) with frontFace=ccw, cullMode=none is
+// FRONT-facing per WebGPU/Dawn → `@builtin(front_facing)` true → green. (Geometry +
+// fragment mirror the CTS `render_pipeline/culling_tests`.) yawgpu read red (back).
+const FRONT_FACING_SHADER: &str = r#"
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+    var pos = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, 1.0), vec2<f32>(-1.0, 0.0), vec2<f32>(0.0, 1.0));
+    return vec4<f32>(pos[vi], 0.0, 1.0);
+}
+@fragment
+fn fs(@builtin(front_facing) ff: bool) -> @location(0) vec4<f32> {
+    return select(vec4<f32>(1.0, 0.0, 0.0, 1.0), vec4<f32>(0.0, 1.0, 0.0, 1.0), ff);
+}
+"#;
+
 // Oversized triangle covering the whole framebuffer. In WebGPU NDC (Y up) the
 // vertex order (-1,-1),(3,-1),(-1,3) is counter-clockwise, so frontFace=CCW makes
 // it front-facing. The fragment writes storage=1 (so culling => storage stays 0)
@@ -268,7 +284,52 @@ fn metal_compressed_multilayer_roundtrip() {
     );
 }
 
+/// F-046: a clip-space-CCW triangle with `frontFace=ccw`, `cullMode=none` must be
+/// FRONT-facing (`@builtin(front_facing)` true → green) per WebGPU/Dawn.
+#[test]
+#[ignore = "manual real-backend test"]
+fn metal_front_facing_ccw_is_front() {
+    let pixel = run_front_facing();
+    assert_eq!(
+        pixel, GREEN,
+        "clip-CCW + frontFace=ccw read as back-facing (winding inverted vs WebGPU)"
+    );
+}
+
 // ---- runners ----------------------------------------------------------------
+
+fn run_front_facing() -> [u8; 4] {
+    let mut out = RED;
+    with_device(|ctx| unsafe {
+        let color = ctx.color_texture();
+        let color_view = yawgpu::wgpuTextureCreateView(color, std::ptr::null());
+        let module = create_wgsl_module(ctx.device, FRONT_FACING_SHADER);
+        // No bind group: a self-contained vertex/fragment pipeline (frontFace=ccw, cull=none).
+        let pipeline = create_raster_pipeline(
+            ctx.device,
+            module,
+            native::WGPUFrontFace_CCW,
+            native::WGPUCullMode_None,
+        );
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(ctx.device, std::ptr::null());
+        let pass = begin_color_pass(encoder, color_view); // clears red
+        yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        let readback = ctx.readback_buffer(READBACK_SIZE as u64);
+        copy_color(encoder, color, readback);
+        ctx.submit(encoder);
+        let pixels = read_buffer(ctx.instance, readback, READBACK_SIZE);
+        out = read_pixel(&pixels, 0, 0); // top-left = the CCW triangle
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuRenderPipelineRelease(pipeline);
+        yawgpu::wgpuShaderModuleRelease(module);
+        yawgpu::wgpuTextureViewRelease(color_view);
+        yawgpu::wgpuTextureRelease(color);
+    });
+    out
+}
 
 fn run_cull(front_face: native::WGPUFrontFace) -> (u32, [u8; 4]) {
     let mut out = (0u32, RED);
