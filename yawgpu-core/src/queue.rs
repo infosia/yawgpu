@@ -739,7 +739,7 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
         viewport: pass.viewport.map(hal_viewport),
         scissor_rect: pass.scissor_rect.map(hal_scissor_rect),
         blend_constant: pass.blend_constant,
-        stencil_reference: pass.stencil_reference,
+        stencil_reference: pass.stencil_reference & 0xFF,
         draw,
     }))
 }
@@ -1555,6 +1555,44 @@ fn fs() -> @location(0) vec4<f32> {
                     && pass.bind_samplers[0].binding == 1
                     && pass.bind_samplers[0].metal_index == 1
         ));
+    }
+
+    fn submitted_render_pass_stencil_reference(reference: u32) -> u32 {
+        let device = noop_device();
+        let view = noop_render_attachment(&device);
+        let pipeline = Arc::new(
+            device
+                .create_render_pipeline(render_pipeline_descriptor(render_shader_module(&device))),
+        );
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.set_stencil_reference(reference), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(finish_error, None);
+        assert_eq!(device.queue().submit(&[Arc::new(command_buffer)]), None);
+
+        let submitted = match device.queue().hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => Vec::new(),
+        };
+        submitted
+            .iter()
+            .find_map(|copy| match copy {
+                HalCopy::RenderPass(pass) => Some(pass.stencil_reference),
+                _ => None,
+            })
+            .expect("render pass should be submitted")
+    }
+
+    #[test]
+    fn render_pass_submit_masks_stencil_reference_to_stencil_bit_width() {
+        assert_eq!(submitted_render_pass_stencil_reference(258), 2);
+        assert_eq!(submitted_render_pass_stencil_reference(7), 7);
     }
 
     #[test]
