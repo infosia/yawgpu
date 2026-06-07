@@ -343,6 +343,7 @@ impl TextureFormat {
                 .storage(),
             TextureFormat::RGB10A2_UINT => FormatCaps::uint_color(4, 4).renderable().multisample(),
             TextureFormat::RGB10A2_UNORM => FormatCaps::float_color(4, 4)
+                .alpha()
                 .blendable()
                 .renderable()
                 .multisample(),

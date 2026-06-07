@@ -2687,6 +2687,23 @@ mod tests {
     }
 
     #[test]
+    fn rgb10a2unorm_alpha_to_coverage_pipeline_is_accepted() {
+        let device = noop_device();
+        let module = render_shader_module(&device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.multisample.count = 4;
+        descriptor.multisample.alpha_to_coverage_enabled = true;
+        descriptor.fragment.as_mut().expect("fragment").targets[0].format =
+            TextureFormat::from_raw(TextureFormat::RGB10A2_UNORM);
+
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            None
+        );
+        assert!(!device.create_render_pipeline(descriptor).is_error());
+    }
+
+    #[test]
     fn validate_inter_stage_interface_rejects_missing_fragment_input() {
         let device = noop_device();
         let vertex = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(

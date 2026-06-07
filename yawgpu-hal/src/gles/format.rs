@@ -164,6 +164,294 @@ pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<GlesFormat,
         HalTextureFormat::Rgba32Float => {
             Ok(gles_format(glow::RGBA32F, glow::RGBA, glow::FLOAT, 16))
         }
+        HalTextureFormat::Bc1RgbaUnorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_S3TC_DXT1_EXT,
+            glow::RGBA,
+            0,
+            8,
+        )),
+        HalTextureFormat::Bc1RgbaUnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT,
+            glow::RGBA,
+            0,
+            8,
+        )),
+        HalTextureFormat::Bc2RgbaUnorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_S3TC_DXT3_EXT,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Bc2RgbaUnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Bc3RgbaUnorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_S3TC_DXT5_EXT,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Bc3RgbaUnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Bc4RUnorm => Ok(gles_format(glow::COMPRESSED_RED_RGTC1, glow::RED, 0, 8)),
+        HalTextureFormat::Bc4RSnorm => Ok(gles_format(
+            glow::COMPRESSED_SIGNED_RED_RGTC1,
+            glow::RED,
+            0,
+            8,
+        )),
+        HalTextureFormat::Bc5RgUnorm => Ok(gles_format(glow::COMPRESSED_RG_RGTC2, glow::RG, 0, 16)),
+        HalTextureFormat::Bc5RgSnorm => Ok(gles_format(
+            glow::COMPRESSED_SIGNED_RG_RGTC2,
+            glow::RG,
+            0,
+            16,
+        )),
+        HalTextureFormat::Bc6hRgbUfloat => Ok(gles_format(
+            glow::COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT,
+            glow::RGB,
+            0,
+            16,
+        )),
+        HalTextureFormat::Bc6hRgbFloat => Ok(gles_format(
+            glow::COMPRESSED_RGB_BPTC_SIGNED_FLOAT,
+            glow::RGB,
+            0,
+            16,
+        )),
+        HalTextureFormat::Bc7RgbaUnorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_BPTC_UNORM,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Bc7RgbaUnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB_ALPHA_BPTC_UNORM,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Etc2Rgb8Unorm => {
+            Ok(gles_format(glow::COMPRESSED_RGB8_ETC2, glow::RGB, 0, 8))
+        }
+        HalTextureFormat::Etc2Rgb8UnormSrgb => {
+            Ok(gles_format(glow::COMPRESSED_SRGB8_ETC2, glow::RGB, 0, 8))
+        }
+        HalTextureFormat::Etc2Rgb8a1Unorm => Ok(gles_format(
+            glow::COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2,
+            glow::RGBA,
+            0,
+            8,
+        )),
+        HalTextureFormat::Etc2Rgb8a1UnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2,
+            glow::RGBA,
+            0,
+            8,
+        )),
+        HalTextureFormat::Etc2Rgba8Unorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA8_ETC2_EAC,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Etc2Rgba8UnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB8_ALPHA8_ETC2_EAC,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::EacR11Unorm => Ok(gles_format(glow::COMPRESSED_R11_EAC, glow::RED, 0, 8)),
+        HalTextureFormat::EacR11Snorm => Ok(gles_format(
+            glow::COMPRESSED_SIGNED_R11_EAC,
+            glow::RED,
+            0,
+            8,
+        )),
+        HalTextureFormat::EacRg11Unorm => {
+            Ok(gles_format(glow::COMPRESSED_RG11_EAC, glow::RG, 0, 16))
+        }
+        HalTextureFormat::EacRg11Snorm => Ok(gles_format(
+            glow::COMPRESSED_SIGNED_RG11_EAC,
+            glow::RG,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc4x4Unorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_ASTC_4x4_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc4x4UnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc5x4Unorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_ASTC_5x4_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc5x4UnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB8_ALPHA8_ASTC_5x4_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc5x5Unorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_ASTC_5x5_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc5x5UnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB8_ALPHA8_ASTC_5x5_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc6x5Unorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_ASTC_6x5_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc6x5UnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB8_ALPHA8_ASTC_6x5_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc6x6Unorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_ASTC_6x6_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc6x6UnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB8_ALPHA8_ASTC_6x6_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc8x5Unorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_ASTC_8x5_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc8x5UnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB8_ALPHA8_ASTC_8x5_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc8x6Unorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_ASTC_8x6_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc8x6UnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB8_ALPHA8_ASTC_8x6_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc8x8Unorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_ASTC_8x8_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc8x8UnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB8_ALPHA8_ASTC_8x8_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc10x5Unorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_ASTC_10x5_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc10x5UnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB8_ALPHA8_ASTC_10x5_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc10x6Unorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_ASTC_10x6_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc10x6UnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB8_ALPHA8_ASTC_10x6_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc10x8Unorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_ASTC_10x8_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc10x8UnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB8_ALPHA8_ASTC_10x8_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc10x10Unorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_ASTC_10x10_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc10x10UnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB8_ALPHA8_ASTC_10x10_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc12x10Unorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_ASTC_12x10_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc12x10UnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB8_ALPHA8_ASTC_12x10_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc12x12Unorm => Ok(gles_format(
+            glow::COMPRESSED_RGBA_ASTC_12x12_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
+        HalTextureFormat::Astc12x12UnormSrgb => Ok(gles_format(
+            glow::COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR,
+            glow::RGBA,
+            0,
+            16,
+        )),
         _ => Err(HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "texture format not supported on GLES (P15.3)",

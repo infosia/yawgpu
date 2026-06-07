@@ -68,14 +68,16 @@ impl Adapter {
     /// Returns the features.
     #[must_use]
     pub fn features(&self) -> FeatureSet {
+        let mut features = supported_features();
+        add_texture_compression_features(&mut features, &self.inner.hal);
+
         #[cfg(not(feature = "tiled"))]
         {
-            supported_features()
+            features
         }
 
         #[cfg(feature = "tiled")]
         {
-            let mut features = supported_features();
             add_tiled_features(
                 &mut features,
                 self.backend(),
@@ -206,11 +208,6 @@ pub struct TiledCapabilities {
 pub(crate) fn supported_features() -> FeatureSet {
     [
         Feature::CoreFeaturesAndLimits,
-        Feature::TextureCompressionBc,
-        Feature::TextureCompressionBcSliced3d,
-        Feature::TextureCompressionEtc2,
-        Feature::TextureCompressionAstc,
-        Feature::TextureCompressionAstcSliced3d,
         Feature::Depth32FloatStencil8,
         Feature::Rg11b10UfloatRenderable,
         Feature::Bgra8UnormStorage,
@@ -221,6 +218,24 @@ pub(crate) fn supported_features() -> FeatureSet {
     ]
     .into_iter()
     .collect()
+}
+
+fn add_texture_compression_features(features: &mut FeatureSet, hal: &HalAdapter) {
+    if hal.supports_texture_compression_bc() {
+        features.insert(Feature::TextureCompressionBc);
+        if hal.supports_texture_compression_bc_sliced_3d() {
+            features.insert(Feature::TextureCompressionBcSliced3d);
+        }
+    }
+    if hal.supports_texture_compression_etc2() {
+        features.insert(Feature::TextureCompressionEtc2);
+    }
+    if hal.supports_texture_compression_astc() {
+        features.insert(Feature::TextureCompressionAstc);
+        if hal.supports_texture_compression_astc_sliced_3d() {
+            features.insert(Feature::TextureCompressionAstcSliced3d);
+        }
+    }
 }
 
 /// Returns true when tiled rendering features are supported by `backend`.
@@ -326,6 +341,23 @@ mod tests {
         assert!(adapter.features().contains(&Feature::CoreFeaturesAndLimits));
         assert!(adapter.has_feature(Feature::TimestampQuery));
         assert!(!adapter.has_feature(Feature::Other(7)));
+    }
+
+    #[test]
+    fn compression_features_are_adapter_gated_and_noop_preserves_coverage() {
+        let base = supported_features();
+        assert!(!base.contains(&Feature::TextureCompressionBc));
+        assert!(!base.contains(&Feature::TextureCompressionBcSliced3d));
+        assert!(!base.contains(&Feature::TextureCompressionEtc2));
+        assert!(!base.contains(&Feature::TextureCompressionAstc));
+        assert!(!base.contains(&Feature::TextureCompressionAstcSliced3d));
+
+        let features = noop_adapter().features();
+        assert!(features.contains(&Feature::TextureCompressionBc));
+        assert!(features.contains(&Feature::TextureCompressionBcSliced3d));
+        assert!(features.contains(&Feature::TextureCompressionEtc2));
+        assert!(features.contains(&Feature::TextureCompressionAstc));
+        assert!(features.contains(&Feature::TextureCompressionAstcSliced3d));
     }
 
     #[test]

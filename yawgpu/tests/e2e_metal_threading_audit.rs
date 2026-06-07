@@ -229,6 +229,45 @@ fn metal_same_3d_texture_disjoint_copy() {
     );
 }
 
+/// Audit C: each advertised compressed family must actually create + round-trip a
+/// block (queueWriteTexture upload → T2B readback) — proves "advertise iff
+/// implemented". A byte round-trip needs no decoder. On this M2, Metal advertises
+/// BC + ETC2 + ASTC.
+#[test]
+#[ignore = "manual real-backend test"]
+fn metal_bc1_compressed_roundtrip() {
+    let (up, down) = run_compressed_roundtrip(native::WGPUTextureFormat_BC1RGBAUnorm, 8);
+    assert_eq!(up, down, "BC1 compressed block did not round-trip");
+}
+
+#[test]
+#[ignore = "manual real-backend test"]
+fn metal_etc2_compressed_roundtrip() {
+    let (up, down) = run_compressed_roundtrip(native::WGPUTextureFormat_ETC2RGB8Unorm, 8);
+    assert_eq!(up, down, "ETC2 compressed block did not round-trip");
+}
+
+#[test]
+#[ignore = "manual real-backend test"]
+fn metal_astc_compressed_roundtrip() {
+    let (up, down) = run_compressed_roundtrip(native::WGPUTextureFormat_ASTC4x4Unorm, 16);
+    assert_eq!(up, down, "ASTC compressed block did not round-trip");
+}
+
+/// A 2-LAYER compressed copy exercises the per-layer buffer stride
+/// (`bufferImageHeight`), which a single-layer copy ignores. Each layer must
+/// round-trip its own block (Round-2 Vulkan block→texel `bufferImageHeight` fix).
+#[test]
+#[ignore = "manual real-backend test"]
+fn metal_compressed_multilayer_roundtrip() {
+    let (l0_up, l0_down, l1_up, l1_down) = run_compressed_multilayer_roundtrip();
+    assert_eq!(l0_up, l0_down, "compressed layer 0 did not round-trip");
+    assert_eq!(
+        l1_up, l1_down,
+        "compressed layer 1 did not round-trip (per-layer buffer stride wrong)"
+    );
+}
+
 // ---- runners ----------------------------------------------------------------
 
 fn run_cull(front_face: native::WGPUFrontFace) -> (u32, [u8; 4]) {
@@ -747,6 +786,176 @@ unsafe fn copy_texture_layers(
         depthOrArrayLayers: layers,
     };
     yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &src, &dst, &extent);
+}
+
+fn run_compressed_roundtrip(
+    format: native::WGPUTextureFormat,
+    block_bytes: usize,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut out = (Vec::new(), Vec::new());
+    with_device(|ctx| unsafe {
+        // 4x4 compressed texture = exactly one block.
+        let descriptor = native::WGPUTextureDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            usage: native::WGPUTextureUsage_CopyDst | native::WGPUTextureUsage_CopySrc,
+            dimension: native::WGPUTextureDimension_2D,
+            size: native::WGPUExtent3D {
+                width: 4,
+                height: 4,
+                depthOrArrayLayers: 1,
+            },
+            format,
+            mipLevelCount: 1,
+            sampleCount: 1,
+            viewFormatCount: 0,
+            viewFormats: std::ptr::null(),
+        };
+        let texture = yawgpu::wgpuDeviceCreateTexture(ctx.device, &descriptor);
+        assert!(!texture.is_null(), "compressed texture creation failed");
+        let block: Vec<u8> = (0..block_bytes)
+            .map(|i| (i as u8).wrapping_mul(17).wrapping_add(3))
+            .collect();
+        let extent = native::WGPUExtent3D {
+            width: 4,
+            height: 4,
+            depthOrArrayLayers: 1,
+        };
+        // Upload the block (one block row; queueWriteTexture has no 256 alignment rule).
+        let write_dst = native::WGPUTexelCopyTextureInfo {
+            texture,
+            mipLevel: 0,
+            origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+            aspect: native::WGPUTextureAspect_All,
+        };
+        let write_layout = native::WGPUTexelCopyBufferLayout {
+            offset: 0,
+            bytesPerRow: block_bytes as u32,
+            rowsPerImage: 1,
+        };
+        yawgpu::wgpuQueueWriteTexture(
+            ctx.queue,
+            &write_dst,
+            block.as_ptr().cast(),
+            block.len(),
+            &write_layout,
+            &extent,
+        );
+        // Read it back via T2B (command copy → 256-aligned bytesPerRow).
+        let readback = ctx.readback_buffer(BYTES_PER_ROW as u64);
+        let read_src = native::WGPUTexelCopyTextureInfo {
+            texture,
+            mipLevel: 0,
+            origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+            aspect: native::WGPUTextureAspect_All,
+        };
+        let read_dst = native::WGPUTexelCopyBufferInfo {
+            layout: native::WGPUTexelCopyBufferLayout {
+                offset: 0,
+                bytesPerRow: BYTES_PER_ROW,
+                rowsPerImage: 1,
+            },
+            buffer: readback,
+        };
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(ctx.device, std::ptr::null());
+        yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &read_src, &read_dst, &extent);
+        ctx.submit(encoder);
+        let bytes = read_buffer(ctx.instance, readback, block_bytes);
+        out = (block, bytes);
+
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuTextureRelease(texture);
+    });
+    out
+}
+
+fn run_compressed_multilayer_roundtrip() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
+    const BLOCK: usize = 8; // BC1
+    let mut out = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    with_device(|ctx| unsafe {
+        // 2-layer 4x4 BC1 = one block per layer.
+        let descriptor = native::WGPUTextureDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            usage: native::WGPUTextureUsage_CopyDst | native::WGPUTextureUsage_CopySrc,
+            dimension: native::WGPUTextureDimension_2D,
+            size: native::WGPUExtent3D {
+                width: 4,
+                height: 4,
+                depthOrArrayLayers: 2,
+            },
+            format: native::WGPUTextureFormat_BC1RGBAUnorm,
+            mipLevelCount: 1,
+            sampleCount: 1,
+            viewFormatCount: 0,
+            viewFormats: std::ptr::null(),
+        };
+        let texture = yawgpu::wgpuDeviceCreateTexture(ctx.device, &descriptor);
+        assert!(
+            !texture.is_null(),
+            "compressed array texture creation failed"
+        );
+        let block_a: Vec<u8> = (0..BLOCK)
+            .map(|i| (i as u8).wrapping_mul(7).wrapping_add(1))
+            .collect();
+        let block_b: Vec<u8> = (0..BLOCK)
+            .map(|i| (i as u8).wrapping_mul(13).wrapping_add(5))
+            .collect();
+        let mut upload = block_a.clone();
+        upload.extend_from_slice(&block_b); // layer stride = bytesPerRow(8) * rowsPerImage(1) = 8
+        let extent = native::WGPUExtent3D {
+            width: 4,
+            height: 4,
+            depthOrArrayLayers: 2,
+        };
+        let write_dst = native::WGPUTexelCopyTextureInfo {
+            texture,
+            mipLevel: 0,
+            origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+            aspect: native::WGPUTextureAspect_All,
+        };
+        let write_layout = native::WGPUTexelCopyBufferLayout {
+            offset: 0,
+            bytesPerRow: BLOCK as u32,
+            rowsPerImage: 1,
+        };
+        yawgpu::wgpuQueueWriteTexture(
+            ctx.queue,
+            &write_dst,
+            upload.as_ptr().cast(),
+            upload.len(),
+            &write_layout,
+            &extent,
+        );
+        // T2B both layers: command copy → 256-aligned bytesPerRow; layer stride = 256*1.
+        let layer_stride = BYTES_PER_ROW as usize;
+        let readback = ctx.readback_buffer((layer_stride * 2) as u64);
+        let read_src = native::WGPUTexelCopyTextureInfo {
+            texture,
+            mipLevel: 0,
+            origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+            aspect: native::WGPUTextureAspect_All,
+        };
+        let read_dst = native::WGPUTexelCopyBufferInfo {
+            layout: native::WGPUTexelCopyBufferLayout {
+                offset: 0,
+                bytesPerRow: BYTES_PER_ROW,
+                rowsPerImage: 1,
+            },
+            buffer: readback,
+        };
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(ctx.device, std::ptr::null());
+        yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &read_src, &read_dst, &extent);
+        ctx.submit(encoder);
+        let bytes = read_buffer(ctx.instance, readback, layer_stride + BLOCK);
+        let l0_down = bytes[0..BLOCK].to_vec();
+        let l1_down = bytes[layer_stride..layer_stride + BLOCK].to_vec();
+        out = (block_a, l0_down, block_b, l1_down);
+
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuTextureRelease(texture);
+    });
+    out
 }
 
 // ---- device context + shared helpers ----------------------------------------
@@ -1279,6 +1488,36 @@ unsafe fn request_device(
     instance: native::WGPUInstance,
     adapter: native::WGPUAdapter,
 ) -> native::WGPUDevice {
+    // Enable whichever compressed-texture features this adapter advertises, so the
+    // compressed-format probes can create compressed textures (harmless for the
+    // other probes; only advertised families are enabled, keeping it portable).
+    let mut required_features: Vec<native::WGPUFeatureName> = Vec::new();
+    for feature in [
+        native::WGPUFeatureName_TextureCompressionBC,
+        native::WGPUFeatureName_TextureCompressionETC2,
+        native::WGPUFeatureName_TextureCompressionASTC,
+    ] {
+        if yawgpu::wgpuAdapterHasFeature(adapter, feature) != 0 {
+            required_features.push(feature);
+        }
+    }
+    let descriptor = native::WGPUDeviceDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        requiredFeatureCount: required_features.len(),
+        requiredFeatures: if required_features.is_empty() {
+            std::ptr::null()
+        } else {
+            required_features.as_ptr()
+        },
+        requiredLimits: std::ptr::null(),
+        defaultQueue: native::WGPUQueueDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+        },
+        deviceLostCallbackInfo: std::mem::zeroed(),
+        uncapturedErrorCallbackInfo: std::mem::zeroed(),
+    };
     let mut device: native::WGPUDevice = std::ptr::null();
     let callback_info = native::WGPURequestDeviceCallbackInfo {
         nextInChain: std::ptr::null_mut(),
@@ -1287,7 +1526,7 @@ unsafe fn request_device(
         userdata1: (&mut device as *mut native::WGPUDevice).cast(),
         userdata2: std::ptr::null_mut(),
     };
-    let future = yawgpu::wgpuAdapterRequestDevice(adapter, std::ptr::null(), callback_info);
+    let future = yawgpu::wgpuAdapterRequestDevice(adapter, &descriptor, callback_info);
     wait(instance, future);
     assert!(!device.is_null());
     device

@@ -2381,7 +2381,10 @@ pub(super) fn validate_buffer_texture_range(
     buffer: &VulkanBuffer,
     copy: &HalBufferTextureCopy,
 ) -> Result<(), HalError> {
-    let rows = u64::from(copy.extent.height.saturating_sub(1));
+    let (_, block_width, block_height) = texture_block_info(copy);
+    let width_blocks = div_ceil_u32(copy.extent.width, block_width);
+    let height_blocks = div_ceil_u32(copy.extent.height, block_height);
+    let rows = u64::from(height_blocks.saturating_sub(1));
     let last_row = rows
         .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
         .ok_or_else(|| buffer_error("buffer texture row range overflows"))?;
@@ -2390,7 +2393,7 @@ pub(super) fn validate_buffer_texture_range(
         .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
         .and_then(|bytes| bytes.checked_mul(u64::from(copy.buffer_layout.rows_per_image)))
         .ok_or_else(|| buffer_error("buffer texture image range overflows"))?;
-    let row_bytes = u64::from(copy.extent.width)
+    let row_bytes = u64::from(width_blocks)
         .checked_mul(u64::from(texture_bytes_per_pixel(copy)?))
         .ok_or_else(|| buffer_error("buffer texture row bytes overflow"))?;
     let required = copy
@@ -2446,10 +2449,18 @@ pub(super) fn buffer_image_copy(
     aspect: vk::ImageAspectFlags,
 ) -> Result<vk::BufferImageCopy, HalError> {
     let buffer_row_length = buffer_row_length(copy.buffer_layout.bytes_per_row, bytes_per_pixel)?;
+    let buffer_row_length = buffer_row_length
+        .checked_mul(texture_block_width(copy))
+        .ok_or_else(|| buffer_error("buffer texture row length overflows"))?;
+    let buffer_image_height = copy
+        .buffer_layout
+        .rows_per_image
+        .checked_mul(texture_block_height(copy))
+        .ok_or_else(|| buffer_error("buffer texture image height overflows"))?;
     Ok(vk::BufferImageCopy::default()
         .buffer_offset(copy.buffer_layout.offset)
         .buffer_row_length(buffer_row_length)
-        .buffer_image_height(copy.buffer_layout.rows_per_image)
+        .buffer_image_height(buffer_image_height)
         .image_subresource(texture_copy_subresource_layers(
             aspect,
             texture.dimension,
@@ -2524,6 +2535,22 @@ pub(super) fn buffer_row_length(bytes_per_row: u32, bytes_per_pixel: u32) -> Res
     Ok(bytes_per_row / bytes_per_pixel)
 }
 
+fn texture_block_info(copy: &HalBufferTextureCopy) -> (u32, u32, u32) {
+    copy.format.compressed_block_info().unwrap_or((1, 1, 1))
+}
+
+fn texture_block_width(copy: &HalBufferTextureCopy) -> u32 {
+    texture_block_info(copy).1
+}
+
+fn texture_block_height(copy: &HalBufferTextureCopy) -> u32 {
+    texture_block_info(copy).2
+}
+
+fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
+    value.div_ceil(divisor)
+}
+
 /// Converts this value into image offset.
 pub(super) fn to_image_offset(x: u32, y: u32, z: u32) -> Result<vk::Offset3D, HalError> {
     Ok(vk::Offset3D {
@@ -2545,7 +2572,7 @@ pub(super) fn to_image_extent(extent: HalExtent3d) -> vk::Extent3D {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{noop, HalTextureDescriptor, HalTextureUsage};
+    use crate::{noop, HalBufferTextureLayout, HalOrigin3d, HalTextureDescriptor, HalTextureUsage};
 
     fn dummy_texture(format: HalTextureFormat) -> HalTexture {
         let device = noop::NoopDevice::new();
@@ -2714,6 +2741,57 @@ mod tests {
             aspect_bytes_per_pixel(HalTextureFormat::Unsupported, HalTextureAspect::All, 0)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn buffer_image_copy_converts_compressed_layout_from_blocks_to_texels() {
+        let device = noop::NoopDevice::new();
+        let mut texture =
+            dummy_vulkan_texture(HalTextureDimension::D2, HalTextureFormat::Bc1RgbaUnorm);
+        texture.bytes_per_pixel = 8;
+        let copy = HalBufferTextureCopy {
+            buffer: HalBuffer::Noop(device.create_buffer(
+                1024,
+                crate::HalBufferUsage {
+                    map_read: false,
+                    map_write: false,
+                    copy_src: true,
+                    copy_dst: true,
+                    index: false,
+                    vertex: false,
+                    uniform: false,
+                    storage: false,
+                    indirect: false,
+                    query_resolve: false,
+                },
+            )),
+            buffer_layout: HalBufferTextureLayout {
+                offset: 0,
+                bytes_per_row: 256,
+                rows_per_image: 2,
+            },
+            texture: HalTexture::Vulkan(texture.clone()),
+            format: HalTextureFormat::Bc1RgbaUnorm,
+            aspect: HalTextureAspect::All,
+            mip_level: 0,
+            origin: HalOrigin3d { x: 0, y: 0, z: 0 },
+            extent: HalExtent3d {
+                width: 4,
+                height: 8,
+                depth_or_array_layers: 2,
+            },
+        };
+
+        let region = buffer_image_copy(
+            &copy,
+            &texture,
+            texture_bytes_per_pixel(&copy).expect("compressed block byte size"),
+            vk::ImageAspectFlags::COLOR,
+        )
+        .expect("compressed buffer image copy");
+
+        assert_eq!(region.buffer_row_length, 128);
+        assert_eq!(region.buffer_image_height, 8);
     }
 
     #[test]

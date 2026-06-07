@@ -289,6 +289,54 @@ impl VulkanAdapter {
         !matches!(self.framebuffer_fetch_path, FramebufferFetchPath::Disabled)
     }
 
+    /// Returns true when BC texture compression is supported by this physical device.
+    #[must_use]
+    pub fn supports_texture_compression_bc(&self) -> bool {
+        unsafe {
+            self.instance
+                .instance
+                .get_physical_device_features(self.physical_device)
+                .texture_compression_bc
+                == vk::TRUE
+        }
+    }
+
+    /// Returns true when 3D BC texture compression is supported by this physical device.
+    #[must_use]
+    pub fn supports_texture_compression_bc_sliced_3d(&self) -> bool {
+        false
+    }
+
+    /// Returns true when ETC2/EAC texture compression is supported by this physical device.
+    #[must_use]
+    pub fn supports_texture_compression_etc2(&self) -> bool {
+        unsafe {
+            self.instance
+                .instance
+                .get_physical_device_features(self.physical_device)
+                .texture_compression_etc2
+                == vk::TRUE
+        }
+    }
+
+    /// Returns true when ASTC LDR texture compression is supported by this physical device.
+    #[must_use]
+    pub fn supports_texture_compression_astc(&self) -> bool {
+        unsafe {
+            self.instance
+                .instance
+                .get_physical_device_features(self.physical_device)
+                .texture_compression_astc_ldr
+                == vk::TRUE
+        }
+    }
+
+    /// Returns true when 3D ASTC texture compression is supported by this physical device.
+    #[must_use]
+    pub fn supports_texture_compression_astc_sliced_3d(&self) -> bool {
+        false
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<VulkanDevice, HalError> {
         let queue_family_index = self
