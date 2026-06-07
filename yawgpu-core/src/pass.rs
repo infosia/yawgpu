@@ -582,9 +582,24 @@ pub(crate) fn validate_vertex_buffer_oob(
                 .checked_add(instance_count)
                 .ok_or_else(|| "render pass draw instance count overflows".to_owned())?,
         };
-        let required_size = layout
-            .array_stride
-            .checked_mul(u64::from(stride_count))
+        if stride_count == 0 {
+            continue;
+        }
+        let last_stride = layout
+            .attributes
+            .iter()
+            .map(|attribute| {
+                attribute
+                    .offset
+                    .checked_add(attribute.format.info().byte_size)
+                    .ok_or_else(|| "render pass vertex buffer required size overflows".to_owned())
+            })
+            .max()
+            .transpose()?
+            .unwrap_or(0);
+        let required_size = u64::from(stride_count - 1)
+            .checked_mul(layout.array_stride)
+            .and_then(|size| size.checked_add(last_stride))
             .ok_or_else(|| "render pass vertex buffer required size overflows".to_owned())?;
         let slot = u32::try_from(slot)
             .map_err(|_| "render pipeline vertex buffer slot is too large".to_owned())?;

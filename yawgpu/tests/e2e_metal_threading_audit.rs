@@ -40,6 +40,19 @@ const RED: [u8; 4] = [255, 0, 0, 255];
 // (float-union) clear path would read back a different number.
 const INT_CLEAR: u32 = 0xDEAD_BEEF;
 
+// Over-strict audit (B#2): a compute shader writes a distinct value per array layer
+// of a 2d-array r32uint storage texture; core previously false-rejected the
+// multi-layer storage binding.
+const STORAGE_ARRAY_SHADER: &str = r#"
+@group(0) @binding(0) var img: texture_storage_2d_array<r32uint, write>;
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    textureStore(img, vec2<i32>(i32(gid.x), i32(gid.y)), i32(gid.z),
+        vec4<u32>(gid.z * 100u + 7u, 0u, 0u, 0u));
+}
+"#;
+const COPY3D_VALUE: u32 = 0x0000_ABCD;
+
 // Oversized triangle covering the whole framebuffer. In WebGPU NDC (Y up) the
 // vertex order (-1,-1),(3,-1),(-1,3) is counter-clockwise, so frontFace=CCW makes
 // it front-facing. The fragment writes storage=1 (so culling => storage stays 0)
@@ -190,6 +203,29 @@ fn metal_two_draws_one_pass_accumulate() {
     assert_eq!(
         left, GREEN,
         "first draw was wiped by the second draw's pass (render pass re-cleared between draws)"
+    );
+}
+
+/// Over-strict audit B#2: a multi-layer `2d-array` storage-texture binding must be
+/// accepted AND each layer must be written independently (compute `textureStore`
+/// per layer). Reads back distinct per-layer values.
+#[test]
+#[ignore = "manual real-backend test"]
+fn metal_storage_2d_array_binding_writes_per_layer() {
+    let (l0, l1) = run_storage_2d_array();
+    assert_eq!(l0, 7, "layer 0 storage write missing/incorrect");
+    assert_eq!(l1, 107, "layer 1 storage write missing/incorrect");
+}
+
+/// Over-strict audit B#3: a same-3D-texture `copyTextureToTexture` between DISJOINT
+/// z-slices must be accepted and execute. Fill z=0, copy z=0 → z=1, read back z=1.
+#[test]
+#[ignore = "manual real-backend test"]
+fn metal_same_3d_texture_disjoint_copy() {
+    let value = run_3d_disjoint_copy();
+    assert_eq!(
+        value, COPY3D_VALUE,
+        "3D same-texture disjoint copy did not execute"
     );
 }
 
@@ -470,6 +506,247 @@ fn run_integer_clear() -> u32 {
         yawgpu::wgpuTextureRelease(texture);
     });
     out
+}
+
+fn run_storage_2d_array() -> (u32, u32) {
+    let mut out = (0u32, 0u32);
+    with_device(|ctx| unsafe {
+        let texture = create_layered_texture(
+            ctx.device,
+            native::WGPUTextureFormat_R32Uint,
+            native::WGPUTextureUsage_StorageBinding | native::WGPUTextureUsage_CopySrc,
+            2,
+        );
+        // Default view of a 2-layer 2D texture is a 2-layer `2d-array` view.
+        let view = yawgpu::wgpuTextureCreateView(texture, std::ptr::null());
+        let module = create_wgsl_module(ctx.device, STORAGE_ARRAY_SHADER);
+        let pipeline = create_compute_pipeline(ctx.device, module);
+        let layout = yawgpu::wgpuComputePipelineGetBindGroupLayout(pipeline, 0);
+        let bind_group = create_texture_bind_group(ctx.device, layout, view);
+
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(ctx.device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuComputePassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderDispatchWorkgroups(pass, WIDTH, HEIGHT, 2);
+        yawgpu::wgpuComputePassEncoderEnd(pass);
+        yawgpu::wgpuComputePassEncoderRelease(pass);
+
+        let layer_stride = BYTES_PER_ROW as usize * HEIGHT as usize;
+        let readback = ctx.readback_buffer((layer_stride * 2) as u64);
+        copy_texture_layers(encoder, texture, readback, 2);
+        ctx.submit(encoder);
+        let bytes = read_buffer(ctx.instance, readback, layer_stride * 2);
+        out = (
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            u32::from_le_bytes([
+                bytes[layer_stride],
+                bytes[layer_stride + 1],
+                bytes[layer_stride + 2],
+                bytes[layer_stride + 3],
+            ]),
+        );
+
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuBindGroupRelease(bind_group);
+        yawgpu::wgpuBindGroupLayoutRelease(layout);
+        yawgpu::wgpuComputePipelineRelease(pipeline);
+        yawgpu::wgpuShaderModuleRelease(module);
+        yawgpu::wgpuTextureViewRelease(view);
+        yawgpu::wgpuTextureRelease(texture);
+    });
+    out
+}
+
+fn run_3d_disjoint_copy() -> u32 {
+    let mut out = 0u32;
+    with_device(|ctx| unsafe {
+        let texture = create_3d_texture(
+            ctx.device,
+            native::WGPUTextureFormat_R32Uint,
+            native::WGPUTextureUsage_CopySrc | native::WGPUTextureUsage_CopyDst,
+            2,
+        );
+        // Fill the z=0 slice with COPY3D_VALUE via queueWriteTexture.
+        let data = [COPY3D_VALUE; (WIDTH * HEIGHT) as usize];
+        let write_dst = native::WGPUTexelCopyTextureInfo {
+            texture,
+            mipLevel: 0,
+            origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+            aspect: native::WGPUTextureAspect_All,
+        };
+        let write_layout = native::WGPUTexelCopyBufferLayout {
+            offset: 0,
+            bytesPerRow: WIDTH * 4,
+            rowsPerImage: HEIGHT,
+        };
+        let slice_extent = native::WGPUExtent3D {
+            width: WIDTH,
+            height: HEIGHT,
+            depthOrArrayLayers: 1,
+        };
+        yawgpu::wgpuQueueWriteTexture(
+            ctx.queue,
+            &write_dst,
+            data.as_ptr().cast(),
+            std::mem::size_of_val(&data),
+            &write_layout,
+            &slice_extent,
+        );
+
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(ctx.device, std::ptr::null());
+        // Same texture, disjoint z: copy z=0 -> z=1.
+        let copy_src = native::WGPUTexelCopyTextureInfo {
+            texture,
+            mipLevel: 0,
+            origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+            aspect: native::WGPUTextureAspect_All,
+        };
+        let copy_dst = native::WGPUTexelCopyTextureInfo {
+            texture,
+            mipLevel: 0,
+            origin: native::WGPUOrigin3D { x: 0, y: 0, z: 1 },
+            aspect: native::WGPUTextureAspect_All,
+        };
+        yawgpu::wgpuCommandEncoderCopyTextureToTexture(
+            encoder,
+            &copy_src,
+            &copy_dst,
+            &slice_extent,
+        );
+        // Read back z=1.
+        let readback = ctx.readback_buffer(READBACK_SIZE as u64);
+        let read_src = native::WGPUTexelCopyTextureInfo {
+            texture,
+            mipLevel: 0,
+            origin: native::WGPUOrigin3D { x: 0, y: 0, z: 1 },
+            aspect: native::WGPUTextureAspect_All,
+        };
+        let read_dst = native::WGPUTexelCopyBufferInfo {
+            layout: native::WGPUTexelCopyBufferLayout {
+                offset: 0,
+                bytesPerRow: BYTES_PER_ROW,
+                rowsPerImage: HEIGHT,
+            },
+            buffer: readback,
+        };
+        yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &read_src, &read_dst, &slice_extent);
+        ctx.submit(encoder);
+        let bytes = read_buffer(ctx.instance, readback, READBACK_SIZE);
+        out = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuTextureRelease(texture);
+    });
+    out
+}
+
+unsafe fn create_layered_texture(
+    device: native::WGPUDevice,
+    format: native::WGPUTextureFormat,
+    usage: native::WGPUTextureUsage,
+    layers: u32,
+) -> native::WGPUTexture {
+    let descriptor = native::WGPUTextureDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage,
+        dimension: native::WGPUTextureDimension_2D,
+        size: native::WGPUExtent3D {
+            width: WIDTH,
+            height: HEIGHT,
+            depthOrArrayLayers: layers,
+        },
+        format,
+        mipLevelCount: 1,
+        sampleCount: 1,
+        viewFormatCount: 0,
+        viewFormats: std::ptr::null(),
+    };
+    let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+    assert!(!texture.is_null());
+    texture
+}
+
+unsafe fn create_3d_texture(
+    device: native::WGPUDevice,
+    format: native::WGPUTextureFormat,
+    usage: native::WGPUTextureUsage,
+    depth: u32,
+) -> native::WGPUTexture {
+    let descriptor = native::WGPUTextureDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage,
+        dimension: native::WGPUTextureDimension_3D,
+        size: native::WGPUExtent3D {
+            width: WIDTH,
+            height: HEIGHT,
+            depthOrArrayLayers: depth,
+        },
+        format,
+        mipLevelCount: 1,
+        sampleCount: 1,
+        viewFormatCount: 0,
+        viewFormats: std::ptr::null(),
+    };
+    let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+    assert!(!texture.is_null());
+    texture
+}
+
+unsafe fn create_texture_bind_group(
+    device: native::WGPUDevice,
+    layout: native::WGPUBindGroupLayout,
+    view: native::WGPUTextureView,
+) -> native::WGPUBindGroup {
+    let entry = native::WGPUBindGroupEntry {
+        nextInChain: std::ptr::null_mut(),
+        binding: 0,
+        buffer: std::ptr::null(),
+        offset: 0,
+        size: 0,
+        sampler: std::ptr::null(),
+        textureView: view,
+    };
+    let descriptor = native::WGPUBindGroupDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout,
+        entryCount: 1,
+        entries: &entry,
+    };
+    let bind_group = yawgpu::wgpuDeviceCreateBindGroup(device, &descriptor);
+    assert!(!bind_group.is_null());
+    bind_group
+}
+
+unsafe fn copy_texture_layers(
+    encoder: native::WGPUCommandEncoder,
+    texture: native::WGPUTexture,
+    readback: native::WGPUBuffer,
+    layers: u32,
+) {
+    let src = native::WGPUTexelCopyTextureInfo {
+        texture,
+        mipLevel: 0,
+        origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+        aspect: native::WGPUTextureAspect_All,
+    };
+    let dst = native::WGPUTexelCopyBufferInfo {
+        layout: native::WGPUTexelCopyBufferLayout {
+            offset: 0,
+            bytesPerRow: BYTES_PER_ROW,
+            rowsPerImage: HEIGHT,
+        },
+        buffer: readback,
+    };
+    let extent = native::WGPUExtent3D {
+        width: WIDTH,
+        height: HEIGHT,
+        depthOrArrayLayers: layers,
+    };
+    yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &src, &dst, &extent);
 }
 
 // ---- device context + shared helpers ----------------------------------------

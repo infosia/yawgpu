@@ -286,7 +286,6 @@ fn index_buffer_oob() {
 }
 
 #[test]
-#[ignore = "core vertex-buffer draw OOB validation does not account for CTS attribute lastStride semantics; CTS expects draw-time vertex/instance buffer bounds errors"]
 fn vertex_buffer_oob() {
     let test = ValidationTest::new();
     unsafe {

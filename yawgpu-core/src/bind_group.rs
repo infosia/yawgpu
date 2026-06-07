@@ -460,9 +460,6 @@ pub(crate) fn validate_bind_group_storage_texture(
     if texture_view.mip_level_count() != 1 {
         return Some("storage texture bindings require a single mip level".to_owned());
     }
-    if texture_view.array_layer_count() != 1 {
-        return Some("storage texture bindings require a single array layer".to_owned());
-    }
 
     None
 }
@@ -575,6 +572,91 @@ mod tests {
                 TextureViewDimension::D2,
             ),
             Some("bind group texture usage does not satisfy the layout".to_owned())
+        );
+    }
+
+    #[test]
+    fn bind_group_storage_texture_allows_2d_array_layers_but_requires_single_mip() {
+        let device = noop_device();
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: 4,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::StorageTexture {
+                    access: StorageTextureAccess::WriteOnly,
+                    format: rgba8_unorm(),
+                    view_dimension: TextureViewDimension::D2Array,
+                }),
+            }],
+            error: None,
+        }));
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::STORAGE_BINDING,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 2,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 2,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let (array_view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D2Array),
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(2),
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(error, None);
+        let group = device.create_bind_group(
+            layout.clone(),
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::TextureView {
+                    texture_view: Arc::new(array_view),
+                    device: Arc::new(device.clone()),
+                },
+            }],
+        );
+        assert!(!group.is_error());
+
+        let (multi_mip_view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D2Array),
+            base_mip_level: 0,
+            mip_level_count: Some(2),
+            base_array_layer: 0,
+            array_layer_count: Some(2),
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(error, None);
+        device.push_error_scope(ErrorFilter::Validation);
+        let error_group = device.create_bind_group(
+            layout,
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::TextureView {
+                    texture_view: Arc::new(multi_mip_view),
+                    device: Arc::new(device.clone()),
+                },
+            }],
+        );
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid bind group should be scoped");
+        assert!(error_group.is_error());
+        assert_eq!(
+            error.message,
+            "storage texture bindings require a single mip level"
         );
     }
 
