@@ -151,6 +151,8 @@ pub(crate) enum CommandExecution {
     BufferClear(BufferClearCommand),
     /// Texture copy variant.
     TextureCopy(TextureCopyCommand),
+    /// Query-set resolve variant.
+    ResolveQuerySet(ResolveQuerySetCommand),
     /// Compute pass variant.
     ComputePass(ComputePassCommand),
     /// Render pass variant.
@@ -200,7 +202,19 @@ pub(crate) struct RenderPassCommand {
     pub(crate) scissor_rect: Option<ScissorRect>,
     pub(crate) blend_constant: [f32; 4],
     pub(crate) stencil_reference: u32,
+    pub(crate) occlusion_query_set: Option<QuerySet>,
+    pub(crate) occlusion_query_index: Option<u32>,
     pub(crate) draw: Option<RenderDrawExecution>,
+}
+
+/// Stores the data needed to replay a query-set resolve.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolveQuerySetCommand {
+    pub(crate) query_set: Arc<QuerySet>,
+    pub(crate) first_query: u32,
+    pub(crate) query_count: u32,
+    pub(crate) destination: Arc<Buffer>,
+    pub(crate) destination_offset: u64,
 }
 
 /// Stores viewport state.
@@ -570,16 +584,39 @@ impl CommandEncoder {
         destination: Arc<Buffer>,
         destination_offset: u64,
     ) -> Option<String> {
-        self.record_referenced_query_set((*query_set).clone());
-        self.record_buffer_command(vec![Arc::clone(&destination)], None, None, None, || {
-            validate_resolve_query_set(
-                &query_set,
-                first_query,
-                query_count,
-                &destination,
-                destination_offset,
-            )
-        })
+        if let Err(message) = self.record_command_guard() {
+            let mut state = self.inner.state.lock();
+            if state.lifecycle == CommandEncoderLifecycle::Recording {
+                record_first_error_locked(&mut state, message);
+                return None;
+            }
+            return Some(message);
+        }
+
+        if let Err(message) = validate_resolve_query_set(
+            &query_set,
+            first_query,
+            query_count,
+            &destination,
+            destination_offset,
+        ) {
+            self.record_first_error(message);
+        } else {
+            self.record_referenced_query_set((*query_set).clone());
+            let mut state = self.inner.state.lock();
+            state.has_recorded_command = true;
+            state.referenced_buffers.push(Arc::clone(&destination));
+            state
+                .command_ops
+                .push(CommandExecution::ResolveQuerySet(ResolveQuerySetCommand {
+                    query_set,
+                    first_query,
+                    query_count,
+                    destination,
+                    destination_offset,
+                }));
+        }
+        None
     }
 
     /// Records a buffer-to-texture copy after validating layout, sizes, and usages.

@@ -94,8 +94,24 @@ Status: ☐ ◐ ☑ ✗(N/A).
 > clean; uncaptured/`assert_device_error!` path unregressed).
 
 ### P8.1 QuerySet creation (`QuerySetValidationTests`/`QueryValidationTests`)
-- **QS1** `CreateQuerySet` type ∈ {Occlusion, Timestamp}; count > 0
-  and ≤ max (4096 per Dawn). ☑ (P8.1)
+- **QS1** `CreateQuerySet` type ∈ {Occlusion, Timestamp}; count ≤ max
+  (4096 per Dawn). ☑ (P8.1) WebGPU does not require `count > 0`, so a
+  `count == 0` set is accepted as a (degenerate, unusable) set — it is
+  not rejected. On Metal the occlusion visibility-result buffer is
+  floored at 8 bytes so a `count == 0` set still yields a valid buffer
+  (`MTLDevice.newBufferWithLength` returns nil for length 0). (F-050)
+- **QS-OCC** Occlusion-query EXECUTION (F-050): an occlusion `QuerySet`
+  owns a backend `HalQuerySet` (Metal = a private visibility-result
+  `MTLBuffer` of `count*8` bytes; Noop = count; Vulkan/GLES = placeholder
+  pending slice 2). `begin/endOcclusionQuery` thread the active query
+  index onto each draw's HAL render pass (Metal:
+  `setVisibilityResultMode(Counting, index*8)`); `resolveQuerySet`
+  records a real `HalCopy::ResolveQuerySet` (Metal blit; Noop/Vulkan/GLES
+  zero-fill). **Limitation:** because each draw replays as its own HAL
+  render pass, a single occlusion query spanning multiple draws records
+  the per-draw visibility result (last writer wins, not summed); the
+  conformant single-draw case is correct. Multi-draw-in-one-query is a
+  known gap of the render-pass-per-draw model.
 - **QS2** Timestamp type requires the `timestamp-query` feature
   (HasFeature); absent ⇒ error + error QuerySet. ☑ (P8.1)
 - **QS3** `GetType`/`GetCount` reflect the descriptor; `Destroy`

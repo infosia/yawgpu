@@ -7,7 +7,8 @@ use yawgpu_hal::{
     HalBufferClear, HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout, HalBufferUsage,
     HalComputeDispatch, HalComputePass, HalCopy, HalDevice, HalDraw, HalIndexFormat, HalQueue,
     HalRenderColorTarget, HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass,
-    HalScissorRect, HalTextureAspect, HalTextureCopy, HalTextureViewDimension, HalViewport,
+    HalResolveQuerySet, HalScissorRect, HalTextureAspect, HalTextureCopy, HalTextureViewDimension,
+    HalViewport,
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
@@ -26,6 +27,7 @@ use crate::copy::*;
 use crate::error::*;
 use crate::extent::*;
 use crate::pass::*;
+use crate::query_set::QuerySet;
 use crate::render_pipeline::*;
 #[cfg(feature = "tiled")]
 use crate::subpass::*;
@@ -297,6 +299,7 @@ fn command_buffer_referenced_textures(command_buffer: &CommandBuffer) -> Vec<Tex
             }
             CommandExecution::BufferCopy(_)
             | CommandExecution::BufferClear(_)
+            | CommandExecution::ResolveQuerySet(_)
             | CommandExecution::ComputePass(_) => {}
         }
     }
@@ -365,6 +368,17 @@ pub(crate) fn hal_command_execution(op: &CommandExecution) -> Option<HalCopy> {
                 buffer,
                 offset: clear.offset,
                 size: clear.size,
+            }))
+        }
+        CommandExecution::ResolveQuerySet(resolve) => {
+            let query_set = resolve.query_set.hal()?;
+            let destination = resolve.destination.hal()?;
+            Some(HalCopy::ResolveQuerySet(HalResolveQuerySet {
+                query_set,
+                first_query: resolve.first_query,
+                query_count: resolve.query_count,
+                destination,
+                destination_offset: resolve.destination_offset,
             }))
         }
         CommandExecution::TextureCopy(copy) => hal_texture_copy_execution(copy),
@@ -740,6 +754,8 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
         scissor_rect: pass.scissor_rect.map(hal_scissor_rect),
         blend_constant: pass.blend_constant,
         stencil_reference: pass.stencil_reference & 0xFF,
+        occlusion_query_set: pass.occlusion_query_set.as_ref().and_then(QuerySet::hal),
+        occlusion_query_index: pass.occlusion_query_index,
         draw,
     }))
 }
@@ -1593,6 +1609,79 @@ fn fs() -> @location(0) vec4<f32> {
     fn render_pass_submit_masks_stencil_reference_to_stencil_bit_width() {
         assert_eq!(submitted_render_pass_stencil_reference(258), 2);
         assert_eq!(submitted_render_pass_stencil_reference(7), 7);
+    }
+
+    #[test]
+    fn occlusion_query_draw_and_resolve_reach_noop_hal() {
+        let device = noop_device();
+        let view = noop_render_attachment(&device);
+        let pipeline = Arc::new(
+            device
+                .create_render_pipeline(render_pipeline_descriptor(render_shader_module(&device))),
+        );
+        let (query_set, error) = device.create_query_set(QuerySetDescriptor {
+            label: "occlusion".to_owned(),
+            kind: QueryType::Occlusion,
+            count: 1,
+        });
+        assert_eq!(error, None);
+        let query_set = Arc::new(query_set);
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::QUERY_RESOLVE,
+            size: 256,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&noop_render_pass_descriptor(
+            view,
+            Some((*query_set).clone()),
+        ));
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.begin_occlusion_query(0), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end_occlusion_query(), None);
+        assert_eq!(pass.end(), None);
+        assert_eq!(
+            encoder.resolve_query_set(Arc::clone(&query_set), 0, 1, Arc::clone(&destination), 0),
+            None
+        );
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(finish_error, None);
+        assert!(matches!(
+            command_buffer.command_ops(),
+            [CommandExecution::RenderPass(pass), CommandExecution::ResolveQuerySet(resolve)]
+                if pass.occlusion_query_index == Some(0)
+                    && pass.occlusion_query_set.as_ref().is_some_and(|set| set.same(&query_set))
+                    && resolve.query_set.same(&query_set)
+                    && resolve.destination.same(&destination)
+                    && resolve.first_query == 0
+                    && resolve.query_count == 1
+                    && resolve.destination_offset == 0
+        ));
+
+        assert_eq!(device.queue().submit(&[Arc::new(command_buffer)]), None);
+        let submitted = match device.queue().hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => Vec::new(),
+        };
+        let mut saw_render_query_index = false;
+        let mut resolve_destination = None;
+        for copy in submitted {
+            match copy {
+                HalCopy::RenderPass(pass) => {
+                    saw_render_query_index |=
+                        pass.occlusion_query_index == Some(0) && pass.occlusion_query_set.is_some();
+                }
+                HalCopy::ResolveQuerySet(resolve) => {
+                    resolve_destination = Some(resolve.destination);
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_render_query_index);
+        let destination = resolve_destination.expect("query resolve should be submitted");
+        assert_eq!(destination.read(0, 8).expect("read resolved bytes"), [0; 8]);
     }
 
     #[test]

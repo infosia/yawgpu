@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use yawgpu_hal::HalQuerySet;
 
 use crate::adapter::*;
 use crate::device::*;
@@ -72,6 +73,7 @@ pub(crate) struct QuerySetInner {
     pub(crate) label: Mutex<String>,
     pub(crate) kind: QueryType,
     pub(crate) count: u32,
+    pub(crate) hal: Option<HalQuerySet>,
     pub(crate) state: Mutex<QuerySetState>,
 }
 
@@ -84,12 +86,17 @@ pub(crate) struct QuerySetState {
 
 impl QuerySet {
     /// Creates a new instance.
-    pub(crate) fn new(descriptor: QuerySetDescriptor, is_error: bool) -> Self {
+    pub(crate) fn new(
+        descriptor: QuerySetDescriptor,
+        is_error: bool,
+        hal: Option<HalQuerySet>,
+    ) -> Self {
         Self {
             inner: Arc::new(QuerySetInner {
                 label: Mutex::new(descriptor.label),
                 kind: descriptor.kind,
                 count: descriptor.count,
+                hal,
                 state: Mutex::new(QuerySetState {
                     is_error,
                     is_destroyed: false,
@@ -108,6 +115,11 @@ impl QuerySet {
     #[must_use]
     pub fn count(&self) -> u32 {
         self.inner.count
+    }
+
+    /// Returns the HAL query set.
+    pub(crate) fn hal(&self) -> Option<HalQuerySet> {
+        self.inner.hal.clone()
     }
 
     /// Sets label on this object or encoder.
@@ -186,6 +198,7 @@ mod tests {
         assert_eq!(other_error, None);
         assert_eq!(query_set.kind(), QueryType::Occlusion);
         assert_eq!(query_set.count(), 4);
+        assert!(query_set.hal().is_some());
         assert!(!query_set.is_error());
         assert!(query_set.same(&clone));
         assert!(!query_set.same(&other));
@@ -204,6 +217,7 @@ mod tests {
             count: MAX_QUERY_COUNT + 1,
         });
         assert!(error_query_set.is_error());
+        assert!(error_query_set.hal().is_none());
         assert_eq!(
             error,
             Some("query set count exceeds the maximum query count".to_owned())

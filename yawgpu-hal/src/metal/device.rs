@@ -80,6 +80,20 @@ impl MetalDevice {
         }
     }
 
+    /// Creates a query set matching the given kind and count.
+    pub fn create_query_set(
+        &self,
+        kind: HalQueryKind,
+        count: u32,
+    ) -> Result<MetalQuerySet, HalError> {
+        match kind {
+            HalQueryKind::Occlusion => {
+                self.allocations.fetch_add(1, Ordering::Relaxed);
+                MetalQuerySet::new(&self.device, count)
+            }
+        }
+    }
+
     /// Creates a transient attachment matching the given concrete descriptor.
     #[cfg(feature = "tiled")]
     pub fn create_transient_attachment(

@@ -44,6 +44,39 @@ pub(super) fn encode_buffer_clear(
     Ok(())
 }
 
+/// Records query-set resolve encode into the command stream.
+pub(super) fn encode_resolve_query_set(
+    blit: &ProtocolObject<dyn MTLBlitCommandEncoder>,
+    resolve: &HalResolveQuerySet,
+) -> Result<(), HalError> {
+    let HalQuerySet::Metal(query_set) = &resolve.query_set else {
+        return Err(buffer_error("query set is not Metal-backed"));
+    };
+    let HalBuffer::Metal(destination) = &resolve.destination else {
+        return Err(buffer_error(
+            "query resolve destination is not Metal-backed",
+        ));
+    };
+    let source_offset = u64::from(resolve.first_query)
+        .checked_mul(8)
+        .ok_or_else(|| buffer_error("query resolve source offset overflows"))?;
+    let size = u64::from(resolve.query_count)
+        .checked_mul(8)
+        .ok_or_else(|| buffer_error("query resolve byte count overflows"))?;
+    query_set.buffer.validate_range(source_offset, size)?;
+    destination.validate_range(resolve.destination_offset, size)?;
+    unsafe {
+        blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+            query_set.buffer()?,
+            to_ns(source_offset)?,
+            destination.inner()?,
+            to_ns(resolve.destination_offset)?,
+            to_ns(size)?,
+        );
+    }
+    Ok(())
+}
+
 /// Records encode into the command stream.
 pub(super) fn encode_buffer_to_texture(
     blit: &ProtocolObject<dyn MTLBlitCommandEncoder>,
@@ -509,6 +542,13 @@ pub(super) fn render_pass_descriptor(
             stencil_attachment.setClearStencil(depth_stencil.stencil_clear_value);
         }
     }
+    match &pass.occlusion_query_set {
+        Some(HalQuerySet::Metal(query_set)) => {
+            descriptor.setVisibilityResultBuffer(Some(query_set.buffer()?));
+        }
+        Some(_) => return Err(buffer_error("occlusion query set is not Metal-backed")),
+        None => {}
+    }
     Ok(descriptor)
 }
 
@@ -771,6 +811,14 @@ pub(super) fn encode_render_pass(
         pass.blend_constant[3],
     );
     encoder.setStencilReferenceValue(pass.stencil_reference);
+    if let Some(query_index) = pass.occlusion_query_index {
+        encoder.setVisibilityResultMode_offset(
+            MTLVisibilityResultMode::Counting,
+            to_ns(u64::from(query_index) * 8)?,
+        );
+    } else {
+        encoder.setVisibilityResultMode_offset(MTLVisibilityResultMode::Disabled, 0);
+    }
     for binding in &pass.bind_buffers {
         encode_render_bind_buffer(encoder, binding)?;
     }

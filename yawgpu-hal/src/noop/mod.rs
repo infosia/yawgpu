@@ -1,7 +1,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::{HalBufferUsage, HalCopy, HalError, HalTextureDescriptor, HalTextureDimension};
+use crate::{
+    HalBufferUsage, HalCopy, HalError, HalQueryKind, HalTextureDescriptor, HalTextureDimension,
+};
 
 /// Stores noop instance data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -87,7 +89,14 @@ impl NoopDevice {
     #[must_use]
     pub fn create_buffer(&self, size: u64, _usage: HalBufferUsage) -> NoopBuffer {
         self.allocations.fetch_add(1, Ordering::Relaxed);
-        NoopBuffer { size }
+        NoopBuffer::new(size)
+    }
+
+    /// Creates a query set of the given kind and count.
+    #[must_use]
+    pub fn create_query_set(&self, _kind: HalQueryKind, count: u32) -> u32 {
+        self.allocations.fetch_add(1, Ordering::Relaxed);
+        count
     }
 
     /// Creates a texture matching the given descriptor.
@@ -143,6 +152,15 @@ impl NoopQueue {
 
     /// Records submitted copy commands for Noop unit-test inspection.
     pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
+        for copy in copies {
+            if let HalCopy::ResolveQuerySet(resolve) = copy {
+                let byte_count = resolve_query_byte_count(resolve.query_count)?;
+                let zeros = vec![0; byte_count];
+                resolve
+                    .destination
+                    .write(resolve.destination_offset, &zeros)?;
+            }
+        }
         self.submitted_copies
             .lock()
             .map_err(|_| HalError::QueueSubmissionFailed { backend: "noop" })?
@@ -175,13 +193,71 @@ impl Default for NoopQueue {
 #[derive(Debug, Clone)]
 pub struct NoopBuffer {
     size: u64,
+    data: Arc<Mutex<Vec<u8>>>,
 }
 
 impl NoopBuffer {
+    /// Creates a new noop buffer with zero-initialized storage.
+    #[must_use]
+    pub fn new(size: u64) -> Self {
+        let len = usize::try_from(size).unwrap_or(0);
+        Self {
+            size,
+            data: Arc::new(Mutex::new(vec![0; len])),
+        }
+    }
+
     /// Returns the size.
     #[must_use]
     pub fn size(&self) -> u64 {
         self.size
+    }
+
+    /// Writes bytes into the buffer.
+    pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), HalError> {
+        let end = validate_noop_buffer_range(self.size, offset, data.len() as u64)?;
+        let offset = usize::try_from(offset).map_err(|_| HalError::BufferOperationFailed {
+            backend: "noop",
+            message: "buffer offset is too large",
+        })?;
+        let mut storage = self
+            .data
+            .lock()
+            .map_err(|_| HalError::BufferOperationFailed {
+                backend: "noop",
+                message: "buffer storage lock failed",
+            })?;
+        if end > storage.len() {
+            return Err(HalError::BufferOperationFailed {
+                backend: "noop",
+                message: "buffer storage is too small for range",
+            });
+        }
+        storage[offset..end].copy_from_slice(data);
+        Ok(())
+    }
+
+    /// Reads bytes from the buffer.
+    pub fn read(&self, offset: u64, len: u64) -> Result<Vec<u8>, HalError> {
+        let end = validate_noop_buffer_range(self.size, offset, len)?;
+        let offset = usize::try_from(offset).map_err(|_| HalError::BufferOperationFailed {
+            backend: "noop",
+            message: "buffer offset is too large",
+        })?;
+        let storage = self
+            .data
+            .lock()
+            .map_err(|_| HalError::BufferOperationFailed {
+                backend: "noop",
+                message: "buffer storage lock failed",
+            })?;
+        if end > storage.len() {
+            return Err(HalError::BufferOperationFailed {
+                backend: "noop",
+                message: "buffer storage is too small for range",
+            });
+        }
+        Ok(storage[offset..end].to_vec())
     }
 
     /// Returns mapped ptr.
@@ -189,6 +265,32 @@ impl NoopBuffer {
     pub fn mapped_ptr(&self) -> Option<std::ptr::NonNull<u8>> {
         None
     }
+}
+
+fn resolve_query_byte_count(query_count: u32) -> Result<usize, HalError> {
+    usize::try_from(u64::from(query_count) * 8).map_err(|_| HalError::BufferOperationFailed {
+        backend: "noop",
+        message: "query resolve byte count is too large",
+    })
+}
+
+fn validate_noop_buffer_range(size: u64, offset: u64, len: u64) -> Result<usize, HalError> {
+    let end = offset
+        .checked_add(len)
+        .ok_or(HalError::BufferOperationFailed {
+            backend: "noop",
+            message: "buffer range overflows",
+        })?;
+    if end > size {
+        return Err(HalError::BufferOperationFailed {
+            backend: "noop",
+            message: "buffer range exceeds buffer size",
+        });
+    }
+    usize::try_from(end).map_err(|_| HalError::BufferOperationFailed {
+        backend: "noop",
+        message: "buffer range is too large",
+    })
 }
 
 /// Stores noop texture data used by validation and backend submission.

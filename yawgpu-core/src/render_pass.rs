@@ -317,6 +317,8 @@ impl RenderPassEncoder {
                 scissor_rect: state.scissor_rect,
                 blend_constant: state.blend_constant,
                 stencil_reference: state.stencil_reference,
+                occlusion_query_set: state.occlusion_query_set.clone(),
+                occlusion_query_index: state.open_occlusion_query,
                 draw: Some(RenderDrawExecution::Direct {
                     vertex_count,
                     instance_count,
@@ -380,6 +382,8 @@ impl RenderPassEncoder {
                 scissor_rect: state.scissor_rect,
                 blend_constant: state.blend_constant,
                 stencil_reference: state.stencil_reference,
+                occlusion_query_set: state.occlusion_query_set.clone(),
+                occlusion_query_index: state.open_occlusion_query,
                 draw: Some(RenderDrawExecution::Indexed {
                     index_count,
                     instance_count,
@@ -435,6 +439,8 @@ impl RenderPassEncoder {
                 scissor_rect: state.scissor_rect,
                 blend_constant: state.blend_constant,
                 stencil_reference: state.stencil_reference,
+                occlusion_query_set: state.occlusion_query_set.clone(),
+                occlusion_query_index: state.open_occlusion_query,
                 draw: Some(RenderDrawExecution::Indirect {
                     offset: indirect_offset,
                 }),
@@ -495,6 +501,8 @@ impl RenderPassEncoder {
                 scissor_rect: state.scissor_rect,
                 blend_constant: state.blend_constant,
                 stencil_reference: state.stencil_reference,
+                occlusion_query_set: state.occlusion_query_set.clone(),
+                occlusion_query_index: state.open_occlusion_query,
                 draw: Some(RenderDrawExecution::IndexedIndirect {
                     offset: indirect_offset,
                 }),
@@ -619,6 +627,8 @@ impl RenderPassEncoder {
                         scissor_rect: state.scissor_rect,
                         blend_constant: state.blend_constant,
                         stencil_reference: state.stencil_reference,
+                        occlusion_query_set: state.occlusion_query_set.clone(),
+                        occlusion_query_index: state.open_occlusion_query,
                         draw: Some(draw.draw),
                     });
                 }

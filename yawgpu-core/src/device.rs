@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use yawgpu_hal::HalDevice;
+use yawgpu_hal::{HalDevice, HalQueryKind};
 
 use crate::adapter::*;
 use crate::bind_group::*;
@@ -109,14 +109,32 @@ impl Device {
     #[must_use]
     pub fn create_query_set(&self, descriptor: QuerySetDescriptor) -> (QuerySet, Option<String>) {
         if self.is_lost() {
-            return (QuerySet::new(descriptor, true), None);
+            return (QuerySet::new(descriptor, true, None), None);
         }
         let error = validate_query_set_descriptor(&descriptor, &self.inner.features);
-        let is_error = error.is_some();
-        (
-            QuerySet::new(descriptor, is_error),
-            error.map(str::to_owned),
-        )
+        if let Some(error) = error {
+            return (
+                QuerySet::new(descriptor, true, None),
+                Some(error.to_owned()),
+            );
+        }
+        let hal = match descriptor.kind {
+            QueryType::Occlusion => match self
+                .inner
+                .hal
+                .create_query_set(HalQueryKind::Occlusion, descriptor.count)
+            {
+                Ok(hal) => Some(hal),
+                Err(error) => {
+                    return (
+                        QuerySet::new(descriptor, true, None),
+                        Some(error.to_string()),
+                    );
+                }
+            },
+            QueryType::Timestamp | QueryType::Unknown(_) => None,
+        };
+        (QuerySet::new(descriptor, false, hal), None)
     }
 
     /// Returns true when both handles share the same backing object.
