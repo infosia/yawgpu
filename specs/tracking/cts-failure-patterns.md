@@ -53,14 +53,20 @@ GPU effect of a non-default value on a real backend — which is exactly what th
   (both over- and under-strict); later findings (F-025..F-043) shifted to EXECUTION bugs (threading /
   backend). Once validation became conformant, the gaps moved downstream.
 
-## Audit status
+## Audit status — ALL SWEPT
 
-- **Swept:** 1b (threading audit, commit `de4a99f`/`f82c2d6`), 1c (narrowing audit, commit `73dbf38`).
-- **Not yet swept (proactive audits to run, A→B→C):**
-  - **A — 1a execution-gap:** every command/op recorded by `yawgpu-core` must emit a HAL command at submit
-    (no silent no-op path); walk every `CommandExecution` / pass-command / queue-op variant + each backend's
-    submit/encode handling. Highest expected impact.
-  - **B — over-strict validation + encoder-poisoning:** find validation rules stricter than the WebGPU spec
-    (false-rejects), and audit whether a single invalid op over-poisons the command buffer beyond spec.
-  - **C — format-table completeness:** every WebGPU-required format present + correctly classified
-    (renderable / multisample / storage / filterable / copy / blendable) across the core + HAL tables.
+- **1b** threading audit — commit `de4a99f` / `f82c2d6`.
+- **1c** narrowing audit — commit `73dbf38`. Ledger `narrowing-audit.md`.
+- **A — execution-gap (1a)** — commit `7f42d19`. Ledger `execution-gap-audit.md`. Found the SEVERE multi-draw
+  re-clear (a render pass with ≥2 draws re-cleared/discarded between draws — only the last survived) + GLES
+  render texture/sampler bindings silently ignored. (Documented-deferred: `wgpuCommandEncoderWriteBuffer`
+  stub, occlusion/timestamp queries.)
+- **B — over-strict validation** — commit `adc6b97`. Ledger `overstrict-audit.md`. Fixed vertex-buffer draw
+  OOB (`lastStride`), storage `2d-array` layer false-reject, 3D same-texture disjoint-z copy false-reject.
+  (Encoder-poisoning confirmed spec-correct.)
+- **C — format-table completeness** — commit `6e288d6`. Ledger `format-completeness-audit.md`. Table was
+  complete (0 missing); fixed rgb10a2unorm `has_alpha`; IMPLEMENTED BC/ETC2/ASTC compressed formats with
+  per-device feature gating (was advertised-but-unbacked). (Deferred: GLES + sliced-3d compressed
+  advertisement; tier2 read-write-storage breadth.)
+
+All real-GPU verified on Metal + Vulkan/MoltenVK; each had a Clean Review with no open CRITICAL/MAJOR.
