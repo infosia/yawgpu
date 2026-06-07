@@ -22,7 +22,20 @@ instances.
   WebGPU `texture-formats-tier2` spec may extend read-write storage to a broader set (rg32*, rgba32*,
   rgba16*, rgba8*). Impl+test self-consistent → low confidence; confirm against current spec before changing.
 
-## Fix (this slice)
-- #1 (rgb10a2unorm `.alpha()`): add `.alpha()` to the `RGB10A2_UNORM` caps so alpha-to-coverage pipelines
-  targeting it are accepted. (Add a Noop unit test; the alpha-to-coverage validation path is exercised.)
-- #2 (compression over-advertisement): scope decided by the user (see below).
+## RESOLVED (commit pending push)
+- **#1 rgb10a2unorm** now sets `.alpha()`; alpha-to-coverage pipeline targeting it accepted (Noop unit).
+- **#2 compressed formats IMPLEMENTED** (user chose implement): `HalTextureFormat` variants for BC1–BC7 /
+  ETC2+EAC / ASTC LDR (+sRGB); `hal_texture_format` arms; Vulkan + Metal native mappings (correct block byte
+  sizes); GLES constant mappings (advertises nothing yet → deferred). **Per-device feature gating** (the
+  conformance fix): `supported_features()` no longer advertises compression unconditionally;
+  `Adapter::features()` adds each family iff the device supports it AND it's implemented (Vulkan
+  `vkGetPhysicalDeviceFeatures`; Metal `supportsBCTextureCompression`+`supportsFamily(Apple2)`; GLES false;
+  Noop true). Compressed B2T/T2B copies use block sizing (incl. the Round-2 Vulkan `bufferImageHeight`
+  block→texel fix for multi-layer copies). Sliced-3d + GLES advertisement deferred.
+- **Verified real-GPU Metal + Vulkan/MoltenVK:** BC1/ETC2/ASTC single-block create+writeTexture+T2B
+  round-trip, and a **2-layer** BC1 round-trip (the multi-layer probe that caught the Round-2
+  `bufferImageHeight` MAJOR — per-layer block correct after the fix). 13→14 e2e probes per backend green; no
+  regression. Noop unit tests (rgb10a2 alpha, gating, copy-block, Vulkan layout conversion). Clean Review:
+  no CRITICAL/MAJOR after the Round-2 fix.
+- **Ambiguous (still deferred):** tier2 read-write-storage breadth (impl + CTS port agree; needs spec
+  confirmation).

@@ -18,7 +18,10 @@ pub(super) fn validate_buffer_texture_range(
     buffer: &MetalBuffer,
     copy: &HalBufferTextureCopy,
 ) -> Result<(), HalError> {
-    let rows = u64::from(copy.extent.height.saturating_sub(1));
+    let (_, block_width, block_height) = copy.format.compressed_block_info().unwrap_or((1, 1, 1));
+    let width_blocks = copy.extent.width.div_ceil(block_width);
+    let height_blocks = copy.extent.height.div_ceil(block_height);
+    let rows = u64::from(height_blocks.saturating_sub(1));
     let last_row = rows
         .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
         .ok_or_else(|| buffer_error("buffer texture row range overflows"))?;
@@ -27,7 +30,7 @@ pub(super) fn validate_buffer_texture_range(
         .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
         .and_then(|bytes| bytes.checked_mul(u64::from(copy.buffer_layout.rows_per_image)))
         .ok_or_else(|| buffer_error("buffer texture image range overflows"))?;
-    let row_bytes = u64::from(copy.extent.width)
+    let row_bytes = u64::from(width_blocks)
         .checked_mul(u64::from(texture_bytes_per_pixel(copy)?))
         .ok_or_else(|| buffer_error("buffer texture row bytes overflow"))?;
     let required = copy
@@ -166,6 +169,58 @@ pub(super) fn map_texture_format(
         HalTextureFormat::Depth24PlusStencil8 => Ok((MTLPixelFormat::Depth32Float_Stencil8, 5)),
         HalTextureFormat::Depth32Float => Ok((MTLPixelFormat::Depth32Float, 4)),
         HalTextureFormat::Depth32FloatStencil8 => Ok((MTLPixelFormat::Depth32Float_Stencil8, 5)),
+        HalTextureFormat::Bc1RgbaUnorm => Ok((MTLPixelFormat::BC1_RGBA, 8)),
+        HalTextureFormat::Bc1RgbaUnormSrgb => Ok((MTLPixelFormat::BC1_RGBA_sRGB, 8)),
+        HalTextureFormat::Bc2RgbaUnorm => Ok((MTLPixelFormat::BC2_RGBA, 16)),
+        HalTextureFormat::Bc2RgbaUnormSrgb => Ok((MTLPixelFormat::BC2_RGBA_sRGB, 16)),
+        HalTextureFormat::Bc3RgbaUnorm => Ok((MTLPixelFormat::BC3_RGBA, 16)),
+        HalTextureFormat::Bc3RgbaUnormSrgb => Ok((MTLPixelFormat::BC3_RGBA_sRGB, 16)),
+        HalTextureFormat::Bc4RUnorm => Ok((MTLPixelFormat::BC4_RUnorm, 8)),
+        HalTextureFormat::Bc4RSnorm => Ok((MTLPixelFormat::BC4_RSnorm, 8)),
+        HalTextureFormat::Bc5RgUnorm => Ok((MTLPixelFormat::BC5_RGUnorm, 16)),
+        HalTextureFormat::Bc5RgSnorm => Ok((MTLPixelFormat::BC5_RGSnorm, 16)),
+        HalTextureFormat::Bc6hRgbUfloat => Ok((MTLPixelFormat::BC6H_RGBUfloat, 16)),
+        HalTextureFormat::Bc6hRgbFloat => Ok((MTLPixelFormat::BC6H_RGBFloat, 16)),
+        HalTextureFormat::Bc7RgbaUnorm => Ok((MTLPixelFormat::BC7_RGBAUnorm, 16)),
+        HalTextureFormat::Bc7RgbaUnormSrgb => Ok((MTLPixelFormat::BC7_RGBAUnorm_sRGB, 16)),
+        HalTextureFormat::Etc2Rgb8Unorm => Ok((MTLPixelFormat::ETC2_RGB8, 8)),
+        HalTextureFormat::Etc2Rgb8UnormSrgb => Ok((MTLPixelFormat::ETC2_RGB8_sRGB, 8)),
+        HalTextureFormat::Etc2Rgb8a1Unorm => Ok((MTLPixelFormat::ETC2_RGB8A1, 8)),
+        HalTextureFormat::Etc2Rgb8a1UnormSrgb => Ok((MTLPixelFormat::ETC2_RGB8A1_sRGB, 8)),
+        HalTextureFormat::Etc2Rgba8Unorm => Ok((MTLPixelFormat::EAC_RGBA8, 16)),
+        HalTextureFormat::Etc2Rgba8UnormSrgb => Ok((MTLPixelFormat::EAC_RGBA8_sRGB, 16)),
+        HalTextureFormat::EacR11Unorm => Ok((MTLPixelFormat::EAC_R11Unorm, 8)),
+        HalTextureFormat::EacR11Snorm => Ok((MTLPixelFormat::EAC_R11Snorm, 8)),
+        HalTextureFormat::EacRg11Unorm => Ok((MTLPixelFormat::EAC_RG11Unorm, 16)),
+        HalTextureFormat::EacRg11Snorm => Ok((MTLPixelFormat::EAC_RG11Snorm, 16)),
+        HalTextureFormat::Astc4x4Unorm => Ok((MTLPixelFormat::ASTC_4x4_LDR, 16)),
+        HalTextureFormat::Astc4x4UnormSrgb => Ok((MTLPixelFormat::ASTC_4x4_sRGB, 16)),
+        HalTextureFormat::Astc5x4Unorm => Ok((MTLPixelFormat::ASTC_5x4_LDR, 16)),
+        HalTextureFormat::Astc5x4UnormSrgb => Ok((MTLPixelFormat::ASTC_5x4_sRGB, 16)),
+        HalTextureFormat::Astc5x5Unorm => Ok((MTLPixelFormat::ASTC_5x5_LDR, 16)),
+        HalTextureFormat::Astc5x5UnormSrgb => Ok((MTLPixelFormat::ASTC_5x5_sRGB, 16)),
+        HalTextureFormat::Astc6x5Unorm => Ok((MTLPixelFormat::ASTC_6x5_LDR, 16)),
+        HalTextureFormat::Astc6x5UnormSrgb => Ok((MTLPixelFormat::ASTC_6x5_sRGB, 16)),
+        HalTextureFormat::Astc6x6Unorm => Ok((MTLPixelFormat::ASTC_6x6_LDR, 16)),
+        HalTextureFormat::Astc6x6UnormSrgb => Ok((MTLPixelFormat::ASTC_6x6_sRGB, 16)),
+        HalTextureFormat::Astc8x5Unorm => Ok((MTLPixelFormat::ASTC_8x5_LDR, 16)),
+        HalTextureFormat::Astc8x5UnormSrgb => Ok((MTLPixelFormat::ASTC_8x5_sRGB, 16)),
+        HalTextureFormat::Astc8x6Unorm => Ok((MTLPixelFormat::ASTC_8x6_LDR, 16)),
+        HalTextureFormat::Astc8x6UnormSrgb => Ok((MTLPixelFormat::ASTC_8x6_sRGB, 16)),
+        HalTextureFormat::Astc8x8Unorm => Ok((MTLPixelFormat::ASTC_8x8_LDR, 16)),
+        HalTextureFormat::Astc8x8UnormSrgb => Ok((MTLPixelFormat::ASTC_8x8_sRGB, 16)),
+        HalTextureFormat::Astc10x5Unorm => Ok((MTLPixelFormat::ASTC_10x5_LDR, 16)),
+        HalTextureFormat::Astc10x5UnormSrgb => Ok((MTLPixelFormat::ASTC_10x5_sRGB, 16)),
+        HalTextureFormat::Astc10x6Unorm => Ok((MTLPixelFormat::ASTC_10x6_LDR, 16)),
+        HalTextureFormat::Astc10x6UnormSrgb => Ok((MTLPixelFormat::ASTC_10x6_sRGB, 16)),
+        HalTextureFormat::Astc10x8Unorm => Ok((MTLPixelFormat::ASTC_10x8_LDR, 16)),
+        HalTextureFormat::Astc10x8UnormSrgb => Ok((MTLPixelFormat::ASTC_10x8_sRGB, 16)),
+        HalTextureFormat::Astc10x10Unorm => Ok((MTLPixelFormat::ASTC_10x10_LDR, 16)),
+        HalTextureFormat::Astc10x10UnormSrgb => Ok((MTLPixelFormat::ASTC_10x10_sRGB, 16)),
+        HalTextureFormat::Astc12x10Unorm => Ok((MTLPixelFormat::ASTC_12x10_LDR, 16)),
+        HalTextureFormat::Astc12x10UnormSrgb => Ok((MTLPixelFormat::ASTC_12x10_sRGB, 16)),
+        HalTextureFormat::Astc12x12Unorm => Ok((MTLPixelFormat::ASTC_12x12_LDR, 16)),
+        HalTextureFormat::Astc12x12UnormSrgb => Ok((MTLPixelFormat::ASTC_12x12_sRGB, 16)),
         HalTextureFormat::Unsupported => Err(texture_error("unsupported texture format")),
     }
 }

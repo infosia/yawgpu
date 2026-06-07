@@ -793,6 +793,58 @@ pub(crate) fn hal_texture_format(format: TextureFormat) -> HalTextureFormat {
         TextureFormat::DEPTH24_PLUS_STENCIL8 => HalTextureFormat::Depth24PlusStencil8,
         TextureFormat::DEPTH32_FLOAT => HalTextureFormat::Depth32Float,
         TextureFormat::DEPTH32_FLOAT_STENCIL8 => HalTextureFormat::Depth32FloatStencil8,
+        TextureFormat::BC1_RGBA_UNORM => HalTextureFormat::Bc1RgbaUnorm,
+        TextureFormat::BC1_RGBA_UNORM_SRGB => HalTextureFormat::Bc1RgbaUnormSrgb,
+        TextureFormat::BC2_RGBA_UNORM => HalTextureFormat::Bc2RgbaUnorm,
+        TextureFormat::BC2_RGBA_UNORM_SRGB => HalTextureFormat::Bc2RgbaUnormSrgb,
+        TextureFormat::BC3_RGBA_UNORM => HalTextureFormat::Bc3RgbaUnorm,
+        TextureFormat::BC3_RGBA_UNORM_SRGB => HalTextureFormat::Bc3RgbaUnormSrgb,
+        TextureFormat::BC4_R_UNORM => HalTextureFormat::Bc4RUnorm,
+        TextureFormat::BC4_R_SNORM => HalTextureFormat::Bc4RSnorm,
+        TextureFormat::BC5_RG_UNORM => HalTextureFormat::Bc5RgUnorm,
+        TextureFormat::BC5_RG_SNORM => HalTextureFormat::Bc5RgSnorm,
+        TextureFormat::BC6H_RGB_UFLOAT => HalTextureFormat::Bc6hRgbUfloat,
+        TextureFormat::BC6H_RGB_FLOAT => HalTextureFormat::Bc6hRgbFloat,
+        TextureFormat::BC7_RGBA_UNORM => HalTextureFormat::Bc7RgbaUnorm,
+        TextureFormat::BC7_RGBA_UNORM_SRGB => HalTextureFormat::Bc7RgbaUnormSrgb,
+        TextureFormat::ETC2_RGB8_UNORM => HalTextureFormat::Etc2Rgb8Unorm,
+        TextureFormat::ETC2_RGB8_UNORM_SRGB => HalTextureFormat::Etc2Rgb8UnormSrgb,
+        TextureFormat::ETC2_RGB8A1_UNORM => HalTextureFormat::Etc2Rgb8a1Unorm,
+        TextureFormat::ETC2_RGB8A1_UNORM_SRGB => HalTextureFormat::Etc2Rgb8a1UnormSrgb,
+        TextureFormat::ETC2_RGBA8_UNORM => HalTextureFormat::Etc2Rgba8Unorm,
+        TextureFormat::ETC2_RGBA8_UNORM_SRGB => HalTextureFormat::Etc2Rgba8UnormSrgb,
+        TextureFormat::EAC_R11_UNORM => HalTextureFormat::EacR11Unorm,
+        TextureFormat::EAC_R11_SNORM => HalTextureFormat::EacR11Snorm,
+        TextureFormat::EAC_RG11_UNORM => HalTextureFormat::EacRg11Unorm,
+        TextureFormat::EAC_RG11_SNORM => HalTextureFormat::EacRg11Snorm,
+        TextureFormat::ASTC4X4_UNORM => HalTextureFormat::Astc4x4Unorm,
+        TextureFormat::ASTC4X4_UNORM_SRGB => HalTextureFormat::Astc4x4UnormSrgb,
+        TextureFormat::ASTC5X4_UNORM => HalTextureFormat::Astc5x4Unorm,
+        TextureFormat::ASTC5X4_UNORM_SRGB => HalTextureFormat::Astc5x4UnormSrgb,
+        TextureFormat::ASTC5X5_UNORM => HalTextureFormat::Astc5x5Unorm,
+        TextureFormat::ASTC5X5_UNORM_SRGB => HalTextureFormat::Astc5x5UnormSrgb,
+        TextureFormat::ASTC6X5_UNORM => HalTextureFormat::Astc6x5Unorm,
+        TextureFormat::ASTC6X5_UNORM_SRGB => HalTextureFormat::Astc6x5UnormSrgb,
+        TextureFormat::ASTC6X6_UNORM => HalTextureFormat::Astc6x6Unorm,
+        TextureFormat::ASTC6X6_UNORM_SRGB => HalTextureFormat::Astc6x6UnormSrgb,
+        TextureFormat::ASTC8X5_UNORM => HalTextureFormat::Astc8x5Unorm,
+        TextureFormat::ASTC8X5_UNORM_SRGB => HalTextureFormat::Astc8x5UnormSrgb,
+        TextureFormat::ASTC8X6_UNORM => HalTextureFormat::Astc8x6Unorm,
+        TextureFormat::ASTC8X6_UNORM_SRGB => HalTextureFormat::Astc8x6UnormSrgb,
+        TextureFormat::ASTC8X8_UNORM => HalTextureFormat::Astc8x8Unorm,
+        TextureFormat::ASTC8X8_UNORM_SRGB => HalTextureFormat::Astc8x8UnormSrgb,
+        TextureFormat::ASTC10X5_UNORM => HalTextureFormat::Astc10x5Unorm,
+        TextureFormat::ASTC10X5_UNORM_SRGB => HalTextureFormat::Astc10x5UnormSrgb,
+        TextureFormat::ASTC10X6_UNORM => HalTextureFormat::Astc10x6Unorm,
+        TextureFormat::ASTC10X6_UNORM_SRGB => HalTextureFormat::Astc10x6UnormSrgb,
+        TextureFormat::ASTC10X8_UNORM => HalTextureFormat::Astc10x8Unorm,
+        TextureFormat::ASTC10X8_UNORM_SRGB => HalTextureFormat::Astc10x8UnormSrgb,
+        TextureFormat::ASTC10X10_UNORM => HalTextureFormat::Astc10x10Unorm,
+        TextureFormat::ASTC10X10_UNORM_SRGB => HalTextureFormat::Astc10x10UnormSrgb,
+        TextureFormat::ASTC12X10_UNORM => HalTextureFormat::Astc12x10Unorm,
+        TextureFormat::ASTC12X10_UNORM_SRGB => HalTextureFormat::Astc12x10UnormSrgb,
+        TextureFormat::ASTC12X12_UNORM => HalTextureFormat::Astc12x12Unorm,
+        TextureFormat::ASTC12X12_UNORM_SRGB => HalTextureFormat::Astc12x12UnormSrgb,
         _ => HalTextureFormat::Unsupported,
     }
 }
@@ -895,6 +947,182 @@ mod tests {
             (TextureFormat::RGBA32_UINT, HalTextureFormat::Rgba32Uint),
             (TextureFormat::RGBA32_SINT, HalTextureFormat::Rgba32Sint),
             (TextureFormat::RGBA32_FLOAT, HalTextureFormat::Rgba32Float),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(hal_texture_format(TextureFormat::from_raw(raw)), expected);
+        }
+    }
+
+    #[test]
+    fn hal_texture_format_maps_compressed_formats() {
+        let cases = [
+            (
+                TextureFormat::BC1_RGBA_UNORM,
+                HalTextureFormat::Bc1RgbaUnorm,
+            ),
+            (
+                TextureFormat::BC1_RGBA_UNORM_SRGB,
+                HalTextureFormat::Bc1RgbaUnormSrgb,
+            ),
+            (
+                TextureFormat::BC2_RGBA_UNORM,
+                HalTextureFormat::Bc2RgbaUnorm,
+            ),
+            (
+                TextureFormat::BC2_RGBA_UNORM_SRGB,
+                HalTextureFormat::Bc2RgbaUnormSrgb,
+            ),
+            (
+                TextureFormat::BC3_RGBA_UNORM,
+                HalTextureFormat::Bc3RgbaUnorm,
+            ),
+            (
+                TextureFormat::BC3_RGBA_UNORM_SRGB,
+                HalTextureFormat::Bc3RgbaUnormSrgb,
+            ),
+            (TextureFormat::BC4_R_UNORM, HalTextureFormat::Bc4RUnorm),
+            (TextureFormat::BC4_R_SNORM, HalTextureFormat::Bc4RSnorm),
+            (TextureFormat::BC5_RG_UNORM, HalTextureFormat::Bc5RgUnorm),
+            (TextureFormat::BC5_RG_SNORM, HalTextureFormat::Bc5RgSnorm),
+            (
+                TextureFormat::BC6H_RGB_UFLOAT,
+                HalTextureFormat::Bc6hRgbUfloat,
+            ),
+            (
+                TextureFormat::BC6H_RGB_FLOAT,
+                HalTextureFormat::Bc6hRgbFloat,
+            ),
+            (
+                TextureFormat::BC7_RGBA_UNORM,
+                HalTextureFormat::Bc7RgbaUnorm,
+            ),
+            (
+                TextureFormat::BC7_RGBA_UNORM_SRGB,
+                HalTextureFormat::Bc7RgbaUnormSrgb,
+            ),
+            (
+                TextureFormat::ETC2_RGB8_UNORM,
+                HalTextureFormat::Etc2Rgb8Unorm,
+            ),
+            (
+                TextureFormat::ETC2_RGB8_UNORM_SRGB,
+                HalTextureFormat::Etc2Rgb8UnormSrgb,
+            ),
+            (
+                TextureFormat::ETC2_RGB8A1_UNORM,
+                HalTextureFormat::Etc2Rgb8a1Unorm,
+            ),
+            (
+                TextureFormat::ETC2_RGB8A1_UNORM_SRGB,
+                HalTextureFormat::Etc2Rgb8a1UnormSrgb,
+            ),
+            (
+                TextureFormat::ETC2_RGBA8_UNORM,
+                HalTextureFormat::Etc2Rgba8Unorm,
+            ),
+            (
+                TextureFormat::ETC2_RGBA8_UNORM_SRGB,
+                HalTextureFormat::Etc2Rgba8UnormSrgb,
+            ),
+            (TextureFormat::EAC_R11_UNORM, HalTextureFormat::EacR11Unorm),
+            (TextureFormat::EAC_R11_SNORM, HalTextureFormat::EacR11Snorm),
+            (
+                TextureFormat::EAC_RG11_UNORM,
+                HalTextureFormat::EacRg11Unorm,
+            ),
+            (
+                TextureFormat::EAC_RG11_SNORM,
+                HalTextureFormat::EacRg11Snorm,
+            ),
+            (TextureFormat::ASTC4X4_UNORM, HalTextureFormat::Astc4x4Unorm),
+            (
+                TextureFormat::ASTC4X4_UNORM_SRGB,
+                HalTextureFormat::Astc4x4UnormSrgb,
+            ),
+            (TextureFormat::ASTC5X4_UNORM, HalTextureFormat::Astc5x4Unorm),
+            (
+                TextureFormat::ASTC5X4_UNORM_SRGB,
+                HalTextureFormat::Astc5x4UnormSrgb,
+            ),
+            (TextureFormat::ASTC5X5_UNORM, HalTextureFormat::Astc5x5Unorm),
+            (
+                TextureFormat::ASTC5X5_UNORM_SRGB,
+                HalTextureFormat::Astc5x5UnormSrgb,
+            ),
+            (TextureFormat::ASTC6X5_UNORM, HalTextureFormat::Astc6x5Unorm),
+            (
+                TextureFormat::ASTC6X5_UNORM_SRGB,
+                HalTextureFormat::Astc6x5UnormSrgb,
+            ),
+            (TextureFormat::ASTC6X6_UNORM, HalTextureFormat::Astc6x6Unorm),
+            (
+                TextureFormat::ASTC6X6_UNORM_SRGB,
+                HalTextureFormat::Astc6x6UnormSrgb,
+            ),
+            (TextureFormat::ASTC8X5_UNORM, HalTextureFormat::Astc8x5Unorm),
+            (
+                TextureFormat::ASTC8X5_UNORM_SRGB,
+                HalTextureFormat::Astc8x5UnormSrgb,
+            ),
+            (TextureFormat::ASTC8X6_UNORM, HalTextureFormat::Astc8x6Unorm),
+            (
+                TextureFormat::ASTC8X6_UNORM_SRGB,
+                HalTextureFormat::Astc8x6UnormSrgb,
+            ),
+            (TextureFormat::ASTC8X8_UNORM, HalTextureFormat::Astc8x8Unorm),
+            (
+                TextureFormat::ASTC8X8_UNORM_SRGB,
+                HalTextureFormat::Astc8x8UnormSrgb,
+            ),
+            (
+                TextureFormat::ASTC10X5_UNORM,
+                HalTextureFormat::Astc10x5Unorm,
+            ),
+            (
+                TextureFormat::ASTC10X5_UNORM_SRGB,
+                HalTextureFormat::Astc10x5UnormSrgb,
+            ),
+            (
+                TextureFormat::ASTC10X6_UNORM,
+                HalTextureFormat::Astc10x6Unorm,
+            ),
+            (
+                TextureFormat::ASTC10X6_UNORM_SRGB,
+                HalTextureFormat::Astc10x6UnormSrgb,
+            ),
+            (
+                TextureFormat::ASTC10X8_UNORM,
+                HalTextureFormat::Astc10x8Unorm,
+            ),
+            (
+                TextureFormat::ASTC10X8_UNORM_SRGB,
+                HalTextureFormat::Astc10x8UnormSrgb,
+            ),
+            (
+                TextureFormat::ASTC10X10_UNORM,
+                HalTextureFormat::Astc10x10Unorm,
+            ),
+            (
+                TextureFormat::ASTC10X10_UNORM_SRGB,
+                HalTextureFormat::Astc10x10UnormSrgb,
+            ),
+            (
+                TextureFormat::ASTC12X10_UNORM,
+                HalTextureFormat::Astc12x10Unorm,
+            ),
+            (
+                TextureFormat::ASTC12X10_UNORM_SRGB,
+                HalTextureFormat::Astc12x10UnormSrgb,
+            ),
+            (
+                TextureFormat::ASTC12X12_UNORM,
+                HalTextureFormat::Astc12x12Unorm,
+            ),
+            (
+                TextureFormat::ASTC12X12_UNORM_SRGB,
+                HalTextureFormat::Astc12x12UnormSrgb,
+            ),
         ];
 
         for (raw, expected) in cases {

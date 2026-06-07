@@ -62,6 +62,36 @@ impl GlesAdapter {
         }
     }
 
+    /// Returns true when BC texture compression is supported.
+    #[must_use]
+    pub fn supports_texture_compression_bc(&self) -> bool {
+        false
+    }
+
+    /// Returns true when 3D BC texture compression is supported.
+    #[must_use]
+    pub fn supports_texture_compression_bc_sliced_3d(&self) -> bool {
+        false
+    }
+
+    /// Returns true when ETC2/EAC texture compression is supported.
+    #[must_use]
+    pub fn supports_texture_compression_etc2(&self) -> bool {
+        false
+    }
+
+    /// Returns true when ASTC texture compression is supported.
+    #[must_use]
+    pub fn supports_texture_compression_astc(&self) -> bool {
+        false
+    }
+
+    /// Returns true when 3D ASTC texture compression is supported.
+    #[must_use]
+    pub fn supports_texture_compression_astc_sliced_3d(&self) -> bool {
+        false
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<GlesDevice, HalError> {
         match &self.inner {

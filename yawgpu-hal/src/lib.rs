@@ -304,6 +304,81 @@ impl HalAdapter {
         )
     }
 
+    /// Returns true when BC texture compression is supported.
+    #[must_use]
+    pub fn supports_texture_compression_bc(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => true,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_texture_compression_bc(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_texture_compression_bc(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_texture_compression_bc(),
+        }
+    }
+
+    /// Returns true when 3D BC texture compression is supported.
+    #[must_use]
+    pub fn supports_texture_compression_bc_sliced_3d(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => true,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_texture_compression_bc_sliced_3d(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_texture_compression_bc_sliced_3d(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_texture_compression_bc_sliced_3d(),
+        }
+    }
+
+    /// Returns true when ETC2/EAC texture compression is supported.
+    #[must_use]
+    pub fn supports_texture_compression_etc2(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => true,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_texture_compression_etc2(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_texture_compression_etc2(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_texture_compression_etc2(),
+        }
+    }
+
+    /// Returns true when ASTC texture compression is supported.
+    #[must_use]
+    pub fn supports_texture_compression_astc(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => true,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_texture_compression_astc(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_texture_compression_astc(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_texture_compression_astc(),
+        }
+    }
+
+    /// Returns true when 3D ASTC texture compression is supported.
+    #[must_use]
+    pub fn supports_texture_compression_astc_sliced_3d(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => true,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_texture_compression_astc_sliced_3d(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_texture_compression_astc_sliced_3d(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_texture_compression_astc_sliced_3d(),
+        }
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<HalDevice, HalError> {
         match self {

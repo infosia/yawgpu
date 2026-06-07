@@ -2443,6 +2443,65 @@ mod tests {
     }
 
     #[test]
+    fn command_encoder_accepts_block_aligned_compressed_buffer_texture_copies() {
+        let device = noop_adapter()
+            .create_device(
+                None,
+                &[crate::adapter::Feature::TextureCompressionBc],
+                "",
+                "",
+            )
+            .expect("Noop compressed texture device");
+        let texture = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: TextureFormat::from_raw(TextureFormat::BC1_RGBA_UNORM),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
+            size: 1024,
+            mapped_at_creation: false,
+        }));
+        let buffer_info = TexelCopyBufferInfo {
+            buffer,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(256),
+                rows_per_image: Some(1),
+            },
+        };
+        let texture_info = TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: 0 },
+            aspect: TextureAspect::All,
+        };
+        let size = Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+        let encoder = device.create_command_encoder();
+
+        assert_eq!(
+            encoder.copy_buffer_to_texture(buffer_info.clone(), texture_info.clone(), size),
+            None
+        );
+        assert_eq!(
+            encoder.copy_texture_to_buffer(texture_info, buffer_info, size),
+            None
+        );
+    }
+
+    #[test]
     fn copy_texture_to_texture_allows_same_3d_texture_disjoint_z_ranges_only() {
         let device = noop_device();
         let texture_3d = Arc::new(device.create_texture(TextureDescriptor {

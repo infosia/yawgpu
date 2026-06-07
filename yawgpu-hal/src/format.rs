@@ -138,6 +138,110 @@ pub enum HalTextureFormat {
     Depth32Float,
     /// Depth32 float stencil8 variant.
     Depth32FloatStencil8,
+    /// BC1 RGBA unorm block-compressed variant.
+    Bc1RgbaUnorm,
+    /// BC1 RGBA unorm srgb block-compressed variant.
+    Bc1RgbaUnormSrgb,
+    /// BC2 RGBA unorm block-compressed variant.
+    Bc2RgbaUnorm,
+    /// BC2 RGBA unorm srgb block-compressed variant.
+    Bc2RgbaUnormSrgb,
+    /// BC3 RGBA unorm block-compressed variant.
+    Bc3RgbaUnorm,
+    /// BC3 RGBA unorm srgb block-compressed variant.
+    Bc3RgbaUnormSrgb,
+    /// BC4 R unorm block-compressed variant.
+    Bc4RUnorm,
+    /// BC4 R snorm block-compressed variant.
+    Bc4RSnorm,
+    /// BC5 RG unorm block-compressed variant.
+    Bc5RgUnorm,
+    /// BC5 RG snorm block-compressed variant.
+    Bc5RgSnorm,
+    /// BC6H RGB ufloat block-compressed variant.
+    Bc6hRgbUfloat,
+    /// BC6H RGB float block-compressed variant.
+    Bc6hRgbFloat,
+    /// BC7 RGBA unorm block-compressed variant.
+    Bc7RgbaUnorm,
+    /// BC7 RGBA unorm srgb block-compressed variant.
+    Bc7RgbaUnormSrgb,
+    /// ETC2 RGB8 unorm block-compressed variant.
+    Etc2Rgb8Unorm,
+    /// ETC2 RGB8 unorm srgb block-compressed variant.
+    Etc2Rgb8UnormSrgb,
+    /// ETC2 RGB8A1 unorm block-compressed variant.
+    Etc2Rgb8a1Unorm,
+    /// ETC2 RGB8A1 unorm srgb block-compressed variant.
+    Etc2Rgb8a1UnormSrgb,
+    /// ETC2 RGBA8 unorm block-compressed variant.
+    Etc2Rgba8Unorm,
+    /// ETC2 RGBA8 unorm srgb block-compressed variant.
+    Etc2Rgba8UnormSrgb,
+    /// EAC R11 unorm block-compressed variant.
+    EacR11Unorm,
+    /// EAC R11 snorm block-compressed variant.
+    EacR11Snorm,
+    /// EAC RG11 unorm block-compressed variant.
+    EacRg11Unorm,
+    /// EAC RG11 snorm block-compressed variant.
+    EacRg11Snorm,
+    /// ASTC 4x4 unorm block-compressed variant.
+    Astc4x4Unorm,
+    /// ASTC 4x4 unorm srgb block-compressed variant.
+    Astc4x4UnormSrgb,
+    /// ASTC 5x4 unorm block-compressed variant.
+    Astc5x4Unorm,
+    /// ASTC 5x4 unorm srgb block-compressed variant.
+    Astc5x4UnormSrgb,
+    /// ASTC 5x5 unorm block-compressed variant.
+    Astc5x5Unorm,
+    /// ASTC 5x5 unorm srgb block-compressed variant.
+    Astc5x5UnormSrgb,
+    /// ASTC 6x5 unorm block-compressed variant.
+    Astc6x5Unorm,
+    /// ASTC 6x5 unorm srgb block-compressed variant.
+    Astc6x5UnormSrgb,
+    /// ASTC 6x6 unorm block-compressed variant.
+    Astc6x6Unorm,
+    /// ASTC 6x6 unorm srgb block-compressed variant.
+    Astc6x6UnormSrgb,
+    /// ASTC 8x5 unorm block-compressed variant.
+    Astc8x5Unorm,
+    /// ASTC 8x5 unorm srgb block-compressed variant.
+    Astc8x5UnormSrgb,
+    /// ASTC 8x6 unorm block-compressed variant.
+    Astc8x6Unorm,
+    /// ASTC 8x6 unorm srgb block-compressed variant.
+    Astc8x6UnormSrgb,
+    /// ASTC 8x8 unorm block-compressed variant.
+    Astc8x8Unorm,
+    /// ASTC 8x8 unorm srgb block-compressed variant.
+    Astc8x8UnormSrgb,
+    /// ASTC 10x5 unorm block-compressed variant.
+    Astc10x5Unorm,
+    /// ASTC 10x5 unorm srgb block-compressed variant.
+    Astc10x5UnormSrgb,
+    /// ASTC 10x6 unorm block-compressed variant.
+    Astc10x6Unorm,
+    /// ASTC 10x6 unorm srgb block-compressed variant.
+    Astc10x6UnormSrgb,
+    /// ASTC 10x8 unorm block-compressed variant.
+    Astc10x8Unorm,
+    /// ASTC 10x8 unorm srgb block-compressed variant.
+    Astc10x8UnormSrgb,
+    /// ASTC 10x10 unorm block-compressed variant.
+    Astc10x10Unorm,
+    /// ASTC 10x10 unorm srgb block-compressed variant.
+    Astc10x10UnormSrgb,
+    /// ASTC 12x10 unorm block-compressed variant.
+    Astc12x10Unorm,
+    /// ASTC 12x10 unorm srgb block-compressed variant.
+    Astc12x10UnormSrgb,
+    /// ASTC 12x12 unorm block-compressed variant.
+    Astc12x12Unorm,
+    /// ASTC 12x12 unorm srgb block-compressed variant.
+    Astc12x12UnormSrgb,
     /// Unsupported variant.
     Unsupported,
 }
@@ -180,6 +284,61 @@ impl HalTextureFormat {
             | Self::Rgba32Sint => HalColorClearKind::Sint,
             _ => HalColorClearKind::Float,
         }
+    }
+
+    /// Returns compressed texture block information as `(bytes, width, height)`.
+    #[must_use]
+    pub fn compressed_block_info(self) -> Option<(u32, u32, u32)> {
+        let info = match self {
+            Self::Bc1RgbaUnorm
+            | Self::Bc1RgbaUnormSrgb
+            | Self::Bc4RUnorm
+            | Self::Bc4RSnorm
+            | Self::Etc2Rgb8Unorm
+            | Self::Etc2Rgb8UnormSrgb
+            | Self::Etc2Rgb8a1Unorm
+            | Self::Etc2Rgb8a1UnormSrgb
+            | Self::EacR11Unorm
+            | Self::EacR11Snorm => (8, 4, 4),
+            Self::Bc2RgbaUnorm
+            | Self::Bc2RgbaUnormSrgb
+            | Self::Bc3RgbaUnorm
+            | Self::Bc3RgbaUnormSrgb
+            | Self::Bc5RgUnorm
+            | Self::Bc5RgSnorm
+            | Self::Bc6hRgbUfloat
+            | Self::Bc6hRgbFloat
+            | Self::Bc7RgbaUnorm
+            | Self::Bc7RgbaUnormSrgb
+            | Self::Etc2Rgba8Unorm
+            | Self::Etc2Rgba8UnormSrgb
+            | Self::EacRg11Unorm
+            | Self::EacRg11Snorm
+            | Self::Astc4x4Unorm
+            | Self::Astc4x4UnormSrgb => (16, 4, 4),
+            Self::Astc5x4Unorm | Self::Astc5x4UnormSrgb => (16, 5, 4),
+            Self::Astc5x5Unorm | Self::Astc5x5UnormSrgb => (16, 5, 5),
+            Self::Astc6x5Unorm | Self::Astc6x5UnormSrgb => (16, 6, 5),
+            Self::Astc6x6Unorm | Self::Astc6x6UnormSrgb => (16, 6, 6),
+            Self::Astc8x5Unorm | Self::Astc8x5UnormSrgb => (16, 8, 5),
+            Self::Astc8x6Unorm | Self::Astc8x6UnormSrgb => (16, 8, 6),
+            Self::Astc8x8Unorm | Self::Astc8x8UnormSrgb => (16, 8, 8),
+            Self::Astc10x5Unorm | Self::Astc10x5UnormSrgb => (16, 10, 5),
+            Self::Astc10x6Unorm | Self::Astc10x6UnormSrgb => (16, 10, 6),
+            Self::Astc10x8Unorm | Self::Astc10x8UnormSrgb => (16, 10, 8),
+            Self::Astc10x10Unorm | Self::Astc10x10UnormSrgb => (16, 10, 10),
+            Self::Astc12x10Unorm | Self::Astc12x10UnormSrgb => (16, 12, 10),
+            Self::Astc12x12Unorm | Self::Astc12x12UnormSrgb => (16, 12, 12),
+            _ => return None,
+        };
+        Some(info)
+    }
+
+    /// Returns the texture block byte size for copies and allocation metadata.
+    #[must_use]
+    pub fn texel_block_size(self, uncompressed_bytes_per_pixel: u32) -> u32 {
+        self.compressed_block_info()
+            .map_or(uncompressed_bytes_per_pixel, |(bytes, _, _)| bytes)
     }
 }
 

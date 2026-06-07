@@ -12,9 +12,9 @@ use objc2_metal::{
     MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction, MTLCompileOptions,
     MTLComputeCommandEncoder, MTLComputePipelineState, MTLCopyAllDevices,
     MTLCreateSystemDefaultDevice, MTLCullMode, MTLDepthClipMode, MTLDepthStencilDescriptor,
-    MTLDepthStencilState, MTLDevice, MTLDrawable, MTLFunction, MTLIndexType, MTLLibrary,
-    MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder,
-    MTLRenderPassDescriptor, MTLRenderPipelineColorAttachmentDescriptor,
+    MTLDepthStencilState, MTLDevice, MTLDrawable, MTLFunction, MTLGPUFamily, MTLIndexType,
+    MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType,
+    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineColorAttachmentDescriptor,
     MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerAddressMode,
     MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerMipFilter, MTLSamplerState,
     MTLScissorRect, MTLSize, MTLStencilDescriptor, MTLStencilOperation, MTLStorageMode,
@@ -116,6 +116,36 @@ impl MetalAdapter {
     #[must_use]
     pub fn registry_id(&self) -> u64 {
         self.device.registryID()
+    }
+
+    /// Returns true when BC texture compression is supported.
+    #[must_use]
+    pub fn supports_texture_compression_bc(&self) -> bool {
+        self.device.supportsBCTextureCompression()
+    }
+
+    /// Returns true when 3D BC texture compression is supported.
+    #[must_use]
+    pub fn supports_texture_compression_bc_sliced_3d(&self) -> bool {
+        false
+    }
+
+    /// Returns true when ETC2/EAC texture compression is supported.
+    #[must_use]
+    pub fn supports_texture_compression_etc2(&self) -> bool {
+        self.device.supportsFamily(MTLGPUFamily::Apple2)
+    }
+
+    /// Returns true when ASTC LDR texture compression is supported.
+    #[must_use]
+    pub fn supports_texture_compression_astc(&self) -> bool {
+        self.device.supportsFamily(MTLGPUFamily::Apple2)
+    }
+
+    /// Returns true when 3D ASTC texture compression is supported.
+    #[must_use]
+    pub fn supports_texture_compression_astc_sliced_3d(&self) -> bool {
+        false
     }
 
     /// Creates a device (and its default queue) on this adapter.
