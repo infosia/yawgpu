@@ -1,6 +1,6 @@
 use super::*;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
-use crate::{HalTextureAspect, HalTextureDimension, HalTextureViewDimension};
+use crate::{HalTextureAspect, HalTextureDimension, HalTextureViewDimension, HalViewport};
 
 /// Records encode into the command stream.
 pub(super) fn encode_buffer_copy(
@@ -775,6 +775,7 @@ pub(super) fn encode_render_pass(
         encode_render_bind_buffer(encoder, binding)?;
     }
     encode_render_buffer_sizes(encoder, pipeline, &pass.bind_buffers)?;
+    encode_render_frag_depth_clamp(encoder, pipeline, pass.viewport)?;
     for binding in &pass.bind_textures {
         encode_render_bind_texture(encoder, binding)?;
     }
@@ -837,6 +838,28 @@ fn encode_render_buffer_sizes(
     Ok(())
 }
 
+fn encode_render_frag_depth_clamp(
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    pipeline: &MetalRenderPipeline,
+    viewport: Option<HalViewport>,
+) -> Result<(), HalError> {
+    let Some(slot) = pipeline.fragment_frag_depth_clamp_slot else {
+        return Ok(());
+    };
+    let range = viewport.map_or([0.0, 1.0], |viewport| {
+        [viewport.min_depth, viewport.max_depth]
+    });
+    unsafe {
+        encoder.setFragmentBytes_length_atIndex(
+            NonNull::new((&raw const range).cast_mut().cast())
+                .ok_or_else(|| buffer_error("MSL frag-depth clamp range data is missing"))?,
+            std::mem::size_of_val(&range),
+            to_ns(u64::from(slot))?,
+        );
+    }
+    Ok(())
+}
+
 /// Records subpass encode into the command stream.
 #[cfg(feature = "tiled")]
 pub(super) fn encode_subpass_render_pass(
@@ -894,6 +917,7 @@ fn encode_subpass_draw(
     for binding in &draw.bind_buffers {
         encode_render_bind_buffer(encoder, binding)?;
     }
+    encode_render_frag_depth_clamp(encoder, pipeline, draw.viewport)?;
     for binding in &draw.bind_textures {
         encode_render_bind_texture(encoder, binding)?;
     }

@@ -1149,6 +1149,9 @@ pub(crate) fn select_render_shader_source(
                             .map(|fragment| fragment.buffer_size_bindings.as_slice())
                             .unwrap_or(&[]),
                     ),
+                    fragment_frag_depth_clamp_slot: fragment
+                        .as_ref()
+                        .and_then(|fragment| fragment.frag_depth_clamp_slot),
                 },
                 vertex.entry_point,
                 fragment.map(|fragment| fragment.entry_point),

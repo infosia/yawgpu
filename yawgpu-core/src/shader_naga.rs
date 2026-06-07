@@ -64,6 +64,8 @@ pub(crate) struct GeneratedMsl {
     pub buffer_sizes_slot: Option<u32>,
     /// Bindings whose byte lengths populate `_mslBufferSizes`.
     pub buffer_size_bindings: Vec<MslBufferSizeBinding>,
+    /// Reserved fragment immediate slot for the frag-depth clamp range.
+    pub frag_depth_clamp_slot: Option<u32>,
 }
 
 /// Stores generated shader source for generated GLSL.
@@ -624,6 +626,7 @@ impl ReflectedModule {
             entry_point,
             buffer_sizes_slot: buffer_sizes_slot.map(u32::from),
             buffer_size_bindings,
+            frag_depth_clamp_slot: None,
         })
     }
 
@@ -679,6 +682,18 @@ impl ReflectedModule {
     ) -> Result<GeneratedMsl, String> {
         let (module, info) =
             self.process_overrides_for_entry(entry_name, stage, stage_options.pipeline_constants)?;
+        let needs_frag_depth_clamp = stage == naga::ShaderStage::Fragment
+            && fragment_entry_writes_frag_depth(&module, entry_name);
+        let (module, info) = if needs_frag_depth_clamp {
+            naga::back::clamp_frag_depth::clamp_frag_depth(
+                &module,
+                &info,
+                (naga::ShaderStage::Fragment, entry_name),
+            )
+            .map_err(|error| error.to_string())?
+        } else {
+            (module, info)
+        };
         let resources = msl_resources(binding_map)?;
         let buffer_size_bindings = msl_buffer_size_bindings_for_entry(&module, entry_name)?;
         let vertex_buffer_indices = stage_options
@@ -688,13 +703,22 @@ impl ReflectedModule {
             .collect::<Vec<_>>();
         let buffer_sizes_slot =
             msl_buffer_sizes_slot(binding_map, &buffer_size_bindings, &vertex_buffer_indices)?;
+        let frag_depth_clamp_slot = if needs_frag_depth_clamp {
+            let size_slot = buffer_sizes_slot
+                .map(u32::from)
+                .into_iter()
+                .collect::<Vec<_>>();
+            Some(msl_next_buffer_slot(binding_map, &size_slot)?)
+        } else {
+            None
+        };
         let mut per_entry_point_map = BTreeMap::new();
         per_entry_point_map.insert(
             entry_name.to_owned(),
             naga::back::msl::EntryPointResources {
                 resources,
                 sizes_buffer: buffer_sizes_slot,
-                ..Default::default()
+                immediates_buffer: frag_depth_clamp_slot,
             },
         );
         let mut color_slot_map = naga::FastHashMap::default();
@@ -724,6 +748,7 @@ impl ReflectedModule {
             entry_point,
             buffer_sizes_slot: buffer_sizes_slot.map(u32::from),
             buffer_size_bindings,
+            frag_depth_clamp_slot: frag_depth_clamp_slot.map(u32::from),
         })
     }
 
@@ -1145,6 +1170,13 @@ fn msl_buffer_sizes_slot(
     if buffer_size_bindings.is_empty() {
         return Ok(None);
     }
+    msl_next_buffer_slot(binding_map, extra_buffer_indices).map(Some)
+}
+
+fn msl_next_buffer_slot(
+    binding_map: &MslBindingMap,
+    extra_buffer_indices: &[u32],
+) -> Result<naga::back::msl::Slot, String> {
     let resource_max = binding_map
         .resources
         .iter()
@@ -1160,8 +1192,7 @@ fn msl_buffer_sizes_slot(
         .max(resource_max)
         .saturating_add(1);
     u8::try_from(next_slot)
-        .map(Some)
-        .map_err(|_| "MSL buffer-sizes slot exceeds the supported slot range".to_owned())
+        .map_err(|_| "MSL generated buffer slot exceeds the supported slot range".to_owned())
 }
 
 fn msl_buffer_size_bindings_for_entry(
@@ -1223,6 +1254,22 @@ fn msl_needs_array_length(
         } => true,
         _ => false,
     }
+}
+
+fn fragment_entry_writes_frag_depth(module: &naga::Module, entry_point: &str) -> bool {
+    module
+        .entry_points
+        .iter()
+        .find(|entry| entry.stage == naga::ShaderStage::Fragment && entry.name == entry_point)
+        .is_some_and(|entry| {
+            let mut builtins = ReflectedFragmentBuiltins {
+                entry_point: entry.name.clone(),
+                frag_depth: false,
+                sample_mask: false,
+            };
+            collect_output_builtins(module, &entry.function, &mut builtins);
+            builtins.frag_depth
+        })
 }
 
 fn msl_vertex_buffer_mappings(
@@ -2263,6 +2310,38 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
 
         assert!(generated.source.contains("fragment"));
         assert!(!generated.entry_point.is_empty());
+        assert_eq!(generated.frag_depth_clamp_slot, None);
+        assert!(!generated.source.contains("metal::clamp"));
+    }
+
+    #[test]
+    fn generate_render_fragment_msl_clamps_frag_depth_output() {
+        let module = parse_and_validate_wgsl(
+            "struct Out {
+                 @location(0) color: vec4<f32>,
+                 @builtin(frag_depth) depth: f32,
+             }
+
+             @fragment fn fs() -> Out {
+                 return Out(vec4<f32>(0.0, 1.0, 0.0, 1.0), 2.0);
+             }",
+        )
+        .unwrap();
+
+        let generated = module
+            .generate_render_fragment_msl(
+                "fs",
+                &MslBindingMap {
+                    resources: Vec::new(),
+                },
+                &[],
+                &naga::back::PipelineConstants::default(),
+            )
+            .expect("frag-depth fragment MSL should generate");
+
+        assert!(generated.source.contains("metal::clamp"));
+        assert!(generated.source.contains("naga_frag_depth_clamp"));
+        assert!(generated.frag_depth_clamp_slot.is_some());
     }
 
     #[test]

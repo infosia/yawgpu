@@ -878,8 +878,8 @@ never a reason to skip a CTS case.
   188/0 (no regression). 1-line prescribed fix, fully CTS-verified on both backends → self-reviewed.
   **Re-verified via CTS re-run against current yawgpu: F-046 (culling/winding) `12/12` and F-049
   (render_bundle) `4/4` are already resolved by the threading audit (`de4a99f`) — stale in FINDINGS.** Open
-  CTS findings remaining (F-044 + F-047 since RESOLVED below): F-045 (frag_depth viewport clamp),
-  F-050 (occlusion query).
+  CTS findings remaining (F-044/F-047/F-045 since RESOLVED below — F-045 on Metal; its Vulkan/MoltenVK case
+  is a documented MoltenVK artifact): F-050 (occlusion query).
 - **External-CTS finding F-044 — RESOLVED.** T46 (V16) `vertex_state/correctness:
   vertex_format_to_shader_format_conversion`: yawgpu implemented ONLY the 4 `float32` vertex formats; every
   other `GPUVertexFormat` decoded to **zero** (`pass=1 fail=8`, Metal == Vulkan/MoltenVK). Root cause:
@@ -912,6 +912,28 @@ never a reason to skip a CTS case.
   `culling_tests` clean (no regression from the Metal split). **Clean Review: 0 CRITICAL/MAJOR** (override
   keying matches naga's contract; all reflection uses the processed module; inter-stage IO intact across the
   split; 3 MINOR — chief: the now-test-only `generate_render_msl` is a drift hazard, candidate for removal).
+- **External-CTS finding F-045 — RESOLVED on Metal (Vulkan/MoltenVK = MoltenVK artifact).**
+  `rendering/depth_clip_clamp:depth_test_input_clamped`: a fragment-shader-written `@builtin(frag_depth)` must
+  be **clamped to the viewport `[minDepth,maxDepth]` before the depth test**; yawgpu didn't → the r8unorm
+  target got `255` where a correctly-clamped depth keeps it `0` (Metal == Vulkan/MoltenVK; also wgpu-native).
+  Metal/D3D (unlike OpenGL/Vulkan, which clamp automatically) do NOT clamp shader-written depth — that's why
+  Dawn injects Tint's `ClampFragDepth` for Metal/D3D and why naga has no such transform. Fix is **two-repo**:
+  (1) a new naga `back::clamp_frag_depth` transform (`infosia/wgpu` fork, `feature/tiled`
+  `3d7d7944d`): injects an `AddressSpace::Immediate` `vec2<f32>` global `[min,max]` and wraps each returned
+  depth with `clamp(depth, range.x, range.y)` (handles scalar + struct-member outputs, recurses control flow);
+  yawgpu's naga `rev` bumped to it. (2) yawgpu wiring (coding agent): the MSL fragment path runs the transform
+  after `process_overrides` when the FS writes frag_depth, reserving an immediate buffer slot ABOVE the
+  resource + `_mslBufferSizes` slots (`msl_next_buffer_slot`); the Metal HAL binds `[minDepth,maxDepth]`
+  (default `[0,1]`, from the per-draw viewport) at that slot before every render + tiled-subpass draw.
+  **Metal-only by design** — the SPIR-V (Vulkan) and GLSL (GLES) paths are untouched because native
+  Vulkan/GL clamp automatically per spec. + Noop unit tests (naga: scalar/struct/no-op/MSL-string; yawgpu:
+  clamp present + slot `Some` for frag_depth FS, absent + `None` otherwise). **Verified real-GPU (Claude):**
+  `rendering,depth_clip_clamp = 1/1` on **Metal** (unclippedDepth subcase skips — no depth-clip-control;
+  was `0/1`); no regression (`rendering,depth` 130/0, `rendering,draw` 564/0). **Vulkan/MoltenVK still fails
+  `0/1`** — expected: the SPIR-V path is deliberately unchanged; native Vulkan clamps per spec, so this is a
+  MoltenVK translation artifact (F-033 class), **unverified on this Mac** (no native Vulkan); confirm on
+  native Windows/Vulkan, or optionally extend the transform to the SPIR-V path (idempotent double-clamp) to
+  turn MoltenVK green. **Clean Review: 0 CRITICAL/0 MAJOR/0 MINOR.**
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.

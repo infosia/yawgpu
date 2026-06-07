@@ -43,6 +43,7 @@ pub struct MetalRenderPipeline {
     pub(super) vertex_buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
     pub(super) fragment_buffer_sizes_slot: Option<u32>,
     pub(super) fragment_buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
+    pub(super) fragment_frag_depth_clamp_slot: Option<u32>,
 }
 
 unsafe impl Send for MetalRenderPipeline {}
@@ -200,6 +201,7 @@ pub(super) fn create_render_pipeline(
         vertex_buffer_size_bindings: size_metadata.vertex_bindings,
         fragment_buffer_sizes_slot: size_metadata.fragment_slot,
         fragment_buffer_size_bindings: size_metadata.fragment_bindings,
+        fragment_frag_depth_clamp_slot: size_metadata.fragment_frag_depth_clamp_slot,
     })
 }
 
@@ -330,6 +332,7 @@ struct RenderSizeMetadata {
     vertex_bindings: Vec<HalMslBufferSizeBinding>,
     fragment_slot: Option<u32>,
     fragment_bindings: Vec<HalMslBufferSizeBinding>,
+    fragment_frag_depth_clamp_slot: Option<u32>,
 }
 
 fn render_size_metadata(shader: &HalShaderSource) -> RenderSizeMetadata {
@@ -339,18 +342,21 @@ fn render_size_metadata(shader: &HalShaderSource) -> RenderSizeMetadata {
             vertex_buffer_size_bindings,
             fragment_buffer_sizes_slot,
             fragment_buffer_size_bindings,
+            fragment_frag_depth_clamp_slot,
             ..
         } => RenderSizeMetadata {
             vertex_slot: *vertex_buffer_sizes_slot,
             vertex_bindings: vertex_buffer_size_bindings.clone(),
             fragment_slot: *fragment_buffer_sizes_slot,
             fragment_bindings: fragment_buffer_size_bindings.clone(),
+            fragment_frag_depth_clamp_slot: *fragment_frag_depth_clamp_slot,
         },
         _ => RenderSizeMetadata {
             vertex_slot: None,
             vertex_bindings: Vec::new(),
             fragment_slot: None,
             fragment_bindings: Vec::new(),
+            fragment_frag_depth_clamp_slot: None,
         },
     }
 }
