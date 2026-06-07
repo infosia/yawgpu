@@ -1,5 +1,6 @@
 #[cfg(feature = "tiled")]
 use crate::HalError;
+use crate::HalQuerySet;
 #[cfg(feature = "tiled")]
 use crate::HalTransientAttachment;
 use crate::{
@@ -107,6 +108,21 @@ pub struct HalBufferClear {
     pub size: u64,
 }
 
+/// Wraps query-set resolve data for the selected backend.
+#[derive(Debug, Clone)]
+pub struct HalResolveQuerySet {
+    /// Source query set.
+    pub query_set: HalQuerySet,
+    /// First query index to resolve.
+    pub first_query: u32,
+    /// Number of query results to resolve.
+    pub query_count: u32,
+    /// Destination buffer.
+    pub destination: HalBuffer,
+    /// Destination byte offset.
+    pub destination_offset: u64,
+}
+
 /// Enumerates HAL copy values.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -121,6 +137,8 @@ pub enum HalCopy {
     TextureToBuffer(HalBufferTextureCopy),
     /// Texture to texture variant.
     TextureToTexture(HalTextureCopy),
+    /// Query-set resolve variant.
+    ResolveQuerySet(HalResolveQuerySet),
     /// Compute pass variant.
     ComputePass(HalComputePass),
     /// Render pass variant.
@@ -321,6 +339,10 @@ pub struct HalRenderPass {
     pub blend_constant: [f32; 4],
     /// Render pass stencil reference.
     pub stencil_reference: u32,
+    /// Optional occlusion query set for this render pass.
+    pub occlusion_query_set: Option<HalQuerySet>,
+    /// Optional active occlusion query index for this draw.
+    pub occlusion_query_index: Option<u32>,
     /// Draw.
     pub draw: Option<HalDraw>,
 }

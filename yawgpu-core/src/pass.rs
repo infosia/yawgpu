@@ -216,6 +216,8 @@ impl PassEncoderInner {
                 scissor_rect: state.scissor_rect,
                 blend_constant: state.blend_constant,
                 stencil_reference: state.stencil_reference,
+                occlusion_query_set: None,
+                occlusion_query_index: None,
                 draw: None,
             })
         } else {

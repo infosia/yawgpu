@@ -878,8 +878,9 @@ never a reason to skip a CTS case.
   188/0 (no regression). 1-line prescribed fix, fully CTS-verified on both backends → self-reviewed.
   **Re-verified via CTS re-run against current yawgpu: F-046 (culling/winding) `12/12` and F-049
   (render_bundle) `4/4` are already resolved by the threading audit (`de4a99f`) — stale in FINDINGS.** Open
-  CTS findings remaining (F-044/F-047/F-045 since RESOLVED below — F-045 on Metal; its Vulkan/MoltenVK case
-  is a documented MoltenVK artifact): F-050 (occlusion query).
+  CTS findings remaining: F-050 is RESOLVED on Metal (slice 1 below; was the last open finding) — only its
+  Vulkan execution (slice 2) is pending. (F-044/F-047/F-045 also RESOLVED below; F-045 on Metal, its
+  Vulkan/MoltenVK case is a documented MoltenVK artifact.)
 - **External-CTS finding F-044 — RESOLVED.** T46 (V16) `vertex_state/correctness:
   vertex_format_to_shader_format_conversion`: yawgpu implemented ONLY the 4 `float32` vertex formats; every
   other `GPUVertexFormat` decoded to **zero** (`pass=1 fail=8`, Metal == Vulkan/MoltenVK). Root cause:
@@ -934,6 +935,26 @@ never a reason to skip a CTS case.
   MoltenVK translation artifact (F-033 class), **unverified on this Mac** (no native Vulkan); confirm on
   native Windows/Vulkan, or optionally extend the transform to the SPIR-V path (idempotent double-clamp) to
   turn MoltenVK green. **Clean Review: 0 CRITICAL/0 MAJOR/0 MINOR.**
+- **External-CTS finding F-050 — RESOLVED on Metal (slice 1 of 2; Vulkan = slice 2).**
+  `command_buffer/queries/occlusionQuery`: occlusion queries resolved to **0** even when fragments pass
+  (`occlusion_query,basic` failed; `,empty` passed since 0 is correct) — cross-HAL `pass=1 fail=1`. Classic
+  "validate but don't execute": core validated/tracked begin/end-occlusion + resolve, but the `QuerySet`
+  allocated no backend resource, the active-query index never reached a HAL render pass, and
+  `resolve_query_set` recorded **no command** (`record_buffer_command(..,None,None,None,..)`), so results were
+  never written. yawgpu-hal had zero occlusion plumbing. **Slice 1 (core + Noop + Metal):** new `HalQuerySet`
+  (Metal = private visibility-result `MTLBuffer` `max(count*8,8)`; Noop = count; Vulkan/GLES = non-erroring
+  placeholders) + `HalCopy::ResolveQuerySet` (Metal blit; Noop/Vulkan/GLES zero-fill) + `HalRenderPass`
+  occlusion fields; core threads the per-draw active query index (each draw = one HAL render pass) + records a
+  real `CommandExecution::ResolveQuerySet`; Metal sets `visibilityResultBuffer` + `setVisibilityResultMode
+  (Counting, i*8)` per active query. + Noop unit tests (resolve recorded + destination written + active index
+  reaches HAL) and `#[ignore]` Metal query-set tests. **Verified real-GPU (Claude):** CTS
+  `occlusionQuery = 2/2` on **Metal** (was `1/1`); no regression (`rendering,draw` 564/0); Vulkan/MoltenVK
+  unchanged `1/1` (placeholder, slice 2). **Clean Review: 1 CRITICAL fixed** (`count==0` set → Metal
+  `newBufferWithLength(0)` returns nil → submit failure; fixed by flooring the visibility buffer at 8 bytes —
+  NOT by a core `count>0` rejection, since `count==0` is valid WebGPU; confirmed on M2). **Limitation
+  (documented, accepted):** a single occlusion query spanning multiple draws records the per-draw result
+  (render-pass-per-draw model); the conformant single-draw case is correct (`70-finalize.md` QS-OCC).
+  **Slice 2 pending:** Vulkan `VkQueryPool` + `vkCmdBeginQuery/EndQuery` + `vkCmdCopyQueryPoolResults`.
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.

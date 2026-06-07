@@ -16,9 +16,9 @@ pub use command::{
     HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy,
     HalBufferTextureLayout, HalComputeDispatch, HalComputePass, HalCopy, HalDescriptorBinding,
     HalDescriptorBindingKind, HalDraw, HalIndexFormat, HalRenderColorTarget,
-    HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalScissorRect,
-    HalStorageTextureAccess, HalTextureAspect, HalTextureCopy, HalTextureViewDimension,
-    HalViewport,
+    HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalResolveQuerySet,
+    HalScissorRect, HalStorageTextureAccess, HalTextureAspect, HalTextureCopy,
+    HalTextureViewDimension, HalViewport,
 };
 #[cfg(feature = "tiled")]
 pub use command::{
@@ -408,6 +408,14 @@ pub enum HalBackend {
     Gles,
 }
 
+/// Enumerates HAL query set kind values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HalQueryKind {
+    /// Occlusion query set.
+    Occlusion,
+}
+
 /// Enumerates HAL device values.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -527,6 +535,26 @@ impl HalDevice {
             Self::Metal(device) => HalTexture::Metal(device.create_texture(descriptor)),
             #[cfg(feature = "gles")]
             Self::Gles(device) => HalTexture::Gles(device.create_texture(descriptor)),
+        }
+    }
+
+    /// Creates a query set matching the given kind and count.
+    pub fn create_query_set(
+        &self,
+        kind: HalQueryKind,
+        count: u32,
+    ) -> Result<HalQuerySet, HalError> {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(device) => Ok(HalQuerySet::Noop {
+                count: device.create_query_set(kind, count),
+            }),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => Ok(HalQuerySet::Vulkan { count }),
+            #[cfg(feature = "metal")]
+            Self::Metal(device) => device.create_query_set(kind, count).map(HalQuerySet::Metal),
+            #[cfg(feature = "gles")]
+            Self::Gles(_) => Ok(HalQuerySet::Gles { count }),
         }
     }
 
@@ -967,7 +995,7 @@ impl HalBuffer {
         let _ = (offset, data);
         match self {
             #[cfg(feature = "noop")]
-            Self::Noop(_) => Ok(()),
+            Self::Noop(buffer) => buffer.write(offset, data),
             #[cfg(feature = "vulkan")]
             Self::Vulkan(buffer) => buffer.write(offset, data),
             #[cfg(feature = "metal")]
@@ -983,15 +1011,7 @@ impl HalBuffer {
         let _ = offset;
         match self {
             #[cfg(feature = "noop")]
-            Self::Noop(_) => usize::try_from(len).map_or_else(
-                |_| {
-                    Err(HalError::BufferOperationFailed {
-                        backend: "noop",
-                        message: "read length is too large",
-                    })
-                },
-                |len| Ok(vec![0; len]),
-            ),
+            Self::Noop(buffer) => buffer.read(offset, len),
             #[cfg(feature = "vulkan")]
             Self::Vulkan(buffer) => buffer.read(offset, len),
             #[cfg(feature = "metal")]
@@ -1033,6 +1053,50 @@ pub enum HalTexture {
     #[cfg(feature = "gles")]
     /// GLES variant.
     Gles(gles::GlesTexture),
+}
+
+/// Enumerates HAL query-set values.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum HalQuerySet {
+    #[cfg(feature = "noop")]
+    /// Noop query-set variant.
+    Noop {
+        /// Number of queries in the set.
+        count: u32,
+    },
+    #[cfg(feature = "vulkan")]
+    /// Vulkan placeholder query-set variant.
+    Vulkan {
+        /// Number of queries in the set.
+        count: u32,
+    },
+    #[cfg(feature = "metal")]
+    /// Metal query-set variant.
+    Metal(metal::MetalQuerySet),
+    #[cfg(feature = "gles")]
+    /// GLES placeholder query-set variant.
+    Gles {
+        /// Number of queries in the set.
+        count: u32,
+    },
+}
+
+impl HalQuerySet {
+    /// Returns the number of queries in this set.
+    #[must_use]
+    pub fn count(&self) -> u32 {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop { count } => *count,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan { count } => *count,
+            #[cfg(feature = "metal")]
+            Self::Metal(query_set) => query_set.count(),
+            #[cfg(feature = "gles")]
+            Self::Gles { count } => *count,
+        }
+    }
 }
 
 /// Enumerates HAL transient attachment values.
@@ -1436,6 +1500,27 @@ mod tests {
     }
 
     #[test]
+    fn hal_query_set_noop_creates_and_resolves_zeroes() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let queue = device.queue();
+        let query_set = device.create_query_set(HalQueryKind::Occlusion, 2)?;
+        let destination = device.create_buffer(16, HalBufferUsage::default());
+
+        assert_eq!(query_set.count(), 2);
+        destination.write(0, &[1; 16])?;
+        queue.submit_copies(&[HalCopy::ResolveQuerySet(HalResolveQuerySet {
+            query_set,
+            first_query: 0,
+            query_count: 2,
+            destination: destination.clone(),
+            destination_offset: 0,
+        })])?;
+
+        assert_eq!(destination.read(0, 16)?, [0; 16]);
+        Ok(())
+    }
+
+    #[test]
     fn hal_queue_submit_copies_noop_records_depth_only_render_pass() -> Result<(), HalError> {
         let device = noop_device()?;
         let queue = device.queue();
@@ -1468,6 +1553,8 @@ mod tests {
             scissor_rect: None,
             blend_constant: [0.0; 4],
             stencil_reference: 0,
+            occlusion_query_set: None,
+            occlusion_query_index: None,
             draw: None,
         })])?;
 
@@ -1508,12 +1595,14 @@ mod tests {
     }
 
     #[test]
-    fn hal_buffer_read_noop_returns_zeroed_vector() -> Result<(), HalError> {
+    fn hal_buffer_noop_round_trips_written_bytes() -> Result<(), HalError> {
         let device = noop_device()?;
         let buffer = device.create_buffer(16, HalBufferUsage::default());
 
         assert_eq!(buffer.read(0, 0)?, Vec::<u8>::new());
         assert_eq!(buffer.read(4, 4)?, vec![0, 0, 0, 0]);
+        buffer.write(5, &[9, 8, 7])?;
+        assert_eq!(buffer.read(4, 5)?, vec![0, 9, 8, 7, 0]);
         Ok(())
     }
 

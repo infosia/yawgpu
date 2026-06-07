@@ -65,6 +65,18 @@ impl GlesQueue {
                     match copy {
                         HalCopy::Buffer(copy) => submit_buffer_copy(gl, copy)?,
                         HalCopy::BufferClear(clear) => submit_buffer_clear(gl, clear)?,
+                        HalCopy::ResolveQuerySet(resolve) => {
+                            let byte_count =
+                                usize::try_from(u64::from(resolve.query_count) * 8).map_err(
+                                    |_| HalError::BufferOperationFailed {
+                                        backend: BACKEND,
+                                        message: "query resolve byte count is too large",
+                                    },
+                                )?;
+                            resolve
+                                .destination
+                                .write(resolve.destination_offset, &vec![0; byte_count])?;
+                        }
                         HalCopy::BufferToTexture(copy) => submit_buffer_to_texture(gl, copy)?,
                         HalCopy::TextureToBuffer(copy) => submit_texture_to_buffer(gl, copy)?,
                         HalCopy::TextureToTexture(copy) => submit_texture_to_texture(gl, copy)?,

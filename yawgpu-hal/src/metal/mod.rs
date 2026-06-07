@@ -20,7 +20,7 @@ use objc2_metal::{
     MTLScissorRect, MTLSize, MTLStencilDescriptor, MTLStencilOperation, MTLStorageMode,
     MTLStoreAction, MTLTexture as MTLTextureTrait, MTLTextureDescriptor, MTLTextureType,
     MTLTextureUsage, MTLVertexDescriptor, MTLVertexFormat, MTLVertexStepFunction, MTLViewport,
-    MTLWinding,
+    MTLVisibilityResultMode, MTLWinding,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
@@ -30,10 +30,11 @@ use crate::{
     HalColorTargetState, HalCompareFunction, HalComputeDispatch, HalComputePass, HalCopy,
     HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalDraw, HalError, HalExtent3d,
     HalFilterMode, HalFrontFace, HalIndexFormat, HalMipmapFilterMode, HalMslBufferSizeBinding,
-    HalPresentMode, HalPrimitiveTopology, HalRenderLoadOp, HalRenderPass,
-    HalRenderPipelineDescriptor, HalSampler, HalSamplerDescriptor, HalShaderSource,
-    HalStencilFaceState, HalStencilOperation, HalSurfaceConfiguration, HalTexture, HalTextureCopy,
-    HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
+    HalPresentMode, HalPrimitiveTopology, HalQueryKind, HalQuerySet, HalRenderLoadOp,
+    HalRenderPass, HalRenderPipelineDescriptor, HalResolveQuerySet, HalSampler,
+    HalSamplerDescriptor, HalShaderSource, HalStencilFaceState, HalStencilOperation,
+    HalSurfaceConfiguration, HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
+    HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
 #[cfg(feature = "tiled")]
 use crate::{
@@ -167,6 +168,7 @@ mod device;
 mod encode;
 mod format;
 mod pipeline;
+mod query_set;
 mod queue;
 mod surface;
 use self::encode::*;
@@ -180,6 +182,7 @@ mod texture;
 pub use buffer::MetalBuffer;
 pub use device::MetalDevice;
 pub use pipeline::{MetalComputePipeline, MetalRenderPipeline};
+pub use query_set::MetalQuerySet;
 pub use queue::MetalQueue;
 pub use surface::MetalSurface;
 #[cfg(feature = "tiled")]

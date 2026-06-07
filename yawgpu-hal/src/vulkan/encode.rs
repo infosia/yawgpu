@@ -60,6 +60,18 @@ pub(super) fn record_and_submit_copies(
                 HalCopy::BufferClear(clear) => {
                     encode_buffer_clear(&queue.device.device, command_buffer, clear)?;
                 }
+                HalCopy::ResolveQuerySet(resolve) => {
+                    let byte_count =
+                        usize::try_from(u64::from(resolve.query_count) * 8).map_err(|_| {
+                            HalError::BufferOperationFailed {
+                                backend: BACKEND,
+                                message: "query resolve byte count is too large",
+                            }
+                        })?;
+                    resolve
+                        .destination
+                        .write(resolve.destination_offset, &vec![0; byte_count])?;
+                }
                 HalCopy::BufferToTexture(copy) => {
                     encode_buffer_to_texture(&queue.device.device, command_buffer, copy)?;
                 }
@@ -340,6 +352,7 @@ fn retain_copy_resources(copy: &HalCopy, retained: &mut Vec<RetainedResource>) {
             retain_hal_buffer(&copy.destination, retained);
         }
         HalCopy::BufferClear(clear) => retain_hal_buffer(&clear.buffer, retained),
+        HalCopy::ResolveQuerySet(resolve) => retain_hal_buffer(&resolve.destination, retained),
         HalCopy::BufferToTexture(copy) | HalCopy::TextureToBuffer(copy) => {
             retain_hal_buffer(&copy.buffer, retained);
             retain_hal_texture(&copy.texture, retained);
@@ -450,7 +463,10 @@ fn find_surface_pending(copies: &[HalCopy]) -> Option<Arc<Mutex<SurfacePendingSt
 
 fn surface_pending_from_copy(copy: &HalCopy) -> Option<Arc<Mutex<SurfacePendingState>>> {
     match copy {
-        HalCopy::Buffer(_) | HalCopy::BufferClear(_) | HalCopy::ComputePass(_) => None,
+        HalCopy::Buffer(_)
+        | HalCopy::BufferClear(_)
+        | HalCopy::ResolveQuerySet(_)
+        | HalCopy::ComputePass(_) => None,
         HalCopy::BufferToTexture(copy) | HalCopy::TextureToBuffer(copy) => {
             surface_pending_from_hal_texture(&copy.texture)
         }
