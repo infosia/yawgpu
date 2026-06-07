@@ -315,7 +315,11 @@ mod tests {
     fn test_spirv_words() -> Vec<u32> {
         shader_naga::parse_and_validate_wgsl("@compute @workgroup_size(2, 3, 4) fn cs() {}")
             .expect("test WGSL should validate")
-            .generate_spirv("cs", naga::ShaderStage::Compute)
+            .generate_spirv(
+                "cs",
+                naga::ShaderStage::Compute,
+                &naga::back::PipelineConstants::default(),
+            )
             .expect("test WGSL should generate SPIR-V")
     }
 

@@ -95,6 +95,13 @@ pub(crate) struct GeneratedRenderMsl {
     pub fragment_buffer_size_bindings: Vec<MslBufferSizeBinding>,
 }
 
+struct RenderMslStageOptions<'a> {
+    vertex_buffer_mappings: Vec<naga::back::msl::VertexBufferMapping>,
+    force_point_size: bool,
+    subpass_color_slots: &'a [((u32, u32), u32)],
+    pipeline_constants: &'a naga::back::PipelineConstants,
+}
+
 /// Stores binding metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MslVertexBufferBinding {
@@ -514,7 +521,10 @@ impl ReflectedModule {
         &self,
         entry_name: &str,
         stage: naga::ShaderStage,
+        pipeline_constants: &naga::back::PipelineConstants,
     ) -> Result<Vec<u32>, String> {
+        let (module, info) =
+            self.process_overrides_for_entry(entry_name, stage, pipeline_constants)?;
         let options = naga::back::spv::Options {
             fake_missing_bindings: true,
             ..Default::default()
@@ -523,7 +533,7 @@ impl ReflectedModule {
             shader_stage: stage,
             entry_point: entry_name.to_owned(),
         };
-        naga::back::spv::write_vec(&self.module, &self.info, &options, Some(&pipeline_options))
+        naga::back::spv::write_vec(&module, &info, &options, Some(&pipeline_options))
             .map_err(|error| error.to_string())
     }
 
@@ -533,7 +543,10 @@ impl ReflectedModule {
         &self,
         entry_name: &str,
         stage: naga::ShaderStage,
+        pipeline_constants: &naga::back::PipelineConstants,
     ) -> Result<GeneratedGlsl, String> {
+        let (module, info) =
+            self.process_overrides_for_entry(entry_name, stage, pipeline_constants)?;
         let options = naga::back::glsl::Options {
             version: naga::back::glsl::Version::Embedded {
                 version: 310,
@@ -552,8 +565,8 @@ impl ReflectedModule {
         let mut source = String::new();
         let mut writer = naga::back::glsl::Writer::new(
             &mut source,
-            &self.module,
-            &self.info,
+            &module,
+            &info,
             &options,
             &pipeline_options,
             naga::proc::BoundsCheckPolicies::default(),
@@ -571,9 +584,15 @@ impl ReflectedModule {
         &self,
         entry_name: &str,
         binding_map: &MslBindingMap,
+        pipeline_constants: &naga::back::PipelineConstants,
     ) -> Result<GeneratedMsl, String> {
+        let (module, info) = self.process_overrides_for_entry(
+            entry_name,
+            naga::ShaderStage::Compute,
+            pipeline_constants,
+        )?;
         let resources = msl_resources(binding_map)?;
-        let buffer_size_bindings = self.msl_buffer_size_bindings_for_entry(entry_name)?;
+        let buffer_size_bindings = msl_buffer_size_bindings_for_entry(&module, entry_name)?;
         let buffer_sizes_slot = msl_buffer_sizes_slot(binding_map, &buffer_size_bindings, &[])?;
         let mut per_entry_point_map = BTreeMap::new();
         per_entry_point_map.insert(
@@ -595,11 +614,11 @@ impl ReflectedModule {
             entry_point: Some((naga::ShaderStage::Compute, entry_name.to_owned())),
             ..Default::default()
         };
-        let (source, info) =
-            naga::back::msl::write_string(&self.module, &self.info, &options, &pipeline_options)
+        let (source, write_info) =
+            naga::back::msl::write_string(&module, &info, &options, &pipeline_options)
                 .map_err(|error| error.to_string())?;
         let entry_point =
-            emitted_entry_point_name(&self.module, &info, naga::ShaderStage::Compute, entry_name)?;
+            emitted_entry_point_name(&module, &write_info, naga::ShaderStage::Compute, entry_name)?;
         Ok(GeneratedMsl {
             source,
             entry_point,
@@ -615,13 +634,18 @@ impl ReflectedModule {
         binding_map: &MslBindingMap,
         vertex_buffers: &[MslVertexBufferBinding],
         force_point_size: bool,
+        pipeline_constants: &naga::back::PipelineConstants,
     ) -> Result<GeneratedMsl, String> {
         self.generate_render_stage_msl(
             entry_name,
             naga::ShaderStage::Vertex,
             binding_map,
-            msl_vertex_buffer_mappings(vertex_buffers)?,
-            force_point_size,
+            RenderMslStageOptions {
+                vertex_buffer_mappings: msl_vertex_buffer_mappings(vertex_buffers)?,
+                force_point_size,
+                subpass_color_slots: &[],
+                pipeline_constants,
+            },
         )
     }
 
@@ -630,13 +654,19 @@ impl ReflectedModule {
         &self,
         entry_name: &str,
         binding_map: &MslBindingMap,
+        subpass_color_slots: &[((u32, u32), u32)],
+        pipeline_constants: &naga::back::PipelineConstants,
     ) -> Result<GeneratedMsl, String> {
         self.generate_render_stage_msl(
             entry_name,
             naga::ShaderStage::Fragment,
             binding_map,
-            Vec::new(),
-            false,
+            RenderMslStageOptions {
+                vertex_buffer_mappings: Vec::new(),
+                force_point_size: false,
+                subpass_color_slots,
+                pipeline_constants,
+            },
         )
     }
 
@@ -645,12 +675,14 @@ impl ReflectedModule {
         entry_name: &str,
         stage: naga::ShaderStage,
         binding_map: &MslBindingMap,
-        vertex_buffer_mappings: Vec<naga::back::msl::VertexBufferMapping>,
-        force_point_size: bool,
+        stage_options: RenderMslStageOptions<'_>,
     ) -> Result<GeneratedMsl, String> {
+        let (module, info) =
+            self.process_overrides_for_entry(entry_name, stage, stage_options.pipeline_constants)?;
         let resources = msl_resources(binding_map)?;
-        let buffer_size_bindings = self.msl_buffer_size_bindings_for_entry(entry_name)?;
-        let vertex_buffer_indices = vertex_buffer_mappings
+        let buffer_size_bindings = msl_buffer_size_bindings_for_entry(&module, entry_name)?;
+        let vertex_buffer_indices = stage_options
+            .vertex_buffer_mappings
             .iter()
             .map(|mapping| mapping.id)
             .collect::<Vec<_>>();
@@ -665,23 +697,28 @@ impl ReflectedModule {
                 ..Default::default()
             },
         );
+        let mut color_slot_map = naga::FastHashMap::default();
+        for &(key, slot) in stage_options.subpass_color_slots {
+            color_slot_map.insert(key, slot);
+        }
         let options = naga::back::msl::Options {
             lang_version: (2, 4),
             per_entry_point_map,
             fake_missing_bindings: false,
+            subpass_color_slots: color_slot_map,
             bounds_check_policies: msl_bounds_check_policies(),
             ..Default::default()
         };
         let pipeline_options = naga::back::msl::PipelineOptions {
             entry_point: Some((stage, entry_name.to_owned())),
-            vertex_buffer_mappings,
-            allow_and_force_point_size: force_point_size,
+            vertex_buffer_mappings: stage_options.vertex_buffer_mappings,
+            allow_and_force_point_size: stage_options.force_point_size,
             ..Default::default()
         };
-        let (source, info) =
-            naga::back::msl::write_string(&self.module, &self.info, &options, &pipeline_options)
+        let (source, write_info) =
+            naga::back::msl::write_string(&module, &info, &options, &pipeline_options)
                 .map_err(|error| error.to_string())?;
-        let entry_point = emitted_entry_point_name(&self.module, &info, stage, entry_name)?;
+        let entry_point = emitted_entry_point_name(&module, &write_info, stage, entry_name)?;
         Ok(GeneratedMsl {
             source,
             entry_point,
@@ -700,6 +737,14 @@ impl ReflectedModule {
         subpass_color_slots: &[((u32, u32), u32)],
         force_point_size: bool,
     ) -> Result<GeneratedRenderMsl, String> {
+        let empty_pipeline_constants = naga::back::PipelineConstants::default();
+        let (module, info) = naga::back::pipeline_constants::process_overrides(
+            &self.module,
+            &self.info,
+            None,
+            &empty_pipeline_constants,
+        )
+        .map_err(|error| error.to_string())?;
         let resources = msl_resources(binding_map)?;
         let vertex_buffer_mappings = msl_vertex_buffer_mappings(vertex_buffers)?;
         let vertex_buffer_indices = vertex_buffer_mappings
@@ -707,14 +752,14 @@ impl ReflectedModule {
             .map(|mapping| mapping.id)
             .collect::<Vec<_>>();
         let vertex_buffer_size_bindings =
-            self.msl_buffer_size_bindings_for_entry(vertex_entry_name)?;
+            msl_buffer_size_bindings_for_entry(&module, vertex_entry_name)?;
         let vertex_buffer_sizes_slot = msl_buffer_sizes_slot(
             binding_map,
             &vertex_buffer_size_bindings,
             &vertex_buffer_indices,
         )?;
         let fragment_buffer_size_bindings = fragment_entry_name
-            .map(|entry| self.msl_buffer_size_bindings_for_entry(entry))
+            .map(|entry| msl_buffer_size_bindings_for_entry(&module, entry))
             .transpose()?
             .unwrap_or_default();
         let fragment_buffer_sizes_slot =
@@ -757,18 +802,14 @@ impl ReflectedModule {
             ..Default::default()
         };
         let (source, info) =
-            naga::back::msl::write_string(&self.module, &self.info, &options, &pipeline_options)
+            naga::back::msl::write_string(&module, &info, &options, &pipeline_options)
                 .map_err(|error| error.to_string())?;
-        let vertex_entry_point = emitted_entry_point_name(
-            &self.module,
-            &info,
-            naga::ShaderStage::Vertex,
-            vertex_entry_name,
-        )?;
+        let vertex_entry_point =
+            emitted_entry_point_name(&module, &info, naga::ShaderStage::Vertex, vertex_entry_name)?;
         let fragment_entry_point = fragment_entry_name
             .map(|fragment_entry_name| {
                 emitted_entry_point_name(
-                    &self.module,
+                    &module,
                     &info,
                     naga::ShaderStage::Fragment,
                     fragment_entry_name,
@@ -847,6 +888,27 @@ impl ReflectedModule {
         )
         .map_err(|error| error.to_string())?;
         resolved_workgroup_size(&module, &info, entry_point)
+    }
+
+    fn process_overrides_for_entry<'a>(
+        &'a self,
+        entry_name: &str,
+        stage: naga::ShaderStage,
+        pipeline_constants: &naga::back::PipelineConstants,
+    ) -> Result<
+        (
+            std::borrow::Cow<'a, naga::Module>,
+            std::borrow::Cow<'a, naga::valid::ModuleInfo>,
+        ),
+        String,
+    > {
+        naga::back::pipeline_constants::process_overrides(
+            &self.module,
+            &self.info,
+            Some((stage, entry_name)),
+            pipeline_constants,
+        )
+        .map_err(|error| error.to_string())
     }
 
     /// Returns entry point io reflected by the validated shader module.
@@ -944,33 +1006,7 @@ impl ReflectedModule {
         &self,
         entry_point: &str,
     ) -> Result<Vec<MslBufferSizeBinding>, String> {
-        if !self
-            .module
-            .entry_points
-            .iter()
-            .any(|entry| entry.name == entry_point)
-        {
-            return Err(
-                "shader entry point was not found for MSL buffer-size reflection".to_owned(),
-            );
-        }
-        Ok(self
-            .module
-            .global_variables
-            .iter()
-            .filter_map(|(_, global)| {
-                let binding = global.binding?;
-                if !matches!(global.space, naga::AddressSpace::Storage { .. })
-                    || !msl_needs_array_length(global.ty, &self.module.types)
-                {
-                    return None;
-                }
-                Some(MslBufferSizeBinding {
-                    group: binding.group,
-                    binding: binding.binding,
-                })
-            })
-            .collect())
+        msl_buffer_size_bindings_for_entry(&self.module, entry_point)
     }
 
     /// Returns fragment builtins reflected by the validated shader module.
@@ -1126,6 +1162,35 @@ fn msl_buffer_sizes_slot(
     u8::try_from(next_slot)
         .map(Some)
         .map_err(|_| "MSL buffer-sizes slot exceeds the supported slot range".to_owned())
+}
+
+fn msl_buffer_size_bindings_for_entry(
+    module: &naga::Module,
+    entry_point: &str,
+) -> Result<Vec<MslBufferSizeBinding>, String> {
+    if !module
+        .entry_points
+        .iter()
+        .any(|entry| entry.name == entry_point)
+    {
+        return Err("shader entry point was not found for MSL buffer-size reflection".to_owned());
+    }
+    Ok(module
+        .global_variables
+        .iter()
+        .filter_map(|(_, global)| {
+            let binding = global.binding?;
+            if !matches!(global.space, naga::AddressSpace::Storage { .. })
+                || !msl_needs_array_length(global.ty, &module.types)
+            {
+                return None;
+            }
+            Some(MslBufferSizeBinding {
+                group: binding.group,
+                binding: binding.binding,
+            })
+        })
+        .collect())
 }
 
 fn msl_bounds_check_policies() -> naga::proc::BoundsCheckPolicies {
@@ -1804,6 +1869,7 @@ fn cs() {
                         },
                     ],
                 },
+                &naga::back::PipelineConstants::default(),
             )
             .expect("MSL generation should provide a sizes buffer slot");
 
@@ -1893,6 +1959,7 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                     }],
                 }],
                 false,
+                &naga::back::PipelineConstants::default(),
             )
             .expect("MSL vertex generation should provide a non-colliding sizes slot");
 
@@ -2143,6 +2210,7 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                 },
                 &[],
                 false,
+                &naga::back::PipelineConstants::default(),
             )
             .expect("render vertex MSL should generate");
 
@@ -2188,11 +2256,80 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                 &MslBindingMap {
                     resources: Vec::new(),
                 },
+                &[],
+                &naga::back::PipelineConstants::default(),
             )
             .expect("render fragment MSL should generate");
 
         assert!(generated.source.contains("fragment"));
         assert!(!generated.entry_point.is_empty());
+    }
+
+    #[test]
+    fn generate_render_fragment_msl_applies_override_default_and_pipeline_value() {
+        let module = override_fragment_module();
+        let default = module
+            .generate_render_fragment_msl(
+                "fs",
+                &MslBindingMap {
+                    resources: Vec::new(),
+                },
+                &[],
+                &naga::back::PipelineConstants::default(),
+            )
+            .expect("default override should generate MSL");
+        let provided = module
+            .generate_render_fragment_msl(
+                "fs",
+                &MslBindingMap {
+                    resources: Vec::new(),
+                },
+                &[],
+                &override_constants("R", 0.6),
+            )
+            .expect("provided override should generate MSL");
+
+        assert!(default.source.contains("1.0"));
+        assert!(provided.source.contains("0.6"));
+        assert_ne!(default.source, provided.source);
+        assert!(!provided.source.contains("override"));
+    }
+
+    #[test]
+    fn generate_spirv_applies_override_default_and_pipeline_value() {
+        let module = override_fragment_module();
+        let default = module
+            .generate_spirv(
+                "fs",
+                ShaderStage::Fragment,
+                &naga::back::PipelineConstants::default(),
+            )
+            .expect("default override should generate SPIR-V");
+        let provided = module
+            .generate_spirv("fs", ShaderStage::Fragment, &override_constants("R", 0.6))
+            .expect("provided override should generate SPIR-V");
+
+        assert!(!default.is_empty());
+        assert!(!provided.is_empty());
+        assert_ne!(default, provided);
+    }
+
+    fn override_fragment_module() -> super::ReflectedModule {
+        parse_and_validate_wgsl(
+            "
+override R: f32 = 1.0;
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+    return vec4<f32>(R, 0.25, 0.5, 0.75);
+}
+",
+        )
+        .expect("override fragment shader should validate")
+    }
+
+    fn override_constants(key: &str, value: f64) -> naga::back::PipelineConstants {
+        [(key.to_owned(), value)].into_iter().collect()
     }
 
     #[test]
@@ -2205,7 +2342,11 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
         .unwrap();
 
         let spirv = module
-            .generate_spirv("vs", ShaderStage::Vertex)
+            .generate_spirv(
+                "vs",
+                ShaderStage::Vertex,
+                &naga::back::PipelineConstants::default(),
+            )
             .expect("vertex-only SPIR-V should generate");
 
         assert!(!spirv.is_empty());
@@ -2222,7 +2363,11 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
         .unwrap();
 
         let generated = module
-            .generate_glsl("vs", ShaderStage::Vertex)
+            .generate_glsl(
+                "vs",
+                ShaderStage::Vertex,
+                &naga::back::PipelineConstants::default(),
+            )
             .expect("vertex GLSL generation should succeed");
 
         assert!(generated.source.contains("#version 310 es"));
@@ -2240,10 +2385,35 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
         .unwrap();
 
         let generated = module
-            .generate_glsl("fs", ShaderStage::Fragment)
+            .generate_glsl(
+                "fs",
+                ShaderStage::Fragment,
+                &naga::back::PipelineConstants::default(),
+            )
             .expect("fragment GLSL generation should succeed");
 
         assert!(generated.source.contains("#version 310 es"));
         assert!(generated.source.contains("void main()"));
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn generate_glsl_applies_override_default_and_pipeline_value() {
+        let module = override_fragment_module();
+        let default = module
+            .generate_glsl(
+                "fs",
+                ShaderStage::Fragment,
+                &naga::back::PipelineConstants::default(),
+            )
+            .expect("default override should generate GLSL");
+        let provided = module
+            .generate_glsl("fs", ShaderStage::Fragment, &override_constants("R", 0.6))
+            .expect("provided override should generate GLSL");
+
+        assert!(default.source.contains("1.0"));
+        assert!(provided.source.contains("0.6"));
+        assert_ne!(default.source, provided.source);
+        assert!(!provided.source.contains("override"));
     }
 }
