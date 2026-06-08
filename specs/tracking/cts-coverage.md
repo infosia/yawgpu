@@ -894,8 +894,10 @@ never a reason to skip a CTS case.
   writable depth/stencil) store ops onto the LAST recorded `RenderPassCommand`
   (`patch_last_render_pass_store_ops`); intermediate draws keep forced `Store`. **Verified real-GPU:**
   `storeop2 = 2/2` on Metal AND Vulkan/MoltenVK (was `1/2`); `storeOp` 14/14, `rendering,depth` 130/0,
-  `stencil` 188/0, `clear_value` 30/0 — no regression. **Clean Review: 0 CRITICAL/MAJOR.** Open FINDINGS.md
-  yawgpu findings: **none**.
+  `stencil` 188/0, `clear_value` 30/0 — no regression. **Clean Review: 0 CRITICAL/MAJOR.**
+  **Then F-055 was surfaced (still OPEN — see below): sampling a depth/stencil aspect of a depth-stencil
+  texture reads wrong, cross-HAL (Metal AND native Windows/Vulkan, user-confirmed). Two fix rounds did not
+  resolve it; paused for empirical isolation.** Open FINDINGS.md yawgpu findings: **F-055**.
 - **External-CTS finding F-044 — RESOLVED.** T46 (V16) `vertex_state/correctness:
   vertex_format_to_shader_format_conversion`: yawgpu implemented ONLY the 4 `float32` vertex formats; every
   other `GPUVertexFormat` decoded to **zero** (`pass=1 fail=8`, Metal == Vulkan/MoltenVK). Root cause:
@@ -1045,6 +1047,42 @@ never a reason to skip a CTS case.
   MAJOR fixed** (GLES non-zero-slot silent mis-route → `HalError`), 1 MINOR (cosmetic `.is_empty()` drift,
   unreachable). **Regression sweep also surfaced a pre-existing, unrelated bug** (`storeop2:discard`,
   render-pass-per-draw `store_op=Store` forcing) — see the summary above; queued for a separate fix.
+- **External-CTS finding F-055 — OPEN (cross-HAL; paused after 2 inconclusive fix rounds).**
+  `memory_sync,texture,readonly_depth_stencil:sampling_while_testing` (`depth24plus-stencil8`,
+  depth+stencil read-only): a 3×3 ds texture is written (init render pass: point-list, per-instance
+  stencil ref + `frag_depth`), then in a later pass its **depth-only aspect** (`texture_2d<f32>`) and
+  **stencil-only aspect** (`texture_2d<u32>`) are sampled via `textureLoad`; readback is `0` (mismatch)
+  instead of `1`. **Fails on Metal AND native Windows/Vulkan (user-confirmed 2026-06-09)** — a real
+  cross-HAL yawgpu bug, NOT a MoltenVK artifact. Dawn + wgpu-native pass. **Investigation so far (all on
+  this branch, then reverted — none resolved it):**
+  - naga MSL/SPIR-V codegen is **correct** — `naga` CLI on the check shader emits
+    `metal::texture2d<float>` (depth) / `metal::texture2d<uint>` (stencil), identical to wgpu. Not a
+    codegen bug.
+  - **Metal aspect-view fix** (needed but insufficient): `metal_texture_view` (`metal/encode.rs:1071`)
+    ignored `binding.aspect` and built a combined-format view → creating a stencil view aborted
+    (`Depth32Float not castable` when it tried `Depth32Float`; the correct mapping is **StencilOnly →
+    `X32_Stencil8`, DepthOnly/All → `map_texture_format` (combined)**, per wgpu's `map_view_format`).
+    Adding that (+ `MTLTextureUsage::PixelFormatView` on combined-ds + `TextureBinding` textures) fixed
+    the abort (ignored Metal view test passes) but the CTS still `fail=1`. Binding the texture directly
+    for the depth/All aspect (mirroring wgpu's format-equal path) also did **not** fix it.
+  - **Vulkan layout fix** (correct-direction but insufficient): `transition_storage_textures`
+    (`vulkan/encode.rs:913`) only transitions **storage** bound textures, not **sampled** ones — so a
+    ds texture left in `DEPTH_STENCIL_ATTACHMENT_OPTIMAL` after the write is sampled in the wrong layout.
+    Adding `transition_sampled_textures` (depth/stencil → `DEPTH_STENCIL_READ_ONLY_OPTIMAL` with the
+    aspect mask; color → `SHADER_READ_ONLY_OPTIMAL`) + matching the descriptor layout
+    (`update_render_descriptor_sets`) + read-only-DS attachment layout — still `fail=1`.
+  - Both backends fail **identically** (`got 0`) despite backend-specific fixes → the **root cause is
+    deeper/shared** and was not pinned. No regression from either fix (`rendering,depth` 130/0,
+    `rendering,stencil` 188/0, `clear_value`, `storeop2` all clean).
+  - **Candidate next steps (untried, for the next session):** (1) write a yawgpu e2e isolation test —
+    render depth+stencil to a ds texture, `copyTextureToBuffer` each aspect to verify the **write**, then
+    sample each aspect to verify the **read**, separately, to localize write-vs-read and depth-vs-stencil;
+    (2) check the **bind-group sample-type** path — a depth texture bound to a `texture_2d<f32>`
+    (filterable/unfilterable-float) entry: does yawgpu-core validate/handle the depth sample type, or
+    silently mis-bind?; (3) the init point-list write correctness in the render-pass-per-draw model;
+    (4) cross-pass sync (Metal auto-hazards, so less likely the Metal cause). Reference: wgpu-hal (passes
+    on Metal + native Vulkan) — `metal::map_view_format`, `vulkan` sampled-ds layout. Speculative changes
+    were **reverted** (user-directed pause); tree clean at `793fc6d`.
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.
