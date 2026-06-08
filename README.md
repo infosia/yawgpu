@@ -472,28 +472,51 @@ SPIR-V or MSL straight to the backend; see
 
 Beyond the in-tree Noop port, yawgpu is the **primary conformance subject**
 of [**webgpu-native-cts**](https://github.com/infosia/webgpu-native-cts) — a
-separate C++ conformance suite that ports the upstream WebGPU CTS and links
+separate C++20 conformance suite that ports the upstream WebGPU CTS and links
 *directly* against the `webgpu.h` C ABI (no JS engine), running each case in
-its own subprocess against a real GPU. Across its ported `api/validation`
-surface (**3977 cases** across 10 files, including a complete `createTexture`
-and a complete `createView`), yawgpu's results are **identical to Dawn**, the
-C++ reference implementation and conformance oracle:
+its own subprocess (`--isolate`) against a real GPU. **Dawn**, Google's C++
+reference implementation, is the conformance **oracle** — the ground truth any
+backend disagreement is judged against — and yawgpu's results match it.
+
+**`api,validation` — 4715 cases across 10 files** (including a complete
+`createTexture` and a complete `createView`), real-GPU Metal (Apple Silicon):
 
 | Implementation (backend, host) | pass | skip | fail | crash |
 |---|--:|--:|--:|--:|
-| **yawgpu** — Metal, Apple Silicon | 3777 | 200 | 0 | 0 |
-| Dawn (reference) — Metal, Apple Silicon | 3777 | 200 | 0 | 0 |
+| **yawgpu** — Metal, Apple Silicon | 4332 | 383 | 0 | 0 |
+| Dawn (reference) — Metal, Apple Silicon | 4324 | 391 | 0 | 0 |
 
-`skip` covers cases gated on optional adapter features. The same clean
-result was confirmed on **Windows / Vulkan** (NVIDIA) over the earlier
-2610-case surface (`pass=2594 skip=16 fail=0 crash=0`, before the
-`createView` tests were added). Every divergence the suite surfaced against
-yawgpu — findings **F-005/006/008/009/010/011/014** (format rejection, the
-`Depth24PlusStencil8` Metal abort, multisample capability, transient-attachment
-usage, render-attachment dimension + `RGBA8Snorm` storage, compressed
-`createTexture` block alignment, and `createView` view-dimension + 3D
-array-layer ranges) — was reported there, fixed in yawgpu, and confirmed
-resolved on hardware.
+yawgpu has **zero failures**, and even *runs* the 8 `immediate_data_size`
+cases Dawn skips. `skip` covers cases gated on optional adapter features. The
+same zero-failure result holds on **native Windows / Vulkan** (NVIDIA GeForce
+RTX 5060 Ti, 2026-06-08): `pass=3257 skip=1458 fail=0 crash=0`. The pass/skip
+split differs from the Metal row only because this NVIDIA Vulkan driver
+feature-gates more optional texture formats than Apple Metal, so more format
+cases skip — the zero-failure outcome is identical on both platforms.
+
+The **full ported suite** (48 file-level queries = 10 `api,validation` +
+38 `api,operation`) is **green on both Tier-1 backends**:
+
+- **Metal** (Apple Silicon) — Dawn (oracle) and yawgpu both run end-to-end
+  green, `pass=247751 / 247579 fail=0 crash=0` (per-subcase leaf totals).
+- **Native Windows / Vulkan** (NVIDIA RTX 5060 Ti, *not* MoltenVK,
+  2026-06-08) — every ported case passes or skips: `pass=7208 skip=388
+  fail=0` per case (`pass=214039 skip=85698 fail=0 crash=0` per subcase),
+  exit 0. The operation ports match Metal exactly.
+
+The suite has surfaced **53 cross-backend findings to date**; every yawgpu
+divergence it found was **reported, fixed, and re-confirmed on hardware** —
+never masked to make a test pass (`expectations/yawgpu.txt` carries no
+expected failures). Two findings remain open, both surfaced by newly-added
+tests: **F-053** (cannot render to multiple color attachments targeting
+different slices of one 3D texture; `3d_texture_slices`) and **F-051**
+(Metal-only crash creating a view of a multisampled texture; `sample_mask` —
+Vulkan/MoltenVK pass it). Two **Mac-only MoltenVK artifacts** also remain —
+**F-033** (color `copyTextureToTexture`) and **F-045** (`frag_depth` not
+viewport-clamped) — confirmed MoltenVK Vulkan→Metal translation limitations,
+not yawgpu defects, and absent on native Vulkan. The **GLES** (Tier 2) HAL is
+the only untested follow-up. Per-finding detail lives in the suite's
+[`docs/FINDINGS.md`](https://github.com/infosia/webgpu-native-cts/blob/main/docs/FINDINGS.md).
 
 ## License
 
