@@ -1322,12 +1322,14 @@ pub(crate) fn render_pass_attachment_scope_uses(
             &attachment.view,
             ResourceAccess::Write,
             TextureAspectMask::COLOR,
+            attachment.depth_slice,
         ));
         if let Some(resolve_target) = &attachment.resolve_target {
             uses.push(texture_attachment_scope_use(
                 resolve_target,
                 ResourceAccess::Write,
                 TextureAspectMask::COLOR,
+                None,
             ));
         }
     }
@@ -1345,6 +1347,7 @@ pub(crate) fn render_pass_attachment_scope_uses(
                     ResourceAccess::Write
                 },
                 TextureAspectMask::DEPTH,
+                None,
             ));
         }
         if caps.aspects.stencil {
@@ -1356,6 +1359,7 @@ pub(crate) fn render_pass_attachment_scope_uses(
                     ResourceAccess::Write
                 },
                 TextureAspectMask::STENCIL,
+                None,
             ));
         }
     }
