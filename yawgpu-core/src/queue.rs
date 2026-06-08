@@ -873,12 +873,12 @@ fn hal_index_format(format: IndexFormat) -> HalIndexFormat {
 }
 
 fn hal_render_color_targets(
-    attachments: &[RenderPassColorExecution],
-) -> Option<Vec<HalRenderColorTarget>> {
+    attachments: &[Option<RenderPassColorExecution>],
+) -> Option<Vec<Option<HalRenderColorTarget>>> {
     attachments
         .iter()
-        .map(|attachment| {
-            Some(HalRenderColorTarget {
+        .map(|attachment| match attachment {
+            Some(attachment) => Some(Some(HalRenderColorTarget {
                 texture: attachment.texture.hal()?,
                 resolve_target: match &attachment.resolve_target {
                     Some(texture) => Some(texture.hal()?),
@@ -897,7 +897,8 @@ fn hal_render_color_targets(
                     attachment.clear_value.b,
                     attachment.clear_value.a,
                 ],
-            })
+            })),
+            None => Some(None),
         })
         .collect()
 }
@@ -1201,6 +1202,94 @@ mod tests {
             fragment: None,
             error: None,
         }))
+    }
+
+    fn sparse_color_pipeline(device: &Device, real_slot: u32) -> Arc<RenderPipeline> {
+        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(format!(
+            "@vertex fn vs() -> @builtin(position) vec4<f32> {{ return vec4<f32>(0.0, 0.0, 0.0, 1.0); }}
+@fragment fn fs() -> @location({real_slot}) vec4<f32> {{ return vec4<f32>(1.0, 0.0, 0.0, 1.0); }}"
+        ))));
+        let mut targets = vec![
+            ColorTargetState {
+                format: TextureFormat::from_raw(TextureFormat::UNDEFINED),
+                blend: None,
+                write_mask: 0,
+            },
+            ColorTargetState {
+                format: TextureFormat::from_raw(TextureFormat::UNDEFINED),
+                blend: None,
+                write_mask: 0,
+            },
+        ];
+        targets[real_slot as usize] = ColorTargetState {
+            format: rgba8_unorm(),
+            blend: None,
+            write_mask: 0xF,
+        };
+        Arc::new(device.create_render_pipeline(RenderPipelineDescriptor {
+            layout: RenderPipelineLayout::Auto,
+            vertex: RenderPipelineVertexState {
+                shader: RenderPipelineShaderStage {
+                    module: module.clone(),
+                    entry_point: Some("vs".to_owned()),
+                    constants: Vec::new(),
+                },
+                buffer_count: 0,
+                buffers: Vec::new(),
+            },
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: FrontFace::Ccw,
+                cull_mode: CullMode::None,
+                unclipped_depth: false,
+            },
+            depth_stencil: None,
+            multisample: MultisampleState {
+                count: 1,
+                mask: u32::MAX,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(RenderPipelineFragmentState {
+                shader: RenderPipelineShaderStage {
+                    module,
+                    entry_point: Some("fs".to_owned()),
+                    constants: Vec::new(),
+                },
+                target_count: 2,
+                targets,
+            }),
+            error: None,
+        }))
+    }
+
+    fn sparse_render_pass_descriptor(
+        real_slot: usize,
+        view: Arc<TextureView>,
+    ) -> RenderPassDescriptor {
+        let attachment = RenderPassColorAttachment {
+            view,
+            depth_slice: None,
+            resolve_target: None,
+            load_op: LoadOp::Clear,
+            store_op: StoreOp::Store,
+            clear_value: Color {
+                r: 0.25,
+                g: 0.5,
+                b: 0.75,
+                a: 1.0,
+            },
+        };
+        let mut color_attachments = vec![None, None];
+        color_attachments[real_slot] = Some(attachment);
+        RenderPassDescriptor {
+            max_color_attachments: Limits::DEFAULT.max_color_attachments,
+            color_attachments,
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            max_draw_count: 50_000_000,
+        }
     }
 
     fn sampled_texture_bind_group_layout(device: &Device, visibility: u64) -> Arc<BindGroupLayout> {
@@ -1909,6 +1998,44 @@ fn fs() -> @location(0) vec4<f32> {
         );
         assert!((attachment.depth_clear_value - 0.5).abs() < f32::EPSILON);
         assert!(pass.draw.is_none());
+    }
+
+    #[test]
+    fn sparse_render_pass_submit_preserves_color_attachment_holes() {
+        for real_slot in [0_usize, 1] {
+            let device = noop_device();
+            let queue = device.queue();
+            let view = noop_render_attachment(&device);
+            let pipeline = sparse_color_pipeline(&device, real_slot as u32);
+            let encoder = device.create_command_encoder();
+            let (pass, error) =
+                encoder.begin_render_pass(&sparse_render_pass_descriptor(real_slot, view));
+            assert_eq!(error, None);
+            assert_eq!(pass.set_pipeline(pipeline), None);
+            assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+            assert_eq!(pass.end(), None);
+            let (command_buffer, error) = encoder.finish();
+            assert_eq!(error, None);
+
+            assert_eq!(queue.submit(&[Arc::new(command_buffer)]), None);
+
+            let submitted = match queue.hal() {
+                HalQueue::Noop(queue) => queue.submitted_copies(),
+                _ => Vec::new(),
+            };
+            let pass = submitted
+                .iter()
+                .find_map(|copy| match copy {
+                    HalCopy::RenderPass(pass) => Some(pass),
+                    _ => None,
+                })
+                .expect("sparse color pass should submit a render pass");
+
+            assert_eq!(pass.color_targets.len(), 2);
+            assert!(pass.color_targets[real_slot].is_some());
+            assert!(pass.color_targets[1 - real_slot].is_none());
+            assert!(pass.draw.is_some());
+        }
     }
 
     #[test]

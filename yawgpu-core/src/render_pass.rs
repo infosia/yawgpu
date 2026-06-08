@@ -761,7 +761,13 @@ mod tests {
         ));
         assert_eq!(command.blend_constant, [0.0; 4]);
         assert_eq!(command.stencil_reference, 0);
-        assert_eq!(command.color_attachments[0].depth_slice, 0);
+        assert_eq!(
+            command.color_attachments[0]
+                .as_ref()
+                .expect("color attachment")
+                .depth_slice,
+            0
+        );
     }
 
     #[test]
@@ -1146,7 +1152,13 @@ mod tests {
         let CommandExecution::RenderPass(command) = &command_buffer.command_ops()[0] else {
             panic!("expected render pass command");
         };
-        assert_eq!(command.color_attachments[0].depth_slice, 1);
+        assert_eq!(
+            command.color_attachments[0]
+                .as_ref()
+                .expect("color attachment")
+                .depth_slice,
+            1
+        );
     }
 
     fn buffer_bind_group(
@@ -1296,7 +1308,9 @@ mod tests {
             panic!("expected render pass command");
         };
         assert_eq!(command.color_attachments.len(), 1);
-        let color = &command.color_attachments[0];
+        let color = command.color_attachments[0]
+            .as_ref()
+            .expect("color attachment");
         assert!(color.resolve_target.is_some());
         assert_eq!(color.resolve_mip_level, 0);
         assert_eq!(color.resolve_array_layer, 0);
@@ -2054,6 +2068,7 @@ fn fs() -> FragmentOutput {
     ) {
         assert_eq!(command.color_attachments.len(), 2);
         for color_attachment in &command.color_attachments {
+            let color_attachment = color_attachment.as_ref().expect("color attachment");
             assert_eq!(color_attachment.load_op, load_op);
             assert_eq!(color_attachment.store_op, store_op);
         }

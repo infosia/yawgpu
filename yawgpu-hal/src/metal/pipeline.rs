@@ -92,7 +92,7 @@ pub(super) fn create_render_pipeline(
     fragment_entry_point: Option<&str>,
     descriptor: &HalRenderPipelineDescriptor,
 ) -> Result<MetalRenderPipeline, HalError> {
-    if descriptor.color_targets.is_empty() && descriptor.depth_stencil.is_none() {
+    if !descriptor.color_targets.iter().any(Option::is_some) && descriptor.depth_stencil.is_none() {
         return Err(shader_error(
             "render pipeline requires a color target or depth-stencil state".to_owned(),
         ));
@@ -113,6 +113,9 @@ pub(super) fn create_render_pipeline(
     // `[[color(N)]]` outputs naturally land in the right MTL slot.
     let color_attachments = pipeline_descriptor.colorAttachments();
     for (i, color_target) in descriptor.color_targets.iter().copied().enumerate() {
+        let Some(color_target) = color_target else {
+            continue;
+        };
         let (pixel_format, _) = map_texture_format(color_target.format)?;
         let attach = unsafe { color_attachments.objectAtIndexedSubscript(i) };
         attach.setPixelFormat(pixel_format);

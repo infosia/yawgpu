@@ -191,7 +191,7 @@ pub(crate) enum ComputeDispatch {
 #[derive(Debug, Clone)]
 pub(crate) struct RenderPassCommand {
     pub(crate) pipeline: Option<Arc<RenderPipeline>>,
-    pub(crate) color_attachments: Vec<RenderPassColorExecution>,
+    pub(crate) color_attachments: Vec<Option<RenderPassColorExecution>>,
     pub(crate) depth_stencil_attachment: Option<RenderPassDepthStencilExecution>,
     pub(crate) attachment_textures: Vec<Texture>,
     pub(crate) bind_groups: BTreeMap<u32, BoundBindGroup>,
@@ -1381,25 +1381,26 @@ pub(crate) fn render_pass_query_sets(descriptor: &RenderPassDescriptor) -> Vec<Q
 /// Returns render pass color executions.
 pub(crate) fn render_pass_color_executions(
     descriptor: &RenderPassDescriptor,
-) -> Vec<RenderPassColorExecution> {
+) -> Vec<Option<RenderPassColorExecution>> {
     descriptor
         .color_attachments
         .iter()
-        .flatten()
         .map(|attachment| {
-            let resolve_target = attachment.resolve_target.as_ref();
-            RenderPassColorExecution {
-                texture: attachment.view.texture(),
-                resolve_target: resolve_target.map(|view| view.texture()),
-                mip_level: attachment.view.base_mip_level(),
-                array_layer: attachment.view.base_array_layer(),
-                depth_slice: attachment.depth_slice.unwrap_or(0),
-                resolve_mip_level: resolve_target.map_or(0, |view| view.base_mip_level()),
-                resolve_array_layer: resolve_target.map_or(0, |view| view.base_array_layer()),
-                load_op: attachment.load_op,
-                store_op: attachment.store_op,
-                clear_value: attachment.clear_value,
-            }
+            attachment.as_ref().map(|attachment| {
+                let resolve_target = attachment.resolve_target.as_ref();
+                RenderPassColorExecution {
+                    texture: attachment.view.texture(),
+                    resolve_target: resolve_target.map(|view| view.texture()),
+                    mip_level: attachment.view.base_mip_level(),
+                    array_layer: attachment.view.base_array_layer(),
+                    depth_slice: attachment.depth_slice.unwrap_or(0),
+                    resolve_mip_level: resolve_target.map_or(0, |view| view.base_mip_level()),
+                    resolve_array_layer: resolve_target.map_or(0, |view| view.base_array_layer()),
+                    load_op: attachment.load_op,
+                    store_op: attachment.store_op,
+                    clear_value: attachment.clear_value,
+                }
+            })
         })
         .collect()
 }

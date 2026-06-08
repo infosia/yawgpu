@@ -1382,7 +1382,13 @@ pub(crate) fn hal_render_pipeline_descriptor(
             fragment
                 .targets
                 .iter()
-                .map(hal_color_target_state)
+                .map(|target| {
+                    if target.format.is_undefined() {
+                        Ok(None)
+                    } else {
+                        hal_color_target_state(target).map(Some)
+                    }
+                })
                 .collect::<Result<Vec<_>, String>>()
         })
         .transpose()?
@@ -2775,7 +2781,7 @@ mod tests {
 
         assert_eq!(hal.sample_count, 1);
         assert_eq!(hal.color_targets.len(), 1);
-        let target = hal.color_targets[0];
+        let target = hal.color_targets[0].expect("color target");
         assert_eq!(target.format, hal_texture_format(rgba8_unorm()));
         assert_eq!(target.write_mask, 0b0101);
         let blend = target.blend.expect("blend");
@@ -2784,6 +2790,36 @@ mod tests {
         assert_eq!(blend.color.dst_factor, HalBlendFactor::OneMinusConstant);
         assert_eq!(blend.alpha.src_factor, HalBlendFactor::Constant);
         assert_eq!(blend.alpha.dst_factor, HalBlendFactor::OneMinusDstAlpha);
+    }
+
+    #[test]
+    fn hal_render_pipeline_descriptor_preserves_undefined_color_target_holes() {
+        let device = noop_device();
+        let module = render_shader_module(&device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        let fragment = descriptor.fragment.as_mut().expect("fragment");
+        fragment.target_count = 2;
+        fragment.targets = vec![
+            ColorTargetState {
+                format: TextureFormat::from_raw(TextureFormat::UNDEFINED),
+                blend: None,
+                write_mask: 0,
+            },
+            ColorTargetState {
+                format: rgba8_unorm(),
+                blend: None,
+                write_mask: 0xF,
+            },
+        ];
+
+        let hal = hal_render_pipeline_descriptor(&descriptor, &[]).expect("HAL render descriptor");
+
+        assert_eq!(hal.color_targets.len(), 2);
+        assert_eq!(hal.color_targets[0], None);
+        assert_eq!(
+            hal.color_targets[1].map(|target| target.format),
+            Some(hal_texture_format(rgba8_unorm()))
+        );
     }
 
     #[test]
