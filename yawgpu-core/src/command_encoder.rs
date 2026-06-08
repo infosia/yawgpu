@@ -941,6 +941,36 @@ impl CommandEncoder {
             .push(CommandExecution::RenderPass(command));
     }
 
+    /// Restores user store ops on the most recently recorded render-pass command.
+    pub(crate) fn patch_last_render_pass_store_ops(
+        &self,
+        color_store_ops: &[Option<StoreOp>],
+        depth_store_op: Option<StoreOp>,
+        stencil_store_op: Option<StoreOp>,
+    ) {
+        let mut state = self.inner.state.lock();
+        let Some(CommandExecution::RenderPass(command)) = state.command_ops.last_mut() else {
+            return;
+        };
+        for (attachment, store_op) in command
+            .color_attachments
+            .iter_mut()
+            .zip(color_store_ops.iter().copied())
+        {
+            if let (Some(attachment), Some(store_op)) = (attachment, store_op) {
+                attachment.store_op = store_op;
+            }
+        }
+        if let Some(attachment) = &mut command.depth_stencil_attachment {
+            if let Some(store_op) = depth_store_op {
+                attachment.depth_store_op = store_op;
+            }
+            if let Some(store_op) = stencil_store_op {
+                attachment.stencil_store_op = store_op;
+            }
+        }
+    }
+
     /// Appends a finished subpass-render-pass command to the encoder's command list.
     #[cfg(feature = "tiled")]
     pub(crate) fn record_subpass_render_pass(&self, command: SubpassRenderPassCommand) {
