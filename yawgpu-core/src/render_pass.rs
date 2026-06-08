@@ -1044,7 +1044,7 @@ mod tests {
             panic!("expected second render pass command");
         };
         assert_render_pass_attachment_ops(first, LoadOp::Clear, StoreOp::Store);
-        assert_render_pass_attachment_ops(second, LoadOp::Load, StoreOp::Store);
+        assert_render_pass_attachment_ops(second, LoadOp::Load, StoreOp::Discard);
 
         let clear_encoder = device.create_command_encoder();
         let (clear_pass, begin_error) = clear_encoder.begin_render_pass(&descriptor);
@@ -1059,6 +1059,82 @@ mod tests {
         };
         assert!(clear_only.draw.is_none());
         assert_render_pass_attachment_ops(clear_only, LoadOp::Clear, StoreOp::Discard);
+    }
+
+    #[test]
+    fn render_pass_encoder_final_draw_preserves_user_color_store_op() {
+        for store_op in [StoreOp::Store, StoreOp::Discard] {
+            let device = noop_device();
+            let pipeline = noop_render_pipeline(&device);
+            let view = noop_render_attachment(&device);
+            let mut descriptor = noop_render_pass_descriptor(view, None);
+            descriptor.color_attachments[0]
+                .as_mut()
+                .expect("color attachment")
+                .store_op = store_op;
+
+            let encoder = device.create_command_encoder();
+            let (pass, begin_error) = encoder.begin_render_pass(&descriptor);
+            assert_eq!(begin_error, None);
+            assert_eq!(pass.set_pipeline(pipeline), None);
+            assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+            assert_eq!(pass.end(), None);
+
+            let (command_buffer, error) = encoder.finish();
+            assert_eq!(error, None);
+            assert_eq!(command_buffer.command_ops().len(), 1);
+            let CommandExecution::RenderPass(command) = &command_buffer.command_ops()[0] else {
+                panic!("expected render pass command");
+            };
+            let color = command.color_attachments[0]
+                .as_ref()
+                .expect("color attachment");
+            assert_eq!(color.store_op, store_op);
+        }
+    }
+
+    #[test]
+    fn render_pass_encoder_two_draws_force_intermediate_store_and_preserve_final_store_op() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let view = noop_render_attachment(&device);
+        let mut descriptor = noop_render_pass_descriptor(view, None);
+        descriptor.color_attachments[0]
+            .as_mut()
+            .expect("color attachment")
+            .store_op = StoreOp::Discard;
+
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&descriptor);
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(command_buffer.command_ops().len(), 2);
+        let CommandExecution::RenderPass(first) = &command_buffer.command_ops()[0] else {
+            panic!("expected first render pass command");
+        };
+        let CommandExecution::RenderPass(last) = &command_buffer.command_ops()[1] else {
+            panic!("expected last render pass command");
+        };
+        assert_eq!(
+            first.color_attachments[0]
+                .as_ref()
+                .expect("color attachment")
+                .store_op,
+            StoreOp::Store
+        );
+        assert_eq!(
+            last.color_attachments[0]
+                .as_ref()
+                .expect("color attachment")
+                .store_op,
+            StoreOp::Discard
+        );
     }
 
     #[test]

@@ -198,6 +198,25 @@ impl PassEncoderInner {
         let unbalanced_debug_groups = state.debug_group_depth != 0;
         let open_occlusion_query = state.open_occlusion_query.is_some();
         let draw_count_exceeded = state.draw_count > state.max_draw_count;
+        let restore_store_ops = if state.render_pass_recorded && state.draw_count > 0 {
+            Some((
+                state
+                    .render_color_attachments
+                    .iter()
+                    .map(|attachment| attachment.as_ref().map(|attachment| attachment.store_op))
+                    .collect::<Vec<_>>(),
+                state
+                    .render_depth_stencil_attachment
+                    .as_ref()
+                    .map(|attachment| attachment.depth_store_op),
+                state
+                    .render_depth_stencil_attachment
+                    .as_ref()
+                    .map(|attachment| attachment.stencil_store_op),
+            ))
+        } else {
+            None
+        };
         let render_pass_command = if !state.render_pass_recorded
             && (!state.render_color_attachments.is_empty()
                 || state.render_depth_stencil_attachment.is_some())
@@ -227,6 +246,13 @@ impl PassEncoderInner {
 
         if let Some(command) = render_pass_command {
             self.parent.record_render_pass(command);
+        }
+        if let Some((color_store_ops, depth_store_op, stencil_store_op)) = restore_store_ops {
+            self.parent.patch_last_render_pass_store_ops(
+                &color_store_ops,
+                depth_store_op,
+                stencil_store_op,
+            );
         }
         self.parent.end_pass(self.token);
         if unbalanced_debug_groups {
