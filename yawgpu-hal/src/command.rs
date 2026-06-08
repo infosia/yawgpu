@@ -317,8 +317,8 @@ pub struct HalBoundSampler {
 pub struct HalRenderPass {
     /// Pipeline.
     pub pipeline: Option<HalRenderPipeline>,
-    /// Color targets in attachment slot order.
-    pub color_targets: Vec<HalRenderColorTarget>,
+    /// Color targets in attachment slot order; `None` is an empty slot.
+    pub color_targets: Vec<Option<HalRenderColorTarget>>,
     /// Optional depth-stencil attachment.
     pub depth_stencil_attachment: Option<HalRenderDepthStencilAttachment>,
     /// Bind buffers.

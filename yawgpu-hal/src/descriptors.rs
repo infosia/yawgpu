@@ -12,8 +12,8 @@ pub struct HalRenderPipelineDescriptor {
     pub sample_mask: u32,
     /// Enables alpha-to-coverage.
     pub alpha_to_coverage_enabled: bool,
-    /// Color target states.
-    pub color_targets: Vec<HalColorTargetState>,
+    /// Color target states in attachment slot order; `None` is an empty slot.
+    pub color_targets: Vec<Option<HalColorTargetState>>,
     /// Depth stencil state.
     pub depth_stencil: Option<HalDepthStencilState>,
     /// Vertex buffers.

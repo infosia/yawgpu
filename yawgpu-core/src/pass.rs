@@ -41,7 +41,7 @@ pub(crate) struct PassEncoderState {
     pub(crate) render_extent: Option<Extent3d>,
     pub(crate) attachment_textures: Vec<Texture>,
     pub(crate) attachment_texture_uses: Vec<TextureScopeUse>,
-    pub(crate) render_color_attachments: Vec<RenderPassColorExecution>,
+    pub(crate) render_color_attachments: Vec<Option<RenderPassColorExecution>>,
     pub(crate) render_depth_stencil_attachment: Option<RenderPassDepthStencilExecution>,
     pub(crate) render_pass_recorded: bool,
     pub(crate) blend_constant: [f32; 4],
@@ -62,7 +62,7 @@ pub(crate) struct PassEncoderInit {
     pub(crate) attachment_signature: Option<AttachmentSignature>,
     pub(crate) render_extent: Option<Extent3d>,
     pub(crate) attachment_textures: Vec<Texture>,
-    pub(crate) render_color_attachments: Vec<RenderPassColorExecution>,
+    pub(crate) render_color_attachments: Vec<Option<RenderPassColorExecution>>,
     pub(crate) render_depth_stencil_attachment: Option<RenderPassDepthStencilExecution>,
     pub(crate) occlusion_query_set: Option<QuerySet>,
     pub(crate) max_draw_count: u64,
@@ -118,12 +118,12 @@ impl PassEncoderState {
     pub(crate) fn load_attachments_for_draw(
         &mut self,
     ) -> (
-        Vec<RenderPassColorExecution>,
+        Vec<Option<RenderPassColorExecution>>,
         Option<RenderPassDepthStencilExecution>,
     ) {
         let mut color_attachments = self.render_color_attachments.clone();
         let mut depth_stencil_attachment = self.render_depth_stencil_attachment.clone();
-        for attachment in &mut color_attachments {
+        for attachment in color_attachments.iter_mut().flatten() {
             attachment.store_op = StoreOp::Store;
         }
         if let Some(attachment) = &mut depth_stencil_attachment {
@@ -131,7 +131,7 @@ impl PassEncoderState {
             attachment.stencil_store_op = StoreOp::Store;
         }
         if self.render_pass_recorded {
-            for attachment in &mut color_attachments {
+            for attachment in color_attachments.iter_mut().flatten() {
                 attachment.load_op = LoadOp::Load;
             }
             if let Some(attachment) = &mut depth_stencil_attachment {

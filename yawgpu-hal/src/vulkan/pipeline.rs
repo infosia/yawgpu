@@ -490,15 +490,25 @@ fn create_render_pass_for_descriptor(
     device: &ash::Device,
     descriptor: &HalRenderPipelineDescriptor,
 ) -> Result<vk::RenderPass, HalError> {
-    if descriptor.color_targets.is_empty() && descriptor.depth_stencil.is_none() {
+    if !descriptor.color_targets.iter().any(Option::is_some) && descriptor.depth_stencil.is_none() {
         return Err(shader_error(
             "render pipeline requires a color target or depth-stencil state",
         ));
     }
     let mut attachments = Vec::new();
     let mut color_references = Vec::new();
-    for (index, color_target) in descriptor.color_targets.iter().enumerate() {
+    for color_target in &descriptor.color_targets {
+        let Some(color_target) = color_target else {
+            color_references.push(
+                vk::AttachmentReference::default()
+                    .attachment(vk::ATTACHMENT_UNUSED)
+                    .layout(vk::ImageLayout::UNDEFINED),
+            );
+            continue;
+        };
         let (format, _) = map_texture_format(color_target.format)?;
+        let index = u32::try_from(attachments.len())
+            .map_err(|_| shader_error("color attachment index is too large"))?;
         attachments.push(
             vk::AttachmentDescription::default()
                 .format(format)
@@ -512,10 +522,7 @@ fn create_render_pass_for_descriptor(
         );
         color_references.push(
             vk::AttachmentReference::default()
-                .attachment(
-                    u32::try_from(index)
-                        .map_err(|_| shader_error("color attachment index is too large"))?,
-                )
+                .attachment(index)
                 .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
         );
     }
@@ -568,7 +575,7 @@ fn create_render_pass_for_descriptor(
     } else {
         subpass
     };
-    let has_color = !descriptor.color_targets.is_empty();
+    let has_color = descriptor.color_targets.iter().any(Option::is_some);
     let has_depth_stencil = descriptor.depth_stencil.is_some();
     let attachment_stage = attachment_pipeline_stages(has_color, has_depth_stencil);
     let attachment_access = attachment_access_flags(has_color, has_depth_stencil);
@@ -926,7 +933,7 @@ pub(super) fn create_graphics_pipeline(
     let color_attachments = descriptor
         .color_targets
         .iter()
-        .map(|target| color_blend_attachment(*target))
+        .map(|target| target.map_or_else(color_blend_hole_attachment, color_blend_attachment))
         .collect::<Vec<_>>();
     let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
         .logic_op_enable(false)
@@ -1008,6 +1015,12 @@ fn color_blend_attachment(target: HalColorTargetState) -> vk::PipelineColorBlend
             .alpha_blend_op(vk_blend_operation(blend.alpha.operation));
     }
     attachment
+}
+
+fn color_blend_hole_attachment() -> vk::PipelineColorBlendAttachmentState {
+    vk::PipelineColorBlendAttachmentState::default()
+        .blend_enable(false)
+        .color_write_mask(vk::ColorComponentFlags::empty())
 }
 
 fn vk_color_write_mask(write_mask: u32) -> vk::ColorComponentFlags {

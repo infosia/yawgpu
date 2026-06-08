@@ -62,11 +62,11 @@ pub(crate) fn render_descriptor() -> HalRenderPipelineDescriptor {
         sample_count: 1,
         sample_mask: u32::MAX,
         alpha_to_coverage_enabled: false,
-        color_targets: vec![HalColorTargetState {
+        color_targets: vec![Some(HalColorTargetState {
             format: HalTextureFormat::Rgba8Unorm,
             blend: None,
             write_mask: 0xf,
-        }],
+        })],
         depth_stencil: None,
         vertex_buffers: Vec::new(),
         primitive_topology: HalPrimitiveTopology::TriangleList,

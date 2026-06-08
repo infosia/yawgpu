@@ -209,12 +209,12 @@ impl MetalDevice {
             .iter()
             .enumerate()
             .map(|(index, attachment)| {
-                let state = descriptor.color_targets.get(index).copied();
-                HalColorTargetState {
+                let state = descriptor.color_targets.get(index).copied().flatten();
+                Some(HalColorTargetState {
                     format: attachment.format,
                     blend: state.and_then(|state| state.blend),
                     write_mask: state.map_or(0xf, |state| state.write_mask),
-                }
+                })
             })
             .collect();
         if adjusted.depth_stencil.is_none() {

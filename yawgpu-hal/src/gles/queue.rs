@@ -400,7 +400,8 @@ fn create_render_fbo(
     gl: &glow::Context,
     pass: &HalRenderPass,
 ) -> Result<glow::Framebuffer, HalError> {
-    if pass.color_targets.len() > 1 {
+    validate_render_pass_color_target_slot(pass)?;
+    if pass.color_targets.iter().flatten().count() > 1 {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "GLES render pass supports at most one color attachment",
@@ -409,6 +410,7 @@ fn create_render_fbo(
     if pass
         .color_targets
         .iter()
+        .flatten()
         .any(|target| target.resolve_target.is_some())
     {
         return Err(HalError::BufferOperationFailed {
@@ -418,8 +420,9 @@ fn create_render_fbo(
     }
     let color_target = pass
         .color_targets
-        .first()
-        .as_ref()
+        .iter()
+        .flatten()
+        .next()
         .map(|target| match &target.texture {
             HalTexture::Gles(texture) => Ok(texture),
             _ => Err(HalError::BufferOperationFailed {
@@ -554,7 +557,7 @@ fn create_render_fbo(
             gl.disable(glow::SCISSOR_TEST);
         }
         let mut clear_mask = 0;
-        if let Some(color) = pass.color_targets.first() {
+        if let Some(color) = pass.color_targets.iter().flatten().next() {
             let [r, g, b, a] = color.clear_color;
             gl.clear_color(r as f32, g as f32, b as f32, a as f32);
             if matches!(color.load_op, HalRenderLoadOp::Clear) {
@@ -584,6 +587,21 @@ fn create_render_fbo(
         }
         Ok(fbo)
     }
+}
+
+fn validate_render_pass_color_target_slot(pass: &HalRenderPass) -> Result<(), HalError> {
+    if pass
+        .color_targets
+        .iter()
+        .position(Option::is_some)
+        .is_some_and(|slot| slot > 0)
+    {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES render pass does not support a color attachment at a non-zero slot",
+        });
+    }
+    Ok(())
 }
 
 fn run_render_draw(
@@ -1407,6 +1425,94 @@ fn u32_from_u64(value: u64, message: &'static str) -> Result<u32, HalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn noop_render_texture() -> Result<HalTexture, HalError> {
+        let instance = crate::HalInstance::new_noop();
+        let adapter = instance
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop instance yields one adapter");
+        let device = adapter.create_device()?;
+        Ok(device.create_texture(&crate::HalTextureDescriptor {
+            dimension: crate::HalTextureDimension::D2,
+            format: crate::HalTextureFormat::Rgba8Unorm,
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+            mip_level_count: 1,
+            sample_count: 1,
+            usage: crate::HalTextureUsage {
+                copy_src: true,
+                copy_dst: true,
+                texture_binding: false,
+                storage_binding: false,
+                render_attachment: true,
+            },
+        }))
+    }
+
+    fn render_color_target() -> Result<crate::HalRenderColorTarget, HalError> {
+        Ok(crate::HalRenderColorTarget {
+            texture: noop_render_texture()?,
+            resolve_target: None,
+            mip_level: 0,
+            array_layer: 0,
+            depth_slice: 0,
+            resolve_mip_level: 0,
+            resolve_array_layer: 0,
+            load_op: HalRenderLoadOp::Clear,
+            store: true,
+            clear_color: [0.0, 0.0, 0.0, 1.0],
+        })
+    }
+
+    fn render_pass(
+        color_targets: Vec<Option<crate::HalRenderColorTarget>>,
+    ) -> crate::HalRenderPass {
+        crate::HalRenderPass {
+            pipeline: None,
+            color_targets,
+            depth_stencil_attachment: None,
+            bind_buffers: Vec::new(),
+            bind_textures: Vec::new(),
+            bind_samplers: Vec::new(),
+            vertex_buffers: Vec::new(),
+            index_buffer: None,
+            indirect_buffer: None,
+            viewport: None,
+            scissor_rect: None,
+            blend_constant: [0.0; 4],
+            stencil_reference: 0,
+            occlusion_query_set: None,
+            occlusion_query_index: None,
+            draw: None,
+        }
+    }
+
+    #[test]
+    fn validate_render_pass_color_target_slot_rejects_non_zero_color_slot() -> Result<(), HalError>
+    {
+        validate_render_pass_color_target_slot(&render_pass(vec![Some(render_color_target()?)]))?;
+        validate_render_pass_color_target_slot(&render_pass(vec![
+            Some(render_color_target()?),
+            None,
+        ]))?;
+
+        let error = validate_render_pass_color_target_slot(&render_pass(vec![
+            None,
+            Some(render_color_target()?),
+        ]))
+        .expect_err("GLES must reject a render target at slot 1");
+        assert!(matches!(
+            error,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message: "GLES render pass does not support a color attachment at a non-zero slot",
+            }
+        ));
+        Ok(())
+    }
 
     #[test]
     fn pixels_per_row_accepts_aligned_and_zero_stride() {

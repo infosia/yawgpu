@@ -144,7 +144,7 @@ impl GlesRenderPipeline {
                 device,
                 program: Ok(program),
                 vertex_buffers: descriptor.vertex_buffers,
-                color_target: descriptor.color_targets.first().copied(),
+                color_target: descriptor.color_targets.iter().copied().flatten().next(),
                 depth_stencil: descriptor.depth_stencil,
                 primitive_topology: descriptor.primitive_topology,
                 front_face: descriptor.front_face,
@@ -258,10 +258,21 @@ fn build_compute_program(
 fn validate_render_pipeline_descriptor(
     descriptor: &HalRenderPipelineDescriptor,
 ) -> Result<(), HalError> {
-    if descriptor.color_targets.len() > 1 {
+    if descriptor.color_targets.iter().flatten().count() > 1 {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "GLES render pipeline supports at most one color target",
+        });
+    }
+    if descriptor
+        .color_targets
+        .iter()
+        .position(Option::is_some)
+        .is_some_and(|slot| slot > 0)
+    {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES render pipeline does not support a color attachment at a non-zero slot",
         });
     }
     if descriptor.sample_count > 1 {
@@ -288,7 +299,7 @@ fn validate_render_pipeline_descriptor(
             message: "GLES render pipeline does not support unclipped depth",
         });
     }
-    if let Some(target) = descriptor.color_targets.first() {
+    if let Some(target) = descriptor.color_targets.iter().flatten().next() {
         if !matches!(
             target.format,
             HalTextureFormat::Rgba8Unorm | HalTextureFormat::Bgra8Unorm
@@ -306,7 +317,7 @@ fn validate_render_pipeline_descriptor(
             });
         }
     }
-    if descriptor.color_targets.is_empty() && descriptor.depth_stencil.is_none() {
+    if !descriptor.color_targets.iter().any(Option::is_some) && descriptor.depth_stencil.is_none() {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "GLES render pipeline requires a color target or depth-stencil state",
@@ -490,6 +501,58 @@ fn compile_shader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn color_target() -> HalColorTargetState {
+        HalColorTargetState {
+            format: HalTextureFormat::Rgba8Unorm,
+            blend: None,
+            write_mask: 0xf,
+        }
+    }
+
+    fn render_descriptor(
+        color_targets: Vec<Option<HalColorTargetState>>,
+    ) -> HalRenderPipelineDescriptor {
+        HalRenderPipelineDescriptor {
+            sample_count: 1,
+            sample_mask: u32::MAX,
+            alpha_to_coverage_enabled: false,
+            color_targets,
+            depth_stencil: None,
+            vertex_buffers: Vec::new(),
+            primitive_topology: crate::HalPrimitiveTopology::TriangleList,
+            front_face: crate::HalFrontFace::Ccw,
+            cull_mode: crate::HalCullMode::None,
+            unclipped_depth: false,
+        }
+    }
+
+    #[test]
+    fn validate_render_pipeline_descriptor_rejects_non_zero_color_slot() {
+        assert!(validate_render_pipeline_descriptor(&render_descriptor(vec![
+            Some(color_target())
+        ]))
+        .is_ok());
+        assert!(validate_render_pipeline_descriptor(&render_descriptor(vec![
+            Some(color_target()),
+            None,
+        ]))
+        .is_ok());
+
+        let error = validate_render_pipeline_descriptor(&render_descriptor(vec![
+            None,
+            Some(color_target()),
+        ]))
+        .expect_err("GLES must reject a real color target at slot 1");
+        assert!(matches!(
+            error,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message:
+                    "GLES render pipeline does not support a color attachment at a non-zero slot",
+            }
+        ));
+    }
 
     #[test]
     fn block_binding_from_name_extracts_naga_binding_suffix() {
