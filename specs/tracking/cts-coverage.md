@@ -886,11 +886,16 @@ never a reason to skip a CTS case.
   core, `63a6ccc`), **F-051** (Metal multisample texture view crash + `multisample.mask`, `770e330`), and
   **F-054** (sparse / null color attachments, cross-HAL, `a21f50f`). F-053's remaining Vulkan/MoltenVK
   failure is a confirmed MoltenVK 3D-multi-slice artifact (F-033/F-045 class) — native Windows/Vulkan
-  passes (user-confirmed). **Then a regression sweep surfaced a pre-existing (NOT F-054) bug**, queued for
-  fix: `render_pass,storeop2:storeOp="discard"` reads back the drawn value instead of discarding — the
-  render-pass-per-draw model's `load_attachments_for_draw` forces `store_op=Store` on every draw, dropping
-  the user's `storeOp=Discard` on the final HAL pass (confirmed identical pre-F-054, cross-HAL; clear-only
-  passes are correct). Open FINDINGS.md yawgpu findings: **none** (storeop2 not yet catalogued there).
+  passes (user-confirmed). **A regression sweep then surfaced a pre-existing (NOT F-054) bug, now
+  RESOLVED** (`f8ced46`): `render_pass,storeop2:storeOp="discard"` read back the drawn value instead of
+  discarding — the render-pass-per-draw model's `load_attachments_for_draw` forced `store_op=Store` on
+  every draw, dropping the user's `storeOp=Discard` on the final HAL pass (confirmed identical pre-F-054,
+  cross-HAL; clear-only passes were already correct). Fix: at pass `end`, restore the user's color (and
+  writable depth/stencil) store ops onto the LAST recorded `RenderPassCommand`
+  (`patch_last_render_pass_store_ops`); intermediate draws keep forced `Store`. **Verified real-GPU:**
+  `storeop2 = 2/2` on Metal AND Vulkan/MoltenVK (was `1/2`); `storeOp` 14/14, `rendering,depth` 130/0,
+  `stencil` 188/0, `clear_value` 30/0 — no regression. **Clean Review: 0 CRITICAL/MAJOR.** Open FINDINGS.md
+  yawgpu findings: **none**.
 - **External-CTS finding F-044 — RESOLVED.** T46 (V16) `vertex_state/correctness:
   vertex_format_to_shader_format_conversion`: yawgpu implemented ONLY the 4 `float32` vertex formats; every
   other `GPUVertexFormat` decoded to **zero** (`pass=1 fail=8`, Metal == Vulkan/MoltenVK). Root cause:
