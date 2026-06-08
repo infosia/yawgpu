@@ -9,6 +9,7 @@ pub struct MetalTexture {
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) depth_or_array_layers: u32,
+    pub(super) sample_count: u32,
     pub(super) bytes_per_pixel: u32,
 }
 
@@ -50,6 +51,7 @@ impl std::fmt::Debug for MetalTexture {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("depth_or_array_layers", &self.depth_or_array_layers)
+            .field("sample_count", &self.sample_count)
             .finish()
     }
 }

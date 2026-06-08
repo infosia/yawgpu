@@ -1073,7 +1073,12 @@ fn metal_texture_view(
     binding: &HalBoundTexture,
 ) -> Result<Retained<ProtocolObject<dyn MTLTextureTrait>>, HalError> {
     let (pixel_format, _) = map_texture_format(binding.format)?;
-    let texture_type = metal_texture_view_type(binding.dimension);
+    let texture_type =
+        if binding.dimension == HalTextureViewDimension::D2 && texture.sample_count > 1 {
+            MTLTextureType::Type2DMultisample
+        } else {
+            metal_texture_view_type(binding.dimension)
+        };
     let level_range = NSRange::new(
         to_ns(u64::from(binding.base_mip_level))?,
         to_ns(u64::from(binding.mip_level_count))?,
@@ -1265,6 +1270,7 @@ fn metal_index_type(format: HalIndexFormat) -> MTLIndexType {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_helpers::*;
     use super::*;
 
     #[test]
@@ -1282,6 +1288,33 @@ mod tests {
                 message: "MSL buffer size exceeds u32"
             }
         ));
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    fn metal_texture_view_uses_multisample_type_for_msaa_d2_source() {
+        let device = metal_device();
+        let mut descriptor = texture_descriptor();
+        descriptor.sample_count = 4;
+        let texture = device.create_texture(&descriptor);
+        let binding = HalBoundTexture {
+            group: 0,
+            binding: 0,
+            metal_index: 0,
+            texture: HalTexture::Metal(texture.clone()),
+            format: descriptor.format,
+            dimension: HalTextureViewDimension::D2,
+            base_mip_level: 0,
+            mip_level_count: 1,
+            base_array_layer: 0,
+            array_layer_count: 1,
+            aspect: HalTextureAspect::All,
+            storage_access: None,
+        };
+
+        let view = metal_texture_view(&texture, &binding)
+            .expect("multisampled D2 texture view should allocate");
+        assert_eq!(view.textureType(), MTLTextureType::Type2DMultisample);
     }
 }
 

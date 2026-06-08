@@ -1066,6 +1066,12 @@ pub(crate) fn select_render_shader_source(
                             .to_owned(),
                     );
                 }
+                if descriptor.multisample.mask != u32::MAX {
+                    return Err(
+                        "Metal MSL shader passthrough does not support a non-default multisample mask"
+                            .to_owned(),
+                    );
+                }
                 return Ok((
                     HalShaderSource::Msl(source.to_owned()),
                     vertex_entry_name.to_owned(),
@@ -1123,6 +1129,7 @@ pub(crate) fn select_render_shader_source(
                         &msl_binding_map,
                         subpass_color_slots,
                         fragment_pipeline_constants,
+                        descriptor.multisample.mask,
                     )?)
                 }
                 (None, None, None) => None,
@@ -3030,6 +3037,22 @@ mod tests {
         assert!(matches!(source, HalShaderSource::Msl(selected) if selected == msl_source));
         assert_eq!(vertex_entry, "vs");
         assert_eq!(fragment_entry.as_deref(), Some("fs"));
+
+        let mut masked_msl_descriptor = msl_descriptor.clone();
+        masked_msl_descriptor.multisample.mask = 0b0101;
+        assert_eq!(
+            select_render_shader_source(
+                HalBackend::Metal,
+                &masked_msl_descriptor,
+                "vs",
+                Some("fs"),
+                &[],
+                &[],
+                &[],
+            )
+            .expect_err("non-default Metal MSL passthrough sample mask must be rejected"),
+            "Metal MSL shader passthrough does not support a non-default multisample mask"
+        );
 
         assert_eq!(
             select_render_shader_source(

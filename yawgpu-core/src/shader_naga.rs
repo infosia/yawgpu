@@ -102,6 +102,7 @@ struct RenderMslStageOptions<'a> {
     force_point_size: bool,
     subpass_color_slots: &'a [((u32, u32), u32)],
     pipeline_constants: &'a naga::back::PipelineConstants,
+    sample_mask: u32,
 }
 
 /// Stores binding metadata.
@@ -648,6 +649,7 @@ impl ReflectedModule {
                 force_point_size,
                 subpass_color_slots: &[],
                 pipeline_constants,
+                sample_mask: u32::MAX,
             },
         )
     }
@@ -659,6 +661,7 @@ impl ReflectedModule {
         binding_map: &MslBindingMap,
         subpass_color_slots: &[((u32, u32), u32)],
         pipeline_constants: &naga::back::PipelineConstants,
+        sample_mask: u32,
     ) -> Result<GeneratedMsl, String> {
         self.generate_render_stage_msl(
             entry_name,
@@ -669,6 +672,7 @@ impl ReflectedModule {
                 force_point_size: false,
                 subpass_color_slots,
                 pipeline_constants,
+                sample_mask,
             },
         )
     }
@@ -694,6 +698,18 @@ impl ReflectedModule {
         } else {
             (module, info)
         };
+        let (module, info) =
+            if stage == naga::ShaderStage::Fragment && stage_options.sample_mask != u32::MAX {
+                naga::back::sample_mask::apply_sample_mask(
+                    &module,
+                    &info,
+                    (naga::ShaderStage::Fragment, entry_name),
+                    stage_options.sample_mask,
+                )
+                .map_err(|error| error.to_string())?
+            } else {
+                (module, info)
+            };
         let resources = msl_resources(binding_map)?;
         let buffer_size_bindings = msl_buffer_size_bindings_for_entry(&module, entry_name)?;
         let vertex_buffer_indices = stage_options
@@ -2305,6 +2321,7 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                 },
                 &[],
                 &naga::back::PipelineConstants::default(),
+                u32::MAX,
             )
             .expect("render fragment MSL should generate");
 
@@ -2336,6 +2353,7 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                 },
                 &[],
                 &naga::back::PipelineConstants::default(),
+                u32::MAX,
             )
             .expect("frag-depth fragment MSL should generate");
 
@@ -2355,6 +2373,7 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                 },
                 &[],
                 &naga::back::PipelineConstants::default(),
+                u32::MAX,
             )
             .expect("default override should generate MSL");
         let provided = module
@@ -2365,6 +2384,7 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                 },
                 &[],
                 &override_constants("R", 0.6),
+                u32::MAX,
             )
             .expect("provided override should generate MSL");
 
@@ -2372,6 +2392,47 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
         assert!(provided.source.contains("0.6"));
         assert_ne!(default.source, provided.source);
         assert!(!provided.source.contains("override"));
+    }
+
+    #[test]
+    fn generate_render_fragment_msl_applies_sample_mask() {
+        let module = parse_and_validate_wgsl(
+            "struct Out {
+                 @location(0) color: vec4<f32>,
+                 @builtin(sample_mask) mask: u32,
+             }
+
+             @fragment fn fs() -> Out {
+                 return Out(vec4<f32>(0.0, 1.0, 0.0, 1.0), 0xffffffffu);
+             }",
+        )
+        .unwrap();
+        let default = module
+            .generate_render_fragment_msl(
+                "fs",
+                &MslBindingMap {
+                    resources: Vec::new(),
+                },
+                &[],
+                &naga::back::PipelineConstants::default(),
+                u32::MAX,
+            )
+            .expect("default sample mask fragment MSL should generate");
+        let masked = module
+            .generate_render_fragment_msl(
+                "fs",
+                &MslBindingMap {
+                    resources: Vec::new(),
+                },
+                &[],
+                &naga::back::PipelineConstants::default(),
+                0b0101,
+            )
+            .expect("masked fragment MSL should generate");
+
+        assert!(default.source.contains("sample_mask"));
+        assert!(masked.source.contains("sample_mask"));
+        assert_ne!(default.source, masked.source);
     }
 
     #[test]
