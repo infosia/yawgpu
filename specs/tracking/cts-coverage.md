@@ -881,11 +881,16 @@ never a reason to skip a CTS case.
   CTS findings remaining: **none** — F-050 (the last open finding) is RESOLVED on Metal AND Vulkan/MoltenVK
   (below). All FINDINGS.md yawgpu items are closed: F-044/F-045/F-047/F-048/F-050 fixed (F-045's
   Vulkan/MoltenVK case is a documented MoltenVK artifact); F-046/F-049 were stale (already resolved).
-  **Update (2026-06-08):** two newly-added operation ports then surfaced two more yawgpu findings, both now
+  **Update (2026-06-08):** newly-added operation ports then surfaced more yawgpu findings, all now
   RESOLVED on Tier-1 (native Metal + native Vulkan): **F-053** (3D `multiple_color_attachments` usage-scope,
-  core, `63a6ccc`) and **F-051** (Metal multisample texture view crash + `multisample.mask`, `770e330`).
-  F-053's remaining Vulkan/MoltenVK failure is a confirmed MoltenVK 3D-multi-slice artifact (F-033/F-045
-  class) — native Windows/Vulkan passes (user-confirmed). Open CTS findings remaining: **none**.
+  core, `63a6ccc`), **F-051** (Metal multisample texture view crash + `multisample.mask`, `770e330`), and
+  **F-054** (sparse / null color attachments, cross-HAL, `a21f50f`). F-053's remaining Vulkan/MoltenVK
+  failure is a confirmed MoltenVK 3D-multi-slice artifact (F-033/F-045 class) — native Windows/Vulkan
+  passes (user-confirmed). **Then a regression sweep surfaced a pre-existing (NOT F-054) bug**, queued for
+  fix: `render_pass,storeop2:storeOp="discard"` reads back the drawn value instead of discarding — the
+  render-pass-per-draw model's `load_attachments_for_draw` forces `store_op=Store` on every draw, dropping
+  the user's `storeOp=Discard` on the final HAL pass (confirmed identical pre-F-054, cross-HAL; clear-only
+  passes are correct). Open FINDINGS.md yawgpu findings: **none** (storeop2 not yet catalogued there).
 - **External-CTS finding F-044 — RESOLVED.** T46 (V16) `vertex_state/correctness:
   vertex_format_to_shader_format_conversion`: yawgpu implemented ONLY the 4 `float32` vertex formats; every
   other `GPUVertexFormat` decoded to **zero** (`pass=1 fail=8`, Metal == Vulkan/MoltenVK). Root cause:
@@ -1009,6 +1014,32 @@ never a reason to skip a CTS case.
     `render_pipeline`/`rendering`/`render_pass` regression sweep clean. **Clean Review: 1 MAJOR fixed** —
     removing the HAL reject let Metal **MSL shader-passthrough** (opt-in `shader-passthrough` feature)
     silently ignore a non-default mask (can't inject into opaque MSL); now rejected at pipeline creation.
+- **External-CTS finding F-054 — RESOLVED (cross-HAL; core + Metal + Vulkan).** `commit a21f50f`.
+  `render_pipeline,pipeline_output_targets:color,attachments` (2 cases): a render pass + pipeline with an
+  empty color slot (null `view` / `Undefined` target) interleaved with a real `rgba8unorm`, fragment
+  writing only the non-empty `@location`, read back **zero** (`expected 199, got 0`, Metal ==
+  Vulkan/MoltenVK). Two coupled bugs: (1) the `Undefined`-format target mapped to
+  `HalTextureFormat::Unsupported` → the Metal/Vulkan pipeline builder's `map_texture_format` errored →
+  pipeline creation failed → nothing rendered (so even the real slot's clear never ran). (2)
+  `render_pass_color_executions` **flattened** the sparse holes (`.flatten()`), collapsing slot indices so
+  the fragment's `@location(N)` misaligned with the attachment at slot N (the FFI already preserved holes
+  as `Vec<Option<…>>` — only the executions path dropped them). WebGPU requires `@location(N)` → color
+  slot N, and empty slots are valid holes. Fix (coding agent): make the color-target lists sparse
+  end-to-end — `HalRenderPass.color_targets` + `HalRenderPipelineDescriptor.color_targets` become
+  `Vec<Option<…>>` (None = hole); core stops flattening; `hal_render_pipeline_descriptor` maps an
+  `Undefined`-format target to `None`. Metal skips `None` slots (`colorAttachments[slot]` Invalid/unset,
+  indexed by slot). Vulkan emits `VK_ATTACHMENT_UNUSED` color references + a disabled zero-write blend
+  attachment per hole, slot-aligned across the encode render pass, the pipeline render pass, and the
+  color-blend array; image views / transitions / retention / clear values skip holes. GLES (Tier 2): a
+  real target at slot 0 (trailing holes OK) is supported, but a real target at a **non-zero** slot has no
+  single-`COLOR_ATTACHMENT0` mapping → `HalError` (catalogued `67-gles-backend.md`) instead of silent
+  mis-route. + Noop unit tests (hole preservation both orders; pipeline `Undefined`→None; GLES non-zero
+  slot rejection). **Verified real-GPU (Claude):** `color,attachments = 2/2` on **Metal AND
+  Vulkan/MoltenVK** (was `0/2`); regression sweep (render_pipeline/rendering/render_pass/sample_mask/
+  3d_texture_slices) clean both backends; full Noop workspace test green. **Clean Review: 0 CRITICAL, 1
+  MAJOR fixed** (GLES non-zero-slot silent mis-route → `HalError`), 1 MINOR (cosmetic `.is_empty()` drift,
+  unreachable). **Regression sweep also surfaced a pre-existing, unrelated bug** (`storeop2:discard`,
+  render-pass-per-draw `store_op=Store` forcing) — see the summary above; queued for a separate fix.
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.
