@@ -881,6 +881,11 @@ never a reason to skip a CTS case.
   CTS findings remaining: **none** — F-050 (the last open finding) is RESOLVED on Metal AND Vulkan/MoltenVK
   (below). All FINDINGS.md yawgpu items are closed: F-044/F-045/F-047/F-048/F-050 fixed (F-045's
   Vulkan/MoltenVK case is a documented MoltenVK artifact); F-046/F-049 were stale (already resolved).
+  **Update (2026-06-08):** two newly-added operation ports then surfaced two more yawgpu findings, both now
+  RESOLVED on Tier-1 (native Metal + native Vulkan): **F-053** (3D `multiple_color_attachments` usage-scope,
+  core, `63a6ccc`) and **F-051** (Metal multisample texture view crash + `multisample.mask`, `770e330`).
+  F-053's remaining Vulkan/MoltenVK failure is a confirmed MoltenVK 3D-multi-slice artifact (F-033/F-045
+  class) — native Windows/Vulkan passes (user-confirmed). Open CTS findings remaining: **none**.
 - **External-CTS finding F-044 — RESOLVED.** T46 (V16) `vertex_state/correctness:
   vertex_format_to_shader_format_conversion`: yawgpu implemented ONLY the 4 `float32` vertex formats; every
   other `GPUVertexFormat` decoded to **zero** (`pass=1 fail=8`, Metal == Vulkan/MoltenVK). Root cause:
@@ -965,6 +970,45 @@ never a reason to skip a CTS case.
   documented limitation. **Verified real-GPU (Claude):** `occlusionQuery = 2/2` on **Metal AND
   Vulkan/MoltenVK** (was `1/1`); no regression (`rendering,draw` 564/0 both). **Clean Reviews:** 1 CRITICAL
   (count==0) + 1 CRITICAL (WAIT-on-unwritten) + 1 MAJOR (cross-buffer scan) all fixed; 0 open.
+- **External-CTS finding F-053 — RESOLVED (core; Tier-1 native Metal + native Vulkan).** `commit 63a6ccc`.
+  `rendering/3d_texture_slices:multiple_color_attachments,same_mip_level`: a render pass with 4 color
+  attachments, each bound to a different `depthSlice` (0..3) of the **same** 3D `rgba8unorm` texture, read
+  back **zero** — nothing was written (`pass=0 fail=1`, Metal == Vulkan/MoltenVK). Pure **core** bug
+  (cross-HAL): the render-pass usage-scope tracker (`pass.rs` `TextureScopeUse`) modelled only mip +
+  array-layer ranges, not the 3D `depthSlice`, so the four attachment writes collided as "write the same
+  texture subresource twice" → the first draw failed validation → no `RenderPassCommand` recorded → the
+  texture stayed zero-init. The dedicated `validate_color_attachment_overlap` already keyed on depth_slice
+  and was correct; only the usage-scope path was wrong. Fix (coding agent): add `depth_slice: Option<u32>`
+  to `TextureScopeUse` and AND a depth-slice check into `texture_subresource_ranges_overlap` (two `Some`
+  slices overlap only if equal; any `None` overlaps anything, preserving the sampled-binding-vs-attachment
+  hazard); color attachments carry their `depthSlice`, resolve/depth-stencil/bind-group uses pass `None`. +
+  Noop unit test (different slices → Ok; same slice / whole-range `None` → still Err). **Verified real-GPU
+  (Claude):** `3d_texture_slices = 7/7` on **Metal** (was `6/7`); no regression. **MoltenVK still fails the
+  multi-slice case only** (single-slice passes on MoltenVK; native Metal passes) → **confirmed MoltenVK
+  3D-multi-slice translation artifact (F-033/F-045 class): native Windows/Vulkan PASSES (user-confirmed
+  2026-06-08).** **Clean Review: 0 CRITICAL/MAJOR** (1 optional MINOR — test self-containedness).
+- **External-CTS finding F-051 — RESOLVED (Metal HAL; both backends green).** `commit 770e330` (+ naga
+  `infosia/wgpu` `f510a088b`). `render_pipeline,sample_mask` (6 cases, MSAA `sampleCount=4`): yawgpu's Metal
+  HAL **aborted** creating a default view of the multisampled render target (the per-sample compute readback
+  binds it as `texture_multisampled_2d<f32>`). Fixing the crash **unmasked** a second, deeper gap: WebGPU
+  `multisample.mask` had **no effect** on Metal (the test's 4-bit masks were all rejected; every case read
+  zero). Two halves, one finding (Metal-only — Vulkan was already 6/6 via `pSampleMask`):
+  - **Crash half:** `metal_texture_view` hardcoded `MTLTextureType::Type2D`; creating a `Type2D` view of a
+    `Type2DMultisample` source is invalid → abort. `MetalTexture` now carries `sample_count`; a D2 view of a
+    `sample_count>1` source builds a `Type2DMultisample` view.
+  - **Feature half:** Metal has **no** pipeline/encoder sample-mask API (verified: no
+    `MTLRenderPipelineDescriptor.sampleMask`, no `setSampleMask`), so the constant mask must be folded into
+    the fragment shader. Two-repo, like F-045: (1) new naga `back::sample_mask::apply_sample_mask` transform
+    (`infosia/wgpu` `f510a088b`) ANDs the constant mask into `@builtin(sample_mask)` (synthesizing one if
+    absent; no-op on `u32::MAX`; baked as a literal — no per-draw uniform); yawgpu's naga `rev` bumped to it.
+    (2) yawgpu wiring (coding agent): the fragment MSL path applies it after override processing + the
+    `clamp_frag_depth` transform, threaded from `descriptor.multisample.mask`; the over-strict Metal HAL
+    "non-default mask" reject is removed. **Metal-only** (SPIR-V/Vulkan untouched — fixed-function
+    `pSampleMask`). + naga unit tests (7) + yawgpu MSL-codegen test. **Verified real-GPU (Claude):**
+    `render_pipeline,sample_mask = 6/6` on **Metal** (was 6 crash) and **6/6 on Vulkan/MoltenVK**; Metal
+    `render_pipeline`/`rendering`/`render_pass` regression sweep clean. **Clean Review: 1 MAJOR fixed** —
+    removing the HAL reject let Metal **MSL shader-passthrough** (opt-in `shader-passthrough` feature)
+    silently ignore a non-default mask (can't inject into opaque MSL); now rejected at pipeline creation.
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.
