@@ -707,6 +707,7 @@ pub(crate) struct TextureScopeUse {
     pub(crate) mip_level_count: u32,
     pub(crate) base_array_layer: u32,
     pub(crate) array_layer_count: u32,
+    pub(crate) depth_slice: Option<u32>,
     pub(crate) aspects: TextureAspectMask,
     pub(crate) access: ResourceAccess,
 }
@@ -1001,6 +1002,7 @@ pub(crate) fn texture_scope_use(
         mip_level_count: texture_view.mip_level_count(),
         base_array_layer: texture_view.base_array_layer(),
         array_layer_count: texture_view.array_layer_count(),
+        depth_slice: None,
         aspects: texture_view_aspect_mask(texture_view),
         access,
     }
@@ -1010,6 +1012,7 @@ pub(crate) fn texture_attachment_scope_use(
     texture_view: &TextureView,
     access: ResourceAccess,
     aspects: TextureAspectMask,
+    depth_slice: Option<u32>,
 ) -> TextureScopeUse {
     TextureScopeUse {
         texture: texture_view.texture(),
@@ -1017,6 +1020,7 @@ pub(crate) fn texture_attachment_scope_use(
         mip_level_count: texture_view.mip_level_count(),
         base_array_layer: texture_view.base_array_layer(),
         array_layer_count: texture_view.array_layer_count(),
+        depth_slice,
         aspects,
         access,
     }
@@ -1062,7 +1066,14 @@ pub(crate) fn texture_subresource_ranges_overlap(a: &TextureScopeUse, b: &Textur
         a.array_layer_count,
         b.base_array_layer,
         b.array_layer_count,
-    )
+    ) && depth_slices_overlap(a.depth_slice, b.depth_slice)
+}
+
+fn depth_slices_overlap(a: Option<u32>, b: Option<u32>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
 }
 
 fn ranges_overlap(a_start: u32, a_count: u32, b_start: u32, b_count: u32) -> bool {
@@ -1393,6 +1404,7 @@ mod tests {
             mip_level_count,
             base_array_layer,
             array_layer_count,
+            depth_slice: None,
             aspects,
             access,
         }
@@ -1459,6 +1471,71 @@ mod tests {
         );
         assert_eq!(
             validate_texture_usage_scope(&[write_mip0, read_same_subresource]),
+            Err(
+                "usage scope cannot read and write or write the same texture subresource twice"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn texture_usage_scope_tracks_3d_attachment_depth_slices() {
+        let texture = noop_texture();
+        let mut write_slice0 = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            ResourceAccess::Write,
+        );
+        write_slice0.depth_slice = Some(0);
+        let mut write_slice1 = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            ResourceAccess::Write,
+        );
+        write_slice1.depth_slice = Some(1);
+        assert_eq!(
+            validate_texture_usage_scope(&[write_slice0.clone(), write_slice1]),
+            Ok(())
+        );
+
+        let mut write_same_slice = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            ResourceAccess::Write,
+        );
+        write_same_slice.depth_slice = Some(0);
+        let expected = Err(
+            "usage scope cannot read and write or write the same texture subresource twice"
+                .to_owned(),
+        );
+        assert_eq!(
+            validate_texture_usage_scope(&[write_slice0.clone(), write_same_slice]),
+            expected
+        );
+
+        let read_whole_range = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            ResourceAccess::Read,
+        );
+        assert_eq!(
+            validate_texture_usage_scope(&[write_slice0, read_whole_range]),
             Err(
                 "usage scope cannot read and write or write the same texture subresource twice"
                     .to_owned()
