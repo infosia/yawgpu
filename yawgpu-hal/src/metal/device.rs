@@ -67,6 +67,7 @@ impl MetalDevice {
                 width: descriptor.width,
                 height: descriptor.height,
                 depth_or_array_layers: descriptor.depth_or_array_layers,
+                sample_count: descriptor.sample_count,
                 bytes_per_pixel,
             },
             Err(_) => MetalTexture {
@@ -75,6 +76,7 @@ impl MetalDevice {
                 width: descriptor.width,
                 height: descriptor.height,
                 depth_or_array_layers: descriptor.depth_or_array_layers,
+                sample_count: 1,
                 bytes_per_pixel: 0,
             },
         }

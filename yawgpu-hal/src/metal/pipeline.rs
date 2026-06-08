@@ -97,11 +97,7 @@ pub(super) fn create_render_pipeline(
             "render pipeline requires a color target or depth-stencil state".to_owned(),
         ));
     }
-    if descriptor.sample_mask != u32::MAX {
-        return Err(shader_error(
-            "Metal render pipeline does not support non-default multisample mask".to_owned(),
-        ));
-    }
+    // Metal has no pipeline sample-mask API; yawgpu-core bakes the mask into MSL.
     let size_metadata = render_size_metadata(&shader);
     let (vertex_function, fragment_function) =
         create_render_functions(device, shader, vertex_entry_point, fragment_entry_point)?;

@@ -95,6 +95,7 @@ impl MetalSurface {
             width: config.width,
             height: config.height,
             depth_or_array_layers: 1,
+            sample_count: 1,
             bytes_per_pixel,
         })
     }
