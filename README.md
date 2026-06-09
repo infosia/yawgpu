@@ -429,14 +429,12 @@ SPIR-V or MSL straight to the backend; see
 - **Validation-tested**: the WebGPU validation rules are exercised by an
   extensive suite that runs on the Noop backend with no GPU, so correctness
   checks need no hardware.
-- **CTS conformance**: the validation suite includes a case-by-case port of
-  the official [WebGPU Conformance Test Suite](https://github.com/gpuweb/cts)
-  `api/validation` group — 122 of its 129 spec files (704 `g.test()` cases;
-  the remaining 7 are browser/canvas-only), each re-expressed as a native
-  Rust test under `yawgpu/tests/cts/validation/` and run on Noop. A handful
-  of subcases that depend on optional features or as-yet-unimplemented core
-  rules are kept as spec-correct `#[ignore]`d bodies rather than weakened
-  assertions.
+- **CTS conformance**: yawgpu is verified case-by-case against the official
+  [WebGPU Conformance Test Suite](https://github.com/gpuweb/cts) through
+  [webgpu-native-cts](https://github.com/infosia/webgpu-native-cts), which ports
+  the CTS onto the `webgpu.h` C ABI and runs each case against a real GPU
+  (Metal and Vulkan/MoltenVK), with **Dawn** as the conformance oracle — see
+  [Independent conformance](#independent-conformance--webgpu-native-cts) below.
 - **Unit-tested public API**: every public function across the three crates
   has a direct unit test.
 - **Real-GPU end-to-end tests**: buffer/texture/compute/render paths are
@@ -470,7 +468,7 @@ SPIR-V or MSL straight to the backend; see
 
 ### Independent conformance — webgpu-native-cts
 
-Beyond the in-tree Noop port, yawgpu is the **primary conformance subject**
+yawgpu is the **primary conformance subject**
 of [**webgpu-native-cts**](https://github.com/infosia/webgpu-native-cts) — a
 separate C++20 conformance suite that ports the upstream WebGPU CTS and links
 *directly* against the `webgpu.h` C ABI (no JS engine), running each case in
@@ -504,18 +502,16 @@ The **full ported suite** (48 file-level queries = 10 `api,validation` +
   fail=0` per case (`pass=214039 skip=85698 fail=0 crash=0` per subcase),
   exit 0. The operation ports match Metal exactly.
 
-The suite has surfaced **53 cross-backend findings to date**; every yawgpu
+The suite has surfaced **59 cross-backend findings to date**; every yawgpu
 divergence it found was **reported, fixed, and re-confirmed on hardware** —
 never masked to make a test pass (`expectations/yawgpu.txt` carries no
-expected failures). Two findings remain open, both surfaced by newly-added
-tests: **F-053** (cannot render to multiple color attachments targeting
-different slices of one 3D texture; `3d_texture_slices`) and **F-051**
-(Metal-only crash creating a view of a multisampled texture; `sample_mask` —
-Vulkan/MoltenVK pass it). Two **Mac-only MoltenVK artifacts** also remain —
-**F-033** (color `copyTextureToTexture`) and **F-045** (`frag_depth` not
-viewport-clamped) — confirmed MoltenVK Vulkan→Metal translation limitations,
-not yawgpu defects, and absent on native Vulkan. The **GLES** (Tier 2) HAL is
-the only untested follow-up. Per-finding detail lives in the suite's
+expected failures), and **no yawgpu finding remains open**. Three **Mac-only
+MoltenVK artifacts** remain — **F-033** (color `copyTextureToTexture`),
+**F-045** (`frag_depth` not viewport-clamped), and **F-053** (rendering to
+multiple 3D depth-slices in one pass) — confirmed MoltenVK Vulkan→Metal
+translation limitations, not yawgpu defects, and absent on native Vulkan. The
+**GLES** (Tier 2) HAL is the only untested follow-up. Per-finding detail lives
+in the suite's
 [`docs/FINDINGS.md`](https://github.com/infosia/webgpu-native-cts/blob/main/docs/FINDINGS.md).
 
 ## License
