@@ -129,6 +129,13 @@ pub(crate) fn validate_bind_group_layout_descriptor(
                         "storage texture binding format must support storage usage".to_owned(),
                     );
                 }
+                if access == StorageTextureAccess::ReadOnly && !caps.storage_read_only_capable {
+                    // `bgra8unorm` is write-only-storage capable but not read-only.
+                    return Some(
+                        "storage texture binding format must support read-only storage access"
+                            .to_owned(),
+                    );
+                }
                 if access == StorageTextureAccess::ReadWrite && !caps.read_write_storage_capable {
                     return Some(
                         "storage texture binding format must support read-write storage access"

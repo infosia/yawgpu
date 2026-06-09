@@ -115,11 +115,15 @@ fn storage_texture_format() {
   textureStore(tex, vec2i(0), vec4f());
   return vec4f();
 }";
+        // `r8unorm` is a write-only storage format only with `texture-formats-tier1`,
+        // which this default device does not enable — so its auto-layout storage
+        // binding is rejected (`rgba8sint`, by contrast, is baseline-storage and
+        // valid, per F-059).
         let invalid = "
-@group(0) @binding(0) var tex: texture_storage_2d<rgba8sint, write>;
+@group(0) @binding(0) var tex: texture_storage_2d<r8unorm, write>;
 @vertex fn main() -> @builtin(position) vec4f { return vec4f(); }
 @fragment fn fs() -> @location(0) vec4f {
-  textureStore(tex, vec2i(0), vec4i());
+  textureStore(tex, vec2i(0), vec4f());
   return vec4f();
 }";
         for is_async in [false, true] {

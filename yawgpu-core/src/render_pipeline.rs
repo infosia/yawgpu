@@ -2510,37 +2510,12 @@ pub(crate) fn effective_render_bind_group_layouts(
                     )?);
                 }
             }
-            validate_render_auto_layout_storage_textures(&requirements)?;
+            // Storage-texture format/access support is validated uniformly by
+            // the derived bind-group-layout validation (`bind_group_layout.rs`,
+            // via `FormatCaps`), so no render-specific format gate is needed.
             derive_bind_group_layouts(requirements, limits, features)
         }
     }
-}
-
-fn validate_render_auto_layout_storage_textures(
-    requirements: &[StageResourceBinding],
-) -> Result<(), String> {
-    for requirement in requirements {
-        if !requirement.binding.statically_used {
-            continue;
-        }
-        let shader_naga::ReflectedResourceBindingKind::StorageTexture { format, access, .. } =
-            &requirement.binding.kind
-        else {
-            continue;
-        };
-        let format = reflected_storage_texture_format(format)?;
-        let access = reflected_storage_texture_access(access);
-        if requirement.stage == PipelineShaderStage::Fragment
-            && access != StorageTextureAccess::ReadOnly
-            && format == TextureFormat::from_raw(TextureFormat::RGBA8_SINT)
-        {
-            return Err(
-                "render pipeline auto layout storage texture format/access is unsupported"
-                    .to_owned(),
-            );
-        }
-    }
-    Ok(())
 }
 
 /// Returns stage resource bindings.
