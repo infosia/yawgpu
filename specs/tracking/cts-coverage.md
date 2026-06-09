@@ -895,9 +895,11 @@ never a reason to skip a CTS case.
   (`patch_last_render_pass_store_ops`); intermediate draws keep forced `Store`. **Verified real-GPU:**
   `storeop2 = 2/2` on Metal AND Vulkan/MoltenVK (was `1/2`); `storeOp` 14/14, `rendering,depth` 130/0,
   `stencil` 188/0, `clear_value` 30/0 — no regression. **Clean Review: 0 CRITICAL/MAJOR.**
-  **Then F-055 was surfaced (still OPEN — see below): sampling a depth/stencil aspect of a depth-stencil
-  texture reads wrong, cross-HAL (Metal AND native Windows/Vulkan, user-confirmed). Two fix rounds did not
-  resolve it; paused for empirical isolation.** Open FINDINGS.md yawgpu findings: **F-055**.
+  **Then F-055 was surfaced and is now RESOLVED (see below): sampling a depth/stencil aspect of a
+  depth-stencil texture read wrong, cross-HAL. Root-caused to THREE layered bugs (two core + one Metal HAL);
+  the two earlier "fix rounds" were ineffective because a core validation false-reject invalidated the
+  command buffer before execution. Verified on Metal AND Vulkan/MoltenVK.** Open FINDINGS.md yawgpu
+  findings: **none** (native Windows/Vulkan re-confirmation suggested — see F-055 entry).
 - **External-CTS finding F-044 — RESOLVED.** T46 (V16) `vertex_state/correctness:
   vertex_format_to_shader_format_conversion`: yawgpu implemented ONLY the 4 `float32` vertex formats; every
   other `GPUVertexFormat` decoded to **zero** (`pass=1 fail=8`, Metal == Vulkan/MoltenVK). Root cause:
@@ -1047,42 +1049,55 @@ never a reason to skip a CTS case.
   MAJOR fixed** (GLES non-zero-slot silent mis-route → `HalError`), 1 MINOR (cosmetic `.is_empty()` drift,
   unreachable). **Regression sweep also surfaced a pre-existing, unrelated bug** (`storeop2:discard`,
   render-pass-per-draw `store_op=Store` forcing) — see the summary above; queued for a separate fix.
-- **External-CTS finding F-055 — OPEN (cross-HAL; paused after 2 inconclusive fix rounds).**
+- **External-CTS finding F-055 — RESOLVED (cross-HAL; root-caused to THREE layered bugs).**
   `memory_sync,texture,readonly_depth_stencil:sampling_while_testing` (`depth24plus-stencil8`,
   depth+stencil read-only): a 3×3 ds texture is written (init render pass: point-list, per-instance
-  stencil ref + `frag_depth`), then in a later pass its **depth-only aspect** (`texture_2d<f32>`) and
-  **stencil-only aspect** (`texture_2d<u32>`) are sampled via `textureLoad`; readback is `0` (mismatch)
-  instead of `1`. **Fails on Metal AND native Windows/Vulkan (user-confirmed 2026-06-09)** — a real
-  cross-HAL yawgpu bug, NOT a MoltenVK artifact. Dawn + wgpu-native pass. **Investigation so far (all on
-  this branch, then reverted — none resolved it):**
-  - naga MSL/SPIR-V codegen is **correct** — `naga` CLI on the check shader emits
-    `metal::texture2d<float>` (depth) / `metal::texture2d<uint>` (stencil), identical to wgpu. Not a
-    codegen bug.
-  - **Metal aspect-view fix** (needed but insufficient): `metal_texture_view` (`metal/encode.rs:1071`)
-    ignored `binding.aspect` and built a combined-format view → creating a stencil view aborted
-    (`Depth32Float not castable` when it tried `Depth32Float`; the correct mapping is **StencilOnly →
-    `X32_Stencil8`, DepthOnly/All → `map_texture_format` (combined)**, per wgpu's `map_view_format`).
-    Adding that (+ `MTLTextureUsage::PixelFormatView` on combined-ds + `TextureBinding` textures) fixed
-    the abort (ignored Metal view test passes) but the CTS still `fail=1`. Binding the texture directly
-    for the depth/All aspect (mirroring wgpu's format-equal path) also did **not** fix it.
-  - **Vulkan layout fix** (correct-direction but insufficient): `transition_storage_textures`
-    (`vulkan/encode.rs:913`) only transitions **storage** bound textures, not **sampled** ones — so a
-    ds texture left in `DEPTH_STENCIL_ATTACHMENT_OPTIMAL` after the write is sampled in the wrong layout.
-    Adding `transition_sampled_textures` (depth/stencil → `DEPTH_STENCIL_READ_ONLY_OPTIMAL` with the
-    aspect mask; color → `SHADER_READ_ONLY_OPTIMAL`) + matching the descriptor layout
-    (`update_render_descriptor_sets`) + read-only-DS attachment layout — still `fail=1`.
-  - Both backends fail **identically** (`got 0`) despite backend-specific fixes → the **root cause is
-    deeper/shared** and was not pinned. No regression from either fix (`rendering,depth` 130/0,
-    `rendering,stencil` 188/0, `clear_value`, `storeop2` all clean).
-  - **Candidate next steps (untried, for the next session):** (1) write a yawgpu e2e isolation test —
-    render depth+stencil to a ds texture, `copyTextureToBuffer` each aspect to verify the **write**, then
-    sample each aspect to verify the **read**, separately, to localize write-vs-read and depth-vs-stencil;
-    (2) check the **bind-group sample-type** path — a depth texture bound to a `texture_2d<f32>`
-    (filterable/unfilterable-float) entry: does yawgpu-core validate/handle the depth sample type, or
-    silently mis-bind?; (3) the init point-list write correctness in the render-pass-per-draw model;
-    (4) cross-pass sync (Metal auto-hazards, so less likely the Metal cause). Reference: wgpu-hal (passes
-    on Metal + native Vulkan) — `metal::map_view_format`, `vulkan` sampled-ds layout. Speculative changes
-    were **reverted** (user-directed pause); tree clean at `793fc6d`.
+  stencil ref + `frag_depth`), then a read-only-DS pass samples it, and a check pass re-samples its
+  **depth-only aspect** (`texture_2d<f32>`) and **stencil-only aspect** (`texture_2d<u32>`); readback was
+  `0` instead of `1`, cross-HAL. **Why the two earlier rounds failed:** they fixed HAL-execution-layer
+  issues, but a **core validation false-reject invalidated the command buffer before execution**, so the
+  HAL fixes never ran and the result texture stayed at its (zero) clear. With the masking validation bug
+  fixed, the real layering became visible via an **empirical e2e isolation** (`e2e_metal_depth.rs`:
+  `metal_readonly_depth_stencil_isolation` proved each of write-depth / write-stencil / read-depth /
+  read-stencil works in isolation; `..._single_submit` reproduced the failure as the exact 3-pass /
+  1-submit CTS structure and **captured the device-error sink**, which named the validation false-reject).
+  Three layered bugs:
+  - **(1) Core, aspect-blind sample-type validation** (`bind_group.rs`). `validate_bind_group_texture`
+    reduced to the whole format's output class (`None` for a depth-stencil format), ignoring the view's
+    **aspect** — so binding the depth aspect to an unfilterable-float `texture_2d<f32>` ("unfilterable-float
+    texture bindings require a float texture format") OR the stencil aspect to a `texture_2d<u32>` (uint)
+    was wrongly REJECTED → bind group invalid → command buffer invalid → result never written → `got 0`
+    on **every** backend (this is what made the failure identical cross-HAL and masked rounds 1–2). Fix:
+    new `texture_view_sample_type(caps, aspect)` (depth aspect → `Depth`, stencil aspect → `Uint`, combined
+    `All` → `None`/reject, colour → output class) + a compatibility matrix mirroring wgpu's
+    `device::resource` rules (depth view is accepted by both `Depth` and `UnfilterableFloat` layout types).
+  - **(2) Core, `writes_stencil` false-reject** (`render_pipeline.rs`). The read-only-DS test pass uses a
+    stencil state whose ops are all `Keep` (a stencil *test*, not a write), but `writes_stencil()` keyed on
+    `stencil_write_mask != 0` alone → rejected as "read-only stencil attachment is incompatible with stencil
+    writes" → command buffer invalid. Fix: mirror wgpu `StencilState::is_read_only` — writes iff
+    `write_mask != 0` AND a non-culled face has a non-`Keep` op (new pure `stencil_face_writes`). `writes_depth`
+    is already correct (keys on `depth_write_enabled`, matching wgpu `is_depth_read_only`).
+  - **(3) Metal HAL, aspect-blind sampled view** (`metal/{format,encode,texture}.rs`). `metal_texture_view`
+    ignored `binding.aspect` and built a combined-format view, so sampling the stencil aspect read garbage.
+    Fix: `map_sampled_view_format(format, aspect)` maps the **stencil aspect of a combined depth-stencil
+    format → `X32_Stencil8`** (yawgpu maps both packed ds formats to `Depth32Float_Stencil8`, so always
+    `X32_Stencil8`), everything else (incl. the depth aspect, sampled through the combined format) → its own
+    pixel format — mirrors wgpu-hal `map_view_format`; plus `MTLTextureUsage::PixelFormatView` on combined
+    depth-stencil textures (`is_combined_depth_stencil`) so the reinterpret view is allowed.
+  **Verified:** F-055 CTS `pass=1` on **Metal AND Vulkan/MoltenVK**; Noop repro test
+  `depth_stencil_aspect_sample_type_compat` + unit tests (`texture_view_sample_type_is_aspect_specific`,
+  `stencil_face_writes_only_on_non_keep_ops`); regression sweep `rendering,depth`/`rendering,stencil`/
+  `readonly_depth_stencil`/`command_buffer,basic` `pass=322 fail=0` on Metal; Noop validation suites,
+  metal+vulkan HAL lib tests, and clippy (`-D warnings`) all clean. **Clean Review: 0 CRITICAL/MAJOR.**
+  **Native Windows/Vulkan re-confirmation suggested:** bugs (1)+(2) are core (backend-independent) and fully
+  explain the user-observed native-Vulkan failure; the Vulkan HAL already builds aspect-correct image views,
+  so MoltenVK passes with only the core fixes. A *separate latent* gap remains on strict Vulkan validation
+  layers — `encode_render_pass` transitions only attachments, not bound **sampled** textures, to a readable
+  layout (the descriptor declares `SHADER_READ_ONLY_OPTIMAL` but a written ds image is left in
+  `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`; for the read-only-DS+sample pass both uses need
+  `DEPTH_STENCIL_READ_ONLY_OPTIMAL`). Desktop drivers (and MoltenVK) typically read correctly regardless, so
+  this may not surface as a failure — if native Windows/Vulkan still fails after these fixes, that layout
+  transition is the documented follow-up.
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.

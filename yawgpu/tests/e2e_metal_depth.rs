@@ -3351,3 +3351,935 @@ fn empty_string_view() -> native::WGPUStringView {
         length: 0,
     }
 }
+
+// ---------------------------------------------------------------------------
+// F-055 isolation — separate the four stages of the CTS
+// `readonly_depth_stencil:sampling_while_testing` case (init writes depth+stencil
+// into a 3x3 Depth24PlusStencil8, then both aspects are sampled) so a failure
+// localises to write-vs-read and depth-vs-stencil. Mirrors the CTS init exactly
+// (point-list, per-instance stencil reference, frag_depth), then:
+//   (1) copyTextureToBuffer(DepthOnly)   -> verifies the depth write
+//   (2) copyTextureToBuffer(StencilOnly) -> verifies the stencil write
+//   (3) sample the depth aspect (texture_2d<f32>) -> verifies the depth read
+//   (4) sample the stencil aspect (texture_2d<u32>) -> verifies the stencil read
+// ---------------------------------------------------------------------------
+
+// CTS init: stencil(x,y)=x+1 via instance index + stencil reference, depth via
+// frag_depth = (window_y_center)/10 → texture row r has depth (r+1)/10.
+const DS_INIT_SHADER: &str = r#"
+@vertex fn vs(@builtin(instance_index) x: u32, @builtin(vertex_index) y: u32) -> @builtin(position) vec4f {
+    let texcoord = (vec2f(f32(x), f32(y)) + vec2f(0.5)) / 3.0;
+    return vec4f((texcoord * 2.0) - vec2f(1.0), 0.0, 1.0);
+}
+@fragment fn fs_with_depth(@builtin(position) pos: vec4f) -> @builtin(frag_depth) f32 {
+    return (pos.y + 0.5) / 10.0;
+}
+"#;
+
+// Full-screen triangle that samples the depth aspect and writes the depth value
+// scaled by 100 (so (r+1)/10 → (r+1)*10) into an r32uint target.
+const DS_SAMPLE_DEPTH_SHADER: &str = r#"
+@group(0) @binding(0) var depthTex: texture_2d<f32>;
+@vertex fn vs(@builtin(vertex_index) id: u32) -> @builtin(position) vec4f {
+    let pos = array(vec2f(-3.0, -1.0), vec2f(3.0, -1.0), vec2f(0.0, 2.0));
+    return vec4f(pos[id], 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) u32 {
+    let texel = vec2u(floor(pos.xy));
+    return u32(round(textureLoad(depthTex, texel, 0).r * 100.0));
+}
+"#;
+
+// Full-screen triangle that samples the stencil aspect and writes the raw
+// stencil value into an r32uint target.
+const DS_SAMPLE_STENCIL_SHADER: &str = r#"
+@group(0) @binding(0) var stencilTex: texture_2d<u32>;
+@vertex fn vs(@builtin(vertex_index) id: u32) -> @builtin(position) vec4f {
+    let pos = array(vec2f(-3.0, -1.0), vec2f(3.0, -1.0), vec2f(0.0, 2.0));
+    return vec4f(pos[id], 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) u32 {
+    let texel = vec2u(floor(pos.xy));
+    return textureLoad(stencilTex, texel, 0).r;
+}
+"#;
+
+/// F-055 isolation across all four stages (write/read × depth/stencil).
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "metal")]
+fn metal_readonly_depth_stencil_isolation() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+    const W: u32 = 3;
+    const H: u32 = 3;
+    const BPR: u32 = 256;
+    const RB: usize = (BPR * H) as usize;
+
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let extent = native::WGPUExtent3D {
+            width: W,
+            height: H,
+            depthOrArrayLayers: 1,
+        };
+
+        // 3x3 Depth24PlusStencil8, render-attachment + sampled + copy-src.
+        let ds_desc = native::WGPUTextureDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            usage: native::WGPUTextureUsage_RenderAttachment
+                | native::WGPUTextureUsage_TextureBinding
+                | native::WGPUTextureUsage_CopySrc,
+            dimension: native::WGPUTextureDimension_2D,
+            size: extent,
+            format: native::WGPUTextureFormat_Depth24PlusStencil8,
+            mipLevelCount: 1,
+            sampleCount: 1,
+            viewFormatCount: 0,
+            viewFormats: std::ptr::null(),
+        };
+        let ds = yawgpu::wgpuDeviceCreateTexture(device, &ds_desc);
+        assert!(!ds.is_null());
+        let ds_full_view = yawgpu::wgpuTextureCreateView(ds, std::ptr::null());
+
+        // ----- init pipeline (point-list, depth-write, stencil replace) -----
+        let init_module = create_wgsl_module(device, DS_INIT_SHADER);
+        let init_ds_state = native::WGPUDepthStencilState {
+            nextInChain: std::ptr::null_mut(),
+            format: native::WGPUTextureFormat_Depth24PlusStencil8,
+            depthWriteEnabled: native::WGPUOptionalBool_True,
+            depthCompare: native::WGPUCompareFunction_Always,
+            stencilFront: native::WGPUStencilFaceState {
+                compare: native::WGPUCompareFunction_Always,
+                failOp: native::WGPUStencilOperation_Keep,
+                depthFailOp: native::WGPUStencilOperation_Keep,
+                passOp: native::WGPUStencilOperation_Replace,
+            },
+            stencilBack: native::WGPUStencilFaceState {
+                compare: native::WGPUCompareFunction_Always,
+                failOp: native::WGPUStencilOperation_Keep,
+                depthFailOp: native::WGPUStencilOperation_Keep,
+                passOp: native::WGPUStencilOperation_Replace,
+            },
+            stencilReadMask: 0xFF,
+            stencilWriteMask: 0xFF,
+            depthBias: 0,
+            depthBiasSlopeScale: 0.0,
+            depthBiasClamp: 0.0,
+        };
+        let mut init_primitive = primitive_state();
+        init_primitive.topology = native::WGPUPrimitiveTopology_PointList;
+        let init_pipe_desc = native::WGPURenderPipelineDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            layout: std::ptr::null(),
+            vertex: native::WGPUVertexState {
+                nextInChain: std::ptr::null_mut(),
+                module: init_module,
+                entryPoint: string_view("vs"),
+                constantCount: 0,
+                constants: std::ptr::null(),
+                bufferCount: 0,
+                buffers: std::ptr::null(),
+            },
+            primitive: init_primitive,
+            depthStencil: &init_ds_state,
+            multisample: multisample_state(),
+            fragment: &native::WGPUFragmentState {
+                nextInChain: std::ptr::null_mut(),
+                module: init_module,
+                entryPoint: string_view("fs_with_depth"),
+                constantCount: 0,
+                constants: std::ptr::null(),
+                targetCount: 0,
+                targets: std::ptr::null(),
+            },
+        };
+        let init_pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(device, &init_pipe_desc);
+        assert!(!init_pipeline.is_null(), "init pipeline creation failed");
+
+        // ----- Submit 1: init render pass (3 point draws, per-instance stencil) -----
+        {
+            let ds_att = native::WGPURenderPassDepthStencilAttachment {
+                nextInChain: std::ptr::null_mut(),
+                view: ds_full_view,
+                depthLoadOp: native::WGPULoadOp_Clear,
+                depthStoreOp: native::WGPUStoreOp_Store,
+                depthClearValue: 0.0,
+                depthReadOnly: 0,
+                stencilLoadOp: native::WGPULoadOp_Clear,
+                stencilStoreOp: native::WGPUStoreOp_Store,
+                stencilClearValue: 0,
+                stencilReadOnly: 0,
+            };
+            let pass_desc = native::WGPURenderPassDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                colorAttachmentCount: 0,
+                colorAttachments: std::ptr::null(),
+                depthStencilAttachment: &ds_att,
+                occlusionQuerySet: std::ptr::null(),
+                timestampWrites: std::ptr::null(),
+            };
+            let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, init_pipeline);
+            for i in 0..3u32 {
+                yawgpu::wgpuRenderPassEncoderSetStencilReference(pass, i + 1);
+                yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 0, i);
+            }
+            yawgpu::wgpuRenderPassEncoderEnd(pass);
+            yawgpu::wgpuRenderPassEncoderRelease(pass);
+            submit_encoder(queue, encoder);
+        }
+
+        // ----- Submit 2: copy each aspect back to verify the WRITE -----
+        let buf_depth = create_buffer(
+            device,
+            RB as u64,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        let buf_stencil = create_buffer(
+            device,
+            RB as u64,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        {
+            let copy = |encoder, aspect, buffer| {
+                let src = native::WGPUTexelCopyTextureInfo {
+                    texture: ds,
+                    mipLevel: 0,
+                    origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+                    aspect,
+                };
+                let info = native::WGPUTexelCopyBufferInfo {
+                    layout: native::WGPUTexelCopyBufferLayout {
+                        offset: 0,
+                        bytesPerRow: BPR,
+                        rowsPerImage: H,
+                    },
+                    buffer,
+                };
+                yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &src, &info, &extent);
+            };
+            let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            copy(encoder, native::WGPUTextureAspect_DepthOnly, buf_depth);
+            copy(encoder, native::WGPUTextureAspect_StencilOnly, buf_stencil);
+            submit_encoder(queue, encoder);
+        }
+        let depth_bytes = read_buffer(instance, buf_depth, 0, RB);
+        let stencil_bytes = read_buffer(instance, buf_stencil, 0, RB);
+        let mut write_depth_bad = Vec::new();
+        let mut write_stencil_bad = Vec::new();
+        for row in 0..H as usize {
+            for col in 0..W as usize {
+                let d_off = row * BPR as usize + col * 4;
+                let d = f32::from_le_bytes([
+                    depth_bytes[d_off],
+                    depth_bytes[d_off + 1],
+                    depth_bytes[d_off + 2],
+                    depth_bytes[d_off + 3],
+                ]);
+                let want_d = (row as f32 + 1.0) / 10.0;
+                if (d - want_d).abs() > 0.01 {
+                    write_depth_bad.push((col, row, want_d, d));
+                }
+                let s = stencil_bytes[row * BPR as usize + col];
+                let want_s = (col + 1) as u8;
+                if s != want_s {
+                    write_stencil_bad.push((col, row, want_s, s));
+                }
+            }
+        }
+
+        // ----- Submit 3: sample each aspect into an r32uint to verify the READ -----
+        let sample_read = |module_src: &str, aspect: native::WGPUTextureAspect| -> Vec<u32> {
+            let module = create_wgsl_module(device, module_src);
+            let color_target = native::WGPUColorTargetState {
+                nextInChain: std::ptr::null_mut(),
+                format: native::WGPUTextureFormat_R32Uint,
+                blend: std::ptr::null(),
+                writeMask: native::WGPUColorWriteMask_All,
+            };
+            let pipe_desc = native::WGPURenderPipelineDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                layout: std::ptr::null(),
+                vertex: native::WGPUVertexState {
+                    nextInChain: std::ptr::null_mut(),
+                    module,
+                    entryPoint: string_view("vs"),
+                    constantCount: 0,
+                    constants: std::ptr::null(),
+                    bufferCount: 0,
+                    buffers: std::ptr::null(),
+                },
+                primitive: primitive_state(),
+                depthStencil: std::ptr::null(),
+                multisample: multisample_state(),
+                fragment: &native::WGPUFragmentState {
+                    nextInChain: std::ptr::null_mut(),
+                    module,
+                    entryPoint: string_view("fs"),
+                    constantCount: 0,
+                    constants: std::ptr::null(),
+                    targetCount: 1,
+                    targets: &color_target,
+                },
+            };
+            let pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(device, &pipe_desc);
+            assert!(!pipeline.is_null(), "sample pipeline creation failed");
+
+            // Aspect view + auto bind group.
+            let aspect_view_desc = native::WGPUTextureViewDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                format: native::WGPUTextureFormat_Depth24PlusStencil8,
+                dimension: native::WGPUTextureViewDimension_2D,
+                baseMipLevel: 0,
+                mipLevelCount: 1,
+                baseArrayLayer: 0,
+                arrayLayerCount: 1,
+                aspect,
+                usage: native::WGPUTextureUsage_None,
+            };
+            let aspect_view = yawgpu::wgpuTextureCreateView(ds, &aspect_view_desc);
+            let bgl = yawgpu::wgpuRenderPipelineGetBindGroupLayout(pipeline, 0);
+            let entry = native::WGPUBindGroupEntry {
+                nextInChain: std::ptr::null_mut(),
+                binding: 0,
+                buffer: std::ptr::null(),
+                offset: 0,
+                size: 0,
+                sampler: std::ptr::null(),
+                textureView: aspect_view,
+            };
+            let bg_desc = native::WGPUBindGroupDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                layout: bgl,
+                entryCount: 1,
+                entries: &entry,
+            };
+            let bind_group = yawgpu::wgpuDeviceCreateBindGroup(device, &bg_desc);
+            assert!(!bind_group.is_null(), "sample bind group creation failed");
+
+            let result = yawgpu::wgpuDeviceCreateTexture(
+                device,
+                &native::WGPUTextureDescriptor {
+                    nextInChain: std::ptr::null_mut(),
+                    label: empty_string_view(),
+                    usage: native::WGPUTextureUsage_RenderAttachment
+                        | native::WGPUTextureUsage_CopySrc,
+                    dimension: native::WGPUTextureDimension_2D,
+                    size: extent,
+                    format: native::WGPUTextureFormat_R32Uint,
+                    mipLevelCount: 1,
+                    sampleCount: 1,
+                    viewFormatCount: 0,
+                    viewFormats: std::ptr::null(),
+                },
+            );
+            let result_view = yawgpu::wgpuTextureCreateView(result, std::ptr::null());
+            let color_att = native::WGPURenderPassColorAttachment {
+                nextInChain: std::ptr::null_mut(),
+                view: result_view,
+                depthSlice: native::WGPU_DEPTH_SLICE_UNDEFINED,
+                resolveTarget: std::ptr::null(),
+                loadOp: native::WGPULoadOp_Clear,
+                storeOp: native::WGPUStoreOp_Store,
+                clearValue: native::WGPUColor {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
+                },
+            };
+            let pass_desc = native::WGPURenderPassDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                colorAttachmentCount: 1,
+                colorAttachments: &color_att,
+                depthStencilAttachment: std::ptr::null(),
+                occlusionQuerySet: std::ptr::null(),
+                timestampWrites: std::ptr::null(),
+            };
+            let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+            yawgpu::wgpuRenderPassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+            yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+            yawgpu::wgpuRenderPassEncoderEnd(pass);
+            yawgpu::wgpuRenderPassEncoderRelease(pass);
+            let buf = create_buffer(
+                device,
+                RB as u64,
+                native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+            );
+            let src = native::WGPUTexelCopyTextureInfo {
+                texture: result,
+                mipLevel: 0,
+                origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+                aspect: native::WGPUTextureAspect_All,
+            };
+            let info = native::WGPUTexelCopyBufferInfo {
+                layout: native::WGPUTexelCopyBufferLayout {
+                    offset: 0,
+                    bytesPerRow: BPR,
+                    rowsPerImage: H,
+                },
+                buffer: buf,
+            };
+            yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &src, &info, &extent);
+            submit_encoder(queue, encoder);
+            let bytes = read_buffer(instance, buf, 0, RB);
+            let mut values = Vec::new();
+            for row in 0..H as usize {
+                for col in 0..W as usize {
+                    let off = row * BPR as usize + col * 4;
+                    values.push(u32::from_le_bytes([
+                        bytes[off],
+                        bytes[off + 1],
+                        bytes[off + 2],
+                        bytes[off + 3],
+                    ]));
+                }
+            }
+            yawgpu::wgpuBufferRelease(buf);
+            yawgpu::wgpuTextureViewRelease(result_view);
+            yawgpu::wgpuTextureRelease(result);
+            yawgpu::wgpuBindGroupRelease(bind_group);
+            yawgpu::wgpuBindGroupLayoutRelease(bgl);
+            yawgpu::wgpuTextureViewRelease(aspect_view);
+            yawgpu::wgpuRenderPipelineRelease(pipeline);
+            yawgpu::wgpuShaderModuleRelease(module);
+            values
+        };
+
+        let depth_read = sample_read(DS_SAMPLE_DEPTH_SHADER, native::WGPUTextureAspect_DepthOnly);
+        let stencil_read =
+            sample_read(DS_SAMPLE_STENCIL_SHADER, native::WGPUTextureAspect_StencilOnly);
+        let mut read_depth_bad = Vec::new();
+        let mut read_stencil_bad = Vec::new();
+        for row in 0..H as usize {
+            for col in 0..W as usize {
+                let idx = row * W as usize + col;
+                let want_d = ((row + 1) * 10) as u32;
+                if depth_read[idx] != want_d {
+                    read_depth_bad.push((col, row, want_d, depth_read[idx]));
+                }
+                let want_s = (col + 1) as u32;
+                if stencil_read[idx] != want_s {
+                    read_stencil_bad.push((col, row, want_s, stencil_read[idx]));
+                }
+            }
+        }
+
+        // Report all four stages together so a single run pins every failure.
+        let err = errors.lock().expect("error lock");
+        assert!(
+            write_depth_bad.is_empty()
+                && write_stencil_bad.is_empty()
+                && read_depth_bad.is_empty()
+                && read_stencil_bad.is_empty()
+                && err.is_empty(),
+            "F-055 isolation:\n  WRITE depth bad (col,row,want,got): {write_depth_bad:?}\n  \
+             WRITE stencil bad: {write_stencil_bad:?}\n  READ depth bad (col,row,want,got): \
+             {read_depth_bad:?}\n  READ stencil bad: {read_stencil_bad:?}\n  errors: {err:?}"
+        );
+        drop(err);
+
+        yawgpu::wgpuBufferRelease(buf_stencil);
+        yawgpu::wgpuBufferRelease(buf_depth);
+        yawgpu::wgpuRenderPipelineRelease(init_pipeline);
+        yawgpu::wgpuShaderModuleRelease(init_module);
+        yawgpu::wgpuTextureViewRelease(ds_full_view);
+        yawgpu::wgpuTextureRelease(ds);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+// CTS test pass: read-only DS attachment + concurrent sampling of both aspects,
+// no colour output (depth/stencil tested, fragment discards on sample).
+const DS_TEST_PASS_SHADER: &str = r#"
+@group(0) @binding(0) var depthTex: texture_2d<f32>;
+@group(0) @binding(1) var stencilTex: texture_2d<u32>;
+@vertex fn vs(@builtin(vertex_index) id: u32) -> @builtin(position) vec4f {
+    let pos = array(vec2f(-3.0, -1.0), vec2f(3.0, -1.0), vec2f(0.0, 2.0));
+    return vec4f(pos[id], 0.15, 1.0);
+}
+@fragment fn fs(@builtin(position) pos: vec4f) {
+    let texel = vec2u(floor(pos.xy));
+    if textureLoad(stencilTex, texel, 0).r > 2 { discard; }
+    if textureLoad(depthTex, texel, 0).r > 0.21 { discard; }
+}
+"#;
+
+// CTS check pass: re-sample both aspects, write 1 to r32uint on a match.
+const DS_CHECK_PASS_SHADER: &str = r#"
+@group(0) @binding(0) var depthTex: texture_2d<f32>;
+@group(0) @binding(1) var stencilTex: texture_2d<u32>;
+@vertex fn vs(@builtin(vertex_index) id: u32) -> @builtin(position) vec4f {
+    let pos = array(vec2f(-3.0, -1.0), vec2f(3.0, -1.0), vec2f(0.0, 2.0));
+    return vec4f(pos[id], 0.15, 1.0);
+}
+@fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) u32 {
+    let texel = vec2u(floor(pos.xy));
+    let initStencil = texel.x + 1;
+    let initDepth = f32(texel.y + 1) / 10.0;
+    if textureLoad(stencilTex, texel, 0).r != initStencil { return 0u; }
+    if abs(textureLoad(depthTex, texel, 0).r - initDepth) > 0.01 { return 0u; }
+    return 1u;
+}
+"#;
+
+/// F-055 full reproduction — the exact CTS structure: ONE command encoder, three
+/// passes (init write, read-only-DS + concurrent sample, check sample → result),
+/// ONE submit. The isolation probe (separate submits) passes; this pins whether
+/// the same-command-buffer multi-pass structure (read-only-DS-while-sampling +
+/// cross-pass write→sample) is what fails. Captures the device error sink.
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "metal")]
+fn metal_readonly_depth_stencil_single_submit() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+    const W: u32 = 3;
+    const H: u32 = 3;
+    const BPR: u32 = 256;
+    const RB: usize = (BPR * H) as usize;
+
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let extent = native::WGPUExtent3D {
+            width: W,
+            height: H,
+            depthOrArrayLayers: 1,
+        };
+        let ds = yawgpu::wgpuDeviceCreateTexture(
+            device,
+            &native::WGPUTextureDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                usage: native::WGPUTextureUsage_RenderAttachment
+                    | native::WGPUTextureUsage_TextureBinding,
+                dimension: native::WGPUTextureDimension_2D,
+                size: extent,
+                format: native::WGPUTextureFormat_Depth24PlusStencil8,
+                mipLevelCount: 1,
+                sampleCount: 1,
+                viewFormatCount: 0,
+                viewFormats: std::ptr::null(),
+            },
+        );
+        let ds_full_view = yawgpu::wgpuTextureCreateView(ds, std::ptr::null());
+        let aspect_view = |aspect| {
+            yawgpu::wgpuTextureCreateView(
+                ds,
+                &native::WGPUTextureViewDescriptor {
+                    nextInChain: std::ptr::null_mut(),
+                    label: empty_string_view(),
+                    format: native::WGPUTextureFormat_Depth24PlusStencil8,
+                    dimension: native::WGPUTextureViewDimension_2D,
+                    baseMipLevel: 0,
+                    mipLevelCount: 1,
+                    baseArrayLayer: 0,
+                    arrayLayerCount: 1,
+                    aspect,
+                    usage: native::WGPUTextureUsage_None,
+                },
+            )
+        };
+        let depth_view = aspect_view(native::WGPUTextureAspect_DepthOnly);
+        let stencil_view = aspect_view(native::WGPUTextureAspect_StencilOnly);
+
+        let result = yawgpu::wgpuDeviceCreateTexture(
+            device,
+            &native::WGPUTextureDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                usage: native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+                dimension: native::WGPUTextureDimension_2D,
+                size: extent,
+                format: native::WGPUTextureFormat_R32Uint,
+                mipLevelCount: 1,
+                sampleCount: 1,
+                viewFormatCount: 0,
+                viewFormats: std::ptr::null(),
+            },
+        );
+        let result_view = yawgpu::wgpuTextureCreateView(result, std::ptr::null());
+
+        // ----- pipelines -----
+        let init_module = create_wgsl_module(device, DS_INIT_SHADER);
+        let test_module = create_wgsl_module(device, DS_TEST_PASS_SHADER);
+        let check_module = create_wgsl_module(device, DS_CHECK_PASS_SHADER);
+
+        let stencil_face = native::WGPUStencilFaceState {
+            compare: native::WGPUCompareFunction_Always,
+            failOp: native::WGPUStencilOperation_Keep,
+            depthFailOp: native::WGPUStencilOperation_Keep,
+            passOp: native::WGPUStencilOperation_Replace,
+        };
+        let init_ds_state = native::WGPUDepthStencilState {
+            nextInChain: std::ptr::null_mut(),
+            format: native::WGPUTextureFormat_Depth24PlusStencil8,
+            depthWriteEnabled: native::WGPUOptionalBool_True,
+            depthCompare: native::WGPUCompareFunction_Always,
+            stencilFront: stencil_face,
+            stencilBack: stencil_face,
+            stencilReadMask: 0xFF,
+            stencilWriteMask: 0xFF,
+            depthBias: 0,
+            depthBiasSlopeScale: 0.0,
+            depthBiasClamp: 0.0,
+        };
+        let mut point_prim = primitive_state();
+        point_prim.topology = native::WGPUPrimitiveTopology_PointList;
+        let init_pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(
+            device,
+            &native::WGPURenderPipelineDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                layout: std::ptr::null(),
+                vertex: native::WGPUVertexState {
+                    nextInChain: std::ptr::null_mut(),
+                    module: init_module,
+                    entryPoint: string_view("vs"),
+                    constantCount: 0,
+                    constants: std::ptr::null(),
+                    bufferCount: 0,
+                    buffers: std::ptr::null(),
+                },
+                primitive: point_prim,
+                depthStencil: &init_ds_state,
+                multisample: multisample_state(),
+                fragment: &native::WGPUFragmentState {
+                    nextInChain: std::ptr::null_mut(),
+                    module: init_module,
+                    entryPoint: string_view("fs_with_depth"),
+                    constantCount: 0,
+                    constants: std::ptr::null(),
+                    targetCount: 0,
+                    targets: std::ptr::null(),
+                },
+            },
+        );
+
+        // test pipeline: read-only DS, no colour output.
+        let keep_face = native::WGPUStencilFaceState {
+            compare: native::WGPUCompareFunction_LessEqual,
+            failOp: native::WGPUStencilOperation_Keep,
+            depthFailOp: native::WGPUStencilOperation_Keep,
+            passOp: native::WGPUStencilOperation_Keep,
+        };
+        let test_ds_state = native::WGPUDepthStencilState {
+            nextInChain: std::ptr::null_mut(),
+            format: native::WGPUTextureFormat_Depth24PlusStencil8,
+            depthWriteEnabled: native::WGPUOptionalBool_False,
+            depthCompare: native::WGPUCompareFunction_LessEqual,
+            stencilFront: keep_face,
+            stencilBack: keep_face,
+            stencilReadMask: 0xFF,
+            stencilWriteMask: 0xFF,
+            depthBias: 0,
+            depthBiasSlopeScale: 0.0,
+            depthBiasClamp: 0.0,
+        };
+        let test_pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(
+            device,
+            &native::WGPURenderPipelineDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                layout: std::ptr::null(),
+                vertex: native::WGPUVertexState {
+                    nextInChain: std::ptr::null_mut(),
+                    module: test_module,
+                    entryPoint: string_view("vs"),
+                    constantCount: 0,
+                    constants: std::ptr::null(),
+                    bufferCount: 0,
+                    buffers: std::ptr::null(),
+                },
+                primitive: primitive_state(),
+                depthStencil: &test_ds_state,
+                multisample: multisample_state(),
+                fragment: &native::WGPUFragmentState {
+                    nextInChain: std::ptr::null_mut(),
+                    module: test_module,
+                    entryPoint: string_view("fs"),
+                    constantCount: 0,
+                    constants: std::ptr::null(),
+                    targetCount: 0,
+                    targets: std::ptr::null(),
+                },
+            },
+        );
+
+        let check_color_target = native::WGPUColorTargetState {
+            nextInChain: std::ptr::null_mut(),
+            format: native::WGPUTextureFormat_R32Uint,
+            blend: std::ptr::null(),
+            writeMask: native::WGPUColorWriteMask_All,
+        };
+        let check_pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(
+            device,
+            &native::WGPURenderPipelineDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                layout: std::ptr::null(),
+                vertex: native::WGPUVertexState {
+                    nextInChain: std::ptr::null_mut(),
+                    module: check_module,
+                    entryPoint: string_view("vs"),
+                    constantCount: 0,
+                    constants: std::ptr::null(),
+                    bufferCount: 0,
+                    buffers: std::ptr::null(),
+                },
+                primitive: primitive_state(),
+                depthStencil: std::ptr::null(),
+                multisample: multisample_state(),
+                fragment: &native::WGPUFragmentState {
+                    nextInChain: std::ptr::null_mut(),
+                    module: check_module,
+                    entryPoint: string_view("fs"),
+                    constantCount: 0,
+                    constants: std::ptr::null(),
+                    targetCount: 1,
+                    targets: &check_color_target,
+                },
+            },
+        );
+        assert!(!init_pipeline.is_null() && !test_pipeline.is_null() && !check_pipeline.is_null());
+
+        // ----- bind groups (test + check share the same aspect views) -----
+        let make_bg = |pipeline| {
+            let bgl = yawgpu::wgpuRenderPipelineGetBindGroupLayout(pipeline, 0);
+            let entries = [
+                native::WGPUBindGroupEntry {
+                    nextInChain: std::ptr::null_mut(),
+                    binding: 0,
+                    buffer: std::ptr::null(),
+                    offset: 0,
+                    size: 0,
+                    sampler: std::ptr::null(),
+                    textureView: depth_view,
+                },
+                native::WGPUBindGroupEntry {
+                    nextInChain: std::ptr::null_mut(),
+                    binding: 1,
+                    buffer: std::ptr::null(),
+                    offset: 0,
+                    size: 0,
+                    sampler: std::ptr::null(),
+                    textureView: stencil_view,
+                },
+            ];
+            let bg = yawgpu::wgpuDeviceCreateBindGroup(
+                device,
+                &native::WGPUBindGroupDescriptor {
+                    nextInChain: std::ptr::null_mut(),
+                    label: empty_string_view(),
+                    layout: bgl,
+                    entryCount: 2,
+                    entries: entries.as_ptr(),
+                },
+            );
+            yawgpu::wgpuBindGroupLayoutRelease(bgl);
+            assert!(!bg.is_null());
+            bg
+        };
+        let test_bg = make_bg(test_pipeline);
+        let check_bg = make_bg(check_pipeline);
+
+        // ----- ONE encoder, THREE passes, ONE submit -----
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        // Pass 1: init.
+        {
+            let ds_att = native::WGPURenderPassDepthStencilAttachment {
+                nextInChain: std::ptr::null_mut(),
+                view: ds_full_view,
+                depthLoadOp: native::WGPULoadOp_Clear,
+                depthStoreOp: native::WGPUStoreOp_Store,
+                depthClearValue: 0.0,
+                depthReadOnly: 0,
+                stencilLoadOp: native::WGPULoadOp_Clear,
+                stencilStoreOp: native::WGPUStoreOp_Store,
+                stencilClearValue: 0,
+                stencilReadOnly: 0,
+            };
+            let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(
+                encoder,
+                &native::WGPURenderPassDescriptor {
+                    nextInChain: std::ptr::null_mut(),
+                    label: empty_string_view(),
+                    colorAttachmentCount: 0,
+                    colorAttachments: std::ptr::null(),
+                    depthStencilAttachment: &ds_att,
+                    occlusionQuerySet: std::ptr::null(),
+                    timestampWrites: std::ptr::null(),
+                },
+            );
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, init_pipeline);
+            for i in 0..3u32 {
+                yawgpu::wgpuRenderPassEncoderSetStencilReference(pass, i + 1);
+                yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 0, i);
+            }
+            yawgpu::wgpuRenderPassEncoderEnd(pass);
+            yawgpu::wgpuRenderPassEncoderRelease(pass);
+        }
+        // Pass 2: read-only DS + concurrent sample.
+        {
+            let ds_att = native::WGPURenderPassDepthStencilAttachment {
+                nextInChain: std::ptr::null_mut(),
+                view: ds_full_view,
+                depthLoadOp: native::WGPULoadOp_Undefined,
+                depthStoreOp: native::WGPUStoreOp_Undefined,
+                depthClearValue: 0.0,
+                depthReadOnly: 1,
+                stencilLoadOp: native::WGPULoadOp_Undefined,
+                stencilStoreOp: native::WGPUStoreOp_Undefined,
+                stencilClearValue: 0,
+                stencilReadOnly: 1,
+            };
+            let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(
+                encoder,
+                &native::WGPURenderPassDescriptor {
+                    nextInChain: std::ptr::null_mut(),
+                    label: empty_string_view(),
+                    colorAttachmentCount: 0,
+                    colorAttachments: std::ptr::null(),
+                    depthStencilAttachment: &ds_att,
+                    occlusionQuerySet: std::ptr::null(),
+                    timestampWrites: std::ptr::null(),
+                },
+            );
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, test_pipeline);
+            yawgpu::wgpuRenderPassEncoderSetStencilReference(pass, 2);
+            yawgpu::wgpuRenderPassEncoderSetBindGroup(pass, 0, test_bg, 0, std::ptr::null());
+            yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+            yawgpu::wgpuRenderPassEncoderEnd(pass);
+            yawgpu::wgpuRenderPassEncoderRelease(pass);
+        }
+        // Pass 3: check → result.
+        {
+            let color_att = native::WGPURenderPassColorAttachment {
+                nextInChain: std::ptr::null_mut(),
+                view: result_view,
+                depthSlice: native::WGPU_DEPTH_SLICE_UNDEFINED,
+                resolveTarget: std::ptr::null(),
+                loadOp: native::WGPULoadOp_Clear,
+                storeOp: native::WGPUStoreOp_Store,
+                clearValue: native::WGPUColor {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
+                },
+            };
+            let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(
+                encoder,
+                &native::WGPURenderPassDescriptor {
+                    nextInChain: std::ptr::null_mut(),
+                    label: empty_string_view(),
+                    colorAttachmentCount: 1,
+                    colorAttachments: &color_att,
+                    depthStencilAttachment: std::ptr::null(),
+                    occlusionQuerySet: std::ptr::null(),
+                    timestampWrites: std::ptr::null(),
+                },
+            );
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, check_pipeline);
+            yawgpu::wgpuRenderPassEncoderSetBindGroup(pass, 0, check_bg, 0, std::ptr::null());
+            yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+            yawgpu::wgpuRenderPassEncoderEnd(pass);
+            yawgpu::wgpuRenderPassEncoderRelease(pass);
+        }
+        submit_encoder(queue, encoder);
+
+        // Copy result → buffer and read.
+        let buf = create_buffer(
+            device,
+            RB as u64,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        {
+            let src = native::WGPUTexelCopyTextureInfo {
+                texture: result,
+                mipLevel: 0,
+                origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+                aspect: native::WGPUTextureAspect_All,
+            };
+            let info = native::WGPUTexelCopyBufferInfo {
+                layout: native::WGPUTexelCopyBufferLayout {
+                    offset: 0,
+                    bytesPerRow: BPR,
+                    rowsPerImage: H,
+                },
+                buffer: buf,
+            };
+            let enc = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            yawgpu::wgpuCommandEncoderCopyTextureToBuffer(enc, &src, &info, &extent);
+            submit_encoder(queue, enc);
+        }
+        let bytes = read_buffer(instance, buf, 0, RB);
+        let mut bad = Vec::new();
+        for row in 0..H as usize {
+            for col in 0..W as usize {
+                let off = row * BPR as usize + col * 4;
+                let v = u32::from_le_bytes([
+                    bytes[off],
+                    bytes[off + 1],
+                    bytes[off + 2],
+                    bytes[off + 3],
+                ]);
+                if v != 1 {
+                    bad.push((col, row, v));
+                }
+            }
+        }
+        let err = errors.lock().expect("error lock");
+        assert!(
+            bad.is_empty() && err.is_empty(),
+            "F-055 single-submit: result texels != 1 (col,row,got): {bad:?}; errors: {err:?}"
+        );
+        drop(err);
+
+        yawgpu::wgpuBufferRelease(buf);
+        yawgpu::wgpuBindGroupRelease(check_bg);
+        yawgpu::wgpuBindGroupRelease(test_bg);
+        yawgpu::wgpuRenderPipelineRelease(check_pipeline);
+        yawgpu::wgpuRenderPipelineRelease(test_pipeline);
+        yawgpu::wgpuRenderPipelineRelease(init_pipeline);
+        yawgpu::wgpuShaderModuleRelease(check_module);
+        yawgpu::wgpuShaderModuleRelease(test_module);
+        yawgpu::wgpuShaderModuleRelease(init_module);
+        yawgpu::wgpuTextureViewRelease(result_view);
+        yawgpu::wgpuTextureRelease(result);
+        yawgpu::wgpuTextureViewRelease(stencil_view);
+        yawgpu::wgpuTextureViewRelease(depth_view);
+        yawgpu::wgpuTextureViewRelease(ds_full_view);
+        yawgpu::wgpuTextureRelease(ds);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}

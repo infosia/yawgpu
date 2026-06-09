@@ -760,10 +760,24 @@ impl RenderPipeline {
     }
 
     /// Returns true when this pipeline can write stencil.
+    ///
+    /// A pipeline writes stencil only when the write mask is non-zero **and** at
+    /// least one non-culled face has a stencil operation other than `Keep`. The
+    /// write mask alone does not imply a write — a state whose every operation is
+    /// `Keep` (e.g. a depth/stencil *test* with `passOp = Keep`) leaves stencil
+    /// untouched and is compatible with a read-only stencil attachment. Mirrors
+    /// wgpu's `StencilState::is_read_only`.
     pub(crate) fn writes_stencil(&self) -> bool {
-        self.inner
-            ._depth_stencil
-            .is_some_and(|depth| depth.stencil_write_mask != 0)
+        let Some(depth) = self.inner._depth_stencil else {
+            return false;
+        };
+        if depth.stencil_write_mask == 0 {
+            return false;
+        }
+        let cull = self.inner._primitive.cull_mode;
+        let front_writes = cull != CullMode::Front && stencil_face_writes(depth.stencil_front);
+        let back_writes = cull != CullMode::Back && stencil_face_writes(depth.stencil_back);
+        front_writes || back_writes
     }
 
     /// Returns subpass compatibility metadata.
@@ -2050,6 +2064,15 @@ pub(crate) fn stencil_face_uses_stencil(face: StencilFaceState) -> bool {
         || face.pass_op != StencilOperation::Keep
 }
 
+/// Returns true when a stencil face performs a stencil *write* — any of its
+/// operations is not `Keep`. The compare function is a test (a read), not a
+/// write, so it is deliberately excluded; see [`RenderPipeline::writes_stencil`].
+pub(crate) fn stencil_face_writes(face: StencilFaceState) -> bool {
+    face.fail_op != StencilOperation::Keep
+        || face.depth_fail_op != StencilOperation::Keep
+        || face.pass_op != StencilOperation::Keep
+}
+
 /// Validates fragment depth output and returns a descriptive error on failure.
 pub(crate) fn validate_fragment_depth_output(
     descriptor: &RenderPipelineDescriptor,
@@ -2657,6 +2680,34 @@ mod tests {
             validate_depth_stencil_aspects(state, &FeatureSet::default()),
             Err("render pipeline depth test or write requires a depth format".to_owned())
         );
+    }
+
+    #[test]
+    fn stencil_face_writes_only_on_non_keep_ops() {
+        // The compare function is a test, not a write: an all-`Keep` face never
+        // writes stencil even with a non-`Always` compare. This is the F-055
+        // false-reject — `writes_stencil` previously keyed only on a non-zero
+        // write mask and wrongly rejected such a pipeline against a read-only
+        // stencil attachment.
+        let keep = StencilFaceState {
+            compare: CompareFunction::LessEqual,
+            fail_op: StencilOperation::Keep,
+            depth_fail_op: StencilOperation::Keep,
+            pass_op: StencilOperation::Keep,
+        };
+        assert!(!stencil_face_writes(keep));
+
+        let mut pass_replace = keep;
+        pass_replace.pass_op = StencilOperation::Replace;
+        assert!(stencil_face_writes(pass_replace));
+
+        let mut fail_replace = keep;
+        fail_replace.fail_op = StencilOperation::Replace;
+        assert!(stencil_face_writes(fail_replace));
+
+        let mut depth_fail_replace = keep;
+        depth_fail_replace.depth_fail_op = StencilOperation::Replace;
+        assert!(stencil_face_writes(depth_fail_replace));
     }
 
     fn depth_stencil_state() -> DepthStencilState {

@@ -157,7 +157,12 @@ pub(super) fn create_texture(
     } else {
         MTLStorageMode::Shared
     });
-    texture_descriptor.setUsage(map_texture_usage(descriptor.usage));
+    let mut texture_usage = map_texture_usage(descriptor.usage);
+    if is_combined_depth_stencil(descriptor.format) {
+        // Allow a stencil-only reinterpret view (`X32_Stencil8`) for sampling.
+        texture_usage |= MTLTextureUsage::PixelFormatView;
+    }
+    texture_descriptor.setUsage(texture_usage);
     let texture = device
         .newTextureWithDescriptor(&texture_descriptor)
         .ok_or_else(|| texture_error("texture allocation failed"))?;
