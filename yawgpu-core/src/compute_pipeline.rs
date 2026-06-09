@@ -96,6 +96,8 @@ pub(crate) enum MetalBindingKind {
     StorageTexture { access: StorageTextureAccess },
     /// Sampler binding.
     Sampler,
+    /// External texture binding.
+    ExternalTexture,
 }
 
 impl ComputePipeline {
@@ -374,6 +376,7 @@ pub(crate) fn hal_descriptor_bindings(
                     }
                 }
                 MetalBindingKind::Sampler => HalDescriptorBindingKind::Sampler,
+                MetalBindingKind::ExternalTexture => HalDescriptorBindingKind::Texture,
             },
         })
         .collect()
@@ -404,6 +407,9 @@ pub(crate) fn msl_resource_bindings(
                     shader_naga::MslResourceBindingKind::Texture
                 }
                 MetalBindingKind::Sampler => shader_naga::MslResourceBindingKind::Sampler,
+                MetalBindingKind::ExternalTexture => {
+                    shader_naga::MslResourceBindingKind::ExternalTexture
+                }
             },
         })
         .collect()
@@ -427,6 +433,7 @@ pub(crate) fn metal_buffer_binding_map(
                     MetalBindingKind::StorageTexture { access }
                 }
                 Some(BindingLayoutKind::Sampler { .. }) => MetalBindingKind::Sampler,
+                Some(BindingLayoutKind::ExternalTexture) => MetalBindingKind::ExternalTexture,
                 _ => continue,
             };
             bindings.push(MetalBufferBinding {
@@ -435,12 +442,20 @@ pub(crate) fn metal_buffer_binding_map(
                 metal_index,
                 kind,
             });
-            metal_index = metal_index.saturating_add(1);
+            metal_index = metal_index.saturating_add(match kind {
+                MetalBindingKind::ExternalTexture => 4,
+                _ => 1,
+            });
         }
     }
     bindings.sort_by_key(|binding| (binding.group, binding.binding));
-    for (index, binding) in bindings.iter_mut().enumerate() {
-        binding.metal_index = u32::try_from(index).unwrap_or(u32::MAX);
+    let mut metal_index = 0u32;
+    for binding in &mut bindings {
+        binding.metal_index = metal_index;
+        metal_index = metal_index.saturating_add(match binding.kind {
+            MetalBindingKind::ExternalTexture => 4,
+            _ => 1,
+        });
     }
     bindings
 }
@@ -975,6 +990,9 @@ pub(crate) fn reflected_binding_layout_kind(
             format: reflected_storage_texture_format(format)?,
             view_dimension: reflected_texture_view_dimension(*view_dimension),
         }),
+        shader_naga::ReflectedResourceBindingKind::ExternalTexture => {
+            Ok(BindingLayoutKind::ExternalTexture)
+        }
     }
 }
 
@@ -1186,6 +1204,10 @@ pub(crate) fn validate_shader_binding_compat(
         | (
             shader_naga::ReflectedResourceBindingKind::StorageTexture { .. },
             BindingLayoutKind::StorageTexture { .. },
+        )
+        | (
+            shader_naga::ReflectedResourceBindingKind::ExternalTexture,
+            BindingLayoutKind::ExternalTexture,
         ) => {
             let expected = reflected_binding_layout_kind(binding)?;
             if shader_binding_layout_kinds_compatible(expected, layout_kind) {
@@ -1229,10 +1251,9 @@ pub(crate) fn shader_binding_layout_kinds_compatible(
     // access, and samplers match unless exactly one is a comparison sampler
     // (F-061). view dimension, multisampled and storage format must still match.
     match (expected, actual) {
-        (
-            BindingLayoutKind::Sampler { ty: shader },
-            BindingLayoutKind::Sampler { ty: layout },
-        ) => sampler_types_compatible(layout, shader),
+        (BindingLayoutKind::Sampler { ty: shader }, BindingLayoutKind::Sampler { ty: layout }) => {
+            sampler_types_compatible(layout, shader)
+        }
         (
             BindingLayoutKind::Texture {
                 sample_type,
@@ -1276,6 +1297,7 @@ pub(crate) fn shader_binding_layout_kinds_compatible(
                 multisampled: actual_multisampled,
             },
         ) => sample_type == actual_sample_type && multisampled == actual_multisampled,
+        (BindingLayoutKind::ExternalTexture, BindingLayoutKind::ExternalTexture) => true,
         _ => false,
     }
 }
@@ -1406,6 +1428,37 @@ mod tests {
         assert_eq!(
             validate_shader_binding_compat(&binding, layout_kind(2)),
             Err("compute pipeline layout buffer minBindingSize is too small".to_owned())
+        );
+    }
+
+    #[test]
+    fn external_texture_reflection_derives_exact_layout_compat() {
+        let binding = shader_naga::ReflectedResourceBinding {
+            group: 0,
+            binding: 0,
+            kind: shader_naga::ReflectedResourceBindingKind::ExternalTexture,
+            min_binding_size: 0,
+            statically_used: true,
+        };
+
+        assert_eq!(
+            reflected_binding_layout_kind(&binding),
+            Ok(BindingLayoutKind::ExternalTexture)
+        );
+        assert_eq!(
+            validate_shader_binding_compat(&binding, BindingLayoutKind::ExternalTexture),
+            Ok(())
+        );
+        assert_eq!(
+            validate_shader_binding_compat(
+                &binding,
+                BindingLayoutKind::Texture {
+                    sample_type: TextureSampleType::Float,
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+            ),
+            Err("compute pipeline layout binding type is incompatible".to_owned())
         );
     }
 

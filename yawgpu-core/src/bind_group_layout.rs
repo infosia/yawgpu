@@ -143,6 +143,7 @@ pub(crate) fn validate_bind_group_layout_descriptor(
                     );
                 }
             }
+            BindingLayoutKind::ExternalTexture => {}
             BindingLayoutKind::Sampler { .. } => {}
         }
 
@@ -235,6 +236,8 @@ pub enum BindingLayoutKind {
         /// View dimension variant.
         view_dimension: TextureViewDimension,
     },
+    /// External texture variant.
+    ExternalTexture,
 }
 
 /// Enumerates buffer binding type values.
@@ -427,6 +430,63 @@ mod tests {
         assert_eq!(
             error.message,
             "bind group layout bindingArraySize greater than one is not supported"
+        );
+    }
+
+    #[test]
+    fn external_texture_counts_as_four_sampled_one_sampler_one_uniform_per_stage() {
+        let entry = BindGroupLayoutEntry {
+            binding: 0,
+            visibility: SHADER_STAGE_FRAGMENT,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::ExternalTexture),
+        };
+        assert_eq!(
+            validate_bind_group_layout_descriptor(
+                &[entry],
+                Limits::DEFAULT,
+                &FeatureSet::default()
+            ),
+            None
+        );
+
+        let sampled_limited = Limits {
+            max_sampled_textures_per_shader_stage: 3,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(
+            validate_bind_group_layout_descriptor(
+                &[entry],
+                sampled_limited,
+                &FeatureSet::default()
+            ),
+            Some("too many sampled textures for one shader stage".to_owned())
+        );
+
+        let sampler_limited = Limits {
+            max_samplers_per_shader_stage: 0,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(
+            validate_bind_group_layout_descriptor(
+                &[entry],
+                sampler_limited,
+                &FeatureSet::default()
+            ),
+            Some("too many samplers for one shader stage".to_owned())
+        );
+
+        let uniform_limited = Limits {
+            max_uniform_buffers_per_shader_stage: 0,
+            ..Limits::DEFAULT
+        };
+        assert_eq!(
+            validate_bind_group_layout_descriptor(
+                &[entry],
+                uniform_limited,
+                &FeatureSet::default()
+            ),
+            Some("too many uniform buffers for one shader stage".to_owned())
         );
     }
 }

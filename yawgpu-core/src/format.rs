@@ -1223,10 +1223,12 @@ mod tests {
             );
         }
         // rg32* is storage-capable but NOT in the tier2 read-write set.
-        assert!(!TextureFormat::from_raw(TextureFormat::RG32_UINT)
-            .caps(&all)
-            .expect("rg32uint caps")
-            .read_write_storage_capable);
+        assert!(
+            !TextureFormat::from_raw(TextureFormat::RG32_UINT)
+                .caps(&all)
+                .expect("rg32uint caps")
+                .read_write_storage_capable
+        );
     }
 
     #[test]

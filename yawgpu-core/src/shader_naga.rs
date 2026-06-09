@@ -51,6 +51,8 @@ pub(crate) enum MslResourceBindingKind {
     Texture,
     /// Sampler variant.
     Sampler,
+    /// External texture variant.
+    ExternalTexture,
 }
 
 /// Stores generated shader source for generated MSL.
@@ -426,6 +428,8 @@ pub(crate) enum ReflectedResourceBindingKind {
         /// View dimension variant.
         view_dimension: ReflectedTextureViewDimension,
     },
+    /// External texture variant.
+    ExternalTexture,
 }
 
 /// Enumerates reflected texture view dimension values.
@@ -515,7 +519,8 @@ fn validate_module(module: naga::Module) -> Result<ReflectedModule, String> {
     let capabilities = naga::valid::Capabilities::SHADER_FLOAT16
         | naga::valid::Capabilities::CUBE_ARRAY_TEXTURES
         | naga::valid::Capabilities::MULTISAMPLED_SHADING
-        | naga::valid::Capabilities::STORAGE_TEXTURE_16BIT_NORM_FORMATS;
+        | naga::valid::Capabilities::STORAGE_TEXTURE_16BIT_NORM_FORMATS
+        | naga::valid::Capabilities::TEXTURE_EXTERNAL;
     // Enabled capabilities:
     // - SHADER_FLOAT16: Phase-5 overridable-constant validation needs WGSL
     //   `enable f16; override x: f16;` shaders from Dawn.
@@ -528,6 +533,7 @@ fn validate_module(module: naga::Module) -> Result<ReflectedModule, String> {
     // - STORAGE_TEXTURE_16BIT_NORM_FORMATS: the 16-bit-norm storage formats
     //   (`r16unorm`, `rgba16snorm`, …) are baseline-storage in WebGPU; naga gates
     //   the WGSL `texture_storage_*<r16unorm, …>` types behind this (F-059).
+    // - TEXTURE_EXTERNAL: WebGPU baseline external textures (`texture_external`).
     let mut validator =
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities);
     let info = validator
@@ -546,6 +552,9 @@ impl ReflectedModule {
     ) -> Result<Vec<u32>, String> {
         let (module, info) =
             self.process_overrides_for_entry(entry_name, stage, pipeline_constants)?;
+        let mut module = module.into_owned();
+        let info = info.into_owned();
+        lower_external_textures_for_spirv(&mut module);
         let options = naga::back::spv::Options {
             fake_missing_bindings: true,
             ..Default::default()
@@ -1195,10 +1204,76 @@ fn msl_resources(binding_map: &MslBindingMap) -> Result<naga::back::msl::Binding
                         sampler: Some(naga::back::msl::BindSamplerTarget::Resource(slot)),
                         ..Default::default()
                     },
+                    MslResourceBindingKind::ExternalTexture => {
+                        let plane0 = slot;
+                        let plane1 = slot.checked_add(1).ok_or_else(|| {
+                            "MSL external texture plane index exceeds the supported slot range"
+                                .to_owned()
+                        })?;
+                        let plane2 = slot.checked_add(2).ok_or_else(|| {
+                            "MSL external texture plane index exceeds the supported slot range"
+                                .to_owned()
+                        })?;
+                        let params = slot.checked_add(3).ok_or_else(|| {
+                            "MSL external texture params index exceeds the supported slot range"
+                                .to_owned()
+                        })?;
+                        naga::back::msl::BindTarget {
+                            external_texture: Some(naga::back::msl::BindExternalTextureTarget {
+                                planes: [plane0, plane1, plane2],
+                                params,
+                            }),
+                            ..Default::default()
+                        }
+                    }
                 },
             ))
         })
         .collect()
+}
+
+fn lower_external_textures_for_spirv(module: &mut naga::Module) {
+    if !module.types.iter().any(|(_, ty)| {
+        matches!(
+            ty.inner,
+            naga::TypeInner::Image {
+                class: naga::ImageClass::External,
+                ..
+            }
+        )
+    }) {
+        return;
+    }
+    let external_types = module
+        .types
+        .iter()
+        .filter_map(|(handle, ty)| {
+            matches!(
+                ty.inner,
+                naga::TypeInner::Image {
+                    class: naga::ImageClass::External,
+                    ..
+                }
+            )
+            .then_some((handle, ty.name.clone()))
+        })
+        .collect::<Vec<_>>();
+    for (handle, name) in external_types {
+        module.types.replace(
+            handle,
+            naga::Type {
+                name,
+                inner: naga::TypeInner::Image {
+                    dim: naga::ImageDimension::D2,
+                    arrayed: false,
+                    class: naga::ImageClass::Sampled {
+                        kind: naga::ScalarKind::Float,
+                        multi: false,
+                    },
+                },
+            },
+        );
+    }
 }
 
 fn msl_buffer_sizes_slot(
@@ -1219,8 +1294,11 @@ fn msl_next_buffer_slot(
     let resource_max = binding_map
         .resources
         .iter()
-        .filter(|binding| binding.kind == MslResourceBindingKind::Buffer)
-        .map(|binding| binding.metal_index)
+        .filter_map(|binding| match binding.kind {
+            MslResourceBindingKind::Buffer => Some(binding.metal_index),
+            MslResourceBindingKind::ExternalTexture => Some(binding.metal_index.saturating_add(3)),
+            _ => None,
+        })
         .max()
         .unwrap_or(0);
     let next_slot = extra_buffer_indices
@@ -1728,6 +1806,7 @@ fn resource_binding_kind(
                         view_dimension: reflected_texture_view_dimension(*dim, *arrayed),
                     })
                 }
+                naga::ImageClass::External => Some(ReflectedResourceBindingKind::ExternalTexture),
                 _ => None,
             },
             _ => None,
@@ -2299,6 +2378,53 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
             .find(|binding| binding.binding == 3)
             .unwrap();
         assert!(!unused.statically_used);
+    }
+
+    #[test]
+    fn external_texture_validates_reflects_and_generates_backend_sources() {
+        let module = parse_and_validate_wgsl(
+            "@group(0) @binding(0) var tex: texture_external;
+             @fragment fn fs() -> @location(0) vec4<f32> {
+                 return textureLoad(tex, vec2<i32>(0, 0));
+             }",
+        )
+        .expect("external texture WGSL should validate");
+
+        let bindings = module.resource_bindings_for_entry("fs").unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings[0].kind,
+            ReflectedResourceBindingKind::ExternalTexture
+        );
+        assert!(bindings[0].statically_used);
+
+        let msl = module
+            .generate_render_fragment_msl(
+                "fs",
+                &MslBindingMap {
+                    resources: vec![MslResourceBinding {
+                        group: 0,
+                        binding: 0,
+                        metal_index: 0,
+                        kind: MslResourceBindingKind::ExternalTexture,
+                    }],
+                },
+                &[],
+                &naga::back::PipelineConstants::default(),
+                u32::MAX,
+            )
+            .expect("external texture fragment MSL should generate");
+        assert!(msl.source.contains("_plane0"));
+        assert!(msl.source.contains("_params"));
+
+        let spirv = module
+            .generate_spirv(
+                "fs",
+                ShaderStage::Fragment,
+                &naga::back::PipelineConstants::default(),
+            )
+            .expect("external texture fragment SPIR-V fallback should generate");
+        assert!(!spirv.is_empty());
     }
 
     #[cfg(feature = "tiled")]

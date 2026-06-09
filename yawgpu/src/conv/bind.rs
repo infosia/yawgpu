@@ -158,6 +158,17 @@ fn map_bind_group_layout_entry(
     let mut present_count = 0;
     let mut kind = None;
 
+    if unsafe { external_texture_binding_layout(entry.nextInChain) }.is_some() {
+        present_count += 1;
+        if !standard_binding_layout_fields_empty(entry) {
+            set_first_error(
+                error,
+                "external texture binding layout must not set standard binding layout fields",
+            );
+        }
+        kind = Some(core::BindingLayoutKind::ExternalTexture);
+    }
+
     #[cfg(feature = "tiled")]
     if let Some(input_attachment) = unsafe { input_attachment_binding_layout(entry.nextInChain) } {
         present_count += 1;
@@ -215,7 +226,21 @@ unsafe fn input_attachment_binding_layout<'a>(
     None
 }
 
-#[cfg(feature = "tiled")]
+unsafe fn external_texture_binding_layout<'a>(
+    mut chain: *const native::WGPUChainedStruct,
+) -> Option<&'a native::WGPUExternalTextureBindingLayout> {
+    while let Some(node) = chain.as_ref() {
+        if node.sType == native::WGPUSType_ExternalTextureBindingLayout {
+            return Some(
+                &*(node as *const native::WGPUChainedStruct
+                    as *const native::WGPUExternalTextureBindingLayout),
+            );
+        }
+        chain = node.next;
+    }
+    None
+}
+
 fn standard_binding_layout_fields_empty(entry: &native::WGPUBindGroupLayoutEntry) -> bool {
     entry.buffer.type_ == native::WGPUBufferBindingType_BindingNotUsed
         && entry.sampler.type_ == native::WGPUSamplerBindingType_BindingNotUsed

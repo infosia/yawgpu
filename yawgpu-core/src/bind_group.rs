@@ -267,6 +267,9 @@ pub(crate) fn validate_bind_group_entry(
             "input-attachment binding must not be supplied in the bind group; it is auto-wired by the subpass pass"
                 .to_owned(),
         ),
+        (_, BindingLayoutKind::ExternalTexture) => Some(
+            "external texture bind group entries are not implemented in this slice".to_owned(),
+        ),
         (BindGroupResource::Invalid(message), _) => Some(message.clone()),
         _ => Some("bind group entry resource kind must match the layout".to_owned()),
     }
