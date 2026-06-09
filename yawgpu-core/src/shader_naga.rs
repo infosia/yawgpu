@@ -506,10 +506,18 @@ pub(crate) fn reflect_spirv(words: &[u32]) -> Result<ReflectedModule, String> {
 }
 
 fn validate_module(module: naga::Module) -> Result<ReflectedModule, String> {
-    let capabilities = naga::valid::Capabilities::SHADER_FLOAT16;
+    let capabilities = naga::valid::Capabilities::SHADER_FLOAT16
+        | naga::valid::Capabilities::CUBE_ARRAY_TEXTURES
+        | naga::valid::Capabilities::MULTISAMPLED_SHADING;
     // Enabled capabilities:
     // - SHADER_FLOAT16: Phase-5 overridable-constant validation needs WGSL
     //   `enable f16; override x: f16;` shaders from Dawn.
+    // - CUBE_ARRAY_TEXTURES + MULTISAMPLED_SHADING: WebGPU-baseline sampled
+    //   texture types (`texture_cube_array<T>`, `texture_multisampled_2d<T>`).
+    //   naga gates both behind a capability; omitting them turned every such
+    //   shader into an error module (F-057). wgpu enables both for any WebGPU
+    //   device (the `CUBE_ARRAY_TEXTURES` / `MULTISAMPLED_SHADING` downlevel
+    //   flags are baseline on Metal/Vulkan).
     let mut validator =
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities);
     let info = validator
@@ -1896,6 +1904,43 @@ mod tests {
     fn parses_and_validates_trivial_wgsl() {
         let source = "@vertex fn main() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }";
         assert!(parse_and_validate_wgsl(source).is_ok());
+    }
+
+    #[test]
+    fn validates_cube_array_and_multisampled_sampled_textures() {
+        // F-057: a float cube-array sampled texture is a core WebGPU type; naga
+        // gates the `Cube` + arrayed image type behind `CUBE_ARRAY_TEXTURES`, so
+        // dropping that capability turned every cube-array shader into an error
+        // module (masked for sint/uint, whose filtering-sampler cases the CTS
+        // expects to fail anyway, but surfaced for the float case it expects to
+        // succeed). Both capabilities are WebGPU baseline.
+        for source in [
+            r"
+@group(0) @binding(0) var t: texture_cube_array<f32>;
+@group(0) @binding(1) var s: sampler;
+@compute @workgroup_size(1) fn cs() {
+    _ = textureGather(0, t, s, vec3f(0), 0);
+}
+",
+            r"
+@group(0) @binding(0) var t: texture_cube_array<u32>;
+@group(0) @binding(1) var s: sampler;
+@compute @workgroup_size(1) fn cs() {
+    _ = textureGather(0, t, s, vec3f(0), 0);
+}
+",
+            r"
+@group(0) @binding(0) var t: texture_multisampled_2d<f32>;
+@compute @workgroup_size(1) fn cs() {
+    _ = textureLoad(t, vec2i(0), 0);
+}
+",
+        ] {
+            assert!(
+                parse_and_validate_wgsl(source).is_ok(),
+                "expected shader to validate: {source}"
+            );
+        }
     }
 
     #[test]
