@@ -76,6 +76,21 @@ work follows principle 1 above (direct unit tests) — porting a
 Dawn test is optional, useful when it materially closes a
 spec-coverage gap.
 
+### CTS conformance — webgpu-native-cts
+
+WebGPU CTS conformance (`api/validation` + `api/operation`) is verified
+**externally** by
+[webgpu-native-cts](https://github.com/infosia/webgpu-native-cts), which links
+the `webgpu.h` C ABI directly and runs each case against a real GPU (Metal +
+Vulkan/MoltenVK) with **Dawn** as the oracle — not by in-repo Rust ports. The
+in-repo test layers are: the inline `#[cfg(test)]` unit tests (principle 1 — the
+primary public-API coverage), the Dawn-ported `yawgpu/tests/*_validation.rs`
+Noop regression tests, and the `yawgpu/tests/e2e_{metal,vulkan,gles}_*.rs`
+real-GPU tests. A yawgpu divergence the CTS suite finds is root-caused and fixed
+in the library (with its inline unit test), then re-confirmed on hardware; the
+finding ledger is `specs/tracking/cts-coverage.md` and the suite's
+`docs/FINDINGS.md`.
+
 ## Code conventions
 
 - `#[non_exhaustive]` on extensible public enums/structs.
