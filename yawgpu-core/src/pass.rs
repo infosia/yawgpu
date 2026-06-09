@@ -890,6 +890,7 @@ pub(crate) fn collect_bind_group_usage(
             #[cfg(feature = "tiled")]
             BindingLayoutKind::InputAttachment { .. } => None,
             BindingLayoutKind::Sampler { .. } => None,
+            BindingLayoutKind::ExternalTexture => Some(ResourceAccess::Read),
         };
         let Some(access) = access else {
             continue;

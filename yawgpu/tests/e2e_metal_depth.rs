@@ -3764,8 +3764,10 @@ fn metal_readonly_depth_stencil_isolation() {
         };
 
         let depth_read = sample_read(DS_SAMPLE_DEPTH_SHADER, native::WGPUTextureAspect_DepthOnly);
-        let stencil_read =
-            sample_read(DS_SAMPLE_STENCIL_SHADER, native::WGPUTextureAspect_StencilOnly);
+        let stencil_read = sample_read(
+            DS_SAMPLE_STENCIL_SHADER,
+            native::WGPUTextureAspect_StencilOnly,
+        );
         let mut read_depth_bad = Vec::new();
         let mut read_stencil_bad = Vec::new();
         for row in 0..H as usize {

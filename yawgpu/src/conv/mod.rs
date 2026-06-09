@@ -1351,6 +1351,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn map_bind_group_layout_descriptor_decodes_external_texture_entry() {
+        let mut external_texture = native::WGPUExternalTextureBindingLayout {
+            chain: native::WGPUChainedStruct {
+                next: std::ptr::null_mut(),
+                sType: native::WGPUSType_ExternalTextureBindingLayout,
+            },
+        };
+        let entry = native::WGPUBindGroupLayoutEntry {
+            nextInChain: (&mut external_texture.chain) as *mut native::WGPUChainedStruct,
+            binding: 2,
+            visibility: native::WGPUShaderStage_Fragment,
+            bindingArraySize: 0,
+            buffer: unused_buffer_layout(),
+            sampler: unused_sampler_layout(),
+            texture: unused_texture_layout(),
+            storageTexture: unused_storage_texture_layout(),
+        };
+        let descriptor = native::WGPUBindGroupLayoutDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            entryCount: 1,
+            entries: &entry,
+        };
+
+        let mapped = unsafe { map_bind_group_layout_descriptor(&descriptor) };
+        assert_eq!(mapped.error, None);
+        assert_eq!(
+            mapped.entries[0].kind,
+            Some(core::BindingLayoutKind::ExternalTexture)
+        );
+    }
+
     #[cfg(feature = "tiled")]
     #[test]
     fn map_bind_group_layout_descriptor_decodes_input_attachment_entry() {

@@ -2053,9 +2053,7 @@ pub(crate) fn validate_depth_stencil_aspects(
     if has_depth {
         // `depthWriteEnabled` is always required for a depth format.
         if depth_stencil.depth_write_enabled.is_none() {
-            return Err(
-                "render pipeline depth format requires depthWriteEnabled".to_owned(),
-            );
+            return Err("render pipeline depth format requires depthWriteEnabled".to_owned());
         }
         // `depthCompare` is required only when the depth aspect is actually used:
         // depth is written, or a stencil face's depthFailOp (which consults the
@@ -2664,8 +2662,7 @@ mod tests {
         SubpassLayoutDesc, SubpassPassLayoutDescriptor,
     };
     use crate::test_helpers::*;
-    #[cfg(any(feature = "shader-passthrough", feature = "tiled"))]
-    use crate::ErrorFilter;
+    use crate::{ErrorFilter, TextureViewDimension};
 
     use std::sync::Arc;
 
@@ -2820,7 +2817,10 @@ mod tests {
         let mut writes_depth_ok = base();
         writes_depth_ok.depth_write_enabled = Some(true);
         writes_depth_ok.depth_compare = Some(CompareFunction::Always);
-        assert_eq!(validate_depth_stencil_aspects(writes_depth_ok, &features), Ok(()));
+        assert_eq!(
+            validate_depth_stencil_aspects(writes_depth_ok, &features),
+            Ok(())
+        );
     }
 
     fn depth_stencil_state() -> DepthStencilState {
@@ -3370,6 +3370,90 @@ mod tests {
         assert_eq!(scoped, None);
     }
 
+    #[test]
+    fn external_texture_render_pipeline_auto_layout_and_explicit_compat() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@group(0) @binding(0) var tex: texture_external;
+             @vertex
+             fn vs() -> @builtin(position) vec4<f32> {
+                 return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+             }
+             @fragment
+             fn fs() -> @location(0) vec4<f32> {
+                 return textureLoad(tex, vec2<i32>(0, 0));
+             }"
+                .to_owned(),
+            )),
+        );
+
+        let auto = device.create_render_pipeline(render_pipeline_descriptor(Arc::clone(&module)));
+        assert!(!auto.is_error());
+        assert_eq!(
+            auto.bind_group_layouts()[0].entries()[0].kind,
+            Some(BindingLayoutKind::ExternalTexture)
+        );
+
+        let mismatch_layout =
+            Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+                entries: vec![BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: SHADER_STAGE_FRAGMENT,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Texture {
+                        sample_type: TextureSampleType::Float,
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    }),
+                }],
+                error: None,
+            }));
+        let mismatch_pipeline_layout =
+            Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+                bind_group_layouts: vec![mismatch_layout],
+                immediate_size: 0,
+                error: None,
+            }));
+        let mut mismatch = render_pipeline_descriptor(Arc::clone(&module));
+        mismatch.layout = RenderPipelineLayout::Explicit(mismatch_pipeline_layout);
+        device.push_error_scope(ErrorFilter::Validation);
+        let mismatch_pipeline = device.create_render_pipeline(mismatch);
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("external texture mismatch should be scoped");
+        assert!(mismatch_pipeline.is_error());
+        assert_eq!(
+            scoped.message,
+            "compute pipeline layout binding type is incompatible"
+        );
+
+        let external_layout =
+            Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+                entries: vec![BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: SHADER_STAGE_FRAGMENT,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::ExternalTexture),
+                }],
+                error: None,
+            }));
+        let external_pipeline_layout =
+            Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+                bind_group_layouts: vec![external_layout],
+                immediate_size: 0,
+                error: None,
+            }));
+        let mut matched = render_pipeline_descriptor(module);
+        matched.layout = RenderPipelineLayout::Explicit(external_pipeline_layout);
+        device.push_error_scope(ErrorFilter::Validation);
+        let matched_pipeline = device.create_render_pipeline(matched);
+        let scoped = device.pop_error_scope().expect("scope should exist");
+        assert!(!matched_pipeline.is_error());
+        assert_eq!(scoped, None);
+    }
+
     #[cfg(feature = "tiled")]
     fn subpass_input_shader(sample: &str) -> String {
         format!(
@@ -3798,7 +3882,9 @@ mod tests {
         // while a read-only bundle may run in a read-write pass.
         let sig = |depth_ro: bool, stencil_ro: bool| AttachmentSignature {
             color_formats: vec![Some(TextureFormat::from_raw(TextureFormat::RGBA8_UNORM))],
-            depth_stencil_format: Some(TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8)),
+            depth_stencil_format: Some(TextureFormat::from_raw(
+                TextureFormat::DEPTH24_PLUS_STENCIL8,
+            )),
             sample_count: 1,
             depth_read_only: depth_ro,
             stencil_read_only: stencil_ro,
@@ -3834,10 +3920,7 @@ mod tests {
             effective_sampling(Some(I::Perspective), Some(S::Center)),
             Some(S::Center)
         );
-        assert_eq!(
-            effective_sampling(Some(I::Linear), None),
-            Some(S::Center)
-        );
+        assert_eq!(effective_sampling(Some(I::Linear), None), Some(S::Center));
         assert_ne!(
             effective_sampling(Some(I::Perspective), Some(S::Sample)),
             effective_sampling(Some(I::Perspective), None)

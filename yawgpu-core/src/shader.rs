@@ -267,6 +267,11 @@ impl StageResourceCounts {
             #[cfg(feature = "tiled")]
             BindingLayoutKind::InputAttachment { .. } => self.sampled_textures += 1,
             BindingLayoutKind::StorageTexture { .. } => self.storage_textures += 1,
+            BindingLayoutKind::ExternalTexture => {
+                self.sampled_textures += 4;
+                self.samplers += 1;
+                self.uniform_buffers += 1;
+            }
         }
     }
 }
