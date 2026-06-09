@@ -1,6 +1,15 @@
 # CTS coverage ledger — `api/validation`
 
-Live status of porting the WebGPU CTS (`gpuweb/cts`,
+> **CTS `api/validation` conformance is owned by the external
+> [webgpu-native-cts](https://github.com/infosia/webgpu-native-cts) `.spec.cpp`
+> suite**, run case-by-case against real Metal + Vulkan/MoltenVK with Dawn as the
+> oracle. In-repo, public-API coverage is the per-fn inline `#[cfg(test)]` unit
+> tests (CLAUDE.md principle 1) plus the Dawn-ported top-level
+> `yawgpu/tests/*_validation.rs` regression tests and the `e2e_*` GPU tests. This
+> ledger is the record of which `api/validation` areas were ported and the
+> findings each surfaced.
+
+Status of porting the WebGPU CTS (`gpuweb/cts`,
 `src/webgpu/api/validation/`) onto the yawgpu C FFI. Methodology,
 exclusions, harness contract, directory layout, and the `$CTS`
 checkout-path convention: `specs/blocks/91-cts-conformance.md`.
