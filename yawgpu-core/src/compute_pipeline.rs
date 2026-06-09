@@ -1056,6 +1056,37 @@ pub(crate) fn reflected_storage_texture_format(format: &str) -> Result<TextureFo
         "Rgba32Uint" => 0x0000_002A,
         "Rgba32Sint" => 0x0000_002B,
         "Rgba32Float" => 0x0000_0029,
+        // `texture-formats-tier1` storage formats — recognised here so the
+        // shared `caps.storage_capable` check (feature-gated in
+        // `FormatCaps::apply_feature_upgrades`) decides acceptance, instead of
+        // rejecting them up front (F-059).
+        "R8Unorm" => 0x0000_0001,
+        "R8Snorm" => 0x0000_0002,
+        "R8Uint" => 0x0000_0003,
+        "R8Sint" => 0x0000_0004,
+        "R16Uint" => 0x0000_0007,
+        "R16Sint" => 0x0000_0008,
+        "R16Float" => 0x0000_0009,
+        "Rg8Unorm" => 0x0000_000A,
+        "Rg8Snorm" => 0x0000_000B,
+        "Rg8Uint" => 0x0000_000C,
+        "Rg8Sint" => 0x0000_000D,
+        "Rg16Uint" => 0x0000_0013,
+        "Rg16Sint" => 0x0000_0014,
+        "Rg16Float" => 0x0000_0015,
+        "Bgra8Unorm" => 0x0000_001B,
+        "Rgb10a2Uint" => 0x0000_001D,
+        "Rgb10a2Unorm" => 0x0000_001E,
+        "Rg11b10Ufloat" => 0x0000_001F,
+        // 16-bit-norm storage formats — baseline-storage in WebGPU, gated only by
+        // format availability; naga also needs `STORAGE_TEXTURE_16BIT_NORM_FORMATS`
+        // to compile them (F-059).
+        "R16Unorm" => 0x0000_0005,
+        "R16Snorm" => 0x0000_0006,
+        "Rg16Unorm" => 0x0000_0011,
+        "Rg16Snorm" => 0x0000_0012,
+        "Rgba16Unorm" => 0x0000_0024,
+        "Rgba16Snorm" => 0x0000_0025,
         _ => return Err("pipeline auto layout storage texture format is unsupported".to_owned()),
     };
     Ok(TextureFormat::from_raw(raw))

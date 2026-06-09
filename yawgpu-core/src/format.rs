@@ -581,11 +581,14 @@ impl TextureFormat {
                 | TextureFormat::RGB10A2_UNORM
                 | TextureFormat::RG11B10_UFLOAT => {
                     caps.storage_capable = true;
+                    caps.storage_read_only_capable = true;
                 }
                 _ => {}
             }
         }
         if self.0 == TextureFormat::BGRA8_UNORM && features.contains(&Feature::Bgra8UnormStorage) {
+            // `bgra8unorm` storage is write-only — NOT read-only-capable (the one
+            // WebGPU format with that asymmetry); leave `storage_read_only_capable`.
             caps.storage_capable = true;
         }
         if features.contains(&Feature::TextureFormatsTier1) {
@@ -598,8 +601,25 @@ impl TextureFormat {
             }
         }
         if features.contains(&Feature::TextureFormatsTier2) {
+            // `texture-formats-tier2` grants read-write storage to this set
+            // (mirrors the WebGPU CTS `kTextureFormatsTier2EnablesStorageReadWrite`).
+            // R32{uint,sint,float} already have read-write storage at baseline.
             match self.0 {
-                TextureFormat::RGBA16_FLOAT | TextureFormat::RGBA32_FLOAT => {
+                TextureFormat::R8_UNORM
+                | TextureFormat::R8_UINT
+                | TextureFormat::R8_SINT
+                | TextureFormat::RGBA8_UNORM
+                | TextureFormat::RGBA8_UINT
+                | TextureFormat::RGBA8_SINT
+                | TextureFormat::R16_UINT
+                | TextureFormat::R16_SINT
+                | TextureFormat::R16_FLOAT
+                | TextureFormat::RGBA16_UINT
+                | TextureFormat::RGBA16_SINT
+                | TextureFormat::RGBA16_FLOAT
+                | TextureFormat::RGBA32_UINT
+                | TextureFormat::RGBA32_SINT
+                | TextureFormat::RGBA32_FLOAT => {
                     caps.read_write_storage_capable = true;
                 }
                 _ => {}
@@ -763,8 +783,14 @@ pub struct FormatCaps {
     pub renderable: bool,
     /// Multisample capable.
     pub multisample_capable: bool,
-    /// Storage capable.
+    /// Storage capable (write-only storage; also the texture `STORAGE_BINDING`
+    /// usage). A format may be write-only-storage capable yet not read-only —
+    /// the only such WebGPU format is `bgra8unorm` — so read-only access is
+    /// gated by [`Self::storage_read_only_capable`], not this flag.
     pub storage_capable: bool,
+    /// Read-only storage capable. Equals [`Self::storage_capable`] for every
+    /// format except `bgra8unorm` (write-only-storage but not read-only).
+    pub storage_read_only_capable: bool,
     /// Read-write storage capable.
     pub read_write_storage_capable: bool,
     /// Filterable as a float sampled texture.
@@ -923,6 +949,7 @@ impl FormatCaps {
             renderable: false,
             multisample_capable: false,
             storage_capable: false,
+            storage_read_only_capable: false,
             read_write_storage_capable: false,
             filterable: false,
             output_class,
@@ -948,9 +975,12 @@ impl FormatCaps {
         self
     }
 
-    /// Constant value for fn.
+    /// Constant value for fn. Marks the format as both write-only and read-only
+    /// storage capable (the common case; `bgra8unorm`'s write-only-only storage
+    /// is set directly in `apply_feature_upgrades`, not via this builder).
     pub(crate) const fn storage(mut self) -> Self {
         self.storage_capable = true;
+        self.storage_read_only_capable = true;
         self
     }
 
@@ -1150,6 +1180,53 @@ mod tests {
                 .expect("RGBA8Snorm caps")
                 .storage_capable
         );
+    }
+
+    #[test]
+    fn storage_access_caps_match_webgpu_tables() {
+        // F-059: storage-format capability must distinguish write-only / read-only
+        // / read-write per the WebGPU tables.
+        let mut all = FeatureSet::new();
+        all.insert(Feature::TextureFormatsTier1);
+        all.insert(Feature::TextureFormatsTier2);
+        all.insert(Feature::Bgra8UnormStorage);
+
+        // bgra8unorm: write-only storage capable, but NOT read-only or read-write.
+        let bgra = TextureFormat::from_raw(TextureFormat::BGRA8_UNORM)
+            .caps(&all)
+            .expect("bgra8unorm caps");
+        assert!(bgra.storage_capable, "bgra8unorm is write-only storage");
+        assert!(
+            !bgra.storage_read_only_capable,
+            "bgra8unorm is NOT read-only storage"
+        );
+        assert!(!bgra.read_write_storage_capable);
+
+        // tier1 storage formats are both write-only and read-only capable.
+        let r8 = TextureFormat::from_raw(TextureFormat::R8_UNORM)
+            .caps(&all)
+            .expect("r8unorm caps");
+        assert!(r8.storage_capable && r8.storage_read_only_capable);
+
+        // `texture-formats-tier2` read-write set (sample members) + a non-member.
+        for raw in [
+            TextureFormat::RGBA8_UNORM,
+            TextureFormat::RGBA16_UINT,
+            TextureFormat::RGBA32_SINT,
+            TextureFormat::R8_UINT,
+        ] {
+            assert!(
+                TextureFormat::from_raw(raw)
+                    .caps(&all)
+                    .is_some_and(|c| c.read_write_storage_capable),
+                "{raw:#x} must be read-write storage under tier2"
+            );
+        }
+        // rg32* is storage-capable but NOT in the tier2 read-write set.
+        assert!(!TextureFormat::from_raw(TextureFormat::RG32_UINT)
+            .caps(&all)
+            .expect("rg32uint caps")
+            .read_write_storage_capable);
     }
 
     #[test]

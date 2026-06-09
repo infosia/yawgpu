@@ -508,7 +508,8 @@ pub(crate) fn reflect_spirv(words: &[u32]) -> Result<ReflectedModule, String> {
 fn validate_module(module: naga::Module) -> Result<ReflectedModule, String> {
     let capabilities = naga::valid::Capabilities::SHADER_FLOAT16
         | naga::valid::Capabilities::CUBE_ARRAY_TEXTURES
-        | naga::valid::Capabilities::MULTISAMPLED_SHADING;
+        | naga::valid::Capabilities::MULTISAMPLED_SHADING
+        | naga::valid::Capabilities::STORAGE_TEXTURE_16BIT_NORM_FORMATS;
     // Enabled capabilities:
     // - SHADER_FLOAT16: Phase-5 overridable-constant validation needs WGSL
     //   `enable f16; override x: f16;` shaders from Dawn.
@@ -518,6 +519,9 @@ fn validate_module(module: naga::Module) -> Result<ReflectedModule, String> {
     //   shader into an error module (F-057). wgpu enables both for any WebGPU
     //   device (the `CUBE_ARRAY_TEXTURES` / `MULTISAMPLED_SHADING` downlevel
     //   flags are baseline on Metal/Vulkan).
+    // - STORAGE_TEXTURE_16BIT_NORM_FORMATS: the 16-bit-norm storage formats
+    //   (`r16unorm`, `rgba16snorm`, …) are baseline-storage in WebGPU; naga gates
+    //   the WGSL `texture_storage_*<r16unorm, …>` types behind this (F-059).
     let mut validator =
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities);
     let info = validator
