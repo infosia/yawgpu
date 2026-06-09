@@ -361,7 +361,10 @@ fn depth_stencil_aspects_are_validated() {
             default_multisample(),
         );
 
+        // F-058: `depthCompare` is required only when the depth aspect is used,
+        // so enable depth writes — then omitting `depthCompare` is an error.
         let mut missing_depth_settings = depth_state();
+        missing_depth_settings.depthWriteEnabled = native::WGPUOptionalBool_True;
         missing_depth_settings.depthCompare = native::WGPUCompareFunction_Undefined;
         assert_pipeline_error(
             &test,
