@@ -321,6 +321,12 @@ pub(crate) struct ReflectedEntryPointIo {
     pub inputs: Vec<ReflectedIoLocation>,
     /// Outputs.
     pub outputs: Vec<ReflectedIoLocation>,
+    /// Number of stage-input `@builtin`s that consume an inter-stage shader
+    /// variable slot toward `maxInterStageShaderVariables` (fragment
+    /// `front_facing` / `sample_index` / `sample_mask` / `primitive_index` /
+    /// `subgroup_invocation_id` / `subgroup_size`). `@builtin(position)` does
+    /// not count.
+    pub input_inter_stage_builtins: u32,
 }
 
 /// Identifies reflected override key.
@@ -975,6 +981,11 @@ impl ReflectedModule {
                     entry_point: entry.name.clone(),
                     inputs: collect_function_inputs(&self.module, &entry.function, stage),
                     outputs: collect_function_outputs(&self.module, &entry.function, stage),
+                    input_inter_stage_builtins: count_inter_stage_input_builtins(
+                        &self.module,
+                        &entry.function,
+                        stage,
+                    ),
                 })
             })
             .collect()
@@ -1445,6 +1456,57 @@ fn collect_function_inputs(
     locations
 }
 
+/// Returns true for the stage-input `@builtin`s that consume a
+/// `maxInterStageShaderVariables` slot (per WebGPU): `front_facing`,
+/// `sample_index`, `sample_mask`, `primitive_index`, `subgroup_invocation_id`,
+/// `subgroup_size`. `position` and every other built-in are excluded.
+fn is_inter_stage_counting_builtin(builtin: naga::BuiltIn) -> bool {
+    matches!(
+        builtin,
+        naga::BuiltIn::FrontFacing
+            | naga::BuiltIn::SampleIndex
+            | naga::BuiltIn::SampleMask
+            | naga::BuiltIn::PrimitiveIndex
+            | naga::BuiltIn::SubgroupInvocationId
+            | naga::BuiltIn::SubgroupSize
+    )
+}
+
+/// Counts the inter-stage-slot-consuming stage-input `@builtin`s on a fragment
+/// (or vertex) entry point. They may appear directly on an argument or as the
+/// members of a struct argument.
+fn count_inter_stage_input_builtins(
+    module: &naga::Module,
+    function: &naga::Function,
+    stage: ReflectedShaderStage,
+) -> u32 {
+    if stage == ReflectedShaderStage::Compute {
+        return 0;
+    }
+    let mut count = 0;
+    for argument in &function.arguments {
+        match argument.binding.as_ref() {
+            Some(naga::Binding::BuiltIn(builtin)) => {
+                if is_inter_stage_counting_builtin(*builtin) {
+                    count += 1;
+                }
+            }
+            _ => {
+                if let naga::TypeInner::Struct { members, .. } = &module.types[argument.ty].inner {
+                    for member in members {
+                        if let Some(naga::Binding::BuiltIn(builtin)) = member.binding.as_ref() {
+                            if is_inter_stage_counting_builtin(*builtin) {
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
 fn collect_function_outputs(
     module: &naga::Module,
     function: &naga::Function,
@@ -1908,6 +1970,33 @@ mod tests {
     fn parses_and_validates_trivial_wgsl() {
         let source = "@vertex fn main() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }";
         assert!(parse_and_validate_wgsl(source).is_ok());
+    }
+
+    #[test]
+    fn counts_inter_stage_input_builtins() {
+        // F-063: front_facing + sample_index + sample_mask each consume an
+        // inter-stage variable slot; position does not.
+        let module = parse_and_validate_wgsl(
+            r"
+@fragment fn fs(
+    @builtin(position) pos: vec4f,
+    @builtin(front_facing) ff: bool,
+    @builtin(sample_index) si: u32,
+    @builtin(sample_mask) sm: u32,
+    @location(0) uv: vec2f,
+) -> @location(0) vec4f {
+    return vec4f(uv, 0.0, 1.0);
+}
+",
+        )
+        .expect("fragment with builtin inputs should validate");
+        let io = module
+            .entry_point_io()
+            .into_iter()
+            .find(|io| io.entry_point == "fs")
+            .expect("fs entry point");
+        assert_eq!(io.input_inter_stage_builtins, 3);
+        assert_eq!(io.inputs.len(), 1);
     }
 
     #[test]

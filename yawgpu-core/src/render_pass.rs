@@ -586,7 +586,10 @@ impl RenderPassEncoder {
                 if bundle.is_error() {
                     return Err("render pass cannot execute an error render bundle".to_owned());
                 }
-                if bundle.attachment_signature() != &pass_signature {
+                if !bundle
+                    .attachment_signature()
+                    .bundle_compatible_with_pass(&pass_signature)
+                {
                     return Err(
                         "render bundle attachment signature is incompatible with the render pass"
                             .to_owned(),
