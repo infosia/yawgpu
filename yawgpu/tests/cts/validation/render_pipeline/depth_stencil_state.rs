@@ -65,11 +65,14 @@ fn depth_compare_optional() {
                 true,
             ),
             (
+                // F-058: depth aspect unused (depthWriteEnabled=false, stencil
+                // depthFailOps=keep) — `depthCompare` is optional and may be
+                // Undefined, so this is valid.
                 native::WGPUTextureFormat_Depth24Plus,
                 native::WGPUCompareFunction_Undefined,
                 native::WGPUOptionalBool_False,
                 default_stencil_face(),
-                false,
+                true,
             ),
             (
                 native::WGPUTextureFormat_Stencil8,
