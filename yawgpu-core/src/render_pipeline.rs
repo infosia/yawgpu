@@ -2033,12 +2033,27 @@ pub(crate) fn validate_depth_stencil_aspects(
         return Err("render pipeline depth test or write requires a depth format".to_owned());
     }
 
-    if has_depth
-        && (depth_stencil.depth_compare.is_none() || depth_stencil.depth_write_enabled.is_none())
-    {
-        return Err(
-            "render pipeline depth format requires depthCompare and depthWriteEnabled".to_owned(),
-        );
+    if has_depth {
+        // `depthWriteEnabled` is always required for a depth format.
+        if depth_stencil.depth_write_enabled.is_none() {
+            return Err(
+                "render pipeline depth format requires depthWriteEnabled".to_owned(),
+            );
+        }
+        // `depthCompare` is required only when the depth aspect is actually used:
+        // depth is written, or a stencil face's depthFailOp (which consults the
+        // depth test) is not `Keep`. When depth is neither written nor consulted,
+        // `depthCompare` may be omitted (F-058 — yawgpu previously always required
+        // it). Mirrors the WebGPU `GPUDepthStencilState` validation algorithm.
+        let depth_aspect_used = depth_stencil.depth_write_enabled == Some(true)
+            || depth_stencil.stencil_front.depth_fail_op != StencilOperation::Keep
+            || depth_stencil.stencil_back.depth_fail_op != StencilOperation::Keep;
+        if depth_aspect_used && depth_stencil.depth_compare.is_none() {
+            return Err(
+                "render pipeline depth format requires depthCompare when the depth aspect is used"
+                    .to_owned(),
+            );
+        }
     }
 
     if depth_stencil_uses_stencil(depth_stencil) && !has_stencil {
@@ -2708,6 +2723,53 @@ mod tests {
         let mut depth_fail_replace = keep;
         depth_fail_replace.depth_fail_op = StencilOperation::Replace;
         assert!(stencil_face_writes(depth_fail_replace));
+    }
+
+    #[test]
+    fn depth_compare_is_optional_when_depth_aspect_is_unused() {
+        let keep_face = StencilFaceState {
+            compare: CompareFunction::Always,
+            fail_op: StencilOperation::Keep,
+            depth_fail_op: StencilOperation::Keep,
+            pass_op: StencilOperation::Keep,
+        };
+        let base = || DepthStencilState {
+            format: depth32_float(),
+            depth_write_enabled: Some(false),
+            depth_compare: None,
+            stencil_front: keep_face,
+            stencil_back: keep_face,
+            stencil_read_mask: u32::MAX,
+            stencil_write_mask: u32::MAX,
+            depth_bias: 0,
+            depth_bias_slope_scale: 0.0,
+            depth_bias_clamp: 0.0,
+        };
+        let features = FeatureSet::default();
+
+        // F-058: depth neither written nor consulted -> `depthCompare` is optional.
+        assert_eq!(validate_depth_stencil_aspects(base(), &features), Ok(()));
+
+        // `depthWriteEnabled` is always required for a depth format.
+        let mut missing_write = base();
+        missing_write.depth_write_enabled = None;
+        assert!(validate_depth_stencil_aspects(missing_write, &features).is_err());
+
+        // Depth written -> `depthCompare` becomes required.
+        let mut writes_depth = base();
+        writes_depth.depth_write_enabled = Some(true);
+        assert!(validate_depth_stencil_aspects(writes_depth, &features).is_err());
+
+        // A non-`Keep` stencil depthFailOp consults the depth test -> required.
+        let mut depth_fail = base();
+        depth_fail.stencil_front.depth_fail_op = StencilOperation::Replace;
+        assert!(validate_depth_stencil_aspects(depth_fail, &features).is_err());
+
+        // Supplying `depthCompare` satisfies the used cases.
+        let mut writes_depth_ok = base();
+        writes_depth_ok.depth_write_enabled = Some(true);
+        writes_depth_ok.depth_compare = Some(CompareFunction::Always);
+        assert_eq!(validate_depth_stencil_aspects(writes_depth_ok, &features), Ok(()));
     }
 
     fn depth_stencil_state() -> DepthStencilState {
