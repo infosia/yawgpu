@@ -1113,10 +1113,25 @@ never a reason to skip a CTS case.
   two requirements and gates `depthCompare` on `depth_aspect_used`. **Verified:** CTS `depth_stencil_state`
   `pass=1600 fail=0` on Metal AND Vulkan/MoltenVK; Noop unit test
   `depth_compare_is_optional_when_depth_aspect_is_unused`.
-- **External-CTS finding F-059 — OPEN (deferred, next session).** `render_pipeline,misc` storage-texture
-  format support gap (~366/744): yawgpu's storage-texture-format support (write-only / read-write) is
-  narrower than the spec, in both pipeline-layout validation and the WGSL frontend. A broad support gap —
-  left for a dedicated slice.
+- **External-CTS finding F-059 — RESOLVED (cross-HAL; commits `3e7a189` + `959f856`).**
+  `render_pipeline,misc:storage_texture,format` (366/720): yawgpu's storage-texture-format support was
+  narrower than the WebGPU tables. Four facets fixed: (1) `compute_pipeline.rs`
+  `reflected_storage_texture_format` recognised only the 16 always-storage formats — added the 18
+  texture-formats-tier1 formats + 6 16-bit-norm formats (the shared `FormatCaps` check then gates
+  acceptance per feature); (2) `shader_naga.rs` enabled naga `STORAGE_TEXTURE_16BIT_NORM_FORMATS` so
+  `texture_storage_*<r16unorm,…>` compiles; (3) `format.rs` widened the texture-formats-tier2 read-write set
+  to the full 15-format WebGPU list and added `storage_read_only_capable` (= `storage_capable` except
+  `bgra8unorm`, the one write-only-but-not-read-only storage format); (4) `bind_group_layout.rs` rejects
+  read-only access on a non-read-only-capable format, and `render_pipeline.rs` dropped a hardcoded
+  RGBA8_SINT fragment-storage reject (rgba8sint write-only storage is valid) — storage format/access is now
+  validated uniformly via the derived BGL. **Verified:** `storage_texture,format` `pass=720 fail=0` on
+  Metal AND Vulkan/MoltenVK; unit test `format::storage_access_caps_match_webgpu_tables`; clippy + Clean
+  Review (0 CRITICAL/MAJOR) clean. Two stale Noop ports were realigned to the corrected behavior
+  (`depth_compare_optional` F-058 port, `storage_texture_format` invalid case → `r8unorm`).
+  **Newly observed, not yet a finding:** `render_pipeline,misc:external_texture` (2) fails —
+  `texture_external` needs naga `TEXTURE_EXTERNAL` + a webgpu.h external-texture binding, which yawgpu has
+  no analogue for (per the `createBindGroup` port note); pre-existing, orthogonal to F-059, likely an N/A /
+  skip candidate for the port. Flag for triage.
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.
