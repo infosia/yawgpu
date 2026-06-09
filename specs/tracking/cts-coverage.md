@@ -898,8 +898,8 @@ never a reason to skip a CTS case.
   **Then F-055 was surfaced and is now RESOLVED (see below): sampling a depth/stencil aspect of a
   depth-stencil texture read wrong, cross-HAL. Root-caused to THREE layered bugs (two core + one Metal HAL);
   the two earlier "fix rounds" were ineffective because a core validation false-reject invalidated the
-  command buffer before execution. Verified on Metal AND Vulkan/MoltenVK.** Open FINDINGS.md yawgpu
-  findings: **none** (native Windows/Vulkan re-confirmation suggested — see F-055 entry).
+  command buffer before execution. Verified on Metal, Vulkan/MoltenVK, AND native Windows/Vulkan
+  (user-confirmed 2026-06-09).** Open FINDINGS.md yawgpu findings: **none**.
 - **External-CTS finding F-044 — RESOLVED.** T46 (V16) `vertex_state/correctness:
   vertex_format_to_shader_format_conversion`: yawgpu implemented ONLY the 4 `float32` vertex formats; every
   other `GPUVertexFormat` decoded to **zero** (`pass=1 fail=8`, Metal == Vulkan/MoltenVK). Root cause:
@@ -1089,15 +1089,15 @@ never a reason to skip a CTS case.
   `stencil_face_writes_only_on_non_keep_ops`); regression sweep `rendering,depth`/`rendering,stencil`/
   `readonly_depth_stencil`/`command_buffer,basic` `pass=322 fail=0` on Metal; Noop validation suites,
   metal+vulkan HAL lib tests, and clippy (`-D warnings`) all clean. **Clean Review: 0 CRITICAL/MAJOR.**
-  **Native Windows/Vulkan re-confirmation suggested:** bugs (1)+(2) are core (backend-independent) and fully
-  explain the user-observed native-Vulkan failure; the Vulkan HAL already builds aspect-correct image views,
-  so MoltenVK passes with only the core fixes. A *separate latent* gap remains on strict Vulkan validation
-  layers — `encode_render_pass` transitions only attachments, not bound **sampled** textures, to a readable
-  layout (the descriptor declares `SHADER_READ_ONLY_OPTIMAL` but a written ds image is left in
-  `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`; for the read-only-DS+sample pass both uses need
-  `DEPTH_STENCIL_READ_ONLY_OPTIMAL`). Desktop drivers (and MoltenVK) typically read correctly regardless, so
-  this may not surface as a failure — if native Windows/Vulkan still fails after these fixes, that layout
-  transition is the documented follow-up.
+  **Native Windows/Vulkan: confirmed passing (user, 2026-06-09)** — bugs (1)+(2) are core
+  (backend-independent) and fully accounted for the native-Vulkan failure; the two core fixes alone resolve
+  it on native Vulkan (NVIDIA RTX 5060 Ti) as well as MoltenVK (the Vulkan HAL already builds aspect-correct
+  image views). One *latent, non-failing* gap is noted for future hardening: `encode_render_pass` transitions
+  only attachments, not bound **sampled** textures, to a readable layout (the descriptor declares
+  `SHADER_READ_ONLY_OPTIMAL` while a written ds image stays in `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`; the
+  read-only-DS+sample pass would ideally use `DEPTH_STENCIL_READ_ONLY_OPTIMAL` for both uses). It did not
+  surface as a functional failure or conformance break on native Vulkan; track as optional validation-layer
+  hardening, not a bug.
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.
