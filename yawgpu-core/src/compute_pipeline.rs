@@ -1221,11 +1221,18 @@ pub(crate) fn shader_binding_layout_kinds_compatible(
     expected: BindingLayoutKind,
     actual: BindingLayoutKind,
 ) -> bool {
+    // `expected` is the shader-reflected binding, `actual` is the explicit
+    // pipeline-layout binding. Compatibility is NOT exact equality — it mirrors
+    // the WebGPU shader↔layout rules (`doResourcesMatch`/`doSampleTypesMatch`/
+    // `doAccessesMatch`): a float layout sample type accepts either float shader
+    // type, a read-write layout access accepts read-write or write-only shader
+    // access, and samplers match unless exactly one is a comparison sampler
+    // (F-061). view dimension, multisampled and storage format must still match.
     match (expected, actual) {
         (
-            BindingLayoutKind::Sampler { ty: expected },
-            BindingLayoutKind::Sampler { ty: actual },
-        ) => expected == actual,
+            BindingLayoutKind::Sampler { ty: shader },
+            BindingLayoutKind::Sampler { ty: layout },
+        ) => sampler_types_compatible(layout, shader),
         (
             BindingLayoutKind::Texture {
                 sample_type,
@@ -1238,7 +1245,7 @@ pub(crate) fn shader_binding_layout_kinds_compatible(
                 multisampled: actual_multisampled,
             },
         ) => {
-            sample_type == actual_sample_type
+            sample_types_compatible(actual_sample_type, sample_type)
                 && view_dimension == actual_view_dimension
                 && multisampled == actual_multisampled
         }
@@ -1254,7 +1261,7 @@ pub(crate) fn shader_binding_layout_kinds_compatible(
                 view_dimension: actual_view_dimension,
             },
         ) => {
-            access == actual_access
+            storage_accesses_compatible(actual_access, access)
                 && format == actual_format
                 && view_dimension == actual_view_dimension
         }
@@ -1271,6 +1278,39 @@ pub(crate) fn shader_binding_layout_kinds_compatible(
         ) => sample_type == actual_sample_type && multisampled == actual_multisampled,
         _ => false,
     }
+}
+
+/// Mirrors WebGPU `doSampleTypesMatch` (shader↔layout): a float layout sample
+/// type (filterable or unfilterable) accepts either float shader sample type;
+/// every other sample type must match exactly.
+fn sample_types_compatible(layout: TextureSampleType, shader: TextureSampleType) -> bool {
+    match layout {
+        TextureSampleType::Float | TextureSampleType::UnfilterableFloat => matches!(
+            shader,
+            TextureSampleType::Float | TextureSampleType::UnfilterableFloat
+        ),
+        other => other == shader,
+    }
+}
+
+/// Mirrors WebGPU `doAccessesMatch`: a read-write layout storage access accepts
+/// a read-write or write-only shader access; every other access must match
+/// exactly.
+fn storage_accesses_compatible(layout: StorageTextureAccess, shader: StorageTextureAccess) -> bool {
+    match layout {
+        StorageTextureAccess::ReadWrite => matches!(
+            shader,
+            StorageTextureAccess::ReadWrite | StorageTextureAccess::WriteOnly
+        ),
+        other => other == shader,
+    }
+}
+
+/// Mirrors WebGPU sampler compatibility: the layout and shader samplers are
+/// compatible when they share a type, or when neither is a comparison sampler.
+fn sampler_types_compatible(layout: SamplerBindingType, shader: SamplerBindingType) -> bool {
+    layout == shader
+        || (layout != SamplerBindingType::Comparison && shader != SamplerBindingType::Comparison)
 }
 
 /// Returns buffer binding types compatible.
@@ -1582,5 +1622,67 @@ mod tests {
         .expect("override constant should resolve");
 
         assert!(resolve_compute_workgroup(&module, "cs", &constants, Limits::DEFAULT).is_err());
+    }
+
+    #[test]
+    fn shader_layout_binding_kind_compatibility_follows_webgpu_rules() {
+        // F-061 sample-type rule: a float layout (filterable/unfilterable) accepts
+        // either float shader type; other types are exact.
+        assert!(sample_types_compatible(
+            TextureSampleType::Float,
+            TextureSampleType::UnfilterableFloat
+        ));
+        assert!(sample_types_compatible(
+            TextureSampleType::UnfilterableFloat,
+            TextureSampleType::Float
+        ));
+        assert!(!sample_types_compatible(
+            TextureSampleType::Float,
+            TextureSampleType::Depth
+        ));
+        assert!(sample_types_compatible(
+            TextureSampleType::Depth,
+            TextureSampleType::Depth
+        ));
+        assert!(!sample_types_compatible(
+            TextureSampleType::Uint,
+            TextureSampleType::Sint
+        ));
+
+        // Access rule: a read-write layout accepts read-write or write-only.
+        assert!(storage_accesses_compatible(
+            StorageTextureAccess::ReadWrite,
+            StorageTextureAccess::WriteOnly
+        ));
+        assert!(storage_accesses_compatible(
+            StorageTextureAccess::ReadWrite,
+            StorageTextureAccess::ReadWrite
+        ));
+        assert!(!storage_accesses_compatible(
+            StorageTextureAccess::ReadOnly,
+            StorageTextureAccess::WriteOnly
+        ));
+        assert!(!storage_accesses_compatible(
+            StorageTextureAccess::WriteOnly,
+            StorageTextureAccess::ReadWrite
+        ));
+
+        // Sampler rule: same type, or neither is comparison.
+        assert!(sampler_types_compatible(
+            SamplerBindingType::Filtering,
+            SamplerBindingType::NonFiltering
+        ));
+        assert!(sampler_types_compatible(
+            SamplerBindingType::Comparison,
+            SamplerBindingType::Comparison
+        ));
+        assert!(!sampler_types_compatible(
+            SamplerBindingType::Comparison,
+            SamplerBindingType::Filtering
+        ));
+        assert!(!sampler_types_compatible(
+            SamplerBindingType::Filtering,
+            SamplerBindingType::Comparison
+        ));
     }
 }
