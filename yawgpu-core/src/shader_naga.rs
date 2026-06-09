@@ -552,9 +552,15 @@ impl ReflectedModule {
     ) -> Result<Vec<u32>, String> {
         let (module, info) =
             self.process_overrides_for_entry(entry_name, stage, pipeline_constants)?;
-        let mut module = module.into_owned();
-        let info = info.into_owned();
-        lower_external_textures_for_spirv(&mut module);
+        // naga's SPIR-V backend does not implement `ImageClass::External`, and
+        // wgpu likewise leaves external textures unimplemented on Vulkan (both
+        // naga-SPIR-V and wgpu-hal/vulkan). Reject external-texture pipelines on
+        // the Vulkan backend with a clean error (NOT a panic, and NOT a fake
+        // texture_2d rewrite that would silently mis-sample) — yawgpu's external
+        // texture support is Metal-only.
+        if module_has_external_texture(&module) {
+            return Err("external textures are not supported on the Vulkan backend".to_owned());
+        }
         let options = naga::back::spv::Options {
             fake_missing_bindings: true,
             ..Default::default()
@@ -1232,8 +1238,12 @@ fn msl_resources(binding_map: &MslBindingMap) -> Result<naga::back::msl::Binding
         .collect()
 }
 
-fn lower_external_textures_for_spirv(module: &mut naga::Module) {
-    if !module.types.iter().any(|(_, ty)| {
+/// Returns true when any image type in the module is an external texture
+/// (`ImageClass::External`). naga's SPIR-V backend does not implement external
+/// textures, so the Vulkan code path uses this to reject such pipelines with a
+/// clean error instead of panicking.
+fn module_has_external_texture(module: &naga::Module) -> bool {
+    module.types.iter().any(|(_, ty)| {
         matches!(
             ty.inner,
             naga::TypeInner::Image {
@@ -1241,39 +1251,7 @@ fn lower_external_textures_for_spirv(module: &mut naga::Module) {
                 ..
             }
         )
-    }) {
-        return;
-    }
-    let external_types = module
-        .types
-        .iter()
-        .filter_map(|(handle, ty)| {
-            matches!(
-                ty.inner,
-                naga::TypeInner::Image {
-                    class: naga::ImageClass::External,
-                    ..
-                }
-            )
-            .then_some((handle, ty.name.clone()))
-        })
-        .collect::<Vec<_>>();
-    for (handle, name) in external_types {
-        module.types.replace(
-            handle,
-            naga::Type {
-                name,
-                inner: naga::TypeInner::Image {
-                    dim: naga::ImageDimension::D2,
-                    arrayed: false,
-                    class: naga::ImageClass::Sampled {
-                        kind: naga::ScalarKind::Float,
-                        multi: false,
-                    },
-                },
-            },
-        );
-    }
+    })
 }
 
 fn msl_buffer_sizes_slot(
@@ -2417,14 +2395,17 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
         assert!(msl.source.contains("_plane0"));
         assert!(msl.source.contains("_params"));
 
-        let spirv = module
+        // SPIR-V (Vulkan): external textures are unsupported. Must return a clean
+        // error (never panic, never silently emit a wrong shader), matching wgpu
+        // which also leaves Vulkan external textures unimplemented.
+        let spirv_err = module
             .generate_spirv(
                 "fs",
                 ShaderStage::Fragment,
                 &naga::back::PipelineConstants::default(),
             )
-            .expect("external texture fragment SPIR-V fallback should generate");
-        assert!(!spirv.is_empty());
+            .expect_err("external texture SPIR-V must be cleanly rejected, not generated");
+        assert!(spirv_err.contains("external textures are not supported on the Vulkan backend"));
     }
 
     #[cfg(feature = "tiled")]

@@ -1157,11 +1157,24 @@ never a reason to skip a CTS case.
   (b) fragment stage-input `@builtin`s (front_facing/sample_index/sample_mask/primitive_index/subgroup_*)
   consume `maxInterStageShaderVariables` slots; counted toward the input limit — 4 under-validations.
   **Verified:** `inter_stage` `pass=96 fail=0` both HALs.
-- **External-CTS finding F-060 — OPEN (external-texture feature; Slice 1 dispatched to coding agent).**
+- **External-CTS finding F-060 — RESOLVED (Slice 1: validation/codegen; commit 3665178 + SPIR-V honest-rejection follow-up).**
   Behaviour contract + rules R1–R10 in `specs/blocks/36-external-textures.md`; user chose full wgpu-parity
-  (binding model + vendor create), implemented in two slices per `HANDOFF.md`. Slice 1 (validation/codegen,
-  closes F-060) is in progress.
-  `render_pipeline,misc:external_texture` (2): a `texture_external` shader fails to compile (error module).
+  (binding model + vendor create), implemented in two slices. **Slice 1 (validation/codegen, closes F-060)
+  is DONE:** `texture_external` validates + reflects, auto-layout derives an `ExternalTexture` BGL entry
+  (4 sampled + 1 sampler + 1 uniform), explicit-layout compat is exact, the FFI binding-layout chain maps,
+  and codegen lowers per backend. **Backend support is Metal-only, matching wgpu.** Metal: MSL lowers the
+  external texture (3 planes + params); F-060 CTS `pass=2/0`. **Vulkan: naga's SPIR-V backend does not lower
+  `ImageClass::External` (neither does wgpu-hal/vulkan), so `generate_spirv` rejects external-texture
+  pipelines with a clean `GPUInternalError` (no panic, no fake `texture_2d` rewrite).** The descriptor is
+  *valid* WebGPU (binding model + validation are core/backend-independent), so F-060 CTS still `pass=2/0` on
+  MoltenVK — validation succeeds; the backend limitation surfaces as an internal error that the CTS's
+  `WGPUErrorFilter_Validation` scope correctly does not capture. An earlier Slice-1 draft used a
+  `lower_external_textures_for_spirv` hack (rewriting `texture_external`→`texture_2d` to pass Vulkan); it was
+  rejected as dishonest (it would silently mis-sample) and replaced with the clean rejection above — strictly
+  better than wgpu, which `unimplemented!()`-panics on the same path. Regression:
+  `yawgpu/tests/e2e_vulkan_external_texture.rs` (real MoltenVK: asserts the internal error fires + no panic).
+  Slice 2 (vendor create + runtime binding, Metal-only e2e) remains for a follow-up.
+  Original finding — `render_pipeline,misc:external_texture` (2): a `texture_external` shader fails to compile (error module).
   Unlike F-057 (a missing naga capability), supporting it needs naga `TEXTURE_EXTERNAL` **plus** an
   external-texture binding model — a `BindingLayoutKind` variant, `ImageClass::External` reflection, the
   `WGPUExternalTextureBindingLayout`/`…BindingEntry` FFI, auto-layout derivation, and HAL codegen of naga's
