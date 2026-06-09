@@ -1137,10 +1137,35 @@ never a reason to skip a CTS case.
   Metal AND Vulkan/MoltenVK; unit test `format::storage_access_caps_match_webgpu_tables`; clippy + Clean
   Review (0 CRITICAL/MAJOR) clean. Two stale Noop ports were realigned to the corrected behavior
   (`depth_compare_optional` F-058 port, `storage_texture_format` invalid case → `r8unorm`).
-  **Newly observed, not yet a finding:** `render_pipeline,misc:external_texture` (2) fails —
-  `texture_external` needs naga `TEXTURE_EXTERNAL` + a webgpu.h external-texture binding, which yawgpu has
-  no analogue for (per the `createBindGroup` port note); pre-existing, orthogonal to F-059, likely an N/A /
-  skip candidate for the port. Flag for triage.
+  **Newly observed, then catalogued as F-060 (below).**
+- **External-CTS finding F-061 — RESOLVED (cross-HAL; commit `0323fae`).**
+  `render_pipeline,resource_compatibility` (80): `shader_binding_layout_kinds_compatible` required exact
+  equality of texture sample type / storage access / sampler type between the shader-reflected binding and
+  the explicit pipeline layout. Relaxed to the WebGPU `doResourcesMatch` rules (a float layout sample type
+  accepts either float shader type; a read-write layout access accepts read-write or write-only; samplers
+  match unless exactly one is comparison; view dimension / multisampled / storage format stay exact).
+  **Verified:** `resource_compatibility` `pass=15754 fail=0` on Metal AND Vulkan/MoltenVK.
+- **External-CTS finding F-062 — RESOLVED (cross-HAL; commit `54badb6`).**
+  `encoding,render_bundle` (30): bundle↔pass compatibility was whole-signature equality. Color/depth-stencil
+  formats + sample count match exactly, but read-only is an *implication* — a read-write bundle cannot run in
+  a read-only pass, a read-only bundle may run in a read-write pass
+  (`AttachmentSignature::bundle_compatible_with_pass`). **Verified:** `render_bundle` `pass=113 fail=0` both HALs.
+- **External-CTS finding F-063 — RESOLVED (cross-HAL; commit `54badb6`).**
+  `render_pipeline,inter_stage` (12): (a) interpolation/sampling compared raw, but naga only fills defaults
+  when interpolation is unspecified, so `@interpolate(perspective)` ≠ `@interpolate(perspective, center)` — 8
+  false rejects; fixed by normalizing with WebGPU defaults (`effective_interpolation`/`effective_sampling`).
+  (b) fragment stage-input `@builtin`s (front_facing/sample_index/sample_mask/primitive_index/subgroup_*)
+  consume `maxInterStageShaderVariables` slots; counted toward the input limit — 4 under-validations.
+  **Verified:** `inter_stage` `pass=96 fail=0` both HALs.
+- **External-CTS finding F-060 — OPEN (external-texture feature; scope decision pending).**
+  `render_pipeline,misc:external_texture` (2): a `texture_external` shader fails to compile (error module).
+  Unlike F-057 (a missing naga capability), supporting it needs naga `TEXTURE_EXTERNAL` **plus** an
+  external-texture binding model — a `BindingLayoutKind` variant, `ImageClass::External` reflection, the
+  `WGPUExternalTextureBindingLayout`/`…BindingEntry` FFI, auto-layout derivation, and HAL codegen of naga's
+  external-texture lowering. webgpu.h declares the types but states external-texture *creation* is
+  "extremely implementation-dependent and not defined in this header", and the `createBindGroup` port already
+  treats external textures as N/A. This is a feature, not a validation fix — left for a user scope decision
+  (implement external-texture support vs. mark the 2 cases N/A/skip in the port).
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.
