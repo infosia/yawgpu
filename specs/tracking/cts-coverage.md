@@ -1098,6 +1098,25 @@ never a reason to skip a CTS case.
   read-only-DS+sample pass would ideally use `DEPTH_STENCIL_READ_ONLY_OPTIMAL` for both uses). It did not
   surface as a functional failure or conformance break on native Vulkan; track as optional validation-layer
   hardening, not a bug.
+- **External-CTS finding F-057 — RESOLVED (cross-HAL, WGSL frontend; commit `ae60d20`).**
+  `api,validation,non_filterable_texture` (8/160): `texture_cube_array<f32>` (any cube-array / multisampled
+  sampled texture) produced an **error shader module**. `shader_naga.rs` `validate_module` passed only
+  `Capabilities::SHADER_FLOAT16` to the naga validator, dropping the WebGPU-baseline `CUBE_ARRAY_TEXTURES` +
+  `MULTISAMPLED_SHADING` (naga gates the `Cube`+arrayed and multisampled image types behind them). Fix: OR
+  both in. **Verified:** CTS `non_filterable_texture` `pass=160 fail=0` on Metal AND Vulkan/MoltenVK; unit
+  test `validates_cube_array_and_multisampled_sampled_textures`; clippy + Clean Review (0 CRITICAL/MAJOR).
+- **External-CTS finding F-058 — RESOLVED (cross-HAL, pipeline validation; commit `0380cce`).**
+  `render_pipeline,depth_stencil_state:depthCompare_optional` (10): yawgpu over-required `depthCompare` for a
+  depth format even when the depth aspect is unused. Per WebGPU, `depthCompare` is required only when depth
+  is written (`depthWriteEnabled == true`) or consulted by a non-`Keep` stencil `depthFailOp`;
+  `depthWriteEnabled` is always required for a depth format. Fix: `validate_depth_stencil_aspects` splits the
+  two requirements and gates `depthCompare` on `depth_aspect_used`. **Verified:** CTS `depth_stencil_state`
+  `pass=1600 fail=0` on Metal AND Vulkan/MoltenVK; Noop unit test
+  `depth_compare_is_optional_when_depth_aspect_is_unused`.
+- **External-CTS finding F-059 — OPEN (deferred, next session).** `render_pipeline,misc` storage-texture
+  format support gap (~366/744): yawgpu's storage-texture-format support (write-only / read-write) is
+  narrower than the spec, in both pipeline-layout validation and the WGSL frontend. A broad support gap —
+  left for a dedicated slice.
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.
