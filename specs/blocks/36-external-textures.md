@@ -13,9 +13,20 @@ the canonical `webgpu.h` declares the handle/binding types but states external-t
 creation is "extremely implementation-dependent and not defined in this header". This
 mirrors wgpu, whose creation API (`Device::create_external_texture(desc, planes)`,
 `wgpu/src/api/device.rs:370`) is likewise a non-canonical, create-from-plane-views
-method (the JS `GPUDevice.importExternalTexture(video)` is web-only). **Vulkan + Metal
-are Tier-1**; GLES (Tier 2) may `HalError` at execution (catalogue in
-`67-gles-backend.md`).
+method (the JS `GPUDevice.importExternalTexture(video)` is web-only).
+
+**Backend support — Metal-only, matching wgpu.** External-texture *sampling*
+(the codegen that lowers `texture_external` to plane textures + a params buffer)
+is implemented on **Metal only**, exactly as in wgpu — wgpu's external-texture
+shader path is unimplemented on both naga's SPIR-V backend and `wgpu-hal/vulkan`.
+naga's SPIR-V backend does not lower `naga::ImageClass::External`, so the **Vulkan**
+backend rejects an external-texture pipeline with a clean **`GPUInternalError`**
+(never a panic, never a silent fake-`texture_2d` rewrite). The descriptor itself is
+*valid* WebGPU (binding model + validation are core and backend-independent — see the
+Tier-independent core-validation rule in `CLAUDE.md`); the rejection is a HAL-level
+code-generation limitation surfaced honestly as an internal error. This is strictly
+better than wgpu, which `unimplemented!()`-panics on the same Vulkan path. GLES
+(Tier 2) likewise `HalError`s at execution (catalogue in `67-gles-backend.md`).
 
 ## Surface
 
@@ -53,24 +64,30 @@ non-multisampled, `TEXTURE_BINDING`.
 ## Rules
 
 Slice 1 (validation/codegen — closes F-060; exercised by inline unit tests +
-the F-060 CTS case on real Metal + Vulkan/MoltenVK):
+the F-060 CTS case on real Metal + Vulkan/MoltenVK) — **DONE (commit 3665178;
+SPIR-V honest-rejection follow-up)**:
 
-- **R1** ☐ The WGSL frontend compiles `texture_external` (naga `TEXTURE_EXTERNAL`
+- **R1** ☑ The WGSL frontend compiles `texture_external` (naga `TEXTURE_EXTERNAL`
   capability enabled); a `texture_external` shader does not become an error module.
   *(F-060.)*
-- **R2** ☐ `naga::ImageClass::External` reflects to a dedicated external-texture
+- **R2** ☑ `naga::ImageClass::External` reflects to a dedicated external-texture
   binding kind; auto-layout derives an `ExternalTexture` bind-group-layout entry.
-- **R3** ☐ An external-texture bind-group-layout entry counts **4 sampled textures
+- **R3** ☑ An external-texture bind-group-layout entry counts **4 sampled textures
   + 1 sampler + 1 uniform buffer** toward the per-stage binding limits (mirrors wgpu
   `binding_model.rs:497-508`); over-limit is rejected.
-- **R4** ☐ Explicit-layout compatibility: a `texture_external` shader binding is
+- **R4** ☑ Explicit-layout compatibility: a `texture_external` shader binding is
   compatible only with an `ExternalTexture` layout entry (exact), incompatible with
   any other kind.
-- **R5** ☐ The FFI `WGPUExternalTextureBindingLayout` (chained) maps to the
+- **R5** ☑ The FFI `WGPUExternalTextureBindingLayout` (chained) maps to the
   external-texture binding-layout kind in `wgpuDeviceCreateBindGroupLayout`.
-- **R6** ☐ MSL and SPIR-V codegen lower the external texture (3 planes + params) with
+- **R6** ☑ **Metal:** MSL codegen lowers the external texture (3 planes + params) with
   the HAL-assigned `BindTarget::external_texture` slots; a render/compute pipeline
-  binding a `texture_external` validates and compiles on Metal and Vulkan.
+  binding a `texture_external` validates and compiles. **Vulkan:** naga's SPIR-V backend
+  does not lower `ImageClass::External`, so `generate_spirv` rejects external-texture
+  pipelines with a clean `GPUInternalError` (`"external textures are not supported on
+  the Vulkan backend"`) — no panic, no fake rewrite — matching wgpu's Metal-only support.
+  Regression: `yawgpu/tests/e2e_vulkan_external_texture.rs` (real MoltenVK: asserts the
+  internal error fires and no panic occurs); Metal coverage via the F-060 CTS case.
 
 Slice 2 (resource + create + runtime binding — full wgpu-parity; inline unit tests +
 GPU e2e authored by Claude):
@@ -83,9 +100,10 @@ GPU e2e authored by Claude):
   (`planes: ArrayVec<TextureView,3>` + `params: Buffer`), `Drop` releases.
 - **R9** ☐ A `WGPUExternalTextureBindingEntry` in `wgpuDeviceCreateBindGroup` binds the
   external texture; at draw/dispatch the 3 plane views + params buffer are bound at the
-  slots from R6 (Metal + Vulkan).
+  slots from R6 (**Metal**; Vulkan rejects external-texture pipelines at codegen per R6).
 - **R10** ☐ End-to-end: sampling an `Nv12`/`Rgba` external texture in a fragment shader
-  yields the colour-space-converted result (GPU readback on Metal + Vulkan).
+  yields the colour-space-converted result (GPU readback on **Metal**, matching wgpu's
+  Metal-only external-texture support).
 
 ## Async
 
