@@ -12,7 +12,7 @@ use crate::bind_group_common::{
     release_bind_group_layouts, sampler_binding, sampler_layout_typed, storage_texture_layout,
     texture_binding, texture_layout,
 };
-use crate::common::{device_limits, request_device};
+use crate::common::{device_limits, empty_string_view, request_device};
 
 #[test]
 fn binding_count_mismatch() {
@@ -1104,5 +1104,103 @@ fn sampler_compare_function_with_binding_type() {
             yawgpu::wgpuSamplerRelease(sampler);
             yawgpu::wgpuBindGroupLayoutRelease(layout);
         }
+    }
+}
+
+/// Regression for F-055: the depth/stencil **aspect** of a depth-stencil
+/// texture view must be bindable to the sample type its aspect supports.
+/// WebGPU sample-type compatibility is aspect-specific: a `DepthOnly` view
+/// supports `depth` and `unfilterable-float` (a `texture_2d<f32>` accessed via
+/// `textureLoad`), a `StencilOnly` view supports `uint`. yawgpu previously
+/// validated only the whole format's output class (which is `None` for a
+/// depth-stencil format), wrongly rejecting both — so binding the aspect views
+/// the CTS `readonly_depth_stencil:sampling_while_testing` test uses failed,
+/// invalidating the command buffer and reading back 0.
+#[test]
+fn depth_stencil_aspect_sample_type_compat() {
+    let test = ValidationTest::new();
+    unsafe {
+        let texture = create_texture_2d(
+            test.device(),
+            native::WGPUTextureUsage_TextureBinding | native::WGPUTextureUsage_RenderAttachment,
+            native::WGPUTextureFormat_Depth24PlusStencil8,
+            1,
+            1,
+            1,
+        );
+
+        let make_aspect_view = |aspect: native::WGPUTextureAspect| {
+            let descriptor = native::WGPUTextureViewDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                format: native::WGPUTextureFormat_Depth24PlusStencil8,
+                dimension: native::WGPUTextureViewDimension_2D,
+                baseMipLevel: 0,
+                mipLevelCount: 1,
+                baseArrayLayer: 0,
+                arrayLayerCount: 1,
+                aspect,
+                usage: native::WGPUTextureUsage_None,
+            };
+            yawgpu::wgpuTextureCreateView(texture, &descriptor)
+        };
+
+        // (view aspect, layout sample type, accepted?)
+        for (aspect, sample_type, success) in [
+            // depth aspect → depth (texture_depth_2d) and unfilterable-float
+            // (texture_2d<f32> via textureLoad) are both accepted.
+            (
+                native::WGPUTextureAspect_DepthOnly,
+                native::WGPUTextureSampleType_Depth,
+                true,
+            ),
+            (
+                native::WGPUTextureAspect_DepthOnly,
+                native::WGPUTextureSampleType_UnfilterableFloat,
+                true,
+            ),
+            // depth aspect is not uint/sint.
+            (
+                native::WGPUTextureAspect_DepthOnly,
+                native::WGPUTextureSampleType_Uint,
+                false,
+            ),
+            // stencil aspect → uint (texture_2d<u32>) only.
+            (
+                native::WGPUTextureAspect_StencilOnly,
+                native::WGPUTextureSampleType_Uint,
+                true,
+            ),
+            (
+                native::WGPUTextureAspect_StencilOnly,
+                native::WGPUTextureSampleType_Depth,
+                false,
+            ),
+            (
+                native::WGPUTextureAspect_StencilOnly,
+                native::WGPUTextureSampleType_UnfilterableFloat,
+                false,
+            ),
+        ] {
+            let layout = expect_bind_group_layout(
+                &test,
+                true,
+                &[texture_layout(
+                    0,
+                    native::WGPUShaderStage_Fragment,
+                    sample_type,
+                    native::WGPUTextureViewDimension_2D,
+                    false,
+                )],
+            );
+            let view = make_aspect_view(aspect);
+            let bind_group =
+                expect_bind_group(&test, success, layout, &[texture_binding(0, view)]);
+            release_bind_group(bind_group);
+            yawgpu::wgpuTextureViewRelease(view);
+            yawgpu::wgpuBindGroupLayoutRelease(layout);
+        }
+
+        yawgpu::wgpuTextureRelease(texture);
     }
 }

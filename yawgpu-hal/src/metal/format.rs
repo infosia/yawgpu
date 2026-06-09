@@ -240,6 +240,34 @@ pub(super) fn map_texture_usage(usage: HalTextureUsage) -> MTLTextureUsage {
     metal_usage
 }
 
+/// Returns true for the combined (packed) depth-stencil formats. Such textures
+/// need `MTLTextureUsage::PixelFormatView` so a stencil-only reinterpret view
+/// (`X32_Stencil8`) can be created from them for sampling.
+pub(super) fn is_combined_depth_stencil(format: HalTextureFormat) -> bool {
+    matches!(
+        format,
+        HalTextureFormat::Depth24PlusStencil8 | HalTextureFormat::Depth32FloatStencil8
+    )
+}
+
+/// Maps a `(format, aspect)` pair to the `MTLPixelFormat` a *sampled* texture
+/// view must use. The stencil aspect of a combined depth-stencil format must be
+/// reinterpreted to a stencil-only format (`X32_Stencil8`) — Metal cannot sample
+/// the stencil plane through the combined depth-stencil format. The depth aspect
+/// (and every other aspect) samples through the format's own pixel format: a
+/// `texture2d<float>` reads the depth plane of the combined format directly.
+/// Mirrors wgpu-hal's `Adapter::map_view_format`.
+pub(super) fn map_sampled_view_format(
+    format: HalTextureFormat,
+    aspect: crate::HalTextureAspect,
+) -> Result<MTLPixelFormat, HalError> {
+    if matches!(aspect, crate::HalTextureAspect::StencilOnly) && is_combined_depth_stencil(format) {
+        return Ok(MTLPixelFormat::X32_Stencil8);
+    }
+    let (pixel_format, _) = map_texture_format(format)?;
+    Ok(pixel_format)
+}
+
 /// Converts address mode into the corresponding yawgpu representation.
 pub(super) fn map_address_mode(mode: HalAddressMode) -> MTLSamplerAddressMode {
     match mode {

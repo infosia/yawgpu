@@ -395,39 +395,72 @@ pub(crate) fn validate_bind_group_texture(
     else {
         return Some("bind group texture view format must be supported".to_owned());
     };
-    match sample_type {
-        TextureSampleType::Float => {
-            if caps.output_class != Some(FormatOutputClass::Float) || !caps.filterable {
-                return Some(
-                    "float texture bindings require a filterable float texture format".to_owned(),
-                );
-            }
-        }
-        TextureSampleType::UnfilterableFloat => {
-            if caps.output_class != Some(FormatOutputClass::Float) {
-                return Some(
-                    "unfilterable-float texture bindings require a float texture format".to_owned(),
-                );
-            }
-        }
-        TextureSampleType::Depth => {
-            if !caps.aspects.depth {
-                return Some("depth texture bindings require a depth texture format".to_owned());
-            }
-        }
-        TextureSampleType::Sint => {
-            if caps.output_class != Some(FormatOutputClass::Sint) {
-                return Some("sint texture bindings require a sint texture format".to_owned());
-            }
-        }
-        TextureSampleType::Uint => {
-            if caps.output_class != Some(FormatOutputClass::Uint) {
-                return Some("uint texture bindings require a uint texture format".to_owned());
-            }
-        }
+
+    // WebGPU sample-type compatibility is keyed on the *view's aspect*, not the
+    // whole format: the depth aspect of a depth-stencil format samples as
+    // `depth` (and is also bindable to an unfilterable-float `texture_2d<f32>`),
+    // the stencil aspect as `uint`. Reducing to the whole format's output class
+    // (which is `None` for a depth-stencil format) wrongly rejects both. Mirror
+    // wgpu's `device::resource` compatibility matrix.
+    let Some(view_sample_type) = texture_view_sample_type(&caps, texture_view.aspect()) else {
+        return Some("bind group texture view aspect has no sampleable type".to_owned());
+    };
+    let compatible = matches!(
+        (sample_type, view_sample_type),
+        (TextureSampleType::Uint, TextureSampleType::Uint)
+            | (TextureSampleType::Sint, TextureSampleType::Sint)
+            | (TextureSampleType::Depth, TextureSampleType::Depth)
+            // A filterable-float binding requires a filterable-float view.
+            | (TextureSampleType::Float, TextureSampleType::Float)
+            // An unfilterable-float binding accepts any float view, and also a
+            // depth view (the depth aspect of a depth/depth-stencil format).
+            | (
+                TextureSampleType::UnfilterableFloat,
+                TextureSampleType::Float
+                    | TextureSampleType::UnfilterableFloat
+                    | TextureSampleType::Depth,
+            )
+    );
+    if !compatible {
+        return Some(format!(
+            "bind group texture view sample type {view_sample_type:?} is not compatible with \
+             layout sample type {sample_type:?}"
+        ));
     }
 
     None
+}
+
+/// Returns the sample type a texture view exposes for `aspect`, following the
+/// WebGPU per-aspect rules: a depth aspect samples as `depth`, a stencil aspect
+/// as `uint`, and a colour format from its output class. Returns `None` when the
+/// (format, aspect) pair is not sampleable — e.g. the combined `All` aspect of a
+/// depth-stencil format, which must select a single aspect before sampling.
+fn texture_view_sample_type(caps: &FormatCaps, aspect: TextureAspect) -> Option<TextureSampleType> {
+    match aspect {
+        TextureAspect::DepthOnly => caps.aspects.depth.then_some(TextureSampleType::Depth),
+        TextureAspect::StencilOnly => caps.aspects.stencil.then_some(TextureSampleType::Uint),
+        TextureAspect::All => {
+            if caps.aspects.depth && caps.aspects.stencil {
+                None
+            } else if caps.aspects.depth {
+                Some(TextureSampleType::Depth)
+            } else if caps.aspects.stencil {
+                Some(TextureSampleType::Uint)
+            } else {
+                match caps.output_class {
+                    Some(FormatOutputClass::Float) => Some(if caps.filterable {
+                        TextureSampleType::Float
+                    } else {
+                        TextureSampleType::UnfilterableFloat
+                    }),
+                    Some(FormatOutputClass::Sint) => Some(TextureSampleType::Sint),
+                    Some(FormatOutputClass::Uint) => Some(TextureSampleType::Uint),
+                    None => None,
+                }
+            }
+        }
+    }
 }
 
 /// Validates bind group storage texture and returns a descriptive error on failure.
@@ -759,6 +792,46 @@ mod tests {
                 "input-attachment binding must not be supplied in the bind group; it is auto-wired by the subpass pass"
                     .to_owned()
             )
+        );
+    }
+
+    #[test]
+    fn texture_view_sample_type_is_aspect_specific() {
+        // Depth-stencil format: the aspect selects the sampleable type, and the
+        // combined `All` aspect is not sampleable (must select one). This is the
+        // F-055 root cause — reducing to the whole format's output class (which
+        // is `None` for a depth-stencil format) loses the aspect.
+        let ds = FormatCaps::depth_stencil(4);
+        assert_eq!(
+            texture_view_sample_type(&ds, TextureAspect::DepthOnly),
+            Some(TextureSampleType::Depth)
+        );
+        assert_eq!(
+            texture_view_sample_type(&ds, TextureAspect::StencilOnly),
+            Some(TextureSampleType::Uint)
+        );
+        assert_eq!(texture_view_sample_type(&ds, TextureAspect::All), None);
+
+        // Depth-only format: `All` resolves to the single depth aspect.
+        let depth = FormatCaps::depth(4);
+        assert_eq!(
+            texture_view_sample_type(&depth, TextureAspect::All),
+            Some(TextureSampleType::Depth)
+        );
+
+        // Colour formats resolve from their output class via the `All` aspect.
+        assert_eq!(
+            texture_view_sample_type(&FormatCaps::uint_color(4, 1), TextureAspect::All),
+            Some(TextureSampleType::Uint)
+        );
+        assert_eq!(
+            texture_view_sample_type(&FormatCaps::sint_color(4, 1), TextureAspect::All),
+            Some(TextureSampleType::Sint)
+        );
+        // A non-filterable float colour format samples as unfilterable-float.
+        assert_eq!(
+            texture_view_sample_type(&FormatCaps::float_color(16, 4), TextureAspect::All),
+            Some(TextureSampleType::UnfilterableFloat)
         );
     }
 }
