@@ -39,6 +39,23 @@ pub(crate) struct AttachmentSignature {
     pub(crate) stencil_read_only: bool,
 }
 
+impl AttachmentSignature {
+    /// Returns whether a render bundle carrying this signature may execute in a
+    /// render pass whose signature is `pass`. Color/depth-stencil formats and
+    /// sample count must match exactly; for each aspect the pass marks
+    /// read-only, the bundle must also be read-only — a read-write bundle cannot
+    /// run in a read-only pass, but a read-only bundle may run in a read-write
+    /// pass. Mirrors the WebGPU `executeBundles` rule (F-062), which is *not*
+    /// whole-signature equality.
+    pub(crate) fn bundle_compatible_with_pass(&self, pass: &AttachmentSignature) -> bool {
+        self.color_formats == pass.color_formats
+            && self.depth_stencil_format == pass.depth_stencil_format
+            && self.sample_count == pass.sample_count
+            && (!pass.depth_read_only || self.depth_read_only)
+            && (!pass.stencil_read_only || self.stencil_read_only)
+    }
+}
+
 /// Describes render pipeline descriptor.
 #[derive(Debug, Clone)]
 pub struct RenderPipelineDescriptor {
@@ -2362,8 +2379,12 @@ pub(crate) fn validate_inter_stage_interface(
 
     let outputs = inter_stage_outputs(&descriptor.vertex, vertex_entry)?;
     let inputs = inter_stage_inputs(fragment, fragment_entry)?;
-    validate_inter_stage_limits(&outputs, limits, "output")?;
-    validate_inter_stage_limits(&inputs, limits, "input")?;
+    // Fragment stage-input `@builtin`s (front_facing, sample_index, sample_mask,
+    // …) also consume `maxInterStageShaderVariables` slots, so count them with
+    // the user-defined inputs (F-063).
+    let input_builtins = inter_stage_input_builtin_count(fragment, fragment_entry)?;
+    validate_inter_stage_limits(&outputs, 0, limits, "output")?;
+    validate_inter_stage_limits(&inputs, input_builtins, limits, "input")?;
     if matches!(descriptor.primitive.topology, PrimitiveTopology::PointList)
         && outputs.len() >= limits.max_inter_stage_shader_variables as usize
     {
@@ -2380,12 +2401,22 @@ pub(crate) fn validate_inter_stage_interface(
         if output.ty != input.ty {
             return Err("render pipeline inter-stage types are incompatible".to_owned());
         }
-        if output.interpolation != input.interpolation {
+        // Compare interpolation type and sampling after applying WebGPU defaults:
+        // an unspecified interpolation defaults to `perspective`, and an
+        // unspecified sampling defaults to `center` for perspective/linear. naga
+        // only fills these defaults when the *interpolation* was unspecified, so
+        // `@interpolate(perspective)` (sampling None) and `@interpolate(perspective,
+        // center)` would otherwise compare unequal — a false reject (F-063).
+        if effective_interpolation(output.interpolation)
+            != effective_interpolation(input.interpolation)
+        {
             return Err(
                 "render pipeline inter-stage interpolation types are incompatible".to_owned(),
             );
         }
-        if output.sampling != input.sampling {
+        if effective_sampling(output.interpolation, output.sampling)
+            != effective_sampling(input.interpolation, input.sampling)
+        {
             return Err(
                 "render pipeline inter-stage interpolation sampling is incompatible".to_owned(),
             );
@@ -2394,12 +2425,40 @@ pub(crate) fn validate_inter_stage_interface(
     Ok(())
 }
 
+/// Returns the effective inter-stage interpolation, defaulting an unspecified
+/// interpolation to `perspective` (the WebGPU default).
+fn effective_interpolation(
+    interpolation: Option<shader_naga::ReflectedInterpolation>,
+) -> shader_naga::ReflectedInterpolation {
+    interpolation.unwrap_or(shader_naga::ReflectedInterpolation::Perspective)
+}
+
+/// Returns the effective inter-stage sampling. For perspective/linear
+/// interpolation an unspecified sampling defaults to `center`; for flat (and
+/// per-vertex) interpolation the sampling carries as-is.
+fn effective_sampling(
+    interpolation: Option<shader_naga::ReflectedInterpolation>,
+    sampling: Option<shader_naga::ReflectedSampling>,
+) -> Option<shader_naga::ReflectedSampling> {
+    match effective_interpolation(interpolation) {
+        shader_naga::ReflectedInterpolation::Perspective
+        | shader_naga::ReflectedInterpolation::Linear => {
+            Some(sampling.unwrap_or(shader_naga::ReflectedSampling::Center))
+        }
+        shader_naga::ReflectedInterpolation::Flat
+        | shader_naga::ReflectedInterpolation::PerVertex => sampling,
+    }
+}
+
 fn validate_inter_stage_limits(
     locations: &BTreeMap<u32, shader_naga::ReflectedIoLocation>,
+    extra_builtins: u32,
     limits: Limits,
     label: &str,
 ) -> Result<(), String> {
-    if locations.len() > limits.max_inter_stage_shader_variables as usize {
+    if locations.len() as u64 + u64::from(extra_builtins)
+        > u64::from(limits.max_inter_stage_shader_variables)
+    {
         return Err(format!(
             "render pipeline inter-stage {label} count exceeds the device limit"
         ));
@@ -2453,6 +2512,23 @@ fn inter_stage_inputs(
                 .collect()
         })
         .unwrap_or_default())
+}
+
+/// Returns the number of fragment stage-input `@builtin`s that consume an
+/// inter-stage shader-variable slot (F-063).
+fn inter_stage_input_builtin_count(
+    fragment: &RenderPipelineFragmentState,
+    fragment_entry: &str,
+) -> Result<u32, String> {
+    let Some(module) = fragment.shader.module.reflected() else {
+        return Err("fragment module reflection failed".to_owned());
+    };
+    Ok(module
+        .entry_point_io()
+        .into_iter()
+        .find(|io| io.entry_point == fragment_entry)
+        .map(|io| io.input_inter_stage_builtins)
+        .unwrap_or(0))
 }
 
 /// Validates render pipeline layout and returns a descriptive error on failure.
@@ -3713,5 +3789,60 @@ mod tests {
             bindings[0].kind,
             HalDescriptorBindingKind::Buffer(HalBufferBindingKind::InputAttachment)
         ));
+    }
+
+    #[test]
+    fn bundle_attachment_signature_compat_uses_readonly_implication() {
+        // F-062: formats/sample-count match exactly, but read-only is an
+        // implication — a read-write bundle cannot run in a read-only pass,
+        // while a read-only bundle may run in a read-write pass.
+        let sig = |depth_ro: bool, stencil_ro: bool| AttachmentSignature {
+            color_formats: vec![Some(TextureFormat::from_raw(TextureFormat::RGBA8_UNORM))],
+            depth_stencil_format: Some(TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8)),
+            sample_count: 1,
+            depth_read_only: depth_ro,
+            stencil_read_only: stencil_ro,
+        };
+        // Identical → compatible.
+        assert!(sig(true, true).bundle_compatible_with_pass(&sig(true, true)));
+        // Read-only bundle in a read-write pass → compatible.
+        assert!(sig(true, true).bundle_compatible_with_pass(&sig(false, false)));
+        // Read-write bundle in a read-only pass → incompatible.
+        assert!(!sig(false, false).bundle_compatible_with_pass(&sig(true, true)));
+        assert!(!sig(true, false).bundle_compatible_with_pass(&sig(true, true)));
+        // Differing color formats → incompatible regardless of read-only.
+        let other_color = AttachmentSignature {
+            color_formats: vec![Some(TextureFormat::from_raw(TextureFormat::RG8_UNORM))],
+            ..sig(false, false)
+        };
+        assert!(!other_color.bundle_compatible_with_pass(&sig(false, false)));
+    }
+
+    #[test]
+    fn inter_stage_interpolation_defaults_are_applied() {
+        use shader_naga::{ReflectedInterpolation as I, ReflectedSampling as S};
+        // F-063: unspecified interpolation defaults to perspective; unspecified
+        // sampling defaults to center for perspective/linear, so `perspective`
+        // (None sampling) matches `perspective, center`.
+        assert_eq!(effective_interpolation(None), I::Perspective);
+        assert_eq!(effective_sampling(None, None), Some(S::Center));
+        assert_eq!(
+            effective_sampling(Some(I::Perspective), None),
+            Some(S::Center)
+        );
+        assert_eq!(
+            effective_sampling(Some(I::Perspective), Some(S::Center)),
+            Some(S::Center)
+        );
+        assert_eq!(
+            effective_sampling(Some(I::Linear), None),
+            Some(S::Center)
+        );
+        assert_ne!(
+            effective_sampling(Some(I::Perspective), Some(S::Sample)),
+            effective_sampling(Some(I::Perspective), None)
+        );
+        // Flat carries sampling as-is (no center default).
+        assert_eq!(effective_sampling(Some(I::Flat), None), None);
     }
 }
