@@ -137,4 +137,24 @@ mod tests {
             .expect("Metal buffer allocation should succeed");
         assert!(buffer.mapped_ptr().is_some());
     }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_buffer_zero_size_read_returns_empty_and_write_is_noop() {
+        // F-072: zero-size buffers must be usable on Metal; the 1-byte
+        // backing allocation must not surface to callers.
+        let buffer = metal_device()
+            .create_buffer(0, HalBufferUsage::default())
+            .expect("zero-size Metal buffer must succeed");
+        assert_eq!(buffer.size(), 0);
+        assert!(buffer.mapped_ptr().is_some());
+        assert_eq!(
+            buffer.read(0, 0).expect("zero-length read must succeed"),
+            Vec::<u8>::new(),
+        );
+        buffer
+            .write(0, &[])
+            .expect("zero-length write must succeed");
+    }
 }

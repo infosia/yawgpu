@@ -166,3 +166,20 @@ re-fire.
   range [offset,size) per map.
 - `WGPUBufferMapState` mapping; `wgpuBufferGetMapState` returns live state.
 - Reuse `Limits.max_buffer_size` (P1.2a) for B4.
+
+## CTS findings — buffer mapping (2026-06-10, batch Y-2)
+
+- **F-072 — Metal zero-size buffers/maps.** Mapping a zero-size buffer or a
+  zero-length range is valid WebGPU (Dawn and yawgpu-Vulkan accept it). Metal's
+  `newBufferWithLength(0)` returns **nil**, which (post-F-065) surfaces as a
+  spurious `OutOfMemory`. Rule: the Metal HAL allocates `max(size, 1)` bytes and
+  keeps the **logical** size at the requested value (mirrors wgpu); all
+  map/read/write bounds validate against the logical size. CTS:
+  `api,operation,buffers,map` Metal `fail=0`.
+- **F-073 — mappedAtCreation OOM must not abort.** `wgpuDeviceCreateBuffer`
+  with `mappedAtCreation=true` and an impossible size (~9 PB) must not panic:
+  the host-side mapping allocation is **fallible** (`try_reserve`-style, never
+  an infallible `Vec::with_capacity(size)`), an error/unallocatable buffer
+  performs **no** host allocation, and `getMappedRange` on it returns null.
+  No process abort under any descriptor. CTS: `api,operation,buffers,map_oom`
+  both HALs, no crash.

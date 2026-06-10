@@ -246,23 +246,37 @@ impl Device {
             self.dispatch_error(ErrorKind::Validation, message);
         }
 
-        let hal = if is_error {
-            None
-        } else {
-            match self
-                .inner
-                .hal
-                .create_buffer(descriptor.size, hal_buffer_usage(descriptor.usage))
-            {
-                Ok(hal) => Some(hal),
-                Err(error) => {
-                    self.dispatch_hal_allocation_error(error);
-                    return Buffer::new(descriptor, None, true);
-                }
+        // Validation errors return an error buffer immediately — no host or
+        // HAL allocation is attempted (F-073: avoids aborting on huge sizes).
+        if is_error {
+            return Buffer::new(descriptor, None, true);
+        }
+
+        let hal = match self
+            .inner
+            .hal
+            .create_buffer(descriptor.size, hal_buffer_usage(descriptor.usage))
+        {
+            Ok(hal) => Some(hal),
+            Err(error) => {
+                self.dispatch_hal_allocation_error(error);
+                return Buffer::new(descriptor, None, true);
             }
         };
 
-        Buffer::new(descriptor, hal, is_error)
+        // Attempt the host-side backing allocation.  On failure dispatch an
+        // OutOfMemory error and return an error buffer with no host storage
+        // so getMappedRange returns null (F-073).
+        match Buffer::try_new(descriptor, hal) {
+            Ok(buffer) => buffer,
+            Err(hal) => {
+                self.dispatch_error(
+                    ErrorKind::OutOfMemory,
+                    "out of memory allocating host buffer storage",
+                );
+                Buffer::new(descriptor, hal, true)
+            }
+        }
     }
 
     /// Validates the descriptor and creates a texture on this device.

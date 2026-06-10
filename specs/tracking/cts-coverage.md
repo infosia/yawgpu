@@ -1190,7 +1190,7 @@ never a reason to skip a CTS case.
   `y+height > maxViewportBounds−1`, plus separate per-dimension `width/height ≤ maxTextureDimension2D`
   checks (`pass.rs::validate_viewport_bounds`). An interim fix used `x <= -max_bounds` (non-strict) and
   wrongly rejected the CTS `om=-2` boundary case (`x = -2*max` is valid) — caught in review and corrected.
-  **Verified:** `setViewport,xy_rect_contained_in_bounds` `pass=26 fail=0` on Metal AND Vulkan/MoltenVK.
+  **Verified:** `setViewport,xy_rect_contained_in_bounds` `pass=26 fail=0` on Metal, Vulkan/MoltenVK, AND native Windows/Vulkan (RTX 5060 Ti, user-confirmed 2026-06-10).
 - **External-CTS finding F-064 — RESOLVED (cross-HAL; honest-limit fix).**
   `pipeline,immediates` `pipeline_creation_immediate_size_mismatch` (4): yawgpu advertised
   `maxImmediateSize = 64` but the naga WGSL frontend cannot compile `var<immediate>`, so the test's shader
@@ -1199,7 +1199,7 @@ never a reason to skip a CTS case.
   always-max R14 rule now yields 0; `maxImmediateSize=UNDEFINED` maps to the 0 default). The CTS gates the
   test on `maxImmediateSize != 0`, so it now **skips**, exactly as on the CTS's Dawn build. Same posture as
   F-060: advertise the capability we actually have, never fake one. Spec: block 00 R14.
-  **Verified:** `pipeline,immediates` `skip=30 fail=0` on Metal AND Vulkan/MoltenVK.
+  **Verified:** `pipeline,immediates` `skip=30 fail=0` on Metal, Vulkan/MoltenVK, AND native Windows/Vulkan (RTX 5060 Ti, user-confirmed 2026-06-10).
 - **External-CTS finding F-067 — RESOLVED (cross-HAL; 3 sub-fixes + 1 unmasked HAL gap).**
   `image_copy,buffer_related` (`bytes_per_row_alignment` + `buffer,device_mismatch`; Metal 15 / MoltenVK 8
   observed originally):
@@ -1222,7 +1222,7 @@ never a reason to skip a CTS case.
     `Queue::write_texture` now **repacks** rows into a tightly-packed staging layout
     (`queue.rs::repack_texel_rows`) whenever the caller's stride/offset is not texel-block-aligned, so
     every backend receives a representable layout.
-  **Verified:** `image_copy,buffer_related` `pass=9065 fail=0` on Metal AND Vulkan/MoltenVK.
+  **Verified:** `image_copy,buffer_related` `pass=9065 fail=0` on Metal, Vulkan/MoltenVK, AND native Windows/Vulkan (RTX 5060 Ti, user-confirmed 2026-06-10).
 - **External-CTS finding F-065 — RESOLVED (cross-HAL; error-model fix in 3 parts).**
   `error_scope` (`simple`/`parent_scope`/`current_scope`; 7 observed originally): yawgpu never produced
   `GPUOutOfMemoryError` and never fired the canonical uncaptured-error callback.
@@ -1249,7 +1249,40 @@ never a reason to skip a CTS case.
     (`vulkan/{buffer,texture}.rs`, `memory_heap_size`). No artificial thresholds — genuine heap capacity only.
   Regressions: `yawgpu/tests/e2e_metal_oom.rs` + `e2e_vulkan_oom.rs` (real GPU: a within-limits 64 GiB
   texture yields `ErrorKind::OutOfMemory`, not Validation, no panic) — both green on the M2.
-  **Verified:** `error_scope` `pass=49 fail=0` on Metal AND Vulkan/MoltenVK.
+  **Verified:** `error_scope` `pass=49 fail=0` on Metal, Vulkan/MoltenVK, AND native Windows/Vulkan (RTX 5060 Ti, user-confirmed 2026-06-10).
+- **External-CTS finding F-076 — RESOLVED (both HALs; sampler anisotropy clamping).**
+  `api,operation,sampling,anisotropy` (3): WebGPU clamps `maxAnisotropy` above the platform maximum —
+  never an error; two samplers clamped to the same effective value must render identically. **Metal:**
+  the value was passed unclamped to `setMaxAnisotropy` (range [1,16]) — now clamped
+  (`metal/texture.rs::clamp_anisotropy`). **Vulkan:** `anisotropyEnable = true` was set without ever
+  enabling the `samplerAnisotropy` device feature (VUID-VkSamplerCreateInfo-anisotropyEnable-01070) and
+  the value was unclamped — the root cause of the MoltenVK error-command-buffer failures on every
+  anisotropy case. Now: the feature is enabled at device creation when supported,
+  `VkPhysicalDeviceLimits.maxSamplerAnisotropy` is stored, and
+  `vulkan/texture.rs::effective_anisotropy` clamps (feature-absent ⇒ `anisotropyEnable=false`,
+  effective 1). Spec: block 20 → "CTS findings — sampler anisotropy".
+  **Verified:** `sampling,anisotropy` `pass=3 fail=0` on Metal AND Vulkan/MoltenVK.
+- **External-CTS finding F-072 — RESOLVED (Metal zero-size buffers/maps).**
+  `api,operation,buffers,map` (~93 Metal-only): mapping a zero-size buffer or zero-length range is valid
+  WebGPU, but Metal's `newBufferWithLength(0)` returns **nil** — which post-F-065 surfaced as a spurious
+  `OutOfMemory` on creation. The Metal HAL now allocates `max(size, 1)` bytes while keeping the logical
+  size at the requested value (mirrors wgpu); the map/read/write paths already validated against the
+  logical size. Regression: `#[ignore]` real-Metal unit tests (zero-size create / read / write) green on
+  the M2. Spec: block 10 → "CTS findings — buffer mapping".
+  **Verified:** `buffers,map` `pass=900 fail=0` on Metal AND Vulkan/MoltenVK.
+- **External-CTS finding F-073 — RESOLVED (mappedAtCreation OOM abort; cross-HAL).**
+  `api,operation,buffers,map_oom`: `wgpuDeviceCreateBuffer` with `mappedAtCreation=true` and a ~9 PB size
+  aborted the process — `Buffer::new` unconditionally allocated the host mapping
+  (`Vec::with_capacity(9 PB)` → allocator abort), even for buffers that had already failed validation.
+  Host mapping allocation is now **fallible** (`HostBuffer::try_new`, `try_reserve_exact`-based; the
+  `read` path too); valid buffers route an allocation failure to `ErrorKind::OutOfMemory` and return an
+  error buffer. One review round caught an over-correction: error buffers with `mappedAtCreation=true`
+  must STILL report `mapState='mapped'` with a writable scratch range when the size is allocatable (4 CTS
+  `mappedAtCreation,mapState:usageType="invalid"` regressions on both HALs) — the error-buffer
+  constructor now attempts the same fallible allocation and only falls back to `Unmapped`/null when it
+  genuinely cannot allocate (the 9 PB case). Spec: block 10 → "CTS findings — buffer mapping".
+  **Verified:** `buffers,map_oom` `pass=20 fail=0 crash=0` AND `buffers,map` `pass=900 fail=0` on Metal
+  AND Vulkan/MoltenVK; `error_scope` re-confirmed `pass=49 fail=0` both HALs.
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.

@@ -8,6 +8,12 @@ pub(super) struct VulkanDeviceInner {
     pub(super) memory_properties: vk::PhysicalDeviceMemoryProperties,
     pub(super) queue_family_index: u32,
     pub(super) occlusion_query_precise: bool,
+    /// Whether the `samplerAnisotropy` device feature was enabled at device creation.
+    pub(super) sampler_anisotropy: bool,
+    /// `VkPhysicalDeviceLimits.maxSamplerAnisotropy` — the hardware ceiling for
+    /// anisotropic filtering. Used to clamp `VkSamplerCreateInfo.maxAnisotropy`
+    /// per WebGPU semantics (clamp, never error).
+    pub(super) max_sampler_anisotropy: f32,
     pub(super) allocations: AtomicU64,
     #[cfg(feature = "tiled")]
     pub(super) framebuffer_fetch_path: FramebufferFetchPath,

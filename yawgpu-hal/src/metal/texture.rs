@@ -219,6 +219,16 @@ pub(super) fn create_transient_attachment(
     })
 }
 
+/// Metal's documented maximum for `setMaxAnisotropy` (API range [1, 16]).
+/// Values above this are clamped — WebGPU requires clamping, not an error.
+const METAL_MAX_ANISOTROPY: u16 = 16;
+
+/// Clamps a requested anisotropy value to Metal's documented [1, 16] range.
+/// WebGPU semantics: values above the platform maximum are silently clamped.
+pub(super) fn clamp_anisotropy(requested: u16) -> u16 {
+    requested.clamp(1, METAL_MAX_ANISOTROPY)
+}
+
 /// Creates sampler and reports validation errors through the owning device.
 pub(super) fn create_sampler(
     device: &ProtocolObject<dyn MTLDevice>,
@@ -233,11 +243,38 @@ pub(super) fn create_sampler(
     sampler_descriptor.setMipFilter(map_mipmap_filter_mode(descriptor.mipmap_filter));
     sampler_descriptor.setLodMinClamp(descriptor.lod_min_clamp);
     sampler_descriptor.setLodMaxClamp(descriptor.lod_max_clamp);
-    sampler_descriptor.setMaxAnisotropy(to_ns(u64::from(descriptor.max_anisotropy))?);
+    // Clamp to Metal's [1, 16] range; WebGPU requires clamping, not an error.
+    let clamped = clamp_anisotropy(descriptor.max_anisotropy);
+    sampler_descriptor.setMaxAnisotropy(to_ns(u64::from(clamped))?);
     if let Some(compare) = descriptor.compare {
         sampler_descriptor.setCompareFunction(map_compare_function(compare));
     }
     device
         .newSamplerStateWithDescriptor(&sampler_descriptor)
         .ok_or_else(|| texture_error("sampler allocation failed"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_anisotropy_clamps_above_max_to_16() {
+        assert_eq!(clamp_anisotropy(1024), 16);
+        assert_eq!(clamp_anisotropy(17), 16);
+    }
+
+    #[test]
+    fn clamp_anisotropy_passes_through_values_within_range() {
+        assert_eq!(clamp_anisotropy(16), 16);
+        assert_eq!(clamp_anisotropy(8), 8);
+        assert_eq!(clamp_anisotropy(1), 1);
+    }
+
+    #[test]
+    fn clamp_anisotropy_clamps_zero_to_one() {
+        // core validation rejects 0, but clamp_anisotropy is a pure helper;
+        // verify it doesn't panic and returns the floor.
+        assert_eq!(clamp_anisotropy(0), 1);
+    }
 }
