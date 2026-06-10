@@ -242,8 +242,18 @@ pub struct HalBoundBuffer {
     pub group: u32,
     /// Binding.
     pub binding: u32,
-    /// Metal index.
+    /// Metal per-kind buffer-space slot (used by the compute encoder and as the
+    /// fallback when `vertex_metal_index` / `fragment_metal_index` are both
+    /// `None`).
     pub metal_index: u32,
+    /// Metal per-kind buffer-space slot for the vertex stage of a render
+    /// pipeline.  `None` for compute bindings and for bindings that are not
+    /// visible to the vertex stage.
+    pub vertex_metal_index: Option<u32>,
+    /// Metal per-kind buffer-space slot for the fragment stage of a render
+    /// pipeline.  `None` for compute bindings and for bindings that are not
+    /// visible to the fragment stage.
+    pub fragment_metal_index: Option<u32>,
     /// Buffer.
     pub buffer: HalBuffer,
     /// Offset.
@@ -277,8 +287,18 @@ pub struct HalBoundTexture {
     pub group: u32,
     /// Binding.
     pub binding: u32,
-    /// Metal index.
+    /// Metal per-kind texture-space slot (used by the compute encoder and as
+    /// the fallback when `vertex_metal_index` / `fragment_metal_index` are both
+    /// `None`).
     pub metal_index: u32,
+    /// Metal per-kind texture-space slot for the vertex stage of a render
+    /// pipeline.  `None` for compute bindings and for bindings not visible to
+    /// the vertex stage.
+    pub vertex_metal_index: Option<u32>,
+    /// Metal per-kind texture-space slot for the fragment stage of a render
+    /// pipeline.  `None` for compute bindings and for bindings not visible to
+    /// the fragment stage.
+    pub fragment_metal_index: Option<u32>,
     /// Texture.
     pub texture: HalTexture,
     /// View format.
@@ -306,8 +326,18 @@ pub struct HalBoundSampler {
     pub group: u32,
     /// Binding.
     pub binding: u32,
-    /// Metal index.
+    /// Metal per-kind sampler-space slot (used by the compute encoder and as
+    /// the fallback when `vertex_metal_index` / `fragment_metal_index` are both
+    /// `None`).
     pub metal_index: u32,
+    /// Metal per-kind sampler-space slot for the vertex stage of a render
+    /// pipeline.  `None` for compute bindings and for bindings not visible to
+    /// the vertex stage.
+    pub vertex_metal_index: Option<u32>,
+    /// Metal per-kind sampler-space slot for the fragment stage of a render
+    /// pipeline.  `None` for compute bindings and for bindings not visible to
+    /// the fragment stage.
+    pub fragment_metal_index: Option<u32>,
     /// Sampler.
     pub sampler: HalSampler,
 }
@@ -820,6 +850,8 @@ mod tests {
             group: 1,
             binding: 2,
             metal_index: 3,
+            vertex_metal_index: Some(1),
+            fragment_metal_index: Some(2),
             texture,
             format: HalTextureFormat::Depth32Float,
             dimension: HalTextureViewDimension::D2,
@@ -834,6 +866,8 @@ mod tests {
         assert_eq!(binding.group, 1);
         assert_eq!(binding.binding, 2);
         assert_eq!(binding.metal_index, 3);
+        assert_eq!(binding.vertex_metal_index, Some(1));
+        assert_eq!(binding.fragment_metal_index, Some(2));
         assert!(matches!(binding.texture, HalTexture::Noop(_)));
         assert_eq!(binding.format, HalTextureFormat::Depth32Float);
         assert_eq!(binding.dimension, HalTextureViewDimension::D2);

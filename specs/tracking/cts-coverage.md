@@ -1519,3 +1519,31 @@ for f in sorted(glob.glob(root+"/**/*.spec.ts", recursive=True)):
     print(f"{n:3d}  {rel}")
 PY
 ```
+
+- **External-CTS finding F-077 — RESOLVED (three layered defects).**
+  `api,operation,sampling,sampler_texture` (max-bindings shader; Metal process abort):
+  - **(1) naga-fork MSL writer panic — FIXED (fork commit `ecad20360`, pending push + rev bump).**
+    Several writer paths format a storage-texture type with EMPTY usage-based access flags and hit
+    `unreachable\!("module is not valid")` (the CTS shader's `texture_storage_2d<rgba8unorm, read>`
+    bindings). Fix: fall back to the type's declared access; only a fmt error when both are empty.
+    Verified with a local `[patch]`: the abort becomes a graceful pipeline error. Regression tests in
+    `naga/tests/msl_storage_access_f077.rs` (note: they cover the fallback, not the exact CTS shape).
+  - **(2) Metal binding-slot model — flat counter across kinds and stages (refactor in flight).**
+    Instrumentation surfaced the post-fix error: `'sampler' attribute parameter is out of bounds:
+    must be between 0 and 15`. `metal_buffer_binding_map` assigns ONE flat index sequence across
+    buffers/textures/samplers and across both render stages; Metal's `[[buffer/texture/sampler(N)]]`
+    spaces are per-kind AND per-stage (samplers capped at 16). Fix design: per-kind counters, per-stage
+    (visibility-filtered) maps for render pipelines, vertex-buffer slots starting after the
+    vertex-stage buffer count, per-stage runtime indices on the HalBound* records, slot-range
+    validation at pipeline creation.
+  - **(2) — DONE.** Per-kind (buffer/texture/sampler) per-stage (visibility-filtered) slot counters;
+    external textures take 3 texture slots + 1 params buffer slot; vertex buffers start after the
+    vertex-stage buffer count; HalBound* records carry per-stage indices consumed by
+    setVertex*/setFragment*; slot ranges validated at pipeline creation.
+  - **(3) Review fix:** the refactor draft wrongly applied the 16-entry SAMPLER cap to the TEXTURE
+    table (`MAX_TEXTURE_SLOT = 15`), rejecting valid 16-texture stages with a `Metal texture slot 16`
+    internal error — corrected to Metal's 31-entry table (`= 30`).
+  naga rev bumped to fork `ecad2036`. **Verified:** `sampling,sampler_texture` `pass=1 fail=0 crash=0`
+  on Metal AND Vulkan/MoltenVK (was: Metal process abort); regressions re-confirmed both HALs
+  (`sampling,anisotropy` 3/0, `buffers,map` 900/0, `error_scope` 49/0, `memory_layout` Metal residue
+  still the 9 F-070 naga cases).

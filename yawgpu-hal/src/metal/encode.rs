@@ -1057,11 +1057,34 @@ fn encode_render_bind_buffer(
             "render bind buffer offset exceeds buffer size",
         ));
     }
-    let index = to_ns(u64::from(binding.metal_index))?;
     let offset = to_ns(binding.offset)?;
-    unsafe {
-        encoder.setVertexBuffer_offset_atIndex(Some(buffer.inner()?), offset, index);
-        encoder.setFragmentBuffer_offset_atIndex(Some(buffer.inner()?), offset, index);
+    // Per-stage binding: use stage-specific slots when available, otherwise
+    // fall back to the flat metal_index for both stages (backwards compat).
+    if let Some(vtx) = binding.vertex_metal_index {
+        let vtx_index = to_ns(u64::from(vtx))?;
+        unsafe {
+            encoder.setVertexBuffer_offset_atIndex(Some(buffer.inner()?), offset, vtx_index);
+        }
+    } else if binding.fragment_metal_index.is_none() {
+        // No per-stage info: bind to both stages at the flat index (compute
+        // code path reuses this function for bind-group buffers in render
+        // pipelines that predate per-stage maps; also handles Noop).
+        let index = to_ns(u64::from(binding.metal_index))?;
+        unsafe {
+            encoder.setVertexBuffer_offset_atIndex(Some(buffer.inner()?), offset, index);
+        }
+    }
+    if let Some(frag) = binding.fragment_metal_index {
+        let frag_index = to_ns(u64::from(frag))?;
+        unsafe {
+            encoder.setFragmentBuffer_offset_atIndex(Some(buffer.inner()?), offset, frag_index);
+        }
+    } else if binding.vertex_metal_index.is_none() {
+        // Symmetric fallback for fragment stage.
+        let index = to_ns(u64::from(binding.metal_index))?;
+        unsafe {
+            encoder.setFragmentBuffer_offset_atIndex(Some(buffer.inner()?), offset, index);
+        }
     }
     Ok(())
 }
@@ -1074,10 +1097,28 @@ fn encode_render_bind_texture(
         return Err(texture_error("render bind texture is not Metal-backed"));
     };
     let view = metal_texture_view(texture, binding)?;
-    let index = to_ns(u64::from(binding.metal_index))?;
-    unsafe {
-        encoder.setVertexTexture_atIndex(Some(view.as_ref()), index);
-        encoder.setFragmentTexture_atIndex(Some(view.as_ref()), index);
+    // Per-stage binding: use stage-specific texture slots when available.
+    if let Some(vtx) = binding.vertex_metal_index {
+        let vtx_index = to_ns(u64::from(vtx))?;
+        unsafe {
+            encoder.setVertexTexture_atIndex(Some(view.as_ref()), vtx_index);
+        }
+    } else if binding.fragment_metal_index.is_none() {
+        let index = to_ns(u64::from(binding.metal_index))?;
+        unsafe {
+            encoder.setVertexTexture_atIndex(Some(view.as_ref()), index);
+        }
+    }
+    if let Some(frag) = binding.fragment_metal_index {
+        let frag_index = to_ns(u64::from(frag))?;
+        unsafe {
+            encoder.setFragmentTexture_atIndex(Some(view.as_ref()), frag_index);
+        }
+    } else if binding.vertex_metal_index.is_none() {
+        let index = to_ns(u64::from(binding.metal_index))?;
+        unsafe {
+            encoder.setFragmentTexture_atIndex(Some(view.as_ref()), index);
+        }
     }
     Ok(())
 }
@@ -1136,10 +1177,28 @@ fn encode_render_bind_sampler(
         ._inner
         .as_deref()
         .ok_or_else(|| texture_error("sampler allocation failed"))?;
-    let index = to_ns(u64::from(binding.metal_index))?;
-    unsafe {
-        encoder.setVertexSamplerState_atIndex(Some(sampler), index);
-        encoder.setFragmentSamplerState_atIndex(Some(sampler), index);
+    // Per-stage binding: use stage-specific sampler slots when available.
+    if let Some(vtx) = binding.vertex_metal_index {
+        let vtx_index = to_ns(u64::from(vtx))?;
+        unsafe {
+            encoder.setVertexSamplerState_atIndex(Some(sampler), vtx_index);
+        }
+    } else if binding.fragment_metal_index.is_none() {
+        let index = to_ns(u64::from(binding.metal_index))?;
+        unsafe {
+            encoder.setVertexSamplerState_atIndex(Some(sampler), index);
+        }
+    }
+    if let Some(frag) = binding.fragment_metal_index {
+        let frag_index = to_ns(u64::from(frag))?;
+        unsafe {
+            encoder.setFragmentSamplerState_atIndex(Some(sampler), frag_index);
+        }
+    } else if binding.vertex_metal_index.is_none() {
+        let index = to_ns(u64::from(binding.metal_index))?;
+        unsafe {
+            encoder.setFragmentSamplerState_atIndex(Some(sampler), index);
+        }
     }
     Ok(())
 }
@@ -1317,6 +1376,8 @@ mod tests {
             group: 0,
             binding: 0,
             metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
             texture: HalTexture::Metal(texture.clone()),
             format: descriptor.format,
             dimension: HalTextureViewDimension::D2,

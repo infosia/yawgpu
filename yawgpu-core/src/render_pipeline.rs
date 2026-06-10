@@ -840,6 +840,14 @@ pub(crate) fn create_hal_render_pipeline(
     if matches!(hal_device.backend(), HalBackend::Noop) {
         return (Some(HalRenderPipeline::Noop), None);
     }
+    // Validate Metal slot ranges up front so the Metal compiler never sees an
+    // out-of-range slot (Metal rejects these at compile-time with a cryptic
+    // message that is hard to trace back to the binding layout).
+    if matches!(hal_device.backend(), HalBackend::Metal) {
+        if let Err(message) = validate_metal_slot_ranges(metal_bindings) {
+            return (None, Some(message));
+        }
+    }
     if descriptor.fragment.is_none() && descriptor.depth_stencil.is_none() {
         return (
             None,
@@ -1126,8 +1134,13 @@ pub(crate) fn select_render_shader_source(
                 descriptor.vertex.shader.module.reflected().ok_or_else(|| {
                     "render pipeline requires a reflected shader module".to_owned()
                 })?;
-            let msl_binding_map = shader_naga::MslBindingMap {
-                resources: msl_resource_bindings(metal_bindings),
+            // Build separate per-stage binding maps so each stage's codegen
+            // receives the correct per-kind slot indices for its own index space.
+            let msl_vertex_binding_map = shader_naga::MslBindingMap {
+                resources: msl_stage_resource_bindings(metal_bindings, true),
+            };
+            let msl_fragment_binding_map = shader_naga::MslBindingMap {
+                resources: msl_stage_resource_bindings(metal_bindings, false),
             };
             let msl_vertex_buffers =
                 msl_vertex_buffer_bindings(&descriptor.vertex.buffers, vertex_buffer_bindings)?;
@@ -1135,7 +1148,7 @@ pub(crate) fn select_render_shader_source(
                 matches!(descriptor.primitive.topology, PrimitiveTopology::PointList);
             let vertex = module.generate_render_vertex_msl(
                 vertex_entry_name,
-                &msl_binding_map,
+                &msl_vertex_binding_map,
                 &msl_vertex_buffers,
                 force_point_size,
                 &vertex_pipeline_constants,
@@ -1157,7 +1170,7 @@ pub(crate) fn select_render_shader_source(
                         };
                     Some(fragment_module.generate_render_fragment_msl(
                         fragment_entry_name,
-                        &msl_binding_map,
+                        &msl_fragment_binding_map,
                         subpass_color_slots,
                         fragment_pipeline_constants,
                         descriptor.multisample.mask,
@@ -1352,12 +1365,67 @@ fn hal_msl_buffer_size_bindings(
         .collect()
 }
 
+/// Returns MSL resource bindings projected to a single render stage.
+///
+/// `vertex = true` selects `vertex_metal_index`; `vertex = false` selects
+/// `fragment_metal_index`.  Entries that have no index for the requested stage
+/// are omitted — naga only needs bindings that the stage actually uses.
+/// When both per-stage indices are `None` (compute-style flat map) the flat
+/// `metal_index` is used for both stages as a fallback.
+pub(crate) fn msl_stage_resource_bindings(
+    bindings: &[MetalBufferBinding],
+    vertex: bool,
+) -> Vec<shader_naga::MslResourceBinding> {
+    bindings
+        .iter()
+        .filter_map(|binding| {
+            // Choose the stage-specific index; fall back to flat metal_index when
+            // no per-stage indices are stored (backwards compat, or compute maps).
+            let metal_index = if vertex {
+                match binding.vertex_metal_index {
+                    Some(idx) => idx,
+                    None if binding.fragment_metal_index.is_none() => binding.metal_index,
+                    None => return None, // not visible to vertex stage
+                }
+            } else {
+                match binding.fragment_metal_index {
+                    Some(idx) => idx,
+                    None if binding.vertex_metal_index.is_none() => binding.metal_index,
+                    None => return None, // not visible to fragment stage
+                }
+            };
+            Some(shader_naga::MslResourceBinding {
+                group: binding.group,
+                binding: binding.binding,
+                metal_index,
+                ext_params_buffer_slot: binding.ext_params_buffer_slot,
+                kind: match binding.kind {
+                    MetalBindingKind::Buffer(_) => shader_naga::MslResourceBindingKind::Buffer,
+                    MetalBindingKind::Texture | MetalBindingKind::StorageTexture { .. } => {
+                        shader_naga::MslResourceBindingKind::Texture
+                    }
+                    MetalBindingKind::Sampler => shader_naga::MslResourceBindingKind::Sampler,
+                    MetalBindingKind::ExternalTexture => {
+                        shader_naga::MslResourceBindingKind::ExternalTexture
+                    }
+                },
+            })
+        })
+        .collect()
+}
+
 /// Returns metal vertex buffer binding map.
+///
+/// Vertex buffers share the `[[buffer(N)]]` index space with bind-group
+/// buffers in the vertex stage.  The start slot must therefore be placed
+/// immediately after the last vertex-stage buffer-space slot used by the
+/// bind-group layout (i.e. `vertex_stage_buffer_count(metal_bindings)`), not
+/// after the total number of entries in the flat binding list.
 pub(crate) fn metal_vertex_buffer_binding_map(
     vertex_buffer_count: usize,
     metal_bindings: &[MetalBufferBinding],
 ) -> Vec<MetalVertexBufferBinding> {
-    let start = metal_bindings.len();
+    let start = vertex_stage_buffer_count(metal_bindings);
     (0..vertex_buffer_count)
         .filter_map(|slot| {
             Some(MetalVertexBufferBinding {

@@ -36,8 +36,14 @@ pub(crate) struct MslResourceBinding {
     pub group: u32,
     /// Binding.
     pub binding: u32,
-    /// Metal index.
+    /// Per-kind Metal slot: buffer-space for `Buffer`, texture-space for
+    /// `Texture` and `ExternalTexture` (planes base slot), sampler-space for
+    /// `Sampler`.
     pub metal_index: u32,
+    /// For `ExternalTexture` only: the buffer-space slot assigned to the params
+    /// buffer that carries the external-texture metadata.  For all other kinds
+    /// this is `None`.
+    pub ext_params_buffer_slot: Option<u32>,
     /// Kind.
     pub kind: MslResourceBindingKind,
 }
@@ -1266,6 +1272,9 @@ fn msl_resources(binding_map: &MslBindingMap) -> Result<naga::back::msl::Binding
                         ..Default::default()
                     },
                     MslResourceBindingKind::ExternalTexture => {
+                        // `metal_index` is the texture-space base slot for the
+                        // three plane textures; `ext_params_buffer_slot` is the
+                        // buffer-space slot for the params buffer.
                         let plane0 = slot;
                         let plane1 = slot.checked_add(1).ok_or_else(|| {
                             "MSL external texture plane index exceeds the supported slot range"
@@ -1275,10 +1284,18 @@ fn msl_resources(binding_map: &MslBindingMap) -> Result<naga::back::msl::Binding
                             "MSL external texture plane index exceeds the supported slot range"
                                 .to_owned()
                         })?;
-                        let params = slot.checked_add(3).ok_or_else(|| {
-                            "MSL external texture params index exceeds the supported slot range"
-                                .to_owned()
-                        })?;
+                        let params = binding
+                            .ext_params_buffer_slot
+                            .ok_or_else(|| {
+                                "MSL external texture binding is missing params buffer slot"
+                                    .to_owned()
+                            })
+                            .and_then(|s| {
+                                u8::try_from(s).map_err(|_| {
+                                    "MSL external texture params slot exceeds the supported slot range"
+                                        .to_owned()
+                                })
+                            })?;
                         naga::back::msl::BindTarget {
                             external_texture: Some(naga::back::msl::BindExternalTextureTarget {
                                 planes: [plane0, plane1, plane2],
@@ -1324,12 +1341,17 @@ fn msl_next_buffer_slot(
     binding_map: &MslBindingMap,
     extra_buffer_indices: &[u32],
 ) -> Result<naga::back::msl::Slot, String> {
+    // With per-kind counters, buffers and external-texture params each occupy
+    // their own slots in the buffer-space.  For ordinary Buffer bindings
+    // `metal_index` IS the buffer slot; for ExternalTexture bindings
+    // `ext_params_buffer_slot` is the buffer slot (metal_index is in the
+    // separate texture space).
     let resource_max = binding_map
         .resources
         .iter()
         .filter_map(|binding| match binding.kind {
             MslResourceBindingKind::Buffer => Some(binding.metal_index),
-            MslResourceBindingKind::ExternalTexture => Some(binding.metal_index.saturating_add(3)),
+            MslResourceBindingKind::ExternalTexture => binding.ext_params_buffer_slot,
             _ => None,
         })
         .max()
@@ -2172,12 +2194,14 @@ fn cs() {
                             group: 0,
                             binding: 0,
                             metal_index: 0,
+                            ext_params_buffer_slot: None,
                             kind: MslResourceBindingKind::Texture,
                         },
                         MslResourceBinding {
                             group: 0,
                             binding: 1,
-                            metal_index: 1,
+                            metal_index: 0,
+                            ext_params_buffer_slot: None,
                             kind: MslResourceBindingKind::Buffer,
                         },
                     ],
@@ -2186,7 +2210,9 @@ fn cs() {
             )
             .expect("MSL generation should provide a sizes buffer slot");
 
-        assert_eq!(generated.buffer_sizes_slot, Some(2));
+        // With per-kind counters the buffer binding is at buffer-space slot 0,
+        // so the _mslBufferSizes slot is 1 (the next available buffer slot).
+        assert_eq!(generated.buffer_sizes_slot, Some(1));
         assert_eq!(
             generated.buffer_size_bindings,
             [super::MslBufferSizeBinding {
@@ -2257,12 +2283,13 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                         group: 0,
                         binding: 0,
                         metal_index: 0,
+                        ext_params_buffer_slot: None,
                         kind: MslResourceBindingKind::Buffer,
                     }],
                 },
                 &[MslVertexBufferBinding {
                     slot: 0,
-                    metal_index: 2,
+                    metal_index: 1,
                     array_stride: 16,
                     step_mode: MslVertexStepMode::Vertex,
                     attributes: vec![MslVertexAttribute {
@@ -2276,7 +2303,9 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
             )
             .expect("MSL vertex generation should provide a non-colliding sizes slot");
 
-        assert_eq!(generated.buffer_sizes_slot, Some(3));
+        // buffer-space slot 0 is occupied by the bind-group buffer, slot 1 by
+        // the vertex buffer → buffer_sizes goes to slot 2.
+        assert_eq!(generated.buffer_sizes_slot, Some(2));
     }
 
     #[test]
@@ -2438,7 +2467,9 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                     resources: vec![MslResourceBinding {
                         group: 0,
                         binding: 0,
+                        // planes at texture slots 0,1,2; params buffer at slot 0
                         metal_index: 0,
+                        ext_params_buffer_slot: Some(0),
                         kind: MslResourceBindingKind::ExternalTexture,
                     }],
                 },

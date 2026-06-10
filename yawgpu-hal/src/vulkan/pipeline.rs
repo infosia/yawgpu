@@ -1980,6 +1980,8 @@ mod tests {
             group: 0,
             binding: 1,
             metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
             texture: HalTexture::Noop(
                 device
                     .create_texture(&HalTextureDescriptor {
