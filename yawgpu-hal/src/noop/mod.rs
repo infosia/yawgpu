@@ -86,10 +86,9 @@ impl NoopDevice {
     }
 
     /// Allocates a buffer of the given size on this device.
-    #[must_use]
-    pub fn create_buffer(&self, size: u64, _usage: HalBufferUsage) -> NoopBuffer {
+    pub fn create_buffer(&self, size: u64, _usage: HalBufferUsage) -> Result<NoopBuffer, HalError> {
         self.allocations.fetch_add(1, Ordering::Relaxed);
-        NoopBuffer::new(size)
+        Ok(NoopBuffer::new(size))
     }
 
     /// Creates a query set of the given kind and count.
@@ -100,17 +99,19 @@ impl NoopDevice {
     }
 
     /// Creates a texture matching the given descriptor.
-    #[must_use]
-    pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> NoopTexture {
+    pub fn create_texture(
+        &self,
+        descriptor: &HalTextureDescriptor,
+    ) -> Result<NoopTexture, HalError> {
         self.allocations.fetch_add(1, Ordering::Relaxed);
-        NoopTexture {
+        Ok(NoopTexture {
             dimension: descriptor.dimension,
             width: descriptor.width,
             height: descriptor.height,
             depth_or_array_layers: descriptor.depth_or_array_layers,
             mip_level_count: descriptor.mip_level_count,
             sample_count: descriptor.sample_count,
-        }
+        })
     }
 
     /// Creates a transient attachment matching the given descriptor.
@@ -427,9 +428,13 @@ mod tests {
         let device = NoopDevice::new();
 
         assert_eq!(device.allocation_count(), 0);
-        let _buffer = device.create_buffer(4, HalBufferUsage::default());
+        let _buffer = device
+            .create_buffer(4, HalBufferUsage::default())
+            .expect("Noop buffer allocation should succeed");
         assert_eq!(device.allocation_count(), 1);
-        let _texture = device.create_texture(&texture_descriptor());
+        let _texture = device
+            .create_texture(&texture_descriptor())
+            .expect("Noop texture allocation should succeed");
         assert_eq!(device.allocation_count(), 2);
         let _sampler = device.create_sampler();
         assert_eq!(device.allocation_count(), 3);
@@ -445,7 +450,9 @@ mod tests {
     #[test]
     fn noop_device_create_buffer_records_size_and_increments_allocation_count() {
         let device = NoopDevice::new();
-        let buffer = device.create_buffer(64, HalBufferUsage::default());
+        let buffer = device
+            .create_buffer(64, HalBufferUsage::default())
+            .expect("Noop buffer allocation should succeed");
 
         assert_eq!(buffer.size(), 64);
         assert_eq!(device.allocation_count(), 1);
@@ -454,7 +461,9 @@ mod tests {
     #[test]
     fn noop_device_create_texture_increments_allocation_count() {
         let device = NoopDevice::new();
-        let _texture = device.create_texture(&texture_descriptor());
+        let _texture = device
+            .create_texture(&texture_descriptor())
+            .expect("Noop texture allocation should succeed");
 
         assert_eq!(device.allocation_count(), 1);
     }
@@ -469,7 +478,9 @@ mod tests {
         descriptor.depth_or_array_layers = 3;
         descriptor.mip_level_count = 4;
 
-        let texture = device.create_texture(&descriptor);
+        let texture = device
+            .create_texture(&descriptor)
+            .expect("Noop texture allocation should succeed");
 
         assert_eq!(texture.dimension(), HalTextureDimension::D3);
         assert_eq!(texture.width(), 8);
@@ -485,7 +496,9 @@ mod tests {
         let mut descriptor = texture_descriptor();
         descriptor.sample_count = 4;
 
-        let texture = device.create_texture(&descriptor);
+        let texture = device
+            .create_texture(&descriptor)
+            .expect("Noop texture allocation should succeed");
 
         assert_eq!(texture.sample_count(), 4);
         assert_eq!(device.allocation_count(), 1);
@@ -519,9 +532,18 @@ mod tests {
     fn noop_buffer_size_returns_created_size() {
         let device = NoopDevice::new();
 
-        assert_eq!(device.create_buffer(0, HalBufferUsage::default()).size(), 0);
         assert_eq!(
-            device.create_buffer(4096, HalBufferUsage::default()).size(),
+            device
+                .create_buffer(0, HalBufferUsage::default())
+                .expect("Noop buffer allocation should succeed")
+                .size(),
+            0
+        );
+        assert_eq!(
+            device
+                .create_buffer(4096, HalBufferUsage::default())
+                .expect("Noop buffer allocation should succeed")
+                .size(),
             4096
         );
     }
@@ -529,7 +551,9 @@ mod tests {
     #[test]
     fn noop_buffer_mapped_ptr_returns_none() {
         let device = NoopDevice::new();
-        let buffer = device.create_buffer(128, HalBufferUsage::default());
+        let buffer = device
+            .create_buffer(128, HalBufferUsage::default())
+            .expect("Noop buffer allocation should succeed");
 
         assert!(buffer.mapped_ptr().is_none());
     }

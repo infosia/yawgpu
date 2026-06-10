@@ -76,8 +76,12 @@ mod tests {
     #[cfg(feature = "vulkan")]
     fn vulkan_queue_submit_copies_accepts_buffer_copy() {
         let device = vulkan_device();
-        let source = device.create_buffer(4, HalBufferUsage::default());
-        let destination = device.create_buffer(4, HalBufferUsage::default());
+        let source = device
+            .create_buffer(4, HalBufferUsage::default())
+            .expect("Vulkan source buffer allocation should succeed");
+        let destination = device
+            .create_buffer(4, HalBufferUsage::default())
+            .expect("Vulkan destination buffer allocation should succeed");
         source.write(0, &[1, 2, 3, 4]).expect("write source");
         device
             .queue()

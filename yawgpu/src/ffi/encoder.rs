@@ -393,13 +393,6 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToTexture(
         .expect("wgpuCommandEncoderCopyBufferToTexture copySize must not be null");
     let source_buffer = clone_handle(source.buffer, "WGPUBuffer");
     let destination_texture = clone_handle(destination.texture, "WGPUTexture");
-    if !source_buffer.device.same(&encoder.device) {
-        encoder.device.dispatch_error(
-            core::ErrorKind::Validation,
-            "copy buffer to texture source buffer must belong to the command encoder device",
-        );
-        return;
-    }
     if !destination_texture.device.same(&encoder.device) {
         encoder.device.dispatch_error(
             core::ErrorKind::Validation,
@@ -415,6 +408,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToTexture(
         encoder.core.copy_buffer_to_texture(
             core::TexelCopyBufferInfo {
                 buffer: Arc::clone(&source_buffer.core),
+                device: Some((*source_buffer.device).clone()),
                 layout: map_texel_copy_buffer_layout(source.layout),
             },
             core::TexelCopyTextureInfo {
@@ -462,13 +456,6 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToBuffer(
         );
         return;
     }
-    if !destination_buffer.device.same(&encoder.device) {
-        encoder.device.dispatch_error(
-            core::ErrorKind::Validation,
-            "copy texture to buffer destination buffer must belong to the command encoder device",
-        );
-        return;
-    }
     let (source_mip_level, source_origin, source_aspect) =
         map_texel_copy_texture_info_parts(source);
 
@@ -483,6 +470,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToBuffer(
             },
             core::TexelCopyBufferInfo {
                 buffer: Arc::clone(&destination_buffer.core),
+                device: Some((*destination_buffer.device).clone()),
                 layout: map_texel_copy_buffer_layout(destination.layout),
             },
             map_extent_3d(*copy_size),

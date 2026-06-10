@@ -106,17 +106,16 @@ fn max_immediate_size_always_uses_supported_limit() {
 
     unsafe {
         let supported = get_adapter_limits(test.adapter());
-        assert!(supported.maxImmediateSize > 16);
+        assert_eq!(supported.maxImmediateSize, 0);
 
-        let mut required = undefined_limits();
-        required.maxImmediateSize = 16;
+        let required = undefined_limits();
         let result = request_device(test.instance(), test.adapter(), Some(&required));
         assert_eq!(result.status, native::WGPURequestDeviceStatus_Success);
         assert!(!result.device.is_null());
         assert!(result.message.is_empty());
 
         let limits = get_device_limits(result.device);
-        assert_eq!(limits.maxImmediateSize, supported.maxImmediateSize);
+        assert_eq!(limits.maxImmediateSize, 0);
 
         yawgpu::wgpuDeviceRelease(result.device);
     }

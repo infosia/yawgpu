@@ -182,6 +182,16 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
             userdata1: 0,
             userdata2: 0,
         });
+    let uncaptured_error_callback = descriptor
+        .as_ref()
+        .map(|descriptor| {
+            map_uncaptured_error_callback_info(descriptor.uncapturedErrorCallbackInfo)
+        })
+        .unwrap_or(UncapturedErrorCallbackInfo {
+            callback: None,
+            userdata1: 0,
+            userdata2: 0,
+        });
     let result = adapter
         .core
         .create_device(
@@ -191,7 +201,7 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
             queue_label,
         )
         .map(|device| {
-            Arc::new(WGPUDeviceImpl {
+            let device_impl = Arc::new(WGPUDeviceImpl {
                 core: Arc::new(device),
                 instance: Arc::clone(&adapter.instance),
                 device_lost_callback,
@@ -201,7 +211,23 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
                 pipeline_layout_cache: Mutex::new(HashMap::new()),
                 compute_pipeline_cache: Mutex::new(HashMap::new()),
                 render_pipeline_cache: Mutex::new(HashMap::new()),
-            })
+            });
+            if let Some(callback) = uncaptured_error_callback.callback {
+                let device_handle = Arc::as_ptr(&device_impl) as usize;
+                let userdata1 = uncaptured_error_callback.userdata1;
+                let userdata2 = uncaptured_error_callback.userdata2;
+                device_impl.set_uncaptured_error_callback(Some(move |error: core::DeviceError| {
+                    let device = device_handle as native::WGPUDevice;
+                    callback(
+                        &device,
+                        map_error_type(error.kind),
+                        string_view(error.message.as_bytes()),
+                        userdata1 as *mut c_void,
+                        userdata2 as *mut c_void,
+                    );
+                }));
+            }
+            device_impl
         })
         .map_err(|err| err.to_string());
     let failed = result.is_err();

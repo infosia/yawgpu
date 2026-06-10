@@ -788,7 +788,9 @@ mod tests {
     #[cfg(feature = "vulkan")]
     fn vulkan_retire_ring_wait_all_releases_retained_buffer() {
         let device = vulkan_device();
-        let buffer = device.create_buffer(16, HalBufferUsage::default());
+        let buffer = device
+            .create_buffer(16, HalBufferUsage::default())
+            .expect("Vulkan buffer allocation should succeed");
         let inner = Arc::clone(buffer.inner.as_ref().expect("buffer allocation"));
         let fence = signaled_fence(&device);
         let mut retire = RetireRing::new(1);
@@ -817,7 +819,9 @@ mod tests {
     #[cfg(feature = "vulkan")]
     fn vulkan_retire_ring_slot_reuse_releases_retained_texture() {
         let device = vulkan_device();
-        let texture = device.create_texture(&texture_descriptor());
+        let texture = device
+            .create_texture(&texture_descriptor())
+            .expect("Vulkan texture allocation should succeed");
         let inner = Arc::clone(texture.inner.as_ref().expect("texture allocation"));
         let first_fence = signaled_fence(&device);
         let second_fence = signaled_fence(&device);

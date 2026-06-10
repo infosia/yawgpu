@@ -94,6 +94,37 @@ ComputePassEncoder: `SetPipeline`/`SetBindGroup`/`DispatchWorkgroups`/
 - **C18–C22** T2T format-compat (sRGB), usage/OOB, depth/stencil,
   sample-count match, same-texture subresource. :1747. ☑ (P6.3)
 - **C79** texture aspect consistency with format. ☑ (P6.3)
+- **CTS finding F-067 (2026-06-10):** two buffer↔texture-copy
+  (`copyBufferToTexture`/`copyTextureToBuffer`) validation gaps —
+  - **(a) combined depth+stencil aspect.** A buffer copy of a *combined*
+    depth+stencil format (`depth24plus-stencil8`, `depth32float-stencil8`) with
+    `aspect = All` is never permitted — only a single aspect (depth-only /
+    stencil-only) is buffer-copyable. (This is the **inverse** of the T2T rule,
+    which *requires* `All` for combined DS — see `validate_texture_to_texture_copy`.)
+    `validate_buffer_texture_copy` must reject `aspect == All` when the format has
+    both a depth and a stencil aspect. Single-aspect DS formats (`stencil8`,
+    `depth16unorm`, `depth32float`) and colour formats are unaffected.
+  - **(b) buffer device-mismatch.** The copy's buffer must belong to the same
+    device as the command encoder (mirrors the bind-group `same`-device check);
+    a mismatched-device buffer is a validation error. Requires threading the
+    owning device of each copy resource through the FFI (as `BindGroupResource`
+    already carries `device`).
+  - **(c) bytesPerRow alignment** for single-aspect DS formats was investigated
+    and is **already enforced** (`validate_texel_copy_layout`,
+    `require_bytes_per_row_alignment = true`); confirm via the CTS re-run that no
+    residual remains after (a)+(b).
+  **Resolution notes (2026-06-10):** (a) applies to **both** the copy path
+  (`validate_buffer_texture_copy`) and the `writeTexture` path
+  (`validate_queue_write_texture`) — the rule is identical. (b) is enforced as a
+  **deferred** encoder error (recorded, surfaced at `finish()`), per the WebGPU
+  encoder error model; the older eager FFI buffer-device check was removed in its
+  favour. Additionally, `wgpuQueueWriteTexture` permits an *arbitrary*
+  (non-texel-aligned) `bytesPerRow`/offset, which Vulkan's texel-unit
+  `bufferRowLength` cannot represent: `Queue::write_texture` repacks rows into a
+  tightly-packed staging layout (`repack_texel_rows`) whenever the caller's
+  stride/offset is not texel-block-aligned, and the Vulkan HAL passes
+  `bufferRowLength = 0` for single-block-row copies.
+  See `specs/tracking/cts-coverage.md` → F-067.
 
 ### P6.4 RenderPass descriptor
 - **C23–C27** ≥1 attachment, color count ≤ max & RenderAttachment &
@@ -110,6 +141,15 @@ ComputePassEncoder: `SetPipeline`/`SetBindGroup`/`DispatchWorkgroups`/
   dynamic-offset count/align/bounds, vertex/index buffer set. ☑ (P6.5)
 - **C56–C59** SetViewport/ScissorRect finite+bounds,
   SetBlendConstant finite, SetStencilReference. ☑ (P6.5)
+  - **CTS finding F-066 (2026-06-10):** `setViewport` bounds were too strict —
+    they rejected an in-bounds viewport. The allowed rectangle is **not** clamped
+    to `maxTextureDimension2D`; per WebGPU/Dawn the bound is
+    `maxViewportBounds = 2 × maxTextureDimension2D`: reject when
+    `x < -maxViewportBounds`, `y < -maxViewportBounds`,
+    `x + width > maxViewportBounds − 1`, or `y + height > maxViewportBounds − 1`,
+    **plus** the separate per-dimension limits `width > maxTextureDimension2D` /
+    `height > maxTextureDimension2D` (and the existing non-negative/finite
+    checks). See `specs/tracking/cts-coverage.md` → F-066.
 - compute: SetPipeline-before-dispatch, bind-group compat,
   DispatchWorkgroups size ≤ `maxComputeWorkgroupsPerDimension`. ☑ (P6.5)
 - P41 draw-time: a BindGroup from pipeline A's default BGL rejected

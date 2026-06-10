@@ -7,7 +7,7 @@ use crate::buffer::*;
 use crate::compute_pass::*;
 use crate::compute_pipeline::*;
 use crate::copy::*;
-use crate::device::FeatureSet;
+use crate::device::{Device, FeatureSet};
 use crate::extent::*;
 use crate::format::*;
 use crate::limits::*;
@@ -29,6 +29,7 @@ pub struct CommandEncoder {
 /// Holds shared state for the command encoder handle.
 #[derive(Debug)]
 pub(crate) struct CommandEncoderInner {
+    pub(crate) device: Option<Device>,
     pub(crate) features: FeatureSet,
     pub(crate) limits: Limits,
     pub(crate) state: Mutex<CommandEncoderState>,
@@ -314,9 +315,10 @@ pub(crate) struct BoundIndirectBuffer {
 
 impl CommandEncoder {
     /// Creates a new instance.
-    pub(crate) fn new(features: FeatureSet, limits: Limits) -> Self {
+    pub(crate) fn new(device: Option<Device>, features: FeatureSet, limits: Limits) -> Self {
         Self {
             inner: Arc::new(CommandEncoderInner {
+                device,
                 features,
                 limits,
                 state: Mutex::new(CommandEncoderState {
@@ -337,7 +339,7 @@ impl CommandEncoder {
 
     /// Creates an error-state instance.
     pub(crate) fn new_error(message: impl Into<String>) -> Self {
-        let encoder = Self::new(FeatureSet::new(), Limits::DEFAULT);
+        let encoder = Self::new(None, FeatureSet::new(), Limits::DEFAULT);
         encoder.record_first_error(message);
         encoder
     }
@@ -644,6 +646,7 @@ impl CommandEncoder {
                     TextureUsage::COPY_DST,
                     copy_size,
                     "copy buffer to texture",
+                    self.inner.device.as_ref(),
                 )
             },
         )
@@ -674,6 +677,7 @@ impl CommandEncoder {
                     TextureUsage::COPY_SRC,
                     copy_size,
                     "copy texture to buffer",
+                    self.inner.device.as_ref(),
                 )
             },
         )
@@ -1754,7 +1758,15 @@ pub(crate) fn validate_buffer_texture_copy(
     required_texture_usage: TextureUsage,
     copy_size: Extent3d,
     label: &str,
+    encoder_device: Option<&Device>,
 ) -> Result<(), String> {
+    if let (Some(encoder_device), Some(buffer_device)) =
+        (encoder_device, buffer_copy.device.as_ref())
+    {
+        if !encoder_device.same(buffer_device) {
+            return Err(format!("{label} buffer must belong to the same device"));
+        }
+    }
     let buffer = buffer_copy.buffer;
     let texture = texture_copy.texture;
     if buffer.is_error() || texture.is_error() {
@@ -1779,6 +1791,14 @@ pub(crate) fn validate_buffer_texture_copy(
         label,
         true,
     )?;
+    if format_caps.aspects.depth
+        && format_caps.aspects.stencil
+        && texture_copy.aspect == TextureAspect::All
+    {
+        return Err(format!(
+            "{label} of a combined depth-stencil format requires a single aspect"
+        ));
+    }
     if !buffer_copy.layout.offset.is_multiple_of(4) {
         return Err(format!("{label} buffer offset must be 4-byte aligned"));
     }
@@ -2492,7 +2512,11 @@ mod tests {
             origin: Origin3d { x: 0, y: 0, z: 0 },
             aspect: TextureAspect::All,
         };
-        let buffer_info = TexelCopyBufferInfo { buffer, layout };
+        let buffer_info = TexelCopyBufferInfo {
+            buffer,
+            device: None,
+            layout,
+        };
         let encoder = device.create_command_encoder();
 
         assert_eq!(
@@ -2544,6 +2568,7 @@ mod tests {
         }));
         let buffer_info = TexelCopyBufferInfo {
             buffer,
+            device: None,
             layout: TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(256),
@@ -2810,6 +2835,150 @@ mod tests {
                     .to_owned()
             )
         );
+    }
+
+    #[test]
+    fn buffer_texture_copy_rejects_combined_depth_stencil_all_aspect() {
+        let device = noop_device();
+        let size = Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        };
+        let texture = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_SRC | TextureUsage::RENDER_ATTACHMENT,
+            dimension: TextureDimension::D2,
+            size,
+            format: TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 256,
+            mapped_at_creation: false,
+        }));
+        let buffer_info = TexelCopyBufferInfo {
+            buffer,
+            device: Some(device.clone()),
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(256),
+                rows_per_image: None,
+            },
+        };
+        let texture_info = |aspect| TexelCopyTextureInfo {
+            texture: Arc::clone(&texture),
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: 0 },
+            aspect,
+        };
+        let encoder = device.create_command_encoder();
+
+        assert_eq!(
+            encoder.copy_texture_to_buffer(
+                texture_info(TextureAspect::All),
+                buffer_info.clone(),
+                size
+            ),
+            None
+        );
+        let (_, error) = encoder.finish();
+        assert_eq!(
+            error,
+            Some(
+                "copy texture to buffer of a combined depth-stencil format requires a single aspect"
+                    .to_owned()
+            )
+        );
+
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.copy_texture_to_buffer(
+                texture_info(TextureAspect::DepthOnly),
+                buffer_info,
+                size
+            ),
+            None
+        );
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+    }
+
+    #[test]
+    fn buffer_texture_copy_rejects_buffer_from_different_device() {
+        let adapter = noop_adapter();
+        let device_a = adapter
+            .create_device(None, &[], "", "")
+            .expect("first Noop device");
+        let device_b = adapter
+            .create_device(None, &[], "", "")
+            .expect("second Noop device");
+        let texture = Arc::new(device_a.create_texture(texture_descriptor_4x4()));
+        let other_buffer = Arc::new(device_b.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC,
+            size: 1024,
+            mapped_at_creation: false,
+        }));
+        let same_device_buffer = Arc::new(device_a.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC,
+            size: 1024,
+            mapped_at_creation: false,
+        }));
+        let texture_info = TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: 0 },
+            aspect: TextureAspect::All,
+        };
+        let layout = TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(256),
+            rows_per_image: None,
+        };
+        let size = Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+
+        let encoder = device_a.create_command_encoder();
+        assert_eq!(
+            encoder.copy_buffer_to_texture(
+                TexelCopyBufferInfo {
+                    buffer: other_buffer,
+                    device: Some(device_b),
+                    layout,
+                },
+                texture_info.clone(),
+                size,
+            ),
+            None
+        );
+        let (_, error) = encoder.finish();
+        assert_eq!(
+            error,
+            Some("copy buffer to texture buffer must belong to the same device".to_owned())
+        );
+
+        let encoder = device_a.create_command_encoder();
+        assert_eq!(
+            encoder.copy_buffer_to_texture(
+                TexelCopyBufferInfo {
+                    buffer: same_device_buffer,
+                    device: Some(device_a),
+                    layout,
+                },
+                texture_info,
+                size,
+            ),
+            None
+        );
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
     }
 
     #[test]

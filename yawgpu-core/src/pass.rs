@@ -1380,7 +1380,15 @@ pub(crate) fn validate_viewport_bounds(
     limits: Limits,
 ) -> Result<(), String> {
     let max = limits.max_texture_dimension_2d as f32;
-    if x < -max || y < -max || x + width > max || y + height > max {
+    if width > max || height > max {
+        return Err("render pass viewport size exceeds device bounds".to_owned());
+    }
+    let max_bounds = max * 2.0;
+    if x < -max_bounds
+        || y < -max_bounds
+        || x + width > max_bounds - 1.0
+        || y + height > max_bounds - 1.0
+    {
         return Err("render pass viewport rectangle exceeds device bounds".to_owned());
     }
     Ok(())
@@ -1611,6 +1619,32 @@ mod tests {
                 "usage scope cannot read and write or write the same texture subresource twice"
                     .to_owned()
             )
+        );
+    }
+
+    #[test]
+    fn viewport_bounds_use_double_limit_rectangle_and_single_limit_size() {
+        let limits = Limits::DEFAULT;
+
+        assert_eq!(
+            validate_viewport_bounds(1.0, 0.0, 4096.0, 4096.0, limits),
+            Ok(())
+        );
+        assert_eq!(
+            validate_viewport_bounds(4096.0, 0.0, 4096.0, 4096.0, limits),
+            Err("render pass viewport rectangle exceeds device bounds".to_owned())
+        );
+        assert_eq!(
+            validate_viewport_bounds(0.0, 0.0, 4097.0, 1.0, limits),
+            Err("render pass viewport size exceeds device bounds".to_owned())
+        );
+        assert_eq!(
+            validate_viewport_bounds(-8192.0, 0.0, 4096.0, 4096.0, limits),
+            Ok(())
+        );
+        assert_eq!(
+            validate_viewport_bounds(-8193.0, 0.0, 4096.0, 4096.0, limits),
+            Err("render pass viewport rectangle exceeds device bounds".to_owned())
         );
     }
 

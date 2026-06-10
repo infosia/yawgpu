@@ -565,6 +565,12 @@ pub(crate) fn validate_queue_write_texture(
     {
         return Err("queue texture write size must be texel block aligned".to_owned());
     }
+    if format_caps.aspects.depth && format_caps.aspects.stencil && aspect == TextureAspect::All {
+        return Err(
+            "queue texture write of a combined depth-stencil format requires a single aspect"
+                .to_owned(),
+        );
+    }
     // The depth or stencil aspect can only be written as a whole 2D subresource:
     // full mip width/height at a zero x/y origin. A range of array layers
     // (non-zero `origin.z` / `write_size.depth_or_array_layers > 1`) is allowed —
@@ -1336,7 +1342,9 @@ mod tests {
         let hal_device = hal_noop_device();
         let texture = Texture::from_hal(
             descriptor.clone(),
-            hal_device.create_texture(&hal_descriptor),
+            hal_device
+                .create_texture(&hal_descriptor)
+                .expect("Noop texture allocation should succeed"),
         );
 
         assert_eq!(texture.usage(), descriptor.usage);
@@ -1430,6 +1438,52 @@ mod tests {
                 4,
             ),
             Err("queue texture write destination must be a valid live texture".to_owned())
+        );
+    }
+
+    #[test]
+    fn validate_queue_write_texture_rejects_combined_depth_stencil_all_aspect() {
+        let device = noop_device();
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_DST | TextureUsage::RENDER_ATTACHMENT,
+            format: TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+            ..texture_descriptor_4x4()
+        });
+        let layout = TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(256),
+            rows_per_image: None,
+        };
+        let size = Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+
+        assert_eq!(
+            texture.validate_queue_write(
+                0,
+                Origin3d { x: 0, y: 0, z: 0 },
+                size,
+                TextureAspect::All,
+                layout,
+                1024,
+            ),
+            Err(
+                "queue texture write of a combined depth-stencil format requires a single aspect"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            texture.validate_queue_write(
+                0,
+                Origin3d { x: 0, y: 0, z: 0 },
+                size,
+                TextureAspect::DepthOnly,
+                layout,
+                1024,
+            ),
+            Ok(())
         );
     }
 

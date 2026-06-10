@@ -178,7 +178,7 @@ pub(super) fn create_texture(
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .initial_layout(vk::ImageLayout::UNDEFINED);
     let image = unsafe { device.device.create_image(&image_info, None) }
-        .map_err(|_| texture_error("image creation failed"))?;
+        .map_err(|error| map_texture_error(error, "image creation failed"))?;
     let requirements = unsafe { device.device.get_image_memory_requirements(image) };
     let memory_type_index = find_memory_type_index(
         &device.memory_properties,
@@ -191,15 +191,29 @@ pub(super) fn create_texture(
         }
         texture_error("compatible image memory type not found")
     })?;
-    let allocate_info = vk::MemoryAllocateInfo::default()
-        .allocation_size(requirements.size)
-        .memory_type_index(memory_type_index);
-    let memory = unsafe { device.device.allocate_memory(&allocate_info, None) }.map_err(|_| {
+    // Proactive guard: reject allocations that exceed the backing heap capacity.
+    // MoltenVK defers real Metal allocation so vkAllocateMemory may return
+    // VK_SUCCESS for impossible sizes; comparing against the heap size catches
+    // those before the call and produces a deterministic OutOfMemory error.
+    if requirements.size > memory_heap_size(&device.memory_properties, memory_type_index) {
         unsafe {
             device.device.destroy_image(image, None);
         }
-        texture_error("image memory allocation failed")
-    })?;
+        return Err(HalError::OutOfMemory {
+            backend: BACKEND,
+            resource: "texture",
+        });
+    }
+    let allocate_info = vk::MemoryAllocateInfo::default()
+        .allocation_size(requirements.size)
+        .memory_type_index(memory_type_index);
+    let memory =
+        unsafe { device.device.allocate_memory(&allocate_info, None) }.map_err(|error| {
+            unsafe {
+                device.device.destroy_image(image, None);
+            }
+            map_texture_error(error, "image memory allocation failed")
+        })?;
     if let Err(error) = unsafe { device.device.bind_image_memory(image, memory, 0) } {
         unsafe {
             device.device.destroy_image(image, None);
@@ -619,6 +633,36 @@ pub(super) fn color_subresource_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds a minimal `vk::PhysicalDeviceMemoryProperties` with a single
+    /// device-local heap of the given capacity for pure-logic tests.
+    #[allow(clippy::field_reassign_with_default)] // array elements cannot be set in struct literal
+    fn device_local_memory_properties(heap_size: u64) -> vk::PhysicalDeviceMemoryProperties {
+        let mut props = vk::PhysicalDeviceMemoryProperties::default();
+        props.memory_type_count = 1;
+        props.memory_types[0].heap_index = 0;
+        props.memory_types[0].property_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+        props.memory_heap_count = 1;
+        props.memory_heaps[0].size = heap_size;
+        props
+    }
+
+    #[test]
+    fn texture_heap_guard_rejects_requirement_exceeding_heap() {
+        let props = device_local_memory_properties(1024);
+        let heap = memory_heap_size(&props, 0);
+        // 64 GiB (CTS oversized texture) must exceed a 1 KiB synthetic heap
+        let oversized: u64 = 64 * 1024 * 1024 * 1024;
+        assert!(oversized > heap, "oversized requirement should exceed heap");
+    }
+
+    #[test]
+    fn texture_heap_guard_accepts_requirement_within_heap() {
+        let props = device_local_memory_properties(u64::MAX);
+        let heap = memory_heap_size(&props, 0);
+        let normal: u64 = 4 * 4 * 4; // tiny 4×4 rgba8 texture
+        assert!(normal <= heap, "small requirement should fit in heap");
+    }
 
     fn texture_usage(
         texture_binding: bool,
