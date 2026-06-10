@@ -183,3 +183,12 @@ re-fire.
   performs **no** host allocation, and `getMappedRange` on it returns null.
   No process abort under any descriptor. CTS: `api,operation,buffers,map_oom`
   both HALs, no crash.
+- **F-074 — `queue.writeBuffer` queue-timeline ordering.** `writeBuffer` must
+  behave as if enqueued: its effect is ordered AFTER all previously submitted
+  work. A direct host write into the destination buffer's mapped memory races
+  in-flight submissions (observed on MoltenVK; genuine on any async queue).
+  Rule: `Queue::write_buffer` stages the data into a fresh `copy_src` buffer
+  and submits a `HalCopy::Buffer` via `submit_copies` (exactly like
+  `write_texture`); staging allocation failures map per the F-065 OOM rules.
+  Noop executes `HalCopy::Buffer` eagerly so map-reads observe the bytes.
+  CTS: `api,operation,memory_sync,buffer,multiple_buffers` 263/263 both HALs.

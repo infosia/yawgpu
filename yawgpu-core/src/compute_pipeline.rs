@@ -270,6 +270,7 @@ pub(crate) fn select_compute_shader_source(
                     buffer_size_bindings: hal_msl_buffer_size_bindings(
                         &generated.buffer_size_bindings,
                     ),
+                    workgroup_memory_sizes: generated.workgroup_memory_sizes,
                 },
                 generated.entry_point,
                 Vec::new(),

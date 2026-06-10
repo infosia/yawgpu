@@ -144,7 +144,12 @@ pub unsafe extern "C" fn wgpuQueueWriteBuffer(
     let data = std::slice::from_raw_parts(data.cast::<u8>(), size);
     dispatch_optional_device_error(
         &queue.device,
-        queue.core.write_buffer(&buffer.core, buffer_offset, data),
+        queue.core.write_buffer(core::QueueBufferWrite {
+            device: queue.device.hal(),
+            buffer: &buffer.core,
+            offset: buffer_offset,
+            data,
+        }),
     );
 }
 

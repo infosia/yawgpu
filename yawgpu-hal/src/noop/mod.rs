@@ -152,14 +152,30 @@ impl NoopQueue {
     }
 
     /// Records submitted copy commands for Noop unit-test inspection.
+    ///
+    /// `HalCopy::Buffer` copies are executed eagerly so that subsequent
+    /// map-reads on the destination buffer observe the written bytes (mirrors
+    /// the real-GPU semantics where the copy completes before any following
+    /// `mapAsync` resolves).
     pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
         for copy in copies {
-            if let HalCopy::ResolveQuerySet(resolve) = copy {
-                let byte_count = resolve_query_byte_count(resolve.query_count)?;
-                let zeros = vec![0; byte_count];
-                resolve
-                    .destination
-                    .write(resolve.destination_offset, &zeros)?;
+            match copy {
+                HalCopy::Buffer(buf_copy) => {
+                    // Read from source, write into destination in order to
+                    // make the data visible for subsequent map-reads.
+                    let data = buf_copy.source.read(buf_copy.source_offset, buf_copy.size)?;
+                    buf_copy
+                        .destination
+                        .write(buf_copy.destination_offset, &data)?;
+                }
+                HalCopy::ResolveQuerySet(resolve) => {
+                    let byte_count = resolve_query_byte_count(resolve.query_count)?;
+                    let zeros = vec![0; byte_count];
+                    resolve
+                        .destination
+                        .write(resolve.destination_offset, &zeros)?;
+                }
+                _ => {}
             }
         }
         self.submitted_copies

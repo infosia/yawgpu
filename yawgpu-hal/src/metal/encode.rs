@@ -358,6 +358,17 @@ pub(super) fn encode_compute_pass(
         ));
     };
     encoder.setComputePipelineState(&pipeline.inner);
+    // Allocate threadgroup (workgroup) memory slots required by var<workgroup>
+    // globals emitted by naga as [[threadgroup(N)]] arguments. Metal requires
+    // each slot to be explicitly sized before dispatch; without this every slot
+    // reads as zero. Mirrors wgpu-hal/src/metal/command.rs set_compute_pipeline
+    // (lines 1756-1773). The sizes are already rounded to a multiple of 16 by
+    // collect_workgroup_memory_sizes in yawgpu-core.
+    for (index, &size) in pipeline.workgroup_memory_sizes.iter().enumerate() {
+        unsafe {
+            encoder.setThreadgroupMemoryLength_atIndex(size as usize, index);
+        }
+    }
     for binding in &pass.bind_buffers {
         encode_compute_buffer(encoder, binding)?;
     }

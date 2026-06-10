@@ -685,25 +685,6 @@ impl Buffer {
         self.inner.host.ptr_at(offset)
     }
 
-    /// Applies a queue-side write of `data` at `offset` to the buffer's backing store.
-    pub(crate) fn write_from_queue(&self, offset: u64, data: &[u8]) -> Option<DeviceError> {
-        let size = match u64::try_from(data.len()) {
-            Ok(size) => size,
-            Err(_) => {
-                return Some(DeviceError::validation("queue write size is too large"));
-            }
-        };
-        if let Err(message) = self.validate_queue_write(offset, size) {
-            return Some(DeviceError::validation(message));
-        }
-        if let Some(hal) = &self.inner.hal {
-            if let Err(error) = hal.write(offset, data) {
-                return Some(DeviceError::internal(error.to_string()));
-            }
-        }
-        None
-    }
-
     /// Returns the HAL.
     pub fn hal(&self) -> Option<HalBuffer> {
         self.inner.hal.clone()

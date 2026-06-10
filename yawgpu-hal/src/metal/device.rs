@@ -131,19 +131,26 @@ impl MetalDevice {
         workgroup_size: (u32, u32, u32),
         _bindings: &[HalDescriptorBinding],
     ) -> Result<MetalComputePipeline, HalError> {
-        let (msl_source, buffer_sizes_slot, buffer_size_bindings) = match shader {
-            HalShaderSource::Msl(source) => (source, None, Vec::new()),
-            HalShaderSource::MslWithBufferSizes {
-                source,
-                buffer_sizes_slot,
-                buffer_size_bindings,
-            } => (source, buffer_sizes_slot, buffer_size_bindings),
-            _ => {
-                return Err(shader_error(
-                    "Metal compute pipeline requires MSL".to_owned(),
-                ));
-            }
-        };
+        let (msl_source, buffer_sizes_slot, buffer_size_bindings, workgroup_memory_sizes) =
+            match shader {
+                HalShaderSource::Msl(source) => (source, None, Vec::new(), Vec::new()),
+                HalShaderSource::MslWithBufferSizes {
+                    source,
+                    buffer_sizes_slot,
+                    buffer_size_bindings,
+                    workgroup_memory_sizes,
+                } => (
+                    source,
+                    buffer_sizes_slot,
+                    buffer_size_bindings,
+                    workgroup_memory_sizes,
+                ),
+                _ => {
+                    return Err(shader_error(
+                        "Metal compute pipeline requires MSL".to_owned(),
+                    ));
+                }
+            };
         create_compute_pipeline(
             &self.device,
             &msl_source,
@@ -151,6 +158,7 @@ impl MetalDevice {
             workgroup_size,
             buffer_sizes_slot,
             buffer_size_bindings,
+            workgroup_memory_sizes,
         )
     }
 
@@ -389,6 +397,47 @@ mod tests {
             .create_compute_pipeline(compute_msl(), "main0", (1, 1, 1), &[])
             .expect("create compute pipeline");
         assert_eq!(pipeline.workgroup_size, (1, 1, 1));
+        // A pipeline created from plain Msl (no workgroup vars) has empty sizes.
+        assert!(pipeline.workgroup_memory_sizes.is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_device_create_compute_pipeline_stores_workgroup_memory_sizes() {
+        // Build the MSL source that naga would emit for a shader with two
+        // var<workgroup> arguments: [[threadgroup(0)]] and [[threadgroup(1)]].
+        // The sizes are pre-rounded (32, 16) as yawgpu-core would supply them.
+        let source = r#"
+#include <metal_stdlib>
+using namespace metal;
+kernel void cs(
+    uint3 gid [[thread_position_in_grid]],
+    threadgroup uint* tg_a [[threadgroup(0)]],
+    threadgroup float* tg_b [[threadgroup(1)]])
+{
+    tg_a[0] = 1u;
+    *tg_b = 2.0;
+}
+"#
+        .to_owned();
+        let shader = HalShaderSource::MslWithBufferSizes {
+            source,
+            buffer_sizes_slot: None,
+            buffer_size_bindings: Vec::new(),
+            workgroup_memory_sizes: vec![32, 16],
+        };
+        let device = metal_device();
+        let pipeline = device
+            .create_compute_pipeline(shader, "cs", (1, 1, 1), &[])
+            .expect("workgroup memory pipeline should compile");
+        // Verify the sizes are stored on the pipeline, ready for
+        // setThreadgroupMemoryLength:atIndex: at dispatch time.
+        assert_eq!(
+            pipeline.workgroup_memory_sizes,
+            vec![32, 16],
+            "workgroup_memory_sizes must be stored on the Metal compute pipeline"
+        );
     }
 
     #[test]

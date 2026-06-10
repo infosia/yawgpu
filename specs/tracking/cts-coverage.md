@@ -1283,6 +1283,33 @@ never a reason to skip a CTS case.
   genuinely cannot allocate (the 9 PB case). Spec: block 10 → "CTS findings — buffer mapping".
   **Verified:** `buffers,map_oom` `pass=20 fail=0 crash=0` AND `buffers,map` `pass=900 fail=0` on Metal
   AND Vulkan/MoltenVK; `error_scope` re-confirmed `pass=49 fail=0` both HALs.
+- **External-CTS finding F-074 — RESOLVED (queue.writeBuffer ordering; was MoltenVK-observed).**
+  `api,operation,memory_sync,buffer,multiple_buffers` (21 MoltenVK: `rw` 16 / `ww` 5, all
+  `boundary="queue-op"`): `Queue::write_buffer` performed a **direct host write** into the destination
+  HAL buffer's mapped memory (`Buffer::write_from_queue` → `hal.write`), unordered against previously
+  submitted command buffers — in-flight GPU reads observed the later write. (Metal passed only because
+  its submit path is effectively synchronous; the bug was genuine queue-timeline misordering.) Fixed by
+  mirroring `write_texture`: validate, allocate a `copy_src` staging buffer (F-065 OOM mapping applies),
+  write into the staging memory, and submit a `HalCopy::Buffer` via `submit_copies` so the copy executes
+  in submission order. Noop's `submit_copies` now executes Buffer copies eagerly (map-read visibility).
+  FFI passes the HAL device via the new `QueueBufferWrite` (mirrors `QueueTextureWrite`).
+  **Verified:** `multiple_buffers` `pass=263 fail=0` on Metal AND Vulkan/MoltenVK; `buffers,map` 900/0 and
+  `error_scope` 49/0 re-confirmed both HALs. Native-Vulkan re-confirm queued with the next user sweep.
+- **External-CTS finding F-069 — RESOLVED (Metal workgroup memory; yawgpu-HAL half).**
+  `shader,execution,memory_layout` (55 yawgpu-only on Metal: `var<workgroup>` round-trips read zeros):
+  naga's MSL backend emits workgroup globals as `[[threadgroup(N)]]` entry-point arguments, and Metal
+  requires `setThreadgroupMemoryLength:atIndex:` for each slot before dispatch — yawgpu's Metal HAL
+  never called it, so every threadgroup slot was unallocated. Now: `generate_msl` collects per-entry
+  workgroup-variable sizes in naga emission order, rounded up to 16 (mirrors wgpu-hal `load_shader`);
+  plumbed via `HalShaderSource::MslWithBufferSizes` → `MetalComputePipeline.workgroup_memory_sizes`; the
+  compute encoder sets each slot length after `setComputePipelineState`. The fix also cleared most of the
+  `write_layout` workgroup cases previously catalogued as "shared" with wgpu-native — yawgpu's cause was
+  the missing allocation; wgpu-native fails them for its own reason.
+  **Verified:** `memory_layout` Metal `fail 103 → 9`; the 9 are all `struct_inner_align` (every address
+  space) = the F-070 **naga-lineage** residue, not a yawgpu-HAL defect. MoltenVK residue is 50 cases,
+  all naga-SPIR-V layout families (`write_layout` workgroup matrix/vector align/stride +
+  `struct_inner_align`/`struct_double_align`/`array_stride_size`) — likewise F-070 territory, queued for
+  the naga-fork batch. `#[ignore]` real-Metal pipeline test (workgroup sizes stored) green on the M2.
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.

@@ -8,6 +8,11 @@ pub struct MetalComputePipeline {
     pub(super) workgroup_size: (u32, u32, u32),
     pub(super) buffer_sizes_slot: Option<u32>,
     pub(super) buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
+    /// Per-argument threadgroup memory allocation sizes (bytes, rounded to a
+    /// multiple of 16). Mirrors `wg_memory_sizes` in wgpu-hal/metal/device.rs.
+    /// The compute encoder calls `setThreadgroupMemoryLength:atIndex:` for each
+    /// entry in this vec before every dispatch.
+    pub(super) workgroup_memory_sizes: Vec<u32>,
 }
 
 unsafe impl Send for MetalComputePipeline {}
@@ -18,6 +23,7 @@ impl std::fmt::Debug for MetalComputePipeline {
         f.debug_struct("MetalComputePipeline")
             .field("workgroup_size", &self.workgroup_size)
             .field("buffer_sizes_slot", &self.buffer_sizes_slot)
+            .field("workgroup_memory_sizes", &self.workgroup_memory_sizes)
             .finish()
     }
 }
@@ -65,6 +71,7 @@ pub(super) fn create_compute_pipeline(
     workgroup_size: (u32, u32, u32),
     buffer_sizes_slot: Option<u32>,
     buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
+    workgroup_memory_sizes: Vec<u32>,
 ) -> Result<MetalComputePipeline, HalError> {
     let source = NSString::from_str(msl_source);
     let library = device
@@ -81,6 +88,7 @@ pub(super) fn create_compute_pipeline(
         workgroup_size,
         buffer_sizes_slot,
         buffer_size_bindings,
+        workgroup_memory_sizes,
     })
 }
 
