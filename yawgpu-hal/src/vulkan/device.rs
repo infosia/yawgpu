@@ -308,4 +308,30 @@ mod tests {
             .expect("create render pipeline");
         assert_ne!(pipeline.inner.pipeline, vk::Pipeline::null());
     }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_device_oversized_allocations_return_out_of_memory() {
+        // u64::MAX exceeds every Vulkan heap size, so vkAllocateMemory returns
+        // VK_ERROR_OUT_OF_DEVICE_MEMORY → OutOfMemory.
+        // For the texture, use dimensions that are within Vulkan's physical-device
+        // image-size limits (16384×16384, 2048 array layers) but whose total byte
+        // size (16384×16384×4 bytes × 2048 layers = 2 TiB) cannot be satisfied by
+        // any real device, causing vkAllocateMemory to return OutOfMemory.
+        let device = vulkan_device();
+        assert!(matches!(
+            device.create_buffer(u64::MAX, HalBufferUsage::default()),
+            Err(HalError::OutOfMemory { .. })
+        ));
+
+        let mut descriptor = texture_descriptor();
+        descriptor.width = 16384;
+        descriptor.height = 16384;
+        descriptor.depth_or_array_layers = 2048;
+        assert!(matches!(
+            device.create_texture(&descriptor),
+            Err(HalError::OutOfMemory { .. })
+        ));
+    }
 }

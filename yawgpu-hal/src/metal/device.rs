@@ -315,6 +315,11 @@ mod tests {
     #[ignore = "manual real Metal backend test"]
     #[cfg(feature = "metal")]
     fn metal_device_oversized_allocations_return_out_of_memory() {
+        // Dimensions must stay within Metal's MTLTextureDescriptor hard limits
+        // (width/height ≤ 16384, array_length ≤ 2048) or Metal will ASSERT before
+        // newTextureWithDescriptor can return nil.  Use the maximum legal dimensions
+        // so the total byte size (16384×16384×4 bytes × 2048 layers = 2 TiB) is
+        // impossible to satisfy, causing newTextureWithDescriptor to return nil → OutOfMemory.
         let device = metal_device();
         assert!(matches!(
             device.create_buffer(u64::MAX, HalBufferUsage::default()),
@@ -325,8 +330,9 @@ mod tests {
         ));
 
         let mut descriptor = texture_descriptor();
-        descriptor.width = u32::MAX;
-        descriptor.height = u32::MAX;
+        descriptor.width = 16384;
+        descriptor.height = 16384;
+        descriptor.depth_or_array_layers = 2048;
         assert!(matches!(
             device.create_texture(&descriptor),
             Err(HalError::OutOfMemory {
