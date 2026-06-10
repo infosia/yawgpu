@@ -48,6 +48,19 @@ pub(crate) struct QueueInner {
     pub(crate) label: Mutex<String>,
 }
 
+/// Describes a queue buffer write operation.
+#[derive(Debug, Clone, Copy)]
+pub struct QueueBufferWrite<'a> {
+    /// Device used to allocate the temporary staging buffer.
+    pub device: &'a HalDevice,
+    /// Destination buffer.
+    pub buffer: &'a Buffer,
+    /// Byte offset into the destination buffer.
+    pub offset: u64,
+    /// Source bytes.
+    pub data: &'a [u8],
+}
+
 /// Describes a queue texture write operation.
 #[derive(Debug, Clone, Copy)]
 pub struct QueueTextureWrite<'a> {
@@ -98,9 +111,91 @@ impl Queue {
         self.inner.label.lock().clone()
     }
 
-    /// Writes `data` into the buffer at `offset` directly from the queue.
-    pub fn write_buffer(&self, buffer: &Buffer, offset: u64, data: &[u8]) -> Option<DeviceError> {
-        buffer.write_from_queue(offset, data)
+    /// Writes `data` into the buffer at `offset` using a staging buffer copy.
+    ///
+    /// The write is ordered after all previously submitted queue work: a
+    /// temporary `copy_src` staging buffer is allocated, the host data is
+    /// written into it, and then a `HalCopy::Buffer` is submitted via
+    /// `submit_copies`.  This matches the WebGPU queue-timeline ordering
+    /// guarantee and avoids the race on Vulkan where a direct host write
+    /// into the destination buffer can be observed by still-executing prior
+    /// submits (CTS finding F-074).
+    ///
+    /// Empty writes (zero-length `data`) are validated and then skip
+    /// staging allocation, matching the no-op behaviour of the former direct
+    /// path.
+    pub fn write_buffer(&self, write: QueueBufferWrite<'_>) -> Option<DeviceError> {
+        let QueueBufferWrite {
+            device,
+            buffer,
+            offset,
+            data,
+        } = write;
+
+        // Validate size fits in u64 first (mirrors write_texture).
+        let size = match u64::try_from(data.len()) {
+            Ok(s) => s,
+            Err(_) => {
+                return Some(DeviceError::validation("queue write buffer size is too large"));
+            }
+        };
+
+        // Run all core validation (error/destroyed/mapped/usage/alignment/bounds).
+        if let Err(message) = buffer.validate_queue_write(offset, size) {
+            return Some(DeviceError::validation(message));
+        }
+
+        // Zero-length write: validated above, nothing to copy.
+        if data.is_empty() {
+            return None;
+        }
+
+        // Allocate a staging buffer with copy_src semantics.  The host writes
+        // the data into fresh memory with no ordering constraint; the GPU copy
+        // that follows is sequenced after prior submits by the queue.
+        let staging = match device.create_buffer(
+            size,
+            HalBufferUsage {
+                copy_src: true,
+                ..HalBufferUsage::default()
+            },
+        ) {
+            Ok(buf) => buf,
+            Err(error) => {
+                let kind = match error {
+                    yawgpu_hal::HalError::OutOfMemory { .. } => ErrorKind::OutOfMemory,
+                    _ => ErrorKind::Internal,
+                };
+                return Some(DeviceError::new(kind, error.to_string()));
+            }
+        };
+
+        if let Err(error) = staging.write(0, data) {
+            return Some(DeviceError::internal(error.to_string()));
+        }
+
+        // Retrieve the HAL handle for the destination buffer.  A None here
+        // means the buffer is an error buffer, which validate_queue_write
+        // would have caught above; treat it as internal if somehow reached.
+        let Some(destination) = buffer.hal() else {
+            return Some(DeviceError::internal(
+                "queue write buffer destination has no HAL buffer",
+            ));
+        };
+
+        let copy = HalCopy::Buffer(HalBufferCopy {
+            source: staging,
+            source_offset: 0,
+            destination,
+            destination_offset: offset,
+            size,
+        });
+
+        self.inner
+            .hal
+            .submit_copies(&[copy])
+            .err()
+            .map(|error| DeviceError::internal(error.to_string()))
     }
 
     /// Waits until all submitted queue work has completed.
@@ -1759,7 +1854,15 @@ fn fs() -> @location(0) vec4<f32> {
             mapped_at_creation: false,
         });
 
-        assert_eq!(queue.write_buffer(&buffer, 0, &[1, 2, 3, 4]), None);
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &[1, 2, 3, 4],
+            }),
+            None
+        );
         assert_eq!(queue.submit(&[]), None);
     }
 
@@ -2255,12 +2358,208 @@ fn fs() -> @location(0) vec4<f32> {
             mapped_at_creation: false,
         });
 
-        assert_eq!(queue.write_buffer(&buffer, 0, &[1, 2, 3, 4]), None);
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &[1, 2, 3, 4],
+            }),
+            None
+        );
         assert_eq!(buffer.begin_map(MapMode::Read, 0, 4), Ok(()));
         assert_eq!(queue.wait_idle(), None);
         assert_eq!(
             buffer.resolve_pending_map_with_gpu_completion(|| true),
             MapAsyncStatus::Success
+        );
+    }
+
+    // F-074: write_buffer staging-copy tests ---------------------------------
+
+    /// Verifies that `write_buffer` via the staged-copy path makes data
+    /// visible on Noop when the destination buffer is mapped for reading.
+    ///
+    /// The Noop `submit_copies` now executes `HalCopy::Buffer` eagerly, so
+    /// the bytes written into the staging buffer appear in the destination
+    /// before the map-read's `resolve_pending_map` reads them back.
+    #[test]
+    fn queue_write_buffer_staged_copy_data_visible_on_map_read() {
+        let device = noop_device();
+        let queue = device.queue();
+        // 16 bytes; write 8 bytes at offset 8 (8-byte aligned, within bounds).
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::MAP_READ | BufferUsage::COPY_DST,
+            size: 16,
+            mapped_at_creation: false,
+        });
+
+        // Write [0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80] at offset 8.
+        let write_data: [u8; 8] = [0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80];
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 8,
+                data: &write_data,
+            }),
+            None
+        );
+
+        // Map the full buffer for reading; the staged copy must already have
+        // landed in the destination buffer storage.
+        assert_eq!(buffer.begin_map(MapMode::Read, 0, 16), Ok(()));
+        assert_eq!(queue.wait_idle(), None);
+        let status = buffer.resolve_pending_map_with_gpu_completion(|| true);
+        assert_eq!(status, MapAsyncStatus::Success);
+
+        // getMappedRange requires 8-byte-aligned offset; read from offset 8.
+        let ptr = buffer
+            .mapped_range(true, 8, Some(8))
+            .expect("mapped_range must succeed after resolved read map");
+        // Safety: Noop host buffer; pointer is valid for `size` bytes.
+        let read: Vec<u8> = unsafe { std::slice::from_raw_parts(ptr, 8).to_vec() };
+        assert_eq!(read, write_data);
+
+        assert_eq!(buffer.unmap(), None);
+    }
+
+    /// `write_buffer` with an out-of-bounds range must return a validation
+    /// error and must NOT submit any copies.
+    #[test]
+    fn queue_write_buffer_oob_offset_returns_validation_error_and_no_copy() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 8,
+            mapped_at_creation: false,
+        });
+
+        // offset=8, data=[0,0,0,0] → end=12 > size=8 → OOB.
+        let err = queue.write_buffer(QueueBufferWrite {
+            device: device.hal(),
+            buffer: &buffer,
+            offset: 8,
+            data: &[0, 0, 0, 0],
+        });
+        assert!(err.is_some());
+        assert_eq!(
+            err.unwrap().kind,
+            ErrorKind::Validation,
+            "OOB write must be a Validation error"
+        );
+
+        // No HalCopy should have been submitted.
+        let submitted = match queue.hal() {
+            HalQueue::Noop(q) => q.submitted_copies(),
+            _ => Vec::new(),
+        };
+        assert!(
+            submitted.is_empty(),
+            "no copies must be submitted on validation failure"
+        );
+    }
+
+    /// `write_buffer` on an error buffer must return a validation error and
+    /// must NOT submit any copies.
+    #[test]
+    fn queue_write_buffer_error_buffer_returns_validation_error_and_no_copy() {
+        let device = noop_device();
+        let queue = device.queue();
+        device.push_error_scope(ErrorFilter::Validation);
+        let error_buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::NONE,
+            size: 4,
+            mapped_at_creation: false,
+        });
+        let _scope_error = device.pop_error_scope();
+
+        let err = queue.write_buffer(QueueBufferWrite {
+            device: device.hal(),
+            buffer: &error_buffer,
+            offset: 0,
+            data: &[1, 2, 3, 4],
+        });
+        assert!(err.is_some());
+        assert_eq!(
+            err.unwrap().kind,
+            ErrorKind::Validation,
+            "write to error buffer must be a Validation error"
+        );
+
+        let submitted = match queue.hal() {
+            HalQueue::Noop(q) => q.submitted_copies(),
+            _ => Vec::new(),
+        };
+        assert!(
+            submitted.is_empty(),
+            "no copies must be submitted on validation failure"
+        );
+    }
+
+    /// `write_buffer` with an empty slice must return `None` without submitting
+    /// any copies (zero-length writes are a no-op after validation).
+    #[test]
+    fn queue_write_buffer_empty_data_is_noop_after_validation() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 8,
+            mapped_at_creation: false,
+        });
+
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &[],
+            }),
+            None,
+            "empty write must succeed"
+        );
+
+        let submitted = match queue.hal() {
+            HalQueue::Noop(q) => q.submitted_copies(),
+            _ => Vec::new(),
+        };
+        assert!(
+            submitted.is_empty(),
+            "empty write must not submit any copies"
+        );
+    }
+
+    /// Verifies that `write_buffer` submits a `HalCopy::Buffer` on the Noop
+    /// queue, confirming the staging-copy dispatch path is taken.
+    #[test]
+    fn queue_write_buffer_submits_buffer_copy_to_hal() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 8,
+            mapped_at_creation: false,
+        });
+
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &[1, 2, 3, 4, 5, 6, 7, 8],
+            }),
+            None
+        );
+
+        let submitted = match queue.hal() {
+            HalQueue::Noop(q) => q.submitted_copies(),
+            _ => Vec::new(),
+        };
+        assert!(
+            matches!(submitted.as_slice(), [HalCopy::Buffer(copy)] if copy.size == 8),
+            "write_buffer must submit exactly one HalCopy::Buffer of the correct size"
         );
     }
 

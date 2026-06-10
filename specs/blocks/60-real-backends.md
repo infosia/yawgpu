@@ -184,3 +184,16 @@ Red (ported end2end test, `#[ignore]`, fails / unimplemented) → Green
   remap) vs the bind-group layout core already derives — P7.4.
 - end2end readback (map-after-submit) needed to assert results;
   scope the minimal readback path in P7.2.
+
+## CTS finding F-069 — Metal threadgroup memory (2026-06-11)
+
+naga's MSL backend emits `var<workgroup>` globals as `[[threadgroup(N)]]`
+entry-point arguments; Metal requires the compute encoder to size each slot
+via `setThreadgroupMemoryLength:atIndex:` before dispatch (unallocated slots
+read zeros). Rule: MSL generation (`generate_msl`) reports per-entry-point
+workgroup-variable sizes in naga emission order, rounded up to a multiple of
+16 (Metal requirement; mirrors wgpu-hal `load_shader`); the Metal compute
+pipeline stores them and the encoder sets each slot length right after
+`setComputePipelineState`. Vulkan/GLES ignore the field (workgroup storage is
+declared in the module). CTS: `shader,execution,memory_layout` Metal residue
+is naga-lineage only (F-070).

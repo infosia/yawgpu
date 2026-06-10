@@ -68,6 +68,18 @@ pub(crate) struct GeneratedMsl {
     pub buffer_size_bindings: Vec<MslBufferSizeBinding>,
     /// Reserved fragment immediate slot for the frag-depth clamp range.
     pub frag_depth_clamp_slot: Option<u32>,
+    /// Per-argument threadgroup memory allocation sizes (bytes, rounded up to a
+    /// multiple of 16) for compute shaders that use `var<workgroup>` globals.
+    ///
+    /// naga's MSL backend emits each workgroup variable as an entry-point
+    /// argument annotated with `[[threadgroup(N)]]`, where N is the 0-based
+    /// declaration index among all workgroup globals used by that entry point.
+    /// Metal requires the compute encoder to call
+    /// `setThreadgroupMemoryLength:atIndex:` for each such slot before dispatch;
+    /// without this the slots read as zeros.  The vec is empty for compute shaders
+    /// that have no workgroup variables, and is also empty for render shaders
+    /// (which cannot use workgroup memory through this path).
+    pub workgroup_memory_sizes: Vec<u32>,
 }
 
 /// Stores generated shader source for generated GLSL.
@@ -630,6 +642,8 @@ impl ReflectedModule {
         let resources = msl_resources(binding_map)?;
         let buffer_size_bindings = msl_buffer_size_bindings_for_entry(&module, entry_name)?;
         let buffer_sizes_slot = msl_buffer_sizes_slot(binding_map, &buffer_size_bindings, &[])?;
+        let workgroup_memory_sizes =
+            collect_workgroup_memory_sizes(&module, &info, entry_name)?;
         let mut per_entry_point_map = BTreeMap::new();
         per_entry_point_map.insert(
             entry_name.to_owned(),
@@ -661,6 +675,7 @@ impl ReflectedModule {
             buffer_sizes_slot: buffer_sizes_slot.map(u32::from),
             buffer_size_bindings,
             frag_depth_clamp_slot: None,
+            workgroup_memory_sizes,
         })
     }
 
@@ -798,6 +813,9 @@ impl ReflectedModule {
             buffer_sizes_slot: buffer_sizes_slot.map(u32::from),
             buffer_size_bindings,
             frag_depth_clamp_slot: frag_depth_clamp_slot.map(u32::from),
+            // Render stages (vertex/fragment) cannot use var<workgroup> through this
+            // path; workgroup_memory_sizes only applies to compute pipelines.
+            workgroup_memory_sizes: Vec::new(),
         })
     }
 
@@ -1183,6 +1201,43 @@ fn resolved_workgroup_size(
         override_keys: [None, None, None],
         workgroup_storage_size: storage_size,
     })
+}
+
+/// Collects the per-threadgroup-argument allocation sizes for a compute entry point.
+///
+/// naga's MSL backend emits each `var<workgroup>` global used by the entry point as
+/// a kernel argument `[[threadgroup(N)]]`, in the iteration order of the module's
+/// global-variable arena.  Metal requires the compute encoder to call
+/// `setThreadgroupMemoryLength:atIndex:` for each such slot before dispatch, with a
+/// length rounded up to a multiple of 16 bytes (the Metal alignment requirement).
+/// This function mirrors the logic in wgpu-hal/src/metal/device.rs `load_shader`
+/// (lines 344-352), using `module.types[var.ty].inner.size(module.to_ctx())` for the
+/// raw byte size and then `next_multiple_of(16)` for the aligned allocation size.
+fn collect_workgroup_memory_sizes(
+    module: &naga::Module,
+    info: &naga::valid::ModuleInfo,
+    entry_name: &str,
+) -> Result<Vec<u32>, String> {
+    let Some(entry_index) = module
+        .entry_points
+        .iter()
+        .position(|entry| entry.name == entry_name && entry.stage == naga::ShaderStage::Compute)
+    else {
+        return Err("compute entry point was not found for workgroup memory reflection".to_owned());
+    };
+    let ep_info = info.get_entry_point(entry_index);
+    let mut sizes = Vec::new();
+    for (var_handle, var) in module.global_variables.iter() {
+        if var.space == naga::AddressSpace::WorkGroup && !ep_info[var_handle].is_empty() {
+            // `TypeInner::size` returns the byte count of the type as laid out
+            // in memory, matching naga's MSL emission for the threadgroup arg.
+            let raw_size = module.types[var.ty].inner.size(module.to_ctx());
+            // Metal requires the threadgroup slot length to be a multiple of 16.
+            let aligned = raw_size.next_multiple_of(16);
+            sizes.push(aligned);
+        }
+    }
+    Ok(sizes)
 }
 
 fn msl_resources(binding_map: &MslBindingMap) -> Result<naga::back::msl::BindingMap, String> {
@@ -2800,5 +2855,97 @@ fn fs() -> @location(0) vec4<f32> {
         assert!(provided.source.contains("0.6"));
         assert_ne!(default.source, provided.source);
         assert!(!provided.source.contains("override"));
+    }
+
+    // --- F-069: workgroup memory sizes ---
+
+    fn empty_binding_map() -> MslBindingMap {
+        MslBindingMap {
+            resources: Vec::new(),
+        }
+    }
+
+    /// A compute shader with two var<workgroup> globals:
+    ///
+    /// - `a: array<u32, 7>` → raw size 28 bytes → aligned to 32
+    /// - `b: f32`           → raw size  4 bytes → aligned to 16
+    ///
+    /// Globals are collected in module declaration order (naga arena order),
+    /// which matches the `[[threadgroup(N)]]` assignment order in the MSL emitter.
+    #[test]
+    fn generate_msl_returns_workgroup_memory_sizes_for_workgroup_vars() {
+        let module = parse_and_validate_wgsl(
+            r"
+var<workgroup> a: array<u32, 7>;
+var<workgroup> b: f32;
+
+@compute @workgroup_size(1)
+fn cs() {
+    a[0] = 1u;
+    b = 2.0;
+}
+",
+        )
+        .expect("workgroup shader should validate");
+
+        let generated = module
+            .generate_msl("cs", &empty_binding_map(), &naga::back::PipelineConstants::default())
+            .expect("MSL generation should succeed");
+
+        // array<u32, 7> = 7 * 4 = 28 bytes → next_multiple_of(16) = 32
+        // f32 = 4 bytes → next_multiple_of(16) = 16
+        assert_eq!(
+            generated.workgroup_memory_sizes,
+            vec![32, 16],
+            "workgroup memory sizes must be rounded up to multiples of 16"
+        );
+    }
+
+    /// A compute shader with no workgroup vars returns an empty vec.
+    #[test]
+    fn generate_msl_returns_empty_workgroup_memory_sizes_when_no_workgroup_vars() {
+        let module = parse_and_validate_wgsl(
+            r"
+@compute @workgroup_size(1)
+fn cs() {}
+",
+        )
+        .expect("trivial compute shader should validate");
+
+        let generated = module
+            .generate_msl("cs", &empty_binding_map(), &naga::back::PipelineConstants::default())
+            .expect("MSL generation should succeed");
+
+        assert!(
+            generated.workgroup_memory_sizes.is_empty(),
+            "shader without workgroup vars must return empty workgroup_memory_sizes"
+        );
+    }
+
+    /// Render (vertex) MSL generation does not produce workgroup_memory_sizes —
+    /// the field is always empty for render stages.
+    #[test]
+    fn generate_render_msl_returns_empty_workgroup_memory_sizes() {
+        let module = parse_and_validate_wgsl(
+            "@vertex fn vs() -> @builtin(position) vec4<f32> {
+                return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+            }",
+        )
+        .expect("vertex shader should validate");
+
+        let generated = module
+            .generate_render_vertex_msl(
+                "vs",
+                &empty_binding_map(),
+                &[],
+                false,
+                &naga::back::PipelineConstants::default(),
+            )
+            .expect("render vertex MSL should succeed");
+
+        assert!(
+            generated.workgroup_memory_sizes.is_empty(),
+            "render stages must always return empty workgroup_memory_sizes"
+        );
     }
 }

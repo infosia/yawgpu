@@ -12,6 +12,12 @@ pub enum HalShaderSource {
         buffer_sizes_slot: Option<u32>,
         /// Bindings whose byte lengths populate `_mslBufferSizes`.
         buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
+        /// Per-argument threadgroup memory allocation sizes (bytes, already
+        /// rounded up to a multiple of 16) for compute shaders that use
+        /// `var<workgroup>` globals.  The Metal HAL calls
+        /// `setThreadgroupMemoryLength:atIndex:` for each entry before dispatch.
+        /// Empty when the compute shader has no workgroup variables.
+        workgroup_memory_sizes: Vec<u32>,
     },
     /// Per-stage MSL render sources.
     MslStages {
@@ -116,6 +122,7 @@ mod tests {
             source: "kernel void main0() {}".to_owned(),
             buffer_sizes_slot: Some(3),
             buffer_size_bindings: vec![HalMslBufferSizeBinding::new(1, 2)],
+            workgroup_memory_sizes: vec![32, 16],
         };
 
         assert!(matches!(
@@ -124,8 +131,10 @@ mod tests {
                 source,
                 buffer_sizes_slot: Some(3),
                 buffer_size_bindings,
+                workgroup_memory_sizes,
             } if source == "kernel void main0() {}"
                 && buffer_size_bindings == [HalMslBufferSizeBinding::new(1, 2)]
+                && workgroup_memory_sizes == [32, 16]
         ));
     }
 }
