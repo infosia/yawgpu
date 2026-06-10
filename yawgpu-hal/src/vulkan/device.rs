@@ -321,20 +321,30 @@ mod tests {
     fn vulkan_device_oversized_allocations_return_out_of_memory() {
         // u64::MAX exceeds every Vulkan heap size, so vkAllocateMemory returns
         // VK_ERROR_OUT_OF_DEVICE_MEMORY → OutOfMemory.
-        // For the texture, use dimensions that are within Vulkan's physical-device
-        // image-size limits (16384×16384, 2048 array layers) but whose total byte
-        // size (16384×16384×4 bytes × 2048 layers = 2 TiB) cannot be satisfied by
-        // any real device, causing vkAllocateMemory to return OutOfMemory.
+        // For the texture, mirror the WebGPU CTS OOM recipe (error_test.ts):
+        // query the device's own maxImageDimension2D / maxImageArrayLayers so
+        // the descriptor stays legal on any device, and use a 16-byte texel
+        // format so the total byte size (1 TiB even at spec-minimum limits)
+        // cannot be satisfied, causing allocation to fail with OutOfMemory.
         let device = vulkan_device();
         assert!(matches!(
             device.create_buffer(u64::MAX, HalBufferUsage::default()),
             Err(HalError::OutOfMemory { .. })
         ));
 
+        let limits = unsafe {
+            device
+                .inner
+                ._instance
+                .instance
+                .get_physical_device_properties(device.inner.physical_device)
+                .limits
+        };
         let mut descriptor = texture_descriptor();
-        descriptor.width = 16384;
-        descriptor.height = 16384;
-        descriptor.depth_or_array_layers = 2048;
+        descriptor.format = crate::HalTextureFormat::Rgba32Float;
+        descriptor.width = limits.max_image_dimension2_d;
+        descriptor.height = limits.max_image_dimension2_d;
+        descriptor.depth_or_array_layers = limits.max_image_array_layers;
         assert!(matches!(
             device.create_texture(&descriptor),
             Err(HalError::OutOfMemory { .. })
