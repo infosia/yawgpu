@@ -228,21 +228,28 @@ pub(crate) struct HostBuffer {
 }
 
 impl HostBuffer {
-    /// Creates a new instance.
-    pub(crate) fn new(size: u64) -> Self {
-        debug_assert!(
-            usize::try_from(size).is_ok(),
-            "buffer sizes above usize::MAX must be rejected before allocation"
-        );
-        let len = match usize::try_from(size) {
-            Ok(len) => len,
-            Err(_) => usize::MAX,
-        };
-        let bytes = (0..len)
-            .map(|_| UnsafeCell::new(0))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        Self { bytes }
+    /// Creates a zero-length host buffer used for error buffers and non-mapped buffers.
+    pub(crate) fn empty() -> Self {
+        Self {
+            bytes: Box::new([]),
+        }
+    }
+
+    /// Attempts to allocate `size` bytes of host storage for a mapped buffer.
+    ///
+    /// Returns `Err(())` if the size cannot be represented as `usize` or if
+    /// the system allocator cannot satisfy the request (out-of-memory).
+    /// Callers must treat allocation failure as an out-of-memory condition and
+    /// return an error buffer with no host storage rather than aborting.
+    pub(crate) fn try_new(size: u64) -> Result<Self, ()> {
+        let len = usize::try_from(size).map_err(|_| ())?;
+        let mut v: Vec<UnsafeCell<u8>> = Vec::new();
+        v.try_reserve_exact(len).map_err(|_| ())?;
+        // `resize` after a successful reserve does not reallocate.
+        v.resize_with(len, || UnsafeCell::new(0));
+        Ok(Self {
+            bytes: v.into_boxed_slice(),
+        })
     }
 
     /// Returns ptr at.
@@ -282,7 +289,9 @@ impl HostBuffer {
         if end > self.bytes.len() {
             return Err("host buffer read range exceeds buffer size".to_owned());
         }
-        let mut data = Vec::with_capacity(size);
+        let mut data: Vec<u8> = Vec::new();
+        data.try_reserve_exact(size)
+            .map_err(|_| "host buffer read allocation failed".to_owned())?;
         for cell in &self.bytes[offset..end] {
             data.push(unsafe { *cell.get() });
         }
@@ -304,39 +313,59 @@ unsafe impl Send for HostBuffer {}
 unsafe impl Sync for HostBuffer {}
 
 impl Buffer {
-    /// Creates a new instance.
+    /// Creates an error buffer, optionally with a fallible host mapping.
+    ///
+    /// When `descriptor.mapped_at_creation` is true the constructor attempts
+    /// a fallible host allocation via `HostBuffer::try_new`.  On success the
+    /// buffer starts in the `Mapped` state with a full-range `ActiveMap`
+    /// (write mode), mirroring the spec requirement that "a buffer created
+    /// with mappedAtCreation=true is mapped at creation even if it is an
+    /// error buffer" (WebGPU § 6.4).  On OOM the buffer falls back to
+    /// `HostBuffer::empty()` and `Unmapped` — no abort is possible because
+    /// the allocation goes through `try_new` only (F-073).
+    ///
+    /// When `mapped_at_creation` is false the buffer is always `Unmapped`
+    /// with no host storage.
     pub(crate) fn new(
         descriptor: BufferDescriptor,
         hal: Option<HalBuffer>,
         is_error: bool,
     ) -> Self {
-        let map_state = if descriptor.mapped_at_creation {
-            BufferMapState::Mapped
+        debug_assert!(
+            is_error,
+            "Buffer::new must only be called for error buffers; use Buffer::try_new for valid buffers"
+        );
+
+        // For mappedAtCreation error buffers attempt a small, fallible host
+        // allocation so that getMappedRange can return a writable scratch
+        // pointer.  Giant sizes (e.g. the 9 PB OOM case) fail try_new and
+        // silently fall back to empty / Unmapped — the process cannot abort.
+        let (host, map_state, active_map) = if descriptor.mapped_at_creation {
+            match HostBuffer::try_new(descriptor.size) {
+                Ok(host) => (
+                    host,
+                    BufferMapState::Mapped,
+                    Some(ActiveMap {
+                        mode: MapMode::Write,
+                        offset: 0,
+                        size: descriptor.size,
+                    }),
+                ),
+                Err(()) => (HostBuffer::empty(), BufferMapState::Unmapped, None),
+            }
         } else {
-            BufferMapState::Unmapped
+            (HostBuffer::empty(), BufferMapState::Unmapped, None)
         };
-        let active_map = if descriptor.mapped_at_creation {
-            Some(ActiveMap {
-                mode: MapMode::Write,
-                offset: 0,
-                size: descriptor.size,
-            })
-        } else {
-            None
-        };
+
         Self {
             inner: Arc::new(BufferInner {
                 hal,
                 usage: descriptor.usage,
                 size: descriptor.size,
-                host: HostBuffer::new(if is_error && !descriptor.mapped_at_creation {
-                    0
-                } else {
-                    descriptor.size
-                }),
+                host,
                 state: Mutex::new(BufferState {
                     map_state,
-                    is_error,
+                    is_error: true,
                     is_destroyed: false,
                     pending_map: None,
                     active_map,
@@ -344,6 +373,52 @@ impl Buffer {
                 }),
             }),
         }
+    }
+
+    /// Attempts to create a valid (non-error) buffer with host storage.
+    ///
+    /// Returns `Err(hal)` if the host-side backing allocation fails
+    /// (out-of-memory).  The caller is responsible for dispatching an
+    /// `OutOfMemory` error through the device error sink and creating an
+    /// error buffer via `Buffer::new` (F-073).
+    pub(crate) fn try_new(
+        descriptor: BufferDescriptor,
+        hal: Option<HalBuffer>,
+    ) -> Result<Self, Option<HalBuffer>> {
+        // All map paths (mappedAtCreation write, MapAsync write-back, and
+        // MapAsync read-back) require host-side storage.  Allocation is
+        // fallible so that a huge-but-valid size cannot abort the process.
+        let host = HostBuffer::try_new(descriptor.size).map_err(|_| hal.clone())?;
+
+        let (map_state, active_map) = if descriptor.mapped_at_creation {
+            (
+                BufferMapState::Mapped,
+                Some(ActiveMap {
+                    mode: MapMode::Write,
+                    offset: 0,
+                    size: descriptor.size,
+                }),
+            )
+        } else {
+            (BufferMapState::Unmapped, None)
+        };
+
+        Ok(Self {
+            inner: Arc::new(BufferInner {
+                hal,
+                usage: descriptor.usage,
+                size: descriptor.size,
+                host,
+                state: Mutex::new(BufferState {
+                    map_state,
+                    is_error: false,
+                    is_destroyed: false,
+                    pending_map: None,
+                    active_map,
+                    mapped_ranges: Vec::new(),
+                }),
+            }),
+        })
     }
 
     /// Returns the size.
@@ -997,15 +1072,38 @@ mod tests {
 
     #[test]
     fn invalid_mapped_at_creation_buffer_still_exposes_initial_mapping() {
-        let buffer = noop_device().create_buffer(BufferDescriptor {
+        // WebGPU § 6.4: a buffer created with mappedAtCreation=true must start
+        // in the 'mapped' state even if it is an error buffer (invalid usage,
+        // etc.).  The CTS usageType="invalid" case exercises exactly this path:
+        // usage=NONE (validation error), size=8, mappedAtCreation=true.
+        //
+        // F-073 caveat: the allocation is fallible (try_new) so that a genuine
+        // OOM (e.g. 9 PB) still falls back to Unmapped without aborting.
+        let device = noop_device();
+        device.push_error_scope(ErrorFilter::Validation);
+        let buffer = device.create_buffer(BufferDescriptor {
             usage: BufferUsage::NONE,
-            size: 16,
+            size: 8,
             mapped_at_creation: true,
         });
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid usage must produce a validation error");
 
+        assert_eq!(error.message, "buffer usage must be non-zero");
         assert!(buffer.is_error());
+        // mapState must be 'mapped' even for the error buffer.
         assert_eq!(buffer.map_state(), BufferMapState::Mapped);
-        assert!(buffer.mapped_range(false, 0, None).is_some());
+        // getMappedRange must return a valid (non-null) writable pointer.
+        assert!(
+            buffer.mapped_range(false, 0, Some(8)).is_some(),
+            "getMappedRange must return a writable pointer for a small error buffer with mappedAtCreation"
+        );
+        // Unmap transitions to Unmapped.
+        assert_eq!(buffer.unmap(), None);
+        assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
+        // MapAsync is still rejected on error buffers.
         assert_eq!(
             buffer.begin_map(MapMode::Write, 0, 4),
             Err("cannot map an error buffer")
@@ -1025,5 +1123,143 @@ mod tests {
             Err("map mode must be exactly Read or Write")
         );
         assert_eq!(MapMode::from_bits(4), Err("map mode has unsupported bits"));
+    }
+
+    #[test]
+    fn oom_mapped_at_creation_does_not_abort_and_returns_no_mapping() {
+        // F-073: wgpuDeviceCreateBuffer with mappedAtCreation=true and a size
+        // that exceeds maxBufferSize must not abort the process.  The buffer
+        // fails validation (B4: size > maxBufferSize), is_error becomes true,
+        // and getMappedRange must return null (no host allocation is attempted).
+        // kMaxSafeMultipleOf8 from the CTS: Number.MAX_SAFE_INTEGER - 7.
+        const MAX_SAFE_MULTIPLE_OF_8: u64 = 9_007_199_254_740_984;
+
+        let device = noop_device();
+        device.push_error_scope(ErrorFilter::Validation);
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::MAP_WRITE | BufferUsage::COPY_SRC,
+            size: MAX_SAFE_MULTIPLE_OF_8,
+            mapped_at_creation: true,
+        });
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("huge buffer must produce a validation error");
+
+        // Validation error must be raised (B4: size exceeds maxBufferSize).
+        assert_eq!(error.kind, ErrorKind::Validation);
+        assert_eq!(error.message, "buffer size exceeds device limit");
+
+        // The buffer must be an error buffer with no mapping — no abort.
+        assert!(buffer.is_error());
+        assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
+        // getMappedRange must return null (None in Rust API).
+        assert_eq!(buffer.mapped_range(false, 0, None), None);
+        assert_eq!(buffer.mapped_range(false, 0, Some(0)), None);
+    }
+
+    #[test]
+    fn oom_mapped_at_creation_works_for_all_buffer_usages() {
+        // F-073: verify that no usage combination + huge size can abort the process.
+        const HUGE_SIZE: u64 = 9_007_199_254_740_984;
+        let usages = [
+            BufferUsage::MAP_READ | BufferUsage::COPY_DST,
+            BufferUsage::MAP_WRITE | BufferUsage::COPY_SRC,
+            BufferUsage::COPY_SRC,
+            BufferUsage::COPY_DST,
+            BufferUsage::INDEX,
+            BufferUsage::VERTEX,
+            BufferUsage::UNIFORM,
+            BufferUsage::STORAGE,
+            BufferUsage::INDIRECT,
+            BufferUsage::QUERY_RESOLVE,
+        ];
+        let device = noop_device();
+        for usage in usages {
+            device.push_error_scope(ErrorFilter::Validation);
+            let buffer = device.create_buffer(BufferDescriptor {
+                usage,
+                size: HUGE_SIZE,
+                mapped_at_creation: true,
+            });
+            let _error = device
+                .pop_error_scope()
+                .expect("scope should exist");
+
+            // Buffer must be an error buffer; no mapping; no abort.
+            assert!(
+                buffer.is_error(),
+                "expected error buffer for usage={usage:?}"
+            );
+            assert_eq!(
+                buffer.map_state(),
+                BufferMapState::Unmapped,
+                "expected Unmapped for usage={usage:?}"
+            );
+            assert_eq!(
+                buffer.mapped_range(false, 0, None),
+                None,
+                "expected null getMappedRange for usage={usage:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn small_mapped_at_creation_buffer_still_maps_and_round_trips() {
+        // F-073 regression: ensure the normal mappedAtCreation path is unbroken.
+        let device = noop_device();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::MAP_WRITE | BufferUsage::COPY_SRC,
+            size: 16,
+            mapped_at_creation: true,
+        });
+        assert!(!buffer.is_error());
+        assert_eq!(buffer.map_state(), BufferMapState::Mapped);
+        assert!(
+            buffer.mapped_range(false, 0, Some(16)).is_some(),
+            "getMappedRange must succeed for a valid mappedAtCreation buffer"
+        );
+        assert_eq!(buffer.unmap(), None);
+        assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
+    }
+
+    #[test]
+    fn zero_size_buffer_map_async_and_get_mapped_range_succeed() {
+        // F-072: zero-size buffers and zero-length map ranges are valid WebGPU.
+        // Verify on the Noop path (core validation must pass before any HAL).
+        let device = noop_device();
+
+        // Full-buffer read map on a size=0 MAP_READ buffer.
+        let read_buf = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::MAP_READ | BufferUsage::COPY_DST,
+            size: 0,
+            mapped_at_creation: false,
+        });
+        assert_eq!(read_buf.size(), 0);
+        assert_eq!(read_buf.begin_map(MapMode::Read, 0, 0), Ok(()));
+        assert_eq!(read_buf.resolve_pending_map(), MapAsyncStatus::Success);
+        assert_eq!(read_buf.map_state(), BufferMapState::Mapped);
+        // WGPU_WHOLE_MAP_SIZE == None → uses buffer size (0) minus offset (0) = 0.
+        assert!(
+            read_buf.mapped_range(true, 0, None).is_some(),
+            "get_const_mapped_range(0, WHOLE) must succeed on a zero-size buffer"
+        );
+        assert_eq!(read_buf.unmap(), None);
+        assert_eq!(read_buf.map_state(), BufferMapState::Unmapped);
+
+        // Full-buffer write map on a size=0 MAP_WRITE buffer (mappedAtCreation path).
+        let mac_buf = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::MAP_WRITE | BufferUsage::COPY_SRC,
+            size: 0,
+            mapped_at_creation: true,
+        });
+        assert_eq!(mac_buf.size(), 0);
+        assert_eq!(mac_buf.map_state(), BufferMapState::Mapped);
+        assert!(
+            mac_buf.mapped_range(false, 0, Some(0)).is_some(),
+            "get_mapped_range(0, 0) must succeed on a zero-size mappedAtCreation buffer"
+        );
+        assert_eq!(mac_buf.unmap(), None);
+        assert_eq!(mac_buf.map_state(), BufferMapState::Unmapped);
     }
 }

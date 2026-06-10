@@ -186,3 +186,20 @@ phases need.
 - Default-view inference rules (format=texture.format, dimension from
   texture dim+layers, mip/array full range) — from webgpu.h
   `WGPUTextureViewDescriptor` `INIT` + spec.
+
+## CTS findings — sampler anisotropy (2026-06-10, batch Y-3)
+
+- **F-076 — `maxAnisotropy` clamping.** WebGPU: values above the platform
+  maximum are **clamped**, never an error; two samplers clamped to the same
+  effective value must render identically. Core keeps the `maxAnisotropy >= 1`
+  validation only. Per backend:
+  - **Metal:** clamp to Metal's documented `[1, 16]` before
+    `setMaxAnisotropy` (`metal/texture.rs`).
+  - **Vulkan:** enable the `samplerAnisotropy` device feature at device
+    creation when the physical device supports it; clamp
+    `VkSamplerCreateInfo.maxAnisotropy` to
+    `VkPhysicalDeviceLimits.maxSamplerAnisotropy`; if the feature is
+    unsupported, force `anisotropyEnable = false` (effective value 1). Setting
+    `anisotropyEnable = true` without the feature is a VUID violation — the
+    root cause of the MoltenVK error-command-buffer failures.
+  CTS: `api,operation,sampling,anisotropy` 3/3 on both HALs.

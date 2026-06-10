@@ -393,11 +393,41 @@ fn transient_subresource_range(aspect: vk::ImageAspectFlags) -> vk::ImageSubreso
         .layer_count(1)
 }
 
+/// Computes the effective anisotropy enable flag and clamped max value.
+///
+/// WebGPU semantics: values above the platform maximum are clamped, never an
+/// error. `anisotropy_enable` must only be set to `true` when the
+/// `samplerAnisotropy` device feature is enabled; otherwise the Vulkan spec
+/// (VUID-VkSamplerCreateInfo-anisotropyEnable-01070) is violated and MoltenVK
+/// produces an error command buffer.
+///
+/// Returns `(anisotropy_enable, max_anisotropy)` for use in
+/// `VkSamplerCreateInfo`.
+pub(super) fn effective_anisotropy(
+    requested: u16,
+    feature_enabled: bool,
+    device_max: f32,
+) -> (bool, f32) {
+    if !feature_enabled {
+        // Feature absent: anisotropic filtering is unavailable; fall back to 1.
+        return (false, 1.0);
+    }
+    let clamped = f32::from(requested).clamp(1.0, device_max);
+    // anisotropyEnable must be false when the effective value is 1.0 to avoid
+    // VUID violations on implementations that clamp internally.
+    (clamped > 1.0, clamped)
+}
+
 /// Creates sampler and reports validation errors through the owning device.
 pub(super) fn create_sampler(
     device: Arc<VulkanDeviceInner>,
     descriptor: &HalSamplerDescriptor,
 ) -> Result<VulkanSamplerInner, HalError> {
+    let (anisotropy_enable, max_anisotropy) = effective_anisotropy(
+        descriptor.max_anisotropy,
+        device.sampler_anisotropy,
+        device.max_sampler_anisotropy,
+    );
     let sampler_info = vk::SamplerCreateInfo::default()
         .mag_filter(map_filter_mode(descriptor.mag_filter))
         .min_filter(map_filter_mode(descriptor.min_filter))
@@ -406,8 +436,8 @@ pub(super) fn create_sampler(
         .address_mode_v(map_address_mode(descriptor.address_mode_v))
         .address_mode_w(map_address_mode(descriptor.address_mode_w))
         .mip_lod_bias(0.0)
-        .anisotropy_enable(descriptor.max_anisotropy > 1)
-        .max_anisotropy(f32::from(descriptor.max_anisotropy))
+        .anisotropy_enable(anisotropy_enable)
+        .max_anisotropy(max_anisotropy)
         .compare_enable(descriptor.compare.is_some())
         .compare_op(
             descriptor
@@ -633,6 +663,41 @@ pub(super) fn color_subresource_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_anisotropy_clamps_above_device_max_to_device_max() {
+        // (1024, true, 16.0) → (true, 16.0)
+        let (enable, max) = effective_anisotropy(1024, true, 16.0);
+        assert!(enable, "anisotropy should be enabled");
+        assert_eq!(max, 16.0);
+    }
+
+    #[test]
+    fn effective_anisotropy_passes_through_exact_device_max() {
+        // (16, true, 16.0) → (true, 16.0)
+        let (enable, max) = effective_anisotropy(16, true, 16.0);
+        assert!(enable, "anisotropy should be enabled");
+        assert_eq!(max, 16.0);
+    }
+
+    #[test]
+    fn effective_anisotropy_disables_when_requested_is_one() {
+        // (1, true, 16.0) → (false, 1.0)
+        let (enable, max) = effective_anisotropy(1, true, 16.0);
+        assert!(!enable, "anisotropy should be disabled for max_anisotropy=1");
+        assert_eq!(max, 1.0);
+    }
+
+    #[test]
+    fn effective_anisotropy_disables_when_feature_absent() {
+        // (1024, false, 16.0) → (false, 1.0)
+        let (enable, max) = effective_anisotropy(1024, false, 16.0);
+        assert!(
+            !enable,
+            "anisotropy must be disabled when feature is not enabled"
+        );
+        assert_eq!(max, 1.0, "max should fall back to 1.0 when feature absent");
+    }
 
     /// Builds a minimal `vk::PhysicalDeviceMemoryProperties` with a single
     /// device-local heap of the given capacity for pure-logic tests.

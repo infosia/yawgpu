@@ -365,9 +365,16 @@ impl VulkanAdapter {
                 .get_physical_device_features(self.physical_device)
         };
         let occlusion_query_precise = supported_features.occlusion_query_precise == vk::TRUE;
+        // Enable samplerAnisotropy when the physical device supports it.
+        // Setting anisotropyEnable = true without this feature enabled is a VUID
+        // violation and causes MoltenVK to produce error command buffers.
+        let sampler_anisotropy = supported_features.sampler_anisotropy == vk::TRUE;
         let mut enabled_features = vk::PhysicalDeviceFeatures::default();
         if occlusion_query_precise {
             enabled_features.occlusion_query_precise = vk::TRUE;
+        }
+        if sampler_anisotropy {
+            enabled_features.sampler_anisotropy = vk::TRUE;
         }
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
@@ -385,6 +392,13 @@ impl VulkanAdapter {
                 .instance
                 .get_physical_device_memory_properties(self.physical_device)
         };
+        // Query the device property limit for anisotropy so create_sampler can clamp.
+        let device_properties = unsafe {
+            self.instance
+                .instance
+                .get_physical_device_properties(self.physical_device)
+        };
+        let max_sampler_anisotropy = device_properties.limits.max_sampler_anisotropy;
         let inner = Arc::new(VulkanDeviceInner {
             _instance: Arc::clone(&self.instance),
             device,
@@ -392,6 +406,8 @@ impl VulkanAdapter {
             memory_properties,
             queue_family_index,
             occlusion_query_precise,
+            sampler_anisotropy,
+            max_sampler_anisotropy,
             allocations: AtomicU64::new(0),
             #[cfg(feature = "tiled")]
             framebuffer_fetch_path: self.framebuffer_fetch_path,

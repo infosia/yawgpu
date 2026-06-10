@@ -47,8 +47,15 @@ impl MetalDevice {
         self.allocations.fetch_add(1, Ordering::Relaxed);
         // MTLBuffer has no per-usage validation; the parameter is accepted
         // for HAL symmetry.
+        //
+        // Metal returns nil for `newBufferWithLength(0)`, but WebGPU permits
+        // zero-size buffers. Allocate at least 1 byte so Metal always returns
+        // a valid MTLBuffer; the *logical* size field keeps the requested
+        // value so all map/read/write bounds validate against 0 (mirrors the
+        // wgpu Metal backend).
+        let alloc_size = usize::try_from(size).unwrap_or(usize::MAX).max(1);
         let buffer = self.device.newBufferWithLength_options(
-            usize::try_from(size).unwrap_or(usize::MAX),
+            alloc_size,
             MTLResourceOptions::StorageModeShared,
         );
         let Some(buffer) = buffer else {
@@ -294,6 +301,28 @@ mod tests {
         assert_eq!(buffer.size(), 16);
         assert!(buffer.mapped_ptr().is_some());
         assert_eq!(device.allocation_count(), 1);
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_device_create_zero_size_buffer_succeeds_with_logical_size_zero() {
+        // F-072: Metal returns nil for newBufferWithLength(0); we allocate 1
+        // byte internally but expose size=0 so all map/range checks see 0.
+        let device = metal_device();
+        let buffer = device
+            .create_buffer(0, HalBufferUsage::default())
+            .expect("zero-size Metal buffer should succeed (F-072)");
+        assert_eq!(buffer.size(), 0, "logical size must be 0");
+        assert!(
+            buffer.mapped_ptr().is_some(),
+            "mapped_ptr must be Some (1-byte backing allocation)"
+        );
+        assert_eq!(
+            buffer.read(0, 0).expect("zero-length read should succeed"),
+            Vec::<u8>::new(),
+        );
+        buffer.write(0, &[]).expect("zero-length write should succeed");
     }
 
     #[test]
