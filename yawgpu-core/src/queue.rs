@@ -757,6 +757,8 @@ fn hal_subpass_draw_execution(draw: &SubpassDrawExecution) -> Option<HalSubpassD
             group: 0,
             binding: binding.slot,
             metal_index: binding.metal_index,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
             buffer: bound.buffer.hal()?,
             offset: bound.offset,
             size: bound.size,
@@ -1035,6 +1037,8 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
                 group: 0,
                 binding: binding.slot,
                 metal_index: binding.metal_index,
+                vertex_metal_index: None,
+                fragment_metal_index: None,
                 buffer: bound.buffer.hal()?,
                 offset: bound.offset,
                 size: bound.size,
@@ -1297,6 +1301,8 @@ pub(crate) fn hal_bind_resources(
                     group: binding.group,
                     binding: binding.binding,
                     metal_index: binding.metal_index,
+                    vertex_metal_index: binding.vertex_metal_index,
+                    fragment_metal_index: binding.fragment_metal_index,
                     buffer: buffer.hal()?,
                     offset,
                     size: *size,
@@ -1307,6 +1313,8 @@ pub(crate) fn hal_bind_resources(
                     group: binding.group,
                     binding: binding.binding,
                     metal_index: binding.metal_index,
+                    vertex_metal_index: binding.vertex_metal_index,
+                    fragment_metal_index: binding.fragment_metal_index,
                     texture: texture_view.texture().hal()?,
                     format: hal_texture_format(texture_view.format()),
                     dimension: hal_texture_view_dimension(texture_view.dimension()),
@@ -1326,6 +1334,8 @@ pub(crate) fn hal_bind_resources(
                     group: binding.group,
                     binding: binding.binding,
                     metal_index: binding.metal_index,
+                    vertex_metal_index: binding.vertex_metal_index,
+                    fragment_metal_index: binding.fragment_metal_index,
                     texture: texture_view.texture().hal()?,
                     format: hal_texture_format(texture_view.format()),
                     dimension: hal_texture_view_dimension(texture_view.dimension()),
@@ -1342,6 +1352,8 @@ pub(crate) fn hal_bind_resources(
                     group: binding.group,
                     binding: binding.binding,
                     metal_index: binding.metal_index,
+                    vertex_metal_index: binding.vertex_metal_index,
+                    fragment_metal_index: binding.fragment_metal_index,
                     sampler: sampler.hal()?,
                 });
             }
@@ -1891,6 +1903,9 @@ fn fs() -> @location(0) vec4<f32> {
             HalQueue::Noop(queue) => queue.submitted_copies(),
             _ => Vec::new(),
         };
+        // With per-kind counters texture-space and sampler-space are
+        // independent, so both the sampled texture (binding=0) and the sampler
+        // (binding=1) get slot 0 in their respective Metal index spaces.
         assert!(matches!(
             submitted.as_slice(),
             [HalCopy::ComputePass(pass)]
@@ -1909,7 +1924,7 @@ fn fs() -> @location(0) vec4<f32> {
                     && pass.bind_samplers.len() == 1
                     && pass.bind_samplers[0].group == 0
                     && pass.bind_samplers[0].binding == 1
-                    && pass.bind_samplers[0].metal_index == 1
+                    && pass.bind_samplers[0].metal_index == 0
         ));
     }
 
@@ -1980,6 +1995,10 @@ fn fs() -> @location(0) vec4<f32> {
             HalQueue::Noop(queue) => queue.submitted_copies(),
             _ => Vec::new(),
         };
+        // With per-kind per-stage counters both stages share the same Metal
+        // index spaces.  The sampled texture (binding=0) gets texture-space
+        // slot 0 and the sampler (binding=1) gets sampler-space slot 0; the
+        // flat `metal_index` is the vertex-stage value in both cases.
         assert!(matches!(
             submitted.as_slice(),
             [HalCopy::RenderPass(pass)]
@@ -1998,7 +2017,7 @@ fn fs() -> @location(0) vec4<f32> {
                     && pass.bind_samplers.len() == 1
                     && pass.bind_samplers[0].group == 0
                     && pass.bind_samplers[0].binding == 1
-                    && pass.bind_samplers[0].metal_index == 1
+                    && pass.bind_samplers[0].metal_index == 0
         ));
     }
 

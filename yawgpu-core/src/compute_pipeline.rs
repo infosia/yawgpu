@@ -81,7 +81,21 @@ pub(crate) struct ResolvedComputeWorkgroup {
 pub(crate) struct MetalBufferBinding {
     pub(crate) group: u32,
     pub(crate) binding: u32,
+    /// Per-kind Metal slot used for compute pipelines and as fallback for render
+    /// pipelines when both `vertex_metal_index` and `fragment_metal_index` are
+    /// `None` (i.e. the binding is visible to a single well-known stage).
+    /// Buffer-space for `Buffer`; texture-space base for
+    /// `Texture`/`StorageTexture`/`ExternalTexture`; sampler-space for `Sampler`.
     pub(crate) metal_index: u32,
+    /// For `ExternalTexture` only: the buffer-space slot reserved for the
+    /// external-texture params buffer.  `None` for all other binding kinds.
+    pub(crate) ext_params_buffer_slot: Option<u32>,
+    /// For render pipelines: per-kind slot in the vertex stage's index space.
+    /// `None` when the binding is not visible to the vertex stage.
+    pub(crate) vertex_metal_index: Option<u32>,
+    /// For render pipelines: per-kind slot in the fragment stage's index space.
+    /// `None` when the binding is not visible to the fragment stage.
+    pub(crate) fragment_metal_index: Option<u32>,
     pub(crate) kind: MetalBindingKind,
 }
 
@@ -204,6 +218,14 @@ pub(crate) fn create_hal_compute_pipeline(
     };
     if matches!(hal_device.backend(), HalBackend::Noop) {
         return (Some(HalComputePipeline::Noop), None);
+    }
+    // Validate Metal slot ranges up front so the Metal compiler never sees an
+    // out-of-range slot (Metal rejects these at compile-time with a cryptic
+    // message that is hard to trace back to the binding layout).
+    if matches!(hal_device.backend(), HalBackend::Metal) {
+        if let Err(message) = validate_metal_slot_ranges(metal_bindings) {
+            return (None, Some(message));
+        }
     }
     let Some(workgroup) = workgroup else {
         return (
@@ -402,6 +424,7 @@ pub(crate) fn msl_resource_bindings(
             group: binding.group,
             binding: binding.binding,
             metal_index: binding.metal_index,
+            ext_params_buffer_slot: binding.ext_params_buffer_slot,
             kind: match binding.kind {
                 MetalBindingKind::Buffer(_) => shader_naga::MslResourceBindingKind::Buffer,
                 MetalBindingKind::Texture | MetalBindingKind::StorageTexture { .. } => {
@@ -417,11 +440,19 @@ pub(crate) fn msl_resource_bindings(
 }
 
 /// Returns metal buffer binding map.
+///
+/// For compute pipelines all entries are included in one map with per-kind
+/// counters (buffer-space / texture-space / sampler-space are independent).
+/// For render pipelines the `visibility` of each layout entry is used to build
+/// per-stage per-kind counters; the flat `metal_index` field holds the
+/// vertex-stage index (matching the legacy behaviour for single-stage entries)
+/// and `vertex_metal_index`/`fragment_metal_index` carry the independent
+/// per-stage slot when both stages are present.
 pub(crate) fn metal_buffer_binding_map(
     layouts: &[Arc<BindGroupLayout>],
 ) -> Vec<MetalBufferBinding> {
-    let mut bindings = Vec::new();
-    let mut metal_index = 0u32;
+    // Collect raw entries sorted by (group, binding).
+    let mut raw: Vec<(u32, u32, u64, MetalBindingKind)> = Vec::new();
     for (group_index, layout) in layouts.iter().enumerate() {
         let Ok(group) = u32::try_from(group_index) else {
             break;
@@ -437,28 +468,304 @@ pub(crate) fn metal_buffer_binding_map(
                 Some(BindingLayoutKind::ExternalTexture) => MetalBindingKind::ExternalTexture,
                 _ => continue,
             };
+            raw.push((group, entry.binding, entry.visibility, kind));
+        }
+    }
+    raw.sort_by_key(|&(group, binding, _, _)| (group, binding));
+
+    // Determine whether this is a render layout (any entry has vertex or
+    // fragment visibility) or a compute layout.
+    let is_render = raw
+        .iter()
+        .any(|&(_, _, vis, _)| vis & (SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT) != 0);
+
+    let mut bindings = Vec::with_capacity(raw.len());
+
+    if is_render {
+        // Per-stage per-kind counters.
+        let mut vtx_buf = 0u32;
+        let mut vtx_tex = 0u32;
+        let mut vtx_smp = 0u32;
+        let mut frag_buf = 0u32;
+        let mut frag_tex = 0u32;
+        let mut frag_smp = 0u32;
+
+        for (group, binding, visibility, kind) in raw {
+            let in_vtx = visibility & SHADER_STAGE_VERTEX != 0;
+            let in_frag = visibility & SHADER_STAGE_FRAGMENT != 0;
+
+            // Assign per-stage slots and advance counters.
+            let (vertex_metal_index, fragment_metal_index, ext_params_buffer_slot) = match kind {
+                MetalBindingKind::Buffer(_) => {
+                    let vi = if in_vtx {
+                        let s = vtx_buf;
+                        vtx_buf = vtx_buf.saturating_add(1);
+                        Some(s)
+                    } else {
+                        None
+                    };
+                    let fi = if in_frag {
+                        let s = frag_buf;
+                        frag_buf = frag_buf.saturating_add(1);
+                        Some(s)
+                    } else {
+                        None
+                    };
+                    (vi, fi, None)
+                }
+                MetalBindingKind::Texture | MetalBindingKind::StorageTexture { .. } => {
+                    let vi = if in_vtx {
+                        let s = vtx_tex;
+                        vtx_tex = vtx_tex.saturating_add(1);
+                        Some(s)
+                    } else {
+                        None
+                    };
+                    let fi = if in_frag {
+                        let s = frag_tex;
+                        frag_tex = frag_tex.saturating_add(1);
+                        Some(s)
+                    } else {
+                        None
+                    };
+                    (vi, fi, None)
+                }
+                MetalBindingKind::Sampler => {
+                    let vi = if in_vtx {
+                        let s = vtx_smp;
+                        vtx_smp = vtx_smp.saturating_add(1);
+                        Some(s)
+                    } else {
+                        None
+                    };
+                    let fi = if in_frag {
+                        let s = frag_smp;
+                        frag_smp = frag_smp.saturating_add(1);
+                        Some(s)
+                    } else {
+                        None
+                    };
+                    (vi, fi, None)
+                }
+                MetalBindingKind::ExternalTexture => {
+                    // 3 plane textures + 1 params buffer per stage.
+                    let vi_tex = if in_vtx {
+                        let s = vtx_tex;
+                        vtx_tex = vtx_tex.saturating_add(3);
+                        Some(s)
+                    } else {
+                        None
+                    };
+                    let fi_tex = if in_frag {
+                        let s = frag_tex;
+                        frag_tex = frag_tex.saturating_add(3);
+                        Some(s)
+                    } else {
+                        None
+                    };
+                    let vi_buf = if in_vtx {
+                        let s = vtx_buf;
+                        vtx_buf = vtx_buf.saturating_add(1);
+                        Some(s)
+                    } else {
+                        None
+                    };
+                    let fi_buf = if in_frag {
+                        let s = frag_buf;
+                        frag_buf = frag_buf.saturating_add(1);
+                        Some(s)
+                    } else {
+                        None
+                    };
+                    // The flat `metal_index` / `ext_params_buffer_slot` are set
+                    // from the vertex-stage values (or fragment if vertex-only is
+                    // absent) — callers that use the flat fields get the
+                    // vertex-stage assignment, matching legacy compute behaviour.
+                    let _ = (vi_buf, fi_buf, fi_tex);
+                    (vi_tex, fi_tex, vi_buf)
+                }
+            };
+
+            // Flat `metal_index`: use vertex index when available, then fragment.
+            let metal_index = vertex_metal_index
+                .or(fragment_metal_index)
+                .unwrap_or(0);
+
             bindings.push(MetalBufferBinding {
                 group,
-                binding: entry.binding,
+                binding,
                 metal_index,
+                ext_params_buffer_slot,
+                vertex_metal_index,
+                fragment_metal_index,
                 kind,
             });
-            metal_index = metal_index.saturating_add(match kind {
-                MetalBindingKind::ExternalTexture => 4,
-                _ => 1,
+        }
+    } else {
+        // Compute (or no-visibility) layout: one flat map with per-kind counters.
+        let mut buf_idx = 0u32;
+        let mut tex_idx = 0u32;
+        let mut smp_idx = 0u32;
+
+        for (group, binding, _, kind) in raw {
+            let (metal_index, ext_params_buffer_slot) = match kind {
+                MetalBindingKind::Buffer(_) => {
+                    let s = buf_idx;
+                    buf_idx = buf_idx.saturating_add(1);
+                    (s, None)
+                }
+                MetalBindingKind::Texture | MetalBindingKind::StorageTexture { .. } => {
+                    let s = tex_idx;
+                    tex_idx = tex_idx.saturating_add(1);
+                    (s, None)
+                }
+                MetalBindingKind::Sampler => {
+                    let s = smp_idx;
+                    smp_idx = smp_idx.saturating_add(1);
+                    (s, None)
+                }
+                MetalBindingKind::ExternalTexture => {
+                    // 3 consecutive texture slots + 1 buffer slot.
+                    let tex_base = tex_idx;
+                    tex_idx = tex_idx.saturating_add(3);
+                    let buf_slot = buf_idx;
+                    buf_idx = buf_idx.saturating_add(1);
+                    (tex_base, Some(buf_slot))
+                }
+            };
+            bindings.push(MetalBufferBinding {
+                group,
+                binding,
+                metal_index,
+                ext_params_buffer_slot,
+                vertex_metal_index: None,
+                fragment_metal_index: None,
+                kind,
             });
         }
     }
-    bindings.sort_by_key(|binding| (binding.group, binding.binding));
-    let mut metal_index = 0u32;
-    for binding in &mut bindings {
-        binding.metal_index = metal_index;
-        metal_index = metal_index.saturating_add(match binding.kind {
-            MetalBindingKind::ExternalTexture => 4,
-            _ => 1,
-        });
-    }
+
     bindings
+}
+
+/// Returns the number of buffer-space slots consumed by the vertex stage of
+/// a render pipeline binding map.  Used to place vertex-buffer slots
+/// immediately after the bind-group buffer slots in the same `[[buffer(N)]]`
+/// index space.
+pub(crate) fn vertex_stage_buffer_count(metal_bindings: &[MetalBufferBinding]) -> usize {
+    // Count distinct buffer-space slots used by the vertex stage.
+    // For ExternalTexture the params buffer occupies the buffer space too.
+    let max_slot = metal_bindings
+        .iter()
+        .filter_map(|b| b.vertex_metal_index.and_then(|_| {
+            // The vertex buffer-space slot is:
+            //   - `vertex_metal_index` for Buffer bindings
+            //   - `ext_params_buffer_slot` for ExternalTexture (vertex_metal_index
+            //     is texture-space here)
+            match b.kind {
+                MetalBindingKind::Buffer(_) => b.vertex_metal_index.map(|s| s + 1),
+                MetalBindingKind::ExternalTexture => {
+                    b.ext_params_buffer_slot.map(|s| s + 1)
+                }
+                _ => None,
+            }
+        }))
+        .max()
+        .unwrap_or(0);
+    usize::try_from(max_slot).unwrap_or(0)
+}
+
+/// Validates Metal slot assignments for a binding map and returns an error
+/// if any slot index exceeds the hardware limit.
+///
+/// Metal limits: `[[buffer(N)]]` slots 0–30, `[[texture(N)]]` and
+/// `[[sampler(N)]]` slots 0–15.
+pub(crate) fn validate_metal_slot_ranges(
+    metal_bindings: &[MetalBufferBinding],
+) -> Result<(), String> {
+    const MAX_BUFFER_SLOT: u32 = 30;
+    // Metal's texture argument table has at least 31 entries (indices 0-30)
+    // on every WebGPU-capable device; only the sampler table is capped at 16
+    // entries (indices 0-15). Review fix: an earlier draft wrongly applied the
+    // sampler cap to textures, rejecting valid max-bindings pipelines (F-077).
+    const MAX_TEXTURE_SLOT: u32 = 30;
+    const MAX_SAMPLER_SLOT: u32 = 15;
+
+    for binding in metal_bindings {
+        // Check flat + per-stage indices for each kind.
+        let check_buf = |slot: u32| -> Result<(), String> {
+            if slot > MAX_BUFFER_SLOT {
+                Err(format!(
+                    "Metal buffer slot {slot} exceeds the maximum allowed slot ({MAX_BUFFER_SLOT})"
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        let check_tex = |slot: u32| -> Result<(), String> {
+            if slot > MAX_TEXTURE_SLOT {
+                Err(format!(
+                    "Metal texture slot {slot} exceeds the maximum allowed slot ({MAX_TEXTURE_SLOT})"
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        let check_smp = |slot: u32| -> Result<(), String> {
+            if slot > MAX_SAMPLER_SLOT {
+                Err(format!(
+                    "Metal sampler slot {slot} exceeds the maximum allowed slot ({MAX_SAMPLER_SLOT})"
+                ))
+            } else {
+                Ok(())
+            }
+        };
+
+        match binding.kind {
+            MetalBindingKind::Buffer(_) => {
+                check_buf(binding.metal_index)?;
+                if let Some(s) = binding.vertex_metal_index {
+                    check_buf(s)?;
+                }
+                if let Some(s) = binding.fragment_metal_index {
+                    check_buf(s)?;
+                }
+            }
+            MetalBindingKind::Texture | MetalBindingKind::StorageTexture { .. } => {
+                check_tex(binding.metal_index)?;
+                if let Some(s) = binding.vertex_metal_index {
+                    check_tex(s)?;
+                }
+                if let Some(s) = binding.fragment_metal_index {
+                    check_tex(s)?;
+                }
+            }
+            MetalBindingKind::Sampler => {
+                check_smp(binding.metal_index)?;
+                if let Some(s) = binding.vertex_metal_index {
+                    check_smp(s)?;
+                }
+                if let Some(s) = binding.fragment_metal_index {
+                    check_smp(s)?;
+                }
+            }
+            MetalBindingKind::ExternalTexture => {
+                // Planes are in texture-space; check base + 2 for all stages.
+                let bases = [binding.metal_index]
+                    .into_iter()
+                    .chain(binding.vertex_metal_index)
+                    .chain(binding.fragment_metal_index);
+                for base in bases {
+                    check_tex(base.saturating_add(2))?;
+                }
+                // Params buffer is in buffer-space.
+                if let Some(s) = binding.ext_params_buffer_slot {
+                    check_buf(s)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validates compute pipeline descriptor and returns a descriptive error on failure.
@@ -1738,5 +2045,183 @@ mod tests {
             SamplerBindingType::Filtering,
             SamplerBindingType::Comparison
         ));
+    }
+
+    /// Build a minimal single-group layout with one entry per kind descriptor.
+    fn make_layout(_device: &crate::device::Device, entries: Vec<BindGroupLayoutEntry>) -> Arc<BindGroupLayout> {
+        Arc::new(BindGroupLayout::new(entries, false, true))
+    }
+
+    fn buf_entry(binding: u32, vis: u64) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: vis,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: 0,
+            }),
+        }
+    }
+
+    fn tex_entry(binding: u32, vis: u64) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: vis,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::Texture {
+                sample_type: TextureSampleType::Float,
+                view_dimension: TextureViewDimension::D2,
+                multisampled: false,
+            }),
+        }
+    }
+
+    fn smp_entry(binding: u32, vis: u64) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: vis,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::Sampler {
+                ty: SamplerBindingType::Filtering,
+            }),
+        }
+    }
+
+    fn ext_entry(binding: u32, vis: u64) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: vis,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::ExternalTexture),
+        }
+    }
+
+    #[test]
+    fn metal_binding_map_per_kind_counters_are_independent() {
+        // Layout: buffer@0, texture@1, sampler@2, texture@3, sampler@4
+        // Expected: buffer-space: buf@0→0; texture-space: tex@1→0, tex@3→1;
+        //           sampler-space: smp@2→0, smp@4→1.
+        let device = noop_device();
+        let layout = make_layout(&device, vec![
+            buf_entry(0, SHADER_STAGE_COMPUTE),
+            tex_entry(1, SHADER_STAGE_COMPUTE),
+            smp_entry(2, SHADER_STAGE_COMPUTE),
+            tex_entry(3, SHADER_STAGE_COMPUTE),
+            smp_entry(4, SHADER_STAGE_COMPUTE),
+        ]);
+        let bindings = metal_buffer_binding_map(&[layout]);
+
+        // Find each binding by kind and slot.
+        let buf = bindings.iter().find(|b| b.binding == 0).unwrap();
+        let tex0 = bindings.iter().find(|b| b.binding == 1).unwrap();
+        let smp0 = bindings.iter().find(|b| b.binding == 2).unwrap();
+        let tex1 = bindings.iter().find(|b| b.binding == 3).unwrap();
+        let smp1 = bindings.iter().find(|b| b.binding == 4).unwrap();
+
+        assert_eq!(buf.metal_index, 0, "buffer slot");
+        assert_eq!(tex0.metal_index, 0, "first texture slot");
+        assert_eq!(smp0.metal_index, 0, "first sampler slot");
+        assert_eq!(tex1.metal_index, 1, "second texture slot");
+        assert_eq!(smp1.metal_index, 1, "second sampler slot");
+    }
+
+    #[test]
+    fn metal_binding_map_external_texture_consumes_three_texture_and_one_buffer_slot() {
+        // ExternalTexture occupies 3 consecutive texture slots + 1 buffer slot.
+        // A plain buffer after it should start at buffer slot 1 (not 0).
+        let device = noop_device();
+        let layout = make_layout(&device, vec![
+            ext_entry(0, SHADER_STAGE_COMPUTE),
+            buf_entry(1, SHADER_STAGE_COMPUTE),
+        ]);
+        let bindings = metal_buffer_binding_map(&[layout]);
+
+        let ext = bindings.iter().find(|b| b.binding == 0).unwrap();
+        let buf = bindings.iter().find(|b| b.binding == 1).unwrap();
+
+        // ExternalTexture: texture-space base slot 0, params buffer slot 0.
+        assert_eq!(ext.metal_index, 0, "ext texture base slot");
+        assert_eq!(ext.ext_params_buffer_slot, Some(0), "ext params buffer slot");
+        // The plain buffer follows in buffer-space: slot 1 (after the ext params slot).
+        assert_eq!(buf.metal_index, 1, "buffer after external texture");
+    }
+
+    #[test]
+    fn metal_binding_map_per_stage_indices_are_independent_for_render_pipelines() {
+        // Render layout:
+        //   binding 0 — VERTEX only (buffer)
+        //   binding 1 — FRAGMENT only (texture)
+        //   binding 2 — BOTH (sampler)
+        // Expected:
+        //   binding 0: vertex_metal_index=Some(0), fragment_metal_index=None
+        //   binding 1: vertex_metal_index=None, fragment_metal_index=Some(0)
+        //   binding 2 (sampler): vertex_metal_index=Some(0), fragment_metal_index=Some(0)
+        let device = noop_device();
+        let layout = make_layout(&device, vec![
+            buf_entry(0, SHADER_STAGE_VERTEX),
+            tex_entry(1, SHADER_STAGE_FRAGMENT),
+            smp_entry(2, SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT),
+        ]);
+        let bindings = metal_buffer_binding_map(&[layout]);
+
+        let buf = bindings.iter().find(|b| b.binding == 0).unwrap();
+        let tex = bindings.iter().find(|b| b.binding == 1).unwrap();
+        let smp = bindings.iter().find(|b| b.binding == 2).unwrap();
+
+        // VERTEX-only buffer.
+        assert_eq!(buf.vertex_metal_index, Some(0));
+        assert_eq!(buf.fragment_metal_index, None);
+
+        // FRAGMENT-only texture.
+        assert_eq!(tex.vertex_metal_index, None);
+        assert_eq!(tex.fragment_metal_index, Some(0));
+
+        // BOTH sampler — each stage has its own independent counter starting at 0.
+        assert_eq!(smp.vertex_metal_index, Some(0));
+        assert_eq!(smp.fragment_metal_index, Some(0));
+    }
+
+    #[test]
+    fn metal_vertex_buffer_start_slot_equals_vertex_stage_buffer_count() {
+        use crate::render_pipeline::metal_vertex_buffer_binding_map;
+        // Two VERTEX-visible buffers → vertex buffer start slot must be 2.
+        let device = noop_device();
+        let layout = make_layout(&device, vec![
+            buf_entry(0, SHADER_STAGE_VERTEX),
+            buf_entry(1, SHADER_STAGE_VERTEX),
+        ]);
+        let bindings = metal_buffer_binding_map(&[layout]);
+        let vb_bindings = metal_vertex_buffer_binding_map(1, &bindings);
+        // The one vertex buffer should start at Metal buffer slot 2.
+        assert_eq!(vb_bindings[0].metal_index, 2);
+    }
+
+    #[test]
+    fn validate_metal_slot_ranges_rejects_sampler_past_limit() {
+        // Build 16 sampler bindings (slots 0-15) — last one is slot 15 which is
+        // still in range.  The 17th would be slot 16 which must be rejected.
+        let device = noop_device();
+        let entries: Vec<_> = (0..17).map(|i| smp_entry(i, SHADER_STAGE_COMPUTE)).collect();
+        let layout = make_layout(&device, entries);
+        let bindings = metal_buffer_binding_map(&[layout]);
+
+        let result = validate_metal_slot_ranges(&bindings);
+        assert!(result.is_err(), "slot 16 must exceed the sampler limit of 15");
+        let msg = result.unwrap_err();
+        assert!(msg.contains("sampler slot"), "error mentions sampler: {msg}");
+    }
+
+    #[test]
+    fn validate_metal_slot_ranges_accepts_valid_layout() {
+        let device = noop_device();
+        let layout = make_layout(&device, vec![
+            buf_entry(0, SHADER_STAGE_COMPUTE),
+            tex_entry(1, SHADER_STAGE_COMPUTE),
+            smp_entry(2, SHADER_STAGE_COMPUTE),
+        ]);
+        let bindings = metal_buffer_binding_map(&[layout]);
+        assert_eq!(validate_metal_slot_ranges(&bindings), Ok(()));
     }
 }
