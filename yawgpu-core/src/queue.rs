@@ -140,13 +140,151 @@ impl Queue {
         if extent_is_empty(write_size) {
             return None;
         }
-        let staging = device.create_buffer(
+
+        // Determine if the caller's layout needs repacking into a tightly-packed
+        // staging buffer. Vulkan's bufferRowLength is expressed in texels, so a
+        // bytes_per_row that is not a multiple of the per-aspect block size cannot
+        // be represented. Similarly, bufferOffset must be texel-aligned, so a
+        // layout.offset that is not a multiple of the block size is also repacked.
+        // When either condition holds, we copy each row individually into a new
+        // staging buffer with offset=0 and a tight (block-aligned) stride.
+        let Some(format_caps) = texture.format_caps() else {
+            return Some(DeviceError::internal(
+                "queue write texture format is unsupported",
+            ));
+        };
+        let block_size = u64::from(crate::copy::texel_copy_block_size(format_caps, aspect));
+        let width_blocks =
+            u64::from(crate::copy::div_ceil_u32(write_size.width, format_caps.block_w));
+        let height_blocks =
+            u64::from(crate::copy::div_ceil_u32(write_size.height, format_caps.block_h));
+        let depth = u64::from(write_size.depth_or_array_layers);
+        // Tight row bytes: width_blocks * block_size (always fits in u32 per
+        // validation, but use u64 throughout for checked arithmetic).
+        let tight_row_bytes = width_blocks.saturating_mul(block_size);
+
+        let needs_repack = layout
+            .bytes_per_row
+            .is_some_and(|bpr| u64::from(bpr) % block_size != 0)
+            || (block_size > 1 && layout.offset % block_size != 0);
+
+        if needs_repack {
+            // src_bytes_per_row is guaranteed Some by validation (multi-row implies
+            // bytes_per_row is required).
+            let src_bytes_per_row = u64::from(layout.bytes_per_row.unwrap_or(0));
+            let src_rows_per_image = u64::from(
+                layout
+                    .rows_per_image
+                    .unwrap_or(height_blocks as u32),
+            );
+
+            let repacked = match repack_texel_rows(
+                data,
+                layout.offset,
+                src_bytes_per_row,
+                src_rows_per_image,
+                tight_row_bytes,
+                height_blocks,
+                depth,
+            ) {
+                Ok(buf) => buf,
+                Err(message) => {
+                    return Some(DeviceError::internal(message));
+                }
+            };
+
+            let repacked_size = match u64::try_from(repacked.len()) {
+                Ok(n) => n,
+                Err(_) => {
+                    return Some(DeviceError::internal(
+                        "queue write texture repack buffer size overflows",
+                    ))
+                }
+            };
+            let staging = match device.create_buffer(
+                repacked_size,
+                HalBufferUsage {
+                    copy_src: true,
+                    ..HalBufferUsage::default()
+                },
+            ) {
+                Ok(buffer) => buffer,
+                Err(error) => {
+                    let kind = match error {
+                        yawgpu_hal::HalError::OutOfMemory { .. } => ErrorKind::OutOfMemory,
+                        _ => ErrorKind::Internal,
+                    };
+                    return Some(DeviceError::new(kind, error.to_string()));
+                }
+            };
+            if let Err(error) = staging.write(0, &repacked) {
+                return Some(DeviceError::internal(error.to_string()));
+            }
+
+            // Build a packed HAL layout: offset=0, tight stride, height_blocks rows.
+            let packed_bytes_per_row = match u32::try_from(tight_row_bytes) {
+                Ok(n) => n,
+                Err(_) => {
+                    return Some(DeviceError::internal(
+                        "queue write texture packed bytes_per_row overflows u32",
+                    ))
+                }
+            };
+            let packed_rows_per_image = match u32::try_from(height_blocks) {
+                Ok(n) => n,
+                Err(_) => {
+                    return Some(DeviceError::internal(
+                        "queue write texture packed rows_per_image overflows u32",
+                    ))
+                }
+            };
+            let buffer_layout = HalBufferTextureLayout {
+                offset: 0,
+                bytes_per_row: packed_bytes_per_row,
+                rows_per_image: packed_rows_per_image,
+            };
+
+            let format = hal_texture_format(texture.format());
+            let Some(texture) = texture.hal() else {
+                return Some(DeviceError::internal(
+                    "queue write texture has no HAL texture",
+                ));
+            };
+            let copy = HalCopy::BufferToTexture(HalBufferTextureCopy {
+                buffer: staging,
+                buffer_layout,
+                texture,
+                format,
+                aspect: hal_texture_aspect(aspect),
+                mip_level,
+                origin: hal_origin(origin),
+                extent: hal_extent(write_size),
+            });
+            return self
+                .inner
+                .hal
+                .submit_copies(&[copy])
+                .err()
+                .map(|error| DeviceError::internal(error.to_string()));
+        }
+
+        // Fast path: layout is already backend-representable; copy verbatim.
+        let staging = match device.create_buffer(
             data_size,
             HalBufferUsage {
                 copy_src: true,
                 ..HalBufferUsage::default()
             },
-        );
+        ) {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                let kind = match error {
+                    yawgpu_hal::HalError::OutOfMemory { .. } => ErrorKind::OutOfMemory,
+                    _ => ErrorKind::Internal,
+                };
+                return Some(DeviceError::new(kind, error.to_string()));
+            }
+        };
         if let Err(error) = staging.write(0, data) {
             return Some(DeviceError::internal(error.to_string()));
         }
@@ -326,6 +464,67 @@ fn push_subpass_resource_textures(
             textures.push(resolve_target.texture());
         }
     }
+}
+
+/// Repacks a caller-strided texel-copy source into a tightly-packed buffer.
+///
+/// The caller's buffer may have an arbitrary `bytes_per_row` (no alignment rule
+/// for `wgpuQueueWriteTexture`). Vulkan's `bufferRowLength` is expressed in
+/// texels, so a stride that is not a multiple of the per-aspect block size is
+/// not representable. This function copies each row individually from the source
+/// into a new `Vec<u8>` with stride exactly `row_bytes`, discarding any
+/// inter-row and inter-image padding.
+///
+/// All source ranges are guaranteed in-bounds by the preceding call to
+/// `validate_queue_write_texture`, but we use checked slicing for defence in
+/// depth rather than panicking.
+pub(crate) fn repack_texel_rows(
+    data: &[u8],
+    src_offset: u64,
+    src_bytes_per_row: u64,
+    src_rows_per_image: u64,
+    row_bytes: u64,
+    height_blocks: u64,
+    depth: u64,
+) -> Result<Vec<u8>, String> {
+    let total = row_bytes
+        .checked_mul(height_blocks)
+        .and_then(|n| n.checked_mul(depth))
+        .ok_or_else(|| "repack_texel_rows: output size overflows u64".to_owned())?;
+    let total_usize = usize::try_from(total)
+        .map_err(|_| "repack_texel_rows: output size overflows usize".to_owned())?;
+    let row_bytes_usize = usize::try_from(row_bytes)
+        .map_err(|_| "repack_texel_rows: row_bytes overflows usize".to_owned())?;
+
+    let mut out = vec![0u8; total_usize];
+    for d in 0..depth {
+        for r in 0..height_blocks {
+            let src_start = src_offset
+                .checked_add(d.checked_mul(src_rows_per_image).ok_or_else(|| {
+                    "repack_texel_rows: source offset overflows u64".to_owned()
+                })?)
+                .and_then(|n| n.checked_mul(src_bytes_per_row))
+                .and_then(|n| n.checked_add(r.checked_mul(src_bytes_per_row)?))
+                .ok_or_else(|| "repack_texel_rows: source offset overflows u64".to_owned())?;
+            let src_start_usize = usize::try_from(src_start)
+                .map_err(|_| "repack_texel_rows: source offset overflows usize".to_owned())?;
+            let src_end_usize = src_start_usize
+                .checked_add(row_bytes_usize)
+                .ok_or_else(|| "repack_texel_rows: source end overflows usize".to_owned())?;
+            let src_row = data
+                .get(src_start_usize..src_end_usize)
+                .ok_or_else(|| "repack_texel_rows: source slice out of bounds".to_owned())?;
+
+            let dst_start = (d * height_blocks + r) * row_bytes;
+            let dst_start_usize = usize::try_from(dst_start)
+                .map_err(|_| "repack_texel_rows: destination offset overflows usize".to_owned())?;
+            let dst_end_usize = dst_start_usize
+                .checked_add(row_bytes_usize)
+                .ok_or_else(|| "repack_texel_rows: destination end overflows usize".to_owned())?;
+            out[dst_start_usize..dst_end_usize].copy_from_slice(src_row);
+        }
+    }
+    Ok(out)
 }
 
 fn hal_buffer_texture_layout(
@@ -2246,6 +2445,178 @@ fn fs() -> @location(0) vec4<f32> {
         assert!(matches!(
             hal_command_execution(&CommandExecution::BufferClear(clear)),
             Some(HalCopy::BufferClear(clear)) if clear.offset == 4 && clear.size == 8
+        ));
+    }
+
+    // --- repack_texel_rows unit tests ---
+
+    #[test]
+    fn repack_texel_rows_two_rows_depth_one_strips_padding() {
+        // 2 rows, depth=1, row_bytes=8, src stride=257 (non-block-aligned).
+        // Source layout: [row0(8 bytes) | padding(249 bytes)] [row1(8 bytes)]
+        // Total source consumed: offset(0) + 257 + 8 = 265 bytes.
+        let mut data = vec![0u8; 265];
+        // Fill row0 with 0x01, row1 with 0x02.
+        data[..8].fill(0x01);
+        data[257..265].fill(0x02);
+        let result = repack_texel_rows(
+            &data,
+            /*src_offset=*/ 0,
+            /*src_bytes_per_row=*/ 257,
+            /*src_rows_per_image=*/ 2,
+            /*row_bytes=*/ 8,
+            /*height_blocks=*/ 2,
+            /*depth=*/ 1,
+        )
+        .expect("repack should succeed");
+
+        assert_eq!(result.len(), 16);
+        assert_eq!(&result[..8], &[0x01; 8]);
+        assert_eq!(&result[8..], &[0x02; 8]);
+    }
+
+    #[test]
+    fn repack_texel_rows_depth_two_skips_image_padding() {
+        // 2 images, 2 rows each, row_bytes=4, src stride=8, rows_per_image=3
+        // (i.e. one row of padding between images).
+        // Image 0: row0=[0x01;4] + pad(4), row1=[0x02;4] + pad(4), image-pad-row=[0xFF;4] + pad(4)
+        // Image 1: row0=[0x03;4] + pad(4), row1=[0x04;4] + pad(4)
+        // Total source: offset(0) + 3*8 + 2*8 = 40 bytes.
+        let mut data = vec![0u8; 40];
+        // Image 0 row 0
+        data[0..4].fill(0x01);
+        // Image 0 row 1
+        data[8..12].fill(0x02);
+        // Image 0 padding row (bytes 16..24) left as 0.
+        // Image 1 row 0 starts at offset 3*8=24
+        data[24..28].fill(0x03);
+        // Image 1 row 1 at offset 24+8=32
+        data[32..36].fill(0x04);
+
+        let result = repack_texel_rows(
+            &data,
+            /*src_offset=*/ 0,
+            /*src_bytes_per_row=*/ 8,
+            /*src_rows_per_image=*/ 3,
+            /*row_bytes=*/ 4,
+            /*height_blocks=*/ 2,
+            /*depth=*/ 2,
+        )
+        .expect("repack should succeed");
+
+        // Output: image0 row0 + image0 row1 + image1 row0 + image1 row1 = 4*4 = 16 bytes.
+        assert_eq!(result.len(), 16);
+        assert_eq!(&result[0..4], &[0x01; 4]);
+        assert_eq!(&result[4..8], &[0x02; 4]);
+        assert_eq!(&result[8..12], &[0x03; 4]);
+        assert_eq!(&result[12..16], &[0x04; 4]);
+    }
+
+    // --- write_texture with unaligned bytes_per_row integration tests ---
+
+    /// Creates a 2x2 rgba8unorm COPY_DST texture on the noop device.
+    fn noop_2x2_rgba8_texture(device: &Device) -> Texture {
+        device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn write_texture_unaligned_bytes_per_row_succeeds_on_noop() {
+        // rgba8unorm: block_size=4, so bytes_per_row=257 is not 4-aligned.
+        // 2 rows need bytes_per_row specified. Source has stride 257 and 8 final bytes.
+        // Data must satisfy: offset(0) + (height_blocks-1)*bpr + row_bytes
+        //   = 0 + 1*257 + 8 = 265 bytes.
+        let device = noop_device();
+        let queue = device.queue();
+        let texture = noop_2x2_rgba8_texture(&device);
+        let data = vec![7_u8; 265];
+
+        let error = queue.write_texture(QueueTextureWrite {
+            device: device.hal(),
+            texture: &texture,
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: 0 },
+            write_size: Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+            },
+            aspect: TextureAspect::All,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(257),
+                rows_per_image: None,
+            },
+            data: &data,
+        });
+        // Must succeed: no error on noop backend.
+        assert_eq!(error, None);
+
+        // On the noop HAL the submitted copy should carry the packed layout:
+        // offset=0, bytes_per_row=8 (2 texels * 4 bytes), rows_per_image=2.
+        let submitted = match queue.hal() {
+            HalQueue::Noop(q) => q.submitted_copies(),
+            _ => panic!("expected Noop queue"),
+        };
+        assert!(matches!(
+            submitted.as_slice(),
+            [HalCopy::BufferToTexture(copy)]
+                if copy.buffer_layout.offset == 0
+                    && copy.buffer_layout.bytes_per_row == 8
+                    && copy.buffer_layout.rows_per_image == 2
+        ));
+    }
+
+    #[test]
+    fn write_texture_aligned_bytes_per_row_uses_verbatim_path() {
+        // bytes_per_row=16 is 4-aligned (block_size=4): fast path, layout unchanged.
+        let device = noop_device();
+        let queue = device.queue();
+        let texture = noop_2x2_rgba8_texture(&device);
+        let data = vec![5_u8; 32]; // offset(0) + 1*16 + 8 = 24; 32 ≥ 24.
+
+        let error = queue.write_texture(QueueTextureWrite {
+            device: device.hal(),
+            texture: &texture,
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: 0 },
+            write_size: Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+            },
+            aspect: TextureAspect::All,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(16),
+                rows_per_image: None,
+            },
+            data: &data,
+        });
+        assert_eq!(error, None);
+
+        let submitted = match queue.hal() {
+            HalQueue::Noop(q) => q.submitted_copies(),
+            _ => panic!("expected Noop queue"),
+        };
+        // Verbatim path: layout forwarded as given.
+        assert!(matches!(
+            submitted.as_slice(),
+            [HalCopy::BufferToTexture(copy)]
+                if copy.buffer_layout.offset == 0
+                    && copy.buffer_layout.bytes_per_row == 16
+                    && copy.buffer_layout.rows_per_image == 2
         ));
     }
 }

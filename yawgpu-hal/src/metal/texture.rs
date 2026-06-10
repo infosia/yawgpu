@@ -163,9 +163,13 @@ pub(super) fn create_texture(
         texture_usage |= MTLTextureUsage::PixelFormatView;
     }
     texture_descriptor.setUsage(texture_usage);
-    let texture = device
-        .newTextureWithDescriptor(&texture_descriptor)
-        .ok_or_else(|| texture_error("texture allocation failed"))?;
+    let texture =
+        device
+            .newTextureWithDescriptor(&texture_descriptor)
+            .ok_or(HalError::OutOfMemory {
+                backend: BACKEND,
+                resource: "texture",
+            })?;
     Ok((texture, bytes_per_pixel))
 }
 

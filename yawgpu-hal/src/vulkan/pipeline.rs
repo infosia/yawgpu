@@ -1980,22 +1980,26 @@ mod tests {
             group: 0,
             binding: 1,
             metal_index: 0,
-            texture: HalTexture::Noop(device.create_texture(&HalTextureDescriptor {
-                dimension: HalTextureDimension::D2,
-                format,
-                width: 4,
-                height: 4,
-                depth_or_array_layers: 3,
-                mip_level_count: 5,
-                sample_count: 1,
-                usage: HalTextureUsage {
-                    copy_src: false,
-                    copy_dst: false,
-                    texture_binding: true,
-                    storage_binding: false,
-                    render_attachment: false,
-                },
-            })),
+            texture: HalTexture::Noop(
+                device
+                    .create_texture(&HalTextureDescriptor {
+                        dimension: HalTextureDimension::D2,
+                        format,
+                        width: 4,
+                        height: 4,
+                        depth_or_array_layers: 3,
+                        mip_level_count: 5,
+                        sample_count: 1,
+                        usage: HalTextureUsage {
+                            copy_src: false,
+                            copy_dst: false,
+                            texture_binding: true,
+                            storage_binding: false,
+                            render_attachment: false,
+                        },
+                    })
+                    .expect("Noop texture allocation should succeed"),
+            ),
             format,
             dimension: HalTextureViewDimension::D2,
             base_mip_level: 2,

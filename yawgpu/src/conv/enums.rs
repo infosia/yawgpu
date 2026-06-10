@@ -28,6 +28,14 @@ impl DeviceLostCallbackInfo {
     }
 }
 
+impl UncapturedErrorCallbackInfo {
+    /// Returns true when this object has the requested callback.
+    #[must_use]
+    pub fn has_callback(self) -> bool {
+        self.callback.is_some()
+    }
+}
+
 /// Converts error filter into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_error_filter(value: native::WGPUErrorFilter) -> Option<core::ErrorFilter> {

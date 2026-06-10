@@ -193,17 +193,18 @@ impl GlesDevice {
     }
 
     /// Allocates a buffer of the given size on this device.
-    #[must_use]
-    pub fn create_buffer(&self, size: u64, usage: HalBufferUsage) -> GlesBuffer {
+    pub fn create_buffer(&self, size: u64, usage: HalBufferUsage) -> Result<GlesBuffer, HalError> {
         self.inner.allocation_increment();
-        GlesBuffer::new(Arc::clone(&self.inner), size, usage)
+        Ok(GlesBuffer::new(Arc::clone(&self.inner), size, usage))
     }
 
     /// Creates a texture matching the given descriptor.
-    #[must_use]
-    pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> GlesTexture {
+    pub fn create_texture(
+        &self,
+        descriptor: &HalTextureDescriptor,
+    ) -> Result<GlesTexture, HalError> {
         self.inner.allocation_increment();
-        GlesTexture::new(Arc::clone(&self.inner), descriptor)
+        Ok(GlesTexture::new(Arc::clone(&self.inner), descriptor))
     }
 
     /// Creates a sampler matching the given descriptor.

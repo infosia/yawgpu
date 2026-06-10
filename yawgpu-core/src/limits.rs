@@ -102,7 +102,7 @@ impl Limits {
         max_compute_workgroup_size_y: 128,
         max_compute_workgroup_size_z: 64,
         max_compute_workgroups_per_dimension: 65_535,
-        max_immediate_size: 64,
+        max_immediate_size: 0,
     };
 
     /// Validates required limits and returns a descriptive error on failure.
@@ -290,6 +290,19 @@ mod tests {
         assert_eq!(
             supported.validate_required_limits(Some(&required)),
             Err("required max_storage_buffer_binding_size exceeds max_buffer_size".to_owned())
+        );
+    }
+
+    #[test]
+    fn default_limits_advertise_no_immediate_data_support() {
+        let supported = Limits::DEFAULT;
+        assert_eq!(supported.max_immediate_size, 0);
+
+        let mut required = supported;
+        required.max_immediate_size = 4;
+        assert_eq!(
+            supported.validate_required_limits(Some(&required)),
+            Err("required limit max_immediate_size=4 exceeds supported 0".to_owned())
         );
     }
 }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use yawgpu_hal::{HalExtent3d, HalOrigin3d};
 
 use crate::buffer::*;
+use crate::device::Device;
 use crate::extent::*;
 use crate::format::*;
 use crate::texture::*;
@@ -24,6 +25,8 @@ pub struct TexelCopyBufferLayout {
 pub struct TexelCopyBufferInfo {
     /// Buffer.
     pub buffer: Arc<Buffer>,
+    /// Device that owns the buffer, when known by the API boundary.
+    pub device: Option<Device>,
     /// Layout.
     pub layout: TexelCopyBufferLayout,
 }

@@ -507,35 +507,36 @@ impl HalDevice {
     }
 
     /// Allocates a buffer of the given size on this device.
-    #[must_use]
-    pub fn create_buffer(&self, size: u64, usage: HalBufferUsage) -> HalBuffer {
-        match self {
+    pub fn create_buffer(&self, size: u64, usage: HalBufferUsage) -> Result<HalBuffer, HalError> {
+        Ok(match self {
             #[cfg(feature = "noop")]
-            Self::Noop(device) => HalBuffer::Noop(device.create_buffer(size, usage)),
+            Self::Noop(device) => HalBuffer::Noop(device.create_buffer(size, usage)?),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(device) => HalBuffer::Vulkan(device.create_buffer(size, usage)),
+            Self::Vulkan(device) => HalBuffer::Vulkan(device.create_buffer(size, usage)?),
             #[cfg(feature = "metal")]
-            Self::Metal(device) => HalBuffer::Metal(device.create_buffer(size, usage)),
+            Self::Metal(device) => HalBuffer::Metal(device.create_buffer(size, usage)?),
             #[cfg(feature = "gles")]
-            Self::Gles(device) => HalBuffer::Gles(device.create_buffer(size, usage)),
-        }
+            Self::Gles(device) => HalBuffer::Gles(device.create_buffer(size, usage)?),
+        })
     }
 
     /// Creates a texture matching the given descriptor.
-    #[must_use]
-    pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> HalTexture {
+    pub fn create_texture(
+        &self,
+        descriptor: &HalTextureDescriptor,
+    ) -> Result<HalTexture, HalError> {
         #[cfg(not(any(feature = "metal", feature = "vulkan", feature = "gles")))]
         let _ = descriptor;
-        match self {
+        Ok(match self {
             #[cfg(feature = "noop")]
-            Self::Noop(device) => HalTexture::Noop(device.create_texture(descriptor)),
+            Self::Noop(device) => HalTexture::Noop(device.create_texture(descriptor)?),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(device) => HalTexture::Vulkan(device.create_texture(descriptor)),
+            Self::Vulkan(device) => HalTexture::Vulkan(device.create_texture(descriptor)?),
             #[cfg(feature = "metal")]
-            Self::Metal(device) => HalTexture::Metal(device.create_texture(descriptor)),
+            Self::Metal(device) => HalTexture::Metal(device.create_texture(descriptor)?),
             #[cfg(feature = "gles")]
-            Self::Gles(device) => HalTexture::Gles(device.create_texture(descriptor)),
-        }
+            Self::Gles(device) => HalTexture::Gles(device.create_texture(descriptor)?),
+        })
     }
 
     /// Creates a query set matching the given kind and count.
@@ -1362,7 +1363,7 @@ mod tests {
     #[test]
     fn hal_device_create_buffer_noop_records_requested_size() -> Result<(), HalError> {
         let device = noop_device()?;
-        let buffer = device.create_buffer(256, HalBufferUsage::default());
+        let buffer = device.create_buffer(256, HalBufferUsage::default())?;
 
         assert!(matches!(buffer, HalBuffer::Noop(_)));
         assert_eq!(buffer.size(), 256);
@@ -1373,7 +1374,7 @@ mod tests {
     fn hal_device_create_texture_noop_returns_texture_and_increments_allocations(
     ) -> Result<(), HalError> {
         let device = noop_device()?;
-        let texture = device.create_texture(&texture_descriptor());
+        let texture = device.create_texture(&texture_descriptor())?;
 
         assert!(matches!(texture, HalTexture::Noop(_)));
         assert_eq!(device.allocation_count(), 1);
@@ -1478,9 +1479,9 @@ mod tests {
     fn hal_queue_submit_copies_noop_accepts_empty_and_buffer_copy() -> Result<(), HalError> {
         let device = noop_device()?;
         let queue = device.queue();
-        let source = device.create_buffer(8, HalBufferUsage::default());
-        let destination = device.create_buffer(8, HalBufferUsage::default());
-        let clear_buffer = device.create_buffer(8, HalBufferUsage::default());
+        let source = device.create_buffer(8, HalBufferUsage::default())?;
+        let destination = device.create_buffer(8, HalBufferUsage::default())?;
+        let clear_buffer = device.create_buffer(8, HalBufferUsage::default())?;
         let copy = HalCopy::Buffer(HalBufferCopy {
             source,
             source_offset: 0,
@@ -1503,7 +1504,7 @@ mod tests {
         let device = noop_device()?;
         let queue = device.queue();
         let query_set = device.create_query_set(HalQueryKind::Occlusion, 2)?;
-        let destination = device.create_buffer(16, HalBufferUsage::default());
+        let destination = device.create_buffer(16, HalBufferUsage::default())?;
 
         assert_eq!(query_set.count(), 2);
         destination.write(0, &[1; 16])?;
@@ -1524,7 +1525,7 @@ mod tests {
     fn hal_queue_submit_copies_noop_records_depth_only_render_pass() -> Result<(), HalError> {
         let device = noop_device()?;
         let queue = device.queue();
-        let depth = device.create_texture(&depth_texture_descriptor());
+        let depth = device.create_texture(&depth_texture_descriptor())?;
 
         queue.submit_copies(&[HalCopy::RenderPass(HalRenderPass {
             pipeline: None,
@@ -1579,7 +1580,7 @@ mod tests {
     #[test]
     fn hal_buffer_size_noop_matches_creation_size() -> Result<(), HalError> {
         let device = noop_device()?;
-        let buffer = device.create_buffer(4096, HalBufferUsage::default());
+        let buffer = device.create_buffer(4096, HalBufferUsage::default())?;
 
         assert_eq!(buffer.size(), 4096);
         Ok(())
@@ -1588,7 +1589,7 @@ mod tests {
     #[test]
     fn hal_buffer_write_noop_accepts_empty_and_non_empty_data() -> Result<(), HalError> {
         let device = noop_device()?;
-        let buffer = device.create_buffer(16, HalBufferUsage::default());
+        let buffer = device.create_buffer(16, HalBufferUsage::default())?;
 
         buffer.write(0, &[])?;
         buffer.write(4, &[1, 2, 3, 4])
@@ -1597,7 +1598,7 @@ mod tests {
     #[test]
     fn hal_buffer_noop_round_trips_written_bytes() -> Result<(), HalError> {
         let device = noop_device()?;
-        let buffer = device.create_buffer(16, HalBufferUsage::default());
+        let buffer = device.create_buffer(16, HalBufferUsage::default())?;
 
         assert_eq!(buffer.read(0, 0)?, Vec::<u8>::new());
         assert_eq!(buffer.read(4, 4)?, vec![0, 0, 0, 0]);
@@ -1609,7 +1610,7 @@ mod tests {
     #[test]
     fn hal_buffer_mapped_ptr_noop_returns_none() -> Result<(), HalError> {
         let device = noop_device()?;
-        let buffer = device.create_buffer(16, HalBufferUsage::default());
+        let buffer = device.create_buffer(16, HalBufferUsage::default())?;
 
         assert!(buffer.mapped_ptr().is_none());
         Ok(())

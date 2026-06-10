@@ -752,27 +752,35 @@ mod tests {
 
     fn depth_texture() -> HalTexture {
         let device = noop::NoopDevice::new();
-        HalTexture::Noop(device.create_texture(&HalTextureDescriptor {
-            dimension: HalTextureDimension::D2,
-            format: HalTextureFormat::Depth32Float,
-            width: 4,
-            height: 4,
-            depth_or_array_layers: 1,
-            mip_level_count: 1,
-            sample_count: 1,
-            usage: HalTextureUsage {
-                copy_src: false,
-                copy_dst: false,
-                texture_binding: false,
-                storage_binding: false,
-                render_attachment: true,
-            },
-        }))
+        HalTexture::Noop(
+            device
+                .create_texture(&HalTextureDescriptor {
+                    dimension: HalTextureDimension::D2,
+                    format: HalTextureFormat::Depth32Float,
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    usage: HalTextureUsage {
+                        copy_src: false,
+                        copy_dst: false,
+                        texture_binding: false,
+                        storage_binding: false,
+                        render_attachment: true,
+                    },
+                })
+                .expect("Noop texture allocation should succeed"),
+        )
     }
 
     fn noop_buffer(size: u64) -> HalBuffer {
         let device = noop::NoopDevice::new();
-        HalBuffer::Noop(device.create_buffer(size, HalBufferUsage::default()))
+        HalBuffer::Noop(
+            device
+                .create_buffer(size, HalBufferUsage::default())
+                .expect("Noop buffer allocation should succeed"),
+        )
     }
 
     #[test]

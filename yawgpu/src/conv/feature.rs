@@ -79,6 +79,17 @@ pub struct DeviceLostCallbackInfo {
     pub userdata2: usize,
 }
 
+/// Stores uncaptured error callback metadata.
+#[derive(Debug, Clone, Copy)]
+pub struct UncapturedErrorCallbackInfo {
+    /// Callback.
+    pub callback: native::WGPUUncapturedErrorCallback,
+    /// Userdata1.
+    pub userdata1: usize,
+    /// Userdata2.
+    pub userdata2: usize,
+}
+
 /// Converts device lost callback info into the corresponding yawgpu representation.
 #[must_use]
 pub fn map_device_lost_callback_info(
@@ -86,6 +97,18 @@ pub fn map_device_lost_callback_info(
 ) -> DeviceLostCallbackInfo {
     DeviceLostCallbackInfo {
         mode: value.mode,
+        callback: value.callback,
+        userdata1: value.userdata1 as usize,
+        userdata2: value.userdata2 as usize,
+    }
+}
+
+/// Converts uncaptured error callback info into the corresponding yawgpu representation.
+#[must_use]
+pub fn map_uncaptured_error_callback_info(
+    value: native::WGPUUncapturedErrorCallbackInfo,
+) -> UncapturedErrorCallbackInfo {
+    UncapturedErrorCallbackInfo {
         callback: value.callback,
         userdata1: value.userdata1 as usize,
         userdata2: value.userdata2 as usize,

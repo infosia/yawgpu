@@ -159,8 +159,12 @@ mod tests {
     #[cfg(feature = "metal")]
     fn metal_queue_submit_copies_accepts_buffer_copy() {
         let device = metal_device();
-        let source = device.create_buffer(4, HalBufferUsage::default());
-        let destination = device.create_buffer(4, HalBufferUsage::default());
+        let source = device
+            .create_buffer(4, HalBufferUsage::default())
+            .expect("Metal source buffer allocation should succeed");
+        let destination = device
+            .create_buffer(4, HalBufferUsage::default())
+            .expect("Metal destination buffer allocation should succeed");
         source.write(0, &[1, 2, 3, 4]).expect("write source");
         device
             .queue()

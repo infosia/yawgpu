@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use yawgpu_hal::{HalDevice, HalQueryKind};
+use yawgpu_hal::{HalDevice, HalError, HalQueryKind};
 
 use crate::adapter::*;
 use crate::bind_group::*;
@@ -189,6 +189,11 @@ impl Device {
         self.inner.error_sink.lock().uncaptured_error_callback = callback.map(|f| Arc::new(f) as _);
     }
 
+    /// Clears the uncaptured error callback.
+    pub fn clear_uncaptured_error_callback(&self) {
+        self.inner.error_sink.lock().uncaptured_error_callback = None;
+    }
+
     /// Pushes an error scope with the given filter onto the device's error-scope stack.
     pub fn push_error_scope(&self, filter: ErrorFilter) {
         self.inner.error_sink.lock().scopes.push(ErrorScope {
@@ -244,11 +249,17 @@ impl Device {
         let hal = if is_error {
             None
         } else {
-            Some(
-                self.inner
-                    .hal
-                    .create_buffer(descriptor.size, hal_buffer_usage(descriptor.usage)),
-            )
+            match self
+                .inner
+                .hal
+                .create_buffer(descriptor.size, hal_buffer_usage(descriptor.usage))
+            {
+                Ok(hal) => Some(hal),
+                Err(error) => {
+                    self.dispatch_hal_allocation_error(error);
+                    return Buffer::new(descriptor, None, true);
+                }
+            }
         };
 
         Buffer::new(descriptor, hal, is_error)
@@ -269,14 +280,28 @@ impl Device {
         let hal = if is_error {
             None
         } else {
-            Some(
-                self.inner
-                    .hal
-                    .create_texture(&hal_texture_descriptor(&descriptor)),
-            )
+            match self
+                .inner
+                .hal
+                .create_texture(&hal_texture_descriptor(&descriptor))
+            {
+                Ok(hal) => Some(hal),
+                Err(error) => {
+                    self.dispatch_hal_allocation_error(error);
+                    return Texture::new(descriptor, None, true, self.features());
+                }
+            }
         };
 
         Texture::new(descriptor, hal, is_error, self.features())
+    }
+
+    fn dispatch_hal_allocation_error(&self, error: HalError) {
+        let kind = match error {
+            HalError::OutOfMemory { .. } => ErrorKind::OutOfMemory,
+            _ => ErrorKind::Internal,
+        };
+        self.dispatch_error(kind, error.to_string());
     }
 
     /// Validates the descriptor and creates a transient attachment on this device.
@@ -477,7 +502,7 @@ impl Device {
         if self.is_lost() {
             CommandEncoder::new_error("command encoder device is lost")
         } else {
-            CommandEncoder::new(self.features(), self.limits())
+            CommandEncoder::new(Some(self.clone()), self.features(), self.limits())
         }
     }
 
@@ -771,6 +796,35 @@ mod tests {
     }
 
     #[test]
+    fn device_allocation_errors_do_not_misclassify_noop_success_or_validation() {
+        let device = noop_device();
+
+        device.push_error_scope(ErrorFilter::OutOfMemory);
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+        let oom_scope = device.pop_error_scope().expect("scope should exist");
+        assert!(!buffer.is_error());
+        assert_eq!(oom_scope, None);
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let invalid = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: device.limits().max_buffer_size + 1,
+            mapped_at_creation: false,
+        });
+        let validation = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid buffer should be scoped");
+        assert!(invalid.is_error());
+        assert_eq!(validation.kind, ErrorKind::Validation);
+        assert_eq!(validation.message, "buffer size exceeds device limit");
+    }
+
+    #[test]
     fn device_create_texture_happy_path_and_invalid_size_scope_error() {
         let device = noop_device();
         let before = device.allocation_count();
@@ -1028,6 +1082,30 @@ mod tests {
             callback_count.fetch_add(1, Ordering::Relaxed);
         }));
         device.dispatch_error(ErrorKind::Internal, "uncaptured internal error");
+
+        assert_eq!(uncaptured_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn clear_uncaptured_error_callback_prevents_later_dispatch() {
+        let instance = Instance::new_noop();
+        let adapter = instance
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter should exist");
+        let device = adapter
+            .create_device(None, &[], "", "")
+            .expect("Noop device should be created");
+        let uncaptured_count = Arc::new(AtomicUsize::new(0));
+        let callback_count = uncaptured_count.clone();
+
+        device.set_uncaptured_error_callback(Some(move |_| {
+            callback_count.fetch_add(1, Ordering::Relaxed);
+        }));
+        device.dispatch_error(ErrorKind::Internal, "before clear");
+        device.clear_uncaptured_error_callback();
+        device.dispatch_error(ErrorKind::Internal, "after clear");
 
         assert_eq!(uncaptured_count.load(Ordering::Relaxed), 1);
     }

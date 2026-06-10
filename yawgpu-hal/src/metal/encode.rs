@@ -1299,7 +1299,9 @@ mod tests {
         let device = metal_device();
         let mut descriptor = texture_descriptor();
         descriptor.sample_count = 4;
-        let texture = device.create_texture(&descriptor);
+        let texture = device
+            .create_texture(&descriptor)
+            .expect("Metal texture allocation should succeed");
         let binding = HalBoundTexture {
             group: 0,
             binding: 0,

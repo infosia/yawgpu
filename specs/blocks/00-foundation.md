@@ -108,8 +108,16 @@ from a later phase; tracked here but ported in that phase, not Phase 1.
   features ⇒ device `HasFeature(CoreFeaturesAndLimits)==false`. :421. ☑ (P1.2b)
 - **R13** Compat adapter, explicit `CoreFeaturesAndLimits` ⇒ device
   `HasFeature(CoreFeaturesAndLimits)==true`. :400. ☑ (P1.2b)
-- **R14** `maxImmediateSize`: requested < supported ⇒ device gets the
-  supported max (always-max limit). `AlwaysMax` :450. ☑ (P1.2a)
+- **R14** `maxImmediateSize`: always-max limit — the device gets the
+  supported max regardless of the requested value. `AlwaysMax` :450. ☑ (P1.2a)
+  **CTS finding F-064 (2026-06-10):** the supported max is **0** — yawgpu does
+  **not** support immediate data (push-constant-style `var<immediate>`), because
+  the naga WGSL frontend cannot compile that address space. Advertising
+  `maxImmediateSize=0` is the honest signal (`supportsImmediateData()` in the CTS
+  is `maxImmediateSize != 0`, so the `pipeline,immediates` test feature-gates off,
+  exactly as on the CTS's Dawn build). This mirrors the F-060 posture: advertise
+  the capability yawgpu actually has, never a value it cannot honour. See
+  `specs/tracking/cts-coverage.md` → F-064.
 
 ### LabelTests.cpp — Phase 1 subset
 
@@ -153,7 +161,42 @@ from a later phase; tracked here but ported in that phase, not Phase 1.
 ## Error model
 
 Per-device error sink (Phase 0): uncaptured-error callback + error-scope
-stack; `dispatch_error` → top scope else uncaptured.
+stack; `dispatch_error` → top scope else uncaptured. The error `kind`
+(`Validation` / `OutOfMemory` / `Internal`) selects which `popErrorScope`
+filter catches it; a mismatched filter lets the error propagate to a parent
+scope or fire as uncaptured.
+
+**CTS finding F-065 (2026-06-10) — out-of-memory classification.** A
+descriptor that is *valid* WebGPU (within all advertised limits) but whose
+backing allocation the GPU cannot satisfy must surface as a
+**`GPUOutOfMemoryError`** (`ErrorKind::OutOfMemory`), caught only by an
+`'out-of-memory'`-filtered scope — never as a validation error. yawgpu
+previously emitted only `Validation`/`Internal` and never `OutOfMemory`, so an
+OOM-triggering `createTexture`/`createBuffer` was misclassified. The fix makes
+the HAL allocation calls (`HalDevice::create_buffer`/`create_texture`) fallible
+(`Result<_, HalError>`, new `HalError::OutOfMemory`); `Device::create_buffer`/
+`create_texture` map an allocation failure to `dispatch_error(ErrorKind::
+OutOfMemory, …)` and return an error resource (other `HalError`s map to
+`Internal`). Validation still runs first — only descriptors that pass validation
+reach the HAL and can OOM. See `specs/tracking/cts-coverage.md` → F-065.
+
+Two further rules from the F-065 resolution:
+- **Canonical uncaptured-error callback.** `wgpuAdapterRequestDevice` installs
+  `WGPUDeviceDescriptor.uncapturedErrorCallbackInfo` (mirrors the device-lost
+  wiring); an error whose kind matches no active scope filter fires it with the
+  mapped `WGPUErrorType`. The callback's lifetime is tied to the FFI device
+  handle: `WGPUDeviceImpl::Drop` clears the core sink
+  (`Device::clear_uncaptured_error_callback`) so a longer-lived queue/encoder
+  (which holds `Arc<core::Device>`, not the FFI handle) can never fire a
+  dangling callback after `wgpuDeviceRelease` (UAF found in review; regression
+  test `wgpuDeviceRelease_clears_descriptor_uncaptured_error_callback`).
+- **Vulkan heap-size guard.** An allocation whose `VkMemoryRequirements.size`
+  exceeds the capacity of the chosen memory type's heap can never genuinely
+  succeed; the Vulkan HAL returns `HalError::OutOfMemory` before
+  `vkAllocateMemory`. This is the driver-grade check the Vulkan spec expects and
+  compensates for MoltenVK, which defers the real Metal allocation and returns
+  `VK_SUCCESS` for impossible sizes (no artificial thresholds — genuine heap
+  capacity only).
 
 ### Device-lost channel (design decision — P1.3)
 
@@ -182,7 +225,9 @@ stack; `dispatch_error` → top scope else uncaptured.
 - The Noop adapter exposes **one** synthetic adapter whose **supported
   limits = the WebGPU spec default limits** (Dawn's `v1` default column in
   `dawn/src/dawn/native/Limits.cpp`, e.g. `maxBindGroups=4`,
-  `minUniformBufferOffsetAlignment=256`, `maxImmediateSize` default 64).
+  `minUniformBufferOffsetAlignment=256`). **`maxImmediateSize` = 0** — immediate
+  data is opt-in and yawgpu cannot compile `var<immediate>` shaders, so the
+  honest supported max is 0 (CTS finding F-064; was 64).
 - Limit classification follows Dawn's `Limits.cpp` macro tags:
   - **Maximum** (higher-is-better): requested must be ≤ supported, else
     RequestDevice `Error`. Effective device limit = `max(requested,
@@ -191,7 +236,8 @@ stack; `dispatch_error` → top scope else uncaptured.
   - **Alignment** (lower-is-better): requested must be ≥ supported, else
     `Error`; effective = `min(requested, default)` analog (R4).
   - **`maxImmediateSize`**: always set to the supported max regardless of
-    the requested value (R14, "always max").
+    the requested value (R14, "always max"). The supported max is **0**
+    (no immediate-data support — F-064), so the effective limit is always 0.
 - Core-vs-compat is selected by `WGPURequestAdapterOptions.featureLevel`
   (`WGPUFeatureLevel`: `Undefined=0`→Core, `Compatibility=1`, `Core=2`;
   webgpu.h:625, options:4138). The Noop adapter records the requested

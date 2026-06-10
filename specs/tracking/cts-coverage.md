@@ -1182,6 +1182,74 @@ never a reason to skip a CTS case.
   "extremely implementation-dependent and not defined in this header", and the `createBindGroup` port already
   treats external textures as N/A. This is a feature, not a validation fix — left for a user scope decision
   (implement external-texture support vs. mark the 2 cases N/A/skip in the port).
+- **External-CTS finding F-066 — RESOLVED (cross-HAL).**
+  `encoding,cmds,render,dynamic_state` `setViewport,xy_rect_contained_in_bounds` (2):
+  `validate_viewport_bounds` clamped the viewport rectangle to `maxTextureDimension2D`. The WebGPU/Dawn
+  rule is `maxViewportBounds = 2 × maxTextureDimension2D` with a **strict** lower bound: reject when
+  `x < -maxViewportBounds`, `y < -maxViewportBounds`, `x+width > maxViewportBounds−1`, or
+  `y+height > maxViewportBounds−1`, plus separate per-dimension `width/height ≤ maxTextureDimension2D`
+  checks (`pass.rs::validate_viewport_bounds`). An interim fix used `x <= -max_bounds` (non-strict) and
+  wrongly rejected the CTS `om=-2` boundary case (`x = -2*max` is valid) — caught in review and corrected.
+  **Verified:** `setViewport,xy_rect_contained_in_bounds` `pass=26 fail=0` on Metal AND Vulkan/MoltenVK.
+- **External-CTS finding F-064 — RESOLVED (cross-HAL; honest-limit fix).**
+  `pipeline,immediates` `pipeline_creation_immediate_size_mismatch` (4): yawgpu advertised
+  `maxImmediateSize = 64` but the naga WGSL frontend cannot compile `var<immediate>`, so the test's shader
+  became an error module and pipeline creation failed on the wrong rule. yawgpu does **not** support
+  immediate data — the honest supported max is **0** (`Limits::DEFAULT.max_immediate_size = 0`; the
+  always-max R14 rule now yields 0; `maxImmediateSize=UNDEFINED` maps to the 0 default). The CTS gates the
+  test on `maxImmediateSize != 0`, so it now **skips**, exactly as on the CTS's Dawn build. Same posture as
+  F-060: advertise the capability we actually have, never fake one. Spec: block 00 R14.
+  **Verified:** `pipeline,immediates` `skip=30 fail=0` on Metal AND Vulkan/MoltenVK.
+- **External-CTS finding F-067 — RESOLVED (cross-HAL; 3 sub-fixes + 1 unmasked HAL gap).**
+  `image_copy,buffer_related` (`bytes_per_row_alignment` + `buffer,device_mismatch`; Metal 15 / MoltenVK 8
+  observed originally):
+  - **(a) combined depth+stencil `aspect=All`:** a buffer copy/write of `depth24plus-stencil8` /
+    `depth32float-stencil8` is only legal one aspect at a time. Added the rejection to **both** paths:
+    `validate_buffer_texture_copy` (copyB2T/T2B) and `validate_queue_write_texture` (writeTexture — the
+    first fix round missed this path; 26 Metal cases stayed red until it was added).
+  - **(b) buffer device-mismatch:** `TexelCopyBufferInfo` now carries the owning `Device` (captured at the
+    FFI boundary, mirroring `BindGroupResource`), and `validate_buffer_texture_copy` rejects a buffer from
+    another device. The pre-existing **eager** FFI buffer-device check was removed — WebGPU defers encoder
+    validation errors to `finish()`, and the eager dispatch fired outside the CTS error scope (2 cases
+    surfaced as uncaptured errors until the eager check was removed in favour of the deferred core check).
+  - **(c) bytesPerRow 256-alignment** for copies was already enforced; no change.
+  - **Unmasked Vulkan HAL gap — writeTexture arbitrary row stride:** once F-065's uncaptured-error wiring
+    landed, 864 MoltenVK `bytes_per_row_alignment` WriteTexture cases surfaced a real Vulkan HAL defect
+    that had previously been silently swallowed: `wgpuQueueWriteTexture` permits an arbitrary (non
+    texel-aligned) `bytesPerRow`, but Vulkan's `VkBufferImageCopy.bufferRowLength` is in texels and cannot
+    represent it; the HAL rejected the copy at submit. Fixed twice over: single-block-row copies pass
+    `bufferRowLength = 0` (tightly packed; `vulkan/encode.rs::buffer_image_copy`), and
+    `Queue::write_texture` now **repacks** rows into a tightly-packed staging layout
+    (`queue.rs::repack_texel_rows`) whenever the caller's stride/offset is not texel-block-aligned, so
+    every backend receives a representable layout.
+  **Verified:** `image_copy,buffer_related` `pass=9065 fail=0` on Metal AND Vulkan/MoltenVK.
+- **External-CTS finding F-065 — RESOLVED (cross-HAL; error-model fix in 3 parts).**
+  `error_scope` (`simple`/`parent_scope`/`current_scope`; 7 observed originally): yawgpu never produced
+  `GPUOutOfMemoryError` and never fired the canonical uncaptured-error callback.
+  - **(1) OOM classification:** `HalDevice::create_buffer`/`create_texture` are now fallible
+    (`Result<_, HalError>`, new `HalError::OutOfMemory`); Metal maps nil
+    `newBufferWithLength`/`newTextureWithDescriptor` to OOM, Vulkan maps
+    `ERROR_OUT_OF_{DEVICE,HOST}_MEMORY` across create/allocate/bind, Noop/GLES stay `Ok`.
+    `Device::create_buffer/texture` route `HalError::OutOfMemory` → `ErrorKind::OutOfMemory`, other HAL
+    errors → `Internal`; validation still runs first. (This also replaced the old silent
+    `inner: None` degradation on Metal/Vulkan allocation failure with honest errors.)
+  - **(2) canonical uncaptured-error callback:** `wgpuAdapterRequestDevice` previously ignored
+    `WGPUDeviceDescriptor.uncapturedErrorCallbackInfo` (only the `testing_*` hook existed), so errors
+    escaping every scope fired nothing — all four `simple/different` cases failed. The descriptor callback
+    is now installed (mirroring the device-lost wiring). Review caught a **use-after-free** in the first
+    implementation (the closure captured a raw `WGPUDeviceImpl` pointer inside the longer-lived
+    `DeviceInner` sink; a surviving queue could fire it after `wgpuDeviceRelease`) — fixed by clearing the
+    sink callback in `WGPUDeviceImpl::Drop` (`Device::clear_uncaptured_error_callback`), with an FFI
+    lifetime regression test.
+  - **(3) MoltenVK heap-size guard:** on MoltenVK the CTS's 64 GiB OOM-trigger texture *succeeded* —
+    MoltenVK defers the real Metal allocation, so `vkCreateImage`/`vkAllocateMemory`/`vkBindImageMemory`
+    all return `VK_SUCCESS` and no error of any kind fired (12 MoltenVK cases). Added the driver-grade
+    guard the Vulkan spec expects: an allocation whose `VkMemoryRequirements.size` exceeds the capacity of
+    the chosen memory type's heap can never succeed → `HalError::OutOfMemory` before `vkAllocateMemory`
+    (`vulkan/{buffer,texture}.rs`, `memory_heap_size`). No artificial thresholds — genuine heap capacity only.
+  Regressions: `yawgpu/tests/e2e_metal_oom.rs` + `e2e_vulkan_oom.rs` (real GPU: a within-limits 64 GiB
+  texture yields `ErrorKind::OutOfMemory`, not Validation, no panic) — both green on the M2.
+  **Verified:** `error_scope` `pass=49 fail=0` on Metal AND Vulkan/MoltenVK.
 - **External-CTS api/operation finding F-032 — RESOLVED.**
   The T27 `image_copy` depth/stencil ports surfaced that yawgpu zeroed the depth/stencil
   aspect of buffer⇄texture copies — un-masked once F-031's gap-7 stopped rejecting them.

@@ -100,7 +100,9 @@ mod tests {
     #[ignore = "manual real Metal backend test"]
     #[cfg(feature = "metal")]
     fn metal_buffer_size_returns_created_size() {
-        let buffer = metal_device().create_buffer(32, HalBufferUsage::default());
+        let buffer = metal_device()
+            .create_buffer(32, HalBufferUsage::default())
+            .expect("Metal buffer allocation should succeed");
         assert_eq!(buffer.size(), 32);
     }
 
@@ -108,7 +110,9 @@ mod tests {
     #[ignore = "manual real Metal backend test"]
     #[cfg(feature = "metal")]
     fn metal_buffer_write_updates_mapped_memory() {
-        let buffer = metal_device().create_buffer(4, HalBufferUsage::default());
+        let buffer = metal_device()
+            .create_buffer(4, HalBufferUsage::default())
+            .expect("Metal buffer allocation should succeed");
         buffer.write(0, &[5, 6, 7, 8]).expect("write buffer");
         assert_eq!(buffer.read(0, 4).expect("read buffer"), [5, 6, 7, 8]);
     }
@@ -117,7 +121,9 @@ mod tests {
     #[ignore = "manual real Metal backend test"]
     #[cfg(feature = "metal")]
     fn metal_buffer_read_returns_written_bytes() {
-        let buffer = metal_device().create_buffer(4, HalBufferUsage::default());
+        let buffer = metal_device()
+            .create_buffer(4, HalBufferUsage::default())
+            .expect("Metal buffer allocation should succeed");
         buffer.write(1, &[9, 10]).expect("write buffer");
         assert_eq!(buffer.read(1, 2).expect("read buffer"), [9, 10]);
     }
@@ -126,7 +132,9 @@ mod tests {
     #[ignore = "manual real Metal backend test"]
     #[cfg(feature = "metal")]
     fn metal_buffer_mapped_ptr_returns_non_null_pointer() {
-        let buffer = metal_device().create_buffer(4, HalBufferUsage::default());
+        let buffer = metal_device()
+            .create_buffer(4, HalBufferUsage::default())
+            .expect("Metal buffer allocation should succeed");
         assert!(buffer.mapped_ptr().is_some());
     }
 }

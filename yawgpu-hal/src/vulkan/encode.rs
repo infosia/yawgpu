@@ -2627,10 +2627,21 @@ pub(super) fn buffer_image_copy(
     bytes_per_pixel: u32,
     aspect: vk::ImageAspectFlags,
 ) -> Result<vk::BufferImageCopy, HalError> {
-    let buffer_row_length = buffer_row_length(copy.buffer_layout.bytes_per_row, bytes_per_pixel)?;
-    let buffer_row_length = buffer_row_length
-        .checked_mul(texture_block_width(copy))
-        .ok_or_else(|| buffer_error("buffer texture row length overflows"))?;
+    // Vulkan bufferRowLength is a row stride in texels and is only consulted
+    // when the copy spans more than one block-row.  When height_in_blocks <= 1
+    // the copy is single-row: pass 0 ("tightly packed") regardless of
+    // bytesPerRow — WebGPU explicitly allows non-texel-aligned bytesPerRow for
+    // single-row copies and Vulkan ignores bufferRowLength in that case.
+    let height_in_blocks = div_ceil_u32(copy.extent.height, texture_block_height(copy));
+    let buffer_row_length = if height_in_blocks <= 1 {
+        0
+    } else {
+        let row_length =
+            buffer_row_length(copy.buffer_layout.bytes_per_row, bytes_per_pixel)?;
+        row_length
+            .checked_mul(texture_block_width(copy))
+            .ok_or_else(|| buffer_error("buffer texture row length overflows"))?
+    };
     let buffer_image_height = copy
         .buffer_layout
         .rows_per_image
@@ -2755,22 +2766,26 @@ mod tests {
 
     fn dummy_texture(format: HalTextureFormat) -> HalTexture {
         let device = noop::NoopDevice::new();
-        HalTexture::Noop(device.create_texture(&HalTextureDescriptor {
-            dimension: HalTextureDimension::D2,
-            format,
-            width: 4,
-            height: 4,
-            depth_or_array_layers: 1,
-            mip_level_count: 1,
-            sample_count: 1,
-            usage: HalTextureUsage {
-                copy_src: false,
-                copy_dst: false,
-                texture_binding: false,
-                storage_binding: false,
-                render_attachment: true,
-            },
-        }))
+        HalTexture::Noop(
+            device
+                .create_texture(&HalTextureDescriptor {
+                    dimension: HalTextureDimension::D2,
+                    format,
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    usage: HalTextureUsage {
+                        copy_src: false,
+                        copy_dst: false,
+                        texture_binding: false,
+                        storage_binding: false,
+                        render_attachment: true,
+                    },
+                })
+                .expect("Noop texture allocation should succeed"),
+        )
     }
 
     fn dummy_vulkan_texture(
@@ -2929,21 +2944,25 @@ mod tests {
             dummy_vulkan_texture(HalTextureDimension::D2, HalTextureFormat::Bc1RgbaUnorm);
         texture.bytes_per_pixel = 8;
         let copy = HalBufferTextureCopy {
-            buffer: HalBuffer::Noop(device.create_buffer(
-                1024,
-                crate::HalBufferUsage {
-                    map_read: false,
-                    map_write: false,
-                    copy_src: true,
-                    copy_dst: true,
-                    index: false,
-                    vertex: false,
-                    uniform: false,
-                    storage: false,
-                    indirect: false,
-                    query_resolve: false,
-                },
-            )),
+            buffer: HalBuffer::Noop(
+                device
+                    .create_buffer(
+                        1024,
+                        crate::HalBufferUsage {
+                            map_read: false,
+                            map_write: false,
+                            copy_src: true,
+                            copy_dst: true,
+                            index: false,
+                            vertex: false,
+                            uniform: false,
+                            storage: false,
+                            indirect: false,
+                            query_resolve: false,
+                        },
+                    )
+                    .expect("Noop buffer allocation should succeed"),
+            ),
             buffer_layout: HalBufferTextureLayout {
                 offset: 0,
                 bytes_per_row: 256,
@@ -2971,6 +2990,114 @@ mod tests {
 
         assert_eq!(region.buffer_row_length, 128);
         assert_eq!(region.buffer_image_height, 8);
+    }
+
+    // Helper shared by the single-row and multi-row buffer_image_copy tests.
+    fn make_copy(
+        bytes_per_row: u32,
+        rows_per_image: u32,
+        width: u32,
+        height: u32,
+        depth_or_array_layers: u32,
+    ) -> (HalBufferTextureCopy, VulkanTexture) {
+        let device = noop::NoopDevice::new();
+        let texture = dummy_vulkan_texture(HalTextureDimension::D2, HalTextureFormat::Rgba8Unorm);
+        let copy = HalBufferTextureCopy {
+            buffer: HalBuffer::Noop(
+                device
+                    .create_buffer(
+                        65536,
+                        crate::HalBufferUsage {
+                            map_read: false,
+                            map_write: false,
+                            copy_src: true,
+                            copy_dst: true,
+                            index: false,
+                            vertex: false,
+                            uniform: false,
+                            storage: false,
+                            indirect: false,
+                            query_resolve: false,
+                        },
+                    )
+                    .expect("Noop buffer allocation should succeed"),
+            ),
+            buffer_layout: HalBufferTextureLayout {
+                offset: 0,
+                bytes_per_row,
+                rows_per_image,
+            },
+            texture: HalTexture::Vulkan(texture.clone()),
+            format: HalTextureFormat::Rgba8Unorm,
+            aspect: HalTextureAspect::All,
+            mip_level: 0,
+            origin: HalOrigin3d { x: 0, y: 0, z: 0 },
+            extent: HalExtent3d {
+                width,
+                height,
+                depth_or_array_layers,
+            },
+        };
+        (copy, texture)
+    }
+
+    /// A single-row copy with a non-texel-aligned bytesPerRow (257 bytes for a
+    /// 4-byte/texel rgba8unorm texture) must succeed and yield bufferRowLength
+    /// == 0 (tightly packed).  WebGPU allows arbitrary bytesPerRow when the
+    /// copy height is ≤ one block-row; Vulkan ignores bufferRowLength in that
+    /// case.
+    #[test]
+    fn buffer_image_copy_single_row_non_aligned_bytes_per_row_yields_zero_row_length() {
+        // 257 is not divisible by 4 (rgba8unorm bytes-per-pixel).
+        let (copy, texture) = make_copy(257, 0, 4, 1, 1);
+        let region = buffer_image_copy(
+            &copy,
+            &texture,
+            4, // rgba8unorm bytes_per_pixel
+            vk::ImageAspectFlags::COLOR,
+        )
+        .expect("single-row non-aligned copy must not error");
+        assert_eq!(
+            region.buffer_row_length, 0,
+            "single-row copy must use tightly-packed (0) bufferRowLength"
+        );
+    }
+
+    /// A multi-row copy with a texel-aligned bytesPerRow must compute
+    /// bufferRowLength exactly as before (regression guard).
+    #[test]
+    fn buffer_image_copy_multi_row_aligned_bytes_per_row_computes_row_length() {
+        // 256 bytes / 4 bytes-per-pixel = 64 texels wide.
+        let (copy, texture) = make_copy(256, 4, 4, 4, 1);
+        let region = buffer_image_copy(
+            &copy,
+            &texture,
+            4, // rgba8unorm bytes_per_pixel
+            vk::ImageAspectFlags::COLOR,
+        )
+        .expect("multi-row aligned copy must not error");
+        // 256 / 4 = 64, block_width = 1 for rgba8unorm, so bufferRowLength = 64.
+        assert_eq!(
+            region.buffer_row_length, 64,
+            "multi-row copy must compute texel-stride bufferRowLength"
+        );
+    }
+
+    /// A multi-row copy with a non-texel-aligned bytesPerRow must still error
+    /// (the divisibility check is only skipped for single-row copies).
+    #[test]
+    fn buffer_image_copy_multi_row_non_aligned_bytes_per_row_errors() {
+        let (copy, texture) = make_copy(257, 4, 4, 4, 1);
+        let result = buffer_image_copy(
+            &copy,
+            &texture,
+            4, // rgba8unorm bytes_per_pixel
+            vk::ImageAspectFlags::COLOR,
+        );
+        assert!(
+            result.is_err(),
+            "multi-row copy with non-aligned bytesPerRow must return an error"
+        );
     }
 
     #[test]

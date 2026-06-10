@@ -39,8 +39,11 @@ impl MetalDevice {
     }
 
     /// Allocates a buffer of the given size on this device.
-    #[must_use]
-    pub fn create_buffer(&self, size: u64, _usage: HalBufferUsage) -> MetalBuffer {
+    pub fn create_buffer(
+        &self,
+        size: u64,
+        _usage: HalBufferUsage,
+    ) -> Result<MetalBuffer, HalError> {
         self.allocations.fetch_add(1, Ordering::Relaxed);
         // MTLBuffer has no per-usage validation; the parameter is accepted
         // for HAL symmetry.
@@ -48,38 +51,36 @@ impl MetalDevice {
             usize::try_from(size).unwrap_or(usize::MAX),
             MTLResourceOptions::StorageModeShared,
         );
-        let mapped_ptr = buffer.as_ref().map(|buffer| buffer.contents().cast::<u8>());
-        MetalBuffer {
-            inner: buffer,
+        let Some(buffer) = buffer else {
+            return Err(HalError::OutOfMemory {
+                backend: BACKEND,
+                resource: "buffer",
+            });
+        };
+        let mapped_ptr = Some(buffer.contents().cast::<u8>());
+        Ok(MetalBuffer {
+            inner: Some(buffer),
             mapped_ptr,
             size,
-        }
+        })
     }
 
     /// Creates a texture matching the given descriptor.
-    #[must_use]
-    pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> MetalTexture {
+    pub fn create_texture(
+        &self,
+        descriptor: &HalTextureDescriptor,
+    ) -> Result<MetalTexture, HalError> {
         self.allocations.fetch_add(1, Ordering::Relaxed);
-        match create_texture(&self.device, descriptor) {
-            Ok((inner, bytes_per_pixel)) => MetalTexture {
-                inner: Some(inner),
-                dimension: descriptor.dimension,
-                width: descriptor.width,
-                height: descriptor.height,
-                depth_or_array_layers: descriptor.depth_or_array_layers,
-                sample_count: descriptor.sample_count,
-                bytes_per_pixel,
-            },
-            Err(_) => MetalTexture {
-                inner: None,
-                dimension: descriptor.dimension,
-                width: descriptor.width,
-                height: descriptor.height,
-                depth_or_array_layers: descriptor.depth_or_array_layers,
-                sample_count: 1,
-                bytes_per_pixel: 0,
-            },
-        }
+        let (inner, bytes_per_pixel) = create_texture(&self.device, descriptor)?;
+        Ok(MetalTexture {
+            inner: Some(inner),
+            dimension: descriptor.dimension,
+            width: descriptor.width,
+            height: descriptor.height,
+            depth_or_array_layers: descriptor.depth_or_array_layers,
+            sample_count: descriptor.sample_count,
+            bytes_per_pixel,
+        })
     }
 
     /// Creates a query set matching the given kind and count.
@@ -287,7 +288,9 @@ mod tests {
     #[cfg(feature = "metal")]
     fn metal_device_create_buffer_records_size_and_maps_memory() {
         let device = metal_device();
-        let buffer = device.create_buffer(16, HalBufferUsage::default());
+        let buffer = device
+            .create_buffer(16, HalBufferUsage::default())
+            .expect("Metal buffer allocation should succeed");
         assert_eq!(buffer.size(), 16);
         assert!(buffer.mapped_ptr().is_some());
         assert_eq!(device.allocation_count(), 1);
@@ -298,12 +301,39 @@ mod tests {
     #[cfg(feature = "metal")]
     fn metal_device_create_texture_records_descriptor_shape() {
         let device = metal_device();
-        let texture = device.create_texture(&texture_descriptor());
+        let texture = device
+            .create_texture(&texture_descriptor())
+            .expect("Metal texture allocation should succeed");
         assert_eq!(texture.width, 4);
         assert_eq!(texture.height, 4);
         assert_eq!(texture.depth_or_array_layers, 1);
         assert_eq!(texture.bytes_per_pixel, 4);
         assert!(texture.inner.is_some());
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_device_oversized_allocations_return_out_of_memory() {
+        let device = metal_device();
+        assert!(matches!(
+            device.create_buffer(u64::MAX, HalBufferUsage::default()),
+            Err(HalError::OutOfMemory {
+                backend: BACKEND,
+                resource: "buffer"
+            })
+        ));
+
+        let mut descriptor = texture_descriptor();
+        descriptor.width = u32::MAX;
+        descriptor.height = u32::MAX;
+        assert!(matches!(
+            device.create_texture(&descriptor),
+            Err(HalError::OutOfMemory {
+                backend: BACKEND,
+                resource: "texture"
+            })
+        ));
     }
 
     #[test]

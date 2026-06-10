@@ -14,6 +14,14 @@ pub enum HalError {
         /// Backend name.
         backend: &'static str,
     },
+    #[error("HAL out of memory: {backend}: {resource}")]
+    /// Out-of-memory variant.
+    OutOfMemory {
+        /// Backend name.
+        backend: &'static str,
+        /// Resource name.
+        resource: &'static str,
+    },
     #[error("HAL queue submission failed: {backend}")]
     /// Queue submission failed variant.
     QueueSubmissionFailed {

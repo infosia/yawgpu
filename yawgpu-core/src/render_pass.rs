@@ -1985,7 +1985,7 @@ fn fs() -> @location(0) vec4<f32> {
         assert_eq!(begin_error, None);
 
         let max = device.limits().max_texture_dimension_2d as f32;
-        assert_eq!(pass.set_viewport(max, 0.0, 1.0, 1.0, 0.0, 1.0), None);
+        assert_eq!(pass.set_viewport(max * 2.0, 0.0, 1.0, 1.0, 0.0, 1.0), None);
         assert_eq!(pass.end(), None);
 
         let (command_buffer, error) = encoder.finish();

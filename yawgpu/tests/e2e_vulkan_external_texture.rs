@@ -110,7 +110,9 @@ fn vulkan_external_texture_pipeline_reports_internal_error_without_panic() {
                 panic!("expected a GPUInternalError for the Vulkan external-texture pipeline, got: {captured:?}")
             });
         assert!(
-            internal.message.contains("external textures are not supported on the Vulkan backend"),
+            internal
+                .message
+                .contains("external textures are not supported on the Vulkan backend"),
             "unexpected internal error message: {}",
             internal.message
         );

@@ -108,8 +108,9 @@ use crate::conv::{
     map_render_pipeline_descriptor, map_sampler_descriptor, map_shader_module_descriptor,
     map_texel_copy_buffer_layout, map_texel_copy_texture_info_parts, map_texture_aspect,
     map_texture_descriptor, map_texture_dimension_to_native, map_texture_format_to_native,
-    map_texture_usage, map_texture_usage_to_native, map_texture_view_descriptor, release_handle,
-    string_view, string_view_to_str, DeviceLostCallbackInfo,
+    map_texture_usage, map_texture_usage_to_native, map_texture_view_descriptor,
+    map_uncaptured_error_callback_info, release_handle, string_view, string_view_to_str,
+    DeviceLostCallbackInfo, UncapturedErrorCallbackInfo,
 };
 #[cfg(feature = "tiled")]
 use crate::conv::{
@@ -622,6 +623,7 @@ impl Drop for WGPUDeviceImpl {
 impl WGPUDeviceImpl {
     fn implicit_destroy_on_last_release(&self) {
         self.schedule_device_lost(std::ptr::null(), core::DeviceLostReason::Destroyed);
+        self.core.clear_uncaptured_error_callback();
     }
 
     fn schedule_device_lost(
@@ -2135,6 +2137,15 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct UncapturedErrorState {
+        fired: u32,
+        error_type: native::WGPUErrorType,
+        message: String,
+        saw_device: bool,
+        userdata2: usize,
+    }
+
+    #[derive(Default)]
     struct PopErrorScopeState {
         fired: u32,
         status: native::WGPUPopErrorScopeStatus,
@@ -2204,6 +2215,21 @@ mod tests {
         state.fired += 1;
         state.status = status;
         state.device = device;
+    }
+
+    unsafe extern "C" fn uncaptured_error_callback(
+        device: *const native::WGPUDevice,
+        error_type: native::WGPUErrorType,
+        message: native::WGPUStringView,
+        userdata1: *mut c_void,
+        userdata2: *mut c_void,
+    ) {
+        let state = &mut *(userdata1 as *mut UncapturedErrorState);
+        state.fired += 1;
+        state.error_type = error_type;
+        state.message = string_view_to_string(message);
+        state.saw_device = !device.is_null() && !(*device).is_null();
+        state.userdata2 = userdata2 as usize;
     }
 
     unsafe extern "C" fn pop_error_scope_callback(
@@ -2439,6 +2465,14 @@ mod tests {
         instance: native::WGPUInstance,
         adapter: native::WGPUAdapter,
     ) -> native::WGPUDevice {
+        request_noop_device_with_descriptor(instance, adapter, std::ptr::null())
+    }
+
+    unsafe fn request_noop_device_with_descriptor(
+        instance: native::WGPUInstance,
+        adapter: native::WGPUAdapter,
+        descriptor: *const native::WGPUDeviceDescriptor,
+    ) -> native::WGPUDevice {
         let mut state = RequestDeviceState::default();
         let callback_info = native::WGPURequestDeviceCallbackInfo {
             nextInChain: std::ptr::null_mut(),
@@ -2447,7 +2481,7 @@ mod tests {
             userdata1: (&mut state as *mut RequestDeviceState).cast(),
             userdata2: std::ptr::null_mut(),
         };
-        let future = wgpuAdapterRequestDevice(adapter, std::ptr::null(), callback_info);
+        let future = wgpuAdapterRequestDevice(adapter, descriptor, callback_info);
         assert_ne!(future.id, 0);
 
         for _ in 0..8 {
@@ -2461,6 +2495,36 @@ mod tests {
         assert_eq!(state.status, native::WGPURequestDeviceStatus_Success);
         assert!(!state.device.is_null());
         state.device
+    }
+
+    fn device_descriptor_with_uncaptured_error_callback(
+        state: &mut UncapturedErrorState,
+        userdata2: usize,
+    ) -> native::WGPUDeviceDescriptor {
+        native::WGPUDeviceDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            requiredFeatureCount: 0,
+            requiredFeatures: std::ptr::null(),
+            requiredLimits: std::ptr::null(),
+            defaultQueue: native::WGPUQueueDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+            },
+            deviceLostCallbackInfo: native::WGPUDeviceLostCallbackInfo {
+                nextInChain: std::ptr::null_mut(),
+                mode: 0,
+                callback: None,
+                userdata1: std::ptr::null_mut(),
+                userdata2: std::ptr::null_mut(),
+            },
+            uncapturedErrorCallbackInfo: native::WGPUUncapturedErrorCallbackInfo {
+                nextInChain: std::ptr::null_mut(),
+                callback: Some(uncaptured_error_callback),
+                userdata1: (state as *mut UncapturedErrorState).cast(),
+                userdata2: userdata2 as *mut c_void,
+            },
+        }
     }
 
     unsafe fn release_handles(
@@ -2569,6 +2633,65 @@ mod tests {
 
             assert_eq!(counter.load(Ordering::Relaxed), 1);
             release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuAdapterRequestDevice_installs_descriptor_uncaptured_error_callback() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let mut callback_state = UncapturedErrorState::default();
+            let descriptor =
+                device_descriptor_with_uncaptured_error_callback(&mut callback_state, 0x5678);
+            let device = request_noop_device_with_descriptor(instance, adapter, &descriptor);
+
+            let bad_buffer_desc = buffer_descriptor(native::WGPUBufferUsage_None, 4);
+            let bad_buffer = wgpuDeviceCreateBuffer(device, &bad_buffer_desc);
+            assert!(!bad_buffer.is_null());
+            assert_eq!(callback_state.fired, 1);
+            assert_eq!(callback_state.error_type, native::WGPUErrorType_Validation);
+            assert!(callback_state.message.contains("buffer usage"));
+            assert!(callback_state.saw_device);
+            assert_eq!(callback_state.userdata2, 0x5678);
+
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let scoped_bad_buffer = wgpuDeviceCreateBuffer(device, &bad_buffer_desc);
+            assert!(!scoped_bad_buffer.is_null());
+            assert_eq!(callback_state.fired, 1);
+            assert_validation_error_contains(instance, device, "buffer usage");
+
+            wgpuBufferRelease(scoped_bad_buffer);
+            wgpuBufferRelease(bad_buffer);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuDeviceRelease_clears_descriptor_uncaptured_error_callback() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let mut callback_state = UncapturedErrorState::default();
+            let descriptor =
+                device_descriptor_with_uncaptured_error_callback(&mut callback_state, 0);
+            let device = request_noop_device_with_descriptor(instance, adapter, &descriptor);
+            let queue = wgpuDeviceGetQueue(device);
+            let buffer_desc = buffer_descriptor(native::WGPUBufferUsage_CopyDst, 4);
+            let buffer = wgpuDeviceCreateBuffer(device, &buffer_desc);
+            let bytes = [1_u8, 2, 3, 4];
+
+            wgpuQueueWriteBuffer(queue, buffer, 4, bytes.as_ptr().cast(), bytes.len());
+            assert_eq!(callback_state.fired, 1);
+
+            wgpuDeviceRelease(device);
+            wgpuQueueWriteBuffer(queue, buffer, 4, bytes.as_ptr().cast(), bytes.len());
+            assert_eq!(callback_state.fired, 1);
+
+            wgpuBufferRelease(buffer);
+            wgpuQueueRelease(queue);
+            wgpuAdapterRelease(adapter);
+            wgpuInstanceRelease(instance);
         }
     }
 

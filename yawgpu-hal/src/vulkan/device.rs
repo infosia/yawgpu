@@ -75,48 +75,38 @@ impl VulkanDevice {
     }
 
     /// Allocates a buffer of the given size on this device.
-    #[must_use]
-    pub fn create_buffer(&self, size: u64, usage: HalBufferUsage) -> VulkanBuffer {
+    pub fn create_buffer(
+        &self,
+        size: u64,
+        usage: HalBufferUsage,
+    ) -> Result<VulkanBuffer, HalError> {
         self.inner.allocations.fetch_add(1, Ordering::Relaxed);
-        match create_buffer(Arc::clone(&self.inner), size, usage) {
-            Ok(inner) => VulkanBuffer {
-                inner: Some(Arc::new(inner)),
-                size,
-            },
-            Err(_) => VulkanBuffer { inner: None, size },
-        }
+        let inner = create_buffer(Arc::clone(&self.inner), size, usage)?;
+        Ok(VulkanBuffer {
+            inner: Some(Arc::new(inner)),
+            size,
+        })
     }
 
     /// Creates a texture matching the given descriptor.
-    #[must_use]
-    pub fn create_texture(&self, descriptor: &HalTextureDescriptor) -> VulkanTexture {
+    pub fn create_texture(
+        &self,
+        descriptor: &HalTextureDescriptor,
+    ) -> Result<VulkanTexture, HalError> {
         self.inner.allocations.fetch_add(1, Ordering::Relaxed);
-        match create_texture(Arc::clone(&self.inner), descriptor) {
-            Ok((inner, bytes_per_pixel)) => VulkanTexture {
-                inner: Some(Arc::new(inner)),
-                swapchain: None,
-                surface_pending: None,
-                dimension: descriptor.dimension,
-                width: descriptor.width,
-                height: descriptor.height,
-                depth_or_array_layers: descriptor.depth_or_array_layers,
-                sample_count: descriptor.sample_count,
-                bytes_per_pixel,
-                format: descriptor.format,
-            },
-            Err(_) => VulkanTexture {
-                inner: None,
-                swapchain: None,
-                surface_pending: None,
-                dimension: descriptor.dimension,
-                width: descriptor.width,
-                height: descriptor.height,
-                depth_or_array_layers: descriptor.depth_or_array_layers,
-                sample_count: descriptor.sample_count,
-                bytes_per_pixel: 0,
-                format: descriptor.format,
-            },
-        }
+        let (inner, bytes_per_pixel) = create_texture(Arc::clone(&self.inner), descriptor)?;
+        Ok(VulkanTexture {
+            inner: Some(Arc::new(inner)),
+            swapchain: None,
+            surface_pending: None,
+            dimension: descriptor.dimension,
+            width: descriptor.width,
+            height: descriptor.height,
+            depth_or_array_layers: descriptor.depth_or_array_layers,
+            sample_count: descriptor.sample_count,
+            bytes_per_pixel,
+            format: descriptor.format,
+        })
     }
 
     /// Creates a query set matching the given kind and count.
@@ -250,7 +240,9 @@ mod tests {
     #[cfg(feature = "vulkan")]
     fn vulkan_device_create_buffer_records_size_and_maps_memory() {
         let device = vulkan_device();
-        let buffer = device.create_buffer(16, HalBufferUsage::default());
+        let buffer = device
+            .create_buffer(16, HalBufferUsage::default())
+            .expect("Vulkan buffer allocation should succeed");
         assert_eq!(buffer.size(), 16);
         assert!(buffer.mapped_ptr().is_some());
         assert_eq!(device.allocation_count(), 1);
@@ -261,7 +253,9 @@ mod tests {
     #[cfg(feature = "vulkan")]
     fn vulkan_device_create_texture_records_descriptor_shape() {
         let device = vulkan_device();
-        let texture = device.create_texture(&texture_descriptor());
+        let texture = device
+            .create_texture(&texture_descriptor())
+            .expect("Vulkan texture allocation should succeed");
         assert_eq!(texture.width, 4);
         assert_eq!(texture.height, 4);
         assert_eq!(texture.depth_or_array_layers, 1);

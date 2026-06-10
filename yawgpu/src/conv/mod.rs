@@ -928,6 +928,30 @@ mod tests {
     }
 
     #[test]
+    fn has_callback_detects_present_and_absent_uncaptured_error_callbacks() {
+        unsafe extern "C" fn callback(
+            _device: *const native::WGPUDevice,
+            _type: native::WGPUErrorType,
+            _message: native::WGPUStringView,
+            _userdata1: *mut c_void,
+            _userdata2: *mut c_void,
+        ) {
+        }
+
+        let with_callback = UncapturedErrorCallbackInfo {
+            callback: Some(callback),
+            userdata1: 1,
+            userdata2: 2,
+        };
+        let without_callback = UncapturedErrorCallbackInfo {
+            callback: None,
+            ..with_callback
+        };
+        assert!(with_callback.has_callback());
+        assert!(!without_callback.has_callback());
+    }
+
+    #[test]
     fn map_buffer_descriptor_round_trips_fields() {
         let descriptor = native::WGPUBufferDescriptor {
             nextInChain: std::ptr::null_mut(),
@@ -1881,6 +1905,35 @@ mod tests {
         assert_eq!(mapped.userdata2, 0x5678);
 
         let absent = map_device_lost_callback_info(native::WGPUDeviceLostCallbackInfo {
+            callback: None,
+            ..native_info
+        });
+        assert!(!absent.has_callback());
+    }
+
+    #[test]
+    fn map_uncaptured_error_callback_info_round_trips_present_and_absent_callback() {
+        unsafe extern "C" fn callback(
+            _device: *const native::WGPUDevice,
+            _type: native::WGPUErrorType,
+            _message: native::WGPUStringView,
+            _userdata1: *mut c_void,
+            _userdata2: *mut c_void,
+        ) {
+        }
+
+        let native_info = native::WGPUUncapturedErrorCallbackInfo {
+            nextInChain: std::ptr::null_mut(),
+            callback: Some(callback),
+            userdata1: 0x1234usize as *mut c_void,
+            userdata2: 0x5678usize as *mut c_void,
+        };
+        let mapped = map_uncaptured_error_callback_info(native_info);
+        assert!(mapped.has_callback());
+        assert_eq!(mapped.userdata1, 0x1234);
+        assert_eq!(mapped.userdata2, 0x5678);
+
+        let absent = map_uncaptured_error_callback_info(native::WGPUUncapturedErrorCallbackInfo {
             callback: None,
             ..native_info
         });
