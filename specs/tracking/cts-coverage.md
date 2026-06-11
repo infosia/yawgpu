@@ -1567,3 +1567,21 @@ PY
   **Verified:** `robust_access_vertex` Metal `pass=1856 fail=0 crash=0` (was 89/60 fails through the
   fix iterations); regressions clean (`sampler_texture` 1/0, real-GPU `e2e_metal_draw` 3/3 +
   `e2e_metal_render` 3/3). Vulkan/native verification: user sweep with the F-068 query.
+
+- **External-CTS finding F-081 — RESOLVED (d376a1b follow-up).**
+  `render_pipeline,misc:external_texture` (2): the per-stage binding rework set
+  `ext_params_buffer_slot` from the VERTEX-stage buffer slot only; a fragment-only
+  `texture_external` binding got `None` → "MSL external texture binding is missing params
+  buffer slot" on both backends. Fixed (`vi_buf.or(fi_buf)` in the ExternalTexture arm) +
+  Noop repro test. **Verified:** `external_texture` `pass=2 fail=0` on Metal.
+- **External-CTS finding F-078 — NOT a yawgpu regression (false pass unmasked; naga-lineage).**
+  `shader,execution,robust_access` (1068): the test WGSL indexes `array<i32,3>` via
+  `let index = (3u);` — naga const-propagates the `let` and rejects it as a STATIC OOB
+  validation error at BOTH fork revs (naga-cli verified f510a088 == ecad2036); Tint accepts
+  (a `let` index is runtime per WGSL). The earlier "green pass=1068" was a FALSE PASS: the
+  invalid pipeline made dispatch a no-op and the result buffer kept its initialized
+  expected value. F-065's uncaptured-error wiring exposed it; wgpu-native aborts on the
+  same group (F-071) — same naga lineage. Real fix: naga fork validator must not treat
+  let-propagated indices as const-expression OOB errors (queued with the Phase-4 naga
+  batch alongside F-070). Two Noop guard tests for the explicit-2-group compute-pipeline
+  shape were added during triage (compute_pipeline.rs).

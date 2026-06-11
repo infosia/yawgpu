@@ -3529,6 +3529,66 @@ mod tests {
         assert_eq!(scoped, None);
     }
 
+    /// Regression B / F-081: a fragment-only `texture_external` render pipeline
+    /// must have `ext_params_buffer_slot = Some(...)` in its `MetalBufferBinding`.
+    ///
+    /// Before the fix, the ExternalTexture arm in `metal_buffer_binding_map`
+    /// returned `(vi_tex, fi_tex, vi_buf)` where `vi_buf` is `None` for
+    /// fragment-only visibility.  That propagated as `ext_params_buffer_slot =
+    /// None`, causing `msl_resources` to abort with "MSL external texture
+    /// binding is missing params buffer slot" on both Metal and (superficially)
+    /// Vulkan backends.
+    ///
+    /// This test reproduces the defect on Noop by inspecting the binding map
+    /// directly, so it fails *before* the fix and passes after.
+    #[test]
+    fn fragment_only_external_texture_binding_has_ext_params_buffer_slot() {
+        let device = noop_device();
+        // Fragment-only external texture shader: vs does not reference `tex`,
+        // so auto layout assigns SHADER_STAGE_FRAGMENT visibility to it.
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@group(0) @binding(0) var tex: texture_external;
+             @vertex
+             fn vs() -> @builtin(position) vec4<f32> {
+                 return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+             }
+             @fragment
+             fn fs() -> @location(0) vec4<f32> {
+                 return textureLoad(tex, vec2<i32>(0, 0));
+             }"
+                .to_owned(),
+            )),
+        );
+        let pipeline = device.create_render_pipeline(render_pipeline_descriptor(module));
+        assert!(!pipeline.is_error(), "pipeline must not be in error state");
+
+        // The binding map must contain exactly one entry for the external texture.
+        let bindings = pipeline.metal_bindings();
+        let ext = bindings
+            .iter()
+            .find(|b| matches!(b.kind, MetalBindingKind::ExternalTexture))
+            .expect("external texture binding must be present in the binding map");
+
+        // Before the fix: ext_params_buffer_slot == None (vi_buf was used instead
+        // of vi_buf.or(fi_buf)).  After the fix it must be Some.
+        assert!(
+            ext.ext_params_buffer_slot.is_some(),
+            "fragment-only ExternalTexture must have a non-None ext_params_buffer_slot \
+             (regression B / F-081); got None"
+        );
+        // Fragment-metal-index must be Some (the binding is visible to the
+        // fragment stage) and vertex-metal-index must be None.
+        assert!(
+            ext.fragment_metal_index.is_some(),
+            "fragment-only ExternalTexture must have fragment_metal_index = Some(_)"
+        );
+        assert_eq!(
+            ext.vertex_metal_index, None,
+            "fragment-only ExternalTexture must have vertex_metal_index = None"
+        );
+    }
+
     #[cfg(feature = "tiled")]
     fn subpass_input_shader(sample: &str) -> String {
         format!(
