@@ -578,11 +578,14 @@ pub(crate) fn metal_buffer_binding_map(
                         None
                     };
                     // The flat `metal_index` / `ext_params_buffer_slot` are set
-                    // from the vertex-stage values (or fragment if vertex-only is
-                    // absent) — callers that use the flat fields get the
-                    // vertex-stage assignment, matching legacy compute behaviour.
-                    let _ = (vi_buf, fi_buf, fi_tex);
-                    (vi_tex, fi_tex, vi_buf)
+                    // from the vertex-stage values when present, falling back to
+                    // fragment-stage values for fragment-only bindings.  Without
+                    // the fallback a fragment-only ExternalTexture would get
+                    // `ext_params_buffer_slot = None` (vi_buf = None), causing
+                    // "MSL external texture binding is missing params buffer slot"
+                    // at codegen time (Regression B / F-081).
+                    let _ = fi_tex;
+                    (vi_tex, fi_tex, vi_buf.or(fi_buf))
                 }
             };
 
@@ -2223,5 +2226,169 @@ mod tests {
         ]);
         let bindings = metal_buffer_binding_map(&[layout]);
         assert_eq!(validate_metal_slot_ranges(&bindings), Ok(()));
+    }
+
+    // ---- Regression A (F-078): explicit two-group compute pipeline must not error ----
+
+    fn storage_bgl_entry(binding: u32) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: SHADER_STAGE_COMPUTE,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::Buffer {
+                ty: BufferBindingType::Storage,
+                has_dynamic_offset: false,
+                min_binding_size: 0,
+            }),
+        }
+    }
+
+    fn uniform_bgl_entry(binding: u32) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: SHADER_STAGE_COMPUTE,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: 0,
+            }),
+        }
+    }
+
+    /// Regression A: explicit two-group compute pipeline (group 0 = storage buffer;
+    /// group 1 = uniform + storage) must create without error on every backend
+    /// including Noop.  This was broken by the d376a1b per-kind/per-stage binding-map
+    /// rework when it misclassified a compute layout as a render layout (or vice
+    /// versa), producing Metal slot validation failures even on Noop.
+    #[test]
+    fn explicit_two_group_compute_pipeline_creates_without_error() {
+        // Shader matching the CTS `robust_access,linear_memory` shape exactly:
+        // group(0) binding(0): storage read_write buffer
+        // group(1) binding(0): uniform buffer (constants)
+        // group(1) binding(1): storage read_write buffer (result)
+        const WGSL: &str = "\
+struct Constants { zero: u32 }\n\
+struct Result { value: u32 }\n\
+@group(0) @binding(0) var<storage, read_write> src: array<u32>;\n\
+@group(1) @binding(0) var<uniform> constants: Constants;\n\
+@group(1) @binding(1) var<storage, read_write> result: Result;\n\
+@compute @workgroup_size(1)\n\
+fn main() {\n\
+  _ = constants.zero;\n\
+  result.value = select(src[0], 0u, constants.zero == 0u);\n\
+}\n";
+
+        let device = noop_device();
+
+        // BGL 0: one storage buffer binding with COMPUTE visibility.
+        let bgl0 = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![storage_bgl_entry(0)],
+            error: None,
+        }));
+
+        // BGL 1: uniform (binding 0) + storage read_write (binding 1), COMPUTE visibility.
+        let bgl1 = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![uniform_bgl_entry(0), storage_bgl_entry(1)],
+            error: None,
+        }));
+
+        let layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![Arc::clone(&bgl0), Arc::clone(&bgl1)],
+            immediate_size: 0,
+            error: None,
+        }));
+
+        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            WGSL.to_owned(),
+        )));
+        assert!(!module.is_error(), "shader module must compile");
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(Arc::clone(&layout)),
+            shader_module: Arc::clone(&module),
+            entry_point: Some("main".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        });
+        let scoped = device.pop_error_scope().expect("scope should exist");
+        assert!(!pipeline.is_error(), "pipeline must not be an error");
+        assert_eq!(scoped, None, "no validation error expected for explicit two-group compute pipeline");
+
+        // Also verify the metal binding map assigns per-kind slots correctly:
+        // Buffer indices must be sequential across groups (0, 1, 2).
+        let bindings = pipeline.metal_bindings();
+        let b00 = bindings.iter().find(|b| b.group == 0 && b.binding == 0)
+            .expect("group 0 binding 0 must be present");
+        let b10 = bindings.iter().find(|b| b.group == 1 && b.binding == 0)
+            .expect("group 1 binding 0 must be present");
+        let b11 = bindings.iter().find(|b| b.group == 1 && b.binding == 1)
+            .expect("group 1 binding 1 must be present");
+
+        assert_eq!(b00.metal_index, 0, "group0/binding0 must be buffer slot 0");
+        assert_eq!(b10.metal_index, 1, "group1/binding0 must be buffer slot 1");
+        assert_eq!(b11.metal_index, 2, "group1/binding1 must be buffer slot 2");
+
+        // All are compute-layout entries: per-stage indices must be None.
+        assert_eq!(b00.vertex_metal_index, None);
+        assert_eq!(b00.fragment_metal_index, None);
+        assert_eq!(b10.vertex_metal_index, None);
+        assert_eq!(b10.fragment_metal_index, None);
+        assert_eq!(b11.vertex_metal_index, None);
+        assert_eq!(b11.fragment_metal_index, None);
+    }
+
+    /// Regression A (empty-group variant): group 0 is EMPTY (no entries), group 1
+    /// has uniform + storage.  The empty BGL is valid and must not cause an error.
+    #[test]
+    fn explicit_two_group_compute_pipeline_with_empty_group0_creates_without_error() {
+        const WGSL: &str = "\
+struct Constants { zero: u32 }\n\
+struct Result { value: u32 }\n\
+@group(1) @binding(0) var<uniform> constants: Constants;\n\
+@group(1) @binding(1) var<storage, read_write> result: Result;\n\
+@compute @workgroup_size(1)\n\
+fn main() {\n\
+  _ = constants.zero;\n\
+  result.value = 0u;\n\
+}\n";
+
+        let device = noop_device();
+
+        // BGL 0: intentionally empty.
+        let bgl0 = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![],
+            error: None,
+        }));
+
+        // BGL 1: uniform + storage.
+        let bgl1 = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![uniform_bgl_entry(0), storage_bgl_entry(1)],
+            error: None,
+        }));
+
+        let layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![Arc::clone(&bgl0), Arc::clone(&bgl1)],
+            immediate_size: 0,
+            error: None,
+        }));
+
+        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            WGSL.to_owned(),
+        )));
+        assert!(!module.is_error(), "shader module must compile");
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(Arc::clone(&layout)),
+            shader_module: Arc::clone(&module),
+            entry_point: Some("main".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        });
+        let scoped = device.pop_error_scope().expect("scope should exist");
+        assert!(!pipeline.is_error(), "pipeline with empty group 0 must not be an error");
+        assert_eq!(scoped, None, "no validation error expected");
     }
 }
