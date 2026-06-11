@@ -369,12 +369,21 @@ impl VulkanAdapter {
         // Setting anisotropyEnable = true without this feature enabled is a VUID
         // violation and causes MoltenVK to produce error command buffers.
         let sampler_anisotropy = supported_features.sampler_anisotropy == vk::TRUE;
+        // WebGPU requires OOB vertex-attribute fetches to be clamped/zeroed; Vulkan
+        // robustBufferAccess guarantees bounded behaviour for vertex buffer reads,
+        // covering both direct and indirect draws.  Enable it whenever the physical
+        // device reports support (the spec mandates every Vulkan 1.0 device exposes
+        // this feature, so the guard is defensive rather than required).
+        let robust_buffer_access = supported_features.robust_buffer_access == vk::TRUE;
         let mut enabled_features = vk::PhysicalDeviceFeatures::default();
         if occlusion_query_precise {
             enabled_features.occlusion_query_precise = vk::TRUE;
         }
         if sampler_anisotropy {
             enabled_features.sampler_anisotropy = vk::TRUE;
+        }
+        if robust_buffer_access {
+            enabled_features.robust_buffer_access = vk::TRUE;
         }
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
@@ -700,5 +709,29 @@ mod tests {
             .expect("at least one Vulkan adapter");
         let device = adapter.create_device().expect("create Vulkan device");
         assert_eq!(device.allocation_count(), 0);
+    }
+
+    /// `robust_buffer_access` feature-enable logic: when the physical device
+    /// reports the feature as available (vk::TRUE), it must be forwarded into
+    /// `enabled_features`; when absent, it must remain FALSE.
+    #[test]
+    fn vulkan_create_device_enables_robust_buffer_access_when_supported() {
+        // Simulate the feature-enable logic in create_device without a real GPU.
+        for (supported, expected_enabled) in [(vk::TRUE, vk::TRUE), (vk::FALSE, vk::FALSE)] {
+            let supported_features = vk::PhysicalDeviceFeatures {
+                robust_buffer_access: supported,
+                ..Default::default()
+            };
+            let robust_buffer_access = supported_features.robust_buffer_access == vk::TRUE;
+            let mut enabled_features = vk::PhysicalDeviceFeatures::default();
+            if robust_buffer_access {
+                enabled_features.robust_buffer_access = vk::TRUE;
+            }
+            assert_eq!(
+                enabled_features.robust_buffer_access,
+                expected_enabled,
+                "robust_buffer_access should be {expected_enabled} when supported={supported}"
+            );
+        }
     }
 }

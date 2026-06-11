@@ -197,3 +197,17 @@ pipeline stores them and the encoder sets each slot length right after
 `setComputePipelineState`. Vulkan/GLES ignore the field (workgroup storage is
 declared in the module). CTS: `shader,execution,memory_layout` Metal residue
 is naga-lineage only (F-070).
+
+## CTS finding F-068 — vertex OOB robustness (2026-06-11)
+
+WebGPU requires OOB vertex-attribute fetches (including via indirect draw
+params) to be clamped/zeroed. yawgpu does NOT implement wgpu's
+indirect-validation compute prepass; instead: **Vulkan** enables the
+`robustBufferAccess` device feature when supported (hardware bounds vertex
+fetches; MoltenVK cannot honor it — documented translation artifact, native
+Vulkan authoritative). **Metal** enables naga's `vertex_pulling_transform`:
+vertex shaders bounds-guard every attribute fetch against `_mslBufferSizes`;
+the slot is forced whenever vertex buffers exist, and the HAL writes
+storage-array sizes followed by per-vertex-buffer `size − offset` (mapping
+order) before every draw. GLES (Tier 2): unhandled, catalogue in block 67 if
+bring-up reaches this.

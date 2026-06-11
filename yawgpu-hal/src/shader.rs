@@ -42,6 +42,13 @@ pub enum HalShaderSource {
         fragment_buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
         /// Reserved fragment-stage immediate slot for frag-depth clamp range.
         fragment_frag_depth_clamp_slot: Option<u32>,
+        /// Metal buffer indices for vertex buffers, in the same order as
+        /// `vertex_buffer_mappings` passed to naga codegen.  These correspond to
+        /// the `buffer_sizeN` fields appended after the storage-array size fields
+        /// inside `_mslBufferSizes`; the HAL encoder must write the effective byte
+        /// size (buffer.size − bind_offset) of each bound vertex buffer into those
+        /// fields so naga's vertex-pulling OOB guards compare against real data.
+        vertex_buffer_metal_indices: Vec<u32>,
     },
     /// Spir v variant.
     SpirV(Vec<u32>),
@@ -135,6 +142,38 @@ mod tests {
             } if source == "kernel void main0() {}"
                 && buffer_size_bindings == [HalMslBufferSizeBinding::new(1, 2)]
                 && workgroup_memory_sizes == [32, 16]
+        ));
+    }
+
+    #[test]
+    fn hal_shader_source_msl_stages_with_buffer_sizes_includes_vertex_buffer_metal_indices() {
+        let source = HalShaderSource::MslStagesWithBufferSizes {
+            vertex: "vertex_src".to_owned(),
+            fragment: Some("fragment_src".to_owned()),
+            vertex_buffer_sizes_slot: Some(7),
+            vertex_buffer_size_bindings: vec![HalMslBufferSizeBinding::new(0, 1)],
+            fragment_buffer_sizes_slot: None,
+            fragment_buffer_size_bindings: Vec::new(),
+            fragment_frag_depth_clamp_slot: None,
+            vertex_buffer_metal_indices: vec![3, 5],
+        };
+
+        assert!(matches!(
+            source,
+            HalShaderSource::MslStagesWithBufferSizes {
+                vertex,
+                fragment,
+                vertex_buffer_sizes_slot: Some(7),
+                vertex_buffer_size_bindings,
+                fragment_buffer_sizes_slot: None,
+                fragment_buffer_size_bindings,
+                fragment_frag_depth_clamp_slot: None,
+                vertex_buffer_metal_indices,
+            } if vertex == "vertex_src"
+                && fragment.as_deref() == Some("fragment_src")
+                && vertex_buffer_size_bindings == [HalMslBufferSizeBinding::new(0, 1)]
+                && fragment_buffer_size_bindings.is_empty()
+                && vertex_buffer_metal_indices == [3, 5]
         ));
     }
 }

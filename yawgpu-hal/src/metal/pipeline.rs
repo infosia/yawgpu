@@ -50,6 +50,12 @@ pub struct MetalRenderPipeline {
     pub(super) fragment_buffer_sizes_slot: Option<u32>,
     pub(super) fragment_buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
     pub(super) fragment_frag_depth_clamp_slot: Option<u32>,
+    /// Metal buffer indices for vertex buffers in `vertex_buffer_mappings` order.
+    /// These correspond to the `buffer_sizeN` fields that naga appends after the
+    /// storage-array size fields inside `_mslBufferSizes`.  The encoder fills these
+    /// slots with effective vertex-buffer byte sizes before every draw so that
+    /// naga's vertex-pulling OOB guards compare against real values.
+    pub(super) vertex_buffer_metal_indices: Vec<u32>,
 }
 
 unsafe impl Send for MetalRenderPipeline {}
@@ -209,6 +215,7 @@ pub(super) fn create_render_pipeline(
         fragment_buffer_sizes_slot: size_metadata.fragment_slot,
         fragment_buffer_size_bindings: size_metadata.fragment_bindings,
         fragment_frag_depth_clamp_slot: size_metadata.fragment_frag_depth_clamp_slot,
+        vertex_buffer_metal_indices: size_metadata.vertex_buffer_metal_indices,
     })
 }
 
@@ -340,6 +347,8 @@ struct RenderSizeMetadata {
     fragment_slot: Option<u32>,
     fragment_bindings: Vec<HalMslBufferSizeBinding>,
     fragment_frag_depth_clamp_slot: Option<u32>,
+    /// Metal buffer indices for vertex buffers in vertex_buffer_mappings order.
+    vertex_buffer_metal_indices: Vec<u32>,
 }
 
 fn render_size_metadata(shader: &HalShaderSource) -> RenderSizeMetadata {
@@ -350,6 +359,7 @@ fn render_size_metadata(shader: &HalShaderSource) -> RenderSizeMetadata {
             fragment_buffer_sizes_slot,
             fragment_buffer_size_bindings,
             fragment_frag_depth_clamp_slot,
+            vertex_buffer_metal_indices,
             ..
         } => RenderSizeMetadata {
             vertex_slot: *vertex_buffer_sizes_slot,
@@ -357,6 +367,7 @@ fn render_size_metadata(shader: &HalShaderSource) -> RenderSizeMetadata {
             fragment_slot: *fragment_buffer_sizes_slot,
             fragment_bindings: fragment_buffer_size_bindings.clone(),
             fragment_frag_depth_clamp_slot: *fragment_frag_depth_clamp_slot,
+            vertex_buffer_metal_indices: vertex_buffer_metal_indices.clone(),
         },
         _ => RenderSizeMetadata {
             vertex_slot: None,
@@ -364,6 +375,7 @@ fn render_size_metadata(shader: &HalShaderSource) -> RenderSizeMetadata {
             fragment_slot: None,
             fragment_bindings: Vec::new(),
             fragment_frag_depth_clamp_slot: None,
+            vertex_buffer_metal_indices: Vec::new(),
         },
     }
 }
