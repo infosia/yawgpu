@@ -1177,9 +1177,11 @@ pub(crate) fn validate_timestamp_query_set(
     usage: &str,
 ) -> Result<(), String> {
     validate_query_set_alive(query_set, usage)?;
-    if query_set.is_destroyed() {
-        return Err(format!("{usage} cannot use a destroyed query set"));
-    }
+    // Destroyed-query-set check is intentionally deferred to queue.submit time
+    // (WebGPU spec §17.3 "Queue submit validation"). The query set may be
+    // destroyed after recording; it is tracked in CommandBuffer::referenced_query_sets
+    // (via record_referenced_query_sets in begin_render_pass / write_timestamp) and
+    // queue.submit validates every referenced query set is not destroyed before executing.
     if query_set.kind() != QueryType::Timestamp {
         return Err(format!("{usage} requires a timestamp query set"));
     }

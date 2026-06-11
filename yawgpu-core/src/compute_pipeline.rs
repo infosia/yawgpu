@@ -1153,14 +1153,50 @@ fn validate_non_filterable_gather_bindings(
         else {
             continue;
         };
-        if reflected_texture_sample_type(
+        let shader_sample_type = reflected_texture_sample_type(
             sampled,
             sample_kind,
             shader_naga::ReflectedTextureSampleUsage::Gather,
-        )? == TextureSampleType::Float
-        {
+        )?;
+
+        // The texture is filterable (and textureGather is legal with a
+        // Filtering sampler) only when BOTH the shader-reflected type AND the
+        // explicit layout entry agree it is filterable.  The WebGPU F-061 rule
+        // lets an explicit `UnfilterableFloat` layout accept a shader-reflected
+        // `Float` texture — so the shader alone is not authoritative here.
+        // We must also check the layout entry: if the layout says
+        // `UnfilterableFloat`, the texture is non-filterable regardless of what
+        // the shader reflection produces.
+        let layout_sample_type = {
+            let binding = &requirement.binding;
+            let group = usize::try_from(binding.group).ok();
+            group
+                .and_then(|g| layout.bind_group_layouts().get(g))
+                .and_then(|group_layout| {
+                    group_layout
+                        .entries()
+                        .iter()
+                        .find(|entry| entry.binding == binding.binding)
+                })
+                .and_then(|entry| entry.kind)
+                .and_then(|kind| {
+                    if let BindingLayoutKind::Texture { sample_type, .. } = kind {
+                        Some(sample_type)
+                    } else {
+                        None
+                    }
+                })
+        };
+
+        // Skip validation only when the texture is genuinely filterable: the
+        // shader says Float AND the layout says Float (or there is no explicit
+        // layout entry — auto-layout, which derives filterable from the shader).
+        let is_filterable = shader_sample_type == TextureSampleType::Float
+            && layout_sample_type != Some(TextureSampleType::UnfilterableFloat);
+        if is_filterable {
             continue;
         }
+
         let visibility = pipeline_stage_visibility_bit(requirement.stage);
         if layout.bind_group_layouts().iter().any(|group| {
             group.entries().iter().any(|entry| {
@@ -2390,5 +2426,198 @@ fn main() {\n\
         let scoped = device.pop_error_scope().expect("scope should exist");
         assert!(!pipeline.is_error(), "pipeline with empty group 0 must not be an error");
         assert_eq!(scoped, None, "no validation error expected");
+    }
+
+    // ---- F-080: unfilterable-float texture + filtering sampler must error ----
+    //
+    // CTS: api,validation,non_filterable_texture:non_filterable_texture_with_filtering_sampler
+    //
+    // The WGSL shader uses texture_2d<f32> (shader-reflected as Float) with
+    // textureGather.  The explicit BGL declares the texture slot as
+    // UnfilterableFloat.  The F-061 compat rule allows an UnfilterableFloat
+    // layout to accept a Float shader binding — but the explicit
+    // UnfilterableFloat combined with a Filtering sampler must still produce a
+    // validation error.  Before the fix, the shader-Float early-exit in
+    // validate_non_filterable_gather_bindings skipped the check, accepting the
+    // invalid combination silently.
+
+    /// Makes a BGL entry for a texture with the given sample type and visibility.
+    fn tex_entry_with_sample_type(
+        binding: u32,
+        vis: u64,
+        sample_type: TextureSampleType,
+    ) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: vis,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::Texture {
+                sample_type,
+                view_dimension: TextureViewDimension::D2,
+                multisampled: false,
+            }),
+        }
+    }
+
+    /// Makes a BGL entry for a sampler with the given type and visibility.
+    fn smp_entry_with_type(
+        binding: u32,
+        vis: u64,
+        ty: SamplerBindingType,
+    ) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: vis,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::Sampler { ty }),
+        }
+    }
+
+    /// WGSL for the CTS non_filterable_texture test: texture_2d<f32> at
+    /// @group(0) @binding(0), sampler at @group(group_ndx) @binding(1),
+    /// used together in textureGather — all from a compute entry point.
+    fn non_filterable_wgsl(group_ndx: u32) -> String {
+        format!(
+            r"
+@group(0) @binding(0) var t: texture_2d<f32>;
+@group({group_ndx}) @binding(1) var s: sampler;
+
+fn test() {{
+  _ = textureGather(0, t, s, vec2f(0.0));
+}}
+
+@compute @workgroup_size(1) fn cs() {{ test(); }}
+",
+        )
+    }
+
+    /// Regression test (F-080): explicit BGL `UnfilterableFloat` texture + `Filtering`
+    /// sampler in the same group must produce a validation error on compute pipeline
+    /// creation.
+    #[test]
+    fn unfilterable_float_texture_with_filtering_sampler_rejects_compute_pipeline() {
+        let device = noop_device();
+
+        let vis = SHADER_STAGE_COMPUTE;
+        let bgl = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![
+                tex_entry_with_sample_type(0, vis, TextureSampleType::UnfilterableFloat),
+                smp_entry_with_type(1, vis, SamplerBindingType::Filtering),
+            ],
+            error: None,
+        }));
+        let layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![Arc::clone(&bgl)],
+            immediate_size: 0,
+            error: None,
+        }));
+        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            non_filterable_wgsl(0),
+        )));
+        assert!(!module.is_error(), "shader module must compile");
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(layout),
+            shader_module: module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        });
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("unfilterable_float+filtering_sampler must produce a validation error (F-080)");
+        assert!(pipeline.is_error());
+        assert_eq!(
+            scoped.message,
+            "textureGather with a filtering sampler requires a filterable texture binding"
+        );
+    }
+
+    /// Positive case (F-080): explicit BGL `Float` texture + `Filtering` sampler
+    /// must succeed.
+    #[test]
+    fn filterable_float_texture_with_filtering_sampler_accepts_compute_pipeline() {
+        let device = noop_device();
+
+        let vis = SHADER_STAGE_COMPUTE;
+        let bgl = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![
+                tex_entry_with_sample_type(0, vis, TextureSampleType::Float),
+                smp_entry_with_type(1, vis, SamplerBindingType::Filtering),
+            ],
+            error: None,
+        }));
+        let layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![Arc::clone(&bgl)],
+            immediate_size: 0,
+            error: None,
+        }));
+        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            non_filterable_wgsl(0),
+        )));
+        assert!(!module.is_error(), "shader module must compile");
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(layout),
+            shader_module: module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        });
+        let scoped = device.pop_error_scope().expect("scope should exist");
+        assert!(!pipeline.is_error(), "Float+Filtering must succeed");
+        assert_eq!(scoped, None, "no validation error expected for filterable Float");
+    }
+
+    /// Cross-group variant (F-080, sameGroup=false): texture in group 0, sampler
+    /// in group 1 — the rejection must still fire.
+    #[test]
+    fn unfilterable_float_texture_cross_group_filtering_sampler_rejects_compute_pipeline() {
+        let device = noop_device();
+
+        let vis = SHADER_STAGE_COMPUTE;
+        let bgl0 = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![tex_entry_with_sample_type(
+                0,
+                vis,
+                TextureSampleType::UnfilterableFloat,
+            )],
+            error: None,
+        }));
+        let bgl1 = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![smp_entry_with_type(1, vis, SamplerBindingType::Filtering)],
+            error: None,
+        }));
+        let layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![Arc::clone(&bgl0), Arc::clone(&bgl1)],
+            immediate_size: 0,
+            error: None,
+        }));
+        // Sampler is at group 1, binding 1.
+        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            non_filterable_wgsl(1),
+        )));
+        assert!(!module.is_error(), "shader module must compile");
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(layout),
+            shader_module: module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        });
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("cross-group unfilterable+filtering must produce a validation error (F-080)");
+        assert!(pipeline.is_error());
+        assert_eq!(
+            scoped.message,
+            "textureGather with a filtering sampler requires a filterable texture binding"
+        );
     }
 }

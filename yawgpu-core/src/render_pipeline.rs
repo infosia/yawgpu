@@ -4063,4 +4063,140 @@ mod tests {
         // Flat carries sampling as-is (no center default).
         assert_eq!(effective_sampling(Some(I::Flat), None), None);
     }
+
+    // ---- F-080: unfilterable-float texture + filtering sampler must error (render) ----
+    //
+    // CTS: api,validation,non_filterable_texture:non_filterable_texture_with_filtering_sampler
+    // (pipeline=render cases)
+    //
+    // The shader uses texture_2d<f32> + textureGather — naga reflects the texture as
+    // Float.  The explicit BGL declares the texture entry as UnfilterableFloat.  The
+    // F-061 rule allows UnfilterableFloat layout to accept a Float shader binding, but
+    // an UnfilterableFloat texture combined with a Filtering sampler in the same pipeline
+    // layout must still produce a validation error at createRenderPipeline time.
+
+    /// WGSL for the render non_filterable test: texture_2d<f32> at @group(0) @binding(0),
+    /// sampler at @group(group_ndx) @binding(1), used together in textureGather in the
+    /// fragment entry point.
+    fn non_filterable_render_wgsl(group_ndx: u32) -> String {
+        format!(
+            r"
+@group(0) @binding(0) var t: texture_2d<f32>;
+@group({group_ndx}) @binding(1) var s: sampler;
+
+fn test() -> vec4<f32> {{
+  return textureGather(0, t, s, vec2f(0.0));
+}}
+
+@vertex fn vs() -> @builtin(position) vec4f {{ return vec4f(0.0); }}
+@fragment fn fs() -> @location(0) vec4f {{ return test(); }}
+",
+        )
+    }
+
+    /// Regression test (F-080 render): explicit BGL with `UnfilterableFloat` texture and
+    /// `Filtering` sampler in the same group must error on createRenderPipeline.
+    #[test]
+    fn unfilterable_float_texture_with_filtering_sampler_rejects_render_pipeline() {
+        let device = noop_device();
+
+        let vis = SHADER_STAGE_FRAGMENT | SHADER_STAGE_VERTEX;
+        let bgl = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: vis,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Texture {
+                        sample_type: TextureSampleType::UnfilterableFloat,
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    }),
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: vis,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Sampler {
+                        ty: SamplerBindingType::Filtering,
+                    }),
+                },
+            ],
+            error: None,
+        }));
+        let pipeline_layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![Arc::clone(&bgl)],
+            immediate_size: 0,
+            error: None,
+        }));
+        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            non_filterable_render_wgsl(0),
+        )));
+        assert!(!module.is_error(), "shader module must compile");
+
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.layout = RenderPipelineLayout::Explicit(pipeline_layout);
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_render_pipeline(descriptor);
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("UnfilterableFloat+Filtering must produce a validation error (F-080 render)");
+        assert!(pipeline.is_error());
+        assert_eq!(
+            scoped.message,
+            "textureGather with a filtering sampler requires a filterable texture binding"
+        );
+    }
+
+    /// Positive case (F-080 render): explicit BGL with `Float` texture and `Filtering`
+    /// sampler must succeed.
+    #[test]
+    fn filterable_float_texture_with_filtering_sampler_accepts_render_pipeline() {
+        let device = noop_device();
+
+        let vis = SHADER_STAGE_FRAGMENT | SHADER_STAGE_VERTEX;
+        let bgl = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: vis,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Texture {
+                        sample_type: TextureSampleType::Float,
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    }),
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: vis,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Sampler {
+                        ty: SamplerBindingType::Filtering,
+                    }),
+                },
+            ],
+            error: None,
+        }));
+        let pipeline_layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![Arc::clone(&bgl)],
+            immediate_size: 0,
+            error: None,
+        }));
+        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            non_filterable_render_wgsl(0),
+        )));
+        assert!(!module.is_error(), "shader module must compile");
+
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.layout = RenderPipelineLayout::Explicit(pipeline_layout);
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_render_pipeline(descriptor);
+        let scoped = device.pop_error_scope().expect("scope should exist");
+        assert!(!pipeline.is_error(), "Float+Filtering must succeed for render pipeline");
+        assert_eq!(scoped, None, "no validation error expected");
+    }
 }

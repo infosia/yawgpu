@@ -1585,3 +1585,24 @@ PY
   let-propagated indices as const-expression OOB errors (queued with the Phase-4 naga
   batch alongside F-070). Two Noop guard tests for the explicit-2-group compute-pipeline
   shape were added during triage (compute_pipeline.rs).
+
+- **External-CTS finding F-080 — RESOLVED (latent since F-061, not the binding rework).**
+  `non_filterable_texture:non_filterable_texture_with_filtering_sampler` (32): pairing a FILTERING
+  sampler with an `unfilterable-float` texture binding must fail pipeline validation. Root cause was
+  latent since F-061 (`0323fae`): its permissive shader↔layout sample-type compat (an
+  `UnfilterableFloat` layout accepts a shader-reflected `Float` texture) bypassed
+  `validate_non_filterable_gather_bindings`' early-exit, which trusted only the shader-reflected type.
+  The check now also consults the explicit layout entry: a layout-declared `UnfilterableFloat` binding
+  is never treated as filterable. 5 Noop tests (compute + render, same/cross-group, positive cases).
+  **Verified:** `non_filterable_texture` `pass=160 fail=0` on Metal AND Vulkan/MoltenVK.
+- **External-CTS finding F-079 — RESOLVED (existing timing bug unmasked by F-065).**
+  `setBindGroup:state_and_binding_index` destroyed cases (6) + `queue,destroyed,query_set:timestamps`
+  (1): destroyed-resource checks fired at bind-group creation / encode time, surfacing as uncaptured
+  errors outside the spec's validation point. WebGPU defers destroyed-resource validation to
+  `queue.submit` (§17.3). The `is_destroyed` checks were removed from `validate_bind_group_{buffer,
+  texture,storage_texture}` and `validate_timestamp_query_set`; submit now validates referenced
+  buffers/textures/query sets (tracked via set_bind_group / timestamp recording). 3 Noop tests assert
+  the error fires at submit, not encode. Pre-F-065 these early errors were invisible (no uncaptured
+  callback), so the group looked green — same unmasking pattern as F-078.
+  **Verified:** `setBindGroup` `pass=347 fail=0` + `queue,destroyed,query_set` `pass=8 fail=0` on Metal
+  AND Vulkan/MoltenVK; `error_scope` 49/0 + `external_texture` 2/0 re-confirmed.
