@@ -2937,4 +2937,269 @@ fn fs() -> @location(0) vec4<f32> {
                     && copy.buffer_layout.rows_per_image == 2
         ));
     }
+
+    // --- F-079: destroyed bind-group resources / timestamp query sets must error at submit ----
+
+    /// A bind group containing a destroyed uniform buffer must not cause an error at
+    /// create_bind_group, set_bind_group, or finish(). The validation error must fire
+    /// exclusively at queue.submit (WebGPU spec §17.3 "Queue submit validation").
+    ///
+    /// Mirrors CTS api,validation,encoding,cmds,setBindGroup:state_and_binding_index
+    /// with state="destroyed", resourceType="buffer", encoderType="compute pass".
+    #[test]
+    fn destroyed_bind_group_buffer_errors_at_submit_not_at_encode() {
+        let device = noop_device();
+
+        // Create a uniform-buffer bind group layout.
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_COMPUTE,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: 0,
+                }),
+            }],
+            error: None,
+        }));
+
+        // Create a uniform buffer and immediately destroy it before the bind group is created.
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::UNIFORM,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        buffer.destroy();
+        assert!(buffer.is_destroyed(), "buffer must be destroyed before bind group creation");
+
+        // create_bind_group with a destroyed buffer must succeed (not an error bind group).
+        let bind_group = Arc::new(device.create_bind_group(
+            Arc::clone(&layout),
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::Buffer {
+                    buffer: Arc::clone(&buffer),
+                    device: Arc::new(device.clone()),
+                    offset: 0,
+                    size: u64::MAX,
+                },
+            }],
+        ));
+        assert!(
+            !bind_group.is_error(),
+            "bind group with destroyed buffer must not be an error bind group"
+        );
+
+        // set_bind_group on the compute pass must not produce an error.
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None, "begin_compute_pass must succeed");
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None,
+            "set_bind_group with destroyed-buffer bind group must not error during encoding"
+        );
+        assert_eq!(pass.end(), None);
+
+        // finish() must succeed (no error).
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(
+            finish_error, None,
+            "finish must succeed when destroyed buffer is in bind group"
+        );
+        assert!(!command_buffer.is_error());
+
+        // submit() must fail with the destroyed-buffer validation error.
+        let submit_error = device
+            .queue()
+            .submit(&[Arc::new(command_buffer)])
+            .expect("submit must fail when bind group references a destroyed buffer");
+        assert_eq!(
+            submit_error.message, "queue submit cannot use a destroyed buffer",
+            "submit error message must identify the destroyed buffer"
+        );
+    }
+
+    /// A bind group containing a destroyed sampled texture must not cause an error at
+    /// create_bind_group, set_bind_group, or finish(). The validation error must fire
+    /// exclusively at queue.submit (WebGPU spec §17.3 "Queue submit validation").
+    ///
+    /// Mirrors CTS api,validation,encoding,cmds,setBindGroup:state_and_binding_index
+    /// with state="destroyed", resourceType="texture", encoderType="compute pass".
+    #[test]
+    fn destroyed_bind_group_texture_errors_at_submit_not_at_encode() {
+        let device = noop_device();
+
+        // Create a sampled-texture bind group layout.
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_COMPUTE,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Texture {
+                    sample_type: TextureSampleType::UnfilterableFloat,
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                }),
+            }],
+            error: None,
+        }));
+
+        // Create a sampled texture, get a view, then destroy the underlying texture.
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let (view, view_error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(view_error, None);
+        // Destroy the texture before creating the bind group (mirrors CTS destroyAfterCreate=true).
+        texture.destroy();
+        assert!(
+            texture.is_destroyed(),
+            "texture must be destroyed before bind group creation"
+        );
+
+        // create_bind_group with a destroyed texture must succeed.
+        let bind_group = Arc::new(device.create_bind_group(
+            Arc::clone(&layout),
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::TextureView {
+                    texture_view: Arc::new(view),
+                    device: Arc::new(device.clone()),
+                },
+            }],
+        ));
+        assert!(
+            !bind_group.is_error(),
+            "bind group with destroyed texture must not be an error bind group"
+        );
+
+        // set_bind_group on the compute pass must not produce an error.
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None,
+            "set_bind_group with destroyed-texture bind group must not error during encoding"
+        );
+        assert_eq!(pass.end(), None);
+
+        // finish() must succeed.
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(
+            finish_error, None,
+            "finish must succeed when destroyed texture is in bind group"
+        );
+        assert!(!command_buffer.is_error());
+
+        // submit() must fail with the destroyed-texture validation error.
+        let submit_error = device
+            .queue()
+            .submit(&[Arc::new(command_buffer)])
+            .expect("submit must fail when bind group references a destroyed texture");
+        assert_eq!(
+            submit_error.message, "queue submit cannot use a destroyed texture",
+            "submit error message must identify the destroyed texture"
+        );
+    }
+
+    /// A render pass with a destroyed timestamp-query-set in timestampWrites must not
+    /// cause an error at begin_render_pass or finish(). The validation error must fire
+    /// exclusively at queue.submit (WebGPU spec §17.3 "Queue submit validation").
+    ///
+    /// Mirrors CTS api,validation,queue,destroyed,query_set:timestamps with
+    /// querySetState="destroyed" (render-pass sub-case).
+    #[test]
+    fn destroyed_timestamp_query_set_in_render_pass_errors_at_submit_not_at_encode() {
+        // Timestamp query requires the TimestampQuery feature.
+        let mut features = FeatureSet::new();
+        features.insert(crate::Feature::TimestampQuery);
+        let device = crate::Device::from_hal(hal_noop_device(), Limits::DEFAULT, features, "", "");
+
+        let (query_set, qs_error) = device.create_query_set(QuerySetDescriptor {
+            label: "ts".to_owned(),
+            kind: QueryType::Timestamp,
+            count: 2,
+        });
+        assert_eq!(qs_error, None);
+        // Destroy the query set before using it in the render pass.
+        query_set.destroy();
+        assert!(query_set.is_destroyed());
+
+        // Build a minimal render pass with the destroyed timestamp query set.
+        let view = noop_render_attachment(&device);
+        let descriptor = RenderPassDescriptor {
+            max_color_attachments: Limits::DEFAULT.max_color_attachments,
+            color_attachments: vec![Some(RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                load_op: LoadOp::Clear,
+                store_op: StoreOp::Store,
+                clear_value: Color {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: Some(RenderPassTimestampWrites {
+                query_set: query_set.clone(),
+                beginning_index: Some(0),
+                end_index: Some(1),
+            }),
+            max_draw_count: 50_000_000,
+        };
+
+        let encoder = device.create_command_encoder();
+        // begin_render_pass must succeed (no error from the destroyed query set at encode time).
+        let (pass, begin_error) = encoder.begin_render_pass(&descriptor);
+        assert_eq!(
+            begin_error, None,
+            "begin_render_pass must succeed when timestamp query set is destroyed"
+        );
+        assert_eq!(pass.end(), None);
+
+        // finish() must succeed.
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(
+            finish_error, None,
+            "finish must succeed when timestamp query set is destroyed"
+        );
+        assert!(!command_buffer.is_error());
+
+        // submit() must fail.
+        let submit_error = device
+            .queue()
+            .submit(&[Arc::new(command_buffer)])
+            .expect("submit must fail when timestamp query set is destroyed");
+        assert_eq!(
+            submit_error.message, "queue submit cannot use a destroyed query set",
+            "submit error message must identify the destroyed query set"
+        );
+    }
 }

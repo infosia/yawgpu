@@ -295,9 +295,12 @@ pub(crate) fn validate_bind_group_buffer(
     if buffer.is_error() {
         return Some("bind group buffer must not be an error buffer".to_owned());
     }
-    if buffer.is_destroyed() {
-        return Some("bind group buffer must not be destroyed".to_owned());
-    }
+    // Destroyed-buffer check is intentionally deferred to queue.submit time
+    // (WebGPU spec §17.3 "Queue submit validation"). The buffer may be destroyed
+    // after bind-group creation; as long as it is valid at create time and not
+    // yet destroyed, the bind group itself is not an error. The buffer is tracked
+    // in CommandBuffer::referenced_buffers (added in set_bind_group) and
+    // queue.submit validates every referenced buffer is not destroyed.
 
     let (required_usage, alignment, max_binding_size) = match ty {
         BufferBindingType::Uniform => (
@@ -380,9 +383,11 @@ pub(crate) fn validate_bind_group_texture(
         return Some("bind group texture view must not be an error texture view".to_owned());
     }
     let texture = texture_view.texture();
-    if texture.is_destroyed() {
-        return Some("bind group texture must not be destroyed".to_owned());
-    }
+    // Destroyed-texture check is intentionally deferred to queue.submit time
+    // (WebGPU spec §17.3 "Queue submit validation"). The texture may be destroyed
+    // after bind-group creation; the texture is tracked in
+    // CommandBuffer::referenced_textures (added in set_bind_group) and
+    // queue.submit validates every referenced texture is not destroyed.
     if !texture_view.usage().contains(TextureUsage::TEXTURE_BINDING) {
         return Some("bind group texture usage does not satisfy the layout".to_owned());
     }
@@ -480,10 +485,9 @@ pub(crate) fn validate_bind_group_storage_texture(
     if texture_view.is_error() {
         return Some("bind group texture view must not be an error texture view".to_owned());
     }
-    let texture = texture_view.texture();
-    if texture.is_destroyed() {
-        return Some("bind group texture must not be destroyed".to_owned());
-    }
+    // Destroyed-texture check is intentionally deferred to queue.submit time
+    // (WebGPU spec §17.3 "Queue submit validation"). See the same comment in
+    // validate_bind_group_texture.
     if !texture_view.usage().contains(TextureUsage::STORAGE_BINDING) {
         return Some("bind group texture usage does not satisfy the layout".to_owned());
     }
