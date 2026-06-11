@@ -1547,3 +1547,23 @@ PY
   on Metal AND Vulkan/MoltenVK (was: Metal process abort); regressions re-confirmed both HALs
   (`sampling,anisotropy` 3/0, `buffers,map` 900/0, `error_scope` 49/0, `memory_layout` Metal residue
   still the 9 F-070 naga cases).
+
+- **External-CTS finding F-068 — RESOLVED on Metal; Vulkan via robustBufferAccess (native confirm pending).**
+  `shader,execution,robust_access_vertex` (Metal 89 / MoltenVK 129, indirect-dominated): OOB vertex
+  fetches must be clamped/zeroed. Investigation concluded wgpu's indirect-validation compute prepass is
+  AVOIDABLE in yawgpu:
+  - **Vulkan:** enable the `robustBufferAccess` device feature when supported (hardware-bounded vertex
+    fetches, direct AND indirect). Effective on real drivers; **MoltenVK cannot honor it for vertex
+    fetches** (the Metal beneath has no such guarantee) — its residue (~170, nondeterministic) is an
+    F-033-class translation artifact. Native Windows/Vulkan run = authoritative, queued with the user.
+  - **Metal:** enable naga's `vertex_pulling_transform` (render-stage MSL PipelineOptions) — the shader
+    itself bounds-guards every attribute fetch against `_mslBufferSizes`. Two completion bugs found and
+    fixed during verification: (a) the `_mslBufferSizes` slot must be FORCED even without runtime-sized
+    storage arrays (`msl_buffer_sizes_slot_or_force`); (b) the HAL never WROTE the vertex-buffer sizes
+    into the slot — guards compared against stale GPU memory and passed everything
+    (`compose_vertex_stage_sizes`: storage-array sizes first, then per-vertex-buffer
+    `size − bind_offset` in mapping order, refreshed every draw; mirrors wgpu
+    `make_sizes_buffer_update`).
+  **Verified:** `robust_access_vertex` Metal `pass=1856 fail=0 crash=0` (was 89/60 fails through the
+  fix iterations); regressions clean (`sampler_texture` 1/0, real-GPU `e2e_metal_draw` 3/3 +
+  `e2e_metal_render` 3/3). Vulkan/native verification: user sweep with the F-068 query.

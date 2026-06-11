@@ -869,7 +869,7 @@ pub(super) fn encode_render_pass(
     for binding in &pass.bind_buffers {
         encode_render_bind_buffer(encoder, binding)?;
     }
-    encode_render_buffer_sizes(encoder, pipeline, &pass.bind_buffers)?;
+    encode_render_buffer_sizes(encoder, pipeline, &pass.bind_buffers, &pass.vertex_buffers)?;
     encode_render_frag_depth_clamp(encoder, pipeline, pass.viewport)?;
     for binding in &pass.bind_textures {
         encode_render_bind_texture(encoder, binding)?;
@@ -899,13 +899,62 @@ fn mtl_cull_mode(cull_mode: HalCullMode) -> MTLCullMode {
     }
 }
 
+/// Composes the full vertex-stage `_mslBufferSizes` array.
+///
+/// Layout naga emits:
+///   [storage-array sizes …] [buffer_sizeN per vertex_buffer_metal_indices entry]
+///
+/// `bind_buffers` supplies the bind-group buffers (storage-array entries).
+/// `vertex_buffers` supplies the vertex-attribute buffers; each entry in
+/// `vertex_buffer_metal_indices` is looked up by `metal_index`.  The effective
+/// size is `buffer.size − bind_offset`, saturating to 0; a missing binding
+/// yields 0.  All sizes are saturating-cast to `u32`.
+#[cfg_attr(not(feature = "metal"), allow(dead_code))]
+fn compose_vertex_stage_sizes(
+    storage_bindings: &[HalMslBufferSizeBinding],
+    bind_buffers: &[HalBoundBuffer],
+    vertex_buffer_metal_indices: &[u32],
+    vertex_buffers: &[HalBoundBuffer],
+) -> Result<Vec<u32>, HalError> {
+    // Storage-array sizes first.
+    let mut sizes = msl_buffer_sizes(storage_bindings, bind_buffers)?;
+    // Vertex buffer sizes appended in vertex_buffer_mappings order.
+    for &metal_index in vertex_buffer_metal_indices {
+        let effective_size = vertex_buffers
+            .iter()
+            .find(|vb| vb.metal_index == metal_index)
+            .map(|vb| {
+                let HalBuffer::Metal(buffer) = &vb.buffer else {
+                    return 0u64;
+                };
+                buffer.size().saturating_sub(vb.offset)
+            })
+            .unwrap_or(0);
+        sizes.push(u32::try_from(effective_size).unwrap_or(u32::MAX));
+    }
+    Ok(sizes)
+}
+
+/// Composes the vertex-stage `_mslBufferSizes` array and writes it via
+/// `setVertexBytes`, then composes the fragment-stage array and writes it via
+/// `setFragmentBytes`.
+///
+/// The vertex-stage slot is forced when vertex buffers exist, so `sizes` will
+/// be non-empty in that case.  See [`compose_vertex_stage_sizes`] for the exact
+/// layout.
 fn encode_render_buffer_sizes(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     pipeline: &MetalRenderPipeline,
-    buffers: &[HalBoundBuffer],
+    bind_buffers: &[HalBoundBuffer],
+    vertex_buffers: &[HalBoundBuffer],
 ) -> Result<(), HalError> {
     if let Some(slot) = pipeline.vertex_buffer_sizes_slot {
-        let sizes = msl_buffer_sizes(&pipeline.vertex_buffer_size_bindings, buffers)?;
+        let sizes = compose_vertex_stage_sizes(
+            &pipeline.vertex_buffer_size_bindings,
+            bind_buffers,
+            &pipeline.vertex_buffer_metal_indices,
+            vertex_buffers,
+        )?;
         if !sizes.is_empty() {
             unsafe {
                 encoder.setVertexBytes_length_atIndex(
@@ -918,7 +967,7 @@ fn encode_render_buffer_sizes(
         }
     }
     if let Some(slot) = pipeline.fragment_buffer_sizes_slot {
-        let sizes = msl_buffer_sizes(&pipeline.fragment_buffer_size_bindings, buffers)?;
+        let sizes = msl_buffer_sizes(&pipeline.fragment_buffer_size_bindings, bind_buffers)?;
         if !sizes.is_empty() {
             unsafe {
                 encoder.setFragmentBytes_length_atIndex(
@@ -1345,6 +1394,113 @@ fn metal_index_type(format: HalIndexFormat) -> MTLIndexType {
 mod tests {
     use super::super::test_helpers::*;
     use super::*;
+
+    /// Constructs a minimal `MetalBuffer` stub usable in unit tests.
+    /// `inner` is `None` so GPU calls will fail, but `size()` works.
+    fn make_metal_buffer(size: u64) -> MetalBuffer {
+        MetalBuffer {
+            inner: None,
+            mapped_ptr: None,
+            size,
+        }
+    }
+
+    /// Constructs a `HalBoundBuffer` backed by a Metal buffer stub.
+    fn make_vertex_bound_buffer(metal_index: u32, size: u64, offset: u64) -> HalBoundBuffer {
+        HalBoundBuffer {
+            group: 0,
+            binding: metal_index,
+            metal_index,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            buffer: HalBuffer::Metal(make_metal_buffer(size)),
+            offset,
+            size: u64::MAX,
+        }
+    }
+
+    /// `compose_vertex_stage_sizes` places storage-array sizes first, then vertex
+    /// buffer effective sizes (buffer.size - offset) in metal_index order.
+    #[test]
+    fn compose_vertex_stage_sizes_orders_storage_then_vertex_and_subtracts_offset() {
+        // No storage-array bindings; two vertex buffers at metal slots 5 and 8.
+        let storage_bindings: Vec<HalMslBufferSizeBinding> = Vec::new();
+        let bind_buffers: Vec<HalBoundBuffer> = Vec::new();
+        let vertex_buffer_metal_indices = vec![5u32, 8u32];
+        // slot 5: size=256, offset=16 → effective=240
+        // slot 8: size=1024, offset=0  → effective=1024
+        let vertex_buffers = vec![
+            make_vertex_bound_buffer(5, 256, 16),
+            make_vertex_bound_buffer(8, 1024, 0),
+        ];
+
+        let sizes = compose_vertex_stage_sizes(
+            &storage_bindings,
+            &bind_buffers,
+            &vertex_buffer_metal_indices,
+            &vertex_buffers,
+        )
+        .expect("compose must succeed");
+
+        // Expected: [240, 1024] (no storage entries).
+        assert_eq!(sizes, vec![240u32, 1024u32]);
+    }
+
+    /// Missing vertex-buffer binding (no matching metal_index) contributes 0.
+    #[test]
+    fn compose_vertex_stage_sizes_missing_binding_contributes_zero() {
+        let sizes = compose_vertex_stage_sizes(
+            &[],
+            &[],
+            &[3u32], // no vertex buffer at slot 3
+            &[],
+        )
+        .expect("compose must succeed");
+
+        assert_eq!(sizes, vec![0u32]);
+    }
+
+    /// Vertex buffer sizes are appended AFTER any storage-array sizes.
+    #[test]
+    fn compose_vertex_stage_sizes_storage_entries_precede_vertex_entries() {
+        // One storage-array binding with a Noop buffer (size=0 via msl_buffer_sizes fallback path).
+        // The vertex buffer contributes 64.
+        // Noop buffers return 0 from msl_buffer_sizes because bound_buffer_size rejects them.
+        // Use a single vertex buffer slot only to verify ordering structure.
+        let vertex_buffer_metal_indices = vec![2u32];
+        let vertex_buffers = vec![make_vertex_bound_buffer(2, 64, 0)];
+        // Storage binding references group=0,binding=99 which has no matching entry in bind_buffers
+        // → msl_buffer_sizes returns 0 for it.
+        let storage_bindings = vec![HalMslBufferSizeBinding::new(0, 99)];
+        let bind_buffers: Vec<HalBoundBuffer> = Vec::new();
+
+        let sizes = compose_vertex_stage_sizes(
+            &storage_bindings,
+            &bind_buffers,
+            &vertex_buffer_metal_indices,
+            &vertex_buffers,
+        )
+        .expect("compose must succeed");
+
+        // Two entries: [storage_size(0), vertex_size(64)].
+        assert_eq!(sizes.len(), 2);
+        assert_eq!(sizes[0], 0u32); // storage entry (unbound → 0)
+        assert_eq!(sizes[1], 64u32); // vertex entry
+    }
+
+    /// Effective size saturates at u32::MAX for a very large buffer.
+    #[test]
+    fn compose_vertex_stage_sizes_clamps_large_buffer_to_u32_max() {
+        let vertex_buffer_metal_indices = vec![0u32];
+        // Buffer larger than u32::MAX.
+        let vertex_buffers = vec![make_vertex_bound_buffer(0, u64::from(u32::MAX) + 1, 0)];
+
+        let sizes =
+            compose_vertex_stage_sizes(&[], &[], &vertex_buffer_metal_indices, &vertex_buffers)
+                .expect("compose must succeed");
+
+        assert_eq!(sizes, vec![u32::MAX]);
+    }
 
     #[test]
     fn msl_buffer_size_u32_rejects_overflow() {

@@ -1183,6 +1183,12 @@ pub(crate) fn select_render_shader_source(
                     );
                 }
             };
+            // Collect metal indices in the same order as vertex_buffer_mappings
+            // passed to naga codegen (i.e. the order of msl_vertex_buffers).
+            // These are the metal buffer slot ids for the `buffer_sizeN` fields
+            // appended after storage-array size fields in `_mslBufferSizes`.
+            let vertex_buffer_metal_indices: Vec<u32> =
+                msl_vertex_buffers.iter().map(|b| b.metal_index).collect();
             Ok((
                 HalShaderSource::MslStagesWithBufferSizes {
                     vertex: vertex.source,
@@ -1203,6 +1209,7 @@ pub(crate) fn select_render_shader_source(
                     fragment_frag_depth_clamp_slot: fragment
                         .as_ref()
                         .and_then(|fragment| fragment.frag_depth_clamp_slot),
+                    vertex_buffer_metal_indices,
                 },
                 vertex.entry_point,
                 fragment.map(|fragment| fragment.entry_point),

@@ -771,8 +771,17 @@ impl ReflectedModule {
             .iter()
             .map(|mapping| mapping.id)
             .collect::<Vec<_>>();
-        let buffer_sizes_slot =
-            msl_buffer_sizes_slot(binding_map, &buffer_size_bindings, &vertex_buffer_indices)?;
+        // Vertex pulling requires a `_mslBufferSizes` buffer slot even when the
+        // shader has no runtime-sized arrays (the slot holds vertex buffer lengths
+        // used by the OOB guards).  Force allocation whenever vertex buffers are
+        // present.
+        let needs_sizes_slot_for_vertex_pulling = !vertex_buffer_indices.is_empty();
+        let buffer_sizes_slot = msl_buffer_sizes_slot_or_force(
+            binding_map,
+            &buffer_size_bindings,
+            &vertex_buffer_indices,
+            needs_sizes_slot_for_vertex_pulling,
+        )?;
         let frag_depth_clamp_slot = if needs_frag_depth_clamp {
             let size_slot = buffer_sizes_slot
                 .map(u32::from)
@@ -803,11 +812,18 @@ impl ReflectedModule {
             bounds_check_policies: msl_bounds_check_policies(),
             ..Default::default()
         };
+        // Enable vertex pulling so naga emits explicit bounds guards for every
+        // vertex attribute load (zeroing OOB reads).  The existing
+        // `_buffer_sizes` slot plumbing feeds the per-buffer-size constants
+        // that the guards compare against.  When `vertex_buffer_mappings` is
+        // empty (e.g. fullscreen triangles, fragment-only stages) the transform
+        // is a no-op — naga checks `!vertex_buffer_mappings.is_empty()` before
+        // activating it.
         let pipeline_options = naga::back::msl::PipelineOptions {
             entry_point: Some((stage, entry_name.to_owned())),
+            vertex_pulling_transform: true,
             vertex_buffer_mappings: stage_options.vertex_buffer_mappings,
             allow_and_force_point_size: stage_options.force_point_size,
-            ..Default::default()
         };
         let (source, write_info) =
             naga::back::msl::write_string(&module, &info, &options, &pipeline_options)
@@ -851,10 +867,13 @@ impl ReflectedModule {
             .collect::<Vec<_>>();
         let vertex_buffer_size_bindings =
             msl_buffer_size_bindings_for_entry(&module, vertex_entry_name)?;
-        let vertex_buffer_sizes_slot = msl_buffer_sizes_slot(
+        // Vertex pulling requires a sizes slot even when there are no runtime-sized
+        // storage arrays (the slot carries vertex buffer lengths for OOB guards).
+        let vertex_buffer_sizes_slot = msl_buffer_sizes_slot_or_force(
             binding_map,
             &vertex_buffer_size_bindings,
             &vertex_buffer_indices,
+            !vertex_buffer_indices.is_empty(),
         )?;
         let fragment_buffer_size_bindings = fragment_entry_name
             .map(|entry| msl_buffer_size_bindings_for_entry(&module, entry))
@@ -893,11 +912,13 @@ impl ReflectedModule {
             bounds_check_policies: msl_bounds_check_policies(),
             ..Default::default()
         };
+        // Enable vertex pulling (see generate_render_stage_msl for rationale).
+        // Same no-op guarantee applies when vertex_buffer_mappings is empty.
         let pipeline_options = naga::back::msl::PipelineOptions {
             entry_point: None,
+            vertex_pulling_transform: true,
             vertex_buffer_mappings,
             allow_and_force_point_size: force_point_size,
-            ..Default::default()
         };
         let (source, info) =
             naga::back::msl::write_string(&module, &info, &options, &pipeline_options)
@@ -1332,6 +1353,23 @@ fn msl_buffer_sizes_slot(
     extra_buffer_indices: &[u32],
 ) -> Result<Option<naga::back::msl::Slot>, String> {
     if buffer_size_bindings.is_empty() {
+        return Ok(None);
+    }
+    msl_next_buffer_slot(binding_map, extra_buffer_indices).map(Some)
+}
+
+/// Like [`msl_buffer_sizes_slot`] but always allocates a slot when
+/// `force` is true.  Used for vertex stages with vertex buffers: vertex
+/// pulling requires a `_mslBufferSizes` argument even when the shader has
+/// no runtime-sized storage arrays (the slot carries the per-vertex-buffer
+/// lengths used by the OOB guards).
+fn msl_buffer_sizes_slot_or_force(
+    binding_map: &MslBindingMap,
+    buffer_size_bindings: &[MslBufferSizeBinding],
+    extra_buffer_indices: &[u32],
+    force: bool,
+) -> Result<Option<naga::back::msl::Slot>, String> {
+    if buffer_size_bindings.is_empty() && !force {
         return Ok(None);
     }
     msl_next_buffer_slot(binding_map, extra_buffer_indices).map(Some)
@@ -2977,6 +3015,99 @@ fn cs() {}
         assert!(
             generated.workgroup_memory_sizes.is_empty(),
             "render stages must always return empty workgroup_memory_sizes"
+        );
+    }
+
+    /// F-068: vertex-pulling transform must emit OOB guard code for vertex
+    /// attribute loads.  With `vertex_pulling_transform: true`, naga rewrites
+    /// the vertex shader to receive the raw vertex buffer as a device pointer
+    /// and explicitly bounds-checks the vertex id against the buffer size
+    /// (zeroing the attribute on OOB).  The emitted MSL must contain the
+    /// `_mslBufferSizes` struct and the guard comparison (e.g.
+    /// `< (_buffer_sizes.buffer_size`).
+    #[test]
+    fn generate_render_vertex_msl_emits_vertex_pulling_guard_for_vertex_attribute() {
+        let module = parse_and_validate_wgsl(
+            r"
+@vertex
+fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
+    return pos;
+}
+",
+        )
+        .expect("vertex shader with attribute should validate");
+
+        let generated = module
+            .generate_render_vertex_msl(
+                "vs",
+                &MslBindingMap {
+                    resources: Vec::new(),
+                },
+                &[MslVertexBufferBinding {
+                    slot: 0,
+                    metal_index: 0,
+                    array_stride: 16,
+                    step_mode: MslVertexStepMode::Vertex,
+                    attributes: vec![MslVertexAttribute {
+                        shader_location: 0,
+                        offset: 0,
+                        format: MslVertexFormat::Float32x4,
+                    }],
+                }],
+                false,
+                &naga::back::PipelineConstants::default(),
+            )
+            .expect("vertex pulling MSL should generate");
+
+        // Naga emits a `_mslBufferSizes` struct and guards each vertex
+        // attribute read with `< (_buffer_sizes.buffer_size...`.
+        assert!(
+            generated.source.contains("_mslBufferSizes"),
+            "vertex pulling must emit the _mslBufferSizes guard struct; MSL:\n{}",
+            generated.source
+        );
+        assert!(
+            generated.source.contains("_buffer_sizes.buffer_size"),
+            "vertex pulling must emit a bounds-check against _buffer_sizes; MSL:\n{}",
+            generated.source
+        );
+    }
+
+    /// F-068: vertex-pulling transform is a no-op when there are no vertex
+    /// buffers (e.g. fullscreen-triangle shaders that only use
+    /// @builtin(vertex_index)).  The emitted MSL must still compile cleanly and
+    /// must NOT contain spurious guard code.
+    #[test]
+    fn generate_render_vertex_msl_no_vertex_buffers_produces_no_pulling_guard() {
+        let module = parse_and_validate_wgsl(
+            "@vertex fn vs() -> @builtin(position) vec4<f32> {
+                return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+            }",
+        )
+        .expect("no-attribute vertex shader should validate");
+
+        let generated = module
+            .generate_render_vertex_msl(
+                "vs",
+                &MslBindingMap {
+                    resources: Vec::new(),
+                },
+                &[], // no vertex buffers
+                false,
+                &naga::back::PipelineConstants::default(),
+            )
+            .expect("no-attribute vertex MSL should generate");
+
+        // Without vertex buffers the pulling transform is a no-op; no guard
+        // infrastructure should appear.
+        assert!(
+            !generated.source.contains("_buffer_sizes.buffer_size"),
+            "no-buffer vertex shader must not emit pulling guards; MSL:\n{}",
+            generated.source
+        );
+        assert!(
+            generated.source.contains("vertex"),
+            "MSL must still contain a vertex function"
         );
     }
 }
