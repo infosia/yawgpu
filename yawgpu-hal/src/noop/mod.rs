@@ -163,7 +163,9 @@ impl NoopQueue {
                 HalCopy::Buffer(buf_copy) => {
                     // Read from source, write into destination in order to
                     // make the data visible for subsequent map-reads.
-                    let data = buf_copy.source.read(buf_copy.source_offset, buf_copy.size)?;
+                    let data = buf_copy
+                        .source
+                        .read(buf_copy.source_offset, buf_copy.size)?;
                     buf_copy
                         .destination
                         .write(buf_copy.destination_offset, &data)?;

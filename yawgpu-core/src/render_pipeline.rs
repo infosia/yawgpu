@@ -4129,9 +4129,9 @@ fn test() -> vec4<f32> {{
             immediate_size: 0,
             error: None,
         }));
-        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
-            non_filterable_render_wgsl(0),
-        )));
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(non_filterable_render_wgsl(0))),
+        );
         assert!(!module.is_error(), "shader module must compile");
 
         let mut descriptor = render_pipeline_descriptor(module);
@@ -4185,9 +4185,9 @@ fn test() -> vec4<f32> {{
             immediate_size: 0,
             error: None,
         }));
-        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
-            non_filterable_render_wgsl(0),
-        )));
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(non_filterable_render_wgsl(0))),
+        );
         assert!(!module.is_error(), "shader module must compile");
 
         let mut descriptor = render_pipeline_descriptor(module);
@@ -4196,7 +4196,10 @@ fn test() -> vec4<f32> {{
         device.push_error_scope(ErrorFilter::Validation);
         let pipeline = device.create_render_pipeline(descriptor);
         let scoped = device.pop_error_scope().expect("scope should exist");
-        assert!(!pipeline.is_error(), "Float+Filtering must succeed for render pipeline");
+        assert!(
+            !pipeline.is_error(),
+            "Float+Filtering must succeed for render pipeline"
+        );
         assert_eq!(scoped, None, "no validation error expected");
     }
 }

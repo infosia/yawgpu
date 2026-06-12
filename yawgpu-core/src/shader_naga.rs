@@ -581,6 +581,15 @@ impl ReflectedModule {
         }
         let options = naga::back::spv::Options {
             fake_missing_bindings: true,
+            // Mirror wgpu-hal/src/vulkan/adapter.rs: use Restrict for index and
+            // buffer so that out-of-bounds accesses are clamped rather than
+            // producing undefined behaviour.  We do not yet detect
+            // robustBufferAccess2 on the adapter, so Restrict (the safe default)
+            // is used for both.  image_load is also Restrict (matches MSL path).
+            // binding_array remains Unchecked: SPIR-V descriptor arrays require
+            // VK_EXT_descriptor_indexing robust-access extensions which we do not
+            // mandate.
+            bounds_check_policies: spirv_bounds_check_policies(),
             ..Default::default()
         };
         let pipeline_options = naga::back::spv::PipelineOptions {
@@ -648,8 +657,7 @@ impl ReflectedModule {
         let resources = msl_resources(binding_map)?;
         let buffer_size_bindings = msl_buffer_size_bindings_for_entry(&module, entry_name)?;
         let buffer_sizes_slot = msl_buffer_sizes_slot(binding_map, &buffer_size_bindings, &[])?;
-        let workgroup_memory_sizes =
-            collect_workgroup_memory_sizes(&module, &info, entry_name)?;
+        let workgroup_memory_sizes = collect_workgroup_memory_sizes(&module, &info, entry_name)?;
         let mut per_entry_point_map = BTreeMap::new();
         per_entry_point_map.insert(
             entry_name.to_owned(),
@@ -1434,14 +1442,25 @@ fn msl_buffer_size_bindings_for_entry(
         .collect())
 }
 
-fn msl_bounds_check_policies() -> naga::proc::BoundsCheckPolicies {
-    let bounds_check_policy = naga::proc::BoundsCheckPolicy::Restrict;
+/// Returns the shared bounds-check policy set used by both the SPIR-V and MSL
+/// backends.
+///
+/// index/buffer/image_load are all `Restrict` (clamp OOB to a safe in-bounds
+/// address rather than producing undefined behaviour).  `binding_array` is
+/// left `Unchecked` because runtime-sized descriptor arrays require explicit
+/// extension support (VK_EXT_descriptor_indexing / argument buffers) on both
+/// backends.
+fn spirv_bounds_check_policies() -> naga::proc::BoundsCheckPolicies {
     naga::proc::BoundsCheckPolicies {
-        index: bounds_check_policy,
-        buffer: bounds_check_policy,
-        image_load: bounds_check_policy,
+        index: naga::proc::BoundsCheckPolicy::Restrict,
+        buffer: naga::proc::BoundsCheckPolicy::Restrict,
+        image_load: naga::proc::BoundsCheckPolicy::Restrict,
         binding_array: naga::proc::BoundsCheckPolicy::Unchecked,
     }
+}
+
+fn msl_bounds_check_policies() -> naga::proc::BoundsCheckPolicies {
+    spirv_bounds_check_policies()
 }
 
 fn msl_needs_array_length(
@@ -2861,6 +2880,98 @@ fn fs() -> @location(0) vec4<f32> {
         assert!(!spirv.is_empty());
     }
 
+    /// Verify that `spirv_bounds_check_policies` returns `Restrict` for
+    /// index, buffer, and image_load, and `Unchecked` for binding_array —
+    /// matching the wgpu-hal Vulkan adapter choice.
+    ///
+    /// This is a pure policy test (no SPIR-V generation required) so it runs
+    /// on every Noop gate with no GPU.
+    #[test]
+    fn spirv_bounds_check_policies_are_restrict() {
+        let policies = super::spirv_bounds_check_policies();
+        assert_eq!(
+            policies.index,
+            naga::proc::BoundsCheckPolicy::Restrict,
+            "SPIR-V index policy must be Restrict"
+        );
+        assert_eq!(
+            policies.buffer,
+            naga::proc::BoundsCheckPolicy::Restrict,
+            "SPIR-V buffer policy must be Restrict"
+        );
+        assert_eq!(
+            policies.image_load,
+            naga::proc::BoundsCheckPolicy::Restrict,
+            "SPIR-V image_load policy must be Restrict"
+        );
+        assert_eq!(
+            policies.binding_array,
+            naga::proc::BoundsCheckPolicy::Unchecked,
+            "SPIR-V binding_array policy must be Unchecked (no ext mandate)"
+        );
+    }
+
+    /// Verify that a shader with a dynamic array index generates different
+    /// SPIR-V when bounds-check policies are Restrict vs Unchecked — i.e.
+    /// the Restrict policies actually affect the emitted code.
+    #[test]
+    fn generate_spirv_with_dynamic_array_index_differs_from_unchecked() {
+        // A compute shader with a dynamic array access that naga can guard.
+        let module = parse_and_validate_wgsl(
+            r"
+@group(0) @binding(0) var<storage, read_write> buf: array<f32>;
+
+@compute @workgroup_size(1)
+fn cs(@builtin(global_invocation_id) gid: vec3<u32>) {
+    buf[gid.x] = buf[gid.x] + 1.0;
+}
+",
+        )
+        .expect("dynamic-index compute shader should validate");
+
+        let restrict_spirv = module
+            .generate_spirv(
+                "cs",
+                ShaderStage::Compute,
+                &naga::back::PipelineConstants::default(),
+            )
+            .expect("SPIR-V generation with Restrict policies should succeed");
+
+        // Generate a second copy with Unchecked policies to confirm the words differ.
+        let (unchecked_module, unchecked_info) = module
+            .process_overrides_for_entry(
+                "cs",
+                ShaderStage::Compute,
+                &naga::back::PipelineConstants::default(),
+            )
+            .expect("process_overrides should succeed");
+        let unchecked_options = naga::back::spv::Options {
+            fake_missing_bindings: true,
+            bounds_check_policies: naga::proc::BoundsCheckPolicies::default(), // all Unchecked
+            ..Default::default()
+        };
+        let pipeline_opts = naga::back::spv::PipelineOptions {
+            shader_stage: ShaderStage::Compute,
+            entry_point: "cs".to_owned(),
+        };
+        let unchecked_spirv = naga::back::spv::write_vec(
+            &unchecked_module,
+            &unchecked_info,
+            &unchecked_options,
+            Some(&pipeline_opts),
+        )
+        .expect("unchecked SPIR-V generation should succeed");
+
+        assert!(
+            !restrict_spirv.is_empty(),
+            "Restrict SPIR-V must be non-empty"
+        );
+        assert_ne!(
+            restrict_spirv, unchecked_spirv,
+            "Restrict SPIR-V must differ from Unchecked (bounds guards must be emitted)"
+        );
+    }
+
     #[cfg(feature = "gles")]
     #[test]
     fn generate_glsl_emits_vertex_main() {
@@ -2958,7 +3069,11 @@ fn cs() {
         .expect("workgroup shader should validate");
 
         let generated = module
-            .generate_msl("cs", &empty_binding_map(), &naga::back::PipelineConstants::default())
+            .generate_msl(
+                "cs",
+                &empty_binding_map(),
+                &naga::back::PipelineConstants::default(),
+            )
             .expect("MSL generation should succeed");
 
         // array<u32, 7> = 7 * 4 = 28 bytes → next_multiple_of(16) = 32
@@ -2982,7 +3097,11 @@ fn cs() {}
         .expect("trivial compute shader should validate");
 
         let generated = module
-            .generate_msl("cs", &empty_binding_map(), &naga::back::PipelineConstants::default())
+            .generate_msl(
+                "cs",
+                &empty_binding_map(),
+                &naga::back::PipelineConstants::default(),
+            )
             .expect("MSL generation should succeed");
 
         assert!(

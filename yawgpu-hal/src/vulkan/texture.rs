@@ -684,7 +684,10 @@ mod tests {
     fn effective_anisotropy_disables_when_requested_is_one() {
         // (1, true, 16.0) → (false, 1.0)
         let (enable, max) = effective_anisotropy(1, true, 16.0);
-        assert!(!enable, "anisotropy should be disabled for max_anisotropy=1");
+        assert!(
+            !enable,
+            "anisotropy should be disabled for max_anisotropy=1"
+        );
         assert_eq!(max, 1.0);
     }
 

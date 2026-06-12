@@ -24,10 +24,16 @@ pub unsafe extern "C" fn wgpuAdapterAddRef(adapter: native::WGPUAdapter) {
 
 /// Gets the supported limits for an adapter.
 ///
+/// If `limits.nextInChain` points to a `WGPUCompatibilityModeLimits` node
+/// (identified by `WGPUSType_CompatibilityModeLimits`) the per-stage limits
+/// (maxStorageBuffersIn{Vertex,Fragment}Stage,
+/// maxStorageTexturesIn{Vertex,Fragment}Stage) are written into that struct.
+///
 /// # Safety
 ///
 /// `adapter` must be a non-null live yawgpu adapter handle. `limits` must
-/// point to writable `WGPULimits` storage.
+/// point to writable `WGPULimits` storage. When `limits.nextInChain` is
+/// non-null it must be a valid linked list of `WGPUChainedStruct` nodes.
 /// Returns WGPU adapter get limits.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuAdapterGetLimits(
@@ -38,7 +44,13 @@ pub unsafe extern "C" fn wgpuAdapterGetLimits(
     let Some(limits) = limits.as_mut() else {
         return native::WGPUStatus_Error;
     };
-    *limits = map_limits_to_native(adapter.core.limits());
+    // Preserve the caller-supplied chain pointer before overwriting the struct.
+    let caller_chain = limits.nextInChain;
+    let core_limits = adapter.core.limits();
+    *limits = map_limits_to_native(core_limits);
+    limits.nextInChain = caller_chain;
+    // Populate any WGPUCompatibilityModeLimits node the caller attached.
+    fill_compat_limits_chain(caller_chain, core_limits);
     native::WGPUStatus_Success
 }
 
@@ -157,10 +169,18 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
     callback_info: native::WGPURequestDeviceCallbackInfo,
 ) -> native::WGPUFuture {
     let adapter = borrow_handle(adapter, "WGPUAdapter");
-    let required_limits = descriptor
-        .as_ref()
-        .and_then(|descriptor| descriptor.requiredLimits.as_ref())
-        .map(map_limits);
+    let required_limits = descriptor.as_ref().and_then(|descriptor| {
+        descriptor.requiredLimits.as_ref().map(|wgpu_limits| {
+            let mut limits = map_limits(wgpu_limits);
+            // Read the four per-stage limits from a chained
+            // WGPUCompatibilityModeLimits if the caller attached one.
+            apply_compat_limits_from_chain(
+                wgpu_limits.nextInChain as *const native::WGPUChainedStruct,
+                &mut limits,
+            );
+            limits
+        })
+    });
     let required_features = descriptor
         .as_ref()
         .map(|descriptor| required_features_from_descriptor(descriptor))
