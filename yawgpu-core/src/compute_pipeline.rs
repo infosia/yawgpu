@@ -590,9 +590,7 @@ pub(crate) fn metal_buffer_binding_map(
             };
 
             // Flat `metal_index`: use vertex index when available, then fragment.
-            let metal_index = vertex_metal_index
-                .or(fragment_metal_index)
-                .unwrap_or(0);
+            let metal_index = vertex_metal_index.or(fragment_metal_index).unwrap_or(0);
 
             bindings.push(MetalBufferBinding {
                 group,
@@ -660,19 +658,19 @@ pub(crate) fn vertex_stage_buffer_count(metal_bindings: &[MetalBufferBinding]) -
     // For ExternalTexture the params buffer occupies the buffer space too.
     let max_slot = metal_bindings
         .iter()
-        .filter_map(|b| b.vertex_metal_index.and_then(|_| {
-            // The vertex buffer-space slot is:
-            //   - `vertex_metal_index` for Buffer bindings
-            //   - `ext_params_buffer_slot` for ExternalTexture (vertex_metal_index
-            //     is texture-space here)
-            match b.kind {
-                MetalBindingKind::Buffer(_) => b.vertex_metal_index.map(|s| s + 1),
-                MetalBindingKind::ExternalTexture => {
-                    b.ext_params_buffer_slot.map(|s| s + 1)
+        .filter_map(|b| {
+            b.vertex_metal_index.and_then(|_| {
+                // The vertex buffer-space slot is:
+                //   - `vertex_metal_index` for Buffer bindings
+                //   - `ext_params_buffer_slot` for ExternalTexture (vertex_metal_index
+                //     is texture-space here)
+                match b.kind {
+                    MetalBindingKind::Buffer(_) => b.vertex_metal_index.map(|s| s + 1),
+                    MetalBindingKind::ExternalTexture => b.ext_params_buffer_slot.map(|s| s + 1),
+                    _ => None,
                 }
-                _ => None,
-            }
-        }))
+            })
+        })
         .max()
         .unwrap_or(0);
     usize::try_from(max_slot).unwrap_or(0)
@@ -2087,7 +2085,10 @@ mod tests {
     }
 
     /// Build a minimal single-group layout with one entry per kind descriptor.
-    fn make_layout(_device: &crate::device::Device, entries: Vec<BindGroupLayoutEntry>) -> Arc<BindGroupLayout> {
+    fn make_layout(
+        _device: &crate::device::Device,
+        entries: Vec<BindGroupLayoutEntry>,
+    ) -> Arc<BindGroupLayout> {
         Arc::new(BindGroupLayout::new(entries, false, true))
     }
 
@@ -2143,13 +2144,16 @@ mod tests {
         // Expected: buffer-space: buf@0→0; texture-space: tex@1→0, tex@3→1;
         //           sampler-space: smp@2→0, smp@4→1.
         let device = noop_device();
-        let layout = make_layout(&device, vec![
-            buf_entry(0, SHADER_STAGE_COMPUTE),
-            tex_entry(1, SHADER_STAGE_COMPUTE),
-            smp_entry(2, SHADER_STAGE_COMPUTE),
-            tex_entry(3, SHADER_STAGE_COMPUTE),
-            smp_entry(4, SHADER_STAGE_COMPUTE),
-        ]);
+        let layout = make_layout(
+            &device,
+            vec![
+                buf_entry(0, SHADER_STAGE_COMPUTE),
+                tex_entry(1, SHADER_STAGE_COMPUTE),
+                smp_entry(2, SHADER_STAGE_COMPUTE),
+                tex_entry(3, SHADER_STAGE_COMPUTE),
+                smp_entry(4, SHADER_STAGE_COMPUTE),
+            ],
+        );
         let bindings = metal_buffer_binding_map(&[layout]);
 
         // Find each binding by kind and slot.
@@ -2171,10 +2175,13 @@ mod tests {
         // ExternalTexture occupies 3 consecutive texture slots + 1 buffer slot.
         // A plain buffer after it should start at buffer slot 1 (not 0).
         let device = noop_device();
-        let layout = make_layout(&device, vec![
-            ext_entry(0, SHADER_STAGE_COMPUTE),
-            buf_entry(1, SHADER_STAGE_COMPUTE),
-        ]);
+        let layout = make_layout(
+            &device,
+            vec![
+                ext_entry(0, SHADER_STAGE_COMPUTE),
+                buf_entry(1, SHADER_STAGE_COMPUTE),
+            ],
+        );
         let bindings = metal_buffer_binding_map(&[layout]);
 
         let ext = bindings.iter().find(|b| b.binding == 0).unwrap();
@@ -2182,7 +2189,11 @@ mod tests {
 
         // ExternalTexture: texture-space base slot 0, params buffer slot 0.
         assert_eq!(ext.metal_index, 0, "ext texture base slot");
-        assert_eq!(ext.ext_params_buffer_slot, Some(0), "ext params buffer slot");
+        assert_eq!(
+            ext.ext_params_buffer_slot,
+            Some(0),
+            "ext params buffer slot"
+        );
         // The plain buffer follows in buffer-space: slot 1 (after the ext params slot).
         assert_eq!(buf.metal_index, 1, "buffer after external texture");
     }
@@ -2198,11 +2209,14 @@ mod tests {
         //   binding 1: vertex_metal_index=None, fragment_metal_index=Some(0)
         //   binding 2 (sampler): vertex_metal_index=Some(0), fragment_metal_index=Some(0)
         let device = noop_device();
-        let layout = make_layout(&device, vec![
-            buf_entry(0, SHADER_STAGE_VERTEX),
-            tex_entry(1, SHADER_STAGE_FRAGMENT),
-            smp_entry(2, SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT),
-        ]);
+        let layout = make_layout(
+            &device,
+            vec![
+                buf_entry(0, SHADER_STAGE_VERTEX),
+                tex_entry(1, SHADER_STAGE_FRAGMENT),
+                smp_entry(2, SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT),
+            ],
+        );
         let bindings = metal_buffer_binding_map(&[layout]);
 
         let buf = bindings.iter().find(|b| b.binding == 0).unwrap();
@@ -2227,10 +2241,13 @@ mod tests {
         use crate::render_pipeline::metal_vertex_buffer_binding_map;
         // Two VERTEX-visible buffers → vertex buffer start slot must be 2.
         let device = noop_device();
-        let layout = make_layout(&device, vec![
-            buf_entry(0, SHADER_STAGE_VERTEX),
-            buf_entry(1, SHADER_STAGE_VERTEX),
-        ]);
+        let layout = make_layout(
+            &device,
+            vec![
+                buf_entry(0, SHADER_STAGE_VERTEX),
+                buf_entry(1, SHADER_STAGE_VERTEX),
+            ],
+        );
         let bindings = metal_buffer_binding_map(&[layout]);
         let vb_bindings = metal_vertex_buffer_binding_map(1, &bindings);
         // The one vertex buffer should start at Metal buffer slot 2.
@@ -2242,24 +2259,35 @@ mod tests {
         // Build 16 sampler bindings (slots 0-15) — last one is slot 15 which is
         // still in range.  The 17th would be slot 16 which must be rejected.
         let device = noop_device();
-        let entries: Vec<_> = (0..17).map(|i| smp_entry(i, SHADER_STAGE_COMPUTE)).collect();
+        let entries: Vec<_> = (0..17)
+            .map(|i| smp_entry(i, SHADER_STAGE_COMPUTE))
+            .collect();
         let layout = make_layout(&device, entries);
         let bindings = metal_buffer_binding_map(&[layout]);
 
         let result = validate_metal_slot_ranges(&bindings);
-        assert!(result.is_err(), "slot 16 must exceed the sampler limit of 15");
+        assert!(
+            result.is_err(),
+            "slot 16 must exceed the sampler limit of 15"
+        );
         let msg = result.unwrap_err();
-        assert!(msg.contains("sampler slot"), "error mentions sampler: {msg}");
+        assert!(
+            msg.contains("sampler slot"),
+            "error mentions sampler: {msg}"
+        );
     }
 
     #[test]
     fn validate_metal_slot_ranges_accepts_valid_layout() {
         let device = noop_device();
-        let layout = make_layout(&device, vec![
-            buf_entry(0, SHADER_STAGE_COMPUTE),
-            tex_entry(1, SHADER_STAGE_COMPUTE),
-            smp_entry(2, SHADER_STAGE_COMPUTE),
-        ]);
+        let layout = make_layout(
+            &device,
+            vec![
+                buf_entry(0, SHADER_STAGE_COMPUTE),
+                tex_entry(1, SHADER_STAGE_COMPUTE),
+                smp_entry(2, SHADER_STAGE_COMPUTE),
+            ],
+        );
         let bindings = metal_buffer_binding_map(&[layout]);
         assert_eq!(validate_metal_slot_ranges(&bindings), Ok(()));
     }
@@ -2335,9 +2363,8 @@ fn main() {\n\
             error: None,
         }));
 
-        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
-            WGSL.to_owned(),
-        )));
+        let module =
+            Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(WGSL.to_owned())));
         assert!(!module.is_error(), "shader module must compile");
 
         device.push_error_scope(ErrorFilter::Validation);
@@ -2350,16 +2377,25 @@ fn main() {\n\
         });
         let scoped = device.pop_error_scope().expect("scope should exist");
         assert!(!pipeline.is_error(), "pipeline must not be an error");
-        assert_eq!(scoped, None, "no validation error expected for explicit two-group compute pipeline");
+        assert_eq!(
+            scoped, None,
+            "no validation error expected for explicit two-group compute pipeline"
+        );
 
         // Also verify the metal binding map assigns per-kind slots correctly:
         // Buffer indices must be sequential across groups (0, 1, 2).
         let bindings = pipeline.metal_bindings();
-        let b00 = bindings.iter().find(|b| b.group == 0 && b.binding == 0)
+        let b00 = bindings
+            .iter()
+            .find(|b| b.group == 0 && b.binding == 0)
             .expect("group 0 binding 0 must be present");
-        let b10 = bindings.iter().find(|b| b.group == 1 && b.binding == 0)
+        let b10 = bindings
+            .iter()
+            .find(|b| b.group == 1 && b.binding == 0)
             .expect("group 1 binding 0 must be present");
-        let b11 = bindings.iter().find(|b| b.group == 1 && b.binding == 1)
+        let b11 = bindings
+            .iter()
+            .find(|b| b.group == 1 && b.binding == 1)
             .expect("group 1 binding 1 must be present");
 
         assert_eq!(b00.metal_index, 0, "group0/binding0 must be buffer slot 0");
@@ -2410,9 +2446,8 @@ fn main() {\n\
             error: None,
         }));
 
-        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
-            WGSL.to_owned(),
-        )));
+        let module =
+            Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(WGSL.to_owned())));
         assert!(!module.is_error(), "shader module must compile");
 
         device.push_error_scope(ErrorFilter::Validation);
@@ -2424,7 +2459,10 @@ fn main() {\n\
             error: None,
         });
         let scoped = device.pop_error_scope().expect("scope should exist");
-        assert!(!pipeline.is_error(), "pipeline with empty group 0 must not be an error");
+        assert!(
+            !pipeline.is_error(),
+            "pipeline with empty group 0 must not be an error"
+        );
         assert_eq!(scoped, None, "no validation error expected");
     }
 
@@ -2460,11 +2498,7 @@ fn main() {\n\
     }
 
     /// Makes a BGL entry for a sampler with the given type and visibility.
-    fn smp_entry_with_type(
-        binding: u32,
-        vis: u64,
-        ty: SamplerBindingType,
-    ) -> BindGroupLayoutEntry {
+    fn smp_entry_with_type(binding: u32, vis: u64, ty: SamplerBindingType) -> BindGroupLayoutEntry {
         BindGroupLayoutEntry {
             binding,
             visibility: vis,
@@ -2511,9 +2545,8 @@ fn test() {{
             immediate_size: 0,
             error: None,
         }));
-        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
-            non_filterable_wgsl(0),
-        )));
+        let module =
+            Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(non_filterable_wgsl(0))));
         assert!(!module.is_error(), "shader module must compile");
 
         device.push_error_scope(ErrorFilter::Validation);
@@ -2554,9 +2587,8 @@ fn test() {{
             immediate_size: 0,
             error: None,
         }));
-        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
-            non_filterable_wgsl(0),
-        )));
+        let module =
+            Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(non_filterable_wgsl(0))));
         assert!(!module.is_error(), "shader module must compile");
 
         device.push_error_scope(ErrorFilter::Validation);
@@ -2569,7 +2601,10 @@ fn test() {{
         });
         let scoped = device.pop_error_scope().expect("scope should exist");
         assert!(!pipeline.is_error(), "Float+Filtering must succeed");
-        assert_eq!(scoped, None, "no validation error expected for filterable Float");
+        assert_eq!(
+            scoped, None,
+            "no validation error expected for filterable Float"
+        );
     }
 
     /// Cross-group variant (F-080, sameGroup=false): texture in group 0, sampler
@@ -2597,9 +2632,8 @@ fn test() {{
             error: None,
         }));
         // Sampler is at group 1, binding 1.
-        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
-            non_filterable_wgsl(1),
-        )));
+        let module =
+            Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(non_filterable_wgsl(1))));
         assert!(!module.is_error(), "shader module must compile");
 
         device.push_error_scope(ErrorFilter::Validation);

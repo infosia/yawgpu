@@ -28,6 +28,14 @@ pub struct Limits {
     pub max_storage_buffers_per_shader_stage: u32,
     /// Max storage textures per shader stage.
     pub max_storage_textures_per_shader_stage: u32,
+    /// Max storage buffers usable in the vertex stage.
+    pub max_storage_buffers_in_vertex_stage: u32,
+    /// Max storage buffers usable in the fragment stage.
+    pub max_storage_buffers_in_fragment_stage: u32,
+    /// Max storage textures usable in the vertex stage.
+    pub max_storage_textures_in_vertex_stage: u32,
+    /// Max storage textures usable in the fragment stage.
+    pub max_storage_textures_in_fragment_stage: u32,
     /// Max uniform buffers per shader stage.
     pub max_uniform_buffers_per_shader_stage: u32,
     /// Max uniform buffer binding size.
@@ -71,8 +79,8 @@ pub struct Limits {
 impl Limits {
     /// Constant value for default.
     pub const DEFAULT: Self = Self {
-        max_texture_dimension_1d: 4096,
-        max_texture_dimension_2d: 4096,
+        max_texture_dimension_1d: 8192,
+        max_texture_dimension_2d: 8192,
         max_texture_dimension_3d: 2048,
         max_texture_array_layers: 256,
         max_bind_groups: 4,
@@ -84,8 +92,12 @@ impl Limits {
         max_samplers_per_shader_stage: 16,
         max_storage_buffers_per_shader_stage: 8,
         max_storage_textures_per_shader_stage: 4,
+        max_storage_buffers_in_vertex_stage: 8,
+        max_storage_buffers_in_fragment_stage: 8,
+        max_storage_textures_in_vertex_stage: 4,
+        max_storage_textures_in_fragment_stage: 4,
         max_uniform_buffers_per_shader_stage: 12,
-        max_uniform_buffer_binding_size: 16_384,
+        max_uniform_buffer_binding_size: 65_536,
         max_storage_buffer_binding_size: 128 * 1024 * 1024,
         min_uniform_buffer_offset_alignment: 256,
         min_storage_buffer_offset_alignment: 256,
@@ -93,13 +105,13 @@ impl Limits {
         max_buffer_size: 256 * 1024 * 1024,
         max_vertex_attributes: 16,
         max_vertex_buffer_array_stride: 2048,
-        max_inter_stage_shader_variables: 15,
-        max_color_attachments: 4,
+        max_inter_stage_shader_variables: 16,
+        max_color_attachments: 8,
         max_color_attachment_bytes_per_sample: 32,
         max_compute_workgroup_storage_size: 16_384,
-        max_compute_invocations_per_workgroup: 128,
-        max_compute_workgroup_size_x: 128,
-        max_compute_workgroup_size_y: 128,
+        max_compute_invocations_per_workgroup: 256,
+        max_compute_workgroup_size_x: 256,
+        max_compute_workgroup_size_y: 256,
         max_compute_workgroup_size_z: 64,
         max_compute_workgroups_per_dimension: 65_535,
         max_immediate_size: 0,
@@ -130,6 +142,18 @@ impl Limits {
 
         macro_rules! alignment {
             ($field:ident) => {
+                // Alignment-class limits must be powers of two, judged on the
+                // REQUESTED value (CTS requestDevice `limit,worse_than_default`:
+                // requesting default+1 = 257 must fail even though the clamped
+                // effective value would be valid). The relationship checks run
+                // on the effective limits and cannot see this.
+                if !required.$field.is_power_of_two() {
+                    return Err(format!(
+                        "required limit {}={} must be a power of two",
+                        stringify!($field),
+                        required.$field
+                    ));
+                }
                 if required.$field < self.$field {
                     return Err(format!(
                         "required limit {}={} is below supported {}",
@@ -155,6 +179,10 @@ impl Limits {
         maximum!(max_samplers_per_shader_stage);
         maximum!(max_storage_buffers_per_shader_stage);
         maximum!(max_storage_textures_per_shader_stage);
+        maximum!(max_storage_buffers_in_vertex_stage);
+        maximum!(max_storage_buffers_in_fragment_stage);
+        maximum!(max_storage_textures_in_vertex_stage);
+        maximum!(max_storage_textures_in_fragment_stage);
         maximum!(max_uniform_buffers_per_shader_stage);
         maximum!(max_uniform_buffer_binding_size);
         maximum!(max_storage_buffer_binding_size);
@@ -174,7 +202,16 @@ impl Limits {
         maximum!(max_compute_workgroup_size_z);
         maximum!(max_compute_workgroups_per_dimension);
 
-        validate_required_limit_relationships(required)?;
+        // Relationship checks are evaluated on the *effective* limits (after
+        // per-field maximum/alignment clamping to the spec default floor).
+        // Evaluating against `required` causes false rejections: e.g. requesting
+        // only maxComputeInvocationsPerWorkgroup=100 (worse-than-default) leaves
+        // maxComputeWorkgroupSizeX at its (default) 256 in `required`, making the
+        // relationship check fire even though the device would deliver
+        // invocations=256 (clamped to default), which satisfies the constraint.
+        // The CTS `adapter,requestDevice:limit,worse_than_default` confirms that
+        // any single-field worse-than-default Maximum request must succeed.
+        validate_required_limit_relationships(effective)?;
 
         if required.max_immediate_size > self.max_immediate_size {
             return Err(format!(
@@ -261,36 +298,61 @@ mod tests {
 
     #[test]
     fn validate_required_limits_rejects_relationship_violations() {
-        let supported = Limits::DEFAULT;
-        let mut required = Limits::DEFAULT;
-        required.max_compute_workgroup_size_x = 128;
-        required.max_compute_invocations_per_workgroup = 64;
-        assert_eq!(
-            supported.validate_required_limits(Some(&required)),
-            Err(
-                "required max_compute_workgroup_size_x exceeds max_compute_invocations_per_workgroup"
-                    .to_owned()
-            )
-        );
-
+        // Alignment relationship: a non-power-of-two alignment value is
+        // rejected.  The effective alignment = min(required, default) = 48,
+        // which is not a power of two — the check still fires after clamping.
         let mut supported = Limits::DEFAULT;
         supported.min_uniform_buffer_offset_alignment = 32;
-        required = supported;
+        let mut required = supported;
         required.min_uniform_buffer_offset_alignment = 48;
         assert_eq!(
             supported.validate_required_limits(Some(&required)),
-            Err(
-                "required min_uniform_buffer_offset_alignment must be a power of two and at least 32"
-                    .to_owned()
-            )
+            Err("required limit min_uniform_buffer_offset_alignment=48 must be a power of two".to_owned())
         );
 
-        required = Limits::DEFAULT;
-        required.max_buffer_size = Limits::DEFAULT.max_storage_buffer_binding_size - 1;
-        assert_eq!(
-            supported.validate_required_limits(Some(&required)),
-            Err("required max_storage_buffer_binding_size exceeds max_buffer_size".to_owned())
+        // CTS worse_than_default: requesting maxComputeInvocationsPerWorkgroup
+        // worse than the default (all other limits at default) must succeed.
+        // The effective limits resolve size_x and invocations to their defaults
+        // (both 256) so the relationship holds.
+        let supported = Limits::DEFAULT;
+        let mut required = Limits::DEFAULT;
+        required.max_compute_invocations_per_workgroup = 128; // worse-than-default
+        assert!(
+            supported.validate_required_limits(Some(&required)).is_ok(),
+            "worse-than-default maxComputeInvocationsPerWorkgroup must succeed"
         );
+
+        // CTS worse_than_default: requesting maxBindGroupsPlusVertexBuffers=0
+        // (worse than default 24) must succeed.
+        let mut required = Limits::DEFAULT;
+        required.max_bind_groups_plus_vertex_buffers = 0;
+        assert!(
+            supported.validate_required_limits(Some(&required)).is_ok(),
+            "worse-than-default maxBindGroupsPlusVertexBuffers must succeed"
+        );
+
+        // CTS worse_than_default: requesting maxColorAttachmentBytesPerSample=0
+        // must succeed (effective clamps to default 32).
+        let mut required = Limits::DEFAULT;
+        required.max_color_attachment_bytes_per_sample = 0;
+        assert!(
+            supported.validate_required_limits(Some(&required)).is_ok(),
+            "worse-than-default maxColorAttachmentBytesPerSample must succeed"
+        );
+    }
+
+    #[test]
+    fn non_power_of_two_alignment_request_is_rejected() {
+        // CTS requestDevice `limit,worse_than_default` (alignment "1,1"):
+        // default*1 + 1 = 257 is not a power of two and must fail the request
+        // even though min(257, default) would be a valid effective value.
+        let supported = Limits::DEFAULT;
+        let mut required = supported;
+        required.min_uniform_buffer_offset_alignment = 257;
+        assert!(supported.validate_required_limits(Some(&required)).is_err());
+        let mut required2 = supported;
+        required2.min_storage_buffer_offset_alignment = 257;
+        assert!(supported.validate_required_limits(Some(&required2)).is_err());
     }
 
     #[test]
@@ -303,6 +365,266 @@ mod tests {
         assert_eq!(
             supported.validate_required_limits(Some(&required)),
             Err("required limit max_immediate_size=4 exceeds supported 0".to_owned())
+        );
+    }
+
+    #[test]
+    fn default_limits_match_request_device_cts_core_table() {
+        let limits = Limits::DEFAULT;
+
+        assert_eq!(limits.max_texture_dimension_1d, 8192);
+        assert_eq!(limits.max_texture_dimension_2d, 8192);
+        assert_eq!(limits.max_uniform_buffer_binding_size, 65_536);
+        assert_eq!(limits.max_inter_stage_shader_variables, 16);
+        assert_eq!(limits.max_color_attachments, 8);
+        assert_eq!(limits.max_compute_invocations_per_workgroup, 256);
+        assert_eq!(limits.max_compute_workgroup_size_x, 256);
+        assert_eq!(limits.max_compute_workgroup_size_y, 256);
+        assert_eq!(limits.max_immediate_size, 0);
+    }
+
+    #[test]
+    fn validate_required_limits_rejects_better_than_supported_limits() {
+        let supported = Limits::DEFAULT;
+        let mut required = Limits::DEFAULT;
+        required.max_color_attachments = supported.max_color_attachments + 1;
+
+        assert_eq!(
+            supported.validate_required_limits(Some(&required)),
+            Err(format!(
+                "required limit max_color_attachments={} exceeds supported {}",
+                required.max_color_attachments, supported.max_color_attachments
+            ))
+        );
+
+        required = Limits::DEFAULT;
+        required.min_uniform_buffer_offset_alignment =
+            supported.min_uniform_buffer_offset_alignment / 2;
+        assert_eq!(
+            supported.validate_required_limits(Some(&required)),
+            Err(format!(
+                "required limit min_uniform_buffer_offset_alignment={} is below supported {}",
+                required.min_uniform_buffer_offset_alignment,
+                supported.min_uniform_buffer_offset_alignment
+            ))
+        );
+    }
+
+    #[test]
+    fn validate_required_limits_reports_supported_and_clamps_worse_than_default() {
+        let mut supported = Limits::DEFAULT;
+        supported.max_color_attachments = 16;
+        supported.min_uniform_buffer_offset_alignment = 128;
+
+        let mut required = Limits::DEFAULT;
+        required.max_color_attachments = 16;
+        required.min_uniform_buffer_offset_alignment = 128;
+        let effective = supported
+            .validate_required_limits(Some(&required))
+            .expect("supported requested limits should validate");
+        assert_eq!(effective.max_color_attachments, 16);
+        assert_eq!(effective.min_uniform_buffer_offset_alignment, 128);
+
+        required = Limits::DEFAULT;
+        required.max_color_attachments = Limits::DEFAULT.max_color_attachments - 1;
+        required.min_uniform_buffer_offset_alignment =
+            Limits::DEFAULT.min_uniform_buffer_offset_alignment * 2;
+        let effective = Limits::DEFAULT
+            .validate_required_limits(Some(&required))
+            .expect("legal worse-than-default requested limits should validate");
+        assert_eq!(
+            effective.max_color_attachments,
+            Limits::DEFAULT.max_color_attachments
+        );
+        assert_eq!(
+            effective.min_uniform_buffer_offset_alignment,
+            Limits::DEFAULT.min_uniform_buffer_offset_alignment
+        );
+    }
+
+    /// CTS `adapter,requestDevice:limit,worse_than_default` — three previously
+    /// failing cases (F-087 residual 4).  Each limit is set to a
+    /// worse-than-default value in isolation; all others are at their defaults.
+    /// The request must succeed and the device must report the *default* value
+    /// (because effective = max(requested, default) = default).
+    #[test]
+    fn worse_than_default_limits_accepted_and_report_default() {
+        let supported = Limits::DEFAULT;
+
+        // maxComputeInvocationsPerWorkgroup: default=256; request 255 (×2 sub-cases).
+        for requested in [255u32, 156u32] {
+            let mut required = Limits::DEFAULT;
+            required.max_compute_invocations_per_workgroup = requested;
+            let effective = supported
+                .validate_required_limits(Some(&required))
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "worse-than-default maxComputeInvocationsPerWorkgroup={requested} must succeed: {e}"
+                    )
+                });
+            assert_eq!(
+                effective.max_compute_invocations_per_workgroup,
+                Limits::DEFAULT.max_compute_invocations_per_workgroup,
+                "device must report default for maxComputeInvocationsPerWorkgroup"
+            );
+        }
+
+        // maxBindGroupsPlusVertexBuffers: default=24; request 23 and 0.
+        for requested in [23u32, 0u32] {
+            let mut required = Limits::DEFAULT;
+            required.max_bind_groups_plus_vertex_buffers = requested;
+            let effective = supported
+                .validate_required_limits(Some(&required))
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "worse-than-default maxBindGroupsPlusVertexBuffers={requested} must succeed: {e}"
+                    )
+                });
+            assert_eq!(
+                effective.max_bind_groups_plus_vertex_buffers,
+                Limits::DEFAULT.max_bind_groups_plus_vertex_buffers,
+                "device must report default for maxBindGroupsPlusVertexBuffers"
+            );
+        }
+
+        // maxColorAttachmentBytesPerSample: default=32; request 31 and 0.
+        for requested in [31u32, 0u32] {
+            let mut required = Limits::DEFAULT;
+            required.max_color_attachment_bytes_per_sample = requested;
+            let effective = supported
+                .validate_required_limits(Some(&required))
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "worse-than-default maxColorAttachmentBytesPerSample={requested} must succeed: {e}"
+                    )
+                });
+            assert_eq!(
+                effective.max_color_attachment_bytes_per_sample,
+                Limits::DEFAULT.max_color_attachment_bytes_per_sample,
+                "device must report default for maxColorAttachmentBytesPerSample"
+            );
+        }
+    }
+
+    /// Genuinely invalid relationship requests still reject.
+    ///
+    /// A non-power-of-two alignment survives effective-limit clamping (alignment
+    /// fields use `min`, not `max`) and must still be rejected.  Use a
+    /// supported alignment of 32 (the minimum) so that the per-field check
+    /// passes (48 >= 32) and only the power-of-two invariant fires.
+    #[test]
+    fn genuinely_invalid_alignment_relationship_still_rejects() {
+        // Set supported alignment to 32 so values above 32 pass the per-field
+        // check but non-powers-of-two still trigger the invariant.
+        let mut supported = Limits::DEFAULT;
+        supported.min_uniform_buffer_offset_alignment = 32;
+
+        // 48 is not a power of two — the alignment relationship check must
+        // still fire after effective-limit clamping.
+        let mut required = supported; // start from the new supported baseline
+        required.min_uniform_buffer_offset_alignment = 48;
+        assert_eq!(
+            supported.validate_required_limits(Some(&required)),
+            Err("required limit min_uniform_buffer_offset_alignment=48 must be a power of two".to_owned()),
+            "non-power-of-two alignment must still be rejected"
+        );
+
+        // Same for storage buffer offset.
+        let mut supported2 = Limits::DEFAULT;
+        supported2.min_storage_buffer_offset_alignment = 32;
+        let mut required2 = supported2;
+        required2.min_storage_buffer_offset_alignment = 96;
+        assert_eq!(
+            supported2.validate_required_limits(Some(&required2)),
+            Err(
+                "required limit min_storage_buffer_offset_alignment=96 must be a power of two"
+                    .to_owned()
+            ),
+            "non-power-of-two storage alignment must still be rejected"
+        );
+    }
+
+    #[test]
+    fn per_stage_limits_default_values_match_cts_table() {
+        // CTS kLimitInfos: maxStorageBuffersIn{Vertex,Fragment}Stage default=8,
+        // maxStorageTexturesIn{Vertex,Fragment}Stage default=4.
+        let limits = Limits::DEFAULT;
+        assert_eq!(limits.max_storage_buffers_in_vertex_stage, 8);
+        assert_eq!(limits.max_storage_buffers_in_fragment_stage, 8);
+        assert_eq!(limits.max_storage_textures_in_vertex_stage, 4);
+        assert_eq!(limits.max_storage_textures_in_fragment_stage, 4);
+    }
+
+    #[test]
+    fn per_stage_limits_better_than_supported_rejected() {
+        let supported = Limits::DEFAULT;
+
+        let mut required = Limits::DEFAULT;
+        required.max_storage_buffers_in_vertex_stage = supported.max_storage_buffers_in_vertex_stage + 1;
+        assert!(
+            supported.validate_required_limits(Some(&required)).is_err(),
+            "max_storage_buffers_in_vertex_stage above supported must fail"
+        );
+
+        required = Limits::DEFAULT;
+        required.max_storage_buffers_in_fragment_stage = supported.max_storage_buffers_in_fragment_stage + 1;
+        assert!(
+            supported.validate_required_limits(Some(&required)).is_err(),
+            "max_storage_buffers_in_fragment_stage above supported must fail"
+        );
+
+        required = Limits::DEFAULT;
+        required.max_storage_textures_in_vertex_stage = supported.max_storage_textures_in_vertex_stage + 1;
+        assert!(
+            supported.validate_required_limits(Some(&required)).is_err(),
+            "max_storage_textures_in_vertex_stage above supported must fail"
+        );
+
+        required = Limits::DEFAULT;
+        required.max_storage_textures_in_fragment_stage = supported.max_storage_textures_in_fragment_stage + 1;
+        assert!(
+            supported.validate_required_limits(Some(&required)).is_err(),
+            "max_storage_textures_in_fragment_stage above supported must fail"
+        );
+    }
+
+    #[test]
+    fn per_stage_limits_requested_value_delivered() {
+        // Requesting the supported (== default) value must yield that value exactly.
+        let supported = Limits::DEFAULT;
+        let required = Limits::DEFAULT; // all at supported value
+
+        let effective = supported
+            .validate_required_limits(Some(&required))
+            .expect("requesting supported per-stage limits must succeed");
+        assert_eq!(
+            effective.max_storage_buffers_in_vertex_stage,
+            Limits::DEFAULT.max_storage_buffers_in_vertex_stage,
+        );
+        assert_eq!(
+            effective.max_storage_buffers_in_fragment_stage,
+            Limits::DEFAULT.max_storage_buffers_in_fragment_stage,
+        );
+        assert_eq!(
+            effective.max_storage_textures_in_vertex_stage,
+            Limits::DEFAULT.max_storage_textures_in_vertex_stage,
+        );
+        assert_eq!(
+            effective.max_storage_textures_in_fragment_stage,
+            Limits::DEFAULT.max_storage_textures_in_fragment_stage,
+        );
+
+        // Requesting worse-than-default is legal and must not be rejected.
+        let mut required_worse = Limits::DEFAULT;
+        required_worse.max_storage_buffers_in_vertex_stage = Limits::DEFAULT.max_storage_buffers_in_vertex_stage - 1;
+        required_worse.max_storage_buffers_in_fragment_stage = Limits::DEFAULT.max_storage_buffers_in_fragment_stage - 1;
+        let effective_worse = Limits::DEFAULT
+            .validate_required_limits(Some(&required_worse))
+            .expect("worse-than-default per-stage request must succeed");
+        // effective clamps to DEFAULT (the minimum); it must not be below default.
+        assert_eq!(
+            effective_worse.max_storage_buffers_in_vertex_stage,
+            Limits::DEFAULT.max_storage_buffers_in_vertex_stage,
         );
     }
 }

@@ -611,10 +611,16 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderBundleEncoder(
 
 /// Gets the effective limits for a device.
 ///
+/// If `limits.nextInChain` points to a `WGPUCompatibilityModeLimits` node
+/// (identified by `WGPUSType_CompatibilityModeLimits`) the per-stage limits
+/// (maxStorageBuffersIn{Vertex,Fragment}Stage,
+/// maxStorageTexturesIn{Vertex,Fragment}Stage) are written into that struct.
+///
 /// # Safety
 ///
 /// `device` must be a non-null live yawgpu device handle. `limits` must point
-/// to writable `WGPULimits` storage.
+/// to writable `WGPULimits` storage. When `limits.nextInChain` is non-null it
+/// must be a valid linked list of `WGPUChainedStruct` nodes.
 /// Returns WGPU device get limits.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceGetLimits(
@@ -625,7 +631,13 @@ pub unsafe extern "C" fn wgpuDeviceGetLimits(
     let Some(limits) = limits.as_mut() else {
         return native::WGPUStatus_Error;
     };
-    *limits = map_limits_to_native(device.core.limits());
+    // Preserve the caller-supplied chain pointer before overwriting the struct.
+    let caller_chain = limits.nextInChain;
+    let core_limits = device.core.limits();
+    *limits = map_limits_to_native(core_limits);
+    limits.nextInChain = caller_chain;
+    // Populate any WGPUCompatibilityModeLimits node the caller attached.
+    fill_compat_limits_chain(caller_chain, core_limits);
     native::WGPUStatus_Success
 }
 

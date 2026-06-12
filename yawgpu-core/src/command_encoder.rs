@@ -2911,11 +2911,10 @@ mod tests {
 
     #[test]
     fn buffer_texture_copy_rejects_buffer_from_different_device() {
-        let adapter = noop_adapter();
-        let device_a = adapter
+        let device_a = noop_adapter()
             .create_device(None, &[], "", "")
             .expect("first Noop device");
-        let device_b = adapter
+        let device_b = noop_adapter()
             .create_device(None, &[], "", "")
             .expect("second Noop device");
         let texture = Arc::new(device_a.create_texture(texture_descriptor_4x4()));

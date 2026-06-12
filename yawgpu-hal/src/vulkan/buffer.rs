@@ -212,8 +212,7 @@ pub(super) fn memory_heap_size(
     if type_index >= type_count {
         return 0;
     }
-    let heap_index =
-        usize::from(memory_properties.memory_types[type_index].heap_index as u8);
+    let heap_index = usize::from(memory_properties.memory_types[type_index].heap_index as u8);
     if heap_index >= heap_count {
         return 0;
     }

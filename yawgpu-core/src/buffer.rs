@@ -1163,9 +1163,7 @@ mod tests {
                 size: HUGE_SIZE,
                 mapped_at_creation: true,
             });
-            let _error = device
-                .pop_error_scope()
-                .expect("scope should exist");
+            let _error = device.pop_error_scope().expect("scope should exist");
 
             // Buffer must be an error buffer; no mapping; no abort.
             assert!(

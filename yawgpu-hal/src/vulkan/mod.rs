@@ -728,8 +728,7 @@ mod tests {
                 enabled_features.robust_buffer_access = vk::TRUE;
             }
             assert_eq!(
-                enabled_features.robust_buffer_access,
-                expected_enabled,
+                enabled_features.robust_buffer_access, expected_enabled,
                 "robust_buffer_access should be {expected_enabled} when supported={supported}"
             );
         }

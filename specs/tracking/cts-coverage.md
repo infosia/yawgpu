@@ -1606,3 +1606,32 @@ PY
   callback), so the group looked green — same unmasking pattern as F-078.
   **Verified:** `setBindGroup` `pass=347 fail=0` + `queue,destroyed,query_set` `pass=8 fail=0` on Metal
   AND Vulkan/MoltenVK; `error_scope` 49/0 + `external_texture` 2/0 re-confirmed.
+
+- **External-CTS finding F-087 — RESOLVED (requestDevice limits + adapter lifecycle; 73→0).**
+  Four gaps fixed: (1) `Limits::DEFAULT` updated to the current WebGPU defaults (8192 texture 1D/2D,
+  8 color attachments, 256 compute invocations/workgroup-size-X/Y, 65536 uniform binding, 16
+  inter-stage variables; `max_immediate_size` stays 0 per F-064); (2) adapters are single-use —
+  a successful requestDevice consumes the adapter, failed validation does not; (3) better-than-
+  supported limit requests reject; (4) requested limits are delivered per the CTS rule (maximum-class
+  effective = max(requested, default); relationship checks evaluate the EFFECTIVE limits so legal
+  worse-than-default single-field requests succeed; alignment-class values must be powers of two
+  judged on the REQUESTED value — review-found after the effective-relationship change let 257 slip).
+  The newer per-stage limits (maxStorageBuffers/TexturesInVertex/FragmentStage) were entirely missing:
+  added to `Limits` and wired through the chained `WGPUCompatibilityModeLimits` struct (fill on
+  Get*Limits, read on requestDevice). **Verified:** `adapter,requestDevice` `pass=289 fail=0` on Metal
+  AND Vulkan/MoltenVK.
+- **External-CTS finding F-078 — RESOLVED (naga fork `c64748b86`; rev bump `962e97ea`).**
+  The WGSL lowerer const-folded `let index = (3u);` into array accesses and the validator raised
+  static OOB errors for what WGSL defines as runtime (clamped) accesses. let-bound indices now lower
+  to dynamic `Access`; negative const-expression indices are rejected by the lowerer
+  (`ExpectedNonNegative`); literal/const-decl OOB still fails creation. Completing the picture, the
+  SPIR-V backend never set `bounds_check_policies` (naga default = Unchecked) — `generate_spirv` now
+  uses the same Restrict policies as MSL (`spirv_bounds_check_policies`), which the MoltenVK run
+  immediately exposed (630 fails) once the shaders actually executed.
+  **Verified:** `robust_access` `pass=1068 fail=0 crash=0` on Metal AND Vulkan/MoltenVK.
+- **External-CTS finding F-082 — RESOLVED (naga fork; MSL storage-texture coherence).**
+  A storage-texture write followed by a same-invocation read returned stale data on Metal: the MSL
+  writer now emits a `mem_texture` barrier after stores to read_write storage textures (Tint emits a
+  texture fence likewise). Known limitation noted in review: the barrier form is compute-stage; a
+  fragment shader using read_write storage textures would fail MSL compilation honestly rather than
+  silently misread. **Verified:** `texture_intra_invocation_coherence` `pass=12 fail=0` on Metal.

@@ -1,6 +1,11 @@
 use super::*;
 
 /// Converts limits to native into the corresponding yawgpu representation.
+///
+/// The `nextInChain` field is set to null; callers that need to preserve the
+/// caller-supplied chain must restore it after calling this function, then also
+/// call `fill_compat_limits_chain` to populate any chained
+/// `WGPUCompatibilityModeLimits`.
 #[must_use]
 pub fn map_limits_to_native(limits: core::Limits) -> native::WGPULimits {
     native::WGPULimits {
@@ -39,6 +44,87 @@ pub fn map_limits_to_native(limits: core::Limits) -> native::WGPULimits {
         maxComputeWorkgroupSizeZ: limits.max_compute_workgroup_size_z,
         maxComputeWorkgroupsPerDimension: limits.max_compute_workgroups_per_dimension,
         maxImmediateSize: limits.max_immediate_size,
+    }
+}
+
+/// Walks a `WGPUChainedStruct` chain rooted at `chain` and fills any
+/// `WGPUCompatibilityModeLimits` node it finds with the per-stage limits
+/// from `limits`.
+///
+/// The WebGPU spec requires that implementations support the chained
+/// `WGPUCompatibilityModeLimits` struct for both `wgpuAdapterGetLimits` and
+/// `wgpuDeviceGetLimits`, so that callers can query the four in-stage limits
+/// (maxStorageBuffersIn{Vertex,Fragment}Stage and
+/// maxStorageTexturesIn{Vertex,Fragment}Stage).
+///
+/// # Safety
+///
+/// `chain`, when non-null, must point to a valid linked list of
+/// `WGPUChainedStruct` nodes. Any node whose `sType` is
+/// `WGPUSType_CompatibilityModeLimits` must be a valid
+/// `WGPUCompatibilityModeLimits` allocation.
+pub unsafe fn fill_compat_limits_chain(
+    chain: *mut native::WGPUChainedStruct,
+    limits: core::Limits,
+) {
+    let mut node = chain;
+    while let Some(n) = node.as_ref() {
+        if n.sType == native::WGPUSType_CompatibilityModeLimits {
+            if let Some(compat) = node.cast::<native::WGPUCompatibilityModeLimits>().as_mut() {
+                compat.maxStorageBuffersInVertexStage = limits.max_storage_buffers_in_vertex_stage;
+                compat.maxStorageBuffersInFragmentStage =
+                    limits.max_storage_buffers_in_fragment_stage;
+                compat.maxStorageTexturesInVertexStage =
+                    limits.max_storage_textures_in_vertex_stage;
+                compat.maxStorageTexturesInFragmentStage =
+                    limits.max_storage_textures_in_fragment_stage;
+            }
+        }
+        node = n.next;
+    }
+}
+
+/// Reads per-stage compatibility limits from a `WGPUCompatibilityModeLimits`
+/// chain node (if present) and applies them to `limits`.
+///
+/// If no `WGPUCompatibilityModeLimits` chain node is found the four fields
+/// remain at their existing values (typically the spec defaults from
+/// `core::Limits::DEFAULT`).
+///
+/// # Safety
+///
+/// `chain`, when non-null, must point to a valid linked list of
+/// `WGPUChainedStruct` nodes. Any node whose `sType` is
+/// `WGPUSType_CompatibilityModeLimits` must be a valid
+/// `WGPUCompatibilityModeLimits` allocation.
+pub unsafe fn apply_compat_limits_from_chain(
+    chain: *const native::WGPUChainedStruct,
+    limits: &mut core::Limits,
+) {
+    let default = core::Limits::DEFAULT;
+    let mut node = chain;
+    while let Some(n) = node.as_ref() {
+        if n.sType == native::WGPUSType_CompatibilityModeLimits {
+            if let Some(compat) = node.cast::<native::WGPUCompatibilityModeLimits>().as_ref() {
+                limits.max_storage_buffers_in_vertex_stage = limit_u32(
+                    compat.maxStorageBuffersInVertexStage,
+                    default.max_storage_buffers_in_vertex_stage,
+                );
+                limits.max_storage_buffers_in_fragment_stage = limit_u32(
+                    compat.maxStorageBuffersInFragmentStage,
+                    default.max_storage_buffers_in_fragment_stage,
+                );
+                limits.max_storage_textures_in_vertex_stage = limit_u32(
+                    compat.maxStorageTexturesInVertexStage,
+                    default.max_storage_textures_in_vertex_stage,
+                );
+                limits.max_storage_textures_in_fragment_stage = limit_u32(
+                    compat.maxStorageTexturesInFragmentStage,
+                    default.max_storage_textures_in_fragment_stage,
+                );
+            }
+        }
+        node = n.next as *const native::WGPUChainedStruct;
     }
 }
 

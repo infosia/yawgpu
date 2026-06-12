@@ -54,10 +54,9 @@ impl MetalDevice {
         // value so all map/read/write bounds validate against 0 (mirrors the
         // wgpu Metal backend).
         let alloc_size = usize::try_from(size).unwrap_or(usize::MAX).max(1);
-        let buffer = self.device.newBufferWithLength_options(
-            alloc_size,
-            MTLResourceOptions::StorageModeShared,
-        );
+        let buffer = self
+            .device
+            .newBufferWithLength_options(alloc_size, MTLResourceOptions::StorageModeShared);
         let Some(buffer) = buffer else {
             return Err(HalError::OutOfMemory {
                 backend: BACKEND,
@@ -330,7 +329,9 @@ mod tests {
             buffer.read(0, 0).expect("zero-length read should succeed"),
             Vec::<u8>::new(),
         );
-        buffer.write(0, &[]).expect("zero-length write should succeed");
+        buffer
+            .write(0, &[])
+            .expect("zero-length write should succeed");
     }
 
     #[test]

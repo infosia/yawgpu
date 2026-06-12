@@ -2636,8 +2636,7 @@ pub(super) fn buffer_image_copy(
     let buffer_row_length = if height_in_blocks <= 1 {
         0
     } else {
-        let row_length =
-            buffer_row_length(copy.buffer_layout.bytes_per_row, bytes_per_pixel)?;
+        let row_length = buffer_row_length(copy.buffer_layout.bytes_per_row, bytes_per_pixel)?;
         row_length
             .checked_mul(texture_block_width(copy))
             .ok_or_else(|| buffer_error("buffer texture row length overflows"))?

@@ -136,7 +136,9 @@ impl Queue {
         let size = match u64::try_from(data.len()) {
             Ok(s) => s,
             Err(_) => {
-                return Some(DeviceError::validation("queue write buffer size is too large"));
+                return Some(DeviceError::validation(
+                    "queue write buffer size is too large",
+                ));
             }
         };
 
@@ -249,10 +251,14 @@ impl Queue {
             ));
         };
         let block_size = u64::from(crate::copy::texel_copy_block_size(format_caps, aspect));
-        let width_blocks =
-            u64::from(crate::copy::div_ceil_u32(write_size.width, format_caps.block_w));
-        let height_blocks =
-            u64::from(crate::copy::div_ceil_u32(write_size.height, format_caps.block_h));
+        let width_blocks = u64::from(crate::copy::div_ceil_u32(
+            write_size.width,
+            format_caps.block_w,
+        ));
+        let height_blocks = u64::from(crate::copy::div_ceil_u32(
+            write_size.height,
+            format_caps.block_h,
+        ));
         let depth = u64::from(write_size.depth_or_array_layers);
         // Tight row bytes: width_blocks * block_size (always fits in u32 per
         // validation, but use u64 throughout for checked arithmetic).
@@ -267,11 +273,8 @@ impl Queue {
             // src_bytes_per_row is guaranteed Some by validation (multi-row implies
             // bytes_per_row is required).
             let src_bytes_per_row = u64::from(layout.bytes_per_row.unwrap_or(0));
-            let src_rows_per_image = u64::from(
-                layout
-                    .rows_per_image
-                    .unwrap_or(height_blocks as u32),
-            );
+            let src_rows_per_image =
+                u64::from(layout.rows_per_image.unwrap_or(height_blocks as u32));
 
             let repacked = match repack_texel_rows(
                 data,
@@ -594,13 +597,14 @@ pub(crate) fn repack_texel_rows(
     let mut out = vec![0u8; total_usize];
     for d in 0..depth {
         for r in 0..height_blocks {
-            let src_start = src_offset
-                .checked_add(d.checked_mul(src_rows_per_image).ok_or_else(|| {
-                    "repack_texel_rows: source offset overflows u64".to_owned()
-                })?)
-                .and_then(|n| n.checked_mul(src_bytes_per_row))
-                .and_then(|n| n.checked_add(r.checked_mul(src_bytes_per_row)?))
-                .ok_or_else(|| "repack_texel_rows: source offset overflows u64".to_owned())?;
+            let src_start =
+                src_offset
+                    .checked_add(d.checked_mul(src_rows_per_image).ok_or_else(|| {
+                        "repack_texel_rows: source offset overflows u64".to_owned()
+                    })?)
+                    .and_then(|n| n.checked_mul(src_bytes_per_row))
+                    .and_then(|n| n.checked_add(r.checked_mul(src_bytes_per_row)?))
+                    .ok_or_else(|| "repack_texel_rows: source offset overflows u64".to_owned())?;
             let src_start_usize = usize::try_from(src_start)
                 .map_err(|_| "repack_texel_rows: source offset overflows usize".to_owned())?;
             let src_end_usize = src_start_usize
@@ -2778,12 +2782,8 @@ fn fs() -> @location(0) vec4<f32> {
         data[..8].fill(0x01);
         data[257..265].fill(0x02);
         let result = repack_texel_rows(
-            &data,
-            /*src_offset=*/ 0,
-            /*src_bytes_per_row=*/ 257,
-            /*src_rows_per_image=*/ 2,
-            /*row_bytes=*/ 8,
-            /*height_blocks=*/ 2,
+            &data, /*src_offset=*/ 0, /*src_bytes_per_row=*/ 257,
+            /*src_rows_per_image=*/ 2, /*row_bytes=*/ 8, /*height_blocks=*/ 2,
             /*depth=*/ 1,
         )
         .expect("repack should succeed");
@@ -2812,12 +2812,8 @@ fn fs() -> @location(0) vec4<f32> {
         data[32..36].fill(0x04);
 
         let result = repack_texel_rows(
-            &data,
-            /*src_offset=*/ 0,
-            /*src_bytes_per_row=*/ 8,
-            /*src_rows_per_image=*/ 3,
-            /*row_bytes=*/ 4,
-            /*height_blocks=*/ 2,
+            &data, /*src_offset=*/ 0, /*src_bytes_per_row=*/ 8,
+            /*src_rows_per_image=*/ 3, /*row_bytes=*/ 4, /*height_blocks=*/ 2,
             /*depth=*/ 2,
         )
         .expect("repack should succeed");
@@ -2972,7 +2968,10 @@ fn fs() -> @location(0) vec4<f32> {
             mapped_at_creation: false,
         }));
         buffer.destroy();
-        assert!(buffer.is_destroyed(), "buffer must be destroyed before bind group creation");
+        assert!(
+            buffer.is_destroyed(),
+            "buffer must be destroyed before bind group creation"
+        );
 
         // create_bind_group with a destroyed buffer must succeed (not an error bind group).
         let bind_group = Arc::new(device.create_bind_group(

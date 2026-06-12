@@ -12,6 +12,7 @@ fn device_label_defaults_from_descriptor_and_set_label_updates_it() {
         assert_eq!(yawgpu::testing_get_device_label(device), "");
         yawgpu::wgpuDeviceRelease(device);
 
+        let fixture = Fixture::new();
         let device = request_device(fixture.instance, fixture.adapter, Some("dev"), None);
         assert_eq!(yawgpu::testing_get_device_label(device), "dev");
 
@@ -33,6 +34,7 @@ fn queue_label_defaults_from_descriptor_set_label_updates_shared_queue() {
         yawgpu::wgpuQueueRelease(queue);
         yawgpu::wgpuDeviceRelease(device);
 
+        let fixture = Fixture::new();
         let device = request_device(fixture.instance, fixture.adapter, None, Some("q"));
         let queue = yawgpu::wgpuDeviceGetQueue(device);
         assert_eq!(yawgpu::testing_get_queue_label(queue), "q");

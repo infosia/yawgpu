@@ -1625,25 +1625,24 @@ mod tests {
     #[test]
     fn viewport_bounds_use_double_limit_rectangle_and_single_limit_size() {
         let limits = Limits::DEFAULT;
+        let max = limits.max_texture_dimension_2d as f32;
+        let double_max = max * 2.0;
 
+        assert_eq!(validate_viewport_bounds(1.0, 0.0, max, max, limits), Ok(()));
         assert_eq!(
-            validate_viewport_bounds(1.0, 0.0, 4096.0, 4096.0, limits),
-            Ok(())
-        );
-        assert_eq!(
-            validate_viewport_bounds(4096.0, 0.0, 4096.0, 4096.0, limits),
+            validate_viewport_bounds(max, 0.0, max, max, limits),
             Err("render pass viewport rectangle exceeds device bounds".to_owned())
         );
         assert_eq!(
-            validate_viewport_bounds(0.0, 0.0, 4097.0, 1.0, limits),
+            validate_viewport_bounds(0.0, 0.0, max + 1.0, 1.0, limits),
             Err("render pass viewport size exceeds device bounds".to_owned())
         );
         assert_eq!(
-            validate_viewport_bounds(-8192.0, 0.0, 4096.0, 4096.0, limits),
+            validate_viewport_bounds(-double_max, 0.0, max, max, limits),
             Ok(())
         );
         assert_eq!(
-            validate_viewport_bounds(-8193.0, 0.0, 4096.0, 4096.0, limits),
+            validate_viewport_bounds(-double_max - 1.0, 0.0, max, max, limits),
             Err("render pass viewport rectangle exceeds device bounds".to_owned())
         );
     }

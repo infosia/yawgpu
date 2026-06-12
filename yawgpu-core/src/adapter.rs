@@ -4,6 +4,8 @@ use std::sync::Arc;
 use yawgpu_hal::FramebufferFetchPath;
 use yawgpu_hal::{HalAdapter, HalBackend};
 
+use parking_lot::Mutex;
+
 use crate::device::*;
 use crate::error::*;
 use crate::limits::*;
@@ -19,6 +21,7 @@ pub struct Adapter {
 pub(crate) struct AdapterInner {
     pub(crate) hal: HalAdapter,
     pub(crate) feature_level: FeatureLevel,
+    pub(crate) consumed: Mutex<bool>,
 }
 
 impl Adapter {
@@ -35,7 +38,11 @@ impl Adapter {
         feature_level: FeatureLevel,
     ) -> Self {
         Self {
-            inner: Arc::new(AdapterInner { hal, feature_level }),
+            inner: Arc::new(AdapterInner {
+                hal,
+                feature_level,
+                consumed: Mutex::new(false),
+            }),
         }
     }
 
@@ -101,12 +108,17 @@ impl Adapter {
         label: impl Into<String>,
         queue_label: impl Into<String>,
     ) -> Result<Device, Error> {
+        let mut consumed = self.inner.consumed.lock();
+        if *consumed {
+            return Err(Error::Validation("adapter is consumed".to_owned()));
+        }
         let limits = self
             .limits()
             .validate_required_limits(required_limits)
             .map_err(Error::Validation)?;
         let features = self.resolve_features(required_features)?;
         let hal = self.inner.hal.create_device()?;
+        *consumed = true;
         Ok(Device::from_hal(hal, limits, features, label, queue_label))
     }
 
@@ -381,6 +393,27 @@ mod tests {
 
         assert_eq!(device.label(), "device label");
         assert!(device.has_feature(Feature::CoreFeaturesAndLimits));
+        assert_eq!(device.queue().label(), "queue label");
+    }
+
+    #[test]
+    fn adapter_create_device_consumes_adapter_only_after_success() {
+        let adapter = noop_adapter();
+
+        let error = adapter
+            .create_device(None, &[Feature::Other(7)], "", "")
+            .expect_err("failed requestDevice should reject");
+        assert!(matches!(error, Error::Validation(_)));
+
+        let device = adapter
+            .create_device(None, &[], "device label", "queue label")
+            .expect("first valid requestDevice should succeed");
+        assert_eq!(device.label(), "device label");
+
+        let error = adapter
+            .create_device(None, &[], "", "")
+            .expect_err("successful requestDevice should consume adapter");
+        assert!(matches!(error, Error::Validation(message) if message.contains("consumed")));
         assert_eq!(device.queue().label(), "queue label");
     }
 

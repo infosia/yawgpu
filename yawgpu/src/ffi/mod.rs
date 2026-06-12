@@ -95,9 +95,10 @@ use std::sync::{Arc, Mutex};
 use yawgpu_core as core;
 
 use crate::conv::{
-    add_ref_handle, arc_to_handle, borrow_handle, clone_handle, free_supported_features,
-    label_from_string_view, map_bind_group_entries, map_bind_group_layout_descriptor,
-    map_buffer_descriptor, map_buffer_map_state, map_buffer_usage_to_native, map_color,
+    add_ref_handle, apply_compat_limits_from_chain, arc_to_handle, borrow_handle, clone_handle,
+    fill_compat_limits_chain, free_supported_features, label_from_string_view,
+    map_bind_group_entries, map_bind_group_layout_descriptor, map_buffer_descriptor,
+    map_buffer_map_state, map_buffer_usage_to_native, map_color,
     map_compilation_info_request_status_success, map_compilation_message_type_error,
     map_compute_pipeline_descriptor, map_device_lost_callback_info, map_device_lost_reason,
     map_error_filter, map_error_type, map_extent_3d, map_feature, map_feature_level,
@@ -3738,6 +3739,335 @@ mod tests {
     }
 
     #[test]
+    #[allow(non_snake_case)]
+    fn wgpuAdapterGetLimits_fills_chained_WGPUCompatibilityModeLimits() {
+        // The adapter's GetLimits must populate a caller-chained
+        // WGPUCompatibilityModeLimits with the per-stage limit defaults.
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+
+            let mut compat = native::WGPUCompatibilityModeLimits {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_CompatibilityModeLimits,
+                },
+                maxStorageBuffersInVertexStage: 0,
+                maxStorageTexturesInVertexStage: 0,
+                maxStorageBuffersInFragmentStage: 0,
+                maxStorageTexturesInFragmentStage: 0,
+            };
+            let mut limits = zeroed_limits();
+            limits.nextInChain = (&mut compat.chain) as *mut native::WGPUChainedStruct;
+
+            assert_eq!(
+                wgpuAdapterGetLimits(adapter, &mut limits),
+                native::WGPUStatus_Success
+            );
+            // The chain pointer must be preserved after the call.
+            assert_eq!(
+                limits.nextInChain,
+                (&compat.chain) as *const native::WGPUChainedStruct as *mut native::WGPUChainedStruct
+            );
+            // Per-stage fields must match the spec defaults from the CTS table.
+            assert_eq!(
+                compat.maxStorageBuffersInVertexStage,
+                core::Limits::DEFAULT.max_storage_buffers_in_vertex_stage
+            );
+            assert_eq!(
+                compat.maxStorageBuffersInFragmentStage,
+                core::Limits::DEFAULT.max_storage_buffers_in_fragment_stage
+            );
+            assert_eq!(
+                compat.maxStorageTexturesInVertexStage,
+                core::Limits::DEFAULT.max_storage_textures_in_vertex_stage
+            );
+            assert_eq!(
+                compat.maxStorageTexturesInFragmentStage,
+                core::Limits::DEFAULT.max_storage_textures_in_fragment_stage
+            );
+
+            release_handles(instance, adapter, std::ptr::null());
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn wgpuDeviceGetLimits_fills_chained_WGPUCompatibilityModeLimits() {
+        // A device's GetLimits must populate a caller-chained
+        // WGPUCompatibilityModeLimits with the per-stage limits.
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+
+            let mut compat = native::WGPUCompatibilityModeLimits {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_CompatibilityModeLimits,
+                },
+                maxStorageBuffersInVertexStage: 0,
+                maxStorageTexturesInVertexStage: 0,
+                maxStorageBuffersInFragmentStage: 0,
+                maxStorageTexturesInFragmentStage: 0,
+            };
+            let mut limits = zeroed_limits();
+            limits.nextInChain = (&mut compat.chain) as *mut native::WGPUChainedStruct;
+
+            assert_eq!(
+                wgpuDeviceGetLimits(device, &mut limits),
+                native::WGPUStatus_Success
+            );
+            assert_eq!(
+                compat.maxStorageBuffersInVertexStage,
+                core::Limits::DEFAULT.max_storage_buffers_in_vertex_stage
+            );
+            assert_eq!(
+                compat.maxStorageBuffersInFragmentStage,
+                core::Limits::DEFAULT.max_storage_buffers_in_fragment_stage
+            );
+            assert_eq!(
+                compat.maxStorageTexturesInVertexStage,
+                core::Limits::DEFAULT.max_storage_textures_in_vertex_stage
+            );
+            assert_eq!(
+                compat.maxStorageTexturesInFragmentStage,
+                core::Limits::DEFAULT.max_storage_textures_in_fragment_stage
+            );
+
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn wgpuAdapterRequestDevice_per_stage_limits_above_supported_rejected() {
+        // Requesting any per-stage limit above supported (== default) must fail.
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+
+            let mut compat = native::WGPUCompatibilityModeLimits {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_CompatibilityModeLimits,
+                },
+                // maxStorageBuffersInVertexStage supported = 8; request 9.
+                maxStorageBuffersInVertexStage: core::Limits::DEFAULT.max_storage_buffers_in_vertex_stage + 1,
+                maxStorageTexturesInVertexStage: native::WGPU_LIMIT_U32_UNDEFINED,
+                maxStorageBuffersInFragmentStage: native::WGPU_LIMIT_U32_UNDEFINED,
+                maxStorageTexturesInFragmentStage: native::WGPU_LIMIT_U32_UNDEFINED,
+            };
+            let mut req_limits = zeroed_limits();
+            // Set all WGPULimits fields to UNDEFINED so only the compat field is tested.
+            req_limits.maxTextureDimension1D = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxTextureDimension2D = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxTextureDimension3D = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxTextureArrayLayers = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxBindGroups = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxBindGroupsPlusVertexBuffers = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxBindingsPerBindGroup = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxDynamicUniformBuffersPerPipelineLayout = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxDynamicStorageBuffersPerPipelineLayout = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxSampledTexturesPerShaderStage = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxSamplersPerShaderStage = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxStorageBuffersPerShaderStage = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxStorageTexturesPerShaderStage = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxUniformBuffersPerShaderStage = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxUniformBufferBindingSize = native::WGPU_LIMIT_U64_UNDEFINED;
+            req_limits.maxStorageBufferBindingSize = native::WGPU_LIMIT_U64_UNDEFINED;
+            req_limits.minUniformBufferOffsetAlignment = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.minStorageBufferOffsetAlignment = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxVertexBuffers = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxBufferSize = native::WGPU_LIMIT_U64_UNDEFINED;
+            req_limits.maxVertexAttributes = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxVertexBufferArrayStride = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxInterStageShaderVariables = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxColorAttachments = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxColorAttachmentBytesPerSample = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxComputeWorkgroupStorageSize = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxComputeInvocationsPerWorkgroup = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxComputeWorkgroupSizeX = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxComputeWorkgroupSizeY = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxComputeWorkgroupSizeZ = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxComputeWorkgroupsPerDimension = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxImmediateSize = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.nextInChain = (&mut compat.chain) as *mut native::WGPUChainedStruct;
+
+            let mut state = RequestDeviceState::default();
+            let desc = native::WGPUDeviceDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: native::WGPUStringView { data: std::ptr::null(), length: 0 },
+                requiredFeatureCount: 0,
+                requiredFeatures: std::ptr::null(),
+                requiredLimits: &req_limits,
+                defaultQueue: native::WGPUQueueDescriptor {
+                    nextInChain: std::ptr::null_mut(),
+                    label: native::WGPUStringView { data: std::ptr::null(), length: 0 },
+                },
+                deviceLostCallbackInfo: native::WGPUDeviceLostCallbackInfo {
+                    nextInChain: std::ptr::null_mut(),
+                    mode: 0,
+                    callback: None,
+                    userdata1: std::ptr::null_mut(),
+                    userdata2: std::ptr::null_mut(),
+                },
+                uncapturedErrorCallbackInfo: native::WGPUUncapturedErrorCallbackInfo {
+                    nextInChain: std::ptr::null_mut(),
+                    callback: None,
+                    userdata1: std::ptr::null_mut(),
+                    userdata2: std::ptr::null_mut(),
+                },
+            };
+            let callback_info = native::WGPURequestDeviceCallbackInfo {
+                nextInChain: std::ptr::null_mut(),
+                mode: native::WGPUCallbackMode_AllowProcessEvents,
+                callback: Some(request_device_callback),
+                userdata1: (&mut state as *mut RequestDeviceState).cast(),
+                userdata2: std::ptr::null_mut(),
+            };
+            let future = wgpuAdapterRequestDevice(adapter, &desc, callback_info);
+            wgpuInstanceProcessEvents(instance);
+            let _ = future;
+            assert_eq!(
+                state.status,
+                native::WGPURequestDeviceStatus_Error,
+                "requesting per-stage limit above supported must fail"
+            );
+
+            release_handles(instance, adapter, std::ptr::null());
+        }
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn wgpuAdapterRequestDevice_per_stage_limits_at_supported_delivered() {
+        // Requesting supported per-stage limits must succeed and the device must
+        // report those exact values via a chained WGPUCompatibilityModeLimits.
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+
+            // Request the supported (== default) per-stage values via the compat chain.
+            let mut req_compat = native::WGPUCompatibilityModeLimits {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_CompatibilityModeLimits,
+                },
+                maxStorageBuffersInVertexStage: core::Limits::DEFAULT.max_storage_buffers_in_vertex_stage,
+                maxStorageTexturesInVertexStage: core::Limits::DEFAULT.max_storage_textures_in_vertex_stage,
+                maxStorageBuffersInFragmentStage: core::Limits::DEFAULT.max_storage_buffers_in_fragment_stage,
+                maxStorageTexturesInFragmentStage: core::Limits::DEFAULT.max_storage_textures_in_fragment_stage,
+            };
+            let mut req_limits = zeroed_limits();
+            req_limits.maxTextureDimension1D = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxTextureDimension2D = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxTextureDimension3D = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxTextureArrayLayers = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxBindGroups = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxBindGroupsPlusVertexBuffers = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxBindingsPerBindGroup = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxDynamicUniformBuffersPerPipelineLayout = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxDynamicStorageBuffersPerPipelineLayout = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxSampledTexturesPerShaderStage = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxSamplersPerShaderStage = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxStorageBuffersPerShaderStage = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxStorageTexturesPerShaderStage = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxUniformBuffersPerShaderStage = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxUniformBufferBindingSize = native::WGPU_LIMIT_U64_UNDEFINED;
+            req_limits.maxStorageBufferBindingSize = native::WGPU_LIMIT_U64_UNDEFINED;
+            req_limits.minUniformBufferOffsetAlignment = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.minStorageBufferOffsetAlignment = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxVertexBuffers = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxBufferSize = native::WGPU_LIMIT_U64_UNDEFINED;
+            req_limits.maxVertexAttributes = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxVertexBufferArrayStride = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxInterStageShaderVariables = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxColorAttachments = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxColorAttachmentBytesPerSample = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxComputeWorkgroupStorageSize = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxComputeInvocationsPerWorkgroup = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxComputeWorkgroupSizeX = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxComputeWorkgroupSizeY = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxComputeWorkgroupSizeZ = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxComputeWorkgroupsPerDimension = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.maxImmediateSize = native::WGPU_LIMIT_U32_UNDEFINED;
+            req_limits.nextInChain = (&mut req_compat.chain) as *mut native::WGPUChainedStruct;
+
+            let mut state = RequestDeviceState::default();
+            let desc = native::WGPUDeviceDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: native::WGPUStringView { data: std::ptr::null(), length: 0 },
+                requiredFeatureCount: 0,
+                requiredFeatures: std::ptr::null(),
+                requiredLimits: &req_limits,
+                defaultQueue: native::WGPUQueueDescriptor {
+                    nextInChain: std::ptr::null_mut(),
+                    label: native::WGPUStringView { data: std::ptr::null(), length: 0 },
+                },
+                deviceLostCallbackInfo: native::WGPUDeviceLostCallbackInfo {
+                    nextInChain: std::ptr::null_mut(),
+                    mode: 0,
+                    callback: None,
+                    userdata1: std::ptr::null_mut(),
+                    userdata2: std::ptr::null_mut(),
+                },
+                uncapturedErrorCallbackInfo: native::WGPUUncapturedErrorCallbackInfo {
+                    nextInChain: std::ptr::null_mut(),
+                    callback: None,
+                    userdata1: std::ptr::null_mut(),
+                    userdata2: std::ptr::null_mut(),
+                },
+            };
+            let callback_info = native::WGPURequestDeviceCallbackInfo {
+                nextInChain: std::ptr::null_mut(),
+                mode: native::WGPUCallbackMode_AllowProcessEvents,
+                callback: Some(request_device_callback),
+                userdata1: (&mut state as *mut RequestDeviceState).cast(),
+                userdata2: std::ptr::null_mut(),
+            };
+            let future = wgpuAdapterRequestDevice(adapter, &desc, callback_info);
+            wgpuInstanceProcessEvents(instance);
+            let _ = future;
+            assert_eq!(
+                state.status,
+                native::WGPURequestDeviceStatus_Success,
+                "requesting supported per-stage limits must succeed"
+            );
+            assert!(!state.device.is_null());
+
+            // Now read back the limits via the chained compat struct.
+            let mut dev_compat = native::WGPUCompatibilityModeLimits {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_CompatibilityModeLimits,
+                },
+                maxStorageBuffersInVertexStage: 0,
+                maxStorageTexturesInVertexStage: 0,
+                maxStorageBuffersInFragmentStage: 0,
+                maxStorageTexturesInFragmentStage: 0,
+            };
+            let mut dev_limits = zeroed_limits();
+            dev_limits.nextInChain = (&mut dev_compat.chain) as *mut native::WGPUChainedStruct;
+            assert_eq!(
+                wgpuDeviceGetLimits(state.device, &mut dev_limits),
+                native::WGPUStatus_Success
+            );
+            assert_eq!(
+                dev_compat.maxStorageBuffersInVertexStage,
+                core::Limits::DEFAULT.max_storage_buffers_in_vertex_stage,
+                "device must report requested per-stage vertex storage buffers"
+            );
+            assert_eq!(
+                dev_compat.maxStorageBuffersInFragmentStage,
+                core::Limits::DEFAULT.max_storage_buffers_in_fragment_stage,
+                "device must report requested per-stage fragment storage buffers"
+            );
+
+            wgpuDeviceRelease(state.device);
+            release_handles(instance, adapter, std::ptr::null());
+        }
+    }
+
+    #[test]
     fn wgpuAdapterGetFeatures_populates_supported_features_and_free_members() {
         unsafe {
             let instance = make_noop_instance();
@@ -3924,6 +4254,73 @@ mod tests {
 
             wgpuQueueRelease(queue);
             release_handles(instance, adapter, state.device);
+        }
+    }
+
+    #[test]
+    fn wgpuAdapterRequestDevice_consumes_adapter_only_after_success() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let unsupported = 0x7FFF_FFFE as native::WGPUFeatureName;
+            let invalid_descriptor = native::WGPUDeviceDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                requiredFeatureCount: 1,
+                requiredFeatures: &unsupported,
+                requiredLimits: std::ptr::null(),
+                defaultQueue: native::WGPUQueueDescriptor {
+                    nextInChain: std::ptr::null_mut(),
+                    label: empty_string_view(),
+                },
+                deviceLostCallbackInfo: native::WGPUDeviceLostCallbackInfo {
+                    nextInChain: std::ptr::null_mut(),
+                    mode: 0,
+                    callback: None,
+                    userdata1: std::ptr::null_mut(),
+                    userdata2: std::ptr::null_mut(),
+                },
+                uncapturedErrorCallbackInfo: native::WGPUUncapturedErrorCallbackInfo {
+                    nextInChain: std::ptr::null_mut(),
+                    callback: None,
+                    userdata1: std::ptr::null_mut(),
+                    userdata2: std::ptr::null_mut(),
+                },
+            };
+
+            let mut invalid = RequestDeviceState::default();
+            let callback_info = native::WGPURequestDeviceCallbackInfo {
+                nextInChain: std::ptr::null_mut(),
+                mode: native::WGPUCallbackMode_AllowProcessEvents,
+                callback: Some(request_device_callback),
+                userdata1: (&mut invalid as *mut RequestDeviceState).cast(),
+                userdata2: std::ptr::null_mut(),
+            };
+            let future = wgpuAdapterRequestDevice(adapter, &invalid_descriptor, callback_info);
+            assert_ne!(future.id, 0);
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(invalid.fired, 1);
+            assert_eq!(invalid.status, native::WGPURequestDeviceStatus_Error);
+            assert!(invalid.device.is_null());
+
+            let device = request_noop_device(instance, adapter);
+
+            let mut consumed = RequestDeviceState::default();
+            let callback_info = native::WGPURequestDeviceCallbackInfo {
+                nextInChain: std::ptr::null_mut(),
+                mode: native::WGPUCallbackMode_AllowProcessEvents,
+                callback: Some(request_device_callback),
+                userdata1: (&mut consumed as *mut RequestDeviceState).cast(),
+                userdata2: std::ptr::null_mut(),
+            };
+            let future = wgpuAdapterRequestDevice(adapter, std::ptr::null(), callback_info);
+            assert_ne!(future.id, 0);
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(consumed.fired, 1);
+            assert_eq!(consumed.status, native::WGPURequestDeviceStatus_Error);
+            assert!(consumed.device.is_null());
+
+            release_handles(instance, adapter, device);
         }
     }
 
@@ -5049,7 +5446,8 @@ mod tests {
     fn record_time_entry_points_reject_mismatched_device_resources() {
         unsafe {
             let (instance, adapter, device) = noop_chain();
-            let other = request_noop_device(instance, adapter);
+            let other_adapter = request_noop_adapter(instance);
+            let other = request_noop_device(instance, other_adapter);
 
             let foreign_layout_desc = bind_group_layout_descriptor();
             let foreign_layout = wgpuDeviceCreateBindGroupLayout(other, &foreign_layout_desc);
@@ -5085,6 +5483,7 @@ mod tests {
             wgpuBindGroupRelease(bind_group);
             wgpuBindGroupLayoutRelease(foreign_layout);
             wgpuDeviceRelease(other);
+            wgpuAdapterRelease(other_adapter);
             release_handles(instance, adapter, device);
         }
     }

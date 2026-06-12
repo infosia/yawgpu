@@ -314,8 +314,21 @@ fn pipeline_creation_rejects_wrong_device_shader_and_layout() {
 
 unsafe fn request_device(
     instance: native::WGPUInstance,
-    adapter: native::WGPUAdapter,
+    _adapter: native::WGPUAdapter,
 ) -> native::WGPUDevice {
+    let mut adapter: native::WGPUAdapter = std::ptr::null();
+    let adapter_callback_info = native::WGPURequestAdapterCallbackInfo {
+        nextInChain: std::ptr::null_mut(),
+        mode: native::WGPUCallbackMode_AllowProcessEvents,
+        callback: Some(request_adapter_callback),
+        userdata1: (&mut adapter as *mut native::WGPUAdapter).cast(),
+        userdata2: std::ptr::null_mut(),
+    };
+    let future =
+        yawgpu::wgpuInstanceRequestAdapter(instance, std::ptr::null(), adapter_callback_info);
+    wait(instance, future);
+    assert!(!adapter.is_null());
+
     let mut device: native::WGPUDevice = std::ptr::null();
     let callback_info = native::WGPURequestDeviceCallbackInfo {
         nextInChain: std::ptr::null_mut(),
@@ -327,7 +340,19 @@ unsafe fn request_device(
     let future = yawgpu::wgpuAdapterRequestDevice(adapter, std::ptr::null(), callback_info);
     wait(instance, future);
     assert!(!device.is_null());
+    yawgpu::wgpuAdapterRelease(adapter);
     device
+}
+
+unsafe extern "C" fn request_adapter_callback(
+    status: native::WGPURequestAdapterStatus,
+    adapter: native::WGPUAdapter,
+    _message: native::WGPUStringView,
+    userdata1: *mut c_void,
+    _userdata2: *mut c_void,
+) {
+    assert_eq!(status, native::WGPURequestAdapterStatus_Success);
+    *(userdata1 as *mut native::WGPUAdapter) = adapter;
 }
 
 unsafe extern "C" fn request_device_callback(
