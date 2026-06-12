@@ -1635,3 +1635,17 @@ PY
   texture fence likewise). Known limitation noted in review: the barrier form is compute-stage; a
   fragment shader using read_write storage textures would fail MSL compilation honestly rather than
   silently misread. **Verified:** `texture_intra_invocation_coherence` `pass=12 fail=0` on Metal.
+
+- **External-CTS finding F-070 — PARTIALLY RESOLVED: `shadow:loop` fixed (naga fork `ebec34ae4`).**
+  The WGSL parser used ONE local-table scope for both the loop body and the `continuing` block, so
+  same-named `var` declarations in both raised `Error::Redefinition` and the shader failed to compile
+  (the CTS-observed "output never written" was the un-compiled shader's no-op). Per WGSL §6.4 the
+  continuing block is a scope NESTED in the loop-body scope — the fork now pushes/pops an inner scope
+  around the continuing statements. Upstream naga / wgpu-native share the original bug; Tint accepts.
+  First fix implemented via the codex MCP coding agent (loop-shadow.wgsl MSL+SPIR-V snapshots + a
+  positive parse/validate regression). **Verified:** `shader,execution,shadow` `pass=7 fail=0` on Metal
+  AND Vulkan/MoltenVK (naga rev bumped to `ebec34ae4`).
+  Remaining F-070 families (investigated, sized, not yet started): (a) `struct_inner_align` — naga IR
+  `TypeInner::Struct` does not carry the @align-derived struct alignment (Layouter recomputes from
+  members), fix = IR field + ~15 mechanical sites + snapshot regen, ALSO covers most of (b)'s MoltenVK
+  align/stride families; (c) MSL matCx3 column-padding writes — needs column-wise packed_float3 stores.
