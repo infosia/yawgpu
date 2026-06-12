@@ -3767,7 +3767,8 @@ mod tests {
             // The chain pointer must be preserved after the call.
             assert_eq!(
                 limits.nextInChain,
-                (&compat.chain) as *const native::WGPUChainedStruct as *mut native::WGPUChainedStruct
+                (&compat.chain) as *const native::WGPUChainedStruct
+                    as *mut native::WGPUChainedStruct
             );
             // Per-stage fields must match the spec defaults from the CTS table.
             assert_eq!(
@@ -3851,7 +3852,9 @@ mod tests {
                     sType: native::WGPUSType_CompatibilityModeLimits,
                 },
                 // maxStorageBuffersInVertexStage supported = 8; request 9.
-                maxStorageBuffersInVertexStage: core::Limits::DEFAULT.max_storage_buffers_in_vertex_stage + 1,
+                maxStorageBuffersInVertexStage: core::Limits::DEFAULT
+                    .max_storage_buffers_in_vertex_stage
+                    + 1,
                 maxStorageTexturesInVertexStage: native::WGPU_LIMIT_U32_UNDEFINED,
                 maxStorageBuffersInFragmentStage: native::WGPU_LIMIT_U32_UNDEFINED,
                 maxStorageTexturesInFragmentStage: native::WGPU_LIMIT_U32_UNDEFINED,
@@ -3895,13 +3898,19 @@ mod tests {
             let mut state = RequestDeviceState::default();
             let desc = native::WGPUDeviceDescriptor {
                 nextInChain: std::ptr::null_mut(),
-                label: native::WGPUStringView { data: std::ptr::null(), length: 0 },
+                label: native::WGPUStringView {
+                    data: std::ptr::null(),
+                    length: 0,
+                },
                 requiredFeatureCount: 0,
                 requiredFeatures: std::ptr::null(),
                 requiredLimits: &req_limits,
                 defaultQueue: native::WGPUQueueDescriptor {
                     nextInChain: std::ptr::null_mut(),
-                    label: native::WGPUStringView { data: std::ptr::null(), length: 0 },
+                    label: native::WGPUStringView {
+                        data: std::ptr::null(),
+                        length: 0,
+                    },
                 },
                 deviceLostCallbackInfo: native::WGPUDeviceLostCallbackInfo {
                     nextInChain: std::ptr::null_mut(),
@@ -3952,10 +3961,14 @@ mod tests {
                     next: std::ptr::null_mut(),
                     sType: native::WGPUSType_CompatibilityModeLimits,
                 },
-                maxStorageBuffersInVertexStage: core::Limits::DEFAULT.max_storage_buffers_in_vertex_stage,
-                maxStorageTexturesInVertexStage: core::Limits::DEFAULT.max_storage_textures_in_vertex_stage,
-                maxStorageBuffersInFragmentStage: core::Limits::DEFAULT.max_storage_buffers_in_fragment_stage,
-                maxStorageTexturesInFragmentStage: core::Limits::DEFAULT.max_storage_textures_in_fragment_stage,
+                maxStorageBuffersInVertexStage: core::Limits::DEFAULT
+                    .max_storage_buffers_in_vertex_stage,
+                maxStorageTexturesInVertexStage: core::Limits::DEFAULT
+                    .max_storage_textures_in_vertex_stage,
+                maxStorageBuffersInFragmentStage: core::Limits::DEFAULT
+                    .max_storage_buffers_in_fragment_stage,
+                maxStorageTexturesInFragmentStage: core::Limits::DEFAULT
+                    .max_storage_textures_in_fragment_stage,
             };
             let mut req_limits = zeroed_limits();
             req_limits.maxTextureDimension1D = native::WGPU_LIMIT_U32_UNDEFINED;
@@ -3995,13 +4008,19 @@ mod tests {
             let mut state = RequestDeviceState::default();
             let desc = native::WGPUDeviceDescriptor {
                 nextInChain: std::ptr::null_mut(),
-                label: native::WGPUStringView { data: std::ptr::null(), length: 0 },
+                label: native::WGPUStringView {
+                    data: std::ptr::null(),
+                    length: 0,
+                },
                 requiredFeatureCount: 0,
                 requiredFeatures: std::ptr::null(),
                 requiredLimits: &req_limits,
                 defaultQueue: native::WGPUQueueDescriptor {
                     nextInChain: std::ptr::null_mut(),
-                    label: native::WGPUStringView { data: std::ptr::null(), length: 0 },
+                    label: native::WGPUStringView {
+                        data: std::ptr::null(),
+                        length: 0,
+                    },
                 },
                 deviceLostCallbackInfo: native::WGPUDeviceLostCallbackInfo {
                     nextInChain: std::ptr::null_mut(),

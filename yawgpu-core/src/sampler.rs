@@ -150,6 +150,12 @@ impl ResolvedSamplerDescriptor {
             max_anisotropy: descriptor.max_anisotropy,
         }
     }
+
+    pub(crate) fn is_filtering(self) -> bool {
+        self.mag_filter == FilterMode::Linear
+            || self.min_filter == FilterMode::Linear
+            || self.mipmap_filter == MipmapFilterMode::Linear
+    }
 }
 
 /// Stores sampler data used by validation and backend submission.

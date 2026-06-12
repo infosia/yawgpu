@@ -1649,3 +1649,20 @@ PY
   `TypeInner::Struct` does not carry the @align-derived struct alignment (Layouter recomputes from
   members), fix = IR field + ~15 mechanical sites + snapshot regen, ALSO covers most of (b)'s MoltenVK
   align/stride families; (c) MSL matCx3 column-padding writes — needs column-wise packed_float3 stores.
+
+- **External-CTS finding F-089 — RESOLVED (createBindGroup sampler-type compatibility).**
+  Binding a FILTERING sampler (any linear filter mode) to a `non-filtering` BGL entry must fail
+  createBindGroup; yawgpu only enforced comparison vs non-comparison. Added the filtering rule
+  (NonFiltering accepts only non-filtering samplers; Filtering accepts both) via
+  `ResolvedSamplerDescriptor::is_filtering`. Implemented by codex (gpt-5.5 medium).
+  **Verified:** `createBindGroup` `pass=2358 fail=0` on Metal AND Vulkan/MoltenVK.
+- **External-CTS finding F-090 — RESOLVED (fragment-state validation; 146→0).**
+  (a) color-target bytes-per-sample now validated against `maxColorAttachmentBytesPerSample` with the
+  CTS alignment formula (reusable helper, also wired into the render-pass/bundle paths); (b) a fragment
+  shader output with ZERO color targets is valid when a depth-stencil state is present (the real
+  `color_target_exists` rule: no color targets AND no depth-stencil → error); (c) blend factors reading
+  source alpha no longer force a vec4 output requirement beyond the CTS rule; (d) the 16-bit float
+  color formats (r16float/rg16float/rgba16float) are blendable — the format table missed them.
+  One review round: rg16float and the HAL-level no-target guard surfaced in CTS after the first pass.
+  **Verified:** `fragment_state` `pass=10754 fail=0` on Metal AND Vulkan/MoltenVK; regressions clean
+  (`non_filterable_texture` 160/0, `render_pipeline,misc` 744/0).

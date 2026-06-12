@@ -266,7 +266,10 @@ impl TextureFormat {
             }
             TextureFormat::R16_UINT => FormatCaps::uint_color(2, 1).renderable().multisample(),
             TextureFormat::R16_SINT => FormatCaps::sint_color(2, 1).renderable().multisample(),
-            TextureFormat::R16_FLOAT => FormatCaps::float_color(2, 1).renderable().multisample(),
+            TextureFormat::R16_FLOAT => FormatCaps::float_color(2, 1)
+                .blendable()
+                .renderable()
+                .multisample(),
             TextureFormat::RG8_UNORM => FormatCaps::float_color(2, 2)
                 .blendable()
                 .renderable()
@@ -296,7 +299,10 @@ impl TextureFormat {
             }
             TextureFormat::RG16_UINT => FormatCaps::uint_color(4, 2).renderable().multisample(),
             TextureFormat::RG16_SINT => FormatCaps::sint_color(4, 2).renderable().multisample(),
-            TextureFormat::RG16_FLOAT => FormatCaps::float_color(4, 2).renderable().multisample(),
+            TextureFormat::RG16_FLOAT => FormatCaps::float_color(4, 2)
+                .blendable()
+                .renderable()
+                .multisample(),
             TextureFormat::R32_FLOAT => FormatCaps::float_color(4, 1)
                 .renderable()
                 .multisample()
@@ -1271,6 +1277,22 @@ mod tests {
                 TextureFormat::from_raw(srgb).srgb_pair(),
                 Some(TextureFormat::from_raw(linear))
             );
+        }
+    }
+
+    #[test]
+    fn sixteen_bit_float_color_formats_are_blendable() {
+        let features = FeatureSet::default();
+        for raw in [
+            TextureFormat::R16_FLOAT,
+            TextureFormat::RG16_FLOAT,
+            TextureFormat::RGBA16_FLOAT,
+        ] {
+            let caps = TextureFormat::from_raw(raw)
+                .caps(&features)
+                .expect("16-bit float color format should have caps");
+            assert!(caps.renderable);
+            assert!(caps.is_blendable);
         }
     }
 }

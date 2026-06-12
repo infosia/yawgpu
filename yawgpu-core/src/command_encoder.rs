@@ -1261,22 +1261,20 @@ pub(crate) fn render_pass_attachment_signature(
     let mut sample_count = None;
     let mut color_formats = Vec::with_capacity(descriptor.color_attachments.len());
     let mut color_subresources = BTreeSet::new();
-    let mut color_bytes = 0_u32;
+    let mut color_byte_formats = Vec::new();
 
     for attachment in &descriptor.color_attachments {
         if let Some(attachment) = attachment {
             has_attachment = true;
             validate_color_attachment(attachment, features)?;
-            let caps = attachment
+            attachment
                 .view
                 .texture()
                 .view_format_caps(attachment.view.format())
                 .ok_or_else(|| {
                     "render pass color attachment format must be supported".to_owned()
                 })?;
-            color_bytes = color_bytes
-                .checked_add(color_attachment_byte_cost(caps.texel_block_size))
-                .ok_or_else(|| "render pass color attachment byte count overflows".to_owned())?;
+            color_byte_formats.push(attachment.view.format());
             validate_color_attachment_depth_slice(attachment)?;
             validate_single_mip_attachment_view(&attachment.view, "render pass color attachment")?;
             validate_color_attachment_overlap(attachment, &mut color_subresources)?;
@@ -1320,6 +1318,8 @@ pub(crate) fn render_pass_attachment_signature(
     if !has_attachment {
         return Err("render pass requires at least one attachment".to_owned());
     }
+    let color_bytes = color_attachment_bytes_per_sample(color_byte_formats)
+        .ok_or_else(|| "render pass color attachment byte count overflows".to_owned())?;
     if color_bytes > limits.max_color_attachment_bytes_per_sample {
         return Err(
             "render pass color attachment bytes per sample exceed the device limit".to_owned(),
