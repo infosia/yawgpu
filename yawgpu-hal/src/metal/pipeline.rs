@@ -113,6 +113,7 @@ pub(super) fn create_render_pipeline(
     }
     // Metal has no pipeline sample-mask API; yawgpu-core bakes the mask into MSL.
     let size_metadata = render_size_metadata(&shader);
+    let use_vertex_descriptor = render_shader_uses_metal_vertex_descriptor(&shader);
     let (vertex_function, fragment_function) =
         create_render_functions(device, shader, vertex_entry_point, fragment_entry_point)?;
     let pipeline_descriptor = MTLRenderPipelineDescriptor::new();
@@ -144,36 +145,40 @@ pub(super) fn create_render_pipeline(
             pipeline_descriptor.setStencilAttachmentPixelFormat(pixel_format);
         }
     }
-    let vertex_descriptor = MTLVertexDescriptor::new();
-    for buffer in &descriptor.vertex_buffers {
-        let metal_index = buffer
-            .attributes
-            .first()
-            .map(|attribute| attribute.metal_buffer_index)
-            .unwrap_or(0);
-        let layouts = vertex_descriptor.layouts();
-        let layout = unsafe { layouts.objectAtIndexedSubscript(to_ns(u64::from(metal_index))?) };
-        unsafe {
-            layout.setStride(to_ns(buffer.array_stride)?);
-            layout.setStepRate(1);
-        }
-        layout.setStepFunction(match buffer.step_mode {
-            HalVertexStepMode::Vertex => MTLVertexStepFunction::PerVertex,
-            HalVertexStepMode::Instance => MTLVertexStepFunction::PerInstance,
-        });
-        for attribute in &buffer.attributes {
-            let attributes = vertex_descriptor.attributes();
-            let attr = unsafe {
-                attributes.objectAtIndexedSubscript(to_ns(u64::from(attribute.shader_location))?)
-            };
-            attr.setFormat(map_vertex_format(attribute.format)?);
+    if use_vertex_descriptor {
+        let vertex_descriptor = MTLVertexDescriptor::new();
+        for buffer in &descriptor.vertex_buffers {
+            let metal_index = buffer
+                .attributes
+                .first()
+                .map(|attribute| attribute.metal_buffer_index)
+                .unwrap_or(0);
+            let layouts = vertex_descriptor.layouts();
+            let layout =
+                unsafe { layouts.objectAtIndexedSubscript(to_ns(u64::from(metal_index))?) };
             unsafe {
-                attr.setOffset(to_ns(attribute.offset)?);
-                attr.setBufferIndex(to_ns(u64::from(attribute.metal_buffer_index))?);
+                layout.setStride(to_ns(buffer.array_stride)?);
+                layout.setStepRate(1);
+            }
+            layout.setStepFunction(match buffer.step_mode {
+                HalVertexStepMode::Vertex => MTLVertexStepFunction::PerVertex,
+                HalVertexStepMode::Instance => MTLVertexStepFunction::PerInstance,
+            });
+            for attribute in &buffer.attributes {
+                let attributes = vertex_descriptor.attributes();
+                let attr = unsafe {
+                    attributes
+                        .objectAtIndexedSubscript(to_ns(u64::from(attribute.shader_location))?)
+                };
+                attr.setFormat(map_vertex_format(attribute.format)?);
+                unsafe {
+                    attr.setOffset(to_ns(attribute.offset)?);
+                    attr.setBufferIndex(to_ns(u64::from(attribute.metal_buffer_index))?);
+                }
             }
         }
+        pipeline_descriptor.setVertexDescriptor(Some(&vertex_descriptor));
     }
-    pipeline_descriptor.setVertexDescriptor(Some(&vertex_descriptor));
     let inner = device
         .newRenderPipelineStateWithDescriptor_error(&pipeline_descriptor)
         .map_err(|error| shader_error(error.localizedDescription().to_string()))?;
@@ -380,6 +385,10 @@ fn render_size_metadata(shader: &HalShaderSource) -> RenderSizeMetadata {
     }
 }
 
+fn render_shader_uses_metal_vertex_descriptor(shader: &HalShaderSource) -> bool {
+    matches!(shader, HalShaderSource::Msl(_))
+}
+
 fn create_render_functions(
     device: &ProtocolObject<dyn MTLDevice>,
     shader: HalShaderSource,
@@ -539,5 +548,43 @@ fn map_stencil_operation(operation: HalStencilOperation) -> MTLStencilOperation 
         HalStencilOperation::DecrementClamp => MTLStencilOperation::DecrementClamp,
         HalStencilOperation::IncrementWrap => MTLStencilOperation::IncrementWrap,
         HalStencilOperation::DecrementWrap => MTLStencilOperation::DecrementWrap,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_shader_uses_vertex_descriptor_for_msl_passthrough() {
+        let shader = HalShaderSource::Msl(String::new());
+
+        assert!(render_shader_uses_metal_vertex_descriptor(&shader));
+    }
+
+    #[test]
+    fn render_shader_skips_vertex_descriptor_for_naga_vertex_pulling_msl() {
+        let shader = HalShaderSource::MslStagesWithBufferSizes {
+            vertex: String::new(),
+            fragment: None,
+            vertex_buffer_sizes_slot: None,
+            vertex_buffer_size_bindings: Vec::new(),
+            fragment_buffer_sizes_slot: None,
+            fragment_buffer_size_bindings: Vec::new(),
+            fragment_frag_depth_clamp_slot: None,
+            vertex_buffer_metal_indices: Vec::new(),
+        };
+
+        assert!(!render_shader_uses_metal_vertex_descriptor(&shader));
+    }
+
+    #[test]
+    fn render_shader_skips_vertex_descriptor_for_stage_msl_sources() {
+        let shader = HalShaderSource::MslStages {
+            vertex: String::new(),
+            fragment: None,
+        };
+
+        assert!(!render_shader_uses_metal_vertex_descriptor(&shader));
     }
 }

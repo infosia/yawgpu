@@ -1666,3 +1666,15 @@ PY
   One review round: rg16float and the HAL-level no-target guard surfaced in CTS after the first pass.
   **Verified:** `fragment_state` `pass=10754 fail=0` on Metal AND Vulkan/MoltenVK; regressions clean
   (`non_filterable_texture` 160/0, `render_pipeline,misc` 744/0).
+
+- **External-CTS finding F-091 — RESOLVED (naga fork `57dbb00d1` + Metal HAL descriptor fix).**
+  `render_pipeline,vertex_state` aborted the process 518 times on Metal (upstream wgpu-native
+  identically; SPIR-V path clean). Two layers: (1) naga's vertex-pulling emission asserted
+  `buffer_stride > 0`, but WebGPU permits `arrayStride = 0` (constant fetch) — zero-stride mappings now
+  synthesize an effective stride from max(offset + format size) with constant stepping, and overflow is
+  a writer error, never a panic; (2) once naga compiled, Metal itself asserted on the
+  stride-0 `MTLVertexDescriptor` — with vertex pulling the descriptor is vestigial, so the Metal HAL now
+  sets it ONLY for the MSL shader-passthrough path (naga pipelines leave it unset, mirroring wgpu).
+  Implemented via codex (gpt-5.5 medium). **Verified:** `vertex_state` `pass=28151 fail=0 crash=0` on
+  Metal AND Vulkan/MoltenVK; regressions clean (`fragment_state` 10754/0, `robust_access_vertex`
+  1856/0, `sampler_texture` 1/0, real-GPU e2e draw 3/3 + render 3/3 + shader-passthrough 2/2).
