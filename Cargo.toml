@@ -26,11 +26,12 @@ parking_lot = "0.12"
 bitflags = "2"
 smallvec = "1"
 raw-window-handle = "0.6"
-naga = { git = "https://github.com/infosia/wgpu.git", rev = "ebec34ae4e98996a49c4d4dc691cd3e94d5bd001" }
+naga = { git = "https://github.com/infosia/wgpu.git", rev = "57dbb00d145831d998d81eac3124008ae46f2e3a" }
 objc2 = "0.6"
 objc2-core-foundation = "0.3"
 objc2-foundation = "0.3"
 objc2-metal = "0.3"
 objc2-quartz-core = "0.3"
+
 
 
