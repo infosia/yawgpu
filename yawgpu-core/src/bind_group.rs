@@ -223,6 +223,10 @@ pub(crate) fn validate_bind_group_entry(
                 && sampler.descriptor().compare.is_some()
             {
                 Some("non-comparison sampler bindings must not use a compare function".to_owned())
+            } else if ty == SamplerBindingType::NonFiltering
+                && sampler.descriptor().is_filtering()
+            {
+                Some("filtering sampler is incompatible with non-filtering sampler binding".to_owned())
             } else {
                 None
             }
@@ -697,6 +701,58 @@ mod tests {
         assert_eq!(
             error.message,
             "storage texture bindings require a single mip level"
+        );
+    }
+
+    #[test]
+    fn sampler_binding_type_validates_filtering_compatibility() {
+        let device = noop_device();
+        let filtering = Arc::new(device.create_sampler(SamplerDescriptor {
+            mag_filter: Some(FilterMode::Linear),
+            ..SamplerDescriptor::default()
+        }));
+        let non_filtering = Arc::new(device.create_sampler(SamplerDescriptor::default()));
+
+        let entry = |sampler: Arc<Sampler>| BindGroupEntry {
+            binding: 0,
+            resource: BindGroupResource::Sampler {
+                sampler,
+                device: Arc::new(device.clone()),
+            },
+        };
+
+        assert_eq!(
+            validate_bind_group_entry(
+                &device,
+                &entry(Arc::clone(&filtering)),
+                BindingLayoutKind::Sampler {
+                    ty: SamplerBindingType::NonFiltering
+                },
+                device.limits(),
+            ),
+            Some("filtering sampler is incompatible with non-filtering sampler binding".to_owned())
+        );
+        assert_eq!(
+            validate_bind_group_entry(
+                &device,
+                &entry(non_filtering),
+                BindingLayoutKind::Sampler {
+                    ty: SamplerBindingType::NonFiltering
+                },
+                device.limits(),
+            ),
+            None
+        );
+        assert_eq!(
+            validate_bind_group_entry(
+                &device,
+                &entry(filtering),
+                BindingLayoutKind::Sampler {
+                    ty: SamplerBindingType::Filtering
+                },
+                device.limits(),
+            ),
+            None
         );
     }
 

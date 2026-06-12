@@ -307,7 +307,10 @@ mod tests {
         required.min_uniform_buffer_offset_alignment = 48;
         assert_eq!(
             supported.validate_required_limits(Some(&required)),
-            Err("required limit min_uniform_buffer_offset_alignment=48 must be a power of two".to_owned())
+            Err(
+                "required limit min_uniform_buffer_offset_alignment=48 must be a power of two"
+                    .to_owned()
+            )
         );
 
         // CTS worse_than_default: requesting maxComputeInvocationsPerWorkgroup
@@ -352,7 +355,9 @@ mod tests {
         assert!(supported.validate_required_limits(Some(&required)).is_err());
         let mut required2 = supported;
         required2.min_storage_buffer_offset_alignment = 257;
-        assert!(supported.validate_required_limits(Some(&required2)).is_err());
+        assert!(supported
+            .validate_required_limits(Some(&required2))
+            .is_err());
     }
 
     #[test]
@@ -525,7 +530,10 @@ mod tests {
         required.min_uniform_buffer_offset_alignment = 48;
         assert_eq!(
             supported.validate_required_limits(Some(&required)),
-            Err("required limit min_uniform_buffer_offset_alignment=48 must be a power of two".to_owned()),
+            Err(
+                "required limit min_uniform_buffer_offset_alignment=48 must be a power of two"
+                    .to_owned()
+            ),
             "non-power-of-two alignment must still be rejected"
         );
 
@@ -560,28 +568,32 @@ mod tests {
         let supported = Limits::DEFAULT;
 
         let mut required = Limits::DEFAULT;
-        required.max_storage_buffers_in_vertex_stage = supported.max_storage_buffers_in_vertex_stage + 1;
+        required.max_storage_buffers_in_vertex_stage =
+            supported.max_storage_buffers_in_vertex_stage + 1;
         assert!(
             supported.validate_required_limits(Some(&required)).is_err(),
             "max_storage_buffers_in_vertex_stage above supported must fail"
         );
 
         required = Limits::DEFAULT;
-        required.max_storage_buffers_in_fragment_stage = supported.max_storage_buffers_in_fragment_stage + 1;
+        required.max_storage_buffers_in_fragment_stage =
+            supported.max_storage_buffers_in_fragment_stage + 1;
         assert!(
             supported.validate_required_limits(Some(&required)).is_err(),
             "max_storage_buffers_in_fragment_stage above supported must fail"
         );
 
         required = Limits::DEFAULT;
-        required.max_storage_textures_in_vertex_stage = supported.max_storage_textures_in_vertex_stage + 1;
+        required.max_storage_textures_in_vertex_stage =
+            supported.max_storage_textures_in_vertex_stage + 1;
         assert!(
             supported.validate_required_limits(Some(&required)).is_err(),
             "max_storage_textures_in_vertex_stage above supported must fail"
         );
 
         required = Limits::DEFAULT;
-        required.max_storage_textures_in_fragment_stage = supported.max_storage_textures_in_fragment_stage + 1;
+        required.max_storage_textures_in_fragment_stage =
+            supported.max_storage_textures_in_fragment_stage + 1;
         assert!(
             supported.validate_required_limits(Some(&required)).is_err(),
             "max_storage_textures_in_fragment_stage above supported must fail"
@@ -616,8 +628,10 @@ mod tests {
 
         // Requesting worse-than-default is legal and must not be rejected.
         let mut required_worse = Limits::DEFAULT;
-        required_worse.max_storage_buffers_in_vertex_stage = Limits::DEFAULT.max_storage_buffers_in_vertex_stage - 1;
-        required_worse.max_storage_buffers_in_fragment_stage = Limits::DEFAULT.max_storage_buffers_in_fragment_stage - 1;
+        required_worse.max_storage_buffers_in_vertex_stage =
+            Limits::DEFAULT.max_storage_buffers_in_vertex_stage - 1;
+        required_worse.max_storage_buffers_in_fragment_stage =
+            Limits::DEFAULT.max_storage_buffers_in_fragment_stage - 1;
         let effective_worse = Limits::DEFAULT
             .validate_required_limits(Some(&required_worse))
             .expect("worse-than-default per-stage request must succeed");

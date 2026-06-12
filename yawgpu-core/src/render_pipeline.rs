@@ -2038,9 +2038,17 @@ pub(crate) fn validate_render_presence(
     if descriptor.fragment.is_none() && descriptor.depth_stencil.is_none() {
         return Err("render pipeline requires a fragment state or depthStencil state".to_owned());
     }
-    // A fragment state with zero colour targets is allowed here (a frag-depth-only
-    // fragment is valid); `validate_color_targets` separately rejects a fragment
-    // that writes a colour output with no matching target.
+    if descriptor
+        .fragment
+        .as_ref()
+        .is_some_and(|fragment| fragment.target_count == 0)
+        && descriptor.depth_stencil.is_none()
+    {
+        return Err("render pipeline requires a color target or depthStencil state".to_owned());
+    }
+    // A fragment state with zero color targets is allowed. Fragment color
+    // outputs without matching targets are discarded when a depth-stencil state
+    // makes the pipeline complete.
     Ok(())
 }
 
@@ -2245,7 +2253,7 @@ pub(crate) fn validate_color_targets(
     } else {
         fragment_outputs(fragment, fragment_entry)?
     };
-    let mut color_bytes = 0_u32;
+    let mut color_formats = Vec::new();
     let mut has_alpha_to_coverage_target = false;
     for (index, target) in fragment.targets.iter().enumerate() {
         if target.format.is_undefined() {
@@ -2289,7 +2297,7 @@ pub(crate) fn validate_color_targets(
             match output {
                 Some(output) => {
                     validate_fragment_output_compat(*output, caps)?;
-                    if target.blend.is_some_and(blend_state_uses_source_alpha)
+                    if target.blend.is_some_and(color_blend_uses_source_alpha)
                         && output.components < 4
                     {
                         return Err(
@@ -2308,25 +2316,7 @@ pub(crate) fn validate_color_targets(
             }
         }
 
-        color_bytes = color_bytes
-            .checked_add(color_attachment_byte_cost(caps.texel_block_size))
-            .ok_or_else(|| "render pipeline color target byte count overflows".to_owned())?;
-    }
-
-    // Every fragment colour output (`@location(N)`) must have a colour target.
-    // The loop above only checks targets→outputs, so a fragment that writes a
-    // colour with too few (or zero) targets — e.g. a colour fragment paired with
-    // an empty `targets` list — would otherwise slip through. A frag-depth-only
-    // fragment has no colour outputs, so zero targets stays valid. (Subpass
-    // pipelines remap output locations through the pass layout, so skip them.)
-    if !skip_shader_outputs && subpass_color_attachment_indices.is_none() {
-        for &location in outputs.keys() {
-            if location as usize >= fragment.target_count {
-                return Err(
-                    "render pipeline fragment color output requires a color target".to_owned(),
-                );
-            }
-        }
+        color_formats.push(target.format);
     }
 
     if descriptor.multisample.alpha_to_coverage_enabled && !has_alpha_to_coverage_target {
@@ -2334,6 +2324,8 @@ pub(crate) fn validate_color_targets(
             "render pipeline alphaToCoverage requires an alpha blendable color target".to_owned(),
         );
     }
+    let color_bytes = color_attachment_bytes_per_sample(color_formats)
+        .ok_or_else(|| "render pipeline color target byte count overflows".to_owned())?;
     if color_bytes > limits.max_color_attachment_bytes_per_sample {
         return Err(
             "render pipeline color target bytes per sample exceed the device limit".to_owned(),
@@ -2343,8 +2335,69 @@ pub(crate) fn validate_color_targets(
     Ok(())
 }
 
-pub(crate) fn color_attachment_byte_cost(byte_size: u32) -> u32 {
-    byte_size.next_power_of_two()
+pub(crate) fn color_attachment_bytes_per_sample(
+    formats: impl IntoIterator<Item = TextureFormat>,
+) -> Option<u32> {
+    formats.into_iter().try_fold(0_u32, |bytes, format| {
+        let Some((byte_cost, alignment)) = color_attachment_byte_cost_and_alignment(format) else {
+            return Some(bytes);
+        };
+        let aligned = align_color_attachment_bytes(bytes, alignment)?;
+        aligned.checked_add(byte_cost)
+    })
+}
+
+fn align_color_attachment_bytes(bytes: u32, alignment: u32) -> Option<u32> {
+    let addend = alignment.checked_sub(1)?;
+    bytes.checked_add(addend).map(|value| value & !addend)
+}
+
+fn color_attachment_byte_cost_and_alignment(format: TextureFormat) -> Option<(u32, u32)> {
+    match format.raw() {
+        TextureFormat::R8_UNORM
+        | TextureFormat::R8_UINT
+        | TextureFormat::R8_SINT
+        | TextureFormat::R8_SNORM => Some((1, 1)),
+        TextureFormat::RG8_UNORM
+        | TextureFormat::RG8_UINT
+        | TextureFormat::RG8_SINT
+        | TextureFormat::RG8_SNORM => Some((2, 1)),
+        TextureFormat::RGBA8_UNORM
+        | TextureFormat::RGBA8_UNORM_SRGB
+        | TextureFormat::BGRA8_UNORM
+        | TextureFormat::BGRA8_UNORM_SRGB => Some((8, 1)),
+        TextureFormat::RGBA8_UINT | TextureFormat::RGBA8_SINT | TextureFormat::RGBA8_SNORM => {
+            Some((4, 1))
+        }
+        TextureFormat::R16_UNORM
+        | TextureFormat::R16_SNORM
+        | TextureFormat::R16_UINT
+        | TextureFormat::R16_SINT
+        | TextureFormat::R16_FLOAT => Some((2, 2)),
+        TextureFormat::RG16_UNORM
+        | TextureFormat::RG16_SNORM
+        | TextureFormat::RG16_UINT
+        | TextureFormat::RG16_SINT
+        | TextureFormat::RG16_FLOAT => Some((4, 2)),
+        TextureFormat::RGBA16_UNORM => Some((8, 4)),
+        TextureFormat::RGBA16_SNORM
+        | TextureFormat::RGBA16_UINT
+        | TextureFormat::RGBA16_SINT
+        | TextureFormat::RGBA16_FLOAT => Some((8, 2)),
+        TextureFormat::R32_UINT | TextureFormat::R32_SINT | TextureFormat::R32_FLOAT => {
+            Some((4, 4))
+        }
+        TextureFormat::RG32_UINT | TextureFormat::RG32_SINT | TextureFormat::RG32_FLOAT => {
+            Some((8, 4))
+        }
+        TextureFormat::RGBA32_UINT | TextureFormat::RGBA32_SINT | TextureFormat::RGBA32_FLOAT => {
+            Some((16, 4))
+        }
+        TextureFormat::RGB10A2_UINT
+        | TextureFormat::RGB10A2_UNORM
+        | TextureFormat::RG11B10_UFLOAT => Some((8, 4)),
+        _ => None,
+    }
 }
 
 /// Validates blend state and returns a descriptive error on failure.
@@ -2364,8 +2417,8 @@ fn validate_blend_component(component: BlendComponent) -> Result<(), String> {
     Ok(())
 }
 
-fn blend_state_uses_source_alpha(blend: BlendState) -> bool {
-    blend_component_uses_source_alpha(blend.color) || blend_component_uses_source_alpha(blend.alpha)
+fn color_blend_uses_source_alpha(blend: BlendState) -> bool {
+    blend_component_uses_source_alpha(blend.color)
 }
 
 fn blend_component_uses_source_alpha(component: BlendComponent) -> bool {
@@ -2376,7 +2429,11 @@ fn blend_component_uses_source_alpha(component: BlendComponent) -> bool {
 fn blend_factor_uses_source_alpha(factor: BlendFactor) -> bool {
     matches!(
         factor,
-        BlendFactor::SrcAlpha | BlendFactor::OneMinusSrcAlpha | BlendFactor::SrcAlphaSaturated
+        BlendFactor::SrcAlpha
+            | BlendFactor::OneMinusSrcAlpha
+            | BlendFactor::SrcAlphaSaturated
+            | BlendFactor::Src1Alpha
+            | BlendFactor::OneMinusSrc1Alpha
     )
 }
 
@@ -3090,6 +3147,181 @@ mod tests {
             None
         );
         assert!(!device.create_render_pipeline(descriptor).is_error());
+    }
+
+    #[test]
+    fn color_target_bytes_per_sample_uses_cts_alignment_formula() {
+        let device = noop_device();
+        let module = render_shader_module(&device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        let fragment = descriptor.fragment.as_mut().expect("fragment");
+        fragment.targets = vec![
+            ColorTargetState {
+                format: TextureFormat::from_raw(TextureFormat::R8_UNORM),
+                blend: None,
+                write_mask: 0,
+            },
+            ColorTargetState {
+                format: TextureFormat::from_raw(TextureFormat::R32_FLOAT),
+                blend: None,
+                write_mask: 0,
+            },
+            ColorTargetState {
+                format: rgba8_unorm(),
+                blend: None,
+                write_mask: 0,
+            },
+            ColorTargetState {
+                format: TextureFormat::from_raw(TextureFormat::RGBA32_FLOAT),
+                blend: None,
+                write_mask: 0,
+            },
+            ColorTargetState {
+                format: TextureFormat::from_raw(TextureFormat::R8_UNORM),
+                blend: None,
+                write_mask: 0,
+            },
+        ];
+        fragment.target_count = fragment.targets.len();
+
+        let mut tight_limits = device.limits();
+        tight_limits.max_color_attachment_bytes_per_sample = 32;
+        assert_eq!(
+            color_attachment_bytes_per_sample(fragment.targets.iter().map(|target| target.format)),
+            Some(33)
+        );
+        assert!(
+            validate_render_pipeline_descriptor(&descriptor, tight_limits, &device.features())
+                .is_some()
+        );
+
+        tight_limits.max_color_attachment_bytes_per_sample = 33;
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, tight_limits, &device.features()),
+            None
+        );
+    }
+
+    #[test]
+    fn fragment_color_output_without_target_is_valid() {
+        let device = noop_device();
+        let module = render_shader_module(&device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        let fragment = descriptor.fragment.as_mut().expect("fragment");
+        fragment.targets.clear();
+        fragment.target_count = 0;
+        descriptor.depth_stencil = Some(depth_stencil_state());
+
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            None
+        );
+        assert!(!device.create_render_pipeline(descriptor).is_error());
+    }
+
+    #[test]
+    fn fragment_without_color_target_or_depth_stencil_is_invalid() {
+        let device = noop_device();
+        let module = render_shader_module(&device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        let fragment = descriptor.fragment.as_mut().expect("fragment");
+        fragment.targets.clear();
+        fragment.target_count = 0;
+
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            Some("render pipeline requires a color target or depthStencil state".to_owned())
+        );
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_render_pipeline(descriptor);
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid pipeline should be scoped");
+        assert!(pipeline.is_error());
+        assert_eq!(
+            error.message,
+            "render pipeline requires a color target or depthStencil state"
+        );
+    }
+
+    #[test]
+    fn alpha_blend_source_alpha_does_not_require_vec4_fragment_output() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }
+             @fragment fn fs() -> @location(0) f32 { return 1.0; }"
+                    .to_owned(),
+            )),
+        );
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.fragment.as_mut().expect("fragment").targets[0] = ColorTargetState {
+            format: TextureFormat::from_raw(TextureFormat::R8_UNORM),
+            blend: Some(BlendState {
+                color: BlendComponent {
+                    operation: BlendOperation::Add,
+                    src_factor: BlendFactor::One,
+                    dst_factor: BlendFactor::Zero,
+                },
+                alpha: BlendComponent {
+                    operation: BlendOperation::Add,
+                    src_factor: BlendFactor::SrcAlpha,
+                    dst_factor: BlendFactor::Zero,
+                },
+            }),
+            write_mask: 0xF,
+        };
+
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            None
+        );
+        assert!(!device.create_render_pipeline(descriptor).is_error());
+    }
+
+    #[test]
+    fn sixteen_bit_float_color_targets_with_blend_are_valid() {
+        let device = noop_device();
+        for (format, output) in [
+            (TextureFormat::R16_FLOAT, "f32"),
+            (TextureFormat::RG16_FLOAT, "vec2f"),
+            (TextureFormat::RGBA16_FLOAT, "vec4f"),
+        ] {
+            let module = Arc::new(
+                device.create_shader_module(ShaderModuleSource::Wgsl(format!(
+                    "@vertex fn vs() -> @builtin(position) vec4f {{ return vec4f(); }}
+                 @fragment fn fs() -> @location(0) {output} {{ return {output}(); }}"
+                ))),
+            );
+            let mut descriptor = render_pipeline_descriptor(module);
+            descriptor.fragment.as_mut().expect("fragment").targets[0] = ColorTargetState {
+                format: TextureFormat::from_raw(format),
+                blend: Some(BlendState {
+                    color: BlendComponent {
+                        operation: BlendOperation::Add,
+                        src_factor: BlendFactor::One,
+                        dst_factor: BlendFactor::Zero,
+                    },
+                    alpha: BlendComponent {
+                        operation: BlendOperation::Add,
+                        src_factor: BlendFactor::One,
+                        dst_factor: BlendFactor::Zero,
+                    },
+                }),
+                write_mask: 0xF,
+            };
+
+            assert_eq!(
+                validate_render_pipeline_descriptor(
+                    &descriptor,
+                    device.limits(),
+                    &device.features()
+                ),
+                None
+            );
+            assert!(!device.create_render_pipeline(descriptor).is_error());
+        }
     }
 
     #[test]

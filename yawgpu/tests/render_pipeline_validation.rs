@@ -140,6 +140,16 @@ fn render_target_or_depth_stencil_presence_is_validated() {
             &test,
             vertex_single(),
             None,
+            Some(FragmentInput::new(fragment_single(), None, 0)),
+            None,
+            Some(depth_state()),
+            default_primitive(),
+            default_multisample(),
+        );
+        assert_pipeline_ok(
+            &test,
+            vertex_single(),
+            None,
             None,
             None,
             Some(depth_state()),
@@ -506,20 +516,68 @@ fn color_target_formats_outputs_and_blending_are_validated() {
             default_multisample(),
         );
 
-        assert_pipeline_error(
+        assert_pipeline_ok(
             &test,
             vertex_single(),
             None,
             Some(FragmentInput::new(
-                "@fragment fn fs() -> @location(0) vec4u { return vec4u(); }",
+                "@fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
                 None,
-                1,
+                0,
+            )),
+            None,
+            Some(depth_state()),
+            default_primitive(),
+            default_multisample(),
+        );
+
+        let mut alpha_src_blend = blend_state();
+        alpha_src_blend.alpha.srcFactor = native::WGPUBlendFactor_SrcAlpha;
+        let r8_alpha_blend = [color_target_with_blend(
+            native::WGPUTextureFormat_R8Unorm,
+            &alpha_src_blend,
+        )];
+        assert_pipeline_ok(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::with_targets(
+                "@fragment fn fs() -> @location(0) f32 { return 1.0; }",
+                None,
+                &r8_alpha_blend,
             )),
             None,
             None,
             default_primitive(),
             default_multisample(),
         );
+
+        for (format, source) in [
+            (
+                native::WGPUTextureFormat_R16Float,
+                "@fragment fn fs() -> @location(0) f32 { return 1.0; }",
+            ),
+            (
+                native::WGPUTextureFormat_RG16Float,
+                "@fragment fn fs() -> @location(0) vec2f { return vec2f(); }",
+            ),
+            (
+                native::WGPUTextureFormat_RGBA16Float,
+                "@fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
+            ),
+        ] {
+            let blend_target = [color_target_with_blend(format, &blend)];
+            assert_pipeline_ok(
+                &test,
+                vertex_single(),
+                None,
+                Some(FragmentInput::with_targets(source, None, &blend_target)),
+                None,
+                None,
+                default_primitive(),
+                default_multisample(),
+            );
+        }
 
         let undefined_with_blend = [color_target_with_blend(
             native::WGPUTextureFormat_Undefined,
@@ -568,6 +626,39 @@ fn color_target_bytes_per_sample_limit_is_validated() {
                 "@fragment fn fs() {}",
                 None,
                 &targets,
+            )),
+            None,
+            None,
+            default_primitive(),
+            default_multisample(),
+        );
+
+        let under_limit = [
+            color_target_with_write_mask(
+                native::WGPUTextureFormat_R8Unorm,
+                native::WGPUColorWriteMask_None,
+            ),
+            color_target_with_write_mask(
+                native::WGPUTextureFormat_R32Float,
+                native::WGPUColorWriteMask_None,
+            ),
+            color_target_with_write_mask(
+                native::WGPUTextureFormat_RGBA8Unorm,
+                native::WGPUColorWriteMask_None,
+            ),
+            color_target_with_write_mask(
+                native::WGPUTextureFormat_RGBA16Float,
+                native::WGPUColorWriteMask_None,
+            ),
+        ];
+        assert_pipeline_ok(
+            &test,
+            vertex_single(),
+            None,
+            Some(FragmentInput::with_targets(
+                "@fragment fn fs() {}",
+                None,
+                &under_limit,
             )),
             None,
             None,
