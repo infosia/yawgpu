@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::bind_group::*;
 use crate::buffer::*;
 use crate::command_encoder::*;
+use crate::command_encoder::{validate_occlusion_query_set, validate_query_index};
 use crate::copy::*;
 use crate::limits::*;
 use crate::pass::*;
@@ -83,38 +84,6 @@ pub struct RenderPassDepthStencilAttachment {
 #[derive(Debug, Clone)]
 pub struct RenderPassEncoder {
     pub(crate) inner: Arc<PassEncoderInner>,
-}
-
-/// Validates occlusion query set and returns a descriptive error on failure.
-pub(crate) fn validate_occlusion_query_set(
-    query_set: &QuerySet,
-    usage: &str,
-) -> Result<(), String> {
-    validate_query_set_alive(query_set, usage)?;
-    if query_set.kind() != QueryType::Occlusion {
-        return Err(format!("{usage} requires an occlusion query set"));
-    }
-    Ok(())
-}
-
-/// Validates query set alive and returns a descriptive error on failure.
-pub(crate) fn validate_query_set_alive(query_set: &QuerySet, usage: &str) -> Result<(), String> {
-    if query_set.is_error() {
-        return Err(format!("{usage} cannot use an error query set"));
-    }
-    Ok(())
-}
-
-/// Validates query index and returns a descriptive error on failure.
-pub(crate) fn validate_query_index(
-    query_set: &QuerySet,
-    index: u32,
-    name: &str,
-) -> Result<(), String> {
-    if index >= query_set.count() {
-        return Err(format!("{name} exceeds query set count"));
-    }
-    Ok(())
 }
 
 fn validate_pipeline_attachment_compatibility(

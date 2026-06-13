@@ -4,17 +4,12 @@ use std::sync::Arc;
 use yawgpu_hal::{
     HalBackend, HalBlendComponent, HalBlendFactor, HalBlendOperation, HalBlendState,
     HalColorTargetState, HalCompareFunction, HalCullMode, HalDepthStencilState,
-    HalDescriptorBinding, HalDevice, HalFrontFace, HalMslBufferSizeBinding, HalPrimitiveTopology,
-    HalRenderPipeline, HalRenderPipelineDescriptor, HalShaderSource, HalStencilFaceState,
-    HalStencilOperation, HalVertexAttribute, HalVertexBufferLayout, HalVertexFormat,
-    HalVertexStepMode,
+    HalDescriptorBinding, HalDevice, HalFrontFace, HalPrimitiveTopology, HalRenderPipeline,
+    HalRenderPipelineDescriptor, HalShaderSource, HalStencilFaceState, HalStencilOperation,
+    HalVertexAttribute, HalVertexBufferLayout, HalVertexFormat, HalVertexStepMode,
 };
 #[cfg(feature = "tiled")]
-use yawgpu_hal::{
-    HalBufferBindingKind, HalDescriptorBindingKind, HalSubpassAttachmentLayout,
-    HalSubpassDependency, HalSubpassDependencyType, HalSubpassInputAttachment, HalSubpassLayout,
-    HalSubpassPassLayout,
-};
+use yawgpu_hal::{HalBufferBindingKind, HalDescriptorBindingKind};
 
 use crate::bind_group_layout::*;
 use crate::compute_pipeline::*;
@@ -26,7 +21,7 @@ use crate::sampler::*;
 use crate::shader::*;
 use crate::shader_naga;
 #[cfg(feature = "tiled")]
-use crate::subpass::SubpassPassLayout;
+use crate::subpass::{hal_subpass_pass_layout, SubpassPassLayout};
 use crate::texture::*;
 
 /// Stores attachment signature data used by validation and backend submission.
@@ -1008,66 +1003,6 @@ fn input_attachment_hal_bindings(
     bindings
 }
 
-#[cfg(feature = "tiled")]
-fn hal_subpass_pass_layout(
-    layout: &crate::subpass::SubpassPassLayoutDescriptor,
-) -> HalSubpassPassLayout {
-    HalSubpassPassLayout {
-        color_attachments: layout
-            .color_attachments
-            .iter()
-            .map(|attachment| HalSubpassAttachmentLayout {
-                format: hal_texture_format(attachment.format),
-                sample_count: attachment.sample_count,
-            })
-            .collect(),
-        depth_stencil_attachment: layout.depth_stencil_attachment.map(|attachment| {
-            HalSubpassAttachmentLayout {
-                format: hal_texture_format(attachment.format),
-                sample_count: attachment.sample_count,
-            }
-        }),
-        subpasses: layout
-            .subpasses
-            .iter()
-            .map(|subpass| HalSubpassLayout {
-                color_attachment_indices: subpass.color_attachment_indices.clone(),
-                uses_depth_stencil: subpass.uses_depth_stencil,
-                input_attachments: subpass
-                    .input_attachments
-                    .iter()
-                    .map(|input| HalSubpassInputAttachment {
-                        group: input.group,
-                        binding: input.binding,
-                        source_subpass: input.source_subpass,
-                        source_attachment: input.source_attachment,
-                    })
-                    .collect(),
-            })
-            .collect(),
-        dependencies: layout
-            .dependencies
-            .iter()
-            .map(|dependency| HalSubpassDependency {
-                src_subpass: dependency.src_subpass,
-                dst_subpass: dependency.dst_subpass,
-                dependency_type: match dependency.dependency_type {
-                    crate::subpass::SubpassDependencyType::ColorToInput => {
-                        HalSubpassDependencyType::ColorToInput
-                    }
-                    crate::subpass::SubpassDependencyType::DepthToInput => {
-                        HalSubpassDependencyType::DepthToInput
-                    }
-                    crate::subpass::SubpassDependencyType::ColorDepthToInput => {
-                        HalSubpassDependencyType::ColorDepthToInput
-                    }
-                },
-                by_region: dependency.by_region,
-            })
-            .collect(),
-    }
-}
-
 /// Selects the HAL shader source for a render pipeline.
 pub(crate) fn select_render_shader_source(
     backend: HalBackend,
@@ -1361,15 +1296,6 @@ pub(crate) fn select_render_shader_source(
         HalBackend::Noop => Err("Noop backend does not create HAL shader sources".to_owned()),
         _ => Err("unsupported backend does not create HAL shader sources".to_owned()),
     }
-}
-
-fn hal_msl_buffer_size_bindings(
-    bindings: &[shader_naga::MslBufferSizeBinding],
-) -> Vec<HalMslBufferSizeBinding> {
-    bindings
-        .iter()
-        .map(|binding| HalMslBufferSizeBinding::new(binding.group, binding.binding))
-        .collect()
 }
 
 /// Returns MSL resource bindings projected to a single render stage.

@@ -12,10 +12,8 @@ use yawgpu_hal::{
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
-    HalSubpassAttachmentLayout, HalSubpassAttachmentResource, HalSubpassColorAttachment,
-    HalSubpassDependency, HalSubpassDependencyType, HalSubpassDepthStencilAttachment,
-    HalSubpassDraw, HalSubpassInputAttachment, HalSubpassLayout, HalSubpassPassLayout,
-    HalSubpassRenderPassCommand,
+    HalSubpassAttachmentResource, HalSubpassColorAttachment, HalSubpassDepthStencilAttachment,
+    HalSubpassDraw, HalSubpassRenderPassCommand,
 };
 
 use crate::bind_group::*;
@@ -793,60 +791,6 @@ fn hal_subpass_draw_execution(draw: &SubpassDrawExecution) -> Option<HalSubpassD
             first_instance,
         },
     })
-}
-
-#[cfg(feature = "tiled")]
-fn hal_subpass_pass_layout(layout: &SubpassPassLayoutDescriptor) -> HalSubpassPassLayout {
-    HalSubpassPassLayout {
-        color_attachments: layout
-            .color_attachments
-            .iter()
-            .map(|attachment| HalSubpassAttachmentLayout {
-                format: hal_texture_format(attachment.format),
-                sample_count: attachment.sample_count,
-            })
-            .collect(),
-        depth_stencil_attachment: layout.depth_stencil_attachment.map(|attachment| {
-            HalSubpassAttachmentLayout {
-                format: hal_texture_format(attachment.format),
-                sample_count: attachment.sample_count,
-            }
-        }),
-        subpasses: layout
-            .subpasses
-            .iter()
-            .map(|subpass| HalSubpassLayout {
-                color_attachment_indices: subpass.color_attachment_indices.clone(),
-                uses_depth_stencil: subpass.uses_depth_stencil,
-                input_attachments: subpass
-                    .input_attachments
-                    .iter()
-                    .map(|input| HalSubpassInputAttachment {
-                        group: input.group,
-                        binding: input.binding,
-                        source_subpass: input.source_subpass,
-                        source_attachment: input.source_attachment,
-                    })
-                    .collect(),
-            })
-            .collect(),
-        dependencies: layout
-            .dependencies
-            .iter()
-            .map(|dependency| HalSubpassDependency {
-                src_subpass: dependency.src_subpass,
-                dst_subpass: dependency.dst_subpass,
-                dependency_type: match dependency.dependency_type {
-                    SubpassDependencyType::ColorToInput => HalSubpassDependencyType::ColorToInput,
-                    SubpassDependencyType::DepthToInput => HalSubpassDependencyType::DepthToInput,
-                    SubpassDependencyType::ColorDepthToInput => {
-                        HalSubpassDependencyType::ColorDepthToInput
-                    }
-                },
-                by_region: dependency.by_region,
-            })
-            .collect(),
-    }
 }
 
 #[cfg(feature = "tiled")]
