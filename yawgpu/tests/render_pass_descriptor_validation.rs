@@ -31,7 +31,9 @@ fn empty_depth_only_color_only_and_occlusion_query_fields_are_validated() {
             &render_pass_descriptor(&[make_color_attachment(color.view)], None),
         );
 
-        let depth_attachment = make_depth_attachment(depth.view);
+        let mut depth_attachment = make_depth_attachment(depth.view);
+        depth_attachment.stencilLoadOp = native::WGPULoadOp_Undefined;
+        depth_attachment.stencilStoreOp = native::WGPUStoreOp_Undefined;
         assert_render_pass_ok(&test, &render_pass_descriptor(&[], Some(&depth_attachment)));
 
         let query_set_descriptor = native::WGPUQuerySetDescriptor {

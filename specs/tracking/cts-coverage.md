@@ -1678,3 +1678,16 @@ PY
   Implemented via codex (gpt-5.5 medium). **Verified:** `vertex_state` `pass=28151 fail=0 crash=0` on
   Metal AND Vulkan/MoltenVK; regressions clean (`fragment_state` 10754/0, `robust_access_vertex`
   1856/0, `sampler_texture` 1/0, real-GPU e2e draw 3/3 + render 3/3 + shader-passthrough 2/2).
+
+- **External-CTS finding F-092 — RESOLVED (render-pass / attachment validation; 1082→0).**
+  (a) a readOnly depth/stencil aspect with loadOp/storeOp set (and ops on aspects the format lacks) now
+  rejects per the CTS matrix; (b) pipeline depth/stencil WRITE state is incompatible with a readOnly
+  pass/bundle aspect (stencil counts as writing only with a non-zero write mask and writing ops); (c)
+  pipeline↔pass/bundle depth-stencil format must match exactly incl. the `_undef_` cases; (d) render-pass
+  color attachments validate maxColorAttachmentBytesPerSample with the shared F-090 alignment helper;
+  (e) resolve targets reject non-resolvable formats (16-bit snorm). One review round: creation-time
+  "stencil state requires a stencil format" over-fired for DEFAULT stencil state (Keep/Always) on
+  stencil-less formats, masking (b)/(c) — `depth_stencil_uses_stencil()` now keys on non-default face
+  state. Implemented via codex (gpt-5.5 medium). **Verified:** `render_pass_descriptor` `pass=4959
+  fail=0` AND `attachment_compatibility` `pass=7114 fail=0` on Metal AND Vulkan/MoltenVK; regressions
+  clean (`render_bundle` 113/0, `render_pipeline,misc` 744/0, real-GPU e2e_metal_depth 20/20).

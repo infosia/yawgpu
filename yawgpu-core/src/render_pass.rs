@@ -1362,6 +1362,119 @@ mod tests {
     }
 
     #[test]
+    fn render_pass_pipeline_depth_format_must_match_exactly() {
+        let device = noop_device();
+        let color = noop_render_attachment(&device);
+        let depth = depth24_plus_stencil8_attachment(&device);
+        let mut descriptor = noop_render_pass_descriptor(color, None);
+        descriptor.depth_stencil_attachment = Some(depth_stencil_attachment(depth, false, false));
+
+        let matching = depth_format_render_pipeline(
+            &device,
+            Some(TextureFormat::from_raw(
+                TextureFormat::DEPTH24_PLUS_STENCIL8,
+            )),
+            false,
+            false,
+        );
+        let no_depth = noop_render_pipeline(&device);
+        let mismatched = depth_format_render_pipeline(
+            &device,
+            Some(TextureFormat::from_raw(TextureFormat::DEPTH32_FLOAT)),
+            false,
+            false,
+        );
+
+        assert_render_pass_pipeline_finish_ok(&device, descriptor.clone(), matching);
+        assert_render_pass_pipeline_finish_error(&device, descriptor.clone(), no_depth);
+        assert_render_pass_pipeline_finish_error(&device, descriptor, mismatched);
+
+        let color_only = noop_render_pass_descriptor(noop_render_attachment(&device), None);
+        let pipeline_with_depth = depth_format_render_pipeline(
+            &device,
+            Some(TextureFormat::from_raw(
+                TextureFormat::DEPTH24_PLUS_STENCIL8,
+            )),
+            false,
+            false,
+        );
+        assert_render_pass_pipeline_finish_error(&device, color_only, pipeline_with_depth);
+    }
+
+    #[test]
+    fn render_pass_pipeline_writes_are_incompatible_with_read_only_aspects() {
+        let device = noop_device();
+        let color = noop_render_attachment(&device);
+        let depth = depth24_plus_stencil8_attachment(&device);
+        let mut descriptor = noop_render_pass_descriptor(color, None);
+        descriptor.depth_stencil_attachment = Some(depth_stencil_attachment(depth, true, false));
+
+        let depth_writer = depth_format_render_pipeline(
+            &device,
+            Some(TextureFormat::from_raw(
+                TextureFormat::DEPTH24_PLUS_STENCIL8,
+            )),
+            true,
+            false,
+        );
+        assert_render_pass_pipeline_finish_error(&device, descriptor.clone(), depth_writer);
+
+        {
+            let attachment = descriptor
+                .depth_stencil_attachment
+                .as_mut()
+                .expect("depth-stencil attachment");
+            attachment.depth_read_only = false;
+            attachment.depth_load_op = LoadOp::Clear;
+            attachment.depth_store_op = StoreOp::Discard;
+        }
+        let depth_writer = depth_format_render_pipeline(
+            &device,
+            Some(TextureFormat::from_raw(
+                TextureFormat::DEPTH24_PLUS_STENCIL8,
+            )),
+            true,
+            false,
+        );
+        assert_render_pass_pipeline_finish_ok(&device, descriptor.clone(), depth_writer);
+
+        descriptor
+            .depth_stencil_attachment
+            .as_mut()
+            .expect("depth-stencil attachment")
+            .stencil_read_only = true;
+        descriptor
+            .depth_stencil_attachment
+            .as_mut()
+            .expect("depth-stencil attachment")
+            .stencil_load_op = LoadOp::Undefined;
+        descriptor
+            .depth_stencil_attachment
+            .as_mut()
+            .expect("depth-stencil attachment")
+            .stencil_store_op = StoreOp::Undefined;
+        let stencil_writer = depth_format_render_pipeline(
+            &device,
+            Some(TextureFormat::from_raw(
+                TextureFormat::DEPTH24_PLUS_STENCIL8,
+            )),
+            false,
+            true,
+        );
+        assert_render_pass_pipeline_finish_error(&device, descriptor.clone(), stencil_writer);
+
+        let stencil_reader = depth_format_render_pipeline(
+            &device,
+            Some(TextureFormat::from_raw(
+                TextureFormat::DEPTH24_PLUS_STENCIL8,
+            )),
+            false,
+            false,
+        );
+        assert_render_pass_pipeline_finish_ok(&device, descriptor, stencil_reader);
+    }
+
+    #[test]
     fn render_pass_encoder_records_resolve_target() {
         let device = noop_device();
         let pipeline = one_color_render_pipeline(&device, 4);
@@ -1424,6 +1537,106 @@ mod tests {
         });
         assert_eq!(error, None);
         Arc::new(view)
+    }
+
+    fn depth_stencil_attachment(
+        view: Arc<TextureView>,
+        depth_read_only: bool,
+        stencil_read_only: bool,
+    ) -> RenderPassDepthStencilAttachment {
+        RenderPassDepthStencilAttachment {
+            view,
+            depth_load_op: if depth_read_only {
+                LoadOp::Undefined
+            } else {
+                LoadOp::Clear
+            },
+            depth_store_op: if depth_read_only {
+                StoreOp::Undefined
+            } else {
+                StoreOp::Discard
+            },
+            depth_clear_value: 0.0,
+            depth_read_only,
+            stencil_load_op: if stencil_read_only {
+                LoadOp::Undefined
+            } else {
+                LoadOp::Clear
+            },
+            stencil_store_op: if stencil_read_only {
+                StoreOp::Undefined
+            } else {
+                StoreOp::Discard
+            },
+            stencil_clear_value: 0,
+            stencil_read_only,
+        }
+    }
+
+    fn depth_format_render_pipeline(
+        device: &Device,
+        depth_format: Option<TextureFormat>,
+        depth_write: bool,
+        stencil_write: bool,
+    ) -> Arc<RenderPipeline> {
+        let module = render_shader_module(device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.depth_stencil = depth_format.map(|format| DepthStencilState {
+            format,
+            depth_write_enabled: Some(depth_write),
+            depth_compare: (depth_write || stencil_write).then_some(CompareFunction::Always),
+            stencil_front: stencil_face_state(stencil_write),
+            stencil_back: stencil_face_state(stencil_write),
+            stencil_read_mask: u32::MAX,
+            stencil_write_mask: u32::MAX,
+            depth_bias: 0,
+            depth_bias_slope_scale: 0.0,
+            depth_bias_clamp: 0.0,
+        });
+        Arc::new(device.create_render_pipeline(descriptor))
+    }
+
+    fn stencil_face_state(write: bool) -> StencilFaceState {
+        StencilFaceState {
+            compare: CompareFunction::Always,
+            fail_op: StencilOperation::Keep,
+            depth_fail_op: StencilOperation::Keep,
+            pass_op: if write {
+                StencilOperation::Replace
+            } else {
+                StencilOperation::Keep
+            },
+        }
+    }
+
+    fn assert_render_pass_pipeline_finish_ok(
+        device: &Device,
+        descriptor: RenderPassDescriptor,
+        pipeline: Arc<RenderPipeline>,
+    ) {
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&descriptor);
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.end(), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+    }
+
+    fn assert_render_pass_pipeline_finish_error(
+        device: &Device,
+        descriptor: RenderPassDescriptor,
+        pipeline: Arc<RenderPipeline>,
+    ) {
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&descriptor);
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.end(), None);
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert!(error.is_some());
     }
 
     fn render_attachment_3d_view(device: &crate::device::Device) -> Arc<TextureView> {

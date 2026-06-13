@@ -229,6 +229,15 @@ impl TextureFormat {
         self.0 == TextureFormat::UNDEFINED
     }
 
+    /// Returns true when this format can be used as a render-pass resolve format.
+    #[must_use]
+    pub(crate) fn is_resolvable(self) -> bool {
+        !matches!(
+            self.0,
+            TextureFormat::R16_SNORM | TextureFormat::RG16_SNORM | TextureFormat::RGBA16_SNORM
+        )
+    }
+
     /// Returns the caps.
     #[must_use]
     pub fn caps(self, features: &FeatureSet) -> Option<FormatCaps> {
@@ -1186,6 +1195,14 @@ mod tests {
                 .expect("RGBA8Snorm caps")
                 .storage_capable
         );
+    }
+
+    #[test]
+    fn texture_format_resolve_support_matches_cts_snorm_exceptions() {
+        assert!(!TextureFormat::from_raw(TextureFormat::R16_SNORM).is_resolvable());
+        assert!(!TextureFormat::from_raw(TextureFormat::RG16_SNORM).is_resolvable());
+        assert!(!TextureFormat::from_raw(TextureFormat::RGBA16_SNORM).is_resolvable());
+        assert!(TextureFormat::from_raw(TextureFormat::RGBA16_FLOAT).is_resolvable());
     }
 
     #[test]
