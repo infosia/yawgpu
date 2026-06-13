@@ -367,7 +367,8 @@ pub(crate) fn pipeline_constant_map(
         .collect()
 }
 
-fn hal_msl_buffer_size_bindings(
+/// Returns HAL MSL buffer-size bindings.
+pub(crate) fn hal_msl_buffer_size_bindings(
     bindings: &[shader_naga::MslBufferSizeBinding],
 ) -> Vec<HalMslBufferSizeBinding> {
     bindings

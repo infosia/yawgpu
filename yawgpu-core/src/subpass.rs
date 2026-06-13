@@ -3,6 +3,11 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use yawgpu_hal::{HalDevice, HalSubpassRenderPass};
+#[cfg(feature = "tiled")]
+use yawgpu_hal::{
+    HalSubpassAttachmentLayout, HalSubpassDependency, HalSubpassDependencyType,
+    HalSubpassInputAttachment, HalSubpassLayout, HalSubpassPassLayout,
+};
 
 use crate::adapter::{tiled_features_supported, TiledCapabilities};
 use crate::bind_group::*;
@@ -16,6 +21,8 @@ use crate::format::*;
 use crate::limits::*;
 use crate::pass::*;
 use crate::render_pipeline::*;
+#[cfg(feature = "tiled")]
+use crate::texture::hal_texture_format;
 use crate::texture_view::*;
 use crate::transient_attachment::*;
 
@@ -136,6 +143,63 @@ impl SubpassPassLayout {
     #[must_use]
     pub fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+/// Converts a subpass pass layout descriptor to the HAL representation.
+#[cfg(feature = "tiled")]
+pub(crate) fn hal_subpass_pass_layout(
+    layout: &SubpassPassLayoutDescriptor,
+) -> HalSubpassPassLayout {
+    HalSubpassPassLayout {
+        color_attachments: layout
+            .color_attachments
+            .iter()
+            .map(|attachment| HalSubpassAttachmentLayout {
+                format: hal_texture_format(attachment.format),
+                sample_count: attachment.sample_count,
+            })
+            .collect(),
+        depth_stencil_attachment: layout.depth_stencil_attachment.map(|attachment| {
+            HalSubpassAttachmentLayout {
+                format: hal_texture_format(attachment.format),
+                sample_count: attachment.sample_count,
+            }
+        }),
+        subpasses: layout
+            .subpasses
+            .iter()
+            .map(|subpass| HalSubpassLayout {
+                color_attachment_indices: subpass.color_attachment_indices.clone(),
+                uses_depth_stencil: subpass.uses_depth_stencil,
+                input_attachments: subpass
+                    .input_attachments
+                    .iter()
+                    .map(|input| HalSubpassInputAttachment {
+                        group: input.group,
+                        binding: input.binding,
+                        source_subpass: input.source_subpass,
+                        source_attachment: input.source_attachment,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        dependencies: layout
+            .dependencies
+            .iter()
+            .map(|dependency| HalSubpassDependency {
+                src_subpass: dependency.src_subpass,
+                dst_subpass: dependency.dst_subpass,
+                dependency_type: match dependency.dependency_type {
+                    SubpassDependencyType::ColorToInput => HalSubpassDependencyType::ColorToInput,
+                    SubpassDependencyType::DepthToInput => HalSubpassDependencyType::DepthToInput,
+                    SubpassDependencyType::ColorDepthToInput => {
+                        HalSubpassDependencyType::ColorDepthToInput
+                    }
+                },
+                by_region: dependency.by_region,
+            })
+            .collect(),
     }
 }
 
@@ -1086,6 +1150,7 @@ mod tests {
             array_layer_count: None,
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(error, None);
         Arc::new(view)
