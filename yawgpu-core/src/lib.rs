@@ -17,6 +17,7 @@ mod future;
 mod instance;
 mod limits;
 mod pass;
+mod pipeline_id;
 mod pipeline_layout;
 mod query_set;
 mod queue;

@@ -304,6 +304,7 @@ pub(crate) struct BindGroupLayoutInner {
     pub(crate) entries: Vec<BindGroupLayoutEntry>,
     pub(crate) is_error: bool,
     pub(crate) is_default: bool,
+    pub(crate) exclusive_pipeline: Option<u64>,
 }
 
 impl BindGroupLayout {
@@ -318,6 +319,19 @@ impl BindGroupLayout {
                 entries,
                 is_error,
                 is_default,
+                exclusive_pipeline: None,
+            }),
+        }
+    }
+
+    /// Creates an auto-derived layout that is exclusive to one pipeline.
+    pub(crate) fn new_auto(entries: Vec<BindGroupLayoutEntry>, exclusive_pipeline: u64) -> Self {
+        Self {
+            inner: Arc::new(BindGroupLayoutInner {
+                entries,
+                is_error: false,
+                is_default: true,
+                exclusive_pipeline: Some(exclusive_pipeline),
             }),
         }
     }
@@ -356,6 +370,12 @@ impl BindGroupLayout {
     #[must_use]
     pub(crate) fn is_default(&self) -> bool {
         self.inner.is_default
+    }
+
+    /// Returns the pipeline id this auto-derived layout is exclusive to, if any.
+    #[must_use]
+    pub(crate) fn exclusive_pipeline(&self) -> Option<u64> {
+        self.inner.exclusive_pipeline
     }
 
     /// Returns true when both handles share the same backing object.
@@ -406,6 +426,7 @@ mod tests {
         let unused = BindGroupLayout::empty_unused();
         assert!(!unused.is_error());
         assert!(!unused.is_default());
+        assert_eq!(unused.exclusive_pipeline(), None);
         assert!(unused.entries().is_empty());
 
         device.push_error_scope(ErrorFilter::Validation);
@@ -488,5 +509,14 @@ mod tests {
             ),
             Some("too many uniform buffers for one shader stage".to_owned())
         );
+    }
+
+    #[test]
+    fn bind_group_layout_auto_constructor_sets_exclusive_pipeline() {
+        let layout = BindGroupLayout::new_auto(Vec::new(), 42);
+
+        assert!(!layout.is_error());
+        assert!(layout.is_default());
+        assert_eq!(layout.exclusive_pipeline(), Some(42));
     }
 }

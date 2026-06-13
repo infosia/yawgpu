@@ -11,6 +11,7 @@ use crate::bind_group_layout::*;
 use crate::device::FeatureSet;
 use crate::format::*;
 use crate::limits::*;
+use crate::pipeline_id::next_pipeline_id;
 use crate::pipeline_layout::*;
 use crate::shader::*;
 use crate::shader_naga;
@@ -123,10 +124,11 @@ impl ComputePipeline {
         features: &FeatureSet,
         hal_device: Option<&HalDevice>,
     ) -> (Self, Option<String>) {
+        let pipeline_id = next_pipeline_id();
         let resolved = if is_error {
             None
         } else {
-            resolve_compute_pipeline_descriptor(&descriptor, limits, features).ok()
+            resolve_compute_pipeline_descriptor(&descriptor, limits, features, pipeline_id).ok()
         };
         let (entry_name, bindings, workgroup, bind_group_layouts) = resolved.unwrap_or_else(|| {
             (
@@ -776,7 +778,7 @@ pub(crate) fn validate_compute_pipeline_descriptor(
     limits: Limits,
     features: &FeatureSet,
 ) -> Option<String> {
-    resolve_compute_pipeline_descriptor(descriptor, limits, features).err()
+    resolve_compute_pipeline_descriptor(descriptor, limits, features, 0).err()
 }
 
 /// Records resolve into the command stream.
@@ -784,6 +786,7 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
     descriptor: &ComputePipelineDescriptor,
     limits: Limits,
     features: &FeatureSet,
+    pipeline_id: u64,
 ) -> Result<ResolvedPipelineParts, String> {
     if descriptor.shader_module.is_error() {
         return Err("compute pipeline shader module must not be an error module".to_owned());
@@ -822,8 +825,13 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
     let workgroup = resolve_compute_workgroup(module, &entry_name, &constants, limits)?;
     let bindings = module.resource_bindings_for_entry(&entry_name)?;
     validate_compute_pipeline_layout(&descriptor.layout, &bindings)?;
-    let bind_group_layouts =
-        effective_compute_bind_group_layouts(&descriptor.layout, &bindings, limits, features)?;
+    let bind_group_layouts = effective_compute_bind_group_layouts(
+        &descriptor.layout,
+        &bindings,
+        limits,
+        features,
+        pipeline_id,
+    )?;
     Ok((entry_name, bindings, Some(workgroup), bind_group_layouts))
 }
 
@@ -1066,6 +1074,7 @@ pub(crate) fn effective_compute_bind_group_layouts(
     bindings: &[shader_naga::ReflectedResourceBinding],
     limits: Limits,
     features: &FeatureSet,
+    pipeline_id: u64,
 ) -> Result<Vec<Arc<BindGroupLayout>>, String> {
     match layout {
         ComputePipelineLayout::Explicit(layout) => Ok(layout.bind_group_layouts().to_vec()),
@@ -1079,6 +1088,7 @@ pub(crate) fn effective_compute_bind_group_layouts(
                 }),
             limits,
             features,
+            pipeline_id,
         ),
     }
 }
@@ -1222,6 +1232,7 @@ pub(crate) fn derive_bind_group_layouts<I>(
     requirements: I,
     limits: Limits,
     features: &FeatureSet,
+    pipeline_id: u64,
 ) -> Result<Vec<Arc<BindGroupLayout>>, String>
 where
     I: IntoIterator<Item = StageResourceBinding>,
@@ -1265,7 +1276,7 @@ where
         ) {
             return Err(message);
         }
-        layouts.push(Arc::new(BindGroupLayout::new(entries, false, true)));
+        layouts.push(Arc::new(BindGroupLayout::new_auto(entries, pipeline_id)));
     }
 
     let mut stage_counts = [StageResourceCounts::default(); 3];
@@ -1913,7 +1924,7 @@ mod tests {
         ];
 
         assert_eq!(
-            derive_bind_group_layouts(requirements, limits, &FeatureSet::default())
+            derive_bind_group_layouts(requirements, limits, &FeatureSet::default(), 1)
                 .expect_err("aggregate sampled texture over-limit should reject auto layout"),
             "pipeline auto layout uses too many sampled textures for one shader stage"
         );
@@ -1932,7 +1943,7 @@ mod tests {
         ];
 
         assert_eq!(
-            derive_bind_group_layouts(requirements, limits, &FeatureSet::default()).expect_err(
+            derive_bind_group_layouts(requirements, limits, &FeatureSet::default(), 1).expect_err(
                 "aggregate fragment storage texture over-limit should reject auto layout"
             ),
             "pipeline auto layout uses too many storage textures in the fragment stage"
@@ -1954,6 +1965,7 @@ mod tests {
                 ..Limits::DEFAULT
             },
             &FeatureSet::default(),
+            1,
         )
         .expect("auto layout within aggregate stage limits should derive");
 
