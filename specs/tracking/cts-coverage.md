@@ -1813,3 +1813,26 @@ PY
   ~11990); (d) pipeline_bind_group_compat default_bind_group_layouts_never_match (18) — needs the WebGPU
   exclusive-pipeline BGL-compatibility model (structural equality + the auto layout's owning pipeline), not
   yawgpu's current pointer-identity approximation; an auto-layout BGL identity quirk to untangle.
+
+## F-093(d) — auto-layout bind-group-layout compatibility (exclusive pipeline) — RESOLVED (F-093 partial)
+
+- **Finding (F-093 sub-gap d):** `pipeline_bind_group_compat:default_bind_group_layouts_never_match,{render,compute}_pass`
+  failed 18 cases (Metal == MoltenVK): 12 over-reject (compatible auto0/auto0 incl. swapped structurally-identical
+  groups → "incompatible") + 6 under-reject (auto0 pipeline + auto1 bind group accepted, should be incompatible).
+- **Root cause (two parts):** (1) `bind_group_layouts_compatible` used pointer identity (`is_default → same()`) for
+  auto-derived BGLs — wrong both ways (distinct Arcs for structurally-equal groups of one pipeline; and an unrelated
+  alias across pipelines). (2) the `yawgpu` FFI cached pipeline handles by descriptor key including
+  `PipelineLayoutIdentity::Auto`, so two identical `layout:'auto'` pipeline creations returned the SAME cached core
+  pipeline + derived BGL set — making auto0/auto1 alias.
+- **Fix (WebGPU exclusive-pipeline model):** process-unique pipeline id (`pipeline_id.rs`, AtomicU64) allocated per
+  compute/render/subpass-render pipeline creation; auto-derived BGLs tagged `exclusive_pipeline: Some(id)` (explicit /
+  empty-default / error BGLs = None); `bind_group_layouts_compatible` = `required.exclusive_pipeline() ==
+  actual.exclusive_pipeline()` AND structural entry equality (pointer-identity branch removed). FFI no longer caches
+  AUTO-layout pipeline handles (explicit-layout caching retained), so each auto pipeline is a distinct object with its
+  own id. Empty-required-layout skip retained.
+- **Verification (Metal == MoltenVK):** pipeline_bind_group_compat 2520/0 (was 18 fail). Regressions clean:
+  render_pipeline,misc 744/0, compute_pipeline 11826/0, createBindGroup 2358/0, maxStorageTexturesInFragmentStage
+  182/0; real-GPU e2e_metal_compute 5/5 + e2e_metal_draw 3/3 (auto-layout draws/dispatches with bind groups).
+  yawgpu-core --lib 299, yawgpu --lib 147. workspace test exit 0; clippy clean (incl. tiled). Implemented via codex.
+- **F-093 REMAINING (open):** (b) render,draw — sparse (gap) vertex-buffer slots over-rejected as "error render bundle"
+  (~11990); multi-layer (conv gap detection + core unused-slot repr + draw validation + Metal/Vulkan HAL vertex binding).

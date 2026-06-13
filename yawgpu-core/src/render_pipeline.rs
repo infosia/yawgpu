@@ -16,6 +16,7 @@ use crate::compute_pipeline::*;
 use crate::device::FeatureSet;
 use crate::format::*;
 use crate::limits::*;
+use crate::pipeline_id::next_pipeline_id;
 use crate::pipeline_layout::*;
 use crate::sampler::*;
 use crate::shader::*;
@@ -533,10 +534,12 @@ impl RenderPipeline {
         features: &FeatureSet,
         hal_device: Option<&HalDevice>,
     ) -> (Self, Option<String>) {
+        let pipeline_id = next_pipeline_id();
         let resolved = if is_error {
             None
         } else {
-            resolve_render_pipeline_descriptor(&descriptor, limits, features, None).ok()
+            resolve_render_pipeline_descriptor(&descriptor, limits, features, None, pipeline_id)
+                .ok()
         };
         let (vertex_entry_name, fragment_entry_name, bind_group_layouts) =
             resolved.unwrap_or_else(|| {
@@ -603,6 +606,7 @@ impl RenderPipeline {
         features: &FeatureSet,
         hal_device: Option<&HalDevice>,
     ) -> (Self, Option<String>) {
+        let pipeline_id = next_pipeline_id();
         let compatibility = SubpassPipelineCompatibility {
             pass_layout: Arc::clone(&descriptor.pass_layout),
             subpass_index: descriptor.subpass_index,
@@ -623,6 +627,7 @@ impl RenderPipeline {
                         .map(|s| s.color_attachment_indices.clone())
                         .unwrap_or_default(),
                 ),
+                pipeline_id,
             )
             .ok()
         };
@@ -805,7 +810,7 @@ pub(crate) fn validate_render_pipeline_descriptor(
     limits: Limits,
     features: &FeatureSet,
 ) -> Option<String> {
-    resolve_render_pipeline_descriptor(descriptor, limits, features, None).err()
+    resolve_render_pipeline_descriptor(descriptor, limits, features, None, 0).err()
 }
 
 /// Alias for resolved render pipeline parts.
@@ -1692,6 +1697,7 @@ pub(crate) fn resolve_render_pipeline_descriptor(
     limits: Limits,
     features: &FeatureSet,
     subpass_color_attachment_indices: Option<&[u32]>,
+    pipeline_id: u64,
 ) -> Result<ResolvedRenderPipelineParts, String> {
     if let RenderPipelineLayout::Explicit(layout) = &descriptor.layout {
         if layout.is_error() {
@@ -1748,6 +1754,7 @@ pub(crate) fn resolve_render_pipeline_descriptor(
         fragment_entry.as_deref(),
         limits,
         features,
+        pipeline_id,
     )?;
     validate_bind_groups_plus_vertex_buffers(
         &bind_group_layouts,
@@ -2622,6 +2629,7 @@ pub(crate) fn effective_render_bind_group_layouts(
     fragment_entry: Option<&str>,
     limits: Limits,
     features: &FeatureSet,
+    pipeline_id: u64,
 ) -> Result<Vec<Arc<BindGroupLayout>>, String> {
     match &descriptor.layout {
         RenderPipelineLayout::Explicit(layout) => Ok(layout.bind_group_layouts().to_vec()),
@@ -2643,7 +2651,7 @@ pub(crate) fn effective_render_bind_group_layouts(
             // Storage-texture format/access support is validated uniformly by
             // the derived bind-group-layout validation (`bind_group_layout.rs`,
             // via `FormatCaps`), so no render-specific format gate is needed.
-            derive_bind_group_layouts(requirements, limits, features)
+            derive_bind_group_layouts(requirements, limits, features, pipeline_id)
         }
     }
 }
@@ -2712,6 +2720,7 @@ pub(crate) fn validate_multisample_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pass::bind_group_layouts_compatible;
     #[cfg(feature = "tiled")]
     use crate::subpass::{
         AttachmentLayout, SubpassDependency, SubpassDependencyType, SubpassInputAttachment,
@@ -3683,6 +3692,56 @@ mod tests {
     }
 
     #[test]
+    fn auto_render_pipeline_layouts_are_exclusive_per_pipeline_on_noop() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "struct Uniforms {
+                    value: vec4<f32>,
+                };
+
+                @group(2) @binding(0) var<uniform> u2: Uniforms;
+                @group(3) @binding(0) var<uniform> u3: Uniforms;
+
+                @vertex
+                fn vs() -> @builtin(position) vec4<f32> {
+                    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+                }
+
+                @fragment
+                fn fs() -> @location(0) vec4<f32> {
+                    return u2.value + u3.value * 0.0;
+                }"
+                .to_owned(),
+            )),
+        );
+
+        let first = device.create_render_pipeline(render_pipeline_descriptor(Arc::clone(&module)));
+        let second = device.create_render_pipeline(render_pipeline_descriptor(module));
+
+        assert!(!first.is_error());
+        assert!(!second.is_error());
+        assert_eq!(first.bind_group_layouts().len(), 4);
+        assert_eq!(second.bind_group_layouts().len(), 4);
+
+        let first_group_2 = &first.bind_group_layouts()[2];
+        let first_group_3 = &first.bind_group_layouts()[3];
+        let second_group_2 = &second.bind_group_layouts()[2];
+        let first_id = first_group_2
+            .exclusive_pipeline()
+            .expect("auto layout should carry an exclusive pipeline id");
+
+        assert_eq!(first_group_3.exclusive_pipeline(), Some(first_id));
+        assert_ne!(second_group_2.exclusive_pipeline(), Some(first_id));
+        assert!(bind_group_layouts_compatible(first_group_2, first_group_2));
+        assert!(bind_group_layouts_compatible(first_group_2, first_group_3));
+        assert!(!bind_group_layouts_compatible(
+            first_group_2,
+            second_group_2
+        ));
+    }
+
+    #[test]
     fn external_texture_render_pipeline_auto_layout_and_explicit_compat() {
         let device = noop_device();
         let module = Arc::new(
@@ -4067,6 +4126,7 @@ mod tests {
             limits,
             &device.features(),
             Some(&subpass_slot_one),
+            0,
         )
         .expect("subpass-local fragment output should be accepted");
 
@@ -4077,6 +4137,7 @@ mod tests {
             limits,
             &device.features(),
             Some(&subpass_slot_one),
+            0,
         )
         .expect("flat-slot fragment output should be accepted");
 
@@ -4087,7 +4148,8 @@ mod tests {
                 &missing_slot,
                 limits,
                 &device.features(),
-                Some(&[2])
+                Some(&[2]),
+                0
             )
             .expect_err("unmatched fragment output should require writeMask 0"),
             "render pipeline color target without shader output must use writeMask 0"

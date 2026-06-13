@@ -1226,8 +1226,8 @@ pub(crate) fn bind_group_layouts_compatible(
     required: &Arc<BindGroupLayout>,
     actual: &Arc<BindGroupLayout>,
 ) -> bool {
-    if required.is_default() || actual.is_default() {
-        return required.same(actual);
+    if required.exclusive_pipeline() != actual.exclusive_pipeline() {
+        return false;
     }
     if required.entries().len() != actual.entries().len() {
         return false;
@@ -1442,6 +1442,43 @@ mod tests {
             aspects,
             access,
         }
+    }
+
+    fn uniform_layout_entry(binding: u32) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: 4,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: 16,
+            }),
+        }
+    }
+
+    #[test]
+    fn bind_group_layout_compatibility_uses_exclusive_pipeline_and_structure() {
+        let entries = vec![uniform_layout_entry(0)];
+        let explicit_a = Arc::new(BindGroupLayout::new(entries.clone(), false, false));
+        let explicit_b = Arc::new(BindGroupLayout::new(entries.clone(), false, false));
+        let auto_pipeline_a_group_0 = Arc::new(BindGroupLayout::new_auto(entries.clone(), 7));
+        let auto_pipeline_a_group_1 = Arc::new(BindGroupLayout::new_auto(entries.clone(), 7));
+        let auto_pipeline_b_group_0 = Arc::new(BindGroupLayout::new_auto(entries, 8));
+
+        assert!(bind_group_layouts_compatible(&explicit_a, &explicit_b));
+        assert!(bind_group_layouts_compatible(
+            &auto_pipeline_a_group_0,
+            &auto_pipeline_a_group_1
+        ));
+        assert!(!bind_group_layouts_compatible(
+            &auto_pipeline_a_group_0,
+            &auto_pipeline_b_group_0
+        ));
+        assert!(!bind_group_layouts_compatible(
+            &explicit_a,
+            &auto_pipeline_a_group_0
+        ));
     }
 
     #[test]

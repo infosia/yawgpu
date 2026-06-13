@@ -810,6 +810,7 @@ fn validate_subpass_render_pipeline_descriptor(
         limits,
         features,
         Some(&subpass.color_attachment_indices),
+        0,
     )
     .err()
 }

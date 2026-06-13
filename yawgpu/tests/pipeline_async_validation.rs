@@ -211,7 +211,10 @@ fn async_pipeline_reuses_sync_cache_handle() {
     let test = ValidationTest::new();
     unsafe {
         let module = create_wgsl_module(test.device(), compute_source());
-        let descriptor = compute_pipeline_descriptor(module);
+        let bind_group_layout = create_bind_group_layout(test.device(), &[uniform_layout(0)]);
+        let pipeline_layout = create_pipeline_layout(test.device(), &[bind_group_layout]);
+        let mut descriptor = compute_pipeline_descriptor(module);
+        descriptor.layout = pipeline_layout;
         let sync_pipeline = yawgpu::wgpuDeviceCreateComputePipeline(test.device(), &descriptor);
         let mut state = PipelineAsyncState::<native::WGPUComputePipeline>::default();
 
@@ -228,6 +231,8 @@ fn async_pipeline_reuses_sync_cache_handle() {
 
         yawgpu::wgpuComputePipelineRelease(state.pipelines[0]);
         yawgpu::wgpuComputePipelineRelease(sync_pipeline);
+        yawgpu::wgpuPipelineLayoutRelease(pipeline_layout);
+        yawgpu::wgpuBindGroupLayoutRelease(bind_group_layout);
         yawgpu::wgpuShaderModuleRelease(module);
     }
 }
@@ -307,6 +312,33 @@ unsafe fn create_wgsl_module(device: native::WGPUDevice, source: &str) -> native
     yawgpu::wgpuDeviceCreateShaderModule(device, &descriptor)
 }
 
+unsafe fn create_bind_group_layout(
+    device: native::WGPUDevice,
+    entries: &[native::WGPUBindGroupLayoutEntry],
+) -> native::WGPUBindGroupLayout {
+    let descriptor = native::WGPUBindGroupLayoutDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        entryCount: entries.len(),
+        entries: entries.as_ptr(),
+    };
+    yawgpu::wgpuDeviceCreateBindGroupLayout(device, &descriptor)
+}
+
+unsafe fn create_pipeline_layout(
+    device: native::WGPUDevice,
+    layouts: &[native::WGPUBindGroupLayout],
+) -> native::WGPUPipelineLayout {
+    let descriptor = native::WGPUPipelineLayoutDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        bindGroupLayoutCount: layouts.len(),
+        bindGroupLayouts: layouts.as_ptr(),
+        immediateSize: 0,
+    };
+    yawgpu::wgpuDeviceCreatePipelineLayout(device, &descriptor)
+}
+
 fn compute_pipeline_descriptor(
     module: native::WGPUShaderModule,
 ) -> native::WGPUComputePipelineDescriptor {
@@ -372,6 +404,37 @@ fn render_pipeline_descriptor(
             alphaToCoverageEnabled: 0,
         },
         fragment,
+    }
+}
+
+fn uniform_layout(binding: u32) -> native::WGPUBindGroupLayoutEntry {
+    native::WGPUBindGroupLayoutEntry {
+        nextInChain: std::ptr::null_mut(),
+        binding,
+        visibility: native::WGPUShaderStage_Compute,
+        bindingArraySize: 0,
+        buffer: native::WGPUBufferBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            type_: native::WGPUBufferBindingType_Uniform,
+            hasDynamicOffset: 0,
+            minBindingSize: 0,
+        },
+        sampler: native::WGPUSamplerBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            type_: native::WGPUSamplerBindingType_BindingNotUsed,
+        },
+        texture: native::WGPUTextureBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            sampleType: native::WGPUTextureSampleType_BindingNotUsed,
+            viewDimension: native::WGPUTextureViewDimension_Undefined,
+            multisampled: 0,
+        },
+        storageTexture: native::WGPUStorageTextureBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            access: native::WGPUStorageTextureAccess_BindingNotUsed,
+            format: native::WGPUTextureFormat_Undefined,
+            viewDimension: native::WGPUTextureViewDimension_Undefined,
+        },
     }
 }
 

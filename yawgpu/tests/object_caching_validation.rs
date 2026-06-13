@@ -71,12 +71,24 @@ fn compute_pipelines_are_cached_by_module_layout_and_constants() {
         let constants_a = [constant("value", 1.0)];
         let constants_a_again = [constant("value", 1.0)];
         let constants_b = [constant("value", 2.0)];
-        let constant_pipeline =
-            create_compute_pipeline(test.device(), constants_module, None, &constants_a);
-        let constant_pipeline_again =
-            create_compute_pipeline(test.device(), constants_module, None, &constants_a_again);
-        let different_constant_pipeline =
-            create_compute_pipeline(test.device(), constants_module, None, &constants_b);
+        let constant_pipeline = create_compute_pipeline(
+            test.device(),
+            constants_module,
+            Some(layout_a),
+            &constants_a,
+        );
+        let constant_pipeline_again = create_compute_pipeline(
+            test.device(),
+            constants_module,
+            Some(layout_a),
+            &constants_a_again,
+        );
+        let different_constant_pipeline = create_compute_pipeline(
+            test.device(),
+            constants_module,
+            Some(layout_a),
+            &constants_b,
+        );
 
         assert_eq!(constant_pipeline, constant_pipeline_again);
         assert_ne!(constant_pipeline, different_constant_pipeline);
@@ -129,17 +141,27 @@ fn render_pipelines_are_cached_by_layout_modules_and_constants() {
         let constants_a = [constant("value", 1.0)];
         let constants_a_again = [constant("value", 1.0)];
         let constants_b = [constant("value", 2.0)];
-        let constant_pipeline =
-            create_render_pipeline(test.device(), constant_vertex, fragment, None, &constants_a);
+        let constant_pipeline = create_render_pipeline(
+            test.device(),
+            constant_vertex,
+            fragment,
+            Some(layout_a),
+            &constants_a,
+        );
         let constant_pipeline_again = create_render_pipeline(
             test.device(),
             constant_vertex,
             fragment,
-            None,
+            Some(layout_a),
             &constants_a_again,
         );
-        let different_constant_pipeline =
-            create_render_pipeline(test.device(), constant_vertex, fragment, None, &constants_b);
+        let different_constant_pipeline = create_render_pipeline(
+            test.device(),
+            constant_vertex,
+            fragment,
+            Some(layout_a),
+            &constants_b,
+        );
 
         assert_eq!(constant_pipeline, constant_pipeline_again);
         assert_ne!(constant_pipeline, different_constant_pipeline);
@@ -159,6 +181,34 @@ fn render_pipelines_are_cached_by_layout_modules_and_constants() {
         yawgpu::wgpuShaderModuleRelease(fragment);
         yawgpu::wgpuShaderModuleRelease(different_vertex);
         yawgpu::wgpuShaderModuleRelease(vertex);
+    }
+}
+
+#[test]
+fn auto_layout_pipelines_are_not_cached() {
+    let test = ValidationTest::new();
+    unsafe {
+        let compute_module = create_wgsl_module(test.device(), compute_source());
+        let compute_first = create_compute_pipeline(test.device(), compute_module, None, &[]);
+        let compute_second = create_compute_pipeline(test.device(), compute_module, None, &[]);
+
+        assert_ne!(compute_first, compute_second);
+
+        let vertex = create_wgsl_module(test.device(), vertex_source());
+        let fragment = create_wgsl_module(test.device(), fragment_source());
+        let render_first = create_render_pipeline(test.device(), vertex, fragment, None, &[]);
+        let render_second = create_render_pipeline(test.device(), vertex, fragment, None, &[]);
+
+        assert_ne!(render_first, render_second);
+        assert!(test.errors().is_empty());
+
+        yawgpu::wgpuRenderPipelineRelease(render_second);
+        yawgpu::wgpuRenderPipelineRelease(render_first);
+        yawgpu::wgpuShaderModuleRelease(fragment);
+        yawgpu::wgpuShaderModuleRelease(vertex);
+        yawgpu::wgpuComputePipelineRelease(compute_second);
+        yawgpu::wgpuComputePipelineRelease(compute_first);
+        yawgpu::wgpuShaderModuleRelease(compute_module);
     }
 }
 

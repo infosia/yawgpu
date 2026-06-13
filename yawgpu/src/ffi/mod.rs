@@ -808,6 +808,10 @@ unsafe fn compute_pipeline_cache_key(
     if descriptor.compute.module.is_null() {
         return None;
     }
+    let layout = unsafe { layout_identity(descriptor.layout) };
+    if matches!(layout, PipelineLayoutIdentity::Auto) {
+        return None;
+    }
     Some(ComputePipelineCacheKey {
         module: descriptor.compute.module as usize,
         entry_point: cache_string_view(descriptor.compute.entryPoint),
@@ -815,7 +819,7 @@ unsafe fn compute_pipeline_cache_key(
             descriptor.compute.constantCount,
             descriptor.compute.constants,
         )?,
-        layout: unsafe { layout_identity(descriptor.layout) },
+        layout,
     })
 }
 
@@ -825,8 +829,12 @@ unsafe fn render_pipeline_cache_key(
     if descriptor.vertex.module.is_null() {
         return None;
     }
+    let layout = unsafe { layout_identity(descriptor.layout) };
+    if matches!(layout, PipelineLayoutIdentity::Auto) {
+        return None;
+    }
     Some(RenderPipelineCacheKey {
-        layout: unsafe { layout_identity(descriptor.layout) },
+        layout,
         vertex: RenderStageCacheKey {
             module: descriptor.vertex.module as usize,
             entry_point: cache_string_view(descriptor.vertex.entryPoint),
@@ -5610,6 +5618,58 @@ mod tests {
             wgpuComputePipelineRelease(pipeline);
             wgpuPipelineLayoutRelease(pipeline_layout);
             wgpuBindGroupLayoutRelease(bind_group_layout);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn auto_layout_pipeline_creation_is_not_cached() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let compute_module =
+                create_wgsl_module(device, "@compute @workgroup_size(1) fn cs() {}");
+            let compute_desc = compute_pipeline_descriptor(compute_module, std::ptr::null_mut());
+            let compute_a = wgpuDeviceCreateComputePipeline(device, &compute_desc);
+            let compute_b = wgpuDeviceCreateComputePipeline(device, &compute_desc);
+            assert_ne!(compute_a, compute_b);
+
+            let render_module = create_wgsl_module(
+                device,
+                "struct Uniforms {
+                    value: vec4f,
+                };
+
+                @group(2) @binding(0) var<uniform> u2: Uniforms;
+                @group(3) @binding(0) var<uniform> u3: Uniforms;
+
+                @vertex
+                fn vs() -> @builtin(position) vec4f {
+                    return vec4f();
+                }
+
+                @fragment
+                fn fs() -> @location(0) vec4f {
+                    return u2.value + u3.value * 0.0;
+                }",
+            );
+            let render_desc =
+                render_pipeline_descriptor(render_module, render_module, std::ptr::null_mut());
+            let render_a = wgpuDeviceCreateRenderPipeline(device, &render_desc);
+            let render_b = wgpuDeviceCreateRenderPipeline(device, &render_desc);
+            assert_ne!(render_a, render_b);
+
+            let layout_a = wgpuRenderPipelineGetBindGroupLayout(render_a, 2);
+            let layout_b = wgpuRenderPipelineGetBindGroupLayout(render_b, 2);
+            assert_ne!(layout_a, layout_b);
+
+            wgpuBindGroupLayoutRelease(layout_b);
+            wgpuBindGroupLayoutRelease(layout_a);
+            wgpuRenderPipelineRelease(render_b);
+            wgpuRenderPipelineRelease(render_a);
+            wgpuShaderModuleRelease(render_module);
+            wgpuComputePipelineRelease(compute_b);
+            wgpuComputePipelineRelease(compute_a);
+            wgpuShaderModuleRelease(compute_module);
             release_handles(instance, adapter, device);
         }
     }
