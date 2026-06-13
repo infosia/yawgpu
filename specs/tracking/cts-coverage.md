@@ -1741,3 +1741,36 @@ PY
 - **Out of scope / residual:** the MoltenVK-only `maxComputeWorkgroupStorageSize:createComputePipeline,at_over`
   atLimit failure (30, SPIR-V/MoltenVK translation artifact) is unrelated and untouched.
 - **Implemented via** codex (gpt-5.5 medium).
+
+## F-094 — image-copy buffer/layout validation gaps — RESOLVED
+
+- **Finding:** cross-HAL (Metal == MoltenVK), Dawn-oracle. `api,validation,image_copy,{layout_related,
+  buffer_texture_copies,texture_related}`. Surfaced by Y-6 V6. Four+ root-cause bugs:
+- **Bug A — requiredBytesInCopy under-count:** `copy.rs::required_bytes_in_texel_copy` early-returned 0
+  when `last_row_bytes == 0 || height_blocks == 0`, so width=0/height=0-with-depth>1 copies accepted a
+  too-small buffer. Rewritten to the exact WebGPU formula (return 0 only when depth==0; otherwise
+  `bytes_per_row*rows_per_image*(depth-1)` plus, when height_blocks>0, `bytes_per_row*(height_blocks-1)+
+  last_row_bytes`).
+- **DUPLICATION (root of the 552 writeTexture residual):** `validate_texel_copy_layout` +
+  `required_bytes_in_texel_copy` (+ `texel_copy_block_size`, `div_ceil_u32`) were DUPLICATED in both
+  `copy.rs` and `texture.rs`; the copyB2T/T2B path used copy.rs (fixed) while writeTexture used the
+  texture.rs duplicate (still buggy). Deleted the texture.rs duplicates; writeTexture now uses the single
+  canonical `crate::copy::` versions.
+- **Bug B — repack source offset:** `queue.rs::repack_texel_rows` computed
+  `(src_offset + d*rows)*bytes_per_row + r*bytes_per_row` (multiplying the offset by the row stride),
+  causing "repack_texel_rows: source slice out of bounds" on valid non-zero-offset writeTexture (common
+  for compressed formats). Fixed to `src_offset + (d*rows + r)*bytes_per_row`.
+- **Bug C — buffer offset alignment:** `command_encoder.rs::validate_buffer_texture_copy` required
+  offset multiple-of-4 unconditionally; WebGPU requires multiple of the texel block size for color
+  formats (4 only for depth/stencil). Fixed (depth/stencil→4, else `texel_copy_block_size`).
+- **Bug D1 — depth/stencil copy aspect/usage:** added `copy.rs::depth_stencil_copy_allowed(format,
+  aspect, writing_texture)` enforcing the WebGPU per-format copyability table (depth24plus never
+  copyable; depth32float depth read-only via CopyT2B; depth24plus-stencil8 stencil-only;
+  depth32float-stencil8 depth read-only); applied in validate_buffer_texture_copy + validate_queue_write_texture.
+- **Bug D2 — device-mismatch routing:** FFI copyB2T/copyT2B emitted the texture-device-mismatch error via
+  `dispatch_error` (uncaptured); changed to `record_validation_error` (scope-catchable), matching
+  copyBufferToBuffer/copyTextureToTexture.
+- **Verification (Metal == MoltenVK):** layout_related 34139/0, buffer_texture_copies 1358/0,
+  texture_related 21232/0 (were 3426+ fails). Regressions: e2e_metal_texture 7/7 (real writeTexture/
+  copy round-trips), copyTextureToTexture 1904-fail is the unrelated F-093 baseline. `cargo test
+  --workspace` exit 0; clippy clean. Implemented via codex (gpt-5.5 medium).

@@ -138,25 +138,72 @@ pub(crate) fn required_bytes_in_texel_copy(
     last_row_bytes: u64,
     label: &str,
 ) -> Result<u64, String> {
-    if last_row_bytes == 0 || height_blocks == 0 || depth == 0 {
+    if depth == 0 {
         return Ok(0);
     }
 
     let bytes_per_row = u64::from(bytes_per_row.unwrap_or(0));
     let rows_per_image = u64::from(rows_per_image.unwrap_or(height_blocks));
-    let image_offset_rows = rows_per_image
-        .checked_mul(u64::from(depth.saturating_sub(1)))
-        .ok_or_else(|| format!("{label} required byte size overflows"))?;
-    let row_offset_rows = u64::from(height_blocks.saturating_sub(1));
-    let offset_rows = image_offset_rows
-        .checked_add(row_offset_rows)
-        .ok_or_else(|| format!("{label} required byte size overflows"))?;
-    let offset_bytes = bytes_per_row
-        .checked_mul(offset_rows)
-        .ok_or_else(|| format!("{label} required byte size overflows"))?;
-    offset_bytes
-        .checked_add(last_row_bytes)
-        .ok_or_else(|| format!("{label} required byte size overflows"))
+    let mut required = 0u64;
+    if depth > 1 {
+        let image_bytes = bytes_per_row
+            .checked_mul(rows_per_image)
+            .and_then(|n| n.checked_mul(u64::from(depth - 1)))
+            .ok_or_else(|| format!("{label} required byte size overflows"))?;
+        required = required
+            .checked_add(image_bytes)
+            .ok_or_else(|| format!("{label} required byte size overflows"))?;
+    }
+    if height_blocks > 0 {
+        let row_bytes = bytes_per_row
+            .checked_mul(u64::from(height_blocks - 1))
+            .ok_or_else(|| format!("{label} required byte size overflows"))?;
+        required = required
+            .checked_add(row_bytes)
+            .and_then(|n| n.checked_add(last_row_bytes))
+            .ok_or_else(|| format!("{label} required byte size overflows"))?;
+    }
+    Ok(required)
+}
+
+#[cfg(test)]
+mod required_bytes_in_texel_copy_tests {
+    use super::*;
+
+    #[test]
+    fn required_bytes_width_blocks_zero_keeps_stride_bytes() {
+        let required = required_bytes_in_texel_copy(Some(256), Some(4), 4, 5, 0, "zero-width copy")
+            .expect("required bytes should not overflow");
+
+        assert_eq!(required, 4864);
+    }
+
+    #[test]
+    fn required_bytes_height_blocks_zero_keeps_inter_image_bytes() {
+        let required =
+            required_bytes_in_texel_copy(Some(256), Some(4), 0, 5, 12, "zero-height copy")
+                .expect("required bytes should not overflow");
+
+        assert_eq!(required, 4096);
+    }
+
+    #[test]
+    fn required_bytes_depth_zero_is_zero() {
+        let required =
+            required_bytes_in_texel_copy(Some(256), Some(4), 3, 0, 12, "zero-depth copy")
+                .expect("zero-depth copy should not overflow");
+
+        assert_eq!(required, 0);
+    }
+
+    #[test]
+    fn required_bytes_multi_row_multi_image_uses_spec_formula() {
+        let required =
+            required_bytes_in_texel_copy(Some(256), Some(4), 3, 2, 12, "multi-image copy")
+                .expect("required bytes should not overflow");
+
+        assert_eq!(required, 1548);
+    }
 }
 
 /// Returns the per-texel byte size of the *aspect* being copied to/from a buffer.
@@ -176,6 +223,38 @@ pub(crate) fn texel_copy_block_size(format_caps: FormatCaps, aspect: TextureAspe
             format_caps.texel_block_size.saturating_sub(1)
         }
         _ => format_caps.texel_block_size,
+    }
+}
+
+/// Returns true when a depth/stencil texture format supports the copy direction and aspect.
+pub(crate) fn depth_stencil_copy_allowed(
+    format: TextureFormat,
+    aspect: TextureAspect,
+    writing_texture: bool,
+) -> bool {
+    match format.raw() {
+        TextureFormat::STENCIL8 => {
+            matches!(aspect, TextureAspect::All | TextureAspect::StencilOnly)
+        }
+        TextureFormat::DEPTH16_UNORM => {
+            matches!(aspect, TextureAspect::All | TextureAspect::DepthOnly)
+        }
+        TextureFormat::DEPTH32_FLOAT => {
+            !writing_texture && matches!(aspect, TextureAspect::All | TextureAspect::DepthOnly)
+        }
+        TextureFormat::DEPTH24_PLUS => false,
+        TextureFormat::DEPTH24_PLUS_STENCIL8 => aspect == TextureAspect::StencilOnly,
+        TextureFormat::DEPTH32_FLOAT_STENCIL8 => {
+            if writing_texture {
+                aspect == TextureAspect::StencilOnly
+            } else {
+                matches!(
+                    aspect,
+                    TextureAspect::DepthOnly | TextureAspect::StencilOnly
+                )
+            }
+        }
+        _ => true,
     }
 }
 
@@ -242,6 +321,126 @@ mod tests {
             texel_copy_block_size(FormatCaps::depth_stencil(5), TextureAspect::StencilOnly),
             1
         );
+    }
+
+    #[test]
+    fn depth_stencil_copy_allowed_matches_webgpu_table() {
+        let stencil8 = TextureFormat::from_raw(TextureFormat::STENCIL8);
+        assert!(depth_stencil_copy_allowed(
+            stencil8,
+            TextureAspect::All,
+            true
+        ));
+        assert!(depth_stencil_copy_allowed(
+            stencil8,
+            TextureAspect::StencilOnly,
+            false
+        ));
+        assert!(!depth_stencil_copy_allowed(
+            stencil8,
+            TextureAspect::DepthOnly,
+            true
+        ));
+
+        let depth16 = TextureFormat::from_raw(TextureFormat::DEPTH16_UNORM);
+        assert!(depth_stencil_copy_allowed(
+            depth16,
+            TextureAspect::DepthOnly,
+            true
+        ));
+        assert!(depth_stencil_copy_allowed(
+            depth16,
+            TextureAspect::All,
+            false
+        ));
+        assert!(!depth_stencil_copy_allowed(
+            depth16,
+            TextureAspect::StencilOnly,
+            false
+        ));
+
+        let depth32 = TextureFormat::from_raw(TextureFormat::DEPTH32_FLOAT);
+        assert!(!depth_stencil_copy_allowed(
+            depth32,
+            TextureAspect::DepthOnly,
+            true
+        ));
+        assert!(depth_stencil_copy_allowed(
+            depth32,
+            TextureAspect::DepthOnly,
+            false
+        ));
+        assert!(depth_stencil_copy_allowed(
+            depth32,
+            TextureAspect::All,
+            false
+        ));
+        assert!(!depth_stencil_copy_allowed(
+            depth32,
+            TextureAspect::StencilOnly,
+            false
+        ));
+
+        let depth24_plus = TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS);
+        for aspect in [
+            TextureAspect::All,
+            TextureAspect::DepthOnly,
+            TextureAspect::StencilOnly,
+        ] {
+            assert!(!depth_stencil_copy_allowed(depth24_plus, aspect, true));
+            assert!(!depth_stencil_copy_allowed(depth24_plus, aspect, false));
+        }
+
+        let depth24_stencil8 = TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8);
+        assert!(!depth_stencil_copy_allowed(
+            depth24_stencil8,
+            TextureAspect::DepthOnly,
+            false
+        ));
+        assert!(depth_stencil_copy_allowed(
+            depth24_stencil8,
+            TextureAspect::StencilOnly,
+            true
+        ));
+        assert!(!depth_stencil_copy_allowed(
+            depth24_stencil8,
+            TextureAspect::All,
+            false
+        ));
+
+        let depth32_stencil8 = TextureFormat::from_raw(TextureFormat::DEPTH32_FLOAT_STENCIL8);
+        assert!(!depth_stencil_copy_allowed(
+            depth32_stencil8,
+            TextureAspect::DepthOnly,
+            true
+        ));
+        assert!(depth_stencil_copy_allowed(
+            depth32_stencil8,
+            TextureAspect::DepthOnly,
+            false
+        ));
+        assert!(depth_stencil_copy_allowed(
+            depth32_stencil8,
+            TextureAspect::StencilOnly,
+            true
+        ));
+        assert!(depth_stencil_copy_allowed(
+            depth32_stencil8,
+            TextureAspect::StencilOnly,
+            false
+        ));
+        assert!(!depth_stencil_copy_allowed(
+            depth32_stencil8,
+            TextureAspect::All,
+            false
+        ));
+
+        let color = TextureFormat::from_raw(TextureFormat::R8_UNORM);
+        assert!(depth_stencil_copy_allowed(
+            color,
+            TextureAspect::DepthOnly,
+            true
+        ));
     }
 
     #[test]
