@@ -308,6 +308,7 @@ impl Texture {
             array_layer_count,
             aspect: descriptor.aspect.unwrap_or(TextureAspect::All),
             usage: descriptor.usage.unwrap_or_else(|| self.usage()),
+            swizzle: descriptor.swizzle.unwrap_or_default(),
         }
     }
 
@@ -1291,6 +1292,7 @@ mod tests {
             array_layer_count: None,
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(resolved.dimension, TextureViewDimension::D2);
         assert_eq!(resolved.array_layer_count, 1);
@@ -1304,6 +1306,7 @@ mod tests {
             array_layer_count: None,
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(resolved.dimension, TextureViewDimension::Cube);
         assert_eq!(resolved.array_layer_count, 6);
@@ -1317,6 +1320,7 @@ mod tests {
             array_layer_count: None,
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(resolved.dimension, TextureViewDimension::D2Array);
         assert_eq!(resolved.array_layer_count, 7);
@@ -1330,6 +1334,7 @@ mod tests {
             array_layer_count: None,
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(resolved.dimension, TextureViewDimension::CubeArray);
         assert_eq!(resolved.array_layer_count, 6);
@@ -1374,6 +1379,7 @@ mod tests {
             array_layer_count: None,
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(error, None);
         assert!(!view.is_error());
@@ -1508,6 +1514,7 @@ mod tests {
             array_layer_count: None,
             aspect: None,
             usage: None,
+            swizzle: None,
         });
 
         assert_eq!(scoped.kind, ErrorKind::Validation);

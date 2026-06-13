@@ -98,7 +98,10 @@ pub use subpass::{
     SubpassRenderPassDescriptor, DEPTH_STENCIL_ATTACHMENT_INDEX,
 };
 pub use texture::{Texture, TextureDescriptor, TextureDimension, TextureUsage};
-pub use texture_view::{TextureAspect, TextureView, TextureViewDescriptor, TextureViewDimension};
+pub use texture_view::{
+    ComponentSwizzle, TextureAspect, TextureComponentSwizzle, TextureView, TextureViewDescriptor,
+    TextureViewDimension,
+};
 #[cfg(feature = "tiled")]
 pub use transient_attachment::{
     TransientAttachment, TransientAttachmentDescriptor, TransientSizeMode,

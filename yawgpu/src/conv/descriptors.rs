@@ -164,6 +164,49 @@ unsafe fn render_pass_max_draw_count(mut chain: *const native::WGPUChainedStruct
     DEFAULT_MAX_DRAW_COUNT
 }
 
+unsafe fn texture_component_swizzle(
+    mut chain: *const native::WGPUChainedStruct,
+) -> Option<core::TextureComponentSwizzle> {
+    while let Some(node) = unsafe { chain.as_ref() } {
+        if node.sType == native::WGPUSType_TextureComponentSwizzleDescriptor {
+            let descriptor = unsafe {
+                &*(node as *const native::WGPUChainedStruct
+                    as *const native::WGPUTextureComponentSwizzleDescriptor)
+            };
+            return Some(map_texture_component_swizzle(descriptor.swizzle));
+        }
+        chain = node.next;
+    }
+    None
+}
+
+fn map_component_swizzle(
+    value: native::WGPUComponentSwizzle,
+    default: core::ComponentSwizzle,
+) -> core::ComponentSwizzle {
+    match value {
+        native::WGPUComponentSwizzle_Undefined => default,
+        native::WGPUComponentSwizzle_Zero => core::ComponentSwizzle::Zero,
+        native::WGPUComponentSwizzle_One => core::ComponentSwizzle::One,
+        native::WGPUComponentSwizzle_R => core::ComponentSwizzle::R,
+        native::WGPUComponentSwizzle_G => core::ComponentSwizzle::G,
+        native::WGPUComponentSwizzle_B => core::ComponentSwizzle::B,
+        native::WGPUComponentSwizzle_A => core::ComponentSwizzle::A,
+        _ => core::ComponentSwizzle::Zero,
+    }
+}
+
+fn map_texture_component_swizzle(
+    value: native::WGPUTextureComponentSwizzle,
+) -> core::TextureComponentSwizzle {
+    core::TextureComponentSwizzle {
+        r: map_component_swizzle(value.r, core::ComponentSwizzle::R),
+        g: map_component_swizzle(value.g, core::ComponentSwizzle::G),
+        b: map_component_swizzle(value.b, core::ComponentSwizzle::B),
+        a: map_component_swizzle(value.a, core::ComponentSwizzle::A),
+    }
+}
+
 /// Maps a render bundle encoder descriptor.
 ///
 /// # Safety
@@ -560,8 +603,10 @@ pub fn map_texture_view_descriptor(
             array_layer_count: None,
             aspect: None,
             usage: None,
+            swizzle: None,
         };
     };
+    let swizzle = unsafe { texture_component_swizzle(value.nextInChain) };
     core::TextureViewDescriptor {
         format: if value.format == native::WGPUTextureFormat_Undefined {
             None
@@ -587,6 +632,7 @@ pub fn map_texture_view_descriptor(
         } else {
             Some(map_texture_usage(value.usage))
         },
+        swizzle,
     }
 }
 

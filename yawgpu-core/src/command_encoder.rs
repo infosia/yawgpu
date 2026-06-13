@@ -2235,6 +2235,7 @@ mod tests {
                 array_layer_count: 1,
                 aspect: TextureAspect::All,
                 usage: TextureUsage::RENDER_ATTACHMENT,
+                swizzle: TextureComponentSwizzle::default(),
             },
             false,
         );
@@ -2389,7 +2390,9 @@ mod tests {
 
     #[test]
     fn render_pass_resolve_target_rejects_non_resolvable_snorm_format() {
-        let device = noop_device();
+        let device = noop_adapter()
+            .create_device(None, &[crate::Feature::TextureFormatsTier1], "", "")
+            .expect("Noop device should support texture-formats-tier1");
         let mut descriptor = noop_render_pass_descriptor(
             render_attachment_view_with_format(
                 &device,
@@ -2460,6 +2463,7 @@ mod tests {
             array_layer_count: None,
             aspect: None,
             usage: Some(TextureUsage::TEXTURE_BINDING),
+            swizzle: None,
         });
         assert_eq!(error, None);
         let descriptor = noop_render_pass_descriptor(Arc::new(view), None);
@@ -2497,6 +2501,7 @@ mod tests {
             array_layer_count: None,
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(error, None);
         Arc::new(view)

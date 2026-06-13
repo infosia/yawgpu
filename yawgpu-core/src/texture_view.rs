@@ -1,8 +1,59 @@
 use std::sync::Arc;
 
+use crate::adapter::Feature;
 use crate::extent::*;
 use crate::format::*;
 use crate::texture::*;
+
+/// Enumerates texture component swizzle values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ComponentSwizzle {
+    /// Zero constant variant.
+    Zero,
+    /// One constant variant.
+    One,
+    /// Red channel variant.
+    R,
+    /// Green channel variant.
+    G,
+    /// Blue channel variant.
+    B,
+    /// Alpha channel variant.
+    A,
+}
+
+/// Describes texture component swizzle values for a view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureComponentSwizzle {
+    /// Red output channel source.
+    pub r: ComponentSwizzle,
+    /// Green output channel source.
+    pub g: ComponentSwizzle,
+    /// Blue output channel source.
+    pub b: ComponentSwizzle,
+    /// Alpha output channel source.
+    pub a: ComponentSwizzle,
+}
+
+impl Default for TextureComponentSwizzle {
+    fn default() -> Self {
+        Self {
+            r: ComponentSwizzle::R,
+            g: ComponentSwizzle::G,
+            b: ComponentSwizzle::B,
+            a: ComponentSwizzle::A,
+        }
+    }
+}
+
+impl TextureComponentSwizzle {
+    /// Returns true when this swizzle leaves every channel unchanged.
+    #[must_use]
+    pub fn is_identity(&self) -> bool {
+        *self == Self::default()
+    }
+}
 
 /// Enumerates texture view dimension values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +104,8 @@ pub struct TextureViewDescriptor {
     pub aspect: Option<TextureAspect>,
     /// Usage override for this view. `None` inherits the texture usage.
     pub usage: Option<TextureUsage>,
+    /// Component swizzle override for this view.
+    pub swizzle: Option<TextureComponentSwizzle>,
 }
 
 /// A `TextureViewDescriptor` with every defaulted/inferred field already
@@ -70,6 +123,7 @@ pub(crate) struct ResolvedTextureViewDescriptor {
     pub(crate) array_layer_count: u32,
     pub(crate) aspect: TextureAspect,
     pub(crate) usage: TextureUsage,
+    pub(crate) swizzle: TextureComponentSwizzle,
 }
 
 /// Stores texture view data used by validation and backend submission.
@@ -90,6 +144,7 @@ pub(crate) struct TextureViewInner {
     pub(crate) array_layer_count: u32,
     pub(crate) aspect: TextureAspect,
     pub(crate) usage: TextureUsage,
+    pub(crate) swizzle: TextureComponentSwizzle,
     pub(crate) is_error: bool,
 }
 
@@ -111,6 +166,7 @@ impl TextureView {
                 array_layer_count: descriptor.array_layer_count,
                 aspect: descriptor.aspect,
                 usage: descriptor.usage,
+                swizzle: descriptor.swizzle,
                 is_error,
             }),
         }
@@ -176,6 +232,12 @@ impl TextureView {
         self.inner.usage
     }
 
+    /// Returns the component swizzle visible through this texture view.
+    #[must_use]
+    pub fn swizzle(&self) -> TextureComponentSwizzle {
+        self.inner.swizzle
+    }
+
     /// Returns render extent.
     #[must_use]
     pub(crate) fn render_extent(&self) -> Extent3d {
@@ -200,8 +262,18 @@ pub(crate) fn validate_texture_view_descriptor(
         array_layer_count,
         aspect,
         usage,
+        swizzle,
         ..
     } = *descriptor;
+
+    if !swizzle.is_identity()
+        && !texture
+            .inner
+            .features
+            .contains(&Feature::TextureComponentSwizzle)
+    {
+        return Some("texture component swizzle requires the texture-component-swizzle feature");
+    }
 
     if usage.bits() == 0 {
         return Some("texture view usage must be non-zero");
@@ -308,6 +380,28 @@ mod tests {
     use crate::test_helpers::*;
 
     #[test]
+    fn texture_component_swizzle_identity_detection() {
+        assert!(TextureComponentSwizzle::default().is_identity());
+        assert!(TextureComponentSwizzle {
+            r: ComponentSwizzle::R,
+            g: ComponentSwizzle::G,
+            b: ComponentSwizzle::B,
+            a: ComponentSwizzle::A,
+        }
+        .is_identity());
+        assert!(!TextureComponentSwizzle {
+            r: ComponentSwizzle::G,
+            ..TextureComponentSwizzle::default()
+        }
+        .is_identity());
+        assert!(!TextureComponentSwizzle {
+            a: ComponentSwizzle::Zero,
+            ..TextureComponentSwizzle::default()
+        }
+        .is_identity());
+    }
+
+    #[test]
     fn texture_view_descriptor_fields_round_trip() {
         let texture = noop_device().create_texture(layered_mipped_texture_descriptor());
 
@@ -320,6 +414,7 @@ mod tests {
             array_layer_count: Some(2),
             aspect: Some(TextureAspect::All),
             usage: Some(TextureUsage::COPY_SRC),
+            swizzle: Some(TextureComponentSwizzle::default()),
         });
 
         assert_eq!(error, None);
@@ -330,6 +425,57 @@ mod tests {
         assert_eq!(view.base_array_layer(), 1);
         assert_eq!(view.aspect(), TextureAspect::All);
         assert_eq!(view.usage(), TextureUsage::COPY_SRC);
+        assert!(view.swizzle().is_identity());
+    }
+
+    #[test]
+    fn texture_component_swizzle_requires_feature_when_non_identity() {
+        let texture = noop_device().create_texture(layered_mipped_texture_descriptor());
+
+        let (_, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(error, None);
+
+        let (_, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: Some(TextureComponentSwizzle::default()),
+        });
+        assert_eq!(error, None);
+
+        let (_, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: Some(TextureComponentSwizzle {
+                r: ComponentSwizzle::G,
+                ..TextureComponentSwizzle::default()
+            }),
+        });
+        assert_eq!(
+            error,
+            Some("texture component swizzle requires the texture-component-swizzle feature")
+        );
     }
 
     #[test]
@@ -348,6 +494,7 @@ mod tests {
             array_layer_count: None,
             aspect: None,
             usage: Some(TextureUsage::STORAGE_BINDING),
+            swizzle: None,
         });
         assert_eq!(
             error,
@@ -365,6 +512,7 @@ mod tests {
             usage: Some(TextureUsage::from_bits_retain(
                 TextureUsage::TEXTURE_BINDING.bits() | (1_u64 << 40),
             )),
+            swizzle: None,
         });
         assert_eq!(error, Some("texture view usage contains unknown bits"));
     }
@@ -390,6 +538,7 @@ mod tests {
             array_layer_count: Some(1),
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(error, None);
 
@@ -402,6 +551,7 @@ mod tests {
             array_layer_count: Some(2),
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(
             error,
@@ -417,6 +567,7 @@ mod tests {
             array_layer_count: Some(1),
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(
             error,
@@ -443,6 +594,7 @@ mod tests {
             array_layer_count: Some(6),
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(error, None);
 
@@ -463,6 +615,7 @@ mod tests {
             array_layer_count: Some(6),
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(error, Some("cube texture views require square faces"));
 
@@ -475,6 +628,7 @@ mod tests {
             array_layer_count: Some(12),
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(error, Some("cube texture views require square faces"));
     }

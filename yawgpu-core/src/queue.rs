@@ -1433,6 +1433,7 @@ mod tests {
             array_layer_count: None,
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(error, None);
         Arc::new(view)
@@ -1647,6 +1648,7 @@ mod tests {
             array_layer_count: Some(1),
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(error, None);
         let sampler = device.create_sampler(SamplerDescriptor::default());
@@ -1706,6 +1708,7 @@ mod tests {
             array_layer_count: Some(1),
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(error, None);
         Arc::new(device.create_bind_group(
@@ -3069,6 +3072,7 @@ fn fs() -> @location(0) vec4<f32> {
             array_layer_count: None,
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(view_error, None);
         // Destroy the texture before creating the bind group (mirrors CTS destroyAfterCreate=true).

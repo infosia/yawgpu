@@ -1534,6 +1534,7 @@ mod tests {
             array_layer_count: None,
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(error, None);
         Arc::new(view)
@@ -1662,6 +1663,7 @@ mod tests {
             array_layer_count: None,
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(error, None);
         Arc::new(view)
@@ -2252,6 +2254,7 @@ fn fs() -> @location(0) vec4<f32> {
             array_layer_count: None,
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(error, None);
         Arc::new(view)
