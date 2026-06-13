@@ -1952,16 +1952,22 @@ pub(crate) fn validate_texture_copy_subresource(
     validate_copy_aspect(format_caps, aspect, label)?;
 
     let subresource = texture.subresource_size(mip_level);
+    let physical_width = div_ceil_u32(subresource.width, format_caps.block_w)
+        .checked_mul(format_caps.block_w)
+        .ok_or_else(|| format!("{label} subresource width overflows"))?;
+    let physical_height = div_ceil_u32(subresource.height, format_caps.block_h)
+        .checked_mul(format_caps.block_h)
+        .ok_or_else(|| format!("{label} subresource height overflows"))?;
     let empty_copy =
         copy_size.width == 0 || copy_size.height == 0 || copy_size.depth_or_array_layers == 0;
     if origin
         .x
         .checked_add(copy_size.width)
-        .is_none_or(|end| end > subresource.width)
+        .is_none_or(|end| end > physical_width)
         || origin
             .y
             .checked_add(copy_size.height)
-            .is_none_or(|end| end > subresource.height)
+            .is_none_or(|end| end > physical_height)
         || origin
             .z
             .checked_add(copy_size.depth_or_array_layers)
@@ -2839,6 +2845,64 @@ mod tests {
         assert_eq!(
             encoder.copy_texture_to_buffer(texture_info, buffer_info, size),
             None
+        );
+    }
+
+    #[test]
+    fn validate_texture_copy_subresource_uses_physical_compressed_mip_bounds() {
+        let device = noop_adapter()
+            .create_device(
+                None,
+                &[crate::adapter::Feature::TextureCompressionBc],
+                "",
+                "",
+            )
+            .expect("Noop compressed texture device");
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 60,
+                height: 8,
+                depth_or_array_layers: 1,
+            },
+            format: TextureFormat::from_raw(TextureFormat::BC7_RGBA_UNORM),
+            mip_level_count: 2,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+
+        assert_eq!(
+            validate_texture_copy_subresource(
+                &texture,
+                1,
+                Origin3d { x: 0, y: 0, z: 0 },
+                Extent3d {
+                    width: 32,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                TextureAspect::All,
+                "copy texture",
+                true,
+            ),
+            Ok(texture.format_caps().expect("BC7 caps should be available"))
+        );
+        assert_eq!(
+            validate_texture_copy_subresource(
+                &texture,
+                1,
+                Origin3d { x: 0, y: 0, z: 0 },
+                Extent3d {
+                    width: 36,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                TextureAspect::All,
+                "copy texture",
+                true,
+            ),
+            Err("copy texture range exceeds the texture subresource".to_owned())
         );
     }
 
