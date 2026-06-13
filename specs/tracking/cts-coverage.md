@@ -1774,3 +1774,22 @@ PY
   texture_related 21232/0 (were 3426+ fails). Regressions: e2e_metal_texture 7/7 (real writeTexture/
   copy round-trips), copyTextureToTexture 1904-fail is the unrelated F-093 baseline. `cargo test
   --workspace` exit 0; clippy clean. Implemented via codex (gpt-5.5 medium).
+
+## F-093(a) — compressed texture-copy bounds over-validation — RESOLVED (F-093 partial)
+
+- **Finding (F-093 sub-gap a):** `api,validation,encoding,cmds,copyTextureToTexture:
+  copy_ranges_with_compressed_texture_formats` rejected 1904 valid compressed-format copies
+  (Metal == MoltenVK) with "copy texture {source,destination} range exceeds the texture subresource".
+- **Root cause:** `command_encoder.rs::validate_texture_copy_subresource` bounds-checked the copy origin+size
+  against the LOGICAL mip size (`texture.subresource_size`), but block-compressed formats must be validated
+  against the PHYSICAL (block-rounded-up) subresource size. E.g. a 60-wide bc7 texture at mip 1 has logical
+  width 30 but physical width 32; a block-aligned width-32 copy is valid yet was rejected (32 > 30).
+- **Fix:** compute physical width/height = `div_ceil_u32(subresource.{w,h}, block_{w,h}) * block_{w,h}` and
+  bounds-check against those (depth/array stays logical; the depth/stencil full-subresource rule stays against
+  logical, unchanged — d/s are not block-compressed). Shared with buffer<->texture copies; only relaxes bounds,
+  copies still must be block-aligned.
+- **Verification (Metal == MoltenVK):** copyTextureToTexture 9254/0 (was 1904 fail). Regressions clean:
+  image_copy,layout_related 34139/0, image_copy,texture_related 21232/0 (shared validate unaffected). Unit:
+  yawgpu-core --lib 294, yawgpu --lib 146. workspace test exit 0; clippy clean. Implemented via codex.
+- **F-093 REMAINING (open):** (b) render,draw 11990 — bundled draws over-rejected as "error render bundle"
+  (render-bundle draw execution gap, F-042 lineage); (c) encoder_open_state 25; (d) pipeline_bind_group_compat 18.
