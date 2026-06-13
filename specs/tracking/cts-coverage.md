@@ -1715,3 +1715,29 @@ PY
   26619/0, `createTexture` 44473/0 (Metal). Unit: `yawgpu-core --lib` 278, `yawgpu --lib` 145.
   `cargo test --workspace` exit 0; clippy `-D warnings` clean.
 - **Implemented via** codex (gpt-5.5 medium).
+
+## F-101 — per-stage resource binding limits not enforced at auto-layout pipeline creation — RESOLVED
+
+- **Finding:** a `layout:'auto'` pipeline whose shader exceeds a per-stage binding limit
+  (maxSampledTextures/Samplers/UniformBuffers/StorageTexturesPerShaderStage +
+  maxStorageTexturesIn{Vertex,Fragment}Stage) was created without error; Dawn rejects. Explicit
+  layouts already enforced these (createBindGroupLayout/createPipelineLayout at_over pass). Cross-HAL
+  (Metal == MoltenVK), Dawn-oracle. Surfaced by Y-6 V10c. 312 overLimit cases.
+- **Root cause:** the auto path (`effective_{compute,render}_bind_group_layouts` → `derive_bind_group_layouts`)
+  validated each derived BGL per-group via `validate_bind_group_layout_descriptor` but never ran the
+  pipeline-layout-level aggregate per-stage count that the explicit path gets from `validate_pipeline_layout`.
+- **Fix (yawgpu-core/src/compute_pipeline.rs, auto path only):** after building the derived BGLs,
+  `derive_bind_group_layouts` now aggregates `StageResourceCounts` across ALL groups per stage
+  (`visible_stages`: 0=vertex/1=fragment/2=compute) and rejects on the first violation of the five
+  per-shader-stage limits plus the vertex/fragment in-stage storage-texture limits
+  (`max_storage_textures_in_{vertex,fragment}_stage`). Explicit paths (`validate_pipeline_layout`,
+  `validate_bind_group_layout_descriptor`) untouched — they already passed.
+- **Verification (Metal == MoltenVK):** maxSampledTexturesPerShaderStage 612/0, maxSamplersPerShaderStage
+  612/0, maxUniformBuffersPerShaderStage 612/0, maxStorageTexturesPerShaderStage 1116/0,
+  maxStorageTexturesInFragmentStage 182/0, maxStorageTexturesInVertexStage 110/0 (each query spans the
+  auto + explicit variants, so no explicit-path regression). Regressions clean: render_pipeline,misc 744/0,
+  compute_pipeline 11826/0, createPipelineLayout 107/0. Unit: yawgpu-core --lib 281, yawgpu --lib 145.
+  workspace test exit 0; clippy -D warnings clean.
+- **Out of scope / residual:** the MoltenVK-only `maxComputeWorkgroupStorageSize:createComputePipeline,at_over`
+  atLimit failure (30, SPIR-V/MoltenVK translation artifact) is unrelated and untouched.
+- **Implemented via** codex (gpt-5.5 medium).

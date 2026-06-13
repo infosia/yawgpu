@@ -1266,6 +1266,60 @@ where
         }
         layouts.push(Arc::new(BindGroupLayout::new(entries, false, true)));
     }
+
+    let mut stage_counts = [StageResourceCounts::default(); 3];
+    for layout in &layouts {
+        for entry in layout.entries() {
+            let Some(kind) = entry.kind else {
+                continue;
+            };
+            for stage in visible_stages(entry.visibility) {
+                stage_counts[stage].add(kind);
+            }
+        }
+    }
+
+    for counts in stage_counts {
+        if counts.sampled_textures > limits.max_sampled_textures_per_shader_stage {
+            return Err(
+                "pipeline auto layout uses too many sampled textures for one shader stage"
+                    .to_owned(),
+            );
+        }
+        if counts.samplers > limits.max_samplers_per_shader_stage {
+            return Err(
+                "pipeline auto layout uses too many samplers for one shader stage".to_owned(),
+            );
+        }
+        if counts.uniform_buffers > limits.max_uniform_buffers_per_shader_stage {
+            return Err(
+                "pipeline auto layout uses too many uniform buffers for one shader stage"
+                    .to_owned(),
+            );
+        }
+        if counts.storage_textures > limits.max_storage_textures_per_shader_stage {
+            return Err(
+                "pipeline auto layout uses too many storage textures for one shader stage"
+                    .to_owned(),
+            );
+        }
+        if counts.storage_buffers > limits.max_storage_buffers_per_shader_stage {
+            return Err(
+                "pipeline auto layout uses too many storage buffers for one shader stage"
+                    .to_owned(),
+            );
+        }
+    }
+    if stage_counts[0].storage_textures > limits.max_storage_textures_in_vertex_stage {
+        return Err(
+            "pipeline auto layout uses too many storage textures in the vertex stage".to_owned(),
+        );
+    }
+    if stage_counts[1].storage_textures > limits.max_storage_textures_in_fragment_stage {
+        return Err(
+            "pipeline auto layout uses too many storage textures in the fragment stage".to_owned(),
+        );
+    }
     Ok(layouts)
 }
 
@@ -1805,6 +1859,106 @@ mod tests {
             ),
             Err("compute pipeline layout binding type is incompatible".to_owned())
         );
+    }
+
+    fn reflected_texture_binding(group: u32, binding: u32) -> StageResourceBinding {
+        StageResourceBinding {
+            stage: PipelineShaderStage::Fragment,
+            binding: shader_naga::ReflectedResourceBinding {
+                group,
+                binding,
+                kind: shader_naga::ReflectedResourceBindingKind::Texture {
+                    sampled: true,
+                    sample_kind: Some(shader_naga::ReflectedTypeScalarClass::Float),
+                    sample_usage: shader_naga::ReflectedTextureSampleUsage::Sample,
+                    view_dimension: shader_naga::ReflectedTextureViewDimension::D2,
+                    multisampled: false,
+                },
+                min_binding_size: 0,
+                statically_used: true,
+            },
+        }
+    }
+
+    fn reflected_storage_texture_binding(group: u32, binding: u32) -> StageResourceBinding {
+        StageResourceBinding {
+            stage: PipelineShaderStage::Fragment,
+            binding: shader_naga::ReflectedResourceBinding {
+                group,
+                binding,
+                kind: shader_naga::ReflectedResourceBindingKind::StorageTexture {
+                    format: "Rgba8Unorm".to_owned(),
+                    access: shader_naga::ReflectedStorageTextureAccess {
+                        read: false,
+                        write: true,
+                    },
+                    view_dimension: shader_naga::ReflectedTextureViewDimension::D2,
+                },
+                min_binding_size: 0,
+                statically_used: true,
+            },
+        }
+    }
+
+    #[test]
+    fn derive_bind_group_layouts_rejects_aggregate_sampled_texture_stage_over_limit() {
+        let limits = Limits {
+            max_sampled_textures_per_shader_stage: 1,
+            ..Limits::DEFAULT
+        };
+        let requirements = [
+            reflected_texture_binding(0, 0),
+            reflected_texture_binding(1, 0),
+        ];
+
+        assert_eq!(
+            derive_bind_group_layouts(requirements, limits, &FeatureSet::default())
+                .expect_err("aggregate sampled texture over-limit should reject auto layout"),
+            "pipeline auto layout uses too many sampled textures for one shader stage"
+        );
+    }
+
+    #[test]
+    fn derive_bind_group_layouts_rejects_aggregate_fragment_storage_texture_over_limit() {
+        let limits = Limits {
+            max_storage_textures_per_shader_stage: 4,
+            max_storage_textures_in_fragment_stage: 1,
+            ..Limits::DEFAULT
+        };
+        let requirements = [
+            reflected_storage_texture_binding(0, 0),
+            reflected_storage_texture_binding(1, 0),
+        ];
+
+        assert_eq!(
+            derive_bind_group_layouts(requirements, limits, &FeatureSet::default()).expect_err(
+                "aggregate fragment storage texture over-limit should reject auto layout"
+            ),
+            "pipeline auto layout uses too many storage textures in the fragment stage"
+        );
+    }
+
+    #[test]
+    fn derive_bind_group_layouts_accepts_aggregate_stage_counts_within_limits() {
+        let requirements = [
+            reflected_texture_binding(0, 0),
+            reflected_storage_texture_binding(1, 0),
+        ];
+        let layouts = derive_bind_group_layouts(
+            requirements,
+            Limits {
+                max_sampled_textures_per_shader_stage: 1,
+                max_storage_textures_per_shader_stage: 1,
+                max_storage_textures_in_fragment_stage: 1,
+                ..Limits::DEFAULT
+            },
+            &FeatureSet::default(),
+        )
+        .expect("auto layout within aggregate stage limits should derive");
+
+        assert_eq!(layouts.len(), 2);
+        assert_eq!(layouts[0].entries().len(), 1);
+        assert_eq!(layouts[1].entries().len(), 1);
     }
 
     #[cfg(feature = "shader-passthrough")]
