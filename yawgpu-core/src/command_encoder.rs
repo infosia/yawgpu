@@ -1810,8 +1810,30 @@ pub(crate) fn validate_buffer_texture_copy(
             "{label} of a combined depth-stencil format requires a single aspect"
         ));
     }
-    if !buffer_copy.layout.offset.is_multiple_of(4) {
-        return Err(format!("{label} buffer offset must be 4-byte aligned"));
+    let writing_texture = required_texture_usage == TextureUsage::COPY_DST;
+    if (format_caps.aspects.depth || format_caps.aspects.stencil)
+        && !crate::copy::depth_stencil_copy_allowed(
+            texture.format(),
+            texture_copy.aspect,
+            writing_texture,
+        )
+    {
+        return Err(format!(
+            "{label} depth/stencil format does not support this copy aspect/usage"
+        ));
+    }
+    let offset_alignment = if format_caps.aspects.depth || format_caps.aspects.stencil {
+        4
+    } else {
+        u64::from(crate::copy::texel_copy_block_size(
+            format_caps,
+            texture_copy.aspect,
+        ))
+    };
+    if !buffer_copy.layout.offset.is_multiple_of(offset_alignment) {
+        return Err(format!(
+            "{label} buffer offset must be a multiple of the texel block size"
+        ));
     }
     let required_bytes = crate::copy::validate_texel_copy_layout(
         format_caps,
@@ -3118,7 +3140,7 @@ mod tests {
         let encoder = device.create_command_encoder();
         assert_eq!(
             encoder.copy_texture_to_buffer(
-                texture_info(TextureAspect::DepthOnly),
+                texture_info(TextureAspect::StencilOnly),
                 buffer_info,
                 size
             ),
@@ -3127,6 +3149,228 @@ mod tests {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
+    }
+
+    #[test]
+    fn buffer_texture_copy_accepts_color_offset_aligned_to_block_size() {
+        let device = noop_device();
+        let texture = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: TextureFormat::from_raw(TextureFormat::R8_UNORM),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC,
+            size: 1024,
+            mapped_at_creation: false,
+        }));
+
+        assert_eq!(
+            validate_buffer_texture_copy(
+                TexelCopyBufferInfo {
+                    buffer,
+                    device: Some(device.clone()),
+                    layout: TexelCopyBufferLayout {
+                        offset: 1,
+                        bytes_per_row: Some(256),
+                        rows_per_image: None,
+                    },
+                },
+                BufferUsage::COPY_SRC,
+                TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    aspect: TextureAspect::All,
+                },
+                TextureUsage::COPY_DST,
+                Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                "copy buffer to texture",
+                Some(&device),
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn buffer_texture_copy_rejects_depth_offset_not_four_byte_aligned() {
+        let device = noop_device();
+        let texture = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            format: TextureFormat::from_raw(TextureFormat::DEPTH16_UNORM),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+
+        assert_eq!(
+            validate_buffer_texture_copy(
+                TexelCopyBufferInfo {
+                    buffer,
+                    device: Some(device.clone()),
+                    layout: TexelCopyBufferLayout {
+                        offset: 1,
+                        bytes_per_row: None,
+                        rows_per_image: None,
+                    },
+                },
+                BufferUsage::COPY_SRC,
+                TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    aspect: TextureAspect::DepthOnly,
+                },
+                TextureUsage::COPY_DST,
+                Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                "copy buffer to texture",
+                Some(&device),
+            ),
+            Err(
+                "copy buffer to texture buffer offset must be a multiple of the texel block size"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn buffer_texture_copy_rejects_unsupported_depth_stencil_copy_aspect_usage() {
+        let device = noop_device();
+        let buffer_src = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let buffer_dst = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let layout = TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: None,
+            rows_per_image: None,
+        };
+        let size = Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        };
+        let depth24 = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size,
+            format: TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+        let depth32 = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size,
+            format: TextureFormat::from_raw(TextureFormat::DEPTH32_FLOAT),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+
+        assert_eq!(
+            validate_buffer_texture_copy(
+                TexelCopyBufferInfo {
+                    buffer: Arc::clone(&buffer_src),
+                    device: Some(device.clone()),
+                    layout,
+                },
+                BufferUsage::COPY_SRC,
+                TexelCopyTextureInfo {
+                    texture: depth24,
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    aspect: TextureAspect::DepthOnly,
+                },
+                TextureUsage::COPY_DST,
+                size,
+                "copy buffer to texture",
+                Some(&device),
+            ),
+            Err(
+                "copy buffer to texture depth/stencil format does not support this copy aspect/usage"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            validate_buffer_texture_copy(
+                TexelCopyBufferInfo {
+                    buffer: buffer_src,
+                    device: Some(device.clone()),
+                    layout,
+                },
+                BufferUsage::COPY_SRC,
+                TexelCopyTextureInfo {
+                    texture: Arc::clone(&depth32),
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    aspect: TextureAspect::DepthOnly,
+                },
+                TextureUsage::COPY_DST,
+                size,
+                "copy buffer to texture",
+                Some(&device),
+            ),
+            Err(
+                "copy buffer to texture depth/stencil format does not support this copy aspect/usage"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            validate_buffer_texture_copy(
+                TexelCopyBufferInfo {
+                    buffer: buffer_dst,
+                    device: Some(device.clone()),
+                    layout,
+                },
+                BufferUsage::COPY_DST,
+                TexelCopyTextureInfo {
+                    texture: depth32,
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    aspect: TextureAspect::DepthOnly,
+                },
+                TextureUsage::COPY_SRC,
+                size,
+                "copy texture to buffer",
+                Some(&device),
+            ),
+            Ok(())
+        );
     }
 
     #[test]

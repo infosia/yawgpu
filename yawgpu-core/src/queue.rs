@@ -597,14 +597,14 @@ pub(crate) fn repack_texel_rows(
     let mut out = vec![0u8; total_usize];
     for d in 0..depth {
         for r in 0..height_blocks {
-            let src_start =
-                src_offset
-                    .checked_add(d.checked_mul(src_rows_per_image).ok_or_else(|| {
-                        "repack_texel_rows: source offset overflows u64".to_owned()
-                    })?)
-                    .and_then(|n| n.checked_mul(src_bytes_per_row))
-                    .and_then(|n| n.checked_add(r.checked_mul(src_bytes_per_row)?))
-                    .ok_or_else(|| "repack_texel_rows: source offset overflows u64".to_owned())?;
+            let row_index = d
+                .checked_mul(src_rows_per_image)
+                .and_then(|n| n.checked_add(r))
+                .ok_or_else(|| "repack_texel_rows: source offset overflows u64".to_owned())?;
+            let src_start = row_index
+                .checked_mul(src_bytes_per_row)
+                .and_then(|n| n.checked_add(src_offset))
+                .ok_or_else(|| "repack_texel_rows: source offset overflows u64".to_owned())?;
             let src_start_usize = usize::try_from(src_start)
                 .map_err(|_| "repack_texel_rows: source offset overflows usize".to_owned())?;
             let src_end_usize = src_start_usize
@@ -2822,6 +2822,43 @@ fn fs() -> @location(0) vec4<f32> {
         .expect("repack should succeed");
 
         // Output: image0 row0 + image0 row1 + image1 row0 + image1 row1 = 4*4 = 16 bytes.
+        assert_eq!(result.len(), 16);
+        assert_eq!(&result[0..4], &[0x01; 4]);
+        assert_eq!(&result[4..8], &[0x02; 4]);
+        assert_eq!(&result[8..12], &[0x03; 4]);
+        assert_eq!(&result[12..16], &[0x04; 4]);
+    }
+
+    #[test]
+    fn repack_texel_rows_adds_source_offset_after_stride() {
+        let mut data = vec![0u8; 17];
+        data[1..17].copy_from_slice(&[0xA5; 16]);
+
+        let result = repack_texel_rows(
+            &data, /*src_offset=*/ 1, /*src_bytes_per_row=*/ 256,
+            /*src_rows_per_image=*/ 1, /*row_bytes=*/ 16, /*height_blocks=*/ 1,
+            /*depth=*/ 1,
+        )
+        .expect("repack should read from offset one, not offset times stride");
+
+        assert_eq!(result, [0xA5; 16]);
+    }
+
+    #[test]
+    fn repack_texel_rows_source_offset_combines_with_image_and_row_index() {
+        let mut data = vec![0u8; 43];
+        data[3..7].fill(0x01);
+        data[11..15].fill(0x02);
+        data[27..31].fill(0x03);
+        data[35..39].fill(0x04);
+
+        let result = repack_texel_rows(
+            &data, /*src_offset=*/ 3, /*src_bytes_per_row=*/ 8,
+            /*src_rows_per_image=*/ 3, /*row_bytes=*/ 4, /*height_blocks=*/ 2,
+            /*depth=*/ 2,
+        )
+        .expect("repack should combine image, row, and source offset");
+
         assert_eq!(result.len(), 16);
         assert_eq!(&result[0..4], &[0x01; 4]);
         assert_eq!(&result[4..8], &[0x02; 4]);

@@ -572,6 +572,14 @@ pub(crate) fn validate_queue_write_texture(
                 .to_owned(),
         );
     }
+    if (format_caps.aspects.depth || format_caps.aspects.stencil)
+        && !depth_stencil_copy_allowed(texture.format(), aspect, true)
+    {
+        return Err(
+            "queue texture write depth/stencil format does not support this copy aspect/usage"
+                .to_owned(),
+        );
+    }
     // The depth or stencil aspect can only be written as a whole 2D subresource:
     // full mip width/height at a zero x/y origin. A range of array layers
     // (non-zero `origin.z` / `write_size.depth_or_array_layers > 1`) is allowed —
@@ -625,104 +633,6 @@ impl Texture {
                 TextureDimension::D3 => mip(size.depth_or_array_layers),
             },
         }
-    }
-}
-
-/// Validates texel copy layout and returns a descriptive error on failure.
-pub(crate) fn validate_texel_copy_layout(
-    format_caps: FormatCaps,
-    aspect: TextureAspect,
-    write_size: Extent3d,
-    layout: TexelCopyBufferLayout,
-    label: &str,
-    require_bytes_per_row_alignment: bool,
-) -> Result<u64, String> {
-    let width_blocks = div_ceil_u32(write_size.width, format_caps.block_w);
-    let height_blocks = div_ceil_u32(write_size.height, format_caps.block_h);
-    let depth = write_size.depth_or_array_layers;
-    let block_size = texel_copy_block_size(format_caps, aspect);
-    let last_row_bytes = u64::from(width_blocks)
-        .checked_mul(u64::from(block_size))
-        .ok_or_else(|| format!("{label} row byte size overflows"))?;
-
-    if let Some(bytes_per_row) = layout.bytes_per_row {
-        if require_bytes_per_row_alignment && !bytes_per_row.is_multiple_of(256) {
-            return Err(format!("{label} bytesPerRow must be 256-byte aligned"));
-        }
-        if u64::from(bytes_per_row) < last_row_bytes {
-            return Err(format!("{label} bytesPerRow is too small"));
-        }
-    } else if height_blocks > 1 || depth > 1 {
-        return Err(format!(
-            "{label} bytesPerRow is required for multi-row copies"
-        ));
-    }
-
-    if let Some(rows_per_image) = layout.rows_per_image {
-        if rows_per_image < height_blocks {
-            return Err(format!("{label} rowsPerImage is too small"));
-        }
-    } else if depth > 1 {
-        return Err(format!(
-            "{label} rowsPerImage is required for multi-image copies"
-        ));
-    }
-
-    required_bytes_in_texel_copy(
-        layout.bytes_per_row,
-        layout.rows_per_image,
-        height_blocks,
-        depth,
-        last_row_bytes,
-        label,
-    )
-}
-
-/// Returns required bytes in texel copy.
-pub(crate) fn required_bytes_in_texel_copy(
-    bytes_per_row: Option<u32>,
-    rows_per_image: Option<u32>,
-    height_blocks: u32,
-    depth: u32,
-    last_row_bytes: u64,
-    label: &str,
-) -> Result<u64, String> {
-    if last_row_bytes == 0 || height_blocks == 0 || depth == 0 {
-        return Ok(0);
-    }
-
-    let bytes_per_row = u64::from(bytes_per_row.unwrap_or(0));
-    let rows_per_image = u64::from(rows_per_image.unwrap_or(height_blocks));
-    let image_offset_rows = rows_per_image
-        .checked_mul(u64::from(depth.saturating_sub(1)))
-        .ok_or_else(|| format!("{label} required byte size overflows"))?;
-    let row_offset_rows = u64::from(height_blocks.saturating_sub(1));
-    let offset_rows = image_offset_rows
-        .checked_add(row_offset_rows)
-        .ok_or_else(|| format!("{label} required byte size overflows"))?;
-    let offset_bytes = bytes_per_row
-        .checked_mul(offset_rows)
-        .ok_or_else(|| format!("{label} required byte size overflows"))?;
-    offset_bytes
-        .checked_add(last_row_bytes)
-        .ok_or_else(|| format!("{label} required byte size overflows"))
-}
-
-/// Returns texel copy block size.
-pub(crate) fn texel_copy_block_size(format_caps: FormatCaps, aspect: TextureAspect) -> u32 {
-    if aspect == TextureAspect::StencilOnly {
-        1
-    } else {
-        format_caps.texel_block_size
-    }
-}
-
-/// Returns div ceil u32.
-pub(crate) fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
-    if value == 0 {
-        0
-    } else {
-        u64::from(value).div_ceil(u64::from(divisor)) as u32
     }
 }
 
@@ -1485,11 +1395,103 @@ mod tests {
                 0,
                 Origin3d { x: 0, y: 0, z: 0 },
                 size,
-                TextureAspect::DepthOnly,
+                TextureAspect::StencilOnly,
                 layout,
                 1024,
             ),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_queue_write_texture_rejects_unsupported_depth_stencil_copy_usage() {
+        let device = noop_device();
+        let layout = TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(256),
+            rows_per_image: None,
+        };
+        let size = Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+        let depth24 = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_DST | TextureUsage::RENDER_ATTACHMENT,
+            format: TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS),
+            ..texture_descriptor_4x4()
+        });
+        let depth32 = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_DST | TextureUsage::RENDER_ATTACHMENT,
+            format: TextureFormat::from_raw(TextureFormat::DEPTH32_FLOAT),
+            ..texture_descriptor_4x4()
+        });
+
+        assert_eq!(
+            depth24.validate_queue_write(
+                0,
+                Origin3d { x: 0, y: 0, z: 0 },
+                size,
+                TextureAspect::DepthOnly,
+                layout,
+                1024,
+            ),
+            Err(
+                "queue texture write depth/stencil format does not support this copy aspect/usage"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            depth32.validate_queue_write(
+                0,
+                Origin3d { x: 0, y: 0, z: 0 },
+                size,
+                TextureAspect::DepthOnly,
+                layout,
+                1024,
+            ),
+            Err(
+                "queue texture write depth/stencil format does not support this copy aspect/usage"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn validate_queue_write_texture_rejects_zero_height_multi_image_data_one_byte_short() {
+        let device = noop_device();
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 5,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+
+        assert_eq!(
+            texture.validate_queue_write(
+                0,
+                Origin3d { x: 0, y: 0, z: 0 },
+                Extent3d {
+                    width: 3,
+                    height: 0,
+                    depth_or_array_layers: 5,
+                },
+                TextureAspect::All,
+                TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(4),
+                },
+                4095,
+            ),
+            Err("queue texture write dataSize is too small".to_owned())
         );
     }
 

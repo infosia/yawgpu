@@ -5163,6 +5163,76 @@ mod tests {
     }
 
     #[test]
+    fn wgpuCommandEncoder_buffer_texture_copy_texture_device_mismatch_is_scoped() {
+        unsafe {
+            let (instance_a, adapter_a, device_a) = noop_chain();
+            let (instance_b, adapter_b, device_b) = noop_chain();
+            let texture_desc = texture_descriptor(
+                native::WGPUTextureUsage_CopySrc | native::WGPUTextureUsage_CopyDst,
+                4,
+            );
+            let foreign_texture = wgpuDeviceCreateTexture(device_b, &texture_desc);
+            let buffer_desc = buffer_descriptor(
+                native::WGPUBufferUsage_CopySrc | native::WGPUBufferUsage_CopyDst,
+                1024,
+            );
+            let buffer = wgpuDeviceCreateBuffer(device_a, &buffer_desc);
+            let layout = native::WGPUTexelCopyBufferLayout {
+                offset: 0,
+                bytesPerRow: 256,
+                rowsPerImage: native::WGPU_COPY_STRIDE_UNDEFINED,
+            };
+            let buffer_info = native::WGPUTexelCopyBufferInfo { buffer, layout };
+            let texture_info = native::WGPUTexelCopyTextureInfo {
+                texture: foreign_texture,
+                mipLevel: 0,
+                origin: origin(0, 0, 0),
+                aspect: native::WGPUTextureAspect_Undefined,
+            };
+            let copy_size = extent(4, 1, 1);
+
+            let copy_to_texture = wgpuDeviceCreateCommandEncoder(device_a, std::ptr::null());
+            wgpuCommandEncoderCopyBufferToTexture(
+                copy_to_texture,
+                &buffer_info,
+                &texture_info,
+                &copy_size,
+            );
+            wgpuDevicePushErrorScope(device_a, native::WGPUErrorFilter_Validation);
+            let bad_to_texture = wgpuCommandEncoderFinish(copy_to_texture, std::ptr::null());
+            assert_validation_error_contains(
+                instance_a,
+                device_a,
+                "copy buffer to texture destination texture must belong to the command encoder device",
+            );
+            wgpuCommandBufferRelease(bad_to_texture);
+            wgpuCommandEncoderRelease(copy_to_texture);
+
+            let copy_from_texture = wgpuDeviceCreateCommandEncoder(device_a, std::ptr::null());
+            wgpuCommandEncoderCopyTextureToBuffer(
+                copy_from_texture,
+                &texture_info,
+                &buffer_info,
+                &copy_size,
+            );
+            wgpuDevicePushErrorScope(device_a, native::WGPUErrorFilter_Validation);
+            let bad_from_texture = wgpuCommandEncoderFinish(copy_from_texture, std::ptr::null());
+            assert_validation_error_contains(
+                instance_a,
+                device_a,
+                "copy texture to buffer source texture must belong to the command encoder device",
+            );
+            wgpuCommandBufferRelease(bad_from_texture);
+            wgpuCommandEncoderRelease(copy_from_texture);
+
+            wgpuBufferRelease(buffer);
+            wgpuTextureRelease(foreign_texture);
+            release_handles(instance_b, adapter_b, device_b);
+            release_handles(instance_a, adapter_a, device_a);
+        }
+    }
+
+    #[test]
     fn wgpuCommandEncoder_query_and_timestamps() {
         unsafe {
             let (instance, adapter, device) = noop_chain();
