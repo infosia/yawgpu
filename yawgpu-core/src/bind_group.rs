@@ -593,6 +593,7 @@ mod tests {
             array_layer_count: None,
             aspect: None,
             usage: Some(TextureUsage::TEXTURE_BINDING),
+            swizzle: None,
         });
         assert_eq!(error, None);
 
@@ -657,6 +658,7 @@ mod tests {
             array_layer_count: Some(2),
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(error, None);
         let group = device.create_bind_group(
@@ -680,6 +682,7 @@ mod tests {
             array_layer_count: Some(2),
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         assert_eq!(error, None);
         device.push_error_scope(ErrorFilter::Validation);

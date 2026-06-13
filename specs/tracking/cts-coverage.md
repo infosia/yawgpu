@@ -1691,3 +1691,27 @@ PY
   state. Implemented via codex (gpt-5.5 medium). **Verified:** `render_pass_descriptor` `pass=4959
   fail=0` AND `attachment_compatibility` `pass=7114 fail=0` on Metal AND Vulkan/MoltenVK; regressions
   clean (`render_bundle` 113/0, `render_pipeline,misc` 744/0, real-GPU e2e_metal_depth 20/20).
+
+## F-098 + F-099 — capability/format feature gating (texture-component-swizzle + rgba16 norm tier1) — RESOLVED
+
+- **Findings:** F-098 (`texture-component-swizzle` feature gating not enforced — non-identity swizzle
+  views silently accepted without the feature) + F-099 (`rgba16unorm`/`rgba16snorm` not gated behind
+  `texture-formats-tier1` — accepted as always-available core formats). Both cross-HAL (Metal == MoltenVK),
+  Dawn-oracle-confirmed. Surfaced by Y-6 V9.
+- **Fix (yawgpu-core + conv):**
+  - F-099: `format.rs::TextureFormat::caps` now returns `None` for `RGBA16_UNORM`/`RGBA16_SNORM` when
+    `Feature::TextureFormatsTier1` is absent, mirroring the existing `R16`/`RG16` unorm/snorm arms
+    (`rgba16uint/sint/float` stay core, unchanged).
+  - F-098: added `Feature::TextureComponentSwizzle` (NOT advertised in `supported_features()`); new core
+    types `ComponentSwizzle` + `TextureComponentSwizzle{r,g,b,a}` with `is_identity()` (identity =
+    each channel its own / Undefined); `TextureViewDescriptor.swizzle: Option<_>` threaded through
+    `resolve_view_descriptor` into `ResolvedTextureViewDescriptor`; `validate_texture_view_descriptor`
+    rejects a non-identity swizzle when the device lacks the feature ("texture component swizzle requires
+    the texture-component-swizzle feature"). `conv/descriptors.rs::map_texture_view_descriptor` walks
+    `nextInChain` for `WGPUSType_TextureComponentSwizzleDescriptor`; `conv/feature.rs` maps the native
+    feature name both ways.
+- **Verification (Metal + MoltenVK, identical):** `texture_component_swizzle` pass=19/0 (was 18 fail);
+  `texture_formats` pass=451/0; `texture_formats_tier1` pass=551/0. Regressions clean: `createView`
+  26619/0, `createTexture` 44473/0 (Metal). Unit: `yawgpu-core --lib` 278, `yawgpu --lib` 145.
+  `cargo test --workspace` exit 0; clippy `-D warnings` clean.
+- **Implemented via** codex (gpt-5.5 medium).

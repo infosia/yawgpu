@@ -267,6 +267,7 @@ mod tests {
             array_layer_count: None,
             aspect: None,
             usage: None,
+            swizzle: None,
         });
         arc_to_handle(Arc::new(WGPUTextureViewImpl {
             _core: Arc::new(view),
@@ -413,6 +414,7 @@ mod tests {
             native::WGPUFeatureName_BGRA8UnormStorage,
             native::WGPUFeatureName_Float32Filterable,
             native::WGPUFeatureName_TimestampQuery,
+            native::WGPUFeatureName_TextureComponentSwizzle,
             native::WGPUFeatureName_TextureFormatsTier1,
             native::WGPUFeatureName_TextureFormatsTier2,
             0xCAFE,
@@ -1872,12 +1874,68 @@ mod tests {
         assert_eq!(mapped.base_array_layer, 4);
         assert_eq!(mapped.array_layer_count, Some(5));
         assert_eq!(mapped.aspect, Some(core::TextureAspect::All));
+        assert_eq!(mapped.swizzle, None);
 
         let defaulted = map_texture_view_descriptor(None);
         assert_eq!(defaulted.format, None);
         assert_eq!(defaulted.dimension, None);
         assert_eq!(defaulted.mip_level_count, None);
         assert_eq!(defaulted.array_layer_count, None);
+        assert_eq!(defaulted.swizzle, None);
+    }
+
+    #[test]
+    fn map_texture_view_descriptor_decodes_component_swizzle_chain() {
+        let swizzle = native::WGPUTextureComponentSwizzleDescriptor {
+            chain: native::WGPUChainedStruct {
+                next: std::ptr::null_mut(),
+                sType: native::WGPUSType_TextureComponentSwizzleDescriptor,
+            },
+            swizzle: native::WGPUTextureComponentSwizzle {
+                r: native::WGPUComponentSwizzle_G,
+                g: native::WGPUComponentSwizzle_Undefined,
+                b: native::WGPUComponentSwizzle_B,
+                a: native::WGPUComponentSwizzle_Zero,
+            },
+        };
+        let descriptor = native::WGPUTextureViewDescriptor {
+            nextInChain: std::ptr::from_ref(&swizzle.chain).cast_mut(),
+            label: empty_string_view(),
+            format: native::WGPUTextureFormat_Undefined,
+            dimension: native::WGPUTextureViewDimension_Undefined,
+            baseMipLevel: 0,
+            mipLevelCount: native::WGPU_MIP_LEVEL_COUNT_UNDEFINED,
+            baseArrayLayer: 0,
+            arrayLayerCount: native::WGPU_ARRAY_LAYER_COUNT_UNDEFINED,
+            aspect: native::WGPUTextureAspect_Undefined,
+            usage: native::WGPUTextureUsage_None,
+        };
+
+        let mapped = map_texture_view_descriptor(Some(&descriptor));
+        let mapped_swizzle = mapped.swizzle.expect("swizzle should map from chain");
+        assert_eq!(mapped_swizzle.r, core::ComponentSwizzle::G);
+        assert_eq!(mapped_swizzle.g, core::ComponentSwizzle::G);
+        assert_eq!(mapped_swizzle.b, core::ComponentSwizzle::B);
+        assert_eq!(mapped_swizzle.a, core::ComponentSwizzle::Zero);
+        assert!(!mapped_swizzle.is_identity());
+
+        let identity = native::WGPUTextureComponentSwizzleDescriptor {
+            swizzle: native::WGPUTextureComponentSwizzle {
+                r: native::WGPUComponentSwizzle_Undefined,
+                g: native::WGPUComponentSwizzle_G,
+                b: native::WGPUComponentSwizzle_Undefined,
+                a: native::WGPUComponentSwizzle_A,
+            },
+            ..swizzle
+        };
+        let descriptor = native::WGPUTextureViewDescriptor {
+            nextInChain: std::ptr::from_ref(&identity.chain).cast_mut(),
+            ..descriptor
+        };
+        assert!(map_texture_view_descriptor(Some(&descriptor))
+            .swizzle
+            .expect("identity swizzle should map from chain")
+            .is_identity());
     }
 
     #[test]

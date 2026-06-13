@@ -184,6 +184,8 @@ pub enum Feature {
     Float32Filterable,
     /// Timestamp query variant.
     TimestampQuery,
+    /// Texture component swizzle support.
+    TextureComponentSwizzle,
     /// Texture formats tier1 variant.
     TextureFormatsTier1,
     /// Texture formats tier2 variant.

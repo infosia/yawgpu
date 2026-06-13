@@ -372,18 +372,28 @@ impl TextureFormat {
             TextureFormat::RG32_FLOAT => FormatCaps::float_color(8, 2).renderable().storage(),
             TextureFormat::RG32_UINT => FormatCaps::uint_color(8, 2).renderable().storage(),
             TextureFormat::RG32_SINT => FormatCaps::sint_color(8, 2).renderable().storage(),
-            TextureFormat::RGBA16_UNORM => FormatCaps::float_color(8, 4)
-                .alpha()
-                .blendable()
-                .renderable()
-                .multisample()
-                .storage(),
-            TextureFormat::RGBA16_SNORM => FormatCaps::float_color(8, 4)
-                .alpha()
-                .blendable()
-                .renderable()
-                .multisample()
-                .storage(),
+            TextureFormat::RGBA16_UNORM => {
+                if !features.contains(&Feature::TextureFormatsTier1) {
+                    return None;
+                }
+                FormatCaps::float_color(8, 4)
+                    .alpha()
+                    .blendable()
+                    .renderable()
+                    .multisample()
+                    .storage()
+            }
+            TextureFormat::RGBA16_SNORM => {
+                if !features.contains(&Feature::TextureFormatsTier1) {
+                    return None;
+                }
+                FormatCaps::float_color(8, 4)
+                    .alpha()
+                    .blendable()
+                    .renderable()
+                    .multisample()
+                    .storage()
+            }
             TextureFormat::RGBA16_UINT => FormatCaps::uint_color(8, 4)
                 .alpha()
                 .renderable()
@@ -1143,6 +1153,8 @@ mod tests {
             TextureFormat::R16_SNORM,
             TextureFormat::RG16_UNORM,
             TextureFormat::RG16_SNORM,
+            TextureFormat::RGBA16_UNORM,
+            TextureFormat::RGBA16_SNORM,
         ] {
             assert_eq!(TextureFormat::from_raw(raw).caps(&no_features), None);
             let caps = TextureFormat::from_raw(raw)

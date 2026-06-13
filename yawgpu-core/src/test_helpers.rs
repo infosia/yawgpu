@@ -141,6 +141,7 @@ pub(crate) fn noop_render_attachment(device: &Device) -> Arc<TextureView> {
         array_layer_count: None,
         aspect: None,
         usage: None,
+        swizzle: None,
     });
     assert_eq!(error, None);
     Arc::new(view)
