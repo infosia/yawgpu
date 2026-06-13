@@ -1793,3 +1793,23 @@ PY
   yawgpu-core --lib 294, yawgpu --lib 146. workspace test exit 0; clippy clean. Implemented via codex.
 - **F-093 REMAINING (open):** (b) render,draw 11990 — bundled draws over-rejected as "error render bundle"
   (render-bundle draw execution gap, F-042 lineage); (c) encoder_open_state 25; (d) pipeline_bind_group_compat 18.
+
+## F-093(c) — pass command after end() reports error too early — RESOLVED (F-093 partial)
+
+- **Finding (F-093 sub-gap c):** `api,validation,encoding,encoder_open_state:render_pass_commands` failed 25
+  cases (Metal == MoltenVK) "unexpected validation error: pass encoder cannot be used after end". A
+  render/compute pass command issued after `pass.end()` but while the PARENT command encoder is still open
+  must NOT raise an immediate validation error — WebGPU defers it to `commandEncoder.finish()`. Only when the
+  parent encoder itself is finished is the command an immediate error.
+- **Root cause:** `pass.rs::record_pass_command` returned the "after end" Err immediately (FFI dispatched it)
+  whenever the pass `ended` flag was set, conflating the parent-finished case with the pass-ended-parent-open
+  case.
+- **Fix:** restructured `record_pass_command` — parent-finished → immediate `Some(error)`; pass-ended &&
+  parent-open → record the error on the parent encoder (deferred to finish) and return None; otherwise run the
+  command. Shared by render + compute pass encoders. The `ended` lock is dropped before the parent call.
+- **Verification (Metal):** encoder_open_state 119/0 (was 25 fail). workspace test exit 0; clippy clean;
+  yawgpu-core/yawgpu lib tests green. Implemented via codex.
+- **F-093 REMAINING (open):** (b) render,draw bundle over-rejection (sparse vertex-buffer slots — multi-layer,
+  ~11990); (d) pipeline_bind_group_compat default_bind_group_layouts_never_match (18) — needs the WebGPU
+  exclusive-pipeline BGL-compatibility model (structural equality + the auto layout's owning pipeline), not
+  yawgpu's current pointer-identity approximation; an auto-layout BGL identity quirk to untangle.

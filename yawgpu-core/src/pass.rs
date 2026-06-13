@@ -274,61 +274,57 @@ impl PassEncoderInner {
 
     /// Records a debug marker against the shared pass state.
     pub(crate) fn insert_debug_marker(&self) -> Option<String> {
-        self.pass_command_guard().err()
+        self.record_pass_command(|_| Ok(()))
     }
 
     /// Opens a debug group in the shared pass state.
     pub(crate) fn push_debug_group(&self) -> Option<String> {
-        if let Err(message) = self.pass_command_guard() {
-            return Some(message);
-        }
-        let mut state = self.state.lock();
-        state.debug_group_depth = state.debug_group_depth.saturating_add(1);
-        None
+        self.record_pass_command(|state| {
+            state.debug_group_depth = state.debug_group_depth.saturating_add(1);
+            Ok(())
+        })
     }
 
     /// Closes the most recently opened debug group in the shared pass state.
     pub(crate) fn pop_debug_group(&self) -> Option<String> {
-        if let Err(message) = self.pass_command_guard() {
-            return Some(message);
-        }
-        let mut state = self.state.lock();
-        if state.debug_group_depth == 0 {
-            let message = "pass encoder debug group stack is empty".to_owned();
-            self.parent.record_first_error(message);
-            None
+        self.record_pass_command(|state| {
+            if state.debug_group_depth == 0 {
+                Err("pass encoder debug group stack is empty".to_owned())
+            } else {
+                state.debug_group_depth -= 1;
+                Ok(())
+            }
+        })
+    }
+
+    /// Returns an immediate validation error for commands that cannot be deferred.
+    fn pass_command_immediate_error(&self) -> Option<String> {
+        if self.parent.is_finished() {
+            Some("pass encoder cannot be used after parent encoder finish".to_owned())
         } else {
-            state.debug_group_depth -= 1;
             None
         }
     }
 
-    /// Records a pass command after confirming the pass is still open.
+    /// Records a pass command after handling pass and parent encoder lifecycle.
     pub(crate) fn record_pass_command<F>(&self, command: F) -> Option<String>
     where
         F: FnOnce(&mut PassEncoderState) -> Result<(), String>,
     {
-        if let Err(message) = self.pass_command_guard() {
+        if let Some(message) = self.pass_command_immediate_error() {
             return Some(message);
+        }
+        let ended = { self.state.lock().ended };
+        if ended {
+            self.parent
+                .record_first_error("pass encoder cannot be used after end");
+            return None;
         }
         let mut state = self.state.lock();
         if let Err(message) = command(&mut state) {
             self.parent.record_first_error(message);
         }
         None
-    }
-
-    /// Begins a command guard for this pass.
-    pub(crate) fn pass_command_guard(&self) -> Result<(), String> {
-        if self.parent.is_finished() {
-            let message = "pass encoder cannot be used after parent encoder finish".to_owned();
-            return Err(message);
-        }
-        if self.state.lock().ended {
-            let message = "pass encoder cannot be used after end".to_owned();
-            return Err(message);
-        }
-        Ok(())
     }
 }
 
@@ -1420,7 +1416,10 @@ pub(crate) fn validate_scissor_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::{empty_bind_group, noop_device, noop_texture};
+    use crate::test_helpers::{
+        empty_bind_group, noop_device, noop_render_attachment, noop_render_pass_descriptor,
+        noop_render_pipeline, noop_texture,
+    };
 
     use std::sync::Arc;
 
@@ -1443,6 +1442,31 @@ mod tests {
             aspects,
             access,
         }
+    }
+
+    #[test]
+    fn pass_command_after_end_defers_until_parent_finish_on_noop() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.end(), None);
+        assert_eq!(pass.set_pipeline(Arc::clone(&pipeline)), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("pass encoder cannot be used after end".to_owned())
+        );
+        assert_eq!(
+            pass.set_pipeline(pipeline),
+            Some("pass encoder cannot be used after parent encoder finish".to_owned())
+        );
     }
 
     #[test]
