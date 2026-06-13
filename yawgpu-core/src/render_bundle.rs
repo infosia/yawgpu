@@ -712,6 +712,8 @@ pub(crate) fn validate_render_bundle_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::Device;
+    use crate::sampler::CompareFunction;
     use crate::test_helpers::*;
 
     use std::sync::Arc;
@@ -783,6 +785,65 @@ mod tests {
     }
 
     #[test]
+    fn render_bundle_pipeline_depth_format_and_read_only_writes_are_validated() {
+        let device = noop_device();
+        let mut descriptor = render_bundle_encoder_descriptor();
+        descriptor.depth_stencil_format = Some(TextureFormat::from_raw(
+            TextureFormat::DEPTH24_PLUS_STENCIL8,
+        ));
+
+        let matching = bundle_depth_pipeline(
+            &device,
+            Some(TextureFormat::from_raw(
+                TextureFormat::DEPTH24_PLUS_STENCIL8,
+            )),
+            false,
+            false,
+        );
+        let mismatched = bundle_depth_pipeline(
+            &device,
+            Some(TextureFormat::from_raw(TextureFormat::DEPTH32_FLOAT)),
+            false,
+            false,
+        );
+        assert_render_bundle_pipeline_finish_ok(&device, descriptor.clone(), matching);
+        assert_render_bundle_pipeline_finish_error(&device, descriptor.clone(), mismatched);
+
+        descriptor.depth_read_only = true;
+        let depth_writer = bundle_depth_pipeline(
+            &device,
+            Some(TextureFormat::from_raw(
+                TextureFormat::DEPTH24_PLUS_STENCIL8,
+            )),
+            true,
+            false,
+        );
+        assert_render_bundle_pipeline_finish_error(&device, descriptor.clone(), depth_writer);
+
+        descriptor.depth_read_only = false;
+        descriptor.stencil_read_only = true;
+        let stencil_writer = bundle_depth_pipeline(
+            &device,
+            Some(TextureFormat::from_raw(
+                TextureFormat::DEPTH24_PLUS_STENCIL8,
+            )),
+            false,
+            true,
+        );
+        assert_render_bundle_pipeline_finish_error(&device, descriptor.clone(), stencil_writer);
+
+        let stencil_reader = bundle_depth_pipeline(
+            &device,
+            Some(TextureFormat::from_raw(
+                TextureFormat::DEPTH24_PLUS_STENCIL8,
+            )),
+            false,
+            false,
+        );
+        assert_render_bundle_pipeline_finish_ok(&device, descriptor, stencil_reader);
+    }
+
+    #[test]
     fn render_bundle_encoder_indirect_draws() {
         let device = noop_device();
         let pipeline = noop_render_pipeline(&device);
@@ -815,6 +876,70 @@ mod tests {
         let (bundle, error) = bundle_encoder.finish();
         assert_eq!(error, None);
         assert!(!bundle.is_error());
+    }
+
+    fn bundle_depth_pipeline(
+        device: &Device,
+        depth_format: Option<TextureFormat>,
+        depth_write: bool,
+        stencil_write: bool,
+    ) -> Arc<RenderPipeline> {
+        let module = render_shader_module(device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.depth_stencil = depth_format.map(|format| DepthStencilState {
+            format,
+            depth_write_enabled: Some(depth_write),
+            depth_compare: (depth_write || stencil_write).then_some(CompareFunction::Always),
+            stencil_front: bundle_stencil_face_state(stencil_write),
+            stencil_back: bundle_stencil_face_state(stencil_write),
+            stencil_read_mask: u32::MAX,
+            stencil_write_mask: u32::MAX,
+            depth_bias: 0,
+            depth_bias_slope_scale: 0.0,
+            depth_bias_clamp: 0.0,
+        });
+        Arc::new(device.create_render_pipeline(descriptor))
+    }
+
+    fn bundle_stencil_face_state(write: bool) -> StencilFaceState {
+        StencilFaceState {
+            compare: CompareFunction::Always,
+            fail_op: StencilOperation::Keep,
+            depth_fail_op: StencilOperation::Keep,
+            pass_op: if write {
+                StencilOperation::Replace
+            } else {
+                StencilOperation::Keep
+            },
+        }
+    }
+
+    fn assert_render_bundle_pipeline_finish_ok(
+        device: &Device,
+        descriptor: RenderBundleEncoderDescriptor,
+        pipeline: Arc<RenderPipeline>,
+    ) {
+        let (bundle_encoder, error) =
+            RenderBundleEncoder::new(descriptor, device.limits(), device.features());
+        assert_eq!(error, None);
+        assert_eq!(bundle_encoder.set_pipeline(pipeline), None);
+        let (bundle, error) = bundle_encoder.finish();
+        assert_eq!(error, None);
+        assert!(!bundle.is_error());
+    }
+
+    fn assert_render_bundle_pipeline_finish_error(
+        device: &Device,
+        descriptor: RenderBundleEncoderDescriptor,
+        pipeline: Arc<RenderPipeline>,
+    ) {
+        let (bundle_encoder, error) =
+            RenderBundleEncoder::new(descriptor, device.limits(), device.features());
+        assert_eq!(error, None);
+        assert_eq!(bundle_encoder.set_pipeline(pipeline), None);
+        let (bundle, error) = bundle_encoder.finish();
+        assert!(bundle.is_error());
+        assert!(error.is_some());
     }
 
     #[test]

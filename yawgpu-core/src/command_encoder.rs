@@ -1637,6 +1637,12 @@ pub(crate) fn validate_depth_stencil_attachment(
         {
             return Err("render pass depth clear value must be finite and in [0, 1]".to_owned());
         }
+    } else if attachment.depth_load_op != LoadOp::Undefined
+        || attachment.depth_store_op != StoreOp::Undefined
+    {
+        return Err(
+            "render pass non-depth attachment must not set depth load/store ops".to_owned(),
+        );
     }
     if format_caps.aspects.stencil {
         if attachment.stencil_read_only {
@@ -1663,6 +1669,12 @@ pub(crate) fn validate_depth_stencil_attachment(
                     .to_owned(),
             );
         }
+    } else if attachment.stencil_load_op != LoadOp::Undefined
+        || attachment.stencil_store_op != StoreOp::Undefined
+    {
+        return Err(
+            "render pass non-stencil attachment must not set stencil load/store ops".to_owned(),
+        );
     }
     Ok(())
 }
@@ -1737,10 +1749,7 @@ pub(crate) fn validate_resolve_target(
     let Some(caps) = color_texture.view_format_caps(color_view.format()) else {
         return Err("render pass resolveTarget format must be supported".to_owned());
     };
-    if !caps
-        .output_class
-        .is_some_and(|class| class == FormatOutputClass::Float)
-    {
+    if caps.output_class != Some(FormatOutputClass::Float) || !color_view.format().is_resolvable() {
         return Err("render pass resolveTarget format must be resolvable".to_owned());
     }
     if resolve_target.array_layer_count() != 1 {
@@ -2253,6 +2262,180 @@ mod tests {
     }
 
     #[test]
+    fn render_pass_depth_stencil_read_only_and_absent_aspect_ops_match_cts_matrix() {
+        let device = noop_device();
+        let depth_stencil_view = render_attachment_view_with_format(
+            &device,
+            TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+            1,
+        );
+        let mut descriptor = RenderPassDescriptor {
+            max_color_attachments: device.limits().max_color_attachments,
+            color_attachments: Vec::new(),
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: depth_stencil_view,
+                depth_load_op: LoadOp::Undefined,
+                depth_store_op: StoreOp::Undefined,
+                depth_clear_value: 0.0,
+                depth_read_only: true,
+                stencil_load_op: LoadOp::Clear,
+                stencil_store_op: StoreOp::Discard,
+                stencil_clear_value: 0,
+                stencil_read_only: false,
+            }),
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            max_draw_count: 50_000_000,
+        };
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Ok(())
+        );
+
+        descriptor
+            .depth_stencil_attachment
+            .as_mut()
+            .expect("depth-stencil attachment")
+            .depth_load_op = LoadOp::Load;
+        assert!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits())
+                .is_err()
+        );
+
+        let depth_only_view = render_attachment_view_with_format(
+            &device,
+            TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS),
+            1,
+        );
+        {
+            let depth_only = descriptor
+                .depth_stencil_attachment
+                .as_mut()
+                .expect("depth-stencil attachment");
+            depth_only.view = depth_only_view;
+            depth_only.depth_read_only = false;
+            depth_only.depth_load_op = LoadOp::Clear;
+            depth_only.depth_store_op = StoreOp::Discard;
+            depth_only.stencil_load_op = LoadOp::Undefined;
+            depth_only.stencil_store_op = StoreOp::Undefined;
+        }
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Ok(())
+        );
+        descriptor
+            .depth_stencil_attachment
+            .as_mut()
+            .expect("depth-stencil attachment")
+            .stencil_store_op = StoreOp::Store;
+        assert!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn render_pass_color_attachment_byte_limit_sums_with_cts_alignment() {
+        let device = noop_device();
+        let formats = [
+            TextureFormat::from_raw(TextureFormat::R8_UNORM),
+            TextureFormat::from_raw(TextureFormat::R32_FLOAT),
+            TextureFormat::from_raw(TextureFormat::RGBA8_UNORM),
+            TextureFormat::from_raw(TextureFormat::RGBA32_FLOAT),
+            TextureFormat::from_raw(TextureFormat::R8_UNORM),
+        ];
+        let mut descriptor = RenderPassDescriptor {
+            max_color_attachments: device.limits().max_color_attachments,
+            color_attachments: formats
+                .iter()
+                .copied()
+                .map(|format| {
+                    Some(RenderPassColorAttachment {
+                        view: render_attachment_view_with_format(&device, format, 1),
+                        depth_slice: None,
+                        resolve_target: None,
+                        load_op: LoadOp::Clear,
+                        store_op: StoreOp::Store,
+                        clear_value: Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                    })
+                })
+                .collect(),
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            max_draw_count: 50_000_000,
+        };
+        let mut limits = device.limits();
+        limits.max_color_attachment_bytes_per_sample = 33;
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), limits),
+            Ok(())
+        );
+        limits.max_color_attachment_bytes_per_sample = 32;
+        assert!(validate_render_pass_descriptor(&descriptor, &device.features(), limits).is_err());
+
+        descriptor.color_attachments.pop();
+        limits.max_color_attachment_bytes_per_sample = 32;
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), limits),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn render_pass_resolve_target_rejects_non_resolvable_snorm_format() {
+        let device = noop_device();
+        let mut descriptor = noop_render_pass_descriptor(
+            render_attachment_view_with_format(
+                &device,
+                TextureFormat::from_raw(TextureFormat::RGBA16_SNORM),
+                4,
+            ),
+            None,
+        );
+        let snorm_resolve = render_attachment_view_with_format(
+            &device,
+            TextureFormat::from_raw(TextureFormat::RGBA16_SNORM),
+            1,
+        );
+        descriptor.color_attachments[0]
+            .as_mut()
+            .expect("color attachment")
+            .resolve_target = Some(snorm_resolve);
+        assert!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits())
+                .is_err()
+        );
+
+        descriptor.color_attachments[0]
+            .as_mut()
+            .expect("color attachment")
+            .view = render_attachment_view_with_format(
+            &device,
+            TextureFormat::from_raw(TextureFormat::RGBA16_FLOAT),
+            4,
+        );
+        let float_resolve = render_attachment_view_with_format(
+            &device,
+            TextureFormat::from_raw(TextureFormat::RGBA16_FLOAT),
+            1,
+        );
+        descriptor.color_attachments[0]
+            .as_mut()
+            .expect("color attachment")
+            .resolve_target = Some(float_resolve);
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn render_attachment_validation_uses_view_usage_override() {
         let device = noop_device();
         let texture = device.create_texture(TextureDescriptor {
@@ -2285,6 +2468,38 @@ mod tests {
             validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
             Err("render pass color attachment requires RenderAttachment usage".to_owned())
         );
+    }
+
+    fn render_attachment_view_with_format(
+        device: &Device,
+        format: TextureFormat,
+        sample_count: u32,
+    ) -> Arc<TextureView> {
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format,
+            mip_level_count: 1,
+            sample_count,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+        });
+        assert_eq!(error, None);
+        Arc::new(view)
     }
 
     #[test]

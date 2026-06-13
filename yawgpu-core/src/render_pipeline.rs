@@ -2165,8 +2165,6 @@ pub(crate) fn validate_depth_stencil_aspects(
 pub(crate) fn depth_stencil_uses_stencil(depth_stencil: DepthStencilState) -> bool {
     stencil_face_uses_stencil(depth_stencil.stencil_front)
         || stencil_face_uses_stencil(depth_stencil.stencil_back)
-        || depth_stencil.stencil_read_mask != u32::MAX
-        || depth_stencil.stencil_write_mask != u32::MAX
 }
 
 /// Returns stencil face uses stencil.
@@ -2878,6 +2876,78 @@ mod tests {
     }
 
     #[test]
+    fn default_depth_state_is_valid_for_depth_less_format_but_non_default_is_not() {
+        let device = noop_device();
+        let state = DepthStencilState {
+            format: TextureFormat::from_raw(TextureFormat::STENCIL8),
+            depth_write_enabled: Some(false),
+            depth_compare: Some(CompareFunction::Always),
+            stencil_front: default_stencil_face_state(),
+            stencil_back: default_stencil_face_state(),
+            stencil_read_mask: u32::MAX,
+            stencil_write_mask: 0,
+            depth_bias: 0,
+            depth_bias_slope_scale: 0.0,
+            depth_bias_clamp: 0.0,
+        };
+        assert_eq!(
+            validate_depth_stencil_aspects(state, &device.features()),
+            Ok(())
+        );
+
+        let mut descriptor = render_pipeline_descriptor(render_shader_module(&device));
+        descriptor.depth_stencil = Some(state);
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            None
+        );
+        assert!(!device.create_render_pipeline(descriptor).is_error());
+
+        let mut non_default = state;
+        non_default.depth_compare = Some(CompareFunction::Less);
+        assert_eq!(
+            validate_depth_stencil_aspects(non_default, &device.features()),
+            Err("render pipeline depth test or write requires a depth format".to_owned())
+        );
+    }
+
+    #[test]
+    fn default_stencil_state_is_valid_for_stencil_less_format_but_non_default_is_not() {
+        let device = noop_device();
+        let state = DepthStencilState {
+            format: depth32_float(),
+            depth_write_enabled: Some(false),
+            depth_compare: Some(CompareFunction::Always),
+            stencil_front: default_stencil_face_state(),
+            stencil_back: default_stencil_face_state(),
+            stencil_read_mask: u32::MAX,
+            stencil_write_mask: 0,
+            depth_bias: 0,
+            depth_bias_slope_scale: 0.0,
+            depth_bias_clamp: 0.0,
+        };
+        assert_eq!(
+            validate_depth_stencil_aspects(state, &device.features()),
+            Ok(())
+        );
+
+        let mut descriptor = render_pipeline_descriptor(render_shader_module(&device));
+        descriptor.depth_stencil = Some(state);
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            None
+        );
+        assert!(!device.create_render_pipeline(descriptor).is_error());
+
+        let mut non_default = state;
+        non_default.stencil_front.pass_op = StencilOperation::Replace;
+        assert_eq!(
+            validate_depth_stencil_aspects(non_default, &device.features()),
+            Err("render pipeline stencil state requires a stencil format".to_owned())
+        );
+    }
+
+    #[test]
     fn stencil_face_writes_only_on_non_keep_ops() {
         // The compare function is a test, not a write: an all-`Keep` face never
         // writes stencil even with a non-`Always` compare. This is the F-055
@@ -2977,6 +3047,15 @@ mod tests {
             depth_bias: 0,
             depth_bias_slope_scale: 0.0,
             depth_bias_clamp: 0.0,
+        }
+    }
+
+    fn default_stencil_face_state() -> StencilFaceState {
+        StencilFaceState {
+            compare: CompareFunction::Always,
+            fail_op: StencilOperation::Keep,
+            depth_fail_op: StencilOperation::Keep,
+            pass_op: StencilOperation::Keep,
         }
     }
 
