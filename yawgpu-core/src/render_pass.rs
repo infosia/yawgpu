@@ -173,7 +173,7 @@ impl RenderPassEncoder {
                     group,
                     dynamic_offsets,
                 };
-                record_bind_group_buffer_usage_scope(state, &bound)?;
+                record_bind_group_usage_scope(state, &bound)?;
                 state.bind_groups.insert(index, bound);
             } else {
                 state.bind_groups.remove(&index);
@@ -609,8 +609,8 @@ impl RenderPassEncoder {
                 scoped_buffer_uses.extend_from_slice(bundle.buffer_uses());
                 let mut scoped_texture_uses = state.scope_texture_uses.clone();
                 scoped_texture_uses.extend_from_slice(bundle.texture_uses());
-                scoped_texture_uses.extend_from_slice(&state.attachment_texture_uses);
-                validate_resource_usage_scope_lenient(&scoped_buffer_uses, &scoped_texture_uses)?;
+                validate_buffer_usage_scope_lenient(&scoped_buffer_uses)?;
+                validate_texture_usage_scope_lenient(&scoped_texture_uses)?;
                 state
                     .scope_buffer_uses
                     .extend_from_slice(bundle.buffer_uses());
@@ -679,13 +679,17 @@ impl RenderPassEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shader::SHADER_STAGE_FRAGMENT;
     use crate::test_helpers::*;
     use crate::{
-        BindGroupLayout, ColorTargetState, CompareFunction, Device, Extent3d, MultisampleState,
-        PrimitiveState, PrimitiveTopology, RenderPipelineDescriptor, RenderPipelineFragmentState,
-        RenderPipelineLayout, RenderPipelineShaderStage, RenderPipelineVertexState,
-        ShaderModuleSource, TextureDescriptor, TextureDimension, TextureFormat, TextureUsage,
-        VertexAttribute, VertexBufferLayout, VertexFormat, VertexStepMode,
+        BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
+        BindGroupResource, BindingLayoutKind, ColorTargetState, CompareFunction, Device, Extent3d,
+        MultisampleState, PrimitiveState, PrimitiveTopology, RenderPipelineDescriptor,
+        RenderPipelineFragmentState, RenderPipelineLayout, RenderPipelineShaderStage,
+        RenderPipelineVertexState, ShaderModuleSource, StorageTextureAccess, Texture,
+        TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsage,
+        TextureView, TextureViewDimension, VertexAttribute, VertexBufferLayout, VertexFormat,
+        VertexStepMode,
     };
 
     use std::sync::Arc;
@@ -1167,6 +1171,250 @@ mod tests {
     }
 
     #[test]
+    fn render_pass_encoder_rejects_sampled_color_attachment_without_draw() {
+        let device = noop_device();
+        let (attachment, sampled) = color_attachment_and_sampled_views(&device, 0, 0);
+        let bind_group = sampled_texture_bind_group(&device, sampled);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(attachment, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some(
+                "usage scope cannot read and write or write the same texture subresource twice"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn render_pass_encoder_rejects_storage_texture_color_attachment_alias() {
+        let device = noop_device();
+        let (attachment, storage) = color_attachment_and_sampled_views(&device, 0, 0);
+        let bind_group = storage_texture_bind_group(&device, storage);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(attachment, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some(
+                "usage scope cannot read and write or write the same texture subresource twice"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn render_pass_encoder_rejects_duplicate_color_attachment_subresource() {
+        let device = noop_device();
+        let texture = usage_scope_color_texture(&device, 1, 1);
+        let attachment = texture_view(&texture, 0, 1, 0, 1, None);
+        let mut descriptor = noop_render_pass_descriptor(Arc::clone(&attachment), None);
+        let duplicate = descriptor.color_attachments[0]
+            .clone()
+            .expect("color attachment should exist");
+        descriptor.color_attachments.push(Some(duplicate));
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&descriptor);
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some(
+                "usage scope cannot read and write or write the same texture subresource twice"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn render_pass_encoder_allows_read_only_depth_attachment_sampled_binding() {
+        let device = noop_device();
+        let depth = depth_attachment_and_sampled_view(&device);
+        let bind_group = sampled_depth_texture_bind_group(&device, depth.clone());
+        let color = noop_render_attachment(&device);
+        let mut descriptor = noop_render_pass_descriptor(color, None);
+        descriptor.depth_stencil_attachment = Some(depth_stencil_attachment(depth, true, true));
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&descriptor);
+        assert_eq!(begin_error, None);
+
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+    }
+
+    #[test]
+    fn render_pass_encoder_allows_replaced_storage_texture_writes() {
+        let device = noop_device();
+        let texture = usage_scope_color_texture(&device, 1, 1);
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(error, None);
+        let view = Arc::new(view);
+        let bind_group_a = storage_texture_bind_group(&device, Arc::clone(&view));
+        let bind_group_b = storage_texture_bind_group(&device, view);
+        let attachment = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(attachment, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group_a), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group_b), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+    }
+
+    #[test]
+    fn render_pass_encoder_rejects_mixed_storage_texture_write_kinds() {
+        let device = noop_device();
+        let format = TextureFormat::from_raw(TextureFormat::R32_UINT);
+        let texture = usage_scope_color_texture_with_format(&device, 1, 1, format);
+        let view = texture_view(&texture, 0, 1, 0, 1, None);
+        let writeonly = storage_texture_bind_group_with_access_and_format(
+            &device,
+            Arc::clone(&view),
+            StorageTextureAccess::WriteOnly,
+            format,
+        );
+        let readwrite = storage_texture_bind_group_with_access_and_format(
+            &device,
+            view,
+            StorageTextureAccess::ReadWrite,
+            format,
+        );
+        let attachment = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(attachment, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(
+            pass.set_bind_group(0, Some(writeonly), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(
+            pass.set_bind_group(1, Some(readwrite), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some(
+                "usage scope cannot read and write or write the same texture subresource twice"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn render_pass_encoder_rejects_storage_texture_write_sampled_read_alias() {
+        let device = noop_device();
+        let texture = usage_scope_color_texture(&device, 1, 1);
+        let view = texture_view(&texture, 0, 1, 0, 1, None);
+        let write_bind_group = storage_texture_bind_group(&device, Arc::clone(&view));
+        let read_bind_group = sampled_texture_bind_group(&device, view);
+        let attachment = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(attachment, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(
+            pass.set_bind_group(0, Some(write_bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(
+            pass.set_bind_group(1, Some(read_bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some(
+                "usage scope cannot read and write or write the same texture subresource twice"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn render_pass_encoder_allows_sampled_non_overlapping_attachment_mip() {
+        let device = noop_device();
+        let (attachment, sampled) = color_attachment_and_sampled_views(&device, 0, 1);
+        let bind_group = sampled_texture_bind_group(&device, sampled);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(attachment, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+    }
+
+    #[test]
     fn render_pass_encoder_execute_bundles_replays_bundle_draws() {
         let device = noop_device();
         let pipeline = storage_write_render_pipeline(&device);
@@ -1528,6 +1776,206 @@ mod tests {
                 },
             ],
         ))
+    }
+
+    fn sampled_texture_bind_group(
+        device: &crate::device::Device,
+        texture_view: Arc<TextureView>,
+    ) -> Arc<BindGroup> {
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_FRAGMENT,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Texture {
+                    sample_type: TextureSampleType::Float,
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                }),
+            }],
+            error: None,
+        }));
+        Arc::new(device.create_bind_group(
+            layout,
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::TextureView {
+                    texture_view,
+                    device: Arc::new(device.clone()),
+                },
+            }],
+        ))
+    }
+
+    fn sampled_depth_texture_bind_group(
+        device: &crate::device::Device,
+        texture_view: Arc<TextureView>,
+    ) -> Arc<BindGroup> {
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_FRAGMENT,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Texture {
+                    sample_type: TextureSampleType::Depth,
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                }),
+            }],
+            error: None,
+        }));
+        Arc::new(device.create_bind_group(
+            layout,
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::TextureView {
+                    texture_view,
+                    device: Arc::new(device.clone()),
+                },
+            }],
+        ))
+    }
+
+    fn storage_texture_bind_group(
+        device: &crate::device::Device,
+        texture_view: Arc<TextureView>,
+    ) -> Arc<BindGroup> {
+        storage_texture_bind_group_with_access(
+            device,
+            texture_view,
+            StorageTextureAccess::WriteOnly,
+        )
+    }
+
+    fn storage_texture_bind_group_with_access(
+        device: &crate::device::Device,
+        texture_view: Arc<TextureView>,
+        access: StorageTextureAccess,
+    ) -> Arc<BindGroup> {
+        storage_texture_bind_group_with_access_and_format(
+            device,
+            texture_view,
+            access,
+            rgba8_unorm(),
+        )
+    }
+
+    fn storage_texture_bind_group_with_access_and_format(
+        device: &crate::device::Device,
+        texture_view: Arc<TextureView>,
+        access: StorageTextureAccess,
+        format: TextureFormat,
+    ) -> Arc<BindGroup> {
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_FRAGMENT,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::StorageTexture {
+                    access,
+                    format,
+                    view_dimension: TextureViewDimension::D2,
+                }),
+            }],
+            error: None,
+        }));
+        Arc::new(device.create_bind_group(
+            layout,
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::TextureView {
+                    texture_view,
+                    device: Arc::new(device.clone()),
+                },
+            }],
+        ))
+    }
+
+    fn color_attachment_and_sampled_views(
+        device: &crate::device::Device,
+        attachment_mip: u32,
+        sampled_mip: u32,
+    ) -> (Arc<TextureView>, Arc<TextureView>) {
+        let texture = usage_scope_color_texture(device, 2, 1);
+        let attachment = texture_view(&texture, attachment_mip, 1, 0, 1, None);
+        let sampled = texture_view(&texture, sampled_mip, 1, 0, 1, None);
+        (attachment, sampled)
+    }
+
+    fn depth_attachment_and_sampled_view(device: &crate::device::Device) -> Arc<TextureView> {
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: TextureFormat::from_raw(TextureFormat::DEPTH32_FLOAT),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        texture_view(&texture, 0, 1, 0, 1, Some(TextureAspect::DepthOnly))
+    }
+
+    fn usage_scope_color_texture(
+        device: &crate::device::Device,
+        mip_level_count: u32,
+        array_layer_count: u32,
+    ) -> Texture {
+        usage_scope_color_texture_with_format(
+            device,
+            mip_level_count,
+            array_layer_count,
+            rgba8_unorm(),
+        )
+    }
+
+    fn usage_scope_color_texture_with_format(
+        device: &crate::device::Device,
+        mip_level_count: u32,
+        array_layer_count: u32,
+        format: TextureFormat,
+    ) -> Texture {
+        device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT
+                | TextureUsage::TEXTURE_BINDING
+                | TextureUsage::STORAGE_BINDING,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: array_layer_count,
+            },
+            format,
+            mip_level_count,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        })
+    }
+
+    fn texture_view(
+        texture: &Texture,
+        base_mip_level: u32,
+        mip_level_count: u32,
+        base_array_layer: u32,
+        array_layer_count: u32,
+        aspect: Option<TextureAspect>,
+    ) -> Arc<TextureView> {
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level,
+            mip_level_count: Some(mip_level_count),
+            base_array_layer,
+            array_layer_count: Some(array_layer_count),
+            aspect,
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(error, None);
+        Arc::new(view)
     }
 
     fn storage_write_render_bundle(

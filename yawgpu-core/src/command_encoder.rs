@@ -382,10 +382,13 @@ impl CommandEncoder {
                             max_draw_count: descriptor.max_draw_count,
                         },
                     ));
-                    inner
+                    if let Err(message) = inner
                         .state
                         .lock()
-                        .set_attachment_texture_uses(render_pass_attachment_scope_uses(descriptor));
+                        .set_attachment_texture_uses(render_pass_attachment_scope_uses(descriptor))
+                    {
+                        self.record_first_error(message);
+                    }
                     inner
                 },
             },
@@ -1356,14 +1359,14 @@ pub(crate) fn render_pass_attachment_scope_uses(
     for attachment in descriptor.color_attachments.iter().flatten() {
         uses.push(texture_attachment_scope_use(
             &attachment.view,
-            ResourceAccess::Write,
+            TextureAccess::AttachmentWrite,
             TextureAspectMask::COLOR,
             attachment.depth_slice,
         ));
         if let Some(resolve_target) = &attachment.resolve_target {
             uses.push(texture_attachment_scope_use(
                 resolve_target,
-                ResourceAccess::Write,
+                TextureAccess::AttachmentWrite,
                 TextureAspectMask::COLOR,
                 None,
             ));
@@ -1378,9 +1381,9 @@ pub(crate) fn render_pass_attachment_scope_uses(
             uses.push(texture_attachment_scope_use(
                 view,
                 if attachment.depth_read_only {
-                    ResourceAccess::Read
+                    TextureAccess::Read
                 } else {
-                    ResourceAccess::Write
+                    TextureAccess::AttachmentWrite
                 },
                 TextureAspectMask::DEPTH,
                 None,
@@ -1390,9 +1393,9 @@ pub(crate) fn render_pass_attachment_scope_uses(
             uses.push(texture_attachment_scope_use(
                 view,
                 if attachment.stencil_read_only {
-                    ResourceAccess::Read
+                    TextureAccess::Read
                 } else {
-                    ResourceAccess::Write
+                    TextureAccess::AttachmentWrite
                 },
                 TextureAspectMask::STENCIL,
                 None,

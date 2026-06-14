@@ -1888,3 +1888,27 @@ PY
   5/5 + compute 3/3. yawgpu-core --lib 315, yawgpu --lib 148. workspace test exit 0; clippy clean (incl tiled).
   Implemented via codex (two rounds: whole-buffer + draw-time uses, then set-time whole-pass accumulation).
 - **Related open:** F-096 (texture subresource usage-scope, 851) is the texture analog — separate finding.
+
+## F-096 — texture subresource usage-scope hazards in passes — RESOLVED
+
+- **Finding:** `api,validation,resource_usages,texture,{in_pass_encoder,in_render_common,in_render_misc}` failed 851
+  cases (Metal == MoltenVK), all "expected validation error, got none". The texture analog of F-095: same-subresource
+  read/write hazards within a usage scope were not detected. Dawn rejects; genuine yawgpu-core gap.
+- **Fixes (building on F-095's set-time whole-pass scope model):**
+  (1) **timing/coverage:** render-pass texture scope now accumulates at state-setting time — every set_bind_group's
+  textures (accumulated, never removed on rebind, so unused/replaced bindings still count) plus the render attachments
+  (added once at pass begin) — validated whole-pass, so conflicts surface even with no draw. Draw-time texture scope
+  collection removed (no double-count). Compute stays per-dispatch. Render bundles accumulate at set time.
+  (2) **texture conflict rule (subresource + aspect granular, unlike whole-buffer):** introduced
+  `TextureAccess { Read, WriteOnlyStorage, ReadWriteStorage, AttachmentWrite }` (sampled / read-only-storage /
+  read-only depth-stencil aspect = Read; writable storage = WriteOnly/ReadWrite per the binding's access; color/resolve/
+  written depth-stencil aspect = AttachmentWrite). For two uses overlapping in mip range AND layer range AND aspect:
+    - RENDER scope: compatible iff (both Read) OR (same storage-write kind, i.e. WriteOnly+WriteOnly or
+      ReadWrite+ReadWrite). AttachmentWrite never compatible (even attachment+attachment conflicts).
+    - COMPUTE per-dispatch scope: STRICT — compatible iff (both Read); any storage-write conflicts even same-kind.
+  This matches the CTS rule `bothReadOnly || usage0==usage1` for render and the compute-within-dispatch strictness
+  (same render-lenient / compute-strict split as buffers, F-042 lineage).
+- **Verification (Metal == MoltenVK):** texture in_pass_encoder 1578/0, in_render_common 4824/0, in_render_misc 154/0
+  (was 851 fail). Regressions: resource_usages,buffer unchanged (1328/0), render_bundle 113/0, real-GPU e2e_metal
+  draw 5/5 + render 3/3 + compute 3/3 + texture 7/7. yawgpu-core --lib 325, yawgpu --lib 148. workspace test exit 0;
+  clippy clean (incl tiled). Implemented via codex (iterative: set-time accumulation -> 4-state access -> compute/render split).
