@@ -1636,7 +1636,8 @@ PY
   fragment shader using read_write storage textures would fail MSL compilation honestly rather than
   silently misread. **Verified:** `texture_intra_invocation_coherence` `pass=12 fail=0` on Metal.
 
-- **External-CTS finding F-070 — PARTIALLY RESOLVED: `shadow:loop` fixed (naga fork `ebec34ae4`).**
+- **External-CTS finding F-070 — RESOLVED (all naga-fixable sub-parts; remaining residue is MoltenVK
+  translation artifacts). `shadow:loop` fixed (naga fork `ebec34ae4`).**
   The WGSL parser used ONE local-table scope for both the loop body and the `continuing` block, so
   same-named `var` declarations in both raised `Error::Redefinition` and the shader failed to compile
   (the CTS-observed "output never written" was the un-compiled shader's no-op). Per WGSL §6.4 the
@@ -1671,11 +1672,29 @@ PY
     threadgroup memory and packs columns tightly. Categories (b) are pending native-Vulkan re-confirmation
     (Windows/NVIDIA) but (a) is conclusive. No naga fix; nothing to change in yawgpu.
 
-  Remaining F-070 family (investigated, sized, not yet started): `struct_inner_align` — naga IR
-  `TypeInner::Struct` does not carry the @align-derived struct alignment (Layouter recomputes from
-  members); fix is either an IR alignment field (~150 match-arm sites + .ron snapshot regen) or a
-  Layouter/writer-only fix (~30-40 sites). Metal 9 cases (read+write × all address spaces); also accounts
-  for the shared `struct_inner_align`/`struct_double_align`/`struct_inner_size_and_align` MoltenVK residue.
+  - **F-070 sub-part `memory_layout` `struct_inner_align` — RESOLVED 2026-06-14 (naga fork `ee37a074`,
+    yawgpu rev bump).** WGSL requires a struct's alignment = max of member alignments INCLUDING `@align(n)`
+    overrides. The WGSL frontend computed this correctly but stored only `TypeInner::Struct { members,
+    span }` (discarding the alignment), and the Layouter RE-derived alignment from member TYPES alone —
+    so `struct Inner { @align(64) x: u32 }` (true alignment 64) was treated as 4 when nested, placing it
+    at offset 4 instead of 64. The alignment is not recoverable from offsets/span (`@align(64)` and
+    `@size(64)` both give span 64), so the fix adds `alignment: Alignment` to `TypeInner::Struct`: the WGSL
+    frontend stores its computed value, the Layouter reads it, and all other constructors (SPIR-V/GLSL
+    frontends, generated types, atomic upgrade, sample_mask, compaction) supply it via a
+    `Layouter::struct_alignment` helper. IR `.ron` snapshots regenerated. **Verified:** Metal
+    `memory_layout` `425/9 → 434/0` (struct_inner_align cleared in EVERY address space); MoltenVK
+    `memory_layout` `46 → 35` (host-visible cases cleared). No regression either backend (Metal zero_init
+    5089/0, robust_access 1068/0, padding 18/0, image_copy 138408/0; MoltenVK image_copy 138408/0,
+    robust_access 1068/0, zero_init **baseline-confirmed unchanged** 4288/801). `cargo test -p naga` green;
+    yawgpu workspace test exit 0. Implemented via codex (gpt-5.5 medium).
+
+  **F-070 net status:** the three naga-fixable sub-parts (`shadow:loop`, `padding`, `struct_inner_align`)
+  are RESOLVED and Metal-green; the remaining MoltenVK-only residue (workgroup `write_layout` matrices/vec,
+  `struct_inner_*`/`struct_double_align`/`array_stride_size` in `function`/`private`/`workgroup`, and the
+  ~801 workgroup `zero_init` cases) is all **MoltenVK SPIRV-Cross / non-host-visible threadgroup layout
+  translation artifacts** — baseline-confirmed not caused by these fixes, naga emits correct strides/offsets
+  and Metal passes. Tracked as MoltenVK artifact class (F-082/F-083/F-045), pending native-Vulkan
+  re-confirmation; no further yawgpu/naga action.
 
 - **External-CTS finding F-089 — RESOLVED (createBindGroup sampler-type compatibility).**
   Binding a FILTERING sampler (any linear filter mode) to a `non-filtering` BGL entry must fail
