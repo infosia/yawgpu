@@ -352,7 +352,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 [[package]]
 name = "naga"
 version = "29.0.3"
-source = "git+https://github.com/infosia/wgpu.git?rev=ee37a074dd564b865438b6a0eccc9cf2e06b02c0#ee37a074dd564b865438b6a0eccc9cf2e06b02c0"
+source = "git+https://github.com/infosia/wgpu.git?rev=507889964ce374d759131b0bf8f966a78f83a0da#507889964ce374d759131b0bf8f966a78f83a0da"
 dependencies = [
  "arrayvec",
  "bit-set",
