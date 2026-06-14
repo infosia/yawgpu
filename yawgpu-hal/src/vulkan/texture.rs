@@ -542,16 +542,34 @@ pub(super) fn transition_image_aspect(
     }
 }
 
-/// Returns transfer to compute barrier.
+pub(super) fn buffer_write_read_barrier_dst_access_mask() -> vk::AccessFlags {
+    vk::AccessFlags::SHADER_READ
+        | vk::AccessFlags::SHADER_WRITE
+        | vk::AccessFlags::TRANSFER_READ
+        | vk::AccessFlags::TRANSFER_WRITE
+        | vk::AccessFlags::INDIRECT_COMMAND_READ
+        | vk::AccessFlags::INDEX_READ
+}
+
+pub(super) fn buffer_write_read_barrier_dst_stage_mask() -> vk::PipelineStageFlags {
+    vk::PipelineStageFlags::COMPUTE_SHADER
+        | vk::PipelineStageFlags::VERTEX_SHADER
+        | vk::PipelineStageFlags::FRAGMENT_SHADER
+        | vk::PipelineStageFlags::TRANSFER
+        | vk::PipelineStageFlags::DRAW_INDIRECT
+        | vk::PipelineStageFlags::VERTEX_INPUT
+}
+
+/// Records a barrier from transfer writes to later buffer reads or writes.
 pub(super) fn transfer_to_compute_barrier(device: &ash::Device, command_buffer: vk::CommandBuffer) {
     let barrier = vk::MemoryBarrier::default()
         .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-        .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+        .dst_access_mask(buffer_write_read_barrier_dst_access_mask());
     unsafe {
         device.cmd_pipeline_barrier(
             command_buffer,
             vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
+            buffer_write_read_barrier_dst_stage_mask(),
             vk::DependencyFlags::empty(),
             &[barrier],
             &[],
@@ -560,21 +578,16 @@ pub(super) fn transfer_to_compute_barrier(device: &ash::Device, command_buffer: 
     }
 }
 
-/// Returns compute to transfer barrier.
+/// Records a barrier from shader writes to later buffer reads or writes.
 pub(super) fn compute_to_transfer_barrier(device: &ash::Device, command_buffer: vk::CommandBuffer) {
     let barrier = vk::MemoryBarrier::default()
         .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-        .dst_access_mask(
-            vk::AccessFlags::TRANSFER_READ
-                | vk::AccessFlags::TRANSFER_WRITE
-                | vk::AccessFlags::SHADER_READ
-                | vk::AccessFlags::SHADER_WRITE,
-        );
+        .dst_access_mask(buffer_write_read_barrier_dst_access_mask());
     unsafe {
         device.cmd_pipeline_barrier(
             command_buffer,
             vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::COMPUTE_SHADER,
+            buffer_write_read_barrier_dst_stage_mask(),
             vk::DependencyFlags::empty(),
             &[barrier],
             &[],
@@ -689,6 +702,19 @@ mod tests {
             "anisotropy should be disabled for max_anisotropy=1"
         );
         assert_eq!(max, 1.0);
+    }
+
+    #[test]
+    fn buffer_write_read_barrier_covers_indirect_index_and_copy_source_reads() {
+        let access = buffer_write_read_barrier_dst_access_mask();
+        assert!(access.contains(vk::AccessFlags::INDIRECT_COMMAND_READ));
+        assert!(access.contains(vk::AccessFlags::INDEX_READ));
+        assert!(access.contains(vk::AccessFlags::TRANSFER_READ));
+
+        let stages = buffer_write_read_barrier_dst_stage_mask();
+        assert!(stages.contains(vk::PipelineStageFlags::DRAW_INDIRECT));
+        assert!(stages.contains(vk::PipelineStageFlags::VERTEX_INPUT));
+        assert!(stages.contains(vk::PipelineStageFlags::TRANSFER));
     }
 
     #[test]

@@ -755,6 +755,7 @@ pub(super) fn encode_texture_to_buffer(
             &[region],
         );
     }
+    transfer_to_compute_barrier(device, command_buffer);
     Ok(())
 }
 
