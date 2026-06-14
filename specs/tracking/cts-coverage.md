@@ -1934,3 +1934,23 @@ PY
   in those same areas are green (no regression). Metal HAL unchanged (Vulkan-only fix). yawgpu-hal --features vulkan
   --lib 99/0; workspace test exit 0; clippy clean. Native-Vulkan re-confirm pending (user) but same root cause.
   Implemented via codex.
+
+## F-100 — out-of-range @binding validated at module creation, not pipeline creation / not limit-keyed — RESOLVED
+
+- **Finding:** `api,validation,capability_checks,limits,maxBindingsPerBindGroup:createPipeline,at_over` failed 12
+  (Metal == MoltenVK), "unexpected validation error: shader resource binding 1000 exceeds the maximum binding number".
+  An out-of-range `@binding` from an auto-layout pipeline's shader must be rejected at PIPELINE creation against the
+  device `maxBindingsPerBindGroup`, not early at `createShaderModule`.
+- **Root cause:** (1) `shader.rs::validate_module_limits` rejected `binding >= 1000` at createShaderModule (a yawgpu-
+  invented per-module cap; WebGPU doesn't bound the binding number at module creation), so the error escaped the
+  test's pipeline-creation error scope. (2) `bind_group_layout.rs` used a hardcoded `entry.binding >= 1000` (matches
+  the default limit but under-rejects when a device requests `maxBindingsPerBindGroup < 1000` — the test's
+  `underDefault` cases).
+- **Fix:** removed the binding-number rejection from `validate_module_limits` (kept the duplicate-override-id check);
+  changed the bind_group_layout binding check to `entry.binding >= limits.max_bindings_per_bind_group`. `derive_bind_group_layouts`
+  already validates each derived BGL via `validate_bind_group_layout_descriptor(.., limits, ..)`, so an over-range
+  auto-layout binding is now caught at pipeline creation with the real limit (correct timing + correct limit). The
+  explicit `createBindGroupLayout,at_over` sibling stays green and now also handles non-default limits.
+- **Verification (Metal == MoltenVK):** maxBindingsPerBindGroup 43/0 (was 12 fail). Regressions: createBindGroupLayout
+  855/0, shader_module,entry_point 1242/0. yawgpu-core/yawgpu lib tests green; workspace test exit 0; clippy clean
+  (incl tiled). yawgpu-core fix (not naga fork). Implemented via codex.
