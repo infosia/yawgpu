@@ -1645,10 +1645,37 @@ PY
   First fix implemented via the codex MCP coding agent (loop-shadow.wgsl MSL+SPIR-V snapshots + a
   positive parse/validate regression). **Verified:** `shader,execution,shadow` `pass=7 fail=0` on Metal
   AND Vulkan/MoltenVK (naga rev bumped to `ebec34ae4`).
-  Remaining F-070 families (investigated, sized, not yet started): (a) `struct_inner_align` — naga IR
+
+  - **F-070 sub-part `padding` (matCx3 + struct) — RESOLVED 2026-06-14 (naga fork `197a3ddd`).**
+    The MSL backend stored composite values to host-shareable (`storage`) buffers with a whole-value
+    assignment, clobbering padding bytes that WebGPU/WGSL require a store to leave untouched: (1) struct
+    stores emitted `dst = S{.., {}, ..}`, zero-initializing the explicit `char _padN[..]` field and
+    writing it; (2) matCx3 stores emitted `dst = floatNx3(..)`, writing Metal's 16-byte columns including
+    the 4-byte per-column padding. Fix decomposes host-shareable stores: RHS into a temporary, then store
+    leaves individually skipping `_padN`, recursing through structs/arrays, and writing `vec3` leaves /
+    matCx3 columns through `metal::packed_*3` via `reinterpret_cast<device packed_*3*>` (12 bytes only).
+    **Verified (Metal):** `shader,execution,padding` `2/16 → 18/0`; no regression — `zero_init 5089/0`,
+    `robust_access 1068/0`, `value_init 68/0`, `memory_layout` unchanged (still the 9 `struct_inner_align`),
+    `api,operation,command_buffer,image_copy 138408/0`, zero new Metal shader-compile errors. naga snapshot
+    tests regenerated (per-member packed stores) + green (`cargo test -p naga` 359 passed). MSL-only change
+    → MoltenVK SPIR-V path unchanged (its `padding` residue of 2 is a MoltenVK artifact). Implemented via
+    codex (gpt-5.5 medium).
+
+  - **F-070 sub-part `memory_layout` workgroup `write_layout` (MoltenVK-only) — RECLASSIFIED as MoltenVK
+    translation artifact** (same class as F-082/F-083/F-045). NOT a naga SPIR-V defect: naga decorates
+    every struct member with `Offset`/`MatrixStride` and every array with `ArrayStride` unconditionally
+    (so matCx3 carries the correct stride=16 → byte-12 padding), and Metal passes the identical cases.
+    The MoltenVK failures are (a) `[mvk-error] no matching function for call to
+    'spvArrayCopyFromConstantToThreadGroup'` — SPIRV-Cross emits broken MSL for threadgroup array copies
+    (definitive); (b) workgroup matrix byte-12 mismatches — MoltenVK ignores the SPIR-V `MatrixStride` for
+    threadgroup memory and packs columns tightly. Categories (b) are pending native-Vulkan re-confirmation
+    (Windows/NVIDIA) but (a) is conclusive. No naga fix; nothing to change in yawgpu.
+
+  Remaining F-070 family (investigated, sized, not yet started): `struct_inner_align` — naga IR
   `TypeInner::Struct` does not carry the @align-derived struct alignment (Layouter recomputes from
-  members), fix = IR field + ~15 mechanical sites + snapshot regen, ALSO covers most of (b)'s MoltenVK
-  align/stride families; (c) MSL matCx3 column-padding writes — needs column-wise packed_float3 stores.
+  members); fix is either an IR alignment field (~150 match-arm sites + .ron snapshot regen) or a
+  Layouter/writer-only fix (~30-40 sites). Metal 9 cases (read+write × all address spaces); also accounts
+  for the shared `struct_inner_align`/`struct_double_align`/`struct_inner_size_and_align` MoltenVK residue.
 
 - **External-CTS finding F-089 — RESOLVED (createBindGroup sampler-type compatibility).**
   Binding a FILTERING sampler (any linear filter mode) to a `non-filtering` BGL entry must fail
