@@ -132,6 +132,15 @@ impl ComputePassEncoder {
                     .as_ref()
                     .ok_or_else(|| "compute dispatch requires a compute pipeline".to_owned())?,
             );
+            let (mut buffer_uses, texture_uses) =
+                collect_pipeline_usage_scope(pipeline.bind_group_layouts(), &state.bind_groups)?;
+            buffer_uses.push(BufferScopeUse {
+                buffer: Arc::clone(&indirect_buffer),
+                offset: indirect_offset,
+                size: 12,
+                access: ResourceAccess::Read,
+            });
+            validate_resource_usage_scope(&buffer_uses, &texture_uses)?;
             self.inner.parent.record_compute_pass(ComputePassCommand {
                 pipeline,
                 bind_groups: state.bind_groups.clone(),
@@ -335,6 +344,143 @@ mod tests {
             .all(|op| matches!(op, CommandExecution::ComputePass(_))));
     }
 
+    #[test]
+    fn compute_pass_indirect_buffer_conflicts_with_storage_write() {
+        let device = noop_device();
+        let bind_group_layout =
+            Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+                entries: vec![BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: SHADER_STAGE_COMPUTE,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Buffer {
+                        ty: BufferBindingType::Storage,
+                        has_dynamic_offset: false,
+                        min_binding_size: 4,
+                    }),
+                }],
+                error: None,
+            }));
+        let pipeline_layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![Arc::clone(&bind_group_layout)],
+            immediate_size: 0,
+            error: None,
+        }));
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::INDIRECT,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let bind_group = Arc::new(device.create_bind_group(
+            bind_group_layout,
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::Buffer {
+                    buffer: Arc::clone(&buffer),
+                    device: Arc::new(device.clone()),
+                    offset: 0,
+                    size: 16,
+                },
+            }],
+        ));
+        let pipeline = storage_compute_pipeline(&device, pipeline_layout);
+
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(
+            pass.dispatch_workgroups_indirect(buffer, 0, device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some(
+                "usage scope cannot read and write or write the same buffer range twice".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn compute_pass_read_only_buffer_uses_do_not_accumulate_across_dispatches() {
+        let device = noop_device();
+        let bind_group_layout =
+            Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+                entries: vec![BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: SHADER_STAGE_COMPUTE,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: 4,
+                    }),
+                }],
+                error: None,
+            }));
+        let pipeline_layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![Arc::clone(&bind_group_layout)],
+            immediate_size: 0,
+            error: None,
+        }));
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::UNIFORM,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let bind_group = Arc::new(device.create_bind_group(
+            bind_group_layout,
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::Buffer {
+                    buffer,
+                    device: Arc::new(device.clone()),
+                    offset: 0,
+                    size: 16,
+                },
+            }],
+        ));
+        let pipeline_a = uniform_compute_pipeline(&device, Arc::clone(&pipeline_layout));
+        let pipeline_b = uniform_compute_pipeline(&device, pipeline_layout);
+
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline_a), None);
+        assert_eq!(
+            pass.set_bind_group(
+                0,
+                Some(Arc::clone(&bind_group)),
+                Vec::new(),
+                device.limits()
+            ),
+            None
+        );
+        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+        assert_eq!(pass.set_pipeline(pipeline_b), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 2);
+    }
+
     fn storage_compute_pipeline(
         device: &crate::device::Device,
         layout: Arc<crate::pipeline_layout::PipelineLayout>,
@@ -347,6 +493,36 @@ mod tests {
 @compute @workgroup_size(1)
 fn cs() {
     values[0] = 1u;
+}
+"
+                .to_owned(),
+            )),
+        );
+        Arc::new(device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(layout),
+            shader_module: module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        }))
+    }
+
+    fn uniform_compute_pipeline(
+        device: &crate::device::Device,
+        layout: Arc<crate::pipeline_layout::PipelineLayout>,
+    ) -> Arc<ComputePipeline> {
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r"
+struct Params {
+    value: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+
+@compute @workgroup_size(1)
+fn cs() {
+    let value = params.value;
 }
 "
                 .to_owned(),

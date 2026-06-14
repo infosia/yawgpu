@@ -1863,3 +1863,28 @@ PY
 - **F-093 COMPLETE:** (a) compressed copy bounds, (b) sparse vertex slots, (c) pass after-end timing, (d) auto-layout
   exclusive-pipeline compatibility — all resolved. Residual `index_buffer_format_dirtying` (2) is a Dawn-leniency,
   not a yawgpu defect.
+
+## F-095 — buffer usage-scope hazards in passes — RESOLVED
+
+- **Finding:** `api,validation,resource_usages,buffer,{in_pass_encoder,in_pass_misc}` failed 296 cases (Metal ==
+  MoltenVK), all "expected validation error, got none" — using the same buffer as a writable `storage` binding and
+  any other usage in one render-pass usage scope was accepted. Dawn AND wgpu-native reject, so a genuine yawgpu-core gap.
+- **Two root causes:**
+  (1) **whole-buffer scope:** buffer usage-scope conflicts are offset-independent (the CTS varies `hasOverlap` without
+  changing the expected outcome). yawgpu gated conflicts on byte-range overlap; removed that gate so any two scope uses
+  of the same buffer conflict per the access rule regardless of range. (Texture scope still uses subresource ranges.)
+  (2) **scope timing/coverage:** the render-pass usage scope is the WHOLE pass — every resource bound via setBindGroup
+  (every time, including replaced bindings — `reset_buffer_usage_before_draw`), setVertexBuffer, setIndexBuffer, and the
+  indirect buffer of draw{,Indexed}Indirect — and it must catch conflicts even with NO draw (`with_no_draw`). yawgpu
+  only collected bind-group uses at draw time, missing vertex/index/indirect and the no-draw / reset cases.
+- **Fix (yawgpu-core):** render pass + render bundle now ACCUMULATE buffer usage scope at state-setting time
+  (set_bind_group / set_vertex_buffer / set_index_buffer add immediately; draw{,Indexed}Indirect add the indirect buffer
+  as Read; rebinding never removes prior uses), validated whole-buffer (read+write conflicts; write+write allowed;
+  read+read ok). Draw-time `record_pipeline_usage_scope` is now texture-only (no double-count). Compute stays
+  per-dispatch (active bind groups + that dispatch's indirect buffer). `validate_buffer_usage_scope{,_lenient}` no longer
+  gate on range overlap.
+- **Verification (Metal == MoltenVK):** buffer in_pass_encoder 1328/0, in_pass_misc 94/0 (was 296 fail). Regressions:
+  render_bundle (encoding) 113/0, texture resource_usages unchanged (402 = F-096, untouched), real-GPU e2e_metal draw
+  5/5 + compute 3/3. yawgpu-core --lib 315, yawgpu --lib 148. workspace test exit 0; clippy clean (incl tiled).
+  Implemented via codex (two rounds: whole-buffer + draw-time uses, then set-time whole-pass accumulation).
+- **Related open:** F-096 (texture subresource usage-scope, 851) is the texture analog — separate finding.

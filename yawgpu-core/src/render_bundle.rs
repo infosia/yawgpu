@@ -248,13 +248,12 @@ impl RenderBundleEncoder {
         self.record_bundle_command(|state| {
             validate_set_bind_group(index, group.as_deref(), &dynamic_offsets, limits)?;
             if let Some(group) = group {
-                state.bind_groups.insert(
-                    index,
-                    BoundBindGroup {
-                        group,
-                        dynamic_offsets,
-                    },
-                );
+                let bound = BoundBindGroup {
+                    group,
+                    dynamic_offsets,
+                };
+                record_bind_group_buffer_usage_scope(state, &bound)?;
+                state.bind_groups.insert(index, bound);
             } else {
                 state.bind_groups.remove(&index);
             }
@@ -275,6 +274,15 @@ impl RenderBundleEncoder {
             validate_vertex_buffer_slot(slot, limits)?;
             if let Some(buffer) = buffer {
                 let size = validate_set_vertex_buffer(&buffer, offset, size)?;
+                record_buffer_usage_scope_use(
+                    state,
+                    BufferScopeUse {
+                        buffer: Arc::clone(&buffer),
+                        offset,
+                        size,
+                        access: ResourceAccess::Read,
+                    },
+                )?;
                 state.vertex_buffers.insert(
                     slot,
                     BoundVertexBuffer {
@@ -302,6 +310,15 @@ impl RenderBundleEncoder {
         self.record_bundle_command(|state| {
             let format = format.ok_or_else(|| "render pass index format is invalid".to_owned())?;
             let size = validate_set_index_buffer(&buffer, format, offset, size)?;
+            record_buffer_usage_scope_use(
+                state,
+                BufferScopeUse {
+                    buffer: Arc::clone(&buffer),
+                    offset,
+                    size,
+                    access: ResourceAccess::Read,
+                },
+            )?;
             state.index_buffer = Some(BoundIndexBuffer {
                 buffer,
                 format,
@@ -414,8 +431,17 @@ impl RenderBundleEncoder {
                     .ok_or_else(|| "render bundle requires a render pipeline".to_owned())?,
             );
             let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
-            record_pipeline_usage_scope(state, &bind_group_layouts, &[])?;
             validate_indirect_buffer(&indirect_buffer, indirect_offset, 16, "draw indirect")?;
+            record_buffer_usage_scope_use(
+                state,
+                BufferScopeUse {
+                    buffer: Arc::clone(&indirect_buffer),
+                    offset: indirect_offset,
+                    size: 16,
+                    access: ResourceAccess::Read,
+                },
+            )?;
+            record_pipeline_usage_scope(state, &bind_group_layouts, &[])?;
             state
                 .command_referenced_buffers
                 .push(Arc::clone(&indirect_buffer));
@@ -449,13 +475,22 @@ impl RenderBundleEncoder {
                     .ok_or_else(|| "render bundle requires a render pipeline".to_owned())?,
             );
             let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
-            record_pipeline_usage_scope(state, &bind_group_layouts, &[])?;
             validate_indirect_buffer(
                 &indirect_buffer,
                 indirect_offset,
                 20,
                 "draw indexed indirect",
             )?;
+            record_buffer_usage_scope_use(
+                state,
+                BufferScopeUse {
+                    buffer: Arc::clone(&indirect_buffer),
+                    offset: indirect_offset,
+                    size: 20,
+                    access: ResourceAccess::Read,
+                },
+            )?;
+            record_pipeline_usage_scope(state, &bind_group_layouts, &[])?;
             state
                 .command_referenced_buffers
                 .push(Arc::clone(&indirect_buffer));

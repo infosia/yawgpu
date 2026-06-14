@@ -366,7 +366,7 @@ pub(crate) fn validate_render_draw_state(
     limits: Limits,
 ) -> Result<(), String> {
     let pipeline = validate_render_draw_base_state(state, limits, kind.is_indexed())?;
-    validate_usage_scope(
+    validate_usage_scope_textures(
         pipeline.bind_group_layouts(),
         &state.bind_groups,
         Some(&state.attachment_texture_uses),
@@ -723,7 +723,9 @@ pub(crate) enum ResourceAccess {
 #[derive(Debug, Clone)]
 pub(crate) struct BufferScopeUse {
     pub(crate) buffer: Arc<Buffer>,
+    #[allow(dead_code)]
     pub(crate) offset: u64,
+    #[allow(dead_code)]
     pub(crate) size: u64,
     pub(crate) access: ResourceAccess,
 }
@@ -801,24 +803,65 @@ pub(crate) fn collect_pipeline_usage_scope(
     Ok((buffer_uses, texture_uses))
 }
 
+pub(crate) fn validate_usage_scope_textures(
+    required_layouts: &[Arc<BindGroupLayout>],
+    bound_groups: &BTreeMap<u32, BoundBindGroup>,
+    attachment_uses: Option<&[TextureScopeUse]>,
+) -> Result<(), String> {
+    let (_, mut texture_uses) = collect_pipeline_usage_scope(required_layouts, bound_groups)?;
+    if let Some(attachment_uses) = attachment_uses {
+        texture_uses.extend_from_slice(attachment_uses);
+    }
+    validate_texture_usage_scope(&texture_uses)
+}
+
 pub(crate) fn record_pipeline_usage_scope(
     state: &mut PassEncoderState,
     required_layouts: &[Arc<BindGroupLayout>],
     attachment_uses: &[TextureScopeUse],
 ) -> Result<(), String> {
-    let (buffer_uses, texture_uses) =
-        collect_pipeline_usage_scope(required_layouts, &state.bind_groups)?;
+    let (_, texture_uses) = collect_pipeline_usage_scope(required_layouts, &state.bind_groups)?;
     let mut current_texture_uses = texture_uses.clone();
     current_texture_uses.extend_from_slice(attachment_uses);
-    validate_resource_usage_scope(&buffer_uses, &current_texture_uses)?;
-    let mut scoped_buffer_uses = state.scope_buffer_uses.clone();
-    scoped_buffer_uses.extend(buffer_uses.iter().cloned());
+    validate_texture_usage_scope(&current_texture_uses)?;
     let mut scoped_texture_uses = state.scope_texture_uses.clone();
     scoped_texture_uses.extend(texture_uses.iter().cloned());
     scoped_texture_uses.extend_from_slice(attachment_uses);
-    validate_resource_usage_scope_lenient(&scoped_buffer_uses, &scoped_texture_uses)?;
-    state.scope_buffer_uses.extend(buffer_uses);
+    validate_texture_usage_scope_lenient(&scoped_texture_uses)?;
     state.scope_texture_uses.extend(texture_uses);
+    Ok(())
+}
+
+pub(crate) fn record_bind_group_buffer_usage_scope(
+    state: &mut PassEncoderState,
+    bound: &BoundBindGroup,
+) -> Result<(), String> {
+    let mut buffer_uses = Vec::new();
+    let mut texture_uses = Vec::new();
+    collect_bind_group_usage(
+        bound.group.layout(),
+        bound,
+        &mut buffer_uses,
+        &mut texture_uses,
+    )?;
+    record_buffer_usage_scope_uses(state, buffer_uses)
+}
+
+pub(crate) fn record_buffer_usage_scope_use(
+    state: &mut PassEncoderState,
+    buffer_use: BufferScopeUse,
+) -> Result<(), String> {
+    record_buffer_usage_scope_uses(state, vec![buffer_use])
+}
+
+fn record_buffer_usage_scope_uses(
+    state: &mut PassEncoderState,
+    buffer_uses: Vec<BufferScopeUse>,
+) -> Result<(), String> {
+    let mut scoped_buffer_uses = state.scope_buffer_uses.clone();
+    scoped_buffer_uses.extend(buffer_uses.iter().cloned());
+    validate_buffer_usage_scope_lenient(&scoped_buffer_uses)?;
+    state.scope_buffer_uses.extend(buffer_uses);
     Ok(())
 }
 
@@ -944,7 +987,7 @@ pub(crate) fn collect_bind_group_usage(
 pub(crate) fn validate_buffer_usage_scope(buffer_uses: &[BufferScopeUse]) -> Result<(), String> {
     for (index, current) in buffer_uses.iter().enumerate() {
         for previous in &buffer_uses[..index] {
-            if !current.buffer.same(&previous.buffer) || !buffer_ranges_overlap(current, previous) {
+            if !current.buffer.same(&previous.buffer) {
                 continue;
             }
             if current.access == ResourceAccess::Write || previous.access == ResourceAccess::Write {
@@ -964,7 +1007,7 @@ pub(crate) fn validate_buffer_usage_scope_lenient(
 ) -> Result<(), String> {
     for (index, current) in buffer_uses.iter().enumerate() {
         for previous in &buffer_uses[..index] {
-            if !current.buffer.same(&previous.buffer) || !buffer_ranges_overlap(current, previous) {
+            if !current.buffer.same(&previous.buffer) {
                 continue;
             }
             if current.access != previous.access {
@@ -1113,6 +1156,7 @@ fn ranges_overlap(a_start: u32, a_count: u32, b_start: u32, b_count: u32) -> boo
 }
 
 /// Returns buffer ranges overlap.
+#[cfg(test)]
 pub(crate) fn buffer_ranges_overlap(a: &BufferScopeUse, b: &BufferScopeUse) -> bool {
     let a_end = a.offset.saturating_add(a.size);
     let b_end = b.offset.saturating_add(b.size);
@@ -1585,6 +1629,143 @@ mod tests {
             },
         ];
         Arc::new(device.create_render_pipeline(descriptor))
+    }
+
+    fn buffer_scope_use(
+        buffer: Arc<Buffer>,
+        offset: u64,
+        size: u64,
+        access: ResourceAccess,
+    ) -> BufferScopeUse {
+        BufferScopeUse {
+            buffer,
+            offset,
+            size,
+            access,
+        }
+    }
+
+    #[test]
+    fn validate_buffer_usage_scope_uses_whole_buffer_access() {
+        let device = noop_device();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::UNIFORM,
+            size: 64,
+            mapped_at_creation: false,
+        }));
+        let other = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::UNIFORM,
+            size: 64,
+            mapped_at_creation: false,
+        }));
+
+        assert_eq!(
+            validate_buffer_usage_scope(&[
+                buffer_scope_use(buffer.clone(), 0, 16, ResourceAccess::Write),
+                buffer_scope_use(buffer.clone(), 32, 16, ResourceAccess::Read),
+            ]),
+            Err(
+                "usage scope cannot read and write or write the same buffer range twice".to_owned()
+            )
+        );
+        assert!(!buffer_ranges_overlap(
+            &buffer_scope_use(buffer.clone(), 0, 16, ResourceAccess::Write),
+            &buffer_scope_use(buffer.clone(), 32, 16, ResourceAccess::Read),
+        ));
+        assert_eq!(
+            validate_buffer_usage_scope(&[
+                buffer_scope_use(buffer.clone(), 0, 16, ResourceAccess::Read),
+                buffer_scope_use(buffer.clone(), 32, 16, ResourceAccess::Read),
+            ]),
+            Ok(())
+        );
+        assert_eq!(
+            validate_buffer_usage_scope(&[
+                buffer_scope_use(buffer, 0, 16, ResourceAccess::Write),
+                buffer_scope_use(other, 0, 16, ResourceAccess::Read),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_buffer_usage_scope_lenient_uses_whole_buffer_access_policy() {
+        let device = noop_device();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::UNIFORM,
+            size: 64,
+            mapped_at_creation: false,
+        }));
+
+        assert_eq!(
+            validate_buffer_usage_scope_lenient(&[
+                buffer_scope_use(buffer.clone(), 0, 16, ResourceAccess::Write),
+                buffer_scope_use(buffer.clone(), 32, 16, ResourceAccess::Read),
+            ]),
+            Err(
+                "usage scope cannot read and write or write the same buffer range twice".to_owned()
+            )
+        );
+        assert_eq!(
+            validate_buffer_usage_scope_lenient(&[
+                buffer_scope_use(buffer.clone(), 0, 16, ResourceAccess::Write),
+                buffer_scope_use(buffer, 32, 16, ResourceAccess::Write),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn record_buffer_usage_scope_use_accumulates_vertex_and_index_reads() {
+        let device = noop_device();
+        let pipeline = contiguous_vertex_pipeline(&device);
+        let storage_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::VERTEX | BufferUsage::INDEX,
+            size: 64,
+            mapped_at_creation: false,
+        }));
+        let mut state = pass_state_with_pipeline(&device, pipeline.clone());
+        state
+            .vertex_buffers
+            .insert(0, vertex_buffer_binding(Arc::clone(&storage_buffer), 16));
+        state.index_buffer = Some(BoundIndexBuffer {
+            buffer: Arc::clone(&storage_buffer),
+            format: IndexFormat::Uint16,
+            offset: 32,
+            size: 16,
+        });
+
+        let vertex_buffer = state
+            .vertex_buffers
+            .get(&0)
+            .expect("vertex buffer should be set")
+            .clone();
+        record_buffer_usage_scope_use(
+            &mut state,
+            BufferScopeUse {
+                buffer: vertex_buffer.buffer,
+                offset: vertex_buffer.offset,
+                size: vertex_buffer.size,
+                access: ResourceAccess::Read,
+            },
+        )
+        .expect("vertex buffer read use should be valid");
+        let index_buffer = state
+            .index_buffer
+            .as_ref()
+            .expect("index buffer should be set")
+            .clone();
+        record_buffer_usage_scope_use(
+            &mut state,
+            BufferScopeUse {
+                buffer: index_buffer.buffer,
+                offset: index_buffer.offset,
+                size: index_buffer.size,
+                access: ResourceAccess::Read,
+            },
+        )
+        .expect("index buffer read use should be valid");
+        assert_eq!(state.scope_buffer_uses.len(), 2);
     }
 
     #[test]
