@@ -226,17 +226,6 @@ pub(crate) fn validate_module_limits(module: &naga::Module) -> Result<(), String
         }
     }
 
-    for (_, global) in module.global_variables.iter() {
-        if let Some(binding) = global.binding {
-            if binding.binding >= 1000 {
-                return Err(format!(
-                    "shader resource binding {} exceeds the maximum binding number",
-                    binding.binding
-                ));
-            }
-        }
-    }
-
     Ok(())
 }
 
@@ -314,6 +303,51 @@ mod tests {
         assert!(invalid.is_error());
         assert!(invalid.diagnostic().is_some());
         assert!(scoped.message.contains("expected global item"));
+    }
+
+    #[test]
+    fn shader_module_validation_allows_large_binding_numbers_on_noop() {
+        let device = noop_device();
+
+        let module = device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@group(0) @binding(1000) var<uniform> data: u32;\n\
+             @compute @workgroup_size(1) fn cs() { _ = data; }"
+                .to_owned(),
+        ));
+
+        assert!(!module.is_error());
+        assert_eq!(module.diagnostic(), None);
+    }
+
+    #[test]
+    fn shader_module_validation_rejects_duplicate_override_ids_on_noop() {
+        let mut module = naga::Module::default();
+        let ty = module.types.insert(
+            naga::Type {
+                name: None,
+                inner: naga::TypeInner::Scalar(naga::Scalar {
+                    kind: naga::ScalarKind::Uint,
+                    width: 4,
+                }),
+            },
+            naga::Span::default(),
+        );
+        let override_ = naga::Override {
+            name: None,
+            id: Some(0),
+            ty,
+            init: None,
+        };
+
+        module
+            .overrides
+            .append(override_.clone(), naga::Span::default());
+        module.overrides.append(override_, naga::Span::default());
+
+        assert_eq!(
+            validate_module_limits(&module),
+            Err("duplicate shader override id 0".to_owned())
+        );
     }
 
     #[cfg(feature = "shader-passthrough")]

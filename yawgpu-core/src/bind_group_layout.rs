@@ -23,8 +23,10 @@ pub(crate) fn validate_bind_group_layout_descriptor(
     let mut stage_counts = [StageResourceCounts::default(); 3];
 
     for entry in entries {
-        if entry.binding >= 1000 {
-            return Some("bind group layout binding must be less than 1000".to_owned());
+        if entry.binding >= limits.max_bindings_per_bind_group {
+            return Some(
+                "bind group layout entry binding number exceeds maxBindingsPerBindGroup".to_owned(),
+            );
         }
         if !bindings.insert(entry.binding) {
             return Some("bind group layout bindings must be unique".to_owned());
@@ -451,6 +453,70 @@ mod tests {
         assert_eq!(
             error.message,
             "bind group layout bindingArraySize greater than one is not supported"
+        );
+    }
+
+    fn uniform_entry(binding: u32) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: SHADER_STAGE_COMPUTE,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: 4,
+            }),
+        }
+    }
+
+    #[test]
+    fn bind_group_layout_binding_number_uses_device_limit() {
+        let default_limit = Limits::DEFAULT.max_bindings_per_bind_group;
+
+        assert_eq!(
+            validate_bind_group_layout_descriptor(
+                &[uniform_entry(default_limit - 1)],
+                Limits::DEFAULT,
+                &FeatureSet::default()
+            ),
+            None
+        );
+        assert_eq!(
+            validate_bind_group_layout_descriptor(
+                &[uniform_entry(default_limit)],
+                Limits::DEFAULT,
+                &FeatureSet::default()
+            ),
+            Some(
+                "bind group layout entry binding number exceeds maxBindingsPerBindGroup".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn bind_group_layout_binding_number_uses_smaller_custom_limit() {
+        let limits = Limits {
+            max_bindings_per_bind_group: 4,
+            ..Limits::DEFAULT
+        };
+
+        assert_eq!(
+            validate_bind_group_layout_descriptor(
+                &[uniform_entry(3)],
+                limits,
+                &FeatureSet::default()
+            ),
+            None
+        );
+        assert_eq!(
+            validate_bind_group_layout_descriptor(
+                &[uniform_entry(4)],
+                limits,
+                &FeatureSet::default()
+            ),
+            Some(
+                "bind group layout entry binding number exceeds maxBindingsPerBindGroup".to_owned()
+            )
         );
     }
 
