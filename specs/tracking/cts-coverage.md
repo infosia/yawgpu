@@ -2000,3 +2000,48 @@ PY
 - **Verification (Metal == MoltenVK):** maxBindingsPerBindGroup 43/0 (was 12 fail). Regressions: createBindGroupLayout
   855/0, shader_module,entry_point 1242/0. yawgpu-core/yawgpu lib tests green; workspace test exit 0; clippy clean
   (incl tiled). yawgpu-core fix (not naga fork). Implemented via codex.
+
+## F-070 (SPIR-V) — padding-preserving stores + @align struct layout on the Vulkan path — RESOLVED
+
+- **Finding:** the F-070 `padding` (matCx3 + struct) and `struct_inner_align` fixes were first landed for
+  the **MSL** backend (`197a3ddd`) and the **IR** (`ee37a074`); the **SPIR-V** backend still wrote into
+  host-shareable padding / under-applied struct `@align` on the Vulkan path, so MoltenVK retained the
+  host-visible residue (memory_layout 35 fail, padding 2 fail at `ee37a074`).
+- **Fix (naga fork `507889964`, yawgpu rev bump `d06fe63`):** "naga(spv): padding-preserving stores +
+  @align struct layout to host-shareable memory" — the SPIR-V analog of the MSL store decomposition + the
+  IR alignment field now applied on the Vulkan path.
+- **Verification (Apple regression, naga rev `7dd82438`):** Metal unchanged green (memory_layout 434/0,
+  padding 18/0). **MoltenVK improved**: memory_layout 35 -> 22 fail, padding 2 -> 1 fail (host-visible
+  cases cleared). zero_init 4288/801 unchanged. The remaining MoltenVK residue is the pre-existing
+  SPIRV-Cross `spvArrayCopy*ToThreadGroup` / non-host-visible threadgroup-layout artifact class (signatures
+  confirmed), not naga defects. No regression (image_copy 138408/0, memory_sync 263/0, value_init 68/0,
+  robust_access 1068/0 on MoltenVK). Native Vulkan confirmed F-070 fully resolved (user, Windows). Fixed
+  on the Windows side.
+
+## F-105 — bool workgroup-array robust-access write not clamped (Vulkan/SPIR-V path) — RESOLVED
+
+- **Finding:** `shader,execution,robust_access:linear_memory` — 3 cases
+  (`addressSpace="workgroup";access="write";containerType="array";baseType="bool"`) failed on **native
+  Vulkan** (NVIDIA, user 2026-06-14): an OOB `bool` workgroup-array write was not clamped (`expected 0, got
+  1`). Apple GPUs masked it.
+- **Cross-HAL check (Claude, this Mac):** does NOT reproduce on Metal (`robust_access` 1068/0) or MoltenVK
+  (1068/0) — Vulkan/SPIR-V-path-specific, not a Metal/MSL defect. The SPIR-V `bool` array stride was wrong,
+  so the robustness clamp index math addressed the wrong slot.
+- **Fix (naga fork `7dd824389`, yawgpu rev bump `87cc2c6`):** "naga(spv): correct bool array stride so
+  robust workgroup-array writes clamp". Verified native Vulkan (user); Apple regression-confirmed green
+  (Metal + MoltenVK 1068/0, no regression). Fixed on the Windows side.
+
+## F-106 — Vulkan HAL missing write->read barrier for indirect-args / index / copy-source reads — RESOLVED
+
+- **Finding:** `api,operation,memory_sync,buffer,multiple_buffers:wr` — 18 cases failed on **native Vulkan**
+  (NVIDIA, user 2026-06-14): a buffer write was not visible to a later read when the destination use was an
+  indirect-args / index buffer (16) or a copy source (2) (`expected 1, got 0`). `rw`/`single_buffer` and
+  ordinary storage reads passed.
+- **Cross-HAL check (Claude, this Mac):** does NOT reproduce on Metal (`multiple_buffers` 263/0) or MoltenVK
+  (263/0) — a genuine yawgpu **Vulkan-HAL** synchronization gap **latent on Apple GPUs** (coherent /
+  implicitly-ordered memory masks the missing barrier), exposed on NVIDIA. Not an Apple-only quirk — real
+  Vulkan-spec UB.
+- **Root cause / fix (yawgpu-hal `858de27`):** Vulkan-HAL barrier tracking did not add the destination
+  access/stage `VK_ACCESS_INDIRECT_COMMAND_READ_BIT` / `VK_ACCESS_INDEX_READ_BIT` / `TRANSFER_READ` after a
+  storage/copy write to the same buffer; the fix inserts them. Verified native Vulkan (user); Apple
+  regression-confirmed green (Metal + MoltenVK 263/0, no regression). Fixed on the Windows side.
