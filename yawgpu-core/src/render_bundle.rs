@@ -252,7 +252,7 @@ impl RenderBundleEncoder {
                     group,
                     dynamic_offsets,
                 };
-                record_bind_group_buffer_usage_scope(state, &bound)?;
+                record_bind_group_usage_scope(state, &bound)?;
                 state.bind_groups.insert(index, bound);
             } else {
                 state.bind_groups.remove(&index);

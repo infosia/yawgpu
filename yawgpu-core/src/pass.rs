@@ -111,8 +111,16 @@ impl PassEncoderState {
     }
 
     /// Sets attachment texture usages for render-pass scope validation.
-    pub(crate) fn set_attachment_texture_uses(&mut self, uses: Vec<TextureScopeUse>) {
-        self.attachment_texture_uses = uses;
+    pub(crate) fn set_attachment_texture_uses(
+        &mut self,
+        uses: Vec<TextureScopeUse>,
+    ) -> Result<(), String> {
+        let mut scoped_texture_uses = self.scope_texture_uses.clone();
+        scoped_texture_uses.extend(uses.iter().cloned());
+        validate_texture_usage_scope_lenient(&scoped_texture_uses)?;
+        self.attachment_texture_uses = uses.clone();
+        self.scope_texture_uses.extend(uses);
+        Ok(())
     }
 
     pub(crate) fn load_attachments_for_draw(
@@ -366,11 +374,6 @@ pub(crate) fn validate_render_draw_state(
     limits: Limits,
 ) -> Result<(), String> {
     let pipeline = validate_render_draw_base_state(state, limits, kind.is_indexed())?;
-    validate_usage_scope_textures(
-        pipeline.bind_group_layouts(),
-        &state.bind_groups,
-        Some(&state.attachment_texture_uses),
-    )?;
     validate_strip_index_format(pipeline, state, kind.is_indexed())?;
     match kind {
         RenderDrawKind::Direct {
@@ -719,6 +722,29 @@ pub(crate) enum ResourceAccess {
     Write,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextureAccess {
+    Read,
+    WriteOnlyStorage,
+    ReadWriteStorage,
+    AttachmentWrite,
+}
+
+impl TextureAccess {
+    fn compatible_in_render_scope(self, other: Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::Read, Self::Read)
+                | (Self::WriteOnlyStorage, Self::WriteOnlyStorage)
+                | (Self::ReadWriteStorage, Self::ReadWriteStorage)
+        )
+    }
+
+    fn compatible_in_compute_scope(self, other: Self) -> bool {
+        matches!((self, other), (Self::Read, Self::Read))
+    }
+}
+
 /// Stores buffer scope use data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub(crate) struct BufferScopeUse {
@@ -740,7 +766,7 @@ pub(crate) struct TextureScopeUse {
     pub(crate) array_layer_count: u32,
     pub(crate) depth_slice: Option<u32>,
     pub(crate) aspects: TextureAspectMask,
-    pub(crate) access: ResourceAccess,
+    pub(crate) access: TextureAccess,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -803,36 +829,16 @@ pub(crate) fn collect_pipeline_usage_scope(
     Ok((buffer_uses, texture_uses))
 }
 
-pub(crate) fn validate_usage_scope_textures(
-    required_layouts: &[Arc<BindGroupLayout>],
-    bound_groups: &BTreeMap<u32, BoundBindGroup>,
-    attachment_uses: Option<&[TextureScopeUse]>,
-) -> Result<(), String> {
-    let (_, mut texture_uses) = collect_pipeline_usage_scope(required_layouts, bound_groups)?;
-    if let Some(attachment_uses) = attachment_uses {
-        texture_uses.extend_from_slice(attachment_uses);
-    }
-    validate_texture_usage_scope(&texture_uses)
-}
-
 pub(crate) fn record_pipeline_usage_scope(
     state: &mut PassEncoderState,
     required_layouts: &[Arc<BindGroupLayout>],
-    attachment_uses: &[TextureScopeUse],
+    _attachment_uses: &[TextureScopeUse],
 ) -> Result<(), String> {
-    let (_, texture_uses) = collect_pipeline_usage_scope(required_layouts, &state.bind_groups)?;
-    let mut current_texture_uses = texture_uses.clone();
-    current_texture_uses.extend_from_slice(attachment_uses);
-    validate_texture_usage_scope(&current_texture_uses)?;
-    let mut scoped_texture_uses = state.scope_texture_uses.clone();
-    scoped_texture_uses.extend(texture_uses.iter().cloned());
-    scoped_texture_uses.extend_from_slice(attachment_uses);
-    validate_texture_usage_scope_lenient(&scoped_texture_uses)?;
-    state.scope_texture_uses.extend(texture_uses);
+    let _ = collect_pipeline_usage_scope(required_layouts, &state.bind_groups)?;
     Ok(())
 }
 
-pub(crate) fn record_bind_group_buffer_usage_scope(
+pub(crate) fn record_bind_group_usage_scope(
     state: &mut PassEncoderState,
     bound: &BoundBindGroup,
 ) -> Result<(), String> {
@@ -844,7 +850,7 @@ pub(crate) fn record_bind_group_buffer_usage_scope(
         &mut buffer_uses,
         &mut texture_uses,
     )?;
-    record_buffer_usage_scope_uses(state, buffer_uses)
+    record_resource_usage_scope_uses(state, buffer_uses, texture_uses)
 }
 
 pub(crate) fn record_buffer_usage_scope_use(
@@ -858,10 +864,22 @@ fn record_buffer_usage_scope_uses(
     state: &mut PassEncoderState,
     buffer_uses: Vec<BufferScopeUse>,
 ) -> Result<(), String> {
+    record_resource_usage_scope_uses(state, buffer_uses, Vec::new())
+}
+
+fn record_resource_usage_scope_uses(
+    state: &mut PassEncoderState,
+    buffer_uses: Vec<BufferScopeUse>,
+    texture_uses: Vec<TextureScopeUse>,
+) -> Result<(), String> {
     let mut scoped_buffer_uses = state.scope_buffer_uses.clone();
     scoped_buffer_uses.extend(buffer_uses.iter().cloned());
     validate_buffer_usage_scope_lenient(&scoped_buffer_uses)?;
+    let mut scoped_texture_uses = state.scope_texture_uses.clone();
+    scoped_texture_uses.extend(texture_uses.iter().cloned());
+    validate_texture_usage_scope_lenient(&scoped_texture_uses)?;
     state.scope_buffer_uses.extend(buffer_uses);
+    state.scope_texture_uses.extend(texture_uses);
     Ok(())
 }
 
@@ -873,6 +891,7 @@ pub(crate) fn validate_resource_usage_scope(
     validate_texture_usage_scope(texture_uses)
 }
 
+#[allow(dead_code)]
 pub(crate) fn validate_resource_usage_scope_lenient(
     buffer_uses: &[BufferScopeUse],
     texture_uses: &[TextureScopeUse],
@@ -915,33 +934,6 @@ pub(crate) fn collect_bind_group_usage(
         let Some(kind) = layout_entry.kind else {
             continue;
         };
-        let access = match kind {
-            BindingLayoutKind::Buffer {
-                ty: BufferBindingType::Uniform | BufferBindingType::ReadOnlyStorage,
-                ..
-            }
-            | BindingLayoutKind::Texture { .. }
-            | BindingLayoutKind::StorageTexture {
-                access: StorageTextureAccess::ReadOnly,
-                ..
-            } => Some(ResourceAccess::Read),
-            BindingLayoutKind::Buffer {
-                ty: BufferBindingType::Storage,
-                ..
-            }
-            | BindingLayoutKind::StorageTexture {
-                access: StorageTextureAccess::WriteOnly | StorageTextureAccess::ReadWrite,
-                ..
-            } => Some(ResourceAccess::Write),
-            #[cfg(feature = "tiled")]
-            BindingLayoutKind::InputAttachment { .. } => None,
-            BindingLayoutKind::Sampler { .. } => None,
-            BindingLayoutKind::ExternalTexture => Some(ResourceAccess::Read),
-        };
-        let Some(access) = access else {
-            continue;
-        };
-
         match (&entry.resource, kind) {
             (
                 BindGroupResource::Buffer {
@@ -952,6 +944,17 @@ pub(crate) fn collect_bind_group_usage(
                 },
                 BindingLayoutKind::Buffer { .. },
             ) => {
+                let access = match kind {
+                    BindingLayoutKind::Buffer {
+                        ty: BufferBindingType::Uniform | BufferBindingType::ReadOnlyStorage,
+                        ..
+                    } => ResourceAccess::Read,
+                    BindingLayoutKind::Buffer {
+                        ty: BufferBindingType::Storage,
+                        ..
+                    } => ResourceAccess::Write,
+                    _ => unreachable!("buffer resource must have buffer binding layout"),
+                };
                 let dynamic_offset = dynamic_entries
                     .iter()
                     .position(|binding| *binding == entry.binding)
@@ -976,7 +979,25 @@ pub(crate) fn collect_bind_group_usage(
             (
                 BindGroupResource::TextureView { texture_view, .. },
                 BindingLayoutKind::Texture { .. } | BindingLayoutKind::StorageTexture { .. },
-            ) => texture_uses.push(texture_scope_use(texture_view, access)),
+            ) => {
+                let access = match kind {
+                    BindingLayoutKind::Texture { .. }
+                    | BindingLayoutKind::StorageTexture {
+                        access: StorageTextureAccess::ReadOnly,
+                        ..
+                    } => TextureAccess::Read,
+                    BindingLayoutKind::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        ..
+                    } => TextureAccess::WriteOnlyStorage,
+                    BindingLayoutKind::StorageTexture {
+                        access: StorageTextureAccess::ReadWrite,
+                        ..
+                    } => TextureAccess::ReadWriteStorage,
+                    _ => unreachable!("texture resource must have texture binding layout"),
+                };
+                texture_uses.push(texture_scope_use(texture_view, access));
+            }
             _ => {}
         }
     }
@@ -1021,7 +1042,7 @@ pub(crate) fn validate_buffer_usage_scope_lenient(
     Ok(())
 }
 
-/// Validates texture usage scope and returns a descriptive error on failure.
+/// Validates strict texture usage scope and returns a descriptive error on failure.
 pub(crate) fn validate_texture_usage_scope(texture_uses: &[TextureScopeUse]) -> Result<(), String> {
     for (index, current) in texture_uses.iter().enumerate() {
         for previous in &texture_uses[..index] {
@@ -1031,7 +1052,7 @@ pub(crate) fn validate_texture_usage_scope(texture_uses: &[TextureScopeUse]) -> 
             {
                 continue;
             }
-            if current.access == ResourceAccess::Write || previous.access == ResourceAccess::Write {
+            if !current.access.compatible_in_compute_scope(previous.access) {
                 return Err(
                     "usage scope cannot read and write or write the same texture subresource twice"
                         .to_owned(),
@@ -1042,7 +1063,8 @@ pub(crate) fn validate_texture_usage_scope(texture_uses: &[TextureScopeUse]) -> 
     Ok(())
 }
 
-/// Validates texture usage scope allowing write/write overlap across render draws.
+/// Validates texture usage scope allowing same-kind storage writes in render scopes.
+#[allow(dead_code)]
 pub(crate) fn validate_texture_usage_scope_lenient(
     texture_uses: &[TextureScopeUse],
 ) -> Result<(), String> {
@@ -1054,7 +1076,7 @@ pub(crate) fn validate_texture_usage_scope_lenient(
             {
                 continue;
             }
-            if current.access != previous.access {
+            if !current.access.compatible_in_render_scope(previous.access) {
                 return Err(
                     "usage scope cannot read and write or write the same texture subresource twice"
                         .to_owned(),
@@ -1067,7 +1089,7 @@ pub(crate) fn validate_texture_usage_scope_lenient(
 
 pub(crate) fn texture_scope_use(
     texture_view: &TextureView,
-    access: ResourceAccess,
+    access: TextureAccess,
 ) -> TextureScopeUse {
     TextureScopeUse {
         texture: texture_view.texture(),
@@ -1083,7 +1105,7 @@ pub(crate) fn texture_scope_use(
 
 pub(crate) fn texture_attachment_scope_use(
     texture_view: &TextureView,
-    access: ResourceAccess,
+    access: TextureAccess,
     aspects: TextureAspectMask,
     depth_slice: Option<u32>,
 ) -> TextureScopeUse {
@@ -1482,7 +1504,7 @@ mod tests {
         base_array_layer: u32,
         array_layer_count: u32,
         aspects: TextureAspectMask,
-        access: ResourceAccess,
+        access: TextureAccess,
     ) -> TextureScopeUse {
         TextureScopeUse {
             texture: texture.clone(),
@@ -1827,7 +1849,7 @@ mod tests {
             0,
             1,
             TextureAspectMask::COLOR,
-            ResourceAccess::Write,
+            TextureAccess::WriteOnlyStorage,
         );
         let read_mip1 = texture_use(
             &texture,
@@ -1836,7 +1858,7 @@ mod tests {
             0,
             1,
             TextureAspectMask::COLOR,
-            ResourceAccess::Read,
+            TextureAccess::Read,
         );
         let read_layer1 = texture_use(
             &texture,
@@ -1845,7 +1867,7 @@ mod tests {
             1,
             1,
             TextureAspectMask::COLOR,
-            ResourceAccess::Read,
+            TextureAccess::Read,
         );
         let read_stencil = texture_use(
             &texture,
@@ -1854,7 +1876,7 @@ mod tests {
             0,
             1,
             TextureAspectMask::STENCIL,
-            ResourceAccess::Read,
+            TextureAccess::Read,
         );
 
         assert_eq!(
@@ -1874,7 +1896,7 @@ mod tests {
             0,
             1,
             TextureAspectMask::COLOR,
-            ResourceAccess::Read,
+            TextureAccess::Read,
         );
         assert_eq!(
             validate_texture_usage_scope(&[write_mip0, read_same_subresource]),
@@ -1895,7 +1917,7 @@ mod tests {
             0,
             1,
             TextureAspectMask::COLOR,
-            ResourceAccess::Write,
+            TextureAccess::AttachmentWrite,
         );
         write_slice0.depth_slice = Some(0);
         let mut write_slice1 = texture_use(
@@ -1905,7 +1927,7 @@ mod tests {
             0,
             1,
             TextureAspectMask::COLOR,
-            ResourceAccess::Write,
+            TextureAccess::AttachmentWrite,
         );
         write_slice1.depth_slice = Some(1);
         assert_eq!(
@@ -1920,7 +1942,7 @@ mod tests {
             0,
             1,
             TextureAspectMask::COLOR,
-            ResourceAccess::Write,
+            TextureAccess::AttachmentWrite,
         );
         write_same_slice.depth_slice = Some(0);
         let expected = Err(
@@ -1939,7 +1961,7 @@ mod tests {
             0,
             1,
             TextureAspectMask::COLOR,
-            ResourceAccess::Read,
+            TextureAccess::Read,
         );
         assert_eq!(
             validate_texture_usage_scope(&[write_slice0, read_whole_range]),
@@ -1951,7 +1973,7 @@ mod tests {
     }
 
     #[test]
-    fn texture_usage_scope_allows_read_only_overlap_but_rejects_write_write() {
+    fn texture_usage_scope_uses_texture_access_compatibility() {
         let texture = noop_texture();
         let read_a = texture_use(
             &texture,
@@ -1960,7 +1982,7 @@ mod tests {
             0,
             1,
             TextureAspectMask::COLOR,
-            ResourceAccess::Read,
+            TextureAccess::Read,
         );
         let read_b = texture_use(
             &texture,
@@ -1969,24 +1991,120 @@ mod tests {
             0,
             1,
             TextureAspectMask::COLOR,
-            ResourceAccess::Read,
+            TextureAccess::Read,
         );
         assert_eq!(
             validate_texture_usage_scope(&[read_a.clone(), read_b]),
             Ok(())
         );
 
-        let write = texture_use(
+        let storage_write_a = texture_use(
             &texture,
             0,
             1,
             0,
             1,
             TextureAspectMask::COLOR,
-            ResourceAccess::Write,
+            TextureAccess::WriteOnlyStorage,
+        );
+        let storage_write_b = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            TextureAccess::WriteOnlyStorage,
         );
         assert_eq!(
-            validate_texture_usage_scope(&[read_a, write]),
+            validate_texture_usage_scope(&[storage_write_a.clone(), storage_write_b.clone()]),
+            Err(
+                "usage scope cannot read and write or write the same texture subresource twice"
+                    .to_owned()
+            )
+        );
+        let readwrite_storage_a = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            TextureAccess::ReadWriteStorage,
+        );
+        let readwrite_storage_b = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            TextureAccess::ReadWriteStorage,
+        );
+        assert_eq!(
+            validate_texture_usage_scope(&[
+                readwrite_storage_a.clone(),
+                readwrite_storage_b.clone()
+            ]),
+            Err(
+                "usage scope cannot read and write or write the same texture subresource twice"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            validate_texture_usage_scope_lenient(&[storage_write_a.clone(), storage_write_b]),
+            Ok(())
+        );
+        assert_eq!(
+            validate_texture_usage_scope_lenient(&[
+                readwrite_storage_a.clone(),
+                readwrite_storage_b
+            ]),
+            Ok(())
+        );
+
+        assert_eq!(
+            validate_texture_usage_scope(&[read_a, storage_write_a.clone()]),
+            Err(
+                "usage scope cannot read and write or write the same texture subresource twice"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            validate_texture_usage_scope(&[storage_write_a.clone(), readwrite_storage_a]),
+            Err(
+                "usage scope cannot read and write or write the same texture subresource twice"
+                    .to_owned()
+            )
+        );
+
+        let attachment_write_a = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            TextureAccess::AttachmentWrite,
+        );
+        let attachment_write_b = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            TextureAccess::AttachmentWrite,
+        );
+        assert_eq!(
+            validate_texture_usage_scope(&[storage_write_a, attachment_write_a.clone()]),
+            Err(
+                "usage scope cannot read and write or write the same texture subresource twice"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            validate_texture_usage_scope(&[attachment_write_a, attachment_write_b]),
             Err(
                 "usage scope cannot read and write or write the same texture subresource twice"
                     .to_owned()
