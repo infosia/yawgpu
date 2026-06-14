@@ -854,12 +854,9 @@ pub(super) fn create_graphics_pipeline(
     let binding_descriptions = descriptor
         .vertex_buffers
         .iter()
-        .enumerate()
-        .map(|(slot, layout)| {
-            let slot =
-                u32::try_from(slot).map_err(|_| shader_error("vertex buffer slot is too large"))?;
+        .map(|layout| {
             Ok(vk::VertexInputBindingDescription::default()
-                .binding(slot)
+                .binding(layout.slot)
                 .stride(
                     u32::try_from(layout.array_stride)
                         .map_err(|_| shader_error("vertex array stride is too large"))?,
@@ -871,14 +868,12 @@ pub(super) fn create_graphics_pipeline(
         })
         .collect::<Result<Vec<_>, HalError>>()?;
     let mut attribute_descriptions = Vec::new();
-    for (slot, layout) in descriptor.vertex_buffers.iter().enumerate() {
-        let slot =
-            u32::try_from(slot).map_err(|_| shader_error("vertex buffer slot is too large"))?;
+    for layout in &descriptor.vertex_buffers {
         for attribute in &layout.attributes {
             attribute_descriptions.push(
                 vk::VertexInputAttributeDescription::default()
                     .location(attribute.shader_location)
-                    .binding(slot)
+                    .binding(layout.slot)
                     .format(map_vertex_format(attribute.format)?)
                     .offset(
                         u32::try_from(attribute.offset)

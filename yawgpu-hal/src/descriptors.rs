@@ -178,6 +178,8 @@ pub struct HalStencilFaceState {
 /// Stores layout metadata.
 #[derive(Debug, Clone)]
 pub struct HalVertexBufferLayout {
+    /// Original WebGPU vertex buffer slot.
+    pub slot: u32,
     /// Array stride.
     pub array_stride: u64,
     /// Step mode.

@@ -758,6 +758,21 @@ mod tests {
     }
 
     #[test]
+    fn render_pass_zero_stride_vertex_buffer_oob_uses_one_element() {
+        let device = noop_device();
+        let pipeline = zero_stride_vertex_render_pipeline(&device);
+
+        let error = draw_with_padded_vertex_buffer_size(&device, pipeline.clone(), 8);
+        assert_eq!(error, None);
+
+        let error = draw_with_padded_vertex_buffer_size(&device, pipeline, 7);
+        assert_eq!(
+            error,
+            Some("render pass draw vertex buffer range exceeds the bound buffer".to_owned())
+        );
+    }
+
+    #[test]
     fn render_pass_encoder_allows_storage_buffer_write_write_across_draws() {
         let device = noop_device();
         let pipeline = storage_write_render_pipeline(&device);
@@ -1667,7 +1682,24 @@ fn fs() -> @location(0) vec4f {
         let mut descriptor = render_pipeline_descriptor(module);
         descriptor.vertex.buffer_count = 1;
         descriptor.vertex.buffers = vec![VertexBufferLayout {
+            used: true,
             array_stride: 32,
+            step_mode: VertexStepMode::Vertex,
+            attributes: vec![VertexAttribute {
+                format: VertexFormat::from_raw(0x0000_001D),
+                offset: 0,
+                shader_location: 0,
+            }],
+        }];
+        Arc::new(device.create_render_pipeline(descriptor))
+    }
+
+    fn zero_stride_vertex_render_pipeline(device: &Device) -> Arc<RenderPipeline> {
+        let mut descriptor = render_pipeline_descriptor(render_shader_module(device));
+        descriptor.vertex.buffer_count = 1;
+        descriptor.vertex.buffers = vec![VertexBufferLayout {
+            used: true,
+            array_stride: 0,
             step_mode: VertexStepMode::Vertex,
             attributes: vec![VertexAttribute {
                 format: VertexFormat::from_raw(0x0000_001D),

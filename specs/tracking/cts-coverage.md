@@ -1836,3 +1836,30 @@ PY
   yawgpu-core --lib 299, yawgpu --lib 147. workspace test exit 0; clippy clean (incl. tiled). Implemented via codex.
 - **F-093 REMAINING (open):** (b) render,draw — sparse (gap) vertex-buffer slots over-rejected as "error render bundle"
   (~11990); multi-layer (conv gap detection + core unused-slot repr + draw validation + Metal/Vulkan HAL vertex binding).
+
+## F-093(b) — sparse (unused) vertex-buffer slots — RESOLVED (F-093 COMPLETE)
+
+- **Finding (F-093 sub-gap b, the last):** `api,validation,encoding,cmds,render,draw:{vertex_buffer_OOB,
+  buffer_binding_overlap}` failed ~11990 cases (Metal == MoltenVK), surfacing as "render pass cannot execute an
+  error render bundle" (the bundle path; render-pass path masked behind it). Real error: "render pass draw
+  requires all declared vertex buffers to be set".
+- **Root cause:** WebGPU `GPUVertexState.buffers` may contain UNUSED/gap slots (stepMode Undefined + 0 attributes).
+  The test pipeline declares 8 slots with gaps at 0,2-6 and real buffers at slots 1,7. yawgpu (1) lost the gap
+  signal in conv (`map_vertex_step_mode` Undefined→Vertex), (2) `validate_render_draw_base_state` demanded a bound
+  vertex buffer for every slot 0..N (incl. gaps), (3) the HAL emitted gap layouts (Metal aborts on stride-0).
+  Plus a latent under-validation: `validate_vertex_buffer_oob` skipped zero-array-stride buffers entirely.
+- **Fix (multi-layer):** core `VertexBufferLayout` gains `used: bool` (false = gap; KEEPS array_stride so creation
+  still validates the arrayStride limit/alignment for every entry); conv marks `stepMode==Undefined && 0 attributes`
+  as `used:false` preserving the native stride; `validate_render_draw_base_state` requires bound buffers only for
+  used slots; `validate_vertex_buffer_oob` skips only unused slots and no longer skips zero-array-stride used
+  buffers (required size = last_stride); HAL descriptor build (Metal binding map / MSL / Vulkan binding+attribute
+  descriptions) emits only used slots, preserving each used slot's WebGPU index as the binding index.
+- **Verification (Metal == MoltenVK):** render,draw 15708 pass / 2 fail — the 2 are `index_buffer_format_dirtying`,
+  a documented yawgpu-is-stricter-than-Dawn divergence (NOT a defect, left as-is). vertex_state 28151/0 (no
+  regression from the representation change); robust_access 1068/0. Real-GPU e2e_metal draw/render/point 3/1/3.
+  yawgpu-core --lib 305, yawgpu --lib 148, HAL metal 70 / vulkan 98. workspace test exit 0; clippy clean (incl tiled).
+  Implemented via codex (two follow-up rounds: zero-stride OOB, then dense+used repr to keep creation stride
+  validation).
+- **F-093 COMPLETE:** (a) compressed copy bounds, (b) sparse vertex slots, (c) pass after-end timing, (d) auto-layout
+  exclusive-pipeline compatibility — all resolved. Residual `index_buffer_format_dirtying` (2) is a Dawn-leniency,
+  not a yawgpu defect.

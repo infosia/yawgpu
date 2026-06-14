@@ -2416,7 +2416,15 @@ mod tests {
             ],
         );
         let bindings = metal_buffer_binding_map(&[layout]);
-        let vb_bindings = metal_vertex_buffer_binding_map(1, &bindings);
+        let vb_bindings = metal_vertex_buffer_binding_map(
+            &[crate::VertexBufferLayout {
+                used: true,
+                array_stride: 4,
+                step_mode: crate::VertexStepMode::Vertex,
+                attributes: Vec::new(),
+            }],
+            &bindings,
+        );
         // The one vertex buffer should start at Metal buffer slot 2.
         assert_eq!(vb_bindings[0].metal_index, 2);
     }

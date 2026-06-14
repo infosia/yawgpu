@@ -18,8 +18,18 @@ unsafe fn map_vertex_buffers(
     std::slice::from_raw_parts(vertex.buffers, vertex.bufferCount)
         .iter()
         .map(|buffer| {
+            if buffer.stepMode == native::WGPUVertexStepMode_Undefined && buffer.attributeCount == 0
+            {
+                return core::VertexBufferLayout {
+                    used: false,
+                    array_stride: buffer.arrayStride,
+                    step_mode: core::VertexStepMode::Vertex,
+                    attributes: Vec::new(),
+                };
+            }
             let attributes = map_vertex_attributes(buffer, error);
             core::VertexBufferLayout {
+                used: true,
                 array_stride: buffer.arrayStride,
                 step_mode: map_vertex_step_mode(buffer.stepMode, error),
                 attributes,

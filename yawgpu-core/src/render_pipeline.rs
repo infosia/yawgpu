@@ -95,6 +95,12 @@ pub struct RenderPipelineVertexState {
 /// Stores layout metadata.
 #[derive(Debug, Clone)]
 pub struct VertexBufferLayout {
+    /// True when this slot is a used vertex buffer layout.
+    ///
+    /// False marks a WebGPU unused/gap slot: stepMode Undefined with no
+    /// attributes. Its arrayStride is still creation-validated, but the slot
+    /// requires no bound buffer and is not emitted to the HAL.
+    pub used: bool,
     /// Array stride.
     pub array_stride: u64,
     /// Step mode.
@@ -559,7 +565,7 @@ impl RenderPipeline {
             });
         let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
         let vertex_buffer_bindings =
-            metal_vertex_buffer_binding_map(descriptor.vertex.buffer_count, &metal_bindings);
+            metal_vertex_buffer_binding_map(&descriptor.vertex.buffers, &metal_bindings);
         let (hal, backend_error) = if is_error {
             (None, None)
         } else {
@@ -651,7 +657,7 @@ impl RenderPipeline {
             });
         let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
         let vertex_buffer_bindings =
-            metal_vertex_buffer_binding_map(descriptor.base.vertex.buffer_count, &metal_bindings);
+            metal_vertex_buffer_binding_map(&descriptor.base.vertex.buffers, &metal_bindings);
         let (hal, backend_error) = if is_error {
             (None, None)
         } else {
@@ -1360,15 +1366,20 @@ pub(crate) fn msl_stage_resource_bindings(
 /// bind-group layout (i.e. `vertex_stage_buffer_count(metal_bindings)`), not
 /// after the total number of entries in the flat binding list.
 pub(crate) fn metal_vertex_buffer_binding_map(
-    vertex_buffer_count: usize,
+    layouts: &[VertexBufferLayout],
     metal_bindings: &[MetalBufferBinding],
 ) -> Vec<MetalVertexBufferBinding> {
     let start = vertex_stage_buffer_count(metal_bindings);
-    (0..vertex_buffer_count)
+    layouts
+        .iter()
+        .enumerate()
+        .filter(|(_, layout)| layout.used)
+        .enumerate()
         .filter_map(|slot| {
+            let (metal_slot, (slot, _)) = slot;
             Some(MetalVertexBufferBinding {
                 slot: u32::try_from(slot).ok()?,
-                metal_index: u32::try_from(start.checked_add(slot)?).ok()?,
+                metal_index: u32::try_from(start.checked_add(metal_slot)?).ok()?,
             })
         })
         .collect()
@@ -1381,6 +1392,7 @@ pub(crate) fn msl_vertex_buffer_bindings(
 ) -> Result<Vec<shader_naga::MslVertexBufferBinding>, String> {
     layouts
         .iter()
+        .filter(|layout| layout.used)
         .zip(bindings)
         .map(|(layout, binding)| {
             Ok(shader_naga::MslVertexBufferBinding {
@@ -1434,9 +1446,11 @@ pub(crate) fn hal_render_pipeline_descriptor(
         .vertex
         .buffers
         .iter()
+        .filter(|layout| layout.used)
         .zip(bindings)
         .map(|(layout, binding)| {
             Ok(HalVertexBufferLayout {
+                slot: binding.slot,
                 array_stride: layout.array_stride,
                 step_mode: match layout.step_mode {
                     VertexStepMode::Vertex => HalVertexStepMode::Vertex,
@@ -3144,6 +3158,132 @@ mod tests {
 
         let hal = hal_render_pipeline_descriptor(&descriptor, &[]).expect("HAL render descriptor");
         assert_eq!(hal.sample_count, 4);
+    }
+
+    #[test]
+    fn vertex_buffer_binding_and_hal_descriptor_skip_unused_slots() {
+        let device = noop_device();
+        let module = render_shader_module(&device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.vertex.buffer_count = 8;
+        descriptor.vertex.buffers = vec![
+            VertexBufferLayout {
+                used: false,
+                array_stride: 0,
+                step_mode: VertexStepMode::Vertex,
+                attributes: Vec::new(),
+            },
+            VertexBufferLayout {
+                used: true,
+                array_stride: 8,
+                step_mode: VertexStepMode::Vertex,
+                attributes: vec![VertexAttribute {
+                    format: VertexFormat::from_raw(0x0000_001D),
+                    offset: 0,
+                    shader_location: 2,
+                }],
+            },
+            VertexBufferLayout {
+                used: false,
+                array_stride: 0,
+                step_mode: VertexStepMode::Vertex,
+                attributes: Vec::new(),
+            },
+            VertexBufferLayout {
+                used: false,
+                array_stride: 0,
+                step_mode: VertexStepMode::Vertex,
+                attributes: Vec::new(),
+            },
+            VertexBufferLayout {
+                used: false,
+                array_stride: 0,
+                step_mode: VertexStepMode::Vertex,
+                attributes: Vec::new(),
+            },
+            VertexBufferLayout {
+                used: false,
+                array_stride: 0,
+                step_mode: VertexStepMode::Vertex,
+                attributes: Vec::new(),
+            },
+            VertexBufferLayout {
+                used: false,
+                array_stride: 0,
+                step_mode: VertexStepMode::Vertex,
+                attributes: Vec::new(),
+            },
+            VertexBufferLayout {
+                used: true,
+                array_stride: 16,
+                step_mode: VertexStepMode::Instance,
+                attributes: vec![VertexAttribute {
+                    format: VertexFormat::from_raw(0x0000_001D),
+                    offset: 0,
+                    shader_location: 6,
+                }],
+            },
+        ];
+        let bindings = metal_vertex_buffer_binding_map(&descriptor.vertex.buffers, &[]);
+        assert_eq!(
+            bindings
+                .iter()
+                .map(|binding| (binding.slot, binding.metal_index))
+                .collect::<Vec<_>>(),
+            vec![(1, 0), (7, 1)]
+        );
+
+        let msl = msl_vertex_buffer_bindings(&descriptor.vertex.buffers, &bindings)
+            .expect("MSL vertex buffers");
+        assert_eq!(msl.len(), 2);
+        assert_eq!(msl[0].slot, 1);
+        assert_eq!(msl[1].slot, 7);
+
+        let hal =
+            hal_render_pipeline_descriptor(&descriptor, &bindings).expect("HAL render descriptor");
+        assert_eq!(hal.vertex_buffers.len(), 2);
+        assert_eq!(hal.vertex_buffers[0].slot, 1);
+        assert_eq!(hal.vertex_buffers[0].attributes[0].metal_buffer_index, 0);
+        assert_eq!(hal.vertex_buffers[1].slot, 7);
+        assert_eq!(hal.vertex_buffers[1].attributes[0].metal_buffer_index, 1);
+    }
+
+    #[test]
+    fn unused_vertex_buffer_slots_still_validate_array_stride_limit() {
+        let device = noop_device();
+        let module = render_shader_module(&device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.vertex.buffer_count = 1;
+        descriptor.vertex.buffers = vec![VertexBufferLayout {
+            used: false,
+            array_stride: u64::from(device.limits().max_vertex_buffer_array_stride) + 4,
+            step_mode: VertexStepMode::Vertex,
+            attributes: Vec::new(),
+        }];
+
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            Some("render pipeline vertex buffer arrayStride exceeds the device limit".to_owned())
+        );
+    }
+
+    #[test]
+    fn unused_vertex_buffer_slots_still_validate_array_stride_alignment() {
+        let device = noop_device();
+        let module = render_shader_module(&device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.vertex.buffer_count = 1;
+        descriptor.vertex.buffers = vec![VertexBufferLayout {
+            used: false,
+            array_stride: 2,
+            step_mode: VertexStepMode::Vertex,
+            attributes: Vec::new(),
+        }];
+
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            Some("render pipeline vertex buffer arrayStride must be a multiple of 4".to_owned())
+        );
     }
 
     #[test]

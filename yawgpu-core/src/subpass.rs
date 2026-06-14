@@ -708,7 +708,10 @@ fn validate_subpass_vertex_state(
     if pipeline.is_error() {
         return Err("subpass render pass draw requires a valid render pipeline".to_owned());
     }
-    for slot in 0..pipeline.required_vertex_buffer_count() {
+    for (slot, layout) in pipeline.vertex_buffer_layouts().iter().enumerate() {
+        if !layout.used {
+            continue;
+        }
         let slot = u32::try_from(slot)
             .map_err(|_| "render pipeline vertex buffer slot is too large".to_owned())?;
         if !state.vertex_buffers.contains_key(&slot) {
