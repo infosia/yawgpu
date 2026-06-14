@@ -422,7 +422,14 @@ pub(crate) fn validate_render_draw_base_state(
     }
     validate_draw_time_bind_groups_plus_vertex_buffers(state, limits)?;
     validate_pipeline_bind_groups(pipeline.bind_group_layouts(), &state.bind_groups, limits)?;
-    for slot in 0..pipeline.required_vertex_buffer_count() {
+    debug_assert_eq!(
+        pipeline.vertex_buffer_layouts().len(),
+        pipeline.required_vertex_buffer_count()
+    );
+    for (slot, layout) in pipeline.vertex_buffer_layouts().iter().enumerate() {
+        if !layout.used {
+            continue;
+        }
         let slot = u32::try_from(slot)
             .map_err(|_| "render pipeline vertex buffer slot is too large".to_owned())?;
         if !state.vertex_buffers.contains_key(&slot) {
@@ -590,7 +597,7 @@ pub(crate) fn validate_vertex_buffer_oob(
     instance_count: u32,
 ) -> Result<(), String> {
     for (slot, layout) in pipeline.vertex_buffer_layouts().iter().enumerate() {
-        if layout.array_stride == 0 {
+        if !layout.used {
             continue;
         }
         let stride_count = match layout.step_mode {
@@ -1418,8 +1425,9 @@ mod tests {
     use super::*;
     use crate::test_helpers::{
         empty_bind_group, noop_device, noop_render_attachment, noop_render_pass_descriptor,
-        noop_render_pipeline, noop_texture,
+        noop_render_pipeline, noop_texture, render_pipeline_descriptor, render_shader_module,
     };
+    use crate::Device;
 
     use std::sync::Arc;
 
@@ -1455,6 +1463,128 @@ mod tests {
                 min_binding_size: 16,
             }),
         }
+    }
+
+    fn pass_state_with_pipeline(
+        device: &Device,
+        pipeline: Arc<RenderPipeline>,
+    ) -> PassEncoderState {
+        let mut state = PassEncoderState::new(
+            device.limits(),
+            PassEncoderInit {
+                attachment_signature: None,
+                render_extent: None,
+                attachment_textures: Vec::new(),
+                render_color_attachments: Vec::new(),
+                render_depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                max_draw_count: u64::MAX,
+            },
+        );
+        state.render_pipeline = Some(pipeline);
+        state
+    }
+
+    fn vertex_buffer_binding(buffer: Arc<Buffer>, size: u64) -> BoundVertexBuffer {
+        BoundVertexBuffer {
+            buffer,
+            offset: 0,
+            size,
+        }
+    }
+
+    fn sparse_vertex_pipeline(device: &Device) -> Arc<RenderPipeline> {
+        let module = render_shader_module(device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.vertex.buffer_count = 8;
+        descriptor.vertex.buffers = vec![
+            VertexBufferLayout {
+                used: false,
+                array_stride: 0,
+                step_mode: VertexStepMode::Vertex,
+                attributes: Vec::new(),
+            },
+            VertexBufferLayout {
+                used: true,
+                array_stride: 8,
+                step_mode: VertexStepMode::Vertex,
+                attributes: vec![VertexAttribute {
+                    format: VertexFormat::from_raw(0x0000_001D),
+                    offset: 0,
+                    shader_location: 2,
+                }],
+            },
+            VertexBufferLayout {
+                used: false,
+                array_stride: 0,
+                step_mode: VertexStepMode::Vertex,
+                attributes: Vec::new(),
+            },
+            VertexBufferLayout {
+                used: false,
+                array_stride: 0,
+                step_mode: VertexStepMode::Vertex,
+                attributes: Vec::new(),
+            },
+            VertexBufferLayout {
+                used: false,
+                array_stride: 0,
+                step_mode: VertexStepMode::Vertex,
+                attributes: Vec::new(),
+            },
+            VertexBufferLayout {
+                used: false,
+                array_stride: 0,
+                step_mode: VertexStepMode::Vertex,
+                attributes: Vec::new(),
+            },
+            VertexBufferLayout {
+                used: false,
+                array_stride: 0,
+                step_mode: VertexStepMode::Vertex,
+                attributes: Vec::new(),
+            },
+            VertexBufferLayout {
+                used: true,
+                array_stride: 8,
+                step_mode: VertexStepMode::Instance,
+                attributes: vec![VertexAttribute {
+                    format: VertexFormat::from_raw(0x0000_001D),
+                    offset: 0,
+                    shader_location: 6,
+                }],
+            },
+        ];
+        Arc::new(device.create_render_pipeline(descriptor))
+    }
+
+    fn contiguous_vertex_pipeline(device: &Device) -> Arc<RenderPipeline> {
+        let module = render_shader_module(device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.vertex.buffer_count = 2;
+        descriptor.vertex.buffers = vec![
+            VertexBufferLayout {
+                used: true,
+                array_stride: 8,
+                step_mode: VertexStepMode::Vertex,
+                attributes: vec![VertexAttribute {
+                    format: VertexFormat::from_raw(0x0000_001D),
+                    offset: 0,
+                    shader_location: 0,
+                }],
+            },
+            VertexBufferLayout {
+                used: true,
+                array_stride: 8,
+                step_mode: VertexStepMode::Vertex,
+                attributes: vec![VertexAttribute {
+                    format: VertexFormat::from_raw(0x0000_001D),
+                    offset: 0,
+                    shader_location: 1,
+                }],
+            },
+        ];
+        Arc::new(device.create_render_pipeline(descriptor))
     }
 
     #[test]
@@ -1765,6 +1895,62 @@ mod tests {
                 "render pass draw bind group plus vertex buffer count exceeds the device limit"
                     .to_owned()
             )
+        );
+    }
+
+    #[test]
+    fn sparse_vertex_buffer_slots_require_only_used_bindings() {
+        let device = noop_device();
+        let pipeline = sparse_vertex_pipeline(&device);
+        assert!(!pipeline.is_error());
+        let vertex_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::VERTEX,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let instance_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::VERTEX,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let mut state = pass_state_with_pipeline(&device, Arc::clone(&pipeline));
+        state
+            .vertex_buffers
+            .insert(1, vertex_buffer_binding(vertex_buffer, 16));
+        state
+            .vertex_buffers
+            .insert(7, vertex_buffer_binding(instance_buffer, 16));
+
+        assert_eq!(
+            validate_render_draw_base_state(&state, device.limits(), false).map(|_| ()),
+            Ok(())
+        );
+        assert_eq!(
+            validate_vertex_buffer_oob(&pipeline, &state, Some((0, 2)), 0, 2),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn contiguous_vertex_buffer_slots_still_require_each_binding() {
+        let device = noop_device();
+        let pipeline = contiguous_vertex_pipeline(&device);
+        assert!(!pipeline.is_error());
+        let vertex_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::VERTEX,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let mut state = pass_state_with_pipeline(&device, pipeline);
+        state
+            .vertex_buffers
+            .insert(0, vertex_buffer_binding(vertex_buffer, 16));
+
+        assert_eq!(
+            validate_render_draw_base_state(&state, device.limits(), false)
+                .map(|_| ())
+                .expect_err("missing contiguous vertex slot"),
+            "render pass draw requires all declared vertex buffers to be set"
         );
     }
 }

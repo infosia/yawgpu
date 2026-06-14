@@ -1691,6 +1691,7 @@ mod tests {
         let mapped = unsafe { map_render_pipeline_descriptor(&descriptor) };
         assert_eq!(mapped.vertex.shader.entry_point.as_deref(), Some("vs_main"));
         assert_eq!(mapped.vertex.buffer_count, 1);
+        assert!(mapped.vertex.buffers[0].used);
         assert_eq!(mapped.vertex.buffers[0].array_stride, 8);
         assert_eq!(mapped.fragment.as_ref().expect("fragment").target_count, 1);
         assert_eq!(mapped.error, None);
@@ -1708,6 +1709,104 @@ mod tests {
             .error
             .expect("error")
             .contains("vertex buffers"));
+        unsafe { release_handle(shader, "WGPUShaderModule") };
+    }
+
+    #[test]
+    fn map_render_pipeline_descriptor_preserves_sparse_vertex_buffer_slots() {
+        let device = device_impl();
+        let shader = shader_module_handle(&device);
+        let vertex_attribute = native::WGPUVertexAttribute {
+            nextInChain: std::ptr::null_mut(),
+            format: native::WGPUVertexFormat_Float32x2,
+            offset: 0,
+            shaderLocation: 2,
+        };
+        let instance_attribute = native::WGPUVertexAttribute {
+            nextInChain: std::ptr::null_mut(),
+            format: native::WGPUVertexFormat_Float32x2,
+            offset: 0,
+            shaderLocation: 6,
+        };
+        let gap = native::WGPUVertexBufferLayout {
+            nextInChain: std::ptr::null_mut(),
+            stepMode: native::WGPUVertexStepMode_Undefined,
+            arrayStride: 12,
+            attributeCount: 0,
+            attributes: std::ptr::null(),
+        };
+        let vertex_buffer = native::WGPUVertexBufferLayout {
+            nextInChain: std::ptr::null_mut(),
+            stepMode: native::WGPUVertexStepMode_Vertex,
+            arrayStride: 8,
+            attributeCount: 1,
+            attributes: &vertex_attribute,
+        };
+        let instance_buffer = native::WGPUVertexBufferLayout {
+            nextInChain: std::ptr::null_mut(),
+            stepMode: native::WGPUVertexStepMode_Instance,
+            arrayStride: 8,
+            attributeCount: 1,
+            attributes: &instance_attribute,
+        };
+        let vertex_buffers = [gap, vertex_buffer, gap, gap, gap, gap, gap, instance_buffer];
+        let color_target = native::WGPUColorTargetState {
+            nextInChain: std::ptr::null_mut(),
+            format: native::WGPUTextureFormat_RGBA8Unorm,
+            blend: std::ptr::null(),
+            writeMask: native::WGPUColorWriteMask_All,
+        };
+        let fragment = native::WGPUFragmentState {
+            nextInChain: std::ptr::null_mut(),
+            module: shader,
+            entryPoint: string_view(b"fs_main"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            targetCount: 1,
+            targets: &color_target,
+        };
+        let descriptor = native::WGPURenderPipelineDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            layout: std::ptr::null(),
+            vertex: native::WGPUVertexState {
+                nextInChain: std::ptr::null_mut(),
+                module: shader,
+                entryPoint: string_view(b"vs_main"),
+                constantCount: 0,
+                constants: std::ptr::null(),
+                bufferCount: vertex_buffers.len(),
+                buffers: vertex_buffers.as_ptr(),
+            },
+            primitive: primitive_state(),
+            depthStencil: std::ptr::null(),
+            multisample: native::WGPUMultisampleState {
+                nextInChain: std::ptr::null_mut(),
+                count: 1,
+                mask: u32::MAX,
+                alphaToCoverageEnabled: 0,
+            },
+            fragment: &fragment,
+        };
+
+        let mapped = unsafe { map_render_pipeline_descriptor(&descriptor) };
+
+        assert_eq!(mapped.vertex.buffer_count, 8);
+        assert_eq!(mapped.vertex.buffers.len(), 8);
+        assert!(!mapped.vertex.buffers[0].used);
+        assert!(mapped.vertex.buffers[2..7]
+            .iter()
+            .all(|buffer| !buffer.used));
+        assert_eq!(mapped.vertex.buffers[0].array_stride, 12);
+        assert!(mapped.vertex.buffers[0].attributes.is_empty());
+        assert!(mapped.vertex.buffers[1].used);
+        assert_eq!(mapped.vertex.buffers[1].attributes[0].shader_location, 2);
+        assert!(mapped.vertex.buffers[7].used);
+        assert_eq!(
+            mapped.vertex.buffers[7].step_mode,
+            core::VertexStepMode::Instance
+        );
+        assert_eq!(mapped.error, None);
         unsafe { release_handle(shader, "WGPUShaderModule") };
     }
 
