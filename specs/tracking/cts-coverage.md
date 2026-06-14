@@ -1912,3 +1912,25 @@ PY
   (was 851 fail). Regressions: resource_usages,buffer unchanged (1328/0), render_bundle 113/0, real-GPU e2e_metal
   draw 5/5 + render 3/3 + compute 3/3 + texture 7/7. yawgpu-core --lib 325, yawgpu --lib 148. workspace test exit 0;
   clippy clean (incl tiled). Implemented via codex (iterative: set-time accumulation -> 4-state access -> compute/render split).
+
+## F-103 — Vulkan HAL 3D / multi-slice buffer<->texture copy slice-stride bug — RESOLVED
+
+- **Finding:** yawgpu **Vulkan HAL** corrupted non-zero z-slices in 3D (and multi-slice/layer) buffer<->texture
+  copies — `api,operation,command_buffer,image_copy:{rowsPerImage_and_bytesPerRow,offsets_and_sizes,
+  origins_and_extents}` + the stencil8 stencil-only depth_stencil cases (~7546 fails, z=0 correct, z>=1 wrong,
+  ~43 formats). Confirmed on MoltenVK AND native Vulkan (user, 2026-06-14); Metal HAL fully green -> a genuine
+  Vulkan-HAL defect, not a MoltenVK artifact.
+- **Root cause (confirmed by instrumenting `buffer_image_copy`):** `vulkan/encode.rs::buffer_image_copy` forced
+  `bufferRowLength = 0` whenever `height_in_blocks <= 1`, ignoring depth/slices. For a multi-slice single-row copy
+  (e.g. extent {5,1,2}, bytesPerRow=256, rows_per_image=1) Vulkan then derives the row length from
+  `imageExtent.width`, so the per-slice stride became `bufferImageHeight*imageWidth*bpp` (1*5*4=20) instead of
+  `rows_per_image*bytesPerRow` (256) — z=1 read from offset 20 instead of 256. z=0 needs no stride, hence correct.
+- **Fix:** emit `bufferRowLength = 0` ONLY when single block-row AND single slice/layer
+  (`height_in_blocks <= 1 && copy.extent.depth_or_array_layers <= 1`); otherwise set the real texel row length so
+  Vulkan computes the slice/layer stride correctly. Covers 3D and 2D-array. stencil8 stencil-only is covered by the
+  same fix (its per-aspect bytes_per_pixel was already correct = 1).
+- **Verification (MoltenVK):** image_copy rowsPerImage_and_bytesPerRow 22704/0, offsets_and_sizes 56760/0,
+  origins_and_extents 49536/0, rowsPerImage_and_bytesPerRow_depth_stencil 864/0 (was ~7546 fail). 2D/2D-array copies
+  in those same areas are green (no regression). Metal HAL unchanged (Vulkan-only fix). yawgpu-hal --features vulkan
+  --lib 99/0; workspace test exit 0; clippy clean. Native-Vulkan re-confirm pending (user) but same root cause.
+  Implemented via codex.

@@ -2627,13 +2627,11 @@ pub(super) fn buffer_image_copy(
     bytes_per_pixel: u32,
     aspect: vk::ImageAspectFlags,
 ) -> Result<vk::BufferImageCopy, HalError> {
-    // Vulkan bufferRowLength is a row stride in texels and is only consulted
-    // when the copy spans more than one block-row.  When height_in_blocks <= 1
-    // the copy is single-row: pass 0 ("tightly packed") regardless of
-    // bytesPerRow — WebGPU explicitly allows non-texel-aligned bytesPerRow for
-    // single-row copies and Vulkan ignores bufferRowLength in that case.
+    // Vulkan derives the slice stride from bufferRowLength and
+    // bufferImageHeight.  The tightly-packed shortcut is only valid for a
+    // single block-row within a single slice.
     let height_in_blocks = div_ceil_u32(copy.extent.height, texture_block_height(copy));
-    let buffer_row_length = if height_in_blocks <= 1 {
+    let buffer_row_length = if height_in_blocks <= 1 && copy.extent.depth_or_array_layers <= 1 {
         0
     } else {
         let row_length = buffer_row_length(copy.buffer_layout.bytes_per_row, bytes_per_pixel)?;
@@ -2895,6 +2893,11 @@ mod tests {
             1
         );
         assert_eq!(
+            aspect_bytes_per_pixel(HalTextureFormat::Stencil8, HalTextureAspect::StencilOnly, 4,)
+                .expect("stencil8 byte size"),
+            1
+        );
+        assert_eq!(
             aspect_bytes_per_pixel(
                 HalTextureFormat::Depth16Unorm,
                 HalTextureAspect::DepthOnly,
@@ -3060,6 +3063,62 @@ mod tests {
             region.buffer_row_length, 0,
             "single-row copy must use tightly-packed (0) bufferRowLength"
         );
+    }
+
+    /// A single-row multi-slice 3D copy must keep the row length so Vulkan
+    /// computes the correct per-slice stride from bufferImageHeight *
+    /// bufferRowLength.
+    #[test]
+    fn buffer_image_copy_single_row_multi_slice_computes_row_length() {
+        let device = noop::NoopDevice::new();
+        let texture = dummy_vulkan_texture(HalTextureDimension::D3, HalTextureFormat::Rgba8Unorm);
+        let copy = HalBufferTextureCopy {
+            buffer: HalBuffer::Noop(
+                device
+                    .create_buffer(
+                        65536,
+                        crate::HalBufferUsage {
+                            map_read: false,
+                            map_write: false,
+                            copy_src: true,
+                            copy_dst: true,
+                            index: false,
+                            vertex: false,
+                            uniform: false,
+                            storage: false,
+                            indirect: false,
+                            query_resolve: false,
+                        },
+                    )
+                    .expect("Noop buffer allocation should succeed"),
+            ),
+            buffer_layout: HalBufferTextureLayout {
+                offset: 0,
+                bytes_per_row: 256,
+                rows_per_image: 1,
+            },
+            texture: HalTexture::Vulkan(texture.clone()),
+            format: HalTextureFormat::Rgba8Unorm,
+            aspect: HalTextureAspect::All,
+            mip_level: 0,
+            origin: HalOrigin3d { x: 0, y: 0, z: 0 },
+            extent: HalExtent3d {
+                width: 5,
+                height: 1,
+                depth_or_array_layers: 2,
+            },
+        };
+
+        let region = buffer_image_copy(
+            &copy,
+            &texture,
+            4, // rgba8unorm bytes_per_pixel
+            vk::ImageAspectFlags::COLOR,
+        )
+        .expect("single-row multi-slice copy must not error");
+
+        assert_eq!(region.buffer_row_length, 64);
+        assert_eq!(region.buffer_image_height, 1);
     }
 
     /// A multi-row copy with a texel-aligned bytesPerRow must compute
