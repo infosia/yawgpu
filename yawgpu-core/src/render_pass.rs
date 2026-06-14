@@ -169,13 +169,12 @@ impl RenderPassEncoder {
                 self.inner
                     .parent
                     .record_referenced_textures(bind_group_texture_resources(&group));
-                state.bind_groups.insert(
-                    index,
-                    BoundBindGroup {
-                        group,
-                        dynamic_offsets,
-                    },
-                );
+                let bound = BoundBindGroup {
+                    group,
+                    dynamic_offsets,
+                };
+                record_bind_group_buffer_usage_scope(state, &bound)?;
+                state.bind_groups.insert(index, bound);
             } else {
                 state.bind_groups.remove(&index);
             }
@@ -199,6 +198,15 @@ impl RenderPassEncoder {
                 self.inner
                     .parent
                     .record_referenced_buffer(Arc::clone(&buffer));
+                record_buffer_usage_scope_use(
+                    state,
+                    BufferScopeUse {
+                        buffer: Arc::clone(&buffer),
+                        offset,
+                        size,
+                        access: ResourceAccess::Read,
+                    },
+                )?;
                 state.vertex_buffers.insert(
                     slot,
                     BoundVertexBuffer {
@@ -229,6 +237,15 @@ impl RenderPassEncoder {
             self.inner
                 .parent
                 .record_referenced_buffer(Arc::clone(&buffer));
+            record_buffer_usage_scope_use(
+                state,
+                BufferScopeUse {
+                    buffer: Arc::clone(&buffer),
+                    offset,
+                    size,
+                    access: ResourceAccess::Read,
+                },
+            )?;
             state.index_buffer = Some(BoundIndexBuffer {
                 buffer,
                 format,
@@ -382,8 +399,17 @@ impl RenderPassEncoder {
             );
             let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
             let attachment_uses = state.attachment_texture_uses.clone();
-            record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
             validate_indirect_buffer(&indirect_buffer, indirect_offset, 16, "draw indirect")?;
+            record_buffer_usage_scope_use(
+                state,
+                BufferScopeUse {
+                    buffer: Arc::clone(&indirect_buffer),
+                    offset: indirect_offset,
+                    size: 16,
+                    access: ResourceAccess::Read,
+                },
+            )?;
+            record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
             self.inner
                 .parent
                 .record_referenced_buffer(Arc::clone(&indirect_buffer));
@@ -435,13 +461,22 @@ impl RenderPassEncoder {
             );
             let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
             let attachment_uses = state.attachment_texture_uses.clone();
-            record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
             validate_indirect_buffer(
                 &indirect_buffer,
                 indirect_offset,
                 20,
                 "draw indexed indirect",
             )?;
+            record_buffer_usage_scope_use(
+                state,
+                BufferScopeUse {
+                    buffer: Arc::clone(&indirect_buffer),
+                    offset: indirect_offset,
+                    size: 20,
+                    access: ResourceAccess::Read,
+                },
+            )?;
+            record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
             self.inner
                 .parent
                 .record_referenced_buffer(Arc::clone(&indirect_buffer));
@@ -898,6 +933,227 @@ mod tests {
             None
         );
         assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some(
+                "usage scope cannot read and write or write the same buffer range twice".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn render_pass_encoder_rejects_vertex_buffer_storage_write_alias() {
+        let device = noop_device();
+        let pipeline = storage_write_vertex_render_pipeline(&device);
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::VERTEX,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let bind_group = buffer_bind_group(
+            &device,
+            pipeline.bind_group_layouts()[0].clone(),
+            buffer.clone(),
+            0,
+        );
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(
+            pass.set_vertex_buffer(0, Some(buffer), 0, 32, device.limits()),
+            None
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some(
+                "usage scope cannot read and write or write the same buffer range twice".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn render_pass_encoder_allows_vertex_buffer_uniform_read_alias() {
+        let device = noop_device();
+        let pipeline = uniform_read_vertex_render_pipeline(&device);
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::UNIFORM | BufferUsage::VERTEX,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let bind_group = buffer_bind_group(
+            &device,
+            pipeline.bind_group_layouts()[0].clone(),
+            buffer.clone(),
+            0,
+        );
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(
+            pass.set_vertex_buffer(0, Some(buffer), 0, 32, device.limits()),
+            None
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+    }
+
+    #[test]
+    fn render_pass_encoder_rejects_index_buffer_storage_write_alias() {
+        let device = noop_device();
+        let pipeline = storage_write_render_pipeline(&device);
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::INDEX,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let bind_group = buffer_bind_group(
+            &device,
+            pipeline.bind_group_layouts()[0].clone(),
+            buffer.clone(),
+            0,
+        );
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(
+            pass.set_index_buffer(buffer, Some(IndexFormat::Uint16), 0, 16),
+            None
+        );
+        assert_eq!(pass.draw_indexed(3, 1, 0, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some(
+                "usage scope cannot read and write or write the same buffer range twice".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn render_pass_encoder_rejects_set_time_storage_vertex_alias_without_draw() {
+        let device = noop_device();
+        let pipeline = storage_write_render_pipeline(&device);
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::VERTEX,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let bind_group = buffer_bind_group(
+            &device,
+            pipeline.bind_group_layouts()[0].clone(),
+            buffer.clone(),
+            0,
+        );
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(
+            pass.set_vertex_buffer(0, Some(buffer), 0, 32, device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some(
+                "usage scope cannot read and write or write the same buffer range twice".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn render_pass_encoder_rebinding_storage_still_counts_before_vertex_use() {
+        let device = noop_device();
+        let pipeline = storage_write_render_pipeline(&device);
+        let buffer_a = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::VERTEX,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let buffer_b = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let bind_group_a = buffer_bind_group(
+            &device,
+            pipeline.bind_group_layouts()[0].clone(),
+            buffer_a.clone(),
+            0,
+        );
+        let bind_group_b = buffer_bind_group(
+            &device,
+            pipeline.bind_group_layouts()[0].clone(),
+            buffer_b,
+            0,
+        );
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group_a), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group_b), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(
+            pass.set_vertex_buffer(0, Some(buffer_a), 0, 32, device.limits()),
+            None
+        );
         assert_eq!(pass.end(), None);
 
         let (command_buffer, error) = encoder.finish();
@@ -1864,6 +2120,50 @@ fn fs() -> @location(0) vec4<f32> {
         )
     }
 
+    fn storage_write_vertex_render_pipeline(device: &crate::device::Device) -> Arc<RenderPipeline> {
+        vertex_buffer_render_pipeline_from_shader(
+            device,
+            r"
+@group(0) @binding(0) var<storage, read_write> output_buffer: array<u32>;
+
+@vertex
+fn vs(@location(0) position: vec2<f32>) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(position, 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+    output_buffer[0] = 1u;
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+}
+",
+        )
+    }
+
+    fn uniform_read_vertex_render_pipeline(device: &crate::device::Device) -> Arc<RenderPipeline> {
+        vertex_buffer_render_pipeline_from_shader(
+            device,
+            r"
+struct Params {
+    value: vec4<u32>,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+
+@vertex
+fn vs(@location(0) position: vec2<f32>) -> @builtin(position) vec4<f32> {
+    let x = position.x + f32(params.value.x) * 0.0;
+    return vec4<f32>(x, position.y, 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+}
+",
+        )
+    }
+
     fn storage_write_uniform_read_render_pipeline(
         device: &crate::device::Device,
     ) -> Arc<RenderPipeline> {
@@ -1898,6 +2198,27 @@ fn fs() -> @location(0) vec4<f32> {
         let module =
             Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(source.to_owned())));
         Arc::new(device.create_render_pipeline(render_pipeline_descriptor(module)))
+    }
+
+    fn vertex_buffer_render_pipeline_from_shader(
+        device: &crate::device::Device,
+        source: &str,
+    ) -> Arc<RenderPipeline> {
+        let module =
+            Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(source.to_owned())));
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.vertex.buffer_count = 1;
+        descriptor.vertex.buffers = vec![VertexBufferLayout {
+            used: true,
+            array_stride: 8,
+            step_mode: VertexStepMode::Vertex,
+            attributes: vec![VertexAttribute {
+                format: VertexFormat::from_raw(0x0000_001D),
+                offset: 0,
+                shader_location: 0,
+            }],
+        }];
+        Arc::new(device.create_render_pipeline(descriptor))
     }
 
     #[test]
