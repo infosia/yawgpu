@@ -1870,6 +1870,82 @@ pub(super) fn encode_render_pass(
             .layout
             .store(IMAGE_LAYOUT_TRANSFER_SRC, AtomicOrdering::Relaxed);
     }
+    for (texture, target) in color_textures
+        .iter()
+        .copied()
+        .zip(pass.color_targets.iter())
+        .filter_map(|(texture, target)| texture.zip(target.as_ref()))
+        .filter(|(_, target)| !target.store)
+    {
+        let inner = texture.inner()?;
+        transition_image(
+            vk_device,
+            command_buffer,
+            inner,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            IMAGE_LAYOUT_TRANSFER_DST,
+        );
+        let clear_value = unsafe { vulkan_color_clear_value(target.view_format, [0.0; 4]).color };
+        unsafe {
+            vk_device.cmd_clear_color_image(
+                command_buffer,
+                inner.image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &clear_value,
+                &[color_attachment_subresource_range(texture, target)],
+            );
+        }
+        transition_image(
+            vk_device,
+            command_buffer,
+            inner,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            IMAGE_LAYOUT_TRANSFER_SRC,
+        );
+    }
+    if let (Some(texture), Some(attachment)) =
+        (depth_stencil_texture, &pass.depth_stencil_attachment)
+    {
+        let discarded_aspects = discarded_depth_stencil_aspects(
+            attachment.depth_store,
+            attachment.stencil_store,
+            attachment.format,
+        );
+        if !discarded_aspects.is_empty() {
+            let depth_stencil_aspects = depth_stencil_aspect_flags(attachment.format);
+            let inner = texture.inner()?;
+            transition_image_aspect(
+                vk_device,
+                command_buffer,
+                inner,
+                depth_stencil_aspects,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                IMAGE_LAYOUT_TRANSFER_DST,
+            );
+            let mut range = depth_stencil_attachment_subresource_range(attachment);
+            range.aspect_mask = discarded_aspects;
+            unsafe {
+                vk_device.cmd_clear_depth_stencil_image(
+                    command_buffer,
+                    inner.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &vk::ClearDepthStencilValue {
+                        depth: 0.0,
+                        stencil: 0,
+                    },
+                    &[range],
+                );
+            }
+            transition_image_aspect(
+                vk_device,
+                command_buffer,
+                inner,
+                depth_stencil_aspects,
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT,
+            );
+        }
+    }
     Ok(RenderPassTemps {
         descriptor_pools: descriptor_pool.into_iter().collect(),
         framebuffer,
@@ -2179,6 +2255,21 @@ fn depth_stencil_aspect_flags(format: HalTextureFormat) -> vk::ImageAspectFlags 
         flags |= vk::ImageAspectFlags::STENCIL;
     }
     flags
+}
+
+fn discarded_depth_stencil_aspects(
+    depth_store: bool,
+    stencil_store: bool,
+    format: HalTextureFormat,
+) -> vk::ImageAspectFlags {
+    let mut flags = vk::ImageAspectFlags::empty();
+    if !depth_store {
+        flags |= vk::ImageAspectFlags::DEPTH;
+    }
+    if !stencil_store {
+        flags |= vk::ImageAspectFlags::STENCIL;
+    }
+    flags & depth_stencil_aspect_flags(format)
 }
 
 fn copy_format_aspect_flags(format: HalTextureFormat) -> vk::ImageAspectFlags {
@@ -2854,6 +2945,30 @@ mod tests {
         assert_eq!(
             copy_format_aspect_flags(HalTextureFormat::Depth32FloatStencil8),
             vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        );
+    }
+
+    #[test]
+    fn discarded_depth_stencil_aspects_intersects_store_ops_with_format_planes() {
+        assert_eq!(
+            discarded_depth_stencil_aspects(false, true, HalTextureFormat::Depth32Float),
+            vk::ImageAspectFlags::DEPTH
+        );
+        assert_eq!(
+            discarded_depth_stencil_aspects(true, false, HalTextureFormat::Depth32Float),
+            vk::ImageAspectFlags::empty()
+        );
+        assert_eq!(
+            discarded_depth_stencil_aspects(true, false, HalTextureFormat::Stencil8),
+            vk::ImageAspectFlags::STENCIL
+        );
+        assert_eq!(
+            discarded_depth_stencil_aspects(false, true, HalTextureFormat::Depth32FloatStencil8),
+            vk::ImageAspectFlags::DEPTH
+        );
+        assert_eq!(
+            discarded_depth_stencil_aspects(true, true, HalTextureFormat::Depth32FloatStencil8),
+            vk::ImageAspectFlags::empty()
         );
     }
 
