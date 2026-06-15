@@ -254,7 +254,9 @@ pub(crate) struct SubpassRenderPassCommand {
 #[derive(Debug, Clone)]
 pub(crate) struct RenderPassColorExecution {
     pub(crate) texture: Texture,
+    pub(crate) view_format: TextureFormat,
     pub(crate) resolve_target: Option<Texture>,
+    pub(crate) resolve_view_format: Option<TextureFormat>,
     pub(crate) mip_level: u32,
     pub(crate) array_layer: u32,
     pub(crate) depth_slice: u32,
@@ -1429,7 +1431,9 @@ pub(crate) fn render_pass_color_executions(
                 let resolve_target = attachment.resolve_target.as_ref();
                 RenderPassColorExecution {
                     texture: attachment.view.texture(),
+                    view_format: attachment.view.format(),
                     resolve_target: resolve_target.map(|view| view.texture()),
+                    resolve_view_format: resolve_target.map(|view| view.format()),
                     mip_level: attachment.view.base_mip_level(),
                     array_layer: attachment.view.base_array_layer(),
                     depth_slice: attachment.depth_slice.unwrap_or(0),
@@ -2503,6 +2507,79 @@ mod tests {
             validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
             Err("render pass color attachment requires RenderAttachment usage".to_owned())
         );
+    }
+
+    #[test]
+    fn render_pass_color_executions_preserve_reinterpreted_view_formats() {
+        let device = noop_device();
+        let texture_format = TextureFormat::from_raw(TextureFormat::RGBA8_UNORM_SRGB);
+        let view_format = rgba8_unorm();
+        let view = reinterpreted_render_attachment_view(&device, texture_format, view_format, 1);
+        let descriptor = noop_render_pass_descriptor(view, None);
+
+        let executions = render_pass_color_executions(&descriptor);
+        let execution = executions[0].as_ref().expect("color execution");
+        assert_eq!(execution.texture.format(), texture_format);
+        assert_eq!(execution.view_format, view_format);
+        assert_eq!(execution.resolve_view_format, None);
+
+        let color_view =
+            reinterpreted_render_attachment_view(&device, texture_format, view_format, 4);
+        let resolve_view =
+            reinterpreted_render_attachment_view(&device, texture_format, view_format, 1);
+        let mut descriptor = noop_render_pass_descriptor(color_view, None);
+        descriptor.color_attachments[0]
+            .as_mut()
+            .expect("color attachment")
+            .resolve_target = Some(resolve_view);
+
+        let executions = render_pass_color_executions(&descriptor);
+        let execution = executions[0].as_ref().expect("color execution");
+        assert_eq!(execution.texture.format(), texture_format);
+        assert_eq!(execution.view_format, view_format);
+        assert_eq!(
+            execution
+                .resolve_target
+                .as_ref()
+                .expect("resolve target")
+                .format(),
+            texture_format
+        );
+        assert_eq!(execution.resolve_view_format, Some(view_format));
+    }
+
+    fn reinterpreted_render_attachment_view(
+        device: &Device,
+        texture_format: TextureFormat,
+        view_format: TextureFormat,
+        sample_count: u32,
+    ) -> Arc<TextureView> {
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: texture_format,
+            mip_level_count: 1,
+            sample_count,
+            view_formats: vec![view_format],
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: Some(view_format),
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(error, None);
+        Arc::new(view)
     }
 
     fn render_attachment_view_with_format(

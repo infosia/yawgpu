@@ -438,8 +438,13 @@ pub struct HalSubpassDraw {
 pub struct HalRenderColorTarget {
     /// Texture.
     pub texture: HalTexture,
+    /// Format of the WebGPU view bound as this color attachment; may reinterpret
+    /// the underlying texture.
+    pub view_format: HalTextureFormat,
     /// Optional resolve target texture.
     pub resolve_target: Option<HalTexture>,
+    /// Format of the WebGPU view bound as the resolve target, when present.
+    pub resolve_view_format: Option<HalTextureFormat>,
     /// Mip level the attachment view targets.
     pub mip_level: u32,
     /// Array layer the attachment view targets.
