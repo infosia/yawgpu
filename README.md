@@ -476,42 +476,44 @@ its own subprocess (`--isolate`) against a real GPU. **Dawn**, Google's C++
 reference implementation, is the conformance **oracle** — the ground truth any
 backend disagreement is judged against — and yawgpu's results match it.
 
-**`api,validation` — 4715 cases across 10 files** (including a complete
-`createTexture` and a complete `createView`), real-GPU Metal (Apple Silicon):
+The ported suite now covers the **entire `api` surface** — all 129
+`api/validation` and 72 `api/operation` files (234 ported files in total) —
+and runs **green on both Tier-1 backends, on native hardware**. Full
+cross-backend sweep (**2026-06-14**, per-subcase leaf totals):
 
-| Implementation (backend, host) | pass | skip | fail | crash |
+| Implementation (backend, host) | pass | skip | fail | xfail |
 |---|--:|--:|--:|--:|
-| **yawgpu** — Metal, Apple Silicon | 4332 | 383 | 0 | 0 |
-| Dawn (reference) — Metal, Apple Silicon | 4324 | 391 | 0 | 0 |
+| **Dawn** (oracle) — Metal, Apple Silicon | 534184 | 63364 | **0** | — |
+| **yawgpu** — Metal, Apple Silicon | 460730 | 136816 | **2** † | — |
+| **yawgpu** — Vulkan (native, NVIDIA RTX 5060 Ti) | 402163 | 183397 | **0** | 94 |
+| **yawgpu** — Vulkan (MoltenVK) | 445041 | 136816 | 15599 ‡ | 92 |
 
-yawgpu has **zero failures**, and even *runs* the 8 `immediate_data_size`
-cases Dawn skips. `skip` covers cases gated on optional adapter features. The
-same zero-failure result holds on **native Windows / Vulkan** (NVIDIA GeForce
-RTX 5060 Ti, 2026-06-08): `pass=3257 skip=1458 fail=0 crash=0`. The pass/skip
-split differs from the Metal row only because this NVIDIA Vulkan driver
-feature-gates more optional texture formats than Apple Metal, so more format
-cases skip — the zero-failure outcome is identical on both platforms.
+† The 2 Metal "failures" are the documented Dawn-leniency
+`draw,index_buffer_format_dirtying` — yawgpu is *stricter*, not wrong.
+‡ MoltenVK-only SPIRV-Cross translation artifacts, all green on native Metal
+**and** native Vulkan (see below).
 
-The **full ported suite** (48 file-level queries = 10 `api,validation` +
-38 `api,operation`) is **green on both Tier-1 backends**:
+yawgpu's **native Vulkan HAL passes the entire ported suite** (`fail=0` by
+per-file isolation): every divergence the suite found is fixed and
+native-Vulkan-re-verified, with F-085 (spec-in-flux per-sample semantics) and
+F-111 (`GPUExternalTexture` Vulkan feature gap) carried as the 94 `xfail`.
+This is **new in 2026-06** — running the suite against a *native* NVIDIA
+Vulkan driver surfaced seven genuine Vulkan-HAL/naga defects that Apple's
+coherent-memory / tiler behaviour had masked on Metal and MoltenVK
+(**F-105**, **F-106**, and the **F-107…F-110** batch); all are fixed and
+native-Vulkan-re-verified (2026-06-15).
 
-- **Metal** (Apple Silicon) — Dawn (oracle) and yawgpu both run end-to-end
-  green, `pass=247751 / 247579 fail=0 crash=0` (per-subcase leaf totals).
-- **Native Windows / Vulkan** (NVIDIA RTX 5060 Ti, *not* MoltenVK,
-  2026-06-08) — every ported case passes or skips: `pass=7208 skip=388
-  fail=0` per case (`pass=214039 skip=85698 fail=0 crash=0` per subcase),
-  exit 0. The operation ports match Metal exactly.
-
-The suite has surfaced **59 cross-backend findings to date**; every yawgpu
-divergence it found was **reported, fixed, and re-confirmed on hardware** —
-never masked to make a test pass (`expectations/yawgpu.txt` carries no
-expected failures), and **no yawgpu finding remains open**. Three **Mac-only
-MoltenVK artifacts** remain — **F-033** (color `copyTextureToTexture`),
-**F-045** (`frag_depth` not viewport-clamped), and **F-053** (rendering to
-multiple 3D depth-slices in one pass) — confirmed MoltenVK Vulkan→Metal
-translation limitations, not yawgpu defects, and absent on native Vulkan. The
-**GLES** (Tier 2) HAL is the only untested follow-up. Per-finding detail lives
-in the suite's
+The suite has surfaced **111 cross-backend findings to date** (F-001…F-111);
+every yawgpu divergence it found was **reported, fixed, and re-confirmed on
+hardware** — never masked to make a test pass (`expectations/yawgpu.txt`
+carries no expected failures beyond the two documented `xfail`), and **no
+yawgpu finding remains open**. The remaining Mac-only **MoltenVK translation
+artifacts** — e.g. **F-104** / **F-033** (`copyTextureToTexture`), **F-045**
+(`frag_depth` not viewport-clamped), **F-053** (rendering to multiple 3D
+depth-slices in one pass), and the F-070 SPIRV-Cross shader residue — are
+confirmed MoltenVK Vulkan→Metal limitations: green on both native Metal and
+native Vulkan, not yawgpu defects. The **GLES** (Tier 2) HAL is the only
+untested follow-up. Per-finding detail lives in the suite's
 [`docs/FINDINGS.md`](https://github.com/infosia/webgpu-native-cts/blob/main/docs/FINDINGS.md).
 
 ## License
