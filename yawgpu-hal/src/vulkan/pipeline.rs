@@ -824,6 +824,13 @@ fn vk_sample_count(sample_count: u32) -> Result<vk::SampleCountFlags, HalError> 
     }
 }
 
+fn is_strip_topology(topology: HalPrimitiveTopology) -> bool {
+    matches!(
+        topology,
+        HalPrimitiveTopology::LineStrip | HalPrimitiveTopology::TriangleStrip
+    )
+}
+
 /// Creates graphics pipeline and reports validation errors through the owning device.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create_graphics_pipeline(
@@ -887,7 +894,7 @@ pub(super) fn create_graphics_pipeline(
         .vertex_attribute_descriptions(&attribute_descriptions);
     let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
         .topology(map_primitive_topology(descriptor.primitive_topology))
-        .primitive_restart_enable(false);
+        .primitive_restart_enable(is_strip_topology(descriptor.primitive_topology));
     let viewport_state = vk::PipelineViewportStateCreateInfo::default()
         .viewport_count(1)
         .scissor_count(1);
@@ -2006,6 +2013,15 @@ mod tests {
             aspect,
             storage_access: None,
         }
+    }
+
+    #[test]
+    fn primitive_restart_is_enabled_only_for_strip_topologies() {
+        assert!(!is_strip_topology(HalPrimitiveTopology::PointList));
+        assert!(!is_strip_topology(HalPrimitiveTopology::LineList));
+        assert!(is_strip_topology(HalPrimitiveTopology::LineStrip));
+        assert!(!is_strip_topology(HalPrimitiveTopology::TriangleList));
+        assert!(is_strip_topology(HalPrimitiveTopology::TriangleStrip));
     }
 
     #[test]
