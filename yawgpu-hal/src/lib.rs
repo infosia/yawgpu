@@ -476,6 +476,28 @@ impl HalDevice {
         )
     }
 
+    /// Returns true when `VK_EXT_robustness2` / `robustBufferAccess2` was enabled
+    /// at device creation (Vulkan only).
+    ///
+    /// When true, yawgpu-core emits SPIR-V with an `Unchecked` storage-buffer
+    /// bounds policy and relies on hardware robustness, because the software
+    /// `Restrict` clamp breaks workgroup-atomic read-read coherence on the NVIDIA
+    /// driver (CTS finding F-112). All non-Vulkan backends (Noop, Metal, GLES)
+    /// return `false`, keeping the software `Restrict` clamp.
+    #[must_use]
+    pub fn robust_buffer_access2(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => false,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(device) => device.robust_buffer_access2(),
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => false,
+            #[cfg(feature = "gles")]
+            Self::Gles(_) => false,
+        }
+    }
+
     /// Returns the allocation count.
     #[must_use]
     pub fn allocation_count(&self) -> u64 {
@@ -1348,6 +1370,14 @@ mod tests {
         let device = noop_device()?;
 
         assert_eq!(device.backend(), HalBackend::Noop);
+        Ok(())
+    }
+
+    #[test]
+    fn hal_device_robust_buffer_access2_noop_returns_false() -> Result<(), HalError> {
+        let device = noop_device()?;
+
+        assert!(!device.robust_buffer_access2());
         Ok(())
     }
 
