@@ -484,12 +484,14 @@ cross-backend sweep (**2026-06-14**, per-subcase leaf totals):
 | Implementation (backend, host) | pass | skip | fail | xfail |
 |---|--:|--:|--:|--:|
 | **Dawn** (oracle) — Metal, Apple Silicon | 534184 | 63364 | **0** | — |
-| **yawgpu** — Metal, Apple Silicon | 460730 | 136816 | **2** † | — |
+| **yawgpu** — Metal, Apple Silicon | 460730 | 136816 | **0** | 2 † |
 | **yawgpu** — Vulkan (native, NVIDIA RTX 5060 Ti) | 402163 | 183397 | **0** | 94 |
 | **yawgpu** — Vulkan (MoltenVK) | 445041 | 136816 | 15599 ‡ | 92 |
 
-† The 2 Metal "failures" are the documented Dawn-leniency
-`draw,index_buffer_format_dirtying` — yawgpu is *stricter*, not wrong.
+† The 2 Metal `xfail` are the documented Dawn-leniency
+`draw,index_buffer_format_dirtying` — yawgpu *rejects* the draw where Dawn is
+lenient, so it is *stricter*, not wrong; carried as expected in
+`expectations/yawgpu.txt`.
 ‡ MoltenVK-only SPIRV-Cross translation artifacts, all green on native Metal
 **and** native Vulkan (see below).
 
@@ -498,12 +500,14 @@ per-file isolation): every divergence the suite found is fixed and
 native-Vulkan-re-verified, with F-085 (spec-in-flux per-sample semantics) and
 F-111 (`GPUExternalTexture` Vulkan feature gap) carried as the 94 `xfail`.
 This is **new in 2026-06** — running the suite against a *native* NVIDIA
-Vulkan driver surfaced seven genuine Vulkan-HAL/naga defects that Apple's
+Vulkan driver surfaced eight genuine Vulkan-HAL/naga-path defects that Apple's
 coherent-memory / tiler behaviour had masked on Metal and MoltenVK
-(**F-105**, **F-106**, and the **F-107…F-110** batch); all are fixed and
-native-Vulkan-re-verified (2026-06-15).
+(**F-105**, **F-106**, the **F-107…F-110** batch, and **F-112** — a
+storage-buffer bounds-check policy that broke NVIDIA workgroup-atomic
+coherence, gated on `VK_EXT_robustness2`); all are fixed and
+native-Vulkan-re-verified (2026-06-15/16).
 
-The suite has surfaced **111 cross-backend findings to date** (F-001…F-111);
+The suite has surfaced **112 cross-backend findings to date** (F-001…F-112);
 every yawgpu divergence it found was **reported, fixed, and re-confirmed on
 hardware** — never masked to make a test pass (`expectations/yawgpu.txt`
 carries no expected failures beyond the two documented `xfail`), and **no
