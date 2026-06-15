@@ -211,3 +211,34 @@ the slot is forced whenever vertex buffers exist, and the HAL writes
 storage-array sizes followed by per-vertex-buffer `size − offset` (mapping
 order) before every draw. GLES (Tier 2): unhandled, catalogue in block 67 if
 bring-up reaches this.
+
+## CTS finding F-112 — workgroup-atomic coherence vs SPIR-V buffer bounds policy (2026-06-16)
+
+`shader,execution,memory_model,coherence:corr` (the `atomic_workgroup;
+intra_workgroup` non-RMW subcase) recorded the WebGPU-disallowed weak outcome
+`r0==1 && r1==0` (single-location read-read coherence violation) on native
+Vulkan (NVIDIA RTX 5060 Ti). Root-caused on hardware (full diagnostic ledger:
+webgpu-native-cts `docs/FINDINGS.md` F-112):
+
+- **Not a naga/SPIR-V atomic-semantics defect.** yawgpu and wgpu-native emit
+  byte-identical workgroup-atomic SPIR-V (`OpMemoryModel GLSL450`,
+  `scope=Workgroup`, `semantics=0`, no `Coherent` decoration; both post naga
+  PR #8391). Verified by reassembling wgpu-native's captured SPIR-V.
+- **Cause: the SPIR-V `buffer` bounds-check policy.** yawgpu compiled with
+  `BoundsCheckPolicy::Restrict` for `buffer`, emitting a software bounds clamp
+  (`OpArrayLength`+`OpISub`+`OpExtInst UMin`) on every runtime-sized
+  storage-buffer access. On this NVIDIA driver that clamp breaks the
+  workgroup-atomic read-read coherence guarantee in the stress shader.
+  Verified: flipping **only** the `buffer` policy to `Unchecked` makes
+  `coherence:corr` pass 6/6; SPIR-V version (1.0/1.3/1.6), Vulkan API version
+  (1.1/1.3), and workgroup zero-init mode were all ruled out as non-causal.
+
+**Decision (mirrors wgpu).** Detect `VK_EXT_robustness2` / `robustBufferAccess2`
+on the adapter; when present, enable the extension + feature and compile the
+SPIR-V `buffer` bounds-check policy as `Unchecked` (hardware robustness bounds
+OOB buffer access). When absent, keep `Restrict` as the safe fallback. The
+`index` and `image_load` policies stay `Restrict` (the `index` clamp on the
+workgroup array is coherence-neutral and confirmed not the cause). Minimum
+Vulkan version is unchanged (1.1; `VK_EXT_robustness2` is available as an
+extension on 1.1+). yawgpu already enables Vulkan-1.0 `robustBufferAccess`, so
+OOB writes remain bounded regardless. No naga change is required.

@@ -871,6 +871,7 @@ pub(crate) fn create_hal_render_pipeline(
             metal_bindings,
             vertex_buffer_bindings,
             &[],
+            hal_device.robust_buffer_access2(),
         ) {
             Ok(selection) => selection,
             Err(message) => return (None, Some(message)),
@@ -954,6 +955,7 @@ pub(crate) fn create_hal_subpass_render_pipeline(
             metal_bindings,
             vertex_buffer_bindings,
             &subpass_color_slots,
+            hal_device.robust_buffer_access2(),
         ) {
             Ok(selection) => selection,
             Err(message) => return (None, Some(message)),
@@ -1015,6 +1017,11 @@ fn input_attachment_hal_bindings(
 }
 
 /// Selects the HAL shader source for a render pipeline.
+// Render-stage source selection legitimately needs backend, descriptor, both
+// entry names, the Metal binding/vertex-buffer/subpass-color tables, and the
+// robustBufferAccess2 flag (F-112) — grouping them into a struct would only add
+// indirection for a single crate-private call path.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn select_render_shader_source(
     backend: HalBackend,
     descriptor: &RenderPipelineDescriptor,
@@ -1023,6 +1030,7 @@ pub(crate) fn select_render_shader_source(
     metal_bindings: &[MetalBufferBinding],
     vertex_buffer_bindings: &[MetalVertexBufferBinding],
     subpass_color_slots: &[((u32, u32), u32)],
+    unchecked_buffer_bounds: bool,
 ) -> Result<
     (
         HalShaderSource,
@@ -1215,6 +1223,7 @@ pub(crate) fn select_render_shader_source(
                 vertex_entry_name,
                 naga::ShaderStage::Vertex,
                 &vertex_pipeline_constants,
+                unchecked_buffer_bounds,
             )?;
             let fragment = match (fragment, fragment_entry_name) {
                 (Some(fragment), Some(fragment_entry_name)) => {
@@ -1227,6 +1236,7 @@ pub(crate) fn select_render_shader_source(
                         fragment_pipeline_constants.as_ref().ok_or_else(|| {
                             "render pipeline fragment constants were not resolved".to_owned()
                         })?,
+                        unchecked_buffer_bounds,
                     )?)
                 }
                 (None, None) => None,
@@ -3539,6 +3549,7 @@ mod tests {
             &[],
             &[],
             &[],
+            false,
         )
         .expect("separate WGSL modules should generate per-stage MSL");
 
@@ -3561,6 +3572,7 @@ mod tests {
                 entry_point,
                 stage,
                 &naga::back::PipelineConstants::default(),
+                false,
             )
             .expect("test WGSL should generate SPIR-V")
     }
@@ -3634,6 +3646,7 @@ mod tests {
             &[],
             &[],
             &[],
+            false,
         )
         .expect("WGSL should generate Vulkan SPIR-V stages");
         assert!(
@@ -3651,6 +3664,7 @@ mod tests {
             &[],
             &[],
             &[],
+            false,
         )
         .expect("SPIR-V passthrough should select Vulkan SPIR-V stages");
         assert!(matches!(
@@ -3667,6 +3681,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                false,
             )
             .expect_err("mixed SPIR-V vertex and WGSL fragment must be rejected"),
             "render pipeline cannot mix a SPIR-V passthrough module with a non-SPIR-V module"
@@ -3680,6 +3695,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                false,
             )
             .expect_err("mixed WGSL vertex and SPIR-V fragment must be rejected"),
             "render pipeline cannot mix a SPIR-V passthrough module with a non-SPIR-V module"
@@ -3693,6 +3709,7 @@ mod tests {
             &[],
             &[],
             &[],
+            false,
         )
         .expect("MSL passthrough should select Metal MSL");
         assert!(matches!(source, HalShaderSource::Msl(selected) if selected == msl_source));
@@ -3710,6 +3727,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                false,
             )
             .expect_err("non-default Metal MSL passthrough sample mask must be rejected"),
             "Metal MSL shader passthrough does not support a non-default multisample mask"
@@ -3723,7 +3741,8 @@ mod tests {
                 Some("fs"),
                 &[],
                 &[],
-                &[]
+                &[],
+                false,
             )
             .expect_err("SPIR-V must not run on Metal"),
             "SPIR-V shader module cannot be used on the Metal backend"
@@ -3736,7 +3755,8 @@ mod tests {
                 Some("fs"),
                 &[],
                 &[],
-                &[]
+                &[],
+                false,
             )
             .expect_err("MSL must not run on Vulkan"),
             "MSL shader module cannot be used on the Vulkan backend"
@@ -3777,6 +3797,7 @@ mod tests {
             &[],
             &[],
             &[],
+            false,
         )
         .expect("WGSL should generate GLES GLSL stages");
 
@@ -4307,6 +4328,7 @@ mod tests {
                 "fs",
                 naga::ShaderStage::Fragment,
                 &naga::back::PipelineConstants::default(),
+                false,
             )
             .expect("subpass input fragment shader should generate SPIR-V");
         assert!(!spirv.is_empty());

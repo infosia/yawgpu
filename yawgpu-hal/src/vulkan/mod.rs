@@ -355,6 +355,28 @@ impl VulkanAdapter {
             extension_names.push(vk::KHR_SWAPCHAIN_NAME.as_ptr());
         }
         let depth_clip_enable_extension = self.has_device_extension(vk::EXT_DEPTH_CLIP_ENABLE_NAME);
+        // CTS finding F-112: `VK_EXT_robustness2` / `robustBufferAccess2` provides
+        // a hardware bounds clamp for storage-buffer accesses. When enabled,
+        // yawgpu-core emits SPIR-V with the `buffer` bounds policy set to
+        // `Unchecked`, because the software `Restrict` clamp breaks workgroup-atomic
+        // read-read coherence on the NVIDIA driver. Treat it as supported only when
+        // the extension is present AND the feature reports TRUE via the
+        // `get_physical_device_features2` pNext chain.
+        let robustness2_extension = self.has_device_extension(vk::EXT_ROBUSTNESS2_NAME);
+        let robustness2_feature_supported = if robustness2_extension {
+            let mut robustness2_features = vk::PhysicalDeviceRobustness2FeaturesEXT::default();
+            let mut features2 =
+                vk::PhysicalDeviceFeatures2::default().push_next(&mut robustness2_features);
+            unsafe {
+                self.instance
+                    .instance
+                    .get_physical_device_features2(self.physical_device, &mut features2);
+            }
+            robustness2_features.robust_buffer_access2 == vk::TRUE
+        } else {
+            false
+        };
+        let robust_buffer_access2 = robustness2_extension && robustness2_feature_supported;
         #[cfg(feature = "tiled")]
         if let Some(extension_name) = framebuffer_fetch_extension_name(self.framebuffer_fetch_path)
         {
@@ -392,14 +414,22 @@ impl VulkanAdapter {
         if robust_buffer_access {
             enabled_features.robust_buffer_access = vk::TRUE;
         }
+        if robust_buffer_access2 {
+            extension_names.push(vk::EXT_ROBUSTNESS2_NAME.as_ptr());
+        }
         let mut depth_clip_enable_features =
             vk::PhysicalDeviceDepthClipEnableFeaturesEXT::default().depth_clip_enable(true);
+        let mut robustness2_features =
+            vk::PhysicalDeviceRobustness2FeaturesEXT::default().robust_buffer_access2(true);
         let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&extension_names)
             .enabled_features(&enabled_features);
         if depth_clip_control {
             create_info = create_info.push_next(&mut depth_clip_enable_features);
+        }
+        if robust_buffer_access2 {
+            create_info = create_info.push_next(&mut robustness2_features);
         }
         let device = unsafe {
             self.instance
@@ -429,6 +459,7 @@ impl VulkanAdapter {
             occlusion_query_precise,
             depth_clip_control,
             sampler_anisotropy,
+            robust_buffer_access2,
             max_sampler_anisotropy,
             allocations: AtomicU64::new(0),
             #[cfg(feature = "tiled")]
@@ -743,6 +774,39 @@ mod tests {
             assert_eq!(
                 enabled_features.robust_buffer_access, expected_enabled,
                 "robust_buffer_access should be {expected_enabled} when supported={supported}"
+            );
+        }
+    }
+
+    /// `robust_buffer_access2` enable logic (CTS finding F-112): the feature is
+    /// enabled iff the `VK_EXT_robustness2` extension is present AND the physical
+    /// device reports `robustBufferAccess2` as TRUE. Both must hold; either alone
+    /// keeps it disabled. Pure-logic test, no real GPU required.
+    #[test]
+    fn vulkan_create_device_enables_robust_buffer_access2_when_extension_and_feature_present() {
+        for (extension_present, feature_supported, expected) in [
+            (true, true, true),
+            (true, false, false),
+            (false, true, false),
+            (false, false, false),
+        ] {
+            let robustness2_feature_supported = if extension_present {
+                let features = vk::PhysicalDeviceRobustness2FeaturesEXT {
+                    robust_buffer_access2: if feature_supported {
+                        vk::TRUE
+                    } else {
+                        vk::FALSE
+                    },
+                    ..Default::default()
+                };
+                features.robust_buffer_access2 == vk::TRUE
+            } else {
+                false
+            };
+            let robust_buffer_access2 = extension_present && robustness2_feature_supported;
+            assert_eq!(
+                robust_buffer_access2, expected,
+                "robust_buffer_access2 should be {expected} when extension={extension_present} feature={feature_supported}"
             );
         }
     }

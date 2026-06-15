@@ -358,6 +358,7 @@ mod tests {
                 "cs",
                 naga::ShaderStage::Compute,
                 &naga::back::PipelineConstants::default(),
+                false,
             )
             .expect("test WGSL should generate SPIR-V")
     }

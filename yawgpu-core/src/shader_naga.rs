@@ -567,6 +567,7 @@ impl ReflectedModule {
         entry_name: &str,
         stage: naga::ShaderStage,
         pipeline_constants: &naga::back::PipelineConstants,
+        unchecked_buffer_bounds: bool,
     ) -> Result<Vec<u32>, String> {
         let (module, info) =
             self.process_overrides_for_entry(entry_name, stage, pipeline_constants)?;
@@ -581,15 +582,19 @@ impl ReflectedModule {
         }
         let options = naga::back::spv::Options {
             fake_missing_bindings: true,
-            // Mirror wgpu-hal/src/vulkan/adapter.rs: use Restrict for index and
-            // buffer so that out-of-bounds accesses are clamped rather than
-            // producing undefined behaviour.  We do not yet detect
-            // robustBufferAccess2 on the adapter, so Restrict (the safe default)
-            // is used for both.  image_load is also Restrict (matches MSL path).
-            // binding_array remains Unchecked: SPIR-V descriptor arrays require
-            // VK_EXT_descriptor_indexing robust-access extensions which we do not
-            // mandate.
-            bounds_check_policies: spirv_bounds_check_policies(),
+            // Mirror wgpu-hal/src/vulkan/adapter.rs: `index` and `image_load`
+            // stay `Restrict` so that out-of-bounds accesses are clamped rather
+            // than producing undefined behaviour.  The `buffer` policy is
+            // `robustBufferAccess2`-gated (CTS finding F-112): the software
+            // `Restrict` clamp (`OpArrayLength`+`OpISub`+`UMin`) breaks the
+            // workgroup-atomic read-read coherence guarantee on the NVIDIA
+            // driver, so when the adapter enabled `VK_EXT_robustness2` /
+            // `robustBufferAccess2` we switch `buffer` to `Unchecked` and rely
+            // on hardware robustness (this is what wgpu-native does); otherwise
+            // it stays `Restrict`.  binding_array remains Unchecked: SPIR-V
+            // descriptor arrays require VK_EXT_descriptor_indexing robust-access
+            // extensions which we do not mandate.
+            bounds_check_policies: spirv_bounds_check_policies(unchecked_buffer_bounds),
             ..Default::default()
         };
         let pipeline_options = naga::back::spv::PipelineOptions {
@@ -1445,22 +1450,35 @@ fn msl_buffer_size_bindings_for_entry(
 /// Returns the shared bounds-check policy set used by both the SPIR-V and MSL
 /// backends.
 ///
-/// index/buffer/image_load are all `Restrict` (clamp OOB to a safe in-bounds
-/// address rather than producing undefined behaviour).  `binding_array` is
-/// left `Unchecked` because runtime-sized descriptor arrays require explicit
+/// `index` and `image_load` are always `Restrict` (clamp OOB to a safe
+/// in-bounds address rather than producing undefined behaviour).  `binding_array`
+/// is left `Unchecked` because runtime-sized descriptor arrays require explicit
 /// extension support (VK_EXT_descriptor_indexing / argument buffers) on both
 /// backends.
-fn spirv_bounds_check_policies() -> naga::proc::BoundsCheckPolicies {
+///
+/// `buffer` is conditional (CTS finding F-112): when `unchecked_buffer` is true
+/// — i.e. the Vulkan adapter enabled `VK_EXT_robustness2` / `robustBufferAccess2`
+/// and provides the clamp in hardware — it is `Unchecked`, because the software
+/// `Restrict` clamp breaks workgroup-atomic read-read coherence on the NVIDIA
+/// driver.  When false (no hardware robustness, and on Metal) it stays
+/// `Restrict`, the safe software-clamp default.
+fn spirv_bounds_check_policies(unchecked_buffer: bool) -> naga::proc::BoundsCheckPolicies {
     naga::proc::BoundsCheckPolicies {
         index: naga::proc::BoundsCheckPolicy::Restrict,
-        buffer: naga::proc::BoundsCheckPolicy::Restrict,
+        buffer: if unchecked_buffer {
+            naga::proc::BoundsCheckPolicy::Unchecked
+        } else {
+            naga::proc::BoundsCheckPolicy::Restrict
+        },
         image_load: naga::proc::BoundsCheckPolicy::Restrict,
         binding_array: naga::proc::BoundsCheckPolicy::Unchecked,
     }
 }
 
 fn msl_bounds_check_policies() -> naga::proc::BoundsCheckPolicies {
-    spirv_bounds_check_policies()
+    // Metal keeps the software `Restrict` clamp for buffers (F-112 applies only
+    // to the Vulkan SPIR-V path / NVIDIA driver).
+    spirv_bounds_check_policies(false)
 }
 
 fn msl_needs_array_length(
@@ -2546,6 +2564,7 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                 "fs",
                 ShaderStage::Fragment,
                 &naga::back::PipelineConstants::default(),
+                false,
             )
             .expect_err("external texture SPIR-V must be cleanly rejected, not generated");
         assert!(spirv_err.contains("external textures are not supported on the Vulkan backend"));
@@ -2831,10 +2850,16 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                 "fs",
                 ShaderStage::Fragment,
                 &naga::back::PipelineConstants::default(),
+                false,
             )
             .expect("default override should generate SPIR-V");
         let provided = module
-            .generate_spirv("fs", ShaderStage::Fragment, &override_constants("R", 0.6))
+            .generate_spirv(
+                "fs",
+                ShaderStage::Fragment,
+                &override_constants("R", 0.6),
+                false,
+            )
             .expect("provided override should generate SPIR-V");
 
         assert!(!default.is_empty());
@@ -2874,40 +2899,62 @@ fn fs() -> @location(0) vec4<f32> {
                 "vs",
                 ShaderStage::Vertex,
                 &naga::back::PipelineConstants::default(),
+                false,
             )
             .expect("vertex-only SPIR-V should generate");
 
         assert!(!spirv.is_empty());
     }
 
-    /// Verify that `spirv_bounds_check_policies` returns `Restrict` for
-    /// index, buffer, and image_load, and `Unchecked` for binding_array —
-    /// matching the wgpu-hal Vulkan adapter choice.
+    /// Verify the SPIR-V bounds-check policy set: `index` and `image_load` are
+    /// always `Restrict`, `binding_array` is always `Unchecked`, and `buffer`
+    /// is `Restrict` without hardware robustness but `Unchecked` when the
+    /// adapter enabled `robustBufferAccess2` (CTS finding F-112).
     ///
     /// This is a pure policy test (no SPIR-V generation required) so it runs
     /// on every Noop gate with no GPU.
     #[test]
-    fn spirv_bounds_check_policies_are_restrict() {
-        let policies = super::spirv_bounds_check_policies();
+    fn spirv_bounds_check_policies_gate_buffer_on_robustness2() {
+        // Without hardware robustness: software `Restrict` clamp for buffers.
+        let restrict = super::spirv_bounds_check_policies(false);
         assert_eq!(
-            policies.index,
+            restrict.index,
             naga::proc::BoundsCheckPolicy::Restrict,
             "SPIR-V index policy must be Restrict"
         );
         assert_eq!(
-            policies.buffer,
+            restrict.buffer,
             naga::proc::BoundsCheckPolicy::Restrict,
-            "SPIR-V buffer policy must be Restrict"
+            "SPIR-V buffer policy must be Restrict without robustBufferAccess2"
         );
         assert_eq!(
-            policies.image_load,
+            restrict.image_load,
             naga::proc::BoundsCheckPolicy::Restrict,
             "SPIR-V image_load policy must be Restrict"
         );
         assert_eq!(
-            policies.binding_array,
+            restrict.binding_array,
             naga::proc::BoundsCheckPolicy::Unchecked,
             "SPIR-V binding_array policy must be Unchecked (no ext mandate)"
+        );
+
+        // With robustBufferAccess2: `buffer` switches to Unchecked (F-112),
+        // while index/image_load stay Restrict.
+        let unchecked = super::spirv_bounds_check_policies(true);
+        assert_eq!(
+            unchecked.buffer,
+            naga::proc::BoundsCheckPolicy::Unchecked,
+            "SPIR-V buffer policy must be Unchecked with robustBufferAccess2 (F-112)"
+        );
+        assert_eq!(
+            unchecked.index,
+            naga::proc::BoundsCheckPolicy::Restrict,
+            "SPIR-V index policy must stay Restrict with robustBufferAccess2"
+        );
+        assert_eq!(
+            unchecked.image_load,
+            naga::proc::BoundsCheckPolicy::Restrict,
+            "SPIR-V image_load policy must stay Restrict with robustBufferAccess2"
         );
     }
 
@@ -2934,6 +2981,7 @@ fn cs(@builtin(global_invocation_id) gid: vec3<u32>) {
                 "cs",
                 ShaderStage::Compute,
                 &naga::back::PipelineConstants::default(),
+                false,
             )
             .expect("SPIR-V generation with Restrict policies should succeed");
 
@@ -2969,6 +3017,23 @@ fn cs(@builtin(global_invocation_id) gid: vec3<u32>) {
         assert_ne!(
             restrict_spirv, unchecked_spirv,
             "Restrict SPIR-V must differ from Unchecked (bounds guards must be emitted)"
+        );
+
+        // With robustBufferAccess2 (unchecked_buffer_bounds = true) the `buffer`
+        // policy switches to Unchecked, so the storage-buffer access no longer
+        // emits the software clamp and must differ from the Restrict output
+        // (F-112).
+        let robust_spirv = module
+            .generate_spirv(
+                "cs",
+                ShaderStage::Compute,
+                &naga::back::PipelineConstants::default(),
+                true,
+            )
+            .expect("SPIR-V generation with robustBufferAccess2 should succeed");
+        assert_ne!(
+            restrict_spirv, robust_spirv,
+            "robustBufferAccess2 SPIR-V must differ from Restrict (no software buffer clamp)"
         );
     }
 

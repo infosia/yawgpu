@@ -241,6 +241,7 @@ pub(crate) fn create_hal_compute_pipeline(
         entry_name,
         constants,
         metal_bindings,
+        hal_device.robust_buffer_access2(),
     ) {
         Ok(selection) => selection,
         Err(message) => return (None, Some(message)),
@@ -263,6 +264,7 @@ pub(crate) fn select_compute_shader_source(
     entry_name: &str,
     constants: &[PipelineConstant],
     metal_bindings: &[MetalBufferBinding],
+    unchecked_buffer_bounds: bool,
 ) -> Result<(HalShaderSource, String, Vec<HalDescriptorBinding>), String> {
     let pipeline_constants = pipeline_constant_map(constants);
     match backend {
@@ -320,6 +322,7 @@ pub(crate) fn select_compute_shader_source(
                 entry_name,
                 naga::ShaderStage::Compute,
                 &pipeline_constants,
+                unchecked_buffer_bounds,
             )?;
             Ok((
                 HalShaderSource::SpirV(spirv),
@@ -1982,6 +1985,7 @@ mod tests {
                 entry_point,
                 stage,
                 &naga::back::PipelineConstants::default(),
+                false,
             )
             .expect("test WGSL should generate SPIR-V")
     }
@@ -2014,31 +2018,31 @@ mod tests {
         let msl = device.create_shader_module_msl(msl_source.clone(), msl_compute_reflection());
 
         let (source, entry, bindings) =
-            select_compute_shader_source(HalBackend::Vulkan, &wgsl, "cs", &[], &[])
+            select_compute_shader_source(HalBackend::Vulkan, &wgsl, "cs", &[], &[], false)
                 .expect("WGSL should generate Vulkan SPIR-V");
         assert!(matches!(source, HalShaderSource::SpirV(words) if !words.is_empty()));
         assert_eq!(entry, "cs");
         assert!(bindings.is_empty());
 
         let (source, entry, _) =
-            select_compute_shader_source(HalBackend::Vulkan, &spirv, "cs", &[], &[])
+            select_compute_shader_source(HalBackend::Vulkan, &spirv, "cs", &[], &[], false)
                 .expect("SPIR-V passthrough should select Vulkan SPIR-V");
         assert!(matches!(source, HalShaderSource::SpirV(selected) if selected == words));
         assert_eq!(entry, "cs");
 
         let (source, entry, _) =
-            select_compute_shader_source(HalBackend::Metal, &msl, "cs", &[], &[])
+            select_compute_shader_source(HalBackend::Metal, &msl, "cs", &[], &[], false)
                 .expect("MSL passthrough should select Metal MSL");
         assert!(matches!(source, HalShaderSource::Msl(selected) if selected == msl_source));
         assert_eq!(entry, "cs");
 
         assert_eq!(
-            select_compute_shader_source(HalBackend::Metal, &spirv, "cs", &[], &[])
+            select_compute_shader_source(HalBackend::Metal, &spirv, "cs", &[], &[], false)
                 .expect_err("SPIR-V must not run on Metal"),
             "SPIR-V shader module cannot be used on the Metal backend"
         );
         assert_eq!(
-            select_compute_shader_source(HalBackend::Vulkan, &msl, "cs", &[], &[])
+            select_compute_shader_source(HalBackend::Vulkan, &msl, "cs", &[], &[], false)
                 .expect_err("MSL must not run on Vulkan"),
             "MSL shader module cannot be used on the Vulkan backend"
         );
@@ -2053,7 +2057,7 @@ mod tests {
         ));
 
         let (source, entry, bindings) =
-            select_compute_shader_source(HalBackend::Gles, &wgsl, "cs", &[], &[])
+            select_compute_shader_source(HalBackend::Gles, &wgsl, "cs", &[], &[], false)
                 .expect("WGSL should generate GLES GLSL");
 
         let HalShaderSource::Glsl {

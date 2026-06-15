@@ -12,6 +12,11 @@ pub(super) struct VulkanDeviceInner {
     pub(super) depth_clip_control: bool,
     /// Whether the `samplerAnisotropy` device feature was enabled at device creation.
     pub(super) sampler_anisotropy: bool,
+    /// Whether `VK_EXT_robustness2` / `robustBufferAccess2` was enabled at device
+    /// creation. When true, storage-buffer accesses are bounds-checked in
+    /// hardware, so the SPIR-V `buffer` bounds policy can be `Unchecked` rather
+    /// than the software `Restrict` clamp (CTS finding F-112).
+    pub(super) robust_buffer_access2: bool,
     /// `VkPhysicalDeviceLimits.maxSamplerAnisotropy` — the hardware ceiling for
     /// anisotropic filtering. Used to clamp `VkSamplerCreateInfo.maxAnisotropy`
     /// per WebGPU semantics (clamp, never error).
@@ -63,6 +68,14 @@ impl VulkanDevice {
     #[must_use]
     pub fn queue(&self) -> &VulkanQueue {
         &self.queue
+    }
+
+    /// Returns true when `VK_EXT_robustness2` / `robustBufferAccess2` was enabled
+    /// at device creation. When true, callers may emit SPIR-V with an `Unchecked`
+    /// buffer bounds policy and rely on hardware robustness (CTS finding F-112).
+    #[must_use]
+    pub fn robust_buffer_access2(&self) -> bool {
+        self.inner.robust_buffer_access2
     }
 
     /// Returns the detected shader framebuffer-fetch path.
