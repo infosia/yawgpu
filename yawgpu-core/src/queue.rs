@@ -1126,10 +1126,12 @@ fn hal_render_color_targets(
         .map(|attachment| match attachment {
             Some(attachment) => Some(Some(HalRenderColorTarget {
                 texture: attachment.texture.hal()?,
+                view_format: hal_texture_format(attachment.view_format),
                 resolve_target: match &attachment.resolve_target {
                     Some(texture) => Some(texture.hal()?),
                     None => None,
                 },
+                resolve_view_format: attachment.resolve_view_format.map(hal_texture_format),
                 mip_level: attachment.mip_level,
                 array_layer: attachment.array_layer,
                 depth_slice: attachment.depth_slice,

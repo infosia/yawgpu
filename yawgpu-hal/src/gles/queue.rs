@@ -1455,7 +1455,9 @@ mod tests {
     fn render_color_target() -> Result<crate::HalRenderColorTarget, HalError> {
         Ok(crate::HalRenderColorTarget {
             texture: noop_render_texture()?,
+            view_format: crate::HalTextureFormat::Rgba8Unorm,
             resolve_target: None,
+            resolve_view_format: None,
             mip_level: 0,
             array_layer: 0,
             depth_slice: 0,

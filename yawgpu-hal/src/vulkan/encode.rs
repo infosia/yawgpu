@@ -1701,11 +1701,13 @@ pub(super) fn encode_render_pass(
             IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT,
         );
     }
+    let color_formats = render_pass_color_formats(&pass.color_targets);
+    let resolve_formats = render_pass_resolve_formats(&pass.color_targets)?;
     let render_pass = match &pass.pipeline {
         Some(crate::HalRenderPipeline::Vulkan(_)) | None => create_render_pass_for_targets(
             vk_device,
-            &render_pass_color_formats(&color_textures),
-            &render_pass_resolve_formats(&resolve_textures),
+            &color_formats,
+            &resolve_formats,
             &pass.color_targets,
             pass.depth_stencil_attachment.as_ref(),
         )?,
@@ -2049,20 +2051,31 @@ fn vulkan_render_depth_stencil_texture(
 }
 
 fn render_pass_color_formats(
-    color_textures: &[Option<&VulkanTexture>],
+    color_targets: &[Option<HalRenderColorTarget>],
 ) -> Vec<Option<HalTextureFormat>> {
-    color_textures
+    color_targets
         .iter()
-        .map(|texture| texture.map(|texture| texture.format))
+        .map(|target| target.as_ref().map(|target| target.view_format))
         .collect()
 }
 
 fn render_pass_resolve_formats(
-    resolve_textures: &[Option<&VulkanTexture>],
-) -> Vec<Option<HalTextureFormat>> {
-    resolve_textures
+    color_targets: &[Option<HalRenderColorTarget>],
+) -> Result<Vec<Option<HalTextureFormat>>, HalError> {
+    color_targets
         .iter()
-        .map(|texture| texture.map(|texture| texture.format))
+        .map(|target| {
+            let Some(target) = target else {
+                return Ok(None);
+            };
+            if target.resolve_target.is_none() {
+                return Ok(None);
+            }
+            target
+                .resolve_view_format
+                .map(Some)
+                .ok_or_else(|| shader_error("resolve target view format is missing"))
+        })
         .collect()
 }
 
@@ -2072,11 +2085,10 @@ fn render_pass_clear_values(pass: &HalRenderPass) -> Vec<vk::ClearValue> {
         let Some(color) = color else {
             continue;
         };
-        let format = match &color.texture {
-            HalTexture::Vulkan(texture) => texture.format,
-            _ => HalTextureFormat::Unsupported,
-        };
-        clear_values.push(vulkan_color_clear_value(format, color.clear_color));
+        clear_values.push(vulkan_color_clear_value(
+            color.view_format,
+            color.clear_color,
+        ));
     }
     for _ in pass
         .color_targets
@@ -2451,7 +2463,7 @@ fn create_color_attachment_image_view(
     texture: &VulkanTexture,
     target: &HalRenderColorTarget,
 ) -> Result<vk::ImageView, HalError> {
-    let (format, _) = map_texture_format(texture.format)?;
+    let (format, _) = map_texture_format(target.view_format)?;
     create_attachment_image_view(
         device,
         texture.inner()?.image,
@@ -2465,7 +2477,8 @@ fn create_resolve_attachment_image_view(
     texture: &VulkanTexture,
     target: &HalRenderColorTarget,
 ) -> Result<vk::ImageView, HalError> {
-    let (format, _) = map_texture_format(texture.format)?;
+    let view_format = target.resolve_view_format.unwrap_or(texture.format);
+    let (format, _) = map_texture_format(view_format)?;
     create_attachment_image_view(
         device,
         texture.inner()?.image,
@@ -3166,7 +3179,9 @@ mod tests {
                 HalTextureDimension::D2,
                 HalTextureFormat::Rgba8Unorm,
             )),
+            view_format: HalTextureFormat::Rgba8Unorm,
             resolve_target: None,
+            resolve_view_format: None,
             mip_level: 0,
             array_layer: 0,
             depth_slice: 0,
@@ -3218,7 +3233,9 @@ mod tests {
     fn render_attachment_subresource_ranges_scope_mip_layer_and_aspect() {
         let color_target = HalRenderColorTarget {
             texture: dummy_texture(HalTextureFormat::Rgba8Unorm),
+            view_format: HalTextureFormat::Rgba8Unorm,
             resolve_target: None,
+            resolve_view_format: None,
             mip_level: 2,
             array_layer: 1,
             depth_slice: 0,
