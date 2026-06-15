@@ -831,6 +831,14 @@ fn is_strip_topology(topology: HalPrimitiveTopology) -> bool {
     )
 }
 
+fn depth_clamp_and_clip(depth_clip_control: bool, unclipped_depth: bool) -> (bool, Option<bool>) {
+    if depth_clip_control {
+        (true, Some(!unclipped_depth))
+    } else {
+        (unclipped_depth, None)
+    }
+}
+
 /// Creates graphics pipeline and reports validation errors through the owning device.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create_graphics_pipeline(
@@ -903,8 +911,14 @@ pub(super) fn create_graphics_pipeline(
             || depth_stencil.depth_bias_slope_scale != 0.0
             || depth_stencil.depth_bias_clamp != 0.0
     });
-    let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
-        .depth_clamp_enable(descriptor.unclipped_depth)
+    let (depth_clamp_enable, depth_clip_enable) =
+        depth_clamp_and_clip(device.depth_clip_control, descriptor.unclipped_depth);
+    let mut depth_clip_state = depth_clip_enable.map(|depth_clip_enable| {
+        vk::PipelineRasterizationDepthClipStateCreateInfoEXT::default()
+            .depth_clip_enable(depth_clip_enable)
+    });
+    let mut rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+        .depth_clamp_enable(depth_clamp_enable)
         .rasterizer_discard_enable(false)
         .polygon_mode(vk::PolygonMode::FILL)
         .cull_mode(vk_cull_mode(descriptor.cull_mode))
@@ -926,6 +940,9 @@ pub(super) fn create_graphics_pipeline(
                 .map_or(0.0, |depth_stencil| depth_stencil.depth_bias_clamp),
         )
         .line_width(1.0);
+    if let Some(depth_clip_state) = depth_clip_state.as_mut() {
+        rasterization = rasterization.push_next(depth_clip_state);
+    }
     let sample_mask = [descriptor.sample_mask];
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(vk_sample_count(descriptor.sample_count)?)
@@ -2022,6 +2039,14 @@ mod tests {
         assert!(is_strip_topology(HalPrimitiveTopology::LineStrip));
         assert!(!is_strip_topology(HalPrimitiveTopology::TriangleList));
         assert!(is_strip_topology(HalPrimitiveTopology::TriangleStrip));
+    }
+
+    #[test]
+    fn depth_clamp_and_clip_uses_ext_when_depth_clip_control_is_available() {
+        assert_eq!(depth_clamp_and_clip(true, false), (true, Some(true)));
+        assert_eq!(depth_clamp_and_clip(true, true), (true, Some(false)));
+        assert_eq!(depth_clamp_and_clip(false, false), (false, None));
+        assert_eq!(depth_clamp_and_clip(false, true), (true, None));
     }
 
     #[test]

@@ -8,6 +8,8 @@ pub(super) struct VulkanDeviceInner {
     pub(super) memory_properties: vk::PhysicalDeviceMemoryProperties,
     pub(super) queue_family_index: u32,
     pub(super) occlusion_query_precise: bool,
+    /// Whether viewport depth clamp and primitive depth clipping can be controlled separately.
+    pub(super) depth_clip_control: bool,
     /// Whether the `samplerAnisotropy` device feature was enabled at device creation.
     pub(super) sampler_anisotropy: bool,
     /// `VkPhysicalDeviceLimits.maxSamplerAnisotropy` — the hardware ceiling for

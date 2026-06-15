@@ -354,6 +354,7 @@ impl VulkanAdapter {
         if self.has_device_extension(vk::KHR_SWAPCHAIN_NAME) {
             extension_names.push(vk::KHR_SWAPCHAIN_NAME.as_ptr());
         }
+        let depth_clip_enable_extension = self.has_device_extension(vk::EXT_DEPTH_CLIP_ENABLE_NAME);
         #[cfg(feature = "tiled")]
         if let Some(extension_name) = framebuffer_fetch_extension_name(self.framebuffer_fetch_path)
         {
@@ -375,9 +376,15 @@ impl VulkanAdapter {
         // device reports support (the spec mandates every Vulkan 1.0 device exposes
         // this feature, so the guard is defensive rather than required).
         let robust_buffer_access = supported_features.robust_buffer_access == vk::TRUE;
+        let depth_clamp = supported_features.depth_clamp == vk::TRUE;
+        let depth_clip_control = depth_clamp && depth_clip_enable_extension;
         let mut enabled_features = vk::PhysicalDeviceFeatures::default();
         if occlusion_query_precise {
             enabled_features.occlusion_query_precise = vk::TRUE;
+        }
+        if depth_clip_control {
+            enabled_features.depth_clamp = vk::TRUE;
+            extension_names.push(vk::EXT_DEPTH_CLIP_ENABLE_NAME.as_ptr());
         }
         if sampler_anisotropy {
             enabled_features.sampler_anisotropy = vk::TRUE;
@@ -385,10 +392,15 @@ impl VulkanAdapter {
         if robust_buffer_access {
             enabled_features.robust_buffer_access = vk::TRUE;
         }
-        let create_info = vk::DeviceCreateInfo::default()
+        let mut depth_clip_enable_features =
+            vk::PhysicalDeviceDepthClipEnableFeaturesEXT::default().depth_clip_enable(true);
+        let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&extension_names)
             .enabled_features(&enabled_features);
+        if depth_clip_control {
+            create_info = create_info.push_next(&mut depth_clip_enable_features);
+        }
         let device = unsafe {
             self.instance
                 .instance
@@ -415,6 +427,7 @@ impl VulkanAdapter {
             memory_properties,
             queue_family_index,
             occlusion_query_precise,
+            depth_clip_control,
             sampler_anisotropy,
             max_sampler_anisotropy,
             allocations: AtomicU64::new(0),
