@@ -82,7 +82,7 @@ yawgpu is a small Cargo workspace of layered crates:
 |---|---|---|
 | **Noop** | reference | CPU-only; always available. Runs the full validation layer with no GPU. Ideal for CI and headless testing. |
 | **Metal** | 1 — supported | Apple platforms. Built with the `metal` feature via the `objc2` family. |
-| **Vulkan** | 1 — supported | Cross-platform. Built with the `vulkan` feature via `ash`; targets **Vulkan 1.1+** (MoltenVK ≥ 1.1 on macOS, native drivers elsewhere). |
+| **Vulkan** | 1 — supported | Cross-platform. Built with the `vulkan` feature via `ash`; targets **Vulkan 1.1+** (MoltenVK ≥ 1.1 on macOS, native drivers on Linux / Windows / Android). |
 | **OpenGL ES** | 2 — experimental | Opt-in `gles` feature (never in default). Targets Android (native EGL) and Windows (ANGLE by default, host GL via opt-in `YAWGPU_GLES_BACKEND=wgl`). Best-effort: paths that do not cleanly map to GLES 3.1 are rejected at the HAL layer with `HalError`; `yawgpu.h` vendor extensions (`tiled`, `shader-passthrough`) are not implemented for GLES. |
 
 Direct3D is intentionally out of scope.
@@ -454,6 +454,22 @@ SPIR-V or MSL straight to the backend; see
     Vulkan drivers, and the windowed `triangle` example additionally
     runs through the OpenGL ES backend via the WGL fallback (host GL
     driver, opt-in).
+  - **Linux (`x86_64-unknown-linux-gnu`)** — the CI host (`ubuntu-latest`):
+    every push builds the workspace and runs the full unit + validation
+    test suite (Noop backend) green, including the `tiled` feature gate
+    (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). The
+    **Vulkan backend** is additionally verified **real-GPU on Linux**
+    against the native ICD (`ash` loads `libvulkan.so` at runtime) — on
+    Intel Iris Graphics 5100 (HSW GT3) / Mesa / Vulkan 1.2 the basic,
+    buffer, texture, compute, render, depth, external-texture, OOM, and
+    two-subpass `tiled` G-buffer end-to-end suites pass against the live
+    driver. The handful of non-passes are bound to this particular GPU /
+    driver rather than to yawgpu: ETC2 / ASTC compressed-texture
+    roundtrips need compressed-format features this desktop GPU does not
+    expose, `depthCompare=Equal` is sensitive to Mesa depth-invariance
+    precision, and one SPIR-V shader-passthrough render case differs on
+    this driver. X11 / Wayland windowed surface sources are currently
+    recognized-but-inert, so windowed presentation is not yet wired.
   - **Android (`aarch64-linux-android`)** — both Vulkan and OpenGL ES
     backends cross-build from a macOS arm64 host with NDK r30 (see
     "Cross-building for Android" above), including the `mobile`
