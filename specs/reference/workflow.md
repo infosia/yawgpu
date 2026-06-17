@@ -63,6 +63,40 @@ Acceptance criteria:
 Report back: files changed, any Dawn cases intentionally deferred (+why).
 ```
 
+## Coding-agent command execution (codex output-polling constraint)
+
+The coding agent runs in **codex**, whose `exec_command` is asynchronous:
+it launches the process, then drains stdout via `write_stdin` in **30-second
+polling windows** with limited output per chunk. A command that streams a
+burst of output fills the stdout pipe buffer and **blocks on `write()` until
+codex reads it 30 s later** (pipe back-pressure). This throttles throughput
+~100×: a `cargo test --workspace` that runs in ~25 s when executed freely
+(Claude's Bash, the user's terminal) took **30–73 min** inside codex purely
+from this drain — root-caused 2026-06-17 from `~/.codex/sessions` receipts
+(the build "Finished" at +2.5 min; the remaining ~70 min was 30 s polls
+trickling test output). It is **not** build/link time (a full cold build is
+~17 s here) and **not** cargo lock contention (all actors share `./target`
+with identical rustc fingerprints; no `Blocking … file lock` ever observed).
+
+**Rule:** in a codex handoff, any long-running or verbose command (test
+suites, full builds) must redirect output to a file and report the exit
+code, never stream to the console:
+
+```
+cargo test --workspace > /tmp/out.log 2>&1; echo "EXIT=$?"; tail -n 40 /tmp/out.log
+```
+
+This lets the process run at full speed while codex reads only the small
+tail. A test-name **filter does not avoid the cost**: `cargo test -p yawgpu
+<filter>` still spawns every integration-test binary in the package (each
+prints `running 0 tests`), so codex polls through 50+ output flushes — a
+single-test run was observed taking 45 min. Use `--test <binary> <filter>`
+to run one binary, or (preferred) just redirect to a file. The agent's
+targeted gates and the workspace-test ban are specified
+in `blocks/91-cts-conformance.md` → "Completion report → Verification".
+**Claude** runs the full `cargo test --workspace` on review directly via its
+own Bash (no polling harness — ~25 s), so it remains the backstop.
+
 ## Phase Review (mandatory — "Clean Review Then Fix")
 
 Every phase ends with a **mandatory Phase Review** before it can be marked

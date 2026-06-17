@@ -208,9 +208,27 @@ just reply in chat. This lets the reviewer (Claude) read deterministic
 results instead of re-running and polling. The report must contain:
 
 - **Verification** — the exact commands run and their **exit codes**.
-  **The coding agent must NOT run `cargo test --workspace`** (it links 59+
-  test binaries against naga and takes ~1 h in the codex sandbox — wasted
-  effort). Instead the agent runs the cheaper, targeted gates:
+  **The coding agent must NOT run `cargo test --workspace` interactively.**
+  The reason is *not* build/link time (root-caused 2026-06-17: a full cold
+  build — naga from git + all deps + every test binary — is ~17 s on the
+  reference M2; warm full test execution is ~25 s). The ~1 h seen in codex
+  is an artifact of **codex's async `exec_command`/`write_stdin` 30-second
+  output polling**: codex drains the test process's stdout in 30 s windows
+  with tiny per-chunk output, so the process **blocks on stdout pipe
+  back-pressure** and a ~25 s run stretches to 30–73 min. (cargo locks and
+  parallel test threads are *not* involved — Claude/codex/terminal share
+  `./target` with identical rustc fingerprints and never hit
+  `Blocking … file lock`.) **General rule for any long/verbose command in a
+  codex handoff: redirect to a file and report the exit code** —
+  `<cmd> > /tmp/out.log 2>&1; echo "EXIT=$?"; tail -n 40 /tmp/out.log` —
+  which lets the process run at full speed while codex reads only the tail.
+  Note a **test-name filter does not escape this**: `cargo test -p yawgpu
+  <filter>` still launches *every* integration-test binary in the package
+  (each prints `running 0 tests`), so codex still polls through 50+ output
+  flushes at 5–30 s each (observed: a single-test run took 45 min). To run
+  one binary use `--test <binary> <filter>`, but the file-redirect above is
+  the general fix regardless.
+  For verification the agent instead runs the cheaper, targeted gates:
   - lib unit tests: `cargo test -p yawgpu --lib` and `cargo test
     -p yawgpu-core --lib` (fast; catches most regressions — e.g. the FFI
     `ffi::tests` regressions a workspace run would also catch);
