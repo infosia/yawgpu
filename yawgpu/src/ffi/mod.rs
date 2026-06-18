@@ -90,7 +90,7 @@ use crate::{
 };
 use std::collections::{BTreeMap, HashMap};
 use std::os::raw::c_void;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use yawgpu_core as core;
 
@@ -166,13 +166,13 @@ pub struct WGPUDeviceImpl {
     pub(crate) device_lost_callback: DeviceLostCallbackInfo,
     pub(crate) device_lost_futures: Mutex<Vec<u64>>,
     pub(crate) default_queue: Mutex<Option<Arc<WGPUQueueImpl>>>,
-    pub(crate) shader_module_cache: Mutex<HashMap<ShaderModuleCacheKey, Arc<WGPUShaderModuleImpl>>>,
+    pub(crate) shader_module_cache: Mutex<HashMap<ShaderModuleCacheKey, Weak<WGPUShaderModuleImpl>>>,
     pub(crate) pipeline_layout_cache:
-        Mutex<HashMap<PipelineLayoutCacheKey, Arc<WGPUPipelineLayoutImpl>>>,
+        Mutex<HashMap<PipelineLayoutCacheKey, Weak<WGPUPipelineLayoutImpl>>>,
     pub(crate) compute_pipeline_cache:
-        Mutex<HashMap<ComputePipelineCacheKey, Arc<WGPUComputePipelineImpl>>>,
+        Mutex<HashMap<ComputePipelineCacheKey, Weak<WGPUComputePipelineImpl>>>,
     pub(crate) render_pipeline_cache:
-        Mutex<HashMap<RenderPipelineCacheKey, Arc<WGPURenderPipelineImpl>>>,
+        Mutex<HashMap<RenderPipelineCacheKey, Weak<WGPURenderPipelineImpl>>>,
 }
 
 /// Owns the core object and retained handles for the WGPU Instance handle.
@@ -302,6 +302,8 @@ pub(crate) struct PipelineConstantCacheKey {
 /// Identifies compute pipeline cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ComputePipelineCacheKey {
+    // `Arc::as_ptr` of the core shader module (not the transient C handle) — see
+    // `core_shader_module_ptr` for the ABA-safety rationale.
     module: usize,
     entry_point: Option<String>,
     constants: Vec<PipelineConstantCacheKey>,
@@ -323,6 +325,8 @@ pub(crate) struct RenderPipelineCacheKey {
 /// Identifies render stage cache key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RenderStageCacheKey {
+    // `Arc::as_ptr` of the core shader module (not the transient C handle) — see
+    // `core_shader_module_ptr` for the ABA-safety rationale.
     module: usize,
     entry_point: Option<String>,
     constants: Vec<PipelineConstantCacheKey>,
@@ -719,8 +723,15 @@ impl WGPUDeviceImpl {
 // are identified by C-handle identity. This matches the webgpu.h-observable
 // pointer equality in Dawn's ObjectCaching tests; deeper engine-internal dedup
 // of content-equal but handle-distinct sub-objects is intentionally out of scope.
+// Entries are stored as `Weak` (not `Arc`) so that releasing the last public
+// (C) reference to a cached object drops it and runs its `Drop`, reclaiming the
+// backing naga module / HAL pipeline. A live entry still dedups (the `Weak`
+// upgrades while the object is alive); dead entries are pruned on the next miss
+// so the `HashMap` keys (e.g. the full WGSL `String` for shader modules) do not
+// accumulate. See the ABA note on the pipeline cache keys in
+// `compute_pipeline_cache_key` / `render_pipeline_cache_key`.
 fn cache_handle<T>(
-    cache: &Mutex<HashMap<T, Arc<T::Handle>>>,
+    cache: &Mutex<HashMap<T, Weak<T::Handle>>>,
     key: T,
     handle: Arc<T::Handle>,
 ) -> Arc<T::Handle>
@@ -730,15 +741,33 @@ where
     let mut cache = cache
         .lock()
         .expect("device object cache lock must not poison");
-    if let Some(cached) = cache.get(&key) {
-        return Arc::clone(cached);
+    if let Some(cached) = cache.get(&key).and_then(Weak::upgrade) {
+        return cached;
     }
-    cache.insert(key, Arc::clone(&handle));
+    // The lookup missed or the cached entry was dead; prune all dead entries so
+    // their keys are freed too, then record this live object.
+    cache.retain(|_, weak| weak.strong_count() > 0);
+    cache.insert(key, Arc::downgrade(&handle));
     handle
 }
 
 trait CacheKey: Eq + std::hash::Hash {
     type Handle;
+}
+
+/// Returns the number of entries currently stored in a device object cache.
+///
+/// Test-only helper used to assert that dead `Weak` entries (and their keys) are
+/// pruned rather than accumulating for the device's lifetime.
+#[cfg(test)]
+fn cache_len<T>(cache: &Mutex<HashMap<T, Weak<T::Handle>>>) -> usize
+where
+    T: CacheKey,
+{
+    cache
+        .lock()
+        .expect("device object cache lock must not poison")
+        .len()
 }
 
 impl CacheKey for ShaderModuleCacheKey {
@@ -802,6 +831,29 @@ unsafe fn layout_identity(layout: native::WGPUPipelineLayout) -> PipelineLayoutI
     }
 }
 
+// Returns a stable identity for the core shader module backing the C shader
+// module handle `module`, used as a pipeline-cache key component.
+//
+// ABA-safety: the pipeline-cache keys must NOT use the transient C handle
+// pointer (`module as usize`). With the caches now holding `Weak`, a released
+// C shader handle can be freed and a *different* `WGPUShaderModuleImpl` can be
+// allocated at the same address, which would make a stale pipeline-cache entry
+// match a different shader. Instead we key on the *core* shader module
+// `Arc<core::ShaderModule>` pointer: a live pipeline retains that `Arc`
+// (`ComputePipelineInner._shader_module` /
+// `RenderPipelineInner._vertex.shader.module` / `_fragment.shader.module`), so a
+// live pipeline-cache hit (i.e. `Weak::upgrade` succeeded) guarantees the core
+// module is still alive and its pointer still uniquely identifies it — no reuse
+// is possible while a pipeline keyed on it lives.
+//
+// # Safety
+//
+// `module` must be a non-null live yawgpu shader module handle.
+unsafe fn core_shader_module_ptr(module: native::WGPUShaderModule) -> usize {
+    let handle = borrow_handle::<WGPUShaderModuleImpl>(module, "WGPUShaderModule");
+    Arc::as_ptr(&handle._core) as usize
+}
+
 unsafe fn compute_pipeline_cache_key(
     descriptor: &native::WGPUComputePipelineDescriptor,
 ) -> Option<ComputePipelineCacheKey> {
@@ -813,7 +865,7 @@ unsafe fn compute_pipeline_cache_key(
         return None;
     }
     Some(ComputePipelineCacheKey {
-        module: descriptor.compute.module as usize,
+        module: core_shader_module_ptr(descriptor.compute.module),
         entry_point: cache_string_view(descriptor.compute.entryPoint),
         constants: pipeline_constant_cache_keys(
             descriptor.compute.constantCount,
@@ -836,7 +888,7 @@ unsafe fn render_pipeline_cache_key(
     Some(RenderPipelineCacheKey {
         layout,
         vertex: RenderStageCacheKey {
-            module: descriptor.vertex.module as usize,
+            module: core_shader_module_ptr(descriptor.vertex.module),
             entry_point: cache_string_view(descriptor.vertex.entryPoint),
             constants: pipeline_constant_cache_keys(
                 descriptor.vertex.constantCount,
@@ -1171,7 +1223,7 @@ unsafe fn fragment_state_cache_key(
     }
     Some(FragmentStateCacheKey {
         stage: RenderStageCacheKey {
-            module: fragment.module as usize,
+            module: core_shader_module_ptr(fragment.module),
             entry_point: cache_string_view(fragment.entryPoint),
             constants: pipeline_constant_cache_keys(fragment.constantCount, fragment.constants)?,
         },
@@ -6090,6 +6142,126 @@ mod tests {
             assert!(!multi.is_null());
             assert!(shader_module_is_error(multi));
             wgpuShaderModuleRelease(multi);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    // A minimal `CacheKey`/handle pair used to exercise `cache_handle`'s
+    // dedup / prune logic directly, without wiring a real device object.
+    #[derive(Debug, PartialEq, Eq, Hash)]
+    struct DummyCacheKey(u32);
+
+    struct DummyHandle;
+
+    impl CacheKey for DummyCacheKey {
+        type Handle = DummyHandle;
+    }
+
+    #[test]
+    fn cache_handle_dedups_live_objects() {
+        let cache: Mutex<HashMap<DummyCacheKey, Weak<DummyHandle>>> = Mutex::new(HashMap::new());
+        let first = cache_handle(&cache, DummyCacheKey(1), Arc::new(DummyHandle));
+        // A second create with the same key while `first` is still alive must
+        // return the SAME backing object (dedup preserved).
+        let second = cache_handle(&cache, DummyCacheKey(1), Arc::new(DummyHandle));
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(Arc::strong_count(&first), 2);
+        assert_eq!(cache_len(&cache), 1);
+    }
+
+    #[test]
+    fn cache_handle_reclaims_and_prunes_dead_objects() {
+        let cache: Mutex<HashMap<DummyCacheKey, Weak<DummyHandle>>> = Mutex::new(HashMap::new());
+
+        let first = cache_handle(&cache, DummyCacheKey(1), Arc::new(DummyHandle));
+        let first_ptr = Arc::as_ptr(&first);
+        // Drop the only external reference: the cache holds just a `Weak`, so the
+        // object (and any backing allocation behind its `Drop`) is reclaimed.
+        drop(first);
+        {
+            let guard = cache.lock().expect("lock");
+            let weak = guard.get(&DummyCacheKey(1)).expect("entry present");
+            assert_eq!(weak.strong_count(), 0, "dead entry must not keep object alive");
+        }
+
+        // Re-creating with the same key returns a FRESH object (not the dead one)
+        // and prunes the dead entry instead of accumulating a second one.
+        let second = cache_handle(&cache, DummyCacheKey(1), Arc::new(DummyHandle));
+        assert_ne!(first_ptr, Arc::as_ptr(&second));
+        assert_eq!(cache_len(&cache), 1);
+
+        // A distinct key with a since-dropped first key: prune frees the stale
+        // key memory rather than letting the map grow unbounded.
+        drop(second);
+        let _third = cache_handle(&cache, DummyCacheKey(2), Arc::new(DummyHandle));
+        assert_eq!(cache_len(&cache), 1, "dead key must be pruned, not retained");
+    }
+
+    #[test]
+    fn shader_module_cache_dedups_live_and_reclaims_released() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let device_impl = clone_handle::<WGPUDeviceImpl>(device, "WGPUDevice");
+            let source = "@compute @workgroup_size(1) fn main() {}";
+
+            // Two live creates of the same WGSL return the same C handle (dedup).
+            let first = create_wgsl_module(device, source);
+            let second = create_wgsl_module(device, source);
+            assert_eq!(first, second);
+            assert_eq!(cache_len(&device_impl.shader_module_cache), 1);
+
+            // Release both public refs: the cache holds only a `Weak`, so the
+            // backing shader module is dropped (no lifetime-of-device leak).
+            wgpuShaderModuleRelease(first);
+            wgpuShaderModuleRelease(second);
+            {
+                let guard = device_impl.shader_module_cache.lock().expect("lock");
+                let weak = guard
+                    .get(&ShaderModuleCacheKey::Wgsl(source.to_owned()))
+                    .expect("entry present");
+                assert_eq!(weak.strong_count(), 0, "released shader must not be retained");
+            }
+
+            // Re-creating the same WGSL yields a FRESH backing object and prunes
+            // the dead entry (the WGSL `String` key is reclaimed, not duplicated).
+            let third = create_wgsl_module(device, source);
+            assert_eq!(cache_len(&device_impl.shader_module_cache), 1);
+            wgpuShaderModuleRelease(third);
+
+            drop(device_impl);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn pipeline_cache_key_uses_stable_core_module_identity() {
+        // ABA regression: the pipeline cache keys must key on the *core* shader
+        // module `Arc` pointer (which a live pipeline retains), not the transient
+        // C handle pointer (which can be freed and reused once the shader cache
+        // holds only a `Weak`). Two distinct C shader handles wrapping the same
+        // deduped core module must therefore produce the same key component.
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let source = "@compute @workgroup_size(1) fn main() {}";
+
+            // Dedup gives the same C handle (and thus the same core module) twice.
+            let module_a = create_wgsl_module(device, source);
+            let module_b = create_wgsl_module(device, source);
+            assert_eq!(module_a, module_b);
+
+            let key_a = core_shader_module_ptr(module_a);
+            let key_b = core_shader_module_ptr(module_b);
+            assert_eq!(key_a, key_b, "deduped modules must share the core key");
+
+            // A different shader yields a distinct core-module key.
+            let other = "@compute @workgroup_size(1) fn other() {}";
+            let module_c = create_wgsl_module(device, other);
+            assert_ne!(module_a, module_c);
+            assert_ne!(key_a, core_shader_module_ptr(module_c));
+
+            wgpuShaderModuleRelease(module_a);
+            wgpuShaderModuleRelease(module_b);
+            wgpuShaderModuleRelease(module_c);
             release_handles(instance, adapter, device);
         }
     }

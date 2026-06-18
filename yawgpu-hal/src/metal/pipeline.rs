@@ -79,22 +79,30 @@ pub(super) fn create_compute_pipeline(
     buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
     workgroup_memory_sizes: Vec<u32>,
 ) -> Result<MetalComputePipeline, HalError> {
-    let source = NSString::from_str(msl_source);
-    let library = device
-        .newLibraryWithSource_options_error(&source, None)
-        .map_err(|error| shader_error(error.localizedDescription().to_string()))?;
-    let function = library
-        .newFunctionWithName(&NSString::from_str(entry_point))
-        .ok_or_else(|| shader_error(format!("compute function '{entry_point}' not found")))?;
-    let inner = device
-        .newComputePipelineStateWithFunction_error(&function)
-        .map_err(|error| shader_error(error.localizedDescription().to_string()))?;
-    Ok(MetalComputePipeline {
-        inner,
-        workgroup_size,
-        buffer_sizes_slot,
-        buffer_size_bindings,
-        workgroup_memory_sizes,
+    // Wrap the compile in an autoreleasepool so the autoreleased temporaries
+    // produced by the objc calls (NSString, the transient library/function)
+    // are reclaimed when this returns rather than accumulating on a thread with
+    // no drained pool. The returned pipeline state is held by an objc2
+    // `Retained` (explicit +1), so it survives the pool drain. Mirrors
+    // `MetalQueue::submit_copies` / `wait_idle`.
+    autoreleasepool(|_| {
+        let source = NSString::from_str(msl_source);
+        let library = device
+            .newLibraryWithSource_options_error(&source, None)
+            .map_err(|error| shader_error(error.localizedDescription().to_string()))?;
+        let function = library
+            .newFunctionWithName(&NSString::from_str(entry_point))
+            .ok_or_else(|| shader_error(format!("compute function '{entry_point}' not found")))?;
+        let inner = device
+            .newComputePipelineStateWithFunction_error(&function)
+            .map_err(|error| shader_error(error.localizedDescription().to_string()))?;
+        Ok(MetalComputePipeline {
+            inner,
+            workgroup_size,
+            buffer_sizes_slot,
+            buffer_size_bindings,
+            workgroup_memory_sizes,
+        })
     })
 }
 
@@ -106,121 +114,133 @@ pub(super) fn create_render_pipeline(
     fragment_entry_point: Option<&str>,
     descriptor: &HalRenderPipelineDescriptor,
 ) -> Result<MetalRenderPipeline, HalError> {
-    if !descriptor.color_targets.iter().any(Option::is_some) && descriptor.depth_stencil.is_none() {
-        return Err(shader_error(
-            "render pipeline requires a color target or depth-stencil state".to_owned(),
-        ));
-    }
-    // Metal has no pipeline sample-mask API; yawgpu-core bakes the mask into MSL.
-    let size_metadata = render_size_metadata(&shader);
-    let use_vertex_descriptor = render_shader_uses_metal_vertex_descriptor(&shader);
-    let (vertex_function, fragment_function) =
-        create_render_functions(device, shader, vertex_entry_point, fragment_entry_point)?;
-    let pipeline_descriptor = MTLRenderPipelineDescriptor::new();
-    pipeline_descriptor.setVertexFunction(Some(&vertex_function));
-    pipeline_descriptor.setFragmentFunction(fragment_function.as_deref());
-    pipeline_descriptor.setRasterSampleCount(to_ns(u64::from(descriptor.sample_count))?);
-    pipeline_descriptor.setAlphaToCoverageEnabled(descriptor.alpha_to_coverage_enabled);
-    // Each color target populates `MTLRenderPipelineDescriptor.colorAttachments[i]`,
-    // so the MTL pipeline's color-attachment layout matches the encoder slot-for-slot.
-    // For subpass pipelines this carries every layout slot's format (including
-    // ones the current subpass doesn't write to) — the fragment shader's
-    // `[[color(N)]]` outputs naturally land in the right MTL slot.
-    let color_attachments = pipeline_descriptor.colorAttachments();
-    for (i, color_target) in descriptor.color_targets.iter().copied().enumerate() {
-        let Some(color_target) = color_target else {
-            continue;
-        };
-        let (pixel_format, _) = map_texture_format(color_target.format)?;
-        let attach = unsafe { color_attachments.objectAtIndexedSubscript(i) };
-        attach.setPixelFormat(pixel_format);
-        set_color_attachment_state(&attach, color_target);
-    }
-    if let Some(depth_stencil) = descriptor.depth_stencil {
-        let (pixel_format, _) = map_texture_format(depth_stencil.format)?;
-        if format_has_depth_aspect(depth_stencil.format) {
-            pipeline_descriptor.setDepthAttachmentPixelFormat(pixel_format);
+    // Wrap the compile in an autoreleasepool so the autoreleased temporaries
+    // produced by the objc calls (NSString, transient libraries/functions, the
+    // MTLRenderPipelineDescriptor and its sub-descriptors) are reclaimed when
+    // this returns rather than accumulating on a thread with no drained pool.
+    // The returned pipeline state and depth-stencil state are held by objc2
+    // `Retained` (explicit +1), so they survive the pool drain. Mirrors
+    // `MetalQueue::submit_copies` / `wait_idle`.
+    autoreleasepool(|_| {
+        if !descriptor.color_targets.iter().any(Option::is_some)
+            && descriptor.depth_stencil.is_none()
+        {
+            return Err(shader_error(
+                "render pipeline requires a color target or depth-stencil state".to_owned(),
+            ));
         }
-        if format_has_stencil_aspect(depth_stencil.format) {
-            pipeline_descriptor.setStencilAttachmentPixelFormat(pixel_format);
+        // Metal has no pipeline sample-mask API; yawgpu-core bakes the mask into MSL.
+        let size_metadata = render_size_metadata(&shader);
+        let use_vertex_descriptor = render_shader_uses_metal_vertex_descriptor(&shader);
+        let (vertex_function, fragment_function) =
+            create_render_functions(device, shader, vertex_entry_point, fragment_entry_point)?;
+        let pipeline_descriptor = MTLRenderPipelineDescriptor::new();
+        pipeline_descriptor.setVertexFunction(Some(&vertex_function));
+        pipeline_descriptor.setFragmentFunction(fragment_function.as_deref());
+        pipeline_descriptor.setRasterSampleCount(to_ns(u64::from(descriptor.sample_count))?);
+        pipeline_descriptor.setAlphaToCoverageEnabled(descriptor.alpha_to_coverage_enabled);
+        // Each color target populates `MTLRenderPipelineDescriptor.colorAttachments[i]`,
+        // so the MTL pipeline's color-attachment layout matches the encoder slot-for-slot.
+        // For subpass pipelines this carries every layout slot's format (including
+        // ones the current subpass doesn't write to) — the fragment shader's
+        // `[[color(N)]]` outputs naturally land in the right MTL slot.
+        let color_attachments = pipeline_descriptor.colorAttachments();
+        for (i, color_target) in descriptor.color_targets.iter().copied().enumerate() {
+            let Some(color_target) = color_target else {
+                continue;
+            };
+            let (pixel_format, _) = map_texture_format(color_target.format)?;
+            let attach = unsafe { color_attachments.objectAtIndexedSubscript(i) };
+            attach.setPixelFormat(pixel_format);
+            set_color_attachment_state(&attach, color_target);
         }
-    }
-    if use_vertex_descriptor {
-        let vertex_descriptor = MTLVertexDescriptor::new();
-        for buffer in &descriptor.vertex_buffers {
-            let metal_index = buffer
-                .attributes
-                .first()
-                .map(|attribute| attribute.metal_buffer_index)
-                .unwrap_or(0);
-            let layouts = vertex_descriptor.layouts();
-            let layout =
-                unsafe { layouts.objectAtIndexedSubscript(to_ns(u64::from(metal_index))?) };
-            unsafe {
-                layout.setStride(to_ns(buffer.array_stride)?);
-                layout.setStepRate(1);
+        if let Some(depth_stencil) = descriptor.depth_stencil {
+            let (pixel_format, _) = map_texture_format(depth_stencil.format)?;
+            if format_has_depth_aspect(depth_stencil.format) {
+                pipeline_descriptor.setDepthAttachmentPixelFormat(pixel_format);
             }
-            layout.setStepFunction(match buffer.step_mode {
-                HalVertexStepMode::Vertex => MTLVertexStepFunction::PerVertex,
-                HalVertexStepMode::Instance => MTLVertexStepFunction::PerInstance,
-            });
-            for attribute in &buffer.attributes {
-                let attributes = vertex_descriptor.attributes();
-                let attr = unsafe {
-                    attributes
-                        .objectAtIndexedSubscript(to_ns(u64::from(attribute.shader_location))?)
-                };
-                attr.setFormat(map_vertex_format(attribute.format)?);
+            if format_has_stencil_aspect(depth_stencil.format) {
+                pipeline_descriptor.setStencilAttachmentPixelFormat(pixel_format);
+            }
+        }
+        if use_vertex_descriptor {
+            let vertex_descriptor = MTLVertexDescriptor::new();
+            for buffer in &descriptor.vertex_buffers {
+                let metal_index = buffer
+                    .attributes
+                    .first()
+                    .map(|attribute| attribute.metal_buffer_index)
+                    .unwrap_or(0);
+                let layouts = vertex_descriptor.layouts();
+                let layout =
+                    unsafe { layouts.objectAtIndexedSubscript(to_ns(u64::from(metal_index))?) };
                 unsafe {
-                    attr.setOffset(to_ns(attribute.offset)?);
-                    attr.setBufferIndex(to_ns(u64::from(attribute.metal_buffer_index))?);
+                    layout.setStride(to_ns(buffer.array_stride)?);
+                    layout.setStepRate(1);
+                }
+                layout.setStepFunction(match buffer.step_mode {
+                    HalVertexStepMode::Vertex => MTLVertexStepFunction::PerVertex,
+                    HalVertexStepMode::Instance => MTLVertexStepFunction::PerInstance,
+                });
+                for attribute in &buffer.attributes {
+                    let attributes = vertex_descriptor.attributes();
+                    let attr = unsafe {
+                        attributes.objectAtIndexedSubscript(to_ns(u64::from(
+                            attribute.shader_location,
+                        ))?)
+                    };
+                    attr.setFormat(map_vertex_format(attribute.format)?);
+                    unsafe {
+                        attr.setOffset(to_ns(attribute.offset)?);
+                        attr.setBufferIndex(to_ns(u64::from(attribute.metal_buffer_index))?);
+                    }
                 }
             }
+            pipeline_descriptor.setVertexDescriptor(Some(&vertex_descriptor));
         }
-        pipeline_descriptor.setVertexDescriptor(Some(&vertex_descriptor));
-    }
-    let inner = device
-        .newRenderPipelineStateWithDescriptor_error(&pipeline_descriptor)
-        .map_err(|error| shader_error(error.localizedDescription().to_string()))?;
-    // Every render pipeline carries an `MTLDepthStencilState`. When the
-    // public descriptor opts out of depth-stencil (Option::None) we still
-    // bind a no-op state (depthCompare=Always, depthWrite=false, no stencil)
-    // so the encoder doesn't inherit a previous pipeline's depth test/write
-    // against a shared depth attachment. Without this, multi-subpass passes
-    // where one subpass uses depth and a later subpass doesn't would fail
-    // depth-test for the later subpass's draws (the lighting/composite
-    // fullscreen triangles in tiled_deferred specifically lose to the
-    // gbuffer subpass's previously written depth values).
-    let (depth_bias, depth_bias_slope_scale, depth_bias_clamp) = descriptor
-        .depth_stencil
-        .map(|depth_stencil| {
-            (
-                depth_stencil.depth_bias,
-                depth_stencil.depth_bias_slope_scale,
-                depth_stencil.depth_bias_clamp,
-            )
+        let inner = device
+            .newRenderPipelineStateWithDescriptor_error(&pipeline_descriptor)
+            .map_err(|error| shader_error(error.localizedDescription().to_string()))?;
+        // Every render pipeline carries an `MTLDepthStencilState`. When the
+        // public descriptor opts out of depth-stencil (Option::None) we still
+        // bind a no-op state (depthCompare=Always, depthWrite=false, no stencil)
+        // so the encoder doesn't inherit a previous pipeline's depth test/write
+        // against a shared depth attachment. Without this, multi-subpass passes
+        // where one subpass uses depth and a later subpass doesn't would fail
+        // depth-test for the later subpass's draws (the lighting/composite
+        // fullscreen triangles in tiled_deferred specifically lose to the
+        // gbuffer subpass's previously written depth values).
+        let (depth_bias, depth_bias_slope_scale, depth_bias_clamp) = descriptor
+            .depth_stencil
+            .map(|depth_stencil| {
+                (
+                    depth_stencil.depth_bias,
+                    depth_stencil.depth_bias_slope_scale,
+                    depth_stencil.depth_bias_clamp,
+                )
+            })
+            .unwrap_or((0, 0.0, 0.0));
+        let depth_stencil_state = match descriptor.depth_stencil {
+            Some(depth_stencil) => create_depth_stencil_state(device, depth_stencil)?,
+            None => create_noop_depth_stencil_state(device)?,
+        };
+        Ok(MetalRenderPipeline {
+            inner,
+            depth_stencil_state,
+            primitive_topology: descriptor.primitive_topology,
+            front_face: descriptor.front_face,
+            cull_mode: descriptor.cull_mode,
+            unclipped_depth: descriptor.unclipped_depth,
+            depth_bias,
+            depth_bias_slope_scale,
+            depth_bias_clamp,
+            vertex_buffer_sizes_slot: size_metadata.vertex_slot,
+            vertex_buffer_size_bindings: size_metadata.vertex_bindings,
+            fragment_buffer_sizes_slot: size_metadata.fragment_slot,
+            fragment_buffer_size_bindings: size_metadata.fragment_bindings,
+            fragment_frag_depth_clamp_slot: size_metadata.fragment_frag_depth_clamp_slot,
+            vertex_buffer_metal_indices: size_metadata.vertex_buffer_metal_indices,
         })
-        .unwrap_or((0, 0.0, 0.0));
-    let depth_stencil_state = match descriptor.depth_stencil {
-        Some(depth_stencil) => create_depth_stencil_state(device, depth_stencil)?,
-        None => create_noop_depth_stencil_state(device)?,
-    };
-    Ok(MetalRenderPipeline {
-        inner,
-        depth_stencil_state,
-        primitive_topology: descriptor.primitive_topology,
-        front_face: descriptor.front_face,
-        cull_mode: descriptor.cull_mode,
-        unclipped_depth: descriptor.unclipped_depth,
-        depth_bias,
-        depth_bias_slope_scale,
-        depth_bias_clamp,
-        vertex_buffer_sizes_slot: size_metadata.vertex_slot,
-        vertex_buffer_size_bindings: size_metadata.vertex_bindings,
-        fragment_buffer_sizes_slot: size_metadata.fragment_slot,
-        fragment_buffer_size_bindings: size_metadata.fragment_bindings,
-        fragment_frag_depth_clamp_slot: size_metadata.fragment_frag_depth_clamp_slot,
-        vertex_buffer_metal_indices: size_metadata.vertex_buffer_metal_indices,
     })
 }
 
