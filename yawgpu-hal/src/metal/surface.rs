@@ -91,6 +91,7 @@ impl MetalSurface {
         let (_, bytes_per_pixel) = map_texture_format(config.format)?;
         Ok(MetalTexture {
             inner: Some(texture),
+            format: config.format,
             dimension: HalTextureDimension::D2,
             width: config.width,
             height: config.height,

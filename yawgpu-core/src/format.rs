@@ -1,5 +1,6 @@
 use crate::adapter::Feature;
 use crate::device::FeatureSet;
+use crate::texture_view::TextureAspect;
 
 /// Enumerates texture format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +237,34 @@ impl TextureFormat {
             self.0,
             TextureFormat::R16_SNORM | TextureFormat::RG16_SNORM | TextureFormat::RGBA16_SNORM
         )
+    }
+
+    /// Returns the aspect-specific format selected by `aspect` on this
+    /// (possibly combined) format, or `None` when the aspect does not narrow
+    /// the format to a distinct single-aspect format.
+    ///
+    /// For a combined depth-stencil format, `DepthOnly` selects the depth-only
+    /// format (`depth24plus` for `depth24plus-stencil8`, `depth32float` for
+    /// `depth32float-stencil8`) and `StencilOnly` selects `stencil8`. For
+    /// `aspect = All`, or for a single-aspect format, this returns `None`
+    /// because the format is not narrowed. This mirrors the WebGPU
+    /// "aspect-specific format" rule used when validating a texture view whose
+    /// `aspect` selects a single aspect of a combined depth-stencil texture.
+    #[must_use]
+    pub(crate) fn aspect_view_format(self, aspect: TextureAspect) -> Option<TextureFormat> {
+        match (self.0, aspect) {
+            (TextureFormat::DEPTH24_PLUS_STENCIL8, TextureAspect::DepthOnly) => {
+                Some(TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS))
+            }
+            (TextureFormat::DEPTH32_FLOAT_STENCIL8, TextureAspect::DepthOnly) => {
+                Some(TextureFormat::from_raw(TextureFormat::DEPTH32_FLOAT))
+            }
+            (
+                TextureFormat::DEPTH24_PLUS_STENCIL8 | TextureFormat::DEPTH32_FLOAT_STENCIL8,
+                TextureAspect::StencilOnly,
+            ) => Some(TextureFormat::from_raw(TextureFormat::STENCIL8)),
+            _ => None,
+        }
     }
 
     /// Returns the caps.
