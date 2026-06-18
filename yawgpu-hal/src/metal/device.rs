@@ -80,6 +80,7 @@ impl MetalDevice {
         let (inner, bytes_per_pixel) = create_texture(&self.device, descriptor)?;
         Ok(MetalTexture {
             inner: Some(inner),
+            format: descriptor.format,
             dimension: descriptor.dimension,
             width: descriptor.width,
             height: descriptor.height,

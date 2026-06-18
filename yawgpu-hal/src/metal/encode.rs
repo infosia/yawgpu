@@ -1176,7 +1176,8 @@ fn metal_texture_view(
     texture: &MetalTexture,
     binding: &HalBoundTexture,
 ) -> Result<Retained<ProtocolObject<dyn MTLTextureTrait>>, HalError> {
-    let pixel_format = map_sampled_view_format(binding.format, binding.aspect)?;
+    let pixel_format =
+        map_sampled_view_format_for_texture(texture.format, binding.format, binding.aspect)?;
     let texture_type =
         if binding.dimension == HalTextureViewDimension::D2 && texture.sample_count > 1 {
             MTLTextureType::Type2DMultisample

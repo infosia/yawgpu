@@ -1695,7 +1695,15 @@ fn create_sampled_texture_image_view(
     texture: &VulkanTexture,
     bound: &HalBoundTexture,
 ) -> Result<vk::ImageView, HalError> {
-    let (format, _) = map_texture_format(bound.format)?;
+    // A combined depth-stencil image must be viewed through its own (combined)
+    // VkFormat with the desired aspect selected by the subresource aspect mask.
+    // After the core fix, a DepthOnly/StencilOnly view of a combined texture
+    // arrives with the aspect-specific `bound.format` (e.g. `Depth32Float` /
+    // `Stencil8`); using that aspect VkFormat (e.g. `D32_SFLOAT`) for a view of a
+    // `D32_SFLOAT_S8_UINT` image is invalid. Derive the VkFormat from the
+    // texture's format in that case; otherwise honor the view's own format.
+    let view_format = sampled_texture_view_format(texture.format, bound.format);
+    let (format, _) = map_texture_format(view_format)?;
     let view_info = vk::ImageViewCreateInfo::default()
         .image(texture.inner()?.image)
         .view_type(sampled_texture_view_type(bound.dimension))
@@ -1703,6 +1711,23 @@ fn create_sampled_texture_image_view(
         .subresource_range(sampled_texture_subresource_range(bound));
     unsafe { device.create_image_view(&view_info, None) }
         .map_err(|_| texture_error("sampled texture view creation failed"))
+}
+
+/// Selects the `HalTextureFormat` whose `VkFormat` a sampled image view must
+/// use. For a combined depth-stencil texture (both depth and stencil aspects),
+/// an aspect view must keep the texture's combined VkFormat — the aspect is
+/// chosen via the subresource aspect mask, not by reinterpreting to an
+/// aspect-only VkFormat (which Vulkan rejects as format-incompatible). For all
+/// other textures the view's own format is used.
+fn sampled_texture_view_format(
+    texture_format: HalTextureFormat,
+    view_format: HalTextureFormat,
+) -> HalTextureFormat {
+    if format_has_depth_aspect(texture_format) && format_has_stencil_aspect(texture_format) {
+        texture_format
+    } else {
+        view_format
+    }
 }
 
 fn sampled_texture_view_type(dimension: HalTextureViewDimension) -> vk::ImageViewType {
@@ -2076,5 +2101,59 @@ mod tests {
         let range = sampled_texture_subresource_range(&bound);
 
         assert_eq!(range.aspect_mask, vk::ImageAspectFlags::STENCIL);
+    }
+
+    #[test]
+    fn sampled_view_format_keeps_combined_format_for_aspect_views() {
+        // After the core fix, a DepthOnly view of a combined texture arrives with
+        // the aspect-specific view format (e.g. Depth32Float / Depth24Plus); a
+        // StencilOnly view arrives with Stencil8. The image view must still use
+        // the texture's combined VkFormat (the aspect is selected by the aspect
+        // mask), so the view format here resolves to the combined texture format.
+        for combined in [
+            HalTextureFormat::Depth24PlusStencil8,
+            HalTextureFormat::Depth32FloatStencil8,
+        ] {
+            let depth_view = match combined {
+                HalTextureFormat::Depth24PlusStencil8 => HalTextureFormat::Depth24Plus,
+                HalTextureFormat::Depth32FloatStencil8 => HalTextureFormat::Depth32Float,
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                sampled_texture_view_format(combined, depth_view),
+                combined,
+                "depth-aspect view of {combined:?} must keep the combined format"
+            );
+            assert_eq!(
+                sampled_texture_view_format(combined, HalTextureFormat::Stencil8),
+                combined,
+                "stencil-aspect view of {combined:?} must keep the combined format"
+            );
+            assert_eq!(sampled_texture_view_format(combined, combined), combined);
+        }
+    }
+
+    #[test]
+    fn sampled_view_format_keeps_view_format_for_non_combined_textures() {
+        // Non-combined textures (color, depth-only, stencil-only) keep the view's
+        // own format unchanged.
+        assert_eq!(
+            sampled_texture_view_format(
+                HalTextureFormat::Rgba8Unorm,
+                HalTextureFormat::Rgba8Unorm
+            ),
+            HalTextureFormat::Rgba8Unorm
+        );
+        assert_eq!(
+            sampled_texture_view_format(
+                HalTextureFormat::Depth32Float,
+                HalTextureFormat::Depth32Float
+            ),
+            HalTextureFormat::Depth32Float
+        );
+        assert_eq!(
+            sampled_texture_view_format(HalTextureFormat::Stencil8, HalTextureFormat::Stencil8),
+            HalTextureFormat::Stencil8
+        );
     }
 }

@@ -268,6 +268,36 @@ pub(super) fn map_sampled_view_format(
     Ok(pixel_format)
 }
 
+/// Maps a sampled texture view's `MTLPixelFormat` from the *texture's* format
+/// plus the view's aspect. For combined depth-stencil textures the WebGPU view
+/// format may be the aspect-specific format (e.g. `depth32float` for a
+/// `DepthOnly` view of `depth32float-stencil8`), but Metal cannot cast a
+/// combined depth-stencil texture to a depth-only pixel format — the depth
+/// aspect is read as `depth2d` through the combined format directly. So the view
+/// pixel format must be derived from the texture's combined format, not the
+/// view's aspect format:
+/// - `DepthOnly` aspect of a combined depth-stencil texture → the texture's
+///   combined Metal pixel format (no cast).
+/// - `StencilOnly` aspect of a combined depth-stencil texture → `X32_Stencil8`.
+/// - otherwise → map the view's own format (unchanged from `map_sampled_view_format`).
+pub(super) fn map_sampled_view_format_for_texture(
+    texture_format: HalTextureFormat,
+    view_format: HalTextureFormat,
+    aspect: crate::HalTextureAspect,
+) -> Result<MTLPixelFormat, HalError> {
+    if is_combined_depth_stencil(texture_format) {
+        match aspect {
+            crate::HalTextureAspect::StencilOnly => return Ok(MTLPixelFormat::X32_Stencil8),
+            crate::HalTextureAspect::DepthOnly => {
+                let (pixel_format, _) = map_texture_format(texture_format)?;
+                return Ok(pixel_format);
+            }
+            crate::HalTextureAspect::All => {}
+        }
+    }
+    map_sampled_view_format(view_format, aspect)
+}
+
 /// Converts address mode into the corresponding yawgpu representation.
 pub(super) fn map_address_mode(mode: HalAddressMode) -> MTLSamplerAddressMode {
     match mode {
@@ -507,5 +537,77 @@ mod tests {
         for (hal, metal) in cases {
             assert_eq!(map_vertex_format(hal).expect("format supported"), metal);
         }
+    }
+
+    #[test]
+    #[cfg(feature = "metal")]
+    fn sampled_view_format_for_combined_depth_stencil_uses_texture_format() {
+        use crate::HalTextureAspect::{All, DepthOnly, StencilOnly};
+        // A DepthOnly view of a combined depth-stencil texture must NOT cast to a
+        // depth-only Metal pixel format (Metal cannot cast combined → depth-only,
+        // it aborts). It samples the depth aspect through the combined format.
+        for combined in [
+            HalTextureFormat::Depth24PlusStencil8,
+            HalTextureFormat::Depth32FloatStencil8,
+        ] {
+            let (combined_metal, _) = map_texture_format(combined).expect("combined format");
+            // DepthOnly view (CTS supplies the aspect format, e.g. Depth32Float).
+            let view_format = match combined {
+                HalTextureFormat::Depth24PlusStencil8 => HalTextureFormat::Depth24Plus,
+                HalTextureFormat::Depth32FloatStencil8 => HalTextureFormat::Depth32Float,
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                map_sampled_view_format_for_texture(combined, view_format, DepthOnly)
+                    .expect("depth view"),
+                combined_metal,
+                "DepthOnly view of {combined:?} must use the combined Metal format"
+            );
+            // StencilOnly view (CTS supplies Stencil8) → reinterpret to X32_Stencil8.
+            assert_eq!(
+                map_sampled_view_format_for_texture(
+                    combined,
+                    HalTextureFormat::Stencil8,
+                    StencilOnly
+                )
+                .expect("stencil view"),
+                MTLPixelFormat::X32_Stencil8,
+                "StencilOnly view of {combined:?} must be X32_Stencil8"
+            );
+            // All-aspect view keeps the combined format.
+            assert_eq!(
+                map_sampled_view_format_for_texture(combined, combined, All).expect("all view"),
+                combined_metal,
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "metal")]
+    fn sampled_view_format_for_non_combined_texture_maps_view_format() {
+        use crate::HalTextureAspect::All;
+        // Non-combined textures keep the existing behavior: the view's own format
+        // is mapped directly.
+        let (expected, _) = map_texture_format(HalTextureFormat::Rgba8Unorm).expect("format");
+        assert_eq!(
+            map_sampled_view_format_for_texture(
+                HalTextureFormat::Rgba8Unorm,
+                HalTextureFormat::Rgba8Unorm,
+                All
+            )
+            .expect("color view"),
+            expected,
+        );
+        // Depth-only texture (not combined): depth view maps the depth format.
+        let (depth_metal, _) = map_texture_format(HalTextureFormat::Depth32Float).expect("format");
+        assert_eq!(
+            map_sampled_view_format_for_texture(
+                HalTextureFormat::Depth32Float,
+                HalTextureFormat::Depth32Float,
+                crate::HalTextureAspect::DepthOnly
+            )
+            .expect("depth view"),
+            depth_metal,
+        );
     }
 }
