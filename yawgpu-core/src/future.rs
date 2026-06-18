@@ -126,11 +126,16 @@ impl FutureRegistry {
         }
     }
 
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner.lock().futures.len()
+    }
+
     /// Returns process events.
     #[must_use]
     pub fn process_events(&self) -> Vec<FutureId> {
         let mut inner = self.inner.lock();
-        inner
+        let fired = inner
             .futures
             .iter_mut()
             .filter_map(|(id, entry)| {
@@ -148,7 +153,11 @@ impl FutureRegistry {
                     None
                 }
             })
-            .collect()
+            .collect::<Vec<_>>();
+        for id in &fired {
+            inner.futures.remove(id);
+        }
+        fired
     }
 
     /// Returns wait any.
@@ -165,9 +174,11 @@ impl FutureRegistry {
         let mut inner = self.inner.lock();
         let mut completed = Vec::new();
         let mut callbacks_to_fire = Vec::new();
+        let mut completed_present = Vec::new();
 
         for id in ids {
             let Some(entry) = inner.futures.get_mut(id) else {
+                completed.push(*id);
                 continue;
             };
             if entry.state == FutureState::Complete {
@@ -176,7 +187,11 @@ impl FutureRegistry {
                     entry.callback_fired = true;
                     callbacks_to_fire.push(*id);
                 }
+                completed_present.push(*id);
             }
+        }
+        for id in completed_present {
+            inner.futures.remove(&id);
         }
 
         let status = if completed.is_empty() {
@@ -224,5 +239,68 @@ mod tests {
         assert_eq!(result.status, WaitAnyStatus::Success);
         assert_eq!(result.completed, vec![first, second]);
         assert!(result.callbacks_to_fire.is_empty());
+    }
+
+    #[test]
+    fn future_registry_process_events_removes_fired_entries() {
+        let registry = FutureRegistry::new();
+        let id = registry.register(FutureCallbackMode::AllowProcessEvents);
+        registry.complete(id);
+
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.process_events(), vec![id]);
+        assert_eq!(registry.len(), 0);
+        assert!(registry.process_events().is_empty());
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn future_registry_wait_any_reports_removed_process_events_future_completed() {
+        let registry = FutureRegistry::new();
+        let id = registry.register(FutureCallbackMode::AllowProcessEvents);
+        registry.complete(id);
+
+        assert_eq!(registry.process_events(), vec![id]);
+        assert_eq!(registry.len(), 0);
+
+        let result = registry.wait_any(&[id]);
+        assert_eq!(result.status, WaitAnyStatus::Success);
+        assert_eq!(result.completed, vec![id]);
+        assert!(result.callbacks_to_fire.is_empty());
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn future_registry_wait_any_removes_directly_fired_wait_any_only_future() {
+        let registry = FutureRegistry::new();
+        let id = registry.register(FutureCallbackMode::WaitAnyOnly);
+        registry.complete(id);
+
+        let result = registry.wait_any(&[id]);
+        assert_eq!(result.status, WaitAnyStatus::Success);
+        assert_eq!(result.completed, vec![id]);
+        assert_eq!(result.callbacks_to_fire, vec![id]);
+        assert_eq!(registry.len(), 0);
+
+        let result = registry.wait_any(&[id]);
+        assert_eq!(result.status, WaitAnyStatus::Success);
+        assert_eq!(result.completed, vec![id]);
+        assert!(result.callbacks_to_fire.is_empty());
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn future_registry_retains_registered_pending_future() {
+        let registry = FutureRegistry::new();
+        let id = registry.register(FutureCallbackMode::AllowProcessEvents);
+
+        assert_eq!(registry.len(), 1);
+        assert!(registry.process_events().is_empty());
+
+        let result = registry.wait_any(&[id]);
+        assert_eq!(result.status, WaitAnyStatus::TimedOut);
+        assert!(result.completed.is_empty());
+        assert!(result.callbacks_to_fire.is_empty());
+        assert_eq!(registry.len(), 1);
     }
 }

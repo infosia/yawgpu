@@ -25,13 +25,15 @@ impl MetalQueue {
 
     /// Waits until all submitted queue work has completed.
     pub fn wait_idle(&self) -> Result<(), HalError> {
-        let command_buffer = self
-            .inner
-            .commandBuffer()
-            .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
-        command_buffer.commit();
-        command_buffer.waitUntilCompleted();
-        Ok(())
+        autoreleasepool(|_| {
+            let command_buffer = self
+                .inner
+                .commandBuffer()
+                .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
+            command_buffer.commit();
+            command_buffer.waitUntilCompleted();
+            Ok(())
+        })
     }
 
     /// Records and submits the given buffer/texture copy operations.
