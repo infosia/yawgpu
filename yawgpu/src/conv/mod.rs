@@ -414,6 +414,7 @@ mod tests {
             native::WGPUFeatureName_BGRA8UnormStorage,
             native::WGPUFeatureName_Float32Filterable,
             native::WGPUFeatureName_TimestampQuery,
+            native::WGPUFeatureName_ShaderF16,
             native::WGPUFeatureName_TextureComponentSwizzle,
             native::WGPUFeatureName_TextureFormatsTier1,
             native::WGPUFeatureName_TextureFormatsTier2,

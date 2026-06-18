@@ -131,8 +131,11 @@ impl ShaderModule {
     }
 
     /// Constructs this object from wgsl.
-    pub(crate) fn from_wgsl(source: String) -> Result<ShaderModuleSourceKind, String> {
-        let reflected = shader_naga::parse_and_validate_wgsl(&source)?;
+    pub(crate) fn from_wgsl(
+        source: String,
+        shader_f16: bool,
+    ) -> Result<ShaderModuleSourceKind, String> {
+        let reflected = shader_naga::parse_and_validate_wgsl_gated(&source, shader_f16)?;
         validate_module_limits(&reflected.module)?;
         Ok(ShaderModuleSourceKind::Wgsl {
             _source: source,
@@ -142,11 +145,14 @@ impl ShaderModule {
 
     /// Constructs this object from SPIR-V.
     #[cfg(feature = "shader-passthrough")]
-    pub(crate) fn from_spirv(words: Vec<u32>) -> Result<ShaderModuleSourceKind, String> {
+    pub(crate) fn from_spirv(
+        words: Vec<u32>,
+        shader_f16: bool,
+    ) -> Result<ShaderModuleSourceKind, String> {
         if words.first().copied() != Some(0x0723_0203) {
             return Err("SPIR-V shader module must start with the SPIR-V magic number".to_owned());
         }
-        let reflected = shader_naga::reflect_spirv(&words)?;
+        let reflected = shader_naga::reflect_spirv_gated(&words, shader_f16)?;
         validate_module_limits(&reflected.module)?;
         Ok(ShaderModuleSourceKind::Spirv {
             words,
@@ -348,6 +354,44 @@ mod tests {
             validate_module_limits(&module),
             Err("duplicate shader override id 0".to_owned())
         );
+    }
+
+    #[test]
+    fn shader_module_creation_gates_f16_usage_on_required_feature() {
+        let source =
+            "enable f16;\n@compute @workgroup_size(1) fn cs() { let x: f16 = 1.0h; _ = x; }";
+        let device_without_f16 = noop_device();
+        device_without_f16.push_error_scope(ErrorFilter::Validation);
+        let invalid =
+            device_without_f16.create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
+        let scoped = device_without_f16
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("f16 usage should be scoped");
+
+        assert!(invalid.is_error());
+        assert!(!scoped.message.is_empty());
+
+        let adapter = noop_adapter();
+        let device_with_f16 = adapter
+            .create_device(None, &[Feature::ShaderF16], "", "")
+            .expect("Noop adapter should create shader-f16 device");
+        let valid =
+            device_with_f16.create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
+
+        assert!(!valid.is_error());
+        assert_eq!(valid.diagnostic(), None);
+    }
+
+    #[test]
+    fn shader_module_creation_keeps_f16_packing_builtins_baseline() {
+        let device = noop_device();
+        let source = "@compute @workgroup_size(1) fn cs() { let x = pack2x16float(vec2<f32>(1.0, 2.0)); _ = unpack2x16float(x); }";
+
+        let module = device.create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
+
+        assert!(!module.is_error());
+        assert_eq!(module.diagnostic(), None);
     }
 
     #[cfg(feature = "shader-passthrough")]

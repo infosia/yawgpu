@@ -17,6 +17,16 @@ pub(super) struct VulkanDeviceInner {
     /// hardware, so the SPIR-V `buffer` bounds policy can be `Unchecked` rather
     /// than the software `Restrict` clamp (CTS finding F-112).
     pub(super) robust_buffer_access2: bool,
+    /// Whether `VK_KHR_shader_float16_int8` / `shaderFloat16` was enabled.
+    pub(super) shader_float16: bool,
+    /// Whether `VK_KHR_16bit_storage` / `storageBuffer16BitAccess` was enabled.
+    pub(super) storage_buffer16_bit_access: bool,
+    /// Whether `VK_KHR_16bit_storage` / `uniformAndStorageBuffer16BitAccess` was enabled.
+    pub(super) uniform_and_storage_buffer16_bit_access: bool,
+    /// Whether `VK_KHR_16bit_storage` / `storageInputOutput16` was enabled.
+    pub(super) storage_input_output16: bool,
+    /// Whether `VK_KHR_16bit_storage` / `storagePushConstant16` was enabled.
+    pub(super) storage_push_constant16: bool,
     /// `VkPhysicalDeviceLimits.maxSamplerAnisotropy` — the hardware ceiling for
     /// anisotropic filtering. Used to clamp `VkSamplerCreateInfo.maxAnisotropy`
     /// per WebGPU semantics (clamp, never error).
@@ -32,6 +42,17 @@ impl fmt::Debug for VulkanDeviceInner {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VulkanDeviceInner")
+            .field("shader_float16", &self.shader_float16)
+            .field(
+                "storage_buffer16_bit_access",
+                &self.storage_buffer16_bit_access,
+            )
+            .field(
+                "uniform_and_storage_buffer16_bit_access",
+                &self.uniform_and_storage_buffer16_bit_access,
+            )
+            .field("storage_input_output16", &self.storage_input_output16)
+            .field("storage_push_constant16", &self.storage_push_constant16)
             .finish_non_exhaustive()
     }
 }

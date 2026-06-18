@@ -519,30 +519,50 @@ pub(crate) enum ReflectedOverrideValue {
 
 /// Returns parse and validate wgsl.
 pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ReflectedModule, String> {
+    parse_and_validate_wgsl_gated(src, true)
+}
+
+/// Returns parse and validate wgsl using the supplied `shader-f16` gate.
+pub(crate) fn parse_and_validate_wgsl_gated(
+    src: &str,
+    shader_f16: bool,
+) -> Result<ReflectedModule, String> {
     let module = naga::front::wgsl::parse_str(src).map_err(|error| error.to_string())?;
-    validate_module(module)
+    validate_module(module, shader_f16)
 }
 
 /// Reflects a SPIR-V module without re-emitting the input words.
 #[cfg(feature = "shader-passthrough")]
 pub(crate) fn reflect_spirv(words: &[u32]) -> Result<ReflectedModule, String> {
+    reflect_spirv_gated(words, true)
+}
+
+/// Reflects a SPIR-V module using the supplied `shader-f16` gate.
+#[cfg(feature = "shader-passthrough")]
+pub(crate) fn reflect_spirv_gated(
+    words: &[u32],
+    shader_f16: bool,
+) -> Result<ReflectedModule, String> {
     let options = naga::front::spv::Options::default();
     let module = naga::front::spv::Frontend::new(words.iter().copied(), &options)
         .parse()
         .map_err(|error| error.to_string())?;
-    validate_module(module)
+    validate_module(module, shader_f16)
 }
 
-fn validate_module(module: naga::Module) -> Result<ReflectedModule, String> {
-    let capabilities = naga::valid::Capabilities::SHADER_FLOAT16
-        | naga::valid::Capabilities::SHADER_FLOAT16_IN_FLOAT32
+fn validate_module(module: naga::Module, shader_f16: bool) -> Result<ReflectedModule, String> {
+    let mut capabilities = naga::valid::Capabilities::SHADER_FLOAT16_IN_FLOAT32
         | naga::valid::Capabilities::CUBE_ARRAY_TEXTURES
         | naga::valid::Capabilities::MULTISAMPLED_SHADING
         | naga::valid::Capabilities::STORAGE_TEXTURE_16BIT_NORM_FORMATS
         | naga::valid::Capabilities::TEXTURE_EXTERNAL;
+    if shader_f16 {
+        capabilities |= naga::valid::Capabilities::SHADER_FLOAT16;
+    }
     // Enabled capabilities:
-    // - SHADER_FLOAT16: Phase-5 overridable-constant validation needs WGSL
-    //   `enable f16; override x: f16;` shaders from Dawn.
+    // - SHADER_FLOAT16: enabled only for devices that requested WebGPU
+    //   `shader-f16`. naga gates f16 usage, not the bare `enable f16;`
+    //   directive, so tests assert on actual f16 type/literal usage.
     // - SHADER_FLOAT16_IN_FLOAT32: enables the f16-in-f32 packing builtins
     //   `pack2x16float` / `unpack2x16float` / `quantizeToF16` (F-119). naga
     //   documents this capability as NOT requiring the f16 extension — the f16
@@ -2173,13 +2193,53 @@ fn expression_global(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "shader-passthrough")]
+    use super::reflect_spirv_gated;
     use super::{
-        parse_and_validate_wgsl, MslBindingMap, MslResourceBinding, MslResourceBindingKind,
-        MslVertexAttribute, MslVertexBufferBinding, MslVertexFormat, MslVertexStepMode,
-        ReflectedBufferType, ReflectedResourceBindingKind, ReflectedShaderStage,
-        ReflectedTextureSampleUsage, ReflectedTextureViewDimension, ReflectedTypeScalarClass,
+        MslBindingMap, MslResourceBinding, MslResourceBindingKind, MslVertexAttribute,
+        MslVertexBufferBinding, MslVertexFormat, MslVertexStepMode, ReflectedBufferType,
+        ReflectedResourceBindingKind, ReflectedShaderStage, ReflectedTextureSampleUsage,
+        ReflectedTextureViewDimension, ReflectedTypeScalarClass, parse_and_validate_wgsl,
+        parse_and_validate_wgsl_gated,
     };
     use naga::ShaderStage;
+
+    const F16_USAGE_SHADER: &str =
+        "enable f16;\n@compute @workgroup_size(1) fn cs() { let x: f16 = 1.0h; _ = x; }";
+    const PACK_2X16_FLOAT_SHADER: &str = "@compute @workgroup_size(1) fn cs() { let x = pack2x16float(vec2<f32>(1.0, 2.0)); _ = unpack2x16float(x); }";
+
+    #[test]
+    fn parse_and_validate_wgsl_gated_rejects_f16_usage_without_shader_f16() {
+        // naga gates actual f16 usage, not a bare `enable f16;` directive.
+        assert!(parse_and_validate_wgsl_gated(F16_USAGE_SHADER, false).is_err());
+        assert!(parse_and_validate_wgsl_gated(F16_USAGE_SHADER, true).is_ok());
+    }
+
+    #[test]
+    fn parse_and_validate_wgsl_gated_keeps_f16_packing_builtins_baseline() {
+        assert!(parse_and_validate_wgsl_gated(PACK_2X16_FLOAT_SHADER, false).is_ok());
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn reflect_spirv_gated_accepts_plain_shader_without_shader_f16() {
+        // note: generated f16 SPIR-V is rejected by naga's strict SPIR-V
+        // frontend capability filter before it reaches `validate_module`; f16
+        // gate rejection is covered by the shared WGSL validation tests above.
+        let plain_words =
+            parse_and_validate_wgsl("@compute @workgroup_size(1) fn cs() { let x = 1.0; _ = x; }")
+                .unwrap()
+                .generate_spirv(
+                    "cs",
+                    ShaderStage::Compute,
+                    &naga::back::PipelineConstants::default(),
+                    false,
+                )
+                .unwrap();
+
+        assert!(reflect_spirv_gated(&plain_words, false).is_ok());
+        assert!(reflect_spirv_gated(&plain_words, true).is_ok());
+    }
 
     #[test]
     fn parses_and_validates_trivial_wgsl() {
@@ -2428,15 +2488,21 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
         .unwrap();
 
         let entry_points = module.entry_points();
-        assert!(entry_points
-            .iter()
-            .any(|entry| entry.name == "vs" && entry.stage == ReflectedShaderStage::Vertex));
-        assert!(entry_points
-            .iter()
-            .any(|entry| entry.name == "fs" && entry.stage == ReflectedShaderStage::Fragment));
-        assert!(entry_points
-            .iter()
-            .any(|entry| entry.name == "cs" && entry.stage == ReflectedShaderStage::Compute));
+        assert!(
+            entry_points
+                .iter()
+                .any(|entry| entry.name == "vs" && entry.stage == ReflectedShaderStage::Vertex)
+        );
+        assert!(
+            entry_points
+                .iter()
+                .any(|entry| entry.name == "fs" && entry.stage == ReflectedShaderStage::Fragment)
+        );
+        assert!(
+            entry_points
+                .iter()
+                .any(|entry| entry.name == "cs" && entry.stage == ReflectedShaderStage::Compute)
+        );
     }
 
     #[test]

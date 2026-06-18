@@ -389,13 +389,14 @@ impl Device {
                 Some("device is lost".to_owned()),
             );
         }
+        let shader_f16 = self.inner.features.contains(&Feature::ShaderF16);
         let (inner, error) = match source {
-            ShaderModuleSource::Wgsl(source) => match ShaderModule::from_wgsl(source) {
+            ShaderModuleSource::Wgsl(source) => match ShaderModule::from_wgsl(source, shader_f16) {
                 Ok(inner) => (inner, None),
                 Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
             },
             #[cfg(feature = "shader-passthrough")]
-            ShaderModuleSource::Spirv(words) => match ShaderModule::from_spirv(words) {
+            ShaderModuleSource::Spirv(words) => match ShaderModule::from_spirv(words, shader_f16) {
                 Ok(inner) => (inner, None),
                 Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
             },

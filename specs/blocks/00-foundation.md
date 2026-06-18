@@ -247,9 +247,12 @@ Two further rules from the F-065 resolution:
   be requested explicitly via `requiredFeatures`).
 - Synthetic adapter **supported feature set** (requestable on any Noop
   adapter): `CoreFeaturesAndLimits` (0x1), `RG11B10UfloatRenderable` (0xC),
-  `TextureFormatsTier1` (0x13), `TextureFormatsTier2` (0x14). Keep minimal
-  (only what R6/R7/R10–R13 need). `WGPUSupportedFeatures{featureCount,
-  features}` (webgpu.h:2931); free via `wgpuSupportedFeaturesFreeMembers`.
+  `ShaderF16` (0xB), `TextureFormatsTier1` (0x13), `TextureFormatsTier2`
+  (0x14). `ShaderF16` is HAL-gated (Noop/Metal advertise it; Vulkan iff
+  `shaderFloat16`; GLES never) and gates WGSL f16 validation per block 30
+  **S12** — see `specs/tracking/shader-f16.md`. Keep the rest minimal (only
+  what R6/R7/R10–R13 need). `WGPUSupportedFeatures{featureCount, features}`
+  (webgpu.h:2931); free via `wgpuSupportedFeaturesFreeMembers`.
 - RequestDevice `requiredFeatures`: every requested feature must be in the
   supported set else `Error`. Implication closure applied to the device's
   resolved feature set: `TextureFormatsTier2` ⇒ adds `TextureFormatsTier1`;

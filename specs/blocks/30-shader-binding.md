@@ -93,6 +93,14 @@ Phase 4. Rules from Dawn `ShaderModuleValidationTests`,
   (divergence as S6). `ShaderModuleExtensionValidationTest` :973. ☑ (P4.1a)
 - **S8** inter-stage variable location limits — validated at **pipeline**
   creation. Defer→P5.
+- **S12** `shader-f16` feature gate. Shader-module creation enables the naga
+  `SHADER_FLOAT16` capability **iff the device requested the WebGPU
+  `shader-f16` feature**; otherwise a shader that *uses* f16 fails naga
+  validation ⇒ device error + error handle. Baseline capabilities (incl.
+  `SHADER_FLOAT16_IN_FLOAT32` for the F-119 packing builtins) stay
+  unconditional. naga gates on f16 *usage*, not the bare `enable f16;`
+  directive (recorded naga≠Tint divergence). Resolves the m4 divergence;
+  full contract + HAL enablement in `specs/tracking/shader-f16.md`.
 
 ### BindGroupLayout (P4.2)
 

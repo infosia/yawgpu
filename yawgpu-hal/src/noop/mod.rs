@@ -50,6 +50,12 @@ impl NoopAdapter {
         self.name
     }
 
+    /// Returns true when WGSL `shader-f16` is supported.
+    #[must_use]
+    pub(super) fn supports_shader_float16(&self) -> bool {
+        true
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<NoopDevice, HalError> {
         Ok(NoopDevice::new())
@@ -422,6 +428,13 @@ mod tests {
         let adapter = NoopAdapter::synthetic();
 
         assert_eq!(adapter.name(), "yawgpu Noop Adapter");
+    }
+
+    #[test]
+    fn noop_adapter_supports_shader_float16_returns_true() {
+        let adapter = NoopAdapter::synthetic();
+
+        assert!(adapter.supports_shader_float16());
     }
 
     #[test]

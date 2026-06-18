@@ -92,6 +92,12 @@ impl GlesAdapter {
         false
     }
 
+    /// Returns true when WGSL `shader-f16` is supported.
+    #[must_use]
+    pub(super) fn supports_shader_float16(&self) -> bool {
+        false
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<GlesDevice, HalError> {
         match &self.inner {
