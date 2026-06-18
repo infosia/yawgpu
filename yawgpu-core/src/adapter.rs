@@ -77,6 +77,7 @@ impl Adapter {
     pub fn features(&self) -> FeatureSet {
         let mut features = supported_features();
         add_texture_compression_features(&mut features, &self.inner.hal);
+        add_shader_float16_feature(&mut features, &self.inner.hal);
 
         #[cfg(not(feature = "tiled"))]
         {
@@ -184,6 +185,8 @@ pub enum Feature {
     Float32Filterable,
     /// Timestamp query variant.
     TimestampQuery,
+    /// WGSL `shader-f16` support.
+    ShaderF16,
     /// Texture component swizzle support.
     TextureComponentSwizzle,
     /// Texture formats tier1 variant.
@@ -249,6 +252,12 @@ fn add_texture_compression_features(features: &mut FeatureSet, hal: &HalAdapter)
         if hal.supports_texture_compression_astc_sliced_3d() {
             features.insert(Feature::TextureCompressionAstcSliced3d);
         }
+    }
+}
+
+fn add_shader_float16_feature(features: &mut FeatureSet, hal: &HalAdapter) {
+    if hal.supports_shader_float16() {
+        features.insert(Feature::ShaderF16);
     }
 }
 
@@ -372,6 +381,26 @@ mod tests {
         assert!(features.contains(&Feature::TextureCompressionEtc2));
         assert!(features.contains(&Feature::TextureCompressionAstc));
         assert!(features.contains(&Feature::TextureCompressionAstcSliced3d));
+    }
+
+    #[test]
+    fn shader_f16_feature_is_adapter_gated_and_noop_advertises() {
+        let base = supported_features();
+        assert!(!base.contains(&Feature::ShaderF16));
+
+        let features = noop_adapter().features();
+        assert!(features.contains(&Feature::ShaderF16));
+    }
+
+    #[test]
+    fn adapter_create_device_accepts_noop_shader_f16_feature() {
+        let adapter = noop_adapter();
+
+        let device = adapter
+            .create_device(None, &[Feature::ShaderF16], "", "")
+            .expect("Noop device should accept shader-f16");
+
+        assert!(device.has_feature(Feature::ShaderF16));
     }
 
     #[test]

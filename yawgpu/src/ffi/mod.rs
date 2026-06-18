@@ -166,7 +166,8 @@ pub struct WGPUDeviceImpl {
     pub(crate) device_lost_callback: DeviceLostCallbackInfo,
     pub(crate) device_lost_futures: Mutex<Vec<u64>>,
     pub(crate) default_queue: Mutex<Option<Arc<WGPUQueueImpl>>>,
-    pub(crate) shader_module_cache: Mutex<HashMap<ShaderModuleCacheKey, Weak<WGPUShaderModuleImpl>>>,
+    pub(crate) shader_module_cache:
+        Mutex<HashMap<ShaderModuleCacheKey, Weak<WGPUShaderModuleImpl>>>,
     pub(crate) pipeline_layout_cache:
         Mutex<HashMap<PipelineLayoutCacheKey, Weak<WGPUPipelineLayoutImpl>>>,
     pub(crate) compute_pipeline_cache:
@@ -4157,7 +4158,7 @@ mod tests {
             };
 
             wgpuAdapterGetFeatures(adapter, &mut features);
-            assert_eq!(features.featureCount, 13);
+            assert_eq!(features.featureCount, 14);
             let values = std::slice::from_raw_parts(features.features, features.featureCount);
             assert!(values.contains(&native::WGPUFeatureName_CoreFeaturesAndLimits));
             assert!(values.contains(&native::WGPUFeatureName_TextureCompressionBC));
@@ -4170,6 +4171,7 @@ mod tests {
             assert!(values.contains(&native::WGPUFeatureName_BGRA8UnormStorage));
             assert!(values.contains(&native::WGPUFeatureName_Float32Filterable));
             assert!(values.contains(&native::WGPUFeatureName_TimestampQuery));
+            assert!(values.contains(&native::WGPUFeatureName_ShaderF16));
             assert!(values.contains(&native::WGPUFeatureName_TextureFormatsTier1));
             assert!(values.contains(&native::WGPUFeatureName_TextureFormatsTier2));
 
@@ -6181,7 +6183,11 @@ mod tests {
         {
             let guard = cache.lock().expect("lock");
             let weak = guard.get(&DummyCacheKey(1)).expect("entry present");
-            assert_eq!(weak.strong_count(), 0, "dead entry must not keep object alive");
+            assert_eq!(
+                weak.strong_count(),
+                0,
+                "dead entry must not keep object alive"
+            );
         }
 
         // Re-creating with the same key returns a FRESH object (not the dead one)
@@ -6194,7 +6200,11 @@ mod tests {
         // key memory rather than letting the map grow unbounded.
         drop(second);
         let _third = cache_handle(&cache, DummyCacheKey(2), Arc::new(DummyHandle));
-        assert_eq!(cache_len(&cache), 1, "dead key must be pruned, not retained");
+        assert_eq!(
+            cache_len(&cache),
+            1,
+            "dead key must be pruned, not retained"
+        );
     }
 
     #[test]
@@ -6219,7 +6229,11 @@ mod tests {
                 let weak = guard
                     .get(&ShaderModuleCacheKey::Wgsl(source.to_owned()))
                     .expect("entry present");
-                assert_eq!(weak.strong_count(), 0, "released shader must not be retained");
+                assert_eq!(
+                    weak.strong_count(),
+                    0,
+                    "released shader must not be retained"
+                );
             }
 
             // Re-creating the same WGSL yields a FRESH backing object and prunes

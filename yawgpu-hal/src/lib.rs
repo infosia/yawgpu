@@ -379,6 +379,21 @@ impl HalAdapter {
         }
     }
 
+    /// Returns true when WGSL `shader-f16` is supported.
+    #[must_use]
+    pub fn supports_shader_float16(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.supports_shader_float16(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_shader_float16(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_shader_float16(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_shader_float16(),
+        }
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<HalDevice, HalError> {
         match self {
@@ -1363,6 +1378,17 @@ mod tests {
             .expect("Noop adapter exists");
 
         assert_eq!(adapter.backend(), HalBackend::Noop);
+    }
+
+    #[test]
+    fn hal_adapter_supports_shader_float16_noop_returns_true() {
+        let adapter = HalInstance::new_noop()
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter exists");
+
+        assert!(adapter.supports_shader_float16());
     }
 
     #[test]

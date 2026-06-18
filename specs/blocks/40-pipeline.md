@@ -67,11 +67,13 @@ Phase 5. Rules from Dawn `RenderPipelineValidationTests`,
   `ValidationError` status — it does NOT raise a device/uncaptured
   error** (canonical Dawn behavior; J3 fix). The sync path still
   raises the device error as before.
-- **W4/SHADER_FLOAT16 divergence (m4):** the naga `Validator` enables
-  `SHADER_FLOAT16` unconditionally, so `enable f16;` WGSL validates
-  even without a device `shader-f16` feature. yawgpu exposes no
-  canonical ShaderF16 feature-gating path; recorded divergence (refine
-  if a later phase models WGSL feature gating).
+- **W4/SHADER_FLOAT16 (m4) — being resolved.** Historically the naga
+  `Validator` enabled `SHADER_FLOAT16` unconditionally, so `enable f16;`
+  WGSL validated even without a device `shader-f16` feature (recorded
+  divergence). This is now superseded by the canonical `ShaderF16`
+  feature: shader-module creation gates `SHADER_FLOAT16` on the requested
+  feature (block 30 **S12**) and the feature is advertised/honoured per
+  backend. Full contract + status: `specs/tracking/shader-f16.md`.
 - naga≠Tint divergence (as block 30): assert error-vs-success, not exact
   diagnostics; record borderline cases.
 

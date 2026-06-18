@@ -1,10 +1,10 @@
 #[cfg(feature = "tiled")]
 use std::collections::BTreeMap;
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::fmt;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ash::vk;
@@ -337,6 +337,24 @@ impl VulkanAdapter {
         false
     }
 
+    /// Returns true when WGSL `shader-f16` is supported by this physical device.
+    #[must_use]
+    pub(super) fn supports_shader_float16(&self) -> bool {
+        let extension_present = self.has_device_extension(vk::KHR_SHADER_FLOAT16_INT8_NAME);
+        if !extension_present {
+            return false;
+        }
+
+        let mut features = vk::PhysicalDeviceShaderFloat16Int8Features::default();
+        let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut features);
+        unsafe {
+            self.instance
+                .instance
+                .get_physical_device_features2(self.physical_device, &mut features2);
+        }
+        shader_float16_supported(extension_present, features.shader_float16)
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<VulkanDevice, HalError> {
         let queue_family_index = self
@@ -377,6 +395,35 @@ impl VulkanAdapter {
             false
         };
         let robust_buffer_access2 = robustness2_extension && robustness2_feature_supported;
+        let shader_float16_int8_extension =
+            self.has_device_extension(vk::KHR_SHADER_FLOAT16_INT8_NAME);
+        let storage_16bit_extension = self.has_device_extension(vk::KHR_16BIT_STORAGE_NAME);
+        let mut shader_float16_int8_features =
+            vk::PhysicalDeviceShaderFloat16Int8Features::default();
+        let mut storage_16bit_supported_features =
+            vk::PhysicalDevice16BitStorageFeatures::default();
+        if shader_float16_int8_extension || storage_16bit_extension {
+            let mut features2 = vk::PhysicalDeviceFeatures2::default();
+            if shader_float16_int8_extension {
+                features2 = features2.push_next(&mut shader_float16_int8_features);
+            }
+            if storage_16bit_extension {
+                features2 = features2.push_next(&mut storage_16bit_supported_features);
+            }
+            unsafe {
+                self.instance
+                    .instance
+                    .get_physical_device_features2(self.physical_device, &mut features2);
+            }
+        }
+        let shader_float16 = shader_float16_supported(
+            shader_float16_int8_extension,
+            shader_float16_int8_features.shader_float16,
+        );
+        let storage_16bit_features = enabled_16bit_storage_features(
+            storage_16bit_extension,
+            storage_16bit_supported_features,
+        );
         #[cfg(feature = "tiled")]
         if let Some(extension_name) = framebuffer_fetch_extension_name(self.framebuffer_fetch_path)
         {
@@ -417,10 +464,19 @@ impl VulkanAdapter {
         if robust_buffer_access2 {
             extension_names.push(vk::EXT_ROBUSTNESS2_NAME.as_ptr());
         }
+        if shader_float16 {
+            extension_names.push(vk::KHR_SHADER_FLOAT16_INT8_NAME.as_ptr());
+        }
+        if storage_16bit_features.enabled {
+            extension_names.push(vk::KHR_16BIT_STORAGE_NAME.as_ptr());
+        }
         let mut depth_clip_enable_features =
             vk::PhysicalDeviceDepthClipEnableFeaturesEXT::default().depth_clip_enable(true);
         let mut robustness2_features =
             vk::PhysicalDeviceRobustness2FeaturesEXT::default().robust_buffer_access2(true);
+        let mut shader_float16_int8_enable_features =
+            vk::PhysicalDeviceShaderFloat16Int8Features::default().shader_float16(true);
+        let mut storage_16bit_enable_features = storage_16bit_features.to_vk();
         let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&extension_names)
@@ -430,6 +486,12 @@ impl VulkanAdapter {
         }
         if robust_buffer_access2 {
             create_info = create_info.push_next(&mut robustness2_features);
+        }
+        if shader_float16 {
+            create_info = create_info.push_next(&mut shader_float16_int8_enable_features);
+        }
+        if storage_16bit_features.enabled {
+            create_info = create_info.push_next(&mut storage_16bit_enable_features);
         }
         let device = unsafe {
             self.instance
@@ -460,6 +522,12 @@ impl VulkanAdapter {
             depth_clip_control,
             sampler_anisotropy,
             robust_buffer_access2,
+            shader_float16,
+            storage_buffer16_bit_access: storage_16bit_features.storage_buffer16_bit_access,
+            uniform_and_storage_buffer16_bit_access: storage_16bit_features
+                .uniform_and_storage_buffer16_bit_access,
+            storage_input_output16: storage_16bit_features.storage_input_output16,
+            storage_push_constant16: storage_16bit_features.storage_push_constant16,
             max_sampler_anisotropy,
             allocations: AtomicU64::new(0),
             #[cfg(feature = "tiled")]
@@ -531,6 +599,57 @@ fn detect_framebuffer_fetch_path(
         return FramebufferFetchPath::RasterOrderAttachmentAccess;
     }
     FramebufferFetchPath::Disabled
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Enabled16BitStorageFeatures {
+    enabled: bool,
+    storage_buffer16_bit_access: bool,
+    uniform_and_storage_buffer16_bit_access: bool,
+    storage_input_output16: bool,
+    storage_push_constant16: bool,
+}
+
+impl Enabled16BitStorageFeatures {
+    fn to_vk(self) -> vk::PhysicalDevice16BitStorageFeatures<'static> {
+        vk::PhysicalDevice16BitStorageFeatures::default()
+            .storage_buffer16_bit_access(self.storage_buffer16_bit_access)
+            .uniform_and_storage_buffer16_bit_access(self.uniform_and_storage_buffer16_bit_access)
+            .storage_input_output16(self.storage_input_output16)
+            .storage_push_constant16(self.storage_push_constant16)
+    }
+}
+
+fn shader_float16_supported(extension_present: bool, shader_float16: vk::Bool32) -> bool {
+    extension_present && shader_float16 == vk::TRUE
+}
+
+fn enabled_16bit_storage_features(
+    extension_present: bool,
+    supported: vk::PhysicalDevice16BitStorageFeatures<'_>,
+) -> Enabled16BitStorageFeatures {
+    if !extension_present {
+        return Enabled16BitStorageFeatures::default();
+    }
+    let storage_buffer16_bit_access = supported.storage_buffer16_bit_access == vk::TRUE;
+    let uniform_and_storage_buffer16_bit_access =
+        supported.uniform_and_storage_buffer16_bit_access == vk::TRUE;
+    let storage_input_output16 = supported.storage_input_output16 == vk::TRUE;
+    let storage_push_constant16 = supported.storage_push_constant16 == vk::TRUE;
+    let enabled = storage_buffer16_bit_access
+        || uniform_and_storage_buffer16_bit_access
+        || storage_input_output16
+        || storage_push_constant16;
+    if !enabled {
+        return Enabled16BitStorageFeatures::default();
+    }
+    Enabled16BitStorageFeatures {
+        enabled,
+        storage_buffer16_bit_access,
+        uniform_and_storage_buffer16_bit_access,
+        storage_input_output16,
+        storage_push_constant16,
+    }
 }
 
 fn has_device_extension_for_physical_device(
@@ -809,5 +928,51 @@ mod tests {
                 "robust_buffer_access2 should be {expected} when extension={extension_present} feature={feature_supported}"
             );
         }
+    }
+
+    /// `supports_shader_float16` advertises support only when the
+    /// `VK_KHR_shader_float16_int8` extension is present and `shaderFloat16`
+    /// reports TRUE. Pure-logic test, no real GPU required.
+    #[test]
+    fn vulkan_supports_shader_float16_requires_extension_and_feature() {
+        for (extension_present, shader_float16, expected) in [
+            (true, vk::TRUE, true),
+            (true, vk::FALSE, false),
+            (false, vk::TRUE, false),
+            (false, vk::FALSE, false),
+        ] {
+            assert_eq!(
+                shader_float16_supported(extension_present, shader_float16),
+                expected
+            );
+        }
+    }
+
+    /// Device creation enables only the `VK_KHR_16bit_storage` sub-features
+    /// reported by the physical device. Pure-logic test, no real GPU required.
+    #[test]
+    fn vulkan_16bit_storage_enablement_mirrors_reported_subfeatures() {
+        let supported = vk::PhysicalDevice16BitStorageFeatures {
+            storage_buffer16_bit_access: vk::TRUE,
+            uniform_and_storage_buffer16_bit_access: vk::TRUE,
+            storage_input_output16: vk::FALSE,
+            storage_push_constant16: vk::TRUE,
+            ..Default::default()
+        };
+
+        let enabled = enabled_16bit_storage_features(true, supported);
+
+        assert!(enabled.enabled);
+        assert!(enabled.storage_buffer16_bit_access);
+        assert!(enabled.uniform_and_storage_buffer16_bit_access);
+        assert!(!enabled.storage_input_output16);
+        assert!(enabled.storage_push_constant16);
+
+        let disabled = enabled_16bit_storage_features(false, supported);
+        assert_eq!(disabled, Enabled16BitStorageFeatures::default());
+
+        let all_false =
+            enabled_16bit_storage_features(true, vk::PhysicalDevice16BitStorageFeatures::default());
+        assert_eq!(all_false, Enabled16BitStorageFeatures::default());
     }
 }
