@@ -535,6 +535,7 @@ pub(crate) fn reflect_spirv(words: &[u32]) -> Result<ReflectedModule, String> {
 
 fn validate_module(module: naga::Module) -> Result<ReflectedModule, String> {
     let capabilities = naga::valid::Capabilities::SHADER_FLOAT16
+        | naga::valid::Capabilities::SHADER_FLOAT16_IN_FLOAT32
         | naga::valid::Capabilities::CUBE_ARRAY_TEXTURES
         | naga::valid::Capabilities::MULTISAMPLED_SHADING
         | naga::valid::Capabilities::STORAGE_TEXTURE_16BIT_NORM_FORMATS
@@ -542,6 +543,11 @@ fn validate_module(module: naga::Module) -> Result<ReflectedModule, String> {
     // Enabled capabilities:
     // - SHADER_FLOAT16: Phase-5 overridable-constant validation needs WGSL
     //   `enable f16; override x: f16;` shaders from Dawn.
+    // - SHADER_FLOAT16_IN_FLOAT32: enables the f16-in-f32 packing builtins
+    //   `pack2x16float` / `unpack2x16float` / `quantizeToF16` (F-119). naga
+    //   documents this capability as NOT requiring the f16 extension — the f16
+    //   is internal to the packing — so these core WGSL builtins need it even
+    //   for shaders without `enable f16;`.
     // - CUBE_ARRAY_TEXTURES + MULTISAMPLED_SHADING: WebGPU-baseline sampled
     //   texture types (`texture_cube_array<T>`, `texture_multisampled_2d<T>`).
     //   naga gates both behind a capability; omitting them turned every such
@@ -2243,6 +2249,30 @@ mod tests {
                 "expected shader to validate: {source}"
             );
         }
+    }
+
+    #[test]
+    fn validates_pack2x16float_unpack2x16float_builtins() {
+        // F-119: `pack2x16float` / `unpack2x16float` (and `quantizeToF16`) are
+        // core WGSL builtins requiring no `enable f16;` extension — the f16 is
+        // purely internal to the packing. naga's validator gates them behind the
+        // `SHADER_FLOAT16_IN_FLOAT32` capability (distinct from `SHADER_FLOAT16`,
+        // and explicitly not requiring the f16 extension), so omitting it turned
+        // every shader using these builtins into an error module ("Entry point
+        // main at Compute is invalid"). The capability is WebGPU baseline.
+        let source = r"
+@group(0) @binding(0) var<storage, read_write> out: u32;
+@compute @workgroup_size(1)
+fn main() {
+    let p = pack2x16float(vec2<f32>(1.0, 2.0));
+    let u = unpack2x16float(p);
+    out = pack2x16float(u);
+}
+";
+        assert!(
+            parse_and_validate_wgsl(source).is_ok(),
+            "pack2x16float / unpack2x16float shader should validate"
+        );
     }
 
     #[test]
