@@ -111,7 +111,8 @@ never a reason to skip a CTS case.
   relationship validation (~16: invocations vs workgroup,
   maxBindGroupsPlusVertexBuffers, min*Alignment pow2/≥32, binding-size vs
   maxBufferSize, etc.). Still deferred → Batch C: layout/resource
-  compatibility matrices, dual-source-blending/shader-f16 (feature adds),
+  compatibility matrices, dual-source-blending (feature add; shader-f16 has
+  since been implemented — see `specs/tracking/shader-f16.md`),
   bytes-per-sample format-selection matrices, draw-time relationship.
 - **Core-gap follow-up #4 (Batch C, layout/resource compat + misc) — DONE.**
   +30 CTS un-ignored (152→122 remaining): BGL validation (vertex-stage
@@ -193,9 +194,10 @@ never a reason to skip a CTS case.
   maxColorAttachments, required-limit `validate`; **(b) remaining genuine
   core gaps** — vertex-buffer draw OOB lastStride (needs investigation),
   dual-source-blending validation, storage-texture format/access in render
-  auto-layout; **(c) optional-feature additions** (shader-f16,
-  dual-source-blending, subgroups, clip-distances, setImmediates,
-  linear_indexing — implement the feature, not just validate);
+  auto-layout; **(c) optional-feature additions** (dual-source-blending,
+  subgroups, clip-distances, setImmediates, linear_indexing — implement the
+  feature, not just validate; **shader-f16 is now implemented** — advertised +
+  validation-gated + real-GPU verified, see `specs/tracking/shader-f16.md`);
   **(d) native-surface** (canvas/configure/
   getCurrentTexture — no Noop fixture); and **(e) C-ABI-N/A** /
   CTS-`.unimplemented()` (permanent).
