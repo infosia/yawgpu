@@ -420,6 +420,15 @@ By default, shaders are authored in **WGSL** and compiled at pipeline-creation
 time by naga into the backend's native language — Metal Shading Language
 for Metal, SPIR-V for Vulkan.
 
+16-bit floats are supported through the standard WebGPU **`shader-f16`**
+optional feature: request `WGPUFeatureName_ShaderF16` in the device's
+`requiredFeatures`, then use `enable f16;` in WGSL. Shaders that use `f16`
+without the feature requested are rejected with a validation error. It is
+advertised on Metal (native `half`) and on Vulkan when the device exposes
+`shaderFloat16` (the backend also enables `VK_KHR_16bit_storage` so `f16`
+works in storage/uniform buffers, not just arithmetic); it is not available
+on the Tier-2 GLES backend.
+
 With the `shader-passthrough` extension, callers can also hand precompiled
 SPIR-V or MSL straight to the backend; see
 [Shader passthrough](#shader-passthrough--shader-passthrough) above.

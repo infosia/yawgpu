@@ -56,7 +56,9 @@ render 14, vertex 7, get_bgl 7, caching 5, async 7).
   `0.0/-0.0`/NaN normalized before `to_bits` in cache keys. **m5**
   consistent `dispatch_error` in the `try_from` branch.
 - **m2/m4** ACCEPTED: BGL-no-dedup + SHADER_FLOAT16 recorded as
-  divergences in block 40 (Claude, prior commit).
+  divergences in block 40 (Claude, prior commit). **m4 later RESOLVED**: the
+  `shader-f16` feature now gates `SHADER_FLOAT16` on a device-requested
+  feature (block 30 S12) — see `specs/tracking/shader-f16.md` (commit cace46a).
 
 Gate: no open CRITICAL/MAJOR. Phase 5 Review **CLOSED**. Commit:
 `phase-5: phase review — 11 findings (0C/6M/5m) resolved`.
