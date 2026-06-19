@@ -291,6 +291,101 @@ fn main() {
 #[test]
 #[ignore = "manual real-backend test"]
 #[cfg(feature = "metal")]
+fn metal_const_struct_with_matrix_compiles() {
+    // Regression: a module-scope `const` struct that contains a matrix member
+    // made naga's MSL backend emit a `constant`-address-space global whose
+    // aggregate matrix initializer Metal rejects ("cannot have global
+    // constructors (llvm.global_ctors) in program_source") → error pipeline →
+    // "queue submit cannot use an error command buffer". (Not f16-specific; the
+    // f16 member here mirrors the CTS access,structure,index:const case that
+    // surfaced it.) The naga fix inlines such consts instead of emitting the
+    // global; this shader must now compile and read back member_0 = 7.
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device_with_f16(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let shader = r#"
+enable f16;
+@group(0) @binding(0) var<storage, read_write> output : i32;
+struct MyStruct { member_0 : i32, member_1 : f16, member_2 : vec4i, member_3 : mat3x2f, };
+const S = MyStruct(7i, 1.0h, vec4i(2i, 2i, 2i, 2i), mat3x2f(3f, 3f, 3f, 3f, 3f, 3f));
+@compute @workgroup_size(1)
+fn main() { output = S.member_0; }
+"#;
+        let output = create_buffer_sized(
+            device,
+            4,
+            native::WGPUBufferUsage_Storage | native::WGPUBufferUsage_CopySrc,
+        );
+        let readback = create_buffer_sized(
+            device,
+            4,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        let module = create_wgsl_module(device, shader);
+        let pipeline = create_compute_pipeline(device, module);
+        let layout = yawgpu::wgpuComputePipelineGetBindGroupLayout(pipeline, 0);
+        let entry = native::WGPUBindGroupEntry {
+            nextInChain: std::ptr::null_mut(),
+            binding: 0,
+            buffer: output,
+            offset: 0,
+            size: 4,
+            sampler: std::ptr::null(),
+            textureView: std::ptr::null(),
+        };
+        let bg_desc = native::WGPUBindGroupDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            layout,
+            entryCount: 1,
+            entries: &entry,
+        };
+        let bind_group = yawgpu::wgpuDeviceCreateBindGroup(device, &bg_desc);
+
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuComputePassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
+        yawgpu::wgpuComputePassEncoderEnd(pass);
+        yawgpu::wgpuCommandEncoderCopyBufferToBuffer(encoder, output, 0, readback, 0, 4);
+        let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        yawgpu::wgpuCommandBufferRelease(command_buffer);
+        yawgpu::wgpuComputePassEncoderRelease(pass);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+
+        let bytes = read_buffer(instance, readback, 4);
+        let actual = i32::from_ne_bytes(bytes[0..4].try_into().expect("four bytes"));
+        assert_eq!(actual, 7, "const struct member_0 readback");
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "const struct with matrix raised a device error (global-constructors regression)"
+        );
+
+        yawgpu::wgpuBindGroupRelease(bind_group);
+        yawgpu::wgpuBindGroupLayoutRelease(layout);
+        yawgpu::wgpuComputePipelineRelease(pipeline);
+        yawgpu::wgpuShaderModuleRelease(module);
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuBufferRelease(output);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "metal")]
 fn metal_f16_shader_rejected_without_feature() {
     if real_backend_skip_reason(RealBackend::Metal).is_some() {
         return;
