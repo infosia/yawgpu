@@ -164,6 +164,123 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 #[test]
 #[ignore = "manual real-backend test"]
 #[cfg(feature = "vulkan")]
+fn vulkan_f16_bitcast_roundtrip_with_arith() {
+    // F-121 regression on the SPIR-V path: u32 → vec2<f16> → +f16 → u32. Before
+    // the naga fix the bitcast result type was mis-resolved (f32), breaking
+    // SPIR-V OpBitcast result typing + subsequent f16 arithmetic.
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device_with_f16(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let shader = r#"
+enable f16;
+@group(0) @binding(0) var<storage, read> inp: u32;
+@group(0) @binding(1) var<storage, read_write> out: u32;
+@compute @workgroup_size(1)
+fn main() {
+    let h = bitcast<vec2<f16>>(inp);
+    let s = h + vec2<f16>(1.0h, 3.0h);
+    out = bitcast<u32>(s);
+}
+"#;
+        let input: u32 = 0xC000_3C00;
+        let expected: u32 = 0x3C00_4000;
+
+        let input_buffer = create_buffer_sized(
+            device,
+            4,
+            native::WGPUBufferUsage_Storage | native::WGPUBufferUsage_CopyDst,
+        );
+        yawgpu::wgpuQueueWriteBuffer(queue, input_buffer, 0, (&input as *const u32).cast(), 4);
+        let output = create_buffer_sized(
+            device,
+            4,
+            native::WGPUBufferUsage_Storage | native::WGPUBufferUsage_CopySrc,
+        );
+        let readback = create_buffer_sized(
+            device,
+            4,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+
+        let module = create_wgsl_module(device, shader);
+        let pipeline = create_compute_pipeline(device, module);
+        let layout = yawgpu::wgpuComputePipelineGetBindGroupLayout(pipeline, 0);
+        let in_entry = native::WGPUBindGroupEntry {
+            nextInChain: std::ptr::null_mut(),
+            binding: 0,
+            buffer: input_buffer,
+            offset: 0,
+            size: 4,
+            sampler: std::ptr::null(),
+            textureView: std::ptr::null(),
+        };
+        let out_entry = native::WGPUBindGroupEntry {
+            nextInChain: std::ptr::null_mut(),
+            binding: 1,
+            buffer: output,
+            offset: 0,
+            size: 4,
+            sampler: std::ptr::null(),
+            textureView: std::ptr::null(),
+        };
+        let entries = [in_entry, out_entry];
+        let bg_desc = native::WGPUBindGroupDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            layout,
+            entryCount: entries.len(),
+            entries: entries.as_ptr(),
+        };
+        let bind_group = yawgpu::wgpuDeviceCreateBindGroup(device, &bg_desc);
+
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuComputePassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
+        yawgpu::wgpuComputePassEncoderEnd(pass);
+        yawgpu::wgpuCommandEncoderCopyBufferToBuffer(encoder, output, 0, readback, 0, 4);
+        let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        yawgpu::wgpuCommandBufferRelease(command_buffer);
+        yawgpu::wgpuComputePassEncoderRelease(pass);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+
+        let bytes = read_buffer(instance, readback, 4);
+        let actual = u32::from_ne_bytes(bytes[0..4].try_into().expect("four bytes"));
+        assert_eq!(
+            actual, expected,
+            "f16 bitcast round-trip+arith mismatch (got {actual:#x}, want {expected:#x})"
+        );
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "f16 bitcast path raised a device error"
+        );
+
+        yawgpu::wgpuBindGroupRelease(bind_group);
+        yawgpu::wgpuBindGroupLayoutRelease(layout);
+        yawgpu::wgpuComputePipelineRelease(pipeline);
+        yawgpu::wgpuShaderModuleRelease(module);
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuBufferRelease(output);
+        yawgpu::wgpuBufferRelease(input_buffer);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "vulkan")]
 fn vulkan_f16_shader_rejected_without_feature() {
     if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
         return;
