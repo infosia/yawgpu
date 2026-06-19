@@ -307,6 +307,95 @@ fn vulkan_f16_shader_rejected_without_feature() {
     }
 }
 
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "vulkan")]
+fn vulkan_storage_pointer_parameter_compute() {
+    // unrestricted_pointer_parameters: a helper taking a `ptr<storage,...>`
+    // parameter must compile AND run on Vulkan/MoltenVK — naga emits valid
+    // Logical-addressing SPIR-V for a simple pointer param (a memory-object
+    // declaration; no VariablePointers needed). Writes 42 via the pointer.
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let shader = r#"
+@group(0) @binding(0) var<storage, read_write> output : u32;
+fn write_it(p: ptr<storage, u32, read_write>) { *p = 42u; }
+@compute @workgroup_size(1)
+fn main() { write_it(&output); }
+"#;
+        let output = create_buffer_sized(
+            device,
+            4,
+            native::WGPUBufferUsage_Storage | native::WGPUBufferUsage_CopySrc,
+        );
+        let readback = create_buffer_sized(
+            device,
+            4,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        let module = create_wgsl_module(device, shader);
+        let pipeline = create_compute_pipeline(device, module);
+        let layout = yawgpu::wgpuComputePipelineGetBindGroupLayout(pipeline, 0);
+        let entry = native::WGPUBindGroupEntry {
+            nextInChain: std::ptr::null_mut(),
+            binding: 0,
+            buffer: output,
+            offset: 0,
+            size: 4,
+            sampler: std::ptr::null(),
+            textureView: std::ptr::null(),
+        };
+        let bg_desc = native::WGPUBindGroupDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            layout,
+            entryCount: 1,
+            entries: &entry,
+        };
+        let bind_group = yawgpu::wgpuDeviceCreateBindGroup(device, &bg_desc);
+
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuComputePassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
+        yawgpu::wgpuComputePassEncoderEnd(pass);
+        yawgpu::wgpuCommandEncoderCopyBufferToBuffer(encoder, output, 0, readback, 0, 4);
+        let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        yawgpu::wgpuCommandBufferRelease(command_buffer);
+        yawgpu::wgpuComputePassEncoderRelease(pass);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+
+        let bytes = read_buffer(instance, readback, 4);
+        let actual = u32::from_ne_bytes(bytes[0..4].try_into().expect("four bytes"));
+        assert_eq!(actual, 42, "storage pointer-param compute readback");
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "pointer-param shader raised a device error"
+        );
+
+        yawgpu::wgpuBindGroupRelease(bind_group);
+        yawgpu::wgpuBindGroupLayoutRelease(layout);
+        yawgpu::wgpuComputePipelineRelease(pipeline);
+        yawgpu::wgpuShaderModuleRelease(module);
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuBufferRelease(output);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
 // ---- helpers ----
 
 #[cfg(feature = "vulkan")]
