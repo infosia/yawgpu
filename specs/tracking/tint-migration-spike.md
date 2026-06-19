@@ -51,6 +51,34 @@ deps vendored, both mobile targets cross-compile without hacks.
    (shader-passthrough MSL/SPIRV variants, external-texture honest-rejection)
    need re-homing.
 
+## CORRECTION — yawgpu's naga is the TBDR FORK, not vanilla naga + validation fixes
+
+(Added after re-reading `README.md` + `../wgpu/README.md`.) The spike framed naga
+as "just a WGSL→MSL/SPIRV compiler" and claimed migrating to Tint "drops the
+naga-fork maintenance tax." **That benefit was overstated.** yawgpu's naga fork
+(`../wgpu` `feature/tiled`) carries a **custom WGSL language extension** that is
+load-bearing for the flagship `tiled`/`mobile` vendor extensions:
+- `subpass_input<T>` / `subpass_input_multisampled<T>` WGSL types + the
+  `subpassLoad` builtin, lowered by naga to SPIR-V `OpTypeImage Dim=SubpassData`
+  + `InputAttachmentIndex`, MSL `[[color(N)]]`, and GLSL framebuffer-fetch.
+- Footprint: ~20 naga files (frontend typifier/constant_evaluator, validators
+  analyzer/function/expression/handles, and ALL backends spv/msl/glsl/wgsl),
+  ~425 subpass/fork-tagged lines.
+
+Implication for **B**: migrating to Tint does NOT eliminate the shader-compiler
+fork — it **trades** a *clean-rebaseable-on-upstream-wgpu* naga fork for a
+**Dawn/Tint fork**, and the `subpass_input`/`subpassLoad` extension must be
+**re-homed onto Tint** (added to the spike's effort, which ignored it).
+Mitigation: **Tint already has input-attachment primitives** (`input_attachment`
+in `wgsl.def`/parser + SubpassData / `[[color(N)]]` lowering for Dawn's own
+framebuffer-fetch), so the port is a *mapping* of yawgpu's WGSL surface syntax
+onto Tint's machinery, NOT greenfield. Still real, non-trivial scope.
+
+Net effect on the decision: **A's relative attractiveness goes up** — the naga
+fork keeps a clean upstream-wgpu rebase story AND already has TBDR working on 3
+backends; B buys uniformity/F-085-class oracle alignment but must re-build the
+TBDR shader path on Tint and maintain a Dawn fork.
+
 ## Integration surface (yawgpu side)
 
 Replacement target is `yawgpu-core/src/shader_naga.rs` (**3393 LOC**, owns
@@ -59,26 +87,42 @@ that abstraction into the HAL: `metal/{device,pipeline,encode}.rs` build
 `naga::back::msl::{EntryPointResources,BindTarget,MslBindingMap,MslResourceBinding}`
 directly, and `naga::ReflectedResourceBinding` (12 sites) is consumed in pipeline
 + BGL-auto-gen. A swap re-homes all of these onto Tint's `Bindings` + `Inspector`.
+PLUS the `subpass_input`/`subpassLoad` TBDR extension above. Also: the
+`shader-passthrough` ext uses naga's SPIR-V **reflection** (reflect entry
+points/bindings from caller SPIR-V) — Tint has a SPIR-V reader + Inspector, so
+re-homeable, but another wired path.
 
 ## Effort estimate
 
 Feasibility = confirmed (incl. **both** mobile targets). Full production parity
-(shim+FFI + reflection rewiring + CTS re-verify of the whole green surface +
-build.rs productionization) is a **~1.5–3 month** effort, now dominated by **CTS
-re-verification + reflection wiring**, NOT by the (proven) build/FFI/mobile
-mechanics.
+(shim+FFI + reflection rewiring + **re-homing the `subpass_input`/`subpassLoad`
+TBDR extension onto Tint** + CTS re-verify of the whole green surface + build.rs
+productionization) is a **~1.5–3+ month** effort, now dominated by **CTS
+re-verification + reflection wiring + the TBDR shader-path port**, NOT by the
+(proven) build/FFI/mobile mechanics. (The TBDR port was NOT in the original spike
+scope — see the CORRECTION section; it raises B's cost above the initial estimate.)
 
 ## Decision (open — A vs B)
 
 - **A — stay on naga**, port specific Tint algorithms (uniformity = naga#1744)
-  incrementally. Pure-Rust, simple build, easy mobile; but chases Tint's
-  correctness forever and some gaps (uniformity) are large per-fix.
+  incrementally. Pure-Rust, simple build, easy mobile, and the fork **already has
+  the TBDR `subpass_input` extension working on 3 backends** with a clean
+  upstream-wgpu rebase story; but chases Tint's correctness forever and some gaps
+  (uniformity) are large per-fix.
 - **B — migrate to Tint.** Conformance-by-construction (same compiler as the Dawn
   oracle → a whole class of naga-divergence findings, incl. uniformity & F-085,
-  evaporate) + drops the naga-fork maintenance tax; cost is the integration body
-  above + a permanent C++ dependency (acceptable — yawgpu already links
-  MoltenVK/objc2) tracking Dawn's unversioned release cycle.
+  evaporate). **NOTE (corrected):** does NOT drop the shader-compiler-fork tax — it
+  trades the naga fork for a Dawn/Tint fork and must re-home the `subpass_input`/
+  `subpassLoad` TBDR extension onto Tint (feasible — Tint has input-attachment
+  primitives — but real scope). Cost is the integration body above + a permanent
+  C++ dependency (acceptable — yawgpu already links MoltenVK/objc2) tracking Dawn's
+  unversioned release cycle.
 
-Spike verdict: **B is technically de-risked and viable.** The call is a product
-priority decision (maximal conformance + C++ dep vs pure-Rust simplicity), not a
-feasibility one. Related: [[uniformity-naga1744]], [[cts-coverage]].
+Spike verdict: **B is technically de-risked and viable** (build/FFI/Metal/mobile
+all proven), **but the correction lifts B's cost and tilts the trade toward A**:
+the naga fork is NOT just disposable validation tweaks — it's the flagship TBDR
+extension, already working, cleanly rebaseable on upstream wgpu. B's real payoff is
+narrower than first framed (oracle alignment on validation/uniformity/F-085), and
+its real cost is wider (port TBDR to Tint + maintain a Dawn fork). The call is a
+product-priority decision, not a feasibility one. Related: [[uniformity-naga1744]],
+[[cts-coverage]].
