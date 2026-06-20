@@ -241,6 +241,9 @@ fn vulkan_bc1_compressed_roundtrip() {
 #[test]
 #[ignore = "manual real-backend test"]
 fn vulkan_etc2_compressed_roundtrip() {
+    if adapter_lacks_feature(native::WGPUFeatureName_TextureCompressionETC2) {
+        return;
+    }
     let (up, down) = run_compressed_roundtrip(native::WGPUTextureFormat_ETC2RGB8Unorm, 8);
     assert_eq!(up, down, "ETC2 compressed block did not round-trip");
 }
@@ -248,6 +251,9 @@ fn vulkan_etc2_compressed_roundtrip() {
 #[test]
 #[ignore = "manual real-backend test"]
 fn vulkan_astc_compressed_roundtrip() {
+    if adapter_lacks_feature(native::WGPUFeatureName_TextureCompressionASTC) {
+        return;
+    }
     let (up, down) = run_compressed_roundtrip(native::WGPUTextureFormat_ASTC4x4Unorm, 16);
     assert_eq!(up, down, "ASTC compressed block did not round-trip");
 }
@@ -785,6 +791,22 @@ unsafe fn copy_texture_layers(
         depthOrArrayLayers: layers,
     };
     yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &src, &dst, &extent);
+}
+
+/// Returns true when no real Vulkan adapter advertises `feature` (so an
+/// optional-feature test should skip rather than fail).
+fn adapter_lacks_feature(feature: native::WGPUFeatureName) -> bool {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return true;
+    }
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let lacks = yawgpu::wgpuAdapterHasFeature(adapter, feature) == 0;
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+        lacks
+    }
 }
 
 fn run_compressed_roundtrip(

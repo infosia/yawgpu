@@ -994,7 +994,9 @@ fn string_view(value: &str) -> native::WGPUStringView {
     }
 }
 
-/// Current resident set size in KB via `mach_task_self` / `task_info`.
+/// Current resident set size in KB via the platform RSS query
+/// (`mach_task_self`/`task_info` on macOS, `/proc/self/statm` on Linux).
+#[cfg(target_os = "macos")]
 fn current_rss_kb() -> u64 {
     #[repr(C)]
     struct MachTaskBasicInfo {
@@ -1027,4 +1029,24 @@ fn current_rss_kb() -> u64 {
         }
         info.resident_size / 1024
     }
+}
+
+/// Current resident set size in KB from `/proc/self/statm` (field 2 = resident
+/// pages). Returns 0 on any read/parse failure. Page size is the standard 4096.
+#[cfg(target_os = "linux")]
+fn current_rss_kb() -> u64 {
+    const PAGE_SIZE: u64 = 4096;
+    let Ok(statm) = std::fs::read_to_string("/proc/self/statm") else {
+        return 0;
+    };
+    match statm.split_whitespace().nth(1).and_then(|p| p.parse::<u64>().ok()) {
+        Some(pages) => pages * PAGE_SIZE / 1024,
+        None => 0,
+    }
+}
+
+/// Fallback for platforms without an RSS query wired up.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn current_rss_kb() -> u64 {
+    0
 }

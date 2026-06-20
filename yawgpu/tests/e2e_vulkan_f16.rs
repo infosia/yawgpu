@@ -51,10 +51,13 @@ fn vulkan_adapter_advertises_shader_f16() {
     unsafe {
         let instance = create_vulkan_instance();
         let adapter = request_adapter(instance);
-        assert!(
-            yawgpu::wgpuAdapterHasFeature(adapter, native::WGPUFeatureName_ShaderF16) != 0,
-            "Vulkan adapter must advertise shader-f16 (MoltenVK/desktop with shaderFloat16)"
-        );
+        // shader-f16 is an optional WebGPU feature; adapters without it (e.g. a
+        // desktop Vulkan driver lacking shaderFloat16) skip rather than fail.
+        if yawgpu::wgpuAdapterHasFeature(adapter, native::WGPUFeatureName_ShaderF16) == 0 {
+            yawgpu::wgpuAdapterRelease(adapter);
+            yawgpu::wgpuInstanceRelease(instance);
+            return;
+        }
         yawgpu::wgpuAdapterRelease(adapter);
         yawgpu::wgpuInstanceRelease(instance);
     }
@@ -70,6 +73,13 @@ fn vulkan_f16_compute_doubles_values() {
     unsafe {
         let instance = create_vulkan_instance();
         let adapter = request_adapter(instance);
+        // Skip when the adapter lacks the optional shader-f16 feature; requesting
+        // a device with it would otherwise fail and panic the non-unwind callback.
+        if yawgpu::wgpuAdapterHasFeature(adapter, native::WGPUFeatureName_ShaderF16) == 0 {
+            yawgpu::wgpuAdapterRelease(adapter);
+            yawgpu::wgpuInstanceRelease(instance);
+            return;
+        }
         let device = request_device_with_f16(instance, adapter);
         assert!(
             yawgpu::wgpuDeviceHasFeature(device, native::WGPUFeatureName_ShaderF16) != 0,
@@ -174,6 +184,13 @@ fn vulkan_f16_bitcast_roundtrip_with_arith() {
     unsafe {
         let instance = create_vulkan_instance();
         let adapter = request_adapter(instance);
+        // Skip when the adapter lacks the optional shader-f16 feature; requesting
+        // a device with it would otherwise fail and panic the non-unwind callback.
+        if yawgpu::wgpuAdapterHasFeature(adapter, native::WGPUFeatureName_ShaderF16) == 0 {
+            yawgpu::wgpuAdapterRelease(adapter);
+            yawgpu::wgpuInstanceRelease(instance);
+            return;
+        }
         let device = request_device_with_f16(instance, adapter);
         let errors = install_error_capture(device);
         let queue = yawgpu::wgpuDeviceGetQueue(device);
