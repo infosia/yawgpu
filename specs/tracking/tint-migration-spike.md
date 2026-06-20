@@ -126,3 +126,14 @@ narrower than first framed (oracle alignment on validation/uniformity/F-085), an
 its real cost is wider (port TBDR to Tint + maintain a Dawn fork). The call is a
 product-priority decision, not a feasibility one. Related: [[uniformity-naga1744]],
 [[cts-coverage]].
+
+## DECISION — 2026-06-20: stay on naga (A)
+
+User decided to **keep the current direction (A): stay on naga** for now. Tint
+migration is shelved (NOT cancelled — the spike proved it viable and the findings
+above remain valid if revisited). Consequence: `uniformity` (F-120) stays a
+documented upstream-naga limitation pending naga#1744 ([[uniformity-naga1744]]);
+the naga fork (`../wgpu` `feature/tiled`, incl. the TBDR `subpass_input` extension)
+continues as the shader frontend. Revisit B only if the naga divergence cost grows
+materially (e.g. uniformity/correctness findings start blocking real users) or the
+pure-Rust/mobile-simplicity priority changes.
