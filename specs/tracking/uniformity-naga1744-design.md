@@ -23,11 +23,21 @@ summaries + pointer dual-tracking). **Slices 1-5 DONE** (slice 5 cutover removed
 dead `disruptor` path + the `USE_GRAPH_UNIFORMITY`/`DISABLE_UNIFORMITY_REQ_FOR_
 FRAGMENT_STAGE` consts; graph is the only path). **MoltenVK re-verified green**
 (basics:if 342/0, function_variables 219/0, binary_expressions 1024/0, pointers
-58/0 — shared frontend matches Metal). yawgpu workspace tests pass. **naga fork
-committed `783ced3bf`** (feature/tiled). REMAINING: (1) user pushes the fork; (2)
-bump yawgpu Cargo.toml pin to `783ced3bf` + remove the temp `[patch]`; (3) commit
-yawgpu; (4) slice 6 (subgroup uniformity — deferred; skips on Metal, do when yawgpu
-advertises `subgroups`). **MoltenVK run gotcha**: invoke the cts binary DIRECTLY (no
+58/0 — shared frontend matches Metal). yawgpu workspace tests pass. naga fork was
+`783ced3bf` (pin `0320944`), then **13 EDGE CASES** found by the CTS
+`uniformity:functions` (12) + `function_pointer_parameters` (1) g.tests (which the
+initial pass hadn't measured — they're methods of the `uniformity,uniformity` file,
+query `uniformity,uniformity:functions:*`) were fixed in **`4065fd824`**: (a)
+derivative + implicit-LOD textureSample RESULTS are non-uniform (seed
+may_be_non_uniform, not just require-uniform-CF) so a value derived from a
+derivative driving control flow is caught + a fn returning it gets
+ReturnValueMayBeNonUniform; (b) pointer-param codependency (store to `*q` under CF
+that depends on `*p` taints q's output contents). Re-verified Metal: the WHOLE
+non-subgroup uniformity tree fail=0 (functions 40/0, function_pointer_parameters
+22/0, basics 46170/0, …) + structural 0. **F-120 uniformity now FULLY resolved**
+(was "nearly"). REMAINING: (1) user pushes fork `4065fd824`; (2) bump yawgpu pin to
+`4065fd824` + remove `[patch]`; (3) commit yawgpu; (4) slice 6 (subgroup uniformity
+— deferred; skips on Metal, do when yawgpu advertises `subgroups`). **MoltenVK run gotcha**: invoke the cts binary DIRECTLY (no
 `perl -e exec` wrapper) — SIP strips `DYLD_LIBRARY_PATH` for /usr/bin/perl children,
 making the MoltenVK loader fail `BackendUnavailable`.
 
