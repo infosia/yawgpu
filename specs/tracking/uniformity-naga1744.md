@@ -1,4 +1,12 @@
-# Uniformity analysis (F-120 residual) — investigated → deferred to naga#1744
+# Uniformity analysis (F-120 residual) — investigated → deferred → RESOLVED (naga#1744 = gfx-rs/wgpu#4369)
+
+> **SUPERSEDED 2026-06-20**: this ledger records the *initial* investigation that
+> deferred uniformity to naga#1744. The user then chose to implement it, and it was
+> DONE — see `uniformity-naga1744-design.md` (naga `783ced3bf`, yawgpu `0320944`,
+> green Metal+MoltenVK). Issue ref: **gfx-rs/wgpu#4369** "Implement WGSL uniformity
+> analysis" (the naga source cited the old number `gfx-rs/naga#1744`, renumbered to
+> #4369 after the wgpu monorepo merge). Note: `wgpu#6458` below is a *separate*
+> issue (warning-level diagnostic items), not the uniformity-analysis issue.
 
 Investigation 2026-06-20 of the only remaining open chunk of **F-120**
 (webgpu-native-cts finding): the `shader,validation,uniformity,uniformity` CTS

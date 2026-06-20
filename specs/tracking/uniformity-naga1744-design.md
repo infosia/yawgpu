@@ -1,4 +1,10 @@
-# naga#1744 — WGSL-standard uniformity analysis: design & slice plan
+# naga#1744 (= gfx-rs/wgpu#4369) — WGSL-standard uniformity analysis: design & slice plan
+
+> Tracking issue: **gfx-rs/wgpu#4369** "Implement WGSL uniformity analysis"
+> (`https://github.com/gfx-rs/wgpu/issues/4369`). The naga source historically
+> cited this as `gfx-rs/naga#1744`; after naga merged into the wgpu monorepo that
+> issue was renumbered to **#4369** (the old `naga#1744` URL redirects to it). This
+> doc uses "naga#1744" and "wgpu#4369" interchangeably.
 
 Implementing the WGSL-spec uniformity analysis (graph-reachability, as Tint does)
 in yawgpu's naga fork (`../wgpu` `feature/tiled`), to replace naga's coarse
