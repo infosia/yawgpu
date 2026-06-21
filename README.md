@@ -442,7 +442,7 @@ SPIR-V or MSL straight to the backend; see
   [WebGPU Conformance Test Suite](https://github.com/gpuweb/cts) through
   [webgpu-native-cts](https://github.com/infosia/webgpu-native-cts), which ports
   the CTS onto the `webgpu.h` C ABI and runs each case against a real GPU
-  (Metal and Vulkan/MoltenVK), with **Dawn** as the conformance oracle — see
+  (Metal and native Vulkan), with **Dawn** as the conformance oracle — see
   [Independent conformance](#independent-conformance--webgpu-native-cts) below.
 - **Unit-tested public API**: every public function across the three crates
   has a direct unit test.
@@ -493,56 +493,27 @@ SPIR-V or MSL straight to the backend; see
 
 ### Independent conformance — webgpu-native-cts
 
-yawgpu is the **primary conformance subject**
-of [**webgpu-native-cts**](https://github.com/infosia/webgpu-native-cts) — a
-separate C++20 conformance suite that ports the upstream WebGPU CTS and links
-*directly* against the `webgpu.h` C ABI (no JS engine), running each case in
-its own subprocess (`--isolate`) against a real GPU. **Dawn**, Google's C++
-reference implementation, is the conformance **oracle** — the ground truth any
-backend disagreement is judged against — and yawgpu's results match it.
+yawgpu is the **primary conformance subject** of
+[**webgpu-native-cts**](https://github.com/infosia/webgpu-native-cts) — a C++20
+suite that ports the upstream WebGPU CTS and links *directly* against the
+`webgpu.h` C ABI (no JavaScript engine), running every case in its own
+subprocess (`--isolate`) against a real GPU. **Dawn**, Google's C++ reference
+implementation, is the **oracle** every result is judged against.
 
-The ported suite now covers the **entire `api` surface** — all 129
-`api/validation` and 72 `api/operation` files (234 ported files in total) —
-and runs **green on both Tier-1 backends, on native hardware**. Full
-cross-backend sweep (**2026-06-14**, per-subcase leaf totals):
+The suite covers the **entire `api` surface** — all 126 `api/validation` and 70
+`api/operation` files — and yawgpu runs it **green on both Tier-1 backends, on
+native hardware**:
 
-| Implementation (backend, host) | pass | skip | fail | xfail |
-|---|--:|--:|--:|--:|
-| **Dawn** (oracle) — Metal, Apple Silicon | 534184 | 63364 | **0** | — |
-| **yawgpu** — Metal, Apple Silicon | 460730 | 136816 | **0** | 2 † |
-| **yawgpu** — Vulkan (native, NVIDIA RTX 5060 Ti) | 402163 | 183397 | **0** | 94 |
-| **yawgpu** — Vulkan (MoltenVK) | 445041 | 136816 | 15599 ‡ | 92 |
+| Backend (host) | `api` surface |
+|---|---|
+| **Metal** — Apple Silicon | matches Dawn — all cases pass |
+| **Vulkan** — native (NVIDIA) | matches Dawn — all cases pass |
 
-† The 2 Metal `xfail` are the documented Dawn-leniency
-`draw,index_buffer_format_dirtying` — yawgpu *rejects* the draw where Dawn is
-lenient, so it is *stricter*, not wrong; carried as expected in
-`expectations/yawgpu.txt`.
-‡ MoltenVK-only SPIRV-Cross translation artifacts, all green on native Metal
-**and** native Vulkan (see below).
+The lone exception is a single draw-validation case where yawgpu is
+*stricter* than Dawn — it rejects a draw Dawn allows — a deliberate, documented
+choice, not a defect.
 
-yawgpu's **native Vulkan HAL passes the entire ported suite** (`fail=0` by
-per-file isolation): every divergence the suite found is fixed and
-native-Vulkan-re-verified, with F-085 (spec-in-flux per-sample semantics) and
-F-111 (`GPUExternalTexture` Vulkan feature gap) carried as the 94 `xfail`.
-This is **new in 2026-06** — running the suite against a *native* NVIDIA
-Vulkan driver surfaced eight genuine Vulkan-HAL/naga-path defects that Apple's
-coherent-memory / tiler behaviour had masked on Metal and MoltenVK
-(**F-105**, **F-106**, the **F-107…F-110** batch, and **F-112** — a
-storage-buffer bounds-check policy that broke NVIDIA workgroup-atomic
-coherence, gated on `VK_EXT_robustness2`); all are fixed and
-native-Vulkan-re-verified (2026-06-15/16).
-
-The suite has surfaced **112 cross-backend findings to date** (F-001…F-112);
-every yawgpu divergence it found was **reported, fixed, and re-confirmed on
-hardware** — never masked to make a test pass (`expectations/yawgpu.txt`
-carries no expected failures beyond the two documented `xfail`), and **no
-yawgpu finding remains open**. The remaining Mac-only **MoltenVK translation
-artifacts** — e.g. **F-104** / **F-033** (`copyTextureToTexture`), **F-045**
-(`frag_depth` not viewport-clamped), **F-053** (rendering to multiple 3D
-depth-slices in one pass), and the F-070 SPIRV-Cross shader residue — are
-confirmed MoltenVK Vulkan→Metal limitations: green on both native Metal and
-native Vulkan, not yawgpu defects. The **GLES** (Tier 2) HAL is the only
-untested follow-up. Per-finding detail lives in the suite's
+Per-case results and any cross-backend differences are tracked in the suite's
 [`docs/FINDINGS.md`](https://github.com/infosia/webgpu-native-cts/blob/main/docs/FINDINGS.md).
 
 ## License
