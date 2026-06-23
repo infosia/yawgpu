@@ -6,6 +6,34 @@ use crate::shader_naga;
 #[cfg(feature = "shader-passthrough")]
 use crate::ReflectedModule;
 
+/// Stores one shader compilation message for compilation-info callbacks.
+#[derive(Clone, Debug)]
+pub struct CompilationMessage {
+    /// Message severity.
+    pub severity: CompilationSeverity,
+    /// Human-readable message.
+    pub message: String,
+    /// 1-based line number.
+    pub line_num: u64,
+    /// 1-based line position.
+    pub line_pos: u64,
+    /// 0-based byte offset.
+    pub offset: u64,
+    /// Byte length.
+    pub length: u64,
+}
+
+/// Enumerates shader compilation message severities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompilationSeverity {
+    /// Error message.
+    Error,
+    /// Warning message.
+    Warning,
+    /// Info message.
+    Info,
+}
+
 pub(crate) const SHADER_STAGE_VERTEX: u64 = 1;
 pub(crate) const SHADER_STAGE_FRAGMENT: u64 = 2;
 pub(crate) const SHADER_STAGE_COMPUTE: u64 = 4;
@@ -85,6 +113,7 @@ pub struct ShaderModule {
 pub(crate) struct ShaderModuleInner {
     pub(crate) _source: ShaderModuleSourceKind,
     pub(crate) diagnostic: Option<String>,
+    pub(crate) messages: Vec<CompilationMessage>,
     pub(crate) is_error: bool,
 }
 
@@ -121,11 +150,16 @@ pub(crate) enum ShaderModuleSourceKind {
 impl ShaderModule {
     /// Creates a new instance.
     pub(crate) fn new(source: ShaderModuleSourceKind, diagnostic: Option<String>) -> Self {
+        let messages = match &source {
+            ShaderModuleSourceKind::Wgsl { reflected, .. } => reflected.warnings.clone(),
+            _ => Vec::new(),
+        };
         Self {
             inner: Arc::new(ShaderModuleInner {
                 is_error: diagnostic.is_some(),
                 _source: source,
                 diagnostic,
+                messages,
             }),
         }
     }
@@ -187,6 +221,12 @@ impl ShaderModule {
     #[must_use]
     pub fn diagnostic(&self) -> Option<&str> {
         self.inner.diagnostic.as_deref()
+    }
+
+    /// Returns non-fatal compilation messages.
+    #[must_use]
+    pub fn compilation_messages(&self) -> &[CompilationMessage] {
+        &self.inner.messages
     }
 
     /// Returns shader reflection data when the module source provides it.
@@ -298,6 +338,7 @@ mod tests {
         ));
         assert!(!valid.is_error());
         assert_eq!(valid.diagnostic(), None);
+        assert!(valid.compilation_messages().is_empty());
 
         device.push_error_scope(ErrorFilter::Validation);
         let invalid = device.create_shader_module(ShaderModuleSource::Wgsl("not wgsl".to_owned()));
@@ -309,6 +350,22 @@ mod tests {
         assert!(invalid.is_error());
         assert!(invalid.diagnostic().is_some());
         assert!(scoped.message.contains("expected global item"));
+    }
+
+    #[test]
+    fn shader_module_accessors_include_warning_messages() {
+        let device = noop_device();
+        let module = device.create_shader_module(ShaderModuleSource::Wgsl(
+            "diagnostic(info, bogus_rule);\n@compute @workgroup_size(1) fn cs() {}".to_owned(),
+        ));
+
+        assert!(!module.is_error());
+        assert_eq!(module.diagnostic(), None);
+        assert_eq!(module.compilation_messages().len(), 1);
+        assert_eq!(
+            module.compilation_messages()[0].severity,
+            CompilationSeverity::Warning
+        );
     }
 
     #[test]

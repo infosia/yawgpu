@@ -135,6 +135,18 @@ pub fn map_compilation_message_type_error() -> native::WGPUCompilationMessageTyp
     native::WGPUCompilationMessageType_Error
 }
 
+/// Converts compilation message type warning into the corresponding yawgpu representation.
+#[must_use]
+pub fn map_compilation_message_type_warning() -> native::WGPUCompilationMessageType {
+    native::WGPUCompilationMessageType_Warning
+}
+
+/// Converts compilation message type info into the corresponding yawgpu representation.
+#[must_use]
+pub fn map_compilation_message_type_info() -> native::WGPUCompilationMessageType {
+    native::WGPUCompilationMessageType_Info
+}
+
 /// Converts map mode into the corresponding yawgpu representation.
 pub fn map_map_mode(value: native::WGPUMapMode) -> Result<core::MapMode, &'static str> {
     let bits = u32::try_from(value).map_err(|_| "map mode has unsupported bits")?;

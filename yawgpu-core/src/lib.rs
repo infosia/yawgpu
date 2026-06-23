@@ -86,9 +86,9 @@ pub use sampler::{
     AddressMode, CompareFunction, FilterMode, MipmapFilterMode, ResolvedSamplerDescriptor, Sampler,
     SamplerDescriptor,
 };
+pub use shader::{CompilationMessage, CompilationSeverity, ShaderModule, ShaderModuleSource};
 #[cfg(feature = "shader-passthrough")]
 pub use shader::{MslEntryPoint, MslReflection};
-pub use shader::{ShaderModule, ShaderModuleSource};
 #[cfg(feature = "shader-passthrough")]
 pub use shader_naga::ReflectedModule;
 #[cfg(feature = "tiled")]

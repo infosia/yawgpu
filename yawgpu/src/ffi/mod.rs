@@ -100,6 +100,7 @@ use crate::conv::{
     map_bind_group_entries, map_bind_group_layout_descriptor, map_buffer_descriptor,
     map_buffer_map_state, map_buffer_usage_to_native, map_color,
     map_compilation_info_request_status_success, map_compilation_message_type_error,
+    map_compilation_message_type_info, map_compilation_message_type_warning,
     map_compute_pipeline_descriptor, map_device_lost_callback_info, map_device_lost_reason,
     map_error_filter, map_error_type, map_extent_3d, map_feature, map_feature_level,
     map_features_to_native, map_limits, map_limits_to_native, map_map_async_status, map_map_mode,
@@ -1590,21 +1591,48 @@ impl PendingCallback {
                 ..
             } => {
                 if let Some(callback) = callback {
-                    let diagnostic = shader_module.diagnostic();
-                    let message = diagnostic.map(|message| native::WGPUCompilationMessage {
-                        nextInChain: std::ptr::null_mut(),
-                        message: string_view(message.as_bytes()),
-                        type_: map_compilation_message_type_error(),
-                        lineNum: 0,
-                        linePos: 0,
-                        offset: 0,
-                        length: 0,
-                    });
-                    let messages = message.as_ref().map_or(std::ptr::null(), |message| message);
+                    let mut messages = Vec::new();
+                    if let Some(message) = shader_module.diagnostic() {
+                        messages.push(native::WGPUCompilationMessage {
+                            nextInChain: std::ptr::null_mut(),
+                            message: string_view(message.as_bytes()),
+                            type_: map_compilation_message_type_error(),
+                            lineNum: 0,
+                            linePos: 0,
+                            offset: 0,
+                            length: 0,
+                        });
+                    }
+                    messages.extend(shader_module.compilation_messages().iter().map(|message| {
+                        native::WGPUCompilationMessage {
+                            nextInChain: std::ptr::null_mut(),
+                            message: string_view(message.message.as_bytes()),
+                            type_: match message.severity {
+                                core::CompilationSeverity::Error => {
+                                    map_compilation_message_type_error()
+                                }
+                                core::CompilationSeverity::Warning => {
+                                    map_compilation_message_type_warning()
+                                }
+                                core::CompilationSeverity::Info => {
+                                    map_compilation_message_type_info()
+                                }
+                            },
+                            lineNum: message.line_num,
+                            linePos: message.line_pos,
+                            offset: message.offset,
+                            length: message.length,
+                        }
+                    }));
+                    let message_ptr = if messages.is_empty() {
+                        std::ptr::null()
+                    } else {
+                        messages.as_ptr()
+                    };
                     let info = native::WGPUCompilationInfo {
                         nextInChain: std::ptr::null_mut(),
-                        messageCount: usize::from(message.is_some()),
-                        messages,
+                        messageCount: messages.len(),
+                        messages: message_ptr,
                     };
                     callback(
                         map_compilation_info_request_status_success(),
@@ -2251,6 +2279,7 @@ mod tests {
         status: native::WGPUCompilationInfoRequestStatus,
         message_count: usize,
         error_messages: Vec<String>,
+        warning_messages: Vec<String>,
     }
 
     unsafe extern "C" fn request_adapter_callback(
@@ -2376,6 +2405,10 @@ mod tests {
             if message.type_ == native::WGPUCompilationMessageType_Error {
                 state
                     .error_messages
+                    .push(string_view_to_string(message.message));
+            } else if message.type_ == native::WGPUCompilationMessageType_Warning {
+                state
+                    .warning_messages
                     .push(string_view_to_string(message.message));
             }
         }
@@ -5828,6 +5861,25 @@ mod tests {
             );
             assert_eq!(valid_state.message_count, 0);
             assert!(valid_state.error_messages.is_empty());
+            assert!(valid_state.warning_messages.is_empty());
+
+            let warning = create_wgsl_module(
+                device,
+                "diagnostic(info, bogus_rule);\n@compute @workgroup_size(1) fn cs() {}",
+            );
+            let mut warning_state = CompilationInfoState::default();
+            let warning_future = get_compilation_info(warning, &mut warning_state);
+            assert_ne!(warning_future.id, 0);
+            process_events_until_compilation_info_fires(instance, &warning_state);
+            assert_eq!(warning_state.fired, 1);
+            assert_eq!(
+                warning_state.status,
+                native::WGPUCompilationInfoRequestStatus_Success
+            );
+            assert_eq!(warning_state.message_count, 1);
+            assert!(warning_state.error_messages.is_empty());
+            assert_eq!(warning_state.warning_messages.len(), 1);
+            assert!(warning_state.warning_messages[0].contains("unknown `diagnostic"));
 
             wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
             let invalid = create_wgsl_module(device, "not wgsl");
@@ -5846,6 +5898,7 @@ mod tests {
             assert!(!invalid_state.error_messages[0].is_empty());
 
             wgpuShaderModuleRelease(invalid);
+            wgpuShaderModuleRelease(warning);
             drop(module_arc);
             wgpuShaderModuleRelease(module);
             release_handles(instance, adapter, device);

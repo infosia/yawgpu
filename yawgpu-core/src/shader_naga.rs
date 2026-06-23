@@ -4,6 +4,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::shader::{CompilationMessage, CompilationSeverity};
+
 /// Stores reflected shader module data used by validation and backend submission.
 #[derive(Debug)]
 pub struct ReflectedModule {
@@ -11,6 +13,8 @@ pub struct ReflectedModule {
     pub module: naga::Module,
     /// Info.
     pub info: naga::valid::ModuleInfo,
+    /// Non-fatal compilation warnings.
+    pub(crate) warnings: Vec<CompilationMessage>,
 }
 
 /// Stores binding metadata.
@@ -527,8 +531,9 @@ pub(crate) fn parse_and_validate_wgsl_gated(
     src: &str,
     shader_f16: bool,
 ) -> Result<ReflectedModule, String> {
-    let module = naga::front::wgsl::parse_str(src).map_err(|error| error.to_string())?;
-    validate_module(module, shader_f16)
+    let (module, parse_warnings) =
+        naga::front::wgsl::parse_str_with_warnings(src).map_err(|error| error.to_string())?;
+    validate_module(module, shader_f16, src, parse_warnings)
 }
 
 /// Reflects a SPIR-V module without re-emitting the input words.
@@ -547,10 +552,15 @@ pub(crate) fn reflect_spirv_gated(
     let module = naga::front::spv::Frontend::new(words.iter().copied(), &options)
         .parse()
         .map_err(|error| error.to_string())?;
-    validate_module(module, shader_f16)
+    validate_module(module, shader_f16, "", Vec::new())
 }
 
-fn validate_module(module: naga::Module, shader_f16: bool) -> Result<ReflectedModule, String> {
+fn validate_module(
+    module: naga::Module,
+    shader_f16: bool,
+    source: &str,
+    mut warnings: Vec<naga::front::wgsl::WgslWarning>,
+) -> Result<ReflectedModule, String> {
     let mut capabilities = naga::valid::Capabilities::SHADER_FLOAT16_IN_FLOAT32
         | naga::valid::Capabilities::CUBE_ARRAY_TEXTURES
         | naga::valid::Capabilities::MULTISAMPLED_SHADING
@@ -583,7 +593,31 @@ fn validate_module(module: naga::Module, shader_f16: bool) -> Result<ReflectedMo
     let info = validator
         .validate(&module)
         .map_err(|error| error.to_string())?;
-    Ok(ReflectedModule { module, info })
+    warnings.extend(info.warnings().iter().cloned());
+    let warnings = warnings
+        .into_iter()
+        .map(|warning| compilation_warning_from_naga(source, warning))
+        .collect();
+    Ok(ReflectedModule {
+        module,
+        info,
+        warnings,
+    })
+}
+
+fn compilation_warning_from_naga(
+    source: &str,
+    warning: naga::front::wgsl::WgslWarning,
+) -> CompilationMessage {
+    let location = warning.span.location(source);
+    CompilationMessage {
+        severity: CompilationSeverity::Warning,
+        message: warning.message,
+        line_num: u64::from(location.line_number),
+        line_pos: u64::from(location.line_position),
+        offset: u64::from(location.offset),
+        length: u64::from(location.length),
+    }
 }
 
 impl ReflectedModule {
@@ -2196,11 +2230,10 @@ mod tests {
     #[cfg(feature = "shader-passthrough")]
     use super::reflect_spirv_gated;
     use super::{
-        MslBindingMap, MslResourceBinding, MslResourceBindingKind, MslVertexAttribute,
-        MslVertexBufferBinding, MslVertexFormat, MslVertexStepMode, ReflectedBufferType,
-        ReflectedResourceBindingKind, ReflectedShaderStage, ReflectedTextureSampleUsage,
-        ReflectedTextureViewDimension, ReflectedTypeScalarClass, parse_and_validate_wgsl,
-        parse_and_validate_wgsl_gated,
+        parse_and_validate_wgsl, parse_and_validate_wgsl_gated, MslBindingMap, MslResourceBinding,
+        MslResourceBindingKind, MslVertexAttribute, MslVertexBufferBinding, MslVertexFormat,
+        MslVertexStepMode, ReflectedBufferType, ReflectedResourceBindingKind, ReflectedShaderStage,
+        ReflectedTextureSampleUsage, ReflectedTextureViewDimension, ReflectedTypeScalarClass,
     };
     use naga::ShaderStage;
 
@@ -2218,6 +2251,23 @@ mod tests {
     #[test]
     fn parse_and_validate_wgsl_gated_keeps_f16_packing_builtins_baseline() {
         assert!(parse_and_validate_wgsl_gated(PACK_2X16_FLOAT_SHADER, false).is_ok());
+    }
+
+    #[test]
+    fn parse_and_validate_wgsl_gated_collects_unknown_rule_warning() {
+        let module = parse_and_validate_wgsl_gated(
+            "diagnostic(info, bogus_rule);\n@compute @workgroup_size(1) fn cs() {}",
+            false,
+        )
+        .expect("unknown diagnostic rule should validate with warning");
+        assert_eq!(module.warnings.len(), 1);
+        assert_eq!(
+            module.warnings[0].severity,
+            crate::CompilationSeverity::Warning
+        );
+        assert!(module.warnings[0].message.contains("unknown `diagnostic"));
+        assert_eq!(module.warnings[0].line_num, 1);
+        assert_ne!(module.warnings[0].line_pos, 0);
     }
 
     #[cfg(feature = "shader-passthrough")]
@@ -2488,21 +2538,15 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
         .unwrap();
 
         let entry_points = module.entry_points();
-        assert!(
-            entry_points
-                .iter()
-                .any(|entry| entry.name == "vs" && entry.stage == ReflectedShaderStage::Vertex)
-        );
-        assert!(
-            entry_points
-                .iter()
-                .any(|entry| entry.name == "fs" && entry.stage == ReflectedShaderStage::Fragment)
-        );
-        assert!(
-            entry_points
-                .iter()
-                .any(|entry| entry.name == "cs" && entry.stage == ReflectedShaderStage::Compute)
-        );
+        assert!(entry_points
+            .iter()
+            .any(|entry| entry.name == "vs" && entry.stage == ReflectedShaderStage::Vertex));
+        assert!(entry_points
+            .iter()
+            .any(|entry| entry.name == "fs" && entry.stage == ReflectedShaderStage::Fragment));
+        assert!(entry_points
+            .iter()
+            .any(|entry| entry.name == "cs" && entry.stage == ReflectedShaderStage::Compute));
     }
 
     #[test]
