@@ -712,6 +712,22 @@ mod tests {
     }
 
     #[test]
+    fn map_compilation_message_type_warning_returns_warning() {
+        assert_eq!(
+            map_compilation_message_type_warning(),
+            native::WGPUCompilationMessageType_Warning
+        );
+    }
+
+    #[test]
+    fn map_compilation_message_type_info_returns_info() {
+        assert_eq!(
+            map_compilation_message_type_info(),
+            native::WGPUCompilationMessageType_Info
+        );
+    }
+
+    #[test]
     fn map_map_mode_accepts_single_modes_and_rejects_invalid_combinations() {
         assert_eq!(
             map_map_mode(native::WGPUMapMode_Read),
