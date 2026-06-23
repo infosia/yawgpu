@@ -85,13 +85,6 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
         device.dispatch_error(core::ErrorKind::Validation, "surface is invalid");
         return;
     }
-    if device.core.is_lost() {
-        device.dispatch_error(
-            core::ErrorKind::Validation,
-            "surface configuration device is lost",
-        );
-        return;
-    }
     if let Some(message) = surface_configuration_error(device, config) {
         device.dispatch_error(core::ErrorKind::Validation, message);
         return;
@@ -191,10 +184,6 @@ pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
         return;
     }
     let config = config.expect("surface configuration was checked");
-    if config.device.is_lost() {
-        surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_Error;
-        return;
-    }
     if let Some(hal) = surface
         .hal
         .lock()
@@ -264,9 +253,6 @@ pub unsafe extern "C" fn wgpuSurfacePresent(surface: native::WGPUSurface) -> nat
         let Some(config) = config else {
             return native::WGPUStatus_Error;
         };
-        if config.device.is_lost() {
-            return native::WGPUStatus_Error;
-        }
         if hal.present(config.device.queue().hal()).is_err() {
             return native::WGPUStatus_Error;
         }

@@ -16,9 +16,6 @@ pub(super) struct VulkanQueueInner {
 
 impl Drop for VulkanQueueInner {
     fn drop(&mut self) {
-        if self.device.is_destroyed() {
-            return;
-        }
         if let Ok(mut retire) = self.retire.lock() {
             let _ = retire.wait_all(&self.device.device);
         }
@@ -28,9 +25,6 @@ impl Drop for VulkanQueueInner {
 impl VulkanQueue {
     /// Submits an empty command buffer to flush the queue.
     pub fn submit_empty(&self) -> Result<(), HalError> {
-        if self.inner.device.is_destroyed() {
-            return Err(HalError::QueueSubmissionFailed { backend: BACKEND });
-        }
         unsafe {
             self.inner
                 .device
@@ -43,9 +37,6 @@ impl VulkanQueue {
 
     /// Waits until all submitted queue work has completed.
     pub fn wait_idle(&self) -> Result<(), HalError> {
-        if self.inner.device.is_destroyed() {
-            return Err(HalError::QueueSubmissionFailed { backend: BACKEND });
-        }
         unsafe {
             self.inner
                 .device
@@ -57,9 +48,6 @@ impl VulkanQueue {
 
     /// Records and submits the given buffer/texture copy operations.
     pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
-        if self.inner.device.is_destroyed() {
-            return Err(HalError::QueueSubmissionFailed { backend: BACKEND });
-        }
         if copies.is_empty() {
             return self.submit_empty();
         }
