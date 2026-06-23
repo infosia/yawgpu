@@ -2047,3 +2047,56 @@ PY
   access/stage `VK_ACCESS_INDIRECT_COMMAND_READ_BIT` / `VK_ACCESS_INDEX_READ_BIT` / `TRANSFER_READ` after a
   storage/copy write to the same buffer; the fix inserts them. Verified native Vulkan (user); Apple
   regression-confirmed green (Metal + MoltenVK 263/0, no regression). Fixed on the Windows side.
+
+## F-133 — WGSL const/override-eval, @diagnostic scoping, texture overload gaps — RESOLVED (with documented residual under-validations)
+
+Large multi-part finding in `shader,validation` (const-expression eval, pipeline-override
+eval, the `@diagnostic` directive/attribute feature, and texture-builtin overload checks).
+Driven against the Metal HAL (Dawn oracle) and fixed in the naga fork; the dominant
+const-eval-builtin chunk and the binary-operator / precedence / insertBits work landed in
+earlier slices (see the per-slice naga commits). The final slices:
+
+- **@diagnostic (384 -> 0).** naga rejected statement/block `@diagnostic(...)` attributes with
+  "not yet implemented" and dropped WARNING-severity diagnostics. Implemented WGSL
+  statement-level diagnostic-filter scoping (a single optional `diagnostic_filter_leaf` on
+  `ir::Block`; statement-leading attrs wrapped in a synthetic block so they scope the
+  condition; uniformity `process_block` saves/restores the active leaf) **and** warning
+  surfacing (`WgslWarning` + `parse_str_with_warnings`, `ModuleInfo::warnings()`; yawgpu maps
+  them to `WGPUCompilationMessage` of type Warning). naga `3927e8d2d`, yawgpu `636a3c3`.
+- **smoothstep low==high vector mixed override/const (24 -> 0).** `pipeline_constants`
+  flatten helpers now expand vector `Splat`/`ZeroValue` to a full per-lane literal list so a
+  mixed const/override edge pair is detected at pipeline creation. naga `937d23fb0`.
+- **early_evaluation composites override_let_* (7 -> 0).** `process_function` rebuilt the
+  `ExpressionKindTracker` from scratch, losing the front-end `force_non_const` marking on
+  `let` bindings, so a composite mixing an override edge with a `let` value was re-folded and
+  overflowed to infinity. Re-apply `force_non_const` to named (let) expressions; also fixed an
+  `ExpressionAlreadyInScope` duplicate-emit in `filter_emits_in_block`. naga `40f2d7711`.
+- **texture builtin texture_type (17 -> 0).** Three overload-validation gaps: textureGather
+  component arg on a depth texture (lowerer); textureSample/Level offset on a cube texture
+  (validator, Cube only — D1 left allowed for the shared GLSL 1D-offset path); textureSampleGrad
+  on a depth texture (validator Gradient arm, mirroring Bias). naga `f887a4097`.
+
+Verified Metal: parse,diagnostic 800/0; smoothstep 1238/0; early_evaluation 18/0;
+textureSample/Level/Gather/Bias/Grad/Compare/GatherCompare all 0 fail. No regression
+(uniformity 47578/0, functions/restrictions 9915/0, override execution/decl, statement groups).
+
+### Documented residual UNDER-validations (intentionally NOT fixed)
+
+Two `shader,validation` sub-areas remain where naga is permissive (accepts shaders Dawn
+rejects). Both were deliberately left after weighing "rejecting valid code / polluting the
+naga fork is worse than under-validation":
+
+- **Infinite-loop termination (`statement,loop:parse` 4 + `statement,for:parse` 1 = 5).**
+  WGSL requires a `loop`/`for` to be able to exit (reachable `break`/`return`/`break if`);
+  naga accepts break-less infinite loops (`loop {}`, `loop { continue; }`,
+  `loop { discard; }`, `loop { continuing {} }`, `for(;;){}`). A correct WGSL-front-end-only
+  check was prototyped, but naga's **own** snapshot corpus deliberately uses break-less
+  infinite loops as backend codegen fixtures (`tests/in/wgsl/control-flow.wgsl`
+  `loop_switch_continue`, `lexical-scopes.wgsl` `loopLexicalScope`), so landing it would
+  require modifying multiple upstream naga test fixtures + regenerating many backend
+  snapshots (fork divergence) and would alter the intent of deliberate codegen tests.
+  **Decision (user, 2026-06-23): revert and document as known under-validation.** naga is a
+  permissive IR-focused compiler that allows infinite loops by design.
+- **Short-circuit `&&`/`||` operand under-validation (~71).** Accepting `bool && vecN<T>` and
+  similar; fixing it risked rejecting valid short-circuit code (`false && sqrt(-1)`), so an
+  earlier slice reverted the attempt. Left as safe under-validation.
