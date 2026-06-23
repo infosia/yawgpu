@@ -107,3 +107,60 @@ iterations clean. Record the numbers in the eventual commit message.
   webgpu-native-cts, already authoritative; do not touch `expectations/`.
 - `CTS_DEVICE_RECYCLE_INTERVAL` tuning — wrong layer, confirmed dead end.
 - D3D / GLES paths.
+
+---
+
+## ROUND 2 — the entry fix is REAL but INSUFFICIENT (verified on Windows native Vulkan, 2026-06-23)
+
+The `ash::Entry` process-wide share (commit `b71e59c`) landed and its HAL churn unit
+test passes, BUT it does **not** close F-135 at the CTS level. End-to-end re-verify
+(rebuilt `yawgpu.dll` deployed next to `cts.exe`):
+
+- `api,validation,capability_checks,limits,maxStorageBuffersPerShaderStage:*`
+  single-process, `CTS_DEVICE_RECYCLE_INTERVAL=0`, `--workers 1`: **still fail=318**,
+  all `requestDevice failed: HAL device creation failed: vulkan` (unchanged from
+  pre-fix). `--isolate` = fail=0.
+
+There is a **second, distinct leak**. Bisected by subtest:
+- `createBindGroupLayout` (device+limits, no pipeline) → **fail=0** (clean)
+- `createPipelineLayout` → **fail=0** (clean)
+- `createPipeline` → **fail=48** (`HAL device creation failed`, onset ~case #120)
+
+So the remaining leak is **specific to the createPipeline path**, and it is a
+**device-accumulation** leak (the error is *device* creation failing after ~120
+pipeline-creating cases — a leaked pipeline/handle keeps its `Arc<core::Device>` alive,
+so VkDevices accrue until creation fails).
+
+Layer bisect (what it is NOT):
+- **HAL is clean.** A HAL-level churn (`VulkanInstance::new → adapter → create_device →
+  create_compute_pipeline → drop all`) ×200 PASSES. So `yawgpu-hal` device/pipeline Drop
+  is correct — the leak is **above** the HAL, in `yawgpu/src/ffi` + `yawgpu-core`.
+- **Not the pipeline caches.** `WGPUDeviceImpl::{compute,render}_pipeline_cache` hold
+  `Weak<…>` (ffi/mod.rs:173-176) — they do not retain pipelines.
+- **Not CTS cleanup.** CTS tracks + releases pipelines in `GpuTest::finalize()`
+  (`webgpu-native-cts/src/common/harness.cpp:450`); device+BGL churn proves CTS device
+  release works.
+- **Not core retention.** `core::Device::create_compute_pipeline` returns the pipeline;
+  it does not stash a strong ref (`yawgpu-core/src/device.rs:526`).
+
+Leading hypothesis (UNCONFIRMED) — the **async** path. The failing subcases skew
+`async=true` (3 of 4 fail-groups). `wgpuDeviceCreateComputePipelineAsync` registers a
+`PendingCallback` on `WGPUInstanceImpl.pending_callbacks`; if a validation test never
+pumps `wgpuInstanceProcessEvents`, those callbacks pile up. If a pending callback retains
+the device (or forms an instance↔callback cycle), the device never drops → VkDevice leak.
+Verify: (a) does the async create path hold the device/pipeline in the pending callback,
+and is it dropped if the future is abandoned at instance teardown? (b) instrument a
+strong-count / live-object leak counter on Noop across a create-async-pipeline →
+release-pipeline → release-device sequence WITHOUT processEvents.
+
+Next steps for whoever continues:
+1. Add an **FFI-on-Vulkan** (not Noop) churn repro or a Noop refcount-leak assertion for
+   the create-compute-pipeline (sync AND async) → release-pipeline → release-device
+   sequence. This is the missing regression guard (the Noop `noop_chain()` tests can't
+   exhaust a real VkDevice, and the HAL test is below the leak).
+2. Find the leaked strong `Arc<core::Device>` (or `Arc<WGPUDeviceImpl>`) on the
+   createPipeline FFI/core path; fix so `wgpuComputePipelineRelease` + `wgpuDeviceRelease`
+   drop the device to 0. Re-verify the CTS repro goes 318 → 0.
+
+Upstream tracking updated: webgpu-native-cts `docs/FINDINGS.md` F-135 +
+`specs/investigate-yawgpu-device-create-leak.md` (entry fix recorded as partial).
