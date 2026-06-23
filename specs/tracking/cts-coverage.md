@@ -2100,3 +2100,22 @@ naga fork is worse than under-validation":
 - **Short-circuit `&&`/`||` operand under-validation (~71).** Accepting `bool && vecN<T>` and
   similar; fixing it risked rejecting valid short-circuit code (`false && sqrt(-1)`), so an
   earlier slice reverted the attempt. Left as safe under-validation.
+
+## F-134 — naga `select` const-eval CRASH on nested-Compose bool-vector condition — RESOLVED
+
+- **Finding:** `shader,execution,expression,constructor,non_zero:concrete_vector_mix` HARD-CRASHED
+  (SIGABRT) on Metal — 16 cases, all `type="bool"`; Dawn clean; shared with wgpu-native
+  (upstream-naga, not a yawgpu-fork defect). Panic: `constant_evaluator.rs unreachable!()` in
+  `fn select`.
+- **Root cause:** the CTS bool-to-u32 storage conversion (`toStorage`) wraps a `vecN<bool>`
+  result as `select(vecN<u32>(0u), vecN<u32>(1u), <bool-vec>)`. For a MIXED constructor
+  (`vec3<bool>(vec2<bool>(false,true), false)`, signature `2s`) naga's const-fold left the
+  condition `Compose` with a NESTED `Compose` lane (the inner `vec2<bool>`) rather than flat
+  per-lane literals. `fn select` assumed every lane was a flat `Literal`/`ZeroValue` and hit
+  `unreachable!()` (SIGABRT — library panic, violates no-panic principle).
+- **Fix (naga fork `a98f6d3fc`, yawgpu rev bump <this commit>):** flatten the condition and
+  reject/accept component lists through `proc::flatten_compose` before zipping lane-by-lane,
+  and replace the `unreachable!()`s with graceful `ConstantEvaluatorError`s.
+- **Verification (Metal):** `non_zero` constructor group 2144/0/0 (was 16 crash);
+  `concrete_vector_mix` folds to correct lane values. No regression: select exec 147/0,
+  select validation 843/0, zero_value constructor 111/0, naga gate EXIT 0.
