@@ -65,6 +65,76 @@ fn fs() -> @location(0) vec4<f32> {
     }
 }
 
+/// CTS finding F-129(1): a fragment pipeline that performs a *non-uniform*
+/// `discard` followed by a derivative (`fwidth`) must not produce a device
+/// error on native Vulkan. Before the fix, naga lowered `discard` to SPIR-V
+/// `OpKill`, which terminates the invocation; computing a derivative afterwards
+/// is ill-defined and the NVIDIA driver turned the pipeline into an error
+/// object (`queue submit cannot use an error command buffer`). With `discard`
+/// lowering to `OpDemoteToHelperInvocation` (and the device enabling
+/// `shaderDemoteToHelperInvocation`), the invocation stays alive and the
+/// derivative is well-defined. This test reproduces the pre-fix failure and
+/// passes after the fix; it is `#[ignore]` so the Noop CI gate is unaffected.
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "vulkan")]
+fn vulkan_non_uniform_discard_then_fwidth_no_device_error() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+
+        // Mirror the CTS `fwidth` structure (derivatives.cpp): a position-derived
+        // non-uniform `inv_idx`, a conditional `discard` on it, then a derivative.
+        // `inv_idx` differs per pixel, so the `discard` is non-uniform across a
+        // quad; `fwidth` is well-defined only if the discarded invocation stays
+        // alive (demote-to-helper). The color-attachment signature keeps the test
+        // compatible with the shared `run_render_submit` harness.
+        let shader = r#"
+struct VertexOut {
+    @builtin(position) position: vec4<f32>,
+}
+
+@vertex
+fn vs(@location(0) position: vec2<f32>) -> VertexOut {
+    var out: VertexOut;
+    out.position = vec4<f32>(position, 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let inv_idx = u32(position.x) % 2u;
+    let input = f32(inv_idx) + position.y;
+    if inv_idx == 0u {
+        discard;
+    }
+    let v = fwidth(input);
+    return vec4<f32>(v, 0.0, 0.0, 1.0);
+}
+"#;
+        let readback = run_render_submit(device, shader, None);
+        let _pixels = read_unpacked_texture_buffer(instance, readback);
+
+        // The key assertion: no uncaptured device error (pre-fix this fired with
+        // an error command buffer); the pipeline must not be an error object.
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "non-uniform discard + fwidth must not produce a device error"
+        );
+
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
 #[test]
 #[ignore = "manual real-backend test"]
 #[cfg(feature = "vulkan")]
