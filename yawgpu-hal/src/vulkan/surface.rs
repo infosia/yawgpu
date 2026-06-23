@@ -21,7 +21,7 @@ impl Drop for VulkanSurfaceInner {
             return;
         }
         let loader =
-            ash::khr::surface::Instance::new(&self.instance._entry, &self.instance.instance);
+            ash::khr::surface::Instance::new(self.instance._entry, &self.instance.instance);
         unsafe {
             loader.destroy_surface(self.surface, None);
         }
@@ -550,7 +550,7 @@ pub(super) fn create_swapchain(
 ) -> Result<Arc<VulkanSwapchainInner>, HalError> {
     let (format, bytes_per_pixel) = map_texture_format(config.format)?;
     let surface_loader =
-        ash::khr::surface::Instance::new(&device._instance._entry, &device._instance.instance);
+        ash::khr::surface::Instance::new(device._instance._entry, &device._instance.instance);
     let capabilities = unsafe {
         surface_loader
             .get_physical_device_surface_capabilities(device.physical_device, surface.surface)

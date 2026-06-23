@@ -5,7 +5,7 @@ use std::fmt;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ash::vk;
 
@@ -38,6 +38,33 @@ const IMAGE_LAYOUT_TRANSFER_SRC: u8 = 2;
 const IMAGE_LAYOUT_COLOR_ATTACHMENT: u8 = 3;
 const IMAGE_LAYOUT_PRESENT: u8 = 4;
 
+static VULKAN_ENTRY: OnceLock<ash::Entry> = OnceLock::new();
+static VULKAN_ENTRY_INIT: Mutex<()> = Mutex::new(());
+
+fn shared_entry() -> Result<&'static ash::Entry, HalError> {
+    if let Some(entry) = VULKAN_ENTRY.get() {
+        return Ok(entry);
+    }
+
+    let _guard = VULKAN_ENTRY_INIT
+        .lock()
+        .map_err(|_| HalError::BackendUnavailable { backend: BACKEND })?;
+    if let Some(entry) = VULKAN_ENTRY.get() {
+        return Ok(entry);
+    }
+
+    let entry = unsafe { ash::Entry::load() }
+        .map_err(|_| HalError::BackendUnavailable { backend: BACKEND })?;
+    if VULKAN_ENTRY.set(entry).is_err() {
+        return VULKAN_ENTRY
+            .get()
+            .ok_or(HalError::BackendUnavailable { backend: BACKEND });
+    }
+    VULKAN_ENTRY
+        .get()
+        .ok_or(HalError::BackendUnavailable { backend: BACKEND })
+}
+
 /// Stores vulkan instance data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct VulkanInstance {
@@ -47,8 +74,7 @@ pub struct VulkanInstance {
 impl VulkanInstance {
     /// Creates a new instance.
     pub fn new() -> Result<Self, HalError> {
-        let entry = unsafe { ash::Entry::load() }
-            .map_err(|_| HalError::BackendUnavailable { backend: BACKEND })?;
+        let entry = shared_entry()?;
         let available_extensions =
             unsafe { entry.enumerate_instance_extension_properties(None) }
                 .map_err(|_| HalError::BackendUnavailable { backend: BACKEND })?;
@@ -107,7 +133,7 @@ impl VulkanInstance {
             });
         }
         let loader =
-            ash::ext::metal_surface::Instance::new(&self.inner._entry, &self.inner.instance);
+            ash::ext::metal_surface::Instance::new(self.inner._entry, &self.inner.instance);
         let create_info = vk::MetalSurfaceCreateInfoEXT::default().layer(layer);
         let surface = unsafe { loader.create_metal_surface(&create_info, None) }.map_err(|_| {
             HalError::SwapchainCreationFailed {
@@ -147,7 +173,7 @@ impl VulkanInstance {
             });
         }
         let loader =
-            ash::khr::win32_surface::Instance::new(&self.inner._entry, &self.inner.instance);
+            ash::khr::win32_surface::Instance::new(self.inner._entry, &self.inner.instance);
         let create_info = vk::Win32SurfaceCreateInfoKHR::default()
             .hinstance(hinstance as _)
             .hwnd(hwnd as _);
@@ -214,7 +240,7 @@ fn is_supported_api_version(api_version: u32) -> bool {
 }
 
 struct VulkanInstanceInner {
-    _entry: ash::Entry,
+    _entry: &'static ash::Entry,
     instance: ash::Instance,
 }
 
@@ -872,6 +898,45 @@ mod tests {
             .expect("at least one Vulkan adapter");
         let device = adapter.create_device().expect("create Vulkan device");
         assert_eq!(device.allocation_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_instance_new_uses_shared_entry() {
+        let first = VulkanInstance::new().expect("create first Vulkan instance");
+        let second = VulkanInstance::new().expect("create second Vulkan instance");
+
+        assert!(std::ptr::eq(first.inner._entry, second.inner._entry));
+        assert!(std::ptr::eq(
+            shared_entry().expect("shared Vulkan entry"),
+            first.inner._entry
+        ));
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_instance_device_creation_churn_survives_shared_entry() {
+        const ITERATIONS: usize = 160;
+
+        for iteration in 0..ITERATIONS {
+            let instance = VulkanInstance::new().unwrap_or_else(|error| {
+                panic!("create Vulkan instance at iteration {iteration}: {error:?}")
+            });
+            let adapter = instance
+                .enumerate_adapters()
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| panic!("at least one Vulkan adapter at iteration {iteration}"));
+            let device = adapter.create_device().unwrap_or_else(|error| {
+                panic!("create Vulkan device at iteration {iteration}: {error:?}")
+            });
+
+            drop(device);
+            drop(adapter);
+            drop(instance);
+        }
     }
 
     /// `robust_buffer_access` feature-enable logic: when the physical device
