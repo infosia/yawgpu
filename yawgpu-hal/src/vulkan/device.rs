@@ -17,6 +17,12 @@ pub(super) struct VulkanDeviceInner {
     /// hardware, so the SPIR-V `buffer` bounds policy can be `Unchecked` rather
     /// than the software `Restrict` clamp (CTS finding F-112).
     pub(super) robust_buffer_access2: bool,
+    /// Whether `VK_EXT_shader_demote_to_helper_invocation` /
+    /// `shaderDemoteToHelperInvocation` was enabled at device creation. When
+    /// true, SPIR-V `OpDemoteToHelperInvocation` (which naga emits for WGSL
+    /// `discard`) is legal to execute, so derivatives (`fwidth`/`dpdx`/`dpdy`)
+    /// after a non-uniform `discard` are well-defined (CTS finding F-129).
+    pub(super) shader_demote_to_helper_invocation: bool,
     /// Whether `VK_KHR_shader_float16_int8` / `shaderFloat16` was enabled.
     pub(super) shader_float16: bool,
     /// Whether `VK_KHR_16bit_storage` / `storageBuffer16BitAccess` was enabled.
@@ -42,6 +48,10 @@ impl fmt::Debug for VulkanDeviceInner {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VulkanDeviceInner")
+            .field(
+                "shader_demote_to_helper_invocation",
+                &self.shader_demote_to_helper_invocation,
+            )
             .field("shader_float16", &self.shader_float16)
             .field(
                 "storage_buffer16_bit_access",

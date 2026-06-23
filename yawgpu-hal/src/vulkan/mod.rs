@@ -421,6 +421,29 @@ impl VulkanAdapter {
             false
         };
         let robust_buffer_access2 = robustness2_extension && robustness2_feature_supported;
+        // CTS finding F-129(1): naga lowers WGSL `discard` to SPIR-V
+        // `OpDemoteToHelperInvocation` so that derivatives (`fwidth`/`dpdx`/`dpdy`)
+        // after a non-uniform `discard` stay well-defined. Executing that opcode
+        // requires `shaderDemoteToHelperInvocation`. Enable it whenever the device
+        // supports it; if absent, degrade gracefully (device creation still
+        // succeeds — shaders without `discard` are unaffected, and a `discard`
+        // shader would fail pipeline validation rather than crash here).
+        let shader_demote_extension =
+            self.has_device_extension(vk::EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_NAME);
+        let shader_demote_to_helper_invocation = if shader_demote_extension {
+            let mut demote_features =
+                vk::PhysicalDeviceShaderDemoteToHelperInvocationFeatures::default();
+            let mut features2 =
+                vk::PhysicalDeviceFeatures2::default().push_next(&mut demote_features);
+            unsafe {
+                self.instance
+                    .instance
+                    .get_physical_device_features2(self.physical_device, &mut features2);
+            }
+            demote_features.shader_demote_to_helper_invocation == vk::TRUE
+        } else {
+            false
+        };
         let shader_float16_int8_extension =
             self.has_device_extension(vk::KHR_SHADER_FLOAT16_INT8_NAME);
         let storage_16bit_extension = self.has_device_extension(vk::KHR_16BIT_STORAGE_NAME);
@@ -490,6 +513,9 @@ impl VulkanAdapter {
         if robust_buffer_access2 {
             extension_names.push(vk::EXT_ROBUSTNESS2_NAME.as_ptr());
         }
+        if shader_demote_to_helper_invocation {
+            extension_names.push(vk::EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_NAME.as_ptr());
+        }
         if shader_float16 {
             extension_names.push(vk::KHR_SHADER_FLOAT16_INT8_NAME.as_ptr());
         }
@@ -500,6 +526,9 @@ impl VulkanAdapter {
             vk::PhysicalDeviceDepthClipEnableFeaturesEXT::default().depth_clip_enable(true);
         let mut robustness2_features =
             vk::PhysicalDeviceRobustness2FeaturesEXT::default().robust_buffer_access2(true);
+        let mut shader_demote_features =
+            vk::PhysicalDeviceShaderDemoteToHelperInvocationFeatures::default()
+                .shader_demote_to_helper_invocation(true);
         let mut shader_float16_int8_enable_features =
             vk::PhysicalDeviceShaderFloat16Int8Features::default().shader_float16(true);
         let mut storage_16bit_enable_features = storage_16bit_features.to_vk();
@@ -512,6 +541,9 @@ impl VulkanAdapter {
         }
         if robust_buffer_access2 {
             create_info = create_info.push_next(&mut robustness2_features);
+        }
+        if shader_demote_to_helper_invocation {
+            create_info = create_info.push_next(&mut shader_demote_features);
         }
         if shader_float16 {
             create_info = create_info.push_next(&mut shader_float16_int8_enable_features);
@@ -548,6 +580,7 @@ impl VulkanAdapter {
             depth_clip_control,
             sampler_anisotropy,
             robust_buffer_access2,
+            shader_demote_to_helper_invocation,
             shader_float16,
             storage_buffer16_bit_access: storage_16bit_features.storage_buffer16_bit_access,
             uniform_and_storage_buffer16_bit_access: storage_16bit_features

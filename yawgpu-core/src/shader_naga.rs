@@ -3177,6 +3177,131 @@ fn cs(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
     }
 
+    /// CTS finding F-129(1): a non-uniform `discard` followed by a derivative
+    /// (`fwidth`) must VALIDATE. `discard` is demote-to-helper semantics — the
+    /// invocation stays alive and continues — so it must not poison the
+    /// post-merge control flow's uniformity for a later derivative. Before the
+    /// naga uniformity-validator fix, this was wrongly rejected with
+    /// "Required uniformity of control flow for DERIVATIVE not fulfilled".
+    /// Mirrors the CTS shader structure (a position-derived non-uniform
+    /// `inv_idx`, conditional `discard`, then a derivative). Noop-runnable.
+    #[test]
+    fn non_uniform_discard_then_fwidth_validates() {
+        let result = parse_and_validate_wgsl(
+            r"
+@group(0) @binding(0) var<storage, read_write> inputs: array<f32>;
+@group(0) @binding(1) var<storage, read_write> outputs: array<f32>;
+@fragment
+fn fs(@builtin(position) position: vec4<f32>) {
+    let inv_idx = u32(position.x) % 2u;
+    let input = inputs[inv_idx];
+    if inv_idx == 0u { discard; }
+    let v = fwidth(input);
+    outputs[inv_idx] = v;
+}
+",
+        );
+        assert!(
+            result.is_ok(),
+            "non-uniform discard then fwidth must validate (F-129(1)); got error: {:?}",
+            result.err()
+        );
+    }
+
+    /// F-129(1) over-accept guard: relaxing `discard` uniformity must NOT relax
+    /// the genuine rule that a derivative taken *inside* non-uniform control
+    /// flow is illegal. A `fwidth` directly within a non-uniform `if` branch
+    /// must STILL fail validation, confirming the uniformity-validator fix is
+    /// surgical (it only stops `discard` from escaping the function; it does
+    /// not weaken derivative-in-non-uniform-branch detection). Noop-runnable.
+    #[test]
+    fn derivative_inside_non_uniform_branch_still_fails() {
+        let result = parse_and_validate_wgsl(
+            r"
+@group(0) @binding(0) var<storage, read_write> inputs: array<f32>;
+@group(0) @binding(1) var<storage, read_write> outputs: array<f32>;
+@fragment
+fn fs(@builtin(position) position: vec4<f32>) {
+    let inv_idx = u32(position.x) % 2u;
+    let input = inputs[inv_idx];
+    if inv_idx == 0u { let v = fwidth(input); outputs[inv_idx] = v; }
+}
+",
+        );
+        assert!(
+            result.is_err(),
+            "a derivative genuinely inside a non-uniform branch must still fail validation (no over-accept)"
+        );
+    }
+
+    /// CTS finding F-129(1): WGSL `discard` must lower to SPIR-V
+    /// `OpDemoteToHelperInvocation` (opcode 5380), not `OpKill` (opcode 252).
+    /// `OpKill` terminates the invocation, which makes derivatives (`fwidth`/
+    /// `dpdx`/`dpdy`) after a non-uniform `discard` ill-defined on Vulkan;
+    /// demote-to-helper keeps the invocation alive (WGSL `discard` semantics).
+    /// This is a Noop-runnable durable regression guard for the naga-fork change.
+    #[test]
+    fn fragment_discard_lowers_to_demote_to_helper_not_kill() {
+        let module = parse_and_validate_wgsl(
+            r"
+@fragment
+fn fs(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+    if uv.x < 0.5 {
+        discard;
+    }
+    return vec4<f32>(uv, 0.0, 1.0);
+}
+",
+        )
+        .expect("fragment shader with discard should validate");
+
+        let spirv = module
+            .generate_spirv(
+                "fs",
+                ShaderStage::Fragment,
+                &naga::back::PipelineConstants::default(),
+                false,
+            )
+            .expect("SPIR-V generation for a `discard` fragment shader should succeed");
+
+        // SPIR-V opcodes of interest (Khronos unified registry numbers):
+        const OP_KILL: u32 = 252;
+        const OP_DEMOTE_TO_HELPER_INVOCATION: u32 = 5380;
+
+        // A SPIR-V module is a header (5 words) followed by instructions. Each
+        // instruction's first word packs `word_count` in the high 16 bits and
+        // the opcode in the low 16 bits, so `opcode = first_word & 0xFFFF` and
+        // `word_count = first_word >> 16` lets us step over operands.
+        const SPIRV_HEADER_WORDS: usize = 5;
+        let mut found_demote = false;
+        let mut found_kill = false;
+        let mut index = SPIRV_HEADER_WORDS;
+        while index < spirv.len() {
+            let first_word = spirv[index];
+            let opcode = first_word & 0xFFFF;
+            let word_count = (first_word >> 16) as usize;
+            assert!(
+                word_count >= 1,
+                "malformed SPIR-V: zero word_count at index {index}"
+            );
+            match opcode {
+                OP_DEMOTE_TO_HELPER_INVOCATION => found_demote = true,
+                OP_KILL => found_kill = true,
+                _ => {}
+            }
+            index += word_count;
+        }
+
+        assert!(
+            found_demote,
+            "`discard` must emit OpDemoteToHelperInvocation (opcode {OP_DEMOTE_TO_HELPER_INVOCATION})"
+        );
+        assert!(
+            !found_kill,
+            "`discard` must NOT emit OpKill (opcode {OP_KILL}) — it terminates the invocation"
+        );
+    }
+
     #[cfg(feature = "gles")]
     #[test]
     fn generate_glsl_emits_vertex_main() {
