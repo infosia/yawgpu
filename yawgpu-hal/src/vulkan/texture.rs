@@ -91,9 +91,6 @@ pub(super) struct VulkanTextureInner {
 
 impl Drop for VulkanTextureInner {
     fn drop(&mut self) {
-        if self.device.is_destroyed() {
-            return;
-        }
         unsafe {
             self.device.device.destroy_image_view(self.view, None);
             if self.owns_image {
@@ -121,9 +118,6 @@ pub(super) struct VulkanSamplerInner {
 
 impl Drop for VulkanSamplerInner {
     fn drop(&mut self) {
-        if self.device.is_destroyed() {
-            return;
-        }
         unsafe {
             self.device.device.destroy_sampler(self.sampler, None);
         }

@@ -450,20 +450,6 @@ pub enum HalDevice {
 }
 
 impl HalDevice {
-    /// Destroys backend device resources eagerly.
-    pub fn destroy(&self) {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(_) => {}
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(device) => device.destroy(),
-            #[cfg(feature = "metal")]
-            Self::Metal(_) => {}
-            #[cfg(feature = "gles")]
-            Self::Gles(_) => {}
-        }
-    }
-
     /// Returns the backend.
     #[must_use]
     pub fn backend(&self) -> HalBackend {
@@ -1331,17 +1317,6 @@ mod tests {
         let device = adapters[0].create_device()?;
         assert_eq!(device.allocation_count(), 0);
 
-        Ok(())
-    }
-
-    #[test]
-    fn hal_device_destroy_is_idempotent_for_noop() -> Result<(), HalError> {
-        let device = noop_device()?;
-
-        device.destroy();
-        device.destroy();
-
-        assert_eq!(device.allocation_count(), 0);
         Ok(())
     }
 

@@ -16,13 +16,6 @@ impl VulkanBuffer {
 
     /// Records a write command.
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), HalError> {
-        if self
-            .inner
-            .as_ref()
-            .is_some_and(|inner| inner.device.is_destroyed())
-        {
-            return Err(buffer_error("device is destroyed"));
-        }
         let len = u64::try_from(data.len()).map_err(|_| buffer_error("write size is too large"))?;
         self.validate_range(offset, len)?;
         if data.is_empty() {
@@ -41,13 +34,6 @@ impl VulkanBuffer {
 
     /// Reads `len` bytes at `offset` back from the buffer into host memory.
     pub fn read(&self, offset: u64, len: u64) -> Result<Vec<u8>, HalError> {
-        if self
-            .inner
-            .as_ref()
-            .is_some_and(|inner| inner.device.is_destroyed())
-        {
-            return Err(buffer_error("device is destroyed"));
-        }
         let len = usize::try_from(len).map_err(|_| buffer_error("read length is too large"))?;
         self.validate_range(
             offset,
@@ -73,7 +59,6 @@ impl VulkanBuffer {
     pub fn mapped_ptr(&self) -> Option<NonNull<u8>> {
         self.inner
             .as_ref()
-            .filter(|inner| !inner.device.is_destroyed())
             .and_then(|inner| NonNull::new(inner.mapped))
     }
 
@@ -110,9 +95,6 @@ unsafe impl Sync for VulkanBufferInner {}
 
 impl Drop for VulkanBufferInner {
     fn drop(&mut self) {
-        if self.device.is_destroyed() {
-            return;
-        }
         unsafe {
             if !self.mapped.is_null() {
                 self.device.device.unmap_memory(self.memory);

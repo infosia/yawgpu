@@ -217,12 +217,6 @@ impl VulkanSurface {
         device: &VulkanDevice,
         config: HalSurfaceConfiguration,
     ) -> Result<(), HalError> {
-        if device.inner.is_destroyed() {
-            return Err(HalError::SwapchainCreationFailed {
-                backend: BACKEND,
-                message: "device is destroyed",
-            });
-        }
         if self.surface == vk::SurfaceKHR::null() {
             return Err(HalError::SwapchainCreationFailed {
                 backend: BACKEND,
@@ -266,12 +260,6 @@ impl VulkanSurface {
             backend: BACKEND,
             message: "surface is not configured",
         })?;
-        if swapchain.device.is_destroyed() {
-            return Err(HalError::AcquireFailed {
-                backend: BACKEND,
-                message: "device is destroyed",
-            });
-        }
         let device = &swapchain.device.device;
         let sync_index = self.next_sync_index;
         let acquired_sem =
@@ -362,12 +350,6 @@ impl VulkanSurface {
             backend: BACKEND,
             message: "surface is not configured",
         })?;
-        if swapchain.device.is_destroyed() || queue.inner.device.is_destroyed() {
-            return Err(HalError::PresentFailed {
-                backend: BACKEND,
-                message: "device is destroyed",
-            });
-        }
         let texture = swapchain
             .images
             .get(usize::try_from(image_index).unwrap_or(usize::MAX))
@@ -491,13 +473,6 @@ impl VulkanSurface {
             self.in_flight_fences.clear();
             return;
         };
-        if swapchain.device.is_destroyed() {
-            self.image_acquired_semaphores.clear();
-            self.render_finished_semaphores.clear();
-            self.present_ready_semaphores.clear();
-            self.in_flight_fences.clear();
-            return;
-        }
         unsafe {
             for semaphore in self.image_acquired_semaphores.drain(..) {
                 swapchain.device.device.destroy_semaphore(semaphore, None);
@@ -516,9 +491,6 @@ impl VulkanSurface {
 
     pub(super) fn wait_all_in_flight_frames(&mut self) {
         if let Some(swapchain) = self.swapchain.as_ref() {
-            if swapchain.device.is_destroyed() {
-                return;
-            }
             if let Ok(mut state) = self.pending_state.lock() {
                 let _ = state.retire.wait_all(&swapchain.device.device);
             }
@@ -527,12 +499,6 @@ impl VulkanSurface {
 
     fn destroy_transition_command_pool(&mut self) {
         if let Some(swapchain) = self.swapchain.as_ref() {
-            if swapchain.device.is_destroyed() {
-                if let Ok(mut state) = self.pending_state.lock() {
-                    state.transition_command_pool = None;
-                }
-                return;
-            }
             if let Ok(mut state) = self.pending_state.lock() {
                 if let Some(command_pool) = state.transition_command_pool.take() {
                     unsafe {
@@ -569,9 +535,6 @@ impl fmt::Debug for VulkanSwapchainInner {
 impl Drop for VulkanSwapchainInner {
     fn drop(&mut self) {
         self.images.clear();
-        if self.device.is_destroyed() {
-            return;
-        }
         unsafe {
             self.loader.destroy_swapchain(self.swapchain, None);
         }
