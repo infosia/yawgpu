@@ -72,6 +72,9 @@ impl Device {
 
     /// Waits until all submitted default-queue work has completed.
     pub fn wait_idle(&self) -> Option<DeviceError> {
+        if self.is_lost() {
+            return None;
+        }
         self.inner.queue.wait_idle()
     }
 
@@ -156,7 +159,9 @@ impl Device {
 
     /// Destroys this object and releases backend resources.
     pub fn destroy(&self) -> Option<DeviceLostReason> {
-        self.lose(DeviceLostReason::Destroyed)
+        let reason = self.lose(DeviceLostReason::Destroyed);
+        self.inner.hal.destroy();
+        reason
     }
 
     /// Marks the device as lost for the supplied reason.
@@ -788,9 +793,18 @@ mod tests {
         assert_eq!(device.destroy(), None);
 
         let destroyed = noop_device();
+        let allocation_count = destroyed.allocation_count();
         assert_eq!(destroyed.destroy(), Some(DeviceLostReason::Destroyed));
         assert_eq!(destroyed.destroy(), None);
         assert_eq!(destroyed.lost_reason(), Some(DeviceLostReason::Destroyed));
+        assert_eq!(destroyed.wait_idle(), None);
+        let buffer = destroyed.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+        assert!(buffer.is_error());
+        assert_eq!(destroyed.allocation_count(), allocation_count);
     }
 
     #[test]

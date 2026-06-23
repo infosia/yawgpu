@@ -52,13 +52,18 @@ pub unsafe extern "C" fn wgpuQueueOnSubmittedWorkDone(
     callback_info: native::WGPUQueueWorkDoneCallbackInfo,
 ) -> native::WGPUFuture {
     let queue = borrow_handle(queue, "WGPUQueue");
+    let status = if queue.device.is_lost() {
+        core::QueueWorkDoneStatus::Error
+    } else {
+        core::QueueWorkDoneStatus::Success
+    };
     queue
         .instance
         .register_callback(PendingCallback::QueueWorkDone {
             mode: callback_info.mode,
             callback: callback_info.callback,
             device: Arc::clone(&queue.device),
-            status: core::QueueWorkDoneStatus::Success,
+            status,
             userdata1: callback_info.userdata1 as usize,
             userdata2: callback_info.userdata2 as usize,
         })
@@ -83,6 +88,12 @@ pub unsafe extern "C" fn wgpuQueueSubmit(
             core::ErrorKind::Validation,
             "queue submit commands must not be null when commandCount is non-zero",
         );
+        return;
+    }
+    if queue.device.is_lost() {
+        queue
+            .device
+            .dispatch_error(core::ErrorKind::Validation, "queue submit device is lost");
         return;
     }
     let commands = if command_count == 0 {
@@ -127,6 +138,13 @@ pub unsafe extern "C" fn wgpuQueueWriteBuffer(
 ) {
     let queue = borrow_handle(queue, "WGPUQueue");
     let buffer = borrow_handle(buffer, "WGPUBuffer");
+    if queue.device.is_lost() {
+        queue.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "queue write buffer device is lost",
+        );
+        return;
+    }
     if !buffer.device.same(&queue.device) {
         queue.device.dispatch_error(
             core::ErrorKind::Validation,
@@ -173,6 +191,13 @@ pub unsafe extern "C" fn wgpuQueueWriteTexture(
 ) {
     let queue = borrow_handle(queue, "WGPUQueue");
     let data_size_usize = data_size;
+    if queue.device.is_lost() {
+        queue.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "queue write texture device is lost",
+        );
+        return;
+    }
     if data_size > 0 && data.is_null() {
         queue.device.dispatch_error(
             core::ErrorKind::Validation,

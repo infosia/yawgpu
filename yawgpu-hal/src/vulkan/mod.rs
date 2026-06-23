@@ -1,9 +1,9 @@
 #[cfg(feature = "tiled")]
 use std::collections::BTreeMap;
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering as AtomicOrdering};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -556,6 +556,7 @@ impl VulkanAdapter {
             storage_push_constant16: storage_16bit_features.storage_push_constant16,
             max_sampler_anisotropy,
             allocations: AtomicU64::new(0),
+            destroyed: AtomicBool::new(false),
             #[cfg(feature = "tiled")]
             framebuffer_fetch_path: self.framebuffer_fetch_path,
             #[cfg(feature = "tiled")]
