@@ -32,6 +32,7 @@ pub(super) struct VulkanDeviceInner {
     /// per WebGPU semantics (clamp, never error).
     pub(super) max_sampler_anisotropy: f32,
     pub(super) allocations: AtomicU64,
+    pub(super) destroyed: AtomicBool,
     #[cfg(feature = "tiled")]
     pub(super) framebuffer_fetch_path: FramebufferFetchPath,
     #[cfg(feature = "tiled")]
@@ -59,7 +60,17 @@ impl fmt::Debug for VulkanDeviceInner {
 
 impl Drop for VulkanDeviceInner {
     fn drop(&mut self) {
+        self.destroy();
+    }
+}
+
+impl VulkanDeviceInner {
+    pub(super) fn destroy(&self) {
+        if self.destroyed.swap(true, Ordering::AcqRel) {
+            return;
+        }
         unsafe {
+            let _ = self.device.device_wait_idle();
             #[cfg(feature = "tiled")]
             if let Ok(cache) = self.subpass_render_pass_cache.lock() {
                 for &render_pass in cache.values() {
@@ -68,6 +79,10 @@ impl Drop for VulkanDeviceInner {
             }
             self.device.destroy_device(None);
         }
+    }
+
+    pub(super) fn is_destroyed(&self) -> bool {
+        self.destroyed.load(Ordering::Acquire)
     }
 }
 
@@ -79,6 +94,18 @@ pub struct VulkanDevice {
 }
 
 impl VulkanDevice {
+    /// Destroys the Vulkan logical device and makes later drops no-ops.
+    pub(crate) fn destroy(&self) {
+        if self.inner.is_destroyed() {
+            return;
+        }
+        let _ = self.queue.wait_idle();
+        if let Ok(mut retire) = self.queue.inner.retire.lock() {
+            let _ = retire.wait_all(&self.inner.device);
+        }
+        self.inner.destroy();
+    }
+
     /// Returns the allocation count.
     #[must_use]
     pub fn allocation_count(&self) -> u64 {
@@ -122,6 +149,9 @@ impl VulkanDevice {
         size: u64,
         usage: HalBufferUsage,
     ) -> Result<VulkanBuffer, HalError> {
+        if self.inner.is_destroyed() {
+            return Err(HalError::DeviceCreationFailed { backend: BACKEND });
+        }
         self.inner.allocations.fetch_add(1, Ordering::Relaxed);
         let inner = create_buffer(Arc::clone(&self.inner), size, usage)?;
         Ok(VulkanBuffer {
@@ -135,6 +165,9 @@ impl VulkanDevice {
         &self,
         descriptor: &HalTextureDescriptor,
     ) -> Result<VulkanTexture, HalError> {
+        if self.inner.is_destroyed() {
+            return Err(HalError::DeviceCreationFailed { backend: BACKEND });
+        }
         self.inner.allocations.fetch_add(1, Ordering::Relaxed);
         let (inner, bytes_per_pixel) = create_texture(Arc::clone(&self.inner), descriptor)?;
         Ok(VulkanTexture {
@@ -157,6 +190,9 @@ impl VulkanDevice {
         kind: HalQueryKind,
         count: u32,
     ) -> Result<VulkanQuerySet, HalError> {
+        if self.inner.is_destroyed() {
+            return Err(HalError::DeviceCreationFailed { backend: BACKEND });
+        }
         match kind {
             HalQueryKind::Occlusion => {
                 self.inner.allocations.fetch_add(1, Ordering::Relaxed);
@@ -171,6 +207,9 @@ impl VulkanDevice {
         &self,
         descriptor: &HalTransientAttachmentDescriptor,
     ) -> Result<VulkanTransientAttachment, HalError> {
+        if self.inner.is_destroyed() {
+            return Err(HalError::DeviceCreationFailed { backend: BACKEND });
+        }
         self.inner.allocations.fetch_add(1, Ordering::Relaxed);
         create_transient_attachment(Arc::clone(&self.inner), descriptor)
     }
@@ -178,6 +217,9 @@ impl VulkanDevice {
     /// Creates a sampler matching the given descriptor.
     #[must_use]
     pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> VulkanSampler {
+        if self.inner.is_destroyed() {
+            return VulkanSampler { _inner: None };
+        }
         self.inner.allocations.fetch_add(1, Ordering::Relaxed);
         VulkanSampler {
             _inner: create_sampler(Arc::clone(&self.inner), descriptor)
@@ -194,6 +236,9 @@ impl VulkanDevice {
         _workgroup_size: (u32, u32, u32),
         bindings: &[HalDescriptorBinding],
     ) -> Result<VulkanComputePipeline, HalError> {
+        if self.inner.is_destroyed() {
+            return Err(HalError::DeviceCreationFailed { backend: BACKEND });
+        }
         create_compute_pipeline(Arc::clone(&self.inner), shader, entry_point, bindings)
     }
 
@@ -206,6 +251,9 @@ impl VulkanDevice {
         descriptor: &HalRenderPipelineDescriptor,
         bindings: &[HalDescriptorBinding],
     ) -> Result<VulkanRenderPipeline, HalError> {
+        if self.inner.is_destroyed() {
+            return Err(HalError::DeviceCreationFailed { backend: BACKEND });
+        }
         create_render_pipeline(
             Arc::clone(&self.inner),
             shader,
@@ -229,6 +277,9 @@ impl VulkanDevice {
         pass_layout: &HalSubpassPassLayout,
         subpass_index: u32,
     ) -> Result<VulkanRenderPipeline, HalError> {
+        if self.inner.is_destroyed() {
+            return Err(HalError::DeviceCreationFailed { backend: BACKEND });
+        }
         create_subpass_render_pipeline(
             Arc::clone(&self.inner),
             shader,

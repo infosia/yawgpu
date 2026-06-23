@@ -81,6 +81,9 @@ unsafe impl Sync for VulkanQuerySetInner {}
 
 impl Drop for VulkanQuerySetInner {
     fn drop(&mut self) {
+        if self.device.is_destroyed() {
+            return;
+        }
         unsafe {
             self.device.device.destroy_query_pool(self.pool, None);
         }

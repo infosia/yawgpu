@@ -21,6 +21,9 @@ pub(super) struct VulkanComputePipelineInner {
 
 impl Drop for VulkanComputePipelineInner {
     fn drop(&mut self) {
+        if self.device.is_destroyed() {
+            return;
+        }
         unsafe {
             self.device.device.destroy_pipeline(self.pipeline, None);
             self.device
@@ -60,6 +63,9 @@ pub(super) struct VulkanRenderPipelineInner {
 
 impl Drop for VulkanRenderPipelineInner {
     fn drop(&mut self) {
+        if self.device.is_destroyed() {
+            return;
+        }
         unsafe {
             self.device.device.destroy_pipeline(self.pipeline, None);
             self.device
@@ -2140,7 +2146,7 @@ mod tests {
         assert_eq!(
             sampled_texture_view_format(
                 HalTextureFormat::Rgba8Unorm,
-                HalTextureFormat::Rgba8Unorm
+                HalTextureFormat::Rgba8Unorm,
             ),
             HalTextureFormat::Rgba8Unorm
         );
