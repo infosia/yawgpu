@@ -242,3 +242,56 @@ workgroup array is coherence-neutral and confirmed not the cause). Minimum
 Vulkan version is unchanged (1.1; `VK_EXT_robustness2` is available as an
 extension on 1.1+). yawgpu already enables Vulkan-1.0 `robustBufferAccess`, so
 OOB writes remain bounded regardless. No naga change is required.
+
+## CTS finding F-135 — Vulkan entry loaded per `VulkanInstance` → device-creation churn leak (2026-06-23)
+
+webgpu-native-cts `docs/FINDINGS.md` F-135 (`specs/investigate-yawgpu-device-create-leak.md`)
+localized a yawgpu-specific HAL leak: CTS families that own and churn their **own**
+`instance+adapter+device` every case — `api,validation,capability_checks,limits,*`
+(`LimitTest`, `limit_utils.h:330-432`) and `state,device_lost,destroy`
+(`destroy.spec.cpp`) — fail in a single process after ~150 device creations with
+`requestDevice failed: HAL device creation failed: vulkan` (onset at result ~#151,
+then success/failure intermixed — a creation *ceiling*, not a hard cliff). The
+tight repro `…capability_checks,limits,maxStorageBuffersPerShaderStage:*` (700
+cases) is **fail=318** single-process (`--workers 1`) vs **fail=0** under
+`--isolate` (fresh process per case). Whole-area `api,validation` (39,349) shows
+the leak manifesting nondeterministically as either cascade `requestDevice`
+failures or hard `0xC0000005` access violations in exactly these churning
+families. The CTS harness `device-recycle` cannot help — it rebuilds only the
+*cached* device, which these tests never touch (wrong layer).
+
+**Root cause (yawgpu HAL).** `VulkanInstance::new` (`yawgpu-hal/src/vulkan/mod.rs`)
+calls `ash::Entry::load()` on **every** `WGPUInstance` creation, and the loaded
+entry is owned per-instance (`VulkanInstanceInner._entry`), so the last Arc drop
+runs `vkDestroyInstance` **and** `FreeLibrary("vulkan-1.dll")`. Each `WGPUInstance`
+lifecycle is therefore a full `LoadLibrary`/`FreeLibrary` round-trip of the Vulkan
+loader + NVIDIA ICD. The Windows loader/ICD does not fully reclaim per-load state
+(TLS slots, ICD process state) across repeated load/unload cycles; after ~150
+cycles the process hits the ceiling and `vkCreateInstance`/`vkCreateDevice` starts
+failing (or access-violates). The rest of the HAL teardown is correct — every
+`impl Drop` (`VulkanDeviceInner`, `VulkanInstanceInner`, queue/buffer/texture/…)
+destroys its handle, and there is no global registry or Arc cycle retaining
+devices (`VulkanQueueInner → Arc<VulkanDeviceInner>`, no back-edge). The leak is
+purely the per-instance library churn, not unreleased WebGPU objects (consistent
+with F-126, which found no per-test resource leak on the *cached* device path).
+
+**Decision (mirrors wgpu/Dawn).** Load the Vulkan library **once per process** and
+share it across every `VulkanInstance`; never `FreeLibrary` it. Concretely: a
+process-global `static VULKAN_ENTRY: OnceLock<ash::Entry>` in
+`yawgpu-hal/src/vulkan/mod.rs`; `VulkanInstance::new` obtains the entry via
+`get_or_try_init(|| unsafe { ash::Entry::load() })` (mapping load failure to
+`HalError::BackendUnavailable { backend: "vulkan" }`, as today). `VulkanInstanceInner`
+holds a shared handle to the cached entry instead of an owned one, so instance
+`Drop` runs **only** `destroy_instance` — the loader DLL stays resident for the
+process lifetime. This eliminates the load/unload churn so repeated
+`WGPUInstance`/`WGPUDevice` creation no longer self-poisons; `--isolate` remains a
+valid containment but is no longer required for these families. Minimum Vulkan
+version, extension/feature logic, and all existing Drop semantics are unchanged.
+
+Verification: a CTS-test-free standalone churn loop
+(`createInstance → requestAdapter → requestDevice → release` ×700) must reproduce
+`HAL device creation failed` within ~150 iterations **before** the fix and run
+fail-free for 700 iterations **after** it, on the Windows native-Vulkan host. The
+CTS-side carry (run device-churning families under `--isolate`; no `expectations/`
+xfail) is recorded in webgpu-native-cts and is orthogonal to this library fix.
+Implementation handoff: `specs/tracking/f135-vulkan-entry-leak-handoff.md`.
