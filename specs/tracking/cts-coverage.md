@@ -2119,3 +2119,44 @@ naga fork is worse than under-validation":
 - **Verification (Metal):** `non_zero` constructor group 2144/0/0 (was 16 crash);
   `concrete_vector_mix` folds to correct lane values. No regression: select exec 147/0,
   select validation 843/0, zero_value constructor 111/0, naga gate EXIT 0.
+
+## F-136 — naga WGSL: valid `cmp <arith> ||/&&` rejected; short-circuit RHS abstract mis-typed — RESOLVED
+
+- **Finding:** `shader,execution,statement,discard:{three_quarters,function_call}`
+  (`useStorageBuffers ∈ {false,true}`, 4 cases) failed on Metal — "queue submit cannot use an
+  error command buffer", **no compilationInfo** surfaced. Dawn passes all 14 `discard:*`.
+  yawgpu-only; reproduced identically on the pre-F-129 naga (`a98f6d3fc`) and current pin —
+  pre-existing, only caught once the F-129 smoke re-ran `discard:*`. Two independent
+  WGSL front-end bugs in the naga fork (upstream-naga shape, not fork-specific), both of which
+  made naga **reject valid shaders Dawn accepts**, producing an error pipeline → error command
+  buffer at submit (hence no compile error).
+- **Root cause 1 — spurious "binary expression requires parentheses":** the operand-adjacency
+  check (`parse/mod.rs` `rightmost_binary_op`/`leftmost_binary_op`) descended the operand's full
+  spine, so `pos.x >= 0.5*64 || …` compared the deepest op `*` against `||` (illegal adjacency)
+  instead of the actual adjacent top op `>=` (legal). `three_quarters` (`>= 0.5*64 || …`) and
+  `function_call` (`<= 64/2 && …`) were the only `discard` shapes with a comparison whose operand
+  is an arithmetic subexpression followed by a short-circuit op. Also falsely *accepted*
+  `a < b*c < d`.
+- **Root cause 2 — short-circuit RHS abstract literals mis-typed:** after fix 1, `three_quarters`
+  compiled but `function_call` failed at validation (`i32 <= 64/2` became `i32 <= f32`). The
+  suppressed-RHS path in `lower/mod.rs` `append_expression` (F-133 slice 6f) rewrote every
+  abstract literal to `f32`, corrupting integer comparisons. No fixed per-literal concretization
+  can be correct (an `AbstractInt` under `*` against `0.5` must become abstract-float; under `<=`
+  against `i32` must become `i32` — context-dependent, only the consuming op's consensus knows).
+- **Fix (naga fork `b37e5c224`, yawgpu rev bump <this commit>):**
+  (1) replaced the spine-descending lookups with a single non-recursive `top_binary_op`
+  (the layered precedence parser already validates each adjacency exactly once);
+  (2) `append_expression` suppress path → **fold-then-fallback**: const-fold what we can so the
+  consuming op's automatic-conversion consensus concretizes abstracts in context, falling back to
+  an unevaluated runtime expr only on const-eval error (preserves the F-133 "don't reject an
+  unreached invalid RHS like `sqrt(-1.0)`" guarantee);
+  (3) a post-lowering walk (`concretize_reachable_abstract_literals`) in `logical()` concretizes
+  any **stranded** abstract literal still reachable in the runtime RHS subtree (e.g. the arg of a
+  non-const-evaluable `sqrt(-1.0)`) to its WGSL default kind (AbstractInt→i32, AbstractFloat→f32).
+  This also incidentally fixed the F-133 short-circuit residual: `u32`-RHS and all-abstract
+  (`1 < 2`) short-circuits now validate.
+- **Verification (real Metal):** `discard:*` **pass=14/0/0** (was 4 fail). No regression:
+  `expression,binary,{bool_logical 104, ai_arithmetic 50, ai_comparison 24, af_comparison 24,`
+  `af_addition 10, i32_comparison 96, f32_comparison 96}` all 0 fail/0 crash; naga gate EXIT 0
+  (only `wgsl-operators` snapshots changed — a short-circuit RHS `any(vec3(false))` now folds to
+  `false`); yawgpu workspace test 65 ok/0 fail.
