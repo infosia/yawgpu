@@ -95,13 +95,68 @@ impl ReflectedModule {
         binding_map: &MslBindingMap,
         pipeline_constants: &PipelineConstants,
     ) -> Result<GeneratedMsl, String> {
+        self.generate_stage_msl(entry_name, binding_map, pipeline_constants, true)
+    }
+
+    /// Generates render vertex MSL for a validated shader module.
+    pub(crate) fn generate_render_vertex_msl(
+        &self,
+        entry_name: &str,
+        binding_map: &MslBindingMap,
+        vertex_buffers: &[MslVertexBufferBinding],
+        force_point_size: bool,
+        pipeline_constants: &PipelineConstants,
+    ) -> Result<GeneratedMsl, String> {
+        if !vertex_buffers.is_empty() || force_point_size {
+            // TODO(phase-3): vertex layout / point size handled by the Metal HAL
+            // under Tint's stage_in model.
+        }
+        self.generate_stage_msl(entry_name, binding_map, pipeline_constants, false)
+    }
+
+    /// Generates render fragment MSL for a validated shader module.
+    pub(crate) fn generate_render_fragment_msl(
+        &self,
+        entry_name: &str,
+        binding_map: &MslBindingMap,
+        pipeline_constants: &PipelineConstants,
+        sample_mask: u32,
+    ) -> Result<GeneratedMsl, String> {
+        if sample_mask != u32::MAX {
+            // TODO(phase-3): sample mask handled by Tint's MSL writer and the
+            // Metal pipeline state.
+        }
+        self.generate_stage_msl(entry_name, binding_map, pipeline_constants, false)
+    }
+
+    /// Generates render msl for the validated shader module.
+    pub(crate) fn generate_render_msl(
+        &self,
+        _vertex_entry_name: &str,
+        _fragment_entry_name: Option<&str>,
+        _binding_map: &MslBindingMap,
+        _vertex_buffers: &[MslVertexBufferBinding],
+        _force_point_size: bool,
+    ) -> Result<GeneratedRenderMsl, String> {
+        // TODO(P2c.3): combined same-module render under Tint emits per-stage;
+        // the Metal HAL should consume per-stage (MslStagesWithBufferSizes).
+        Err(NOT_IMPLEMENTED.to_owned())
+    }
+
+    fn generate_stage_msl(
+        &self,
+        entry_name: &str,
+        binding_map: &MslBindingMap,
+        pipeline_constants: &PipelineConstants,
+        disable_robustness: bool,
+    ) -> Result<GeneratedMsl, String> {
         let bindings =
             tint_bindings_for_msl(binding_map, &self.resource_bindings_for_entry(entry_name)?)?;
         let output = self.program.generate_msl(
             entry_name,
             &bindings,
             &override_values(pipeline_constants),
-            true,
+            disable_robustness,
         )?;
         let buffer_size_bindings = if output.needs_storage_buffer_sizes {
             self.msl_buffer_size_bindings_for_entry(entry_name)?
@@ -120,41 +175,6 @@ impl ReflectedModule {
             // empty per-argument allocation list until that metadata is exposed.
             workgroup_memory_sizes: Vec::new(),
         })
-    }
-
-    /// Generates render vertex MSL for a validated shader module.
-    pub(crate) fn generate_render_vertex_msl(
-        &self,
-        _entry_name: &str,
-        _binding_map: &MslBindingMap,
-        _vertex_buffers: &[MslVertexBufferBinding],
-        _force_point_size: bool,
-        _pipeline_constants: &PipelineConstants,
-    ) -> Result<GeneratedMsl, String> {
-        Err(NOT_IMPLEMENTED.to_owned())
-    }
-
-    /// Generates render fragment MSL for a validated shader module.
-    pub(crate) fn generate_render_fragment_msl(
-        &self,
-        _entry_name: &str,
-        _binding_map: &MslBindingMap,
-        _pipeline_constants: &PipelineConstants,
-        _sample_mask: u32,
-    ) -> Result<GeneratedMsl, String> {
-        Err(NOT_IMPLEMENTED.to_owned())
-    }
-
-    /// Generates render msl for the validated shader module.
-    pub(crate) fn generate_render_msl(
-        &self,
-        _vertex_entry_name: &str,
-        _fragment_entry_name: Option<&str>,
-        _binding_map: &MslBindingMap,
-        _vertex_buffers: &[MslVertexBufferBinding],
-        _force_point_size: bool,
-    ) -> Result<GeneratedRenderMsl, String> {
-        Err(NOT_IMPLEMENTED.to_owned())
     }
 
     /// Returns entry points reflected by the validated shader module.
