@@ -272,10 +272,27 @@ FULLY GREEN (356/0).** The Tint frontend produces all reflection + codegen the
 yawgpu-core lib suite exercises, entirely from Tint (`shader_tint.rs` has zero naga
 refs). Default (naga) path unchanged throughout.
 
+- **P2d DONE** (`e22da6c`) — `yawgpu` crate forwards a `tint` feature; integration +
+  FFI suites run under Tint and reach parity. Fixed two diagnostic-wording asserts
+  (cfg-split) and a real override-id divergence: naga sets `ReflectedOverride.id`
+  only for explicit `@id(N)`, but Tint assigns an id to every override; yawgpu keys
+  pipeline constants by numeric id only for `@id` overrides, so Tint's implicit ids
+  made name-keyed override constants error → uncached error pipelines → caching
+  tests failed. Shim now reports `has_explicit_id`
+  (`ast::HasAttribute<ast::IdAttribute>`); shader_tint surfaces id only when explicit.
+
+**🏁🏁 MILESTONE (2026-06-26): the ENTIRE Noop-testable surface is GREEN under
+`--features tint`** — yawgpu-core lib (356/0) + yawgpu lib & integration (283/0),
+all reflection + codegen from Tint, naga still default & untouched.
+
 **NEXT:**
-- **P2d** — forward a `tint` feature from the `yawgpu` crate (not present yet) so the
-  integration (`yawgpu/tests/*.rs`) + e2e suites run under Tint; reach parity there;
-  then flip the default to Tint.
+- **Phase 3** — real-GPU CTS under `--features tint` (Metal/MoltenVK/native-Vulkan/
+  ANGLE). The e2e (`#[ignore]`) suites + CTS validate Tint's actual codegen on
+  hardware; this is where the Metal HAL adapts to Tint's per-stage / `stage_in`
+  render model (vertex pulling not replayed). Do this BEFORE flipping the default
+  (flipping makes the real-GPU e2e use Tint codegen).
+- **Flip default → Tint** (after Phase 3 confirms real-GPU parity).
+- **P2c.3** — combined same-module `generate_render_msl` (minor; no test needs it).
 - **P2c.3** — `generate_render_msl` combined same-module (minor; no test needs it yet).
 - **Phase 3** — real-GPU CTS (Metal/MoltenVK/native-Vulkan/ANGLE); the real render
   correctness + Metal HAL adaptation to Tint's per-stage / `stage_in` model.
