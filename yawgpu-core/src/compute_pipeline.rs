@@ -10,11 +10,11 @@ use yawgpu_hal::{
 use crate::bind_group_layout::*;
 use crate::device::FeatureSet;
 use crate::format::*;
+use crate::frontend as shader_naga;
 use crate::limits::*;
 use crate::pipeline_id::next_pipeline_id;
 use crate::pipeline_layout::*;
 use crate::shader::*;
-use crate::shader_naga;
 use crate::texture_view::*;
 
 /// Describes compute pipeline descriptor.
@@ -296,7 +296,7 @@ pub(crate) fn select_compute_shader_source(
                 .ok_or_else(|| "compute pipeline requires a reflected shader module".to_owned())?;
             let spirv = module.generate_spirv(
                 entry_name,
-                naga::ShaderStage::Compute,
+                shader_naga::ShaderStage::Compute,
                 &pipeline_constants,
                 unchecked_buffer_bounds,
             )?;
@@ -313,7 +313,7 @@ pub(crate) fn select_compute_shader_source(
                 .ok_or_else(|| "compute pipeline requires a reflected shader module".to_owned())?;
             let generated = module.generate_glsl(
                 entry_name,
-                naga::ShaderStage::Compute,
+                shader_naga::ShaderStage::Compute,
                 &pipeline_constants,
             )?;
             Ok((
@@ -330,14 +330,15 @@ pub(crate) fn select_compute_shader_source(
     }
 }
 
-/// Returns Naga pipeline constants keyed the same way as WebGPU constant entries.
+/// Returns frontend pipeline constants keyed the same way as WebGPU constant entries.
 pub(crate) fn pipeline_constant_map(
     constants: &[PipelineConstant],
-) -> naga::back::PipelineConstants {
-    constants
-        .iter()
-        .map(|constant| (constant.key.clone(), constant.value))
-        .collect()
+) -> shader_naga::PipelineConstants {
+    shader_naga::PipelineConstants::from_iter(
+        constants
+            .iter()
+            .map(|constant| (constant.key.clone(), constant.value)),
+    )
 }
 
 /// Returns HAL MSL buffer-size bindings.
@@ -954,11 +955,12 @@ pub(crate) fn resolve_compute_workgroup(
 
 fn resolved_pipeline_constant_map(
     constants: &[ResolvedOverrideConstant],
-) -> naga::back::PipelineConstants {
-    constants
-        .iter()
-        .map(|constant| (constant.key.clone(), constant.value))
-        .collect()
+) -> shader_naga::PipelineConstants {
+    shader_naga::PipelineConstants::from_iter(
+        constants
+            .iter()
+            .map(|constant| (constant.key.clone(), constant.value)),
+    )
 }
 
 /// Validates compute pipeline layout and returns a descriptive error on failure.
@@ -1636,6 +1638,7 @@ pub(crate) fn buffer_binding_types_compatible(
 
 #[cfg(test)]
 mod tests {
+    use super::shader_naga;
     use super::*;
     use crate::test_helpers::*;
     use crate::*;
@@ -1867,6 +1870,7 @@ mod tests {
         assert!(source.contains("local_size_x = 2"));
     }
 
+    #[cfg(not(feature = "tint"))]
     #[test]
     fn resolve_compute_workgroup_evaluates_override_expressions() {
         let module = shader_naga::parse_and_validate_wgsl(
@@ -1893,6 +1897,7 @@ mod tests {
         assert_eq!(resolved.storage_size, 64);
     }
 
+    #[cfg(not(feature = "tint"))]
     #[test]
     fn resolve_compute_workgroup_rejects_override_arithmetic_error() {
         let module = shader_naga::parse_and_validate_wgsl(

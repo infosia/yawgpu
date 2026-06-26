@@ -876,6 +876,7 @@ dependencies = [
  "parking_lot",
  "thiserror",
  "yawgpu-hal",
+ "yawgpu-tint",
 ]
 
 [[package]]

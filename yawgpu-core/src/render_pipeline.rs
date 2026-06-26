@@ -13,12 +13,12 @@ use crate::bind_group_layout::*;
 use crate::compute_pipeline::*;
 use crate::device::FeatureSet;
 use crate::format::*;
+use crate::frontend as shader_naga;
 use crate::limits::*;
 use crate::pipeline_id::next_pipeline_id;
 use crate::pipeline_layout::*;
 use crate::sampler::*;
 use crate::shader::*;
-use crate::shader_naga;
 use crate::texture::*;
 
 /// Stores attachment signature data used by validation and backend submission.
@@ -873,7 +873,7 @@ pub(crate) fn select_render_shader_source(
             })?;
             let vertex = vertex_module.generate_spirv(
                 vertex_entry_name,
-                naga::ShaderStage::Vertex,
+                shader_naga::ShaderStage::Vertex,
                 &vertex_pipeline_constants,
                 unchecked_buffer_bounds,
             )?;
@@ -884,7 +884,7 @@ pub(crate) fn select_render_shader_source(
                     })?;
                     Some(fragment_module.generate_spirv(
                         fragment_entry_name,
-                        naga::ShaderStage::Fragment,
+                        shader_naga::ShaderStage::Fragment,
                         fragment_pipeline_constants.as_ref().ok_or_else(|| {
                             "render pipeline fragment constants were not resolved".to_owned()
                         })?,
@@ -912,7 +912,7 @@ pub(crate) fn select_render_shader_source(
             })?;
             let vertex_glsl = vertex_module.generate_glsl(
                 vertex_entry_name,
-                naga::ShaderStage::Vertex,
+                shader_naga::ShaderStage::Vertex,
                 &vertex_pipeline_constants,
             )?;
             let fragment_glsl = match (fragment, fragment_entry_name) {
@@ -924,7 +924,7 @@ pub(crate) fn select_render_shader_source(
                         fragment_module
                             .generate_glsl(
                                 fragment_entry_name,
-                                naga::ShaderStage::Fragment,
+                                shader_naga::ShaderStage::Fragment,
                                 fragment_pipeline_constants.as_ref().ok_or_else(|| {
                                     "render pipeline fragment constants were not resolved"
                                         .to_owned()
@@ -2293,6 +2293,7 @@ pub(crate) fn validate_multisample_state(
 
 #[cfg(test)]
 mod tests {
+    use super::shader_naga;
     use super::*;
     use crate::pass::bind_group_layouts_compatible;
     use crate::test_helpers::*;

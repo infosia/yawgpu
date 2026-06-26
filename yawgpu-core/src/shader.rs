@@ -1,8 +1,9 @@
+#[cfg(not(feature = "tint"))]
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::bind_group_layout::*;
-use crate::shader_naga;
+use crate::frontend;
 
 /// Stores one shader compilation message for compilation-info callbacks.
 #[derive(Clone, Debug)]
@@ -69,7 +70,7 @@ pub(crate) enum ShaderModuleSourceKind {
         /// Source variant.
         _source: String,
         /// Reflected variant.
-        reflected: Box<shader_naga::ReflectedModule>,
+        reflected: Box<frontend::ReflectedModule>,
     },
     /// Invalid variant.
     Invalid,
@@ -97,7 +98,8 @@ impl ShaderModule {
         source: String,
         shader_f16: bool,
     ) -> Result<ShaderModuleSourceKind, String> {
-        let reflected = shader_naga::parse_and_validate_wgsl_gated(&source, shader_f16)?;
+        let reflected = frontend::parse_and_validate_wgsl_gated(&source, shader_f16)?;
+        #[cfg(not(feature = "tint"))]
         validate_module_limits(&reflected.module)?;
         Ok(ShaderModuleSourceKind::Wgsl {
             _source: source,
@@ -125,7 +127,7 @@ impl ShaderModule {
 
     /// Returns shader reflection data when the module source provides it.
     #[must_use]
-    pub(crate) fn reflected(&self) -> Option<&shader_naga::ReflectedModule> {
+    pub(crate) fn reflected(&self) -> Option<&frontend::ReflectedModule> {
         match &self.inner._source {
             ShaderModuleSourceKind::Wgsl { reflected, .. } => Some(reflected),
             _ => None,
@@ -134,6 +136,7 @@ impl ShaderModule {
 }
 
 /// Validates module limits and returns a descriptive error on failure.
+#[cfg(not(feature = "tint"))]
 pub(crate) fn validate_module_limits(module: &naga::Module) -> Result<(), String> {
     let mut ids = BTreeSet::new();
     for (_, override_) in module.overrides.iter() {
@@ -252,6 +255,7 @@ mod tests {
         assert_eq!(module.diagnostic(), None);
     }
 
+    #[cfg(not(feature = "tint"))]
     #[test]
     fn shader_module_validation_rejects_duplicate_override_ids_on_noop() {
         let mut module = naga::Module::default();

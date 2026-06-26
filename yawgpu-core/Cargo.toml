@@ -6,9 +6,11 @@ license.workspace = true
 
 [features]
 gles = ["naga/glsl-out"]
+tint = ["dep:yawgpu-tint"]
 
 [dependencies]
 yawgpu-hal = { path = "../yawgpu-hal" }
+yawgpu-tint = { path = "../yawgpu-tint", optional = true }
 parking_lot.workspace = true
 thiserror.workspace = true
 naga = { workspace = true, features = ["wgsl-in", "msl-out", "spv-out"] }
