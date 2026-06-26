@@ -386,6 +386,26 @@ all reflection + codegen from Tint, naga still default & untouched.
   ideally native Vulkan too. Also triage `two_color_attachments` (count 3≠1) — may be
   the same winding issue or separate. Then optional GLES, flip the default, Phase 4.
   Combined `generate_render_msl` (P2c.3) still skeleton.
+
+  **Finding #4 RESOLVED** (`cd7914d`): unified Vulkan clip-space on a negative-height
+  viewport (HAL) + dropped naga's in-shader `ADJUST_COORDINATE_SPACE`. Real MoltenVK:
+  naga DEFAULT unregressed, tint render/threading (incl. two_color_attachments) green.
+
+  ### 🏁🏁🏁 Phase 3 MILESTONE: both Tier-1 backends at near-full parity under Tint (real M2 + MoltenVK)
+  Comprehensive e2e sweep under `--features {metal,vulkan},tint`:
+  - **Metal 79/80** (every e2e_metal_* binary).
+  - **Vulkan/MoltenVK 51/52** (every e2e_vulkan_* binary).
+  - naga DEFAULT path unregressed throughout.
+
+  Six hardware bugs found+fixed, all masked on Noop (Noop never compiles backend
+  shaders): arrayLength ICE, MSL entry minify, MSL stage_in vertex descriptor,
+  point_size, array_length_from_constants, Vulkan Y-flip/winding.
+
+  **Only 2 remaining e2e failures, both bounded:**
+  1. `e2e_metal_depth::metal_readonly_depth_stencil_isolation` — read-only
+     depth-stencil isolation (NOT frag_depth; the 19 frag_depth tests pass). Investigate.
+  2. `e2e_vulkan_external_texture` — external textures, **deferred** by the governing
+     decision (rework via Tint's native support, not naga's honest-rejection).
 - **Flip default → Tint** (after Phase 3 confirms real-GPU parity).
 - **P2c.3** — combined same-module `generate_render_msl` (minor; no test needs it).
 - **P2c.3** — `generate_render_msl` combined same-module (minor; no test needs it yet).
