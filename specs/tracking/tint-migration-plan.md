@@ -359,10 +359,22 @@ all reflection + codegen from Tint, naga still default & untouched.
   threading_audit 15/15} all green under `--features metal,tint`; naga default
   render unchanged (no regression).
 
-  **Phase 3 remaining:** MoltenVK + native-Vulkan real-GPU check under
-  `--features vulkan,tint` (SPIR-V binding/entry contract — the analog of the Metal
-  findings), optional GLES/ANGLE, then **flip the default to Tint**, then Phase 4
-  (remove naga). Combined `generate_render_msl` (P2c.3) still skeleton.
+  **Phase 3 — Vulkan/MoltenVK under `--features vulkan,tint` (M2, started):**
+  e2e_vulkan_{compute 4/4, f16 5/5} GREEN — SPIR-V compute lines up (Tint keeps
+  `main` in SPIR-V; binding remap works). **Finding #4 (active): render triangle
+  winding / front-face.** Failures cluster on culling + winding-sensitive draws:
+  `vulkan_cull_back_discards_back_facing_cw`, `vulkan_cull_back_keeps_front_facing_ccw`,
+  `vulkan_render_uniform_color_triangle_readback` (no green pixel — likely the
+  triangle is front-face-culled because its winding flipped), plus
+  `vulkan_render_two_color_attachments_write_distinct_targets` (count 3≠1). Likely
+  root cause: the Vulkan **clip-space / Y-flip / winding convention** differs between
+  Tint's and naga's SPIR-V (naga applies a Vulkan position adjustment); under Tint
+  the emitted winding is opposite, so the test's front_face/cull setup culls the
+  triangle. **Next:** dump Tint vs naga SPIR-V for the cull triangle, compare the
+  position/Y handling + how yawgpu sets `frontFace`/viewport, reconcile (likely a
+  HAL front-face or a Tint writer option), re-verify on MoltenVK + ideally native
+  Vulkan. Then optional GLES, then flip the default, then Phase 4 (remove naga).
+  Combined `generate_render_msl` (P2c.3) still skeleton.
 - **Flip default → Tint** (after Phase 3 confirms real-GPU parity).
 - **P2c.3** — combined same-module `generate_render_msl` (minor; no test needs it).
 - **P2c.3** — `generate_render_msl` combined same-module (minor; no test needs it yet).
