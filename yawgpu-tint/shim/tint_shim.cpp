@@ -6,16 +6,21 @@
 #include <cstring>
 #include <exception>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "src/tint/api/common/substitute_overrides_config.h"
 #include "src/tint/api/helpers/generate_bindings.h"
 #include "src/tint/api/tint.h"
 #include "src/tint/lang/core/constant/value.h"
+#include "src/tint/lang/core/ir/referenced_module_vars.h"
+#include "src/tint/lang/core/type/pointer.h"
 #include "src/tint/lang/glsl/writer/helpers/generate_bindings.h"
 #include "src/tint/lang/glsl/writer/writer.h"
+#include "src/tint/lang/msl/writer/common/options.h"
 #include "src/tint/lang/msl/writer/writer.h"
 #include "src/tint/lang/spirv/writer/writer.h"
 #include "src/tint/lang/wgsl/ast/id_attribute.h"
@@ -142,6 +147,94 @@ tint::Result<tint::core::ir::Module> lower_ir(const YawgpuTintProgram* program) 
         .enable_validation_asserts = false,
     };
     return tint::wgsl::reader::ProgramToLoweredIR(program->program, options);
+}
+
+const tint::core::ir::Function* find_ir_entry_point(const tint::core::ir::Module& ir,
+                                                    const std::string& ep_name) {
+    for (auto* f : ir.functions) {
+        if (f != nullptr && f->IsEntryPoint() && ir.NameOf(f).NameView() == ep_name) {
+            return f;
+        }
+    }
+    return nullptr;
+}
+
+tint::msl::writer::ArrayLengthOptions generate_array_length_from_constants(
+    tint::core::ir::Module& ir,
+    const std::string& ep_name,
+    uint32_t buffer_sizes_slot,
+    std::vector<tint::BindingPoint>& ordered_bindings) {
+    tint::msl::writer::ArrayLengthOptions options{
+        .ubo_binding = buffer_sizes_slot,
+    };
+
+    const tint::core::ir::Function* ep_func = find_ir_entry_point(ir, ep_name);
+    if (ep_func == nullptr) {
+        return options;
+    }
+
+    tint::core::ir::ReferencedModuleVars<const tint::core::ir::Module> referenced_module_vars{ir};
+    auto& refs = referenced_module_vars.TransitiveReferences(ep_func);
+
+    std::unordered_set<tint::BindingPoint> storage_bindings;
+    for (auto* var : refs) {
+        auto bp = var->BindingPoint();
+        if (!bp.has_value()) {
+            continue;
+        }
+
+        auto* ty = var->Result()->Type()->As<tint::core::type::Pointer>();
+        if (ty != nullptr && ty->AddressSpace() == tint::core::AddressSpace::kStorage &&
+            !ty->HasFixedFootprint()) {
+            if (storage_bindings.insert(*bp).second) {
+                auto size_index = static_cast<uint32_t>(ordered_bindings.size());
+                options.bindpoint_to_size_index.emplace(*bp, size_index);
+                ordered_bindings.push_back(*bp);
+            }
+        }
+    }
+
+    return options;
+}
+
+void mark_used_buffer_bindings(const tint::BindingMap& map, std::vector<bool>& used) {
+    for (const auto& entry : map) {
+        if (entry.second.group == 0 && entry.second.binding < used.size()) {
+            used[entry.second.binding] = true;
+        }
+    }
+}
+
+std::optional<tint::BindingPoint> choose_immediate_binding_point(const tint::Bindings& bindings,
+                                                                 uint32_t buffer_sizes_slot) {
+    std::vector<bool> used(256, false);
+    if (buffer_sizes_slot < used.size()) {
+        used[buffer_sizes_slot] = true;
+    }
+    mark_used_buffer_bindings(bindings.uniform, used);
+    mark_used_buffer_bindings(bindings.storage, used);
+
+    for (uint32_t binding = 0; binding < used.size(); ++binding) {
+        if (!used[binding]) {
+            return tint::BindingPoint{.group = 0u, .binding = binding};
+        }
+    }
+    return std::nullopt;
+}
+
+uint32_t* dup_binding_pairs(const std::vector<tint::BindingPoint>& bindings) {
+    if (bindings.empty()) {
+        return nullptr;
+    }
+    uint32_t* out = static_cast<uint32_t*>(std::malloc(bindings.size() * 2 * sizeof(uint32_t)));
+    if (out == nullptr) {
+        return nullptr;
+    }
+    for (size_t i = 0; i < bindings.size(); ++i) {
+        out[i * 2] = bindings[i].group;
+        out[i * 2 + 1] = bindings[i].binding;
+    }
+    return out;
 }
 
 void fill_entry_point(const tint::inspector::EntryPoint& ep, YawgpuTintEntryPoint* out) {
@@ -566,6 +659,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
                               const YawgpuTintBindings* bindings,
                               const YawgpuTintOverrideValue* ov,
                               size_t n_ov,
+                              uint32_t buffer_sizes_slot,
                               bool disable_robustness,
                               YawgpuTintMslOutput* out,
                               char** err) {
@@ -575,6 +669,8 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
     if (out != nullptr) {
         out->msl = nullptr;
         out->needs_storage_buffer_sizes = false;
+        out->buffer_size_bindings = nullptr;
+        out->n_buffer_size_bindings = 0;
     }
     try {
         if (program == nullptr || out == nullptr) {
@@ -593,7 +689,11 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         options.bindings = all_remaps_empty(bindings)
                                ? tint::GenerateBindings(ir.Get(), entry_point, true, true)
                                : make_bindings(bindings);
-        options.immediate_binding_point = tint::BindingPoint{.group = 0u, .binding = 30u};
+        options.immediate_binding_point =
+            choose_immediate_binding_point(options.bindings, buffer_sizes_slot);
+        std::vector<tint::BindingPoint> ordered_size_bindings;
+        options.array_length_from_constants = generate_array_length_from_constants(
+            ir.Get(), entry_point, buffer_sizes_slot, ordered_size_bindings);
         auto override_cfg = make_override_config(program, ov, n_ov);
         if (override_cfg != tint::Success) {
             set_error(err, override_cfg.Failure());
@@ -607,8 +707,21 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
             return false;
         }
         out->msl = dup_string(result->msl);
+        if (out->msl == nullptr) {
+            set_error_string(err, "failed to allocate MSL output");
+            return false;
+        }
         out->needs_storage_buffer_sizes = result->needs_storage_buffer_sizes;
-        return out->msl != nullptr;
+        out->buffer_size_bindings = dup_binding_pairs(ordered_size_bindings);
+        out->n_buffer_size_bindings = ordered_size_bindings.size();
+        if (!ordered_size_bindings.empty() && out->buffer_size_bindings == nullptr) {
+            std::free(out->msl);
+            out->msl = nullptr;
+            out->n_buffer_size_bindings = 0;
+            set_error_string(err, "failed to allocate MSL buffer size bindings");
+            return false;
+        }
+        return true;
     } catch (const std::exception& e) {
         set_error_string(err, e.what());
         return false;

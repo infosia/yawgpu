@@ -116,6 +116,8 @@ mod imp {
     struct RawMslOutput {
         msl: *mut c_char,
         needs_storage_buffer_sizes: bool,
+        buffer_size_bindings: *mut u32,
+        n_buffer_size_bindings: usize,
     }
 
     extern "C" {
@@ -181,6 +183,7 @@ mod imp {
             bindings: *const RawBindings,
             ov: *const RawOverrideValue,
             n_ov: usize,
+            buffer_sizes_slot: u32,
             disable_robustness: bool,
             out: *mut RawMslOutput,
             err: *mut *mut c_char,
@@ -231,6 +234,37 @@ mod imp {
         }
         // SAFETY: reflection strings are borrowed from the live program handle.
         unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
+    }
+
+    fn raw_buffer_size_bindings(
+        ptr: *mut u32,
+        len: usize,
+    ) -> Result<Vec<MslBufferSizeBinding>, String> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        if ptr.is_null() {
+            return Err("tint: MSL buffer size bindings pointer was NULL".to_owned());
+        }
+        let Some(word_len) = len.checked_mul(2) else {
+            // SAFETY: non-null shim outputs are malloc-owned.
+            unsafe { yawgpu_tint_u32_free(ptr) };
+            return Err("tint: MSL buffer size bindings length overflowed".to_owned());
+        };
+        // SAFETY: the shim returns `word_len` initialized words allocated by malloc.
+        let bindings = unsafe {
+            let data = slice::from_raw_parts(ptr, word_len);
+            let out = data
+                .chunks_exact(2)
+                .map(|pair| MslBufferSizeBinding {
+                    group: pair[0],
+                    binding: pair[1],
+                })
+                .collect();
+            yawgpu_tint_u32_free(ptr);
+            out
+        };
+        Ok(bindings)
     }
 
     /// Initializes the Tint runtime.
@@ -435,6 +469,7 @@ mod imp {
             entry_point: &str,
             bindings: &Bindings,
             overrides: &[OverrideValue],
+            buffer_sizes_slot: u32,
             robust: bool,
         ) -> Result<MslOutput, String> {
             let ep = cstring(entry_point, "entry point")?;
@@ -444,6 +479,8 @@ mod imp {
             let mut out = RawMslOutput {
                 msl: ptr::null_mut(),
                 needs_storage_buffer_sizes: false,
+                buffer_size_bindings: ptr::null_mut(),
+                n_buffer_size_bindings: 0,
             };
             let mut err = ptr::null_mut();
             // SAFETY: all pointers are valid for the duration of the call.
@@ -454,6 +491,7 @@ mod imp {
                     &raw_bindings,
                     raw_overrides.as_ptr(),
                     raw_overrides.len(),
+                    buffer_sizes_slot,
                     !robust,
                     &mut out,
                     &mut err,
@@ -463,6 +501,10 @@ mod imp {
                 return Err(take_error(err));
             }
             if out.msl.is_null() {
+                if !out.buffer_size_bindings.is_null() {
+                    // SAFETY: successful shim outputs are malloc-owned.
+                    unsafe { yawgpu_tint_u32_free(out.buffer_size_bindings) };
+                }
                 return Err("tint: MSL generator returned NULL output".to_owned());
             }
             // SAFETY: `out.msl` is owned by Rust after success.
@@ -471,9 +513,12 @@ mod imp {
                 yawgpu_tint_string_free(out.msl);
                 s
             };
+            let buffer_size_bindings =
+                raw_buffer_size_bindings(out.buffer_size_bindings, out.n_buffer_size_bindings)?;
             Ok(MslOutput {
                 source: msl,
                 needs_storage_buffer_sizes: out.needs_storage_buffer_sizes,
+                buffer_size_bindings,
             })
         }
 
@@ -583,6 +628,17 @@ mod imp {
         pub source: String,
         /// Whether the generated MSL needs a storage-buffer-size table.
         pub needs_storage_buffer_sizes: bool,
+        /// Ordered storage bindings whose byte lengths populate the size table.
+        pub buffer_size_bindings: Vec<MslBufferSizeBinding>,
+    }
+
+    /// A storage binding whose byte length is required by generated MSL.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct MslBufferSizeBinding {
+        /// Original WebGPU bind group.
+        pub group: u32,
+        /// Original WebGPU binding number.
+        pub binding: u32,
     }
 
     /// A reflected entry point.
@@ -1234,7 +1290,7 @@ mod imp {
     pub fn wgsl_to_msl(wgsl: &str, entry_point: &str) -> Result<String, String> {
         let program = Program::parse(wgsl, false)?;
         Ok(program
-            .generate_msl(entry_point, &Bindings::default(), &[], true)?
+            .generate_msl(entry_point, &Bindings::default(), &[], 0, true)?
             .source)
     }
 }
@@ -1298,6 +1354,7 @@ mod imp {
             _entry_point: &str,
             _bindings: &Bindings,
             _overrides: &[OverrideValue],
+            _buffer_sizes_slot: u32,
             _robust: bool,
         ) -> Result<MslOutput, String> {
             Err(UNAVAILABLE.to_owned())
@@ -1331,6 +1388,17 @@ mod imp {
         pub source: String,
         /// Whether the generated MSL needs a storage-buffer-size table.
         pub needs_storage_buffer_sizes: bool,
+        /// Ordered storage bindings whose byte lengths populate the size table.
+        pub buffer_size_bindings: Vec<MslBufferSizeBinding>,
+    }
+
+    /// A storage binding whose byte length is required by generated MSL.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct MslBufferSizeBinding {
+        /// Original WebGPU bind group.
+        pub group: u32,
+        /// Original WebGPU binding number.
+        pub binding: u32,
     }
 
     /// A reflected entry point.
@@ -1794,7 +1862,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     fn compute_generates_msl_spirv_glsl() {
         let program = Program::parse(compute_wgsl(), false).unwrap();
         let bindings = Bindings::default();
-        let msl = program.generate_msl("cs", &bindings, &[], true).unwrap();
+        let msl = program.generate_msl("cs", &bindings, &[], 0, true).unwrap();
         assert!(msl.source.contains("kernel"), "MSL:\n{}", msl.source);
         let spirv = program.generate_spirv("cs", &bindings, &[], true).unwrap();
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
@@ -1803,11 +1871,47 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     }
 
     #[test]
+    fn compute_msl_array_length_returns_size_bindings() {
+        let wgsl = r#"
+struct Data {
+  values: array<u32>,
+}
+
+@group(1) @binding(2) var<storage, read_write> data: Data;
+
+@compute @workgroup_size(1)
+fn cs() {
+  if (arrayLength(&data.values) > 0u) {
+    data.values[0] = arrayLength(&data.values);
+  }
+}
+"#;
+        let program = Program::parse(wgsl, false).unwrap();
+        let msl = program
+            .generate_msl("cs", &Bindings::default(), &[], 9, true)
+            .unwrap();
+        assert!(
+            msl.source
+                .contains("tint_storage_buffer_sizes [[buffer(9)]]"),
+            "MSL:\n{}",
+            msl.source
+        );
+        assert!(msl.needs_storage_buffer_sizes);
+        assert_eq!(
+            msl.buffer_size_bindings,
+            vec![MslBufferSizeBinding {
+                group: 1,
+                binding: 2,
+            }]
+        );
+    }
+
+    #[test]
     fn render_stages_generate_msl_and_spirv() {
         let program = Program::parse(render_wgsl(), false).unwrap();
         let bindings = Bindings::default();
         for ep in ["vs", "fs"] {
-            let msl = program.generate_msl(ep, &bindings, &[], true).unwrap();
+            let msl = program.generate_msl(ep, &bindings, &[], 0, true).unwrap();
             assert!(!msl.source.is_empty());
             let spirv = program.generate_spirv(ep, &bindings, &[], true).unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));
@@ -1966,6 +2070,7 @@ fn cs() {}
                     name: "x".to_owned(),
                     value: 2.0,
                 }],
+                0,
                 true,
             )
             .unwrap()
@@ -1978,6 +2083,7 @@ fn cs() {}
                     name: "x".to_owned(),
                     value: 5.0,
                 }],
+                0,
                 true,
             )
             .unwrap()
@@ -2029,11 +2135,11 @@ fn cs() { _ = u.value; }
             ..Bindings::default()
         };
         let default_msl = program
-            .generate_msl("cs", &default_bindings, &[], true)
+            .generate_msl("cs", &default_bindings, &[], 0, true)
             .unwrap()
             .source;
         let remapped_msl = program
-            .generate_msl("cs", &remapped, &[], true)
+            .generate_msl("cs", &remapped, &[], 0, true)
             .unwrap()
             .source;
         assert!(remapped_msl.contains("[[buffer(7)]]"), "{remapped_msl}");
@@ -2059,7 +2165,7 @@ fn cs() {
 "#;
         let program = Program::parse(wgsl, true).unwrap();
         let msl = program
-            .generate_msl("cs", &Bindings::default(), &[], true)
+            .generate_msl("cs", &Bindings::default(), &[], 0, true)
             .unwrap();
         assert!(msl.source.contains("kernel"));
     }
