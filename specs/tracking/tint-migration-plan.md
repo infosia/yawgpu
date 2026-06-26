@@ -291,6 +291,26 @@ all reflection + codegen from Tint, naga still default & untouched.
   hardware; this is where the Metal HAL adapts to Tint's per-stage / `stage_in`
   render model (vertex pulling not replayed). Do this BEFORE flipping the default
   (flipping makes the real-GPU e2e use Tint codegen).
+
+  **Phase 3 finding #1 (2026-06-26, Metal e2e compute under tint): Tint ICEs
+  (aborts the process — `[[noreturn]]`) on any `arrayLength()` / runtime-sized
+  storage array.** `tint/lang/msl/writer/raise/decompose_buffer.cc:111
+  TINT_ASSERT(call->Func() != kArrayLength)` fires because the shim's
+  `generate_msl` never sets `options.array_length_from_constants` (the
+  `_mslBufferSizes` contract). `cmd/tint/main.cc:1116 GenerateArrayLengthFromConstants`
+  sets `ubo_binding` (slot 30, == its `immediate_binding_point`) + a
+  `bindpoint_to_size_index` mapping each non-fixed-footprint kStorage buffer the
+  entry point references → a sequential index. **Fix (next slice):** the shim's
+  `generate_msl` must set `array_length_from_constants` with `ubo_binding =
+  yawgpu's computed buffer_sizes_slot` and `bindpoint_to_size_index` matching the
+  ORDER yawgpu's Metal HAL fills `_mslBufferSizes` (i.e. `buffer_size_bindings[i]
+  → i`); reconcile with the shim's hardcoded `immediate_binding_point = {0,30}`
+  (from P1b — may itself collide with a real slot 30 binding). This is the
+  shim↔Metal-HAL `_mslBufferSizes` contract; verify on real Metal. (Didn't show on
+  Noop — Noop never generates MSL.) Note: the ICE confirms Tint aborts are real and
+  uncatchable across FFI (P2a.0) — fixing the missing option avoids THIS abort, but
+  fuzz/adversarial WGSL can still abort; a true guard would need out-of-process
+  compilation or a Tint patch.
 - **Flip default → Tint** (after Phase 3 confirms real-GPU parity).
 - **P2c.3** — combined same-module `generate_render_msl` (minor; no test needs it).
 - **P2c.3** — `generate_render_msl` combined same-module (minor; no test needs it yet).
