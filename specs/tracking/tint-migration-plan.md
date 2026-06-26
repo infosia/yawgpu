@@ -348,6 +348,21 @@ all reflection + codegen from Tint, naga still default & untouched.
   formats/offsets/strides/step-modes) and bind vertex buffers at the slots Tint
   expects, replacing vertex pulling for the Tint frontend. Largest remaining Phase 3
   chunk; then re-verify render on Metal, then MoltenVK/native-Vulkan, then flip.
+
+  **Phase 3 finding #3 RESOLVED** (`e7eec7c` + `411f262`): the Metal HAL already had
+  an `MTLVertexDescriptor` path but chose it by `HalShaderSource` *variant*; now
+  `render_shader_uses_metal_vertex_descriptor` detects the model from the emitted
+  vertex MSL source (`contains("[[stage_in]]")`) — Tint stage_in → descriptor,
+  naga pulling → pulling (unchanged). Plus `emit_vertex_point_size` wired through the
+  shim (point-list needs `[[point_size]]`). **🏁 Metal e2e at PARITY under Tint
+  (real M2):** e2e_metal_{compute 5/5, render 3/3, point 1/1, f16 5/5, f114, f115,
+  threading_audit 15/15} all green under `--features metal,tint`; naga default
+  render unchanged (no regression).
+
+  **Phase 3 remaining:** MoltenVK + native-Vulkan real-GPU check under
+  `--features vulkan,tint` (SPIR-V binding/entry contract — the analog of the Metal
+  findings), optional GLES/ANGLE, then **flip the default to Tint**, then Phase 4
+  (remove naga). Combined `generate_render_msl` (P2c.3) still skeleton.
 - **Flip default → Tint** (after Phase 3 confirms real-GPU parity).
 - **P2c.3** — combined same-module `generate_render_msl` (minor; no test needs it).
 - **P2c.3** — `generate_render_msl` combined same-module (minor; no test needs it yet).
