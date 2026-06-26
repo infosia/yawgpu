@@ -59,4 +59,8 @@ target_include_directories(tint_shim PRIVATE
     ${YAWGPU_DAWN_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_link_libraries(tint_shim PRIVATE tint_api tint_api_helpers)
+target_link_libraries(tint_shim PRIVATE
+    tint_api
+    tint_api_helpers
+    tint_lang_glsl_writer_helpers
+)
