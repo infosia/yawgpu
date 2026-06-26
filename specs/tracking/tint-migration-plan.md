@@ -331,6 +331,23 @@ all reflection + codegen from Tint, naga still default & untouched.
   `(dst_group,dst_binding)` differently than expected), reconcile, re-verify on real
   Metal. This is THE core Metal binding contract for the Tint frontend; the
   SPIR-V/Vulkan path needs the analogous real-GPU check too.
+
+  **Phase 3 finding #2 RESOLVED** (`d1e97c8`): Tint minifies the MSL entry point
+  (`main`→`v`); the shim now sets `remapped_entry_point_name = "tint_"+ep` and
+  returns it so the Metal HAL binds the right function. **Real Metal:
+  e2e_metal_compute --features metal,tint 5/5** (was 4/5 all-zeros). Compute under
+  Tint fully works on hardware.
+
+  **Phase 3 finding #3 (active): render needs the Metal HAL to use a
+  `MTLVertexDescriptor` (`stage_in`) instead of naga-style vertex pulling.**
+  `e2e_metal_render --features metal,tint` real tests fail (no triangle — a vertex
+  shader reads `@location(0) position: vec2<f32>` from a vertex buffer). Per the
+  governing decision we do NOT replay naga vertex pulling; Tint emits vertex MSL
+  expecting Metal `[[stage_in]]` attributes, so **yawgpu-hal/metal must build a
+  `MTLVertexDescriptor` from the pipeline's vertex-buffer layouts** (attribute
+  formats/offsets/strides/step-modes) and bind vertex buffers at the slots Tint
+  expects, replacing vertex pulling for the Tint frontend. Largest remaining Phase 3
+  chunk; then re-verify render on Metal, then MoltenVK/native-Vulkan, then flip.
 - **Flip default → Tint** (after Phase 3 confirms real-GPU parity).
 - **P2c.3** — combined same-module `generate_render_msl` (minor; no test needs it).
 - **P2c.3** — `generate_render_msl` combined same-module (minor; no test needs it yet).
