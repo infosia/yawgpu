@@ -18,6 +18,7 @@
 #include "src/tint/lang/glsl/writer/writer.h"
 #include "src/tint/lang/msl/writer/writer.h"
 #include "src/tint/lang/spirv/writer/writer.h"
+#include "src/tint/lang/wgsl/ast/id_attribute.h"
 #include "src/tint/lang/wgsl/ast/identifier.h"
 #include "src/tint/lang/wgsl/ast/module.h"
 #include "src/tint/lang/wgsl/ast/override.h"
@@ -382,8 +383,14 @@ void fill_override(const tint::Program& program,
     out->id = ov.id.value;
     out->type_class = static_cast<uint8_t>(ov.type);
     out->has_default = ov.is_initialized;
-    out->default_value =
-        ov.is_initialized ? override_default_value(find_override_global(program, ov), ov.type) : 0.0;
+    const tint::sem::GlobalVariable* global = find_override_global(program, ov);
+    // Tint assigns an id to every override (sequential without `@id`); only an
+    // explicit `@id(N)` attribute counts as an explicit id for WebGPU's
+    // constant-key rules.
+    out->has_explicit_id =
+        global != nullptr &&
+        tint::ast::HasAttribute<tint::ast::IdAttribute>(global->Declaration()->attributes);
+    out->default_value = ov.is_initialized ? override_default_value(global, ov.type) : 0.0;
 }
 
 }  // namespace

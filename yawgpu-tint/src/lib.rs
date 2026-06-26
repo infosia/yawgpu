@@ -77,6 +77,7 @@ mod imp {
     struct RawOverride {
         name: *const c_char,
         id: u16,
+        has_explicit_id: bool,
         type_class: u8,
         has_default: bool,
         default_value: f64,
@@ -413,6 +414,7 @@ mod imp {
                 let mut raw = RawOverride {
                     name: ptr::null(),
                     id: 0,
+                    has_explicit_id: false,
                     type_class: 0,
                     has_default: false,
                     default_value: 0.0,
@@ -1041,8 +1043,12 @@ mod imp {
     pub struct Override {
         /// Override name.
         pub name: String,
-        /// Numeric override identifier.
+        /// Numeric override identifier (always assigned by Tint).
         pub id: u16,
+        /// Whether the override has an explicit `@id(N)` attribute (vs an id Tint
+        /// assigned implicitly). Callers applying WebGPU's "key by numeric id only
+        /// for `@id` overrides" rule must consult this rather than `id` alone.
+        pub has_explicit_id: bool,
         /// Override scalar type.
         pub type_class: OverrideType,
         /// Whether the override has a default initializer.
@@ -1056,6 +1062,7 @@ mod imp {
             Ok(Self {
                 name: raw_string(raw.name),
                 id: raw.id,
+                has_explicit_id: raw.has_explicit_id,
                 type_class: OverrideType::try_from_raw(raw.type_class)?,
                 has_default: raw.has_default,
                 default_value: raw.default_value,

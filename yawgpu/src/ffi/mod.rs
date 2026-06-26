@@ -2166,6 +2166,19 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    // Shader-frontend-specific diagnostic wording. The default (naga) and the
+    // Tint frontend (`--features tint`) phrase the same parse error / diagnostic
+    // differently; per the migration's governing decision we assert each
+    // frontend's actual wording rather than force one onto the other.
+    #[cfg(not(feature = "tint"))]
+    const NOT_WGSL_PARSE_ERROR: &str = "expected global item";
+    #[cfg(feature = "tint")]
+    const NOT_WGSL_PARSE_ERROR: &str = "unexpected token";
+    #[cfg(not(feature = "tint"))]
+    const UNKNOWN_DIAGNOSTIC_WARNING: &str = "unknown `diagnostic";
+    #[cfg(feature = "tint")]
+    const UNKNOWN_DIAGNOSTIC_WARNING: &str = "unrecognized diagnostic rule";
     use crate::YAWGPU_INSTANCE_BACKEND_NOOP;
 
     #[derive(Default)]
@@ -4498,7 +4511,7 @@ mod tests {
             assert!(!compute_module.is_null());
             wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
             let bad_shader = create_wgsl_module(device, "not wgsl");
-            assert_validation_error_contains(instance, device, "expected global item");
+            assert_validation_error_contains(instance, device, NOT_WGSL_PARSE_ERROR);
 
             let bgl_desc = bind_group_layout_descriptor();
             let bind_group_layout = wgpuDeviceCreateBindGroupLayout(device, &bgl_desc);
@@ -5772,11 +5785,11 @@ mod tests {
             assert_eq!(warning_state.message_count, 1);
             assert!(warning_state.error_messages.is_empty());
             assert_eq!(warning_state.warning_messages.len(), 1);
-            assert!(warning_state.warning_messages[0].contains("unknown `diagnostic"));
+            assert!(warning_state.warning_messages[0].contains(UNKNOWN_DIAGNOSTIC_WARNING));
 
             wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
             let invalid = create_wgsl_module(device, "not wgsl");
-            assert_validation_error_contains(instance, device, "expected global item");
+            assert_validation_error_contains(instance, device, NOT_WGSL_PARSE_ERROR);
             let mut invalid_state = CompilationInfoState::default();
             let invalid_future = get_compilation_info(invalid, &mut invalid_state);
             assert_ne!(invalid_future.id, 0);

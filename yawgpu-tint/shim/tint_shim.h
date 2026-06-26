@@ -140,6 +140,11 @@ bool yawgpu_tint_resource_binding_get(const YawgpuTintProgram*,
 typedef struct {
     const char* name;          /* borrowed; valid until program destroyed */
     uint16_t id;
+    /* True only when the override has an explicit `@id(N)` attribute. Tint
+     * always assigns a numeric id (sequential when `@id` is absent), so callers
+     * that need WebGPU's "key by numeric id only for @id overrides" rule must use
+     * this flag rather than treating every id as explicit. */
+    bool has_explicit_id;
     uint8_t type_class;
     bool has_default;
     double default_value;

@@ -12,6 +12,8 @@ default = []
 gles = ["yawgpu-core/gles", "yawgpu-hal/gles", "yawgpu-test/gles"]
 metal = ["yawgpu-hal/metal", "yawgpu-test/metal"]
 vulkan = ["yawgpu-hal/vulkan", "yawgpu-test/vulkan"]
+# Selects the Tint shader frontend (parallel-then-switch; naga stays default).
+tint = ["yawgpu-core/tint"]
 
 [dependencies]
 yawgpu-core = { path = "../yawgpu-core" }
