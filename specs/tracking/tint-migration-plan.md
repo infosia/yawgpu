@@ -9,6 +9,19 @@ blocker is removed: the user has decided to delete all naga-fork vendor
 extensions** (see "Decisions" below), so migration scope no longer includes any
 extension re-home.
 
+## Governing decision (user, 2026-06-26): align to Tint, not naga
+
+**naga is being removed entirely, so adopt whatever model Tint is comfortable
+with — do NOT force naga's representations/output onto Tint.** Where naga and Tint
+diverge, prefer **Tint's** representation and adapt yawgpu-core / the HAL / the
+tests to match (Tint is the CTS oracle's compiler, so its classification is the
+spec-correct reference). Concretely: render MSL uses Tint's per-entry-point model
+(per-stage modules; the Metal HAL adapts — e.g. Metal vertex descriptors instead of
+naga-style vertex pulling — rather than us replaying naga's combined-module
+transforms); texture filterability uses Tint's direct `kFilterable`/`kUnfilterable`;
+diagnostics/warnings follow Tint, and naga-specific test expectations are updated to
+Tint's output. This governs P2c.2, the divergence resolutions, and Phase 3.
+
 ## Decisions (user, 2026-06-26)
 
 1. **Vendor extensions: delete all.** Drop the TBDR `subpass_input`/`subpassLoad`
