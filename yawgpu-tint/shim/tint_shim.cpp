@@ -661,6 +661,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
                               size_t n_ov,
                               uint32_t buffer_sizes_slot,
                               bool disable_robustness,
+                              bool emit_vertex_point_size,
                               YawgpuTintMslOutput* out,
                               char** err) {
     if (err != nullptr) {
@@ -689,6 +690,10 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         options.entry_point_name = entry_point;
         options.remapped_entry_point_name = remapped_entry_point;
         options.disable_robustness = disable_robustness;
+        // Point-list topology on Metal requires every vertex to set [[point_size]];
+        // Tint emits it (= 1.0) when asked. yawgpu threads this from the render
+        // pipeline's force_point_size.
+        options.emit_vertex_point_size = emit_vertex_point_size;
         options.bindings = all_remaps_empty(bindings)
                                ? tint::GenerateBindings(ir.Get(), entry_point, true, true)
                                : make_bindings(bindings);

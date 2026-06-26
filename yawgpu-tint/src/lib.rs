@@ -186,6 +186,7 @@ mod imp {
             n_ov: usize,
             buffer_sizes_slot: u32,
             disable_robustness: bool,
+            emit_vertex_point_size: bool,
             out: *mut RawMslOutput,
             err: *mut *mut c_char,
         ) -> bool;
@@ -472,6 +473,7 @@ mod imp {
             overrides: &[OverrideValue],
             buffer_sizes_slot: u32,
             robust: bool,
+            emit_vertex_point_size: bool,
         ) -> Result<MslOutput, String> {
             let ep = cstring(entry_point, "entry point")?;
             let raw_bindings_owned = bindings.as_raw();
@@ -495,6 +497,7 @@ mod imp {
                     raw_overrides.len(),
                     buffer_sizes_slot,
                     !robust,
+                    emit_vertex_point_size,
                     &mut out,
                     &mut err,
                 )
@@ -1316,7 +1319,7 @@ mod imp {
     pub fn wgsl_to_msl(wgsl: &str, entry_point: &str) -> Result<String, String> {
         let program = Program::parse(wgsl, false)?;
         Ok(program
-            .generate_msl(entry_point, &Bindings::default(), &[], 0, true)?
+            .generate_msl(entry_point, &Bindings::default(), &[], 0, true, false)?
             .source)
     }
 }
@@ -1382,6 +1385,7 @@ mod imp {
             _overrides: &[OverrideValue],
             _buffer_sizes_slot: u32,
             _robust: bool,
+            _emit_vertex_point_size: bool,
         ) -> Result<MslOutput, String> {
             Err(UNAVAILABLE.to_owned())
         }
@@ -1890,7 +1894,9 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     fn compute_generates_msl_spirv_glsl() {
         let program = Program::parse(compute_wgsl(), false).unwrap();
         let bindings = Bindings::default();
-        let msl = program.generate_msl("cs", &bindings, &[], 0, true).unwrap();
+        let msl = program
+            .generate_msl("cs", &bindings, &[], 0, true, false)
+            .unwrap();
         assert!(msl.source.contains("kernel"), "MSL:\n{}", msl.source);
         let spirv = program.generate_spirv("cs", &bindings, &[], true).unwrap();
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
@@ -1916,7 +1922,7 @@ fn cs() {
 "#;
         let program = Program::parse(wgsl, false).unwrap();
         let msl = program
-            .generate_msl("cs", &Bindings::default(), &[], 9, true)
+            .generate_msl("cs", &Bindings::default(), &[], 9, true, false)
             .unwrap();
         assert!(
             msl.source
@@ -1939,7 +1945,9 @@ fn cs() {
         let program = Program::parse(render_wgsl(), false).unwrap();
         let bindings = Bindings::default();
         for ep in ["vs", "fs"] {
-            let msl = program.generate_msl(ep, &bindings, &[], 0, true).unwrap();
+            let msl = program
+                .generate_msl(ep, &bindings, &[], 0, true, false)
+                .unwrap();
             assert!(!msl.source.is_empty());
             let spirv = program.generate_spirv(ep, &bindings, &[], true).unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));
@@ -2100,6 +2108,7 @@ fn cs() {}
                 }],
                 0,
                 true,
+                false,
             )
             .unwrap()
             .source;
@@ -2113,6 +2122,7 @@ fn cs() {}
                 }],
                 0,
                 true,
+                false,
             )
             .unwrap()
             .source;
@@ -2163,11 +2173,11 @@ fn cs() { _ = u.value; }
             ..Bindings::default()
         };
         let default_msl = program
-            .generate_msl("cs", &default_bindings, &[], 0, true)
+            .generate_msl("cs", &default_bindings, &[], 0, true, false)
             .unwrap()
             .source;
         let remapped_msl = program
-            .generate_msl("cs", &remapped, &[], 0, true)
+            .generate_msl("cs", &remapped, &[], 0, true, false)
             .unwrap()
             .source;
         assert!(remapped_msl.contains("[[buffer(7)]]"), "{remapped_msl}");
@@ -2193,7 +2203,7 @@ fn cs() {
 "#;
         let program = Program::parse(wgsl, true).unwrap();
         let msl = program
-            .generate_msl("cs", &Bindings::default(), &[], 0, true)
+            .generate_msl("cs", &Bindings::default(), &[], 0, true, false)
             .unwrap();
         assert!(msl.source.contains("kernel"));
     }
