@@ -8,11 +8,15 @@ license.workspace = true
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
-default = []
+# Tint is the default shader frontend. Build with `--no-default-features` (plus a
+# backend feature, e.g. `--no-default-features --features metal`) to select the
+# legacy naga frontend; naga is removed in Phase 4 once Tint has landed.
+default = ["tint"]
 gles = ["yawgpu-core/gles", "yawgpu-hal/gles", "yawgpu-test/gles"]
 metal = ["yawgpu-hal/metal", "yawgpu-test/metal"]
 vulkan = ["yawgpu-hal/vulkan", "yawgpu-test/vulkan"]
-# Selects the Tint shader frontend (parallel-then-switch; naga stays default).
+# Tint shader frontend (now the default; kept as an explicit feature until naga
+# is removed in Phase 4).
 tint = ["yawgpu-core/tint"]
 
 [dependencies]
