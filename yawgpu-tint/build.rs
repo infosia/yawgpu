@@ -59,7 +59,10 @@ fn resolve_dawn_dir() -> Option<PathBuf> {
     }
 
     let manifest = env::var("CARGO_MANIFEST_DIR").ok()?;
-    let vendored = Path::new(&manifest).parent()?.join("third_party").join("dawn");
+    let vendored = Path::new(&manifest)
+        .parent()?
+        .join("third_party")
+        .join("dawn");
     let has_dawn = vendored.join("CMakeLists.txt").is_file();
     let deps_fetched = vendored
         .join("third_party")
