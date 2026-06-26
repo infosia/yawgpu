@@ -142,6 +142,36 @@ void fill_entry_point(const tint::inspector::EntryPoint& ep, YawgpuTintEntryPoin
     out->wg_z = ep.workgroup_size ? ep.workgroup_size->z : 0;
     out->frag_depth_used = ep.frag_depth_used;
     out->sample_mask_used = ep.input_sample_mask_used || ep.output_sample_mask_used;
+    out->input_sample_mask_used = ep.input_sample_mask_used;
+    out->front_facing_used = ep.front_facing_used;
+    out->sample_index_used = ep.sample_index_used;
+    out->primitive_index_used = ep.primitive_index_used;
+    out->subgroup_invocation_id_used = ep.subgroup_invocation_id_used;
+    out->subgroup_size_used = ep.subgroup_size_used;
+}
+
+const tint::inspector::EntryPoint* find_entry_point(const YawgpuTintProgram* program,
+                                                    const char* ep) {
+    if (program == nullptr || ep == nullptr) {
+        return nullptr;
+    }
+    std::string name(ep);
+    for (const auto& entry : program->entry_points) {
+        if (entry.name == name) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+void fill_stage_variable(const tint::inspector::StageVariable& variable,
+                         YawgpuTintStageVariable* out) {
+    out->has_location = variable.attributes.location.has_value();
+    out->location = variable.attributes.location.value_or(0);
+    out->component_type = static_cast<uint8_t>(variable.component_type);
+    out->composition_type = static_cast<uint8_t>(variable.composition_type);
+    out->interpolation_type = static_cast<uint8_t>(variable.interpolation_type);
+    out->interpolation_sampling = static_cast<uint8_t>(variable.interpolation_sampling);
 }
 
 void fill_resource_binding(const tint::inspector::ResourceBinding& binding,
@@ -274,6 +304,40 @@ bool yawgpu_tint_entry_point_get(const YawgpuTintProgram* program,
         return false;
     }
     fill_entry_point(program->entry_points[i], out);
+    return true;
+}
+
+size_t yawgpu_tint_entry_point_input_count(const YawgpuTintProgram* program, const char* ep) {
+    const auto* entry = find_entry_point(program, ep);
+    return entry != nullptr ? entry->input_variables.size() : 0;
+}
+
+bool yawgpu_tint_entry_point_input_get(const YawgpuTintProgram* program,
+                                       const char* ep,
+                                       size_t i,
+                                       YawgpuTintStageVariable* out) {
+    const auto* entry = find_entry_point(program, ep);
+    if (entry == nullptr || out == nullptr || i >= entry->input_variables.size()) {
+        return false;
+    }
+    fill_stage_variable(entry->input_variables[i], out);
+    return true;
+}
+
+size_t yawgpu_tint_entry_point_output_count(const YawgpuTintProgram* program, const char* ep) {
+    const auto* entry = find_entry_point(program, ep);
+    return entry != nullptr ? entry->output_variables.size() : 0;
+}
+
+bool yawgpu_tint_entry_point_output_get(const YawgpuTintProgram* program,
+                                        const char* ep,
+                                        size_t i,
+                                        YawgpuTintStageVariable* out) {
+    const auto* entry = find_entry_point(program, ep);
+    if (entry == nullptr || out == nullptr || i >= entry->output_variables.size()) {
+        return false;
+    }
+    fill_stage_variable(entry->output_variables[i], out);
     return true;
 }
 

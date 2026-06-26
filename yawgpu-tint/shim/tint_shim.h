@@ -41,10 +41,42 @@ typedef struct {
     bool has_workgroup_size;
     uint32_t wg_x, wg_y, wg_z;
     bool frag_depth_used, sample_mask_used;
+    bool input_sample_mask_used, front_facing_used, sample_index_used;
+    bool primitive_index_used, subgroup_invocation_id_used, subgroup_size_used;
 } YawgpuTintEntryPoint;
 
 size_t yawgpu_tint_entry_point_count(const YawgpuTintProgram*);
 bool yawgpu_tint_entry_point_get(const YawgpuTintProgram*, size_t i, YawgpuTintEntryPoint* out);
+
+/* Stage-variable enums mirror tint/lang/wgsl/inspector/entry_point.h:
+ * component_type:
+ *   0=kF32, 1=kU32, 2=kI32, 3=kF16, 4=kUnknown.
+ * composition_type:
+ *   0=kScalar, 1=kVec2, 2=kVec3, 3=kVec4, 4=kUnknown.
+ * interpolation_type:
+ *   0=kPerspective, 1=kLinear, 2=kFlat, 3=kUnknown.
+ * interpolation_sampling:
+ *   0=kNone, 1=kCenter, 2=kCentroid, 3=kSample, 4=kFirst, 5=kEither,
+ *   6=kUnknown. */
+typedef struct {
+    bool has_location;
+    uint32_t location;
+    uint8_t component_type;
+    uint8_t composition_type;
+    uint8_t interpolation_type;
+    uint8_t interpolation_sampling;
+} YawgpuTintStageVariable;
+
+size_t yawgpu_tint_entry_point_input_count(const YawgpuTintProgram*, const char* ep);
+bool yawgpu_tint_entry_point_input_get(const YawgpuTintProgram*,
+                                       const char* ep,
+                                       size_t i,
+                                       YawgpuTintStageVariable* out);
+size_t yawgpu_tint_entry_point_output_count(const YawgpuTintProgram*, const char* ep);
+bool yawgpu_tint_entry_point_output_get(const YawgpuTintProgram*,
+                                        const char* ep,
+                                        size_t i,
+                                        YawgpuTintStageVariable* out);
 
 /* Resource enums mirror tint/lang/wgsl/inspector/resource_binding.h:
  * resource_type:
