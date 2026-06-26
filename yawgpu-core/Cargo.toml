@@ -5,16 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-# Tint is the default shader frontend (the naga→Tint migration "switch"). Build
-# with `--no-default-features` to select the legacy naga frontend; naga is removed
-# entirely in Phase 4 once Tint has landed.
-default = ["tint"]
-gles = ["naga/glsl-out"]
-tint = ["dep:yawgpu-tint"]
+gles = ["yawgpu-hal/gles"]
 
 [dependencies]
 yawgpu-hal = { path = "../yawgpu-hal" }
-yawgpu-tint = { path = "../yawgpu-tint", optional = true }
+yawgpu-tint = { path = "../yawgpu-tint" }
 parking_lot.workspace = true
 thiserror.workspace = true
-naga = { workspace = true, features = ["wgsl-in", "msl-out", "spv-out"] }

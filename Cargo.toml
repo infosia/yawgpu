@@ -12,9 +12,8 @@ members = [
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
-# Build-speed: drop debuginfo from dev/test builds. The dominant `cargo test`
-# cost is linking ~59 integration-test binaries against the heavy `naga`
-# dep; debuginfo bloats every link. Tests/CI don't need line tables.
+# Build-speed: drop debuginfo from dev/test builds. Tests/CI don't need line
+# tables.
 [profile.dev]
 debug = 0
 
@@ -27,7 +26,6 @@ parking_lot = "0.12"
 bitflags = "2"
 smallvec = "1"
 raw-window-handle = "0.6"
-naga = { git = "https://github.com/infosia/wgpu.git", rev = "b37e5c224" }
 objc2 = "0.6"
 objc2-core-foundation = "0.3"
 objc2-foundation = "0.3"

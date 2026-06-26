@@ -13,7 +13,7 @@ use crate::bind_group_layout::*;
 use crate::compute_pipeline::*;
 use crate::device::FeatureSet;
 use crate::format::*;
-use crate::frontend as shader_naga;
+use crate::frontend;
 use crate::limits::*;
 use crate::pipeline_id::next_pipeline_id;
 use crate::pipeline_layout::*;
@@ -788,10 +788,10 @@ pub(crate) fn select_render_shader_source(
                 })?;
             // Build separate per-stage binding maps so each stage's codegen
             // receives the correct per-kind slot indices for its own index space.
-            let msl_vertex_binding_map = shader_naga::MslBindingMap {
+            let msl_vertex_binding_map = frontend::MslBindingMap {
                 resources: msl_stage_resource_bindings(metal_bindings, true),
             };
-            let msl_fragment_binding_map = shader_naga::MslBindingMap {
+            let msl_fragment_binding_map = frontend::MslBindingMap {
                 resources: msl_stage_resource_bindings(metal_bindings, false),
             };
             let msl_vertex_buffers =
@@ -835,7 +835,7 @@ pub(crate) fn select_render_shader_source(
                 }
             };
             // Collect metal indices in the same order as vertex_buffer_mappings
-            // passed to naga codegen (i.e. the order of msl_vertex_buffers).
+            // passed to shader codegen (i.e. the order of msl_vertex_buffers).
             // These are the metal buffer slot ids for the `buffer_sizeN` fields
             // appended after storage-array size fields in `_mslBufferSizes`.
             let vertex_buffer_metal_indices: Vec<u32> =
@@ -873,7 +873,7 @@ pub(crate) fn select_render_shader_source(
             })?;
             let vertex = vertex_module.generate_spirv(
                 vertex_entry_name,
-                shader_naga::ShaderStage::Vertex,
+                frontend::ShaderStage::Vertex,
                 &vertex_pipeline_constants,
                 unchecked_buffer_bounds,
             )?;
@@ -884,7 +884,7 @@ pub(crate) fn select_render_shader_source(
                     })?;
                     Some(fragment_module.generate_spirv(
                         fragment_entry_name,
-                        shader_naga::ShaderStage::Fragment,
+                        frontend::ShaderStage::Fragment,
                         fragment_pipeline_constants.as_ref().ok_or_else(|| {
                             "render pipeline fragment constants were not resolved".to_owned()
                         })?,
@@ -912,7 +912,7 @@ pub(crate) fn select_render_shader_source(
             })?;
             let vertex_glsl = vertex_module.generate_glsl(
                 vertex_entry_name,
-                shader_naga::ShaderStage::Vertex,
+                frontend::ShaderStage::Vertex,
                 &vertex_pipeline_constants,
             )?;
             let fragment_glsl = match (fragment, fragment_entry_name) {
@@ -924,7 +924,7 @@ pub(crate) fn select_render_shader_source(
                         fragment_module
                             .generate_glsl(
                                 fragment_entry_name,
-                                shader_naga::ShaderStage::Fragment,
+                                frontend::ShaderStage::Fragment,
                                 fragment_pipeline_constants.as_ref().ok_or_else(|| {
                                     "render pipeline fragment constants were not resolved"
                                         .to_owned()
@@ -959,13 +959,13 @@ pub(crate) fn select_render_shader_source(
 ///
 /// `vertex = true` selects `vertex_metal_index`; `vertex = false` selects
 /// `fragment_metal_index`.  Entries that have no index for the requested stage
-/// are omitted — naga only needs bindings that the stage actually uses.
+/// are omitted, so only bindings that the stage actually uses are included.
 /// When both per-stage indices are `None` (compute-style flat map) the flat
 /// `metal_index` is used for both stages as a fallback.
 pub(crate) fn msl_stage_resource_bindings(
     bindings: &[MetalBufferBinding],
     vertex: bool,
-) -> Vec<shader_naga::MslResourceBinding> {
+) -> Vec<frontend::MslResourceBinding> {
     bindings
         .iter()
         .filter_map(|binding| {
@@ -984,19 +984,19 @@ pub(crate) fn msl_stage_resource_bindings(
                     None => return None, // not visible to fragment stage
                 }
             };
-            Some(shader_naga::MslResourceBinding {
+            Some(frontend::MslResourceBinding {
                 group: binding.group,
                 binding: binding.binding,
                 metal_index,
                 ext_params_buffer_slot: binding.ext_params_buffer_slot,
                 kind: match binding.kind {
-                    MetalBindingKind::Buffer(_) => shader_naga::MslResourceBindingKind::Buffer,
+                    MetalBindingKind::Buffer(_) => frontend::MslResourceBindingKind::Buffer,
                     MetalBindingKind::Texture | MetalBindingKind::StorageTexture { .. } => {
-                        shader_naga::MslResourceBindingKind::Texture
+                        frontend::MslResourceBindingKind::Texture
                     }
-                    MetalBindingKind::Sampler => shader_naga::MslResourceBindingKind::Sampler,
+                    MetalBindingKind::Sampler => frontend::MslResourceBindingKind::Sampler,
                     MetalBindingKind::ExternalTexture => {
-                        shader_naga::MslResourceBindingKind::ExternalTexture
+                        frontend::MslResourceBindingKind::ExternalTexture
                     }
                 },
             })
@@ -1035,25 +1035,25 @@ pub(crate) fn metal_vertex_buffer_binding_map(
 pub(crate) fn msl_vertex_buffer_bindings(
     layouts: &[VertexBufferLayout],
     bindings: &[MetalVertexBufferBinding],
-) -> Result<Vec<shader_naga::MslVertexBufferBinding>, String> {
+) -> Result<Vec<frontend::MslVertexBufferBinding>, String> {
     layouts
         .iter()
         .filter(|layout| layout.used)
         .zip(bindings)
         .map(|(layout, binding)| {
-            Ok(shader_naga::MslVertexBufferBinding {
+            Ok(frontend::MslVertexBufferBinding {
                 slot: binding.slot,
                 metal_index: binding.metal_index,
                 array_stride: layout.array_stride,
                 step_mode: match layout.step_mode {
-                    VertexStepMode::Vertex => shader_naga::MslVertexStepMode::Vertex,
-                    VertexStepMode::Instance => shader_naga::MslVertexStepMode::Instance,
+                    VertexStepMode::Vertex => frontend::MslVertexStepMode::Vertex,
+                    VertexStepMode::Instance => frontend::MslVertexStepMode::Instance,
                 },
                 attributes: layout
                     .attributes
                     .iter()
                     .map(|attribute| {
-                        Ok(shader_naga::MslVertexAttribute {
+                        Ok(frontend::MslVertexAttribute {
                             shader_location: attribute.shader_location,
                             offset: attribute.offset,
                             format: msl_vertex_format(attribute.format)?,
@@ -1243,51 +1243,49 @@ fn hal_stencil_operation(operation: StencilOperation) -> HalStencilOperation {
 }
 
 /// Returns msl vertex format.
-pub(crate) fn msl_vertex_format(
-    format: VertexFormat,
-) -> Result<shader_naga::MslVertexFormat, String> {
+pub(crate) fn msl_vertex_format(format: VertexFormat) -> Result<frontend::MslVertexFormat, String> {
     match format.0 {
-        0x0000_0001 => Ok(shader_naga::MslVertexFormat::Uint8),
-        0x0000_0002 => Ok(shader_naga::MslVertexFormat::Uint8x2),
-        0x0000_0003 => Ok(shader_naga::MslVertexFormat::Uint8x4),
-        0x0000_0004 => Ok(shader_naga::MslVertexFormat::Sint8),
-        0x0000_0005 => Ok(shader_naga::MslVertexFormat::Sint8x2),
-        0x0000_0006 => Ok(shader_naga::MslVertexFormat::Sint8x4),
-        0x0000_0007 => Ok(shader_naga::MslVertexFormat::Unorm8),
-        0x0000_0008 => Ok(shader_naga::MslVertexFormat::Unorm8x2),
-        0x0000_0009 => Ok(shader_naga::MslVertexFormat::Unorm8x4),
-        0x0000_000A => Ok(shader_naga::MslVertexFormat::Snorm8),
-        0x0000_000B => Ok(shader_naga::MslVertexFormat::Snorm8x2),
-        0x0000_000C => Ok(shader_naga::MslVertexFormat::Snorm8x4),
-        0x0000_000D => Ok(shader_naga::MslVertexFormat::Uint16),
-        0x0000_000E => Ok(shader_naga::MslVertexFormat::Uint16x2),
-        0x0000_000F => Ok(shader_naga::MslVertexFormat::Uint16x4),
-        0x0000_0010 => Ok(shader_naga::MslVertexFormat::Sint16),
-        0x0000_0011 => Ok(shader_naga::MslVertexFormat::Sint16x2),
-        0x0000_0012 => Ok(shader_naga::MslVertexFormat::Sint16x4),
-        0x0000_0013 => Ok(shader_naga::MslVertexFormat::Unorm16),
-        0x0000_0014 => Ok(shader_naga::MslVertexFormat::Unorm16x2),
-        0x0000_0015 => Ok(shader_naga::MslVertexFormat::Unorm16x4),
-        0x0000_0016 => Ok(shader_naga::MslVertexFormat::Snorm16),
-        0x0000_0017 => Ok(shader_naga::MslVertexFormat::Snorm16x2),
-        0x0000_0018 => Ok(shader_naga::MslVertexFormat::Snorm16x4),
-        0x0000_0019 => Ok(shader_naga::MslVertexFormat::Float16),
-        0x0000_001A => Ok(shader_naga::MslVertexFormat::Float16x2),
-        0x0000_001B => Ok(shader_naga::MslVertexFormat::Float16x4),
-        0x0000_001C => Ok(shader_naga::MslVertexFormat::Float32),
-        0x0000_001D => Ok(shader_naga::MslVertexFormat::Float32x2),
-        0x0000_001E => Ok(shader_naga::MslVertexFormat::Float32x3),
-        0x0000_001F => Ok(shader_naga::MslVertexFormat::Float32x4),
-        0x0000_0020 => Ok(shader_naga::MslVertexFormat::Uint32),
-        0x0000_0021 => Ok(shader_naga::MslVertexFormat::Uint32x2),
-        0x0000_0022 => Ok(shader_naga::MslVertexFormat::Uint32x3),
-        0x0000_0023 => Ok(shader_naga::MslVertexFormat::Uint32x4),
-        0x0000_0024 => Ok(shader_naga::MslVertexFormat::Sint32),
-        0x0000_0025 => Ok(shader_naga::MslVertexFormat::Sint32x2),
-        0x0000_0026 => Ok(shader_naga::MslVertexFormat::Sint32x3),
-        0x0000_0027 => Ok(shader_naga::MslVertexFormat::Sint32x4),
-        0x0000_0028 => Ok(shader_naga::MslVertexFormat::Unorm10_10_10_2),
-        0x0000_0029 => Ok(shader_naga::MslVertexFormat::Unorm8x4Bgra),
+        0x0000_0001 => Ok(frontend::MslVertexFormat::Uint8),
+        0x0000_0002 => Ok(frontend::MslVertexFormat::Uint8x2),
+        0x0000_0003 => Ok(frontend::MslVertexFormat::Uint8x4),
+        0x0000_0004 => Ok(frontend::MslVertexFormat::Sint8),
+        0x0000_0005 => Ok(frontend::MslVertexFormat::Sint8x2),
+        0x0000_0006 => Ok(frontend::MslVertexFormat::Sint8x4),
+        0x0000_0007 => Ok(frontend::MslVertexFormat::Unorm8),
+        0x0000_0008 => Ok(frontend::MslVertexFormat::Unorm8x2),
+        0x0000_0009 => Ok(frontend::MslVertexFormat::Unorm8x4),
+        0x0000_000A => Ok(frontend::MslVertexFormat::Snorm8),
+        0x0000_000B => Ok(frontend::MslVertexFormat::Snorm8x2),
+        0x0000_000C => Ok(frontend::MslVertexFormat::Snorm8x4),
+        0x0000_000D => Ok(frontend::MslVertexFormat::Uint16),
+        0x0000_000E => Ok(frontend::MslVertexFormat::Uint16x2),
+        0x0000_000F => Ok(frontend::MslVertexFormat::Uint16x4),
+        0x0000_0010 => Ok(frontend::MslVertexFormat::Sint16),
+        0x0000_0011 => Ok(frontend::MslVertexFormat::Sint16x2),
+        0x0000_0012 => Ok(frontend::MslVertexFormat::Sint16x4),
+        0x0000_0013 => Ok(frontend::MslVertexFormat::Unorm16),
+        0x0000_0014 => Ok(frontend::MslVertexFormat::Unorm16x2),
+        0x0000_0015 => Ok(frontend::MslVertexFormat::Unorm16x4),
+        0x0000_0016 => Ok(frontend::MslVertexFormat::Snorm16),
+        0x0000_0017 => Ok(frontend::MslVertexFormat::Snorm16x2),
+        0x0000_0018 => Ok(frontend::MslVertexFormat::Snorm16x4),
+        0x0000_0019 => Ok(frontend::MslVertexFormat::Float16),
+        0x0000_001A => Ok(frontend::MslVertexFormat::Float16x2),
+        0x0000_001B => Ok(frontend::MslVertexFormat::Float16x4),
+        0x0000_001C => Ok(frontend::MslVertexFormat::Float32),
+        0x0000_001D => Ok(frontend::MslVertexFormat::Float32x2),
+        0x0000_001E => Ok(frontend::MslVertexFormat::Float32x3),
+        0x0000_001F => Ok(frontend::MslVertexFormat::Float32x4),
+        0x0000_0020 => Ok(frontend::MslVertexFormat::Uint32),
+        0x0000_0021 => Ok(frontend::MslVertexFormat::Uint32x2),
+        0x0000_0022 => Ok(frontend::MslVertexFormat::Uint32x3),
+        0x0000_0023 => Ok(frontend::MslVertexFormat::Uint32x4),
+        0x0000_0024 => Ok(frontend::MslVertexFormat::Sint32),
+        0x0000_0025 => Ok(frontend::MslVertexFormat::Sint32x2),
+        0x0000_0026 => Ok(frontend::MslVertexFormat::Sint32x3),
+        0x0000_0027 => Ok(frontend::MslVertexFormat::Sint32x4),
+        0x0000_0028 => Ok(frontend::MslVertexFormat::Unorm10_10_10_2),
+        0x0000_0029 => Ok(frontend::MslVertexFormat::Unorm8x4Bgra),
         _ => Err("unsupported Metal vertex format".to_owned()),
     }
 }
@@ -1365,13 +1363,13 @@ pub(crate) fn resolve_render_pipeline_descriptor(
     }
     let vertex_entry = resolve_render_entry(
         &descriptor.vertex.shader,
-        shader_naga::ReflectedShaderStage::Vertex,
+        frontend::ReflectedShaderStage::Vertex,
         "vertex",
     )?;
     let fragment_entry = if let Some(fragment) = &descriptor.fragment {
         Some(resolve_render_entry(
             &fragment.shader,
-            shader_naga::ReflectedShaderStage::Fragment,
+            frontend::ReflectedShaderStage::Fragment,
             "fragment",
         )?)
     } else {
@@ -1518,10 +1516,10 @@ pub(crate) fn validate_vertex_state(
             );
         };
         let input_class = match input.scalar {
-            shader_naga::ReflectedTypeScalarClass::Float => FormatOutputClass::Float,
-            shader_naga::ReflectedTypeScalarClass::Sint => FormatOutputClass::Sint,
-            shader_naga::ReflectedTypeScalarClass::Uint => FormatOutputClass::Uint,
-            shader_naga::ReflectedTypeScalarClass::Bool => {
+            frontend::ReflectedTypeScalarClass::Float => FormatOutputClass::Float,
+            frontend::ReflectedTypeScalarClass::Sint => FormatOutputClass::Sint,
+            frontend::ReflectedTypeScalarClass::Uint => FormatOutputClass::Uint,
+            frontend::ReflectedTypeScalarClass::Bool => {
                 return Err("render pipeline vertex shader input type is incompatible".to_owned());
             }
         };
@@ -1537,7 +1535,7 @@ pub(crate) fn validate_vertex_state(
 pub(crate) fn vertex_inputs(
     vertex: &RenderPipelineVertexState,
     vertex_entry: &str,
-) -> Result<BTreeMap<u32, shader_naga::ReflectedTypeClass>, String> {
+) -> Result<BTreeMap<u32, frontend::ReflectedTypeClass>, String> {
     let Some(module) = vertex.shader.module.reflected() else {
         return Err("vertex module reflection failed".to_owned());
     };
@@ -1557,7 +1555,7 @@ pub(crate) fn vertex_inputs(
 /// Records resolve into the command stream.
 pub(crate) fn resolve_render_entry(
     stage: &RenderPipelineShaderStage,
-    expected_stage: shader_naga::ReflectedShaderStage,
+    expected_stage: frontend::ReflectedShaderStage,
     label: &str,
 ) -> Result<String, String> {
     if stage.module.is_error() {
@@ -1965,7 +1963,7 @@ fn blend_factor_uses_source_alpha(factor: BlendFactor) -> bool {
 pub(crate) fn fragment_outputs(
     fragment: &RenderPipelineFragmentState,
     fragment_entry: Option<&str>,
-) -> Result<BTreeMap<u32, shader_naga::ReflectedTypeClass>, String> {
+) -> Result<BTreeMap<u32, frontend::ReflectedTypeClass>, String> {
     let Some(entry_name) = fragment_entry else {
         return Ok(BTreeMap::new());
     };
@@ -1987,17 +1985,17 @@ pub(crate) fn fragment_outputs(
 
 /// Validates fragment output compat and returns a descriptive error on failure.
 pub(crate) fn validate_fragment_output_compat(
-    output: shader_naga::ReflectedTypeClass,
+    output: frontend::ReflectedTypeClass,
     caps: FormatCaps,
 ) -> Result<(), String> {
     let Some(format_class) = caps.output_class else {
         return Err("render pipeline color target format has no output class".to_owned());
     };
     let output_class = match output.scalar {
-        shader_naga::ReflectedTypeScalarClass::Float => FormatOutputClass::Float,
-        shader_naga::ReflectedTypeScalarClass::Sint => FormatOutputClass::Sint,
-        shader_naga::ReflectedTypeScalarClass::Uint => FormatOutputClass::Uint,
-        shader_naga::ReflectedTypeScalarClass::Bool => {
+        frontend::ReflectedTypeScalarClass::Float => FormatOutputClass::Float,
+        frontend::ReflectedTypeScalarClass::Sint => FormatOutputClass::Sint,
+        frontend::ReflectedTypeScalarClass::Uint => FormatOutputClass::Uint,
+        frontend::ReflectedTypeScalarClass::Bool => {
             return Err("render pipeline fragment output type is incompatible".to_owned());
         }
     };
@@ -2046,8 +2044,8 @@ pub(crate) fn validate_inter_stage_interface(
         }
         // Compare interpolation type and sampling after applying WebGPU defaults:
         // an unspecified interpolation defaults to `perspective`, and an
-        // unspecified sampling defaults to `center` for perspective/linear. naga
-        // only fills these defaults when the *interpolation* was unspecified, so
+        // unspecified sampling defaults to `center` for perspective/linear. The
+        // frontend only fills these defaults when the *interpolation* was unspecified, so
         // `@interpolate(perspective)` (sampling None) and `@interpolate(perspective,
         // center)` would otherwise compare unequal — a false reject (F-063).
         if effective_interpolation(output.interpolation)
@@ -2071,30 +2069,29 @@ pub(crate) fn validate_inter_stage_interface(
 /// Returns the effective inter-stage interpolation, defaulting an unspecified
 /// interpolation to `perspective` (the WebGPU default).
 fn effective_interpolation(
-    interpolation: Option<shader_naga::ReflectedInterpolation>,
-) -> shader_naga::ReflectedInterpolation {
-    interpolation.unwrap_or(shader_naga::ReflectedInterpolation::Perspective)
+    interpolation: Option<frontend::ReflectedInterpolation>,
+) -> frontend::ReflectedInterpolation {
+    interpolation.unwrap_or(frontend::ReflectedInterpolation::Perspective)
 }
 
 /// Returns the effective inter-stage sampling. For perspective/linear
 /// interpolation an unspecified sampling defaults to `center`; for flat (and
 /// per-vertex) interpolation the sampling carries as-is.
 fn effective_sampling(
-    interpolation: Option<shader_naga::ReflectedInterpolation>,
-    sampling: Option<shader_naga::ReflectedSampling>,
-) -> Option<shader_naga::ReflectedSampling> {
+    interpolation: Option<frontend::ReflectedInterpolation>,
+    sampling: Option<frontend::ReflectedSampling>,
+) -> Option<frontend::ReflectedSampling> {
     match effective_interpolation(interpolation) {
-        shader_naga::ReflectedInterpolation::Perspective
-        | shader_naga::ReflectedInterpolation::Linear => {
-            Some(sampling.unwrap_or(shader_naga::ReflectedSampling::Center))
+        frontend::ReflectedInterpolation::Perspective
+        | frontend::ReflectedInterpolation::Linear => {
+            Some(sampling.unwrap_or(frontend::ReflectedSampling::Center))
         }
-        shader_naga::ReflectedInterpolation::Flat
-        | shader_naga::ReflectedInterpolation::PerVertex => sampling,
+        frontend::ReflectedInterpolation::Flat => sampling,
     }
 }
 
 fn validate_inter_stage_limits(
-    locations: &BTreeMap<u32, shader_naga::ReflectedIoLocation>,
+    locations: &BTreeMap<u32, frontend::ReflectedIoLocation>,
     extra_builtins: u32,
     limits: Limits,
     label: &str,
@@ -2120,7 +2117,7 @@ fn validate_inter_stage_limits(
 fn inter_stage_outputs(
     vertex: &RenderPipelineVertexState,
     vertex_entry: &str,
-) -> Result<BTreeMap<u32, shader_naga::ReflectedIoLocation>, String> {
+) -> Result<BTreeMap<u32, frontend::ReflectedIoLocation>, String> {
     let Some(module) = vertex.shader.module.reflected() else {
         return Err("vertex module reflection failed".to_owned());
     };
@@ -2140,7 +2137,7 @@ fn inter_stage_outputs(
 fn inter_stage_inputs(
     fragment: &RenderPipelineFragmentState,
     fragment_entry: &str,
-) -> Result<BTreeMap<u32, shader_naga::ReflectedIoLocation>, String> {
+) -> Result<BTreeMap<u32, frontend::ReflectedIoLocation>, String> {
     let Some(module) = fragment.shader.module.reflected() else {
         return Err("fragment module reflection failed".to_owned());
     };
@@ -2293,7 +2290,6 @@ pub(crate) fn validate_multisample_state(
 
 #[cfg(test)]
 mod tests {
-    use super::shader_naga;
     use super::*;
     use crate::pass::bind_group_layouts_compatible;
     use crate::test_helpers::*;
@@ -3104,16 +3100,8 @@ mod tests {
                 if vertex.contains("vertex")
                     && fragment.as_ref().is_some_and(|fragment| fragment.contains("fragment"))
         ));
-        let expected_vertex_entry = if cfg!(feature = "tint") {
-            "tint_vs"
-        } else {
-            "vs"
-        };
-        let expected_fragment_entry = if cfg!(feature = "tint") {
-            "tint_fs"
-        } else {
-            "fs"
-        };
+        let expected_vertex_entry = "tint_vs";
+        let expected_fragment_entry = "tint_fs";
         assert_eq!(vertex_entry, expected_vertex_entry);
         assert_eq!(fragment_entry.as_deref(), Some(expected_fragment_entry));
         assert!(bindings.is_empty());
@@ -3395,7 +3383,7 @@ mod tests {
 
     #[test]
     fn inter_stage_interpolation_defaults_are_applied() {
-        use shader_naga::{ReflectedInterpolation as I, ReflectedSampling as S};
+        use frontend::{ReflectedInterpolation as I, ReflectedSampling as S};
         // F-063: unspecified interpolation defaults to perspective; unspecified
         // sampling defaults to center for perspective/linear, so `perspective`
         // (None sampling) matches `perspective, center`.
@@ -3423,7 +3411,7 @@ mod tests {
     // CTS: api,validation,non_filterable_texture:non_filterable_texture_with_filtering_sampler
     // (pipeline=render cases)
     //
-    // The shader uses texture_2d<f32> + textureGather — naga reflects the texture as
+    // The shader uses texture_2d<f32> + textureGather. The frontend reflects the texture as
     // Float.  The explicit BGL declares the texture entry as UnfilterableFloat.  The
     // F-061 rule allows UnfilterableFloat layout to accept a Float shader binding, but
     // an UnfilterableFloat texture combined with a Filtering sampler in the same pipeline

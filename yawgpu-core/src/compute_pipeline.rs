@@ -10,7 +10,7 @@ use yawgpu_hal::{
 use crate::bind_group_layout::*;
 use crate::device::FeatureSet;
 use crate::format::*;
-use crate::frontend as shader_naga;
+use crate::frontend;
 use crate::limits::*;
 use crate::pipeline_id::next_pipeline_id;
 use crate::pipeline_layout::*;
@@ -63,7 +63,7 @@ pub(crate) struct ComputePipelineInner {
     pub(crate) _layout: ComputePipelineLayout,
     pub(crate) _shader_module: Arc<ShaderModule>,
     pub(crate) entry_name: String,
-    pub(crate) _bindings: Vec<shader_naga::ReflectedResourceBinding>,
+    pub(crate) _bindings: Vec<frontend::ReflectedResourceBinding>,
     pub(crate) metal_bindings: Vec<MetalBufferBinding>,
     pub(crate) hal: Option<HalComputePipeline>,
     pub(crate) bind_group_layouts: Vec<Arc<BindGroupLayout>>,
@@ -201,7 +201,7 @@ impl ComputePipeline {
 /// Alias for resolved pipeline parts.
 pub(crate) type ResolvedPipelineParts = (
     String,
-    Vec<shader_naga::ReflectedResourceBinding>,
+    Vec<frontend::ReflectedResourceBinding>,
     Option<ResolvedComputeWorkgroup>,
     Vec<Arc<BindGroupLayout>>,
 );
@@ -272,7 +272,7 @@ pub(crate) fn select_compute_shader_source(
             let module = shader_module
                 .reflected()
                 .ok_or_else(|| "compute pipeline requires a reflected shader module".to_owned())?;
-            let msl_binding_map = shader_naga::MslBindingMap {
+            let msl_binding_map = frontend::MslBindingMap {
                 resources: msl_resource_bindings(metal_bindings),
             };
             let generated =
@@ -296,7 +296,7 @@ pub(crate) fn select_compute_shader_source(
                 .ok_or_else(|| "compute pipeline requires a reflected shader module".to_owned())?;
             let spirv = module.generate_spirv(
                 entry_name,
-                shader_naga::ShaderStage::Compute,
+                frontend::ShaderStage::Compute,
                 &pipeline_constants,
                 unchecked_buffer_bounds,
             )?;
@@ -313,7 +313,7 @@ pub(crate) fn select_compute_shader_source(
                 .ok_or_else(|| "compute pipeline requires a reflected shader module".to_owned())?;
             let generated = module.generate_glsl(
                 entry_name,
-                shader_naga::ShaderStage::Compute,
+                frontend::ShaderStage::Compute,
                 &pipeline_constants,
             )?;
             Ok((
@@ -331,10 +331,8 @@ pub(crate) fn select_compute_shader_source(
 }
 
 /// Returns frontend pipeline constants keyed the same way as WebGPU constant entries.
-pub(crate) fn pipeline_constant_map(
-    constants: &[PipelineConstant],
-) -> shader_naga::PipelineConstants {
-    shader_naga::PipelineConstants::from_iter(
+pub(crate) fn pipeline_constant_map(constants: &[PipelineConstant]) -> frontend::PipelineConstants {
+    frontend::PipelineConstants::from_iter(
         constants
             .iter()
             .map(|constant| (constant.key.clone(), constant.value)),
@@ -343,7 +341,7 @@ pub(crate) fn pipeline_constant_map(
 
 /// Returns HAL MSL buffer-size bindings.
 pub(crate) fn hal_msl_buffer_size_bindings(
-    bindings: &[shader_naga::MslBufferSizeBinding],
+    bindings: &[frontend::MslBufferSizeBinding],
 ) -> Vec<HalMslBufferSizeBinding> {
     bindings
         .iter()
@@ -392,22 +390,22 @@ pub(crate) fn hal_storage_texture_access(access: StorageTextureAccess) -> HalSto
 /// Returns MSL resource bindings.
 pub(crate) fn msl_resource_bindings(
     bindings: &[MetalBufferBinding],
-) -> Vec<shader_naga::MslResourceBinding> {
+) -> Vec<frontend::MslResourceBinding> {
     bindings
         .iter()
-        .map(|binding| shader_naga::MslResourceBinding {
+        .map(|binding| frontend::MslResourceBinding {
             group: binding.group,
             binding: binding.binding,
             metal_index: binding.metal_index,
             ext_params_buffer_slot: binding.ext_params_buffer_slot,
             kind: match binding.kind {
-                MetalBindingKind::Buffer(_) => shader_naga::MslResourceBindingKind::Buffer,
+                MetalBindingKind::Buffer(_) => frontend::MslResourceBindingKind::Buffer,
                 MetalBindingKind::Texture | MetalBindingKind::StorageTexture { .. } => {
-                    shader_naga::MslResourceBindingKind::Texture
+                    frontend::MslResourceBindingKind::Texture
                 }
-                MetalBindingKind::Sampler => shader_naga::MslResourceBindingKind::Sampler,
+                MetalBindingKind::Sampler => frontend::MslResourceBindingKind::Sampler,
                 MetalBindingKind::ExternalTexture => {
-                    shader_naga::MslResourceBindingKind::ExternalTexture
+                    frontend::MslResourceBindingKind::ExternalTexture
                 }
             },
         })
@@ -784,13 +782,13 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
 
 /// Records resolve into the command stream.
 pub(crate) fn resolve_compute_entry(
-    module: &shader_naga::ReflectedModule,
+    module: &frontend::ReflectedModule,
     entry_point: Option<&str>,
 ) -> Result<String, String> {
     let entries = module.entry_points();
     let compute_entries = entries
         .iter()
-        .filter(|entry| entry.stage == shader_naga::ReflectedShaderStage::Compute)
+        .filter(|entry| entry.stage == frontend::ReflectedShaderStage::Compute)
         .collect::<Vec<_>>();
 
     match entry_point {
@@ -822,7 +820,7 @@ pub(crate) struct ResolvedOverrideConstant {
 
 /// Records resolve into the command stream.
 pub(crate) fn resolve_pipeline_constants(
-    overrides: &[shader_naga::ReflectedOverride],
+    overrides: &[frontend::ReflectedOverride],
     constants: &[PipelineConstant],
 ) -> Result<Vec<ResolvedOverrideConstant>, String> {
     let mut seen_keys = BTreeSet::new();
@@ -852,7 +850,7 @@ pub(crate) fn resolve_pipeline_constants(
 
 /// Records resolve into the command stream.
 pub(crate) fn resolve_pipeline_constant_key(
-    overrides: &[shader_naga::ReflectedOverride],
+    overrides: &[frontend::ReflectedOverride],
     key: &str,
 ) -> Result<usize, String> {
     if let Ok(id) = key.parse::<u16>() {
@@ -877,7 +875,7 @@ pub(crate) fn resolve_pipeline_constant_key(
 
 /// Validates pipeline constant value and returns a descriptive error on failure.
 pub(crate) fn validate_pipeline_constant_value(
-    override_: &shader_naga::ReflectedOverride,
+    override_: &frontend::ReflectedOverride,
     value: f64,
 ) -> Result<(), String> {
     if !value.is_finite() {
@@ -888,7 +886,7 @@ pub(crate) fn validate_pipeline_constant_value(
     }
 
     match override_.ty.scalar {
-        shader_naga::ReflectedTypeScalarClass::Float => {
+        frontend::ReflectedTypeScalarClass::Float => {
             let max = if override_.ty.width == 2 {
                 65_504.0
             } else {
@@ -898,24 +896,24 @@ pub(crate) fn validate_pipeline_constant_value(
                 return Err("pipeline constant value is outside the override type range".to_owned());
             }
         }
-        shader_naga::ReflectedTypeScalarClass::Sint => {
+        frontend::ReflectedTypeScalarClass::Sint => {
             if value.fract() != 0.0 || value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
                 return Err("pipeline constant value is outside the override type range".to_owned());
             }
         }
-        shader_naga::ReflectedTypeScalarClass::Uint => {
+        frontend::ReflectedTypeScalarClass::Uint => {
             if value.fract() != 0.0 || value < 0.0 || value > f64::from(u32::MAX) {
                 return Err("pipeline constant value is outside the override type range".to_owned());
             }
         }
-        shader_naga::ReflectedTypeScalarClass::Bool => {}
+        frontend::ReflectedTypeScalarClass::Bool => {}
     }
     Ok(())
 }
 
 /// Records resolve into the command stream.
 pub(crate) fn resolve_compute_workgroup(
-    module: &shader_naga::ReflectedModule,
+    module: &frontend::ReflectedModule,
     entry_name: &str,
     constants: &[ResolvedOverrideConstant],
     limits: Limits,
@@ -955,8 +953,8 @@ pub(crate) fn resolve_compute_workgroup(
 
 fn resolved_pipeline_constant_map(
     constants: &[ResolvedOverrideConstant],
-) -> shader_naga::PipelineConstants {
-    shader_naga::PipelineConstants::from_iter(
+) -> frontend::PipelineConstants {
+    frontend::PipelineConstants::from_iter(
         constants
             .iter()
             .map(|constant| (constant.key.clone(), constant.value)),
@@ -966,7 +964,7 @@ fn resolved_pipeline_constant_map(
 /// Validates compute pipeline layout and returns a descriptive error on failure.
 pub(crate) fn validate_compute_pipeline_layout(
     layout: &ComputePipelineLayout,
-    bindings: &[shader_naga::ReflectedResourceBinding],
+    bindings: &[frontend::ReflectedResourceBinding],
 ) -> Result<(), String> {
     let ComputePipelineLayout::Explicit(layout) = layout else {
         return Ok(());
@@ -988,7 +986,7 @@ pub(crate) fn validate_compute_pipeline_layout(
 /// Returns effective compute bind group layouts.
 pub(crate) fn effective_compute_bind_group_layouts(
     layout: &ComputePipelineLayout,
-    bindings: &[shader_naga::ReflectedResourceBinding],
+    bindings: &[frontend::ReflectedResourceBinding],
     limits: Limits,
     features: &FeatureSet,
     pipeline_id: u64,
@@ -1014,7 +1012,7 @@ pub(crate) fn effective_compute_bind_group_layouts(
 #[derive(Debug, Clone)]
 pub(crate) struct StageResourceBinding {
     pub(crate) stage: PipelineShaderStage,
-    pub(crate) binding: shader_naga::ReflectedResourceBinding,
+    pub(crate) binding: frontend::ReflectedResourceBinding,
 }
 
 /// Enumerates pipeline shader stage values.
@@ -1070,10 +1068,10 @@ fn validate_non_filterable_gather_bindings(
     requirements: &[StageResourceBinding],
 ) -> Result<(), String> {
     for requirement in requirements {
-        let shader_naga::ReflectedResourceBindingKind::Texture {
+        let frontend::ReflectedResourceBindingKind::Texture {
             sampled,
             sample_kind,
-            sample_usage: shader_naga::ReflectedTextureSampleUsage::Gather,
+            sample_usage: frontend::ReflectedTextureSampleUsage::Gather,
             ..
         } = requirement.binding.kind
         else {
@@ -1082,7 +1080,7 @@ fn validate_non_filterable_gather_bindings(
         let shader_sample_type = reflected_texture_sample_type(
             sampled,
             sample_kind,
-            shader_naga::ReflectedTextureSampleUsage::Gather,
+            frontend::ReflectedTextureSampleUsage::Gather,
         )?;
 
         // The texture is filterable (and textureGather is legal with a
@@ -1254,7 +1252,7 @@ where
 
 /// Returns reflected bind group layout entry.
 pub(crate) fn reflected_bind_group_layout_entry(
-    binding: &shader_naga::ReflectedResourceBinding,
+    binding: &frontend::ReflectedResourceBinding,
     visibility: u64,
 ) -> Result<BindGroupLayoutEntry, String> {
     Ok(BindGroupLayoutEntry {
@@ -1267,21 +1265,21 @@ pub(crate) fn reflected_bind_group_layout_entry(
 
 /// Returns reflected binding layout kind.
 pub(crate) fn reflected_binding_layout_kind(
-    binding: &shader_naga::ReflectedResourceBinding,
+    binding: &frontend::ReflectedResourceBinding,
 ) -> Result<BindingLayoutKind, String> {
     match &binding.kind {
-        shader_naga::ReflectedResourceBindingKind::Buffer(ty) => Ok(BindingLayoutKind::Buffer {
+        frontend::ReflectedResourceBindingKind::Buffer(ty) => Ok(BindingLayoutKind::Buffer {
             ty: match ty {
-                shader_naga::ReflectedBufferType::Uniform => BufferBindingType::Uniform,
-                shader_naga::ReflectedBufferType::Storage => BufferBindingType::Storage,
-                shader_naga::ReflectedBufferType::ReadOnlyStorage => {
+                frontend::ReflectedBufferType::Uniform => BufferBindingType::Uniform,
+                frontend::ReflectedBufferType::Storage => BufferBindingType::Storage,
+                frontend::ReflectedBufferType::ReadOnlyStorage => {
                     BufferBindingType::ReadOnlyStorage
                 }
             },
             has_dynamic_offset: false,
             min_binding_size: binding.min_binding_size,
         }),
-        shader_naga::ReflectedResourceBindingKind::Sampler { comparison } => {
+        frontend::ReflectedResourceBindingKind::Sampler { comparison } => {
             Ok(BindingLayoutKind::Sampler {
                 ty: if *comparison {
                     SamplerBindingType::Comparison
@@ -1290,7 +1288,7 @@ pub(crate) fn reflected_binding_layout_kind(
                 },
             })
         }
-        shader_naga::ReflectedResourceBindingKind::Texture {
+        frontend::ReflectedResourceBindingKind::Texture {
             sampled,
             sample_kind,
             sample_usage,
@@ -1301,7 +1299,7 @@ pub(crate) fn reflected_binding_layout_kind(
             view_dimension: reflected_texture_view_dimension(*view_dimension),
             multisampled: *multisampled,
         }),
-        shader_naga::ReflectedResourceBindingKind::StorageTexture {
+        frontend::ReflectedResourceBindingKind::StorageTexture {
             format,
             access,
             view_dimension,
@@ -1310,7 +1308,7 @@ pub(crate) fn reflected_binding_layout_kind(
             format: reflected_storage_texture_format(format)?,
             view_dimension: reflected_texture_view_dimension(*view_dimension),
         }),
-        shader_naga::ReflectedResourceBindingKind::ExternalTexture => {
+        frontend::ReflectedResourceBindingKind::ExternalTexture => {
             Ok(BindingLayoutKind::ExternalTexture)
         }
     }
@@ -1319,41 +1317,41 @@ pub(crate) fn reflected_binding_layout_kind(
 /// Returns reflected texture sample type.
 pub(crate) fn reflected_texture_sample_type(
     sampled: bool,
-    sample_kind: Option<shader_naga::ReflectedTypeScalarClass>,
-    sample_usage: shader_naga::ReflectedTextureSampleUsage,
+    sample_kind: Option<frontend::ReflectedTypeScalarClass>,
+    sample_usage: frontend::ReflectedTextureSampleUsage,
 ) -> Result<TextureSampleType, String> {
     if !sampled {
         return Ok(TextureSampleType::Depth);
     }
     match sample_kind {
-        Some(shader_naga::ReflectedTypeScalarClass::Float) => Ok(match sample_usage {
-            shader_naga::ReflectedTextureSampleUsage::Sample
-            | shader_naga::ReflectedTextureSampleUsage::Gather => TextureSampleType::Float,
-            shader_naga::ReflectedTextureSampleUsage::Load => TextureSampleType::UnfilterableFloat,
+        Some(frontend::ReflectedTypeScalarClass::Float) => Ok(match sample_usage {
+            frontend::ReflectedTextureSampleUsage::Sample
+            | frontend::ReflectedTextureSampleUsage::Gather => TextureSampleType::Float,
+            frontend::ReflectedTextureSampleUsage::Load => TextureSampleType::UnfilterableFloat,
         }),
-        Some(shader_naga::ReflectedTypeScalarClass::Sint) => Ok(TextureSampleType::Sint),
-        Some(shader_naga::ReflectedTypeScalarClass::Uint) => Ok(TextureSampleType::Uint),
+        Some(frontend::ReflectedTypeScalarClass::Sint) => Ok(TextureSampleType::Sint),
+        Some(frontend::ReflectedTypeScalarClass::Uint) => Ok(TextureSampleType::Uint),
         _ => Err("pipeline texture binding sample type is unsupported".to_owned()),
     }
 }
 
 /// Returns reflected texture view dimension.
 pub(crate) fn reflected_texture_view_dimension(
-    dimension: shader_naga::ReflectedTextureViewDimension,
+    dimension: frontend::ReflectedTextureViewDimension,
 ) -> TextureViewDimension {
     match dimension {
-        shader_naga::ReflectedTextureViewDimension::D1 => TextureViewDimension::D1,
-        shader_naga::ReflectedTextureViewDimension::D2 => TextureViewDimension::D2,
-        shader_naga::ReflectedTextureViewDimension::D2Array => TextureViewDimension::D2Array,
-        shader_naga::ReflectedTextureViewDimension::Cube => TextureViewDimension::Cube,
-        shader_naga::ReflectedTextureViewDimension::CubeArray => TextureViewDimension::CubeArray,
-        shader_naga::ReflectedTextureViewDimension::D3 => TextureViewDimension::D3,
+        frontend::ReflectedTextureViewDimension::D1 => TextureViewDimension::D1,
+        frontend::ReflectedTextureViewDimension::D2 => TextureViewDimension::D2,
+        frontend::ReflectedTextureViewDimension::D2Array => TextureViewDimension::D2Array,
+        frontend::ReflectedTextureViewDimension::Cube => TextureViewDimension::Cube,
+        frontend::ReflectedTextureViewDimension::CubeArray => TextureViewDimension::CubeArray,
+        frontend::ReflectedTextureViewDimension::D3 => TextureViewDimension::D3,
     }
 }
 
 /// Returns reflected storage texture access.
 pub(crate) fn reflected_storage_texture_access(
-    access: &shader_naga::ReflectedStorageTextureAccess,
+    access: &frontend::ReflectedStorageTextureAccess,
 ) -> StorageTextureAccess {
     match (access.read, access.write) {
         (true, true) => StorageTextureAccess::ReadWrite,
@@ -1404,7 +1402,8 @@ pub(crate) fn reflected_storage_texture_format(format: &str) -> Result<TextureFo
         "Rgb10a2Unorm" => 0x0000_001E,
         "Rg11b10Ufloat" => 0x0000_001F,
         // 16-bit-norm storage formats — baseline-storage in WebGPU, gated only by
-        // format availability; naga also needs `STORAGE_TEXTURE_16BIT_NORM_FORMATS`
+        // format availability; the shader frontend must accept baseline WebGPU
+        // storage formats here.
         // to compile them (F-059).
         "R16Unorm" => 0x0000_0005,
         "R16Snorm" => 0x0000_0006,
@@ -1478,12 +1477,12 @@ pub(crate) fn pipeline_stage_visibility_bit(stage: PipelineShaderStage) -> u64 {
 
 /// Validates shader binding compat and returns a descriptive error on failure.
 pub(crate) fn validate_shader_binding_compat(
-    binding: &shader_naga::ReflectedResourceBinding,
+    binding: &frontend::ReflectedResourceBinding,
     layout_kind: BindingLayoutKind,
 ) -> Result<(), String> {
     match (&binding.kind, layout_kind) {
         (
-            shader_naga::ReflectedResourceBindingKind::Buffer(shader_ty),
+            frontend::ReflectedResourceBindingKind::Buffer(shader_ty),
             BindingLayoutKind::Buffer {
                 ty,
                 min_binding_size,
@@ -1501,19 +1500,19 @@ pub(crate) fn validate_shader_binding_compat(
             Ok(())
         }
         (
-            shader_naga::ReflectedResourceBindingKind::Sampler { .. },
+            frontend::ReflectedResourceBindingKind::Sampler { .. },
             BindingLayoutKind::Sampler { .. },
         )
         | (
-            shader_naga::ReflectedResourceBindingKind::Texture { .. },
+            frontend::ReflectedResourceBindingKind::Texture { .. },
             BindingLayoutKind::Texture { .. },
         )
         | (
-            shader_naga::ReflectedResourceBindingKind::StorageTexture { .. },
+            frontend::ReflectedResourceBindingKind::StorageTexture { .. },
             BindingLayoutKind::StorageTexture { .. },
         )
         | (
-            shader_naga::ReflectedResourceBindingKind::ExternalTexture,
+            frontend::ReflectedResourceBindingKind::ExternalTexture,
             BindingLayoutKind::ExternalTexture,
         ) => {
             let expected = reflected_binding_layout_kind(binding)?;
@@ -1618,19 +1617,19 @@ fn sampler_types_compatible(layout: SamplerBindingType, shader: SamplerBindingTy
 
 /// Returns buffer binding types compatible.
 pub(crate) fn buffer_binding_types_compatible(
-    shader_ty: shader_naga::ReflectedBufferType,
+    shader_ty: frontend::ReflectedBufferType,
     layout_ty: BufferBindingType,
 ) -> bool {
     matches!(
         (shader_ty, layout_ty),
         (
-            shader_naga::ReflectedBufferType::Uniform,
+            frontend::ReflectedBufferType::Uniform,
             BufferBindingType::Uniform
         ) | (
-            shader_naga::ReflectedBufferType::Storage,
+            frontend::ReflectedBufferType::Storage,
             BufferBindingType::Storage
         ) | (
-            shader_naga::ReflectedBufferType::ReadOnlyStorage,
+            frontend::ReflectedBufferType::ReadOnlyStorage,
             BufferBindingType::ReadOnlyStorage
         )
     )
@@ -1638,7 +1637,6 @@ pub(crate) fn buffer_binding_types_compatible(
 
 #[cfg(test)]
 mod tests {
-    use super::shader_naga;
     use super::*;
     use crate::test_helpers::*;
     use crate::*;
@@ -1683,11 +1681,11 @@ mod tests {
 
     #[test]
     fn shader_binding_compat_defers_unspecified_min_binding_size() {
-        let binding = shader_naga::ReflectedResourceBinding {
+        let binding = frontend::ReflectedResourceBinding {
             group: 0,
             binding: 0,
-            kind: shader_naga::ReflectedResourceBindingKind::Buffer(
-                shader_naga::ReflectedBufferType::Uniform,
+            kind: frontend::ReflectedResourceBindingKind::Buffer(
+                frontend::ReflectedBufferType::Uniform,
             ),
             min_binding_size: 4,
             statically_used: true,
@@ -1715,10 +1713,10 @@ mod tests {
 
     #[test]
     fn external_texture_reflection_derives_exact_layout_compat() {
-        let binding = shader_naga::ReflectedResourceBinding {
+        let binding = frontend::ReflectedResourceBinding {
             group: 0,
             binding: 0,
-            kind: shader_naga::ReflectedResourceBindingKind::ExternalTexture,
+            kind: frontend::ReflectedResourceBindingKind::ExternalTexture,
             min_binding_size: 0,
             statically_used: true,
         };
@@ -1747,14 +1745,14 @@ mod tests {
     fn reflected_texture_binding(group: u32, binding: u32) -> StageResourceBinding {
         StageResourceBinding {
             stage: PipelineShaderStage::Fragment,
-            binding: shader_naga::ReflectedResourceBinding {
+            binding: frontend::ReflectedResourceBinding {
                 group,
                 binding,
-                kind: shader_naga::ReflectedResourceBindingKind::Texture {
+                kind: frontend::ReflectedResourceBindingKind::Texture {
                     sampled: true,
-                    sample_kind: Some(shader_naga::ReflectedTypeScalarClass::Float),
-                    sample_usage: shader_naga::ReflectedTextureSampleUsage::Sample,
-                    view_dimension: shader_naga::ReflectedTextureViewDimension::D2,
+                    sample_kind: Some(frontend::ReflectedTypeScalarClass::Float),
+                    sample_usage: frontend::ReflectedTextureSampleUsage::Sample,
+                    view_dimension: frontend::ReflectedTextureViewDimension::D2,
                     multisampled: false,
                 },
                 min_binding_size: 0,
@@ -1766,16 +1764,16 @@ mod tests {
     fn reflected_storage_texture_binding(group: u32, binding: u32) -> StageResourceBinding {
         StageResourceBinding {
             stage: PipelineShaderStage::Fragment,
-            binding: shader_naga::ReflectedResourceBinding {
+            binding: frontend::ReflectedResourceBinding {
                 group,
                 binding,
-                kind: shader_naga::ReflectedResourceBindingKind::StorageTexture {
+                kind: frontend::ReflectedResourceBindingKind::StorageTexture {
                     format: "Rgba8Unorm".to_owned(),
-                    access: shader_naga::ReflectedStorageTextureAccess {
+                    access: frontend::ReflectedStorageTextureAccess {
                         read: false,
                         write: true,
                     },
-                    view_dimension: shader_naga::ReflectedTextureViewDimension::D2,
+                    view_dimension: frontend::ReflectedTextureViewDimension::D2,
                 },
                 min_binding_size: 0,
                 statically_used: true,
@@ -1868,54 +1866,6 @@ mod tests {
         assert!(bindings.is_empty());
         assert!(source.contains("#version 310 es"));
         assert!(source.contains("local_size_x = 2"));
-    }
-
-    #[cfg(not(feature = "tint"))]
-    #[test]
-    fn resolve_compute_workgroup_evaluates_override_expressions() {
-        let module = shader_naga::parse_and_validate_wgsl(
-            "override n: u32 = 4u;
-             var<workgroup> scratch: array<u32, n * 2u>;
-             @compute @workgroup_size(n + 1u, 1, 1)
-             fn cs() { scratch[0] = 1u; }",
-        )
-        .expect("test WGSL should validate");
-        let overrides = module.overrides();
-        let constants = resolve_pipeline_constants(
-            &overrides,
-            &[PipelineConstant {
-                key: "n".to_owned(),
-                value: 8.0,
-            }],
-        )
-        .expect("override should resolve");
-
-        let resolved = resolve_compute_workgroup(&module, "cs", &constants, Limits::DEFAULT)
-            .expect("override expressions should evaluate");
-
-        assert_eq!(resolved.size, [9, 1, 1]);
-        assert_eq!(resolved.storage_size, 64);
-    }
-
-    #[cfg(not(feature = "tint"))]
-    #[test]
-    fn resolve_compute_workgroup_rejects_override_arithmetic_error() {
-        let module = shader_naga::parse_and_validate_wgsl(
-            "override n: u32;
-             @compute @workgroup_size(1u / n, 1, 1)
-             fn cs() {}",
-        )
-        .expect("override arithmetic is pipeline-time validation");
-        let constants = resolve_pipeline_constants(
-            &module.overrides(),
-            &[PipelineConstant {
-                key: "n".to_owned(),
-                value: 0.0,
-            }],
-        )
-        .expect("override constant should resolve");
-
-        assert!(resolve_compute_workgroup(&module, "cs", &constants, Limits::DEFAULT).is_err());
     }
 
     #[test]

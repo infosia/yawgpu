@@ -303,8 +303,6 @@ pub(crate) enum ReflectedInterpolation {
     Linear,
     /// Flat variant.
     Flat,
-    /// Per-vertex variant.
-    PerVertex,
 }
 
 /// Enumerates reflected interpolation sampling values.
