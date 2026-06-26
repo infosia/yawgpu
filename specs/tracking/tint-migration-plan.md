@@ -216,11 +216,37 @@ of the workspace is unaffected.
     --features tint --lib` is intentionally **red (293 pass / 58 fail)** — all 58
     are pipeline/render-pass creation tests that require codegen, which is still
     the P2c skeleton. Goes green as P2b.2 + P2c land.
-- **NEXT: P2b.2** (shim IO extension + `entry_point_io`) → **P2c** (codegen:
-  generate_{spirv,msl,glsl} + render variants + `msl_buffer_size_bindings`, mapping
-  PipelineConstants→overrides + flat Metal indices→binding remap) → **P2d** (flip
-  the feature default + parity). Watch codex for shortcuts (it delegated to naga
-  once).
+- **P2c.1 DONE** (`7d09188`) — non-render codegen from Tint: `generate_spirv`,
+  `generate_glsl` (gles), compute `generate_msl`; PipelineConstants→overrides;
+  MslBindingMap→Tint per-class binding remap (buffers classified uniform/storage,
+  textures sampled/storage via reflection); robustness via `disable_robustness`.
+- **P2b.2 DONE** (`a414c77`) — `entry_point_io` from Tint (shim exposes
+  inspector StageVariables: location/component+composition type/interpolation).
+  This unblocked render-pipeline inter-stage validation: `--features tint --lib`
+  **58 → 6 failures** (349 pass).
+
+**Remaining `--features tint --lib` failures (6), now well-isolated:**
+1. **render-MSL codegen (1 test, → P2c.2)** — `generate_render_{vertex,fragment,}_msl`
+   still skeleton. Architectural question: naga emits ONE MSL module with both
+   stages + Metal-specific transforms (vertex pulling, frag-depth clamp, sample
+   mask); Tint emits per-entry-point. Decide per-stage modules vs combined, and
+   whether to replicate the transforms via Tint options or adapt the Metal HAL.
+   (Noop tests don't compile MSL, so only the explicit MSL-generation test fails
+   on Noop; real-Metal render correctness is a Phase 3 item.)
+2. **texture sample-type / filterability divergence (3 tests)** — yawgpu derives
+   filterable-vs-unfilterable-float from `sample_usage` (Load/Sample/Gather, which
+   naga computes by IR usage analysis); Tint reports filterability directly
+   (`kFilterable`/`kUnfilterable`), and the P2b mapping collapsed both to plain
+   `Float` + hardcoded `sample_usage: Sample`. Fix needs the shim to expose Tint's
+   filterability/texture-usage and a reconciled mapping. (Phase-3-class semantic
+   divergence.)
+3. **diagnostic/warning parity (2 tests)** — Tint emits different
+   warnings/diagnostics than naga.
+
+**NEXT: P2c.2** (render-MSL — the one architectural decision left) + resolve the 5
+semantic divergences (texture filterability ×3, diagnostics ×2) → **P2d** (flip the
+feature default + full parity). Then Phase 3 (real-GPU CTS) / Phase 4 (remove naga).
+Watch codex for shortcuts (it delegated reflection to naga once — caught + reverted).
 
 ### Phase 3 — CTS re-verification on real GPU (the dominant cost)
 
