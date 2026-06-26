@@ -126,7 +126,7 @@ impl ReflectedModule {
         if module_has_external_texture(&module) {
             return Err("external textures are not supported on the Vulkan backend".to_owned());
         }
-        let options = naga::back::spv::Options {
+        let mut options = naga::back::spv::Options {
             fake_missing_bindings: true,
             // Mirror wgpu-hal/src/vulkan/adapter.rs: `index` and `image_load`
             // stay `Restrict` so that out-of-bounds accesses are clamped rather
@@ -143,6 +143,14 @@ impl ReflectedModule {
             bounds_check_policies: spirv_bounds_check_policies(unchecked_buffer_bounds),
             ..Default::default()
         };
+        // The Vulkan HAL flips clip-space Y via a negative-height viewport (the
+        // wgpu/Dawn convention), so the shader must NOT also flip Y. Drop naga's
+        // in-shader ADJUST_COORDINATE_SPACE so naga matches the Tint frontend (Tint
+        // never flips in-shader); both then emit un-flipped SPIR-V and the HAL flips
+        // once. (Other default flags — LABEL_VARYINGS, CLAMP_FRAG_DEPTH — are kept.)
+        options
+            .flags
+            .remove(naga::back::spv::WriterFlags::ADJUST_COORDINATE_SPACE);
         let pipeline_options = naga::back::spv::PipelineOptions {
             shader_stage: stage,
             entry_point: entry_name.to_owned(),

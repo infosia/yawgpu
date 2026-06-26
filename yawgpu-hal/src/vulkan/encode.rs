@@ -1037,20 +1037,25 @@ pub(super) fn encode_render_pass(
                 vk::PipelineBindPoint::GRAPHICS,
                 pipeline.inner.pipeline,
             );
+            // Flip clip-space Y with a negative-height viewport (the wgpu/Dawn
+            // convention: origin at `y + height`, height negated). WebGPU clip space
+            // is Y-up while the Vulkan framebuffer is Y-down; doing the flip here
+            // means neither shader frontend (naga or Tint) flips Y in-shader, so they
+            // agree. Requires Vulkan 1.1 / VK_KHR_maintenance1 (MoltenVK supports it).
             let viewport = pass.viewport.map_or(
                 vk::Viewport {
                     x: 0.0,
-                    y: 0.0,
+                    y: height as f32,
                     width: width as f32,
-                    height: height as f32,
+                    height: -(height as f32),
                     min_depth: 0.0,
                     max_depth: 1.0,
                 },
                 |viewport| vk::Viewport {
                     x: viewport.x,
-                    y: viewport.y,
+                    y: viewport.y + viewport.height,
                     width: viewport.width,
-                    height: viewport.height,
+                    height: -viewport.height,
                     min_depth: viewport.min_depth,
                     max_depth: viewport.max_depth,
                 },
