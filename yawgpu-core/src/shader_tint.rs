@@ -214,8 +214,38 @@ impl ReflectedModule {
 
     /// Returns entry point io reflected by the validated shader module.
     pub(crate) fn entry_point_io(&self) -> Vec<ReflectedEntryPointIo> {
-        // TODO(P2b.2): expose Tint entry point input/output variables in the shim.
-        Vec::new()
+        self.program
+            .entry_points()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| {
+                let is_compute = entry.stage == yawgpu_tint::PipelineStage::Compute;
+                ReflectedEntryPointIo {
+                    inputs: if is_compute {
+                        Vec::new()
+                    } else {
+                        self.program
+                            .entry_point_inputs(&entry.name)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter_map(reflected_io_location)
+                            .collect()
+                    },
+                    outputs: if is_compute {
+                        Vec::new()
+                    } else {
+                        self.program
+                            .entry_point_outputs(&entry.name)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter_map(reflected_io_location)
+                            .collect()
+                    },
+                    input_inter_stage_builtins: input_inter_stage_builtin_count(&entry),
+                    entry_point: entry.name,
+                }
+            })
+            .collect()
     }
 
     /// Returns resource bindings reflected by the validated shader module.
@@ -569,6 +599,81 @@ fn texture_view_dimension(dim: yawgpu_tint::TextureDimension) -> ReflectedTextur
     }
 }
 
+fn reflected_io_location(variable: yawgpu_tint::StageVariable) -> Option<ReflectedIoLocation> {
+    Some(ReflectedIoLocation {
+        location: variable.location?,
+        ty: reflected_stage_variable_type(variable.component_type, variable.composition_type)?,
+        interpolation: reflected_interpolation(variable.interpolation_type),
+        sampling: reflected_sampling(variable.interpolation_sampling),
+    })
+}
+
+fn reflected_stage_variable_type(
+    component: yawgpu_tint::ComponentType,
+    composition: yawgpu_tint::CompositionType,
+) -> Option<ReflectedTypeClass> {
+    let (scalar, width) = match component {
+        yawgpu_tint::ComponentType::F32 => (ReflectedTypeScalarClass::Float, 4),
+        yawgpu_tint::ComponentType::U32 => (ReflectedTypeScalarClass::Uint, 4),
+        yawgpu_tint::ComponentType::I32 => (ReflectedTypeScalarClass::Sint, 4),
+        yawgpu_tint::ComponentType::F16 => (ReflectedTypeScalarClass::Float, 2),
+        yawgpu_tint::ComponentType::Unknown => return None,
+    };
+    let components = match composition {
+        yawgpu_tint::CompositionType::Scalar => 1,
+        yawgpu_tint::CompositionType::Vec2 => 2,
+        yawgpu_tint::CompositionType::Vec3 => 3,
+        yawgpu_tint::CompositionType::Vec4 => 4,
+        yawgpu_tint::CompositionType::Unknown => return None,
+    };
+    Some(ReflectedTypeClass {
+        scalar,
+        components,
+        width,
+    })
+}
+
+fn reflected_interpolation(
+    interpolation: yawgpu_tint::InterpolationType,
+) -> Option<ReflectedInterpolation> {
+    match interpolation {
+        yawgpu_tint::InterpolationType::Perspective => Some(ReflectedInterpolation::Perspective),
+        yawgpu_tint::InterpolationType::Linear => Some(ReflectedInterpolation::Linear),
+        yawgpu_tint::InterpolationType::Flat => Some(ReflectedInterpolation::Flat),
+        yawgpu_tint::InterpolationType::Unknown => None,
+    }
+}
+
+fn reflected_sampling(sampling: yawgpu_tint::InterpolationSampling) -> Option<ReflectedSampling> {
+    match sampling {
+        yawgpu_tint::InterpolationSampling::None | yawgpu_tint::InterpolationSampling::Unknown => {
+            None
+        }
+        yawgpu_tint::InterpolationSampling::Center => Some(ReflectedSampling::Center),
+        yawgpu_tint::InterpolationSampling::Centroid => Some(ReflectedSampling::Centroid),
+        yawgpu_tint::InterpolationSampling::Sample => Some(ReflectedSampling::Sample),
+        yawgpu_tint::InterpolationSampling::First => Some(ReflectedSampling::First),
+        yawgpu_tint::InterpolationSampling::Either => Some(ReflectedSampling::Either),
+    }
+}
+
+fn input_inter_stage_builtin_count(entry: &yawgpu_tint::EntryPoint) -> u32 {
+    if entry.stage == yawgpu_tint::PipelineStage::Compute {
+        return 0;
+    }
+    // WebGPU counts these stage-input builtins against
+    // `maxInterStageShaderVariables`: front_facing, sample_index, input
+    // sample_mask, primitive_index, subgroup_invocation_id, and subgroup_size.
+    // Tint reflects each as an entry-point boolean; position and all other
+    // builtins are intentionally excluded from this count.
+    u32::from(entry.front_facing_used)
+        + u32::from(entry.sample_index_used)
+        + u32::from(entry.input_sample_mask_used)
+        + u32::from(entry.primitive_index_used)
+        + u32::from(entry.subgroup_invocation_id_used)
+        + u32::from(entry.subgroup_size_used)
+}
+
 fn texel_format(format: yawgpu_tint::TexelFormat) -> Result<String, String> {
     let name = match format {
         yawgpu_tint::TexelFormat::R8Snorm => "R8Snorm",
@@ -776,6 +881,64 @@ fn fs() -> @location(0) vec4<f32> {
                 && binding.binding == 2
                 && binding.kind == ReflectedResourceBindingKind::Sampler { comparison: false }
         }));
+    }
+
+    #[test]
+    fn reflects_vertex_fragment_io_from_tint() {
+        let module = parse_and_validate_wgsl(
+            r#"
+struct VsOut {
+  @builtin(position) pos: vec4f,
+  @location(0) value: f32,
+  @location(1) @interpolate(flat) index: u32,
+}
+
+@vertex
+fn vs(@location(0) value: f32, @location(1) @interpolate(flat) index: u32) -> VsOut {
+  return VsOut(vec4f(0.0, 0.0, 0.0, 1.0), value, index);
+}
+
+@fragment
+fn fs(
+  @builtin(position) pos: vec4f,
+  @builtin(front_facing) ff: bool,
+  @builtin(sample_index) si: u32,
+  @builtin(sample_mask) sm: u32,
+  @location(0) value: f32,
+  @location(1) @interpolate(flat) index: u32,
+) -> @location(0) vec4f {
+  _ = pos;
+  _ = ff;
+  _ = si;
+  _ = sm;
+  return vec4f(value + f32(index), 0.0, 0.0, 1.0);
+}
+"#,
+        )
+        .unwrap();
+
+        let io = module.entry_point_io();
+        let vs = io.iter().find(|entry| entry.entry_point == "vs").unwrap();
+        assert_eq!(vs.inputs.len(), 2);
+        let vs_value = vs.inputs.iter().find(|input| input.location == 0).unwrap();
+        assert_eq!(vs_value.ty.scalar, ReflectedTypeScalarClass::Float);
+        assert_eq!(vs_value.ty.components, 1);
+        assert_eq!(vs_value.ty.width, 4);
+        let vs_index = vs.inputs.iter().find(|input| input.location == 1).unwrap();
+        assert_eq!(vs_index.ty.scalar, ReflectedTypeScalarClass::Uint);
+        assert_eq!(vs_index.interpolation, Some(ReflectedInterpolation::Flat));
+        assert_eq!(vs_index.sampling, Some(ReflectedSampling::First));
+        assert_eq!(vs.outputs.len(), 2);
+        assert_eq!(vs.input_inter_stage_builtins, 0);
+
+        let fs = io.iter().find(|entry| entry.entry_point == "fs").unwrap();
+        assert_eq!(fs.inputs.len(), 2);
+        assert!(fs.outputs.iter().any(|output| {
+            output.location == 0
+                && output.ty.scalar == ReflectedTypeScalarClass::Float
+                && output.ty.components == 4
+        }));
+        assert_eq!(fs.input_inter_stage_builtins, 3);
     }
 
     #[test]

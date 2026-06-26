@@ -30,6 +30,23 @@ mod imp {
         wg_z: u32,
         frag_depth_used: bool,
         sample_mask_used: bool,
+        input_sample_mask_used: bool,
+        front_facing_used: bool,
+        sample_index_used: bool,
+        primitive_index_used: bool,
+        subgroup_invocation_id_used: bool,
+        subgroup_size_used: bool,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct RawStageVariable {
+        has_location: bool,
+        location: u32,
+        component_type: u8,
+        composition_type: u8,
+        interpolation_type: u8,
+        interpolation_sampling: u8,
     }
 
     #[repr(C)]
@@ -106,6 +123,26 @@ mod imp {
             program: *const RawProgram,
             i: usize,
             out: *mut RawEntryPoint,
+        ) -> bool;
+        fn yawgpu_tint_entry_point_input_count(
+            program: *const RawProgram,
+            ep: *const c_char,
+        ) -> usize;
+        fn yawgpu_tint_entry_point_input_get(
+            program: *const RawProgram,
+            ep: *const c_char,
+            i: usize,
+            out: *mut RawStageVariable,
+        ) -> bool;
+        fn yawgpu_tint_entry_point_output_count(
+            program: *const RawProgram,
+            ep: *const c_char,
+        ) -> usize;
+        fn yawgpu_tint_entry_point_output_get(
+            program: *const RawProgram,
+            ep: *const c_char,
+            i: usize,
+            out: *mut RawStageVariable,
         ) -> bool;
         fn yawgpu_tint_resource_binding_count(
             program: *const RawProgram,
@@ -229,6 +266,12 @@ mod imp {
                     wg_z: 0,
                     frag_depth_used: false,
                     sample_mask_used: false,
+                    input_sample_mask_used: false,
+                    front_facing_used: false,
+                    sample_index_used: false,
+                    primitive_index_used: false,
+                    subgroup_invocation_id_used: false,
+                    subgroup_size_used: false,
                 };
                 // SAFETY: `raw` points to valid writable memory.
                 let ok = unsafe { yawgpu_tint_entry_point_get(self.raw, i, &mut raw) };
@@ -236,6 +279,62 @@ mod imp {
                     return Err("tint: failed to read entry point reflection".to_owned());
                 }
                 out.push(EntryPoint::try_from_raw(raw)?);
+            }
+            Ok(out)
+        }
+
+        /// Returns stage input variables used by `entry_point`.
+        pub fn entry_point_inputs(&self, entry_point: &str) -> Result<Vec<StageVariable>, String> {
+            self.entry_point_variables(entry_point, StageVariableDirection::Input)
+        }
+
+        /// Returns stage output variables used by `entry_point`.
+        pub fn entry_point_outputs(&self, entry_point: &str) -> Result<Vec<StageVariable>, String> {
+            self.entry_point_variables(entry_point, StageVariableDirection::Output)
+        }
+
+        fn entry_point_variables(
+            &self,
+            entry_point: &str,
+            direction: StageVariableDirection,
+        ) -> Result<Vec<StageVariable>, String> {
+            let ep = cstring(entry_point, "entry point")?;
+            // SAFETY: pointers are valid for the duration of the call.
+            let count = unsafe {
+                match direction {
+                    StageVariableDirection::Input => {
+                        yawgpu_tint_entry_point_input_count(self.raw, ep.as_ptr())
+                    }
+                    StageVariableDirection::Output => {
+                        yawgpu_tint_entry_point_output_count(self.raw, ep.as_ptr())
+                    }
+                }
+            };
+            let mut out = Vec::with_capacity(count);
+            for i in 0..count {
+                let mut raw = RawStageVariable {
+                    has_location: false,
+                    location: 0,
+                    component_type: 0,
+                    composition_type: 0,
+                    interpolation_type: 0,
+                    interpolation_sampling: 0,
+                };
+                // SAFETY: pointers are valid for the duration of the call.
+                let ok = unsafe {
+                    match direction {
+                        StageVariableDirection::Input => {
+                            yawgpu_tint_entry_point_input_get(self.raw, ep.as_ptr(), i, &mut raw)
+                        }
+                        StageVariableDirection::Output => {
+                            yawgpu_tint_entry_point_output_get(self.raw, ep.as_ptr(), i, &mut raw)
+                        }
+                    }
+                };
+                if !ok {
+                    return Err("tint: failed to read stage variable reflection".to_owned());
+                }
+                out.push(StageVariable::try_from_raw(raw)?);
             }
             Ok(out)
         }
@@ -436,6 +535,11 @@ mod imp {
         }
     }
 
+    enum StageVariableDirection {
+        Input,
+        Output,
+    }
+
     /// MSL generator output.
     pub struct MslOutput {
         /// Generated MSL source.
@@ -457,6 +561,18 @@ mod imp {
         pub frag_depth_used: bool,
         /// Whether the entry point uses sample_mask.
         pub sample_mask_used: bool,
+        /// Whether the entry point reads sample_mask as an input.
+        pub input_sample_mask_used: bool,
+        /// Whether the entry point reads front_facing.
+        pub front_facing_used: bool,
+        /// Whether the entry point reads sample_index.
+        pub sample_index_used: bool,
+        /// Whether the entry point reads primitive_index.
+        pub primitive_index_used: bool,
+        /// Whether the entry point reads subgroup_invocation_id.
+        pub subgroup_invocation_id_used: bool,
+        /// Whether the entry point reads subgroup_size.
+        pub subgroup_size_used: bool,
     }
 
     impl EntryPoint {
@@ -469,6 +585,41 @@ mod imp {
                     .then_some([raw.wg_x, raw.wg_y, raw.wg_z]),
                 frag_depth_used: raw.frag_depth_used,
                 sample_mask_used: raw.sample_mask_used,
+                input_sample_mask_used: raw.input_sample_mask_used,
+                front_facing_used: raw.front_facing_used,
+                sample_index_used: raw.sample_index_used,
+                primitive_index_used: raw.primitive_index_used,
+                subgroup_invocation_id_used: raw.subgroup_invocation_id_used,
+                subgroup_size_used: raw.subgroup_size_used,
+            })
+        }
+    }
+
+    /// A reflected entry point input or output variable.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct StageVariable {
+        /// Location attribute, when the variable is location-based IO.
+        pub location: Option<u32>,
+        /// Scalar component type.
+        pub component_type: ComponentType,
+        /// Scalar or vector composition.
+        pub composition_type: CompositionType,
+        /// Interpolation type.
+        pub interpolation_type: InterpolationType,
+        /// Interpolation sampling.
+        pub interpolation_sampling: InterpolationSampling,
+    }
+
+    impl StageVariable {
+        fn try_from_raw(raw: RawStageVariable) -> Result<Self, String> {
+            Ok(Self {
+                location: raw.has_location.then_some(raw.location),
+                component_type: ComponentType::try_from_raw(raw.component_type)?,
+                composition_type: CompositionType::try_from_raw(raw.composition_type)?,
+                interpolation_type: InterpolationType::try_from_raw(raw.interpolation_type)?,
+                interpolation_sampling: InterpolationSampling::try_from_raw(
+                    raw.interpolation_sampling,
+                )?,
             })
         }
     }
@@ -554,6 +705,72 @@ mod imp {
                 }
             }
         };
+    }
+
+    raw_enum! {
+        /// Stage variable scalar component type.
+        pub enum ComponentType {
+            /// f32 component.
+            F32 = 0,
+            /// u32 component.
+            U32 = 1,
+            /// i32 component.
+            I32 = 2,
+            /// f16 component.
+            F16 = 3,
+            /// Unknown component type.
+            Unknown = 4,
+        }
+    }
+
+    raw_enum! {
+        /// Stage variable scalar or vector composition.
+        pub enum CompositionType {
+            /// Scalar.
+            Scalar = 0,
+            /// Two-component vector.
+            Vec2 = 1,
+            /// Three-component vector.
+            Vec3 = 2,
+            /// Four-component vector.
+            Vec4 = 3,
+            /// Unknown composition.
+            Unknown = 4,
+        }
+    }
+
+    raw_enum! {
+        /// Stage variable interpolation type.
+        pub enum InterpolationType {
+            /// Perspective interpolation.
+            Perspective = 0,
+            /// Linear interpolation.
+            Linear = 1,
+            /// Flat interpolation.
+            Flat = 2,
+            /// Unknown interpolation.
+            Unknown = 3,
+        }
+    }
+
+    raw_enum! {
+        /// Stage variable interpolation sampling.
+        pub enum InterpolationSampling {
+            /// No sampling value.
+            None = 0,
+            /// Center sampling.
+            Center = 1,
+            /// Centroid sampling.
+            Centroid = 2,
+            /// Sample sampling.
+            Sample = 3,
+            /// First sampling.
+            First = 4,
+            /// Either sampling.
+            Either = 5,
+            /// Unknown sampling.
+            Unknown = 6,
+        }
     }
 
     raw_enum! {
@@ -950,6 +1167,19 @@ mod imp {
             Err(UNAVAILABLE.to_owned())
         }
 
+        /// Returns stage input variables used by `entry_point`.
+        pub fn entry_point_inputs(&self, _entry_point: &str) -> Result<Vec<StageVariable>, String> {
+            Err(UNAVAILABLE.to_owned())
+        }
+
+        /// Returns stage output variables used by `entry_point`.
+        pub fn entry_point_outputs(
+            &self,
+            _entry_point: &str,
+        ) -> Result<Vec<StageVariable>, String> {
+            Err(UNAVAILABLE.to_owned())
+        }
+
         /// Returns resource bindings used by `entry_point`.
         pub fn resource_bindings(
             &self,
@@ -1017,6 +1247,18 @@ mod imp {
         pub frag_depth_used: bool,
         /// Whether the entry point uses sample_mask.
         pub sample_mask_used: bool,
+        /// Whether the entry point reads sample_mask as an input.
+        pub input_sample_mask_used: bool,
+        /// Whether the entry point reads front_facing.
+        pub front_facing_used: bool,
+        /// Whether the entry point reads sample_index.
+        pub sample_index_used: bool,
+        /// Whether the entry point reads primitive_index.
+        pub primitive_index_used: bool,
+        /// Whether the entry point reads subgroup_invocation_id.
+        pub subgroup_invocation_id_used: bool,
+        /// Whether the entry point reads subgroup_size.
+        pub subgroup_size_used: bool,
     }
 
     /// Pipeline stage.
@@ -1028,6 +1270,83 @@ mod imp {
         Fragment,
         /// Compute shader stage.
         Compute,
+    }
+
+    /// A reflected entry point input or output variable.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct StageVariable {
+        /// Location attribute, when the variable is location-based IO.
+        pub location: Option<u32>,
+        /// Scalar component type.
+        pub component_type: ComponentType,
+        /// Scalar or vector composition.
+        pub composition_type: CompositionType,
+        /// Interpolation type.
+        pub interpolation_type: InterpolationType,
+        /// Interpolation sampling.
+        pub interpolation_sampling: InterpolationSampling,
+    }
+
+    /// Stage variable scalar component type.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ComponentType {
+        /// f32 component.
+        F32,
+        /// u32 component.
+        U32,
+        /// i32 component.
+        I32,
+        /// f16 component.
+        F16,
+        /// Unknown component type.
+        Unknown,
+    }
+
+    /// Stage variable scalar or vector composition.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum CompositionType {
+        /// Scalar.
+        Scalar,
+        /// Two-component vector.
+        Vec2,
+        /// Three-component vector.
+        Vec3,
+        /// Four-component vector.
+        Vec4,
+        /// Unknown composition.
+        Unknown,
+    }
+
+    /// Stage variable interpolation type.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum InterpolationType {
+        /// Perspective interpolation.
+        Perspective,
+        /// Linear interpolation.
+        Linear,
+        /// Flat interpolation.
+        Flat,
+        /// Unknown interpolation.
+        Unknown,
+    }
+
+    /// Stage variable interpolation sampling.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum InterpolationSampling {
+        /// No sampling value.
+        None,
+        /// Center sampling.
+        Center,
+        /// Centroid sampling.
+        Centroid,
+        /// Sample sampling.
+        Sample,
+        /// First sampling.
+        First,
+        /// Either sampling.
+        Either,
+        /// Unknown sampling.
+        Unknown,
     }
 
     /// A reflected resource binding.
@@ -1397,6 +1716,52 @@ fn cs() {
         assert!(bindings
             .iter()
             .any(|b| b.group == 2 && b.binding == 4 && b.resource_type == ResourceType::Sampler));
+    }
+
+    #[test]
+    fn reflects_entry_point_stage_variables() {
+        let wgsl = r#"
+struct VsOut {
+  @builtin(position) pos: vec4f,
+  @location(0) value: f32,
+  @location(1) @interpolate(flat) index: u32,
+}
+
+@vertex
+fn vs(@location(0) value: f32, @location(1) @interpolate(flat) index: u32) -> VsOut {
+  return VsOut(vec4f(0.0, 0.0, 0.0, 1.0), value, index);
+}
+
+@fragment
+fn fs(@location(0) value: f32, @location(1) @interpolate(flat) index: u32) -> @location(0) vec4f {
+  return vec4f(value + f32(index), 0.0, 0.0, 1.0);
+}
+"#;
+        let program = Program::parse(wgsl, false).unwrap();
+
+        let inputs = program.entry_point_inputs("fs").unwrap();
+        let value = inputs
+            .iter()
+            .find(|variable| variable.location == Some(0))
+            .unwrap();
+        assert_eq!(value.component_type, ComponentType::F32);
+        assert_eq!(value.composition_type, CompositionType::Scalar);
+
+        let index = inputs
+            .iter()
+            .find(|variable| variable.location == Some(1))
+            .unwrap();
+        assert_eq!(index.component_type, ComponentType::U32);
+        assert_eq!(index.composition_type, CompositionType::Scalar);
+        assert_eq!(index.interpolation_type, InterpolationType::Flat);
+        assert_eq!(index.interpolation_sampling, InterpolationSampling::First);
+
+        let outputs = program.entry_point_outputs("vs").unwrap();
+        assert!(outputs.iter().any(|variable| {
+            variable.location == Some(1)
+                && variable.component_type == ComponentType::U32
+                && variable.interpolation_type == InterpolationType::Flat
+        }));
     }
 
     #[test]
