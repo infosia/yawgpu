@@ -80,7 +80,8 @@ std::string cstr_or_empty(const char* s) {
 bool all_remaps_empty(const YawgpuTintBindings* bindings) {
     return bindings == nullptr ||
            (bindings->n_uniform == 0 && bindings->n_storage == 0 && bindings->n_texture == 0 &&
-            bindings->n_storage_texture == 0 && bindings->n_sampler == 0);
+            bindings->n_storage_texture == 0 && bindings->n_sampler == 0 &&
+            bindings->n_external_texture == 0);
 }
 
 void fill_binding_map(tint::BindingMap& map,
@@ -106,6 +107,17 @@ tint::Bindings make_bindings(const YawgpuTintBindings* bindings) {
     fill_binding_map(out.texture, bindings->texture, bindings->n_texture);
     fill_binding_map(out.storage_texture, bindings->storage_texture, bindings->n_storage_texture);
     fill_binding_map(out.sampler, bindings->sampler, bindings->n_sampler);
+    if (bindings->external_texture != nullptr) {
+        for (size_t i = 0; i < bindings->n_external_texture; ++i) {
+            const auto& e = bindings->external_texture[i];
+            out.external_texture[tint::BindingPoint{e.src_group, e.src_binding}] =
+                tint::ExternalMultiplanarTexture{
+                    /*metadata=*/tint::BindingPoint{0u, e.params_slot},
+                    /*plane0=*/tint::BindingPoint{0u, e.plane0_slot},
+                    /*plane1=*/tint::BindingPoint{0u, e.plane1_slot},
+                };
+        }
+    }
     return out;
 }
 

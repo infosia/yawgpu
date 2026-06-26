@@ -158,6 +158,14 @@ typedef struct {
 } YawgpuTintBindingRemap;
 
 typedef struct {
+    uint32_t src_group;     /* WGSL group of the texture_external */
+    uint32_t src_binding;   /* WGSL binding of the texture_external */
+    uint32_t plane0_slot;   /* MSL texture slot for plane 0 */
+    uint32_t plane1_slot;   /* MSL texture slot for plane 1 */
+    uint32_t params_slot;   /* MSL buffer slot for the params (metadata) UBO */
+} YawgpuTintExternalTextureRemap;
+
+typedef struct {
     const YawgpuTintBindingRemap* uniform;
     size_t n_uniform;
     const YawgpuTintBindingRemap* storage;
@@ -168,6 +176,8 @@ typedef struct {
     size_t n_storage_texture;
     const YawgpuTintBindingRemap* sampler;
     size_t n_sampler;
+    const YawgpuTintExternalTextureRemap* external_texture;
+    size_t n_external_texture;
 } YawgpuTintBindings;
 
 typedef struct {

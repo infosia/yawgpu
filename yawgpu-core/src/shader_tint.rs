@@ -462,7 +462,35 @@ fn tint_bindings_for_msl(
                 bindings.sampler.push(remap);
             }
             MslResourceBindingKind::ExternalTexture => {
-                return Err("MSL external texture binding remap is not implemented".to_owned());
+                match resources.get(&(binding.group, binding.binding)).copied() {
+                    Some(ReflectedResourceBindingKind::ExternalTexture) => {
+                        let params_slot = binding.ext_params_buffer_slot.ok_or_else(|| {
+                            "MSL external texture binding is missing its params buffer slot"
+                                .to_owned()
+                        })?;
+                        bindings
+                            .external_texture
+                            .push(yawgpu_tint::ExternalTextureRemap {
+                                group: binding.group,
+                                binding: binding.binding,
+                                plane0_slot: binding.metal_index,
+                                plane1_slot: binding.metal_index + 1,
+                                params_slot,
+                            });
+                    }
+                    Some(_) => {
+                        return Err(
+                            "MSL external texture binding map entry does not match reflected resource kind"
+                                .to_owned(),
+                        );
+                    }
+                    None => {
+                        return Err(
+                            "MSL external texture binding map entry was not reflected for the entry point"
+                                .to_owned(),
+                        );
+                    }
+                }
             }
         }
     }
