@@ -15,8 +15,6 @@ use crate::pass::*;
 use crate::query_set::*;
 use crate::render_pass::*;
 use crate::render_pipeline::*;
-#[cfg(feature = "tiled")]
-use crate::subpass::*;
 use crate::texture::*;
 use crate::texture_view::*;
 
@@ -158,9 +156,6 @@ pub(crate) enum CommandExecution {
     ComputePass(ComputePassCommand),
     /// Render pass variant.
     RenderPass(RenderPassCommand),
-    #[cfg(feature = "tiled")]
-    /// Subpass render pass variant.
-    SubpassRenderPass(SubpassRenderPassCommand),
 }
 
 /// Stores the data needed to replay a ComputePassCommand.
@@ -236,18 +231,6 @@ pub(crate) struct ScissorRect {
     pub(crate) y: u32,
     pub(crate) width: u32,
     pub(crate) height: u32,
-}
-
-/// Stores the data needed to replay a SubpassRenderPassCommand.
-#[cfg(feature = "tiled")]
-#[derive(Debug, Clone)]
-pub(crate) struct SubpassRenderPassCommand {
-    pub(crate) layout: Arc<SubpassPassLayout>,
-    pub(crate) extent: Extent3d,
-    pub(crate) color_attachments: Vec<SubpassColorAttachmentBinding>,
-    pub(crate) depth_stencil_attachment: Option<SubpassDepthStencilAttachmentBinding>,
-    #[allow(dead_code)]
-    pub(crate) draws: Vec<SubpassDrawExecution>,
 }
 
 /// Stores color metadata.
@@ -419,66 +402,6 @@ impl CommandEncoder {
                 )),
             },
             immediate_error,
-        )
-    }
-
-    /// Begins a tiled subpass render pass.
-    #[cfg(feature = "tiled")]
-    #[must_use]
-    pub fn begin_subpass_render_pass(
-        &self,
-        device: &crate::Device,
-        descriptor: SubpassRenderPassDescriptor,
-    ) -> (SubpassRenderPass, Option<String>) {
-        let mut state = self.inner.state.lock();
-        let token = PassToken {
-            kind: PassKind::Render,
-            id: state.next_pass_id,
-        };
-        state.next_pass_id = state.next_pass_id.saturating_add(1);
-        if state.lifecycle != CommandEncoderLifecycle::Recording {
-            return (
-                SubpassRenderPass::new(self.clone(), token, descriptor, None, true),
-                Some("command encoder cannot record after finish".to_owned()),
-            );
-        }
-        if state.open_pass.is_some() {
-            record_first_error_locked(
-                &mut state,
-                "command encoder cannot begin a pass while another pass is open",
-            );
-            return (
-                SubpassRenderPass::new(self.clone(), token, descriptor, None, true),
-                None,
-            );
-        }
-        if state.has_recorded_command {
-            record_first_error_locked(
-                &mut state,
-                "subpass render pass must be the first command encoder operation",
-            );
-            return (
-                SubpassRenderPass::new(self.clone(), token, descriptor, None, true),
-                None,
-            );
-        }
-        let validation_error = validate_subpass_render_pass_descriptor(&descriptor).or_else(|| {
-            resolve_subpass_render_pass_resources(device, &device.inner.hal, &descriptor).err()
-        });
-        let is_error = validation_error.is_some();
-        let hal = if is_error {
-            None
-        } else {
-            device.inner.hal.begin_subpass_render_pass().ok()
-        };
-        if let Some(message) = validation_error {
-            record_first_error_locked(&mut state, message);
-        }
-        state.has_recorded_command = true;
-        state.open_pass = Some(token);
-        (
-            SubpassRenderPass::new(self.clone(), token, descriptor, hal, is_error),
-            None,
         )
     }
 
@@ -978,16 +901,6 @@ impl CommandEncoder {
                 attachment.stencil_store_op = store_op;
             }
         }
-    }
-
-    /// Appends a finished subpass-render-pass command to the encoder's command list.
-    #[cfg(feature = "tiled")]
-    pub(crate) fn record_subpass_render_pass(&self, command: SubpassRenderPassCommand) {
-        self.inner
-            .state
-            .lock()
-            .command_ops
-            .push(CommandExecution::SubpassRenderPass(command));
     }
 
     /// Returns true when this object is finished.
@@ -1492,7 +1405,6 @@ pub(crate) fn validate_color_attachment(
     attachment: &RenderPassColorAttachment,
     features: &FeatureSet,
 ) -> Result<(), String> {
-    let texture = attachment.view.texture();
     let Some(format_caps) = attachment.view.format().caps(features) else {
         return Err("render pass color attachment format must be supported".to_owned());
     };
@@ -1511,14 +1423,6 @@ pub(crate) fn validate_color_attachment(
     }
     if attachment.store_op == StoreOp::Undefined {
         return Err("render pass color attachment storeOp must be set".to_owned());
-    }
-    if texture.usage().contains(TextureUsage::TRANSIENT_ATTACHMENT)
-        && (attachment.load_op != LoadOp::Clear || attachment.store_op != StoreOp::Discard)
-    {
-        return Err(
-            "render pass transient color attachment requires clear loadOp and discard storeOp"
-                .to_owned(),
-        );
     }
     if attachment.load_op == LoadOp::Clear
         && ![
@@ -1594,7 +1498,6 @@ pub(crate) fn validate_depth_stencil_attachment(
     attachment: &RenderPassDepthStencilAttachment,
     features: &FeatureSet,
 ) -> Result<(), String> {
-    let texture = attachment.view.texture();
     let Some(format_caps) = attachment.view.format().caps(features) else {
         return Err("render pass depth-stencil attachment format must be supported".to_owned());
     };
@@ -1628,16 +1531,6 @@ pub(crate) fn validate_depth_stencil_attachment(
         } else if attachment.depth_store_op == StoreOp::Undefined {
             return Err("render pass depth storeOp must be set".to_owned());
         }
-        if texture.usage().contains(TextureUsage::TRANSIENT_ATTACHMENT)
-            && !attachment.depth_read_only
-            && (attachment.depth_load_op != LoadOp::Clear
-                || attachment.depth_store_op != StoreOp::Discard)
-        {
-            return Err(
-                "render pass transient depth attachment requires clear loadOp and discard storeOp"
-                    .to_owned(),
-            );
-        }
         if attachment.depth_load_op == LoadOp::Clear
             && (!attachment.depth_clear_value.is_finite()
                 || !(0.0..=1.0).contains(&attachment.depth_clear_value))
@@ -1665,16 +1558,6 @@ pub(crate) fn validate_depth_stencil_attachment(
             return Err("render pass stencil loadOp must be set".to_owned());
         } else if attachment.stencil_store_op == StoreOp::Undefined {
             return Err("render pass stencil storeOp must be set".to_owned());
-        }
-        if texture.usage().contains(TextureUsage::TRANSIENT_ATTACHMENT)
-            && !attachment.stencil_read_only
-            && (attachment.stencil_load_op != LoadOp::Clear
-                || attachment.stencil_store_op != StoreOp::Discard)
-        {
-            return Err(
-                "render pass transient stencil attachment requires clear loadOp and discard storeOp"
-                    .to_owned(),
-            );
         }
     } else if attachment.stencil_load_op != LoadOp::Undefined
         || attachment.stencil_store_op != StoreOp::Undefined
@@ -1740,12 +1623,6 @@ pub(crate) fn validate_resolve_target(
         .contains(TextureUsage::RENDER_ATTACHMENT)
     {
         return Err("render pass resolveTarget requires RenderAttachment usage".to_owned());
-    }
-    if resolve_texture
-        .usage()
-        .contains(TextureUsage::TRANSIENT_ATTACHMENT)
-    {
-        return Err("render pass resolveTarget must not use TransientAttachment usage".to_owned());
     }
     if resolve_texture.sample_count() != 1 {
         return Err("render pass resolveTarget sampleCount must be one".to_owned());

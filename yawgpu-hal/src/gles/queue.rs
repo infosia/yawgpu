@@ -66,13 +66,11 @@ impl GlesQueue {
                         HalCopy::Buffer(copy) => submit_buffer_copy(gl, copy)?,
                         HalCopy::BufferClear(clear) => submit_buffer_clear(gl, clear)?,
                         HalCopy::ResolveQuerySet(resolve) => {
-                            let byte_count =
-                                usize::try_from(u64::from(resolve.query_count) * 8).map_err(
-                                    |_| HalError::BufferOperationFailed {
-                                        backend: BACKEND,
-                                        message: "query resolve byte count is too large",
-                                    },
-                                )?;
+                            let byte_count = usize::try_from(u64::from(resolve.query_count) * 8)
+                                .map_err(|_| HalError::BufferOperationFailed {
+                                    backend: BACKEND,
+                                    message: "query resolve byte count is too large",
+                                })?;
                             resolve
                                 .destination
                                 .write(resolve.destination_offset, &vec![0; byte_count])?;
@@ -82,14 +80,6 @@ impl GlesQueue {
                         HalCopy::TextureToTexture(copy) => submit_texture_to_texture(gl, copy)?,
                         HalCopy::ComputePass(pass) => submit_compute_pass(gl, pass)?,
                         HalCopy::RenderPass(pass) => submit_render_pass(gl, pass)?,
-                        #[cfg(feature = "tiled")]
-                        HalCopy::SubpassRenderPass(_) => {
-                            return Err(HalError::BufferOperationFailed {
-                                backend: BACKEND,
-                                message:
-                                    "GLES backend supports only buffer, texture, compute, and render commands in P15.5",
-                            });
-                        }
                     }
                 }
                 unsafe {
@@ -299,13 +289,6 @@ fn binding_target(bindings: &[HalDescriptorBinding], binding: u32) -> Result<u32
         HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform) => Ok(glow::UNIFORM_BUFFER),
         HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage) => {
             Ok(glow::SHADER_STORAGE_BUFFER)
-        }
-        #[cfg(feature = "tiled")]
-        HalDescriptorBindingKind::Buffer(HalBufferBindingKind::InputAttachment) => {
-            Err(HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "input attachments are not valid buffer bindings",
-            })
         }
         HalDescriptorBindingKind::Texture
         | HalDescriptorBindingKind::StorageTexture { .. }
@@ -1434,7 +1417,7 @@ mod tests {
             .next()
             .expect("Noop instance yields one adapter");
         let device = adapter.create_device()?;
-        Ok(device.create_texture(&crate::HalTextureDescriptor {
+        device.create_texture(&crate::HalTextureDescriptor {
             dimension: crate::HalTextureDimension::D2,
             format: crate::HalTextureFormat::Rgba8Unorm,
             width: 1,
@@ -1449,7 +1432,7 @@ mod tests {
                 storage_binding: false,
                 render_attachment: true,
             },
-        }))
+        })
     }
 
     fn render_color_target() -> Result<crate::HalRenderColorTarget, HalError> {

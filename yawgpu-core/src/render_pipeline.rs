@@ -8,8 +8,6 @@ use yawgpu_hal::{
     HalRenderPipelineDescriptor, HalShaderSource, HalStencilFaceState, HalStencilOperation,
     HalVertexAttribute, HalVertexBufferLayout, HalVertexFormat, HalVertexStepMode,
 };
-#[cfg(feature = "tiled")]
-use yawgpu_hal::{HalBufferBindingKind, HalDescriptorBindingKind};
 
 use crate::bind_group_layout::*;
 use crate::compute_pipeline::*;
@@ -21,8 +19,6 @@ use crate::pipeline_layout::*;
 use crate::sampler::*;
 use crate::shader::*;
 use crate::shader_naga;
-#[cfg(feature = "tiled")]
-use crate::subpass::{hal_subpass_pass_layout, SubpassPassLayout};
 use crate::texture::*;
 
 /// Stores attachment signature data used by validation and backend submission.
@@ -497,31 +493,7 @@ pub(crate) struct RenderPipelineInner {
     pub(crate) vertex_buffer_bindings: Vec<MetalVertexBufferBinding>,
     pub(crate) hal: Option<HalRenderPipeline>,
     pub(crate) bind_group_layouts: Vec<Arc<BindGroupLayout>>,
-    #[cfg(feature = "tiled")]
-    pub(crate) subpass_compatibility: Option<SubpassPipelineCompatibility>,
     pub(crate) is_error: bool,
-}
-
-/// Describes subpass-pipeline compatibility metadata.
-#[cfg(feature = "tiled")]
-#[derive(Debug, Clone)]
-pub(crate) struct SubpassPipelineCompatibility {
-    pub(crate) pass_layout: Arc<SubpassPassLayout>,
-    pub(crate) subpass_index: u32,
-}
-
-/// Describes a subpass render pipeline descriptor.
-#[cfg(feature = "tiled")]
-#[derive(Debug, Clone)]
-pub struct SubpassRenderPipelineDescriptor {
-    /// Base render pipeline descriptor.
-    pub base: RenderPipelineDescriptor,
-    /// Compatible subpass pass layout.
-    pub pass_layout: Arc<SubpassPassLayout>,
-    /// Compatible subpass index.
-    pub subpass_index: u32,
-    /// Descriptor error from FFI conversion.
-    pub error: Option<String>,
 }
 
 /// Stores binding metadata.
@@ -544,8 +516,7 @@ impl RenderPipeline {
         let resolved = if is_error {
             None
         } else {
-            resolve_render_pipeline_descriptor(&descriptor, limits, features, None, pipeline_id)
-                .ok()
+            resolve_render_pipeline_descriptor(&descriptor, limits, features, pipeline_id).ok()
         };
         let (vertex_entry_name, fragment_entry_name, bind_group_layouts) =
             resolved.unwrap_or_else(|| {
@@ -594,100 +565,6 @@ impl RenderPipeline {
                     vertex_buffer_bindings,
                     hal,
                     bind_group_layouts,
-                    #[cfg(feature = "tiled")]
-                    subpass_compatibility: None,
-                    is_error,
-                }),
-            },
-            backend_error,
-        )
-    }
-
-    /// Creates a new subpass-compatible render pipeline.
-    #[cfg(feature = "tiled")]
-    pub(crate) fn new_subpass(
-        descriptor: SubpassRenderPipelineDescriptor,
-        is_error: bool,
-        limits: Limits,
-        features: &FeatureSet,
-        hal_device: Option<&HalDevice>,
-    ) -> (Self, Option<String>) {
-        let pipeline_id = next_pipeline_id();
-        let compatibility = SubpassPipelineCompatibility {
-            pass_layout: Arc::clone(&descriptor.pass_layout),
-            subpass_index: descriptor.subpass_index,
-        };
-        let resolved = if is_error {
-            None
-        } else {
-            resolve_render_pipeline_descriptor(
-                &descriptor.base,
-                limits,
-                features,
-                Some(
-                    &descriptor
-                        .pass_layout
-                        .descriptor()
-                        .subpasses
-                        .get(descriptor.subpass_index as usize)
-                        .map(|s| s.color_attachment_indices.clone())
-                        .unwrap_or_default(),
-                ),
-                pipeline_id,
-            )
-            .ok()
-        };
-        let (vertex_entry_name, fragment_entry_name, bind_group_layouts) =
-            resolved.unwrap_or_else(|| {
-                (
-                    descriptor
-                        .base
-                        .vertex
-                        .shader
-                        .entry_point
-                        .clone()
-                        .unwrap_or_default(),
-                    descriptor
-                        .base
-                        .fragment
-                        .as_ref()
-                        .and_then(|fragment| fragment.shader.entry_point.clone()),
-                    Vec::new(),
-                )
-            });
-        let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
-        let vertex_buffer_bindings =
-            metal_vertex_buffer_binding_map(&descriptor.base.vertex.buffers, &metal_bindings);
-        let (hal, backend_error) = if is_error {
-            (None, None)
-        } else {
-            create_hal_subpass_render_pipeline(
-                hal_device,
-                &descriptor,
-                &vertex_entry_name,
-                fragment_entry_name.as_deref(),
-                &metal_bindings,
-                &vertex_buffer_bindings,
-                &bind_group_layouts,
-            )
-        };
-        let is_error = is_error || backend_error.is_some();
-        (
-            Self {
-                inner: Arc::new(RenderPipelineInner {
-                    _layout: descriptor.base.layout,
-                    _vertex: descriptor.base.vertex,
-                    _primitive: descriptor.base.primitive,
-                    _depth_stencil: descriptor.base.depth_stencil,
-                    _multisample: descriptor.base.multisample,
-                    _fragment: descriptor.base.fragment,
-                    vertex_entry_name,
-                    fragment_entry_name,
-                    metal_bindings,
-                    vertex_buffer_bindings,
-                    hal,
-                    bind_group_layouts,
-                    subpass_compatibility: Some(compatibility),
                     is_error,
                 }),
             },
@@ -802,12 +679,6 @@ impl RenderPipeline {
         let back_writes = cull != CullMode::Back && stencil_face_writes(depth.stencil_back);
         front_writes || back_writes
     }
-
-    /// Returns subpass compatibility metadata.
-    #[cfg(feature = "tiled")]
-    pub(crate) fn subpass_compatibility(&self) -> Option<&SubpassPipelineCompatibility> {
-        self.inner.subpass_compatibility.as_ref()
-    }
 }
 
 /// Validates render pipeline descriptor and returns a descriptive error on failure.
@@ -816,20 +687,11 @@ pub(crate) fn validate_render_pipeline_descriptor(
     limits: Limits,
     features: &FeatureSet,
 ) -> Option<String> {
-    resolve_render_pipeline_descriptor(descriptor, limits, features, None, 0).err()
+    resolve_render_pipeline_descriptor(descriptor, limits, features, 0).err()
 }
 
 /// Alias for resolved render pipeline parts.
 pub(crate) type ResolvedRenderPipelineParts = (String, Option<String>, Vec<Arc<BindGroupLayout>>);
-
-#[cfg(feature = "shader-passthrough")]
-fn render_pipeline_uses_msl(descriptor: &RenderPipelineDescriptor) -> bool {
-    descriptor.vertex.shader.module.msl_passthrough().is_some()
-        || descriptor
-            .fragment
-            .as_ref()
-            .is_some_and(|fragment| fragment.shader.module.msl_passthrough().is_some())
-}
 
 /// Creates HAL render pipeline and reports validation errors through the owning device.
 pub(crate) fn create_hal_render_pipeline(
@@ -870,7 +732,6 @@ pub(crate) fn create_hal_render_pipeline(
             fragment_entry_name,
             metal_bindings,
             vertex_buffer_bindings,
-            &[],
             hal_device.robust_buffer_access2(),
         ) {
             Ok(selection) => selection,
@@ -892,133 +753,9 @@ pub(crate) fn create_hal_render_pipeline(
     }
 }
 
-/// Creates HAL subpass render pipeline and reports validation errors through the owning device.
-#[cfg(feature = "tiled")]
-pub(crate) fn create_hal_subpass_render_pipeline(
-    hal_device: Option<&HalDevice>,
-    descriptor: &SubpassRenderPipelineDescriptor,
-    vertex_entry_name: &str,
-    fragment_entry_name: Option<&str>,
-    metal_bindings: &[MetalBufferBinding],
-    vertex_buffer_bindings: &[MetalVertexBufferBinding],
-    bind_group_layouts: &[Arc<BindGroupLayout>],
-) -> (Option<HalRenderPipeline>, Option<String>) {
-    let Some(hal_device) = hal_device else {
-        return (None, None);
-    };
-    if descriptor.base.multisample.count != 1 {
-        return (
-            None,
-            Some("subpass render pipeline does not yet support multisample > 1".to_owned()),
-        );
-    }
-    if matches!(hal_device.backend(), HalBackend::Noop) {
-        return (Some(HalRenderPipeline::Noop), None);
-    }
-    if descriptor.base.fragment.is_none() {
-        return (
-            None,
-            Some("subpass render pipeline requires a fragment stage".to_owned()),
-        );
-    }
-    let Some(fragment_entry_name) = fragment_entry_name else {
-        return (
-            None,
-            Some("subpass render pipeline requires a fragment entry point".to_owned()),
-        );
-    };
-    // Build the Metal pass-local color-slot map from the pass layout's input
-    // attachments for this subpass: each `subpass_input` shader binding
-    // `(group, binding)` maps to its `source_attachment` color slot index in
-    // the layout's color attachments. naga's MSL backend lowers
-    // `subpassLoad(global)` to `[[color(N)]]` using this map; without it,
-    // subpass inputs would silently read zero.
-    let subpass_color_slots: Vec<((u32, u32), u32)> = descriptor
-        .pass_layout
-        .descriptor()
-        .subpasses
-        .get(descriptor.subpass_index as usize)
-        .map(|subpass| {
-            subpass
-                .input_attachments
-                .iter()
-                .map(|input| ((input.group, input.binding), input.source_attachment))
-                .collect()
-        })
-        .unwrap_or_default();
-    let (shader, vertex_entry_point, fragment_entry_point, mut descriptor_bindings) =
-        match select_render_shader_source(
-            hal_device.backend(),
-            &descriptor.base,
-            vertex_entry_name,
-            Some(fragment_entry_name),
-            metal_bindings,
-            vertex_buffer_bindings,
-            &subpass_color_slots,
-            hal_device.robust_buffer_access2(),
-        ) {
-            Ok(selection) => selection,
-            Err(message) => return (None, Some(message)),
-        };
-    let Some(fragment_entry_point) = fragment_entry_point else {
-        return (
-            None,
-            Some("subpass render pipeline requires a fragment entry point".to_owned()),
-        );
-    };
-    // Vulkan reads subpass inputs through `INPUT_ATTACHMENT` descriptors wired
-    // from the pass layout's input-source mapping; the Metal backend reads them
-    // via the color-slot map supplied above, so it takes no extra descriptors here.
-    if matches!(hal_device.backend(), HalBackend::Vulkan) {
-        descriptor_bindings.extend(input_attachment_hal_bindings(bind_group_layouts));
-    }
-    let hal_descriptor =
-        match hal_render_pipeline_descriptor(&descriptor.base, vertex_buffer_bindings) {
-            Ok(descriptor) => descriptor,
-            Err(message) => return (None, Some(message)),
-        };
-    let hal_pass_layout = hal_subpass_pass_layout(descriptor.pass_layout.descriptor());
-    match hal_device.create_subpass_render_pipeline(
-        shader,
-        &vertex_entry_point,
-        &fragment_entry_point,
-        &hal_descriptor,
-        &descriptor_bindings,
-        &hal_pass_layout,
-        descriptor.subpass_index,
-    ) {
-        Ok(pipeline) => (Some(pipeline), None),
-        Err(error) => (None, Some(error.to_string())),
-    }
-}
-
-/// Builds HAL input-attachment descriptor bindings from the resolved bind group
-/// layouts (Vulkan binds subpass inputs through `INPUT_ATTACHMENT` descriptors).
-#[cfg(feature = "tiled")]
-fn input_attachment_hal_bindings(
-    bind_group_layouts: &[Arc<BindGroupLayout>],
-) -> Vec<HalDescriptorBinding> {
-    let mut bindings = Vec::new();
-    for (group_index, layout) in bind_group_layouts.iter().enumerate() {
-        let Ok(group) = u32::try_from(group_index) else {
-            break;
-        };
-        for entry in layout.entries() {
-            if matches!(entry.kind, Some(BindingLayoutKind::InputAttachment { .. })) {
-                bindings.push(HalDescriptorBinding {
-                    group,
-                    binding: entry.binding,
-                    kind: HalDescriptorBindingKind::Buffer(HalBufferBindingKind::InputAttachment),
-                });
-            }
-        }
-    }
-    bindings
-}
-
 /// Selects the HAL shader source for a render pipeline.
 // Render-stage source selection legitimately needs backend, descriptor, both
-// entry names, the Metal binding/vertex-buffer/subpass-color tables, and the
+// entry names, the Metal binding/vertex-buffer tables, and the
 // robustBufferAccess2 flag (F-112) — grouping them into a struct would only add
 // indirection for a single crate-private call path.
 #[allow(clippy::too_many_arguments)]
@@ -1029,7 +766,6 @@ pub(crate) fn select_render_shader_source(
     fragment_entry_name: Option<&str>,
     metal_bindings: &[MetalBufferBinding],
     vertex_buffer_bindings: &[MetalVertexBufferBinding],
-    subpass_color_slots: &[((u32, u32), u32)],
     unchecked_buffer_bounds: bool,
 ) -> Result<
     (
@@ -1046,44 +782,6 @@ pub(crate) fn select_render_shader_source(
         fragment.map(|fragment| pipeline_constant_map(&fragment.shader.constants));
     match backend {
         HalBackend::Metal => {
-            #[cfg(feature = "shader-passthrough")]
-            if let Some((source, _)) = descriptor.vertex.shader.module.msl_passthrough() {
-                let Some(fragment) = fragment else {
-                    return Err(
-                        "Metal passthrough render pipeline requires a fragment stage".to_owned(),
-                    );
-                };
-                if !Arc::ptr_eq(&descriptor.vertex.shader.module, &fragment.shader.module) {
-                    return Err(
-                        "Metal render pipeline requires vertex and fragment entries in the same MSL module"
-                            .to_owned(),
-                    );
-                }
-                if descriptor.multisample.mask != u32::MAX {
-                    return Err(
-                        "Metal MSL shader passthrough does not support a non-default multisample mask"
-                            .to_owned(),
-                    );
-                }
-                return Ok((
-                    HalShaderSource::Msl(source.to_owned()),
-                    vertex_entry_name.to_owned(),
-                    fragment_entry_name.map(str::to_owned),
-                    Vec::new(),
-                ));
-            }
-            #[cfg(feature = "shader-passthrough")]
-            if descriptor
-                .vertex
-                .shader
-                .module
-                .spirv_passthrough()
-                .is_some()
-                || fragment
-                    .is_some_and(|fragment| fragment.shader.module.spirv_passthrough().is_some())
-            {
-                return Err("SPIR-V shader module cannot be used on the Metal backend".to_owned());
-            }
             let module =
                 descriptor.vertex.shader.module.reflected().ok_or_else(|| {
                     "render pipeline requires a reflected shader module".to_owned()
@@ -1125,7 +823,6 @@ pub(crate) fn select_render_shader_source(
                     Some(fragment_module.generate_render_fragment_msl(
                         fragment_entry_name,
                         &msl_fragment_binding_map,
-                        subpass_color_slots,
                         fragment_pipeline_constants,
                         descriptor.multisample.mask,
                     )?)
@@ -1171,51 +868,6 @@ pub(crate) fn select_render_shader_source(
             ))
         }
         HalBackend::Vulkan => {
-            #[cfg(feature = "shader-passthrough")]
-            if descriptor.vertex.shader.module.msl_passthrough().is_some()
-                || fragment
-                    .is_some_and(|fragment| fragment.shader.module.msl_passthrough().is_some())
-            {
-                return Err("MSL shader module cannot be used on the Vulkan backend".to_owned());
-            }
-            #[cfg(feature = "shader-passthrough")]
-            if let Some((vertex_words, _)) = descriptor.vertex.shader.module.spirv_passthrough() {
-                let Some(fragment) = fragment else {
-                    return Err(
-                        "SPIR-V passthrough render pipeline requires a fragment stage".to_owned(),
-                    );
-                };
-                let Some((fragment_words, _)) = fragment.shader.module.spirv_passthrough() else {
-                    return Err(
-                        "render pipeline cannot mix a SPIR-V passthrough module with a non-SPIR-V module"
-                            .to_owned(),
-                    );
-                };
-                return Ok((
-                    HalShaderSource::SpirVStages {
-                        vertex: vertex_words.to_vec(),
-                        fragment: Some(fragment_words.to_vec()),
-                    },
-                    vertex_entry_name.to_owned(),
-                    fragment_entry_name.map(str::to_owned),
-                    hal_descriptor_bindings(metal_bindings),
-                ));
-            }
-            #[cfg(feature = "shader-passthrough")]
-            if descriptor
-                .vertex
-                .shader
-                .module
-                .spirv_passthrough()
-                .is_some()
-                || fragment
-                    .is_some_and(|fragment| fragment.shader.module.spirv_passthrough().is_some())
-            {
-                return Err(
-                    "render pipeline cannot mix a SPIR-V passthrough module with a non-SPIR-V module"
-                        .to_owned(),
-                );
-            }
             let vertex_module = descriptor.vertex.shader.module.reflected().ok_or_else(|| {
                 "render pipeline requires a reflected vertex shader module".to_owned()
             })?;
@@ -1255,22 +907,6 @@ pub(crate) fn select_render_shader_source(
         }
         #[cfg(feature = "gles")]
         HalBackend::Gles => {
-            #[cfg(feature = "shader-passthrough")]
-            if descriptor.vertex.shader.module.msl_passthrough().is_some()
-                || fragment.shader.module.msl_passthrough().is_some()
-                || descriptor
-                    .vertex
-                    .shader
-                    .module
-                    .spirv_passthrough()
-                    .is_some()
-                || fragment
-                    .is_some_and(|fragment| fragment.shader.module.spirv_passthrough().is_some())
-            {
-                return Err(
-                    "passthrough shader modules cannot be used on the GLES backend".to_owned(),
-                );
-            }
             let vertex_module = descriptor.vertex.shader.module.reflected().ok_or_else(|| {
                 "render pipeline requires a reflected vertex shader module".to_owned()
             })?;
@@ -1720,7 +1356,6 @@ pub(crate) fn resolve_render_pipeline_descriptor(
     descriptor: &RenderPipelineDescriptor,
     limits: Limits,
     features: &FeatureSet,
-    subpass_color_attachment_indices: Option<&[u32]>,
     pipeline_id: u64,
 ) -> Result<ResolvedRenderPipelineParts, String> {
     if let RenderPipelineLayout::Explicit(layout) = &descriptor.layout {
@@ -1728,13 +1363,6 @@ pub(crate) fn resolve_render_pipeline_descriptor(
             return Err("render pipeline layout must not be an error pipeline layout".to_owned());
         }
     }
-    #[cfg(feature = "shader-passthrough")]
-    if render_pipeline_uses_msl(descriptor)
-        && matches!(descriptor.layout, RenderPipelineLayout::Auto)
-    {
-        return Err("MSL shader module requires an explicit pipeline layout".to_owned());
-    }
-
     let vertex_entry = resolve_render_entry(
         &descriptor.vertex.shader,
         shader_naga::ReflectedShaderStage::Vertex,
@@ -1763,13 +1391,7 @@ pub(crate) fn resolve_render_pipeline_descriptor(
     }
     validate_fragment_depth_output(descriptor, fragment_entry.as_deref(), features)?;
     validate_inter_stage_interface(descriptor, &vertex_entry, fragment_entry.as_deref(), limits)?;
-    validate_color_targets(
-        descriptor,
-        fragment_entry.as_deref(),
-        limits,
-        features,
-        subpass_color_attachment_indices,
-    )?;
+    validate_color_targets(descriptor, fragment_entry.as_deref(), limits, features)?;
     validate_render_pipeline_layout(descriptor, &vertex_entry, fragment_entry.as_deref())?;
     validate_multisample_state(descriptor, fragment_entry.as_deref())?;
     let bind_group_layouts = effective_render_bind_group_layouts(
@@ -1916,10 +1538,6 @@ pub(crate) fn vertex_inputs(
     vertex: &RenderPipelineVertexState,
     vertex_entry: &str,
 ) -> Result<BTreeMap<u32, shader_naga::ReflectedTypeClass>, String> {
-    #[cfg(feature = "shader-passthrough")]
-    if vertex.shader.module.msl_passthrough().is_some() {
-        return Ok(BTreeMap::new());
-    }
     let Some(module) = vertex.shader.module.reflected() else {
         return Err("vertex module reflection failed".to_owned());
     };
@@ -1946,16 +1564,6 @@ pub(crate) fn resolve_render_entry(
         return Err(format!(
             "render pipeline {label} shader module must not be an error module"
         ));
-    }
-    #[cfg(feature = "shader-passthrough")]
-    if let Some((_, reflection)) = stage.module.msl_passthrough() {
-        let stage_bit = match expected_stage {
-            shader_naga::ReflectedShaderStage::Vertex => SHADER_STAGE_VERTEX,
-            shader_naga::ReflectedShaderStage::Fragment => SHADER_STAGE_FRAGMENT,
-            shader_naga::ReflectedShaderStage::Compute => SHADER_STAGE_COMPUTE,
-        };
-        return resolve_msl_entry(reflection, stage_bit, stage.entry_point.as_deref(), label)
-            .map(|entry| entry.name.clone());
     }
     let Some(module) = stage.module.reflected() else {
         return Err(format!(
@@ -2011,13 +1619,6 @@ pub(crate) fn validate_render_presence(
 
 /// Validates render constants and returns a descriptive error on failure.
 pub(crate) fn validate_render_constants(stage: &RenderPipelineShaderStage) -> Result<(), String> {
-    #[cfg(feature = "shader-passthrough")]
-    if stage.module.msl_passthrough().is_some() {
-        if stage.constants.is_empty() {
-            return Ok(());
-        }
-        return Err("MSL shader module does not support pipeline constants".to_owned());
-    }
     let Some(module) = stage.module.reflected() else {
         return Err("render pipeline stage requires a reflected shader module".to_owned());
     };
@@ -2150,10 +1751,6 @@ pub(crate) fn validate_fragment_depth_output(
     let Some(fragment) = &descriptor.fragment else {
         return Ok(());
     };
-    #[cfg(feature = "shader-passthrough")]
-    if fragment.shader.module.msl_passthrough().is_some() {
-        return Ok(());
-    }
     let Some(entry_name) = fragment_entry else {
         return Ok(());
     };
@@ -2181,7 +1778,6 @@ pub(crate) fn validate_color_targets(
     fragment_entry: Option<&str>,
     limits: Limits,
     features: &FeatureSet,
-    subpass_color_attachment_indices: Option<&[u32]>,
 ) -> Result<(), String> {
     let Some(fragment) = &descriptor.fragment else {
         return Ok(());
@@ -2193,21 +1789,7 @@ pub(crate) fn validate_color_targets(
         return Err("render pipeline color target count exceeds the device limit".to_owned());
     }
 
-    let skip_shader_outputs = {
-        #[cfg(feature = "shader-passthrough")]
-        {
-            fragment.shader.module.msl_passthrough().is_some()
-        }
-        #[cfg(not(feature = "shader-passthrough"))]
-        {
-            false
-        }
-    };
-    let outputs = if skip_shader_outputs {
-        BTreeMap::new()
-    } else {
-        fragment_outputs(fragment, fragment_entry)?
-    };
+    let outputs = fragment_outputs(fragment, fragment_entry)?;
     let mut color_formats = Vec::new();
     let mut has_alpha_to_coverage_target = false;
     for (index, target) in fragment.targets.iter().enumerate() {
@@ -2238,37 +1820,24 @@ pub(crate) fn validate_color_targets(
             has_alpha_to_coverage_target = true;
         }
 
-        if !skip_shader_outputs {
-            // Block 55 accepts both subpass-local and flat-slot `@location`
-            // conventions for subpass pipelines. Vulkan remaps the
-            // subpass-local index through VkRenderPass, while Metal's MSL
-            // path emits the flat color slot directly; HAL routing decides
-            // which convention is used at submission time.
-            let subpass_local = index as u32;
-            let flat = subpass_color_attachment_indices
-                .and_then(|indices| indices.get(index).copied())
-                .unwrap_or(subpass_local);
-            let output = outputs.get(&subpass_local).or_else(|| outputs.get(&flat));
-            match output {
-                Some(output) => {
-                    validate_fragment_output_compat(*output, caps)?;
-                    if target.blend.is_some_and(color_blend_uses_source_alpha)
-                        && output.components < 4
-                    {
-                        return Err(
-                            "render pipeline blend state requires a vec4 fragment output"
-                                .to_owned(),
-                        );
-                    }
-                }
-                None if target.write_mask != 0 => {
+        let output = outputs.get(&(index as u32));
+        match output {
+            Some(output) => {
+                validate_fragment_output_compat(*output, caps)?;
+                if target.blend.is_some_and(color_blend_uses_source_alpha) && output.components < 4
+                {
                     return Err(
-                        "render pipeline color target without shader output must use writeMask 0"
-                            .to_owned(),
+                        "render pipeline blend state requires a vec4 fragment output".to_owned(),
                     );
                 }
-                None => {}
             }
+            None if target.write_mask != 0 => {
+                return Err(
+                    "render pipeline color target without shader output must use writeMask 0"
+                        .to_owned(),
+                );
+            }
+            None => {}
         }
 
         color_formats.push(target.format);
@@ -2400,10 +1969,6 @@ pub(crate) fn fragment_outputs(
     let Some(entry_name) = fragment_entry else {
         return Ok(BTreeMap::new());
     };
-    #[cfg(feature = "shader-passthrough")]
-    if fragment.shader.module.msl_passthrough().is_some() {
-        return Ok(BTreeMap::new());
-    }
     let Some(module) = fragment.shader.module.reflected() else {
         return Err("fragment module reflection failed".to_owned());
     };
@@ -2455,13 +2020,6 @@ pub(crate) fn validate_inter_stage_interface(
     let Some(fragment_entry) = fragment_entry else {
         return Ok(());
     };
-    #[cfg(feature = "shader-passthrough")]
-    if descriptor.vertex.shader.module.msl_passthrough().is_some()
-        || fragment.shader.module.msl_passthrough().is_some()
-    {
-        return Ok(());
-    }
-
     let outputs = inter_stage_outputs(&descriptor.vertex, vertex_entry)?;
     let inputs = inter_stage_inputs(fragment, fragment_entry)?;
     // Fragment stage-input `@builtin`s (front_facing, sample_index, sample_mask,
@@ -2686,10 +2244,6 @@ pub(crate) fn stage_resource_bindings(
     entry_point: &str,
     pipeline_stage: PipelineShaderStage,
 ) -> Result<Vec<StageResourceBinding>, String> {
-    #[cfg(feature = "shader-passthrough")]
-    if stage.module.msl_passthrough().is_some() {
-        return Ok(Vec::new());
-    }
     let Some(module) = stage.module.reflected() else {
         return Err("render pipeline stage requires a reflected shader module".to_owned());
     };
@@ -2717,10 +2271,6 @@ pub(crate) fn validate_multisample_state(
     }
     if multisample.alpha_to_coverage_enabled {
         if let (Some(fragment), Some(entry_name)) = (&descriptor.fragment, fragment_entry) {
-            #[cfg(feature = "shader-passthrough")]
-            if fragment.shader.module.msl_passthrough().is_some() {
-                return Ok(());
-            }
             let module = fragment
                 .shader
                 .module
@@ -2745,11 +2295,6 @@ pub(crate) fn validate_multisample_state(
 mod tests {
     use super::*;
     use crate::pass::bind_group_layouts_compatible;
-    #[cfg(feature = "tiled")]
-    use crate::subpass::{
-        AttachmentLayout, SubpassDependency, SubpassDependencyType, SubpassInputAttachment,
-        SubpassLayoutDesc, SubpassPassLayoutDescriptor,
-    };
     use crate::test_helpers::*;
     use crate::{ErrorFilter, TextureViewDimension};
 
@@ -3548,7 +3093,6 @@ mod tests {
             Some("fs"),
             &[],
             &[],
-            &[],
             false,
         )
         .expect("separate WGSL modules should generate per-stage MSL");
@@ -3562,205 +3106,6 @@ mod tests {
         assert_eq!(vertex_entry, "vs");
         assert_eq!(fragment_entry.as_deref(), Some("fs"));
         assert!(bindings.is_empty());
-    }
-
-    #[cfg(feature = "shader-passthrough")]
-    fn spirv_words(source: &str, entry_point: &str, stage: naga::ShaderStage) -> Vec<u32> {
-        shader_naga::parse_and_validate_wgsl(source)
-            .expect("test WGSL should validate")
-            .generate_spirv(
-                entry_point,
-                stage,
-                &naga::back::PipelineConstants::default(),
-                false,
-            )
-            .expect("test WGSL should generate SPIR-V")
-    }
-
-    #[cfg(feature = "shader-passthrough")]
-    fn msl_render_reflection() -> MslReflection {
-        MslReflection {
-            entry_points: vec![
-                MslEntryPoint {
-                    name: "vs".to_owned(),
-                    stage: SHADER_STAGE_VERTEX,
-                    workgroup_size: [1, 1, 1],
-                },
-                MslEntryPoint {
-                    name: "fs".to_owned(),
-                    stage: SHADER_STAGE_FRAGMENT,
-                    workgroup_size: [1, 1, 1],
-                },
-            ],
-        }
-    }
-
-    #[cfg(feature = "shader-passthrough")]
-    #[test]
-    fn select_render_shader_source_covers_passthrough_backend_matrix() {
-        let device = noop_device();
-        let wgsl_module = render_shader_module(&device);
-        let wgsl_descriptor = render_pipeline_descriptor(Arc::clone(&wgsl_module));
-
-        let vertex_source = "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }";
-        let fragment_source =
-            "@fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0, 0.0, 0.0, 1.0); }";
-        let vertex_words = spirv_words(vertex_source, "vs", naga::ShaderStage::Vertex);
-        let fragment_words = spirv_words(fragment_source, "fs", naga::ShaderStage::Fragment);
-        let vertex_spirv = Arc::new(device.create_shader_module_spirv(vertex_words.clone()));
-        let fragment_spirv = Arc::new(device.create_shader_module_spirv(fragment_words.clone()));
-        let mut spirv_descriptor = render_pipeline_descriptor(Arc::clone(&vertex_spirv));
-        spirv_descriptor
-            .fragment
-            .as_mut()
-            .expect("fragment should exist")
-            .shader
-            .module = Arc::clone(&fragment_spirv);
-
-        let msl_source =
-            "vertex float4 vs() { return float4(0); }\nfragment float4 fs() { return float4(1); }"
-                .to_owned();
-        let msl_module =
-            Arc::new(device.create_shader_module_msl(msl_source.clone(), msl_render_reflection()));
-        let msl_descriptor = render_pipeline_descriptor(Arc::clone(&msl_module));
-        let mut mixed_vertex_spirv = render_pipeline_descriptor(Arc::clone(&vertex_spirv));
-        mixed_vertex_spirv
-            .fragment
-            .as_mut()
-            .expect("fragment should exist")
-            .shader
-            .module = Arc::clone(&wgsl_module);
-        let mut mixed_fragment_spirv = render_pipeline_descriptor(Arc::clone(&wgsl_module));
-        mixed_fragment_spirv
-            .fragment
-            .as_mut()
-            .expect("fragment should exist")
-            .shader
-            .module = Arc::clone(&fragment_spirv);
-
-        let (source, vertex_entry, fragment_entry, bindings) = select_render_shader_source(
-            HalBackend::Vulkan,
-            &wgsl_descriptor,
-            "vs",
-            Some("fs"),
-            &[],
-            &[],
-            &[],
-            false,
-        )
-        .expect("WGSL should generate Vulkan SPIR-V stages");
-        assert!(
-            matches!(source, HalShaderSource::SpirVStages { vertex, fragment } if !vertex.is_empty() && fragment.as_ref().is_some_and(|fragment| !fragment.is_empty()))
-        );
-        assert_eq!(vertex_entry, "vs");
-        assert_eq!(fragment_entry.as_deref(), Some("fs"));
-        assert!(bindings.is_empty());
-
-        let (source, _, _, _) = select_render_shader_source(
-            HalBackend::Vulkan,
-            &spirv_descriptor,
-            "vs",
-            Some("fs"),
-            &[],
-            &[],
-            &[],
-            false,
-        )
-        .expect("SPIR-V passthrough should select Vulkan SPIR-V stages");
-        assert!(matches!(
-            source,
-            HalShaderSource::SpirVStages { vertex, fragment }
-                if vertex == vertex_words && fragment.as_deref() == Some(fragment_words.as_slice())
-        ));
-        assert_eq!(
-            select_render_shader_source(
-                HalBackend::Vulkan,
-                &mixed_vertex_spirv,
-                "vs",
-                Some("fs"),
-                &[],
-                &[],
-                &[],
-                false,
-            )
-            .expect_err("mixed SPIR-V vertex and WGSL fragment must be rejected"),
-            "render pipeline cannot mix a SPIR-V passthrough module with a non-SPIR-V module"
-        );
-        assert_eq!(
-            select_render_shader_source(
-                HalBackend::Vulkan,
-                &mixed_fragment_spirv,
-                "vs",
-                Some("fs"),
-                &[],
-                &[],
-                &[],
-                false,
-            )
-            .expect_err("mixed WGSL vertex and SPIR-V fragment must be rejected"),
-            "render pipeline cannot mix a SPIR-V passthrough module with a non-SPIR-V module"
-        );
-
-        let (source, vertex_entry, fragment_entry, _) = select_render_shader_source(
-            HalBackend::Metal,
-            &msl_descriptor,
-            "vs",
-            Some("fs"),
-            &[],
-            &[],
-            &[],
-            false,
-        )
-        .expect("MSL passthrough should select Metal MSL");
-        assert!(matches!(source, HalShaderSource::Msl(selected) if selected == msl_source));
-        assert_eq!(vertex_entry, "vs");
-        assert_eq!(fragment_entry.as_deref(), Some("fs"));
-
-        let mut masked_msl_descriptor = msl_descriptor.clone();
-        masked_msl_descriptor.multisample.mask = 0b0101;
-        assert_eq!(
-            select_render_shader_source(
-                HalBackend::Metal,
-                &masked_msl_descriptor,
-                "vs",
-                Some("fs"),
-                &[],
-                &[],
-                &[],
-                false,
-            )
-            .expect_err("non-default Metal MSL passthrough sample mask must be rejected"),
-            "Metal MSL shader passthrough does not support a non-default multisample mask"
-        );
-
-        assert_eq!(
-            select_render_shader_source(
-                HalBackend::Metal,
-                &spirv_descriptor,
-                "vs",
-                Some("fs"),
-                &[],
-                &[],
-                &[],
-                false,
-            )
-            .expect_err("SPIR-V must not run on Metal"),
-            "SPIR-V shader module cannot be used on the Metal backend"
-        );
-        assert_eq!(
-            select_render_shader_source(
-                HalBackend::Vulkan,
-                &msl_descriptor,
-                "vs",
-                Some("fs"),
-                &[],
-                &[],
-                &[],
-                false,
-            )
-            .expect_err("MSL must not run on Vulkan"),
-            "MSL shader module cannot be used on the Vulkan backend"
-        );
     }
 
     #[cfg(feature = "gles")]
@@ -3796,7 +3141,6 @@ mod tests {
             Some("fs"),
             &[],
             &[],
-            &[],
             false,
         )
         .expect("WGSL should generate GLES GLSL stages");
@@ -3811,45 +3155,6 @@ mod tests {
         assert_eq!(vertex_entry, "vs");
         assert_eq!(fragment_entry.as_deref(), Some("fs"));
         assert!(bindings.is_empty());
-    }
-
-    #[cfg(feature = "shader-passthrough")]
-    #[test]
-    fn msl_render_pipeline_requires_explicit_layout_on_noop() {
-        let device = noop_device();
-        let module = Arc::new(device.create_shader_module_msl(
-            "vertex float4 vs() { return float4(0); }\nfragment float4 fs() { return float4(1); }"
-                .to_owned(),
-            msl_render_reflection(),
-        ));
-
-        device.push_error_scope(ErrorFilter::Validation);
-        let auto = device.create_render_pipeline(render_pipeline_descriptor(Arc::clone(&module)));
-        let scoped = device
-            .pop_error_scope()
-            .expect("scope should exist")
-            .expect("auto MSL render pipeline should be scoped");
-        assert!(auto.is_error());
-        assert_eq!(
-            scoped.message,
-            "MSL shader module requires an explicit pipeline layout"
-        );
-
-        let explicit_layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
-            bind_group_layouts: Vec::new(),
-            immediate_size: 0,
-            error: None,
-        }));
-        let mut descriptor = render_pipeline_descriptor(module);
-        descriptor.layout = RenderPipelineLayout::Explicit(explicit_layout);
-
-        device.push_error_scope(ErrorFilter::Validation);
-        let explicit = device.create_render_pipeline(descriptor);
-        let scoped = device.pop_error_scope().expect("scope should exist");
-        assert!(!explicit.is_error());
-        assert_eq!(explicit.vertex_entry_name(), "vs");
-        assert_eq!(explicit.fragment_entry_name(), Some("fs"));
-        assert_eq!(scoped, None);
     }
 
     #[test]
@@ -4045,432 +3350,9 @@ mod tests {
             "fragment-only ExternalTexture must have vertex_metal_index = None"
         );
     }
-
-    #[cfg(feature = "tiled")]
-    fn subpass_input_shader(sample: &str) -> String {
-        format!(
-            "@group(0) @binding(0) var s: subpass_input<{sample}>;
-             @vertex
-             fn vs() -> @builtin(position) vec4<f32> {{
-                 return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-             }}
-             @fragment
-             fn fs() -> @location(0) vec4<f32> {{
-                 let loaded = subpassLoad(s);
-                 if loaded.x == {zero} {{
-                     return vec4<f32>(1.0, 0.0, 0.0, 1.0);
-                 }}
-                 return vec4<f32>(0.0, 1.0, 0.0, 1.0);
-             }}",
-            zero = if sample == "f32" { "0.0" } else { "0" }
-        )
-    }
-
-    #[cfg(feature = "tiled")]
-    fn render_shader_module_with_fragment_location(
-        device: &crate::device::Device,
-        location: u32,
-    ) -> Arc<ShaderModule> {
-        Arc::new(
-            device.create_shader_module(ShaderModuleSource::Wgsl(format!(
-                "@vertex
-             fn vs() -> @builtin(position) vec4<f32> {{
-                 return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-             }}
-
-             @fragment
-             fn fs() -> @location({location}) vec4<f32> {{
-                 return vec4<f32>(1.0, 0.0, 0.0, 1.0);
-             }}"
-            ))),
-        )
-    }
-
     fn depth32_float() -> TextureFormat {
         TextureFormat::from_raw(0x30)
     }
-
-    #[cfg(feature = "tiled")]
-    fn subpass_attachment_layout(format: TextureFormat) -> AttachmentLayout {
-        AttachmentLayout {
-            format,
-            sample_count: 1,
-        }
-    }
-
-    #[cfg(feature = "tiled")]
-    fn multi_color_depth_layout_descriptor() -> SubpassPassLayoutDescriptor {
-        SubpassPassLayoutDescriptor {
-            color_attachments: vec![
-                subpass_attachment_layout(rgba8_unorm()),
-                subpass_attachment_layout(rgba8_unorm()),
-                subpass_attachment_layout(rgba8_unorm()),
-            ],
-            depth_stencil_attachment: Some(subpass_attachment_layout(depth32_float())),
-            subpasses: vec![
-                SubpassLayoutDesc {
-                    color_attachment_indices: vec![0, 1],
-                    uses_depth_stencil: true,
-                    input_attachments: Vec::new(),
-                },
-                SubpassLayoutDesc {
-                    color_attachment_indices: vec![2],
-                    uses_depth_stencil: false,
-                    input_attachments: vec![SubpassInputAttachment {
-                        group: 0,
-                        binding: 0,
-                        source_subpass: 0,
-                        source_attachment: 0,
-                    }],
-                },
-            ],
-            dependencies: vec![SubpassDependency {
-                src_subpass: 0,
-                dst_subpass: 1,
-                dependency_type: SubpassDependencyType::ColorToInput,
-                by_region: true,
-            }],
-            error: None,
-        }
-    }
-
-    #[cfg(feature = "tiled")]
-    fn multi_output_render_shader_module(device: &crate::device::Device) -> Arc<ShaderModule> {
-        Arc::new(
-            device.create_shader_module(ShaderModuleSource::Wgsl(
-                "@vertex
-                 fn vs() -> @builtin(position) vec4<f32> {
-                     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-                 }
-
-                 struct Output {
-                     @location(0) a: vec4<f32>,
-                     @location(1) b: vec4<f32>,
-                 }
-
-                 @fragment
-                 fn fs() -> Output {
-                     var out: Output;
-                     out.a = vec4<f32>(1.0, 0.0, 0.0, 1.0);
-                     out.b = vec4<f32>(0.0, 1.0, 0.0, 1.0);
-                     return out;
-                 }"
-                .to_owned(),
-            )),
-        )
-    }
-
-    #[cfg(feature = "tiled")]
-    fn subpass_pipeline_descriptor_for_layout(
-        device: &crate::device::Device,
-        layout: Arc<SubpassPassLayout>,
-    ) -> SubpassRenderPipelineDescriptor {
-        let module = multi_output_render_shader_module(device);
-        let mut base = render_pipeline_descriptor(module);
-        base.depth_stencil = Some(DepthStencilState {
-            format: depth32_float(),
-            depth_write_enabled: Some(true),
-            depth_compare: Some(CompareFunction::Less),
-            stencil_front: StencilFaceState {
-                compare: CompareFunction::Always,
-                fail_op: StencilOperation::Keep,
-                depth_fail_op: StencilOperation::Keep,
-                pass_op: StencilOperation::Keep,
-            },
-            stencil_back: StencilFaceState {
-                compare: CompareFunction::Always,
-                fail_op: StencilOperation::Keep,
-                depth_fail_op: StencilOperation::Keep,
-                pass_op: StencilOperation::Keep,
-            },
-            stencil_read_mask: u32::MAX,
-            stencil_write_mask: u32::MAX,
-            depth_bias: 0,
-            depth_bias_slope_scale: 0.0,
-            depth_bias_clamp: 0.0,
-        });
-        if let Some(fragment) = &mut base.fragment {
-            fragment.target_count = 2;
-            fragment.targets = vec![
-                ColorTargetState {
-                    format: rgba8_unorm(),
-                    blend: None,
-                    write_mask: 0xF,
-                },
-                ColorTargetState {
-                    format: rgba8_unorm(),
-                    blend: None,
-                    write_mask: 0xF,
-                },
-            ];
-        }
-        SubpassRenderPipelineDescriptor {
-            base,
-            pass_layout: layout,
-            subpass_index: 0,
-            error: None,
-        }
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn subpass_pipeline_accepts_depth_stencil() {
-        let device = noop_device();
-        let layout =
-            Arc::new(device.create_subpass_pass_layout(multi_color_depth_layout_descriptor()));
-        let descriptor = subpass_pipeline_descriptor_for_layout(&device, layout);
-
-        device.push_error_scope(ErrorFilter::Validation);
-        let pipeline = device.create_subpass_render_pipeline(descriptor);
-        let scoped = device.pop_error_scope().expect("scope should exist");
-
-        assert!(!pipeline.is_error());
-        assert_eq!(scoped, None);
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn subpass_pipeline_accepts_multiple_color_targets() {
-        let device = noop_device();
-        let layout =
-            Arc::new(device.create_subpass_pass_layout(multi_color_depth_layout_descriptor()));
-        let descriptor = subpass_pipeline_descriptor_for_layout(&device, layout);
-
-        device.push_error_scope(ErrorFilter::Validation);
-        let pipeline = device.create_subpass_render_pipeline(descriptor);
-        let scoped = device.pop_error_scope().expect("scope should exist");
-
-        assert!(!pipeline.is_error());
-        assert_eq!(scoped, None);
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn subpass_pipeline_rejects_multisample_above_one() {
-        let device = noop_device();
-        let mut layout_descriptor = multi_color_depth_layout_descriptor();
-        for attachment in &mut layout_descriptor.color_attachments {
-            attachment.sample_count = 4;
-        }
-        if let Some(depth) = &mut layout_descriptor.depth_stencil_attachment {
-            depth.sample_count = 4;
-        }
-        let layout = Arc::new(device.create_subpass_pass_layout(layout_descriptor));
-        let mut descriptor = subpass_pipeline_descriptor_for_layout(&device, layout);
-        descriptor.base.multisample.count = 4;
-
-        device.push_error_scope(ErrorFilter::Internal);
-        let pipeline = device.create_subpass_render_pipeline(descriptor);
-        let scoped = device
-            .pop_error_scope()
-            .expect("scope should exist")
-            .expect("multisample rejection should be scoped");
-
-        assert!(pipeline.is_error());
-        assert_eq!(
-            scoped.message,
-            "subpass render pipeline does not yet support multisample > 1"
-        );
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn validate_color_targets_subpass_accepts_both_location_conventions() {
-        let device = noop_device();
-        let limits = device.limits();
-        let subpass_slot_one = [1];
-
-        let subpass_local =
-            render_pipeline_descriptor(render_shader_module_with_fragment_location(&device, 0));
-        resolve_render_pipeline_descriptor(
-            &subpass_local,
-            limits,
-            &device.features(),
-            Some(&subpass_slot_one),
-            0,
-        )
-        .expect("subpass-local fragment output should be accepted");
-
-        let flat_slot =
-            render_pipeline_descriptor(render_shader_module_with_fragment_location(&device, 1));
-        resolve_render_pipeline_descriptor(
-            &flat_slot,
-            limits,
-            &device.features(),
-            Some(&subpass_slot_one),
-            0,
-        )
-        .expect("flat-slot fragment output should be accepted");
-
-        let missing_slot =
-            render_pipeline_descriptor(render_shader_module_with_fragment_location(&device, 3));
-        assert_eq!(
-            resolve_render_pipeline_descriptor(
-                &missing_slot,
-                limits,
-                &device.features(),
-                Some(&[2]),
-                0
-            )
-            .expect_err("unmatched fragment output should require writeMask 0"),
-            "render pipeline color target without shader output must use writeMask 0"
-        );
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn subpass_input_shader_generates_spirv_and_msl_status_is_known() {
-        let module = shader_naga::parse_and_validate_wgsl(&subpass_input_shader("f32"))
-            .expect("subpass input WGSL should validate");
-
-        let spirv = module
-            .generate_spirv(
-                "fs",
-                naga::ShaderStage::Fragment,
-                &naga::back::PipelineConstants::default(),
-                false,
-            )
-            .expect("subpass input fragment shader should generate SPIR-V");
-        assert!(!spirv.is_empty());
-
-        let msl = module
-            .generate_render_msl(
-                "vs",
-                Some("fs"),
-                &shader_naga::MslBindingMap {
-                    resources: Vec::new(),
-                },
-                &[],
-                &[((0, 0), 0)],
-                false,
-            )
-            .expect("naga must lower subpass_input when subpass_color_slots is populated");
-        assert!(msl.source.contains("[[color("));
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn subpass_input_explicit_layout_checks_sample_type() {
-        let device = noop_device();
-        let module = Arc::new(
-            device.create_shader_module(ShaderModuleSource::Wgsl(subpass_input_shader("i32"))),
-        );
-        let float_layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
-            entries: vec![BindGroupLayoutEntry {
-                binding: 0,
-                visibility: SHADER_STAGE_FRAGMENT,
-                binding_array_size: 0,
-                kind: Some(BindingLayoutKind::InputAttachment {
-                    sample_type: TextureSampleType::Float,
-                    multisampled: false,
-                }),
-            }],
-            error: None,
-        }));
-        let sint_layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
-            entries: vec![BindGroupLayoutEntry {
-                binding: 0,
-                visibility: SHADER_STAGE_FRAGMENT,
-                binding_array_size: 0,
-                kind: Some(BindingLayoutKind::InputAttachment {
-                    sample_type: TextureSampleType::Sint,
-                    multisampled: false,
-                }),
-            }],
-            error: None,
-        }));
-
-        let float_pipeline_layout =
-            Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
-                bind_group_layouts: vec![float_layout],
-                immediate_size: 0,
-                error: None,
-            }));
-        let mut mismatch = render_pipeline_descriptor(Arc::clone(&module));
-        mismatch.layout = RenderPipelineLayout::Explicit(float_pipeline_layout);
-
-        device.push_error_scope(ErrorFilter::Validation);
-        let mismatch_pipeline = device.create_render_pipeline(mismatch);
-        let scoped = device
-            .pop_error_scope()
-            .expect("scope should exist")
-            .expect("mismatch should be scoped");
-        assert!(mismatch_pipeline.is_error());
-        assert_eq!(
-            scoped.message,
-            "pipeline layout binding kind is incompatible with the shader binding"
-        );
-
-        let sint_pipeline_layout =
-            Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
-                bind_group_layouts: vec![sint_layout],
-                immediate_size: 0,
-                error: None,
-            }));
-        let mut matched = render_pipeline_descriptor(module);
-        matched.layout = RenderPipelineLayout::Explicit(sint_pipeline_layout);
-
-        device.push_error_scope(ErrorFilter::Validation);
-        let matched_pipeline = device.create_render_pipeline(matched);
-        let scoped = device.pop_error_scope().expect("scope should exist");
-        assert!(!matched_pipeline.is_error());
-        assert_eq!(scoped, None);
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn input_attachment_hal_bindings_extracts_only_input_attachment_entries() {
-        let device = noop_device();
-        // Group 0 mixes an input attachment (binding 0) with a uniform (binding 1);
-        // group 1 holds only a uniform. Only the input attachment must be emitted.
-        let group0 = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
-            entries: vec![
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: SHADER_STAGE_FRAGMENT,
-                    binding_array_size: 0,
-                    kind: Some(BindingLayoutKind::InputAttachment {
-                        sample_type: TextureSampleType::Float,
-                        multisampled: false,
-                    }),
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: SHADER_STAGE_FRAGMENT,
-                    binding_array_size: 0,
-                    kind: Some(BindingLayoutKind::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: 0,
-                    }),
-                },
-            ],
-            error: None,
-        }));
-        let group1 = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
-            entries: vec![BindGroupLayoutEntry {
-                binding: 0,
-                visibility: SHADER_STAGE_FRAGMENT,
-                binding_array_size: 0,
-                kind: Some(BindingLayoutKind::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: 0,
-                }),
-            }],
-            error: None,
-        }));
-
-        let bindings = input_attachment_hal_bindings(&[group0, group1]);
-        assert_eq!(bindings.len(), 1);
-        assert_eq!(bindings[0].group, 0);
-        assert_eq!(bindings[0].binding, 0);
-        assert!(matches!(
-            bindings[0].kind,
-            HalDescriptorBindingKind::Buffer(HalBufferBindingKind::InputAttachment)
-        ));
-    }
-
     #[test]
     fn bundle_attachment_signature_compat_uses_readonly_implication() {
         // F-062: formats/sample-count match exactly, but read-only is an

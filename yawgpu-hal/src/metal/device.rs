@@ -104,16 +104,6 @@ impl MetalDevice {
         }
     }
 
-    /// Creates a transient attachment matching the given concrete descriptor.
-    #[cfg(feature = "tiled")]
-    pub fn create_transient_attachment(
-        &self,
-        descriptor: &HalTransientAttachmentDescriptor,
-    ) -> Result<MetalTransientAttachment, HalError> {
-        self.allocations.fetch_add(1, Ordering::Relaxed);
-        create_transient_attachment(&self.device, descriptor)
-    }
-
     /// Creates a sampler matching the given descriptor.
     #[must_use]
     pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> MetalSampler {
@@ -177,90 +167,6 @@ impl MetalDevice {
             vertex_entry_point,
             fragment_entry_point,
             descriptor,
-        )
-    }
-
-    /// Creates a subpass-compatible render pipeline.
-    ///
-    /// The MTL pipeline gets one `colorAttachments[i].pixelFormat` per slot in
-    /// the pass layout (not just the slots this subpass writes), so the
-    /// pipeline's color-attachment layout matches the encoder's
-    /// `MTLRenderPassDescriptor` slot-for-slot. The WGSL fragment's `@location(N)`
-    /// — emitted by naga as MSL `[[color(N)]]` — lands in MTL slot N (the
-    /// global flat numbering; see e2e shader comments mirroring mgpu's
-    /// `hello_deferred`).
-    ///
-    /// When the caller's `descriptor.depth_stencil` is `None` but the pass
-    /// layout declares a depth-stencil attachment, the MTL pipeline still
-    /// needs `setDepthAttachmentPixelFormat` to match the encoder's bound
-    /// depth attachment (Apple requires the format to match per
-    /// `MTLRenderPipelineDescriptor`). Synthesize a no-op
-    /// `HalDepthStencilState` carrying the layout's format so the pipeline
-    /// declares the right `depthAttachmentPixelFormat`; the actual depth
-    /// test/write stays disabled via the no-op `MTLDepthStencilState` that
-    /// `create_render_pipeline` falls back to (depthCompare=Always,
-    /// depthWrite=false, no stencil).
-    // Each parameter here represents an orthogonal concern (shader source,
-    // two entry points, the base render descriptor, bindings, the pass-level
-    // layout, the subpass index) and matches the shapes the
-    // `HalSubpassRenderPipelineDescriptor` carries from `yawgpu-core`. Folding
-    // them into a struct would just be re-spelling the same eight values, so
-    // accept the clippy warning at this site.
-    #[cfg(feature = "tiled")]
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_subpass_render_pipeline(
-        &self,
-        shader: HalShaderSource,
-        vertex_entry_point: &str,
-        fragment_entry_point: &str,
-        descriptor: &HalRenderPipelineDescriptor,
-        bindings: &[HalDescriptorBinding],
-        pass_layout: &HalSubpassPassLayout,
-        _subpass_index: u32,
-    ) -> Result<MetalRenderPipeline, HalError> {
-        let _ = bindings; // Metal subpass inputs use the color-slot map, not descriptors.
-        let mut adjusted = descriptor.clone();
-        adjusted.color_targets = pass_layout
-            .color_attachments
-            .iter()
-            .enumerate()
-            .map(|(index, attachment)| {
-                let state = descriptor.color_targets.get(index).copied().flatten();
-                Some(HalColorTargetState {
-                    format: attachment.format,
-                    blend: state.and_then(|state| state.blend),
-                    write_mask: state.map_or(0xf, |state| state.write_mask),
-                })
-            })
-            .collect();
-        if adjusted.depth_stencil.is_none() {
-            if let Some(layout_ds) = pass_layout.depth_stencil_attachment.as_ref() {
-                let stencil_disabled = HalStencilFaceState {
-                    compare: HalCompareFunction::Always,
-                    fail_op: HalStencilOperation::Keep,
-                    depth_fail_op: HalStencilOperation::Keep,
-                    pass_op: HalStencilOperation::Keep,
-                };
-                adjusted.depth_stencil = Some(HalDepthStencilState {
-                    format: layout_ds.format,
-                    depth_write_enabled: false,
-                    depth_compare: HalCompareFunction::Always,
-                    stencil_front: stencil_disabled,
-                    stencil_back: stencil_disabled,
-                    stencil_read_mask: 0,
-                    stencil_write_mask: 0,
-                    depth_bias: 0,
-                    depth_bias_slope_scale: 0.0,
-                    depth_bias_clamp: 0.0,
-                });
-            }
-        }
-        self.create_render_pipeline(
-            shader,
-            vertex_entry_point,
-            Some(fragment_entry_point),
-            &adjusted,
-            &[],
         )
     }
 }

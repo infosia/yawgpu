@@ -124,7 +124,6 @@ pub(crate) struct GeneratedRenderMsl {
 struct RenderMslStageOptions<'a> {
     vertex_buffer_mappings: Vec<naga::back::msl::VertexBufferMapping>,
     force_point_size: bool,
-    subpass_color_slots: &'a [((u32, u32), u32)],
     pipeline_constants: &'a naga::back::PipelineConstants,
     sample_mask: u32,
 }
@@ -433,14 +432,6 @@ pub(crate) enum ReflectedResourceBindingKind {
         /// Multisampled variant.
         multisampled: bool,
     },
-    /// Input attachment variant.
-    #[cfg(feature = "tiled")]
-    InputAttachment {
-        /// Sample kind variant.
-        sample_kind: ReflectedTypeScalarClass,
-        /// Multisampled variant.
-        multisampled: bool,
-    },
     /// Storage texture variant.
     StorageTexture {
         /// Format variant.
@@ -534,25 +525,6 @@ pub(crate) fn parse_and_validate_wgsl_gated(
     let (module, parse_warnings) =
         naga::front::wgsl::parse_str_with_warnings(src).map_err(|error| error.to_string())?;
     validate_module(module, shader_f16, src, parse_warnings)
-}
-
-/// Reflects a SPIR-V module without re-emitting the input words.
-#[cfg(feature = "shader-passthrough")]
-pub(crate) fn reflect_spirv(words: &[u32]) -> Result<ReflectedModule, String> {
-    reflect_spirv_gated(words, true)
-}
-
-/// Reflects a SPIR-V module using the supplied `shader-f16` gate.
-#[cfg(feature = "shader-passthrough")]
-pub(crate) fn reflect_spirv_gated(
-    words: &[u32],
-    shader_f16: bool,
-) -> Result<ReflectedModule, String> {
-    let options = naga::front::spv::Options::default();
-    let module = naga::front::spv::Frontend::new(words.iter().copied(), &options)
-        .parse()
-        .map_err(|error| error.to_string())?;
-    validate_module(module, shader_f16, "", Vec::new())
 }
 
 fn validate_module(
@@ -774,7 +746,6 @@ impl ReflectedModule {
             RenderMslStageOptions {
                 vertex_buffer_mappings: msl_vertex_buffer_mappings(vertex_buffers)?,
                 force_point_size,
-                subpass_color_slots: &[],
                 pipeline_constants,
                 sample_mask: u32::MAX,
             },
@@ -786,7 +757,6 @@ impl ReflectedModule {
         &self,
         entry_name: &str,
         binding_map: &MslBindingMap,
-        subpass_color_slots: &[((u32, u32), u32)],
         pipeline_constants: &naga::back::PipelineConstants,
         sample_mask: u32,
     ) -> Result<GeneratedMsl, String> {
@@ -797,7 +767,6 @@ impl ReflectedModule {
             RenderMslStageOptions {
                 vertex_buffer_mappings: Vec::new(),
                 force_point_size: false,
-                subpass_color_slots,
                 pipeline_constants,
                 sample_mask,
             },
@@ -873,15 +842,10 @@ impl ReflectedModule {
                 immediates_buffer: frag_depth_clamp_slot,
             },
         );
-        let mut color_slot_map = naga::FastHashMap::default();
-        for &(key, slot) in stage_options.subpass_color_slots {
-            color_slot_map.insert(key, slot);
-        }
         let options = naga::back::msl::Options {
             lang_version: (2, 4),
             per_entry_point_map,
             fake_missing_bindings: false,
-            subpass_color_slots: color_slot_map,
             bounds_check_policies: msl_bounds_check_policies(),
             ..Default::default()
         };
@@ -921,7 +885,6 @@ impl ReflectedModule {
         fragment_entry_name: Option<&str>,
         binding_map: &MslBindingMap,
         vertex_buffers: &[MslVertexBufferBinding],
-        subpass_color_slots: &[((u32, u32), u32)],
         force_point_size: bool,
     ) -> Result<GeneratedRenderMsl, String> {
         let empty_pipeline_constants = naga::back::PipelineConstants::default();
@@ -973,15 +936,10 @@ impl ReflectedModule {
                 },
             );
         }
-        let mut color_slot_map = naga::FastHashMap::default();
-        for &(key, slot) in subpass_color_slots {
-            color_slot_map.insert(key, slot);
-        }
         let options = naga::back::msl::Options {
             lang_version: (2, 4),
             per_entry_point_map,
             fake_missing_bindings: false,
-            subpass_color_slots: color_slot_map,
             bounds_check_policies: msl_bounds_check_policies(),
             ..Default::default()
         };
@@ -1978,14 +1936,6 @@ fn resource_binding_kind(
                     view_dimension: reflected_texture_view_dimension(*dim, *arrayed),
                     multisampled: *multi,
                 }),
-                #[cfg(feature = "tiled")]
-                naga::ImageClass::Subpass {
-                    aspect: naga::SubpassAspect::Color { kind },
-                    multi,
-                } => Some(ReflectedResourceBindingKind::InputAttachment {
-                    sample_kind: scalar_kind_class(*kind)?,
-                    multisampled: *multi,
-                }),
                 naga::ImageClass::Storage { format, access } => {
                     Some(ReflectedResourceBindingKind::StorageTexture {
                         format: format!("{format:?}"),
@@ -2227,8 +2177,6 @@ fn expression_global(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "shader-passthrough")]
-    use super::reflect_spirv_gated;
     use super::{
         parse_and_validate_wgsl, parse_and_validate_wgsl_gated, MslBindingMap, MslResourceBinding,
         MslResourceBindingKind, MslVertexAttribute, MslVertexBufferBinding, MslVertexFormat,
@@ -2268,27 +2216,6 @@ mod tests {
         assert!(module.warnings[0].message.contains("unknown `diagnostic"));
         assert_eq!(module.warnings[0].line_num, 1);
         assert_ne!(module.warnings[0].line_pos, 0);
-    }
-
-    #[cfg(feature = "shader-passthrough")]
-    #[test]
-    fn reflect_spirv_gated_accepts_plain_shader_without_shader_f16() {
-        // note: generated f16 SPIR-V is rejected by naga's strict SPIR-V
-        // frontend capability filter before it reaches `validate_module`; f16
-        // gate rejection is covered by the shared WGSL validation tests above.
-        let plain_words =
-            parse_and_validate_wgsl("@compute @workgroup_size(1) fn cs() { let x = 1.0; _ = x; }")
-                .unwrap()
-                .generate_spirv(
-                    "cs",
-                    ShaderStage::Compute,
-                    &naga::back::PipelineConstants::default(),
-                    false,
-                )
-                .unwrap();
-
-        assert!(reflect_spirv_gated(&plain_words, false).is_ok());
-        assert!(reflect_spirv_gated(&plain_words, true).is_ok());
     }
 
     #[test]
@@ -2688,7 +2615,6 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                         kind: MslResourceBindingKind::ExternalTexture,
                     }],
                 },
-                &[],
                 &naga::back::PipelineConstants::default(),
                 u32::MAX,
             )
@@ -2708,28 +2634,6 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
             )
             .expect_err("external texture SPIR-V must be cleanly rejected, not generated");
         assert!(spirv_err.contains("external textures are not supported on the Vulkan backend"));
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn reflects_subpass_input_binding_kind() {
-        let module = parse_and_validate_wgsl(
-            "@group(0) @binding(0) var s: subpass_input<i32>;
-             @fragment fn fs() -> @location(0) vec4<i32> {
-                 return subpassLoad(s);
-             }",
-        )
-        .unwrap();
-
-        let bindings = module.resource_bindings_for_entry("fs").unwrap();
-        assert_eq!(bindings.len(), 1);
-        assert_eq!(
-            bindings[0].kind,
-            ReflectedResourceBindingKind::InputAttachment {
-                sample_kind: ReflectedTypeScalarClass::Sint,
-                multisampled: false
-            }
-        );
     }
 
     #[test]
@@ -2793,7 +2697,6 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                     resources: Vec::new(),
                 },
                 &[],
-                &[],
                 false,
             )
             .expect("vertex-only render MSL should generate");
@@ -2841,10 +2744,10 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
         };
 
         let point = module
-            .generate_render_msl("vs", None, &binding_map, &[], &[], true)
+            .generate_render_msl("vs", None, &binding_map, &[], true)
             .expect("point render MSL should generate");
         let triangle = module
-            .generate_render_msl("vs", None, &binding_map, &[], &[], false)
+            .generate_render_msl("vs", None, &binding_map, &[], false)
             .expect("triangle render MSL should generate");
 
         assert!(point.source.contains("point_size"));
@@ -2866,7 +2769,6 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                 &MslBindingMap {
                     resources: Vec::new(),
                 },
-                &[],
                 &naga::back::PipelineConstants::default(),
                 u32::MAX,
             )
@@ -2898,7 +2800,6 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                 &MslBindingMap {
                     resources: Vec::new(),
                 },
-                &[],
                 &naga::back::PipelineConstants::default(),
                 u32::MAX,
             )
@@ -2918,7 +2819,6 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                 &MslBindingMap {
                     resources: Vec::new(),
                 },
-                &[],
                 &naga::back::PipelineConstants::default(),
                 u32::MAX,
             )
@@ -2929,7 +2829,6 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                 &MslBindingMap {
                     resources: Vec::new(),
                 },
-                &[],
                 &override_constants("R", 0.6),
                 u32::MAX,
             )
@@ -2960,7 +2859,6 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                 &MslBindingMap {
                     resources: Vec::new(),
                 },
-                &[],
                 &naga::back::PipelineConstants::default(),
                 u32::MAX,
             )
@@ -2971,7 +2869,6 @@ fn vs(@location(0) pos: vec4<f32>) -> @builtin(position) vec4<f32> {
                 &MslBindingMap {
                     resources: Vec::new(),
                 },
-                &[],
                 &naga::back::PipelineConstants::default(),
                 0b0101,
             )

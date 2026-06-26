@@ -1229,37 +1229,6 @@ pub(crate) fn validate_pipeline_bind_groups(
     Ok(())
 }
 
-/// Validates subpass pipeline bind groups, treating input-attachment-only groups
-/// as auto-wired by the subpass pass.
-///
-/// A subpass-input binding is supplied from the pass layout's input-source
-/// mapping rather than a caller-bound bind group, so a required layout whose
-/// entries are all input attachments is satisfied without a `set_bind_group`
-/// call. Any group that mixes input attachments with other resources still
-/// requires a caller-bound group (the non-input bindings are not auto-wired).
-#[cfg(feature = "tiled")]
-pub(crate) fn validate_subpass_pipeline_bind_groups(
-    required_layouts: &[Arc<BindGroupLayout>],
-    bound_groups: &BTreeMap<u32, BoundBindGroup>,
-    limits: Limits,
-) -> Result<(), String> {
-    for (index, required_layout) in required_layouts.iter().enumerate() {
-        if required_layout.entries().is_empty() {
-            continue;
-        }
-        let index = u32::try_from(index)
-            .map_err(|_| "pipeline bind group index is too large".to_owned())?;
-        let Some(bound) = bound_groups.get(&index) else {
-            if bind_group_layout_is_input_attachment_only(required_layout) {
-                continue;
-            }
-            return Err("pipeline requires a missing bind group".to_owned());
-        };
-        validate_bound_bind_group(required_layout, bound, limits)?;
-    }
-    Ok(())
-}
-
 /// Validates a single bound bind group against its required layout.
 fn validate_bound_bind_group(
     required_layout: &Arc<BindGroupLayout>,
@@ -1278,20 +1247,6 @@ fn validate_bound_bind_group(
         &bound.dynamic_offsets,
         limits,
     )
-}
-
-/// Returns whether every entry in the layout is an input attachment.
-///
-/// Such a group is wired automatically by the subpass pass, so the pipeline does
-/// not need a caller-bound bind group for it. An empty layout is not treated as
-/// input-attachment-only (it carries no auto-wired binding to satisfy).
-#[cfg(feature = "tiled")]
-fn bind_group_layout_is_input_attachment_only(layout: &BindGroupLayout) -> bool {
-    let entries = layout.entries();
-    !entries.is_empty()
-        && entries
-            .iter()
-            .all(|entry| matches!(entry.kind, Some(BindingLayoutKind::InputAttachment { .. })))
 }
 
 /// Returns bind group layouts compatible.

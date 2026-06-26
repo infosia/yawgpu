@@ -177,7 +177,9 @@ mod tests {
     fn shader_module_handle(device: &Arc<WGPUDeviceImpl>) -> native::WGPUShaderModule {
         let shader = device
             .core
-            .create_shader_module(core::ShaderModuleSource::Spirv(Vec::new()));
+            .create_shader_module(core::ShaderModuleSource::Wgsl(
+                "@compute @workgroup_size(1) fn cs() {}".to_owned(),
+            ));
         arc_to_handle(Arc::new(WGPUShaderModuleImpl {
             _core: Arc::new(shader),
             _device: Arc::clone(&device.core),
@@ -422,23 +424,6 @@ mod tests {
         ] {
             assert_eq!(map_feature_to_native(map_feature(value)), value);
         }
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn map_feature_accepts_tiled_vendor_feature_names() {
-        assert_eq!(
-            map_feature(crate::YaWGPUFeatureName_MultiSubpass),
-            core::Feature::MultiSubpass
-        );
-        assert_eq!(
-            map_feature_to_native(core::Feature::TransientAttachments),
-            crate::YaWGPUFeatureName_TransientAttachments
-        );
-        assert_eq!(
-            map_feature_to_native(core::Feature::ShaderFramebufferFetch),
-            crate::YaWGPUFeatureName_ShaderFramebufferFetch
-        );
     }
 
     #[test]
@@ -1425,59 +1410,6 @@ mod tests {
             mapped.entries[0].kind,
             Some(core::BindingLayoutKind::ExternalTexture)
         );
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn map_bind_group_layout_descriptor_decodes_input_attachment_entry() {
-        let mut input_attachment = crate::YaWGPUInputAttachmentBindingLayout {
-            chain: native::WGPUChainedStruct {
-                next: std::ptr::null_mut(),
-                sType: crate::YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT,
-            },
-            sampleType: native::WGPUTextureSampleType_Sint,
-            multisampled: 1,
-        };
-        let entry = native::WGPUBindGroupLayoutEntry {
-            nextInChain: (&mut input_attachment.chain) as *mut native::WGPUChainedStruct,
-            binding: 4,
-            visibility: native::WGPUShaderStage_Fragment,
-            bindingArraySize: 0,
-            buffer: unused_buffer_layout(),
-            sampler: unused_sampler_layout(),
-            texture: unused_texture_layout(),
-            storageTexture: unused_storage_texture_layout(),
-        };
-        let descriptor = native::WGPUBindGroupLayoutDescriptor {
-            nextInChain: std::ptr::null_mut(),
-            label: empty_string_view(),
-            entryCount: 1,
-            entries: &entry,
-        };
-
-        let mapped = unsafe { map_bind_group_layout_descriptor(&descriptor) };
-        assert_eq!(mapped.error, None);
-        assert_eq!(
-            mapped.entries[0].kind,
-            Some(core::BindingLayoutKind::InputAttachment {
-                sample_type: core::TextureSampleType::Sint,
-                multisampled: true
-            })
-        );
-
-        let device = device_impl();
-        device.core.push_error_scope(core::ErrorFilter::Validation);
-        let layout = Arc::new(device.core.create_bind_group_layout(mapped));
-        let pipeline_layout = device
-            .core
-            .create_pipeline_layout(core::PipelineLayoutDescriptor {
-                bind_group_layouts: vec![layout],
-                immediate_size: 0,
-                error: None,
-            });
-        let scoped = device.core.pop_error_scope().expect("scope should exist");
-        assert!(!pipeline_layout.is_error());
-        assert_eq!(scoped, None);
     }
 
     #[test]

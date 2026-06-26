@@ -94,7 +94,7 @@ impl GlesAdapter {
 
     /// Returns true when WGSL `shader-f16` is supported.
     #[must_use]
-    pub(super) fn supports_shader_float16(&self) -> bool {
+    pub(crate) fn supports_shader_float16(&self) -> bool {
         false
     }
 

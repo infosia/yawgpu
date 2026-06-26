@@ -9,10 +9,9 @@ that browsers expose to WebAssembly — without a browser, a JavaScript engine,
 or a web runtime.
 
 On top of the standard `webgpu.h`, yawgpu ships a small companion header
-[`yawgpu.h`](yawgpu/ffi/webgpu-headers/yawgpu.h) that adds vendor extensions
-for backend selection, precompiled-shader passthrough (SPIR-V / MSL), and
-tile-based deferred rendering (subpasses, transient attachments, framebuffer
-fetch). See **[Vendor extensions](#vendor-extensions-yawgpuh)** below.
+[`yawgpu.h`](yawgpu/ffi/webgpu-headers/yawgpu.h) that adds a vendor extension
+for backend selection. See **[Vendor extensions](#vendor-extensions-yawgpuh)**
+below.
 
 ## What makes it different
 
@@ -44,7 +43,7 @@ yawgpu is a small Cargo workspace of layered crates:
 ```
         C / C++ application
                 │  webgpu.h  (standard WebGPU C ABI)
-                │  yawgpu.h  (vendor extensions)
+                │  yawgpu.h  (vendor extension: backend selection)
                 ▼
 ┌───────────────────────────────────────────────┐
 │ yawgpu        C ABI layer                       │  cdylib + staticlib + rlib
@@ -83,7 +82,7 @@ yawgpu is a small Cargo workspace of layered crates:
 | **Noop** | reference | CPU-only; always available. Runs the full validation layer with no GPU. Ideal for CI and headless testing. |
 | **Metal** | 1 — supported | Apple platforms. Built with the `metal` feature via the `objc2` family. |
 | **Vulkan** | 1 — supported | Cross-platform. Built with the `vulkan` feature via `ash`; targets **Vulkan 1.1+** (MoltenVK ≥ 1.1 on macOS, native drivers on Linux / Windows / Android). |
-| **OpenGL ES** | 2 — experimental | Opt-in `gles` feature (never in default). Targets Android (native EGL) and Windows (ANGLE by default, host GL via opt-in `YAWGPU_GLES_BACKEND=wgl`). Best-effort: paths that do not cleanly map to GLES 3.1 are rejected at the HAL layer with `HalError`; `yawgpu.h` vendor extensions (`tiled`, `shader-passthrough`) are not implemented for GLES. |
+| **OpenGL ES** | 2 — experimental | Opt-in `gles` feature (never in default). Targets Android (native EGL) and Windows (ANGLE by default, host GL via opt-in `YAWGPU_GLES_BACKEND=wgl`). Best-effort: paths that do not cleanly map to GLES 3.1 are rejected at the HAL layer with `HalError`. |
 
 Direct3D is intentionally out of scope.
 
@@ -108,22 +107,13 @@ that vendor symbols never collide with the standard WebGPU C API:
 
 | Kind | Prefix | Example |
 |---|---|---|
-| Functions | `yawgpu*` | `yawgpuDeviceCreateShaderModuleSpirV` |
-| Types / structs / enums / handles | `YaWGPU*` | `YaWGPUTransientAttachment` |
+| Functions | `yawgpu*` | *(reserved for future vendor calls)* |
+| Types / structs / enums / handles | `YaWGPU*` | `YaWGPUInstanceBackendSelect` |
 | Constants / macros / SType tags | `YAWGPU_*` / `YAWGPU_STYPE_*` | `YAWGPU_STYPE_INSTANCE_BACKEND_SELECT` |
-| Feature names | `YaWGPUFeatureName_*` | `YaWGPUFeatureName_MultiSubpass` |
 
 Every descriptor ships a matching `YAWGPU_*_INIT` zero/sentinel initializer
-macro, mirroring `webgpu.h` ergonomics. Each extension is gated by an
-opt-in Cargo feature; the default build only exposes the standard WebGPU C
-API plus backend selection.
-
-| Cargo feature | What it adds | Header guard |
-|---|---|---|
-| *(none — always on)* | Backend selection via `YaWGPUInstanceBackendSelect` | — |
-| `shader-passthrough` | Raw SPIR-V / MSL shader modules, bypassing WGSL→naga | `YAWGPU_HAS_SHADER_PASSTHROUGH` |
-| `tiled` | TBDR primitives: subpasses, transient attachments, framebuffer fetch | `YAWGPU_HAS_TILED` |
-| `mobile` | Aggregate of `shader-passthrough` + `tiled` for mobile GPU targets | both guards |
+macro, mirroring `webgpu.h` ergonomics. The default build exposes the
+standard WebGPU C API plus backend selection.
 
 ### Backend selection (always available)
 
@@ -187,80 +177,6 @@ default EGL path is taken. `YAWGPU_GLES_CONTEXT_BACKEND_WGL` is
 Windows-only and falls back to EGL on non-Windows hosts. The entry
 is ignored when the resolved instance backend is not GLES.
 
-### Shader passthrough — `shader-passthrough`
-
-Engines that already ship native shader bytes (a `.spv` blob for Vulkan, an
-MSL source string for Metal) can hand them straight to yawgpu rather than
-authoring WGSL. The default pipeline path always goes through naga; this
-extension keeps the caller's bytes intact and only uses naga's reflection
-to recover the metadata pipeline creation needs.
-
-```c
-/* Vulkan: SPIR-V words go in; naga reflects entry points and bindings. */
-YaWGPUShaderModuleSpirVDescriptor spv = YAWGPU_SHADER_MODULE_SPIRV_DESCRIPTOR_INIT;
-spv.codeSize = word_count;
-spv.code     = spirv_words;
-WGPUShaderModule m = yawgpuDeviceCreateShaderModuleSpirV(device, &spv);
-
-/* Metal: caller supplies MSL source + entry-point metadata. The pipeline
-   layout drives the Metal binding-index mapping documented in yawgpu.h. */
-YaWGPUMslEntryPoint entries[] = {
-    { .name = { .data = "vs_main", .length = 7 }, .stage = WGPUShaderStage_Vertex   },
-    { .name = { .data = "fs_main", .length = 7 }, .stage = WGPUShaderStage_Fragment },
-};
-YaWGPUShaderModuleMslDescriptor msl = YAWGPU_SHADER_MODULE_MSL_DESCRIPTOR_INIT;
-msl.code            = (WGPUStringView){ msl_src, msl_src_len };
-msl.entryPoints     = entries;
-msl.entryPointCount = 2;
-WGPUShaderModule m = yawgpuDeviceCreateShaderModuleMsl(device, &msl);
-```
-
-`examples/triangle_passthrough` exercises both paths on the same triangle
-program.
-
-### Tiled rendering — `tiled`
-
-On tile-based deferred renderers (Apple GPUs; mobile Vulkan on Adreno /
-Mali / PowerVR) a multi-pass G-buffer pipeline can keep intermediate
-attachments **in tile memory** instead of round-tripping to system RAM.
-WebGPU's core API has no concept of subpasses or transient attachments;
-this extension exposes them as additive vendor entry points.
-
-The shape is:
-
-- **Capabilities** — `yawgpuAdapterGetTiledCapabilities` reports
-  `maxSubpasses`, `maxSubpassColorAttachments`, `maxInputAttachments`, and
-  an `estimatedTileMemoryBytes` hint. Three vendor feature names
-  (`YaWGPUFeatureName_MultiSubpass`, `_TransientAttachments`,
-  `_ShaderFramebufferFetch`) plug into the standard
-  `wgpuAdapterHasFeature` / `WGPUDeviceDescriptor.requiredFeatures` flow.
-- **Transient attachments** — `YaWGPUTransientAttachment` is a first-class
-  Arc resource with no DRAM backing (`VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT`
-  + `LAZILY_ALLOCATED` on Vulkan; `MTLStorageModeMemoryless` on Metal).
-  It is only legal as a slot inside a subpass render pass — never bound
-  through a bind group.
-- **Subpass pass layout** — a reusable `YaWGPUSubpassPassLayout`
-  describes attachment formats, per-subpass usage, input-attachment source
-  mapping, and dependencies once; both pipeline creation and pass begin
-  reference it. This is the single source of truth for Vulkan
-  `VkRenderPass` compatibility.
-- **Subpass-aware render pipelines** — `yawgpuDeviceCreateSubpassRenderPipeline`
-  wraps `WGPURenderPipelineDescriptor` with a `(passLayout, subpassIndex)`
-  pair.
-- **Subpass-input bindings** — chain `YaWGPUInputAttachmentBindingLayout`
-  onto a bind-group-layout entry to mark a `(group, binding)` as an input
-  attachment. The *resource* feeding it is wired automatically from the
-  pass layout's source mapping; the caller never creates a bind group or
-  view for it.
-- **Subpass render pass encoder** — `yawgpuCommandEncoderBeginSubpassRenderPass`
-  → record draws → `yawgpuSubpassRenderPassEncoderNextSubpass` → more
-  draws → `…End`. Mirrors the WebGPU render-pass-encoder shape with a
-  `nextSubpass` step in the middle.
-
-`examples/tiled_deferred` records a two-subpass offscreen pass (G-buffer →
-lighting) that reads the G-buffer through a subpass input from tile
-memory, then copies the persistent output to a PNG.
-
 ## Using it from C
 
 Build the library and link against it with the vendored headers:
@@ -273,16 +189,11 @@ cargo build -p yawgpu --release
 cargo build -p yawgpu --release --features metal      # Apple
 cargo build -p yawgpu --release --features vulkan     # Vulkan / MoltenVK
 cargo build -p yawgpu --release --features gles       # Android / Windows ANGLE (Tier 2)
-
-# with vendor extensions
-cargo build -p yawgpu --release --features "vulkan tiled"
-cargo build -p yawgpu --release --features "metal mobile"   # = shader-passthrough + tiled
 ```
 
 This produces `libyawgpu.{a,dylib,so}` (and a Windows `.dll`). Include
-`yawgpu/ffi/webgpu-headers/webgpu.h` (and `yawgpu.h` for the vendor
-extensions), link the library, and call the standard `wgpu*` /
-`yawgpu*` functions.
+`yawgpu/ffi/webgpu-headers/webgpu.h` (and `yawgpu.h` for backend
+selection), link the library, and call the standard `wgpu*` functions.
 
 ### Cross-building for Android
 
@@ -308,7 +219,6 @@ export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--target=aarch64-linux-an
 # Vulkan (Tier 1) — ash dynamically loads libvulkan.so at runtime,
 # which Android 7.0+ (API 24+) ships with the platform.
 cargo build --release --target aarch64-linux-android -p yawgpu --features vulkan
-cargo build --release --target aarch64-linux-android -p yawgpu --features "vulkan mobile"
 
 # GLES (Tier 2)
 cargo build --release --target aarch64-linux-android -p yawgpu --features gles
@@ -333,10 +243,9 @@ rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
 # Real iOS devices (arm64)
 cargo build --release --target aarch64-apple-ios     -p yawgpu --features metal
-cargo build --release --target aarch64-apple-ios     -p yawgpu --features "metal mobile"
 
 # iOS Simulator on Apple Silicon
-cargo build --release --target aarch64-apple-ios-sim -p yawgpu --features "metal mobile"
+cargo build --release --target aarch64-apple-ios-sim -p yawgpu --features metal
 ```
 
 Produces `libyawgpu.{a,dylib,rlib}` under
@@ -353,8 +262,7 @@ generated bindings are exposed under `yawgpu::native`, and the
 ## Examples
 
 The `examples/` directory contains small **C programs** built with CMake that
-link against `libyawgpu` and exercise both the standard `webgpu.h` and the
-`yawgpu.h` vendor extensions:
+link against `libyawgpu` and exercise the standard `webgpu.h` API:
 
 | Example | What it shows | Requires |
 |---|---|---|
@@ -365,8 +273,6 @@ link against `libyawgpu` and exercise both the standard `webgpu.h` and the
 | `surface_smoke` | Opening a window and presenting cleared frames | core |
 | `triangle` | A classic windowed RGB-gradient triangle (vertex-index shader) | core |
 | `hello_triangle` | The same RGB-gradient triangle fed from an interleaved (position + color) vertex buffer | core |
-| `triangle_passthrough` | The same gradient triangle driven from precompiled SPIR-V and MSL | `shader-passthrough` |
-| `tiled_deferred` | Two-subpass G-buffer + lighting with a tile-memory input attachment | `tiled` (Metal / native Vulkan; not MoltenVK) |
 
 Pick a backend at runtime with `YAWGPU_BACKEND`:
 
@@ -378,11 +284,6 @@ cmake --build examples/build
 
 YAWGPU_BACKEND=metal  ./examples/build/triangle/triangle
 YAWGPU_BACKEND=vulkan ./examples/build/compute/compute
-
-# extensions: pass YAWGPU_EXTENSIONS as a CMake cache string
-cmake -S examples -B examples/build-tiled \
-      -DYAWGPU_FEATURE=metal -DYAWGPU_EXTENSIONS="tiled"
-cmake --build examples/build-tiled
 ```
 
 On Windows (MSVC + Vulkan SDK):
@@ -429,10 +330,6 @@ advertised on Metal (native `half`) and on Vulkan when the device exposes
 works in storage/uniform buffers, not just arithmetic); it is not available
 on the Tier-2 GLES backend.
 
-With the `shader-passthrough` extension, callers can also hand precompiled
-SPIR-V or MSL straight to the backend; see
-[Shader passthrough](#shader-passthrough--shader-passthrough) above.
-
 ## Quality
 
 - **Validation-tested**: the WebGPU validation rules are exercised by an
@@ -447,8 +344,7 @@ SPIR-V or MSL straight to the backend; see
 - **Unit-tested public API**: every public function across the three crates
   has a direct unit test.
 - **Real-GPU end-to-end tests**: buffer/texture/compute/render paths are
-  verified against live Metal and Vulkan devices, including the tiled
-  two-subpass G-buffer path. The Vulkan backend runs **validation-clean**
+  verified against live Metal and Vulkan devices. The Vulkan backend runs **validation-clean**
   under `VK_LAYER_KHRONOS_validation` (zero VUID violations across the
   full `--ignored` suite). The OpenGL ES backend (Tier 2) is verified
   end-to-end on a host NVIDIA driver via the WGL fallback
@@ -456,40 +352,36 @@ SPIR-V or MSL straight to the backend; see
   render e2e suites plus the windowed `triangle` example.
 - **Platform coverage**:
   - **macOS** — builds, unit tests, real-GPU end-to-end tests, and the C
-    examples all verified (Metal and Vulkan/MoltenVK; MoltenVK does not
-    support the native subpass-input read path used by `tiled_deferred`).
+    examples all verified (Metal and Vulkan/MoltenVK).
   - **Windows (MSVC)** — builds and passes the full unit-test suite; the
-    windowed and tiled C examples are runtime-verified against native
+    windowed C examples are runtime-verified against native
     Vulkan drivers, and the windowed `triangle` example additionally
     runs through the OpenGL ES backend via the WGL fallback (host GL
     driver, opt-in).
   - **Linux (`x86_64-unknown-linux-gnu`)** — the CI host (`ubuntu-latest`):
     every push builds the workspace and runs the full unit + validation
-    test suite (Noop backend) green, including the `tiled` feature gate
+    test suite (Noop backend) green
     (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). The
     **Vulkan backend** is additionally verified **real-GPU on Linux**
     against the native ICD (`ash` loads `libvulkan.so` at runtime) — on
     Intel Iris Graphics 5100 (HSW GT3) / Mesa / Vulkan 1.2 the basic,
-    buffer, texture, compute, render, depth, external-texture, OOM, and
-    two-subpass `tiled` G-buffer end-to-end suites pass against the live
+    buffer, texture, compute, render, depth, external-texture, and OOM
+    end-to-end suites pass against the live
     driver. The handful of non-passes are bound to this particular GPU /
     driver rather than to yawgpu: ETC2 / ASTC compressed-texture
     roundtrips need compressed-format features this desktop GPU does not
-    expose, `depthCompare=Equal` is sensitive to Mesa depth-invariance
-    precision, and one SPIR-V shader-passthrough render case differs on
-    this driver. X11 / Wayland windowed surface sources are currently
+    expose, and `depthCompare=Equal` is sensitive to Mesa depth-invariance
+    precision. X11 / Wayland windowed surface sources are currently
     recognized-but-inert, so windowed presentation is not yet wired.
   - **Android (`aarch64-linux-android`)** — both Vulkan and OpenGL ES
     backends cross-build from a macOS arm64 host with NDK r30 (see
-    "Cross-building for Android" above), including the `mobile`
-    extension combo (`shader-passthrough` + `tiled`). Real-device
+    "Cross-building for Android" above). Real-device
     runtime verification is left to downstream integrators.
   - **iOS (`aarch64-apple-ios` + `aarch64-apple-ios-sim`)** — the
     Metal backend cross-builds for both real devices and the
     Apple-Silicon iOS Simulator from a macOS arm64 host with Xcode
-    26.5 / iOS SDK 26.5, including the `mobile` extension combo
-    (see "Cross-building for iOS" above). Real-device runtime
-    verification is left to downstream integrators.
+    26.5 / iOS SDK 26.5 (see "Cross-building for iOS" above).
+    Real-device runtime verification is left to downstream integrators.
 
 ### Independent conformance — webgpu-native-cts
 

@@ -1,5 +1,7 @@
 # Block 33 — Shader passthrough (SPIR-V / MSL)
 
+> **REMOVED 2026-06-26 (Tint migration Phase 0).** This vendor extension was deleted from yawgpu. This block is retained as historical record. See `specs/tracking/tint-migration-plan.md`.
+
 Phase 13. **Vendor extension** (not a Dawn port): create `WGPUShaderModule`
 objects from raw SPIR-V or raw MSL, bypassing the WGSL→naga translation that
 blocks 30/40 rely on. Rules here are exercised by **direct unit tests**

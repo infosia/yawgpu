@@ -20,15 +20,6 @@ pub use command::{
     HalScissorRect, HalStorageTextureAccess, HalTextureAspect, HalTextureCopy,
     HalTextureViewDimension, HalViewport,
 };
-#[cfg(feature = "tiled")]
-pub use command::{
-    HalSubpassAttachmentLayout, HalSubpassAttachmentResource, HalSubpassColorAttachment,
-    HalSubpassDependency, HalSubpassDependencyType, HalSubpassDepthStencilAttachment,
-    HalSubpassDraw, HalSubpassInputAttachment, HalSubpassLayout, HalSubpassPassLayout,
-    HalSubpassRenderPass, HalSubpassRenderPassCommand,
-};
-#[cfg(feature = "tiled")]
-pub use descriptors::HalTransientAttachmentDescriptor;
 pub use descriptors::{
     HalBlendComponent, HalBlendFactor, HalBlendOperation, HalBlendState, HalColorTargetState,
     HalCullMode, HalDepthStencilState, HalExtent3d, HalFrontFace, HalOrigin3d,
@@ -43,19 +34,6 @@ pub use format::{
 };
 pub use present::{HalPresentMode, HalSurfaceConfiguration};
 pub use shader::{HalMslBufferSizeBinding, HalShaderSource, HalShaderStage};
-
-/// Enumerates backend paths for shader framebuffer fetch.
-#[cfg(feature = "tiled")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum FramebufferFetchPath {
-    /// Shader framebuffer fetch is unavailable.
-    Disabled,
-    /// Vulkan `VK_EXT_shader_tile_image` path.
-    TileImage,
-    /// Vulkan raster-order attachment access path.
-    RasterOrderAttachmentAccess,
-}
 
 /// Noop module.
 #[cfg(feature = "noop")]
@@ -278,32 +256,6 @@ impl HalAdapter {
         }
     }
 
-    /// Returns the detected shader framebuffer-fetch path.
-    #[cfg(feature = "tiled")]
-    #[must_use]
-    pub fn framebuffer_fetch_path(&self) -> FramebufferFetchPath {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(_) => FramebufferFetchPath::Disabled,
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.framebuffer_fetch_path(),
-            #[cfg(feature = "metal")]
-            Self::Metal(_) => FramebufferFetchPath::TileImage,
-            #[cfg(feature = "gles")]
-            Self::Gles(_) => FramebufferFetchPath::Disabled,
-        }
-    }
-
-    /// Returns true when shader framebuffer fetch is supported.
-    #[cfg(feature = "tiled")]
-    #[must_use]
-    pub fn supports_shader_framebuffer_fetch(&self) -> bool {
-        !matches!(
-            self.framebuffer_fetch_path(),
-            FramebufferFetchPath::Disabled
-        )
-    }
-
     /// Returns true when BC texture compression is supported.
     #[must_use]
     pub fn supports_texture_compression_bc(&self) -> bool {
@@ -465,32 +417,6 @@ impl HalDevice {
         }
     }
 
-    /// Returns the detected shader framebuffer-fetch path.
-    #[cfg(feature = "tiled")]
-    #[must_use]
-    pub fn framebuffer_fetch_path(&self) -> FramebufferFetchPath {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(_) => FramebufferFetchPath::Disabled,
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(device) => device.framebuffer_fetch_path(),
-            #[cfg(feature = "metal")]
-            Self::Metal(_) => FramebufferFetchPath::TileImage,
-            #[cfg(feature = "gles")]
-            Self::Gles(_) => FramebufferFetchPath::Disabled,
-        }
-    }
-
-    /// Returns true when shader framebuffer fetch is supported.
-    #[cfg(feature = "tiled")]
-    #[must_use]
-    pub fn supports_shader_framebuffer_fetch(&self) -> bool {
-        !matches!(
-            self.framebuffer_fetch_path(),
-            FramebufferFetchPath::Disabled
-        )
-    }
-
     /// Returns true when `VK_EXT_robustness2` / `robustBufferAccess2` was enabled
     /// at device creation (Vulkan only).
     ///
@@ -598,91 +524,6 @@ impl HalDevice {
         }
     }
 
-    /// Creates a transient attachment matching the given concrete descriptor.
-    #[cfg(feature = "tiled")]
-    pub fn create_transient_attachment(
-        &self,
-        descriptor: &HalTransientAttachmentDescriptor,
-    ) -> Result<HalTransientAttachment, HalError> {
-        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
-        let _ = descriptor;
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(device) => Ok(HalTransientAttachment::Noop(
-                device.create_transient_attachment(),
-            )),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(device) => device
-                .create_transient_attachment(descriptor)
-                .map(HalTransientAttachment::Vulkan),
-            #[cfg(feature = "metal")]
-            Self::Metal(device) => device
-                .create_transient_attachment(descriptor)
-                .map(HalTransientAttachment::Metal),
-            #[cfg(feature = "gles")]
-            Self::Gles(_) => Err(HalError::BackendUnavailable { backend: "gles" }),
-        }
-    }
-
-    /// Begins a subpass render pass.
-    #[cfg(feature = "tiled")]
-    pub fn begin_subpass_render_pass(&self) -> Result<HalSubpassRenderPass, HalError> {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(_) => Ok(HalSubpassRenderPass::Noop(
-                command::HalNoopSubpassRenderPass::new(),
-            )),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => Ok(HalSubpassRenderPass::Vulkan),
-            #[cfg(feature = "metal")]
-            Self::Metal(_) => Ok(HalSubpassRenderPass::Metal),
-            #[cfg(feature = "gles")]
-            Self::Gles(_) => Err(HalError::BackendUnavailable { backend: "gles" }),
-        }
-    }
-
-    /// Advances a subpass render pass.
-    #[cfg(feature = "tiled")]
-    pub fn next_subpass_render_pass(
-        &self,
-        pass: &mut HalSubpassRenderPass,
-    ) -> Result<(), HalError> {
-        #[allow(unreachable_patterns)]
-        match (self, pass) {
-            #[cfg(feature = "noop")]
-            (Self::Noop(_), HalSubpassRenderPass::Noop(pass)) => {
-                pass.next_subpass();
-                Ok(())
-            }
-            #[cfg(feature = "vulkan")]
-            (Self::Vulkan(_), HalSubpassRenderPass::Vulkan) => Ok(()),
-            #[cfg(feature = "metal")]
-            (Self::Metal(_), HalSubpassRenderPass::Metal) => Ok(()),
-            _ => Err(HalError::BufferOperationFailed {
-                backend: "subpass",
-                message: "subpass pass backend does not match device",
-            }),
-        }
-    }
-
-    /// Ends a subpass render pass.
-    #[cfg(feature = "tiled")]
-    pub fn end_subpass_render_pass(&self, pass: HalSubpassRenderPass) -> Result<(), HalError> {
-        #[allow(unreachable_patterns)]
-        match (self, pass) {
-            #[cfg(feature = "noop")]
-            (Self::Noop(_), HalSubpassRenderPass::Noop(_)) => Ok(()),
-            #[cfg(feature = "vulkan")]
-            (Self::Vulkan(_), HalSubpassRenderPass::Vulkan) => Ok(()),
-            #[cfg(feature = "metal")]
-            (Self::Metal(_), HalSubpassRenderPass::Metal) => Ok(()),
-            _ => Err(HalError::BufferOperationFailed {
-                backend: "subpass",
-                message: "subpass pass backend does not match device",
-            }),
-        }
-    }
-
     /// Creates a sampler matching the given descriptor.
     #[must_use]
     pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> HalSampler {
@@ -778,60 +619,6 @@ impl HalDevice {
                     bindings,
                 )
                 .map(HalRenderPipeline::Gles),
-        }
-    }
-    /// Creates a subpass-compatible render pipeline from the given shaders and pass layout.
-    #[cfg(feature = "tiled")]
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_subpass_render_pipeline(
-        &self,
-        shader: HalShaderSource,
-        vertex_entry_point: &str,
-        fragment_entry_point: &str,
-        descriptor: &HalRenderPipelineDescriptor,
-        bindings: &[HalDescriptorBinding],
-        pass_layout: &HalSubpassPassLayout,
-        subpass_index: u32,
-    ) -> Result<HalRenderPipeline, HalError> {
-        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
-        let _ = (
-            shader,
-            vertex_entry_point,
-            fragment_entry_point,
-            descriptor,
-            bindings,
-            pass_layout,
-            subpass_index,
-        );
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(_) => Ok(HalRenderPipeline::Noop),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(device) => device
-                .create_subpass_render_pipeline(
-                    shader,
-                    vertex_entry_point,
-                    fragment_entry_point,
-                    descriptor,
-                    bindings,
-                    pass_layout,
-                    subpass_index,
-                )
-                .map(HalRenderPipeline::Vulkan),
-            #[cfg(feature = "metal")]
-            Self::Metal(device) => device
-                .create_subpass_render_pipeline(
-                    shader,
-                    vertex_entry_point,
-                    fragment_entry_point,
-                    descriptor,
-                    bindings,
-                    pass_layout,
-                    subpass_index,
-                )
-                .map(HalRenderPipeline::Metal),
-            #[cfg(feature = "gles")]
-            Self::Gles(_) => Err(HalError::BackendUnavailable { backend: "gles" }),
         }
     }
 }
@@ -1134,22 +921,6 @@ impl HalQuerySet {
             Self::Gles { count } => *count,
         }
     }
-}
-
-/// Enumerates HAL transient attachment values.
-#[cfg(feature = "tiled")]
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum HalTransientAttachment {
-    #[cfg(feature = "noop")]
-    /// Noop variant.
-    Noop(noop::NoopTransientAttachment),
-    #[cfg(feature = "vulkan")]
-    /// Vulkan variant.
-    Vulkan(vulkan::VulkanTransientAttachment),
-    #[cfg(feature = "metal")]
-    /// Metal variant.
-    Metal(metal::MetalTransientAttachment),
 }
 
 /// Enumerates HAL sampler values.

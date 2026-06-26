@@ -1,20 +1,12 @@
-#[cfg(feature = "tiled")]
-use std::collections::BTreeMap;
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ash::vk;
 
-#[cfg(feature = "tiled")]
-use crate::{
-    FramebufferFetchPath, HalRenderPipeline, HalSubpassAttachmentResource,
-    HalSubpassDependencyType, HalSubpassDraw, HalSubpassPassLayout, HalSubpassRenderPassCommand,
-    HalTransientAttachment, HalTransientAttachmentDescriptor,
-};
 use crate::{
     HalAddressMode, HalBlendFactor, HalBlendOperation, HalBoundBuffer, HalBoundSampler,
     HalBoundTexture, HalBuffer, HalBufferBindingKind, HalBufferClear, HalBufferCopy,
@@ -266,8 +258,6 @@ pub struct VulkanAdapter {
     instance: Arc<VulkanInstanceInner>,
     physical_device: vk::PhysicalDevice,
     name: String,
-    #[cfg(feature = "tiled")]
-    framebuffer_fetch_path: FramebufferFetchPath,
 }
 
 impl VulkanAdapter {
@@ -284,14 +274,10 @@ impl VulkanAdapter {
             return None;
         }
         let name = physical_device_name(properties)?;
-        #[cfg(feature = "tiled")]
-        let framebuffer_fetch_path = detect_framebuffer_fetch_path(&instance, physical_device);
         Some(Self {
             instance,
             physical_device,
             name,
-            #[cfg(feature = "tiled")]
-            framebuffer_fetch_path,
         })
     }
 
@@ -299,20 +285,6 @@ impl VulkanAdapter {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
-    }
-
-    /// Returns the detected shader framebuffer-fetch path.
-    #[cfg(feature = "tiled")]
-    #[must_use]
-    pub fn framebuffer_fetch_path(&self) -> FramebufferFetchPath {
-        self.framebuffer_fetch_path
-    }
-
-    /// Returns true when shader framebuffer fetch is supported.
-    #[cfg(feature = "tiled")]
-    #[must_use]
-    pub fn supports_shader_framebuffer_fetch(&self) -> bool {
-        !matches!(self.framebuffer_fetch_path, FramebufferFetchPath::Disabled)
     }
 
     /// Returns true when BC texture compression is supported by this physical device.
@@ -473,11 +445,6 @@ impl VulkanAdapter {
             storage_16bit_extension,
             storage_16bit_supported_features,
         );
-        #[cfg(feature = "tiled")]
-        if let Some(extension_name) = framebuffer_fetch_extension_name(self.framebuffer_fetch_path)
-        {
-            extension_names.push(extension_name.as_ptr());
-        }
         let supported_features = unsafe {
             self.instance
                 .instance
@@ -589,10 +556,6 @@ impl VulkanAdapter {
             storage_push_constant16: storage_16bit_features.storage_push_constant16,
             max_sampler_anisotropy,
             allocations: AtomicU64::new(0),
-            #[cfg(feature = "tiled")]
-            framebuffer_fetch_path: self.framebuffer_fetch_path,
-            #[cfg(feature = "tiled")]
-            subpass_render_pass_cache: Mutex::new(BTreeMap::new()),
         });
         Ok(VulkanDevice {
             inner: Arc::clone(&inner),
@@ -626,40 +589,6 @@ impl VulkanAdapter {
         has_device_extension_for_physical_device(&self.instance, self.physical_device, name)
     }
 }
-
-#[cfg(feature = "tiled")]
-fn framebuffer_fetch_extension_name(path: FramebufferFetchPath) -> Option<&'static CStr> {
-    match path {
-        FramebufferFetchPath::TileImage => Some(vk::EXT_SHADER_TILE_IMAGE_NAME),
-        FramebufferFetchPath::RasterOrderAttachmentAccess => {
-            Some(vk::EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_NAME)
-        }
-        FramebufferFetchPath::Disabled => None,
-    }
-}
-
-#[cfg(feature = "tiled")]
-fn detect_framebuffer_fetch_path(
-    instance: &Arc<VulkanInstanceInner>,
-    physical_device: vk::PhysicalDevice,
-) -> FramebufferFetchPath {
-    if has_device_extension_for_physical_device(
-        instance,
-        physical_device,
-        vk::EXT_SHADER_TILE_IMAGE_NAME,
-    ) {
-        return FramebufferFetchPath::TileImage;
-    }
-    if has_device_extension_for_physical_device(
-        instance,
-        physical_device,
-        vk::EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_NAME,
-    ) {
-        return FramebufferFetchPath::RasterOrderAttachmentAccess;
-    }
-    FramebufferFetchPath::Disabled
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Enabled16BitStorageFeatures {
     enabled: bool,
@@ -760,8 +689,6 @@ pub use pipeline::{VulkanComputePipeline, VulkanRenderPipeline};
 pub use query_set::VulkanQuerySet;
 pub use queue::VulkanQueue;
 pub use surface::VulkanSurface;
-#[cfg(feature = "tiled")]
-pub use texture::VulkanTransientAttachment;
 pub use texture::{VulkanSampler, VulkanTexture};
 
 #[cfg(test)]
@@ -836,23 +763,6 @@ mod tests {
             vec![vk::KHR_SURFACE_NAME, vk::KHR_WIN32_SURFACE_NAME]
         );
         assert_eq!(flags, vk::InstanceCreateFlags::default());
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn framebuffer_fetch_extension_name_matches_detected_path() {
-        assert_eq!(
-            framebuffer_fetch_extension_name(FramebufferFetchPath::TileImage),
-            Some(vk::EXT_SHADER_TILE_IMAGE_NAME)
-        );
-        assert_eq!(
-            framebuffer_fetch_extension_name(FramebufferFetchPath::RasterOrderAttachmentAccess),
-            Some(vk::EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_NAME)
-        );
-        assert_eq!(
-            framebuffer_fetch_extension_name(FramebufferFetchPath::Disabled),
-            None
-        );
     }
 
     #[test]

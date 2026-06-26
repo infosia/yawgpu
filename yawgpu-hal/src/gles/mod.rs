@@ -69,5 +69,8 @@ pub(super) fn rebuild_hal_error(error: &crate::HalError) -> crate::HalError {
         crate::HalError::PresentFailed { backend, message } => {
             crate::HalError::PresentFailed { backend, message }
         }
+        crate::HalError::OutOfMemory { backend, resource } => {
+            crate::HalError::OutOfMemory { backend, resource }
+        }
     }
 }

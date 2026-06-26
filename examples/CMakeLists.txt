@@ -34,7 +34,6 @@ cmake_path(GET CMAKE_SOURCE_DIR PARENT_PATH YAWGPU_ROOT)
 set(YAWGPU_PROFILE "debug" CACHE STRING "Cargo profile used for libyawgpu")
 set_property(CACHE YAWGPU_PROFILE PROPERTY STRINGS debug release)
 set(YAWGPU_FEATURE "" CACHE STRING "Optional yawgpu cargo feature: metal or vulkan")
-set(YAWGPU_EXTENSIONS "" CACHE STRING "Optional yawgpu extension cargo features: shader-passthrough;tiled;mobile")
 
 if(YAWGPU_PROFILE STREQUAL "release")
     set(YAWGPU_CARGO_PROFILE_ARG --release)
@@ -45,35 +44,10 @@ else()
 endif()
 
 set(YAWGPU_CARGO_FEATURES)
-set(YAWGPU_ENABLED_EXTENSIONS)
 if(NOT YAWGPU_FEATURE STREQUAL "")
     list(APPEND YAWGPU_CARGO_FEATURES ${YAWGPU_FEATURE})
 endif()
-
-string(REPLACE " " ";" YAWGPU_EXTENSIONS_LIST "${YAWGPU_EXTENSIONS}")
-set(YAWGPU_EXTENSION_COMPILE_DEFS)
-foreach(YAWGPU_EXTENSION IN LISTS YAWGPU_EXTENSIONS_LIST)
-    if(YAWGPU_EXTENSION STREQUAL "")
-        continue()
-    endif()
-    list(APPEND YAWGPU_ENABLED_EXTENSIONS ${YAWGPU_EXTENSION})
-    list(APPEND YAWGPU_CARGO_FEATURES ${YAWGPU_EXTENSION})
-    if(YAWGPU_EXTENSION STREQUAL "shader-passthrough")
-        list(APPEND YAWGPU_EXTENSION_COMPILE_DEFS YAWGPU_HAS_SHADER_PASSTHROUGH)
-    elseif(YAWGPU_EXTENSION STREQUAL "tiled")
-        list(APPEND YAWGPU_EXTENSION_COMPILE_DEFS YAWGPU_HAS_TILED)
-    elseif(YAWGPU_EXTENSION STREQUAL "mobile")
-        list(APPEND YAWGPU_EXTENSION_COMPILE_DEFS
-            YAWGPU_HAS_SHADER_PASSTHROUGH
-            YAWGPU_HAS_TILED
-        )
-    else()
-        message(FATAL_ERROR "Unknown YAWGPU_EXTENSIONS entry: ${YAWGPU_EXTENSION}")
-    endif()
-endforeach()
 list(REMOVE_DUPLICATES YAWGPU_CARGO_FEATURES)
-list(REMOVE_DUPLICATES YAWGPU_EXTENSION_COMPILE_DEFS)
-list(REMOVE_DUPLICATES YAWGPU_ENABLED_EXTENSIONS)
 
 if(YAWGPU_CARGO_FEATURES)
     list(JOIN YAWGPU_CARGO_FEATURES "," YAWGPU_CARGO_FEATURES_ARG)
@@ -82,22 +56,12 @@ else()
     set(YAWGPU_CARGO_FEATURE_ARGS)
 endif()
 
-# Use a feature/extension-specific cargo target directory so dylibs from
-# different build configurations do not overwrite each other in target/${profile}.
-# Without this, a build configured with `-DYAWGPU_EXTENSIONS=tiled` can later
-# dlopen a no-extension dylib from a plain build with the same backend feature.
+# Use a feature-specific cargo target directory so dylibs from different backend
+# configurations do not overwrite each other in target/${profile}.
 if(YAWGPU_FEATURE STREQUAL "")
     set(YAWGPU_TARGET_ROOT "${YAWGPU_ROOT}/target")
 else()
     set(YAWGPU_TARGET_ROOT "${YAWGPU_ROOT}/target-${YAWGPU_FEATURE}")
-endif()
-if(YAWGPU_ENABLED_EXTENSIONS)
-    list(JOIN YAWGPU_ENABLED_EXTENSIONS "-" YAWGPU_EXTENSIONS_TARGET_SUFFIX)
-    if(YAWGPU_FEATURE STREQUAL "")
-        set(YAWGPU_TARGET_ROOT "${YAWGPU_ROOT}/target-${YAWGPU_EXTENSIONS_TARGET_SUFFIX}")
-    else()
-        set(YAWGPU_TARGET_ROOT "${YAWGPU_ROOT}/target-${YAWGPU_FEATURE}-${YAWGPU_EXTENSIONS_TARGET_SUFFIX}")
-    endif()
 endif()
 
 if(DEFINED ENV{CARGO_BUILD_TARGET})
@@ -129,9 +93,6 @@ set_target_properties(yawgpu_c_api PROPERTIES
     IMPORTED_LOCATION "${YAWGPU_SHARED_LIB}"
     INTERFACE_INCLUDE_DIRECTORIES "${YAWGPU_ROOT}/yawgpu/ffi/webgpu-headers"
 )
-if(YAWGPU_EXTENSION_COMPILE_DEFS)
-    target_compile_definitions(yawgpu_c_api INTERFACE ${YAWGPU_EXTENSION_COMPILE_DEFS})
-endif()
 if(WIN32)
     set_target_properties(yawgpu_c_api PROPERTIES
         IMPORTED_IMPLIB "${YAWGPU_IMPORT_LIB}"
@@ -182,10 +143,8 @@ add_subdirectory(enumerate_adapters)
 add_subdirectory(compute)
 add_subdirectory(device_info)
 add_subdirectory(capture)
-add_subdirectory(tiled_deferred)
 if(YAWGPU_WINDOWED_EXAMPLES)
     add_subdirectory(surface_smoke)
     add_subdirectory(triangle)
     add_subdirectory(hello_triangle)
-    add_subdirectory(triangle_passthrough)
 endif()

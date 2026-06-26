@@ -183,30 +183,6 @@ pub unsafe fn map_render_pipeline_descriptor(
     }
 }
 
-/// Converts a subpass render pipeline descriptor to the core representation.
-///
-/// # Safety
-///
-/// `descriptor.base` must satisfy `WGPURenderPipelineDescriptor` pointer
-/// requirements and `descriptor.passLayout` must be a live yawgpu subpass pass
-/// layout handle.
-#[cfg(feature = "tiled")]
-#[must_use]
-pub unsafe fn map_subpass_render_pipeline_descriptor(
-    descriptor: &crate::YaWGPUSubpassRenderPipelineDescriptor,
-) -> core::SubpassRenderPipelineDescriptor {
-    let pass_layout = clone_handle::<crate::YaWGPUSubpassPassLayoutImpl>(
-        descriptor.passLayout,
-        "YaWGPUSubpassPassLayout",
-    );
-    core::SubpassRenderPipelineDescriptor {
-        base: map_render_pipeline_descriptor(&descriptor.base),
-        pass_layout: Arc::clone(&pass_layout._core),
-        subpass_index: descriptor.subpassIndex,
-        error: None,
-    }
-}
-
 fn map_vertex_step_mode(
     value: native::WGPUVertexStepMode,
     error: &mut Option<String>,

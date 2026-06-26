@@ -1,5 +1,7 @@
 # Block 55 — Tiled rendering (TBDR mobile extension)
 
+> **REMOVED 2026-06-26 (Tint migration Phase 0).** This vendor extension was deleted from yawgpu. This block is retained as historical record. See `specs/tracking/tint-migration-plan.md`.
+
 Phase 14. **Vendor extension** (not a Dawn port): tile-based deferred
 rendering primitives for mobile GPUs — transient/memoryless attachments,
 multi-subpass render passes, subpass-input / framebuffer fetch, subpass-aware

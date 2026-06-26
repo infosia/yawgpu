@@ -333,141 +333,6 @@ pub(super) fn create_render_pipeline(
     })
 }
 
-/// Creates a subpass-compatible render pipeline.
-#[cfg(feature = "tiled")]
-#[allow(clippy::too_many_arguments)]
-pub(super) fn create_subpass_render_pipeline(
-    device: Arc<VulkanDeviceInner>,
-    shader: HalShaderSource,
-    vertex_entry_point: &str,
-    fragment_entry_point: &str,
-    descriptor: &HalRenderPipelineDescriptor,
-    bindings: &[HalDescriptorBinding],
-    pass_layout: &HalSubpassPassLayout,
-    subpass_index: u32,
-) -> Result<VulkanRenderPipeline, HalError> {
-    let HalShaderSource::SpirVStages { vertex, fragment } = shader else {
-        return Err(shader_error(
-            "Vulkan subpass render pipeline requires vertex and fragment SPIR-V",
-        ));
-    };
-    let Some(fragment) = fragment else {
-        return Err(shader_error(
-            "Vulkan subpass render pipeline requires fragment SPIR-V",
-        ));
-    };
-    let vertex_entry = CString::new(vertex_entry_point)
-        .map_err(|_| shader_error("vertex entry point contains NUL"))?;
-    let fragment_entry = CString::new(fragment_entry_point)
-        .map_err(|_| shader_error("fragment entry point contains NUL"))?;
-    let vertex_shader_module = create_shader_module(&device, &vertex)?;
-    let fragment_shader_module = match create_shader_module(&device, &fragment) {
-        Ok(module) => module,
-        Err(error) => {
-            unsafe {
-                device
-                    .device
-                    .destroy_shader_module(vertex_shader_module, None);
-            }
-            return Err(error);
-        }
-    };
-    let descriptor_set_layouts = match create_descriptor_set_layouts(
-        &device,
-        bindings,
-        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-    ) {
-        Ok(layouts) => layouts,
-        Err(error) => {
-            unsafe {
-                device
-                    .device
-                    .destroy_shader_module(fragment_shader_module, None);
-                device
-                    .device
-                    .destroy_shader_module(vertex_shader_module, None);
-            }
-            return Err(error);
-        }
-    };
-    let pipeline_layout_info =
-        vk::PipelineLayoutCreateInfo::default().set_layouts(&descriptor_set_layouts);
-    let pipeline_layout = match unsafe {
-        device
-            .device
-            .create_pipeline_layout(&pipeline_layout_info, None)
-    } {
-        Ok(layout) => layout,
-        Err(_) => {
-            unsafe {
-                destroy_descriptor_set_layouts(&device.device, &descriptor_set_layouts);
-                device
-                    .device
-                    .destroy_shader_module(fragment_shader_module, None);
-                device
-                    .device
-                    .destroy_shader_module(vertex_shader_module, None);
-            }
-            return Err(shader_error("render pipeline layout creation failed"));
-        }
-    };
-    let render_pass = match cached_subpass_render_pass_for_layout(&device, pass_layout) {
-        Ok(render_pass) => render_pass,
-        Err(error) => {
-            unsafe {
-                device.device.destroy_pipeline_layout(pipeline_layout, None);
-                destroy_descriptor_set_layouts(&device.device, &descriptor_set_layouts);
-                device
-                    .device
-                    .destroy_shader_module(fragment_shader_module, None);
-                device
-                    .device
-                    .destroy_shader_module(vertex_shader_module, None);
-            }
-            return Err(error);
-        }
-    };
-    let pipeline = match create_graphics_pipeline(
-        &device,
-        descriptor,
-        pipeline_layout,
-        render_pass,
-        subpass_index,
-        vertex_shader_module,
-        Some(fragment_shader_module),
-        &vertex_entry,
-        Some(&fragment_entry),
-    ) {
-        Ok(pipeline) => pipeline,
-        Err(error) => {
-            unsafe {
-                device.device.destroy_pipeline_layout(pipeline_layout, None);
-                destroy_descriptor_set_layouts(&device.device, &descriptor_set_layouts);
-                device
-                    .device
-                    .destroy_shader_module(fragment_shader_module, None);
-                device
-                    .device
-                    .destroy_shader_module(vertex_shader_module, None);
-            }
-            return Err(error);
-        }
-    };
-    Ok(VulkanRenderPipeline {
-        inner: Arc::new(VulkanRenderPipelineInner {
-            device,
-            pipeline,
-            pipeline_layout,
-            render_pass,
-            render_pass_owned: false,
-            descriptor_set_layouts,
-            descriptor_bindings: bindings.to_vec(),
-            vertex_shader_module,
-            fragment_shader_module: Some(fragment_shader_module),
-        }),
-    })
-}
-
 /// Creates shader module and reports validation errors through the owning device.
 pub(super) fn create_shader_module(
     device: &VulkanDeviceInner,
@@ -567,13 +432,13 @@ fn create_render_pass_for_descriptor(
     } else {
         None
     };
-    let subpass = vk::SubpassDescription::default()
+    let vk_subpass = vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
         .color_attachments(&color_references);
-    let subpass = if let Some(depth_reference) = depth_reference.as_ref() {
-        subpass.depth_stencil_attachment(depth_reference)
+    let vk_subpass = if let Some(depth_reference) = depth_reference.as_ref() {
+        vk_subpass.depth_stencil_attachment(depth_reference)
     } else {
-        subpass
+        vk_subpass
     };
     let has_color = descriptor.color_targets.iter().any(Option::is_some);
     let has_depth_stencil = descriptor.depth_stencil.is_some();
@@ -593,11 +458,11 @@ fn create_render_pass_for_descriptor(
         .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
         .src_access_mask(attachment_access)
         .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
-    let subpasses = [subpass];
+    let vk_subpasses = [vk_subpass];
     let dependencies = [dependency_in, dependency_out];
     let render_pass_info = vk::RenderPassCreateInfo::default()
         .attachments(&attachments)
-        .subpasses(&subpasses)
+        .subpasses(&vk_subpasses)
         .dependencies(&dependencies);
     unsafe { device.create_render_pass(&render_pass_info, None) }
         .map_err(|_| shader_error("render pass creation failed"))
@@ -624,196 +489,6 @@ fn attachment_access_flags(has_color: bool, has_depth_stencil: bool) -> vk::Acce
         access |= vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;
     }
     access
-}
-
-#[cfg(feature = "tiled")]
-fn cached_subpass_render_pass_for_layout(
-    device: &VulkanDeviceInner,
-    layout: &HalSubpassPassLayout,
-) -> Result<vk::RenderPass, HalError> {
-    if let Ok(cache) = device.subpass_render_pass_cache.lock() {
-        if let Some(&render_pass) = cache.get(layout) {
-            return Ok(render_pass);
-        }
-    }
-    let render_pass = create_subpass_render_pass_for_layout(&device.device, layout)?;
-    match device.subpass_render_pass_cache.lock() {
-        Ok(mut cache) => {
-            let entry = cache.entry(layout.clone()).or_insert(render_pass);
-            if *entry != render_pass {
-                unsafe {
-                    device.device.destroy_render_pass(render_pass, None);
-                }
-            }
-            Ok(*entry)
-        }
-        Err(_) => Ok(render_pass),
-    }
-}
-
-#[cfg(feature = "tiled")]
-fn create_subpass_render_pass_for_layout(
-    device: &ash::Device,
-    layout: &HalSubpassPassLayout,
-) -> Result<vk::RenderPass, HalError> {
-    let mut attachments = Vec::new();
-    for attachment in &layout.color_attachments {
-        let (format, _) = map_texture_format(attachment.format)?;
-        attachments.push(
-            vk::AttachmentDescription::default()
-                .format(format)
-                .samples(vk_sample_count(attachment.sample_count)?)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
-        );
-    }
-    if let Some(attachment) = layout.depth_stencil_attachment {
-        let (format, _) = map_texture_format(attachment.format)?;
-        attachments.push(
-            vk::AttachmentDescription::default()
-                .format(format)
-                .samples(vk_sample_count(attachment.sample_count)?)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
-        );
-    }
-    let depth_index = layout.color_attachments.len() as u32;
-    let color_refs = layout
-        .subpasses
-        .iter()
-        .map(|subpass| {
-            subpass
-                .color_attachment_indices
-                .iter()
-                .map(|&attachment| {
-                    vk::AttachmentReference::default()
-                        .attachment(attachment)
-                        .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    let input_refs = layout
-        .subpasses
-        .iter()
-        .map(|subpass| {
-            subpass
-                .input_attachments
-                .iter()
-                .map(|input| {
-                    let (attachment, image_layout) = if input.source_attachment == u32::MAX {
-                        (
-                            depth_index,
-                            vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-                        )
-                    } else {
-                        (
-                            input.source_attachment,
-                            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                        )
-                    };
-                    vk::AttachmentReference::default()
-                        .attachment(attachment)
-                        .layout(image_layout)
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    let depth_refs = layout
-        .subpasses
-        .iter()
-        .map(|subpass| {
-            subpass.uses_depth_stencil.then(|| {
-                vk::AttachmentReference::default()
-                    .attachment(depth_index)
-                    .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut subpasses = Vec::new();
-    for index in 0..layout.subpasses.len() {
-        let mut description = vk::SubpassDescription::default()
-            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .color_attachments(&color_refs[index])
-            .input_attachments(&input_refs[index]);
-        if let Some(depth_ref) = depth_refs[index].as_ref() {
-            description = description.depth_stencil_attachment(depth_ref);
-        }
-        subpasses.push(description);
-    }
-    let dependencies = subpass_dependencies_for_layout(layout);
-    let render_pass_info = vk::RenderPassCreateInfo::default()
-        .attachments(&attachments)
-        .subpasses(&subpasses)
-        .dependencies(&dependencies);
-    unsafe { device.create_render_pass(&render_pass_info, None) }
-        .map_err(|_| shader_error("subpass render pass creation failed"))
-}
-
-#[cfg(feature = "tiled")]
-fn subpass_dependencies_for_layout(layout: &HalSubpassPassLayout) -> Vec<vk::SubpassDependency> {
-    let mut dependencies = vec![vk::SubpassDependency::default()
-        .src_subpass(vk::SUBPASS_EXTERNAL)
-        .dst_subpass(0)
-        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)];
-    dependencies.extend(layout.dependencies.iter().map(|dependency| {
-        let (src_stage, src_access, dst_stage, dst_access) = match dependency.dependency_type {
-            HalSubpassDependencyType::ColorToInput => (
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::AccessFlags::INPUT_ATTACHMENT_READ,
-            ),
-            HalSubpassDependencyType::DepthToInput => (
-                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::AccessFlags::INPUT_ATTACHMENT_READ,
-            ),
-            HalSubpassDependencyType::ColorDepthToInput => (
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::AccessFlags::INPUT_ATTACHMENT_READ,
-            ),
-        };
-        vk::SubpassDependency::default()
-            .src_subpass(dependency.src_subpass)
-            .dst_subpass(dependency.dst_subpass)
-            .src_stage_mask(src_stage)
-            .dst_stage_mask(dst_stage)
-            .src_access_mask(src_access)
-            .dst_access_mask(dst_access)
-            .dependency_flags(if dependency.by_region {
-                vk::DependencyFlags::BY_REGION
-            } else {
-                vk::DependencyFlags::empty()
-            })
-    }));
-    dependencies.push(
-        vk::SubpassDependency::default()
-            .src_subpass(layout.subpasses.len().saturating_sub(1) as u32)
-            .dst_subpass(vk::SUBPASS_EXTERNAL)
-            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
-            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_READ),
-    );
-    dependencies
 }
 
 fn vk_sample_count(sample_count: u32) -> Result<vk::SampleCountFlags, HalError> {
@@ -1261,10 +936,6 @@ pub(super) fn descriptor_type(kind: HalDescriptorBindingKind) -> vk::DescriptorT
         HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage) => {
             vk::DescriptorType::STORAGE_BUFFER
         }
-        #[cfg(feature = "tiled")]
-        HalDescriptorBindingKind::Buffer(HalBufferBindingKind::InputAttachment) => {
-            vk::DescriptorType::INPUT_ATTACHMENT
-        }
         HalDescriptorBindingKind::Texture => vk::DescriptorType::SAMPLED_IMAGE,
         HalDescriptorBindingKind::StorageTexture { .. } => vk::DescriptorType::STORAGE_IMAGE,
         HalDescriptorBindingKind::Sampler => vk::DescriptorType::SAMPLER,
@@ -1273,9 +944,7 @@ pub(super) fn descriptor_type(kind: HalDescriptorBindingKind) -> vk::DescriptorT
 
 /// Returns the descriptor set layout stage flags for one binding.
 ///
-/// Input attachments may only be read in the fragment stage
-/// (`VUID-VkDescriptorSetLayoutBinding-descriptorType-01510`), so they take
-/// `FRAGMENT` regardless of the pipeline-wide default; other bindings use it.
+/// All current binding kinds use the pipeline-wide default stage flags.
 fn binding_stage_flags(
     kind: HalDescriptorBindingKind,
     default: vk::ShaderStageFlags,
@@ -1286,10 +955,6 @@ fn binding_stage_flags(
         | HalDescriptorBindingKind::Texture
         | HalDescriptorBindingKind::StorageTexture { .. }
         | HalDescriptorBindingKind::Sampler => default,
-        #[cfg(feature = "tiled")]
-        HalDescriptorBindingKind::Buffer(HalBufferBindingKind::InputAttachment) => {
-            vk::ShaderStageFlags::FRAGMENT
-        }
     }
 }
 
@@ -1966,27 +1631,6 @@ pub(super) fn create_descriptor_pool(
                 ),
         );
     }
-    #[cfg(feature = "tiled")]
-    {
-        let input_attachment_count = bindings
-            .iter()
-            .filter(|binding| {
-                matches!(
-                    binding.kind,
-                    HalDescriptorBindingKind::Buffer(HalBufferBindingKind::InputAttachment)
-                )
-            })
-            .count();
-        if input_attachment_count > 0 {
-            pool_sizes.push(
-                vk::DescriptorPoolSize::default()
-                    .ty(vk::DescriptorType::INPUT_ATTACHMENT)
-                    .descriptor_count(u32::try_from(input_attachment_count).map_err(|_| {
-                        shader_error("input attachment descriptor count is too large")
-                    })?),
-            );
-        }
-    }
     let pool_info = vk::DescriptorPoolCreateInfo::default()
         .max_sets(
             u32::try_from(descriptor_set_count)
@@ -2138,10 +1782,7 @@ mod tests {
         // Non-combined textures (color, depth-only, stencil-only) keep the view's
         // own format unchanged.
         assert_eq!(
-            sampled_texture_view_format(
-                HalTextureFormat::Rgba8Unorm,
-                HalTextureFormat::Rgba8Unorm
-            ),
+            sampled_texture_view_format(HalTextureFormat::Rgba8Unorm, HalTextureFormat::Rgba8Unorm),
             HalTextureFormat::Rgba8Unorm
         );
         assert_eq!(
