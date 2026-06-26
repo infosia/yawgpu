@@ -152,22 +152,26 @@ impl ReflectedModule {
     ) -> Result<GeneratedMsl, String> {
         let bindings =
             tint_bindings_for_msl(binding_map, &self.resource_bindings_for_entry(entry_name)?)?;
+        let buffer_sizes_slot = msl_buffer_sizes_slot(binding_map)?;
         let output = self.program.generate_msl(
             entry_name,
             &bindings,
             &override_values(pipeline_constants),
+            buffer_sizes_slot,
             disable_robustness,
         )?;
-        let buffer_size_bindings = if output.needs_storage_buffer_sizes {
-            self.msl_buffer_size_bindings_for_entry(entry_name)?
-        } else {
-            Vec::new()
-        };
-        let buffer_sizes_slot = msl_buffer_sizes_slot(binding_map, &buffer_size_bindings)?;
+        let buffer_size_bindings = output
+            .buffer_size_bindings
+            .into_iter()
+            .map(|binding| MslBufferSizeBinding {
+                group: binding.group,
+                binding: binding.binding,
+            })
+            .collect::<Vec<_>>();
         Ok(GeneratedMsl {
             source: output.source,
             entry_point: entry_name.to_owned(),
-            buffer_sizes_slot,
+            buffer_sizes_slot: (!buffer_size_bindings.is_empty()).then_some(buffer_sizes_slot),
             buffer_size_bindings,
             frag_depth_clamp_slot: None,
             // The current shim exposes the total workgroup size but not each
@@ -454,13 +458,7 @@ fn tint_bindings_for_msl(
     Ok(bindings)
 }
 
-fn msl_buffer_sizes_slot(
-    binding_map: &MslBindingMap,
-    buffer_size_bindings: &[MslBufferSizeBinding],
-) -> Result<Option<u32>, String> {
-    if buffer_size_bindings.is_empty() {
-        return Ok(None);
-    }
+fn msl_buffer_sizes_slot(binding_map: &MslBindingMap) -> Result<u32, String> {
     let next_slot = binding_map
         .resources
         .iter()
@@ -475,7 +473,7 @@ fn msl_buffer_sizes_slot(
     if next_slot > u32::from(u8::MAX) {
         return Err("MSL generated buffer slot exceeds the supported slot range".to_owned());
     }
-    Ok(Some(next_slot))
+    Ok(next_slot)
 }
 
 fn spirv_local_size(words: &[u32]) -> Option<[u32; 3]> {
@@ -1085,6 +1083,55 @@ fn cs() {}
         assert!(generated.source.contains("kernel"));
         assert!(generated.source.contains("cs"));
         assert_eq!(generated.frag_depth_clamp_slot, None);
+    }
+
+    #[test]
+    fn generate_msl_carries_buffer_sizes_for_runtime_storage_array() {
+        let module = parse_and_validate_wgsl(
+            r#"
+struct Data {
+  values: array<u32>,
+}
+
+@group(0) @binding(0) var<storage, read_write> data: Data;
+
+@compute @workgroup_size(1)
+fn cs() {
+  if (arrayLength(&data.values) > 0u) {
+    data.values[0] = arrayLength(&data.values);
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let generated = module
+            .generate_msl(
+                "cs",
+                &MslBindingMap {
+                    resources: vec![MslResourceBinding {
+                        group: 0,
+                        binding: 0,
+                        metal_index: 3,
+                        ext_params_buffer_slot: None,
+                        kind: MslResourceBindingKind::Buffer,
+                    }],
+                },
+                &PipelineConstants::default(),
+            )
+            .unwrap();
+
+        assert_eq!(generated.buffer_sizes_slot, Some(4));
+        assert_eq!(
+            generated.buffer_size_bindings,
+            vec![MslBufferSizeBinding {
+                group: 0,
+                binding: 0,
+            }]
+        );
+        assert!(generated
+            .source
+            .contains("tint_storage_buffer_sizes [[buffer(4)]]"));
     }
 
     #[test]

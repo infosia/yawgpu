@@ -178,6 +178,8 @@ typedef struct {
 typedef struct {
     char* msl;
     bool needs_storage_buffer_sizes;
+    uint32_t* buffer_size_bindings;
+    size_t n_buffer_size_bindings;
 } YawgpuTintMslOutput;
 
 bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
@@ -185,6 +187,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
                               const YawgpuTintBindings*,
                               const YawgpuTintOverrideValue* ov,
                               size_t n_ov,
+                              uint32_t buffer_sizes_slot,
                               bool disable_robustness,
                               YawgpuTintMslOutput* out,
                               char** err);
