@@ -1,7 +1,7 @@
 //! Tint shader frontend skeleton for the feature-selected frontend facade.
 #![allow(dead_code)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::shader::CompilationMessage;
 pub(crate) use crate::shader_types::*;
@@ -45,33 +45,70 @@ impl ReflectedModule {
     /// Generates spirv for the validated shader module.
     pub(crate) fn generate_spirv(
         &self,
-        _entry_name: &str,
+        entry_name: &str,
         _stage: ShaderStage,
-        _pipeline_constants: &PipelineConstants,
-        _unchecked_buffer_bounds: bool,
+        pipeline_constants: &PipelineConstants,
+        unchecked_buffer_bounds: bool,
     ) -> Result<Vec<u32>, String> {
-        Err(NOT_IMPLEMENTED.to_owned())
+        self.program.generate_spirv(
+            entry_name,
+            &yawgpu_tint::Bindings::default(),
+            &override_values(pipeline_constants),
+            !unchecked_buffer_bounds,
+        )
     }
 
     /// Generates GLSL ES for the validated shader module.
     #[cfg(feature = "gles")]
     pub(crate) fn generate_glsl(
         &self,
-        _entry_name: &str,
+        entry_name: &str,
         _stage: ShaderStage,
-        _pipeline_constants: &PipelineConstants,
+        pipeline_constants: &PipelineConstants,
     ) -> Result<GeneratedGlsl, String> {
-        Err(NOT_IMPLEMENTED.to_owned())
+        let source = self.program.generate_glsl(
+            entry_name,
+            &yawgpu_tint::Bindings::default(),
+            &override_values(pipeline_constants),
+        )?;
+        Ok(GeneratedGlsl {
+            source,
+            entry_point: entry_name.to_owned(),
+        })
     }
 
     /// Generates msl for the validated shader module.
     pub(crate) fn generate_msl(
         &self,
-        _entry_name: &str,
-        _binding_map: &MslBindingMap,
-        _pipeline_constants: &PipelineConstants,
+        entry_name: &str,
+        binding_map: &MslBindingMap,
+        pipeline_constants: &PipelineConstants,
     ) -> Result<GeneratedMsl, String> {
-        Err(NOT_IMPLEMENTED.to_owned())
+        let bindings =
+            tint_bindings_for_msl(binding_map, &self.resource_bindings_for_entry(entry_name)?)?;
+        let output = self.program.generate_msl(
+            entry_name,
+            &bindings,
+            &override_values(pipeline_constants),
+            true,
+        )?;
+        let buffer_size_bindings = if output.needs_storage_buffer_sizes {
+            self.msl_buffer_size_bindings_for_entry(entry_name)?
+        } else {
+            Vec::new()
+        };
+        let buffer_sizes_slot = msl_buffer_sizes_slot(binding_map, &buffer_size_bindings)?;
+        Ok(GeneratedMsl {
+            source: output.source,
+            entry_point: entry_name.to_owned(),
+            buffer_sizes_slot,
+            buffer_size_bindings,
+            frag_depth_clamp_slot: None,
+            // The current shim exposes the total workgroup size but not each
+            // workgroup variable's byte size, so compute encoders receive an
+            // empty per-argument allocation list until that metadata is exposed.
+            workgroup_memory_sizes: Vec::new(),
+        })
     }
 
     /// Generates render vertex MSL for a validated shader module.
@@ -220,10 +257,21 @@ impl ReflectedModule {
     /// Returns storage buffer bindings that populate MSL `_mslBufferSizes`.
     pub(crate) fn msl_buffer_size_bindings_for_entry(
         &self,
-        _entry_point: &str,
+        entry_point: &str,
     ) -> Result<Vec<MslBufferSizeBinding>, String> {
-        // TODO(P2c): derive this from Tint code generation metadata.
-        Err(NOT_IMPLEMENTED.to_owned())
+        Ok(self
+            .resource_bindings_for_entry(entry_point)?
+            .into_iter()
+            .filter_map(|binding| match binding.kind {
+                ReflectedResourceBindingKind::Buffer(
+                    ReflectedBufferType::Storage | ReflectedBufferType::ReadOnlyStorage,
+                ) => Some(MslBufferSizeBinding {
+                    group: binding.group,
+                    binding: binding.binding,
+                }),
+                _ => None,
+            })
+            .collect())
     }
 
     /// Returns fragment builtins reflected by the validated shader module.
@@ -258,6 +306,115 @@ fn shader_stage(stage: yawgpu_tint::PipelineStage) -> ShaderStage {
         yawgpu_tint::PipelineStage::Fragment => ShaderStage::Fragment,
         yawgpu_tint::PipelineStage::Compute => ShaderStage::Compute,
     }
+}
+
+fn override_values(constants: &PipelineConstants) -> Vec<yawgpu_tint::OverrideValue> {
+    constants
+        .constants
+        .iter()
+        .map(|(name, value)| yawgpu_tint::OverrideValue {
+            name: name.clone(),
+            value: *value,
+        })
+        .collect()
+}
+
+fn tint_bindings_for_msl(
+    binding_map: &MslBindingMap,
+    resource_bindings: &[ReflectedResourceBinding],
+) -> Result<yawgpu_tint::Bindings, String> {
+    let resources = resource_bindings
+        .iter()
+        .map(|binding| ((binding.group, binding.binding), &binding.kind))
+        .collect::<HashMap<_, _>>();
+    let mut bindings = yawgpu_tint::Bindings::default();
+    for binding in &binding_map.resources {
+        let remap = yawgpu_tint::BindingRemap {
+            group: binding.group,
+            binding: binding.binding,
+            dst_group: 0,
+            dst_binding: binding.metal_index,
+        };
+        match binding.kind {
+            MslResourceBindingKind::Buffer => {
+                match resources.get(&(binding.group, binding.binding)).copied() {
+                    Some(ReflectedResourceBindingKind::Buffer(ReflectedBufferType::Uniform)) => {
+                        bindings.uniform.push(remap);
+                    }
+                    Some(ReflectedResourceBindingKind::Buffer(
+                        ReflectedBufferType::Storage | ReflectedBufferType::ReadOnlyStorage,
+                    )) => {
+                        bindings.storage.push(remap);
+                    }
+                    Some(_) => {
+                        return Err(
+                            "MSL buffer binding map entry does not match reflected resource kind"
+                                .to_owned(),
+                        );
+                    }
+                    None => {
+                        return Err(
+                            "MSL buffer binding map entry was not reflected for the entry point"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+            MslResourceBindingKind::Texture => {
+                match resources.get(&(binding.group, binding.binding)).copied() {
+                    Some(ReflectedResourceBindingKind::StorageTexture { .. }) => {
+                        bindings.storage_texture.push(remap);
+                    }
+                    Some(ReflectedResourceBindingKind::Texture { .. }) => {
+                        bindings.texture.push(remap);
+                    }
+                    Some(_) => {
+                        return Err(
+                            "MSL texture binding map entry does not match reflected resource kind"
+                                .to_owned(),
+                        );
+                    }
+                    None => {
+                        return Err(
+                            "MSL texture binding map entry was not reflected for the entry point"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+            MslResourceBindingKind::Sampler => {
+                bindings.sampler.push(remap);
+            }
+            MslResourceBindingKind::ExternalTexture => {
+                return Err("MSL external texture binding remap is not implemented".to_owned());
+            }
+        }
+    }
+    Ok(bindings)
+}
+
+fn msl_buffer_sizes_slot(
+    binding_map: &MslBindingMap,
+    buffer_size_bindings: &[MslBufferSizeBinding],
+) -> Result<Option<u32>, String> {
+    if buffer_size_bindings.is_empty() {
+        return Ok(None);
+    }
+    let next_slot = binding_map
+        .resources
+        .iter()
+        .filter_map(|binding| match binding.kind {
+            MslResourceBindingKind::Buffer => Some(binding.metal_index),
+            MslResourceBindingKind::ExternalTexture => binding.ext_params_buffer_slot,
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    if next_slot > u32::from(u8::MAX) {
+        return Err("MSL generated buffer slot exceeds the supported slot range".to_owned());
+    }
+    Ok(Some(next_slot))
 }
 
 fn spirv_local_size(words: &[u32]) -> Option<[u32; 3]> {
@@ -663,5 +820,179 @@ fn fs() -> @builtin(frag_depth) f32 {
                 sample_mask: false,
             }]
         );
+    }
+
+    #[test]
+    fn generate_compute_msl_from_tint() {
+        let module = parse_and_validate_wgsl(
+            r#"
+@compute @workgroup_size(1)
+fn cs() {}
+"#,
+        )
+        .unwrap();
+
+        let generated = module
+            .generate_msl(
+                "cs",
+                &MslBindingMap {
+                    resources: Vec::new(),
+                },
+                &PipelineConstants::default(),
+            )
+            .unwrap();
+
+        assert_eq!(generated.entry_point, "cs");
+        assert!(generated.source.contains("kernel"));
+        assert!(generated.source.contains("cs"));
+        assert_eq!(generated.frag_depth_clamp_slot, None);
+    }
+
+    #[test]
+    fn generate_spirv_from_tint_for_compute_and_render_entries() {
+        let compute = parse_and_validate_wgsl(
+            r#"
+@compute @workgroup_size(1)
+fn cs() {}
+"#,
+        )
+        .unwrap()
+        .generate_spirv(
+            "cs",
+            ShaderStage::Compute,
+            &PipelineConstants::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(compute.first().copied(), Some(0x0723_0203));
+
+        let render = parse_and_validate_wgsl(
+            r#"
+struct VOut {
+  @builtin(position) pos: vec4<f32>,
+};
+
+@vertex
+fn vs() -> VOut {
+  var out: VOut;
+  out.pos = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+  return out;
+}
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+  return vec4<f32>(1.0);
+}
+"#,
+        )
+        .unwrap();
+
+        let vertex = render
+            .generate_spirv(
+                "vs",
+                ShaderStage::Vertex,
+                &PipelineConstants::default(),
+                false,
+            )
+            .unwrap();
+        let fragment = render
+            .generate_spirv(
+                "fs",
+                ShaderStage::Fragment,
+                &PipelineConstants::default(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(vertex.first().copied(), Some(0x0723_0203));
+        assert_eq!(fragment.first().copied(), Some(0x0723_0203));
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn generate_glsl_from_tint() {
+        let generated = parse_and_validate_wgsl(
+            r#"
+@compute @workgroup_size(1)
+fn cs() {}
+"#,
+        )
+        .unwrap()
+        .generate_glsl("cs", ShaderStage::Compute, &PipelineConstants::default())
+        .unwrap();
+
+        assert_eq!(generated.entry_point, "cs");
+        assert!(generated.source.contains("#version 310 es"));
+    }
+
+    #[test]
+    fn generate_msl_uses_metal_binding_indices_from_remap() {
+        let module = parse_and_validate_wgsl(
+            r#"
+struct U {
+  x: vec4<f32>,
+}
+
+struct S {
+  x: u32,
+}
+
+@group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(1) var<storage, read_write> s: S;
+@group(0) @binding(2) var tex: texture_2d<f32>;
+@group(0) @binding(3) var samp: sampler;
+
+@compute @workgroup_size(1)
+fn cs() {
+  let dims = textureDimensions(tex);
+  let sampled = textureSampleLevel(tex, samp, vec2<f32>(0.5), 0.0);
+  s.x = u32(u.x.x + sampled.x) + u32(dims.x);
+}
+"#,
+        )
+        .unwrap();
+
+        let generated = module
+            .generate_msl(
+                "cs",
+                &MslBindingMap {
+                    resources: vec![
+                        MslResourceBinding {
+                            group: 0,
+                            binding: 0,
+                            metal_index: 4,
+                            ext_params_buffer_slot: None,
+                            kind: MslResourceBindingKind::Buffer,
+                        },
+                        MslResourceBinding {
+                            group: 0,
+                            binding: 1,
+                            metal_index: 7,
+                            ext_params_buffer_slot: None,
+                            kind: MslResourceBindingKind::Buffer,
+                        },
+                        MslResourceBinding {
+                            group: 0,
+                            binding: 2,
+                            metal_index: 5,
+                            ext_params_buffer_slot: None,
+                            kind: MslResourceBindingKind::Texture,
+                        },
+                        MslResourceBinding {
+                            group: 0,
+                            binding: 3,
+                            metal_index: 6,
+                            ext_params_buffer_slot: None,
+                            kind: MslResourceBindingKind::Sampler,
+                        },
+                    ],
+                },
+                &PipelineConstants::default(),
+            )
+            .unwrap();
+
+        assert!(generated.source.contains("[[buffer(4)]]"));
+        assert!(generated.source.contains("[[buffer(7)]]"));
+        assert!(generated.source.contains("[[texture(5)]]"));
+        assert!(generated.source.contains("[[sampler(6)]]"));
     }
 }
