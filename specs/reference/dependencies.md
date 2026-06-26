@@ -8,20 +8,24 @@
 | `dawn` | Behaviour spec + ported test source (`src/dawn/tests/unittests/validation`) |
 | `wgpu-native` | C ABI structure inspiration (bindgen rename trick, Arc handles, conv.rs) |
 | `mgpu` | Project layout + enum-dispatch HAL template + conventions |
-| `wgpu` | `infosia/wgpu` fork (gfx-rs/wgpu `v29.0.3` + `tiled-fork` patches); source of `naga` — **git+rev dependency**, local `path` overlay for dev (decided) |
+| `dawn` | Behaviour spec, ported test source, AND the source of **Tint** — yawgpu's shader frontend — vendored as a pinned git submodule at `third_party/dawn` |
 
 ## Crate dependencies
 
-- **naga**: consumed from the `infosia/wgpu` fork as a **git dependency
-  pinned by commit SHA** (not crates.io — the fork carries `tiled-fork`
-  patches the reference stack needs; not a bare `path` dep — CI must build
-  without a sibling `wgpu` checkout). Needed from Phase 4 (shaders).
-  ```toml
-  [workspace.dependencies]
-  naga = { git = "https://github.com/infosia/wgpu.git", rev = "<SHA>" }
+- **Tint** (the shader frontend): Dawn's WGSL compiler, vendored as a **pinned
+  git submodule** at `third_party/dawn`. The `yawgpu-tint` crate's `build.rs`
+  builds the minimal Tint libraries (WGSL reader + inspector + MSL/SPIR-V/GLSL
+  writers) from source via CMake and drives them from Rust through a small C++
+  shim. The default build links Tint, so it needs a C++20 toolchain + CMake and
+  the one-time submodule setup:
+  ```sh
+  git submodule update --init third_party/dawn
+  cd third_party/dawn && python3 tools/fetch_dawn_dependencies.py
   ```
-  Local fast-iteration only (never committed): overlay with
-  `[patch."https://github.com/infosia/wgpu.git"] naga = { path = "wgpu/naga" }`.
+  Without the submodule, `yawgpu-tint` compiles as a non-functional stub.
+  (Tint replaced the earlier naga frontend, which was consumed from an
+  `infosia/wgpu` git fork; that fork and the `naga` crate dependency are no longer
+  used.)
 - **bindgen** (build-dep): generate `webgpu.h` bindings.
 - HAL backends: `ash` (Vulkan), `objc2`/`objc2-metal`/`block2` (Metal) —
   added Phase 7, feature-gated. Noop has no GPU deps. **DirectX is the only
@@ -50,7 +54,9 @@ references it, so bindgen output is reproducible:
   primitive `From<u32>`/`From<i32>` impls in `yawgpu-core` to handle the
   separate enum underlying-type platform difference (MSVC `c_int`, macOS clang
   `c_uint`) by bit-preserving `as` casts at the FFI↔core boundary.
-- `naga`: pinned to `infosia/wgpu` rev
+- `naga`: **OBSOLETE — naga has been removed; Tint (vendored as the
+  `third_party/dawn` submodule) is the shader frontend. The pin/fork details below
+  are kept as historical record only.** Previously pinned to `infosia/wgpu` rev
   **`216627076a7b22ad09fa566de53d1f0f74b59de3`** (`git describe`:
   `v29.0.3-44-g216627076`; remote `https://github.com/infosia/wgpu.git`).
   Wired in Phase 4 (P4.0): `[workspace.dependencies] naga = { git =
@@ -61,7 +67,11 @@ references it, so bindgen output is reproducible:
   "wgpu/naga" }`. naga is `edition 2021`; License MIT OR Apache-2.0
   (`wgpu/naga/LICENSE.{MIT,APACHE}`), compatible with this repo.
 
-## naga upstream-tracking model (two tiers)
+## naga upstream-tracking model (two tiers) — OBSOLETE (naga removed)
+
+> Historical: naga was tracked via an `infosia/wgpu` fork. naga is now removed
+> and Tint is vendored as the `third_party/dawn` submodule (bumped by updating the
+> submodule rev). The two-tier model below no longer applies.
 
 Tracking is split so each tier has one owner:
 

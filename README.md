@@ -26,10 +26,14 @@ yawgpu implements the **entire** WebGPU stack itself:
 - the **GPU backends** themselves — a hand-written hardware abstraction
   layer that talks to Metal and Vulkan directly.
 
-The only third-party GPU-stack dependency is **naga**, used to translate
-WGSL shaders into the platform shading languages (MSL for Metal, SPIR-V for
-Vulkan). Everything else — validation, the object model, the backends — is
-original code.
+The only third-party GPU-stack dependency is **Tint** — Dawn's WGSL compiler —
+used to translate WGSL shaders into the platform shading languages (MSL for
+Metal, SPIR-V for Vulkan, GLSL ES for GLES) and to reflect their interface.
+yawgpu drives Tint (a C++ library) from Rust through a small C shim in the
+`yawgpu-tint` crate. Everything else — validation, the object model, the
+backends — is original code. Because Tint is also the compiler the WebGPU CTS's
+reference (Dawn) uses, yawgpu's shader translation matches the conformance oracle
+by construction.
 
 This is a deliberately different point in the design space from a thin C
 shim layered over an existing Rust GPU engine: yawgpu owns the whole
@@ -179,6 +183,19 @@ is ignored when the resolved instance backend is not GLES.
 
 ## Using it from C
 
+**Prerequisite — the Tint shader compiler.** yawgpu's shader frontend is Tint,
+built from a vendored Dawn checkout (a pinned git submodule), so the build needs a
+C++20 toolchain + CMake and a one-time submodule setup:
+
+```sh
+git submodule update --init third_party/dawn
+cd third_party/dawn && python3 tools/fetch_dawn_dependencies.py && cd ../..
+```
+
+`yawgpu-tint/build.rs` then builds the minimal Tint libraries from source on the
+first `cargo build` (cached afterwards). Without this setup the `yawgpu-tint` crate
+compiles as a non-functional stub.
+
 Build the library and link against it with the vendored headers:
 
 ```sh
@@ -318,8 +335,8 @@ extensions).
 ## Shaders
 
 By default, shaders are authored in **WGSL** and compiled at pipeline-creation
-time by naga into the backend's native language — Metal Shading Language
-for Metal, SPIR-V for Vulkan.
+time by Tint into the backend's native language — Metal Shading Language
+for Metal, SPIR-V for Vulkan, GLSL ES for GLES.
 
 16-bit floats are supported through the standard WebGPU **`shader-f16`**
 optional feature: request `WGPUFeatureName_ShaderF16` in the device's

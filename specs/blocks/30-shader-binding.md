@@ -1,5 +1,11 @@
 # Block 30 — ShaderModule / BindGroupLayout / BindGroup / PipelineLayout
 
+> **Frontend note (post-migration):** yawgpu's shader frontend is now **Tint**
+> (Dawn's WGSL compiler, via the `yawgpu-tint` shim), not naga. The `naga::*` API
+> references and naga-specific behavior below are the *historical* frontend; the
+> equivalent parse / validate / reflect / emit now runs through Tint. See
+> `specs/reference/dependencies.md` and `CLAUDE.md`.
+
 Phase 4. Rules from Dawn `ShaderModuleValidationTests`,
 `WGSLFeatureValidationTests`, `BindGroupValidationTests`,
 `GetBindGroupLayoutValidationTests`, `OverridableConstantsValidationTests`,
