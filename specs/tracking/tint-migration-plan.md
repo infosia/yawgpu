@@ -311,6 +311,26 @@ all reflection + codegen from Tint, naga still default & untouched.
   uncatchable across FFI (P2a.0) — fixing the missing option avoids THIS abort, but
   fuzz/adversarial WGSL can still abort; a true guard would need out-of-process
   compilation or a Tint patch.
+
+  **Phase 3 finding #1 RESOLVED** (`ec62ac7`): shim now sets
+  `array_length_from_constants` (ubo_binding = buffer_sizes_slot; ordered size
+  bindings returned for the HAL). Real Metal e2e no longer SIGTRAPs on arrayLength.
+
+  **Phase 3 finding #2 (the active one): Tint MSL storage-buffer binding indices
+  do NOT match yawgpu's Metal HAL binding** → wrong real-GPU results. Unmasked once
+  the ICE was fixed (crash-masks-behavior): `e2e_metal_compute` under
+  `--features metal,tint` now runs but 4/5 fail — e.g. `metal_compute_fills_storage_buffer`
+  (a FIXED `array<u32,8>` storage buffer at `@group(0)@binding(0)`, NO arrayLength)
+  reads back all zeros instead of `[0,1,4,…,49]`: the shader's writes land in a
+  different Metal `[[buffer(N)]]` slot than where the HAL bound `out_data`. So
+  yawgpu's `MslBindingMap` metal_index → the shim's binding remap → Tint's emitted
+  `[[buffer(N)]]` is NOT round-tripping to the index the Metal HAL binds. **Next
+  slice:** dump Tint's MSL for one failing shader, read its `[[buffer(N)]]`/
+  `[[texture(N)]]` indices, compare to the HAL's bound indices (and check whether
+  the new dynamic `immediate_binding_point` reserves a colliding slot / Tint flattens
+  `(dst_group,dst_binding)` differently than expected), reconcile, re-verify on real
+  Metal. This is THE core Metal binding contract for the Tint frontend; the
+  SPIR-V/Vulkan path needs the analogous real-GPU check too.
 - **Flip default → Tint** (after Phase 3 confirms real-GPU parity).
 - **P2c.3** — combined same-module `generate_render_msl` (minor; no test needs it).
 - **P2c.3** — `generate_render_msl` combined same-module (minor; no test needs it yet).
