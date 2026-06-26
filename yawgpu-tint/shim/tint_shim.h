@@ -177,6 +177,7 @@ typedef struct {
 
 typedef struct {
     char* msl;
+    char* entry_point;
     bool needs_storage_buffer_sizes;
     uint32_t* buffer_size_bindings;
     size_t n_buffer_size_bindings;

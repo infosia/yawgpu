@@ -115,6 +115,7 @@ mod imp {
     #[repr(C)]
     struct RawMslOutput {
         msl: *mut c_char,
+        entry_point: *mut c_char,
         needs_storage_buffer_sizes: bool,
         buffer_size_bindings: *mut u32,
         n_buffer_size_bindings: usize,
@@ -478,6 +479,7 @@ mod imp {
             let raw_overrides = RawOverrideValues::new(overrides)?;
             let mut out = RawMslOutput {
                 msl: ptr::null_mut(),
+                entry_point: ptr::null_mut(),
                 needs_storage_buffer_sizes: false,
                 buffer_size_bindings: ptr::null_mut(),
                 n_buffer_size_bindings: 0,
@@ -501,11 +503,24 @@ mod imp {
                 return Err(take_error(err));
             }
             if out.msl.is_null() {
+                if !out.entry_point.is_null() {
+                    // SAFETY: successful shim outputs are malloc-owned.
+                    unsafe { yawgpu_tint_string_free(out.entry_point) };
+                }
                 if !out.buffer_size_bindings.is_null() {
                     // SAFETY: successful shim outputs are malloc-owned.
                     unsafe { yawgpu_tint_u32_free(out.buffer_size_bindings) };
                 }
                 return Err("tint: MSL generator returned NULL output".to_owned());
+            }
+            if out.entry_point.is_null() {
+                // SAFETY: successful shim outputs are malloc-owned.
+                unsafe { yawgpu_tint_string_free(out.msl) };
+                if !out.buffer_size_bindings.is_null() {
+                    // SAFETY: successful shim outputs are malloc-owned.
+                    unsafe { yawgpu_tint_u32_free(out.buffer_size_bindings) };
+                }
+                return Err("tint: MSL generator returned NULL entry point".to_owned());
             }
             // SAFETY: `out.msl` is owned by Rust after success.
             let msl = unsafe {
@@ -513,10 +528,19 @@ mod imp {
                 yawgpu_tint_string_free(out.msl);
                 s
             };
+            // SAFETY: `out.entry_point` is owned by Rust after success.
+            let entry_point = unsafe {
+                let s = CStr::from_ptr(out.entry_point)
+                    .to_string_lossy()
+                    .into_owned();
+                yawgpu_tint_string_free(out.entry_point);
+                s
+            };
             let buffer_size_bindings =
                 raw_buffer_size_bindings(out.buffer_size_bindings, out.n_buffer_size_bindings)?;
             Ok(MslOutput {
                 source: msl,
+                entry_point,
                 needs_storage_buffer_sizes: out.needs_storage_buffer_sizes,
                 buffer_size_bindings,
             })
@@ -626,6 +650,8 @@ mod imp {
     pub struct MslOutput {
         /// Generated MSL source.
         pub source: String,
+        /// Generated MSL entry point name.
+        pub entry_point: String,
         /// Whether the generated MSL needs a storage-buffer-size table.
         pub needs_storage_buffer_sizes: bool,
         /// Ordered storage bindings whose byte lengths populate the size table.
@@ -1386,6 +1412,8 @@ mod imp {
     pub struct MslOutput {
         /// Generated MSL source.
         pub source: String,
+        /// Generated MSL entry point name.
+        pub entry_point: String,
         /// Whether the generated MSL needs a storage-buffer-size table.
         pub needs_storage_buffer_sizes: bool,
         /// Ordered storage bindings whose byte lengths populate the size table.

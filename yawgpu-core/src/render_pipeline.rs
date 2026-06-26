@@ -3104,8 +3104,18 @@ mod tests {
                 if vertex.contains("vertex")
                     && fragment.as_ref().is_some_and(|fragment| fragment.contains("fragment"))
         ));
-        assert_eq!(vertex_entry, "vs");
-        assert_eq!(fragment_entry.as_deref(), Some("fs"));
+        let expected_vertex_entry = if cfg!(feature = "tint") {
+            "tint_vs"
+        } else {
+            "vs"
+        };
+        let expected_fragment_entry = if cfg!(feature = "tint") {
+            "tint_fs"
+        } else {
+            "fs"
+        };
+        assert_eq!(vertex_entry, expected_vertex_entry);
+        assert_eq!(fragment_entry.as_deref(), Some(expected_fragment_entry));
         assert!(bindings.is_empty());
     }
 
