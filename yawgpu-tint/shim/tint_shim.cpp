@@ -668,6 +668,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
     }
     if (out != nullptr) {
         out->msl = nullptr;
+        out->entry_point = nullptr;
         out->needs_storage_buffer_sizes = false;
         out->buffer_size_bindings = nullptr;
         out->n_buffer_size_bindings = 0;
@@ -678,6 +679,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
             return false;
         }
         std::string entry_point = cstr_or_empty(ep);
+        std::string remapped_entry_point = "tint_" + entry_point;
         auto ir = lower_ir(program);
         if (ir != tint::Success) {
             set_error(err, ir.Failure());
@@ -685,6 +687,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         }
         tint::msl::writer::Options options;
         options.entry_point_name = entry_point;
+        options.remapped_entry_point_name = remapped_entry_point;
         options.disable_robustness = disable_robustness;
         options.bindings = all_remaps_empty(bindings)
                                ? tint::GenerateBindings(ir.Get(), entry_point, true, true)
@@ -711,12 +714,21 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
             set_error_string(err, "failed to allocate MSL output");
             return false;
         }
+        out->entry_point = dup_string(remapped_entry_point);
+        if (out->entry_point == nullptr) {
+            std::free(out->msl);
+            out->msl = nullptr;
+            set_error_string(err, "failed to allocate MSL entry point output");
+            return false;
+        }
         out->needs_storage_buffer_sizes = result->needs_storage_buffer_sizes;
         out->buffer_size_bindings = dup_binding_pairs(ordered_size_bindings);
         out->n_buffer_size_bindings = ordered_size_bindings.size();
         if (!ordered_size_bindings.empty() && out->buffer_size_bindings == nullptr) {
             std::free(out->msl);
+            std::free(out->entry_point);
             out->msl = nullptr;
+            out->entry_point = nullptr;
             out->n_buffer_size_bindings = 0;
             set_error_string(err, "failed to allocate MSL buffer size bindings");
             return false;

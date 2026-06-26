@@ -170,7 +170,7 @@ impl ReflectedModule {
             .collect::<Vec<_>>();
         Ok(GeneratedMsl {
             source: output.source,
-            entry_point: entry_name.to_owned(),
+            entry_point: output.entry_point,
             buffer_sizes_slot: (!buffer_size_bindings.is_empty()).then_some(buffer_sizes_slot),
             buffer_size_bindings,
             frag_depth_clamp_slot: None,
@@ -1064,14 +1064,14 @@ fn fs() -> @builtin(frag_depth) f32 {
         let module = parse_and_validate_wgsl(
             r#"
 @compute @workgroup_size(1)
-fn cs() {}
+fn main() {}
 "#,
         )
         .unwrap();
 
         let generated = module
             .generate_msl(
-                "cs",
+                "main",
                 &MslBindingMap {
                     resources: Vec::new(),
                 },
@@ -1079,9 +1079,8 @@ fn cs() {}
             )
             .unwrap();
 
-        assert_eq!(generated.entry_point, "cs");
-        assert!(generated.source.contains("kernel"));
-        assert!(generated.source.contains("cs"));
+        assert_eq!(generated.entry_point, "tint_main");
+        assert!(generated.source.contains("kernel void tint_main"));
         assert_eq!(generated.frag_depth_clamp_slot, None);
     }
 
