@@ -91,8 +91,10 @@ synchronously on poll, which keeps ported async validation tests deterministic.
 
 - **Scope**: full WebGPU + own HAL is large. Mitigation: strict TDD slices by
   Dawn test file; Noop keeps every slice shippable without a GPU.
-- **naga**: path dep on `wgpu/naga` (decided). Used for WGSL parse +
-  per-backend shader emission (MSL / SPIR-V / GLSL ES).
+- **Tint**: the shader frontend (Dawn's WGSL compiler), built from a vendored
+  Dawn submodule and driven from Rust via the `yawgpu-tint` C shim. Used for WGSL
+  parse/validate, reflection, and per-backend shader emission (MSL / SPIR-V /
+  GLSL ES). (Replaced the earlier naga frontend; Tint matches the CTS oracle.)
 - **Wire**: explicitly out of scope; no dawn-wire analog.
 - **Header drift**: pin the `webgpu.h` we bindgen against; record its commit
   in `specs/reference/dependencies.md`.

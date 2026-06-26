@@ -91,6 +91,20 @@ in the library (with its inline unit test), then re-confirmed on hardware; the
 finding ledger is `specs/tracking/cts-coverage.md` and the suite's
 `docs/FINDINGS.md`.
 
+## Shader frontend — Tint
+
+The WGSL→{MSL, SPIR-V, GLSL ES} compiler and reflection source is **Tint** (Dawn's
+WGSL compiler), vendored as the pinned `third_party/dawn` git submodule and driven
+from Rust through the `yawgpu-tint` crate's C++ shim. Since Tint is the same
+compiler the CTS oracle (Dawn) uses, shader translation matches the oracle by
+construction. The default build links Tint, so it **requires the Dawn submodule
+initialized + its deps fetched** (`git submodule update --init third_party/dawn`,
+then `tools/fetch_dawn_dependencies.py`; see `specs/reference/dependencies.md`);
+without it `yawgpu-tint` is a non-functional stub. Shader-compiler issues are fixed
+in the `yawgpu-tint` shim (or upstream Dawn/Tint) — **there is no longer a naga fork
+to edit**. (Tint replaced the earlier naga frontend; the historical naga/`../wgpu`
+fork workflow is obsolete.)
+
 ## Code conventions
 
 - `#[non_exhaustive]` on extensible public enums/structs.

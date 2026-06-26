@@ -28,7 +28,7 @@ COMPLETE with an open CRITICAL/MAJOR (see `reference/workflow.md`).
 | **1** | Instance/Adapter/Device + Future | `DeviceValidationTests`, `UnsafeAPIValidationTests`, adapter/device init | Async model (Future, callback-info, WaitAny, ProcessEvents) working on Noop |
 | **2** | Buffer + Queue | `BufferValidationTests`, `QueueWriteBufferValidationTests`, `QueueSubmitValidationTests`, `QueueOnSubmittedWorkDoneValidationTests` | create/map/unmap/mappedAtCreation, usage rules, submit |
 | **3** | Texture/View/Sampler | `TextureValidationTests`, `TextureViewValidationTests`, `SamplerValidationTests` | format/dimension/usage validation |
-| **4** | Shader + BindGroup(Layout) + PipelineLayout | `ShaderModuleValidationTests`, `BindGroupValidationTests`, `BindGroupLayout*`, `PipelineLayout*` | naga (`wgpu/naga`) WGSL parse/validate; binding validation |
+| **4** | Shader + BindGroup(Layout) + PipelineLayout | `ShaderModuleValidationTests`, `BindGroupValidationTests`, `BindGroupLayout*`, `PipelineLayout*` | Tint (Dawn's WGSL compiler) WGSL parse/validate; binding validation |
 | **5** | Render/Compute pipeline | `RenderPipelineValidationTests`, `ComputeValidationTests`, `PipelineAndPassCompatibilityTests` | pipeline + layout/format compat |
 | **6** | Command encoding / passes | `CommandBufferValidationTests`, `CopyCommandsValidationTests`, `RenderPassDescriptorValidationTests`, `ComputeDispatch*` | encoder/pass state machine |
 | **7** | Real backends | Dawn `end2end` Basic/Compute/Copy (GPU-gated) | Noop→**Metal→Vulkan** bring-up; real draw/dispatch. *(Order reversed from Vulkan→Metal: dev platform is macOS — Metal native, no MoltenVK; see `blocks/60-real-backends.md` / `tracking/phase-7.md`.)* |
