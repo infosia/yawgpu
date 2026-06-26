@@ -200,6 +200,28 @@ of the workspace is unaffected.
 - **Gate (each slice):** Noop workspace test green; clippy `-D warnings`;
   missing_docs clean; both default (naga) and `--features tint` build.
 
+**Phase 2 progress (2026-06-26):**
+- **P2a DONE** (`6275d39`) — plumbing (dep+feature, `shader_types.rs`, facade,
+  skeleton). Default unchanged.
+- **P2a.0 DONE** (`8f7c8a6`) — shim recovers override default values from the AST
+  (`sem::Variable::ConstantValue()`). ICE: not catchable (Tint `[[noreturn]]`),
+  documented.
+- **P2b DONE** (`757c370`) — `shader_tint` reflection computed **from Tint** (zero
+  naga refs): entry_points / workgroup (+resolved) / resource_bindings /
+  fragment_builtins / overrides. Deferred: `entry_point_io` (→ **P2b.2**, needs a
+  shim extension to expose Tint `EntryPoint` IO variables) and
+  `msl_buffer_size_bindings` (→ P2c). **An initial P2b attempt delegated reflection
+  to a naga mirror — rejected and reverted; shader_tint must never depend on naga.**
+  - **WIP state:** default path green (the standing gate). `cargo test
+    --features tint --lib` is intentionally **red (293 pass / 58 fail)** — all 58
+    are pipeline/render-pass creation tests that require codegen, which is still
+    the P2c skeleton. Goes green as P2b.2 + P2c land.
+- **NEXT: P2b.2** (shim IO extension + `entry_point_io`) → **P2c** (codegen:
+  generate_{spirv,msl,glsl} + render variants + `msl_buffer_size_bindings`, mapping
+  PipelineConstants→overrides + flat Metal indices→binding remap) → **P2d** (flip
+  the feature default + parity). Watch codex for shortcuts (it delegated to naga
+  once).
+
 ### Phase 3 — CTS re-verification on real GPU (the dominant cost)
 
 - Rebuild webgpu-native-cts against Tint-backed yawgpu; run the whole green surface
