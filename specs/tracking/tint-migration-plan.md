@@ -402,8 +402,17 @@ all reflection + codegen from Tint, naga still default & untouched.
   point_size, array_length_from_constants, Vulkan Y-flip/winding.
 
   **Only 2 remaining e2e failures, both bounded:**
-  1. `e2e_metal_depth::metal_readonly_depth_stencil_isolation` — read-only
-     depth-stencil isolation (NOT frag_depth; the 19 frag_depth tests pass). Investigate.
+  1. `e2e_metal_depth::metal_readonly_depth_stencil_isolation` (F-055 isolation) —
+     NOT frag_depth (the 19 frag_depth/stencil depth tests pass under Tint). Symptom:
+     the WRITE pass produces **all-zero depth+stencil** (want 0.1/0.2/0.3 + stencil
+     1/2/3, got 0), and a `WGPUTextureAspect_All` copy of the depth-stencil texture
+     trips the (frontend-independent) core validation "copy texture to buffer
+     depth/stencil format does not support this copy aspect/usage" → error command
+     buffer → submit rejected. Since the copy validation is identical under naga (which
+     passes), the real divergence is upstream: the depth/stencil WRITE isn't landing
+     under Tint. Needs per-stage instrumentation (capture the device error during the
+     WRITE pipeline create/submit, not the readback). Isolated multi-stage edge case —
+     a focused follow-up, not a blocker for the parity result.
   2. `e2e_vulkan_external_texture` — external textures, **deferred** by the governing
      decision (rework via Tint's native support, not naga's honest-rejection).
 - **Flip default → Tint** (after Phase 3 confirms real-GPU parity).
