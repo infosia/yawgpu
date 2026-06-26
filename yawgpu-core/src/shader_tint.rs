@@ -95,7 +95,7 @@ impl ReflectedModule {
         binding_map: &MslBindingMap,
         pipeline_constants: &PipelineConstants,
     ) -> Result<GeneratedMsl, String> {
-        self.generate_stage_msl(entry_name, binding_map, pipeline_constants, true)
+        self.generate_stage_msl(entry_name, binding_map, pipeline_constants, true, false)
     }
 
     /// Generates render vertex MSL for a validated shader module.
@@ -107,11 +107,19 @@ impl ReflectedModule {
         force_point_size: bool,
         pipeline_constants: &PipelineConstants,
     ) -> Result<GeneratedMsl, String> {
-        if !vertex_buffers.is_empty() || force_point_size {
-            // TODO(phase-3): vertex layout / point size handled by the Metal HAL
-            // under Tint's stage_in model.
+        if !vertex_buffers.is_empty() {
+            // TODO(phase-3): vertex layout is handled by the Metal HAL's
+            // MTLVertexDescriptor under Tint's stage_in model (no vertex pulling).
         }
-        self.generate_stage_msl(entry_name, binding_map, pipeline_constants, false)
+        // `force_point_size` makes Tint emit `[[point_size]] = 1.0` (point-list
+        // topology requires it on Metal).
+        self.generate_stage_msl(
+            entry_name,
+            binding_map,
+            pipeline_constants,
+            false,
+            force_point_size,
+        )
     }
 
     /// Generates render fragment MSL for a validated shader module.
@@ -126,7 +134,7 @@ impl ReflectedModule {
             // TODO(phase-3): sample mask handled by Tint's MSL writer and the
             // Metal pipeline state.
         }
-        self.generate_stage_msl(entry_name, binding_map, pipeline_constants, false)
+        self.generate_stage_msl(entry_name, binding_map, pipeline_constants, false, false)
     }
 
     /// Generates render msl for the validated shader module.
@@ -149,6 +157,7 @@ impl ReflectedModule {
         binding_map: &MslBindingMap,
         pipeline_constants: &PipelineConstants,
         disable_robustness: bool,
+        emit_vertex_point_size: bool,
     ) -> Result<GeneratedMsl, String> {
         let bindings =
             tint_bindings_for_msl(binding_map, &self.resource_bindings_for_entry(entry_name)?)?;
@@ -159,6 +168,7 @@ impl ReflectedModule {
             &override_values(pipeline_constants),
             buffer_sizes_slot,
             disable_robustness,
+            emit_vertex_point_size,
         )?;
         let buffer_size_bindings = output
             .buffer_size_bindings

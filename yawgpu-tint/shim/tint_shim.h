@@ -190,6 +190,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
                               size_t n_ov,
                               uint32_t buffer_sizes_slot,
                               bool disable_robustness,
+                              bool emit_vertex_point_size,
                               YawgpuTintMslOutput* out,
                               char** err);
 
