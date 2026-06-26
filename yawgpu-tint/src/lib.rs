@@ -93,6 +93,16 @@ mod imp {
     }
 
     #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct RawExternalTextureRemap {
+        src_group: u32,
+        src_binding: u32,
+        plane0_slot: u32,
+        plane1_slot: u32,
+        params_slot: u32,
+    }
+
+    #[repr(C)]
     struct RawBindings {
         uniform: *const RawBindingRemap,
         n_uniform: usize,
@@ -104,6 +114,8 @@ mod imp {
         n_storage_texture: usize,
         sampler: *const RawBindingRemap,
         n_sampler: usize,
+        external_texture: *const RawExternalTextureRemap,
+        n_external_texture: usize,
     }
 
     #[repr(C)]
@@ -1239,6 +1251,33 @@ mod imp {
         }
     }
 
+    /// A texture_external remap from the WGSL binding point to Metal texture and metadata slots.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ExternalTextureRemap {
+        /// WGSL bind group of the texture_external.
+        pub group: u32,
+        /// WGSL binding of the texture_external.
+        pub binding: u32,
+        /// Metal texture slot for plane 0.
+        pub plane0_slot: u32,
+        /// Metal texture slot for plane 1.
+        pub plane1_slot: u32,
+        /// Metal buffer slot for the external-texture metadata UBO.
+        pub params_slot: u32,
+    }
+
+    impl ExternalTextureRemap {
+        fn as_raw(self) -> RawExternalTextureRemap {
+            RawExternalTextureRemap {
+                src_group: self.group,
+                src_binding: self.binding,
+                plane0_slot: self.plane0_slot,
+                plane1_slot: self.plane1_slot,
+                params_slot: self.params_slot,
+            }
+        }
+    }
+
     /// Resource binding remap sets grouped by resource class.
     #[derive(Debug, Clone, Default)]
     pub struct Bindings {
@@ -1252,6 +1291,8 @@ mod imp {
         pub storage_texture: Vec<BindingRemap>,
         /// Sampler binding remaps.
         pub sampler: Vec<BindingRemap>,
+        /// External texture remaps to Metal plane and metadata slots.
+        pub external_texture: Vec<ExternalTextureRemap>,
     }
 
     struct RawBindingsOwned<'a> {
@@ -1260,6 +1301,7 @@ mod imp {
         texture: Vec<RawBindingRemap>,
         storage_texture: Vec<RawBindingRemap>,
         sampler: Vec<RawBindingRemap>,
+        external_texture: Vec<RawExternalTextureRemap>,
         _marker: PhantomData<&'a Bindings>,
     }
 
@@ -1296,6 +1338,12 @@ mod imp {
                     .copied()
                     .map(BindingRemap::as_raw)
                     .collect(),
+                external_texture: self
+                    .external_texture
+                    .iter()
+                    .copied()
+                    .map(ExternalTextureRemap::as_raw)
+                    .collect(),
                 _marker: PhantomData,
             }
         }
@@ -1314,6 +1362,8 @@ mod imp {
                 n_storage_texture: self.storage_texture.len(),
                 sampler: self.sampler.as_ptr(),
                 n_sampler: self.sampler.len(),
+                external_texture: self.external_texture.as_ptr(),
+                n_external_texture: self.external_texture.len(),
             }
         }
     }
@@ -1874,6 +1924,21 @@ mod imp {
         pub dst_binding: u32,
     }
 
+    /// A texture_external remap from the WGSL binding point to Metal texture and metadata slots.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ExternalTextureRemap {
+        /// WGSL bind group of the texture_external.
+        pub group: u32,
+        /// WGSL binding of the texture_external.
+        pub binding: u32,
+        /// Metal texture slot for plane 0.
+        pub plane0_slot: u32,
+        /// Metal texture slot for plane 1.
+        pub plane1_slot: u32,
+        /// Metal buffer slot for the external-texture metadata UBO.
+        pub params_slot: u32,
+    }
+
     /// Resource binding remap sets grouped by resource class.
     #[derive(Debug, Clone, Default)]
     pub struct Bindings {
@@ -1887,6 +1952,8 @@ mod imp {
         pub storage_texture: Vec<BindingRemap>,
         /// Sampler binding remaps.
         pub sampler: Vec<BindingRemap>,
+        /// External texture remaps to Metal plane and metadata slots.
+        pub external_texture: Vec<ExternalTextureRemap>,
     }
 
     /// Pipeline override substitution value.
@@ -2292,6 +2359,47 @@ override i: i32 = -3i;
         assert_eq!(default("b"), 1.0);
         assert_eq!(default("u"), 7.0);
         assert_eq!(default("i"), -3.0);
+    }
+
+    #[test]
+    fn external_texture_remap_generates_msl() {
+        let wgsl = r#"
+@group(0) @binding(0) var s: sampler;
+@group(0) @binding(1) var t: texture_external;
+
+@fragment
+fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
+  return textureSampleBaseClampToEdge(t, s, p.xy);
+}
+"#;
+        let program = Program::parse(wgsl, false).unwrap();
+        let bindings = Bindings {
+            sampler: vec![BindingRemap {
+                group: 0,
+                binding: 0,
+                dst_group: 0,
+                dst_binding: 0,
+            }],
+            external_texture: vec![ExternalTextureRemap {
+                group: 0,
+                binding: 1,
+                plane0_slot: 0,
+                plane1_slot: 1,
+                params_slot: 0,
+            }],
+            ..Bindings::default()
+        };
+
+        let msl = program
+            .generate_msl("fs", &bindings, &[], 2, true, false, 0xFFFF_FFFF)
+            .unwrap();
+        assert!(!msl.source.is_empty(), "MSL was empty");
+        assert!(msl.source.contains("sampler"), "MSL:\n{}", msl.source);
+        assert!(
+            msl.source.matches("texture2d").count() >= 2,
+            "MSL:\n{}",
+            msl.source
+        );
     }
 
     #[test]
