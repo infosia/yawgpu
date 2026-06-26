@@ -18,7 +18,9 @@ extern "C" {
 
 typedef struct YawgpuTintProgram YawgpuTintProgram;
 
-/* Initializes the Tint runtime. Idempotent; safe to call more than once. */
+/* Initializes the Tint runtime. Idempotent; safe to call more than once.
+ * Tint ICEs terminate the process by design; this Tint revision exposes only
+ * per-ICE callbacks, not a global callback setter that the shim can install. */
 void yawgpu_tint_initialize(void);
 
 /* Parse + validate WGSL. Returns NULL on failure with *err set.
@@ -86,7 +88,9 @@ bool yawgpu_tint_resource_binding_get(const YawgpuTintProgram*,
 
 /* Override type_class mirrors tint::inspector::Override::Type:
  * 0=kBool, 1=kFloat32, 2=kUint32, 3=kInt32, 4=kFloat16.
- * default_value is not exposed by this Tint inspector revision and is 0.0. */
+ * default_value is populated from sem::GlobalVariable::ConstantValue() when
+ * has_default is true; otherwise it is 0.0. Boolean defaults are encoded as
+ * 0.0 or 1.0. */
 typedef struct {
     const char* name;          /* borrowed; valid until program destroyed */
     uint16_t id;

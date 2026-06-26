@@ -1411,6 +1411,8 @@ fn cs() {}
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides[0].name, "x");
         assert_eq!(overrides[0].type_class, OverrideType::Uint32);
+        assert!(overrides[0].has_default);
+        assert_eq!(overrides[0].default_value, 4.0);
 
         let bindings = Bindings::default();
         let a = program
@@ -1438,6 +1440,30 @@ fn cs() {}
             .unwrap()
             .source;
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn reflects_override_default_values() {
+        let wgsl = r#"
+override f: f32 = 1.5;
+override b: bool = true;
+override u: u32 = 7u;
+override i: i32 = -3i;
+@compute @workgroup_size(1) fn cs() {}
+"#;
+        let program = Program::parse(wgsl, false).unwrap();
+        let overrides = program.overrides().unwrap();
+        let default = |name: &str| {
+            overrides
+                .iter()
+                .find(|override_| override_.name == name)
+                .map(|override_| override_.default_value)
+                .unwrap()
+        };
+        assert_eq!(default("f"), 1.5);
+        assert_eq!(default("b"), 1.0);
+        assert_eq!(default("u"), 7.0);
+        assert_eq!(default("i"), -3.0);
     }
 
     #[test]
