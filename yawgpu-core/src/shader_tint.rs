@@ -799,7 +799,10 @@ fn reflected_override(override_: yawgpu_tint::Override) -> ReflectedOverride {
 
     ReflectedOverride {
         name: (!override_.name.is_empty()).then_some(override_.name),
-        id: Some(override_.id),
+        // Only surface the id when `@id` is explicit, matching the default
+        // frontend — yawgpu keys constants by numeric id only for `@id`
+        // overrides, and Tint assigns an implicit id to every override.
+        id: override_.has_explicit_id.then_some(override_.id),
         ty,
         has_default: override_.has_default,
         default_value,
