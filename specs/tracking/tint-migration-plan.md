@@ -422,7 +422,13 @@ all reflection + codegen from Tint, naga still default & untouched.
   Metal = true parity (the single failure is pre-existing under naga); Vulkan = parity
   except the deliberately-deferred external textures. The parallel-then-switch
   "parallel" half is fully validated on hardware.
-- **Flip default → Tint** (after Phase 3 confirms real-GPU parity).
+- **Flip default → Tint — DONE** (`7fda995`): `yawgpu-core` + `yawgpu` now
+  `default = ["tint"]`; the default build/test/e2e use Tint. naga is the
+  `--no-default-features` opt-out (kept until Phase 4). Verified: default workspace
+  green, default e2e_metal/vulkan_compute green on HW, naga opt-out 349/0. **Tint has
+  LANDED.** Consequence: the default build now needs the vendored Dawn submodule (P1c
+  setup); without it yawgpu-tint is a stub. Doc rewrite (README "naga is the only
+  GPU-stack dep", CLAUDE.md naga references, build-setup) is folded into Phase 4.
 - **P2c.3** — combined same-module `generate_render_msl` (minor; no test needs it).
 - **P2c.3** — `generate_render_msl` combined same-module (minor; no test needs it yet).
 - **Phase 3** — real-GPU CTS (Metal/MoltenVK/native-Vulkan/ANGLE); the real render
