@@ -18,7 +18,8 @@ use std::sync::{Arc, Mutex};
 
 use yawgpu::native;
 use yawgpu::{
-    YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_METAL, YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
+    YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_METAL,
+    YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
 };
 use yawgpu_test::{real_backend_skip_reason, RealBackend};
 
@@ -85,9 +86,18 @@ fn f115_texture_load_depth_aspect() {
         assert!(!sampler.is_null());
 
         for (label, format) in [
-            ("Depth32Float       (depth-only)", native::WGPUTextureFormat_Depth32Float),
-            ("Depth32FloatStencil8 (combined)", native::WGPUTextureFormat_Depth32FloatStencil8),
-            ("Depth24PlusStencil8  (combined)", native::WGPUTextureFormat_Depth24PlusStencil8),
+            (
+                "Depth32Float       (depth-only)",
+                native::WGPUTextureFormat_Depth32Float,
+            ),
+            (
+                "Depth32FloatStencil8 (combined)",
+                native::WGPUTextureFormat_Depth32FloatStencil8,
+            ),
+            (
+                "Depth24PlusStencil8  (combined)",
+                native::WGPUTextureFormat_Depth24PlusStencil8,
+            ),
         ] {
             errors.lock().expect("lock").clear();
             eprintln!("--- F-115 format: {label} ---");
@@ -119,7 +129,12 @@ unsafe fn run_one(
     format: native::WGPUTextureFormat,
     errors: &Arc<Mutex<Vec<yawgpu_core::DeviceError>>>,
 ) {
-    let snap = |tag: &str| eprintln!("    after {tag}: errors={}", errors.lock().expect("lock").len());
+    let snap = |tag: &str| {
+        eprintln!(
+            "    after {tag}: errors={}",
+            errors.lock().expect("lock").len()
+        )
+    };
 
     let tex_desc = native::WGPUTextureDescriptor {
         nextInChain: std::ptr::null_mut(),
@@ -146,7 +161,8 @@ unsafe fn run_one(
     // formats. This is the step the earlier minimal repro skipped.
     let has_stencil = matches!(
         format,
-        native::WGPUTextureFormat_Depth32FloatStencil8 | native::WGPUTextureFormat_Depth24PlusStencil8
+        native::WGPUTextureFormat_Depth32FloatStencil8
+            | native::WGPUTextureFormat_Depth24PlusStencil8
     );
     let att_view_desc = native::WGPUTextureViewDescriptor {
         nextInChain: std::ptr::null_mut(),

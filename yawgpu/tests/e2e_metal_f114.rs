@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex};
 
 use yawgpu::native;
 use yawgpu::{
-    YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_METAL, YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
+    YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_METAL,
+    YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
 };
 use yawgpu_test::{real_backend_skip_reason, RealBackend};
 
