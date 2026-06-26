@@ -403,18 +403,25 @@ all reflection + codegen from Tint, naga still default & untouched.
 
   **Only 2 remaining e2e failures, both bounded:**
   1. `e2e_metal_depth::metal_readonly_depth_stencil_isolation` (F-055 isolation) —
-     NOT frag_depth (the 19 frag_depth/stencil depth tests pass under Tint). Symptom:
-     the WRITE pass produces **all-zero depth+stencil** (want 0.1/0.2/0.3 + stencil
-     1/2/3, got 0), and a `WGPUTextureAspect_All` copy of the depth-stencil texture
-     trips the (frontend-independent) core validation "copy texture to buffer
-     depth/stencil format does not support this copy aspect/usage" → error command
-     buffer → submit rejected. Since the copy validation is identical under naga (which
-     passes), the real divergence is upstream: the depth/stencil WRITE isn't landing
-     under Tint. Needs per-stage instrumentation (capture the device error during the
-     WRITE pipeline create/submit, not the readback). Isolated multi-stage edge case —
-     a focused follow-up, not a blocker for the parity result.
-  2. `e2e_vulkan_external_texture` — external textures, **deferred** by the governing
-     decision (rework via Tint's native support, not naga's honest-rejection).
+     **PRE-EXISTING, NOT a Tint regression: it fails IDENTICALLY under naga default**
+     (verified). The test's Submit 2 does a `CopyTextureToBuffer` with `DepthOnly`
+     aspect on a `Depth24PlusStencil8` texture — `depth24plus` has no defined layout
+     and is non-copyable to a buffer, so yawgpu-core correctly rejects it ("copy
+     texture to buffer depth/stencil format does not support this copy aspect/usage")
+     → error command buffer → all-zero readback. A stale/broken test unrelated to the
+     migration; fix is in the test (sample the depth aspect like the READ stage does,
+     don't direct-copy depth24plus) — a separate cleanup. **Conclusion: Metal under
+     Tint has ZERO regressions vs naga — true full parity (both 79/80, same one
+     pre-existing-broken test).**
+  2. `e2e_vulkan_external_texture` — passes under naga, fails under Tint: the ONE
+     genuine Tint difference, and it is **deferred by the governing decision**
+     (external textures get reworked on Tint's native support rather than naga's
+     honest-rejection). Expected until that rework.
+
+  **Net: Tint has ZERO *unexpected* real-GPU regressions on either Tier-1 backend.**
+  Metal = true parity (the single failure is pre-existing under naga); Vulkan = parity
+  except the deliberately-deferred external textures. The parallel-then-switch
+  "parallel" half is fully validated on hardware.
 - **Flip default → Tint** (after Phase 3 confirms real-GPU parity).
 - **P2c.3** — combined same-module `generate_render_msl` (minor; no test needs it).
 - **P2c.3** — `generate_render_msl` combined same-module (minor; no test needs it yet).
