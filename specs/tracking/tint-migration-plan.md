@@ -256,10 +256,33 @@ of the workspace is unaffected.
 3. **diagnostic/warning parity (2 tests)** — Tint emits different
    warnings/diagnostics than naga.
 
-**NEXT: P2c.2** (render-MSL — the one architectural decision left) + resolve the 5
-semantic divergences (texture filterability ×3, diagnostics ×2) → **P2d** (flip the
-feature default + full parity). Then Phase 3 (real-GPU CTS) / Phase 4 (remove naga).
-Watch codex for shortcuts (it delegated reflection to naga once — caught + reverted).
+- **P2-div DONE** (`f410f04`) — resolved the 5 semantic divergences by aligning to
+  Tint: shim exposes non-error diagnostics → `shader_tint` surfaces Tint warnings;
+  shim computes per-texture sample usage (Gather>Sample>Load) from Tint's sem call
+  graph → F-080 textureGather validation works; "not wgsl" parse-error assertion
+  cfg-split per frontend.
+- **P2c.2 DONE** (`114604b`) — render-MSL codegen (Tint per-stage:
+  generate_render_{vertex,fragment}_msl via per-stage `generate_msl`). Vertex
+  pulling / frag-depth clamp / sample mask are NOT replayed (Tint uses `stage_in`;
+  Metal HAL adapts in Phase 3 — marked TODO). `generate_render_msl` combined
+  same-module stays a documented skeleton (P2c.3; no `--features tint` test needs it).
+
+**🏁 MILESTONE (2026-06-26): `cargo test -p yawgpu-core --features tint --lib` is
+FULLY GREEN (356/0).** The Tint frontend produces all reflection + codegen the
+yawgpu-core lib suite exercises, entirely from Tint (`shader_tint.rs` has zero naga
+refs). Default (naga) path unchanged throughout.
+
+**NEXT:**
+- **P2d** — forward a `tint` feature from the `yawgpu` crate (not present yet) so the
+  integration (`yawgpu/tests/*.rs`) + e2e suites run under Tint; reach parity there;
+  then flip the default to Tint.
+- **P2c.3** — `generate_render_msl` combined same-module (minor; no test needs it yet).
+- **Phase 3** — real-GPU CTS (Metal/MoltenVK/native-Vulkan/ANGLE); the real render
+  correctness + Metal HAL adaptation to Tint's per-stage / `stage_in` model.
+- **Phase 4** — remove naga.
+
+(Process note: codex delegated reflection to naga once — caught in review + reverted;
+every shader_tint slice now verifies `grep naga` is empty.)
 
 ### Phase 3 — CTS re-verification on real GPU (the dominant cost)
 
