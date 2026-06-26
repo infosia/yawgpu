@@ -124,6 +124,23 @@ Tint-from-source ≈ 1m20s cold (cached after). Remaining 1b/1c below.
 - Rust FFI wrapper (hand-written or bindgen) presenting safe `Result`-returning
   fns, replacing the 1a smoke surface.
 
+**Phase 1b — DONE (2026-06-26).** Full C ABI + safe Rust `Program` (RAII) wrapper
+landed: `program_create`/`destroy`, entry-point / resource-binding / override
+reflection, and `generate_{msl,spirv,glsl}` with grouped binding remap (MSL flat
+`GenerateBindings(_,_,true,true)`, SPIR-V grouped `(false,false)`, GLSL ES 3.1 +
+`texture_builtins_from_uniform`), `SubstituteOverridesConfig` override values, and
+robustness control. Fresh IR lowered per generate call. Shim wraps every path in
+try/catch → C `false` + heap `*err` (no abort across FFI). 8 unit tests green
+(MSL/SPIR-V/GLSL compute + render stages, reflection, workgroup, overrides+subst,
+binding remap, f16, error path); clippy `-D warnings` + fmt clean; stub mode
+preserved. **Known gaps to resolve in Phase 2:** (1) `Override.default_value` is
+not exposed by this Tint Inspector revision (returned as `0.0`) — yawgpu's
+pipeline-constant resolution needs override defaults, so Phase 2 must recover them
+(AST/const-eval, or run substitute with no values). (2) Tint *internal compiler
+errors* may `abort()` rather than throw; the shim catches `std::exception` but an
+ICE could still take down the process — install a non-aborting Tint ICE reporter
+before relying on the "no abort across FFI" guarantee under fuzz/adversarial WGSL.
+
 **Phase 1c — TODO (vendoring).** Vendor Dawn at a **pinned rev** (git submodule;
 `depot_tools` present at `~/Documents/workspace/bin/depot_tools` for the
 `gclient`/`DEPS` third_party sync) so the Tint build no longer depends on an
