@@ -165,18 +165,40 @@ of the workspace is unaffected.
 
 ### Phase 2 — Reimplement the shader frontend on Tint (parity layer)
 
-- New `yawgpu-core/src/shader_tint.rs` implementing the **same public API** as
-  `shader_naga.rs` (same fn names/signatures, same wrapper types) over the Phase-1
-  FFI. `ReflectedModule`'s naga fields → opaque Tint handle(s).
-- Wire each mapping-table row. Critical sub-tasks: PipelineConstants →
-  `SubstituteOverridesConfig`; flat Metal indices → `Options.bindings`;
-  robustness/bounds-check parity (Tint robustness default ON); entry-point IO /
-  fragment builtins (`frag_depth`/`sample_mask`) / workgroup / overrides via
-  Inspector; runtime-sized storage array buffer-size reflection
-  (`needs_storage_buffer_sizes` + `workgroup_allocations`).
-- Port the inline `#[cfg(test)]` unit tests to assert against Tint output (CLAUDE.md
-  principle 1). Swap `shader_naga` → `shader_tint` at the three call sites.
-- **Gate:** Noop workspace test green; clippy `-D warnings`; missing_docs clean.
+**Decisions (user, 2026-06-26):**
+- **Transition = parallel-then-switch.** Build `shader_tint.rs` *alongside*
+  `shader_naga.rs`, selected by a `tint` cargo feature. naga stays the default
+  through Phase 3 so the same CTS case can be diffed naga-vs-Tint to triage
+  divergences; flip the default to Tint once parity holds, then delete naga
+  (Phase 4). Cost accepted: yawgpu-core depends on both naga and Tint during the
+  transition.
+- **Override default values = recover from the AST in the shim.** Extend
+  `tint_shim` to read override initializer values from the Program AST/sem
+  (the Inspector only exposes `is_initialized`), so yawgpu's pipeline-constant
+  resolution (`compute_workgroup_size`, etc.) matches naga.
+
+**Slicing:**
+- **P2a — plumbing (pure-Rust refactor, no behavior change).** Add the
+  `yawgpu-tint` dep + a `tint` feature to yawgpu-core. Extract the
+  backend-independent reflection/codegen *data* types (`Reflected*`, `Generated*`,
+  `Msl*` — currently defined in `shader_naga.rs`) into a neutral module both
+  frontends produce. Introduce a feature-selected `shader_frontend` facade
+  (default → `shader_naga`, unchanged). Gate: workspace test green (naga path);
+  `--features tint` compiles with `shader_tint` stubbed.
+- **P2a.0 — shim gap fixes (yawgpu-tint).** Override-default-from-AST recovery +
+  a non-aborting Tint ICE reporter (so internal compiler errors route to the C
+  error path, not `abort()`). Unblocks P2b reflection.
+- **P2b — shader_tint reflection.** Entry points / workgroup / resource bindings /
+  overrides (with default values) / fragment builtins → the shared types. Unit
+  tests.
+- **P2c — shader_tint codegen.** `generate_spirv` / `generate_msl` (+ render
+  vertex/fragment variants) / `generate_glsl`, mapping PipelineConstants → override
+  values, flat Metal indices → binding remap, robustness parity, runtime-sized
+  storage buffer-size reflection. Unit tests asserting against Tint output.
+- **P2d — switch + parity.** Port the inline `#[cfg(test)]` tests; make the three
+  call sites use the facade; verify `--features tint` Noop workspace test green.
+- **Gate (each slice):** Noop workspace test green; clippy `-D warnings`;
+  missing_docs clean; both default (naga) and `--features tint` build.
 
 ### Phase 3 — CTS re-verification on real GPU (the dominant cost)
 
