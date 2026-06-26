@@ -10,6 +10,7 @@
 //! as a pinned submodule and make the Tint build unconditional.
 
 use std::env;
+use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=YAWGPU_DAWN_DIR");
@@ -19,10 +20,11 @@ fn main() {
     // Declared so the `have_tint` cfg below does not trip the unexpected-cfg lint.
     println!("cargo:rustc-check-cfg=cfg(have_tint)");
 
-    let Ok(dawn_dir) = env::var("YAWGPU_DAWN_DIR") else {
+    let Some(dawn_dir) = resolve_dawn_dir() else {
         println!(
-            "cargo:warning=YAWGPU_DAWN_DIR not set; yawgpu-tint built as a stub \
-             (Tint FFI unavailable). Set it to a Dawn checkout to enable Tint."
+            "cargo:warning=No Dawn checkout found; yawgpu-tint built as a stub \
+             (Tint FFI unavailable). Initialize the third_party/dawn submodule \
+             (and run its tools/fetch_dawn_dependencies.py), or set YAWGPU_DAWN_DIR."
         );
         return;
     };
@@ -42,4 +44,31 @@ fn main() {
     // Locate libtint_shim at runtime (it is built next to the crate's artifacts).
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", build_dir.display());
     println!("cargo:rustc-cfg=have_tint");
+}
+
+/// Locates a usable Dawn source tree: the explicit `YAWGPU_DAWN_DIR` override
+/// first, otherwise the vendored `third_party/dawn` submodule — but only when
+/// its dependencies have actually been fetched (abseil present), so an
+/// initialized-but-unfetched submodule degrades to the stub instead of a hard
+/// CMake failure.
+fn resolve_dawn_dir() -> Option<PathBuf> {
+    if let Ok(dir) = env::var("YAWGPU_DAWN_DIR") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+
+    let manifest = env::var("CARGO_MANIFEST_DIR").ok()?;
+    let vendored = Path::new(&manifest).parent()?.join("third_party").join("dawn");
+    let has_dawn = vendored.join("CMakeLists.txt").is_file();
+    let deps_fetched = vendored
+        .join("third_party")
+        .join("abseil-cpp")
+        .join("CMakeLists.txt")
+        .is_file();
+    if has_dawn && deps_fetched {
+        Some(vendored)
+    } else {
+        None
+    }
 }

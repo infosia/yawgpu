@@ -141,11 +141,23 @@ errors* may `abort()` rather than throw; the shim catches `std::exception` but a
 ICE could still take down the process — install a non-aborting Tint ICE reporter
 before relying on the "no abort across FFI" guarantee under fuzz/adversarial WGSL.
 
-**Phase 1c — TODO (vendoring).** Vendor Dawn at a **pinned rev** (git submodule;
-`depot_tools` present at `~/Documents/workspace/bin/depot_tools` for the
-`gclient`/`DEPS` third_party sync) so the Tint build no longer depends on an
-external `YAWGPU_DAWN_DIR` checkout. The submodule add + `gclient sync` are
-network ops the **user** runs via the `!` prompt. Record the rev.
+**Phase 1c — DONE (2026-06-26).** Dawn vendored as a pinned submodule at
+`third_party/dawn`, rev `c8f5ca3df8b3b2f0ced5afa3c765e15bd5b065f7` (branch
+chromium/7914). `build.rs` now resolves the Dawn source via `resolve_dawn_dir()`:
+`YAWGPU_DAWN_DIR` override first, else the vendored submodule — gated on a
+deps-fetched marker (`third_party/abseil-cpp/CMakeLists.txt`) so an
+initialized-but-unfetched submodule degrades to the stub instead of a hard CMake
+failure. Verified: `cargo test/clippy -p yawgpu-tint` with **no env var** builds
+Tint from the submodule and passes (8 tests, clippy `-D warnings` clean).
+
+**One-time contributor setup** (the Dawn submodule's `third_party` deps — abseil,
+SPIRV-Tools, etc. — are NOT yawgpu-tracked; they are fetched per-clone):
+```
+git submodule update --init third_party/dawn
+cd third_party/dawn && python3 tools/fetch_dawn_dependencies.py
+```
+Without this, `yawgpu-tint` builds as a stub (Tint FFI unavailable) and the rest
+of the workspace is unaffected.
 - Rust FFI wrapper (hand-written or bindgen) presenting safe `Result`-returning fns.
 - **Gate:** builds on macOS (Metal + Vulkan) and cross-builds iOS arm64 + Android
   arm64-v8a (already proven in spike). Smoke test: trivial WGSL → MSL + SPIR-V +
