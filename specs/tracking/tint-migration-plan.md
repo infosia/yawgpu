@@ -370,10 +370,21 @@ all reflection + codegen from Tint, naga still default & untouched.
   root cause: the Vulkan **clip-space / Y-flip / winding convention** differs between
   Tint's and naga's SPIR-V (naga applies a Vulkan position adjustment); under Tint
   the emitted winding is opposite, so the test's front_face/cull setup culls the
-  triangle. **Next:** dump Tint vs naga SPIR-V for the cull triangle, compare the
-  position/Y handling + how yawgpu sets `frontFace`/viewport, reconcile (likely a
-  HAL front-face or a Tint writer option), re-verify on MoltenVK + ideally native
-  Vulkan. Then optional GLES, then flip the default, then Phase 4 (remove naga).
+  triangle. **ROOT CAUSE CONFIRMED:** naga's SPIR-V default `WriterFlags` includes
+  `ADJUST_COORDINATE_SPACE` (`../wgpu/naga/src/back/spv/mod.rs:1123`) → naga flips Y
+  **in the shader** for Vulkan; yawgpu's Vulkan HAL viewport uses **positive height**
+  (`yawgpu-hal/src/vulkan/encode.rs:1050-1053`, no flip), relying on naga's shader
+  flip. Tint does NOT flip in-shader (Dawn uses a negative-height viewport) and the
+  Tint SPIR-V writer has no clip-space option. So under Tint nothing flips Y → image
+  inverted + winding reversed → front_face/cull tests fail. **Fix (aligned to Tint,
+  a deliberate slice — touches the naga DEFAULT path + HAL, needs dual-frontend
+  real-GPU re-verify):** make the Vulkan HAL flip Y via a **negative-height viewport**
+  (`y += height; height = -height`, the wgpu/Dawn convention) AND drop
+  `ADJUST_COORDINATE_SPACE` from naga's `generate_spirv` flags so naga also stops
+  flipping in-shader — both frontends then emit un-flipped SPIR-V and the HAL flips
+  once. Re-verify naga Vulkan e2e (must stay green) AND tint Vulkan e2e on MoltenVK,
+  ideally native Vulkan too. Also triage `two_color_attachments` (count 3≠1) — may be
+  the same winding issue or separate. Then optional GLES, flip the default, Phase 4.
   Combined `generate_render_msl` (P2c.3) still skeleton.
 - **Flip default → Tint** (after Phase 3 confirms real-GPU parity).
 - **P2c.3** — combined same-module `generate_render_msl` (minor; no test needs it).
