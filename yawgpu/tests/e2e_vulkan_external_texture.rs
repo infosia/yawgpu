@@ -1,8 +1,7 @@
 //! Real-Vulkan regression for F-060 external textures.
 //!
 //! yawgpu matches wgpu's posture: external textures are implemented on Metal
-//! only. The Vulkan backend has no SPIR-V lowering for `texture_external`
-//! (neither does naga's SPIR-V backend nor wgpu-hal/vulkan), so a render
+//! only. The Vulkan backend has no lowering for `texture_external`, so a render
 //! pipeline whose shader samples an external texture cannot be compiled.
 //!
 //! The contract verified here is the honest one the user requested: the
@@ -28,8 +27,7 @@ use yawgpu_test::{real_backend_skip_reason, RealBackend};
 
 // Verbatim upstream WGSL from the CTS external_texture test
 // (api,validation,render_pipeline,misc:external_texture): the fragment entry
-// samples a `texture_external`, so naga emits an `ImageClass::External` image
-// op that the SPIR-V backend cannot lower.
+// samples a `texture_external`, which the Vulkan backend cannot lower.
 const EXTERNAL_TEXTURE_SHADER: &str = "@vertex\n\
 fn vertexMain() -> @builtin(position) vec4f {\n\
   return vec4f(1);\n\
@@ -98,8 +96,8 @@ fn vulkan_external_texture_pipeline_reports_internal_error_without_panic() {
             fragment: &fragment,
         };
 
-        // Reaching this line at all proves there was no panic in naga's SPIR-V
-        // backend (which `unimplemented!()`s on `ImageClass::External`).
+        // Reaching this line at all proves yawgpu-core handled the unsupported
+        // backend path without panicking.
         let pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(device, &descriptor);
 
         let captured = errors.lock().expect("error lock");

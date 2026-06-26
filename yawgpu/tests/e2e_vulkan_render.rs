@@ -67,7 +67,7 @@ fn fs() -> @location(0) vec4<f32> {
 
 /// CTS finding F-129(1): a fragment pipeline that performs a *non-uniform*
 /// `discard` followed by a derivative (`fwidth`) must not produce a device
-/// error on native Vulkan. Before the fix, naga lowered `discard` to SPIR-V
+/// error on native Vulkan. Before the fix, `discard` lowered to SPIR-V
 /// `OpKill`, which terminates the invocation; computing a derivative afterwards
 /// is ill-defined and the NVIDIA driver turned the pipeline into an error
 /// object (`queue submit cannot use an error command buffer`). With `discard`

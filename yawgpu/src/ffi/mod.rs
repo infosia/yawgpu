@@ -684,7 +684,7 @@ impl WGPUDeviceImpl {
 // of content-equal but handle-distinct sub-objects is intentionally out of scope.
 // Entries are stored as `Weak` (not `Arc`) so that releasing the last public
 // (C) reference to a cached object drops it and runs its `Drop`, reclaiming the
-// backing naga module / HAL pipeline. A live entry still dedups (the `Weak`
+// backing shader module / HAL pipeline. A live entry still dedups (the `Weak`
 // upgrades while the object is alive); dead entries are pruned on the next miss
 // so the `HashMap` keys (e.g. the full WGSL `String` for shader modules) do not
 // accumulate. See the ABA note on the pipeline cache keys in
@@ -2167,17 +2167,7 @@ mod tests {
 
     use super::*;
 
-    // Shader-frontend-specific diagnostic wording. The default (naga) and the
-    // Tint frontend (`--features tint`) phrase the same parse error / diagnostic
-    // differently; per the migration's governing decision we assert each
-    // frontend's actual wording rather than force one onto the other.
-    #[cfg(not(feature = "tint"))]
-    const NOT_WGSL_PARSE_ERROR: &str = "expected global item";
-    #[cfg(feature = "tint")]
     const NOT_WGSL_PARSE_ERROR: &str = "unexpected token";
-    #[cfg(not(feature = "tint"))]
-    const UNKNOWN_DIAGNOSTIC_WARNING: &str = "unknown `diagnostic";
-    #[cfg(feature = "tint")]
     const UNKNOWN_DIAGNOSTIC_WARNING: &str = "unrecognized diagnostic rule";
     use crate::YAWGPU_INSTANCE_BACKEND_NOOP;
 

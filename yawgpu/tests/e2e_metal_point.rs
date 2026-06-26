@@ -1,6 +1,5 @@
 //! Real-GPU Metal regression for F-037: a `point-list` render pipeline must
-//! rasterize its points. yawgpu's Metal MSL omitted `[[point_size]]` (naga's
-//! `allow_and_force_point_size` was never set for point topologies), so the point
+//! rasterize its points. yawgpu's Metal MSL omitted `[[point_size]]`, so the point
 //! size was undefined and the point was *intermittently* not drawn (~30%), which
 //! surfaced as flaky `rendering/depth` failures (those tests draw points). This
 //! renders a single point into a colour + depth attachment and reads it back; the

@@ -4,7 +4,7 @@
 //! - the Metal adapter advertises `WGPUFeatureName_ShaderF16`;
 //! - a device that requested `shader-f16` runs an `enable f16;` compute shader
 //!   that reads f16 from a storage buffer, does f16 arithmetic, and writes f16
-//!   back — readback-verified (exercises naga MSL `half` + f16 buffer I/O);
+//!   back — readback-verified (exercises MSL `half` + f16 buffer I/O);
 //! - a device that did NOT request the feature rejects an f16-using shader at
 //!   module creation (the S12 gate fires on a real backend too).
 #![cfg(feature = "metal")]
@@ -171,7 +171,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 #[cfg(feature = "metal")]
 fn metal_f16_bitcast_roundtrip_with_arith() {
     // F-121 regression: bitcast involving f16 (width/size-changing). Before the
-    // naga fix, `bitcast<vec2<f16>>(u32)` lowered to `as_type<float>` (scalar
+    // fix, `bitcast<vec2<f16>>(u32)` lowered to `as_type<float>` (scalar
     // f32), so the subsequent f16 arithmetic failed to compile → error pipeline
     // → "queue submit cannot use an error command buffer". This shader does
     // u32 → vec2<f16> → +f16 → u32, which only compiles/runs when the bitcast
@@ -293,12 +293,12 @@ fn main() {
 #[cfg(feature = "metal")]
 fn metal_const_struct_with_matrix_compiles() {
     // Regression: a module-scope `const` struct that contains a matrix member
-    // made naga's MSL backend emit a `constant`-address-space global whose
+    // made the MSL backend emit a `constant`-address-space global whose
     // aggregate matrix initializer Metal rejects ("cannot have global
     // constructors (llvm.global_ctors) in program_source") → error pipeline →
     // "queue submit cannot use an error command buffer". (Not f16-specific; the
     // f16 member here mirrors the CTS access,structure,index:const case that
-    // surfaced it.) The naga fix inlines such consts instead of emitting the
+    // surfaced it.) The fix inlines such consts instead of emitting the
     // global; this shader must now compile and read back member_0 = 7.
     if real_backend_skip_reason(RealBackend::Metal).is_some() {
         return;

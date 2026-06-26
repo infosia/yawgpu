@@ -1,4 +1,7 @@
-//! Tint shader frontend skeleton for the feature-selected frontend facade.
+//! Tint shader frontend — yawgpu's WGSL→{MSL, SPIR-V, GLSL} compiler and
+//! reflection source, backed by Dawn's Tint via the `yawgpu-tint` shim. This is
+//! the sole shader frontend (the `crate::frontend` alias points here); `generate_msl`
+//! is the combined-render `generate_render_msl` skeleton's only gap (P2c.3).
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
@@ -17,9 +20,9 @@ pub struct ReflectedModule {
     pub(crate) warnings: Vec<CompilationMessage>,
 }
 
-// SAFETY: Phase 2a does not call into the Tint program after parsing; the handle
-// is stored only to preserve the future frontend shape. Later Tint slices must
-// revisit this when reflection and code generation start using the handle.
+// SAFETY: the wrapped `yawgpu_tint::Program` (an opaque Tint handle) is treated as
+// immutable after parsing — reflection and codegen only read from it — so it is safe
+// to send/share across threads.
 unsafe impl Send for ReflectedModule {}
 
 // SAFETY: See the `Send` impl above.
@@ -817,7 +820,7 @@ fn reflected_override(override_: yawgpu_tint::Override) -> ReflectedOverride {
     }
 }
 
-#[cfg(all(test, feature = "tint"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

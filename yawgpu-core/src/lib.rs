@@ -26,7 +26,6 @@ mod render_pass;
 mod render_pipeline;
 mod sampler;
 mod shader;
-#[cfg(feature = "tint")]
 mod shader_tint;
 mod shader_types;
 #[cfg(test)]
@@ -34,12 +33,6 @@ mod test_helpers;
 mod texture;
 mod texture_view;
 
-/// Shader naga module.
-pub(crate) mod shader_naga;
-
-#[cfg(not(feature = "tint"))]
-pub(crate) use crate::shader_naga as frontend;
-#[cfg(feature = "tint")]
 pub(crate) use crate::shader_tint as frontend;
 
 pub use adapter::{Adapter, Feature, FeatureLevel};
@@ -87,9 +80,6 @@ pub use sampler::{
     SamplerDescriptor,
 };
 pub use shader::{CompilationMessage, CompilationSeverity, ShaderModule, ShaderModuleSource};
-#[cfg(not(feature = "tint"))]
-pub use shader_naga::ReflectedModule;
-#[cfg(feature = "tint")]
 pub use shader_tint::ReflectedModule;
 pub use texture::{Texture, TextureDescriptor, TextureDimension, TextureUsage};
 pub use texture_view::{

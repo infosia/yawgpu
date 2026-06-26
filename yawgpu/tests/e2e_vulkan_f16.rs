@@ -176,7 +176,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 #[cfg(feature = "vulkan")]
 fn vulkan_f16_bitcast_roundtrip_with_arith() {
     // F-121 regression on the SPIR-V path: u32 → vec2<f16> → +f16 → u32. Before
-    // the naga fix the bitcast result type was mis-resolved (f32), breaking
+    // the bitcast result type was mis-resolved (f32), breaking
     // SPIR-V OpBitcast result typing + subsequent f16 arithmetic.
     if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
         return;
@@ -330,7 +330,7 @@ fn vulkan_f16_shader_rejected_without_feature() {
 #[cfg(feature = "vulkan")]
 fn vulkan_storage_pointer_parameter_compute() {
     // unrestricted_pointer_parameters: a helper taking a `ptr<storage,...>`
-    // parameter must compile AND run on Vulkan/MoltenVK — naga emits valid
+    // parameter must compile AND run on Vulkan/MoltenVK with valid
     // Logical-addressing SPIR-V for a simple pointer param (a memory-object
     // declaration; no VariablePointers needed). Writes 42 via the pointer.
     if real_backend_skip_reason(RealBackend::Vulkan).is_some() {

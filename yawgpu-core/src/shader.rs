@@ -1,5 +1,3 @@
-#[cfg(not(feature = "tint"))]
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::bind_group_layout::*;
@@ -99,8 +97,6 @@ impl ShaderModule {
         shader_f16: bool,
     ) -> Result<ShaderModuleSourceKind, String> {
         let reflected = frontend::parse_and_validate_wgsl_gated(&source, shader_f16)?;
-        #[cfg(not(feature = "tint"))]
-        validate_module_limits(&reflected.module)?;
         Ok(ShaderModuleSourceKind::Wgsl {
             _source: source,
             reflected: Box::new(reflected),
@@ -133,21 +129,6 @@ impl ShaderModule {
             _ => None,
         }
     }
-}
-
-/// Validates module limits and returns a descriptive error on failure.
-#[cfg(not(feature = "tint"))]
-pub(crate) fn validate_module_limits(module: &naga::Module) -> Result<(), String> {
-    let mut ids = BTreeSet::new();
-    for (_, override_) in module.overrides.iter() {
-        if let Some(id) = override_.id {
-            if !ids.insert(id) {
-                return Err(format!("duplicate shader override id {id}"));
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// Stores stage resource counts data used by validation and backend submission.
@@ -222,9 +203,6 @@ mod tests {
 
         assert!(invalid.is_error());
         assert!(invalid.diagnostic().is_some());
-        #[cfg(not(feature = "tint"))]
-        assert!(scoped.message.contains("expected global item"));
-        #[cfg(feature = "tint")]
         assert!(scoped.message.contains("unexpected token"));
     }
 
@@ -256,38 +234,6 @@ mod tests {
 
         assert!(!module.is_error());
         assert_eq!(module.diagnostic(), None);
-    }
-
-    #[cfg(not(feature = "tint"))]
-    #[test]
-    fn shader_module_validation_rejects_duplicate_override_ids_on_noop() {
-        let mut module = naga::Module::default();
-        let ty = module.types.insert(
-            naga::Type {
-                name: None,
-                inner: naga::TypeInner::Scalar(naga::Scalar {
-                    kind: naga::ScalarKind::Uint,
-                    width: 4,
-                }),
-            },
-            naga::Span::default(),
-        );
-        let override_ = naga::Override {
-            name: None,
-            id: Some(0),
-            ty,
-            init: None,
-        };
-
-        module
-            .overrides
-            .append(override_.clone(), naga::Span::default());
-        module.overrides.append(override_, naga::Span::default());
-
-        assert_eq!(
-            validate_module_limits(&module),
-            Err("duplicate shader override id 0".to_owned())
-        );
     }
 
     #[test]
