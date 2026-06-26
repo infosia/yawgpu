@@ -397,7 +397,20 @@ fn render_size_metadata(shader: &HalShaderSource) -> RenderSizeMetadata {
 }
 
 fn render_shader_uses_metal_vertex_descriptor(shader: &HalShaderSource) -> bool {
-    matches!(shader, HalShaderSource::Msl(_))
+    // A vertex shader that declares Metal `[[stage_in]]` input needs an
+    // `MTLVertexDescriptor` mapping its `[[attribute(N)]]`s to vertex buffers. This
+    // is what the Tint frontend emits. naga's vertex-pulling MSL instead reads
+    // vertex data directly from bound buffers (no `[[stage_in]]`) and must NOT get a
+    // descriptor — so detect the model from the emitted source, not the variant.
+    let vertex_source = match shader {
+        HalShaderSource::Msl(source) | HalShaderSource::MslWithBufferSizes { source, .. } => {
+            Some(source.as_str())
+        }
+        HalShaderSource::MslStages { vertex, .. }
+        | HalShaderSource::MslStagesWithBufferSizes { vertex, .. } => Some(vertex.as_str()),
+        _ => None,
+    };
+    vertex_source.is_some_and(|source| source.contains("[[stage_in]]"))
 }
 
 fn create_render_functions(
@@ -567,10 +580,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn render_shader_uses_vertex_descriptor_for_plain_msl() {
-        let shader = HalShaderSource::Msl(String::new());
-
+    fn render_shader_uses_vertex_descriptor_for_stage_in_msl() {
+        // The Tint frontend emits `[[stage_in]]` vertex input, which needs an
+        // MTLVertexDescriptor regardless of the source variant.
+        let shader = HalShaderSource::MslStagesWithBufferSizes {
+            vertex: "vertex Out v(In in [[stage_in]]) { return {}; }".to_owned(),
+            fragment: None,
+            vertex_buffer_sizes_slot: None,
+            vertex_buffer_size_bindings: Vec::new(),
+            fragment_buffer_sizes_slot: None,
+            fragment_buffer_size_bindings: Vec::new(),
+            fragment_frag_depth_clamp_slot: None,
+            vertex_buffer_metal_indices: Vec::new(),
+        };
         assert!(render_shader_uses_metal_vertex_descriptor(&shader));
+
+        // A plain MSL with no `[[stage_in]]` (e.g. naga non-pulling / no vertex
+        // inputs) must not get a descriptor.
+        assert!(!render_shader_uses_metal_vertex_descriptor(
+            &HalShaderSource::Msl(String::new())
+        ));
     }
 
     #[test]
