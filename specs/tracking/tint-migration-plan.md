@@ -506,3 +506,35 @@ Build/FFI/mobile = de-risked (spike). Now dominated by **Phase 2 reflection wiri
 extension re-home (the user's decision) cuts the spike's "~1.5–3 month" estimate
 materially — the long pole is CTS re-verification of the green surface, not new
 compiler code.
+
+## Post-migration CTS regression audit (2026-06-27)
+
+CTS smoke testing of `feature/tint` against the Dawn oracle (real Metal, via
+webgpu-native-cts) found the "hardware parity" milestone was **premature**: three
+WebGPU behaviors that naga implemented as MSL transforms were left as hardcoded
+stubs in `shader_tint.rs::generate_stage_msl` and silently regressed. All fixed by
+threading the equivalent Tint MSL-writer option through the shim (the **Metal HAL
+needed no change** — it already consumes all three). See memory
+`tint-transform-regressions`.
+
+| Regression | Was | Stub | Tint fix | CTS verify (Metal) |
+|---|---|---|---|---|
+| Workgroup memory reads 0 | F-069 | `workgroup_memory_sizes: Vec::new()` | `Output::workgroup_allocations` → per-index threadgroup sizes (rounded to 16) | atomics 1445/0 (was 86 fail) |
+| Pipeline sample mask dropped | F-051/F-053 | `sample_mask` arg ignored | `Options::fixed_sample_mask` | sample_mask 68/0 (was 32 fail) |
+| frag_depth not clamped to viewport | F-045 | `frag_depth_clamp_slot: None` | `Options::depth_range_offsets={0,4}` at the immediate-block slot (`immediate_binding_point->binding`) | depth_clip_clamp 3/0 |
+
+Also fixed in the same pass (not a regression — a Phase-0 deletion side-effect):
+**`createTexture:new_usages:usage=48`** (`TransientAttachment` 0x20) — TBDR deletion
+dropped the bit from `TextureUsage::ALL`; re-accepted as a plain render attachment
+(no memoryless optimization), validated as transient⊕render-attachment only.
+
+Verified clean afterward on real Metal: operation tree
+(rendering/render_pass/render_pipeline/compute/compute_pipeline/vertex_state)
+1069/0/0, all atomics 1445/0/0, createTexture usage 34/0/0; workspace test + clippy +
+fmt green. CTS build recipe (Tint dylib link): memory `cts-tint-dylib-build`.
+
+**Lesson:** when swapping a shader frontend, grep the new codegen path for
+`None`/`Vec::new()`/`TODO` stubs and map each to a transform the old frontend had;
+verify with the **targeted** CTS case (atomics `*_workgroup`, `sample_mask`,
+`depth_clip_clamp`), never the "basic" case alone. Remaining known stub:
+external-texture MSL remap (deferred — `f060-external-textures`).

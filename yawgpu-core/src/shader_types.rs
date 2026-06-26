@@ -63,7 +63,8 @@ pub(crate) struct GeneratedMsl {
     pub buffer_size_bindings: Vec<MslBufferSizeBinding>,
     /// Reserved fragment immediate slot for the frag-depth clamp range.
     pub frag_depth_clamp_slot: Option<u32>,
-    /// Per-argument threadgroup memory allocation sizes.
+    /// Per-index threadgroup allocation sizes from Tint's workgroup_allocations,
+    /// rounded up to a multiple of 16 for Metal.
     pub workgroup_memory_sizes: Vec<u32>,
 }
 
@@ -75,25 +76,6 @@ pub(crate) struct GeneratedGlsl {
     pub source: String,
     /// Entry point.
     pub entry_point: String,
-}
-
-/// Stores generated shader source for generated render MSL.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GeneratedRenderMsl {
-    /// Source.
-    pub source: String,
-    /// Vertex entry point.
-    pub vertex_entry_point: String,
-    /// Optional fragment entry point.
-    pub fragment_entry_point: Option<String>,
-    /// Reserved vertex-stage MSL buffer slot for `_mslBufferSizes`.
-    pub vertex_buffer_sizes_slot: Option<u32>,
-    /// Vertex-stage bindings whose byte lengths populate `_mslBufferSizes`.
-    pub vertex_buffer_size_bindings: Vec<MslBufferSizeBinding>,
-    /// Reserved fragment-stage MSL buffer slot for `_mslBufferSizes`.
-    pub fragment_buffer_sizes_slot: Option<u32>,
-    /// Fragment-stage bindings whose byte lengths populate `_mslBufferSizes`.
-    pub fragment_buffer_size_bindings: Vec<MslBufferSizeBinding>,
 }
 
 /// Stores binding metadata.

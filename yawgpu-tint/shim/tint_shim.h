@@ -181,6 +181,10 @@ typedef struct {
     bool needs_storage_buffer_sizes;
     uint32_t* buffer_size_bindings;
     size_t n_buffer_size_bindings;
+    uint32_t* workgroup_allocations;    /* per-index threadgroup allocation sizes (compute) */
+    size_t n_workgroup_allocations;
+    bool has_frag_depth_clamp;          /* true if this fragment EP writes frag_depth and clamp was enabled */
+    uint32_t frag_depth_clamp_slot;     /* MSL buffer index of the depth-range immediate block (valid iff has_frag_depth_clamp) */
 } YawgpuTintMslOutput;
 
 bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
@@ -191,6 +195,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
                               uint32_t buffer_sizes_slot,
                               bool disable_robustness,
                               bool emit_vertex_point_size,
+                              uint32_t fixed_sample_mask,
                               YawgpuTintMslOutput* out,
                               char** err);
 
