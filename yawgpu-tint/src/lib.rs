@@ -119,6 +119,10 @@ mod imp {
         needs_storage_buffer_sizes: bool,
         buffer_size_bindings: *mut u32,
         n_buffer_size_bindings: usize,
+        workgroup_allocations: *mut u32,
+        n_workgroup_allocations: usize,
+        has_frag_depth_clamp: bool,
+        frag_depth_clamp_slot: u32,
     }
 
     extern "C" {
@@ -187,6 +191,7 @@ mod imp {
             buffer_sizes_slot: u32,
             disable_robustness: bool,
             emit_vertex_point_size: bool,
+            fixed_sample_mask: u32,
             out: *mut RawMslOutput,
             err: *mut *mut c_char,
         ) -> bool;
@@ -466,6 +471,7 @@ mod imp {
         }
 
         /// Generates MSL for `entry_point`.
+        #[allow(clippy::too_many_arguments)]
         pub fn generate_msl(
             &self,
             entry_point: &str,
@@ -474,6 +480,7 @@ mod imp {
             buffer_sizes_slot: u32,
             robust: bool,
             emit_vertex_point_size: bool,
+            fixed_sample_mask: u32,
         ) -> Result<MslOutput, String> {
             let ep = cstring(entry_point, "entry point")?;
             let raw_bindings_owned = bindings.as_raw();
@@ -485,6 +492,10 @@ mod imp {
                 needs_storage_buffer_sizes: false,
                 buffer_size_bindings: ptr::null_mut(),
                 n_buffer_size_bindings: 0,
+                workgroup_allocations: ptr::null_mut(),
+                n_workgroup_allocations: 0,
+                has_frag_depth_clamp: false,
+                frag_depth_clamp_slot: 0,
             };
             let mut err = ptr::null_mut();
             // SAFETY: all pointers are valid for the duration of the call.
@@ -498,6 +509,7 @@ mod imp {
                     buffer_sizes_slot,
                     !robust,
                     emit_vertex_point_size,
+                    fixed_sample_mask,
                     &mut out,
                     &mut err,
                 )
@@ -514,6 +526,10 @@ mod imp {
                     // SAFETY: successful shim outputs are malloc-owned.
                     unsafe { yawgpu_tint_u32_free(out.buffer_size_bindings) };
                 }
+                if !out.workgroup_allocations.is_null() {
+                    // SAFETY: successful shim outputs are malloc-owned.
+                    unsafe { yawgpu_tint_u32_free(out.workgroup_allocations) };
+                }
                 return Err("tint: MSL generator returned NULL output".to_owned());
             }
             if out.entry_point.is_null() {
@@ -522,6 +538,10 @@ mod imp {
                 if !out.buffer_size_bindings.is_null() {
                     // SAFETY: successful shim outputs are malloc-owned.
                     unsafe { yawgpu_tint_u32_free(out.buffer_size_bindings) };
+                }
+                if !out.workgroup_allocations.is_null() {
+                    // SAFETY: successful shim outputs are malloc-owned.
+                    unsafe { yawgpu_tint_u32_free(out.workgroup_allocations) };
                 }
                 return Err("tint: MSL generator returned NULL entry point".to_owned());
             }
@@ -539,13 +559,33 @@ mod imp {
                 yawgpu_tint_string_free(out.entry_point);
                 s
             };
+            let workgroup_allocations = if out.workgroup_allocations.is_null() {
+                Vec::new()
+            } else {
+                // SAFETY: the shim returns `n_workgroup_allocations` initialized words allocated
+                // by malloc.
+                unsafe {
+                    let allocations = slice::from_raw_parts(
+                        out.workgroup_allocations,
+                        out.n_workgroup_allocations,
+                    )
+                    .to_vec();
+                    yawgpu_tint_u32_free(out.workgroup_allocations);
+                    allocations
+                }
+            };
             let buffer_size_bindings =
                 raw_buffer_size_bindings(out.buffer_size_bindings, out.n_buffer_size_bindings)?;
+            let frag_depth_clamp_slot = out
+                .has_frag_depth_clamp
+                .then_some(out.frag_depth_clamp_slot);
             Ok(MslOutput {
                 source: msl,
                 entry_point,
                 needs_storage_buffer_sizes: out.needs_storage_buffer_sizes,
                 buffer_size_bindings,
+                workgroup_allocations,
+                frag_depth_clamp_slot,
             })
         }
 
@@ -659,6 +699,10 @@ mod imp {
         pub needs_storage_buffer_sizes: bool,
         /// Ordered storage bindings whose byte lengths populate the size table.
         pub buffer_size_bindings: Vec<MslBufferSizeBinding>,
+        /// Per-index threadgroup memory allocation sizes (compute).
+        pub workgroup_allocations: Vec<u32>,
+        /// MSL buffer slot of the frag-depth clamp immediate block, if this fragment entry point writes frag_depth.
+        pub frag_depth_clamp_slot: Option<u32>,
     }
 
     /// A storage binding whose byte length is required by generated MSL.
@@ -1319,7 +1363,15 @@ mod imp {
     pub fn wgsl_to_msl(wgsl: &str, entry_point: &str) -> Result<String, String> {
         let program = Program::parse(wgsl, false)?;
         Ok(program
-            .generate_msl(entry_point, &Bindings::default(), &[], 0, true, false)?
+            .generate_msl(
+                entry_point,
+                &Bindings::default(),
+                &[],
+                0,
+                true,
+                false,
+                0xFFFF_FFFF,
+            )?
             .source)
     }
 }
@@ -1378,6 +1430,7 @@ mod imp {
         }
 
         /// Generates MSL for `entry_point`.
+        #[allow(clippy::too_many_arguments)]
         pub fn generate_msl(
             &self,
             _entry_point: &str,
@@ -1386,6 +1439,7 @@ mod imp {
             _buffer_sizes_slot: u32,
             _robust: bool,
             _emit_vertex_point_size: bool,
+            _fixed_sample_mask: u32,
         ) -> Result<MslOutput, String> {
             Err(UNAVAILABLE.to_owned())
         }
@@ -1422,6 +1476,10 @@ mod imp {
         pub needs_storage_buffer_sizes: bool,
         /// Ordered storage bindings whose byte lengths populate the size table.
         pub buffer_size_bindings: Vec<MslBufferSizeBinding>,
+        /// Per-index threadgroup memory allocation sizes (compute).
+        pub workgroup_allocations: Vec<u32>,
+        /// MSL buffer slot of the frag-depth clamp immediate block, if this fragment entry point writes frag_depth.
+        pub frag_depth_clamp_slot: Option<u32>,
     }
 
     /// A storage binding whose byte length is required by generated MSL.
@@ -1895,7 +1953,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
         let program = Program::parse(compute_wgsl(), false).unwrap();
         let bindings = Bindings::default();
         let msl = program
-            .generate_msl("cs", &bindings, &[], 0, true, false)
+            .generate_msl("cs", &bindings, &[], 0, true, false, 0xFFFF_FFFF)
             .unwrap();
         assert!(msl.source.contains("kernel"), "MSL:\n{}", msl.source);
         let spirv = program.generate_spirv("cs", &bindings, &[], true).unwrap();
@@ -1922,7 +1980,7 @@ fn cs() {
 "#;
         let program = Program::parse(wgsl, false).unwrap();
         let msl = program
-            .generate_msl("cs", &Bindings::default(), &[], 9, true, false)
+            .generate_msl("cs", &Bindings::default(), &[], 9, true, false, 0xFFFF_FFFF)
             .unwrap();
         assert!(
             msl.source
@@ -1941,17 +1999,98 @@ fn cs() {
     }
 
     #[test]
+    fn compute_msl_returns_workgroup_allocations() {
+        let wgsl = r#"
+var<workgroup> wg: atomic<u32>;
+
+@compute @workgroup_size(64)
+fn cs() {
+  atomicAdd(&wg, 1u);
+}
+"#;
+        let program = Program::parse(wgsl, false).unwrap();
+        let msl = program
+            .generate_msl("cs", &Bindings::default(), &[], 0, true, false, 0xFFFF_FFFF)
+            .unwrap();
+        assert!(
+            !msl.workgroup_allocations.is_empty(),
+            "MSL:\n{}",
+            msl.source
+        );
+        assert!(
+            msl.workgroup_allocations[0] >= 4,
+            "allocations: {:?}\nMSL:\n{}",
+            msl.workgroup_allocations,
+            msl.source
+        );
+    }
+
+    #[test]
     fn render_stages_generate_msl_and_spirv() {
         let program = Program::parse(render_wgsl(), false).unwrap();
         let bindings = Bindings::default();
         for ep in ["vs", "fs"] {
             let msl = program
-                .generate_msl(ep, &bindings, &[], 0, true, false)
+                .generate_msl(ep, &bindings, &[], 0, true, false, 0xFFFF_FFFF)
                 .unwrap();
             assert!(!msl.source.is_empty());
             let spirv = program.generate_spirv(ep, &bindings, &[], true).unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));
         }
+    }
+
+    #[test]
+    fn fragment_msl_fixed_sample_mask_affects_output() {
+        let wgsl = r#"
+@fragment
+fn fs() -> @location(0) vec4f {
+  return vec4f(1.0);
+}
+"#;
+        let program = Program::parse(wgsl, false).unwrap();
+        let default_msl = program
+            .generate_msl("fs", &Bindings::default(), &[], 0, true, false, 0xFFFF_FFFF)
+            .unwrap()
+            .source;
+        let masked_msl = program
+            .generate_msl("fs", &Bindings::default(), &[], 0, true, false, 0x1)
+            .unwrap()
+            .source;
+
+        assert_ne!(masked_msl, default_msl, "MSL:\n{masked_msl}");
+    }
+
+    #[test]
+    fn fragment_msl_frag_depth_reports_clamp_slot() {
+        let frag_depth_wgsl = r#"
+@fragment
+fn fs() -> @builtin(frag_depth) f32 {
+  return 2.0;
+}
+"#;
+        let program = Program::parse(frag_depth_wgsl, false).unwrap();
+        let frag_depth_msl = program
+            .generate_msl("fs", &Bindings::default(), &[], 0, true, false, 0xFFFF_FFFF)
+            .unwrap();
+        assert!(frag_depth_msl.frag_depth_clamp_slot.is_some());
+        assert!(
+            frag_depth_msl.source.contains("metal::clamp")
+                || frag_depth_msl.source.contains("clamp("),
+            "MSL:\n{}",
+            frag_depth_msl.source
+        );
+
+        let color_wgsl = r#"
+@fragment
+fn fs() -> @location(0) vec4f {
+  return vec4f(0.0);
+}
+"#;
+        let program = Program::parse(color_wgsl, false).unwrap();
+        let color_msl = program
+            .generate_msl("fs", &Bindings::default(), &[], 0, true, false, 0xFFFF_FFFF)
+            .unwrap();
+        assert_eq!(color_msl.frag_depth_clamp_slot, None);
     }
 
     #[test]
@@ -2109,6 +2248,7 @@ fn cs() {}
                 0,
                 true,
                 false,
+                0xFFFF_FFFF,
             )
             .unwrap()
             .source;
@@ -2123,6 +2263,7 @@ fn cs() {}
                 0,
                 true,
                 false,
+                0xFFFF_FFFF,
             )
             .unwrap()
             .source;
@@ -2173,11 +2314,11 @@ fn cs() { _ = u.value; }
             ..Bindings::default()
         };
         let default_msl = program
-            .generate_msl("cs", &default_bindings, &[], 0, true, false)
+            .generate_msl("cs", &default_bindings, &[], 0, true, false, 0xFFFF_FFFF)
             .unwrap()
             .source;
         let remapped_msl = program
-            .generate_msl("cs", &remapped, &[], 0, true, false)
+            .generate_msl("cs", &remapped, &[], 0, true, false, 0xFFFF_FFFF)
             .unwrap()
             .source;
         assert!(remapped_msl.contains("[[buffer(7)]]"), "{remapped_msl}");
@@ -2203,7 +2344,7 @@ fn cs() {
 "#;
         let program = Program::parse(wgsl, true).unwrap();
         let msl = program
-            .generate_msl("cs", &Bindings::default(), &[], 0, true, false)
+            .generate_msl("cs", &Bindings::default(), &[], 0, true, false, 0xFFFF_FFFF)
             .unwrap();
         assert!(msl.source.contains("kernel"));
     }

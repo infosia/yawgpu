@@ -662,6 +662,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
                               uint32_t buffer_sizes_slot,
                               bool disable_robustness,
                               bool emit_vertex_point_size,
+                              uint32_t fixed_sample_mask,
                               YawgpuTintMslOutput* out,
                               char** err) {
     if (err != nullptr) {
@@ -673,6 +674,10 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         out->needs_storage_buffer_sizes = false;
         out->buffer_size_bindings = nullptr;
         out->n_buffer_size_bindings = 0;
+        out->workgroup_allocations = nullptr;
+        out->n_workgroup_allocations = 0;
+        out->has_frag_depth_clamp = false;
+        out->frag_depth_clamp_slot = 0;
     }
     try {
         if (program == nullptr || out == nullptr) {
@@ -694,11 +699,22 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         // Tint emits it (= 1.0) when asked. yawgpu threads this from the render
         // pipeline's force_point_size.
         options.emit_vertex_point_size = emit_vertex_point_size;
+        options.fixed_sample_mask = fixed_sample_mask;
         options.bindings = all_remaps_empty(bindings)
                                ? tint::GenerateBindings(ir.Get(), entry_point, true, true)
                                : make_bindings(bindings);
         options.immediate_binding_point =
             choose_immediate_binding_point(options.bindings, buffer_sizes_slot);
+        const tint::inspector::EntryPoint* ep_info = find_entry_point(program, entry_point.c_str());
+        const bool has_frag_depth_clamp =
+            ep_info != nullptr && ep_info->frag_depth_used &&
+            options.immediate_binding_point.has_value();
+        uint32_t frag_depth_clamp_slot = 0;
+        if (has_frag_depth_clamp) {
+            options.depth_range_offsets =
+                tint::msl::writer::Options::RangeOffsets{/*min=*/0u, /*max=*/4u};
+            frag_depth_clamp_slot = options.immediate_binding_point->binding;
+        }
         std::vector<tint::BindingPoint> ordered_size_bindings;
         options.array_length_from_constants = generate_array_length_from_constants(
             ir.Get(), entry_point, buffer_sizes_slot, ordered_size_bindings);
@@ -727,6 +743,8 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
             return false;
         }
         out->needs_storage_buffer_sizes = result->needs_storage_buffer_sizes;
+        out->has_frag_depth_clamp = has_frag_depth_clamp;
+        out->frag_depth_clamp_slot = frag_depth_clamp_slot;
         out->buffer_size_bindings = dup_binding_pairs(ordered_size_bindings);
         out->n_buffer_size_bindings = ordered_size_bindings.size();
         if (!ordered_size_bindings.empty() && out->buffer_size_bindings == nullptr) {
@@ -737,6 +755,29 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
             out->n_buffer_size_bindings = 0;
             set_error_string(err, "failed to allocate MSL buffer size bindings");
             return false;
+        }
+        out->n_workgroup_allocations = result->workgroup_allocations.size();
+        if (result->workgroup_allocations.empty()) {
+            out->workgroup_allocations = nullptr;
+            out->n_workgroup_allocations = 0;
+        } else {
+            out->workgroup_allocations = static_cast<uint32_t*>(
+                std::malloc(result->workgroup_allocations.size() * sizeof(uint32_t)));
+            if (out->workgroup_allocations == nullptr) {
+                std::free(out->msl);
+                std::free(out->entry_point);
+                std::free(out->buffer_size_bindings);
+                out->msl = nullptr;
+                out->entry_point = nullptr;
+                out->buffer_size_bindings = nullptr;
+                out->n_buffer_size_bindings = 0;
+                out->n_workgroup_allocations = 0;
+                set_error_string(err, "failed to allocate MSL workgroup allocations");
+                return false;
+            }
+            std::memcpy(out->workgroup_allocations,
+                        result->workgroup_allocations.data(),
+                        result->workgroup_allocations.size() * sizeof(uint32_t));
         }
         return true;
     } catch (const std::exception& e) {

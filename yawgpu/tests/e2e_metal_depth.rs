@@ -3358,10 +3358,11 @@ fn empty_string_view() -> native::WGPUStringView {
 // into a 3x3 Depth24PlusStencil8, then both aspects are sampled) so a failure
 // localises to write-vs-read and depth-vs-stencil. Mirrors the CTS init exactly
 // (point-list, per-instance stencil reference, frag_depth), then:
-//   (1) copyTextureToBuffer(DepthOnly)   -> verifies the depth write
-//   (2) copyTextureToBuffer(StencilOnly) -> verifies the stencil write
-//   (3) sample the depth aspect (texture_2d<f32>) -> verifies the depth read
-//   (4) sample the stencil aspect (texture_2d<u32>) -> verifies the stencil read
+//   (1) copyTextureToBuffer(StencilOnly) -> verifies the stencil write
+//       (the depth aspect of Depth24PlusStencil8 is NOT buffer-copyable per the
+//        WebGPU spec, so the depth write is verified transitively by stage (2))
+//   (2) sample the depth aspect (texture_2d<f32>) -> verifies the depth write+read
+//   (3) sample the stencil aspect (texture_2d<u32>) -> verifies the stencil read
 // ---------------------------------------------------------------------------
 
 // CTS init: stencil(x,y)=x+1 via instance index + stencil reference, depth via
@@ -3541,11 +3542,6 @@ fn metal_readonly_depth_stencil_isolation() {
         }
 
         // ----- Submit 2: copy each aspect back to verify the WRITE -----
-        let buf_depth = create_buffer(
-            device,
-            RB as u64,
-            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
-        );
         let buf_stencil = create_buffer(
             device,
             RB as u64,
@@ -3570,27 +3566,16 @@ fn metal_readonly_depth_stencil_isolation() {
                 yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &src, &info, &extent);
             };
             let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
-            copy(encoder, native::WGPUTextureAspect_DepthOnly, buf_depth);
+            // Only the stencil aspect of Depth24PlusStencil8 is buffer-copyable;
+            // the depth write is verified end-to-end by the depth *sample* readback
+            // (stage 3) below, mirroring the CTS case (which never copies depth).
             copy(encoder, native::WGPUTextureAspect_StencilOnly, buf_stencil);
             submit_encoder(queue, encoder);
         }
-        let depth_bytes = read_buffer(instance, buf_depth, 0, RB);
         let stencil_bytes = read_buffer(instance, buf_stencil, 0, RB);
-        let mut write_depth_bad = Vec::new();
         let mut write_stencil_bad = Vec::new();
         for row in 0..H as usize {
             for col in 0..W as usize {
-                let d_off = row * BPR as usize + col * 4;
-                let d = f32::from_le_bytes([
-                    depth_bytes[d_off],
-                    depth_bytes[d_off + 1],
-                    depth_bytes[d_off + 2],
-                    depth_bytes[d_off + 3],
-                ]);
-                let want_d = (row as f32 + 1.0) / 10.0;
-                if (d - want_d).abs() > 0.01 {
-                    write_depth_bad.push((col, row, want_d, d));
-                }
                 let s = stencil_bytes[row * BPR as usize + col];
                 let want_s = (col + 1) as u8;
                 if s != want_s {
@@ -3787,19 +3772,17 @@ fn metal_readonly_depth_stencil_isolation() {
         // Report all four stages together so a single run pins every failure.
         let err = errors.lock().expect("error lock");
         assert!(
-            write_depth_bad.is_empty()
-                && write_stencil_bad.is_empty()
+            write_stencil_bad.is_empty()
                 && read_depth_bad.is_empty()
                 && read_stencil_bad.is_empty()
                 && err.is_empty(),
-            "F-055 isolation:\n  WRITE depth bad (col,row,want,got): {write_depth_bad:?}\n  \
-             WRITE stencil bad: {write_stencil_bad:?}\n  READ depth bad (col,row,want,got): \
-             {read_depth_bad:?}\n  READ stencil bad: {read_stencil_bad:?}\n  errors: {err:?}"
+            "F-055 isolation:\n  WRITE stencil bad (col,row,want,got): {write_stencil_bad:?}\n  \
+             READ depth bad (col,row,want,got): {read_depth_bad:?}\n  \
+             READ stencil bad: {read_stencil_bad:?}\n  errors: {err:?}"
         );
         drop(err);
 
         yawgpu::wgpuBufferRelease(buf_stencil);
-        yawgpu::wgpuBufferRelease(buf_depth);
         yawgpu::wgpuRenderPipelineRelease(init_pipeline);
         yawgpu::wgpuShaderModuleRelease(init_module);
         yawgpu::wgpuTextureViewRelease(ds_full_view);

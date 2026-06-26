@@ -29,13 +29,16 @@ impl TextureUsage {
     pub const STORAGE_BINDING: Self = Self(8);
     /// Constant value for render attachment.
     pub const RENDER_ATTACHMENT: Self = Self(16);
+    /// Constant value for transient (memoryless) render attachment.
+    pub const TRANSIENT_ATTACHMENT: Self = Self(32);
     /// Mask of all known texture usage bits.
     pub const ALL: Self = Self(
         Self::COPY_SRC.0
             | Self::COPY_DST.0
             | Self::TEXTURE_BINDING.0
             | Self::STORAGE_BINDING.0
-            | Self::RENDER_ATTACHMENT.0,
+            | Self::RENDER_ATTACHMENT.0
+            | Self::TRANSIENT_ATTACHMENT.0,
     );
 
     /// Constructs this object from bits retain.
@@ -340,6 +343,11 @@ pub(crate) fn validate_texture_descriptor(
     }
     if usage.bits() & !TextureUsage::ALL.bits() != 0 {
         return Some("texture usage contains unknown bits");
+    }
+    if usage.contains(TextureUsage::TRANSIENT_ATTACHMENT)
+        && usage != (TextureUsage::TRANSIENT_ATTACHMENT | TextureUsage::RENDER_ATTACHMENT)
+    {
+        return Some("transient attachment textures may only also be used as render attachment");
     }
     if descriptor.sample_count != 1 && descriptor.sample_count != 4 {
         return Some("texture sample count must be 1 or 4");
@@ -752,6 +760,7 @@ pub(crate) fn hal_texture_format(format: TextureFormat) -> HalTextureFormat {
 
 /// Returns HAL texture usage.
 pub(crate) fn hal_texture_usage(usage: TextureUsage) -> HalTextureUsage {
+    // TransientAttachment folds into render_attachment; yawgpu does not apply the memoryless optimization.
     HalTextureUsage {
         copy_src: usage.contains(TextureUsage::COPY_SRC),
         copy_dst: usage.contains(TextureUsage::COPY_DST),
@@ -1069,6 +1078,47 @@ mod tests {
             validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
             Some("texture usage contains unknown bits")
         );
+    }
+
+    #[test]
+    fn validate_texture_descriptor_accepts_transient_render_attachment() {
+        let mut descriptor = texture_descriptor_4x4();
+        descriptor.usage = TextureUsage::RENDER_ATTACHMENT | TextureUsage::TRANSIENT_ATTACHMENT;
+
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn validate_texture_descriptor_rejects_invalid_transient_usage_combinations() {
+        let mut descriptor = texture_descriptor_4x4();
+        descriptor.usage = TextureUsage::TRANSIENT_ATTACHMENT | TextureUsage::COPY_SRC;
+
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
+            Some("transient attachment textures may only also be used as render attachment")
+        );
+
+        descriptor.usage = TextureUsage::TRANSIENT_ATTACHMENT;
+
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
+            Some("transient attachment textures may only also be used as render attachment")
+        );
+    }
+
+    #[test]
+    fn hal_texture_usage_folds_transient_attachment_into_render_attachment() {
+        let usage = TextureUsage::RENDER_ATTACHMENT | TextureUsage::TRANSIENT_ATTACHMENT;
+        let hal = hal_texture_usage(usage);
+
+        assert!(!hal.copy_src);
+        assert!(!hal.copy_dst);
+        assert!(!hal.texture_binding);
+        assert!(!hal.storage_binding);
+        assert!(hal.render_attachment);
     }
 
     #[test]

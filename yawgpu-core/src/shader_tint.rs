@@ -1,15 +1,13 @@
 //! Tint shader frontend — yawgpu's WGSL→{MSL, SPIR-V, GLSL} compiler and
 //! reflection source, backed by Dawn's Tint via the `yawgpu-tint` shim. This is
-//! the sole shader frontend (the `crate::frontend` alias points here); `generate_msl`
-//! is the combined-render `generate_render_msl` skeleton's only gap (P2c.3).
+//! the sole shader frontend (the `crate::frontend` alias points here), and the
+//! render path emits per-stage shader sources for pipeline creation.
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 
 use crate::shader::{CompilationMessage, CompilationSeverity};
 pub(crate) use crate::shader_types::*;
-
-const NOT_IMPLEMENTED: &str = "shader_tint: not yet implemented (P2b/P2c)";
 
 /// Stores reflected shader module data used by validation and backend submission.
 #[derive(Debug)]
@@ -98,7 +96,14 @@ impl ReflectedModule {
         binding_map: &MslBindingMap,
         pipeline_constants: &PipelineConstants,
     ) -> Result<GeneratedMsl, String> {
-        self.generate_stage_msl(entry_name, binding_map, pipeline_constants, true, false)
+        self.generate_stage_msl(
+            entry_name,
+            binding_map,
+            pipeline_constants,
+            true,
+            false,
+            0xFFFF_FFFF,
+        )
     }
 
     /// Generates render vertex MSL for a validated shader module.
@@ -122,6 +127,7 @@ impl ReflectedModule {
             pipeline_constants,
             false,
             force_point_size,
+            0xFFFF_FFFF,
         )
     }
 
@@ -133,25 +139,14 @@ impl ReflectedModule {
         pipeline_constants: &PipelineConstants,
         sample_mask: u32,
     ) -> Result<GeneratedMsl, String> {
-        if sample_mask != u32::MAX {
-            // TODO(phase-3): sample mask handled by Tint's MSL writer and the
-            // Metal pipeline state.
-        }
-        self.generate_stage_msl(entry_name, binding_map, pipeline_constants, false, false)
-    }
-
-    /// Generates render msl for the validated shader module.
-    pub(crate) fn generate_render_msl(
-        &self,
-        _vertex_entry_name: &str,
-        _fragment_entry_name: Option<&str>,
-        _binding_map: &MslBindingMap,
-        _vertex_buffers: &[MslVertexBufferBinding],
-        _force_point_size: bool,
-    ) -> Result<GeneratedRenderMsl, String> {
-        // TODO(P2c.3): combined same-module render under Tint emits per-stage;
-        // the Metal HAL should consume per-stage (MslStagesWithBufferSizes).
-        Err(NOT_IMPLEMENTED.to_owned())
+        self.generate_stage_msl(
+            entry_name,
+            binding_map,
+            pipeline_constants,
+            false,
+            false,
+            sample_mask,
+        )
     }
 
     fn generate_stage_msl(
@@ -161,6 +156,7 @@ impl ReflectedModule {
         pipeline_constants: &PipelineConstants,
         disable_robustness: bool,
         emit_vertex_point_size: bool,
+        fixed_sample_mask: u32,
     ) -> Result<GeneratedMsl, String> {
         let bindings =
             tint_bindings_for_msl(binding_map, &self.resource_bindings_for_entry(entry_name)?)?;
@@ -172,6 +168,7 @@ impl ReflectedModule {
             buffer_sizes_slot,
             disable_robustness,
             emit_vertex_point_size,
+            fixed_sample_mask,
         )?;
         let buffer_size_bindings = output
             .buffer_size_bindings
@@ -186,11 +183,12 @@ impl ReflectedModule {
             entry_point: output.entry_point,
             buffer_sizes_slot: (!buffer_size_bindings.is_empty()).then_some(buffer_sizes_slot),
             buffer_size_bindings,
-            frag_depth_clamp_slot: None,
-            // The current shim exposes the total workgroup size but not each
-            // workgroup variable's byte size, so compute encoders receive an
-            // empty per-argument allocation list until that metadata is exposed.
-            workgroup_memory_sizes: Vec::new(),
+            frag_depth_clamp_slot: output.frag_depth_clamp_slot,
+            workgroup_memory_sizes: output
+                .workgroup_allocations
+                .iter()
+                .map(|&size| size.div_ceil(16) * 16)
+                .collect(),
         })
     }
 

@@ -187,16 +187,21 @@ Red (ported end2end test, `#[ignore]`, fails / unimplemented) → Green
 
 ## CTS finding F-069 — Metal threadgroup memory (2026-06-11)
 
-naga's MSL backend emits `var<workgroup>` globals as `[[threadgroup(N)]]`
+The MSL backend emits `var<workgroup>` globals as `[[threadgroup(N)]]`
 entry-point arguments; Metal requires the compute encoder to size each slot
 via `setThreadgroupMemoryLength:atIndex:` before dispatch (unallocated slots
-read zeros). Rule: MSL generation (`generate_msl`) reports per-entry-point
-workgroup-variable sizes in naga emission order, rounded up to a multiple of
-16 (Metal requirement; mirrors wgpu-hal `load_shader`); the Metal compute
+read zeros). Rule: MSL generation reports per-entry-point workgroup-variable
+sizes, rounded up to a multiple of 16 (Metal requirement); the Metal compute
 pipeline stores them and the encoder sets each slot length right after
 `setComputePipelineState`. Vulkan/GLES ignore the field (workgroup storage is
-declared in the module). CTS: `shader,execution,memory_layout` Metal residue
-is naga-lineage only (F-070).
+declared in the module). **Tint migration (2026-06-27):** the per-index sizes
+now come from Tint's `msl::writer::Output::workgroup_allocations` (surfaced
+through the `yawgpu-tint` shim). The first Tint cut stubbed this to empty and
+**regressed** every `atomics:*_workgroup` case to read zeros — re-fixed and
+re-verified (atomics 1445/0 on Metal); see
+`specs/tracking/tint-migration-plan.md` → "Post-migration CTS regression audit"
+(which also covers the sample-mask and frag-depth-clamp regressions from the
+same class).
 
 ## CTS finding F-068 — vertex OOB robustness (2026-06-11)
 
