@@ -222,7 +222,10 @@ mod tests {
 
         assert!(invalid.is_error());
         assert!(invalid.diagnostic().is_some());
+        #[cfg(not(feature = "tint"))]
         assert!(scoped.message.contains("expected global item"));
+        #[cfg(feature = "tint")]
+        assert!(scoped.message.contains("unexpected token"));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::shader::CompilationMessage;
+use crate::shader::{CompilationMessage, CompilationSeverity};
 pub(crate) use crate::shader_types::*;
 
 const NOT_IMPLEMENTED: &str = "shader_tint: not yet implemented (P2b/P2c)";
@@ -35,10 +35,21 @@ pub(crate) fn parse_and_validate_wgsl_gated(
     src: &str,
     shader_f16: bool,
 ) -> Result<ReflectedModule, String> {
-    Ok(ReflectedModule {
-        program: yawgpu_tint::Program::parse(src, shader_f16)?,
-        warnings: Vec::new(),
-    })
+    let program = yawgpu_tint::Program::parse(src, shader_f16)?;
+    let warnings = program
+        .diagnostics()?
+        .into_iter()
+        .filter(|diagnostic| diagnostic.severity == yawgpu_tint::DiagnosticSeverity::Warning)
+        .map(|diagnostic| CompilationMessage {
+            severity: CompilationSeverity::Warning,
+            message: diagnostic.message,
+            line_num: 0,
+            line_pos: 0,
+            offset: 0,
+            length: 0,
+        })
+        .collect();
+    Ok(ReflectedModule { program, warnings })
 }
 
 impl ReflectedModule {
@@ -546,7 +557,7 @@ fn texture_binding_kind(
     ReflectedResourceBindingKind::Texture {
         sampled,
         sample_kind: sampled_kind(binding.sampled_kind),
-        sample_usage: ReflectedTextureSampleUsage::Sample,
+        sample_usage: texture_sample_usage(binding.sample_usage),
         view_dimension: texture_view_dimension(binding.dim),
         multisampled,
     }
@@ -559,9 +570,17 @@ fn depth_texture_binding_kind(
     ReflectedResourceBindingKind::Texture {
         sampled: false,
         sample_kind: None,
-        sample_usage: ReflectedTextureSampleUsage::Sample,
+        sample_usage: texture_sample_usage(binding.sample_usage),
         view_dimension: texture_view_dimension(binding.dim),
         multisampled,
+    }
+}
+
+fn texture_sample_usage(usage: yawgpu_tint::TextureSampleUsage) -> ReflectedTextureSampleUsage {
+    match usage {
+        yawgpu_tint::TextureSampleUsage::Load => ReflectedTextureSampleUsage::Load,
+        yawgpu_tint::TextureSampleUsage::Sample => ReflectedTextureSampleUsage::Sample,
+        yawgpu_tint::TextureSampleUsage::Gather => ReflectedTextureSampleUsage::Gather,
     }
 }
 
@@ -869,7 +888,7 @@ fn fs() -> @location(0) vec4<f32> {
                     == ReflectedResourceBindingKind::Texture {
                         sampled: true,
                         sample_kind: Some(ReflectedTypeScalarClass::Float),
-                        sample_usage: ReflectedTextureSampleUsage::Sample,
+                        sample_usage: ReflectedTextureSampleUsage::Load,
                         view_dimension: ReflectedTextureViewDimension::D2,
                         multisampled: false,
                     }
@@ -880,6 +899,40 @@ fn fs() -> @location(0) vec4<f32> {
             binding.group == 1
                 && binding.binding == 2
                 && binding.kind == ReflectedResourceBindingKind::Sampler { comparison: false }
+        }));
+    }
+
+    #[test]
+    fn reflects_texture_gather_usage_from_tint() {
+        let module = parse_and_validate_wgsl(
+            r#"
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+
+fn helper(t: texture_2d<f32>) -> vec4f {
+  return textureGather(0, t, samp, vec2f(0.5));
+}
+
+@compute @workgroup_size(1)
+fn cs() {
+  _ = helper(tex);
+}
+"#,
+        )
+        .unwrap();
+
+        let compute = module.resource_bindings_for_entry("cs").unwrap();
+        assert!(compute.iter().any(|binding| {
+            binding.group == 0
+                && binding.binding == 0
+                && binding.kind
+                    == ReflectedResourceBindingKind::Texture {
+                        sampled: true,
+                        sample_kind: Some(ReflectedTypeScalarClass::Float),
+                        sample_usage: ReflectedTextureSampleUsage::Gather,
+                        view_dimension: ReflectedTextureViewDimension::D2,
+                        multisampled: false,
+                    }
         }));
     }
 

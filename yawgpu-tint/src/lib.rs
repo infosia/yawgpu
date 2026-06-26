@@ -51,6 +51,13 @@ mod imp {
 
     #[repr(C)]
     #[derive(Clone, Copy)]
+    struct RawDiagnostic {
+        message: *const c_char,
+        severity: u8,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
     struct RawResourceBinding {
         group: u32,
         binding: u32,
@@ -59,6 +66,7 @@ mod imp {
         sampled_kind: u8,
         sampler_type: u8,
         texel_format: u8,
+        sample_usage: u8,
         size: u64,
         has_array_size: bool,
         array_size: u32,
@@ -143,6 +151,12 @@ mod imp {
             ep: *const c_char,
             i: usize,
             out: *mut RawStageVariable,
+        ) -> bool;
+        fn yawgpu_tint_diagnostic_count(program: *const RawProgram) -> usize;
+        fn yawgpu_tint_diagnostic_get(
+            program: *const RawProgram,
+            i: usize,
+            out: *mut RawDiagnostic,
         ) -> bool;
         fn yawgpu_tint_resource_binding_count(
             program: *const RawProgram,
@@ -293,6 +307,26 @@ mod imp {
             self.entry_point_variables(entry_point, StageVariableDirection::Output)
         }
 
+        /// Returns non-error diagnostics reported for this valid program.
+        pub fn diagnostics(&self) -> Result<Vec<Diagnostic>, String> {
+            // SAFETY: `self.raw` is owned by this Program.
+            let count = unsafe { yawgpu_tint_diagnostic_count(self.raw) };
+            let mut out = Vec::with_capacity(count);
+            for i in 0..count {
+                let mut raw = RawDiagnostic {
+                    message: ptr::null(),
+                    severity: 0,
+                };
+                // SAFETY: `raw` points to valid writable memory.
+                let ok = unsafe { yawgpu_tint_diagnostic_get(self.raw, i, &mut raw) };
+                if !ok {
+                    return Err("tint: failed to read diagnostic".to_owned());
+                }
+                out.push(Diagnostic::try_from_raw(raw)?);
+            }
+            Ok(out)
+        }
+
         fn entry_point_variables(
             &self,
             entry_point: &str,
@@ -354,6 +388,7 @@ mod imp {
                     sampled_kind: 0,
                     sampler_type: 0,
                     texel_format: 0,
+                    sample_usage: 0,
                     size: 0,
                     has_array_size: false,
                     array_size: 0,
@@ -624,6 +659,43 @@ mod imp {
         }
     }
 
+    /// A non-error diagnostic reported for a valid program.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Diagnostic {
+        /// Diagnostic message text.
+        pub message: String,
+        /// Diagnostic severity.
+        pub severity: DiagnosticSeverity,
+    }
+
+    impl Diagnostic {
+        fn try_from_raw(raw: RawDiagnostic) -> Result<Self, String> {
+            Ok(Self {
+                message: raw_string(raw.message),
+                severity: DiagnosticSeverity::try_from_raw(raw.severity)?,
+            })
+        }
+    }
+
+    /// Non-error Tint diagnostic severity.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum DiagnosticSeverity {
+        /// Informational note.
+        Note,
+        /// Warning.
+        Warning,
+    }
+
+    impl DiagnosticSeverity {
+        fn try_from_raw(raw: u8) -> Result<Self, String> {
+            match raw {
+                0 => Ok(Self::Note),
+                1 => Ok(Self::Warning),
+                _ => Err(format!("tint: unknown DiagnosticSeverity value {raw}")),
+            }
+        }
+    }
+
     /// Pipeline stage.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum PipelineStage {
@@ -663,6 +735,8 @@ mod imp {
         pub sampler_type: SamplerType,
         /// Storage texture texel format.
         pub texel_format: TexelFormat,
+        /// Strongest sampled texture usage for the queried entry point.
+        pub sample_usage: TextureSampleUsage,
         /// Static byte size reported by Tint, or zero when not applicable.
         pub size: u64,
         /// Binding array size when present.
@@ -679,6 +753,7 @@ mod imp {
                 sampled_kind: SampledKind::try_from_raw(raw.sampled_kind)?,
                 sampler_type: SamplerType::try_from_raw(raw.sampler_type)?,
                 texel_format: TexelFormat::try_from_raw(raw.texel_format)?,
+                sample_usage: TextureSampleUsage::try_from_raw(raw.sample_usage)?,
                 size: raw.size,
                 array_size: raw.has_array_size.then_some(raw.array_size),
             })
@@ -770,6 +845,18 @@ mod imp {
             Either = 5,
             /// Unknown sampling.
             Unknown = 6,
+        }
+    }
+
+    raw_enum! {
+        /// Sampled texture usage for an entry point.
+        pub enum TextureSampleUsage {
+            /// Texture is only loaded or queried.
+            Load = 0,
+            /// Texture is sampled.
+            Sample = 1,
+            /// Texture is gathered.
+            Gather = 2,
         }
     }
 
@@ -1180,6 +1267,11 @@ mod imp {
             Err(UNAVAILABLE.to_owned())
         }
 
+        /// Returns non-error diagnostics reported for this valid program.
+        pub fn diagnostics(&self) -> Result<Vec<Diagnostic>, String> {
+            Err(UNAVAILABLE.to_owned())
+        }
+
         /// Returns resource bindings used by `entry_point`.
         pub fn resource_bindings(
             &self,
@@ -1349,6 +1441,24 @@ mod imp {
         Unknown,
     }
 
+    /// A non-error diagnostic reported for a valid program.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Diagnostic {
+        /// Diagnostic message text.
+        pub message: String,
+        /// Diagnostic severity.
+        pub severity: DiagnosticSeverity,
+    }
+
+    /// Non-error Tint diagnostic severity.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum DiagnosticSeverity {
+        /// Informational note.
+        Note,
+        /// Warning.
+        Warning,
+    }
+
     /// A reflected resource binding.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct ResourceBinding {
@@ -1366,6 +1476,8 @@ mod imp {
         pub sampler_type: SamplerType,
         /// Storage texture texel format.
         pub texel_format: TexelFormat,
+        /// Strongest sampled texture usage for the queried entry point.
+        pub sample_usage: TextureSampleUsage,
         /// Static byte size reported by Tint, or zero when not applicable.
         pub size: u64,
         /// Binding array size when present.
@@ -1454,6 +1566,17 @@ mod imp {
         NonFiltering,
         /// Unknown filtering mode.
         UnknownFiltering,
+    }
+
+    /// Sampled texture usage for an entry point.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TextureSampleUsage {
+        /// Texture is only loaded or queried.
+        Load,
+        /// Texture is sampled.
+        Sample,
+        /// Texture is gathered.
+        Gather,
     }
 
     /// Storage texture texel format.
@@ -1716,6 +1839,54 @@ fn cs() {
         assert!(bindings
             .iter()
             .any(|b| b.group == 2 && b.binding == 4 && b.resource_type == ResourceType::Sampler));
+    }
+
+    #[test]
+    fn exposes_non_error_diagnostics() {
+        let program = Program::parse(
+            "diagnostic(info, bogus_rule);\n@compute @workgroup_size(1) fn cs() {}",
+            false,
+        )
+        .unwrap();
+        let diagnostics = program.diagnostics().unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, DiagnosticSeverity::Warning);
+        assert!(diagnostics[0]
+            .message
+            .contains("unrecognized diagnostic rule"));
+    }
+
+    #[test]
+    fn reflects_texture_sample_usage() {
+        let wgsl = r#"
+@group(0) @binding(0) var load_tex: texture_2d<f32>;
+@group(0) @binding(1) var sample_tex: texture_2d<f32>;
+@group(0) @binding(2) var gather_tex: texture_2d<f32>;
+@group(0) @binding(3) var samp: sampler;
+
+fn helper(t: texture_2d<f32>) -> vec4f {
+  return textureGather(0, t, samp, vec2f(0.5));
+}
+
+@compute @workgroup_size(1)
+fn cs() {
+  _ = textureLoad(load_tex, vec2i(0), 0);
+  _ = textureSampleLevel(sample_tex, samp, vec2f(0.5), 0.0);
+  _ = helper(gather_tex);
+}
+"#;
+        let program = Program::parse(wgsl, false).unwrap();
+        let bindings = program.resource_bindings("cs").unwrap();
+        let usage = |binding: u32| {
+            bindings
+                .iter()
+                .find(|resource| resource.group == 0 && resource.binding == binding)
+                .map(|resource| resource.sample_usage)
+                .unwrap()
+        };
+        assert_eq!(usage(0), TextureSampleUsage::Load);
+        assert_eq!(usage(1), TextureSampleUsage::Sample);
+        assert_eq!(usage(2), TextureSampleUsage::Gather);
     }
 
     #[test]

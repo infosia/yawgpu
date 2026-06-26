@@ -78,6 +78,16 @@ bool yawgpu_tint_entry_point_output_get(const YawgpuTintProgram*,
                                         size_t i,
                                         YawgpuTintStageVariable* out);
 
+/* Program diagnostics collected during successful parsing.
+ * severity: 0=note/info, 1=warning. Error diagnostics fail program creation. */
+typedef struct {
+    const char* message;       /* borrowed; valid until program destroyed */
+    uint8_t severity;
+} YawgpuTintDiagnostic;
+
+size_t yawgpu_tint_diagnostic_count(const YawgpuTintProgram*);
+bool yawgpu_tint_diagnostic_get(const YawgpuTintProgram*, size_t i, YawgpuTintDiagnostic* out);
+
 /* Resource enums mirror tint/lang/wgsl/inspector/resource_binding.h:
  * resource_type:
  *   0=kUniformBuffer, 1=kStorageBuffer, 2=kReadOnlyStorageBuffer, 3=kSampler,
@@ -102,11 +112,15 @@ bool yawgpu_tint_entry_point_output_get(const YawgpuTintProgram*,
  *   26=kRgba16Float, 27=kR32Uint, 28=kR32Sint, 29=kR32Float,
  *   30=kRg32Uint, 31=kRg32Sint, 32=kRg32Float, 33=kRgba32Uint,
  *   34=kRgba32Sint, 35=kRgba32Float, 36=kR8Unorm, 37=kRgb10A2Uint,
- *   38=kRgb10A2Unorm, 39=kRg11B10Ufloat, 40=kNone. */
+ *   38=kRgb10A2Unorm, 39=kRg11B10Ufloat, 40=kNone.
+ * sample_usage:
+ *   0=load, 1=sample, 2=gather. Strongest usage per texture binding for the
+ *   requested entry point, computed from Tint sem call graph and AST calls. */
 typedef struct {
     uint32_t group, binding;
     uint8_t resource_type;
     uint8_t dim, sampled_kind, sampler_type, texel_format;
+    uint8_t sample_usage;
     uint64_t size;
     bool has_array_size;
     uint32_t array_size;

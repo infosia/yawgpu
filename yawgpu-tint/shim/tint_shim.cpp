@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -22,7 +23,14 @@
 #include "src/tint/lang/wgsl/ast/override.h"
 #include "src/tint/lang/wgsl/inspector/inspector.h"
 #include "src/tint/lang/wgsl/reader/reader.h"
+#include "src/tint/lang/wgsl/sem/builtin_fn.h"
+#include "src/tint/lang/wgsl/sem/call.h"
+#include "src/tint/lang/wgsl/sem/function.h"
+#include "src/tint/lang/wgsl/sem/module.h"
 #include "src/tint/lang/wgsl/sem/variable.h"
+#include "src/tint/utils/containers/hashmap.h"
+#include "src/tint/utils/containers/unique_vector.h"
+#include "src/tint/utils/rtti/switch.h"
 
 #include "tint_shim.h"
 
@@ -30,6 +38,8 @@ struct YawgpuTintProgram {
     tint::Program program;
     std::vector<tint::inspector::EntryPoint> entry_points;
     std::vector<tint::inspector::Override> overrides;
+    std::vector<std::string> diagnostic_messages;
+    std::vector<uint8_t> diagnostic_severities;
 };
 
 namespace {
@@ -150,6 +160,17 @@ void fill_entry_point(const tint::inspector::EntryPoint& ep, YawgpuTintEntryPoin
     out->subgroup_size_used = ep.subgroup_size_used;
 }
 
+uint8_t diagnostic_severity(tint::diag::Severity severity) {
+    switch (severity) {
+        case tint::diag::Severity::Warning:
+            return 1;
+        case tint::diag::Severity::Note:
+        case tint::diag::Severity::Error:
+            return 0;
+    }
+    return 0;
+}
+
 const tint::inspector::EntryPoint* find_entry_point(const YawgpuTintProgram* program,
                                                     const char* ep) {
     if (program == nullptr || ep == nullptr) {
@@ -174,7 +195,136 @@ void fill_stage_variable(const tint::inspector::StageVariable& variable,
     out->interpolation_sampling = static_cast<uint8_t>(variable.interpolation_sampling);
 }
 
+uint8_t max_sample_usage(uint8_t lhs, uint8_t rhs) {
+    return lhs > rhs ? lhs : rhs;
+}
+
+uint8_t builtin_sample_usage(tint::wgsl::BuiltinFn builtin) {
+    switch (builtin) {
+        case tint::wgsl::BuiltinFn::kTextureGather:
+        case tint::wgsl::BuiltinFn::kTextureGatherCompare:
+            return 2;
+        case tint::wgsl::BuiltinFn::kTextureSample:
+        case tint::wgsl::BuiltinFn::kTextureSampleBias:
+        case tint::wgsl::BuiltinFn::kTextureSampleCompare:
+        case tint::wgsl::BuiltinFn::kTextureSampleCompareLevel:
+        case tint::wgsl::BuiltinFn::kTextureSampleGrad:
+        case tint::wgsl::BuiltinFn::kTextureSampleLevel:
+        case tint::wgsl::BuiltinFn::kTextureSampleBaseClampToEdge:
+            return 1;
+        case tint::wgsl::BuiltinFn::kTextureLoad:
+            return 0;
+        default:
+            return 0;
+    }
+}
+
+std::map<std::pair<uint32_t, uint32_t>, uint8_t> texture_sample_usages(
+    const tint::Program& program,
+    const std::string& entry_point) {
+    std::map<std::pair<uint32_t, uint32_t>, uint8_t> usages;
+    const auto& sem = program.Sem();
+    auto entry_point_symbol = program.Symbols().Get(entry_point);
+    if (!entry_point_symbol.IsValid()) {
+        return usages;
+    }
+
+    using GlobalSet = tint::UniqueVector<const tint::sem::GlobalVariable*, 4>;
+    tint::Hashmap<const tint::sem::Function*,
+                  tint::Hashmap<const tint::sem::Parameter*, GlobalSet, 2>,
+                  8>
+        globals_for_handle_parameters;
+
+    auto add_globals_as_parameter = [&](const tint::sem::Function* fn,
+                                        const tint::sem::Parameter* param,
+                                        const GlobalSet* vars) {
+        auto& globals = globals_for_handle_parameters.GetOrAddZero(fn).GetOrAddZero(param);
+        for (const auto* var : *vars) {
+            globals.Add(var);
+        }
+    };
+
+    auto get_globals_for_argument = [&](const tint::sem::Function* fn,
+                                        const tint::sem::ValueExpression* argument,
+                                        GlobalSet* scratch_global) -> const GlobalSet* {
+        auto* identifier = argument->RootIdentifier();
+        auto* local = identifier != nullptr ? identifier->As<tint::sem::LocalVariable>() : nullptr;
+        while (local != nullptr) {
+            identifier = local->Initializer()->RootIdentifier();
+            if (identifier == nullptr) {
+                return scratch_global;
+            }
+            local = identifier->As<tint::sem::LocalVariable>();
+        }
+
+        if (auto* global =
+                identifier != nullptr ? identifier->As<tint::sem::GlobalVariable>() : nullptr) {
+            scratch_global->Add(global);
+            return scratch_global;
+        }
+        if (auto* parameter =
+                identifier != nullptr ? identifier->As<tint::sem::Parameter>() : nullptr) {
+            if (auto by_fn = globals_for_handle_parameters.Get(fn)) {
+                if (auto globals = by_fn.value->Get(parameter)) {
+                    return globals.value;
+                }
+            }
+        }
+        return scratch_global;
+    };
+
+    auto declarations = sem.Module()->DependencyOrderedDeclarations();
+    for (auto rit = declarations.rbegin(); rit != declarations.rend(); rit++) {
+        auto* fn = sem.Get<tint::sem::Function>(*rit);
+        if ((fn == nullptr) || !fn->HasCallGraphEntryPoint(entry_point_symbol)) {
+            continue;
+        }
+
+        for (auto* call : fn->DirectCalls()) {
+            tint::Switch(
+                call->Target(),
+                [&](const tint::sem::Function* callee) {
+                    for (size_t i = 0; i < call->Arguments().Length(); i++) {
+                        auto* parameter = sem.Get(callee->Declaration()->params[i]);
+                        if (parameter == nullptr || !parameter->Type()->IsHandle()) {
+                            continue;
+                        }
+                        GlobalSet scratch_global;
+                        const auto* globals =
+                            get_globals_for_argument(fn, call->Arguments()[i], &scratch_global);
+                        add_globals_as_parameter(callee, parameter, globals);
+                    }
+                },
+                [&](const tint::sem::BuiltinFn* builtin) {
+                    const auto& signature = builtin->Signature();
+                    int texture_index = signature.IndexOf(tint::core::ParameterUsage::kTexture);
+                    if (texture_index == -1 ||
+                        call->Arguments()[static_cast<size_t>(texture_index)]
+                            ->Is<tint::sem::Call>()) {
+                        return;
+                    }
+                    uint8_t usage = builtin_sample_usage(builtin->Fn());
+                    GlobalSet scratch_global;
+                    const auto* texture_globals = get_globals_for_argument(
+                        fn, call->Arguments()[static_cast<size_t>(texture_index)],
+                        &scratch_global);
+                    for (const auto* texture : *texture_globals) {
+                        auto binding_point = texture->Attributes().binding_point;
+                        if (!binding_point.has_value()) {
+                            continue;
+                        }
+                        auto key =
+                            std::make_pair(binding_point->group, binding_point->binding);
+                        usages[key] = max_sample_usage(usages[key], usage);
+                    }
+                });
+        }
+    }
+    return usages;
+}
+
 void fill_resource_binding(const tint::inspector::ResourceBinding& binding,
+                           uint8_t sample_usage,
                            YawgpuTintResourceBinding* out) {
     out->group = binding.bind_group;
     out->binding = binding.binding;
@@ -183,6 +333,7 @@ void fill_resource_binding(const tint::inspector::ResourceBinding& binding,
     out->sampled_kind = static_cast<uint8_t>(binding.sampled_kind);
     out->sampler_type = static_cast<uint8_t>(binding.sampler_type);
     out->texel_format = static_cast<uint8_t>(binding.image_format);
+    out->sample_usage = sample_usage;
     out->size = binding.size;
     out->has_array_size = binding.array_size.has_value();
     out->array_size = binding.array_size.value_or(0);
@@ -271,6 +422,13 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
 
         auto* out = new YawgpuTintProgram();
         out->program = std::move(parsed);
+        for (const auto& diagnostic : out->program.Diagnostics()) {
+            if (diagnostic.severity == tint::diag::Severity::Error) {
+                continue;
+            }
+            out->diagnostic_messages.push_back(diagnostic.message.Plain());
+            out->diagnostic_severities.push_back(diagnostic_severity(diagnostic.severity));
+        }
         tint::inspector::Inspector inspector(out->program);
         out->entry_points = inspector.GetEntryPoints();
         out->overrides = inspector.Overrides();
@@ -341,6 +499,22 @@ bool yawgpu_tint_entry_point_output_get(const YawgpuTintProgram* program,
     return true;
 }
 
+size_t yawgpu_tint_diagnostic_count(const YawgpuTintProgram* program) {
+    return program != nullptr ? program->diagnostic_messages.size() : 0;
+}
+
+bool yawgpu_tint_diagnostic_get(const YawgpuTintProgram* program,
+                                size_t i,
+                                YawgpuTintDiagnostic* out) {
+    if (program == nullptr || out == nullptr || i >= program->diagnostic_messages.size() ||
+        i >= program->diagnostic_severities.size()) {
+        return false;
+    }
+    out->message = program->diagnostic_messages[i].c_str();
+    out->severity = program->diagnostic_severities[i];
+    return true;
+}
+
 size_t yawgpu_tint_resource_binding_count(const YawgpuTintProgram* program, const char* ep) {
     if (program == nullptr) {
         return 0;
@@ -361,7 +535,10 @@ bool yawgpu_tint_resource_binding_get(const YawgpuTintProgram* program,
     if (i >= bindings.size()) {
         return false;
     }
-    fill_resource_binding(bindings[i], out);
+    auto usages = texture_sample_usages(program->program, cstr_or_empty(ep));
+    auto key = std::make_pair(bindings[i].bind_group, bindings[i].binding);
+    auto found = usages.find(key);
+    fill_resource_binding(bindings[i], found != usages.end() ? found->second : 0, out);
     return true;
 }
 
