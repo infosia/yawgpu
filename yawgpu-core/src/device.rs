@@ -19,8 +19,6 @@ use crate::render_pipeline::*;
 use crate::sampler::*;
 use crate::shader::*;
 use crate::texture::*;
-#[cfg(feature = "tiled")]
-use crate::transient_attachment::*;
 
 /// Stores device data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -318,42 +316,6 @@ impl Device {
         self.dispatch_error(kind, error.to_string());
     }
 
-    /// Validates the descriptor and creates a transient attachment on this device.
-    #[cfg(feature = "tiled")]
-    #[must_use]
-    pub fn create_transient_attachment(
-        &self,
-        descriptor: TransientAttachmentDescriptor,
-    ) -> TransientAttachment {
-        if self.is_lost() {
-            return TransientAttachment::new(descriptor, None, true);
-        }
-        let error = validate_transient_attachment_descriptor(&descriptor);
-        let is_error = error.is_some();
-        if let Some(message) = error {
-            self.dispatch_error(ErrorKind::Validation, message);
-        }
-
-        let hal =
-            if is_error {
-                None
-            } else if let TransientSizeMode::Explicit { width, height } = descriptor.size {
-                match self.inner.hal.create_transient_attachment(
-                    &hal_transient_attachment_descriptor(&descriptor, width, height),
-                ) {
-                    Ok(hal) => Some(hal),
-                    Err(error) => {
-                        self.dispatch_error(ErrorKind::Validation, error.to_string());
-                        return TransientAttachment::new(descriptor, None, true);
-                    }
-                }
-            } else {
-                None
-            };
-
-        TransientAttachment::new(descriptor, hal, is_error)
-    }
-
     /// Validates the descriptor and creates a sampler on this device.
     #[must_use]
     pub fn create_sampler(&self, descriptor: SamplerDescriptor) -> Sampler {
@@ -380,7 +342,7 @@ impl Device {
         Sampler::new(resolved, hal, is_error)
     }
 
-    /// Compiles and validates a shader module from its WGSL (or other supported) source.
+    /// Compiles and validates a shader module from its WGSL source.
     #[must_use]
     pub fn create_shader_module(&self, source: ShaderModuleSource) -> ShaderModule {
         if self.is_lost() {
@@ -395,23 +357,6 @@ impl Device {
                 Ok(inner) => (inner, None),
                 Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
             },
-            #[cfg(feature = "shader-passthrough")]
-            ShaderModuleSource::Spirv(words) => match ShaderModule::from_spirv(words, shader_f16) {
-                Ok(inner) => (inner, None),
-                Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
-            },
-            #[cfg(not(feature = "shader-passthrough"))]
-            ShaderModuleSource::Spirv(_) => (
-                ShaderModuleSourceKind::Invalid,
-                Some("SPIR-V passthrough not enabled".to_owned()),
-            ),
-            #[cfg(feature = "shader-passthrough")]
-            ShaderModuleSource::Msl { source, reflection } => {
-                match ShaderModule::from_msl(source, reflection) {
-                    Ok(inner) => (inner, None),
-                    Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
-                }
-            }
             ShaderModuleSource::Invalid(message) => {
                 (ShaderModuleSourceKind::Invalid, Some(message))
             }
@@ -422,24 +367,6 @@ impl Device {
             self.dispatch_error(ErrorKind::Validation, message);
         }
         ShaderModule::new(inner, diagnostic)
-    }
-
-    /// Creates a shader module from raw SPIR-V words.
-    #[cfg(feature = "shader-passthrough")]
-    #[must_use]
-    pub fn create_shader_module_spirv(&self, words: Vec<u32>) -> ShaderModule {
-        self.create_shader_module(ShaderModuleSource::Spirv(words))
-    }
-
-    /// Creates a shader module from raw MSL source and caller-supplied reflection metadata.
-    #[cfg(feature = "shader-passthrough")]
-    #[must_use]
-    pub fn create_shader_module_msl(
-        &self,
-        source: String,
-        reflection: MslReflection,
-    ) -> ShaderModule {
-        self.create_shader_module(ShaderModuleSource::Msl { source, reflection })
     }
 
     /// Validates the descriptor and creates a bind group layout on this device.
@@ -862,54 +789,6 @@ mod tests {
         assert!(error_texture.is_error());
         assert_eq!(error.kind, ErrorKind::Validation);
         assert_eq!(error.message, "2D texture width is out of range");
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn device_create_transient_attachment_validates_explicit_and_defers_match_target() {
-        let device = noop_device();
-
-        device.push_error_scope(ErrorFilter::Validation);
-        let zero = device.create_transient_attachment(TransientAttachmentDescriptor {
-            format: TextureFormat::from(TextureFormat::RGBA8_UNORM),
-            size: TransientSizeMode::Explicit {
-                width: 0,
-                height: 1,
-            },
-            sample_count: 1,
-        });
-        let error = device
-            .pop_error_scope()
-            .expect("scope should exist")
-            .expect("zero explicit size should be scoped");
-        assert!(zero.is_error());
-        assert_eq!(
-            error.message,
-            "explicit transient attachment size must be non-zero"
-        );
-
-        let explicit = device.create_transient_attachment(TransientAttachmentDescriptor {
-            format: TextureFormat::from(TextureFormat::RGBA8_UNORM),
-            size: TransientSizeMode::Explicit {
-                width: 4,
-                height: 4,
-            },
-            sample_count: 1,
-        });
-        assert!(!explicit.is_error());
-        assert!(explicit.hal().is_some());
-
-        let match_target = device.create_transient_attachment(TransientAttachmentDescriptor {
-            format: TextureFormat::from(TextureFormat::RGBA8_UNORM),
-            size: TransientSizeMode::MatchTarget,
-            sample_count: 1,
-        });
-        assert!(!match_target.is_error());
-        assert!(matches!(
-            match_target.descriptor().size,
-            TransientSizeMode::MatchTarget
-        ));
-        assert!(match_target.hal().is_none());
     }
 
     #[test]

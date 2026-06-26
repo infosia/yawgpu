@@ -93,38 +93,6 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginComputePass(
         _instance: Arc::clone(&encoder.instance),
     }))
 }
-
-/// Begins a subpass render pass.
-///
-/// # Safety
-///
-/// `command_encoder` and `descriptor` must be non-null live yawgpu pointers.
-/// Returns yawgpu command encoder begin subpass render pass.
-#[cfg(feature = "tiled")]
-#[no_mangle]
-pub unsafe extern "C" fn yawgpuCommandEncoderBeginSubpassRenderPass(
-    command_encoder: native::WGPUCommandEncoder,
-    descriptor: *const YaWGPUSubpassRenderPassDescriptor,
-) -> crate::YaWGPUSubpassRenderPassEncoder {
-    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
-    let descriptor = descriptor
-        .as_ref()
-        .expect("YaWGPUSubpassRenderPassDescriptor must not be null");
-    let descriptor = map_subpass_render_pass_descriptor(descriptor);
-    let layout = Arc::clone(&descriptor.pass_layout);
-    let (pass, error) = encoder
-        .core
-        .begin_subpass_render_pass(&encoder.device, descriptor);
-    dispatch_optional_error(&encoder.device, error);
-    arc_to_handle(Arc::new(YaWGPUSubpassRenderPassEncoderImpl {
-        core: Arc::new(pass),
-        device: Arc::clone(&encoder.device),
-        _parent: Arc::clone(&encoder.core),
-        _layout: layout,
-        _instance: Arc::clone(&encoder.instance),
-    }))
-}
-
 /// Finishes command encoding into a command buffer.
 ///
 /// # Safety

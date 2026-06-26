@@ -36,11 +36,6 @@ use crate::{
     HalSurfaceConfiguration, HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
     HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
-#[cfg(feature = "tiled")]
-use crate::{
-    HalRenderPipeline, HalSubpassAttachmentResource, HalSubpassDraw, HalSubpassPassLayout,
-    HalSubpassRenderPassCommand, HalTransientAttachment, HalTransientAttachmentDescriptor,
-};
 
 const BACKEND: &str = "metal";
 
@@ -191,8 +186,6 @@ pub use pipeline::{MetalComputePipeline, MetalRenderPipeline};
 pub use query_set::MetalQuerySet;
 pub use queue::MetalQueue;
 pub use surface::MetalSurface;
-#[cfg(feature = "tiled")]
-pub use texture::MetalTransientAttachment;
 pub use texture::{MetalSampler, MetalTexture};
 
 #[cfg(test)]

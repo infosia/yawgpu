@@ -141,9 +141,6 @@ pub(super) fn create_render_pipeline(
         pipeline_descriptor.setAlphaToCoverageEnabled(descriptor.alpha_to_coverage_enabled);
         // Each color target populates `MTLRenderPipelineDescriptor.colorAttachments[i]`,
         // so the MTL pipeline's color-attachment layout matches the encoder slot-for-slot.
-        // For subpass pipelines this carries every layout slot's format (including
-        // ones the current subpass doesn't write to) — the fragment shader's
-        // `[[color(N)]]` outputs naturally land in the right MTL slot.
         let color_attachments = pipeline_descriptor.colorAttachments();
         for (i, color_target) in descriptor.color_targets.iter().copied().enumerate() {
             let Some(color_target) = color_target else {
@@ -185,9 +182,8 @@ pub(super) fn create_render_pipeline(
                 for attribute in &buffer.attributes {
                     let attributes = vertex_descriptor.attributes();
                     let attr = unsafe {
-                        attributes.objectAtIndexedSubscript(to_ns(u64::from(
-                            attribute.shader_location,
-                        ))?)
+                        attributes
+                            .objectAtIndexedSubscript(to_ns(u64::from(attribute.shader_location))?)
                     };
                     attr.setFormat(map_vertex_format(attribute.format)?);
                     unsafe {
@@ -204,12 +200,7 @@ pub(super) fn create_render_pipeline(
         // Every render pipeline carries an `MTLDepthStencilState`. When the
         // public descriptor opts out of depth-stencil (Option::None) we still
         // bind a no-op state (depthCompare=Always, depthWrite=false, no stencil)
-        // so the encoder doesn't inherit a previous pipeline's depth test/write
-        // against a shared depth attachment. Without this, multi-subpass passes
-        // where one subpass uses depth and a later subpass doesn't would fail
-        // depth-test for the later subpass's draws (the lighting/composite
-        // fullscreen triangles in tiled_deferred specifically lose to the
-        // gbuffer subpass's previously written depth values).
+        // so the encoder doesn't inherit a previous pipeline's depth test/write.
         let (depth_bias, depth_bias_slope_scale, depth_bias_clamp) = descriptor
             .depth_stencil
             .map(|depth_stencil| {
@@ -576,7 +567,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn render_shader_uses_vertex_descriptor_for_msl_passthrough() {
+    fn render_shader_uses_vertex_descriptor_for_plain_msl() {
         let shader = HalShaderSource::Msl(String::new());
 
         assert!(render_shader_uses_metal_vertex_descriptor(&shader));

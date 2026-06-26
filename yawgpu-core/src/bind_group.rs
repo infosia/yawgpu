@@ -102,13 +102,6 @@ impl BindGroup {
 }
 
 /// Validates bind group descriptor and returns a descriptive error on failure.
-///
-/// `InputAttachment`-kind layout slots may be omitted by the caller — the
-/// subpass render pass auto-wires them from the pass layout's input-source
-/// map (block 55 "Input attachments are pass-local, auto-wired"). Non-input
-/// slots are still required; an explicit `TextureView` supplied for an
-/// input-attachment slot is still rejected (the slot owner is the pass, not
-/// the caller).
 pub(crate) fn validate_bind_group_descriptor(
     device: &Device,
     layout: &BindGroupLayout,
@@ -118,11 +111,7 @@ pub(crate) fn validate_bind_group_descriptor(
     if layout.is_error() {
         return Some("cannot create bind group from an error bind group layout".to_owned());
     }
-    let required_entry_count = layout
-        .entries()
-        .iter()
-        .filter(|entry| !bind_group_layout_entry_is_input_attachment(entry))
-        .count();
+    let required_entry_count = layout.entries().len();
     if entries.len() != required_entry_count {
         return Some("bind group entry count must match bind group layout".to_owned());
     }
@@ -150,26 +139,12 @@ pub(crate) fn validate_bind_group_descriptor(
     }
 
     for layout_entry in layout.entries() {
-        if !seen.contains(&layout_entry.binding)
-            && !bind_group_layout_entry_is_input_attachment(layout_entry)
-        {
+        if !seen.contains(&layout_entry.binding) {
             return Some("bind group is missing a layout binding".to_owned());
         }
     }
 
     None
-}
-
-fn bind_group_layout_entry_is_input_attachment(entry: &BindGroupLayoutEntry) -> bool {
-    #[cfg(feature = "tiled")]
-    {
-        matches!(entry.kind, Some(BindingLayoutKind::InputAttachment { .. }))
-    }
-    #[cfg(not(feature = "tiled"))]
-    {
-        let _ = entry;
-        false
-    }
 }
 
 /// Validates bind group entry and returns a descriptive error on failure.
@@ -215,18 +190,18 @@ pub(crate) fn validate_bind_group_entry(
                 Some("bind group sampler must belong to the same device".to_owned())
             } else if sampler.is_error() {
                 Some("bind group sampler must not be an error sampler".to_owned())
-            } else if ty == SamplerBindingType::Comparison
-                && sampler.descriptor().compare.is_none()
+            } else if ty == SamplerBindingType::Comparison && sampler.descriptor().compare.is_none()
             {
                 Some("comparison sampler bindings require a compare function".to_owned())
-            } else if ty != SamplerBindingType::Comparison
-                && sampler.descriptor().compare.is_some()
+            } else if ty != SamplerBindingType::Comparison && sampler.descriptor().compare.is_some()
             {
                 Some("non-comparison sampler bindings must not use a compare function".to_owned())
-            } else if ty == SamplerBindingType::NonFiltering
-                && sampler.descriptor().is_filtering()
+            } else if ty == SamplerBindingType::NonFiltering && sampler.descriptor().is_filtering()
             {
-                Some("filtering sampler is incompatible with non-filtering sampler binding".to_owned())
+                Some(
+                    "filtering sampler is incompatible with non-filtering sampler binding"
+                        .to_owned(),
+                )
             } else {
                 None
             }
@@ -266,14 +241,9 @@ pub(crate) fn validate_bind_group_entry(
             format,
             view_dimension,
         ),
-        #[cfg(feature = "tiled")]
-        (_, BindingLayoutKind::InputAttachment { .. }) => Some(
-            "input-attachment binding must not be supplied in the bind group; it is auto-wired by the subpass pass"
-                .to_owned(),
-        ),
-        (_, BindingLayoutKind::ExternalTexture) => Some(
-            "external texture bind group entries are not implemented in this slice".to_owned(),
-        ),
+        (_, BindingLayoutKind::ExternalTexture) => {
+            Some("external texture bind group entries are not implemented in this slice".to_owned())
+        }
         (BindGroupResource::Invalid(message), _) => Some(message.clone()),
         _ => Some("bind group entry resource kind must match the layout".to_owned()),
     }
@@ -511,8 +481,6 @@ pub(crate) fn validate_bind_group_storage_texture(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "tiled")]
-    use crate::shader::SHADER_STAGE_FRAGMENT;
     use crate::test_helpers::*;
     use crate::*;
 
@@ -756,108 +724,6 @@ mod tests {
                 device.limits(),
             ),
             None
-        );
-    }
-
-    #[cfg(feature = "tiled")]
-    fn input_attachment_layout_entry(binding: u32) -> BindGroupLayoutEntry {
-        BindGroupLayoutEntry {
-            binding,
-            visibility: SHADER_STAGE_FRAGMENT,
-            binding_array_size: 0,
-            kind: Some(BindingLayoutKind::InputAttachment {
-                sample_type: TextureSampleType::Float,
-                multisampled: false,
-            }),
-        }
-    }
-
-    #[cfg(feature = "tiled")]
-    fn uniform_layout_entry(binding: u32) -> BindGroupLayoutEntry {
-        BindGroupLayoutEntry {
-            binding,
-            visibility: SHADER_STAGE_FRAGMENT,
-            binding_array_size: 0,
-            kind: Some(BindingLayoutKind::Buffer {
-                ty: BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: 4,
-            }),
-        }
-    }
-
-    #[cfg(feature = "tiled")]
-    fn uniform_bind_group_entry(device: &Device, binding: u32) -> BindGroupEntry {
-        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
-            usage: BufferUsage::UNIFORM,
-            size: 4,
-            mapped_at_creation: false,
-        }));
-        BindGroupEntry {
-            binding,
-            resource: BindGroupResource::Buffer {
-                buffer,
-                device: Arc::new(device.clone()),
-                offset: 0,
-                size: 4,
-            },
-        }
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn validate_bind_group_descriptor_accepts_mixed_group_with_input_omitted() {
-        let device = noop_device();
-        let layout = device.create_bind_group_layout(BindGroupLayoutDescriptor {
-            entries: vec![input_attachment_layout_entry(0), uniform_layout_entry(1)],
-            error: None,
-        });
-        let entries = vec![uniform_bind_group_entry(&device, 1)];
-
-        assert_eq!(
-            validate_bind_group_descriptor(&device, &layout, &entries, device.limits()),
-            None
-        );
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn validate_bind_group_descriptor_rejects_mixed_group_missing_non_input() {
-        let device = noop_device();
-        let layout = device.create_bind_group_layout(BindGroupLayoutDescriptor {
-            entries: vec![input_attachment_layout_entry(0), uniform_layout_entry(1)],
-            error: None,
-        });
-
-        assert_eq!(
-            validate_bind_group_descriptor(&device, &layout, &[], device.limits()),
-            Some("bind group entry count must match bind group layout".to_owned())
-        );
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn validate_bind_group_descriptor_rejects_explicit_view_for_input_slot() {
-        let device = noop_device();
-        let layout = device.create_bind_group_layout(BindGroupLayoutDescriptor {
-            entries: vec![uniform_layout_entry(0), input_attachment_layout_entry(1)],
-            error: None,
-        });
-        let view = noop_render_attachment(&device);
-        let entries = vec![BindGroupEntry {
-            binding: 1,
-            resource: BindGroupResource::TextureView {
-                texture_view: view,
-                device: Arc::new(device.clone()),
-            },
-        }];
-
-        assert_eq!(
-            validate_bind_group_descriptor(&device, &layout, &entries, device.limits()),
-            Some(
-                "input-attachment binding must not be supplied in the bind group; it is auto-wired by the subpass pass"
-                    .to_owned()
-            )
         );
     }
 

@@ -6,8 +6,6 @@ license.workspace = true
 
 [features]
 gles = ["naga/glsl-out"]
-shader-passthrough = ["naga/spv-in"]
-tiled = ["yawgpu-hal/tiled"]
 
 [dependencies]
 yawgpu-hal = { path = "../yawgpu-hal" }

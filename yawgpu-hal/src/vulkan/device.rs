@@ -38,10 +38,6 @@ pub(super) struct VulkanDeviceInner {
     /// per WebGPU semantics (clamp, never error).
     pub(super) max_sampler_anisotropy: f32,
     pub(super) allocations: AtomicU64,
-    #[cfg(feature = "tiled")]
-    pub(super) framebuffer_fetch_path: FramebufferFetchPath,
-    #[cfg(feature = "tiled")]
-    pub(super) subpass_render_pass_cache: Mutex<BTreeMap<HalSubpassPassLayout, vk::RenderPass>>,
 }
 
 impl fmt::Debug for VulkanDeviceInner {
@@ -70,12 +66,6 @@ impl fmt::Debug for VulkanDeviceInner {
 impl Drop for VulkanDeviceInner {
     fn drop(&mut self) {
         unsafe {
-            #[cfg(feature = "tiled")]
-            if let Ok(cache) = self.subpass_render_pass_cache.lock() {
-                for &render_pass in cache.values() {
-                    self.device.destroy_render_pass(render_pass, None);
-                }
-            }
             self.device.destroy_device(None);
         }
     }
@@ -107,23 +97,6 @@ impl VulkanDevice {
     #[must_use]
     pub fn robust_buffer_access2(&self) -> bool {
         self.inner.robust_buffer_access2
-    }
-
-    /// Returns the detected shader framebuffer-fetch path.
-    #[cfg(feature = "tiled")]
-    #[must_use]
-    pub fn framebuffer_fetch_path(&self) -> FramebufferFetchPath {
-        self.inner.framebuffer_fetch_path
-    }
-
-    /// Returns true when shader framebuffer fetch is supported.
-    #[cfg(feature = "tiled")]
-    #[must_use]
-    pub fn supports_shader_framebuffer_fetch(&self) -> bool {
-        !matches!(
-            self.inner.framebuffer_fetch_path,
-            FramebufferFetchPath::Disabled
-        )
     }
 
     /// Allocates a buffer of the given size on this device.
@@ -175,16 +148,6 @@ impl VulkanDevice {
         }
     }
 
-    /// Creates a transient attachment matching the given concrete descriptor.
-    #[cfg(feature = "tiled")]
-    pub fn create_transient_attachment(
-        &self,
-        descriptor: &HalTransientAttachmentDescriptor,
-    ) -> Result<VulkanTransientAttachment, HalError> {
-        self.inner.allocations.fetch_add(1, Ordering::Relaxed);
-        create_transient_attachment(Arc::clone(&self.inner), descriptor)
-    }
-
     /// Creates a sampler matching the given descriptor.
     #[must_use]
     pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> VulkanSampler {
@@ -223,31 +186,6 @@ impl VulkanDevice {
             fragment_entry_point,
             descriptor,
             bindings,
-        )
-    }
-
-    /// Creates a subpass-compatible render pipeline.
-    #[cfg(feature = "tiled")]
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_subpass_render_pipeline(
-        &self,
-        shader: HalShaderSource,
-        vertex_entry_point: &str,
-        fragment_entry_point: &str,
-        descriptor: &HalRenderPipelineDescriptor,
-        bindings: &[HalDescriptorBinding],
-        pass_layout: &HalSubpassPassLayout,
-        subpass_index: u32,
-    ) -> Result<VulkanRenderPipeline, HalError> {
-        create_subpass_render_pipeline(
-            Arc::clone(&self.inner),
-            shader,
-            vertex_entry_point,
-            fragment_entry_point,
-            descriptor,
-            bindings,
-            pass_layout,
-            subpass_index,
         )
     }
 }

@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-#[cfg(feature = "tiled")]
-use yawgpu_hal::FramebufferFetchPath;
 use yawgpu_hal::{HalAdapter, HalBackend};
 
 use parking_lot::Mutex;
@@ -79,18 +77,7 @@ impl Adapter {
         add_texture_compression_features(&mut features, &self.inner.hal);
         add_shader_float16_feature(&mut features, &self.inner.hal);
 
-        #[cfg(not(feature = "tiled"))]
         {
-            features
-        }
-
-        #[cfg(feature = "tiled")]
-        {
-            add_tiled_features(
-                &mut features,
-                self.backend(),
-                self.inner.hal.framebuffer_fetch_path(),
-            );
             features
         }
     }
@@ -193,31 +180,8 @@ pub enum Feature {
     TextureFormatsTier1,
     /// Texture formats tier2 variant.
     TextureFormatsTier2,
-    /// Multi-subpass render pass support.
-    #[cfg(feature = "tiled")]
-    MultiSubpass,
-    /// Transient attachment support.
-    #[cfg(feature = "tiled")]
-    TransientAttachments,
-    /// Shader framebuffer fetch support.
-    #[cfg(feature = "tiled")]
-    ShaderFramebufferFetch,
     /// Other variant.
     Other(u32),
-}
-
-/// Stores tiled rendering limits exposed by the adapter.
-#[cfg(feature = "tiled")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TiledCapabilities {
-    /// Maximum number of subpasses in one tiled render pass.
-    pub max_subpasses: u32,
-    /// Maximum number of color attachments in a subpass.
-    pub max_subpass_color_attachments: u32,
-    /// Maximum number of input attachments in a subpass.
-    pub max_input_attachments: u32,
-    /// Estimated tile memory budget, in bytes.
-    pub estimated_tile_memory_bytes: u32,
 }
 
 /// Returns supported features.
@@ -258,61 +222,6 @@ fn add_texture_compression_features(features: &mut FeatureSet, hal: &HalAdapter)
 fn add_shader_float16_feature(features: &mut FeatureSet, hal: &HalAdapter) {
     if hal.supports_shader_float16() {
         features.insert(Feature::ShaderF16);
-    }
-}
-
-/// Returns true when tiled rendering features are supported by `backend`.
-#[cfg(feature = "tiled")]
-#[must_use]
-pub(crate) fn tiled_features_supported(backend: HalBackend) -> bool {
-    matches!(backend, HalBackend::Metal | HalBackend::Vulkan)
-}
-
-/// Returns true when shader framebuffer fetch is supported by backend/path.
-#[cfg(feature = "tiled")]
-#[must_use]
-pub(crate) fn framebuffer_fetch_supported(backend: HalBackend, path: FramebufferFetchPath) -> bool {
-    match backend {
-        HalBackend::Metal => true,
-        HalBackend::Vulkan => !matches!(path, FramebufferFetchPath::Disabled),
-        HalBackend::Noop => false,
-        _ => false,
-    }
-}
-
-#[cfg(feature = "tiled")]
-fn add_tiled_features(features: &mut FeatureSet, backend: HalBackend, path: FramebufferFetchPath) {
-    if !tiled_features_supported(backend) {
-        return;
-    }
-    features.insert(Feature::MultiSubpass);
-    features.insert(Feature::TransientAttachments);
-    if framebuffer_fetch_supported(backend, path) {
-        features.insert(Feature::ShaderFramebufferFetch);
-    }
-}
-
-#[cfg(feature = "tiled")]
-impl Adapter {
-    /// Returns tiled rendering capabilities for this adapter.
-    #[must_use]
-    pub fn tiled_capabilities(&self) -> TiledCapabilities {
-        if !tiled_features_supported(self.backend()) {
-            return TiledCapabilities {
-                max_subpasses: 0,
-                max_subpass_color_attachments: 0,
-                max_input_attachments: 0,
-                estimated_tile_memory_bytes: 0,
-            };
-        }
-
-        let limits = self.limits();
-        TiledCapabilities {
-            max_subpasses: 4,
-            max_subpass_color_attachments: limits.max_color_attachments,
-            max_input_attachments: limits.max_color_attachments,
-            estimated_tile_memory_bytes: 256 * 1024,
-        }
     }
 }
 
@@ -446,102 +355,5 @@ mod tests {
             .expect_err("successful requestDevice should consume adapter");
         assert!(matches!(error, Error::Validation(message) if message.contains("consumed")));
         assert_eq!(device.queue().label(), "queue label");
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn tiled_features_supported_is_backend_aware_and_noop_does_not_advertise() {
-        assert!(!tiled_features_supported(HalBackend::Noop));
-        assert!(tiled_features_supported(HalBackend::Metal));
-        assert!(tiled_features_supported(HalBackend::Vulkan));
-
-        let adapter = noop_adapter();
-        assert!(!adapter.has_feature(Feature::MultiSubpass));
-        assert!(!adapter.has_feature(Feature::TransientAttachments));
-        assert!(!adapter.has_feature(Feature::ShaderFramebufferFetch));
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn framebuffer_fetch_support_is_backend_and_path_aware() {
-        assert!(framebuffer_fetch_supported(
-            HalBackend::Metal,
-            FramebufferFetchPath::Disabled
-        ));
-        assert!(framebuffer_fetch_supported(
-            HalBackend::Vulkan,
-            FramebufferFetchPath::TileImage
-        ));
-        assert!(framebuffer_fetch_supported(
-            HalBackend::Vulkan,
-            FramebufferFetchPath::RasterOrderAttachmentAccess
-        ));
-        assert!(!framebuffer_fetch_supported(
-            HalBackend::Vulkan,
-            FramebufferFetchPath::Disabled
-        ));
-        assert!(!framebuffer_fetch_supported(
-            HalBackend::Noop,
-            FramebufferFetchPath::TileImage
-        ));
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn tiled_feature_advertise_gates_shader_framebuffer_fetch() {
-        let mut vulkan_disabled = supported_features();
-        add_tiled_features(
-            &mut vulkan_disabled,
-            HalBackend::Vulkan,
-            FramebufferFetchPath::Disabled,
-        );
-        assert!(vulkan_disabled.contains(&Feature::MultiSubpass));
-        assert!(vulkan_disabled.contains(&Feature::TransientAttachments));
-        assert!(!vulkan_disabled.contains(&Feature::ShaderFramebufferFetch));
-
-        let mut vulkan_tile_image = supported_features();
-        add_tiled_features(
-            &mut vulkan_tile_image,
-            HalBackend::Vulkan,
-            FramebufferFetchPath::TileImage,
-        );
-        assert!(vulkan_tile_image.contains(&Feature::ShaderFramebufferFetch));
-
-        let mut vulkan_roaa = supported_features();
-        add_tiled_features(
-            &mut vulkan_roaa,
-            HalBackend::Vulkan,
-            FramebufferFetchPath::RasterOrderAttachmentAccess,
-        );
-        assert!(vulkan_roaa.contains(&Feature::ShaderFramebufferFetch));
-
-        let mut metal = supported_features();
-        add_tiled_features(
-            &mut metal,
-            HalBackend::Metal,
-            FramebufferFetchPath::Disabled,
-        );
-        assert!(metal.contains(&Feature::ShaderFramebufferFetch));
-
-        let mut noop = supported_features();
-        add_tiled_features(&mut noop, HalBackend::Noop, FramebufferFetchPath::TileImage);
-        assert!(!noop.contains(&Feature::MultiSubpass));
-        assert!(!noop.contains(&Feature::ShaderFramebufferFetch));
-    }
-
-    #[cfg(feature = "tiled")]
-    #[test]
-    fn tiled_capabilities_are_zero_on_noop() {
-        let adapter = noop_adapter();
-
-        assert_eq!(
-            adapter.tiled_capabilities(),
-            TiledCapabilities {
-                max_subpasses: 0,
-                max_subpass_color_attachments: 0,
-                max_input_attachments: 0,
-                estimated_tile_memory_bytes: 0,
-            }
-        );
     }
 }

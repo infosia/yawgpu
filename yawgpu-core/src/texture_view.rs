@@ -765,7 +765,9 @@ mod tests {
 
         // aspect=All with the texture's own combined format is accepted.
         let (_, error) = texture.create_view(TextureViewDescriptor {
-            format: Some(TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8)),
+            format: Some(TextureFormat::from_raw(
+                TextureFormat::DEPTH24_PLUS_STENCIL8,
+            )),
             dimension: None,
             base_mip_level: 0,
             mip_level_count: None,

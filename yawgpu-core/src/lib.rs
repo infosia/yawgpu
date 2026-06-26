@@ -26,20 +26,14 @@ mod render_pass;
 mod render_pipeline;
 mod sampler;
 mod shader;
-#[cfg(feature = "tiled")]
-mod subpass;
 #[cfg(test)]
 mod test_helpers;
 mod texture;
 mod texture_view;
-#[cfg(feature = "tiled")]
-mod transient_attachment;
 
 /// Shader naga module.
 pub(crate) mod shader_naga;
 
-#[cfg(feature = "tiled")]
-pub use adapter::TiledCapabilities;
 pub use adapter::{Adapter, Feature, FeatureLevel};
 pub use bind_group::{BindGroup, BindGroupEntry, BindGroupResource};
 pub use bind_group_layout::{
@@ -73,8 +67,6 @@ pub use render_pass::{
     RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor,
     RenderPassEncoder, RenderPassTimestampWrites,
 };
-#[cfg(feature = "tiled")]
-pub use render_pipeline::SubpassRenderPipelineDescriptor;
 pub use render_pipeline::{
     BlendComponent, BlendFactor, BlendOperation, BlendState, ColorTargetState, CullMode,
     DepthStencilState, FrontFace, IndexFormat, MultisampleState, PrimitiveState, PrimitiveTopology,
@@ -87,25 +79,10 @@ pub use sampler::{
     SamplerDescriptor,
 };
 pub use shader::{CompilationMessage, CompilationSeverity, ShaderModule, ShaderModuleSource};
-#[cfg(feature = "shader-passthrough")]
-pub use shader::{MslEntryPoint, MslReflection};
-#[cfg(feature = "shader-passthrough")]
-pub use shader_naga::ReflectedModule;
-#[cfg(feature = "tiled")]
-pub use subpass::{
-    AttachmentLayout, SubpassAttachmentResource, SubpassColorAttachmentBinding, SubpassDependency,
-    SubpassDependencyType, SubpassDepthStencilAttachmentBinding, SubpassInputAttachment,
-    SubpassLayoutDesc, SubpassPassLayout, SubpassPassLayoutDescriptor, SubpassRenderPass,
-    SubpassRenderPassDescriptor, DEPTH_STENCIL_ATTACHMENT_INDEX,
-};
 pub use texture::{Texture, TextureDescriptor, TextureDimension, TextureUsage};
 pub use texture_view::{
     ComponentSwizzle, TextureAspect, TextureComponentSwizzle, TextureView, TextureViewDescriptor,
     TextureViewDimension,
-};
-#[cfg(feature = "tiled")]
-pub use transient_attachment::{
-    TransientAttachment, TransientAttachmentDescriptor, TransientSizeMode,
 };
 
 #[cfg(test)]

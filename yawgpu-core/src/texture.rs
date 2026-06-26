@@ -29,16 +29,13 @@ impl TextureUsage {
     pub const STORAGE_BINDING: Self = Self(8);
     /// Constant value for render attachment.
     pub const RENDER_ATTACHMENT: Self = Self(16);
-    /// Constant value for transient attachment.
-    pub const TRANSIENT_ATTACHMENT: Self = Self(32);
     /// Mask of all known texture usage bits.
     pub const ALL: Self = Self(
         Self::COPY_SRC.0
             | Self::COPY_DST.0
             | Self::TEXTURE_BINDING.0
             | Self::STORAGE_BINDING.0
-            | Self::RENDER_ATTACHMENT.0
-            | Self::TRANSIENT_ATTACHMENT.0,
+            | Self::RENDER_ATTACHMENT.0,
     );
 
     /// Constructs this object from bits retain.
@@ -344,14 +341,6 @@ pub(crate) fn validate_texture_descriptor(
     if usage.bits() & !TextureUsage::ALL.bits() != 0 {
         return Some("texture usage contains unknown bits");
     }
-    if usage.contains(TextureUsage::TRANSIENT_ATTACHMENT)
-        && usage.bits()
-            != (TextureUsage::RENDER_ATTACHMENT | TextureUsage::TRANSIENT_ATTACHMENT).bits()
-    {
-        return Some(
-            "TransientAttachment texture usage requires exactly RenderAttachment and TransientAttachment",
-        );
-    }
     if descriptor.sample_count != 1 && descriptor.sample_count != 4 {
         return Some("texture sample count must be 1 or 4");
     }
@@ -425,11 +414,6 @@ pub(crate) fn validate_texture_descriptor(
         && descriptor.dimension == TextureDimension::D1
     {
         return Some("RenderAttachment textures must not be 1D");
-    }
-    if usage.contains(TextureUsage::TRANSIENT_ATTACHMENT)
-        && descriptor.dimension != TextureDimension::D2
-    {
-        return Some("TransientAttachment textures must be 2D");
     }
     let Some(format_caps) = descriptor.format.caps(features) else {
         return Some("texture format must not be Undefined");
@@ -1084,31 +1068,6 @@ mod tests {
         assert_eq!(
             validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
             Some("texture usage contains unknown bits")
-        );
-    }
-
-    #[test]
-    fn validate_texture_descriptor_rejects_invalid_transient_usage_combinations() {
-        let mut descriptor = texture_descriptor_4x4();
-        descriptor.usage = TextureUsage::TRANSIENT_ATTACHMENT;
-        assert_eq!(
-            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
-            Some(
-                "TransientAttachment texture usage requires exactly RenderAttachment and TransientAttachment"
-            )
-        );
-
-        descriptor.usage = TextureUsage::RENDER_ATTACHMENT | TextureUsage::TRANSIENT_ATTACHMENT;
-        assert_eq!(
-            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
-            None
-        );
-
-        descriptor.dimension = TextureDimension::D3;
-        descriptor.size.depth_or_array_layers = 4;
-        assert_eq!(
-            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
-            Some("TransientAttachment textures must be 2D")
         );
     }
 

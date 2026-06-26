@@ -10,11 +10,6 @@ use yawgpu_hal::{
     HalResolveQuerySet, HalScissorRect, HalTextureAspect, HalTextureCopy, HalTextureViewDimension,
     HalViewport,
 };
-#[cfg(feature = "tiled")]
-use yawgpu_hal::{
-    HalSubpassAttachmentResource, HalSubpassColorAttachment, HalSubpassDepthStencilAttachment,
-    HalSubpassDraw, HalSubpassRenderPassCommand,
-};
 
 use crate::bind_group::*;
 use crate::bind_group_layout::*;
@@ -27,8 +22,6 @@ use crate::extent::*;
 use crate::pass::*;
 use crate::query_set::QuerySet;
 use crate::render_pipeline::*;
-#[cfg(feature = "tiled")]
-use crate::subpass::*;
 use crate::texture::hal_texture_format;
 use crate::texture::*;
 use crate::texture_view::{TextureAspect, TextureViewDimension};
@@ -524,15 +517,6 @@ fn command_buffer_referenced_textures(command_buffer: &CommandBuffer) -> Vec<Tex
                 }
             },
             CommandExecution::RenderPass(pass) => textures.extend(pass.attachment_textures.clone()),
-            #[cfg(feature = "tiled")]
-            CommandExecution::SubpassRenderPass(pass) => {
-                for attachment in &pass.color_attachments {
-                    push_subpass_resource_textures(&mut textures, &attachment.resource);
-                }
-                if let Some(attachment) = &pass.depth_stencil_attachment {
-                    push_subpass_resource_textures(&mut textures, &attachment.resource);
-                }
-            }
             CommandExecution::BufferCopy(_)
             | CommandExecution::BufferClear(_)
             | CommandExecution::ResolveQuerySet(_)
@@ -540,26 +524,6 @@ fn command_buffer_referenced_textures(command_buffer: &CommandBuffer) -> Vec<Tex
         }
     }
     textures
-}
-
-// Persistent subpass attachments are backed by user texture views whose
-// textures may be destroyed; transient attachments are not user textures and
-// cannot be destroyed, so they are skipped.
-#[cfg(feature = "tiled")]
-fn push_subpass_resource_textures(
-    textures: &mut Vec<Texture>,
-    resource: &SubpassAttachmentResource,
-) {
-    if let SubpassAttachmentResource::Persistent {
-        view,
-        resolve_target,
-    } = resource
-    {
-        textures.push(view.texture());
-        if let Some(resolve_target) = resolve_target {
-            textures.push(resolve_target.texture());
-        }
-    }
 }
 
 /// Repacks a caller-strided texel-copy source into a tightly-packed buffer.
@@ -691,8 +655,6 @@ fn hal_command_execution_with_ops(
         CommandExecution::TextureCopy(copy) => hal_texture_copy_execution(copy),
         CommandExecution::ComputePass(pass) => hal_compute_pass_execution(pass),
         CommandExecution::RenderPass(pass) => hal_render_pass_execution(pass),
-        #[cfg(feature = "tiled")]
-        CommandExecution::SubpassRenderPass(pass) => hal_subpass_render_pass_execution(pass),
     }
 }
 
@@ -721,137 +683,6 @@ fn resolve_written_occlusion_queries(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
-}
-
-#[cfg(feature = "tiled")]
-fn hal_subpass_render_pass_execution(pass: &SubpassRenderPassCommand) -> Option<HalCopy> {
-    Some(HalCopy::SubpassRenderPass(HalSubpassRenderPassCommand {
-        layout: hal_subpass_pass_layout(pass.layout.descriptor()),
-        extent: hal_extent(pass.extent),
-        color_attachments: pass
-            .color_attachments
-            .iter()
-            .map(hal_subpass_color_attachment)
-            .collect::<Option<Vec<_>>>()?,
-        depth_stencil_attachment: match &pass.depth_stencil_attachment {
-            Some(attachment) => Some(hal_subpass_depth_stencil_attachment(attachment)?),
-            None => None,
-        },
-        draws: pass
-            .draws
-            .iter()
-            .map(hal_subpass_draw_execution)
-            .collect::<Option<Vec<_>>>()?,
-    }))
-}
-
-#[cfg(feature = "tiled")]
-fn hal_subpass_draw_execution(draw: &SubpassDrawExecution) -> Option<HalSubpassDraw> {
-    let bindings = hal_bind_resources(
-        draw.pipeline.bind_group_layouts(),
-        draw.pipeline.metal_bindings(),
-        &draw.bind_groups,
-    )?;
-    let mut vertex_buffers = Vec::new();
-    for binding in draw.pipeline.vertex_buffer_bindings() {
-        let bound = draw.vertex_buffers.get(&binding.slot)?;
-        vertex_buffers.push(HalBoundBuffer {
-            group: 0,
-            binding: binding.slot,
-            metal_index: binding.metal_index,
-            vertex_metal_index: None,
-            fragment_metal_index: None,
-            buffer: bound.buffer.hal()?,
-            offset: bound.offset,
-            size: bound.size,
-        });
-    }
-    let RenderDrawExecution::Direct {
-        vertex_count,
-        instance_count,
-        first_vertex,
-        first_instance,
-    } = draw.draw
-    else {
-        return None;
-    };
-    Some(HalSubpassDraw {
-        subpass_index: draw.subpass_index,
-        pipeline: draw.pipeline.hal()?,
-        bind_buffers: bindings.buffers,
-        bind_textures: bindings.textures,
-        bind_samplers: bindings.samplers,
-        vertex_buffers,
-        viewport: draw.viewport.map(hal_viewport),
-        scissor_rect: draw.scissor_rect.map(hal_scissor_rect),
-        draw: HalDraw::Direct {
-            vertex_count,
-            instance_count,
-            first_vertex,
-            first_instance,
-        },
-    })
-}
-
-#[cfg(feature = "tiled")]
-fn hal_subpass_color_attachment(
-    attachment: &SubpassColorAttachmentBinding,
-) -> Option<HalSubpassColorAttachment> {
-    Some(HalSubpassColorAttachment {
-        resource: hal_subpass_attachment_resource(&attachment.resource)?,
-        load_op: hal_load_op(attachment.load_op),
-        store: matches!(attachment.store_op, StoreOp::Store),
-        clear_color: [
-            attachment.clear_value.r,
-            attachment.clear_value.g,
-            attachment.clear_value.b,
-            attachment.clear_value.a,
-        ],
-    })
-}
-
-#[cfg(feature = "tiled")]
-fn hal_subpass_depth_stencil_attachment(
-    attachment: &SubpassDepthStencilAttachmentBinding,
-) -> Option<HalSubpassDepthStencilAttachment> {
-    Some(HalSubpassDepthStencilAttachment {
-        resource: hal_subpass_attachment_resource(&attachment.resource)?,
-        depth_load_op: hal_load_op(attachment.depth_load_op),
-        depth_store: matches!(attachment.depth_store_op, StoreOp::Store),
-        depth_clear_value: attachment.depth_clear_value,
-        stencil_load_op: hal_load_op(attachment.stencil_load_op),
-        stencil_store: matches!(attachment.stencil_store_op, StoreOp::Store),
-        stencil_clear_value: attachment.stencil_clear_value,
-    })
-}
-
-#[cfg(feature = "tiled")]
-fn hal_subpass_attachment_resource(
-    resource: &SubpassAttachmentResource,
-) -> Option<HalSubpassAttachmentResource> {
-    match resource {
-        SubpassAttachmentResource::Persistent {
-            view,
-            resolve_target,
-        } => Some(HalSubpassAttachmentResource::Persistent {
-            texture: view.texture().hal()?,
-            resolve_target: match resolve_target {
-                Some(view) => Some(view.texture().hal()?),
-                None => None,
-            },
-        }),
-        SubpassAttachmentResource::Transient(attachment) => {
-            Some(HalSubpassAttachmentResource::Transient(attachment.hal()?))
-        }
-    }
-}
-
-#[cfg(feature = "tiled")]
-fn hal_load_op(load_op: LoadOp) -> HalRenderLoadOp {
-    match load_op {
-        LoadOp::Load => HalRenderLoadOp::Load,
-        LoadOp::Clear | LoadOp::Undefined => HalRenderLoadOp::Clear,
-    }
 }
 
 /// Returns HAL texture copy execution.

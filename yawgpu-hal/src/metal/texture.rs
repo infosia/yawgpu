@@ -14,35 +14,6 @@ pub struct MetalTexture {
     pub(super) bytes_per_pixel: u32,
 }
 
-/// Stores metal transient attachment data used by tiled rendering.
-#[cfg(feature = "tiled")]
-#[derive(Clone)]
-pub struct MetalTransientAttachment {
-    pub(super) _inner: Retained<ProtocolObject<dyn MTLTextureTrait>>,
-    pub(super) _format: HalTextureFormat,
-    pub(super) _width: u32,
-    pub(super) _height: u32,
-    pub(super) _sample_count: u32,
-    pub(super) _memoryless: bool,
-}
-
-#[cfg(feature = "tiled")]
-unsafe impl Send for MetalTransientAttachment {}
-#[cfg(feature = "tiled")]
-unsafe impl Sync for MetalTransientAttachment {}
-
-#[cfg(feature = "tiled")]
-impl std::fmt::Debug for MetalTransientAttachment {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MetalTransientAttachment")
-            .field("width", &self._width)
-            .field("height", &self._height)
-            .field("sample_count", &self._sample_count)
-            .field("memoryless", &self._memoryless)
-            .finish()
-    }
-}
-
 unsafe impl Send for MetalTexture {}
 unsafe impl Sync for MetalTexture {}
 
@@ -172,52 +143,6 @@ pub(super) fn create_texture(
                 resource: "texture",
             })?;
     Ok((texture, bytes_per_pixel))
-}
-
-/// Creates a transient attachment texture.
-#[cfg(feature = "tiled")]
-pub(super) fn create_transient_attachment(
-    device: &ProtocolObject<dyn MTLDevice>,
-    descriptor: &HalTransientAttachmentDescriptor,
-) -> Result<MetalTransientAttachment, HalError> {
-    let (pixel_format, _) = map_texture_format(descriptor.format)?;
-    let texture_descriptor = MTLTextureDescriptor::new();
-    texture_descriptor.setTextureType(if descriptor.sample_count > 1 {
-        MTLTextureType::Type2DMultisample
-    } else {
-        MTLTextureType::Type2D
-    });
-    texture_descriptor.setPixelFormat(pixel_format);
-    unsafe {
-        texture_descriptor.setWidth(to_ns(u64::from(descriptor.width))?);
-        texture_descriptor.setHeight(to_ns(u64::from(descriptor.height))?);
-        texture_descriptor.setDepth(1);
-        texture_descriptor.setArrayLength(1);
-        texture_descriptor.setMipmapLevelCount(1);
-        texture_descriptor.setSampleCount(to_ns(u64::from(descriptor.sample_count))?);
-    }
-    texture_descriptor.setStorageMode(MTLStorageMode::Memoryless);
-    texture_descriptor.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
-    let (texture, memoryless) = match device.newTextureWithDescriptor(&texture_descriptor) {
-        Some(texture) => (texture, true),
-        None => {
-            texture_descriptor.setStorageMode(MTLStorageMode::Private);
-            (
-                device
-                    .newTextureWithDescriptor(&texture_descriptor)
-                    .ok_or_else(|| texture_error("transient texture allocation failed"))?,
-                false,
-            )
-        }
-    };
-    Ok(MetalTransientAttachment {
-        _inner: texture,
-        _format: descriptor.format,
-        _width: descriptor.width,
-        _height: descriptor.height,
-        _sample_count: descriptor.sample_count,
-        _memoryless: memoryless,
-    })
 }
 
 /// Metal's documented maximum for `setMaxAnisotropy` (API range [1, 16]).
