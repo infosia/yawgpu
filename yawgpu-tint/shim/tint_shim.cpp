@@ -12,12 +12,17 @@
 #include "src/tint/api/common/substitute_overrides_config.h"
 #include "src/tint/api/helpers/generate_bindings.h"
 #include "src/tint/api/tint.h"
+#include "src/tint/lang/core/constant/value.h"
 #include "src/tint/lang/glsl/writer/helpers/generate_bindings.h"
 #include "src/tint/lang/glsl/writer/writer.h"
 #include "src/tint/lang/msl/writer/writer.h"
 #include "src/tint/lang/spirv/writer/writer.h"
+#include "src/tint/lang/wgsl/ast/identifier.h"
+#include "src/tint/lang/wgsl/ast/module.h"
+#include "src/tint/lang/wgsl/ast/override.h"
 #include "src/tint/lang/wgsl/inspector/inspector.h"
 #include "src/tint/lang/wgsl/reader/reader.h"
+#include "src/tint/lang/wgsl/sem/variable.h"
 
 #include "tint_shim.h"
 
@@ -153,12 +158,51 @@ void fill_resource_binding(const tint::inspector::ResourceBinding& binding,
     out->array_size = binding.array_size.value_or(0);
 }
 
-void fill_override(const tint::inspector::Override& ov, YawgpuTintOverride* out) {
+double override_default_value(const tint::sem::GlobalVariable* global,
+                              tint::inspector::Override::Type type) {
+    if (global == nullptr || global->Initializer() == nullptr ||
+        global->Initializer()->ConstantValue() == nullptr) {
+        return 0.0;
+    }
+    const auto* value = global->Initializer()->ConstantValue();
+    switch (type) {
+        case tint::inspector::Override::Type::kBool:
+            return value->ValueAs<bool>() ? 1.0 : 0.0;
+        case tint::inspector::Override::Type::kFloat32:
+            return static_cast<double>(value->ValueAs<tint::core::f32>());
+        case tint::inspector::Override::Type::kUint32:
+            return static_cast<double>(value->ValueAs<tint::core::u32>());
+        case tint::inspector::Override::Type::kInt32:
+            return static_cast<double>(value->ValueAs<tint::core::i32>());
+        case tint::inspector::Override::Type::kFloat16:
+            return static_cast<double>(static_cast<float>(value->ValueAs<tint::core::f16>()));
+    }
+    return 0.0;
+}
+
+const tint::sem::GlobalVariable* find_override_global(const tint::Program& program,
+                                                      const tint::inspector::Override& ov) {
+    for (auto* decl : program.AST().Globals<tint::ast::Override>()) {
+        auto* global = program.Sem().Get(decl);
+        if (global == nullptr) {
+            continue;
+        }
+        if (decl->name->symbol.Name() == ov.name) {
+            return global;
+        }
+    }
+    return nullptr;
+}
+
+void fill_override(const tint::Program& program,
+                   const tint::inspector::Override& ov,
+                   YawgpuTintOverride* out) {
     out->name = ov.name.c_str();
     out->id = ov.id.value;
     out->type_class = static_cast<uint8_t>(ov.type);
     out->has_default = ov.is_initialized;
-    out->default_value = 0.0;
+    out->default_value =
+        ov.is_initialized ? override_default_value(find_override_global(program, ov), ov.type) : 0.0;
 }
 
 }  // namespace
@@ -166,6 +210,9 @@ void fill_override(const tint::inspector::Override& ov, YawgpuTintOverride* out)
 extern "C" {
 
 void yawgpu_tint_initialize(void) {
+    // Tint's InternalCompilerError destructor is [[noreturn]]. This Dawn/Tint
+    // revision exposes optional per-ICE callbacks, but no global setter, so the
+    // shim cannot make ICEs catchable or install a process-wide capture hook.
     tint::Initialize();
 }
 
@@ -262,7 +309,7 @@ bool yawgpu_tint_override_get(const YawgpuTintProgram* program, size_t i, Yawgpu
     if (program == nullptr || out == nullptr || i >= program->overrides.size()) {
         return false;
     }
-    fill_override(program->overrides[i], out);
+    fill_override(program->program, program->overrides[i], out);
     return true;
 }
 
