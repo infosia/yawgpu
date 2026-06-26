@@ -452,9 +452,28 @@ every shader_tint slice now verifies `grep naga` is empty.)
 
 ### Phase 4 — Remove naga + cleanup
 
-- Delete `shader_naga.rs`; drop the `naga` dependency from all Cargo manifests;
-  retire the `../wgpu` naga-fork pin. Update CLAUDE.md/DESIGN.md/SPEC.md, the mobile
-  cross-build notes, and memory. Final Phase Review.
+- **P4a — DONE** (`64fe785`): deleted `shader_naga.rs` (−3528 lines); collapsed the
+  `crate::frontend` facade to `shader_tint` unconditionally; repointed all
+  `shader_naga::` → `crate::frontend::`; dropped the naga dep (yawgpu-core), the naga
+  dev-dep (yawgpu), and the `../wgpu` fork pin (workspace + Cargo.lock); removed the
+  `tint` feature + `default=["tint"]` (yawgpu-tint is now a non-optional dep, the sole
+  frontend); `gles` uses Tint's GLSL writer. `grep naga` across yawgpu-core/yawgpu
+  (.rs/.toml) + Cargo.lock = none. **naga is GONE — Tint is the only frontend.**
+  Verified: default workspace green; default Tier-1 e2e on real HW green (Metal
+  compute 5/5 / render 3/3 / point 1/1; Vulkan render 5/5 / threading 14/14 / compute
+  4/4, single-threaded — MoltenVK flakes under parallel test execution).
+- **P4b — docs (in progress):** rewrite README ("only dep is naga" → Tint/Dawn +
+  Dawn-submodule build setup), CLAUDE.md (naga-fork workflow obsolete; frontend is
+  Tint), DESIGN.md/SPEC.md, shader spec blocks.
+- **Remaining follow-ups (non-blocking):** external-texture rework on Tint's native
+  support; combined `generate_render_msl` (P2c.3) skeleton; fix the stale
+  `e2e_metal_depth::metal_readonly_depth_stencil_isolation` test (pre-existing, fails
+  under old naga too — does a non-copyable depth24plus DepthOnly copy).
+
+## 🎉 MIGRATION FUNCTIONALLY COMPLETE — naga→Tint
+Tint is the sole shader frontend, the default build, and verified at parity with the
+old naga frontend on both Tier-1 backends (Metal + Vulkan/MoltenVK) on real hardware.
+`feature/tint` (main untouched) is ready for review/merge.
 
 ## Open design questions (resolve in Phase 1/2, not blocking the plan)
 
