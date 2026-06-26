@@ -267,7 +267,14 @@ unsafe fn iter_writetexture(device: native::WGPUDevice) {
             height: dim,
             depthOrArrayLayers: 1,
         };
-        yawgpu::wgpuQueueWriteTexture(queue, &dest, data.as_ptr().cast(), data.len(), &layout, &size);
+        yawgpu::wgpuQueueWriteTexture(
+            queue,
+            &dest,
+            data.as_ptr().cast(),
+            data.len(),
+            &layout,
+            &size,
+        );
     }
     yawgpu::wgpuTextureRelease(texture);
     yawgpu::wgpuQueueRelease(queue);
@@ -1039,7 +1046,11 @@ fn current_rss_kb() -> u64 {
     let Ok(statm) = std::fs::read_to_string("/proc/self/statm") else {
         return 0;
     };
-    match statm.split_whitespace().nth(1).and_then(|p| p.parse::<u64>().ok()) {
+    match statm
+        .split_whitespace()
+        .nth(1)
+        .and_then(|p| p.parse::<u64>().ok())
+    {
         Some(pages) => pages * PAGE_SIZE / 1024,
         None => 0,
     }

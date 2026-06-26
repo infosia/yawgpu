@@ -397,7 +397,8 @@ fn metal_f16_shader_rejected_without_feature() {
         let device = request_device(instance, adapter);
         let errors = install_error_capture(device);
 
-        let shader = "enable f16;\n@compute @workgroup_size(1) fn cs() { let x: f16 = 1.0h; _ = x; }";
+        let shader =
+            "enable f16;\n@compute @workgroup_size(1) fn cs() { let x: f16 = 1.0h; _ = x; }";
         let module = create_wgsl_module_allow_error(device, shader);
 
         // Without the shader-f16 feature the S12 gate rejects f16 usage: the
