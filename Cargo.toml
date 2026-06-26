@@ -5,6 +5,7 @@ members = [
     "yawgpu-core",
     "yawgpu-hal",
     "yawgpu-test",
+    "yawgpu-tint",
 ]
 
 [workspace.package]

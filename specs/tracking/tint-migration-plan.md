@@ -101,17 +101,34 @@ Shrinks the API surface *before* the Tint swap so Phase 2 targets less code.
 
 ### Phase 1 — Tint build + C shim + Rust FFI
 
-- Vendor Dawn at a **pinned rev** (git submodule or `gclient`/`DEPS` fetch;
-  `depot_tools` present at `~/Documents/workspace/bin/depot_tools`). Record the rev.
-- `build.rs` drives CMake (cmake crate) against Dawn with tint-only flags (reader +
-  inspector + msl/spirv/glsl writers; Dawn backends / HLSL / tests / protobuf OFF),
-  output to `$OUT_DIR`, cached. Link `tint_api` + `tint_api_helpers` + `-lc++`.
+**Phase 1a — DONE (2026-06-26).** New crate `yawgpu-tint` proves the
+build/link/FFI path end-to-end on this Mac. `build.rs` (cmake crate) builds a
+minimal Tint (`add_subdirectory(dawn) EXCLUDE_FROM_ALL` + `tint_shim` target →
+WGSL reader + inspector + MSL/SPIR-V/GLSL writers only; Dawn native backends /
+HLSL / validators / tests / protobuf all off) from a Dawn checkout located via
+`YAWGPU_DAWN_DIR`, links it into one `libtint_shim` dylib, and exposes a C ABI
+(`shim/tint_shim.{h,cpp}`, C++20, no abort across FFI). `src/lib.rs` wraps it; a
+smoke test compiles WGSL→MSL (asserts an MSL `kernel`) and exercises the error
+path. **Graceful degradation:** with `YAWGPU_DAWN_DIR` unset the crate builds as
+a stub (`cfg(have_tint)` off, functions return an "unavailable" error) so
+`cargo build/test --workspace` keeps working without a C++ toolchain. Build of
+Tint-from-source ≈ 1m20s cold (cached after). Remaining 1b/1c below.
+
+**Phase 1b — TODO (full shim, on the proven 1a foundation).**
 - `tint_shim.cpp` (C++20, C ABI): opaque `TintProgram*` handle (parse+validate,
   holds `Program`/IR), reflection getters (entry points, workgroup, resource
-  bindings, overrides), and per-target `Generate` taking yawgpu's binding-remap
-  inputs. **No panics/aborts across FFI** — every Tint ICE/validation failure → a C
-  error code + message (CLAUDE.md principle 3). Clone IR per writer (writers mutate
-  the IR `core::ir::Module&`).
+  bindings, overrides), and per-target `Generate` (MSL/SPIR-V/GLSL) taking
+  yawgpu's binding-remap inputs. **No panics/aborts across FFI** — every Tint
+  ICE/validation failure → a C error code + message (CLAUDE.md principle 3).
+  Clone IR per writer (writers mutate the IR `core::ir::Module&`).
+- Rust FFI wrapper (hand-written or bindgen) presenting safe `Result`-returning
+  fns, replacing the 1a smoke surface.
+
+**Phase 1c — TODO (vendoring).** Vendor Dawn at a **pinned rev** (git submodule;
+`depot_tools` present at `~/Documents/workspace/bin/depot_tools` for the
+`gclient`/`DEPS` third_party sync) so the Tint build no longer depends on an
+external `YAWGPU_DAWN_DIR` checkout. The submodule add + `gclient sync` are
+network ops the **user** runs via the `!` prompt. Record the rev.
 - Rust FFI wrapper (hand-written or bindgen) presenting safe `Result`-returning fns.
 - **Gate:** builds on macOS (Metal + Vulkan) and cross-builds iOS arm64 + Android
   arm64-v8a (already proven in spike). Smoke test: trivial WGSL → MSL + SPIR-V +
