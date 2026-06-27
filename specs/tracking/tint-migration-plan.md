@@ -538,3 +538,34 @@ fmt green. CTS build recipe (Tint dylib link): memory `cts-tint-dylib-build`.
 verify with the **targeted** CTS case (atomics `*_workgroup`, `sample_mask`,
 `depth_clip_clamp`), never the "basic" case alone. Remaining known stub:
 external-texture MSL remap (deferred — `f060-external-textures`).
+
+## CTS Dawn-parity sweep (2026-06-27) — goal: yawgpu CTS == Dawn CTS
+
+User goal: make yawgpu's CTS results **100% identical to Dawn's** (vendor extensions
+incl. TBDR come *after*). Method: run the full `api,validation` + `api,operation`
+tree (~196 file queries) under `cts --isolate --workers 8` vs the Dawn oracle on real
+Metal, cluster failures by test, root-cause each to a single cause, fix, re-sweep.
+
+**Baseline (post-regression-fixes, before this sweep): fail=615, crash=43.** Each
+cluster traced to one root cause, all fixed (shim/core; HAL unchanged except the
+vertex-stride one):
+
+| Cluster | Cases | Root cause | Fix | Commit |
+|---|---|---|---|---|
+| layout/bind-group compat, buffer in-pass | ~352 | Tint reflects only statically-used bindings; yawgpu errored on unused layout bindings | skip unreflected entries in tint_bindings_for_msl | dea89ba |
+| maxComputeWorkgroupStorageSize at_over | ~222 | workgroup_storage_size stubbed to 0 | surface tint::core::ir::GetWorkgroupInfo().storage_size | dea89ba |
+| vertex_state type-match | 41 crash | arrayStride=0 → Metal MTLVertexDescriptor "no stride" abort | Constant step + align_4(max attr extent), mirror Dawn | ab5f94a |
+| storage_texture format, texture_view write | ~20 | texel_format() emitted "Rgb10A2…/Rg11B10…" (caps) vs lowercase keys | align producer literals | 4264df3 |
+| overrides,entry_point validation_error | 2 crash | **use-after-free**: shim parsed against a local Source::File; dangling on diagnostic format | YawgpuTintProgram owns unique_ptr<Source::File> | 1cc4ea6 |
+| overrides,workgroup_size storage limit | 2 | storage size 0 for override-derived sizes | SubstituteOverrides before GetWorkgroupInfo | 190fd69 |
+
+Plus external-texture multiplanar MSL (Slice A, 279f9a4) and the 3 transform
+regressions (e4b0db1). **Pattern confirmed:** nearly every divergence was a Tint
+reflection field stubbed to a default (`0`/`None`/`Vec::new()`) or a naga-era
+assumption (all-bindings-reflected, vertex-pulling). Each fix verified on real Metal
+before the next.
+
+**Known-remaining (expected, not bugs):** `index_buffer_format_dirtying` — yawgpu is
+*stricter* than Dawn's lenient oracle (in expectations/yawgpu.txt). **Not yet swept:**
+the `shader,execution` tree (huge), and Vulkan/MoltenVK + GLES backends. Memory:
+`tint-transform-regressions`. CTS run recipe: `cts-tint-dylib-build`.
