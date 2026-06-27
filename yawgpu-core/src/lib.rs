@@ -32,6 +32,7 @@ mod shader_types;
 mod test_helpers;
 mod texture;
 mod texture_view;
+mod wgsl_language_features;
 
 pub(crate) use crate::shader_tint as frontend;
 
@@ -85,6 +86,15 @@ pub use texture::{Texture, TextureDescriptor, TextureDimension, TextureUsage};
 pub use texture_view::{
     ComponentSwizzle, TextureAspect, TextureComponentSwizzle, TextureView, TextureViewDescriptor,
     TextureViewDimension,
+};
+pub use wgsl_language_features::{
+    SUPPORTED_WGSL_LANGUAGE_FEATURES, WGSL_LANGUAGE_FEATURE_LINEAR_INDEXING,
+    WGSL_LANGUAGE_FEATURE_PACKED_4X8_INTEGER_DOT_PRODUCT,
+    WGSL_LANGUAGE_FEATURE_POINTER_COMPOSITE_ACCESS,
+    WGSL_LANGUAGE_FEATURE_READONLY_AND_READWRITE_STORAGE_TEXTURES,
+    WGSL_LANGUAGE_FEATURE_TEXTURE_AND_SAMPLER_LET, WGSL_LANGUAGE_FEATURE_TEXTURE_FORMATS_TIER1,
+    WGSL_LANGUAGE_FEATURE_UNIFORM_BUFFER_STANDARD_LAYOUT,
+    WGSL_LANGUAGE_FEATURE_UNRESTRICTED_POINTER_PARAMETERS,
 };
 
 #[cfg(test)]

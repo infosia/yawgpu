@@ -36,7 +36,8 @@ pub(crate) fn parse_and_validate_wgsl_gated(
     src: &str,
     shader_f16: bool,
 ) -> Result<ReflectedModule, String> {
-    let program = yawgpu_tint::Program::parse(src, shader_f16)?;
+    let program =
+        yawgpu_tint::Program::parse(src, shader_f16, crate::SUPPORTED_WGSL_LANGUAGE_FEATURES)?;
     let warnings = program
         .diagnostics()?
         .into_iter()
@@ -1537,5 +1538,49 @@ fn cs() {
 
         assert!(generated.source.contains("[[buffer(4)]]"));
         assert!(!generated.source.contains("[[buffer(7)]]"));
+    }
+
+    #[test]
+    fn supported_wgsl_language_features_allow_packed_4x8_and_linear_indexing() {
+        if !yawgpu_tint::HAVE_TINT {
+            return;
+        }
+
+        parse_and_validate_wgsl(
+            r#"
+requires packed_4x8_integer_dot_product;
+requires linear_indexing;
+
+@compute @workgroup_size(1)
+fn cs(@builtin(global_invocation_index) index: u32) {
+  let packed = dot4I8Packed(1u, 2u);
+  _ = packed;
+  _ = index;
+}
+"#,
+        )
+        .expect("packed_4x8 and linear_indexing are in yawgpu's supported WGSL set");
+    }
+
+    #[test]
+    fn supported_wgsl_language_features_reject_subgroup_id() {
+        if !yawgpu_tint::HAVE_TINT {
+            return;
+        }
+
+        let err = parse_and_validate_wgsl(
+            r#"
+requires subgroup_id;
+
+@compute @workgroup_size(1)
+fn cs() {}
+"#,
+        )
+        .expect_err("subgroup_id is intentionally not in yawgpu's supported WGSL set");
+
+        assert!(
+            err.contains("subgroup_id"),
+            "error should mention subgroup_id: {err}"
+        );
     }
 }
