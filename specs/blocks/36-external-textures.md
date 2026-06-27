@@ -107,34 +107,38 @@ SPIR-V honest-rejection follow-up)**:
 
 ### Tint `tint_ExternalTextureParams` UBO layout (Slice 2 target — replaces the naga 208-byte struct)
 
-The runtime must upload **Tint's 296-byte `tint_ExternalTextureParams`** (std140), NOT wgpu's
-208-byte struct. Source of truth: `third_party/dawn/src/tint/lang/core/ir/transform/
-multiplanar_external_texture.cc` (`ExternalTextureParams()` + `TransferFunctionParams()`). Layout
-(byte offsets, std140):
+The runtime must upload **Tint's 288-byte `tint_ExternalTextureParams_packed_vec3`** host struct
+(the layout Tint generates for the host to fill + unpack in-shader), NOT wgpu's 208-byte struct and
+NOT the naïve field-order layout (which ignores MSL alignment). AUTHORITATIVE source: the Dawn
+golden `third_party/dawn/test/tint/builtins/textureLoad/texture_external_param.wgsl.expected.msl`
+(`struct tint_ExternalTextureParams_packed_vec3` with explicit `/* 0xNNNN */` byte offsets). Layout:
 
-| off | field | type | size |
-|---|---|---|---|
-| 0 | `numPlanes` | u32 | 4 |
-| 4 | `doYuvToRgbConversionOnly` | u32 | 4 |
-| 8 | `yuvToRgbConversionMatrix` | mat3x4&lt;f32&gt; | 48 |
-| 56 | `srcTransferFunction` | TransferFunctionParams | 32 |
-| 88 | `dstTransferFunction` | TransferFunctionParams | 32 |
-| 120 | `gamutConversionMatrix` | mat3x3&lt;f32&gt; | 48 |
-| 168 | `sampleTransform` | mat3x2&lt;f32&gt; | 32 |
-| 200 | `loadTransform` | mat3x2&lt;f32&gt; | 32 |
-| 232 | `samplePlane0RectMin` | vec2f | 8 |
-| 240 | `samplePlane0RectMax` | vec2f | 8 |
-| 248 | `samplePlane1RectMin` | vec2f | 8 |
-| 256 | `samplePlane1RectMax` | vec2f | 8 |
-| 264 | `apparentSize` | vec2u | 8 |
-| 272 | `plane1CoordFactor` | vec2f | 8 |
-| 280 | `ootfParam` | vec4f | 16 |
+| off | field | type | size | notes |
+|---|---|---|---|---|
+| 0 | `numPlanes` | u32 | 4 | |
+| 4 | `doYuvToRgbConversionOnly` | u32 | 4 | |
+| 8 | (padding) | — | 8 | mat3x4 needs 16-align |
+| 16 | `yuvToRgbConversionMatrix` | float3x4 | 48 | 3 cols × vec4, 12 floats direct |
+| 64 | `srcTransferFunction` | TransferFunctionParams | 32 | |
+| 96 | `dstTransferFunction` | TransferFunctionParams | 32 | |
+| 128 | `gamutConversionMatrix` | **packed_vec3[3]** | 48 | 3 cols × 3 f32, **stride 16** (4B pad/col) |
+| 176 | `sampleTransform` | float3x2 | 24 | 3 cols × vec2, stride 8 |
+| 200 | `loadTransform` | float3x2 | 24 | 3 cols × vec2, stride 8 |
+| 224 | `samplePlane0RectMin` | vec2f | 8 | |
+| 232 | `samplePlane0RectMax` | vec2f | 8 | |
+| 240 | `samplePlane1RectMin` | vec2f | 8 | |
+| 248 | `samplePlane1RectMax` | vec2f | 8 | |
+| 256 | `apparentSize` | vec2u | 8 | |
+| 264 | `plane1CoordFactor` | vec2f | 8 | |
+| 272 | `ootfParam` | vec4f | 16 | |
 
-Total **296 bytes**. `TransferFunctionParams { mode:u32, A..G:f32 }` = 32 bytes.
-Match Dawn's param computation (`dawn/native/.../ExternalTexture.cpp`) for the
-identity/passthrough and Nv12-YUV cases so the sampled result matches the Dawn oracle.
-The Tint binding model is **2 planes** (plane0/plane1) + the params UBO (metadata); for
-single-plane `Rgba`, `numPlanes=1` and plane1 may alias plane0 (Tint ignores it).
+Total **288 bytes**. `TransferFunctionParams { mode:u32 @0, A,B,C,D,E,F,G:f32 @4..28 }` = 32 bytes.
+**Gotcha (cost a real bug):** the gamut matrix is a PACKED-vec3 array (column stride 16, only 12 bytes
+used/col), and every field after `doYuvToRgbConversionOnly` is shifted by the 8-byte mat3x4 alignment
+pad — the field-declaration order in `multiplanar_external_texture.cc` does NOT give the byte offsets;
+only the `_packed_vec3` golden does. Verified end-to-end: an identity YUV matrix on a 2-plane Nv12
+external texture round-trips (Y,U,V)→(R,G,B). The Tint binding model is **2 planes** (plane0/plane1)
++ the params UBO; for single-plane `Rgba`, `numPlanes=1` and plane1 may alias plane0.
 
 Slice 2 (resource + create + runtime binding — Metal-only, mirrors wgpu; inline unit tests +
 GPU e2e authored by Claude):
@@ -156,10 +160,12 @@ GPU e2e authored by Claude):
   argument-buffer base type → clean `GPUInternalError`, no panic. **Native Vulkan is expected to
   support external textures** (Tint == Dawn's compiler) — likely Dawn-parity win, unverified (host
   is MoltenVK-only). The naga-era "Vulkan rejects at codegen" rule (R6) is superseded.
-- **R10** ◑ End-to-end **Rgba DONE** — sampling an `Rgba` external texture (`doYuvToRgbConversionOnly=1`
-  passthrough) in a fragment shader round-trips the source colour on real **Metal**
-  (`yawgpu/tests/e2e_metal_external_texture.rs::metal_external_texture_rgba_passthrough_round_trips`).
-  **Nv12 (YUV→RGB) TODO** — needs BT.601/709 param values matched to Dawn's `ExternalTexture.cpp`.
+- **R10** ☑ End-to-end on real **Metal** (`yawgpu/tests/e2e_metal_external_texture.rs`): **Rgba**
+  passthrough (`doYuvToRgbConversionOnly=1`) round-trips the source colour, and **Nv12** (2-plane
+  R8 luma + RG8 chroma) with an identity `yuvToRgbConversionMatrix` recombines (Y,U,V)→(R,G,B). The
+  Nv12 test exposed a real params-layout bug — the 288-byte `tint_ExternalTextureParams_packed_vec3`
+  offsets (above) were initially derived from field order and were misaligned; now matched to the
+  Dawn golden. (Color-managed Nv12 with real BT.601/709 + transfer/gamut params is a further refinement.)
 
 ## Async
 

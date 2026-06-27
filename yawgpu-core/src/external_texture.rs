@@ -168,23 +168,23 @@ impl Device {
 
 impl ExternalTextureParams {
     /// Size in bytes of Tint's `tint_ExternalTextureParams` UBO.
-    pub const SIZE: usize = 296;
+    pub const SIZE: usize = 288;
 
     const NUM_PLANES: usize = 0;
     const DO_YUV_TO_RGB_CONVERSION_ONLY: usize = 4;
-    const YUV_TO_RGB_CONVERSION_MATRIX: usize = 8;
-    const SRC_TRANSFER_FUNCTION: usize = 56;
-    const DST_TRANSFER_FUNCTION: usize = 88;
-    const GAMUT_CONVERSION_MATRIX: usize = 120;
-    const SAMPLE_TRANSFORM: usize = 168;
+    const YUV_TO_RGB_CONVERSION_MATRIX: usize = 16;
+    const SRC_TRANSFER_FUNCTION: usize = 64;
+    const DST_TRANSFER_FUNCTION: usize = 96;
+    const GAMUT_CONVERSION_MATRIX: usize = 128;
+    const SAMPLE_TRANSFORM: usize = 176;
     const LOAD_TRANSFORM: usize = 200;
-    const SAMPLE_PLANE0_RECT_MIN: usize = 232;
-    const SAMPLE_PLANE0_RECT_MAX: usize = 240;
-    const SAMPLE_PLANE1_RECT_MIN: usize = 248;
-    const SAMPLE_PLANE1_RECT_MAX: usize = 256;
-    const APPARENT_SIZE: usize = 264;
-    const PLANE1_COORD_FACTOR: usize = 272;
-    const OOTF_PARAM: usize = 280;
+    const SAMPLE_PLANE0_RECT_MIN: usize = 224;
+    const SAMPLE_PLANE0_RECT_MAX: usize = 232;
+    const SAMPLE_PLANE1_RECT_MIN: usize = 240;
+    const SAMPLE_PLANE1_RECT_MAX: usize = 248;
+    const APPARENT_SIZE: usize = 256;
+    const PLANE1_COORD_FACTOR: usize = 264;
+    const OOTF_PARAM: usize = 272;
 
     /// Builds packed Tint params from an external-texture descriptor.
     pub fn from_descriptor(descriptor: &ExternalTextureDescriptor) -> Result<Self, DeviceError> {
@@ -223,7 +223,7 @@ impl ExternalTextureParams {
             Self::DST_TRANSFER_FUNCTION,
             descriptor.dst_transfer_function_parameters,
         );
-        params.write_mat3x3(
+        params.write_packed_vec3_array(
             Self::GAMUT_CONVERSION_MATRIX,
             descriptor.gamut_conversion_matrix,
         );
@@ -275,7 +275,7 @@ impl ExternalTextureParams {
         self.write_f32s(offset + 16, &value[2]);
     }
 
-    fn write_mat3x3(&mut self, offset: usize, value: [f32; 9]) {
+    fn write_packed_vec3_array(&mut self, offset: usize, value: [f32; 9]) {
         self.write_f32s(offset, &value[0..3]);
         self.write_f32s(offset + 16, &value[3..6]);
         self.write_f32s(offset + 32, &value[6..9]);
@@ -607,42 +607,61 @@ mod tests {
 
     #[test]
     fn external_texture_params_offsets_match_spec_table() {
-        assert_eq!(ExternalTextureParams::SIZE, 296);
+        assert_eq!(ExternalTextureParams::SIZE, 288);
         assert_eq!(ExternalTextureParams::NUM_PLANES, 0);
         assert_eq!(ExternalTextureParams::DO_YUV_TO_RGB_CONVERSION_ONLY, 4);
-        assert_eq!(ExternalTextureParams::YUV_TO_RGB_CONVERSION_MATRIX, 8);
-        assert_eq!(ExternalTextureParams::SRC_TRANSFER_FUNCTION, 56);
-        assert_eq!(ExternalTextureParams::DST_TRANSFER_FUNCTION, 88);
-        assert_eq!(ExternalTextureParams::GAMUT_CONVERSION_MATRIX, 120);
-        assert_eq!(ExternalTextureParams::SAMPLE_TRANSFORM, 168);
+        assert_eq!(ExternalTextureParams::YUV_TO_RGB_CONVERSION_MATRIX, 16);
+        assert_eq!(ExternalTextureParams::SRC_TRANSFER_FUNCTION, 64);
+        assert_eq!(ExternalTextureParams::DST_TRANSFER_FUNCTION, 96);
+        assert_eq!(ExternalTextureParams::GAMUT_CONVERSION_MATRIX, 128);
+        assert_eq!(ExternalTextureParams::SAMPLE_TRANSFORM, 176);
         assert_eq!(ExternalTextureParams::LOAD_TRANSFORM, 200);
-        assert_eq!(ExternalTextureParams::SAMPLE_PLANE0_RECT_MIN, 232);
-        assert_eq!(ExternalTextureParams::SAMPLE_PLANE0_RECT_MAX, 240);
-        assert_eq!(ExternalTextureParams::SAMPLE_PLANE1_RECT_MIN, 248);
-        assert_eq!(ExternalTextureParams::SAMPLE_PLANE1_RECT_MAX, 256);
-        assert_eq!(ExternalTextureParams::APPARENT_SIZE, 264);
-        assert_eq!(ExternalTextureParams::PLANE1_COORD_FACTOR, 272);
-        assert_eq!(ExternalTextureParams::OOTF_PARAM, 280);
+        assert_eq!(ExternalTextureParams::SAMPLE_PLANE0_RECT_MIN, 224);
+        assert_eq!(ExternalTextureParams::SAMPLE_PLANE0_RECT_MAX, 232);
+        assert_eq!(ExternalTextureParams::SAMPLE_PLANE1_RECT_MIN, 240);
+        assert_eq!(ExternalTextureParams::SAMPLE_PLANE1_RECT_MAX, 248);
+        assert_eq!(ExternalTextureParams::APPARENT_SIZE, 256);
+        assert_eq!(ExternalTextureParams::PLANE1_COORD_FACTOR, 264);
+        assert_eq!(ExternalTextureParams::OOTF_PARAM, 272);
     }
 
     #[test]
-    fn rgba_identity_params_pack_expected_values() {
+    fn rgba_params_pack_expected_values_at_tint_offsets() {
         let device = noop_device();
-        let params =
-            ExternalTextureParams::from_descriptor(&rgba_descriptor(&device)).expect("params");
+        let mut desc = rgba_descriptor(&device);
+        desc.yuv_to_rgb_conversion_matrix = Some([
+            1.0, 2.0, 3.0, 4.0, //
+            5.0, 6.0, 7.0, 8.0, //
+            9.0, 10.0, 11.0, 12.0,
+        ]);
+        desc.gamut_conversion_matrix = [13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0];
+        let params = ExternalTextureParams::from_descriptor(&desc).expect("params");
         let bytes = params.as_bytes();
         assert_eq!(read_u32(bytes, 0), 1);
         assert_eq!(read_u32(bytes, 4), 1);
-        assert_eq!(read_f32(bytes, 8), 1.0);
-        assert_eq!(read_f32(bytes, 28), 1.0);
-        assert_eq!(read_f32(bytes, 48), 1.0);
-        assert_eq!(read_f32(bytes, 168), 1.0);
-        assert_eq!(read_f32(bytes, 180), 1.0);
-        assert_eq!(read_f32(bytes, 184), 0.0);
-        assert_eq!(read_u32(bytes, 264), 3);
-        assert_eq!(read_u32(bytes, 268), 3);
-        assert_eq!(read_f32(bytes, 272), 0.25);
-        assert_eq!(read_f32(bytes, 276), 0.25);
+        assert_eq!(read_f32(bytes, 16), 1.0);
+        assert_eq!(read_f32(bytes, 20), 2.0);
+        assert_eq!(read_f32(bytes, 60), 12.0);
+        assert_eq!(read_f32(bytes, 128), 13.0);
+        assert_eq!(read_f32(bytes, 136), 15.0);
+        assert_eq!(read_f32(bytes, 140), 0.0);
+        assert_eq!(read_f32(bytes, 144), 16.0);
+        assert_eq!(read_f32(bytes, 152), 18.0);
+        assert_eq!(read_f32(bytes, 156), 0.0);
+        assert_eq!(read_f32(bytes, 160), 19.0);
+        assert_eq!(read_f32(bytes, 168), 21.0);
+        assert_eq!(read_f32(bytes, 172), 0.0);
+        assert_eq!(read_f32(bytes, 176), 1.0);
+        assert_eq!(read_f32(bytes, 188), 1.0);
+        assert_eq!(read_f32(bytes, 192), 0.0);
+        assert_eq!(read_f32(bytes, 200), 1.0);
+        assert_eq!(read_f32(bytes, 212), 1.0);
+        assert_eq!(read_f32(bytes, 224), 0.125);
+        assert_eq!(read_f32(bytes, 232), 0.875);
+        assert_eq!(read_u32(bytes, 256), 3);
+        assert_eq!(read_u32(bytes, 260), 3);
+        assert_eq!(read_f32(bytes, 264), 0.25);
+        assert_eq!(read_f32(bytes, 268), 0.25);
     }
 
     #[test]
