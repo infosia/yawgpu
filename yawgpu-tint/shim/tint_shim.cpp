@@ -6,6 +6,7 @@
 #include <cstring>
 #include <exception>
 #include <map>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -42,6 +43,8 @@
 #include "tint_shim.h"
 
 struct YawgpuTintProgram {
+    // Must outlive `program`: Tint Source objects keep pointers into this file.
+    std::unique_ptr<tint::Source::File> file;
     tint::Program program;
     std::vector<tint::inspector::EntryPoint> entry_points;
     std::vector<tint::inspector::Override> overrides;
@@ -522,18 +525,21 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
             set_error_string(err, "WGSL source pointer is NULL");
             return nullptr;
         }
-        tint::Source::File file("shader.wgsl", std::string(wgsl, wgsl_len));
+
+        auto out = std::make_unique<YawgpuTintProgram>();
+        out->file =
+            std::make_unique<tint::Source::File>("shader.wgsl", std::string(wgsl, wgsl_len));
+
         tint::wgsl::reader::Options options;
         if (shader_f16) {
             options.allowed_features = tint::wgsl::AllowedFeatures::Everything();
         }
-        tint::Program parsed = tint::wgsl::reader::Parse(&file, options);
+        tint::Program parsed = tint::wgsl::reader::Parse(out->file.get(), options);
         if (!parsed.IsValid()) {
             set_error_string(err, parsed.Diagnostics().Str());
             return nullptr;
         }
 
-        auto* out = new YawgpuTintProgram();
         out->program = std::move(parsed);
         for (const auto& diagnostic : out->program.Diagnostics()) {
             if (diagnostic.severity == tint::diag::Severity::Error) {
@@ -547,10 +553,9 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
         out->overrides = inspector.Overrides();
         if (inspector.has_error()) {
             set_error_string(err, inspector.error());
-            delete out;
             return nullptr;
         }
-        return out;
+        return out.release();
     } catch (const std::exception& e) {
         set_error_string(err, e.what());
         return nullptr;

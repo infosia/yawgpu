@@ -2079,6 +2079,24 @@ fn cs() {
     }
 
     #[test]
+    fn override_evaluation_error_returns_err_without_crashing() {
+        let wgsl = r#"
+override cu: u32 = 0u;
+override cx: u32 = 1u / cu;
+
+@compute @workgroup_size(1)
+fn main() {
+  _ = cx;
+}
+"#;
+        let program = Program::parse(wgsl, false).unwrap();
+        let err = program
+            .generate_spirv("main", &Bindings::default(), &[], true)
+            .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
     fn compute_msl_array_length_returns_size_bindings() {
         let wgsl = r#"
 struct Data {
