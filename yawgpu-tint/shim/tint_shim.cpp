@@ -634,7 +634,11 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
 
         tint::wgsl::reader::Options options;
         if (shader_f16) {
-            options.allowed_features = tint::wgsl::AllowedFeatures::Everything();
+            // yawgpu exposes shader-f16 only among WGSL-relevant features. Allow just
+            // the f16 extension; do not un-gate subgroups, dual-source blending,
+            // packed_4x8 dot product, unrestricted pointers, or other unsupported
+            // optional WGSL features.
+            options.allowed_features.extensions.insert(tint::wgsl::Extension::kF16);
         }
         tint::Program parsed = tint::wgsl::reader::Parse(out->file.get(), options);
         if (!parsed.IsValid()) {

@@ -24,7 +24,7 @@ typedef struct YawgpuTintProgram YawgpuTintProgram;
 void yawgpu_tint_initialize(void);
 
 /* Parse + validate WGSL. Returns NULL on failure with *err set.
- * If shader_f16 is true, Tint parses with wgsl::AllowedFeatures::Everything(). */
+ * If shader_f16 is true, Tint allows only the f16 WGSL extension. */
 YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               size_t wgsl_len,
                                               bool shader_f16,

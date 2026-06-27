@@ -2990,6 +2990,28 @@ fn cs() { _ = u.value; }
     }
 
     #[test]
+    fn packed_4x8_integer_dot_product_without_requires_matches_pinned_tint() {
+        // NOTE: pinned-Tint gap -- packed_4x8 builtins are not gated on `requires`
+        // in this Dawn revision; tracked as a CTS expectation.
+        let program = Program::parse(
+            "@compute @workgroup_size(1) fn m() { let v = dot4I8Packed(1u, 2u); }",
+            false,
+        )
+        .unwrap();
+        drop(program);
+    }
+
+    #[test]
+    fn dual_source_blending_requires_extension() {
+        let err = Program::parse(
+            "@fragment fn fs() -> @blend_src(0) @location(0) vec4f { return vec4f(); }",
+            false,
+        )
+        .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
     fn shader_f16_parses_and_generates() {
         let wgsl = r#"
 enable f16;
