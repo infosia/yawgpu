@@ -210,12 +210,15 @@ params) to be clamped/zeroed. yawgpu does NOT implement wgpu's
 indirect-validation compute prepass; instead: **Vulkan** enables the
 `robustBufferAccess` device feature when supported (hardware bounds vertex
 fetches; MoltenVK cannot honor it — documented translation artifact, native
-Vulkan authoritative). **Metal** enables naga's `vertex_pulling_transform`:
-vertex shaders bounds-guard every attribute fetch against `_mslBufferSizes`;
-the slot is forced whenever vertex buffers exist, and the HAL writes
-storage-array sizes followed by per-vertex-buffer `size − offset` (mapping
-order) before every draw. GLES (Tier 2): unhandled, catalogue in block 67 if
-bring-up reaches this.
+Vulkan authoritative). **Metal** bounds-guards attribute fetches in the vertex
+shader against buffer sizes. GLES (Tier 2): unhandled, catalogue in block 67 if
+bring-up reaches this. **Tint migration (2026-06-27):** Metal no longer uses
+naga's `vertex_pulling_transform` — Tint emits `[[stage_in]]` vertex MSL driven
+by an `MTLVertexDescriptor` (the HAL detects `[[stage_in]]` and builds the
+descriptor), and OOB robustness is handled by Tint's own robustness transform
+(`disable_robustness=false`). Re-verified clean on Metal:
+`rendering,robust_access_index` passes under Tint (no regression — unlike the
+three transform behaviors in F-069 above, this path migrated cleanly).
 
 ## CTS finding F-112 — workgroup-atomic coherence vs SPIR-V buffer bounds policy (2026-06-16)
 

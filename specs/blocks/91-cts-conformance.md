@@ -209,9 +209,11 @@ results instead of re-running and polling. The report must contain:
 
 - **Verification** — the exact commands run and their **exit codes**.
   **The coding agent must NOT run `cargo test --workspace` interactively.**
-  The reason is *not* build/link time (root-caused 2026-06-17: a full cold
-  build — naga from git + all deps + every test binary — is ~17 s on the
-  reference M2; warm full test execution is ~25 s). The ~1 h seen in codex
+  The reason is *not* build/link time (root-caused 2026-06-17: a full warm
+  build — all deps + every test binary, with the Tint C++ shim already cached
+  in `$OUT_DIR` — is ~17 s on the reference M2; warm full test execution is
+  ~25 s. Only the *first* build after a clean / submodule change pays the
+  one-time Tint compile, ~1m40s). The ~1 h seen in codex
   is an artifact of **codex's async `exec_command`/`write_stdin` 30-second
   output polling**: codex drains the test process's stdout in 30 s windows
   with tiny per-chunk output, so the process **blocks on stdout pipe

@@ -111,8 +111,11 @@ from a later phase; tracked here but ported in that phase, not Phase 1.
 - **R14** `maxImmediateSize`: always-max limit — the device gets the
   supported max regardless of the requested value. `AlwaysMax` :450. ☑ (P1.2a)
   **CTS finding F-064 (2026-06-10):** the supported max is **0** — yawgpu does
-  **not** support immediate data (push-constant-style `var<immediate>`), because
-  the naga WGSL frontend cannot compile that address space. Advertising
+  **not** support immediate data (push-constant-style `var<immediate>`). (Tint
+  migration: Tint *can* compile that address space — yawgpu already uses immediate
+  data internally for the frag-depth clamp range and array-length constants — so
+  `maxImmediateSize=0` is now a deliberate choice not to expose the user-facing
+  push-constant feature through core/HAL, not a frontend limitation.) Advertising
   `maxImmediateSize=0` is the honest signal (`supportsImmediateData()` in the CTS
   is `maxImmediateSize != 0`, so the `pipeline,immediates` test feature-gates off,
   exactly as on the CTS's Dawn build). This mirrors the F-060 posture: advertise
