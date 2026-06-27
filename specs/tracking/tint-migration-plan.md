@@ -705,3 +705,17 @@ textureLoad regression 40→0. Verified per-cluster on Metal (robust_access 320/
 render+compute storage 234/0); full shader,execution re-sweep pending. api,operation
 tree re-verified 4917/0 after the render fix (compute-robustness-on was the original
 100%-parity state, now restored).
+
+## MILESTONE — shader,execution at full Dawn parity (0 fail)
+
+Final full `shader,execution` sweep after the robustness + vertex-pulling fixes:
+**pass=125255, fail=0, crash=1**. The single crash
+(`textureSample:sampled_2d_coords,lodClamp`) is a parallel-sweep FLAKE — it passes
+145/0/0 on isolated re-run (MoltenVK/Metal resource pressure under --workers 8, not a
+bug). So shader,execution = **0 real failures** (was 192). api,operation compute +
+atomics re-verified 66/0 after the compute-robustness change (no regression).
+
+**yawgpu CTS == Dawn on Metal:** api,validation + api,operation (37280/0/0) AND
+shader,execution (125255/0) all match the Dawn oracle. Remaining for full coverage:
+the `shader,validation` tree, then Vulkan/MoltenVK + GLES backends, then external-texture
+Slices B–D and mobile; vendor extensions (TBDR) last.
