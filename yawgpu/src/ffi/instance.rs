@@ -163,6 +163,76 @@ pub unsafe extern "C" fn wgpuInstanceAddRef(instance: native::WGPUInstance) {
     add_ref_handle(instance, "WGPUInstance");
 }
 
+/// Gets the WGSL language features supported by this instance.
+///
+/// The returned `features` array is allocated by yawgpu and must be released
+/// with `wgpuSupportedWGSLLanguageFeaturesFreeMembers`.
+///
+/// # Safety
+///
+/// `instance` must be a non-null live yawgpu instance handle. `features` must
+/// point to writable `WGPUSupportedWGSLLanguageFeatures` storage.
+/// Returns WGPU instance get WGSL language features.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuInstanceGetWGSLLanguageFeatures(
+    instance: native::WGPUInstance,
+    features: *mut native::WGPUSupportedWGSLLanguageFeatures,
+) {
+    let _instance = borrow_handle(instance, "WGPUInstance");
+    let features = features
+        .as_mut()
+        .expect("WGPUSupportedWGSLLanguageFeatures must not be null");
+    let feature_values = core::SUPPORTED_WGSL_LANGUAGE_FEATURES
+        .iter()
+        .copied()
+        .map(|feature| feature as native::WGPUWGSLLanguageFeatureName)
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let feature_count = feature_values.len();
+    let feature_values = Box::into_raw(feature_values);
+    *features = native::WGPUSupportedWGSLLanguageFeatures {
+        featureCount: feature_count,
+        features: feature_values.cast(),
+    };
+}
+
+/// Returns whether this instance supports a WGSL language feature.
+///
+/// # Safety
+///
+/// `instance` must be a non-null live yawgpu instance handle.
+/// Returns WGPU instance has WGSL language feature.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuInstanceHasWGSLLanguageFeature(
+    instance: native::WGPUInstance,
+    feature: native::WGPUWGSLLanguageFeatureName,
+) -> native::WGPUBool {
+    let _instance = borrow_handle(instance, "WGPUInstance");
+    native::WGPUBool::from(core::SUPPORTED_WGSL_LANGUAGE_FEATURES.contains(&feature))
+}
+
+/// Frees a WGSL language feature array returned by `wgpuInstanceGetWGSLLanguageFeatures`.
+///
+/// # Safety
+///
+/// `supported_features.features`, when non-null, must be a pointer previously
+/// returned by yawgpu from `wgpuInstanceGetWGSLLanguageFeatures`, paired with
+/// the same `featureCount`, and must not be freed more than once.
+/// Returns WGPU supported WGSL language features free members.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuSupportedWGSLLanguageFeaturesFreeMembers(
+    supported_features: native::WGPUSupportedWGSLLanguageFeatures,
+) {
+    if supported_features.features.is_null() {
+        return;
+    }
+    let slice = std::ptr::slice_from_raw_parts_mut(
+        supported_features.features.cast_mut(),
+        supported_features.featureCount,
+    );
+    drop(Box::from_raw(slice));
+}
+
 /// Creates a synthetic Noop surface from a recognized surface-source chain.
 ///
 /// # Safety
@@ -327,5 +397,59 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
         core::WaitAnyStatus::TimedOut => native::WGPUWaitStatus_TimedOut,
         core::WaitAnyStatus::Error => native::WGPUWaitStatus_Error,
         _ => native::WGPUWaitStatus_Error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wgpu_instance_get_wgsl_language_features_reports_canonical_set() {
+        unsafe {
+            let instance = wgpuCreateInstance(std::ptr::null());
+            let mut features = native::WGPUSupportedWGSLLanguageFeatures {
+                featureCount: 0,
+                features: std::ptr::null(),
+            };
+
+            wgpuInstanceGetWGSLLanguageFeatures(instance, &mut features);
+
+            assert_eq!(
+                features.featureCount,
+                core::SUPPORTED_WGSL_LANGUAGE_FEATURES.len()
+            );
+            let values = std::slice::from_raw_parts(features.features, features.featureCount);
+            assert_eq!(values, core::SUPPORTED_WGSL_LANGUAGE_FEATURES);
+            assert_eq!(
+                wgpuInstanceHasWGSLLanguageFeature(
+                    instance,
+                    native::WGPUWGSLLanguageFeatureName_Packed4x8IntegerDotProduct,
+                ),
+                native::WGPUBool::from(true)
+            );
+            assert_eq!(
+                wgpuInstanceHasWGSLLanguageFeature(
+                    instance,
+                    native::WGPUWGSLLanguageFeatureName_SubgroupId,
+                ),
+                native::WGPUBool::from(false)
+            );
+
+            wgpuSupportedWGSLLanguageFeaturesFreeMembers(features);
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn wgpu_supported_wgsl_language_features_free_members_accepts_empty_features() {
+        unsafe {
+            wgpuSupportedWGSLLanguageFeaturesFreeMembers(
+                native::WGPUSupportedWGSLLanguageFeatures {
+                    featureCount: 0,
+                    features: std::ptr::null(),
+                },
+            );
+        }
     }
 }

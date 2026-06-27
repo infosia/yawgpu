@@ -33,7 +33,6 @@
 #include "src/tint/lang/wgsl/ast/module.h"
 #include "src/tint/lang/wgsl/ast/override.h"
 #include "src/tint/lang/wgsl/enums.h"
-#include "src/tint/lang/wgsl/feature_status.h"
 #include "src/tint/lang/wgsl/inspector/inspector.h"
 #include "src/tint/lang/wgsl/reader/reader.h"
 #include "src/tint/lang/wgsl/sem/builtin_fn.h"
@@ -259,6 +258,29 @@ tint::diag::Result<tint::SubstituteOverridesConfig> make_override_config(
         cfg.map.emplace(found->second, values[i].value);
     }
     return cfg;
+}
+
+std::optional<tint::wgsl::LanguageFeature> to_tint_language_feature(uint32_t feature) {
+    switch (feature) {
+        case 1:
+            return tint::wgsl::LanguageFeature::kReadonlyAndReadwriteStorageTextures;
+        case 2:
+            return tint::wgsl::LanguageFeature::kPacked4X8IntegerDotProduct;
+        case 3:
+            return tint::wgsl::LanguageFeature::kUnrestrictedPointerParameters;
+        case 4:
+            return tint::wgsl::LanguageFeature::kPointerCompositeAccess;
+        case 5:
+            return tint::wgsl::LanguageFeature::kUniformBufferStandardLayout;
+        case 7:
+            return tint::wgsl::LanguageFeature::kTextureAndSamplerLet;
+        case 9:
+            return tint::wgsl::LanguageFeature::kTextureFormatsTier1;
+        case 10:
+            return tint::wgsl::LanguageFeature::kLinearIndexing;
+        default:
+            return std::nullopt;
+    }
 }
 
 tint::Result<tint::core::ir::Module> lower_ir(const YawgpuTintProgram* program) {
@@ -620,6 +642,8 @@ void yawgpu_tint_initialize(void) {
 YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               size_t wgsl_len,
                                               bool shader_f16,
+                                              const uint32_t* lang_features,
+                                              size_t n_lang_features,
                                               char** err) {
     if (err != nullptr) {
         *err = nullptr;
@@ -635,14 +659,13 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
             std::make_unique<tint::Source::File>("shader.wgsl", std::string(wgsl, wgsl_len));
 
         tint::wgsl::reader::Options options;
-        // Match Dawn's default device: allow every SHIPPED WGSL language feature
-        // (experimental ones need unsafe toggles the CTS device doesn't set), plus
-        // only the extensions yawgpu exposes (shader-f16 -> kF16).
-        for (auto feature : tint::wgsl::kAllLanguageFeatures) {
-            auto status = tint::wgsl::GetLanguageFeatureStatus(feature);
-            if (status == tint::wgsl::FeatureStatus::kShipped ||
-                status == tint::wgsl::FeatureStatus::kShippedWithKillswitch) {
-                options.allowed_features.features.insert(feature);
+        if (n_lang_features > 0 && lang_features == nullptr) {
+            set_error_string(err, "WGSL language feature pointer is NULL");
+            return nullptr;
+        }
+        for (size_t i = 0; i < n_lang_features; ++i) {
+            if (auto feature = to_tint_language_feature(lang_features[i])) {
+                options.allowed_features.features.insert(*feature);
             }
         }
         if (shader_f16) {

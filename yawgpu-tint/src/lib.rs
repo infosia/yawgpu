@@ -162,6 +162,8 @@ mod imp {
             wgsl: *const c_char,
             wgsl_len: usize,
             shader_f16: bool,
+            lang_features: *const u32,
+            n_lang_features: usize,
             err: *mut *mut c_char,
         ) -> *mut RawProgram;
         fn yawgpu_tint_program_destroy(program: *mut RawProgram);
@@ -328,15 +330,22 @@ mod imp {
 
     impl Program {
         /// Parses WGSL into a Tint program.
-        pub fn parse(wgsl: &str, shader_f16: bool) -> Result<Self, String> {
+        pub fn parse(
+            wgsl: &str,
+            shader_f16: bool,
+            language_features: &[u32],
+        ) -> Result<Self, String> {
             initialize();
             let mut err = ptr::null_mut();
             // SAFETY: `wgsl` is valid for the call and the shim copies it using the length.
+            // `language_features` is valid for the duration of the call.
             let raw = unsafe {
                 yawgpu_tint_program_create(
                     wgsl.as_ptr().cast::<c_char>(),
                     wgsl.len(),
                     shader_f16,
+                    language_features.as_ptr(),
+                    language_features.len(),
                     &mut err,
                 )
             };
@@ -1644,7 +1653,7 @@ mod imp {
 
     /// Compiles WGSL to MSL using the default parse and binding behavior.
     pub fn wgsl_to_msl(wgsl: &str, entry_point: &str) -> Result<String, String> {
-        let program = Program::parse(wgsl, false)?;
+        let program = Program::parse(wgsl, false, &[])?;
         Ok(program
             .generate_msl(
                 entry_point,
@@ -1673,7 +1682,11 @@ mod imp {
 
     impl Program {
         /// Parses WGSL into a Tint program.
-        pub fn parse(_wgsl: &str, _shader_f16: bool) -> Result<Self, String> {
+        pub fn parse(
+            _wgsl: &str,
+            _shader_f16: bool,
+            _language_features: &[u32],
+        ) -> Result<Self, String> {
             Err(UNAVAILABLE.to_owned())
         }
 
@@ -2391,16 +2404,18 @@ fn cs() {
 }
 "#,
             false,
+            &[],
         )
         .unwrap();
         assert_eq!(program.workgroup_storage_size(&[]).unwrap(), 32);
 
-        let program = Program::parse("@compute @workgroup_size(1) fn cs() {}", false).unwrap();
+        let program = Program::parse("@compute @workgroup_size(1) fn cs() {}", false, &[]).unwrap();
         assert_eq!(program.workgroup_storage_size(&[]).unwrap(), 0);
 
         let program = Program::parse(
             "@fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
             false,
+            &[],
         )
         .unwrap();
         assert_eq!(program.workgroup_storage_size(&[]).unwrap(), 0);
@@ -2416,6 +2431,7 @@ fn main() {
 }
 "#,
             false,
+            &[],
         )
         .unwrap();
         assert_eq!(program.workgroup_storage_size(&[]).unwrap(), 16);
@@ -2432,7 +2448,7 @@ fn main() {
 
     #[test]
     fn compute_generates_msl_spirv_glsl() {
-        let program = Program::parse(compute_wgsl(), false).unwrap();
+        let program = Program::parse(compute_wgsl(), false, &[]).unwrap();
         let bindings = Bindings::default();
         let msl = program
             .generate_msl("cs", &bindings, &[], 0, true, false, &[], 0xFFFF_FFFF)
@@ -2455,7 +2471,7 @@ fn main() {
   _ = cx;
 }
 "#;
-        let program = Program::parse(wgsl, false).unwrap();
+        let program = Program::parse(wgsl, false, &[]).unwrap();
         let err = program
             .generate_spirv("main", &Bindings::default(), &[], true)
             .unwrap_err();
@@ -2478,7 +2494,7 @@ fn cs() {
   }
 }
 "#;
-        let program = Program::parse(wgsl, false).unwrap();
+        let program = Program::parse(wgsl, false, &[]).unwrap();
         let msl = program
             .generate_msl(
                 "cs",
@@ -2517,7 +2533,7 @@ fn cs() {
   atomicAdd(&wg, 1u);
 }
 "#;
-        let program = Program::parse(wgsl, false).unwrap();
+        let program = Program::parse(wgsl, false, &[]).unwrap();
         let msl = program
             .generate_msl(
                 "cs",
@@ -2545,7 +2561,7 @@ fn cs() {
 
     #[test]
     fn render_stages_generate_msl_and_spirv() {
-        let program = Program::parse(render_wgsl(), false).unwrap();
+        let program = Program::parse(render_wgsl(), false, &[]).unwrap();
         let bindings = Bindings::default();
         for ep in ["vs", "fs"] {
             let msl = program
@@ -2569,7 +2585,7 @@ fn vs(i: VIn) -> @builtin(position) vec4f {
   return i.p;
 }
 "#;
-        let program = Program::parse(wgsl, false).unwrap();
+        let program = Program::parse(wgsl, false, &[]).unwrap();
         let default_msl = program
             .generate_msl(
                 "vs",
@@ -2625,7 +2641,7 @@ fn fs() -> @location(0) vec4f {
   return vec4f(1.0);
 }
 "#;
-        let program = Program::parse(wgsl, false).unwrap();
+        let program = Program::parse(wgsl, false, &[]).unwrap();
         let default_msl = program
             .generate_msl(
                 "fs",
@@ -2655,7 +2671,7 @@ fn fs() -> @builtin(frag_depth) f32 {
   return 2.0;
 }
 "#;
-        let program = Program::parse(frag_depth_wgsl, false).unwrap();
+        let program = Program::parse(frag_depth_wgsl, false, &[]).unwrap();
         let frag_depth_msl = program
             .generate_msl(
                 "fs",
@@ -2682,7 +2698,7 @@ fn fs() -> @location(0) vec4f {
   return vec4f(0.0);
 }
 "#;
-        let program = Program::parse(color_wgsl, false).unwrap();
+        let program = Program::parse(color_wgsl, false, &[]).unwrap();
         let color_msl = program
             .generate_msl(
                 "fs",
@@ -2714,7 +2730,7 @@ fn cs() {
   s.value[0] = u.value + c;
 }
 "#;
-        let program = Program::parse(wgsl, false).unwrap();
+        let program = Program::parse(wgsl, false, &[]).unwrap();
         let entries = program.entry_points().unwrap();
         assert_eq!(entries[0].workgroup_size, Some([8, 4, 1]));
         let bindings = program.resource_bindings("cs").unwrap();
@@ -2737,6 +2753,7 @@ fn cs() {
         let program = Program::parse(
             "diagnostic(info, bogus_rule);\n@compute @workgroup_size(1) fn cs() {}",
             false,
+            &[],
         )
         .unwrap();
         let diagnostics = program.diagnostics().unwrap();
@@ -2766,7 +2783,7 @@ fn cs() {
   _ = helper(gather_tex);
 }
 "#;
-        let program = Program::parse(wgsl, false).unwrap();
+        let program = Program::parse(wgsl, false, &[]).unwrap();
         let bindings = program.resource_bindings("cs").unwrap();
         let usage = |binding: u32| {
             bindings
@@ -2799,7 +2816,7 @@ fn fs(@location(0) value: f32, @location(1) @interpolate(flat) index: u32) -> @l
   return vec4f(value + f32(index), 0.0, 0.0, 1.0);
 }
 "#;
-        let program = Program::parse(wgsl, false).unwrap();
+        let program = Program::parse(wgsl, false, &[]).unwrap();
 
         let inputs = program.entry_point_inputs("fs").unwrap();
         let value = inputs
@@ -2833,7 +2850,7 @@ override x: u32 = 4;
 @compute @workgroup_size(x, 1, 1)
 fn cs() {}
 "#;
-        let program = Program::parse(wgsl, false).unwrap();
+        let program = Program::parse(wgsl, false, &[]).unwrap();
         let overrides = program.overrides().unwrap();
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides[0].name, "x");
@@ -2886,7 +2903,7 @@ override u: u32 = 7u;
 override i: i32 = -3i;
 @compute @workgroup_size(1) fn cs() {}
 "#;
-        let program = Program::parse(wgsl, false).unwrap();
+        let program = Program::parse(wgsl, false, &[]).unwrap();
         let overrides = program.overrides().unwrap();
         let default = |name: &str| {
             overrides
@@ -2912,7 +2929,7 @@ fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
   return textureSampleBaseClampToEdge(t, s, p.xy);
 }
 "#;
-        let program = Program::parse(wgsl, false).unwrap();
+        let program = Program::parse(wgsl, false, &[]).unwrap();
         let bindings = Bindings {
             sampler: vec![BindingRemap {
                 group: 0,
@@ -2950,7 +2967,7 @@ struct U { value: vec4f }
 @compute @workgroup_size(1)
 fn cs() { _ = u.value; }
 "#;
-        let program = Program::parse(wgsl, false).unwrap();
+        let program = Program::parse(wgsl, false, &[]).unwrap();
         let default_bindings = Bindings::default();
         let remapped = Bindings {
             uniform: vec![BindingRemap {
@@ -2996,6 +3013,7 @@ fn cs() { _ = u.value; }
         let program = Program::parse(
             "@compute @workgroup_size(1) fn m() { let v = dot4I8Packed(1u, 2u); }",
             false,
+            &[],
         )
         .unwrap();
         drop(program);
@@ -3016,7 +3034,7 @@ fn cs() {
   _ = value;
 }
 "#;
-        let program = Program::parse(wgsl, false).unwrap();
+        let program = Program::parse(wgsl, false, &[1]).unwrap();
         drop(program);
     }
 
@@ -3040,7 +3058,7 @@ fn cs() {
   _ = value;
 }
 "#;
-        let program = Program::parse(wgsl, false).unwrap();
+        let program = Program::parse(wgsl, false, &[3]).unwrap();
         drop(program);
     }
 
@@ -3049,6 +3067,7 @@ fn cs() {
         let err = Program::parse(
             "@fragment fn fs() -> @blend_src(0) @location(0) vec4f { return vec4f(); }",
             false,
+            &[],
         )
         .unwrap_err();
         assert!(!err.is_empty());
@@ -3064,7 +3083,7 @@ fn cs() {
   _ = x;
 }
 "#;
-        let program = Program::parse(wgsl, true).unwrap();
+        let program = Program::parse(wgsl, true, &[]).unwrap();
         let msl = program
             .generate_msl(
                 "cs",
@@ -3082,7 +3101,7 @@ fn cs() {
 
     #[test]
     fn invalid_wgsl_reports_error() {
-        let err = Program::parse("this is not wgsl", false).unwrap_err();
+        let err = Program::parse("this is not wgsl", false, &[]).unwrap_err();
         assert!(!err.is_empty());
     }
 
