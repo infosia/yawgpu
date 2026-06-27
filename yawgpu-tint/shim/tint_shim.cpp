@@ -32,6 +32,8 @@
 #include "src/tint/lang/wgsl/ast/identifier.h"
 #include "src/tint/lang/wgsl/ast/module.h"
 #include "src/tint/lang/wgsl/ast/override.h"
+#include "src/tint/lang/wgsl/enums.h"
+#include "src/tint/lang/wgsl/feature_status.h"
 #include "src/tint/lang/wgsl/inspector/inspector.h"
 #include "src/tint/lang/wgsl/reader/reader.h"
 #include "src/tint/lang/wgsl/sem/builtin_fn.h"
@@ -633,11 +635,17 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
             std::make_unique<tint::Source::File>("shader.wgsl", std::string(wgsl, wgsl_len));
 
         tint::wgsl::reader::Options options;
+        // Match Dawn's default device: allow every SHIPPED WGSL language feature
+        // (experimental ones need unsafe toggles the CTS device doesn't set), plus
+        // only the extensions yawgpu exposes (shader-f16 -> kF16).
+        for (auto feature : tint::wgsl::kAllLanguageFeatures) {
+            auto status = tint::wgsl::GetLanguageFeatureStatus(feature);
+            if (status == tint::wgsl::FeatureStatus::kShipped ||
+                status == tint::wgsl::FeatureStatus::kShippedWithKillswitch) {
+                options.allowed_features.features.insert(feature);
+            }
+        }
         if (shader_f16) {
-            // yawgpu exposes shader-f16 only among WGSL-relevant features. Allow just
-            // the f16 extension; do not un-gate subgroups, dual-source blending,
-            // packed_4x8 dot product, unrestricted pointers, or other unsupported
-            // optional WGSL features.
             options.allowed_features.extensions.insert(tint::wgsl::Extension::kF16);
         }
         tint::Program parsed = tint::wgsl::reader::Parse(out->file.get(), options);
