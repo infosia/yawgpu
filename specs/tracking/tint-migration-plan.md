@@ -719,3 +719,34 @@ atomics re-verified 66/0 after the compute-robustness change (no regression).
 shader,execution (125255/0) all match the Dawn oracle. Remaining for full coverage:
 the `shader,validation` tree, then Vulkan/MoltenVK + GLES backends, then external-texture
 Slices B–D and mobile; vendor extensions (TBDR) last.
+
+## MILESTONE — full Metal CTS at Dawn parity (api + shader,execution + shader,validation)
+
+All three ported CTS trees now match the Dawn oracle on real Metal:
+- **api,validation + api,operation: 37280/0/0** (1 expected xfail: index_buffer_format_dirtying)
+- **shader,execution: 125255/0/0**
+- **shader,validation: 35823/0/0**
+
+**shader,validation resolution (27 → 0):** mostly Tint AllowedFeatures configuration:
+- Allow all SHIPPED WGSL language features Dawn allows (readonly_and_readwrite,
+  unrestricted_pointer, …) — not just kF16, and not Everything().
+- Then narrow to the explicit set yawgpu SUPPORTS (compiles+executes):
+  `SUPPORTED_WGSL_LANGUAGE_FEATURES` = packed_4x8, readonly_and_readwrite,
+  unrestricted_pointer, pointer_composite, uniform_buffer_standard_layout,
+  texture_and_sampler_let, texture_formats_tier1, linear_indexing — EXCLUDING the two
+  subgroup features (subgroup runtime not implemented). yawgpu now also implements
+  `wgpuInstanceGetWGSLLanguageFeatures` / `wgpuInstanceHasWGSLLanguageFeature` reporting
+  that same set. packed_4x8 execution verified 32/0 on Metal (commit 252dca9).
+- The last 7 fails were a **webgpu-native-cts harness gap**, not a yawgpu bug: the
+  non-Dawn `hasLanguageFeature` path had no trial-compile probe for packed_4x8 /
+  linear_indexing / texture_formats_tier1 (defaulted to "unsupported"), so it wrongly
+  expected rejection for features yawgpu supports like Dawn. Fixed by adding
+  `requires <feature>;` probes to the harness (webgpu-native-cts commit b23c7fc).
+
+**Dawn-lib note:** the CTS Dawn-backend library (C/dawn/out/Release) was unbuilt; the
+pinned Dawn SOURCE (both third_party/dawn and C/dawn) was already current (c8f5ca3,
+2026-06-25). Rebuilt the Dawn monolithic lib (Unix Makefiles + xcrun clang; depot_tools'
+ninja shim is unusable) to confirm the divergences were real (not stale oracle).
+
+Remaining for full coverage: Vulkan/MoltenVK + GLES backends; external-texture Slices
+B–D; then mobile + vendor extensions (TBDR) last.
