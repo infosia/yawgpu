@@ -100,6 +100,7 @@ impl ReflectedModule {
             entry_name,
             binding_map,
             pipeline_constants,
+            &[],
             true,
             false,
             0xFFFF_FFFF,
@@ -115,16 +116,14 @@ impl ReflectedModule {
         force_point_size: bool,
         pipeline_constants: &PipelineConstants,
     ) -> Result<GeneratedMsl, String> {
-        if !vertex_buffers.is_empty() {
-            // TODO(phase-3): vertex layout is handled by the Metal HAL's
-            // MTLVertexDescriptor under Tint's stage_in model (no vertex pulling).
-        }
+        let vertex_buffers = tint_vertex_buffers(vertex_buffers)?;
         // `force_point_size` makes Tint emit `[[point_size]] = 1.0` (point-list
         // topology requires it on Metal).
         self.generate_stage_msl(
             entry_name,
             binding_map,
             pipeline_constants,
+            &vertex_buffers,
             false,
             force_point_size,
             0xFFFF_FFFF,
@@ -143,31 +142,50 @@ impl ReflectedModule {
             entry_name,
             binding_map,
             pipeline_constants,
+            &[],
             false,
             false,
             sample_mask,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn generate_stage_msl(
         &self,
         entry_name: &str,
         binding_map: &MslBindingMap,
         pipeline_constants: &PipelineConstants,
+        vertex_buffers: &[yawgpu_tint::VertexBuffer],
         disable_robustness: bool,
         emit_vertex_point_size: bool,
         fixed_sample_mask: u32,
     ) -> Result<GeneratedMsl, String> {
         let bindings =
             tint_bindings_for_msl(binding_map, &self.resource_bindings_for_entry(entry_name)?)?;
-        let buffer_sizes_slot = msl_buffer_sizes_slot(binding_map)?;
+        let binding_buffer_sizes_slot = msl_buffer_sizes_slot(binding_map)?;
+        let buffer_sizes_slot = if vertex_buffers.is_empty() {
+            binding_buffer_sizes_slot
+        } else {
+            let max_vertex_metal_index = vertex_buffers
+                .iter()
+                .map(|buffer| buffer.metal_index)
+                .max()
+                .unwrap_or(0);
+            binding_buffer_sizes_slot.max(max_vertex_metal_index.saturating_add(1))
+        };
+        if buffer_sizes_slot > u32::from(u8::MAX) {
+            return Err("MSL generated buffer slot exceeds the supported slot range".to_owned());
+        }
         let output = self.program.generate_msl(
             entry_name,
             &bindings,
             &override_values(pipeline_constants),
             buffer_sizes_slot,
-            disable_robustness,
+            // The wrapper takes `robust` (robustness ENABLED), which is the
+            // negation of this fn's `disable_robustness`.
+            !disable_robustness,
             emit_vertex_point_size,
+            vertex_buffers,
             fixed_sample_mask,
         )?;
         let buffer_size_bindings = output
@@ -181,7 +199,8 @@ impl ReflectedModule {
         Ok(GeneratedMsl {
             source: output.source,
             entry_point: output.entry_point,
-            buffer_sizes_slot: (!buffer_size_bindings.is_empty()).then_some(buffer_sizes_slot),
+            buffer_sizes_slot: (!buffer_size_bindings.is_empty() || !vertex_buffers.is_empty())
+                .then_some(buffer_sizes_slot),
             buffer_size_bindings,
             frag_depth_clamp_slot: output.frag_depth_clamp_slot,
             workgroup_memory_sizes: output
@@ -393,6 +412,91 @@ fn override_values(constants: &PipelineConstants) -> Vec<yawgpu_tint::OverrideVa
             value: *value,
         })
         .collect()
+}
+
+fn tint_vertex_buffers(
+    vertex_buffers: &[MslVertexBufferBinding],
+) -> Result<Vec<yawgpu_tint::VertexBuffer>, String> {
+    vertex_buffers
+        .iter()
+        .map(|buffer| {
+            let array_stride = u32::try_from(buffer.array_stride)
+                .map_err(|_| "MSL vertex buffer array stride exceeds u32".to_owned())?;
+            let attributes = buffer
+                .attributes
+                .iter()
+                .map(|attribute| {
+                    let offset = u32::try_from(attribute.offset)
+                        .map_err(|_| "MSL vertex attribute offset exceeds u32".to_owned())?;
+                    Ok(yawgpu_tint::VertexAttribute {
+                        format: tint_vertex_format(attribute.format),
+                        offset,
+                        shader_location: attribute.shader_location,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(yawgpu_tint::VertexBuffer {
+                slot: buffer.slot,
+                metal_index: buffer.metal_index,
+                array_stride,
+                step_mode: tint_vertex_step_mode(buffer.step_mode),
+                attributes,
+            })
+        })
+        .collect()
+}
+
+fn tint_vertex_step_mode(step_mode: MslVertexStepMode) -> yawgpu_tint::VertexStepMode {
+    match step_mode {
+        MslVertexStepMode::Vertex => yawgpu_tint::VertexStepMode::Vertex,
+        MslVertexStepMode::Instance => yawgpu_tint::VertexStepMode::Instance,
+    }
+}
+
+fn tint_vertex_format(format: MslVertexFormat) -> yawgpu_tint::VertexFormat {
+    match format {
+        MslVertexFormat::Uint8 => yawgpu_tint::VertexFormat::Uint8,
+        MslVertexFormat::Uint8x2 => yawgpu_tint::VertexFormat::Uint8x2,
+        MslVertexFormat::Uint8x4 => yawgpu_tint::VertexFormat::Uint8x4,
+        MslVertexFormat::Sint8 => yawgpu_tint::VertexFormat::Sint8,
+        MslVertexFormat::Sint8x2 => yawgpu_tint::VertexFormat::Sint8x2,
+        MslVertexFormat::Sint8x4 => yawgpu_tint::VertexFormat::Sint8x4,
+        MslVertexFormat::Unorm8 => yawgpu_tint::VertexFormat::Unorm8,
+        MslVertexFormat::Unorm8x2 => yawgpu_tint::VertexFormat::Unorm8x2,
+        MslVertexFormat::Unorm8x4 => yawgpu_tint::VertexFormat::Unorm8x4,
+        MslVertexFormat::Snorm8 => yawgpu_tint::VertexFormat::Snorm8,
+        MslVertexFormat::Snorm8x2 => yawgpu_tint::VertexFormat::Snorm8x2,
+        MslVertexFormat::Snorm8x4 => yawgpu_tint::VertexFormat::Snorm8x4,
+        MslVertexFormat::Uint16 => yawgpu_tint::VertexFormat::Uint16,
+        MslVertexFormat::Uint16x2 => yawgpu_tint::VertexFormat::Uint16x2,
+        MslVertexFormat::Uint16x4 => yawgpu_tint::VertexFormat::Uint16x4,
+        MslVertexFormat::Sint16 => yawgpu_tint::VertexFormat::Sint16,
+        MslVertexFormat::Sint16x2 => yawgpu_tint::VertexFormat::Sint16x2,
+        MslVertexFormat::Sint16x4 => yawgpu_tint::VertexFormat::Sint16x4,
+        MslVertexFormat::Unorm16 => yawgpu_tint::VertexFormat::Unorm16,
+        MslVertexFormat::Unorm16x2 => yawgpu_tint::VertexFormat::Unorm16x2,
+        MslVertexFormat::Unorm16x4 => yawgpu_tint::VertexFormat::Unorm16x4,
+        MslVertexFormat::Snorm16 => yawgpu_tint::VertexFormat::Snorm16,
+        MslVertexFormat::Snorm16x2 => yawgpu_tint::VertexFormat::Snorm16x2,
+        MslVertexFormat::Snorm16x4 => yawgpu_tint::VertexFormat::Snorm16x4,
+        MslVertexFormat::Float16 => yawgpu_tint::VertexFormat::Float16,
+        MslVertexFormat::Float16x2 => yawgpu_tint::VertexFormat::Float16x2,
+        MslVertexFormat::Float16x4 => yawgpu_tint::VertexFormat::Float16x4,
+        MslVertexFormat::Float32 => yawgpu_tint::VertexFormat::Float32,
+        MslVertexFormat::Float32x2 => yawgpu_tint::VertexFormat::Float32x2,
+        MslVertexFormat::Float32x3 => yawgpu_tint::VertexFormat::Float32x3,
+        MslVertexFormat::Float32x4 => yawgpu_tint::VertexFormat::Float32x4,
+        MslVertexFormat::Uint32 => yawgpu_tint::VertexFormat::Uint32,
+        MslVertexFormat::Uint32x2 => yawgpu_tint::VertexFormat::Uint32x2,
+        MslVertexFormat::Uint32x3 => yawgpu_tint::VertexFormat::Uint32x3,
+        MslVertexFormat::Uint32x4 => yawgpu_tint::VertexFormat::Uint32x4,
+        MslVertexFormat::Sint32 => yawgpu_tint::VertexFormat::Sint32,
+        MslVertexFormat::Sint32x2 => yawgpu_tint::VertexFormat::Sint32x2,
+        MslVertexFormat::Sint32x3 => yawgpu_tint::VertexFormat::Sint32x3,
+        MslVertexFormat::Sint32x4 => yawgpu_tint::VertexFormat::Sint32x4,
+        MslVertexFormat::Unorm10_10_10_2 => yawgpu_tint::VertexFormat::Unorm10_10_10_2,
+        MslVertexFormat::Unorm8x4Bgra => yawgpu_tint::VertexFormat::Unorm8x4Bgra,
+    }
 }
 
 fn tint_bindings_for_msl(
@@ -1188,6 +1292,49 @@ fn cs() {
         assert!(generated
             .source
             .contains("tint_storage_buffer_sizes [[buffer(4)]]"));
+    }
+
+    #[test]
+    fn generate_render_vertex_msl_reports_buffer_sizes_for_vertex_pulling() {
+        let module = parse_and_validate_wgsl(
+            r#"
+struct VIn {
+  @location(0) p: vec4<f32>,
+}
+
+@vertex
+fn vs(i: VIn) -> @builtin(position) vec4<f32> {
+  return i.p;
+}
+"#,
+        )
+        .unwrap();
+
+        let vertex_metal_index = 3;
+        let generated = module
+            .generate_render_vertex_msl(
+                "vs",
+                &MslBindingMap {
+                    resources: Vec::new(),
+                },
+                &[MslVertexBufferBinding {
+                    slot: 0,
+                    metal_index: vertex_metal_index,
+                    array_stride: 16,
+                    step_mode: MslVertexStepMode::Vertex,
+                    attributes: vec![MslVertexAttribute {
+                        shader_location: 0,
+                        offset: 0,
+                        format: MslVertexFormat::Float32x4,
+                    }],
+                }],
+                false,
+                &PipelineConstants::default(),
+            )
+            .unwrap();
+
+        assert!(generated.buffer_sizes_slot.is_some());
+        assert!(generated.buffer_sizes_slot.unwrap() > vertex_metal_index);
     }
 
     #[test]

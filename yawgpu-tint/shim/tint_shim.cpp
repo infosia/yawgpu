@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <optional>
@@ -14,6 +15,7 @@
 #include <vector>
 
 #include "src/tint/api/common/substitute_overrides_config.h"
+#include "src/tint/api/common/vertex_pulling_config.h"
 #include "src/tint/api/helpers/generate_bindings.h"
 #include "src/tint/api/tint.h"
 #include "src/tint/lang/core/constant/value.h"
@@ -124,6 +126,105 @@ tint::Bindings make_bindings(const YawgpuTintBindings* bindings) {
         }
     }
     return out;
+}
+
+tint::VertexFormat to_tint_vertex_format(uint8_t format) {
+    switch (format) {
+        case 0:
+            return tint::VertexFormat::kUint8;
+        case 1:
+            return tint::VertexFormat::kUint8x2;
+        case 2:
+            return tint::VertexFormat::kUint8x4;
+        case 3:
+            return tint::VertexFormat::kSint8;
+        case 4:
+            return tint::VertexFormat::kSint8x2;
+        case 5:
+            return tint::VertexFormat::kSint8x4;
+        case 6:
+            return tint::VertexFormat::kUnorm8;
+        case 7:
+            return tint::VertexFormat::kUnorm8x2;
+        case 8:
+            return tint::VertexFormat::kUnorm8x4;
+        case 9:
+            return tint::VertexFormat::kSnorm8;
+        case 10:
+            return tint::VertexFormat::kSnorm8x2;
+        case 11:
+            return tint::VertexFormat::kSnorm8x4;
+        case 12:
+            return tint::VertexFormat::kUint16;
+        case 13:
+            return tint::VertexFormat::kUint16x2;
+        case 14:
+            return tint::VertexFormat::kUint16x4;
+        case 15:
+            return tint::VertexFormat::kSint16;
+        case 16:
+            return tint::VertexFormat::kSint16x2;
+        case 17:
+            return tint::VertexFormat::kSint16x4;
+        case 18:
+            return tint::VertexFormat::kUnorm16;
+        case 19:
+            return tint::VertexFormat::kUnorm16x2;
+        case 20:
+            return tint::VertexFormat::kUnorm16x4;
+        case 21:
+            return tint::VertexFormat::kSnorm16;
+        case 22:
+            return tint::VertexFormat::kSnorm16x2;
+        case 23:
+            return tint::VertexFormat::kSnorm16x4;
+        case 24:
+            return tint::VertexFormat::kFloat16;
+        case 25:
+            return tint::VertexFormat::kFloat16x2;
+        case 26:
+            return tint::VertexFormat::kFloat16x4;
+        case 27:
+            return tint::VertexFormat::kFloat32;
+        case 28:
+            return tint::VertexFormat::kFloat32x2;
+        case 29:
+            return tint::VertexFormat::kFloat32x3;
+        case 30:
+            return tint::VertexFormat::kFloat32x4;
+        case 31:
+            return tint::VertexFormat::kUint32;
+        case 32:
+            return tint::VertexFormat::kUint32x2;
+        case 33:
+            return tint::VertexFormat::kUint32x3;
+        case 34:
+            return tint::VertexFormat::kUint32x4;
+        case 35:
+            return tint::VertexFormat::kSint32;
+        case 36:
+            return tint::VertexFormat::kSint32x2;
+        case 37:
+            return tint::VertexFormat::kSint32x3;
+        case 38:
+            return tint::VertexFormat::kSint32x4;
+        case 39:
+            return tint::VertexFormat::kUnorm10_10_10_2;
+        case 40:
+            return tint::VertexFormat::kUnorm8x4BGRA;
+        default:
+            return tint::VertexFormat::kUint8;
+    }
+}
+
+tint::VertexStepMode to_tint_step_mode(uint8_t step_mode) {
+    switch (step_mode) {
+        case 1:
+            return tint::VertexStepMode::kInstance;
+        case 0:
+        default:
+            return tint::VertexStepMode::kVertex;
+    }
 }
 
 tint::diag::Result<tint::SubstituteOverridesConfig> make_override_config(
@@ -681,6 +782,8 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
                               uint32_t buffer_sizes_slot,
                               bool disable_robustness,
                               bool emit_vertex_point_size,
+                              const YawgpuTintVertexBuffer* vertex_buffers,
+                              size_t n_vertex_buffers,
                               uint32_t fixed_sample_mask,
                               YawgpuTintMslOutput* out,
                               char** err) {
@@ -737,6 +840,48 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         std::vector<tint::BindingPoint> ordered_size_bindings;
         options.array_length_from_constants = generate_array_length_from_constants(
             ir.Get(), entry_point, buffer_sizes_slot, ordered_size_bindings);
+        const auto num_storage = static_cast<uint32_t>(ordered_size_bindings.size());
+        if (n_vertex_buffers > 0) {
+            if (vertex_buffers == nullptr) {
+                set_error_string(err, "vertex buffer pointer is NULL");
+                return false;
+            }
+            tint::VertexPullingConfig config;
+            config.pulling_group = 4u;
+            uint32_t max_slot = 0;
+            for (size_t i = 0; i < n_vertex_buffers; ++i) {
+                max_slot = std::max(max_slot, vertex_buffers[i].slot);
+            }
+            config.vertex_state.resize(max_slot + 1);
+            for (size_t i = 0; i < n_vertex_buffers; ++i) {
+                const auto& buffer = vertex_buffers[i];
+                std::vector<tint::VertexAttributeDescriptor> attributes;
+                attributes.reserve(buffer.n_attributes);
+                if (buffer.n_attributes > 0 && buffer.attributes == nullptr) {
+                    set_error_string(err, "vertex attribute pointer is NULL");
+                    return false;
+                }
+                for (size_t attr_idx = 0; attr_idx < buffer.n_attributes; ++attr_idx) {
+                    const auto& attribute = buffer.attributes[attr_idx];
+                    attributes.push_back(tint::VertexAttributeDescriptor{
+                        .format = to_tint_vertex_format(attribute.format),
+                        .offset = attribute.offset,
+                        .shader_location = attribute.shader_location,
+                    });
+                }
+                config.vertex_state[buffer.slot] = tint::VertexBufferLayoutDescriptor{
+                    buffer.array_stride,
+                    to_tint_step_mode(buffer.step_mode),
+                    std::move(attributes),
+                };
+                tint::BindingPoint src{.group = 4u, .binding = buffer.slot};
+                options.bindings.storage[src] =
+                    tint::BindingPoint{.group = 0u, .binding = buffer.metal_index};
+                options.array_length_from_constants.bindpoint_to_size_index[src] =
+                    num_storage + static_cast<uint32_t>(i);
+            }
+            options.vertex_pulling_config = std::move(config);
+        }
         auto override_cfg = make_override_config(program, ov, n_ov);
         if (override_cfg != tint::Success) {
             set_error(err, override_cfg.Failure());
