@@ -125,6 +125,25 @@ mod imp {
     }
 
     #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct RawVertexAttribute {
+        format: u8,
+        offset: u32,
+        shader_location: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct RawVertexBuffer {
+        slot: u32,
+        metal_index: u32,
+        array_stride: u32,
+        step_mode: u8,
+        attributes: *const RawVertexAttribute,
+        n_attributes: usize,
+    }
+
+    #[repr(C)]
     struct RawMslOutput {
         msl: *mut c_char,
         entry_point: *mut c_char,
@@ -203,6 +222,8 @@ mod imp {
             buffer_sizes_slot: u32,
             disable_robustness: bool,
             emit_vertex_point_size: bool,
+            vertex_buffers: *const RawVertexBuffer,
+            n_vertex_buffers: usize,
             fixed_sample_mask: u32,
             out: *mut RawMslOutput,
             err: *mut *mut c_char,
@@ -499,12 +520,14 @@ mod imp {
             buffer_sizes_slot: u32,
             robust: bool,
             emit_vertex_point_size: bool,
+            vertex_buffers: &[VertexBuffer],
             fixed_sample_mask: u32,
         ) -> Result<MslOutput, String> {
             let ep = cstring(entry_point, "entry point")?;
             let raw_bindings_owned = bindings.as_raw();
             let raw_bindings = raw_bindings_owned.as_raw();
             let raw_overrides = RawOverrideValues::new(overrides)?;
+            let raw_vertex_buffers = RawVertexBuffers::new(vertex_buffers);
             let mut out = RawMslOutput {
                 msl: ptr::null_mut(),
                 entry_point: ptr::null_mut(),
@@ -528,6 +551,8 @@ mod imp {
                     buffer_sizes_slot,
                     !robust,
                     emit_vertex_point_size,
+                    raw_vertex_buffers.as_ptr(),
+                    raw_vertex_buffers.len(),
                     fixed_sample_mask,
                     &mut out,
                     &mut err,
@@ -1396,6 +1421,186 @@ mod imp {
         }
     }
 
+    /// Vertex input attribute used by Tint vertex pulling.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct VertexAttribute {
+        /// WebGPU vertex format.
+        pub format: VertexFormat,
+        /// Byte offset within the vertex buffer element.
+        pub offset: u32,
+        /// WGSL shader location.
+        pub shader_location: u32,
+    }
+
+    impl VertexAttribute {
+        fn as_raw(self) -> RawVertexAttribute {
+            RawVertexAttribute {
+                format: self.format as u8,
+                offset: self.offset,
+                shader_location: self.shader_location,
+            }
+        }
+    }
+
+    /// WebGPU vertex format used by Tint vertex pulling.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[repr(u8)]
+    pub enum VertexFormat {
+        /// uint8.
+        Uint8 = 0,
+        /// uint8x2.
+        Uint8x2 = 1,
+        /// uint8x4.
+        Uint8x4 = 2,
+        /// sint8.
+        Sint8 = 3,
+        /// sint8x2.
+        Sint8x2 = 4,
+        /// sint8x4.
+        Sint8x4 = 5,
+        /// unorm8.
+        Unorm8 = 6,
+        /// unorm8x2.
+        Unorm8x2 = 7,
+        /// unorm8x4.
+        Unorm8x4 = 8,
+        /// snorm8.
+        Snorm8 = 9,
+        /// snorm8x2.
+        Snorm8x2 = 10,
+        /// snorm8x4.
+        Snorm8x4 = 11,
+        /// uint16.
+        Uint16 = 12,
+        /// uint16x2.
+        Uint16x2 = 13,
+        /// uint16x4.
+        Uint16x4 = 14,
+        /// sint16.
+        Sint16 = 15,
+        /// sint16x2.
+        Sint16x2 = 16,
+        /// sint16x4.
+        Sint16x4 = 17,
+        /// unorm16.
+        Unorm16 = 18,
+        /// unorm16x2.
+        Unorm16x2 = 19,
+        /// unorm16x4.
+        Unorm16x4 = 20,
+        /// snorm16.
+        Snorm16 = 21,
+        /// snorm16x2.
+        Snorm16x2 = 22,
+        /// snorm16x4.
+        Snorm16x4 = 23,
+        /// float16.
+        Float16 = 24,
+        /// float16x2.
+        Float16x2 = 25,
+        /// float16x4.
+        Float16x4 = 26,
+        /// float32.
+        Float32 = 27,
+        /// float32x2.
+        Float32x2 = 28,
+        /// float32x3.
+        Float32x3 = 29,
+        /// float32x4.
+        Float32x4 = 30,
+        /// uint32.
+        Uint32 = 31,
+        /// uint32x2.
+        Uint32x2 = 32,
+        /// uint32x3.
+        Uint32x3 = 33,
+        /// uint32x4.
+        Uint32x4 = 34,
+        /// sint32.
+        Sint32 = 35,
+        /// sint32x2.
+        Sint32x2 = 36,
+        /// sint32x3.
+        Sint32x3 = 37,
+        /// sint32x4.
+        Sint32x4 = 38,
+        /// unorm10-10-10-2.
+        Unorm10_10_10_2 = 39,
+        /// unorm8x4-bgra.
+        Unorm8x4Bgra = 40,
+    }
+
+    /// Vertex-buffer stepping mode used by Tint vertex pulling.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[repr(u8)]
+    pub enum VertexStepMode {
+        /// Per-vertex input.
+        Vertex = 0,
+        /// Per-instance input.
+        Instance = 1,
+    }
+
+    /// Vertex buffer layout used by Tint vertex pulling.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct VertexBuffer {
+        /// WebGPU vertex buffer slot.
+        pub slot: u32,
+        /// Metal buffer index where the HAL binds this vertex buffer.
+        pub metal_index: u32,
+        /// Byte stride between elements.
+        pub array_stride: u32,
+        /// Vertex or instance stepping.
+        pub step_mode: VertexStepMode,
+        /// Attributes supplied by this buffer.
+        pub attributes: Vec<VertexAttribute>,
+    }
+
+    struct RawVertexBuffers {
+        attributes: Vec<Vec<RawVertexAttribute>>,
+        buffers: Vec<RawVertexBuffer>,
+    }
+
+    impl RawVertexBuffers {
+        fn new(vertex_buffers: &[VertexBuffer]) -> Self {
+            let attributes = vertex_buffers
+                .iter()
+                .map(|buffer| {
+                    buffer
+                        .attributes
+                        .iter()
+                        .copied()
+                        .map(VertexAttribute::as_raw)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let buffers = vertex_buffers
+                .iter()
+                .zip(&attributes)
+                .map(|(buffer, attributes)| RawVertexBuffer {
+                    slot: buffer.slot,
+                    metal_index: buffer.metal_index,
+                    array_stride: buffer.array_stride,
+                    step_mode: buffer.step_mode as u8,
+                    attributes: attributes.as_ptr(),
+                    n_attributes: attributes.len(),
+                })
+                .collect();
+            Self {
+                attributes,
+                buffers,
+            }
+        }
+
+        fn as_ptr(&self) -> *const RawVertexBuffer {
+            let _keep_attributes_alive = &self.attributes;
+            self.buffers.as_ptr()
+        }
+
+        fn len(&self) -> usize {
+            self.buffers.len()
+        }
+    }
+
     /// Pipeline override substitution value.
     #[derive(Debug, Clone, PartialEq)]
     pub struct OverrideValue {
@@ -1448,6 +1653,7 @@ mod imp {
                 0,
                 true,
                 false,
+                &[],
                 0xFFFF_FFFF,
             )?
             .source)
@@ -1517,6 +1723,7 @@ mod imp {
             _buffer_sizes_slot: u32,
             _robust: bool,
             _emit_vertex_point_size: bool,
+            _vertex_buffers: &[VertexBuffer],
             _fixed_sample_mask: u32,
         ) -> Result<MslOutput, String> {
             Err(UNAVAILABLE.to_owned())
@@ -1989,6 +2196,130 @@ mod imp {
         pub external_texture: Vec<ExternalTextureRemap>,
     }
 
+    /// Vertex input attribute used by Tint vertex pulling.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct VertexAttribute {
+        /// WebGPU vertex format.
+        pub format: VertexFormat,
+        /// Byte offset within the vertex buffer element.
+        pub offset: u32,
+        /// WGSL shader location.
+        pub shader_location: u32,
+    }
+
+    /// WebGPU vertex format used by Tint vertex pulling.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[repr(u8)]
+    pub enum VertexFormat {
+        /// uint8.
+        Uint8 = 0,
+        /// uint8x2.
+        Uint8x2 = 1,
+        /// uint8x4.
+        Uint8x4 = 2,
+        /// sint8.
+        Sint8 = 3,
+        /// sint8x2.
+        Sint8x2 = 4,
+        /// sint8x4.
+        Sint8x4 = 5,
+        /// unorm8.
+        Unorm8 = 6,
+        /// unorm8x2.
+        Unorm8x2 = 7,
+        /// unorm8x4.
+        Unorm8x4 = 8,
+        /// snorm8.
+        Snorm8 = 9,
+        /// snorm8x2.
+        Snorm8x2 = 10,
+        /// snorm8x4.
+        Snorm8x4 = 11,
+        /// uint16.
+        Uint16 = 12,
+        /// uint16x2.
+        Uint16x2 = 13,
+        /// uint16x4.
+        Uint16x4 = 14,
+        /// sint16.
+        Sint16 = 15,
+        /// sint16x2.
+        Sint16x2 = 16,
+        /// sint16x4.
+        Sint16x4 = 17,
+        /// unorm16.
+        Unorm16 = 18,
+        /// unorm16x2.
+        Unorm16x2 = 19,
+        /// unorm16x4.
+        Unorm16x4 = 20,
+        /// snorm16.
+        Snorm16 = 21,
+        /// snorm16x2.
+        Snorm16x2 = 22,
+        /// snorm16x4.
+        Snorm16x4 = 23,
+        /// float16.
+        Float16 = 24,
+        /// float16x2.
+        Float16x2 = 25,
+        /// float16x4.
+        Float16x4 = 26,
+        /// float32.
+        Float32 = 27,
+        /// float32x2.
+        Float32x2 = 28,
+        /// float32x3.
+        Float32x3 = 29,
+        /// float32x4.
+        Float32x4 = 30,
+        /// uint32.
+        Uint32 = 31,
+        /// uint32x2.
+        Uint32x2 = 32,
+        /// uint32x3.
+        Uint32x3 = 33,
+        /// uint32x4.
+        Uint32x4 = 34,
+        /// sint32.
+        Sint32 = 35,
+        /// sint32x2.
+        Sint32x2 = 36,
+        /// sint32x3.
+        Sint32x3 = 37,
+        /// sint32x4.
+        Sint32x4 = 38,
+        /// unorm10-10-10-2.
+        Unorm10_10_10_2 = 39,
+        /// unorm8x4-bgra.
+        Unorm8x4Bgra = 40,
+    }
+
+    /// Vertex-buffer stepping mode used by Tint vertex pulling.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[repr(u8)]
+    pub enum VertexStepMode {
+        /// Per-vertex input.
+        Vertex = 0,
+        /// Per-instance input.
+        Instance = 1,
+    }
+
+    /// Vertex buffer layout used by Tint vertex pulling.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct VertexBuffer {
+        /// WebGPU vertex buffer slot.
+        pub slot: u32,
+        /// Metal buffer index where the HAL binds this vertex buffer.
+        pub metal_index: u32,
+        /// Byte stride between elements.
+        pub array_stride: u32,
+        /// Vertex or instance stepping.
+        pub step_mode: VertexStepMode,
+        /// Attributes supplied by this buffer.
+        pub attributes: Vec<VertexAttribute>,
+    }
+
     /// Pipeline override substitution value.
     #[derive(Debug, Clone, PartialEq)]
     pub struct OverrideValue {
@@ -2104,7 +2435,7 @@ fn main() {
         let program = Program::parse(compute_wgsl(), false).unwrap();
         let bindings = Bindings::default();
         let msl = program
-            .generate_msl("cs", &bindings, &[], 0, true, false, 0xFFFF_FFFF)
+            .generate_msl("cs", &bindings, &[], 0, true, false, &[], 0xFFFF_FFFF)
             .unwrap();
         assert!(msl.source.contains("kernel"), "MSL:\n{}", msl.source);
         let spirv = program.generate_spirv("cs", &bindings, &[], true).unwrap();
@@ -2149,7 +2480,16 @@ fn cs() {
 "#;
         let program = Program::parse(wgsl, false).unwrap();
         let msl = program
-            .generate_msl("cs", &Bindings::default(), &[], 9, true, false, 0xFFFF_FFFF)
+            .generate_msl(
+                "cs",
+                &Bindings::default(),
+                &[],
+                9,
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+            )
             .unwrap();
         assert!(
             msl.source
@@ -2179,7 +2519,16 @@ fn cs() {
 "#;
         let program = Program::parse(wgsl, false).unwrap();
         let msl = program
-            .generate_msl("cs", &Bindings::default(), &[], 0, true, false, 0xFFFF_FFFF)
+            .generate_msl(
+                "cs",
+                &Bindings::default(),
+                &[],
+                0,
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+            )
             .unwrap();
         assert!(
             !msl.workgroup_allocations.is_empty(),
@@ -2200,12 +2549,72 @@ fn cs() {
         let bindings = Bindings::default();
         for ep in ["vs", "fs"] {
             let msl = program
-                .generate_msl(ep, &bindings, &[], 0, true, false, 0xFFFF_FFFF)
+                .generate_msl(ep, &bindings, &[], 0, true, false, &[], 0xFFFF_FFFF)
                 .unwrap();
             assert!(!msl.source.is_empty());
             let spirv = program.generate_spirv(ep, &bindings, &[], true).unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));
         }
+    }
+
+    #[test]
+    fn vertex_msl_uses_vertex_pulling_when_configured() {
+        let wgsl = r#"
+struct VIn {
+  @location(0) p: vec4f,
+}
+
+@vertex
+fn vs(i: VIn) -> @builtin(position) vec4f {
+  return i.p;
+}
+"#;
+        let program = Program::parse(wgsl, false).unwrap();
+        let default_msl = program
+            .generate_msl(
+                "vs",
+                &Bindings::default(),
+                &[],
+                1,
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+            )
+            .unwrap()
+            .source;
+        let pulling_msl = program
+            .generate_msl(
+                "vs",
+                &Bindings::default(),
+                &[],
+                1,
+                true,
+                false,
+                &[VertexBuffer {
+                    slot: 0,
+                    metal_index: 0,
+                    array_stride: 16,
+                    step_mode: VertexStepMode::Vertex,
+                    attributes: vec![VertexAttribute {
+                        format: VertexFormat::Float32x4,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
+                0xFFFF_FFFF,
+            )
+            .unwrap()
+            .source;
+
+        assert!(default_msl.contains("stage_in"), "MSL:\n{default_msl}");
+        assert!(!pulling_msl.contains("stage_in"), "MSL:\n{pulling_msl}");
+        assert!(
+            pulling_msl.contains("[[buffer(0)]]")
+                && pulling_msl.contains("tint_storage_buffer_sizes"),
+            "MSL:\n{pulling_msl}"
+        );
+        assert_ne!(pulling_msl, default_msl);
     }
 
     #[test]
@@ -2218,11 +2627,20 @@ fn fs() -> @location(0) vec4f {
 "#;
         let program = Program::parse(wgsl, false).unwrap();
         let default_msl = program
-            .generate_msl("fs", &Bindings::default(), &[], 0, true, false, 0xFFFF_FFFF)
+            .generate_msl(
+                "fs",
+                &Bindings::default(),
+                &[],
+                0,
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+            )
             .unwrap()
             .source;
         let masked_msl = program
-            .generate_msl("fs", &Bindings::default(), &[], 0, true, false, 0x1)
+            .generate_msl("fs", &Bindings::default(), &[], 0, true, false, &[], 0x1)
             .unwrap()
             .source;
 
@@ -2239,7 +2657,16 @@ fn fs() -> @builtin(frag_depth) f32 {
 "#;
         let program = Program::parse(frag_depth_wgsl, false).unwrap();
         let frag_depth_msl = program
-            .generate_msl("fs", &Bindings::default(), &[], 0, true, false, 0xFFFF_FFFF)
+            .generate_msl(
+                "fs",
+                &Bindings::default(),
+                &[],
+                0,
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+            )
             .unwrap();
         assert!(frag_depth_msl.frag_depth_clamp_slot.is_some());
         assert!(
@@ -2257,7 +2684,16 @@ fn fs() -> @location(0) vec4f {
 "#;
         let program = Program::parse(color_wgsl, false).unwrap();
         let color_msl = program
-            .generate_msl("fs", &Bindings::default(), &[], 0, true, false, 0xFFFF_FFFF)
+            .generate_msl(
+                "fs",
+                &Bindings::default(),
+                &[],
+                0,
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+            )
             .unwrap();
         assert_eq!(color_msl.frag_depth_clamp_slot, None);
     }
@@ -2417,6 +2853,7 @@ fn cs() {}
                 0,
                 true,
                 false,
+                &[],
                 0xFFFF_FFFF,
             )
             .unwrap()
@@ -2432,6 +2869,7 @@ fn cs() {}
                 0,
                 true,
                 false,
+                &[],
                 0xFFFF_FFFF,
             )
             .unwrap()
@@ -2493,7 +2931,7 @@ fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
         };
 
         let msl = program
-            .generate_msl("fs", &bindings, &[], 2, true, false, 0xFFFF_FFFF)
+            .generate_msl("fs", &bindings, &[], 2, true, false, &[], 0xFFFF_FFFF)
             .unwrap();
         assert!(!msl.source.is_empty(), "MSL was empty");
         assert!(msl.source.contains("sampler"), "MSL:\n{}", msl.source);
@@ -2524,11 +2962,20 @@ fn cs() { _ = u.value; }
             ..Bindings::default()
         };
         let default_msl = program
-            .generate_msl("cs", &default_bindings, &[], 0, true, false, 0xFFFF_FFFF)
+            .generate_msl(
+                "cs",
+                &default_bindings,
+                &[],
+                0,
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+            )
             .unwrap()
             .source;
         let remapped_msl = program
-            .generate_msl("cs", &remapped, &[], 0, true, false, 0xFFFF_FFFF)
+            .generate_msl("cs", &remapped, &[], 0, true, false, &[], 0xFFFF_FFFF)
             .unwrap()
             .source;
         assert!(remapped_msl.contains("[[buffer(7)]]"), "{remapped_msl}");
@@ -2554,7 +3001,16 @@ fn cs() {
 "#;
         let program = Program::parse(wgsl, true).unwrap();
         let msl = program
-            .generate_msl("cs", &Bindings::default(), &[], 0, true, false, 0xFFFF_FFFF)
+            .generate_msl(
+                "cs",
+                &Bindings::default(),
+                &[],
+                0,
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+            )
             .unwrap();
         assert!(msl.source.contains("kernel"));
     }

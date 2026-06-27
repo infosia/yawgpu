@@ -186,6 +186,21 @@ typedef struct {
 } YawgpuTintOverrideValue;
 
 typedef struct {
+    uint8_t format;
+    uint32_t offset;
+    uint32_t shader_location;
+} YawgpuTintVertexAttribute;
+
+typedef struct {
+    uint32_t slot;
+    uint32_t metal_index;
+    uint32_t array_stride;
+    uint8_t step_mode;
+    const YawgpuTintVertexAttribute* attributes;
+    size_t n_attributes;
+} YawgpuTintVertexBuffer;
+
+typedef struct {
     char* msl;
     char* entry_point;
     bool needs_storage_buffer_sizes;
@@ -205,6 +220,8 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
                               uint32_t buffer_sizes_slot,
                               bool disable_robustness,
                               bool emit_vertex_point_size,
+                              const YawgpuTintVertexBuffer* vertex_buffers,
+                              size_t n_vertex_buffers,
                               uint32_t fixed_sample_mask,
                               YawgpuTintMslOutput* out,
                               char** err);
