@@ -115,6 +115,27 @@ pub(crate) enum MetalBindingKind {
     ExternalTexture,
 }
 
+/// Returns the device-independent rejection message when any binding is an
+/// external texture, which the Vulkan (SPIR-V) backend does not support.
+///
+/// yawgpu matches wgpu's posture: external textures are implemented on Metal
+/// only. Tint *can* emit SPIR-V for a `texture_external` binding, but the
+/// generated module relies on the multiplanar-external-texture transform's
+/// expanded bindings (plane textures + params buffer) which yawgpu does not set
+/// up for the Vulkan backend. Whether the resulting SPIR-V is accepted then
+/// depends on the driver (NVIDIA compiles it, Mesa rejects it), so the rejection
+/// must happen here — before any SPIR-V reaches a driver — to be deterministic
+/// across GPUs. The descriptor itself is valid WebGPU, so this is a backend
+/// (`Internal`) error, never a validation error.
+pub(crate) fn vulkan_external_texture_rejection(
+    metal_bindings: &[MetalBufferBinding],
+) -> Option<String> {
+    metal_bindings
+        .iter()
+        .any(|binding| matches!(binding.kind, MetalBindingKind::ExternalTexture))
+        .then(|| "external textures are not supported on the Vulkan backend".to_owned())
+}
+
 impl ComputePipeline {
     /// Creates a new instance.
     pub(crate) fn new(
@@ -291,6 +312,9 @@ pub(crate) fn select_compute_shader_source(
             ))
         }
         HalBackend::Vulkan => {
+            if let Some(message) = vulkan_external_texture_rejection(metal_bindings) {
+                return Err(message);
+            }
             let module = shader_module
                 .reflected()
                 .ok_or_else(|| "compute pipeline requires a reflected shader module".to_owned())?;
@@ -1866,6 +1890,58 @@ mod tests {
         assert!(bindings.is_empty());
         assert!(source.contains("#version 310 es"));
         assert!(source.contains("local_size_x = 2"));
+    }
+
+    #[test]
+    fn vulkan_external_texture_rejection_detects_external_binding() {
+        let plain = MetalBufferBinding {
+            group: 0,
+            binding: 0,
+            metal_index: 0,
+            ext_params_buffer_slot: None,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            kind: MetalBindingKind::Texture,
+        };
+        assert_eq!(vulkan_external_texture_rejection(&[plain]), None);
+
+        let external = MetalBufferBinding {
+            group: 0,
+            binding: 0,
+            metal_index: 0,
+            ext_params_buffer_slot: Some(1),
+            vertex_metal_index: None,
+            fragment_metal_index: Some(0),
+            kind: MetalBindingKind::ExternalTexture,
+        };
+        assert_eq!(
+            vulkan_external_texture_rejection(&[external]).as_deref(),
+            Some("external textures are not supported on the Vulkan backend")
+        );
+    }
+
+    #[test]
+    fn select_compute_shader_source_rejects_external_texture_on_vulkan() {
+        let device = noop_device();
+        let wgsl = device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@compute @workgroup_size(1) fn cs() {}".to_owned(),
+        ));
+        let external = [MetalBufferBinding {
+            group: 0,
+            binding: 0,
+            metal_index: 0,
+            ext_params_buffer_slot: Some(1),
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            kind: MetalBindingKind::ExternalTexture,
+        }];
+        let err =
+            select_compute_shader_source(HalBackend::Vulkan, &wgsl, "cs", &[], &external, false)
+                .expect_err("Vulkan must reject external textures");
+        assert_eq!(
+            err,
+            "external textures are not supported on the Vulkan backend"
+        );
     }
 
     #[test]
