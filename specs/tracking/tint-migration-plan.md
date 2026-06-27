@@ -604,3 +604,36 @@ buffer at draw/dispatch. Claude authors the Metal e2e ([[feedback-claude-owns-gp
 create an RGBA texture → external texture → sample via textureSampleBaseClampToEdge →
 readback equals source (single-plane first; NV12 YUV→RGB readback later). CTS target:
 api,validation,render_pipeline,misc:external_texture + the operation external_texture cases.
+
+## shader,execution sweep (2026-06-27) — 99.85% Dawn-parity
+
+Full `shader,execution` tree on real Metal: **pass=125064, fail=192, crash=0**
+(0.15% fail). Two clusters, both real yawgpu-vs-Dawn divergences:
+
+**1. robust_access_vertex:vertex_buffer_access (112) — Tint-migration regression.**
+Out-of-bounds vertex-buffer fetches must return 0 (WebGPU robustness); yawgpu returns
+garbage ("expected green, got red"). Root cause: the migration moved Metal vertex input
+from naga's vertex_pulling_transform to Tint `[[stage_in]]` + MTLVertexDescriptor, which
+loses per-attribute bounds checking. **Dawn enables `Toggle::MetalEnableVertexPulling`
+by DEFAULT on Metal** (`PhysicalDeviceMTL.mm:434`) and feeds Tint's
+`Options::vertex_pulling_config`; the pulling MSL fetches vertices from buffers bound as
+storage, bounds-checked by Tint's robustness transform. **Fix (architectural):** wire
+Tint `vertex_pulling_config` for Metal render pipelines (shim builds the config from the
+vertex layout; HAL binds vertex buffers as storage buffers at the pulling group +
+provides _mslBufferSizes; drop the MTLVertexDescriptor path). Reverts the migration's
+stage_in simplification to Dawn's approach. Tint config:
+`third_party/dawn/src/tint/api/common/vertex_pulling_config.h` +
+`src/dawn/native/metal/ShaderModuleMTL.mm::BuildVertexPullingTransformConfig`.
+This also subsumes the arrayStride=0 fix (ab5f94a) and vertex-format type matching
+(pulling converts in-shader).
+
+**2. textureLoad:storage_textures_2d{,_array} (80) — read storage texture in render
+stages returns 0.** `texture_storage_2d<rgba8unorm, read>` textureLoad in vertex/fragment
+(stage=v/f, 40+40) reads 0; the same in compute passes. Metal usage is correct
+(storage_binding → ShaderRead|ShaderWrite) and core reflects/binds storage textures as
+Texture in the render path (render_pipeline.rs:994). Needs GPU debugging (inspect the
+generated render MSL access mode + the per-stage texture slot the HAL binds vs what Tint
+emits). NOTE: if fix #1 switches render to vertex pulling, re-check this under the new path.
+
+Everything else in shader,execution matches Dawn by construction (Tint is the oracle's
+compiler). Next: fix these two, then the `shader,validation` tree + Vulkan/MoltenVK.
