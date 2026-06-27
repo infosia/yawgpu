@@ -155,11 +155,16 @@ GPU e2e authored by Claude):
   external texture; at draw/dispatch plane0 → `metal_index`, plane1 → `metal_index+1` (RGBA aliases
   plane1=plane0), params → `ext_params_buffer_slot` (the Slice-A slot assignment), per-stage indices
   honoured (`bind_group.rs` + `queue.rs hal_bind_resources` + `HalBoundExternalTexture` +
-  `metal/encode.rs`). **Metal** only; on the Vulkan path Tint now lowers `texture_external` to SPIR-V
-  (naga could not), so the pipeline reaches MoltenVK, which fails SPIR-V→MSL on the multiplanar
-  argument-buffer base type → clean `GPUInternalError`, no panic. **Native Vulkan is expected to
-  support external textures** (Tint == Dawn's compiler) — likely Dawn-parity win, unverified (host
-  is MoltenVK-only). The naga-era "Vulkan rejects at codegen" rule (R6) is superseded.
+  `metal/encode.rs`). **Metal** only. **Vulkan: deterministically rejected at the core level** (commit
+  0985538): although Tint's SPIR-V writer DOES lower `texture_external` (naga could not), whether a
+  driver accepts the resulting multiplanar SPIR-V is **GPU-divergent** — native NVIDIA compiled it,
+  Mesa rejected it, MoltenVK fails SPIR-V→MSL on the argument-buffer base type. yawgpu's posture is
+  wgpu's (external textures are Metal-only), so `select_{render,compute}_shader_source` detects the
+  external-texture binding and returns a backend error (`ErrorKind::Internal`, "external textures are
+  not supported on the Vulkan backend") **before any SPIR-V reaches a driver** — making the rejection
+  device-independent and the `e2e_vulkan_external_texture` contract hold on every GPU. (Re-homing
+  external textures onto Vulkan would require setting up the multiplanar plane/params bindings on the
+  Vulkan HAL, not just relying on the driver to accept Tint's SPIR-V.)
 - **R10** ☑ End-to-end on real **Metal** (`yawgpu/tests/e2e_metal_external_texture.rs`): **Rgba**
   passthrough (`doYuvToRgbConversionOnly=1`) round-trips the source colour, and **Nv12** (2-plane
   R8 luma + RG8 chroma) with an identity `yuvToRgbConversionMatrix` recombines (Y,U,V)→(R,G,B). The
