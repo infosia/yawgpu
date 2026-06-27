@@ -828,6 +828,8 @@ Dawn parity.
 Full per-file sweeps on the yawgpu Vulkan HAL via MoltenVK (CTS_YAWGPU_BACKEND=vulkan):
 - **`api,operation`: 4915 / 0 fail / 2 xfail** (F-139 depth_clip_clamp). ✓ parity.
 - **`api,validation`: 32361 / 0 fail / 3 xfail** (F-111 external_texture ×2 + index_buffer_format_dirtying ×1). ✓ parity.
+- **`shader,validation`: 500375 / 0 fail / 0 xfail.** ✓ fully clean — compile-time WGSL validation is
+  device-independent (Tint-driven), so it matches the Metal tree exactly.
 - **`shader,execution`: 722542 pass / 2811 fail / 92 xfail / 24 xpass.** Root-caused: **every one of the
   2811 fails is a MoltenVK limitation or spec-in-flux semantics — ZERO yawgpu defects.** Breakdown:
   - **2615 = MoltenVK SPIR-V→MSL codegen bug (F-141).** Storing a matrix/composite to a `read_write`
