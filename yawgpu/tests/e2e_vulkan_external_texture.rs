@@ -6,9 +6,14 @@
 //!
 //! The contract verified here is the honest one the user requested: the
 //! descriptor is *valid* WebGPU (no validation error — `success=true` in the
-//! CTS), but the Vulkan backend rejects code generation with a **clean
+//! CTS), but the Vulkan backend rejects the pipeline with a **clean
 //! `GPUInternalError`**, never a panic. This is strictly better than wgpu,
 //! which `unimplemented!()`-panics on the same path.
+//!
+//! The rejection is *device-independent*: yawgpu-core detects the external-texture
+//! binding and routes the backend error before any SPIR-V reaches the driver.
+//! (Relying on SPIR-V codegen to fail was not portable — Tint emits SPIR-V for
+//! `texture_external` and NVIDIA's driver compiled it while Mesa's rejected it.)
 
 #![cfg(feature = "vulkan")]
 

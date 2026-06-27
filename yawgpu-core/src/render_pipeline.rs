@@ -868,6 +868,9 @@ pub(crate) fn select_render_shader_source(
             ))
         }
         HalBackend::Vulkan => {
+            if let Some(message) = vulkan_external_texture_rejection(metal_bindings) {
+                return Err(message);
+            }
             let vertex_module = descriptor.vertex.shader.module.reflected().ok_or_else(|| {
                 "render pipeline requires a reflected vertex shader module".to_owned()
             })?;
@@ -3288,6 +3291,55 @@ mod tests {
         let scoped = device.pop_error_scope().expect("scope should exist");
         assert!(!matched_pipeline.is_error());
         assert_eq!(scoped, None);
+    }
+
+    /// The Vulkan render path rejects external textures deterministically — the
+    /// descriptor is valid WebGPU (no validation error) but the backend has no
+    /// SPIR-V lowering, so `select_render_shader_source` returns a backend error
+    /// before any code reaches a driver. This guards against the driver-dependent
+    /// divergence the `e2e_vulkan_external_texture` regression observed (NVIDIA
+    /// compiled the multiplanar-transformed SPIR-V, Mesa rejected it).
+    #[test]
+    fn select_render_shader_source_rejects_external_texture_on_vulkan() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@group(0) @binding(0) var tex: texture_external;
+             @vertex
+             fn vs() -> @builtin(position) vec4<f32> {
+                 return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+             }
+             @fragment
+             fn fs() -> @location(0) vec4<f32> {
+                 return textureLoad(tex, vec2<i32>(0, 0));
+             }"
+                .to_owned(),
+            )),
+        );
+        let descriptor = render_pipeline_descriptor(module);
+        let external = [MetalBufferBinding {
+            group: 0,
+            binding: 0,
+            metal_index: 0,
+            ext_params_buffer_slot: Some(1),
+            vertex_metal_index: None,
+            fragment_metal_index: Some(0),
+            kind: MetalBindingKind::ExternalTexture,
+        }];
+        let err = select_render_shader_source(
+            HalBackend::Vulkan,
+            &descriptor,
+            "vs",
+            Some("fs"),
+            &external,
+            &[],
+            false,
+        )
+        .expect_err("Vulkan must reject external textures");
+        assert_eq!(
+            err,
+            "external textures are not supported on the Vulkan backend"
+        );
     }
 
     /// Regression B / F-081: a fragment-only `texture_external` render pipeline
