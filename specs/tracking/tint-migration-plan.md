@@ -569,3 +569,38 @@ before the next.
 *stricter* than Dawn's lenient oracle (in expectations/yawgpu.txt). **Not yet swept:**
 the `shader,execution` tree (huge), and Vulkan/MoltenVK + GLES backends. Memory:
 `tint-transform-regressions`. CTS run recipe: `cts-tint-dylib-build`.
+
+## External-texture Slices B–D — concrete plan (Tint multiplanar)
+
+Slice A (279f9a4) generates multiplanar MSL; B–D make external textures usable on
+Metal (Dawn-parity for the external_texture operation/validation cases). Vulkan keeps
+honest GPUInternalError rejection throughout.
+
+**Slice B — vendor create API + ExternalTextureParams.** Add yawgpu.h
+`yawgpuDeviceCreateExternalTexture(device, *desc)` (creation is impl-defined in webgpu.h)
+→ Arc<ExternalTextureImpl>. Descriptor mirrors wgpu/Dawn: plane0 view (+ optional plane1
+for NV12), `yuvConversionMatrix`, gamut matrices, transfer functions, sample/load
+transforms, `apparentSize`, `doYuvToRgbConversionOnly`. The HAL must populate **Tint's**
+`tint_ExternalTextureParams` layout (NOT wgpu's 208-byte struct):
+`numPlanes:u32, doYuvToRgbConversionOnly:u32, yuvToRgbConversionMatrix:mat3x4,
+src/dstTransferFunction:{mode:u32,A..G:f32}, gamutConversionMatrix:mat3x3,
+sample/loadTransform:mat3x2, samplePlane0/1Rect{Min,Max}:vec2f, apparentSize:vec2u,
+plane1CoordFactor:vec2f, ootfParam:vec4f`. Port the param computation from
+`third_party/dawn/src/dawn/native/metal/RenderPipelineMTL.mm` is wrong — use Dawn's
+**`ExternalTexture.cpp`** params math (lines ~172-361: numPlanes, sampleTransform =
+translate(-0.5)·…·translate(0.5)·scale(rectScale)·translate(rectOffset),
+loadTransform = toTexels·sampleTransform·toNormalized, plane1CoordFactor =
+plane1Size/plane0Size). Minimal viable first: single-plane RGBA (numPlanes=1, identity
+matrices, no YUV) to get an end-to-end Metal e2e, then NV12.
+
+**Slice C — runtime bind-group binding.** `bind_group.rs` currently rejects external
+entries ("not implemented in this slice"). Bind the external texture's plane0 (+plane1)
+texture views at the planes-base texture slots and the params UBO at ext_params_buffer_slot
+(the same slots shader_tint feeds Tint in Slice A). An external-texture BGL entry counts
+4 sampled textures + 1 sampler + 1 uniform buffer toward limits (R3, already in core).
+
+**Slice D — Metal HAL plane/params binding + e2e.** HAL binds plane textures + params
+buffer at draw/dispatch. Claude authors the Metal e2e ([[feedback-claude-owns-gpu-tests]]):
+create an RGBA texture → external texture → sample via textureSampleBaseClampToEdge →
+readback equals source (single-plane first; NV12 YUV→RGB readback later). CTS target:
+api,validation,render_pipeline,misc:external_texture + the operation external_texture cases.
