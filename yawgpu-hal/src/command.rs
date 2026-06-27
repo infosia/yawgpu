@@ -99,6 +99,8 @@ pub struct HalComputePass {
     pub bind_textures: Vec<HalBoundTexture>,
     /// Bind samplers.
     pub bind_samplers: Vec<HalBoundSampler>,
+    /// Bind external textures.
+    pub bind_external_textures: Vec<HalBoundExternalTexture>,
     /// Dispatch command.
     pub dispatch: HalComputeDispatch,
 }
@@ -276,6 +278,47 @@ pub struct HalBoundSampler {
     pub sampler: HalSampler,
 }
 
+/// Wraps a bound external texture for the selected backend.
+#[derive(Debug, Clone)]
+pub struct HalBoundExternalTexture {
+    /// Group.
+    pub group: u32,
+    /// Binding.
+    pub binding: u32,
+    /// Plane0 texture.
+    pub plane0: HalTexture,
+    /// Plane1 texture, or plane0 again for single-plane external textures.
+    pub plane1: HalTexture,
+    /// Plane0 Metal texture-space slot.
+    pub plane0_metal_index: u32,
+    /// Plane1 Metal texture-space slot.
+    pub plane1_metal_index: u32,
+    /// Plane0 Metal texture-space slot for the vertex stage.
+    pub plane0_vertex_metal_index: Option<u32>,
+    /// Plane1 Metal texture-space slot for the vertex stage.
+    pub plane1_vertex_metal_index: Option<u32>,
+    /// Plane0 Metal texture-space slot for the fragment stage.
+    pub plane0_fragment_metal_index: Option<u32>,
+    /// Plane1 Metal texture-space slot for the fragment stage.
+    pub plane1_fragment_metal_index: Option<u32>,
+    /// Params buffer.
+    pub params: HalBuffer,
+    /// Params Metal buffer-space slot.
+    pub params_metal_index: u32,
+    /// Params Metal buffer-space slot for the vertex stage.
+    pub params_vertex_metal_index: Option<u32>,
+    /// Params Metal buffer-space slot for the fragment stage.
+    pub params_fragment_metal_index: Option<u32>,
+    /// Plane view format.
+    pub format: HalTextureFormat,
+    /// Plane view dimension.
+    pub dimension: HalTextureViewDimension,
+    /// Params buffer byte offset.
+    pub params_offset: u64,
+    /// Params buffer byte size.
+    pub params_size: u64,
+}
+
 /// Wraps  for the selected backend.
 #[derive(Debug, Clone)]
 pub struct HalRenderPass {
@@ -291,6 +334,8 @@ pub struct HalRenderPass {
     pub bind_textures: Vec<HalBoundTexture>,
     /// Bind samplers.
     pub bind_samplers: Vec<HalBoundSampler>,
+    /// Bind external textures.
+    pub bind_external_textures: Vec<HalBoundExternalTexture>,
     /// Vertex buffers.
     pub vertex_buffers: Vec<HalBoundBuffer>,
     /// Optional index buffer.
@@ -481,6 +526,97 @@ pub enum HalDraw {
         /// Offset into the indirect buffer.
         offset: u64,
     },
+}
+
+#[cfg(test)]
+mod external_texture_tests {
+    use super::*;
+    use crate::{
+        HalBufferUsage, HalInstance, HalTextureDescriptor, HalTextureDimension, HalTextureFormat,
+        HalTextureUsage,
+    };
+
+    fn noop_device() -> crate::HalDevice {
+        let adapter = HalInstance::new_noop()
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter");
+        adapter.create_device().expect("Noop device")
+    }
+
+    fn noop_texture(device: &crate::HalDevice) -> crate::HalTexture {
+        device
+            .create_texture(&HalTextureDescriptor {
+                dimension: HalTextureDimension::D2,
+                format: HalTextureFormat::Rgba8Unorm,
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: HalTextureUsage {
+                    copy_src: false,
+                    copy_dst: false,
+                    texture_binding: true,
+                    storage_binding: false,
+                    render_attachment: false,
+                },
+            })
+            .expect("Noop texture")
+    }
+
+    #[test]
+    fn external_texture_binding_struct_carries_planes_params_and_stage_slots() {
+        let device = noop_device();
+        let plane0 = noop_texture(&device);
+        let plane1 = noop_texture(&device);
+        let params = device
+            .create_buffer(
+                296,
+                HalBufferUsage {
+                    uniform: true,
+                    ..HalBufferUsage::default()
+                },
+            )
+            .expect("Noop params buffer");
+
+        let binding = HalBoundExternalTexture {
+            group: 1,
+            binding: 2,
+            plane0,
+            plane1,
+            plane0_metal_index: 4,
+            plane1_metal_index: 5,
+            plane0_vertex_metal_index: Some(10),
+            plane1_vertex_metal_index: Some(11),
+            plane0_fragment_metal_index: Some(20),
+            plane1_fragment_metal_index: Some(21),
+            params,
+            params_metal_index: 7,
+            params_vertex_metal_index: Some(12),
+            params_fragment_metal_index: Some(22),
+            format: HalTextureFormat::Rgba8Unorm,
+            dimension: HalTextureViewDimension::D2,
+            params_offset: 0,
+            params_size: 296,
+        };
+        let cloned = binding.clone();
+
+        assert_eq!(cloned.group, 1);
+        assert_eq!(cloned.binding, 2);
+        assert_eq!(cloned.plane0_metal_index, 4);
+        assert_eq!(cloned.plane1_metal_index, 5);
+        assert_eq!(cloned.plane0_vertex_metal_index, Some(10));
+        assert_eq!(cloned.plane1_vertex_metal_index, Some(11));
+        assert_eq!(cloned.plane0_fragment_metal_index, Some(20));
+        assert_eq!(cloned.plane1_fragment_metal_index, Some(21));
+        assert_eq!(cloned.params_metal_index, 7);
+        assert_eq!(cloned.params_vertex_metal_index, Some(12));
+        assert_eq!(cloned.params_fragment_metal_index, Some(22));
+        assert_eq!(cloned.params_offset, 0);
+        assert_eq!(cloned.params_size, 296);
+    }
 }
 
 /// Stores layout metadata.

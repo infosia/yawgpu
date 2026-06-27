@@ -10,5 +10,6 @@ gles = ["yawgpu-hal/gles"]
 [dependencies]
 yawgpu-hal = { path = "../yawgpu-hal" }
 yawgpu-tint = { path = "../yawgpu-tint" }
+arrayvec = "0.7"
 parking_lot.workspace = true
 thiserror.workspace = true

@@ -25,13 +25,13 @@ use objc2_metal::{
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use crate::{
-    HalAddressMode, HalBlendFactor, HalBlendOperation, HalBoundBuffer, HalBoundSampler,
-    HalBoundTexture, HalBuffer, HalBufferClear, HalBufferTextureCopy, HalBufferUsage,
-    HalColorTargetState, HalCompareFunction, HalComputeDispatch, HalComputePass, HalCopy,
-    HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalDraw, HalError, HalExtent3d,
-    HalFilterMode, HalFrontFace, HalIndexFormat, HalMipmapFilterMode, HalMslBufferSizeBinding,
-    HalPresentMode, HalPrimitiveTopology, HalQueryKind, HalQuerySet, HalRenderLoadOp,
-    HalRenderPass, HalRenderPipelineDescriptor, HalResolveQuerySet, HalSampler,
+    HalAddressMode, HalBlendFactor, HalBlendOperation, HalBoundBuffer, HalBoundExternalTexture,
+    HalBoundSampler, HalBoundTexture, HalBuffer, HalBufferClear, HalBufferTextureCopy,
+    HalBufferUsage, HalColorTargetState, HalCompareFunction, HalComputeDispatch, HalComputePass,
+    HalCopy, HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalDraw, HalError,
+    HalExtent3d, HalFilterMode, HalFrontFace, HalIndexFormat, HalMipmapFilterMode,
+    HalMslBufferSizeBinding, HalPresentMode, HalPrimitiveTopology, HalQueryKind, HalQuerySet,
+    HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor, HalResolveQuerySet, HalSampler,
     HalSamplerDescriptor, HalShaderSource, HalStencilFaceState, HalStencilOperation,
     HalSurfaceConfiguration, HalTexture, HalTextureClear, HalTextureCopy, HalTextureDescriptor,
     HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,

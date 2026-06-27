@@ -95,6 +95,23 @@ unsafe fn map_bind_group_entry(entry: &native::WGPUBindGroupEntry) -> core::Bind
             device: Arc::clone(&texture_view._device),
         };
     }
+    if let Some(external_texture_entry) = external_texture_binding_entry(entry.nextInChain) {
+        present_count += 1;
+        if external_texture_entry.externalTexture.is_null() {
+            resource = core::BindGroupResource::Invalid(
+                "external texture bind group entry must not be null".to_owned(),
+            );
+        } else {
+            let external_texture = clone_handle::<WGPUExternalTextureImpl>(
+                external_texture_entry.externalTexture,
+                "WGPUExternalTexture",
+            );
+            resource = core::BindGroupResource::ExternalTexture {
+                external_texture: Arc::clone(&external_texture._core),
+                device: Arc::clone(&external_texture._device),
+            };
+        }
+    }
 
     if present_count != 1 {
         resource = core::BindGroupResource::Invalid(
@@ -206,6 +223,21 @@ unsafe fn external_texture_binding_layout<'a>(
             return Some(
                 &*(node as *const native::WGPUChainedStruct
                     as *const native::WGPUExternalTextureBindingLayout),
+            );
+        }
+        chain = node.next;
+    }
+    None
+}
+
+unsafe fn external_texture_binding_entry<'a>(
+    mut chain: *const native::WGPUChainedStruct,
+) -> Option<&'a native::WGPUExternalTextureBindingEntry> {
+    while let Some(node) = chain.as_ref() {
+        if node.sType == native::WGPUSType_ExternalTextureBindingEntry {
+            return Some(
+                &*(node as *const native::WGPUChainedStruct
+                    as *const native::WGPUExternalTextureBindingEntry),
             );
         }
         chain = node.next;

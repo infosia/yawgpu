@@ -987,11 +987,17 @@ pub(crate) fn msl_stage_resource_bindings(
                     None => return None, // not visible to fragment stage
                 }
             };
+            let ext_params_buffer_slot = if vertex {
+                binding.ext_params_vertex_buffer_slot
+            } else {
+                binding.ext_params_fragment_buffer_slot
+            }
+            .or(binding.ext_params_buffer_slot);
             Some(frontend::MslResourceBinding {
                 group: binding.group,
                 binding: binding.binding,
                 metal_index,
-                ext_params_buffer_slot: binding.ext_params_buffer_slot,
+                ext_params_buffer_slot,
                 kind: match binding.kind {
                     MetalBindingKind::Buffer(_) => frontend::MslResourceBindingKind::Buffer,
                     MetalBindingKind::Texture | MetalBindingKind::StorageTexture { .. } => {
@@ -3322,6 +3328,8 @@ mod tests {
             binding: 0,
             metal_index: 0,
             ext_params_buffer_slot: Some(1),
+            ext_params_vertex_buffer_slot: None,
+            ext_params_fragment_buffer_slot: Some(1),
             vertex_metal_index: None,
             fragment_metal_index: Some(0),
             kind: MetalBindingKind::ExternalTexture,

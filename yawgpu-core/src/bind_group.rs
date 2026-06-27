@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::bind_group_layout::*;
 use crate::buffer::*;
 use crate::device::*;
+use crate::external_texture::*;
 use crate::format::*;
 use crate::limits::*;
 use crate::sampler::*;
@@ -45,6 +46,13 @@ pub enum BindGroupResource {
     TextureView {
         /// Texture view variant.
         texture_view: Arc<TextureView>,
+        /// Device variant.
+        device: Arc<Device>,
+    },
+    /// External texture variant.
+    ExternalTexture {
+        /// External texture variant.
+        external_texture: Arc<ExternalTexture>,
         /// Device variant.
         device: Arc<Device>,
     },
@@ -241,12 +249,39 @@ pub(crate) fn validate_bind_group_entry(
             format,
             view_dimension,
         ),
+        (
+            BindGroupResource::ExternalTexture {
+                external_texture,
+                device: resource_device,
+            },
+            BindingLayoutKind::ExternalTexture,
+        ) => validate_bind_group_external_texture(device, resource_device, external_texture),
+        (BindGroupResource::ExternalTexture { .. }, _) => {
+            Some("external texture bind group entry requires an external texture layout".to_owned())
+        }
         (_, BindingLayoutKind::ExternalTexture) => {
-            Some("external texture bind group entries are not implemented in this slice".to_owned())
+            Some("external texture layout requires an external texture resource".to_owned())
         }
         (BindGroupResource::Invalid(message), _) => Some(message.clone()),
         _ => Some("bind group entry resource kind must match the layout".to_owned()),
     }
+}
+
+/// Validates bind group external texture and returns a descriptive error on failure.
+pub(crate) fn validate_bind_group_external_texture(
+    device: &Device,
+    resource_device: &Device,
+    external_texture: &ExternalTexture,
+) -> Option<String> {
+    if !device.same(resource_device) {
+        return Some("bind group external texture must belong to the same device".to_owned());
+    }
+    if external_texture.is_error() {
+        return Some(
+            "bind group external texture must not be an error external texture".to_owned(),
+        );
+    }
+    None
 }
 
 /// Validates bind group buffer and returns a descriptive error on failure.
@@ -486,6 +521,61 @@ mod tests {
 
     use std::sync::Arc;
 
+    fn external_texture_view(device: &Device) -> Arc<TextureView> {
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::TEXTURE_BINDING,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D2),
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(error, None);
+        Arc::new(view)
+    }
+
+    fn external_texture_descriptor(device: &Device) -> ExternalTextureDescriptor {
+        ExternalTextureDescriptor {
+            plane0: external_texture_view(device),
+            plane1: None,
+            format: ExternalTextureFormat::Rgba,
+            crop_origin: Origin2d { x: 0, y: 0 },
+            crop_size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            apparent_size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            do_yuv_to_rgb_conversion_only: true,
+            yuv_to_rgb_conversion_matrix: None,
+            src_transfer_function_parameters: [0.0; 7],
+            dst_transfer_function_parameters: [0.0; 7],
+            gamut_conversion_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            mirrored: false,
+            rotation: ExternalTextureRotation::Rotate0,
+        }
+    }
+
     #[test]
     fn bind_group_accessors_pin_entries_and_is_error() {
         let device = noop_device();
@@ -724,6 +814,64 @@ mod tests {
                 device.limits(),
             ),
             None
+        );
+    }
+
+    #[test]
+    fn external_texture_binding_validation_accepts_layout_and_rejects_mismatches() {
+        let device = noop_device();
+        let external_texture = Arc::new(
+            device
+                .create_external_texture(external_texture_descriptor(&device))
+                .expect("external texture"),
+        );
+        let external_entry = BindGroupEntry {
+            binding: 0,
+            resource: BindGroupResource::ExternalTexture {
+                external_texture,
+                device: Arc::new(device.clone()),
+            },
+        };
+
+        assert_eq!(
+            validate_bind_group_entry(
+                &device,
+                &external_entry,
+                BindingLayoutKind::ExternalTexture,
+                device.limits(),
+            ),
+            None
+        );
+        assert_eq!(
+            validate_bind_group_entry(
+                &device,
+                &external_entry,
+                BindingLayoutKind::Sampler {
+                    ty: SamplerBindingType::Filtering
+                },
+                device.limits(),
+            ),
+            Some(
+                "external texture bind group entry requires an external texture layout".to_owned()
+            )
+        );
+
+        let sampler = Arc::new(device.create_sampler(SamplerDescriptor::default()));
+        let sampler_entry = BindGroupEntry {
+            binding: 0,
+            resource: BindGroupResource::Sampler {
+                sampler,
+                device: Arc::new(device.clone()),
+            },
+        };
+        assert_eq!(
+            validate_bind_group_entry(
+                &device,
+                &sampler_entry,
+                BindingLayoutKind::ExternalTexture,
+                device.limits(),
+            ),
+            Some("external texture layout requires an external texture resource".to_owned())
         );
     }
 

@@ -477,6 +477,9 @@ pub(super) fn encode_compute_pass(
     for binding in &pass.bind_textures {
         encode_compute_texture(encoder, binding)?;
     }
+    for binding in &pass.bind_external_textures {
+        encode_compute_external_texture(encoder, binding)?;
+    }
     for binding in &pass.bind_samplers {
         encode_compute_sampler(encoder, binding)?;
     }
@@ -553,6 +556,48 @@ fn encode_compute_sampler(
         .ok_or_else(|| texture_error("sampler allocation failed"))?;
     unsafe {
         encoder.setSamplerState_atIndex(Some(sampler), to_ns(u64::from(binding.metal_index))?);
+    }
+    Ok(())
+}
+
+fn encode_compute_external_texture(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    binding: &HalBoundExternalTexture,
+) -> Result<(), HalError> {
+    let HalTexture::Metal(plane0) = &binding.plane0 else {
+        return Err(texture_error(
+            "compute external texture plane0 is not Metal-backed",
+        ));
+    };
+    let HalTexture::Metal(plane1) = &binding.plane1 else {
+        return Err(texture_error(
+            "compute external texture plane1 is not Metal-backed",
+        ));
+    };
+    let HalBuffer::Metal(params) = &binding.params else {
+        return Err(buffer_error(
+            "compute external texture params buffer is not Metal-backed",
+        ));
+    };
+    if binding.params_offset > params.size() {
+        return Err(buffer_error(
+            "compute external texture params offset exceeds buffer size",
+        ));
+    }
+    unsafe {
+        encoder.setTexture_atIndex(
+            Some(plane0.inner()?),
+            to_ns(u64::from(binding.plane0_metal_index))?,
+        );
+        encoder.setTexture_atIndex(
+            Some(plane1.inner()?),
+            to_ns(u64::from(binding.plane1_metal_index))?,
+        );
+        encoder.setBuffer_offset_atIndex(
+            Some(params.inner()?),
+            to_ns(binding.params_offset)?,
+            to_ns(u64::from(binding.params_metal_index))?,
+        );
     }
     Ok(())
 }
@@ -783,6 +828,9 @@ pub(super) fn encode_render_pass(
     for binding in &pass.bind_textures {
         encode_render_bind_texture(encoder, binding)?;
     }
+    for binding in &pass.bind_external_textures {
+        encode_render_bind_external_texture(encoder, binding)?;
+    }
     for binding in &pass.bind_samplers {
         encode_render_bind_sampler(encoder, binding)?;
     }
@@ -986,6 +1034,114 @@ fn encode_render_bind_texture(
         let index = to_ns(u64::from(binding.metal_index))?;
         unsafe {
             encoder.setFragmentTexture_atIndex(Some(view.as_ref()), index);
+        }
+    }
+    Ok(())
+}
+
+fn encode_render_bind_external_texture(
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    binding: &HalBoundExternalTexture,
+) -> Result<(), HalError> {
+    let HalTexture::Metal(plane0) = &binding.plane0 else {
+        return Err(texture_error(
+            "render external texture plane0 is not Metal-backed",
+        ));
+    };
+    let HalTexture::Metal(plane1) = &binding.plane1 else {
+        return Err(texture_error(
+            "render external texture plane1 is not Metal-backed",
+        ));
+    };
+    let HalBuffer::Metal(params) = &binding.params else {
+        return Err(buffer_error(
+            "render external texture params buffer is not Metal-backed",
+        ));
+    };
+    if binding.params_offset > params.size() {
+        return Err(buffer_error(
+            "render external texture params offset exceeds buffer size",
+        ));
+    }
+    let offset = to_ns(binding.params_offset)?;
+
+    if let Some(vtx) = binding.plane0_vertex_metal_index {
+        unsafe {
+            encoder.setVertexTexture_atIndex(Some(plane0.inner()?), to_ns(u64::from(vtx))?);
+            encoder.setVertexTexture_atIndex(
+                Some(plane1.inner()?),
+                to_ns(u64::from(binding.plane1_vertex_metal_index.ok_or_else(
+                    || texture_error("render external texture plane1 vertex slot is missing"),
+                )?))?,
+            );
+        }
+    } else if binding.plane0_fragment_metal_index.is_none() {
+        unsafe {
+            encoder.setVertexTexture_atIndex(
+                Some(plane0.inner()?),
+                to_ns(u64::from(binding.plane0_metal_index))?,
+            );
+            encoder.setVertexTexture_atIndex(
+                Some(plane1.inner()?),
+                to_ns(u64::from(binding.plane1_metal_index))?,
+            );
+        }
+    }
+    if let Some(frag) = binding.plane0_fragment_metal_index {
+        unsafe {
+            encoder.setFragmentTexture_atIndex(Some(plane0.inner()?), to_ns(u64::from(frag))?);
+            encoder.setFragmentTexture_atIndex(
+                Some(plane1.inner()?),
+                to_ns(u64::from(binding.plane1_fragment_metal_index.ok_or_else(
+                    || texture_error("render external texture plane1 fragment slot is missing"),
+                )?))?,
+            );
+        }
+    } else if binding.plane0_vertex_metal_index.is_none() {
+        unsafe {
+            encoder.setFragmentTexture_atIndex(
+                Some(plane0.inner()?),
+                to_ns(u64::from(binding.plane0_metal_index))?,
+            );
+            encoder.setFragmentTexture_atIndex(
+                Some(plane1.inner()?),
+                to_ns(u64::from(binding.plane1_metal_index))?,
+            );
+        }
+    }
+
+    if let Some(vtx) = binding.params_vertex_metal_index {
+        unsafe {
+            encoder.setVertexBuffer_offset_atIndex(
+                Some(params.inner()?),
+                offset,
+                to_ns(u64::from(vtx))?,
+            );
+        }
+    } else if binding.params_fragment_metal_index.is_none() {
+        unsafe {
+            encoder.setVertexBuffer_offset_atIndex(
+                Some(params.inner()?),
+                offset,
+                to_ns(u64::from(binding.params_metal_index))?,
+            );
+        }
+    }
+    if let Some(frag) = binding.params_fragment_metal_index {
+        unsafe {
+            encoder.setFragmentBuffer_offset_atIndex(
+                Some(params.inner()?),
+                offset,
+                to_ns(u64::from(frag))?,
+            );
+        }
+    } else if binding.params_vertex_metal_index.is_none() {
+        unsafe {
+            encoder.setFragmentBuffer_offset_atIndex(
+                Some(params.inner()?),
+                offset,
+                to_ns(u64::from(binding.params_metal_index))?,
+            );
         }
     }
     Ok(())
