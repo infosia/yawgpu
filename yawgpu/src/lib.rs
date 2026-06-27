@@ -13,6 +13,7 @@ pub use ffi::command_buffer::*;
 pub use ffi::compute_pass::*;
 pub use ffi::device::*;
 pub use ffi::encoder::*;
+pub use ffi::external_texture::*;
 pub use ffi::instance::*;
 pub use ffi::pipelines::*;
 pub use ffi::query::*;
@@ -45,6 +46,18 @@ pub const YAWGPU_GLES_CONTEXT_BACKEND_EGL: u32 = 1;
 pub const YAWGPU_GLES_CONTEXT_BACKEND_WGL: u32 = 2;
 /// SType value for `YaWGPUGlesContextBackend`.
 pub const YAWGPU_STYPE_GLES_CONTEXT_BACKEND: native::WGPUSType = 0x7000_0002;
+/// Constant value for yawgpu RGBA external textures.
+pub const YAWGPU_EXTERNAL_TEXTURE_FORMAT_RGBA: u32 = 0;
+/// Constant value for yawgpu NV12 external textures.
+pub const YAWGPU_EXTERNAL_TEXTURE_FORMAT_NV12: u32 = 1;
+/// Constant value for no external texture rotation.
+pub const YAWGPU_EXTERNAL_TEXTURE_ROTATION_ROTATE_0_DEGREES: u32 = 0;
+/// Constant value for 90-degree external texture rotation.
+pub const YAWGPU_EXTERNAL_TEXTURE_ROTATION_ROTATE_90_DEGREES: u32 = 1;
+/// Constant value for 180-degree external texture rotation.
+pub const YAWGPU_EXTERNAL_TEXTURE_ROTATION_ROTATE_180_DEGREES: u32 = 2;
+/// Constant value for 270-degree external texture rotation.
+pub const YAWGPU_EXTERNAL_TEXTURE_ROTATION_ROTATE_270_DEGREES: u32 = 3;
 
 /// yawgpu vendor extension for selecting a backend at instance creation.
 ///
@@ -91,6 +104,61 @@ pub struct YaWGPUGlesContextBackend {
     pub chain: native::WGPUChainedStruct,
     /// GLES context backend.
     pub contextBackend: u32,
+}
+
+/// Two-dimensional yawgpu vendor origin.
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct YaWGPUOrigin2D {
+    /// X coordinate.
+    pub x: u32,
+    /// Y coordinate.
+    pub y: u32,
+}
+
+/// Two-dimensional yawgpu vendor extent.
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct YaWGPUExtent2D {
+    /// Width.
+    pub width: u32,
+    /// Height.
+    pub height: u32,
+}
+
+/// yawgpu external texture creation descriptor.
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct YaWGPUExternalTextureDescriptor {
+    /// First plane texture view.
+    pub plane0: native::WGPUTextureView,
+    /// Optional second plane texture view.
+    pub plane1: native::WGPUTextureView,
+    /// One of `YAWGPU_EXTERNAL_TEXTURE_FORMAT_*`.
+    pub format: u32,
+    /// Crop origin in plane0 texels.
+    pub cropOrigin: YaWGPUOrigin2D,
+    /// Crop size in plane0 texels.
+    pub cropSize: YaWGPUExtent2D,
+    /// Shader-visible size.
+    pub apparentSize: YaWGPUExtent2D,
+    /// Whether shaders should only perform YUV-to-RGB conversion.
+    pub doYuvToRgbConversionOnly: native::WGPUBool,
+    /// Column-major mat3x4 YUV-to-RGB conversion matrix.
+    pub yuvToRgbConversionMatrix: [f32; 12],
+    /// Source transfer function parameters.
+    pub srcTransferFunctionParameters: [f32; 7],
+    /// Destination transfer function parameters.
+    pub dstTransferFunctionParameters: [f32; 7],
+    /// Column-major mat3x3 gamut conversion matrix.
+    pub gamutConversionMatrix: [f32; 9],
+    /// Whether sampling should mirror horizontally.
+    pub mirrored: native::WGPUBool,
+    /// One of `YAWGPU_EXTERNAL_TEXTURE_ROTATION_*`.
+    pub rotation: u32,
 }
 
 /// Native module.

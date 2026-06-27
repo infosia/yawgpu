@@ -1463,6 +1463,7 @@ mod tests {
             bind_buffers: Vec::new(),
             bind_textures: Vec::new(),
             bind_samplers: Vec::new(),
+            bind_external_textures: Vec::new(),
             vertex_buffers: Vec::new(),
             index_buffer: None,
             indirect_buffer: None,

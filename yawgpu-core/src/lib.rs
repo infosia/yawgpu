@@ -12,6 +12,7 @@ mod copy;
 mod device;
 mod error;
 mod extent;
+mod external_texture;
 mod format;
 mod future;
 mod instance;
@@ -57,6 +58,10 @@ pub use copy::{
 pub use device::{Device, DeviceLostReason, FeatureSet};
 pub use error::{DeviceError, Error, ErrorFilter, ErrorKind, PopErrorScopeError};
 pub use extent::{Extent3d, Origin3d};
+pub use external_texture::{
+    ExternalTexture, ExternalTextureDescriptor, ExternalTextureFormat, ExternalTextureParams,
+    ExternalTextureRotation, Origin2d,
+};
 pub use format::{FormatAspects, FormatCaps, FormatOutputClass, TextureFormat};
 pub use future::{FutureCallbackMode, FutureId, FutureRegistry, WaitAnyResult, WaitAnyStatus};
 pub use instance::Instance;

@@ -14,6 +14,8 @@ pub mod compute_pass;
 pub mod device;
 /// Encoder module.
 pub mod encoder;
+/// External texture module.
+pub mod external_texture;
 /// Instance module.
 pub mod instance;
 /// Pipelines module.
@@ -187,6 +189,14 @@ pub struct WGPUTextureImpl {
 pub struct WGPUTextureViewImpl {
     pub(crate) _core: Arc<core::TextureView>,
     pub(crate) _texture: Arc<core::Texture>,
+    pub(crate) _device: Arc<core::Device>,
+    pub(crate) _instance: Arc<WGPUInstanceImpl>,
+}
+
+/// Owns the core object and retained handles for the WGPU ExternalTexture handle.
+pub struct WGPUExternalTextureImpl {
+    pub(crate) _core: Arc<core::ExternalTexture>,
+    pub(crate) _planes: Vec<Arc<WGPUTextureViewImpl>>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }

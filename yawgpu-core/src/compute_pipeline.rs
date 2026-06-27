@@ -91,6 +91,12 @@ pub(crate) struct MetalBufferBinding {
     /// For `ExternalTexture` only: the buffer-space slot reserved for the
     /// external-texture params buffer.  `None` for all other binding kinds.
     pub(crate) ext_params_buffer_slot: Option<u32>,
+    /// For render-pipeline `ExternalTexture` only: the vertex-stage
+    /// buffer-space slot reserved for the external-texture params buffer.
+    pub(crate) ext_params_vertex_buffer_slot: Option<u32>,
+    /// For render-pipeline `ExternalTexture` only: the fragment-stage
+    /// buffer-space slot reserved for the external-texture params buffer.
+    pub(crate) ext_params_fragment_buffer_slot: Option<u32>,
     /// For render pipelines: per-kind slot in the vertex stage's index space.
     /// `None` when the binding is not visible to the vertex stage.
     pub(crate) vertex_metal_index: Option<u32>,
@@ -492,7 +498,13 @@ pub(crate) fn metal_buffer_binding_map(
             let in_frag = visibility & SHADER_STAGE_FRAGMENT != 0;
 
             // Assign per-stage slots and advance counters.
-            let (vertex_metal_index, fragment_metal_index, ext_params_buffer_slot) = match kind {
+            let (
+                vertex_metal_index,
+                fragment_metal_index,
+                ext_params_buffer_slot,
+                ext_params_vertex_buffer_slot,
+                ext_params_fragment_buffer_slot,
+            ) = match kind {
                 MetalBindingKind::Buffer(_) => {
                     let vi = if in_vtx {
                         let s = vtx_buf;
@@ -508,7 +520,7 @@ pub(crate) fn metal_buffer_binding_map(
                     } else {
                         None
                     };
-                    (vi, fi, None)
+                    (vi, fi, None, None, None)
                 }
                 MetalBindingKind::Texture | MetalBindingKind::StorageTexture { .. } => {
                     let vi = if in_vtx {
@@ -525,7 +537,7 @@ pub(crate) fn metal_buffer_binding_map(
                     } else {
                         None
                     };
-                    (vi, fi, None)
+                    (vi, fi, None, None, None)
                 }
                 MetalBindingKind::Sampler => {
                     let vi = if in_vtx {
@@ -542,20 +554,20 @@ pub(crate) fn metal_buffer_binding_map(
                     } else {
                         None
                     };
-                    (vi, fi, None)
+                    (vi, fi, None, None, None)
                 }
                 MetalBindingKind::ExternalTexture => {
-                    // 3 plane textures + 1 params buffer per stage.
+                    // 2 plane textures + 1 params buffer per stage.
                     let vi_tex = if in_vtx {
                         let s = vtx_tex;
-                        vtx_tex = vtx_tex.saturating_add(3);
+                        vtx_tex = vtx_tex.saturating_add(2);
                         Some(s)
                     } else {
                         None
                     };
                     let fi_tex = if in_frag {
                         let s = frag_tex;
-                        frag_tex = frag_tex.saturating_add(3);
+                        frag_tex = frag_tex.saturating_add(2);
                         Some(s)
                     } else {
                         None
@@ -574,15 +586,9 @@ pub(crate) fn metal_buffer_binding_map(
                     } else {
                         None
                     };
-                    // The flat `metal_index` / `ext_params_buffer_slot` are set
-                    // from the vertex-stage values when present, falling back to
-                    // fragment-stage values for fragment-only bindings.  Without
-                    // the fallback a fragment-only ExternalTexture would get
-                    // `ext_params_buffer_slot = None` (vi_buf = None), causing
-                    // "MSL external texture binding is missing params buffer slot"
-                    // at codegen time (Regression B / F-081).
-                    let _ = fi_tex;
-                    (vi_tex, fi_tex, vi_buf.or(fi_buf))
+                    // The flat slots keep compute/fallback callers working;
+                    // render codegen and binding use the per-stage slots.
+                    (vi_tex, fi_tex, vi_buf.or(fi_buf), vi_buf, fi_buf)
                 }
             };
 
@@ -594,6 +600,8 @@ pub(crate) fn metal_buffer_binding_map(
                 binding,
                 metal_index,
                 ext_params_buffer_slot,
+                ext_params_vertex_buffer_slot,
+                ext_params_fragment_buffer_slot,
                 vertex_metal_index,
                 fragment_metal_index,
                 kind,
@@ -623,9 +631,9 @@ pub(crate) fn metal_buffer_binding_map(
                     (s, None)
                 }
                 MetalBindingKind::ExternalTexture => {
-                    // 3 consecutive texture slots + 1 buffer slot.
+                    // 2 consecutive texture slots + 1 buffer slot.
                     let tex_base = tex_idx;
-                    tex_idx = tex_idx.saturating_add(3);
+                    tex_idx = tex_idx.saturating_add(2);
                     let buf_slot = buf_idx;
                     buf_idx = buf_idx.saturating_add(1);
                     (tex_base, Some(buf_slot))
@@ -636,6 +644,8 @@ pub(crate) fn metal_buffer_binding_map(
                 binding,
                 metal_index,
                 ext_params_buffer_slot,
+                ext_params_vertex_buffer_slot: None,
+                ext_params_fragment_buffer_slot: None,
                 vertex_metal_index: None,
                 fragment_metal_index: None,
                 kind,
@@ -659,11 +669,13 @@ pub(crate) fn vertex_stage_buffer_count(metal_bindings: &[MetalBufferBinding]) -
             b.vertex_metal_index.and_then(|_| {
                 // The vertex buffer-space slot is:
                 //   - `vertex_metal_index` for Buffer bindings
-                //   - `ext_params_buffer_slot` for ExternalTexture (vertex_metal_index
-                //     is texture-space here)
+                //   - `ext_params_vertex_buffer_slot` for ExternalTexture
+                //     (vertex_metal_index is texture-space here)
                 match b.kind {
                     MetalBindingKind::Buffer(_) => b.vertex_metal_index.map(|s| s + 1),
-                    MetalBindingKind::ExternalTexture => b.ext_params_buffer_slot.map(|s| s + 1),
+                    MetalBindingKind::ExternalTexture => {
+                        b.ext_params_vertex_buffer_slot.map(|s| s + 1)
+                    }
                     _ => None,
                 }
             })
@@ -748,16 +760,22 @@ pub(crate) fn validate_metal_slot_ranges(
                 }
             }
             MetalBindingKind::ExternalTexture => {
-                // Planes are in texture-space; check base + 2 for all stages.
+                // Planes are in texture-space; check base + 1 for all stages.
                 let bases = [binding.metal_index]
                     .into_iter()
                     .chain(binding.vertex_metal_index)
                     .chain(binding.fragment_metal_index);
                 for base in bases {
-                    check_tex(base.saturating_add(2))?;
+                    check_tex(base.saturating_add(1))?;
                 }
                 // Params buffer is in buffer-space.
                 if let Some(s) = binding.ext_params_buffer_slot {
+                    check_buf(s)?;
+                }
+                if let Some(s) = binding.ext_params_vertex_buffer_slot {
+                    check_buf(s)?;
+                }
+                if let Some(s) = binding.ext_params_fragment_buffer_slot {
                     check_buf(s)?;
                 }
             }
@@ -1899,6 +1917,8 @@ mod tests {
             binding: 0,
             metal_index: 0,
             ext_params_buffer_slot: None,
+            ext_params_vertex_buffer_slot: None,
+            ext_params_fragment_buffer_slot: None,
             vertex_metal_index: None,
             fragment_metal_index: None,
             kind: MetalBindingKind::Texture,
@@ -1910,6 +1930,8 @@ mod tests {
             binding: 0,
             metal_index: 0,
             ext_params_buffer_slot: Some(1),
+            ext_params_vertex_buffer_slot: None,
+            ext_params_fragment_buffer_slot: Some(1),
             vertex_metal_index: None,
             fragment_metal_index: Some(0),
             kind: MetalBindingKind::ExternalTexture,
@@ -1931,6 +1953,8 @@ mod tests {
             binding: 0,
             metal_index: 0,
             ext_params_buffer_slot: Some(1),
+            ext_params_vertex_buffer_slot: None,
+            ext_params_fragment_buffer_slot: Some(1),
             vertex_metal_index: None,
             fragment_metal_index: None,
             kind: MetalBindingKind::ExternalTexture,
@@ -2093,8 +2117,8 @@ mod tests {
     }
 
     #[test]
-    fn metal_binding_map_external_texture_consumes_three_texture_and_one_buffer_slot() {
-        // ExternalTexture occupies 3 consecutive texture slots + 1 buffer slot.
+    fn metal_binding_map_external_texture_consumes_two_texture_and_one_buffer_slot() {
+        // ExternalTexture occupies 2 consecutive texture slots + 1 buffer slot.
         // A plain buffer after it should start at buffer slot 1 (not 0).
         let device = noop_device();
         let layout = make_layout(
@@ -2102,12 +2126,14 @@ mod tests {
             vec![
                 ext_entry(0, SHADER_STAGE_COMPUTE),
                 buf_entry(1, SHADER_STAGE_COMPUTE),
+                tex_entry(2, SHADER_STAGE_COMPUTE),
             ],
         );
         let bindings = metal_buffer_binding_map(&[layout]);
 
         let ext = bindings.iter().find(|b| b.binding == 0).unwrap();
         let buf = bindings.iter().find(|b| b.binding == 1).unwrap();
+        let tex = bindings.iter().find(|b| b.binding == 2).unwrap();
 
         // ExternalTexture: texture-space base slot 0, params buffer slot 0.
         assert_eq!(ext.metal_index, 0, "ext texture base slot");
@@ -2118,6 +2144,42 @@ mod tests {
         );
         // The plain buffer follows in buffer-space: slot 1 (after the ext params slot).
         assert_eq!(buf.metal_index, 1, "buffer after external texture");
+        // The plain texture follows in texture-space: slot 2 (after plane0/plane1).
+        assert_eq!(tex.metal_index, 2, "texture after external texture");
+    }
+
+    #[test]
+    fn metal_binding_map_external_texture_keeps_render_stage_slots_distinct() {
+        let device = noop_device();
+        let layout = make_layout(
+            &device,
+            vec![
+                tex_entry(0, SHADER_STAGE_FRAGMENT),
+                buf_entry(1, SHADER_STAGE_VERTEX),
+                ext_entry(2, SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT),
+            ],
+        );
+        let bindings = metal_buffer_binding_map(&[layout]);
+
+        let ext = bindings.iter().find(|b| b.binding == 2).unwrap();
+
+        assert_eq!(ext.vertex_metal_index, Some(0), "vertex plane0 slot");
+        assert_eq!(ext.fragment_metal_index, Some(1), "fragment plane0 slot");
+        assert_eq!(
+            ext.ext_params_vertex_buffer_slot,
+            Some(1),
+            "vertex params slot"
+        );
+        assert_eq!(
+            ext.ext_params_fragment_buffer_slot,
+            Some(0),
+            "fragment params slot"
+        );
+        assert_eq!(
+            ext.ext_params_buffer_slot,
+            Some(1),
+            "flat fallback slot prefers vertex"
+        );
     }
 
     #[test]

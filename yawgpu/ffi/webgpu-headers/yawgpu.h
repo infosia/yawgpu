@@ -17,6 +17,8 @@
  * \par Sections
  * - **Instance backend select** (always available): explicit backend
  *   pick-list, chained into `WGPUInstanceDescriptor`.
+ * - **External texture creation** (always available): vendor creation API for
+ *   WebGPU external textures.
  *
  * For all behavior not redefined here, yawgpu mirrors `webgpu.h`.
  */
@@ -95,6 +97,105 @@ typedef struct YaWGPUInstanceBackendSelect {
     /** One of the `YAWGPU_INSTANCE_BACKEND_*` constants. */
     uint32_t backend;
 } YaWGPUInstanceBackendSelect;
+
+/** @} */
+
+/**
+ * \defgroup ExternalTextureCreate External Texture Create
+ * \brief Vendor creation API for `WGPUExternalTexture`.
+ *
+ * The core `webgpu.h` declares the opaque `WGPUExternalTexture` handle and
+ * bind-group layout/entry types, but does not standardize creation. yawgpu
+ * exposes a Dawn-shaped creation descriptor so runtime parameter packing can
+ * match Tint's multiplanar external-texture transform.
+ *
+ * @{
+ */
+
+/** `WGPUSType` tag reserved for future chained external-texture extensions. */
+#define YAWGPU_STYPE_EXTERNAL_TEXTURE_DESCRIPTOR ((WGPUSType)0x70000003u)
+
+/** External texture source format. */
+typedef enum YaWGPUExternalTextureFormat {
+    /** Single-plane RGBA passthrough. `plane1` must be NULL. */
+    YaWGPUExternalTextureFormat_Rgba = 0,
+    /** Two-plane NV12. `plane0` is Y, `plane1` is interleaved UV. */
+    YaWGPUExternalTextureFormat_Nv12 = 1,
+} YaWGPUExternalTextureFormat;
+
+/** External texture sampling rotation. */
+typedef enum YaWGPUExternalTextureRotation {
+    /** No rotation. */
+    YaWGPUExternalTextureRotation_Rotate0Degrees = 0,
+    /** Rotate 90 degrees. */
+    YaWGPUExternalTextureRotation_Rotate90Degrees = 1,
+    /** Rotate 180 degrees. */
+    YaWGPUExternalTextureRotation_Rotate180Degrees = 2,
+    /** Rotate 270 degrees. */
+    YaWGPUExternalTextureRotation_Rotate270Degrees = 3,
+} YaWGPUExternalTextureRotation;
+
+/** Two-dimensional origin used by yawgpu vendor descriptors. */
+typedef struct YaWGPUOrigin2D {
+    /** X coordinate in texels. */
+    uint32_t x;
+    /** Y coordinate in texels. */
+    uint32_t y;
+} YaWGPUOrigin2D;
+
+/** Two-dimensional extent used by yawgpu vendor descriptors. */
+typedef struct YaWGPUExtent2D {
+    /** Width in texels. */
+    uint32_t width;
+    /** Height in texels. */
+    uint32_t height;
+} YaWGPUExtent2D;
+
+/**
+ * Descriptor for `yawgpuDeviceCreateExternalTexture`.
+ *
+ * This is a plain vendor struct passed directly to the create function, not a
+ * chained `sType` entry. Matrix fields use the same flat float order as Dawn:
+ * column-major `mat3x4` for YUV-to-RGB and column-major `mat3x3` for gamut
+ * conversion.
+ */
+typedef struct YaWGPUExternalTextureDescriptor {
+    /** First plane texture view. Required. */
+    WGPUTextureView plane0;
+    /** Second plane texture view. Required for NV12 and NULL for RGBA. */
+    WGPUTextureView plane1;
+    /** Source format. */
+    YaWGPUExternalTextureFormat format;
+    /** Crop origin in plane0 texels. */
+    YaWGPUOrigin2D cropOrigin;
+    /** Crop size in plane0 texels. */
+    YaWGPUExtent2D cropSize;
+    /** Shader-visible size returned by external texture dimensions. */
+    YaWGPUExtent2D apparentSize;
+    /** When true, shaders stop after YUV-to-RGB conversion. */
+    WGPUBool doYuvToRgbConversionOnly;
+    /** Column-major `mat3x4<f32>` YUV-to-RGB conversion matrix. */
+    float yuvToRgbConversionMatrix[12];
+    /** Source transfer function parameters: G, A, B, C, D, E, F. */
+    float srcTransferFunctionParameters[7];
+    /** Destination transfer function parameters: G, A, B, C, D, E, F. */
+    float dstTransferFunctionParameters[7];
+    /** Column-major `mat3x3<f32>` gamut conversion matrix. */
+    float gamutConversionMatrix[9];
+    /** Whether sampling should mirror horizontally. */
+    WGPUBool mirrored;
+    /** Sampling rotation. */
+    YaWGPUExternalTextureRotation rotation;
+} YaWGPUExternalTextureDescriptor;
+
+/**
+ * Creates a `WGPUExternalTexture`.
+ *
+ * Validation errors are routed through the device error sink and return NULL.
+ */
+WGPU_EXPORT WGPUExternalTexture yawgpuDeviceCreateExternalTexture(
+    WGPUDevice device,
+    YaWGPUExternalTextureDescriptor const * descriptor) WGPU_FUNCTION_ATTRIBUTE;
 
 /** @} */
 

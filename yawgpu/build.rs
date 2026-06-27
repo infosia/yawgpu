@@ -11,6 +11,7 @@ const OBJECT_HANDLES: &[&str] = &[
     "ComputePassEncoder",
     "ComputePipeline",
     "Device",
+    "ExternalTexture",
     "Instance",
     "PipelineLayout",
     "QuerySet",

@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use yawgpu_hal::{
-    HalBoundBuffer, HalBoundIndexBuffer, HalBoundIndirectBuffer, HalBoundSampler, HalBoundTexture,
-    HalBufferClear, HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout, HalBufferUsage,
-    HalComputeDispatch, HalComputePass, HalCopy, HalDevice, HalDraw, HalIndexFormat, HalQueue,
-    HalRenderColorTarget, HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass,
-    HalResolveQuerySet, HalScissorRect, HalTextureAspect, HalTextureClear, HalTextureCopy,
-    HalTextureViewDimension, HalViewport,
+    HalBoundBuffer, HalBoundExternalTexture, HalBoundIndexBuffer, HalBoundIndirectBuffer,
+    HalBoundSampler, HalBoundTexture, HalBufferClear, HalBufferCopy, HalBufferTextureCopy,
+    HalBufferTextureLayout, HalBufferUsage, HalComputeDispatch, HalComputePass, HalCopy, HalDevice,
+    HalDraw, HalIndexFormat, HalQueue, HalRenderColorTarget, HalRenderDepthStencilAttachment,
+    HalRenderLoadOp, HalRenderPass, HalResolveQuerySet, HalScissorRect, HalTextureAspect,
+    HalTextureClear, HalTextureCopy, HalTextureViewDimension, HalViewport,
 };
 
 use crate::bind_group::*;
@@ -1067,6 +1067,7 @@ pub(crate) fn hal_compute_pass_execution(pass: &ComputePassCommand) -> Option<Ha
         bind_buffers: bindings.buffers,
         bind_textures: bindings.textures,
         bind_samplers: bindings.samplers,
+        bind_external_textures: bindings.external_textures,
         dispatch: hal_compute_dispatch(&pass.dispatch)?,
     }))
 }
@@ -1092,6 +1093,7 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
         bind_buffers,
         bind_textures,
         bind_samplers,
+        bind_external_textures,
         vertex_buffers,
         index_buffer,
         indirect_buffer,
@@ -1129,6 +1131,7 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
             bindings.buffers,
             bindings.textures,
             bindings.samplers,
+            bindings.external_textures,
             vertex_buffers,
             index_buffer,
             indirect_buffer,
@@ -1137,6 +1140,7 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
     } else {
         (
             None,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -1155,6 +1159,7 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
         bind_buffers,
         bind_textures,
         bind_samplers,
+        bind_external_textures,
         vertex_buffers,
         index_buffer,
         indirect_buffer,
@@ -1338,6 +1343,7 @@ pub(crate) struct HalBoundResources {
     pub(crate) buffers: Vec<HalBoundBuffer>,
     pub(crate) textures: Vec<HalBoundTexture>,
     pub(crate) samplers: Vec<HalBoundSampler>,
+    pub(crate) external_textures: Vec<HalBoundExternalTexture>,
 }
 
 /// Returns HAL bound shader resources.
@@ -1431,6 +1437,54 @@ pub(crate) fn hal_bind_resources(
                     sampler: sampler.hal()?,
                 });
             }
+            (
+                MetalBindingKind::ExternalTexture,
+                BindGroupResource::ExternalTexture {
+                    external_texture, ..
+                },
+            ) => {
+                let inner = external_texture.inner();
+                let plane0 = inner.planes.first()?;
+                let plane1 = inner.planes.get(1).unwrap_or(plane0);
+                let params_slot = binding.ext_params_buffer_slot?;
+                let params_vertex_metal_index = match binding.vertex_metal_index {
+                    Some(_) => Some(binding.ext_params_vertex_buffer_slot?),
+                    None => None,
+                };
+                let params_fragment_metal_index = match binding.fragment_metal_index {
+                    Some(_) => Some(binding.ext_params_fragment_buffer_slot?),
+                    None => None,
+                };
+                let plane1_metal_index = binding.metal_index.checked_add(1)?;
+                let plane1_vertex_metal_index = match binding.vertex_metal_index {
+                    Some(slot) => Some(slot.checked_add(1)?),
+                    None => None,
+                };
+                let plane1_fragment_metal_index = match binding.fragment_metal_index {
+                    Some(slot) => Some(slot.checked_add(1)?),
+                    None => None,
+                };
+                resources.external_textures.push(HalBoundExternalTexture {
+                    group: binding.group,
+                    binding: binding.binding,
+                    plane0: plane0.texture().hal()?,
+                    plane1: plane1.texture().hal()?,
+                    plane0_metal_index: binding.metal_index,
+                    plane1_metal_index,
+                    plane0_vertex_metal_index: binding.vertex_metal_index,
+                    plane1_vertex_metal_index,
+                    plane0_fragment_metal_index: binding.fragment_metal_index,
+                    plane1_fragment_metal_index,
+                    params: inner.params.hal()?,
+                    params_metal_index: params_slot,
+                    params_vertex_metal_index,
+                    params_fragment_metal_index,
+                    format: hal_texture_format(plane0.format()),
+                    dimension: hal_texture_view_dimension(plane0.dimension()),
+                    params_offset: 0,
+                    params_size: inner.params.size(),
+                });
+            }
             _ => return None,
         }
     }
@@ -1507,6 +1561,65 @@ mod tests {
         });
         assert_eq!(error, None);
         Arc::new(view)
+    }
+
+    fn sampled_external_texture_view(device: &Device) -> Arc<TextureView> {
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::TEXTURE_BINDING,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D2),
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(error, None);
+        Arc::new(view)
+    }
+
+    fn rgba_external_texture(device: &Device) -> Arc<ExternalTexture> {
+        Arc::new(
+            device
+                .create_external_texture(ExternalTextureDescriptor {
+                    plane0: sampled_external_texture_view(device),
+                    plane1: None,
+                    format: ExternalTextureFormat::Rgba,
+                    crop_origin: Origin2d { x: 0, y: 0 },
+                    crop_size: Extent3d {
+                        width: 4,
+                        height: 4,
+                        depth_or_array_layers: 1,
+                    },
+                    apparent_size: Extent3d {
+                        width: 4,
+                        height: 4,
+                        depth_or_array_layers: 1,
+                    },
+                    do_yuv_to_rgb_conversion_only: true,
+                    yuv_to_rgb_conversion_matrix: None,
+                    src_transfer_function_parameters: [0.0; 7],
+                    dst_transfer_function_parameters: [0.0; 7],
+                    gamut_conversion_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                    mirrored: false,
+                    rotation: ExternalTextureRotation::Rotate0,
+                })
+                .expect("external texture"),
+        )
     }
 
     fn depth_only_render_pass_descriptor(view: Arc<TextureView>) -> RenderPassDescriptor {
@@ -1979,6 +2092,76 @@ fn fs() -> @location(0) vec4<f32> {
             None
         );
         assert_eq!(queue.submit(&[]), None);
+    }
+
+    #[test]
+    fn hal_bind_resources_lowers_external_texture_planes_and_params() {
+        let device = noop_device();
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 3,
+                visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::ExternalTexture),
+            }],
+            error: None,
+        }));
+        let external_texture = rgba_external_texture(&device);
+        let bind_group = Arc::new(device.create_bind_group(
+            Arc::clone(&layout),
+            vec![BindGroupEntry {
+                binding: 3,
+                resource: BindGroupResource::ExternalTexture {
+                    external_texture,
+                    device: Arc::new(device.clone()),
+                },
+            }],
+        ));
+        assert!(!bind_group.is_error());
+
+        let mut bind_groups = BTreeMap::new();
+        bind_groups.insert(
+            0,
+            BoundBindGroup {
+                group: bind_group,
+                dynamic_offsets: Vec::new(),
+            },
+        );
+        let resources = hal_bind_resources(
+            &[layout],
+            &[MetalBufferBinding {
+                group: 0,
+                binding: 3,
+                metal_index: 4,
+                ext_params_buffer_slot: Some(7),
+                ext_params_vertex_buffer_slot: Some(12),
+                ext_params_fragment_buffer_slot: Some(22),
+                vertex_metal_index: Some(10),
+                fragment_metal_index: Some(20),
+                kind: MetalBindingKind::ExternalTexture,
+            }],
+            &bind_groups,
+        )
+        .expect("HAL resources");
+
+        assert!(resources.buffers.is_empty());
+        assert!(resources.textures.is_empty());
+        assert!(resources.samplers.is_empty());
+        assert_eq!(resources.external_textures.len(), 1);
+        let binding = &resources.external_textures[0];
+        assert_eq!(binding.group, 0);
+        assert_eq!(binding.binding, 3);
+        assert_eq!(binding.plane0_metal_index, 4);
+        assert_eq!(binding.plane1_metal_index, 5);
+        assert_eq!(binding.plane0_vertex_metal_index, Some(10));
+        assert_eq!(binding.plane1_vertex_metal_index, Some(11));
+        assert_eq!(binding.plane0_fragment_metal_index, Some(20));
+        assert_eq!(binding.plane1_fragment_metal_index, Some(21));
+        assert_eq!(binding.params_metal_index, 7);
+        assert_eq!(binding.params_vertex_metal_index, Some(12));
+        assert_eq!(binding.params_fragment_metal_index, Some(22));
+        assert_eq!(binding.params_offset, 0);
+        assert_eq!(binding.params_size, ExternalTextureParams::SIZE as u64);
     }
 
     #[test]

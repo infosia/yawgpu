@@ -105,21 +105,61 @@ SPIR-V honest-rejection follow-up)**:
   Regression: `yawgpu/tests/e2e_vulkan_external_texture.rs` (real MoltenVK: asserts the
   internal error fires and no panic occurs); Metal coverage via the F-060 CTS case.
 
-Slice 2 (resource + create + runtime binding — full wgpu-parity; inline unit tests +
+### Tint `tint_ExternalTextureParams` UBO layout (Slice 2 target — replaces the naga 208-byte struct)
+
+The runtime must upload **Tint's 296-byte `tint_ExternalTextureParams`** (std140), NOT wgpu's
+208-byte struct. Source of truth: `third_party/dawn/src/tint/lang/core/ir/transform/
+multiplanar_external_texture.cc` (`ExternalTextureParams()` + `TransferFunctionParams()`). Layout
+(byte offsets, std140):
+
+| off | field | type | size |
+|---|---|---|---|
+| 0 | `numPlanes` | u32 | 4 |
+| 4 | `doYuvToRgbConversionOnly` | u32 | 4 |
+| 8 | `yuvToRgbConversionMatrix` | mat3x4&lt;f32&gt; | 48 |
+| 56 | `srcTransferFunction` | TransferFunctionParams | 32 |
+| 88 | `dstTransferFunction` | TransferFunctionParams | 32 |
+| 120 | `gamutConversionMatrix` | mat3x3&lt;f32&gt; | 48 |
+| 168 | `sampleTransform` | mat3x2&lt;f32&gt; | 32 |
+| 200 | `loadTransform` | mat3x2&lt;f32&gt; | 32 |
+| 232 | `samplePlane0RectMin` | vec2f | 8 |
+| 240 | `samplePlane0RectMax` | vec2f | 8 |
+| 248 | `samplePlane1RectMin` | vec2f | 8 |
+| 256 | `samplePlane1RectMax` | vec2f | 8 |
+| 264 | `apparentSize` | vec2u | 8 |
+| 272 | `plane1CoordFactor` | vec2f | 8 |
+| 280 | `ootfParam` | vec4f | 16 |
+
+Total **296 bytes**. `TransferFunctionParams { mode:u32, A..G:f32 }` = 32 bytes.
+Match Dawn's param computation (`dawn/native/.../ExternalTexture.cpp`) for the
+identity/passthrough and Nv12-YUV cases so the sampled result matches the Dawn oracle.
+The Tint binding model is **2 planes** (plane0/plane1) + the params UBO (metadata); for
+single-plane `Rgba`, `numPlanes=1` and plane1 may alias plane0 (Tint ignores it).
+
+Slice 2 (resource + create + runtime binding — Metal-only, mirrors wgpu; inline unit tests +
 GPU e2e authored by Claude):
 
-- **R7** ☐ `yawgpuDeviceCreateExternalTexture(desc, planes)` validates plane count vs
-  `format`, and each plane's sample type (filterable-float), dimension (2D),
+- **R7** ☑ `yawgpuDeviceCreateExternalTexture(desc)` validates plane count vs `format`
+  (`Rgba`=1, `Nv12`=2), and each plane view's sample type (filterable-float), dimension (2D),
   non-multisampled, `TEXTURE_BINDING` usage; mismatches route to the device error sink.
-- **R8** ☐ Creation builds the 208-byte `ExternalTextureParams` from the descriptor and
-  uploads it to a `UNIFORM | COPY_DST` buffer; the resource is `Arc`-handle managed
-  (`planes: ArrayVec<TextureView,3>` + `params: Buffer`), `Drop` releases.
-- **R9** ☐ A `WGPUExternalTextureBindingEntry` in `wgpuDeviceCreateBindGroup` binds the
-  external texture; at draw/dispatch the 3 plane views + params buffer are bound at the
-  slots from R6 (**Metal**; Vulkan rejects external-texture pipelines at codegen per R6).
-- **R10** ☐ End-to-end: sampling an `Nv12`/`Rgba` external texture in a fragment shader
-  yields the colour-space-converted result (GPU readback on **Metal**, matching wgpu's
-  Metal-only external-texture support).
+  (`yawgpu-core/src/external_texture.rs`, `yawgpu/src/ffi/external_texture.rs`.)
+- **R8** ☑ Creation builds the **296-byte Tint `tint_ExternalTextureParams`** (above) from the
+  descriptor and uploads it to a `UNIFORM | COPY_DST` buffer; the resource is `Arc`-handle managed
+  (`planes: ArrayVec<TextureView,2>` + `params: Buffer`), `Drop` releases. Offsets unit-tested
+  against the table above.
+- **R9** ☑ A `WGPUExternalTextureBindingEntry` in `wgpuDeviceCreateBindGroup` binds the
+  external texture; at draw/dispatch plane0 → `metal_index`, plane1 → `metal_index+1` (RGBA aliases
+  plane1=plane0), params → `ext_params_buffer_slot` (the Slice-A slot assignment), per-stage indices
+  honoured (`bind_group.rs` + `queue.rs hal_bind_resources` + `HalBoundExternalTexture` +
+  `metal/encode.rs`). **Metal** only; on the Vulkan path Tint now lowers `texture_external` to SPIR-V
+  (naga could not), so the pipeline reaches MoltenVK, which fails SPIR-V→MSL on the multiplanar
+  argument-buffer base type → clean `GPUInternalError`, no panic. **Native Vulkan is expected to
+  support external textures** (Tint == Dawn's compiler) — likely Dawn-parity win, unverified (host
+  is MoltenVK-only). The naga-era "Vulkan rejects at codegen" rule (R6) is superseded.
+- **R10** ◑ End-to-end **Rgba DONE** — sampling an `Rgba` external texture (`doYuvToRgbConversionOnly=1`
+  passthrough) in a fragment shader round-trips the source colour on real **Metal**
+  (`yawgpu/tests/e2e_metal_external_texture.rs::metal_external_texture_rgba_passthrough_round_trips`).
+  **Nv12 (YUV→RGB) TODO** — needs BT.601/709 param values matched to Dawn's `ExternalTexture.cpp`.
 
 ## Async
 

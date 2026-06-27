@@ -36,8 +36,8 @@ fn set_first_error(error: &mut Option<String>, message: &str) {
 }
 
 use crate::{
-    WGPUBindGroupLayoutImpl, WGPUBufferImpl, WGPUPipelineLayoutImpl, WGPUQuerySetImpl,
-    WGPUSamplerImpl, WGPUShaderModuleImpl, WGPUTextureViewImpl,
+    WGPUBindGroupLayoutImpl, WGPUBufferImpl, WGPUExternalTextureImpl, WGPUPipelineLayoutImpl,
+    WGPUQuerySetImpl, WGPUSamplerImpl, WGPUShaderModuleImpl, WGPUTextureViewImpl,
 };
 
 /// Handle refcount contract:
