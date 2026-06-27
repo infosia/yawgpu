@@ -785,9 +785,9 @@ fn texel_format(format: yawgpu_tint::TexelFormat) -> Result<String, String> {
         yawgpu_tint::TexelFormat::Rgba32Sint => "Rgba32Sint",
         yawgpu_tint::TexelFormat::Rgba32Float => "Rgba32Float",
         yawgpu_tint::TexelFormat::R8Unorm => "R8Unorm",
-        yawgpu_tint::TexelFormat::Rgb10A2Uint => "Rgb10A2Uint",
-        yawgpu_tint::TexelFormat::Rgb10A2Unorm => "Rgb10A2Unorm",
-        yawgpu_tint::TexelFormat::Rg11B10Ufloat => "Rg11B10Ufloat",
+        yawgpu_tint::TexelFormat::Rgb10A2Uint => "Rgb10a2Uint",
+        yawgpu_tint::TexelFormat::Rgb10A2Unorm => "Rgb10a2Unorm",
+        yawgpu_tint::TexelFormat::Rg11B10Ufloat => "Rg11b10Ufloat",
         yawgpu_tint::TexelFormat::None => {
             return Err("tint: storage texture has no texel format".to_owned());
         }
@@ -845,6 +845,22 @@ fn reflected_override(override_: yawgpu_tint::Override) -> ReflectedOverride {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn texel_format_matches_reflected_storage_texture_format_names() {
+        assert_eq!(
+            texel_format(yawgpu_tint::TexelFormat::Rgb10A2Uint).unwrap(),
+            "Rgb10a2Uint"
+        );
+        assert_eq!(
+            texel_format(yawgpu_tint::TexelFormat::Rgb10A2Unorm).unwrap(),
+            "Rgb10a2Unorm"
+        );
+        assert_eq!(
+            texel_format(yawgpu_tint::TexelFormat::Rg11B10Ufloat).unwrap(),
+            "Rg11b10Ufloat"
+        );
+    }
 
     #[test]
     fn reflects_compute_workgroup_size_from_tint() {
