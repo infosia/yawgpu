@@ -18,8 +18,9 @@ use std::sync::{Arc, Mutex};
 use yawgpu::native;
 use yawgpu::{
     YaWGPUExtent2D, YaWGPUExternalTextureDescriptor, YaWGPUInstanceBackendSelect, YaWGPUOrigin2D,
-    YAWGPU_EXTERNAL_TEXTURE_FORMAT_RGBA, YAWGPU_EXTERNAL_TEXTURE_ROTATION_ROTATE_0_DEGREES,
-    YAWGPU_INSTANCE_BACKEND_METAL, YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
+    YAWGPU_EXTERNAL_TEXTURE_FORMAT_NV12, YAWGPU_EXTERNAL_TEXTURE_FORMAT_RGBA,
+    YAWGPU_EXTERNAL_TEXTURE_ROTATION_ROTATE_0_DEGREES, YAWGPU_INSTANCE_BACKEND_METAL,
+    YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
 };
 use yawgpu_test::{real_backend_skip_reason, wait, RealBackend};
 
@@ -250,9 +251,133 @@ fn metal_external_texture_rgba_passthrough_round_trips() {
     }
 }
 
-// TODO(nv12): add metal_external_texture_nv12_yuv_round_trips once the BT.601/709
-// YUV->RGB param packing is confirmed against the Dawn oracle (two planes:
-// R8Unorm luma + RG8Unorm chroma, doYuvToRgbConversionOnly=1).
+/// Renders a fullscreen triangle whose fragment shader `textureLoad`s the given
+/// external texture into an RGBA8Unorm target, then reads back texel (0,0).
+/// Releases only the resources it creates (output, pipeline, bind group, readback);
+/// the caller owns `external` and the planes.
+unsafe fn render_external_texture(
+    instance: native::WGPUInstance,
+    device: native::WGPUDevice,
+    queue: native::WGPUQueue,
+    external: native::WGPUExternalTexture,
+    errors: &Arc<Mutex<Vec<yawgpu_core::DeviceError>>>,
+) -> [u8; 4] {
+    let output = create_texture(
+        device,
+        native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+        native::WGPUTextureFormat_RGBA8Unorm,
+    );
+    let output_view = create_default_view(output);
+    let module = create_wgsl_module(device, EXTERNAL_TEXTURE_SHADER);
+    let pipeline = create_render_pipeline(device, module);
+
+    let layout = yawgpu::wgpuRenderPipelineGetBindGroupLayout(pipeline, 0);
+    assert!(!layout.is_null());
+    let mut ext_entry = native::WGPUExternalTextureBindingEntry {
+        chain: native::WGPUChainedStruct {
+            next: std::ptr::null_mut(),
+            sType: native::WGPUSType_ExternalTextureBindingEntry,
+        },
+        externalTexture: external,
+    };
+    let bind_entry = native::WGPUBindGroupEntry {
+        nextInChain: (&mut ext_entry.chain) as *mut native::WGPUChainedStruct,
+        binding: 0,
+        buffer: std::ptr::null_mut(),
+        offset: 0,
+        size: 0,
+        sampler: std::ptr::null_mut(),
+        textureView: std::ptr::null_mut(),
+    };
+    let entries = [bind_entry];
+    let bind_group_descriptor = native::WGPUBindGroupDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout,
+        entryCount: entries.len(),
+        entries: entries.as_ptr(),
+    };
+    let bind_group = yawgpu::wgpuDeviceCreateBindGroup(device, &bind_group_descriptor);
+    assert!(
+        !bind_group.is_null(),
+        "bind group creation failed: {:?}",
+        errors.lock().expect("error lock")
+    );
+
+    let readback = create_buffer(
+        device,
+        READBACK_SIZE as u64,
+        native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+    );
+    let color_attachment = native::WGPURenderPassColorAttachment {
+        nextInChain: std::ptr::null_mut(),
+        view: output_view,
+        depthSlice: native::WGPU_DEPTH_SLICE_UNDEFINED,
+        resolveTarget: std::ptr::null_mut(),
+        loadOp: native::WGPULoadOp_Clear,
+        storeOp: native::WGPUStoreOp_Store,
+        clearValue: native::WGPUColor {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        },
+    };
+    let attachments = [color_attachment];
+    let pass_descriptor = native::WGPURenderPassDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        colorAttachmentCount: attachments.len(),
+        colorAttachments: attachments.as_ptr(),
+        depthStencilAttachment: std::ptr::null(),
+        occlusionQuerySet: std::ptr::null_mut(),
+        timestampWrites: std::ptr::null(),
+    };
+    let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+    let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_descriptor);
+    yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+    yawgpu::wgpuRenderPassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+    yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+    yawgpu::wgpuRenderPassEncoderEnd(pass);
+    yawgpu::wgpuRenderPassEncoderRelease(pass);
+
+    let color_src = native::WGPUTexelCopyTextureInfo {
+        texture: output,
+        mipLevel: 0,
+        origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+        aspect: native::WGPUTextureAspect_All,
+    };
+    let color_dst = native::WGPUTexelCopyBufferInfo {
+        layout: native::WGPUTexelCopyBufferLayout {
+            offset: 0,
+            bytesPerRow: BYTES_PER_ROW,
+            rowsPerImage: HEIGHT,
+        },
+        buffer: readback,
+    };
+    let extent = native::WGPUExtent3D {
+        width: WIDTH,
+        height: HEIGHT,
+        depthOrArrayLayers: 1,
+    };
+    yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &color_src, &color_dst, &extent);
+    let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+    yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+    yawgpu::wgpuCommandBufferRelease(command_buffer);
+    yawgpu::wgpuCommandEncoderRelease(encoder);
+
+    let pixels = read_buffer(instance, readback, 0, 4);
+
+    yawgpu::wgpuBindGroupRelease(bind_group);
+    yawgpu::wgpuBindGroupLayoutRelease(layout);
+    yawgpu::wgpuRenderPipelineRelease(pipeline);
+    yawgpu::wgpuShaderModuleRelease(module);
+    yawgpu::wgpuTextureViewRelease(output_view);
+    yawgpu::wgpuTextureRelease(output);
+    yawgpu::wgpuBufferRelease(readback);
+
+    [pixels[0], pixels[1], pixels[2], pixels[3]]
+}
 
 unsafe fn create_render_pipeline(
     device: native::WGPUDevice,
@@ -560,4 +685,137 @@ fn empty_string_view() -> native::WGPUStringView {
         data: std::ptr::null(),
         length: 0,
     }
+}
+
+// ── Nv12 (two-plane YUV→RGB) ──────────────────────────────────────────────────
+//
+// R10 second half: a 2-plane Nv12 external texture (R8Unorm luma + RG8Unorm
+// chroma) sampled via `textureLoad` must combine plane0.r + plane1.rg and apply
+// `yuvToRgbConversionMatrix`. Using an *identity* YUV matrix (R=Y, G=U, B=V) with
+// `doYuvToRgbConversionOnly=1` (skip gamut/transfer) makes the conversion exactly
+// the plane recombination, so the readback equals the written (Y,U,V) directly —
+// proving the two-plane load path and the mat3x4 multiply are wired correctly.
+#[test]
+#[ignore = "manual real-backend test"]
+fn metal_external_texture_nv12_two_plane_round_trips() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+    // Y, U, V written into the planes; identity YUV matrix → expected RGBA.
+    const Y: u8 = 64;
+    const U: u8 = 128;
+    const V: u8 = 192;
+    const EXPECTED: [u8; 4] = [Y, U, V, 255];
+
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        // plane0 = R8Unorm luma, plane1 = RG8Unorm chroma.
+        let luma = create_texture(
+            device,
+            native::WGPUTextureUsage_TextureBinding | native::WGPUTextureUsage_CopyDst,
+            native::WGPUTextureFormat_R8Unorm,
+        );
+        write_solid_bytes(queue, luma, &[Y], 1);
+        let plane0 = create_default_view(luma);
+
+        let chroma = create_texture(
+            device,
+            native::WGPUTextureUsage_TextureBinding | native::WGPUTextureUsage_CopyDst,
+            native::WGPUTextureFormat_RG8Unorm,
+        );
+        write_solid_bytes(queue, chroma, &[U, V], 2);
+        let plane1 = create_default_view(chroma);
+
+        let descriptor = YaWGPUExternalTextureDescriptor {
+            plane0,
+            plane1,
+            format: YAWGPU_EXTERNAL_TEXTURE_FORMAT_NV12,
+            cropOrigin: YaWGPUOrigin2D { x: 0, y: 0 },
+            cropSize: YaWGPUExtent2D {
+                width: WIDTH,
+                height: HEIGHT,
+            },
+            apparentSize: YaWGPUExtent2D {
+                width: WIDTH,
+                height: HEIGHT,
+            },
+            doYuvToRgbConversionOnly: 1,
+            // Identity YUV→RGB: R=Y, G=U, B=V (column-major mat3x4).
+            yuvToRgbConversionMatrix: [
+                1.0, 0.0, 0.0, 0.0, // col 0 → R = Y
+                0.0, 1.0, 0.0, 0.0, // col 1 → G = U
+                0.0, 0.0, 1.0, 0.0, // col 2 → B = V
+            ],
+            srcTransferFunctionParameters: [0.0; 7],
+            dstTransferFunctionParameters: [0.0; 7],
+            gamutConversionMatrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            mirrored: 0,
+            rotation: YAWGPU_EXTERNAL_TEXTURE_ROTATION_ROTATE_0_DEGREES,
+        };
+        let external = yawgpu::yawgpuDeviceCreateExternalTexture(device, &descriptor);
+        assert!(
+            !external.is_null(),
+            "Nv12 create returned null: {:?}",
+            errors.lock().expect("error lock")
+        );
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "Nv12 create raised a device error: {:?}",
+            errors.lock().expect("error lock")
+        );
+
+        let result = render_external_texture(instance, device, queue, external, &errors);
+        for (i, (&got, &want)) in result.iter().zip(EXPECTED.iter()).enumerate() {
+            let diff = (got as i16 - want as i16).abs();
+            assert!(
+                diff <= 2,
+                "channel {i}: Nv12 got {got}, expected ~{want} (full {result:?})"
+            );
+        }
+
+        yawgpu::wgpuExternalTextureRelease(external);
+        yawgpu::wgpuTextureRelease(chroma);
+        yawgpu::wgpuTextureRelease(luma);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+unsafe fn write_solid_bytes(
+    queue: native::WGPUQueue,
+    texture: native::WGPUTexture,
+    texel: &[u8],
+    bytes_per_row: u32,
+) {
+    let destination = native::WGPUTexelCopyTextureInfo {
+        texture,
+        mipLevel: 0,
+        origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+        aspect: native::WGPUTextureAspect_All,
+    };
+    let layout = native::WGPUTexelCopyBufferLayout {
+        offset: 0,
+        bytesPerRow: bytes_per_row,
+        rowsPerImage: HEIGHT,
+    };
+    let extent = native::WGPUExtent3D {
+        width: WIDTH,
+        height: HEIGHT,
+        depthOrArrayLayers: 1,
+    };
+    yawgpu::wgpuQueueWriteTexture(
+        queue,
+        &destination,
+        texel.as_ptr().cast(),
+        texel.len(),
+        &layout,
+        &extent,
+    );
 }
