@@ -660,3 +660,31 @@ shader clamp. Next: instrument one failing variant (e.g. instanceCount or
 offsetVertexBuffer=true), compare the bound buffer range + the size value vs Dawn.
 Remaining shader,execution divergences: robust_access_vertex (112) + render storage
 textures (80) = 192/125064 (0.15%). api tree stays at 100% Dawn parity.
+
+## RESOLVED — robust_access_vertex (112 → 0); render robustness had been inverted OFF
+
+The robust_access_vertex 112 failures were TWO bugs (commit ba46e12):
+1. **Render-shader robustness inverted OFF since the migration.** `generate_stage_msl`
+   passed its `disable_robustness` (false) directly into the yawgpu-tint wrapper's
+   `robust` parameter, which negates it — so EVERY render vertex+fragment shader was
+   compiled with Tint robustness DISABLED (no bounds clamps). One-char fix:
+   `!disable_robustness`. This had silently disabled all render-stage buffer/array
+   bounds checking since the naga→Tint cut.
+2. **Metal stage_in instead of vertex pulling.** Even with robustness on, the
+   MTLVertexDescriptor `[[stage_in]]` path can't bounds-check; Dawn uses vertex pulling
+   on Metal by default. Wired Tint `vertex_pulling_config` (the earlier-reverted work,
+   re-done) — vertex buffers read as storage with `min(idx, arrayLength-1)`, sizes from
+   the existing `_mslBufferSizes` writer. Pitfall fixed: `buffer_sizes_slot` must be
+   reported when pulling is active or arrayLength=0 → `arrayLength-1` underflows to
+   UINT_MAX and the clamp no-ops.
+Verified: robust_access_vertex 320/0/0; api,operation 4917/0/0; rendering 553/0/0.
+
+**Lesson:** the earlier "vertex pulling has 0 net effect" measurement was because
+robustness was OFF (bug #1 masked bug #2's fix). Reverting pulling was wrong — both
+fixes were needed together. Inspect the generated MSL (not just pass/fail counts) when a
+fix "does nothing": the missing `min(...)` clamp + absent `tint_storage_buffer_sizes`
+revealed robustness was off.
+
+Remaining shader,execution: render storage-texture textureLoad now passes; a
+**compute** storage-texture textureLoad cluster (~40, float/unorm/snorm read formats
+return 0) remains — under investigation.
