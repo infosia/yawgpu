@@ -637,3 +637,26 @@ emits). NOTE: if fix #1 switches render to vertex pulling, re-check this under t
 
 Everything else in shader,execution matches Dawn by construction (Tint is the oracle's
 compiler). Next: fix these two, then the `shader,validation` tree + Vulkan/MoltenVK.
+
+## UPDATE — vertex-pulling was NOT the robust_access_vertex fix (reverted)
+
+Implemented Tint `vertex_pulling_config` for Metal render vertex shaders (Dawn's
+default) + wired the per-vertex-buffer size into `_mslBufferSizes` so Tint's pulling
+robustness can bounds-check. Basic rendering stayed green (1232/0/0) and the generated
+MSL has the correct clamp (`min(idx, arrayLength-1)`, `arrayLength = sizes[i]/4`) with
+the sizes actually written at runtime (verified `sizes=[32,32]`). BUT a pre/post set
+diff showed **0 fixed / 0 newly-broken — the exact same 112 cases fail** with stage_in
+and with pulling. So the 112 robust_access_vertex failures are **NOT a vertex-buffer
+bounds-clamp issue** — both Metal's stage_in fetch-clamp and Tint's pulling-clamp
+behave identically. The large pulling change was **reverted** (zero CTS benefit).
+
+**Real root-cause direction (unverified):** failures are only `drawIndexed` /
+`drawIndirect` / `drawIndexedIndirect` (direct draws are CPU-validated, not tested) and
+only the harder sub-variants (`partialLastNumber=true`, `offsetVertexBuffer=true`,
+`additionalBuffers>0`, instance-step `instanceCount`). The default sub-variant passes.
+This points at the **effective valid vertex-buffer range/size** yawgpu uses for these
+draws (binding the full allocation vs the test's tight/partial/offset range), not the
+shader clamp. Next: instrument one failing variant (e.g. instanceCount or
+offsetVertexBuffer=true), compare the bound buffer range + the size value vs Dawn.
+Remaining shader,execution divergences: robust_access_vertex (112) + render storage
+textures (80) = 192/125064 (0.15%). api tree stays at 100% Dawn parity.
