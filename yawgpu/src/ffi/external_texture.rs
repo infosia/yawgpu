@@ -219,7 +219,7 @@ mod tests {
                 height: 4,
                 depth_or_array_layers: 1,
             },
-            format: core::TextureFormat::from_raw(native::WGPUTextureFormat_RGBA8Unorm),
+            format: native::WGPUTextureFormat_RGBA8Unorm.into(),
             mip_level_count: 1,
             sample_count: 1,
             view_formats: Vec::new(),
