@@ -17,7 +17,7 @@ pub use command::{
     HalBufferTextureLayout, HalComputeDispatch, HalComputePass, HalCopy, HalDescriptorBinding,
     HalDescriptorBindingKind, HalDraw, HalIndexFormat, HalRenderColorTarget,
     HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalResolveQuerySet,
-    HalScissorRect, HalStorageTextureAccess, HalTextureAspect, HalTextureCopy,
+    HalScissorRect, HalStorageTextureAccess, HalTextureAspect, HalTextureClear, HalTextureCopy,
     HalTextureViewDimension, HalViewport,
 };
 pub use descriptors::{

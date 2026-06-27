@@ -33,8 +33,8 @@ use crate::{
     HalPresentMode, HalPrimitiveTopology, HalQueryKind, HalQuerySet, HalRenderLoadOp,
     HalRenderPass, HalRenderPipelineDescriptor, HalResolveQuerySet, HalSampler,
     HalSamplerDescriptor, HalShaderSource, HalStencilFaceState, HalStencilOperation,
-    HalSurfaceConfiguration, HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
-    HalTextureUsage, HalVertexFormat, HalVertexStepMode,
+    HalSurfaceConfiguration, HalTexture, HalTextureClear, HalTextureCopy, HalTextureDescriptor,
+    HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
 
 const BACKEND: &str = "metal";

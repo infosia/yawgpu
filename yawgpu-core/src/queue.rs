@@ -7,8 +7,8 @@ use yawgpu_hal::{
     HalBufferClear, HalBufferCopy, HalBufferTextureCopy, HalBufferTextureLayout, HalBufferUsage,
     HalComputeDispatch, HalComputePass, HalCopy, HalDevice, HalDraw, HalIndexFormat, HalQueue,
     HalRenderColorTarget, HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass,
-    HalResolveQuerySet, HalScissorRect, HalTextureAspect, HalTextureCopy, HalTextureViewDimension,
-    HalViewport,
+    HalResolveQuerySet, HalScissorRect, HalTextureAspect, HalTextureClear, HalTextureCopy,
+    HalTextureViewDimension, HalViewport,
 };
 
 use crate::bind_group::*;
@@ -24,7 +24,7 @@ use crate::query_set::QuerySet;
 use crate::render_pipeline::*;
 use crate::texture::hal_texture_format;
 use crate::texture::*;
-use crate::texture_view::{TextureAspect, TextureViewDimension};
+use crate::texture_view::{TextureAspect, TextureView, TextureViewDimension};
 
 /// Stores queue data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -228,6 +228,7 @@ impl Queue {
         if extent_is_empty(write_size) {
             return None;
         }
+        let destination_texture = texture;
 
         // Determine if the caller's layout needs repacking into a tightly-packed
         // staging buffer. Vulkan's bufferRowLength is expressed in texels, so a
@@ -349,10 +350,20 @@ impl Queue {
                 origin: hal_origin(origin),
                 extent: hal_extent(write_size),
             });
+            let mut copies = Vec::new();
+            append_texture_write_init_clears(
+                &mut copies,
+                destination_texture,
+                mip_level,
+                origin,
+                write_size,
+                aspect,
+            );
+            copies.push(copy);
             return self
                 .inner
                 .hal
-                .submit_copies(&[copy])
+                .submit_copies(&copies)
                 .err()
                 .map(|error| DeviceError::internal(error.to_string()));
         }
@@ -398,9 +409,19 @@ impl Queue {
             origin: hal_origin(origin),
             extent: hal_extent(write_size),
         });
+        let mut copies = Vec::new();
+        append_texture_write_init_clears(
+            &mut copies,
+            destination_texture,
+            mip_level,
+            origin,
+            write_size,
+            aspect,
+        );
+        copies.push(copy);
         self.inner
             .hal
-            .submit_copies(&[copy])
+            .submit_copies(&copies)
             .err()
             .map(|error| DeviceError::internal(error.to_string()))
     }
@@ -485,9 +506,7 @@ impl Queue {
             .flat_map(|command_buffer| command_buffer.command_ops().iter())
             .collect();
         for (op_index, op) in all_ops.iter().enumerate() {
-            if let Some(copy) = hal_command_execution_with_ops(op, &all_ops[..=op_index]) {
-                copies.push(copy);
-            }
+            append_hal_command_execution(&mut copies, op, &all_ops[..=op_index]);
         }
         if let Err(error) = self.inner.hal.submit_copies(&copies) {
             return Some(DeviceError::internal(error.to_string()));
@@ -610,51 +629,83 @@ pub(crate) fn hal_command_execution(op: &CommandExecution) -> Option<HalCopy> {
     hal_command_execution_with_ops(op, &[op])
 }
 
+#[cfg(test)]
 fn hal_command_execution_with_ops(
     op: &CommandExecution,
     command_ops: &[&CommandExecution],
 ) -> Option<HalCopy> {
+    let mut copies = Vec::new();
+    append_hal_command_execution(&mut copies, op, command_ops);
+    copies.into_iter().next()
+}
+
+fn append_hal_command_execution(
+    copies: &mut Vec<HalCopy>,
+    op: &CommandExecution,
+    command_ops: &[&CommandExecution],
+) {
     match op {
         CommandExecution::BufferCopy(copy) => {
             if copy.size == 0 {
-                return None;
+                return;
             }
-            let source = copy.source.hal()?;
-            let destination = copy.destination.hal()?;
-            Some(HalCopy::Buffer(HalBufferCopy {
+            let Some(source) = copy.source.hal() else {
+                return;
+            };
+            let Some(destination) = copy.destination.hal() else {
+                return;
+            };
+            copies.push(HalCopy::Buffer(HalBufferCopy {
                 source,
                 source_offset: copy.source_offset,
                 destination,
                 destination_offset: copy.destination_offset,
                 size: copy.size,
-            }))
+            }));
         }
         CommandExecution::BufferClear(clear) => {
             if clear.size == 0 {
-                return None;
+                return;
             }
-            let buffer = clear.buffer.hal()?;
-            Some(HalCopy::BufferClear(HalBufferClear {
+            let Some(buffer) = clear.buffer.hal() else {
+                return;
+            };
+            copies.push(HalCopy::BufferClear(HalBufferClear {
                 buffer,
                 offset: clear.offset,
                 size: clear.size,
-            }))
+            }));
         }
         CommandExecution::ResolveQuerySet(resolve) => {
-            let query_set = resolve.query_set.hal()?;
-            let destination = resolve.destination.hal()?;
-            Some(HalCopy::ResolveQuerySet(HalResolveQuerySet {
+            let Some(query_set) = resolve.query_set.hal() else {
+                return;
+            };
+            let Some(destination) = resolve.destination.hal() else {
+                return;
+            };
+            copies.push(HalCopy::ResolveQuerySet(HalResolveQuerySet {
                 query_set,
                 first_query: resolve.first_query,
                 query_count: resolve.query_count,
                 written_queries: resolve_written_occlusion_queries(resolve, command_ops),
                 destination,
                 destination_offset: resolve.destination_offset,
-            }))
+            }));
         }
-        CommandExecution::TextureCopy(copy) => hal_texture_copy_execution(copy),
-        CommandExecution::ComputePass(pass) => hal_compute_pass_execution(pass),
-        CommandExecution::RenderPass(pass) => hal_render_pass_execution(pass),
+        CommandExecution::TextureCopy(copy) => append_texture_copy_execution(copies, copy),
+        CommandExecution::ComputePass(pass) => {
+            append_writable_storage_texture_init_clears(copies, &pass.bind_groups);
+            if let Some(copy) = hal_compute_pass_execution(pass) {
+                copies.push(copy);
+            }
+        }
+        CommandExecution::RenderPass(pass) => {
+            append_writable_storage_texture_init_clears(copies, &pass.bind_groups);
+            append_render_pass_color_attachment_init_clears(copies, pass);
+            if let Some(copy) = hal_render_pass_execution(pass) {
+                copies.push(copy);
+            }
+        }
     }
 }
 
@@ -755,6 +806,248 @@ pub(crate) fn hal_texture_copy_execution(copy: &TextureCopyCommand) -> Option<Ha
             }))
         }
     }
+}
+
+fn append_texture_copy_execution(copies: &mut Vec<HalCopy>, copy: &TextureCopyCommand) {
+    match copy {
+        TextureCopyCommand::BufferToTexture {
+            destination,
+            copy_size,
+            ..
+        } => {
+            append_texture_write_init_clears(
+                copies,
+                &destination.texture,
+                destination.mip_level,
+                destination.origin,
+                *copy_size,
+                destination.aspect,
+            );
+        }
+        TextureCopyCommand::TextureToBuffer {
+            source, copy_size, ..
+        } => {
+            append_texture_read_init_clears(
+                copies,
+                &source.texture,
+                source.mip_level,
+                source.origin,
+                *copy_size,
+                source.aspect,
+            );
+        }
+        TextureCopyCommand::TextureToTexture {
+            source,
+            destination,
+            copy_size,
+        } => {
+            append_texture_read_init_clears(
+                copies,
+                &source.texture,
+                source.mip_level,
+                source.origin,
+                *copy_size,
+                source.aspect,
+            );
+            append_texture_write_init_clears(
+                copies,
+                &destination.texture,
+                destination.mip_level,
+                destination.origin,
+                *copy_size,
+                destination.aspect,
+            );
+        }
+    }
+    if let Some(copy) = hal_texture_copy_execution(copy) {
+        copies.push(copy);
+    }
+}
+
+fn append_texture_read_init_clears(
+    copies: &mut Vec<HalCopy>,
+    texture: &Texture,
+    mip_level: u32,
+    origin: Origin3d,
+    copy_size: Extent3d,
+    aspect: TextureAspect,
+) {
+    if extent_is_empty(copy_size) || !texture_init_clear_supported(texture) {
+        return;
+    }
+    for subresource in texture.copy_subresources(mip_level, origin, copy_size) {
+        if texture.is_initialized(subresource.mip_level, subresource.array_layer) {
+            continue;
+        }
+        append_texture_zero_clear(
+            copies,
+            texture,
+            subresource.mip_level,
+            subresource.array_layer,
+            aspect,
+        );
+        texture.mark_initialized(subresource.mip_level, subresource.array_layer);
+    }
+}
+
+fn append_texture_write_init_clears(
+    copies: &mut Vec<HalCopy>,
+    texture: &Texture,
+    mip_level: u32,
+    origin: Origin3d,
+    copy_size: Extent3d,
+    aspect: TextureAspect,
+) {
+    if extent_is_empty(copy_size) || !texture_init_clear_supported(texture) {
+        return;
+    }
+    for subresource in texture.copy_subresources(mip_level, origin, copy_size) {
+        if !subresource.covers_full_subresource
+            && !texture.is_initialized(subresource.mip_level, subresource.array_layer)
+        {
+            append_texture_zero_clear(
+                copies,
+                texture,
+                subresource.mip_level,
+                subresource.array_layer,
+                aspect,
+            );
+        }
+        texture.mark_initialized(subresource.mip_level, subresource.array_layer);
+    }
+}
+
+fn append_texture_zero_clear(
+    copies: &mut Vec<HalCopy>,
+    texture: &Texture,
+    mip_level: u32,
+    array_layer: u32,
+    aspect: TextureAspect,
+) {
+    let Some(texture_hal) = texture.hal() else {
+        return;
+    };
+    copies.push(HalCopy::ClearTexture(HalTextureClear {
+        texture: texture_hal,
+        format: hal_texture_format(texture.format()),
+        aspect: hal_texture_aspect(aspect),
+        mip_level,
+        base_array_layer: array_layer,
+        array_layer_count: 1,
+    }));
+}
+
+fn texture_init_clear_supported(texture: &Texture) -> bool {
+    texture.is_lazy_init_eligible()
+}
+
+fn append_writable_storage_texture_init_clears(
+    copies: &mut Vec<HalCopy>,
+    bind_groups: &BTreeMap<u32, BoundBindGroup>,
+) {
+    // TODO(stage2): sampled texture bindings that read uninitialized textures
+    // should inject clears before the pass, matching copy and storage writes.
+    for bound in bind_groups.values() {
+        let layout_entries = bound.group.layout().entries();
+        for layout_entry in layout_entries {
+            let Some(BindingLayoutKind::StorageTexture { access, .. }) = layout_entry.kind else {
+                continue;
+            };
+            if access == StorageTextureAccess::ReadOnly {
+                continue;
+            }
+            let Some(entry) = bound
+                .group
+                .entries()
+                .iter()
+                .find(|entry| entry.binding == layout_entry.binding)
+            else {
+                continue;
+            };
+            let BindGroupResource::TextureView { texture_view, .. } = &entry.resource else {
+                continue;
+            };
+            append_texture_view_init_clears(copies, texture_view);
+        }
+    }
+}
+
+fn append_texture_view_init_clears(copies: &mut Vec<HalCopy>, texture_view: &TextureView) {
+    let texture = texture_view.texture();
+    if !texture.is_lazy_init_eligible() {
+        return;
+    }
+    let mip_start = texture_view.base_mip_level();
+    let mip_end = mip_start.saturating_add(texture_view.mip_level_count());
+    for mip_level in mip_start..mip_end {
+        match texture.dimension() {
+            TextureDimension::D3 => {
+                append_texture_subresource_init_clear_if_needed(copies, &texture, mip_level, 0);
+            }
+            TextureDimension::D1 | TextureDimension::D2 => {
+                let layer_start = texture_view.base_array_layer();
+                let layer_end = layer_start.saturating_add(texture_view.array_layer_count());
+                for array_layer in layer_start..layer_end {
+                    append_texture_subresource_init_clear_if_needed(
+                        copies,
+                        &texture,
+                        mip_level,
+                        array_layer,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn append_texture_subresource_init_clear_if_needed(
+    copies: &mut Vec<HalCopy>,
+    texture: &Texture,
+    mip_level: u32,
+    array_layer: u32,
+) {
+    if !texture.is_initialized(mip_level, array_layer) {
+        append_texture_zero_clear(copies, texture, mip_level, array_layer, TextureAspect::All);
+    }
+    texture.mark_initialized(mip_level, array_layer);
+}
+
+fn append_render_pass_color_attachment_init_clears(
+    copies: &mut Vec<HalCopy>,
+    pass: &RenderPassCommand,
+) {
+    for attachment in pass.color_attachments.iter().flatten() {
+        append_render_attachment_init_clear_if_needed(
+            copies,
+            &attachment.texture,
+            attachment.mip_level,
+            attachment.array_layer,
+        );
+        if let Some(resolve_target) = &attachment.resolve_target {
+            append_render_attachment_init_clear_if_needed(
+                copies,
+                resolve_target,
+                attachment.resolve_mip_level,
+                attachment.resolve_array_layer,
+            );
+        }
+    }
+}
+
+fn append_render_attachment_init_clear_if_needed(
+    copies: &mut Vec<HalCopy>,
+    texture: &Texture,
+    mip_level: u32,
+    array_layer: u32,
+) {
+    if !texture.is_lazy_init_eligible() {
+        return;
+    }
+    let tracked_layer = match texture.dimension() {
+        TextureDimension::D3 => 0,
+        TextureDimension::D1 | TextureDimension::D2 => array_layer,
+    };
+    append_texture_subresource_init_clear_if_needed(copies, texture, mip_level, tracked_layer);
 }
 
 fn extent_is_empty(extent: Extent3d) -> bool {
@@ -1566,6 +1859,32 @@ fn cs() {
         }))
     }
 
+    fn write_storage_texture_compute_pipeline(
+        device: &Device,
+        layout: Arc<PipelineLayout>,
+    ) -> Arc<ComputePipeline> {
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r"
+@group(0) @binding(0) var tex: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(1)
+fn cs() {
+    textureStore(tex, vec2<i32>(0, 0), vec4<f32>(0.4, 0.0, 0.0, 1.0));
+}
+"
+                .to_owned(),
+            )),
+        );
+        Arc::new(device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(layout),
+            shader_module: module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        }))
+    }
+
     fn sampled_render_pipeline(
         device: &Device,
         layout: Arc<PipelineLayout>,
@@ -1752,6 +2071,120 @@ fn fs() -> @location(0) vec4<f32> {
     }
 
     #[test]
+    fn writable_storage_texture_pass_clears_before_pass_and_not_before_following_read() {
+        let device = noop_device();
+        let queue = device.queue();
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_COMPUTE,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::StorageTexture {
+                    access: StorageTextureAccess::WriteOnly,
+                    format: rgba8_unorm(),
+                    view_dimension: TextureViewDimension::D2,
+                }),
+            }],
+            error: None,
+        }));
+        let texture = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::STORAGE_BINDING | TextureUsage::COPY_SRC,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+        let (view, view_error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D2),
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(view_error, None);
+        let bind_group = Arc::new(device.create_bind_group(
+            Arc::clone(&layout),
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::TextureView {
+                    texture_view: Arc::new(view),
+                    device: Arc::new(device.clone()),
+                },
+            }],
+        ));
+        let pipeline_layout = explicit_pipeline_layout(&device, layout);
+        let pipeline = write_storage_texture_compute_pipeline(&device, pipeline_layout);
+        let readback = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+        assert_eq!(pass.end(), None);
+        assert_eq!(
+            encoder.copy_texture_to_buffer(
+                TexelCopyTextureInfo {
+                    texture: Arc::clone(&texture),
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    aspect: TextureAspect::All,
+                },
+                TexelCopyBufferInfo {
+                    buffer: readback,
+                    device: None,
+                    layout: TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: None,
+                        rows_per_image: None,
+                    },
+                },
+                Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            ),
+            None
+        );
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+
+        assert_eq!(queue.submit(&[Arc::new(command_buffer)]), None);
+
+        let submitted = match queue.hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => Vec::new(),
+        };
+        assert!(matches!(
+            submitted.as_slice(),
+            [
+                HalCopy::ClearTexture(clear),
+                HalCopy::ComputePass(_),
+                HalCopy::TextureToBuffer(_)
+            ] if clear.mip_level == 0 && clear.base_array_layer == 0
+        ));
+        assert!(texture.is_initialized(0, 0));
+    }
+
+    #[test]
     fn noop_render_pass_records_texture_and_sampler_bindings() {
         let device = noop_device();
         let layout =
@@ -1785,7 +2218,7 @@ fn fs() -> @location(0) vec4<f32> {
         // flat `metal_index` is the vertex-stage value in both cases.
         assert!(matches!(
             submitted.as_slice(),
-            [HalCopy::RenderPass(pass)]
+            [HalCopy::ClearTexture(_), HalCopy::RenderPass(pass)]
                 if pass.bind_textures.len() == 1
                     && pass.bind_textures[0].group == 0
                     && pass.bind_textures[0].binding == 0
@@ -2426,6 +2859,327 @@ fn fs() -> @location(0) vec4<f32> {
                     && copy.buffer_layout.bytes_per_row == 16
                     && copy.buffer_layout.rows_per_image == 4
         ));
+    }
+
+    #[test]
+    fn queue_write_texture_partial_uninitialized_submits_clear_before_copy() {
+        let device = noop_device();
+        let queue = device.queue();
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let data = [7_u8; 16];
+
+        assert_eq!(
+            queue.write_texture(QueueTextureWrite {
+                device: device.hal(),
+                texture: &texture,
+                mip_level: 0,
+                origin: Origin3d { x: 0, y: 0, z: 0 },
+                write_size: Extent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: 1,
+                },
+                aspect: TextureAspect::All,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(8),
+                    rows_per_image: Some(2),
+                },
+                data: &data,
+            }),
+            None
+        );
+
+        let submitted = match queue.hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => panic!("expected Noop queue"),
+        };
+        assert!(matches!(
+            submitted.as_slice(),
+            [HalCopy::ClearTexture(clear), HalCopy::BufferToTexture(copy)]
+                if clear.mip_level == 0
+                    && clear.base_array_layer == 0
+                    && clear.array_layer_count == 1
+                    && copy.mip_level == 0
+                    && copy.extent.width == 2
+                    && copy.extent.height == 2
+        ));
+        assert!(texture.is_initialized(0, 0));
+    }
+
+    #[test]
+    fn depth_texture_copy_execution_does_not_submit_lazy_init_clear() {
+        let device = noop_device();
+        let source = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_SRC,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: depth32_float(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+        let destination = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: depth32_float(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+        let copy = TextureCopyCommand::TextureToTexture {
+            source: TexelCopyTextureInfo {
+                texture: Arc::clone(&source),
+                mip_level: 0,
+                origin: Origin3d { x: 0, y: 0, z: 0 },
+                aspect: TextureAspect::DepthOnly,
+            },
+            destination: TexelCopyTextureInfo {
+                texture: Arc::clone(&destination),
+                mip_level: 0,
+                origin: Origin3d { x: 0, y: 0, z: 0 },
+                aspect: TextureAspect::DepthOnly,
+            },
+            copy_size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+        };
+        let mut copies = Vec::new();
+
+        append_texture_copy_execution(&mut copies, &copy);
+
+        assert!(matches!(copies.as_slice(), [HalCopy::TextureToTexture(_)]));
+        assert!(!source.is_initialized(0, 0));
+        assert!(!destination.is_initialized(0, 0));
+    }
+
+    #[test]
+    fn render_pass_load_color_attachment_clears_before_pass_and_not_before_following_read() {
+        let device = noop_device();
+        let queue = device.queue();
+        let texture = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+        let (view, view_error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(view_error, None);
+        let readback = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&RenderPassDescriptor {
+            max_color_attachments: Limits::DEFAULT.max_color_attachments,
+            color_attachments: vec![Some(RenderPassColorAttachment {
+                view: Arc::new(view),
+                depth_slice: None,
+                resolve_target: None,
+                load_op: LoadOp::Load,
+                store_op: StoreOp::Store,
+                clear_value: Color {
+                    r: 0.0,
+                    g: 1.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            max_draw_count: 50_000_000,
+        });
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.end(), None);
+        assert_eq!(
+            encoder.copy_texture_to_buffer(
+                TexelCopyTextureInfo {
+                    texture: Arc::clone(&texture),
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    aspect: TextureAspect::All,
+                },
+                TexelCopyBufferInfo {
+                    buffer: Arc::clone(&readback),
+                    device: None,
+                    layout: TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: None,
+                        rows_per_image: None,
+                    },
+                },
+                Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            ),
+            None
+        );
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(finish_error, None);
+
+        assert_eq!(queue.submit(&[Arc::new(command_buffer)]), None);
+
+        let submitted = match queue.hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => panic!("expected Noop queue"),
+        };
+        assert!(matches!(
+            submitted.as_slice(),
+            [
+                HalCopy::ClearTexture(clear),
+                HalCopy::RenderPass(_),
+                HalCopy::TextureToBuffer(_)
+            ] if clear.mip_level == 0 && clear.base_array_layer == 0
+        ));
+        assert!(texture.is_initialized(0, 0));
+    }
+
+    #[test]
+    fn render_pass_3d_color_attachment_clears_whole_mip_before_pass() {
+        let device = noop_device();
+        let queue = device.queue();
+        let texture = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+            dimension: TextureDimension::D3,
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 4,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+        let (view, view_error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D3),
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(view_error, None);
+        let readback = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 1024,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&RenderPassDescriptor {
+            max_color_attachments: Limits::DEFAULT.max_color_attachments,
+            color_attachments: vec![Some(RenderPassColorAttachment {
+                view: Arc::new(view),
+                depth_slice: Some(2),
+                resolve_target: None,
+                load_op: LoadOp::Load,
+                store_op: StoreOp::Store,
+                clear_value: Color {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            max_draw_count: 50_000_000,
+        });
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.end(), None);
+        assert_eq!(
+            encoder.copy_texture_to_buffer(
+                TexelCopyTextureInfo {
+                    texture: Arc::clone(&texture),
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    aspect: TextureAspect::All,
+                },
+                TexelCopyBufferInfo {
+                    buffer: readback,
+                    device: None,
+                    layout: TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(1),
+                    },
+                },
+                Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 4,
+                },
+            ),
+            None
+        );
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(finish_error, None);
+
+        assert_eq!(queue.submit(&[Arc::new(command_buffer)]), None);
+
+        let submitted = match queue.hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => panic!("expected Noop queue"),
+        };
+        assert!(matches!(
+            submitted.as_slice(),
+            [
+                HalCopy::ClearTexture(clear),
+                HalCopy::RenderPass(_),
+                HalCopy::TextureToBuffer(_)
+            ] if clear.mip_level == 0
+                && clear.base_array_layer == 0
+                && clear.array_layer_count == 1
+        ));
+        assert!(texture.is_initialized(0, 0));
     }
 
     #[test]

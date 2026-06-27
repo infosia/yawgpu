@@ -5,6 +5,7 @@ use crate::HalTextureDimension;
 #[derive(Clone)]
 pub struct MetalTexture {
     pub(super) inner: Option<Retained<ProtocolObject<dyn MTLTextureTrait>>>,
+    pub(super) device: Retained<ProtocolObject<dyn MTLDevice>>,
     pub(super) format: HalTextureFormat,
     pub(super) dimension: HalTextureDimension,
     pub(super) width: u32,

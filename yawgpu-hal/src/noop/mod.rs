@@ -175,6 +175,7 @@ impl NoopQueue {
                         .destination
                         .write(resolve.destination_offset, &zeros)?;
                 }
+                HalCopy::ClearTexture(_) => {}
                 _ => {}
             }
         }

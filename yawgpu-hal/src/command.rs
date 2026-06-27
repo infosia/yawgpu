@@ -30,6 +30,23 @@ pub struct HalBufferClear {
     pub size: u64,
 }
 
+/// Wraps texture clear data for the selected backend.
+#[derive(Debug, Clone)]
+pub struct HalTextureClear {
+    /// Texture.
+    pub texture: HalTexture,
+    /// Texture format.
+    pub format: HalTextureFormat,
+    /// Aspect to clear.
+    pub aspect: HalTextureAspect,
+    /// Mip level.
+    pub mip_level: u32,
+    /// First array layer to clear.
+    pub base_array_layer: u32,
+    /// Number of array layers to clear.
+    pub array_layer_count: u32,
+}
+
 /// Wraps query-set resolve data for the selected backend.
 #[derive(Debug, Clone)]
 pub struct HalResolveQuerySet {
@@ -55,6 +72,8 @@ pub enum HalCopy {
     Buffer(HalBufferCopy),
     /// Buffer clear variant.
     BufferClear(HalBufferClear),
+    /// Texture clear variant.
+    ClearTexture(HalTextureClear),
     /// Buffer to texture variant.
     BufferToTexture(HalBufferTextureCopy),
     /// Texture to buffer variant.

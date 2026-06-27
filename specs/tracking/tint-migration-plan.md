@@ -750,3 +750,51 @@ ninja shim is unusable) to confirm the divergences were real (not stale oracle).
 
 Remaining for full coverage: Vulkan/MoltenVK + GLES backends; external-texture Slices
 B–D; then mobile + vendor extensions (TBDR) last.
+
+## MILESTONE — Vulkan/MoltenVK api,operation parity + F-138 texture lazy zero-init
+
+**F-138 — texture lazy zero-initialization (Dawn-style).** The Vulkan/MoltenVK
+`api,operation` sweep showed **192 fails**, of which **188 were
+`copyTextureToTexture:color_textures,non_compressed,{non_array,array}`** reading back
+`0xFF`/`-1`/`NaN`: yawgpu had **no texture zero-init** (only buffer clear), so an
+uncopied destination region returned uninitialized memory. Metal passed only because
+Apple GPUs happen to zero memory. WebGPU *requires* every texture subresource to read
+as zero until written. Implemented the Dawn lazy-clearing model (user chose "Lazy /
+Dawn-equivalent"):
+- `yawgpu-core`: per-`TextureInner` init-state (`Vec<bool>` over mip×layer; 3D tracked
+  per-mip since the z-extent is depth, not array layers), gated by `is_lazy_init_eligible`
+  = color aspect ∧ non-depth ∧ non-stencil ∧ uncompressed ∧ single-sample (Stage 1 scope).
+- At submit time, in command-execution order: inject `HalCopy::ClearTexture(0)` before a
+  copy that **reads** or **partially writes** an uninitialized eligible subresource; mark
+  full writes initialized; **before a render pass**, clear-then-mark each uninitialized
+  eligible color attachment + resolve target (covers `loadOp=Load` and the 3D whole-mip
+  case); **before a render/compute pass**, clear-then-mark writable storage-texture
+  bindings.
+- `yawgpu-hal`: new `HalCopy::ClearTexture`/`HalTextureClear`; Vulkan =
+  `cmd_clear_color_image` after a `TRANSFER_DST` transition **+ a WAW pipeline barrier**
+  (TRANSFER→TRANSFER, `TRANSFER_WRITE`→`TRANSFER_WRITE|TRANSFER_READ`) so the clear
+  happens-before the following same-layout transfer copy (MoltenVK auto-hazard-tracks,
+  but native desktop Vulkan needs the explicit barrier); Metal = zeroed staging buffer +
+  blit `copyFromBuffer`; Noop/GLES no-op.
+
+**Three regression waves caught on real GPU and fixed before landing** (each a spurious
+read-clear destroying just-written data — the inverse of the original bug): (1) clearing
+depth/stencil sources → fixed by the eligibility guard; (2) a render-pass-written **color
+output** texture (e.g. the `verifyDepthAspect` green target) being read by `copyT2B` and
+zero-cleared → fixed by marking render color attachments initialized; (3) **storage-texture
+writes** (fragment or compute) being zero-cleared on readback → fixed by clear-before+mark
+on writable storage bindings. A Phase Review then found and fixed 2 MAJORs: M1 the Vulkan
+WAW barrier above, M2 a 3D-attachment over-marking + `loadOp=Load` gap.
+
+**Verified on real GPU (2026-06-27):**
+- **Metal `api,operation`: 4917/0/0** — full parity, zero regression across the whole tree.
+- **Vulkan/MoltenVK `api,operation`: 4914 pass / 3 fail** (was 192) — `copyTextureToTexture`
+  188→0. The 3 residual are **pre-existing, lazy-init-unrelated**:
+  `depth_clip_clamp` ×2 (documented MoltenVK depth-clamp artifact) and
+  `3d_texture_slices:multiple_color_attachments,same_mip_level` ×1 (a yawgpu Vulkan HAL
+  gap creating image views for multiple 3D-slice color attachments — `one_color_attachment`
+  6/6 passes). Triaged separately from F-138.
+
+Deferred to Stage 2 (TODO in code, GPUs zero memory so no CTS case depends on it): clearing
+a texture **sampled** (non-storage read binding) while uninitialized; depth/stencil and
+compressed/MSAA zero-init.
