@@ -3002,6 +3002,49 @@ fn cs() { _ = u.value; }
     }
 
     #[test]
+    fn readonly_and_readwrite_storage_textures_requires_shipped_feature_parses() {
+        let wgsl = r#"
+requires readonly_and_readwrite_storage_textures;
+
+@group(0) @binding(0)
+var tex : texture_storage_2d<r32uint, read_write>;
+
+@compute @workgroup_size(1)
+fn cs() {
+  textureStore(tex, vec2i(0, 0), vec4u(1u, 0u, 0u, 0u));
+  let value = textureLoad(tex, vec2i(0, 0));
+  _ = value;
+}
+"#;
+        let program = Program::parse(wgsl, false).unwrap();
+        drop(program);
+    }
+
+    #[test]
+    fn unrestricted_pointer_parameters_requires_shipped_feature_parses() {
+        let wgsl = r#"
+requires unrestricted_pointer_parameters;
+
+struct Data {
+  value: u32,
+}
+
+fn read_value(data: ptr<function, Data>) -> u32 {
+  return (*data).value;
+}
+
+@compute @workgroup_size(1)
+fn cs() {
+  var data = Data(42u);
+  let value = read_value(&data);
+  _ = value;
+}
+"#;
+        let program = Program::parse(wgsl, false).unwrap();
+        drop(program);
+    }
+
+    #[test]
     fn dual_source_blending_requires_extension() {
         let err = Program::parse(
             "@fragment fn fs() -> @blend_src(0) @location(0) vec4f { return vec4f(); }",
