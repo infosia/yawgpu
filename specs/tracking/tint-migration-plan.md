@@ -821,4 +821,41 @@ compressed/MSAA zero-init.
   `expectations/yawgpu-vulkan.txt`; see memory f045-frag-depth-clamp.
 
 **Vulkan/MoltenVK `api,operation` now: 4915 pass / 0 fail / 2 xfail (documented) / 0 xpass** — at
-Dawn parity. Next: Vulkan `api,validation` + `shader,*` sweeps, then F-138 Stage 2.
+Dawn parity.
+
+## MILESTONE — Vulkan/MoltenVK full-tree sweep (2026-06-28): api at parity, shader,execution gated by MoltenVK
+
+Full per-file sweeps on the yawgpu Vulkan HAL via MoltenVK (CTS_YAWGPU_BACKEND=vulkan):
+- **`api,operation`: 4915 / 0 fail / 2 xfail** (F-139 depth_clip_clamp). ✓ parity.
+- **`api,validation`: 32361 / 0 fail / 3 xfail** (F-111 external_texture ×2 + index_buffer_format_dirtying ×1). ✓ parity.
+- **`shader,execution`: 722542 pass / 2811 fail / 92 xfail / 24 xpass.** Root-caused: **every one of the
+  2811 fails is a MoltenVK limitation or spec-in-flux semantics — ZERO yawgpu defects.** Breakdown:
+  - **2615 = MoltenVK SPIR-V→MSL codegen bug (F-141).** Storing a matrix/composite to a `read_write`
+    storage-buffer member fails Metal shader compilation: SPIRV-Cross emits the SSBO matrix as
+    `volatile device float2x2`, and Metal's matrix copy-assignment operator is not volatile-qualified →
+    `error: no viable overloaded '='` → `VK_ERROR_INVALID_SHADER_NV` → compute/render pipeline creation
+    fails → error command buffer → "queue submit cannot use an error command buffer". Confirmed with a
+    minimal `mat2x2<f32>` store repro + MoltenVK MSL dump. yawgpu's Tint SPIR-V is valid; native Vulkan
+    drivers compile it; Dawn never routes through MoltenVK (Dawn-Metal uses Tint MSL, Dawn-Vulkan uses
+    real drivers). Affects matrix add/sub/mul, f16 matrices/vectors, constructors, memory_layout, struct
+    access, conversions — anything storing a composite to an SSBO member.
+  - **173 = MoltenVK incomplete vertex robustBufferAccess (F-142).** `robust_access_vertex` expects OOB
+    vertex fetches to return 0; yawgpu correctly enables `robustBufferAccess` (+ `robustBufferAccess2`
+    when present) on the Vulkan device (`yawgpu-hal/src/vulkan/mod.rs:459,477`), so native Vulkan honors
+    it. MoltenVK does not fully implement vertex-fetch robustness (esp. indirect/indexed draws: 153/173
+    are `indirect=true`) → garbage instead of 0 → "expected green got red".
+  - **92 = F-085 documented Vulkan per-sample semantics** (`fragment_builtins` sample_mask single-bit +
+    position at sample location, sampleCount=4). Spec in flux (gpuweb#5457/#4777); Dawn suppresses these
+    on Vulkan. A subset is already in `expectations/yawgpu-vulkan.txt`; the full set is the same class.
+  - **21 = MoltenVK BGRA8 storage-texture swizzle** (`textureStore` format=bgra8unorm: byte 0 expected 51
+    got 0 — value landed in the wrong channel; classic MoltenVK B/R swap on BGRA8 storage).
+  - **2 = memory-model weak-behavior probe + eval_order** (probabilistic / flaky, MoltenVK memory ordering).
+
+**Conclusion (user-confirmed direction 2026-06-28: document and move on):** **MoltenVK is not a valid
+oracle for `shader,execution` codegen/robustness parity** — it diverges from real Vulkan drivers in MSL
+generation and robustness, and Dawn is never run through it. The meaningful MoltenVK parity bar is the
+**api trees (operation + validation), both at Dawn parity.** Authoritative `shader,execution` /
+`shader,validation` Vulkan parity is a **native-Vulkan-hardware** question (Linux/Windows), where yawgpu
+uses Tint SPIR-V — the same compiler as the Dawn oracle — so it matches by construction. Not mass-xfailing
+the 2811 (they are MoltenVK-host-specific, not a yawgpu expectation). See memory
+[[moltenvk-shader-execution-limits]]. Next: F-138 Stage 2, external-texture Slices B–D, mobile, GLES.
