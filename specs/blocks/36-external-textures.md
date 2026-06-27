@@ -49,6 +49,22 @@ better than wgpu, which `unimplemented!()`-panics on the same Vulkan path. GLES
 
 ## Architecture (mirrors wgpu)
 
+> **Tint migration (2026-06-27).** The frontend is now Tint, whose multiplanar
+> model differs from naga's: **2 planes** (`plane0`/`plane1`) + a Tint-defined
+> `tint_ExternalTextureParams` UBO (`metadata`), wired via
+> `tint::Bindings::external_texture = ExternalMultiplanarTexture{metadata, plane0,
+> plane1}`. **Slice A DONE** (commit 279f9a4): `texture_external` shaders generate
+> multiplanar MSL through Tint (the HAL maps plane0=metal_index, plane1=metal_index+1,
+> metadata=ext_params_buffer_slot). The Metal HAL must populate Tint's params layout
+> — `numPlanes, doYuvToRgbConversionOnly, yuvToRgbConversionMatrix:mat3x4,
+> src/dstTransferFunction:{mode,A..G}, gamutConversionMatrix:mat3x3,
+> sample/loadTransform:mat3x2, samplePlane0/1Rect{Min,Max}:vec2f, apparentSize:vec2u,
+> plane1CoordFactor:vec2f, ootfParam:vec4f` (see
+> `third_party/dawn/src/tint/lang/core/ir/transform/multiplanar_external_texture.cc`)
+> — **not** wgpu's 208-byte struct below. The naga description that follows is the
+> historical Slice-1 record. Remaining Slices B–D (create API, runtime binding, HAL
+> params + e2e) target Tint's layout. Vulkan keeps honest GPUInternalError rejection.
+
 One external texture lowers to **3 plane `texture2d<float>` + 1 `_params` uniform
 buffer** (naga `back/msl`, `back/spv`; `ExternalTextureNameKey::{Plane(0..2), Params}`).
 The HAL allocates 3 texture slots + 1 buffer slot per external texture and writes them

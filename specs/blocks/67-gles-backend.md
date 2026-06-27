@@ -114,10 +114,19 @@ Per resource:
   `{parent_tex: HalTexture, base_mip, mip_count, base_layer,
   layer_count, aspect}` and resolved at bind/attach time.
 - **Sampler**: `GLuint` sampler object (`glGenSamplers`).
-- **Shader / Pipeline**: WGSL → GLSL ES 3.10 via naga's `glsl-out`;
-  compiled into a `GLuint` program. Bind-group layout + a derived
-  linear-binding remap table are stored on the pipeline.
+- **Shader / Pipeline**: WGSL → GLSL ES 3.10 via the WGSL frontend's
+  GLSL writer; compiled into a `GLuint` program. Bind-group layout + a
+  derived linear-binding remap table are stored on the pipeline.
 - **Compute pipeline**: program object + workgroup size.
+
+> **Tint migration (2026-06-27).** The frontend is now Tint's `glsl::writer`
+> (was naga `glsl-out`). GLES is Tier-2 and its real-GPU re-verification on
+> ANGLE is **deferred** (out of scope for the migration per the user). The
+> naga-specific mechanism names throughout this block (`naga_vs_first_instance`
+> uniform injection, `glsl-out` flags like `use_framebuffer_fetch` /
+> `zero_initialize_workgroup_memory`, `SamplerBindMap`) describe the naga-era
+> design and are **pending revision** against Tint's GLSL writer when GLES
+> bring-up resumes; treat them as historical until then.
 - **Render pipeline**: program + draw state (topology, depth/stencil,
   blend, vertex attrib layout) + vertex array object cache.
 - **Surface**: `EGLSurface` wrapping `ANativeWindow*` (Android) or
