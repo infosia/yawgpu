@@ -118,6 +118,7 @@ pub(crate) struct TextureInner {
     pub(crate) sample_count: u32,
     pub(crate) view_formats: Vec<TextureFormat>,
     pub(crate) state: Mutex<TextureState>,
+    pub(crate) init_state: Mutex<TextureInitState>,
 }
 
 /// Tracks the lifecycle state for texture.
@@ -125,6 +126,22 @@ pub(crate) struct TextureInner {
 pub(crate) struct TextureState {
     pub(crate) is_error: bool,
     pub(crate) is_destroyed: bool,
+}
+
+/// Tracks per-subresource texture initialization.
+#[derive(Debug)]
+pub(crate) struct TextureInitState {
+    initialized: Vec<bool>,
+    array_layer_count: u32,
+    enabled: bool,
+}
+
+/// Describes one texture subresource touched by a copy region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextureCopySubresource {
+    pub(crate) mip_level: u32,
+    pub(crate) array_layer: u32,
+    pub(crate) covers_full_subresource: bool,
 }
 
 impl Texture {
@@ -135,6 +152,8 @@ impl Texture {
         is_error: bool,
         features: FeatureSet,
     ) -> Self {
+        let init_enabled =
+            texture_lazy_init_eligible(descriptor.format, &features, descriptor.sample_count);
         Self {
             inner: Arc::new(TextureInner {
                 hal,
@@ -150,6 +169,12 @@ impl Texture {
                     is_error,
                     is_destroyed: false,
                 }),
+                init_state: Mutex::new(TextureInitState::new(
+                    descriptor.mip_level_count,
+                    descriptor.size.depth_or_array_layers,
+                    descriptor.dimension,
+                    init_enabled,
+                )),
             }),
         }
     }
@@ -206,6 +231,56 @@ impl Texture {
     #[must_use]
     pub fn sample_count(&self) -> u32 {
         self.inner.sample_count
+    }
+
+    /// Returns whether this texture participates in Stage 1 lazy zero-initialization.
+    pub(crate) fn is_lazy_init_eligible(&self) -> bool {
+        texture_lazy_init_eligible(self.format(), &self.inner.features, self.sample_count())
+    }
+
+    /// Returns whether a subresource has been initialized.
+    pub(crate) fn is_initialized(&self, mip: u32, layer: u32) -> bool {
+        self.inner.init_state.lock().is_initialized(mip, layer)
+    }
+
+    /// Marks a subresource initialized.
+    pub(crate) fn mark_initialized(&self, mip: u32, layer: u32) {
+        self.inner.init_state.lock().mark_initialized(mip, layer);
+    }
+
+    /// Enumerates subresources touched by a copy/write region.
+    pub(crate) fn copy_subresources(
+        &self,
+        mip_level: u32,
+        origin: Origin3d,
+        copy_size: Extent3d,
+    ) -> Vec<TextureCopySubresource> {
+        let subresource = self.subresource_size(mip_level);
+        let covers_xy = origin.x == 0
+            && origin.y == 0
+            && copy_size.width == subresource.width
+            && copy_size.height == subresource.height;
+        match self.dimension() {
+            TextureDimension::D3 => vec![TextureCopySubresource {
+                mip_level,
+                array_layer: 0,
+                covers_full_subresource: covers_xy
+                    && origin.z == 0
+                    && copy_size.depth_or_array_layers == subresource.depth_or_array_layers,
+            }],
+            TextureDimension::D1 => vec![TextureCopySubresource {
+                mip_level,
+                array_layer: 0,
+                covers_full_subresource: covers_xy,
+            }],
+            TextureDimension::D2 => (0..copy_size.depth_or_array_layers)
+                .map(|layer_offset| TextureCopySubresource {
+                    mip_level,
+                    array_layer: origin.z + layer_offset,
+                    covers_full_subresource: covers_xy,
+                })
+                .collect(),
+        }
     }
 
     /// Returns view formats.
@@ -326,6 +401,84 @@ impl Texture {
             self, mip_level, origin, write_size, aspect, layout, data_size,
         )
     }
+}
+
+impl TextureInitState {
+    fn new(
+        mip_level_count: u32,
+        depth_or_array_layers: u32,
+        dimension: TextureDimension,
+        enabled: bool,
+    ) -> Self {
+        let array_layer_count = match dimension {
+            TextureDimension::D2 => depth_or_array_layers,
+            TextureDimension::D1 | TextureDimension::D3 => 1,
+        };
+        let len = if enabled {
+            usize::try_from(mip_level_count)
+                .ok()
+                .and_then(|mips| {
+                    usize::try_from(array_layer_count)
+                        .ok()
+                        .and_then(|layers| mips.checked_mul(layers))
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        Self {
+            initialized: vec![false; len],
+            array_layer_count,
+            enabled,
+        }
+    }
+
+    fn is_initialized(&self, mip: u32, layer: u32) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        self.subresource_index(mip, layer)
+            .and_then(|index| self.initialized.get(index))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn mark_initialized(&mut self, mip: u32, layer: u32) {
+        if !self.enabled {
+            return;
+        }
+        let Some(index) = self.subresource_index(mip, layer) else {
+            return;
+        };
+        if let Some(initialized) = self.initialized.get_mut(index) {
+            *initialized = true;
+        }
+    }
+
+    fn subresource_index(&self, mip: u32, layer: u32) -> Option<usize> {
+        if layer >= self.array_layer_count {
+            return None;
+        }
+        let index = mip
+            .checked_mul(self.array_layer_count)?
+            .checked_add(layer)?;
+        usize::try_from(index).ok()
+    }
+}
+
+fn texture_lazy_init_eligible(
+    format: TextureFormat,
+    features: &FeatureSet,
+    sample_count: u32,
+) -> bool {
+    sample_count == 1
+        && format.caps(features).is_some_and(|caps| {
+            caps.aspects.color
+                && !caps.aspects.depth
+                && !caps.aspects.stencil
+                && caps.block_w == 1
+                && caps.block_h == 1
+        })
 }
 
 /// Validates texture descriptor and returns a descriptive error on failure.
@@ -800,6 +953,182 @@ mod tests {
         let usage = TextureUsage::from_bits_retain(raw);
 
         assert_eq!(usage.bits(), raw);
+    }
+
+    #[test]
+    fn texture_is_initialized_starts_false_for_new_texture() {
+        let texture = noop_device().create_texture(TextureDescriptor {
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 2,
+            },
+            mip_level_count: 2,
+            ..valid_texture_descriptor()
+        });
+
+        assert!(!texture.is_initialized(0, 0));
+        assert!(!texture.is_initialized(1, 1));
+    }
+
+    #[test]
+    fn texture_mark_initialized_sets_one_subresource() {
+        let texture = noop_device().create_texture(TextureDescriptor {
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 2,
+            },
+            mip_level_count: 2,
+            ..valid_texture_descriptor()
+        });
+
+        texture.mark_initialized(1, 1);
+
+        assert!(!texture.is_initialized(1, 0));
+        assert!(texture.is_initialized(1, 1));
+    }
+
+    #[test]
+    fn texture_lazy_init_eligible_accepts_single_sample_uncompressed_color_only() {
+        let device = noop_device();
+        let texture = device.create_texture(valid_texture_descriptor());
+
+        assert!(texture.is_lazy_init_eligible());
+    }
+
+    #[test]
+    fn texture_lazy_init_eligible_rejects_depth_stencil_compressed_and_multisampled() {
+        let device = noop_device();
+        let depth = Texture::new(
+            TextureDescriptor {
+                format: TextureFormat::from_raw(TextureFormat::DEPTH16_UNORM),
+                ..valid_texture_descriptor()
+            },
+            None,
+            false,
+            FeatureSet::new(),
+        );
+        let depth_stencil = Texture::new(
+            TextureDescriptor {
+                format: TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+                ..valid_texture_descriptor()
+            },
+            None,
+            false,
+            FeatureSet::new(),
+        );
+        let compressed = Texture::new(
+            TextureDescriptor {
+                format: TextureFormat::from_raw(TextureFormat::BC1_RGBA_UNORM),
+                size: Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                ..valid_texture_descriptor()
+            },
+            None,
+            false,
+            FeatureSet::new(),
+        );
+        let multisampled = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT,
+            sample_count: 4,
+            ..valid_texture_descriptor()
+        });
+
+        assert!(!depth.is_lazy_init_eligible());
+        assert!(!depth_stencil.is_lazy_init_eligible());
+        assert!(!compressed.is_lazy_init_eligible());
+        assert!(!multisampled.is_lazy_init_eligible());
+    }
+
+    #[test]
+    fn texture_mark_initialized_is_noop_for_ineligible_texture() {
+        let texture = Texture::new(
+            TextureDescriptor {
+                format: TextureFormat::from_raw(TextureFormat::DEPTH32_FLOAT),
+                ..valid_texture_descriptor()
+            },
+            None,
+            false,
+            FeatureSet::new(),
+        );
+
+        texture.mark_initialized(0, 0);
+
+        assert!(!texture.is_initialized(0, 0));
+    }
+
+    #[test]
+    fn texture_copy_subresources_enumerates_d2_layers_and_full_coverage() {
+        let texture = noop_device().create_texture(TextureDescriptor {
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 3,
+            },
+            mip_level_count: 2,
+            ..valid_texture_descriptor()
+        });
+
+        let touched = texture.copy_subresources(
+            1,
+            Origin3d { x: 0, y: 0, z: 1 },
+            Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 2,
+            },
+        );
+
+        assert_eq!(
+            touched,
+            vec![
+                TextureCopySubresource {
+                    mip_level: 1,
+                    array_layer: 1,
+                    covers_full_subresource: true,
+                },
+                TextureCopySubresource {
+                    mip_level: 1,
+                    array_layer: 2,
+                    covers_full_subresource: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn texture_copy_subresources_treats_d3_mip_as_one_unit() {
+        let texture = noop_device().create_texture(TextureDescriptor {
+            dimension: TextureDimension::D3,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 4,
+            },
+            mip_level_count: 2,
+            ..valid_texture_descriptor()
+        });
+
+        assert_eq!(
+            texture.copy_subresources(
+                1,
+                Origin3d { x: 0, y: 0, z: 0 },
+                Extent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: 2,
+                },
+            ),
+            vec![TextureCopySubresource {
+                mip_level: 1,
+                array_layer: 0,
+                covers_full_subresource: true,
+            }]
+        );
     }
 
     #[test]

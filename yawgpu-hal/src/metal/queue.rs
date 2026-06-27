@@ -65,6 +65,14 @@ impl MetalQueue {
                         blit.endEncoding();
                         result?;
                     }
+                    HalCopy::ClearTexture(clear) => {
+                        let blit = command_buffer
+                            .blitCommandEncoder()
+                            .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                        let result = encode_texture_clear(&blit, clear);
+                        blit.endEncoding();
+                        result?;
+                    }
                     HalCopy::ResolveQuerySet(resolve) => {
                         let blit = command_buffer
                             .blitCommandEncoder()

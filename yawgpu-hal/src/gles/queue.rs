@@ -65,6 +65,7 @@ impl GlesQueue {
                     match copy {
                         HalCopy::Buffer(copy) => submit_buffer_copy(gl, copy)?,
                         HalCopy::BufferClear(clear) => submit_buffer_clear(gl, clear)?,
+                        HalCopy::ClearTexture(_) => {}
                         HalCopy::ResolveQuerySet(resolve) => {
                             let byte_count = usize::try_from(u64::from(resolve.query_count) * 8)
                                 .map_err(|_| HalError::BufferOperationFailed {

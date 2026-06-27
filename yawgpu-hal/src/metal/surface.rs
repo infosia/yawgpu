@@ -7,6 +7,7 @@ pub struct MetalSurface {
     pub(super) layer: Retained<CAMetalLayer>,
     pub(super) current_drawable: Option<Retained<ProtocolObject<dyn CAMetalDrawable>>>,
     pub(super) config: Option<HalSurfaceConfiguration>,
+    pub(super) device: Option<Retained<ProtocolObject<dyn MTLDevice>>>,
 }
 
 // SAFETY: `MetalSurface` owns a `Retained<CAMetalLayer>` plus an optional
@@ -43,6 +44,7 @@ impl MetalSurface {
             layer,
             current_drawable: None,
             config: None,
+            device: None,
         })
     }
 
@@ -66,6 +68,7 @@ impl MetalSurface {
             HalPresentMode::Immediate | HalPresentMode::Mailbox => {}
         }
         self.current_drawable = None;
+        self.device = Some(device.device.clone());
         self.config = Some(config);
         Ok(())
     }
@@ -74,6 +77,7 @@ impl MetalSurface {
     pub fn unconfigure(&mut self) {
         self.current_drawable = None;
         self.config = None;
+        self.device = None;
     }
 
     /// Returns acquire next texture.
@@ -87,10 +91,15 @@ impl MetalSurface {
             message: "nextDrawable returned null",
         })?;
         let texture = drawable.texture();
+        let device = self.device.clone().ok_or(HalError::AcquireFailed {
+            backend: BACKEND,
+            message: "surface is not configured",
+        })?;
         self.current_drawable = Some(drawable);
         let (_, bytes_per_pixel) = map_texture_format(config.format)?;
         Ok(MetalTexture {
             inner: Some(texture),
+            device,
             format: config.format,
             dimension: HalTextureDimension::D2,
             width: config.width,

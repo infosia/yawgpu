@@ -1,7 +1,8 @@
 use super::*;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::{
-    HalRenderColorTarget, HalRenderDepthStencilAttachment, HalTextureAspect, HalTextureDimension,
+    HalRenderColorTarget, HalRenderDepthStencilAttachment, HalTextureAspect, HalTextureClear,
+    HalTextureDimension,
 };
 
 /// Records submit into the command stream.
@@ -57,6 +58,9 @@ pub(super) fn record_and_submit_copies(
                 }
                 HalCopy::BufferClear(clear) => {
                     encode_buffer_clear(&queue.device.device, command_buffer, clear)?;
+                }
+                HalCopy::ClearTexture(clear) => {
+                    encode_texture_clear(&queue.device.device, command_buffer, clear)?;
                 }
                 HalCopy::ResolveQuerySet(resolve) => {
                     encode_resolve_query_set(&queue.device.device, command_buffer, resolve)?;
@@ -334,6 +338,7 @@ fn retain_copy_resources(copy: &HalCopy, retained: &mut Vec<RetainedResource>) {
             retain_hal_buffer(&copy.destination, retained);
         }
         HalCopy::BufferClear(clear) => retain_hal_buffer(&clear.buffer, retained),
+        HalCopy::ClearTexture(clear) => retain_hal_texture(&clear.texture, retained),
         HalCopy::ResolveQuerySet(resolve) => {
             retain_hal_query_set(&resolve.query_set, retained);
             retain_hal_buffer(&resolve.destination, retained);
@@ -413,6 +418,7 @@ fn surface_pending_from_copy(copy: &HalCopy) -> Option<Arc<Mutex<SurfacePendingS
     match copy {
         HalCopy::Buffer(_)
         | HalCopy::BufferClear(_)
+        | HalCopy::ClearTexture(_)
         | HalCopy::ResolveQuerySet(_)
         | HalCopy::ComputePass(_) => None,
         HalCopy::BufferToTexture(copy) | HalCopy::TextureToBuffer(copy) => {
@@ -488,6 +494,69 @@ pub(super) fn encode_buffer_clear(
         device.cmd_fill_buffer(command_buffer, buffer.buffer, clear.offset, clear.size, 0);
     }
     transfer_to_compute_barrier(device, command_buffer);
+    Ok(())
+}
+
+/// Records texture clear encode into the command stream.
+pub(super) fn encode_texture_clear(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    clear: &HalTextureClear,
+) -> Result<(), HalError> {
+    let crate::HalTexture::Vulkan(texture) = &clear.texture else {
+        return Err(texture_error("texture is not Vulkan-backed"));
+    };
+    validate_mip_level(texture, clear.mip_level)?;
+    let texture_inner = texture.inner()?;
+    let aspect = buffer_texture_copy_aspect_flags(clear.format, clear.aspect);
+    transition_image_aspect(
+        device,
+        command_buffer,
+        texture_inner,
+        aspect,
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        IMAGE_LAYOUT_TRANSFER_DST,
+    );
+    let range = vk::ImageSubresourceRange::default()
+        .aspect_mask(aspect)
+        .base_mip_level(clear.mip_level)
+        .level_count(1)
+        .base_array_layer(match texture.dimension {
+            HalTextureDimension::D3 => 0,
+            HalTextureDimension::D1 | HalTextureDimension::D2 => clear.base_array_layer,
+        })
+        .layer_count(match texture.dimension {
+            HalTextureDimension::D3 => 1,
+            HalTextureDimension::D1 | HalTextureDimension::D2 => clear.array_layer_count,
+        });
+    let value = unsafe { vulkan_color_clear_value(clear.format, [0.0; 4]).color };
+    unsafe {
+        device.cmd_clear_color_image(
+            command_buffer,
+            texture_inner.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &value,
+            &[range],
+        );
+        let barrier = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(texture_inner.image)
+            .subresource_range(range)
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::TRANSFER_READ);
+        device.cmd_pipeline_barrier(
+            command_buffer,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[barrier],
+        );
+    }
     Ok(())
 }
 

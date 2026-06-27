@@ -44,6 +44,107 @@ pub(super) fn encode_buffer_clear(
     Ok(())
 }
 
+/// Records texture clear encode into the command stream.
+pub(super) fn encode_texture_clear(
+    blit: &ProtocolObject<dyn MTLBlitCommandEncoder>,
+    clear: &HalTextureClear,
+) -> Result<(), HalError> {
+    let HalTexture::Metal(texture) = &clear.texture else {
+        return Err(texture_error("texture is not Metal-backed"));
+    };
+    if clear.array_layer_count == 0 {
+        return Ok(());
+    }
+    let (width, height, depth) = mip_texture_extent(texture, clear.mip_level)?;
+    let bytes_per_row = u64::from(width)
+        .checked_mul(u64::from(texture.bytes_per_pixel))
+        .ok_or_else(|| texture_error("texture clear row bytes overflow"))?;
+    let bytes_per_image = bytes_per_row
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| texture_error("texture clear image bytes overflow"))?;
+    let image_count = match texture.dimension {
+        HalTextureDimension::D3 => depth,
+        HalTextureDimension::D1 | HalTextureDimension::D2 => clear.array_layer_count,
+    };
+    let byte_count = bytes_per_image
+        .checked_mul(u64::from(image_count))
+        .ok_or_else(|| texture_error("texture clear byte count overflows"))?;
+    if byte_count == 0 {
+        return Ok(());
+    }
+    let byte_count_ns = to_ns(byte_count)?;
+    let zero_buffer = texture
+        .device
+        .newBufferWithLength_options(byte_count_ns, MTLResourceOptions::StorageModeShared)
+        .ok_or(HalError::OutOfMemory {
+            backend: BACKEND,
+            resource: "texture clear staging buffer",
+        })?;
+    unsafe {
+        std::ptr::write_bytes(
+            zero_buffer.contents().cast::<u8>().as_ptr(),
+            0,
+            byte_count_ns,
+        );
+        let level = to_ns(u64::from(clear.mip_level))?;
+        let size = to_mtl_size(HalExtent3d {
+            width,
+            height,
+            depth_or_array_layers: match texture.dimension {
+                HalTextureDimension::D3 => depth,
+                HalTextureDimension::D1 | HalTextureDimension::D2 => 1,
+            },
+        })?;
+        match texture.dimension {
+            HalTextureDimension::D3 => {
+                blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
+                    &zero_buffer,
+                    0,
+                    to_ns(bytes_per_row)?,
+                    to_ns(bytes_per_image)?,
+                    size,
+                    texture.inner()?,
+                    0,
+                    level,
+                    to_mtl_origin(0, 0, 0)?,
+                );
+            }
+            HalTextureDimension::D1 | HalTextureDimension::D2 => {
+                for layer in 0..clear.array_layer_count {
+                    let source_offset = layer_buffer_offset(0, to_ns(bytes_per_image)?, layer)?;
+                    blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
+                        &zero_buffer,
+                        source_offset,
+                        to_ns(bytes_per_row)?,
+                        to_ns(bytes_per_image)?,
+                        size,
+                        texture.inner()?,
+                        to_ns(u64::from(clear.base_array_layer + layer))?,
+                        level,
+                        to_mtl_origin(0, 0, 0)?,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn mip_texture_extent(texture: &MetalTexture, mip_level: u32) -> Result<(u32, u32, u32), HalError> {
+    let mip = |value: u32| value.checked_shr(mip_level).unwrap_or(0).max(1);
+    Ok((
+        mip(texture.width),
+        match texture.dimension {
+            HalTextureDimension::D1 => 1,
+            HalTextureDimension::D2 | HalTextureDimension::D3 => mip(texture.height),
+        },
+        match texture.dimension {
+            HalTextureDimension::D3 => mip(texture.depth_or_array_layers),
+            HalTextureDimension::D1 | HalTextureDimension::D2 => 1,
+        },
+    ))
+}
+
 /// Records query-set resolve encode into the command stream.
 pub(super) fn encode_resolve_query_set(
     blit: &ProtocolObject<dyn MTLBlitCommandEncoder>,
