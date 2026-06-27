@@ -1,5 +1,6 @@
 use super::*;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
+use crate::metal::format::vertex_format_byte_size;
 
 /// Stores metal compute pipeline data used by validation and backend submission.
 #[derive(Clone)]
@@ -171,14 +172,34 @@ pub(super) fn create_render_pipeline(
                 let layouts = vertex_descriptor.layouts();
                 let layout =
                     unsafe { layouts.objectAtIndexedSubscript(to_ns(u64::from(metal_index))?) };
-                unsafe {
-                    layout.setStride(to_ns(buffer.array_stride)?);
-                    layout.setStepRate(1);
+                if buffer.array_stride == 0 {
+                    // WebGPU allows arrayStride=0 (all vertices read the same
+                    // element). Metal requires a non-zero stride when an
+                    // attribute references the buffer, so synthesize one.
+                    let max_extent = buffer
+                        .attributes
+                        .iter()
+                        .map(|attribute| {
+                            attribute.offset + vertex_format_byte_size(attribute.format)
+                        })
+                        .max()
+                        .unwrap_or(0);
+                    let stride = max_extent.div_ceil(4) * 4;
+                    unsafe {
+                        layout.setStride(to_ns(stride.max(4))?);
+                        layout.setStepRate(0);
+                    }
+                    layout.setStepFunction(MTLVertexStepFunction::Constant);
+                } else {
+                    unsafe {
+                        layout.setStride(to_ns(buffer.array_stride)?);
+                        layout.setStepRate(1);
+                    }
+                    layout.setStepFunction(match buffer.step_mode {
+                        HalVertexStepMode::Vertex => MTLVertexStepFunction::PerVertex,
+                        HalVertexStepMode::Instance => MTLVertexStepFunction::PerInstance,
+                    });
                 }
-                layout.setStepFunction(match buffer.step_mode {
-                    HalVertexStepMode::Vertex => MTLVertexStepFunction::PerVertex,
-                    HalVertexStepMode::Instance => MTLVertexStepFunction::PerInstance,
-                });
                 for attribute in &buffer.attributes {
                     let attributes = vertex_descriptor.attributes();
                     let attr = unsafe {

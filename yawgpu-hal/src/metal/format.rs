@@ -387,6 +387,50 @@ pub(super) fn map_vertex_format(format: HalVertexFormat) -> Result<MTLVertexForm
     }
 }
 
+/// Returns the byte size of a vertex attribute format (the packed size of one element).
+pub(super) fn vertex_format_byte_size(format: HalVertexFormat) -> u64 {
+    match format {
+        HalVertexFormat::Uint8
+        | HalVertexFormat::Sint8
+        | HalVertexFormat::Unorm8
+        | HalVertexFormat::Snorm8 => 1,
+        HalVertexFormat::Uint8x2
+        | HalVertexFormat::Sint8x2
+        | HalVertexFormat::Unorm8x2
+        | HalVertexFormat::Snorm8x2
+        | HalVertexFormat::Uint16
+        | HalVertexFormat::Sint16
+        | HalVertexFormat::Unorm16
+        | HalVertexFormat::Snorm16
+        | HalVertexFormat::Float16 => 2,
+        HalVertexFormat::Uint8x4
+        | HalVertexFormat::Sint8x4
+        | HalVertexFormat::Unorm8x4
+        | HalVertexFormat::Snorm8x4
+        | HalVertexFormat::Uint16x2
+        | HalVertexFormat::Sint16x2
+        | HalVertexFormat::Unorm16x2
+        | HalVertexFormat::Snorm16x2
+        | HalVertexFormat::Float16x2
+        | HalVertexFormat::Float32
+        | HalVertexFormat::Uint32
+        | HalVertexFormat::Sint32
+        | HalVertexFormat::Unorm10_10_10_2
+        | HalVertexFormat::Unorm8x4Bgra => 4,
+        HalVertexFormat::Uint16x4
+        | HalVertexFormat::Sint16x4
+        | HalVertexFormat::Unorm16x4
+        | HalVertexFormat::Snorm16x4
+        | HalVertexFormat::Float16x4
+        | HalVertexFormat::Float32x2
+        | HalVertexFormat::Uint32x2
+        | HalVertexFormat::Sint32x2 => 8,
+        HalVertexFormat::Float32x3 | HalVertexFormat::Uint32x3 | HalVertexFormat::Sint32x3 => 12,
+        HalVertexFormat::Float32x4 | HalVertexFormat::Uint32x4 | HalVertexFormat::Sint32x4 => 16,
+        HalVertexFormat::Unsupported => 16,
+    }
+}
+
 /// Converts primitive topology into the corresponding yawgpu representation.
 pub(super) fn map_primitive_topology(topology: HalPrimitiveTopology) -> MTLPrimitiveType {
     match topology {
@@ -536,6 +580,24 @@ mod tests {
 
         for (hal, metal) in cases {
             assert_eq!(map_vertex_format(hal).expect("format supported"), metal);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "metal")]
+    fn vertex_format_byte_size_matches_core_vertex_format_info() {
+        let cases = [
+            (HalVertexFormat::Uint8, 1),
+            (HalVertexFormat::Unorm8x4, 4),
+            (HalVertexFormat::Float32x3, 12),
+            (HalVertexFormat::Uint32x4, 16),
+            (HalVertexFormat::Unorm10_10_10_2, 4),
+            (HalVertexFormat::Unorm8x4Bgra, 4),
+        ];
+
+        for (format, byte_size) in cases {
+            assert_eq!(vertex_format_byte_size(format), byte_size, "{format:?}");
+            assert_eq!(byte_size.div_ceil(4) * 4, byte_size.max(4));
         }
     }
 
