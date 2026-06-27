@@ -96,12 +96,14 @@ impl ReflectedModule {
         binding_map: &MslBindingMap,
         pipeline_constants: &PipelineConstants,
     ) -> Result<GeneratedMsl, String> {
+        // Robustness ENABLED (disable_robustness = false): WebGPU requires
+        // out-of-bounds safety in compute shaders too.
         self.generate_stage_msl(
             entry_name,
             binding_map,
             pipeline_constants,
             &[],
-            true,
+            false,
             false,
             0xFFFF_FFFF,
         )
