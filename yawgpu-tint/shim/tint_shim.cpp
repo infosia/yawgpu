@@ -16,6 +16,7 @@
 #include "src/tint/api/helpers/generate_bindings.h"
 #include "src/tint/api/tint.h"
 #include "src/tint/lang/core/constant/value.h"
+#include "src/tint/lang/core/ir/reflection.h"
 #include "src/tint/lang/core/ir/referenced_module_vars.h"
 #include "src/tint/lang/core/type/pointer.h"
 #include "src/tint/lang/glsl/writer/helpers/generate_bindings.h"
@@ -859,6 +860,47 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
         }
         *words_out = words;
         *n_words_out = result->spirv.size();
+        return true;
+    } catch (const std::exception& e) {
+        set_error_string(err, e.what());
+        return false;
+    } catch (...) {
+        set_error_string(err, "unknown Tint exception");
+        return false;
+    }
+}
+
+bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram* program,
+                                        uint64_t* out,
+                                        char** err) {
+    if (err != nullptr) {
+        *err = nullptr;
+    }
+    if (out != nullptr) {
+        *out = 0;
+    }
+    try {
+        if (program == nullptr || out == nullptr) {
+            set_error_string(err, "invalid NULL argument");
+            return false;
+        }
+        for (const auto& ep : program->entry_points) {
+            if (ep.stage == tint::inspector::PipelineStage::kCompute && !ep.workgroup_size) {
+                *out = 0;
+                return true;
+            }
+        }
+        auto ir = lower_ir(program);
+        if (ir != tint::Success) {
+            set_error(err, ir.Failure());
+            return false;
+        }
+        auto wi = tint::core::ir::GetWorkgroupInfo(ir.Get());
+        if (wi == tint::Success) {
+            *out = wi->storage_size;
+        } else {
+            *out = 0;
+        }
         return true;
     } catch (const std::exception& e) {
         set_error_string(err, e.what());
