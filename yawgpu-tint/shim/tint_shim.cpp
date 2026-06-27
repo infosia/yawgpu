@@ -19,6 +19,7 @@
 #include "src/tint/lang/core/constant/value.h"
 #include "src/tint/lang/core/ir/reflection.h"
 #include "src/tint/lang/core/ir/referenced_module_vars.h"
+#include "src/tint/lang/core/ir/transform/substitute_overrides.h"
 #include "src/tint/lang/core/type/pointer.h"
 #include "src/tint/lang/glsl/writer/helpers/generate_bindings.h"
 #include "src/tint/lang/glsl/writer/writer.h"
@@ -876,6 +877,8 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
 }
 
 bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram* program,
+                                        const YawgpuTintOverrideValue* ov,
+                                        size_t n_ov,
                                         uint64_t* out,
                                         char** err) {
     if (err != nullptr) {
@@ -889,23 +892,23 @@ bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram* program,
             set_error_string(err, "invalid NULL argument");
             return false;
         }
-        for (const auto& ep : program->entry_points) {
-            if (ep.stage == tint::inspector::PipelineStage::kCompute && !ep.workgroup_size) {
-                *out = 0;
-                return true;
-            }
-        }
         auto ir = lower_ir(program);
         if (ir != tint::Success) {
             set_error(err, ir.Failure());
             return false;
         }
-        auto wi = tint::core::ir::GetWorkgroupInfo(ir.Get());
-        if (wi == tint::Success) {
-            *out = wi->storage_size;
-        } else {
+        auto cfg = make_override_config(program, ov, n_ov);
+        if (cfg != tint::Success) {
             *out = 0;
+            return true;
         }
+        auto sub = tint::core::ir::transform::SubstituteOverrides(ir.Get(), cfg.Get());
+        if (sub != tint::Success) {
+            *out = 0;
+            return true;
+        }
+        auto wi = tint::core::ir::GetWorkgroupInfo(ir.Get());
+        *out = (wi == tint::Success) ? wi->storage_size : 0;
         return true;
     } catch (const std::exception& e) {
         set_error_string(err, e.what());

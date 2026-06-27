@@ -220,6 +220,8 @@ mod imp {
         ) -> bool;
         fn yawgpu_tint_workgroup_storage_size(
             program: *const RawProgram,
+            ov: *const RawOverrideValue,
+            n_ov: usize,
             out: *mut u64,
             err: *mut *mut c_char,
         ) -> bool;
@@ -654,11 +656,20 @@ mod imp {
         }
 
         /// Returns the module's total `var<workgroup>` storage size in bytes.
-        pub fn workgroup_storage_size(&self) -> Result<u64, String> {
+        pub fn workgroup_storage_size(&self, overrides: &[OverrideValue]) -> Result<u64, String> {
+            let raw_overrides = RawOverrideValues::new(overrides)?;
             let mut out = 0u64;
             let mut err = ptr::null_mut();
             // SAFETY: `out` and `err` point to valid writable memory.
-            let ok = unsafe { yawgpu_tint_workgroup_storage_size(self.raw, &mut out, &mut err) };
+            let ok = unsafe {
+                yawgpu_tint_workgroup_storage_size(
+                    self.raw,
+                    raw_overrides.as_ptr(),
+                    raw_overrides.len(),
+                    &mut out,
+                    &mut err,
+                )
+            };
             if !ok {
                 return Err(take_error(err));
             }
@@ -1523,7 +1534,7 @@ mod imp {
         }
 
         /// Returns the module's total `var<workgroup>` storage size in bytes.
-        pub fn workgroup_storage_size(&self) -> Result<u64, String> {
+        pub fn workgroup_storage_size(&self, _overrides: &[OverrideValue]) -> Result<u64, String> {
             Ok(0)
         }
 
@@ -2051,17 +2062,41 @@ fn cs() {
             false,
         )
         .unwrap();
-        assert_eq!(program.workgroup_storage_size().unwrap(), 32);
+        assert_eq!(program.workgroup_storage_size(&[]).unwrap(), 32);
 
         let program = Program::parse("@compute @workgroup_size(1) fn cs() {}", false).unwrap();
-        assert_eq!(program.workgroup_storage_size().unwrap(), 0);
+        assert_eq!(program.workgroup_storage_size(&[]).unwrap(), 0);
 
         let program = Program::parse(
             "@fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
             false,
         )
         .unwrap();
-        assert_eq!(program.workgroup_storage_size().unwrap(), 0);
+        assert_eq!(program.workgroup_storage_size(&[]).unwrap(), 0);
+
+        let program = Program::parse(
+            r#"
+override n: u32 = 4;
+var<workgroup> d: array<u32, n>;
+
+@compute @workgroup_size(1)
+fn main() {
+  d[0] = 1u;
+}
+"#,
+            false,
+        )
+        .unwrap();
+        assert_eq!(program.workgroup_storage_size(&[]).unwrap(), 16);
+        assert_eq!(
+            program
+                .workgroup_storage_size(&[OverrideValue {
+                    name: "n".into(),
+                    value: 8.0,
+                }])
+                .unwrap(),
+            32
+        );
     }
 
     #[test]

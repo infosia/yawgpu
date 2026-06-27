@@ -224,7 +224,7 @@ impl ReflectedModule {
             entry_point: entry.name,
             literal_size,
             override_keys: [None, None, None],
-            workgroup_storage_size: self.program.workgroup_storage_size()?,
+            workgroup_storage_size: self.program.workgroup_storage_size(&[])?,
         }))
     }
 
@@ -254,7 +254,7 @@ impl ReflectedModule {
             entry_point: entry_point.to_owned(),
             literal_size,
             override_keys: [None, None, None],
-            workgroup_storage_size: self.program.workgroup_storage_size()?,
+            workgroup_storage_size: self.program.workgroup_storage_size(&overrides)?,
         })
     }
 
