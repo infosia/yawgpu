@@ -12,6 +12,19 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Export marker for the shim's public C ABI. This header is only ever compiled
+ * into the shim itself (the Rust side declares the same functions by hand), so
+ * the marker is always the producer/export side. On MSVC a shared library
+ * exports nothing by default, so without `__declspec(dllexport)` no import
+ * library is generated and dependents fail to link (LNK1181). On other
+ * toolchains symbols default to public; the visibility attribute keeps the
+ * intent explicit and is a no-op there. */
+#if defined(_WIN32)
+#  define YAWGPU_TINT_API __declspec(dllexport)
+#else
+#  define YAWGPU_TINT_API __attribute__((visibility("default")))
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -21,12 +34,12 @@ typedef struct YawgpuTintProgram YawgpuTintProgram;
 /* Initializes the Tint runtime. Idempotent; safe to call more than once.
  * Tint ICEs terminate the process by design; this Tint revision exposes only
  * per-ICE callbacks, not a global callback setter that the shim can install. */
-void yawgpu_tint_initialize(void);
+YAWGPU_TINT_API void yawgpu_tint_initialize(void);
 
 /* Parse + validate WGSL. Returns NULL on failure with *err set.
  * If shader_f16 is true, Tint allows only the f16 WGSL extension.
  * lang_features contains WGPUWGSLLanguageFeatureName numeric values. */
-YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
+YAWGPU_TINT_API YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               size_t wgsl_len,
                                               bool shader_f16,
                                               const uint32_t* lang_features,
@@ -34,7 +47,7 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               char** err);
 
 /* Destroys a program returned by yawgpu_tint_program_create. NULL is ignored. */
-void yawgpu_tint_program_destroy(YawgpuTintProgram*);
+YAWGPU_TINT_API void yawgpu_tint_program_destroy(YawgpuTintProgram*);
 
 /* Entry point stage. Mirrors tint/lang/wgsl/inspector/entry_point.h:
  * 0=kVertex, 1=kFragment, 2=kCompute. */
@@ -48,8 +61,8 @@ typedef struct {
     bool primitive_index_used, subgroup_invocation_id_used, subgroup_size_used;
 } YawgpuTintEntryPoint;
 
-size_t yawgpu_tint_entry_point_count(const YawgpuTintProgram*);
-bool yawgpu_tint_entry_point_get(const YawgpuTintProgram*, size_t i, YawgpuTintEntryPoint* out);
+YAWGPU_TINT_API size_t yawgpu_tint_entry_point_count(const YawgpuTintProgram*);
+YAWGPU_TINT_API bool yawgpu_tint_entry_point_get(const YawgpuTintProgram*, size_t i, YawgpuTintEntryPoint* out);
 
 /* Stage-variable enums mirror tint/lang/wgsl/inspector/entry_point.h:
  * component_type:
@@ -70,13 +83,13 @@ typedef struct {
     uint8_t interpolation_sampling;
 } YawgpuTintStageVariable;
 
-size_t yawgpu_tint_entry_point_input_count(const YawgpuTintProgram*, const char* ep);
-bool yawgpu_tint_entry_point_input_get(const YawgpuTintProgram*,
+YAWGPU_TINT_API size_t yawgpu_tint_entry_point_input_count(const YawgpuTintProgram*, const char* ep);
+YAWGPU_TINT_API bool yawgpu_tint_entry_point_input_get(const YawgpuTintProgram*,
                                        const char* ep,
                                        size_t i,
                                        YawgpuTintStageVariable* out);
-size_t yawgpu_tint_entry_point_output_count(const YawgpuTintProgram*, const char* ep);
-bool yawgpu_tint_entry_point_output_get(const YawgpuTintProgram*,
+YAWGPU_TINT_API size_t yawgpu_tint_entry_point_output_count(const YawgpuTintProgram*, const char* ep);
+YAWGPU_TINT_API bool yawgpu_tint_entry_point_output_get(const YawgpuTintProgram*,
                                         const char* ep,
                                         size_t i,
                                         YawgpuTintStageVariable* out);
@@ -88,8 +101,8 @@ typedef struct {
     uint8_t severity;
 } YawgpuTintDiagnostic;
 
-size_t yawgpu_tint_diagnostic_count(const YawgpuTintProgram*);
-bool yawgpu_tint_diagnostic_get(const YawgpuTintProgram*, size_t i, YawgpuTintDiagnostic* out);
+YAWGPU_TINT_API size_t yawgpu_tint_diagnostic_count(const YawgpuTintProgram*);
+YAWGPU_TINT_API bool yawgpu_tint_diagnostic_get(const YawgpuTintProgram*, size_t i, YawgpuTintDiagnostic* out);
 
 /* Resource enums mirror tint/lang/wgsl/inspector/resource_binding.h:
  * resource_type:
@@ -129,8 +142,8 @@ typedef struct {
     uint32_t array_size;
 } YawgpuTintResourceBinding;
 
-size_t yawgpu_tint_resource_binding_count(const YawgpuTintProgram*, const char* ep);
-bool yawgpu_tint_resource_binding_get(const YawgpuTintProgram*,
+YAWGPU_TINT_API size_t yawgpu_tint_resource_binding_count(const YawgpuTintProgram*, const char* ep);
+YAWGPU_TINT_API bool yawgpu_tint_resource_binding_get(const YawgpuTintProgram*,
                                       const char* ep,
                                       size_t i,
                                       YawgpuTintResourceBinding* out);
@@ -153,8 +166,8 @@ typedef struct {
     double default_value;
 } YawgpuTintOverride;
 
-size_t yawgpu_tint_override_count(const YawgpuTintProgram*);
-bool yawgpu_tint_override_get(const YawgpuTintProgram*, size_t i, YawgpuTintOverride* out);
+YAWGPU_TINT_API size_t yawgpu_tint_override_count(const YawgpuTintProgram*);
+YAWGPU_TINT_API bool yawgpu_tint_override_get(const YawgpuTintProgram*, size_t i, YawgpuTintOverride* out);
 
 typedef struct {
     uint32_t group, binding, dst_group, dst_binding;
@@ -215,7 +228,7 @@ typedef struct {
     uint32_t frag_depth_clamp_slot;     /* MSL buffer index of the depth-range immediate block (valid iff has_frag_depth_clamp) */
 } YawgpuTintMslOutput;
 
-bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
+YAWGPU_TINT_API bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
                               const char* ep,
                               const YawgpuTintBindings*,
                               const YawgpuTintOverrideValue* ov,
@@ -229,7 +242,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
                               YawgpuTintMslOutput* out,
                               char** err);
 
-bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
+YAWGPU_TINT_API bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
                                 const char* ep,
                                 const YawgpuTintBindings*,
                                 const YawgpuTintOverrideValue* ov,
@@ -241,13 +254,13 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
 
 /* Returns the module's total var<workgroup> storage size in bytes (0 if none).
    Returns false + sets *err on hard failure. */
-bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram*,
+YAWGPU_TINT_API bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram*,
                                         const YawgpuTintOverrideValue* ov,
                                         size_t n_ov,
                                         uint64_t* out,
                                         char** err);
 
-bool yawgpu_tint_generate_glsl(const YawgpuTintProgram*,
+YAWGPU_TINT_API bool yawgpu_tint_generate_glsl(const YawgpuTintProgram*,
                                const char* ep,
                                const YawgpuTintBindings*,
                                const YawgpuTintOverrideValue* ov,
@@ -255,8 +268,8 @@ bool yawgpu_tint_generate_glsl(const YawgpuTintProgram*,
                                char** glsl_out,
                                char** err);
 
-void yawgpu_tint_string_free(char*);
-void yawgpu_tint_u32_free(uint32_t*);
+YAWGPU_TINT_API void yawgpu_tint_string_free(char*);
+YAWGPU_TINT_API void yawgpu_tint_u32_free(uint32_t*);
 
 #ifdef __cplusplus
 }

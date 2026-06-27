@@ -41,9 +41,74 @@ fn main() {
     let build_dir = dst.join("build");
     println!("cargo:rustc-link-search=native={}", build_dir.display());
     println!("cargo:rustc-link-lib=dylib=tint_shim");
-    // Locate libtint_shim at runtime (it is built next to the crate's artifacts).
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", build_dir.display());
+
+    // Detect the *target* OS (not the host): `cfg!` in a build script reflects the
+    // host, while `CARGO_CFG_TARGET_OS` is the platform the shim is built for.
+    let target_windows = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+    if target_windows {
+        // Multi-config MSVC generators (Visual Studio) place artifacts in a
+        // per-config subdirectory (`build/Debug`, `build/Release`, ...), unlike
+        // single-config generators (Ninja, Makefiles) which use `build/`. Add
+        // every config subdir that exists to the link search path so the
+        // import library `tint_shim.lib` is found regardless of generator.
+        for config in ["Debug", "Release", "RelWithDebInfo", "MinSizeRel"] {
+            let dir = build_dir.join(config);
+            if dir.is_dir() {
+                println!("cargo:rustc-link-search=native={}", dir.display());
+            }
+        }
+        // Windows has no rpath: a dependent loads `tint_shim.dll` from the
+        // executable's directory (or PATH). Copy it next to the consuming
+        // artifacts so `cargo test`/`cargo run` and the cdylib find it.
+        copy_runtime_dll(&build_dir);
+    } else {
+        // Locate libtint_shim at runtime (it is built next to the crate's
+        // artifacts). `-Wl,-rpath` is GNU/Clang linker syntax; MSVC rejects it.
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", build_dir.display());
+    }
     println!("cargo:rustc-cfg=have_tint");
+}
+
+/// Copies the built `tint_shim.dll` next to the Cargo target artifacts so it is
+/// discoverable at run time on Windows (which resolves dependent DLLs from the
+/// executable's directory, not via rpath). Failures are warnings, not errors:
+/// linking still succeeds against the import library, and a missing runtime copy
+/// only surfaces when an artifact that loads Tint is actually executed.
+fn copy_runtime_dll(build_dir: &Path) {
+    let candidates = [
+        build_dir.join("tint_shim.dll"),
+        build_dir.join("Debug").join("tint_shim.dll"),
+        build_dir.join("Release").join("tint_shim.dll"),
+        build_dir.join("RelWithDebInfo").join("tint_shim.dll"),
+        build_dir.join("MinSizeRel").join("tint_shim.dll"),
+    ];
+    let Some(dll) = candidates.into_iter().find(|p| p.is_file()) else {
+        println!(
+            "cargo:warning=tint_shim.dll not found under {}; runtime loads of Tint may fail",
+            build_dir.display()
+        );
+        return;
+    };
+
+    // OUT_DIR is `<target>/<profile>/build/<pkg>-<hash>/out`; the profile dir
+    // (where test/example/cdylib artifacts and their `deps/` live) is 3 up.
+    let Some(out_dir) = env::var_os("OUT_DIR").map(PathBuf::from) else {
+        return;
+    };
+    let Some(profile_dir) = out_dir.ancestors().nth(3) else {
+        return;
+    };
+    for dest_dir in [profile_dir.to_path_buf(), profile_dir.join("deps")] {
+        if dest_dir.is_dir() {
+            let dest = dest_dir.join("tint_shim.dll");
+            if let Err(e) = std::fs::copy(&dll, &dest) {
+                println!(
+                    "cargo:warning=failed to copy tint_shim.dll to {}: {e}",
+                    dest.display()
+                );
+            }
+        }
+    }
 }
 
 /// Locates a usable Dawn source tree: the explicit `YAWGPU_DAWN_DIR` override
