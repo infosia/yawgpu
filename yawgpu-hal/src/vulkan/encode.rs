@@ -1860,6 +1860,7 @@ fn create_color_attachment_image_view(
         texture.inner()?.image,
         format,
         color_attachment_subresource_range(texture, target),
+        color_attachment_image_view_usage(),
     )
 }
 
@@ -1875,6 +1876,7 @@ fn create_resolve_attachment_image_view(
         texture.inner()?.image,
         format,
         resolve_attachment_subresource_range(target),
+        color_attachment_image_view_usage(),
     )
 }
 
@@ -1889,6 +1891,7 @@ fn create_depth_stencil_attachment_image_view(
         texture.inner()?.image,
         format,
         depth_stencil_attachment_subresource_range(attachment),
+        depth_stencil_attachment_image_view_usage(),
     )
 }
 
@@ -1897,14 +1900,25 @@ fn create_attachment_image_view(
     image: vk::Image,
     format: vk::Format,
     subresource_range: vk::ImageSubresourceRange,
+    usage: vk::ImageUsageFlags,
 ) -> Result<vk::ImageView, HalError> {
+    let mut view_usage_info = vk::ImageViewUsageCreateInfo::default().usage(usage);
     let view_info = vk::ImageViewCreateInfo::default()
         .image(image)
         .view_type(vk::ImageViewType::TYPE_2D)
         .format(format)
-        .subresource_range(subresource_range);
+        .subresource_range(subresource_range)
+        .push_next(&mut view_usage_info);
     unsafe { device.create_image_view(&view_info, None) }
         .map_err(|_| shader_error("attachment image view creation failed"))
+}
+
+fn color_attachment_image_view_usage() -> vk::ImageUsageFlags {
+    vk::ImageUsageFlags::COLOR_ATTACHMENT
+}
+
+fn depth_stencil_attachment_image_view_usage() -> vk::ImageUsageFlags {
+    vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
 }
 
 fn color_attachment_subresource_range(
@@ -2724,6 +2738,18 @@ mod tests {
         assert_eq!(packed_range.level_count, 1);
         assert_eq!(packed_range.base_array_layer, 2);
         assert_eq!(packed_range.layer_count, 1);
+    }
+
+    #[test]
+    fn render_attachment_image_view_usage_is_limited_to_attachment_role() {
+        assert_eq!(
+            color_attachment_image_view_usage(),
+            vk::ImageUsageFlags::COLOR_ATTACHMENT
+        );
+        assert_eq!(
+            depth_stencil_attachment_image_view_usage(),
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+        );
     }
 
     #[test]

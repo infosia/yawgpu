@@ -798,3 +798,27 @@ WAW barrier above, M2 a 3D-attachment over-marking + `loadOp=Load` gap.
 Deferred to Stage 2 (TODO in code, GPUs zero memory so no CTS case depends on it): clearing
 a texture **sampled** (non-storage read binding) while uninitialized; depth/stencil and
 compressed/MSAA zero-init.
+
+**Residual Vulkan operation fails triaged (the other 3, all lazy-init-unrelated):**
+- **F-140 (FIXED, yawgpu HAL bug)** — `3d_texture_slices:multiple_color_attachments,same_mip_level`
+  failed "attachment image view creation failed". A render-pass color attachment that is one
+  z-slice of a 3D texture is created as a `TYPE_2D` view with `base_array_layer=depth_slice`;
+  yawgpu supplied no `VkImageViewUsageCreateInfo`, so the view inherited the image's FULL usage
+  including `SAMPLED` (the multi-attachment texture also has TextureBinding). A 2D-of-3D view with
+  SAMPLED requires `VK_EXT_image_2d_view_of_3d`, which yawgpu doesn't enable → vkCreateImageView
+  failed. Fix: restrict each attachment view's usage to `COLOR_ATTACHMENT` (resp.
+  `DEPTH_STENCIL_ATTACHMENT`) via `VkImageViewUsageCreateInfo` (matches wgpu-hal), dropping the
+  SAMPLED precondition. `yawgpu-hal/src/vulkan/encode.rs`. Verified: `3d_texture_slices` 6→7/7 on
+  MoltenVK, no operation-tree regression.
+- **F-139 (xfail, MoltenVK artifact — native Vulkan correct)** — `depth_clip_clamp` ×2. WebGPU
+  requires shader-written frag_depth clamped to the viewport [minDepth,maxDepth] and out-of-[0,1]
+  primitives clipped. yawgpu's Vulkan HAL maps this correctly for NATIVE Vulkan (depthClampEnable
+  + `VK_EXT_depth_clip_enable`), but MoltenVK clamps Metal `[[depth]]` only to [0,1] and collapses
+  depthClampEnable to MTLDepthClipMode.Clamp (defeating clip). yawgpu's Metal backend passes via
+  an in-shader frag_depth clamp transform; the Vulkan/SPIR-V path has none because native Vulkan
+  doesn't need one. User chose **xfail + track** (the SPIR-V in-shader clamp port is a MoltenVK-only
+  workaround touching every fragment pipeline layout; deferred). Documented in
+  `expectations/yawgpu-vulkan.txt`; see memory f045-frag-depth-clamp.
+
+**Vulkan/MoltenVK `api,operation` now: 4915 pass / 0 fail / 2 xfail (documented) / 0 xpass** — at
+Dawn parity. Next: Vulkan `api,validation` + `shader,*` sweeps, then F-138 Stage 2.
