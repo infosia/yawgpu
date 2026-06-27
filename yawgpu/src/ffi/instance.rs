@@ -208,7 +208,14 @@ pub unsafe extern "C" fn wgpuInstanceHasWGSLLanguageFeature(
     feature: native::WGPUWGSLLanguageFeatureName,
 ) -> native::WGPUBool {
     let _instance = borrow_handle(instance, "WGPUInstance");
-    native::WGPUBool::from(core::SUPPORTED_WGSL_LANGUAGE_FEATURES.contains(&feature))
+    // Compare via the native alias cast (as in `wgpuInstanceGetWGSLLanguageFeatures`
+    // above) rather than `contains(&feature)`: the core list is `&[u32]` but the
+    // `WGPUWGSLLanguageFeatureName` alias is `i32` on MSVC and `u32` on clang, so a
+    // direct `&u32` vs `&i32` comparison fails to compile on Windows.
+    let supported = core::SUPPORTED_WGSL_LANGUAGE_FEATURES
+        .iter()
+        .any(|&f| f as native::WGPUWGSLLanguageFeatureName == feature);
+    native::WGPUBool::from(supported)
 }
 
 /// Frees a WGSL language feature array returned by `wgpuInstanceGetWGSLLanguageFeatures`.
@@ -420,7 +427,14 @@ mod tests {
                 core::SUPPORTED_WGSL_LANGUAGE_FEATURES.len()
             );
             let values = std::slice::from_raw_parts(features.features, features.featureCount);
-            assert_eq!(values, core::SUPPORTED_WGSL_LANGUAGE_FEATURES);
+            // The returned slice is `WGPUWGSLLanguageFeatureName` (i32 on MSVC, u32
+            // on clang); cast the core `&[u32]` list to the alias before comparing.
+            let expected: Vec<native::WGPUWGSLLanguageFeatureName> =
+                core::SUPPORTED_WGSL_LANGUAGE_FEATURES
+                    .iter()
+                    .map(|&f| f as native::WGPUWGSLLanguageFeatureName)
+                    .collect();
+            assert_eq!(values, expected.as_slice());
             assert_eq!(
                 wgpuInstanceHasWGSLLanguageFeature(
                     instance,

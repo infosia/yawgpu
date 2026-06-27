@@ -26,6 +26,35 @@
   (Tint replaced the earlier naga frontend, which was consumed from an
   `infosia/wgpu` git fork; that fork and the `naga` crate dependency are no longer
   used.)
+
+  **Windows / MSVC shim build (added 2026-06-27).** The shim links as a shared
+  library (`tint_shim.dll`), which on MSVC requires extra handling that the
+  Unix-only `build.rs` lacked:
+  - **Symbol export.** The shim's C ABI in `yawgpu-tint/shim/tint_shim.h` is
+    annotated with a `YAWGPU_TINT_API` macro (`__declspec(dllexport)` on
+    `_WIN32`, `__attribute__((visibility("default")))` elsewhere). Without it MSVC
+    exports nothing from the DLL, so no `tint_shim.lib` import library is emitted
+    and dependents fail to link with `LNK1181: cannot open input file
+    'tint_shim.lib'`. (`WINDOWS_EXPORT_ALL_SYMBOLS` is deliberately *not* used: it
+    would drag in the statically-linked Tint symbols and can hit the 65535-export
+    DLL limit.)
+  - **Multi-config link search.** The `cmake` crate selects the Visual Studio
+    (multi-config) generator when Ninja is absent, placing artifacts under
+    `build/<Config>/` (e.g. `build/Debug/`) rather than `build/`. `build.rs` adds
+    each existing per-config subdir to the link search path so `tint_shim.lib` is
+    found regardless of generator.
+  - **No rpath; runtime DLL copy.** `-Wl,-rpath` is GNU/Clang-only (MSVC emits
+    `LNK4044` and ignores it), so it is gated to non-Windows targets. Windows
+    resolves dependent DLLs from the executable's directory, so `build.rs` copies
+    `tint_shim.dll` into `target/<profile>/` and `target/<profile>/deps/` for
+    `cargo test`/`cargo run` and the cdylib consumers; shipped applications must
+    distribute `tint_shim.dll` next to the yawgpu `.dll`.
+
+  Target detection uses `CARGO_CFG_TARGET_OS` (the build target), not `cfg!`
+  (the build-script host). Verified on Windows: `yawgpu-tint` unit tests pass, the
+  full Noop workspace suite passes, and the real-GPU `e2e_vulkan_*` suite passes
+  against a native NVIDIA driver (the external-texture case is a separate
+  cross-driver behaviour item).
 - **bindgen** (build-dep): generate `webgpu.h` bindings.
 - HAL backends: `ash` (Vulkan), `objc2`/`objc2-metal`/`block2` (Metal) —
   added Phase 7, feature-gated. Noop has no GPU deps. **DirectX is the only

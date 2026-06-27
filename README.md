@@ -192,9 +192,15 @@ git submodule update --init third_party/dawn
 cd third_party/dawn && python3 tools/fetch_dawn_dependencies.py && cd ../..
 ```
 
+(On Windows, invoke the fetch script with `python` if `python3` resolves to the
+Microsoft Store stub.)
+
 `yawgpu-tint/build.rs` then builds the minimal Tint libraries from source on the
 first `cargo build` (cached afterwards). Without this setup the `yawgpu-tint` crate
-compiles as a non-functional stub.
+compiles as a non-functional stub. On Windows (MSVC) the shim is a shared library;
+`build.rs` copies the resulting `tint_shim.dll` next to the Cargo target artifacts
+so tests and binaries load it at run time, and any application shipping the yawgpu
+`.dll` must distribute `tint_shim.dll` alongside it (Windows has no rpath).
 
 Build the library and link against it with the vendored headers:
 
@@ -370,11 +376,17 @@ on the Tier-2 GLES backend.
 - **Platform coverage**:
   - **macOS** — builds, unit tests, real-GPU end-to-end tests, and the C
     examples all verified (Metal and Vulkan/MoltenVK).
-  - **Windows (MSVC)** — builds and passes the full unit-test suite; the
-    windowed C examples are runtime-verified against native
-    Vulkan drivers, and the windowed `triangle` example additionally
-    runs through the OpenGL ES backend via the WGL fallback (host GL
-    driver, opt-in).
+  - **Windows (MSVC)** — builds and passes the full unit-test suite, and the
+    **Vulkan backend is verified real-GPU** against a native driver (NVIDIA):
+    the in-repo `e2e_vulkan_*` suite (basic, buffer, texture, compute, render,
+    depth, f16, OOM, and the threading audit) passes against the live driver.
+    The one exception is the external-texture case: `texture_external` has no
+    Vulkan lowering, and a native NVIDIA driver compiles the resulting pipeline
+    instead of rejecting it (Mesa on Linux does reject it), so the
+    `GPUInternalError` that suite expects is driver-dependent — tracked
+    separately. The windowed C examples are runtime-verified against native
+    Vulkan drivers, and the windowed `triangle` example additionally runs
+    through the OpenGL ES backend via the WGL fallback (host GL driver, opt-in).
   - **Linux (`x86_64-unknown-linux-gnu`)** — the CI host (`ubuntu-latest`):
     every push builds the workspace and runs the full unit + validation
     test suite (Noop backend) green
