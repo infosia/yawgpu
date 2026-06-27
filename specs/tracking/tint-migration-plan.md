@@ -688,3 +688,20 @@ revealed robustness was off.
 Remaining shader,execution: render storage-texture textureLoad now passes; a
 **compute** storage-texture textureLoad cluster (~40, float/unorm/snorm read formats
 return 0) remains — under investigation.
+
+## Robustness fully corrected (render + compute); storage textureLoad resolved
+
+Completing the robustness fix (commit d944a16): the compute `generate_msl` path passed
+`disable_robustness=true`. Before the inversion fix it was accidentally flipped ON (so
+compute storage textureLoad passed); the corrected negation then turned compute
+robustness OFF and regressed compute `textureLoad:storage_textures_2d{,_array}`
+(40 float/unorm/snorm read formats → 0). WebGPU requires robustness in compute too, so
+that path now passes `disable_robustness=false`. **All MSL paths now generate with Tint
+robustness ON** (render vertex/fragment, compute, and the SPIR-V workgroup-size reflect).
+
+Net effect of the robustness + vertex-pulling work on shader,execution (vs the 192-fail
+baseline): robust_access_vertex 112→0, render storage textureLoad 80→0, compute storage
+textureLoad regression 40→0. Verified per-cluster on Metal (robust_access 320/0,
+render+compute storage 234/0); full shader,execution re-sweep pending. api,operation
+tree re-verified 4917/0 after the render fix (compute-robustness-on was the original
+100%-parity state, now restored).
