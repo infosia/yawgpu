@@ -218,6 +218,11 @@ mod imp {
             n_words_out: *mut usize,
             err: *mut *mut c_char,
         ) -> bool;
+        fn yawgpu_tint_workgroup_storage_size(
+            program: *const RawProgram,
+            out: *mut u64,
+            err: *mut *mut c_char,
+        ) -> bool;
         fn yawgpu_tint_generate_glsl(
             program: *const RawProgram,
             ep: *const c_char,
@@ -645,6 +650,18 @@ mod imp {
                 yawgpu_tint_u32_free(words);
                 data
             };
+            Ok(out)
+        }
+
+        /// Returns the module's total `var<workgroup>` storage size in bytes.
+        pub fn workgroup_storage_size(&self) -> Result<u64, String> {
+            let mut out = 0u64;
+            let mut err = ptr::null_mut();
+            // SAFETY: `out` and `err` point to valid writable memory.
+            let ok = unsafe { yawgpu_tint_workgroup_storage_size(self.raw, &mut out, &mut err) };
+            if !ok {
+                return Err(take_error(err));
+            }
             Ok(out)
         }
 
@@ -1505,6 +1522,11 @@ mod imp {
             Err(UNAVAILABLE.to_owned())
         }
 
+        /// Returns the module's total `var<workgroup>` storage size in bytes.
+        pub fn workgroup_storage_size(&self) -> Result<u64, String> {
+            Ok(0)
+        }
+
         /// Generates GLSL ES 3.1 for `entry_point`.
         pub fn generate_glsl(
             &self,
@@ -2013,6 +2035,33 @@ fn fs(in: VsOut) -> @location(0) vec4f {
             let word_count = w[0] >> 16;
             opcode == 71 && word_count == 4 && w[2] == 33 && w[3] == binding
         })
+    }
+
+    #[test]
+    fn reflects_workgroup_storage_size() {
+        let program = Program::parse(
+            r#"
+var<workgroup> data: array<u32, 8>;
+
+@compute @workgroup_size(1)
+fn cs() {
+  data[0] = 1u;
+}
+"#,
+            false,
+        )
+        .unwrap();
+        assert_eq!(program.workgroup_storage_size().unwrap(), 32);
+
+        let program = Program::parse("@compute @workgroup_size(1) fn cs() {}", false).unwrap();
+        assert_eq!(program.workgroup_storage_size().unwrap(), 0);
+
+        let program = Program::parse(
+            "@fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
+            false,
+        )
+        .unwrap();
+        assert_eq!(program.workgroup_storage_size().unwrap(), 0);
     }
 
     #[test]

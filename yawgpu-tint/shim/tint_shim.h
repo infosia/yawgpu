@@ -219,6 +219,10 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
                                 size_t* n_words_out,
                                 char** err);
 
+/* Returns the module's total var<workgroup> storage size in bytes (0 if none / if the
+   workgroup grid size is override-derived). Returns false + sets *err on hard failure. */
+bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram*, uint64_t* out, char** err);
+
 bool yawgpu_tint_generate_glsl(const YawgpuTintProgram*,
                                const char* ep,
                                const YawgpuTintBindings*,

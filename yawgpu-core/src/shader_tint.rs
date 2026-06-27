@@ -224,7 +224,7 @@ impl ReflectedModule {
             entry_point: entry.name,
             literal_size,
             override_keys: [None, None, None],
-            workgroup_storage_size: 0,
+            workgroup_storage_size: self.program.workgroup_storage_size()?,
         }))
     }
 
@@ -254,7 +254,7 @@ impl ReflectedModule {
             entry_point: entry_point.to_owned(),
             literal_size,
             override_keys: [None, None, None],
-            workgroup_storage_size: 0,
+            workgroup_storage_size: self.program.workgroup_storage_size()?,
         })
     }
 
@@ -428,12 +428,7 @@ fn tint_bindings_for_msl(
                                 .to_owned(),
                         );
                     }
-                    None => {
-                        return Err(
-                            "MSL buffer binding map entry was not reflected for the entry point"
-                                .to_owned(),
-                        );
-                    }
+                    None => {}
                 }
             }
             MslResourceBindingKind::Texture => {
@@ -450,16 +445,22 @@ fn tint_bindings_for_msl(
                                 .to_owned(),
                         );
                     }
-                    None => {
-                        return Err(
-                            "MSL texture binding map entry was not reflected for the entry point"
-                                .to_owned(),
-                        );
-                    }
+                    None => {}
                 }
             }
             MslResourceBindingKind::Sampler => {
-                bindings.sampler.push(remap);
+                match resources.get(&(binding.group, binding.binding)).copied() {
+                    Some(ReflectedResourceBindingKind::Sampler { .. }) => {
+                        bindings.sampler.push(remap);
+                    }
+                    Some(_) => {
+                        return Err(
+                            "MSL sampler binding map entry does not match reflected resource kind"
+                                .to_owned(),
+                        );
+                    }
+                    None => {}
+                }
             }
             MslResourceBindingKind::ExternalTexture => {
                 match resources.get(&(binding.group, binding.binding)).copied() {
@@ -484,12 +485,7 @@ fn tint_bindings_for_msl(
                                 .to_owned(),
                         );
                     }
-                    None => {
-                        return Err(
-                            "MSL external texture binding map entry was not reflected for the entry point"
-                                .to_owned(),
-                        );
-                    }
+                    None => {}
                 }
             }
         }
@@ -854,19 +850,25 @@ mod tests {
     fn reflects_compute_workgroup_size_from_tint() {
         let module = parse_and_validate_wgsl(
             r#"
+var<workgroup> data: array<u32, 8>;
+
 @compute @workgroup_size(8, 4, 1)
-fn cs() {}
+fn cs() {
+  data[0] = 1u;
+}
 "#,
         )
         .unwrap();
 
         let reflected = module.compute_workgroup_size("cs").unwrap().unwrap();
         assert_eq!(reflected.literal_size, [8, 4, 1]);
+        assert_eq!(reflected.workgroup_storage_size, 32);
 
         let resolved = module
             .resolved_compute_workgroup_size("cs", &PipelineConstants::default())
             .unwrap();
         assert_eq!(resolved.literal_size, [8, 4, 1]);
+        assert_eq!(resolved.workgroup_storage_size, 32);
     }
 
     #[test]
@@ -1318,5 +1320,57 @@ fn cs() {
         assert!(generated.source.contains("[[buffer(7)]]"));
         assert!(generated.source.contains("[[texture(5)]]"));
         assert!(generated.source.contains("[[sampler(6)]]"));
+    }
+
+    #[test]
+    fn generate_msl_skips_unused_layout_bindings() {
+        let module = parse_and_validate_wgsl(
+            r#"
+struct U {
+  x: u32,
+}
+
+struct Unused {
+  x: u32,
+}
+
+@group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(1) var<storage, read_write> unused: Unused;
+
+@compute @workgroup_size(1)
+fn cs() {
+  _ = u.x;
+}
+"#,
+        )
+        .unwrap();
+
+        let generated = module
+            .generate_msl(
+                "cs",
+                &MslBindingMap {
+                    resources: vec![
+                        MslResourceBinding {
+                            group: 0,
+                            binding: 0,
+                            metal_index: 4,
+                            ext_params_buffer_slot: None,
+                            kind: MslResourceBindingKind::Buffer,
+                        },
+                        MslResourceBinding {
+                            group: 0,
+                            binding: 1,
+                            metal_index: 7,
+                            ext_params_buffer_slot: None,
+                            kind: MslResourceBindingKind::Buffer,
+                        },
+                    ],
+                },
+                &PipelineConstants::default(),
+            )
+            .unwrap();
+
+        assert!(generated.source.contains("[[buffer(4)]]"));
+        assert!(!generated.source.contains("[[buffer(7)]]"));
     }
 }
