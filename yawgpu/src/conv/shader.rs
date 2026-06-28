@@ -7,8 +7,10 @@ use crate::{YaWGPUShaderSourceMSL, YAWGPU_STYPE_SHADER_SOURCE_MSL};
 ///
 /// `descriptor.nextInChain` must be either null or a valid linked list of
 /// `WGPUChainedStruct` nodes. Recognized shader-source nodes must point to
-/// valid `WGPUShaderSourceWGSL` or `YaWGPUShaderSourceMSL` storage. WGSL and
-/// MSL string data must be valid for their declared lengths. When an MSL node
+/// valid `WGPUShaderSourceWGSL`, `WGPUShaderSourceSPIRV`, or
+/// `YaWGPUShaderSourceMSL` storage. WGSL and MSL string data must be valid for
+/// their declared lengths. When a SPIR-V node has a non-zero `codeSize`, `code`
+/// must point to an array with at least that many `u32` words. When an MSL node
 /// has a non-zero `entryPointCount`, `entryPoints` must point to an array with
 /// at least that many valid `YaWGPUMslEntryPoint` elements.
 #[must_use]
@@ -33,6 +35,19 @@ pub unsafe fn map_shader_module_descriptor(
             let code = string_view_to_str(wgsl.code).map_or_else(String::new, ToOwned::to_owned);
             source = Some(core::ShaderModuleSource::Wgsl(code));
         }
+        if node.sType == native::WGPUSType_ShaderSourceSPIRV {
+            if source.is_some() {
+                return core::ShaderModuleSource::Invalid(
+                    "shader module descriptor must contain exactly one shader source".to_owned(),
+                );
+            }
+            let Some(spirv) = chain.cast::<native::WGPUShaderSourceSPIRV>().as_ref() else {
+                return core::ShaderModuleSource::Invalid(
+                    "SPIR-V shader source chain node must be valid".to_owned(),
+                );
+            };
+            source = Some(map_spirv_shader_source(spirv));
+        }
         if node.sType == YAWGPU_STYPE_SHADER_SOURCE_MSL {
             if source.is_some() {
                 return core::ShaderModuleSource::Invalid(
@@ -55,6 +70,29 @@ pub unsafe fn map_shader_module_descriptor(
             "shader module descriptor must contain exactly one shader source".to_owned(),
         )
     })
+}
+
+unsafe fn map_spirv_shader_source(
+    spirv: &native::WGPUShaderSourceSPIRV,
+) -> core::ShaderModuleSource {
+    #[cfg(not(feature = "shader-passthrough"))]
+    {
+        let _ = spirv;
+        core::ShaderModuleSource::Invalid("shader passthrough not enabled".to_owned())
+    }
+    #[cfg(feature = "shader-passthrough")]
+    {
+        let words = if spirv.codeSize == 0 {
+            Vec::new()
+        } else if spirv.code.is_null() {
+            return core::ShaderModuleSource::Invalid(
+                "SPIR-V shader source code must be valid".to_owned(),
+            );
+        } else {
+            std::slice::from_raw_parts(spirv.code, spirv.codeSize as usize).to_vec()
+        };
+        core::ShaderModuleSource::SpirvPassthrough(words)
+    }
 }
 
 unsafe fn map_msl_shader_source(msl: &YaWGPUShaderSourceMSL) -> core::ShaderModuleSource {

@@ -43,6 +43,9 @@ pub(crate) const SHADER_STAGE_COMPUTE: u64 = 4;
 pub enum ShaderModuleSource {
     /// Wgsl variant.
     Wgsl(String),
+    /// Raw SPIR-V words.
+    #[cfg(feature = "shader-passthrough")]
+    SpirvPassthrough(Vec<u32>),
     /// Raw MSL source and caller-provided entry metadata.
     #[cfg(feature = "shader-passthrough")]
     MslPassthrough {
@@ -92,6 +95,12 @@ pub(crate) enum ShaderModuleSourceKind {
         /// Reflected variant.
         reflected: Box<frontend::ReflectedModule>,
     },
+    /// Raw SPIR-V words.
+    #[cfg(feature = "shader-passthrough")]
+    SpirvPassthrough {
+        /// SPIR-V words.
+        words: Vec<u32>,
+    },
     /// Raw MSL source and caller-provided entry metadata.
     #[cfg(feature = "shader-passthrough")]
     MslPassthrough {
@@ -131,6 +140,19 @@ impl ShaderModule {
             _source: source,
             reflected: Box::new(reflected),
         })
+    }
+
+    /// Constructs this object from raw SPIR-V passthrough words.
+    #[cfg(feature = "shader-passthrough")]
+    pub(crate) fn from_spirv(words: Vec<u32>) -> Result<ShaderModuleSourceKind, String> {
+        const SPIRV_MAGIC: u32 = 0x0723_0203;
+        if words.is_empty() {
+            return Err("SPIR-V shader source must not be empty".to_owned());
+        }
+        if words[0] != SPIRV_MAGIC {
+            return Err("SPIR-V shader source has an invalid magic word".to_owned());
+        }
+        Ok(ShaderModuleSourceKind::SpirvPassthrough { words })
     }
 
     /// Constructs this object from raw MSL passthrough source.
@@ -174,6 +196,16 @@ impl ShaderModule {
     pub(crate) fn reflected(&self) -> Option<&frontend::ReflectedModule> {
         match &self.inner._source {
             ShaderModuleSourceKind::Wgsl { reflected, .. } => Some(reflected),
+            _ => None,
+        }
+    }
+
+    /// Returns raw SPIR-V passthrough words when available.
+    #[cfg(feature = "shader-passthrough")]
+    #[must_use]
+    pub fn spirv_passthrough(&self) -> Option<&[u32]> {
+        match &self.inner._source {
+            ShaderModuleSourceKind::SpirvPassthrough { words } => Some(words.as_slice()),
             _ => None,
         }
     }
@@ -335,12 +367,43 @@ mod tests {
     }
 
     #[cfg(feature = "shader-passthrough")]
+    fn valid_spirv_words() -> Vec<u32> {
+        vec![0x0723_0203, 0, 0, 0, 0]
+    }
+
+    #[cfg(feature = "shader-passthrough")]
     fn msl_entry(name: &str, workgroup_size: [u32; 3]) -> MslEntryPoint {
         MslEntryPoint {
             name: name.to_owned(),
             stage: ShaderStage::Compute,
             workgroup_size,
         }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn from_spirv_accepts_magic_prefixed_words() {
+        let words = valid_spirv_words();
+
+        match ShaderModule::from_spirv(words.clone()).expect("valid SPIR-V") {
+            ShaderModuleSourceKind::SpirvPassthrough { words: stored } => {
+                assert_eq!(stored, words);
+            }
+            other => panic!("unexpected source kind: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn from_spirv_rejects_empty_source_and_bad_magic() {
+        assert_eq!(
+            ShaderModule::from_spirv(Vec::new()).expect_err("empty source should fail"),
+            "SPIR-V shader source must not be empty"
+        );
+        assert_eq!(
+            ShaderModule::from_spirv(vec![1, 2, 3]).expect_err("bad magic should fail"),
+            "SPIR-V shader source has an invalid magic word"
+        );
     }
 
     #[cfg(feature = "shader-passthrough")]
@@ -377,6 +440,36 @@ mod tests {
             .expect_err("zero workgroup component should fail"),
             "MSL compute entry point workgroup size must be at least one"
         );
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn spirv_passthrough_accessor_reports_only_spirv_modules() {
+        let spirv = ShaderModule::new(
+            ShaderModule::from_spirv(valid_spirv_words()).expect("valid SPIR-V"),
+            None,
+        );
+        assert_eq!(
+            spirv.spirv_passthrough().expect("SPIR-V accessor"),
+            &[0x0723_0203, 0, 0, 0, 0]
+        );
+
+        let msl = ShaderModule::new(
+            ShaderModule::from_msl(
+                "kernel void cs() {}".to_owned(),
+                vec![msl_entry("cs", [1, 1, 1])],
+            )
+            .expect("valid MSL"),
+            None,
+        );
+        let device = noop_device();
+        let wgsl = device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@compute @workgroup_size(1) fn cs() {}".to_owned(),
+        ));
+        let invalid = ShaderModule::new(ShaderModuleSourceKind::Invalid, Some("bad".to_owned()));
+        assert!(msl.spirv_passthrough().is_none());
+        assert!(wgsl.spirv_passthrough().is_none());
+        assert!(invalid.spirv_passthrough().is_none());
     }
 
     #[cfg(feature = "shader-passthrough")]

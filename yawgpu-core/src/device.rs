@@ -358,6 +358,11 @@ impl Device {
                 Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
             },
             #[cfg(feature = "shader-passthrough")]
+            ShaderModuleSource::SpirvPassthrough(words) => match ShaderModule::from_spirv(words) {
+                Ok(inner) => (inner, None),
+                Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
+            },
+            #[cfg(feature = "shader-passthrough")]
             ShaderModuleSource::MslPassthrough { source, entries } => {
                 match ShaderModule::from_msl(source, entries) {
                     Ok(inner) => (inner, None),
