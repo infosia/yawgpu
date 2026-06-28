@@ -371,28 +371,6 @@ impl VulkanAdapter {
             extension_names.push(vk::KHR_SWAPCHAIN_NAME.as_ptr());
         }
         let depth_clip_enable_extension = self.has_device_extension(vk::EXT_DEPTH_CLIP_ENABLE_NAME);
-        // CTS finding F-112: `VK_EXT_robustness2` / `robustBufferAccess2` provides
-        // a hardware bounds clamp for storage-buffer accesses. When enabled,
-        // yawgpu-core emits SPIR-V with the `buffer` bounds policy set to
-        // `Unchecked`, because the software `Restrict` clamp breaks workgroup-atomic
-        // read-read coherence on the NVIDIA driver. Treat it as supported only when
-        // the extension is present AND the feature reports TRUE via the
-        // `get_physical_device_features2` pNext chain.
-        let robustness2_extension = self.has_device_extension(vk::EXT_ROBUSTNESS2_NAME);
-        let robustness2_feature_supported = if robustness2_extension {
-            let mut robustness2_features = vk::PhysicalDeviceRobustness2FeaturesEXT::default();
-            let mut features2 =
-                vk::PhysicalDeviceFeatures2::default().push_next(&mut robustness2_features);
-            unsafe {
-                self.instance
-                    .instance
-                    .get_physical_device_features2(self.physical_device, &mut features2);
-            }
-            robustness2_features.robust_buffer_access2 == vk::TRUE
-        } else {
-            false
-        };
-        let robust_buffer_access2 = robustness2_extension && robustness2_feature_supported;
         // CTS finding F-129(1): naga lowers WGSL `discard` to SPIR-V
         // `OpDemoteToHelperInvocation` so that derivatives (`fwidth`/`dpdx`/`dpdy`)
         // after a non-uniform `discard` stay well-defined. Executing that opcode
@@ -419,6 +397,35 @@ impl VulkanAdapter {
         let shader_float16_int8_extension =
             self.has_device_extension(vk::KHR_SHADER_FLOAT16_INT8_NAME);
         let storage_16bit_extension = self.has_device_extension(vk::KHR_16BIT_STORAGE_NAME);
+        let vulkan_memory_model_extension =
+            self.has_device_extension(vk::KHR_VULKAN_MEMORY_MODEL_NAME);
+        let image_format_list_extension = self.has_device_extension(vk::KHR_IMAGE_FORMAT_LIST_NAME);
+        let device_properties = unsafe {
+            self.instance
+                .instance
+                .get_physical_device_properties(self.physical_device)
+        };
+        let vulkan_memory_model_available = vulkan_memory_model_available(
+            device_properties.api_version,
+            vulkan_memory_model_extension,
+        );
+        let mut vulkan_memory_model_supported_features =
+            vk::PhysicalDeviceVulkanMemoryModelFeatures::default();
+        if vulkan_memory_model_available {
+            let mut features2 = vk::PhysicalDeviceFeatures2::default()
+                .push_next(&mut vulkan_memory_model_supported_features);
+            unsafe {
+                self.instance
+                    .instance
+                    .get_physical_device_features2(self.physical_device, &mut features2);
+            }
+        }
+        let vulkan_memory_model = vulkan_memory_model_available
+            && vulkan_memory_model_supported_features.vulkan_memory_model == vk::TRUE;
+        let vulkan_memory_model_device_scope = vulkan_memory_model
+            && vulkan_memory_model_supported_features.vulkan_memory_model_device_scope == vk::TRUE;
+        let image_format_list =
+            image_format_list_available(device_properties.api_version, image_format_list_extension);
         let mut shader_float16_int8_features =
             vk::PhysicalDeviceShaderFloat16Int8Features::default();
         let mut storage_16bit_supported_features =
@@ -477,9 +484,6 @@ impl VulkanAdapter {
         if robust_buffer_access {
             enabled_features.robust_buffer_access = vk::TRUE;
         }
-        if robust_buffer_access2 {
-            extension_names.push(vk::EXT_ROBUSTNESS2_NAME.as_ptr());
-        }
         if shader_demote_to_helper_invocation {
             extension_names.push(vk::EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_NAME.as_ptr());
         }
@@ -489,15 +493,28 @@ impl VulkanAdapter {
         if storage_16bit_features.enabled {
             extension_names.push(vk::KHR_16BIT_STORAGE_NAME.as_ptr());
         }
+        if vulkan_memory_model
+            && vulkan_memory_model_extension_required(
+                device_properties.api_version,
+                vulkan_memory_model_extension,
+            )
+        {
+            extension_names.push(vk::KHR_VULKAN_MEMORY_MODEL_NAME.as_ptr());
+        }
+        if image_format_list_extension {
+            extension_names.push(vk::KHR_IMAGE_FORMAT_LIST_NAME.as_ptr());
+        }
         let mut depth_clip_enable_features =
             vk::PhysicalDeviceDepthClipEnableFeaturesEXT::default().depth_clip_enable(true);
-        let mut robustness2_features =
-            vk::PhysicalDeviceRobustness2FeaturesEXT::default().robust_buffer_access2(true);
         let mut shader_demote_features =
             vk::PhysicalDeviceShaderDemoteToHelperInvocationFeatures::default()
                 .shader_demote_to_helper_invocation(true);
         let mut shader_float16_int8_enable_features =
             vk::PhysicalDeviceShaderFloat16Int8Features::default().shader_float16(true);
+        let mut vulkan_memory_model_enable_features =
+            vk::PhysicalDeviceVulkanMemoryModelFeatures::default()
+                .vulkan_memory_model(true)
+                .vulkan_memory_model_device_scope(vulkan_memory_model_device_scope);
         let mut storage_16bit_enable_features = storage_16bit_features.to_vk();
         let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
@@ -506,14 +523,14 @@ impl VulkanAdapter {
         if depth_clip_control {
             create_info = create_info.push_next(&mut depth_clip_enable_features);
         }
-        if robust_buffer_access2 {
-            create_info = create_info.push_next(&mut robustness2_features);
-        }
         if shader_demote_to_helper_invocation {
             create_info = create_info.push_next(&mut shader_demote_features);
         }
         if shader_float16 {
             create_info = create_info.push_next(&mut shader_float16_int8_enable_features);
+        }
+        if vulkan_memory_model {
+            create_info = create_info.push_next(&mut vulkan_memory_model_enable_features);
         }
         if storage_16bit_features.enabled {
             create_info = create_info.push_next(&mut storage_16bit_enable_features);
@@ -531,11 +548,6 @@ impl VulkanAdapter {
                 .get_physical_device_memory_properties(self.physical_device)
         };
         // Query the device property limit for anisotropy so create_sampler can clamp.
-        let device_properties = unsafe {
-            self.instance
-                .instance
-                .get_physical_device_properties(self.physical_device)
-        };
         let max_sampler_anisotropy = device_properties.limits.max_sampler_anisotropy;
         let inner = Arc::new(VulkanDeviceInner {
             _instance: Arc::clone(&self.instance),
@@ -546,9 +558,10 @@ impl VulkanAdapter {
             occlusion_query_precise,
             depth_clip_control,
             sampler_anisotropy,
-            robust_buffer_access2,
             shader_demote_to_helper_invocation,
             shader_float16,
+            vulkan_memory_model,
+            image_format_list,
             storage_buffer16_bit_access: storage_16bit_features.storage_buffer16_bit_access,
             uniform_and_storage_buffer16_bit_access: storage_16bit_features
                 .uniform_and_storage_buffer16_bit_access,
@@ -610,6 +623,24 @@ impl Enabled16BitStorageFeatures {
 
 fn shader_float16_supported(extension_present: bool, shader_float16: vk::Bool32) -> bool {
     extension_present && shader_float16 == vk::TRUE
+}
+
+fn vulkan_memory_model_available(api_version: u32, extension_present: bool) -> bool {
+    let major = vk::api_version_major(api_version);
+    let minor = vk::api_version_minor(api_version);
+    (major, minor) >= (1, 2) || extension_present
+}
+
+fn vulkan_memory_model_extension_required(api_version: u32, extension_present: bool) -> bool {
+    let major = vk::api_version_major(api_version);
+    let minor = vk::api_version_minor(api_version);
+    (major, minor) < (1, 2) && extension_present
+}
+
+fn image_format_list_available(api_version: u32, extension_present: bool) -> bool {
+    let major = vk::api_version_major(api_version);
+    let minor = vk::api_version_minor(api_version);
+    (major, minor) >= (1, 2) || extension_present
 }
 
 fn enabled_16bit_storage_features(
@@ -905,36 +936,61 @@ mod tests {
         }
     }
 
-    /// `robust_buffer_access2` enable logic (CTS finding F-112): the feature is
-    /// enabled iff the `VK_EXT_robustness2` extension is present AND the physical
-    /// device reports `robustBufferAccess2` as TRUE. Both must hold; either alone
-    /// keeps it disabled. Pure-logic test, no real GPU required.
     #[test]
-    fn vulkan_create_device_enables_robust_buffer_access2_when_extension_and_feature_present() {
-        for (extension_present, feature_supported, expected) in [
-            (true, true, true),
-            (true, false, false),
-            (false, true, false),
-            (false, false, false),
+    fn vulkan_memory_model_is_available_from_core_1_2_or_extension() {
+        assert!(vulkan_memory_model_available(vk::API_VERSION_1_2, false));
+        assert!(vulkan_memory_model_available(vk::API_VERSION_1_1, true));
+        assert!(!vulkan_memory_model_available(vk::API_VERSION_1_1, false));
+    }
+
+    #[test]
+    fn vulkan_memory_model_extension_is_required_only_before_core_1_2() {
+        assert!(!vulkan_memory_model_extension_required(
+            vk::API_VERSION_1_2,
+            true
+        ));
+        assert!(vulkan_memory_model_extension_required(
+            vk::API_VERSION_1_1,
+            true
+        ));
+        assert!(!vulkan_memory_model_extension_required(
+            vk::API_VERSION_1_1,
+            false
+        ));
+    }
+
+    #[test]
+    fn vulkan_memory_model_enablement_requires_available_reported_feature() {
+        for (api_version, extension_present, feature_supported, expected) in [
+            (vk::API_VERSION_1_2, false, true, true),
+            (vk::API_VERSION_1_2, false, false, false),
+            (vk::API_VERSION_1_1, true, true, true),
+            (vk::API_VERSION_1_1, true, false, false),
+            (vk::API_VERSION_1_1, false, true, false),
         ] {
-            let robustness2_feature_supported = if extension_present {
-                let features = vk::PhysicalDeviceRobustness2FeaturesEXT {
-                    robust_buffer_access2: if feature_supported {
+            let available = vulkan_memory_model_available(api_version, extension_present);
+            let features = if available {
+                vk::PhysicalDeviceVulkanMemoryModelFeatures {
+                    vulkan_memory_model: if feature_supported {
                         vk::TRUE
                     } else {
                         vk::FALSE
                     },
+                    vulkan_memory_model_device_scope: vk::TRUE,
                     ..Default::default()
-                };
-                features.robust_buffer_access2 == vk::TRUE
+                }
             } else {
-                false
+                vk::PhysicalDeviceVulkanMemoryModelFeatures::default()
             };
-            let robust_buffer_access2 = extension_present && robustness2_feature_supported;
+            let vulkan_memory_model = available && features.vulkan_memory_model == vk::TRUE;
+            let vulkan_memory_model_device_scope =
+                vulkan_memory_model && features.vulkan_memory_model_device_scope == vk::TRUE;
+
             assert_eq!(
-                robust_buffer_access2, expected,
-                "robust_buffer_access2 should be {expected} when extension={extension_present} feature={feature_supported}"
+                vulkan_memory_model, expected,
+                "vulkan_memory_model should be {expected} when api={api_version:#x} extension={extension_present} feature={feature_supported}"
             );
+            assert_eq!(vulkan_memory_model_device_scope, expected);
         }
     }
 
@@ -954,6 +1010,13 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn vulkan_image_format_list_is_available_from_core_1_2_or_extension() {
+        assert!(image_format_list_available(vk::API_VERSION_1_2, false));
+        assert!(image_format_list_available(vk::API_VERSION_1_1, true));
+        assert!(!image_format_list_available(vk::API_VERSION_1_1, false));
     }
 
     /// Device creation enables only the `VK_KHR_16bit_storage` sub-features

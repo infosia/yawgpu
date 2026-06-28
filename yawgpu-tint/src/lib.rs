@@ -237,6 +237,7 @@ mod imp {
             ov: *const RawOverrideValue,
             n_ov: usize,
             disable_robustness: bool,
+            use_vulkan_memory_model: bool,
             words_out: *mut *mut u32,
             n_words_out: *mut usize,
             err: *mut *mut c_char,
@@ -649,6 +650,7 @@ mod imp {
             bindings: &Bindings,
             overrides: &[OverrideValue],
             robust: bool,
+            use_vulkan_memory_model: bool,
         ) -> Result<Vec<u32>, String> {
             let ep = cstring(entry_point, "entry point")?;
             let raw_bindings_owned = bindings.as_raw();
@@ -666,6 +668,7 @@ mod imp {
                     raw_overrides.as_ptr(),
                     raw_overrides.len(),
                     !robust,
+                    use_vulkan_memory_model,
                     &mut words,
                     &mut len,
                     &mut err,
@@ -1749,6 +1752,7 @@ mod imp {
             _bindings: &Bindings,
             _overrides: &[OverrideValue],
             _robust: bool,
+            _use_vulkan_memory_model: bool,
         ) -> Result<Vec<u32>, String> {
             Err(UNAVAILABLE.to_owned())
         }
@@ -2454,8 +2458,17 @@ fn main() {
             .generate_msl("cs", &bindings, &[], 0, true, false, &[], 0xFFFF_FFFF)
             .unwrap();
         assert!(msl.source.contains("kernel"), "MSL:\n{}", msl.source);
-        let spirv = program.generate_spirv("cs", &bindings, &[], true).unwrap();
+        let spirv = program
+            .generate_spirv("cs", &bindings, &[], true, false)
+            .unwrap();
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
+        let spirv_with_vulkan_memory_model = program
+            .generate_spirv("cs", &bindings, &[], true, true)
+            .unwrap();
+        assert_eq!(
+            spirv_with_vulkan_memory_model.first().copied(),
+            Some(0x0723_0203)
+        );
         let glsl = program.generate_glsl("cs", &bindings, &[]).unwrap();
         assert!(glsl.contains("#version 310 es"), "GLSL:\n{glsl}");
     }
@@ -2473,7 +2486,7 @@ fn main() {
 "#;
         let program = Program::parse(wgsl, false, &[]).unwrap();
         let err = program
-            .generate_spirv("main", &Bindings::default(), &[], true)
+            .generate_spirv("main", &Bindings::default(), &[], true, false)
             .unwrap_err();
         assert!(!err.is_empty());
     }
@@ -2568,7 +2581,9 @@ fn cs() {
                 .generate_msl(ep, &bindings, &[], 0, true, false, &[], 0xFFFF_FFFF)
                 .unwrap();
             assert!(!msl.source.is_empty());
-            let spirv = program.generate_spirv(ep, &bindings, &[], true).unwrap();
+            let spirv = program
+                .generate_spirv(ep, &bindings, &[], true, false)
+                .unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));
         }
     }
@@ -2999,9 +3014,11 @@ fn cs() { _ = u.value; }
         assert_ne!(default_msl, remapped_msl);
 
         let default_spv = program
-            .generate_spirv("cs", &default_bindings, &[], true)
+            .generate_spirv("cs", &default_bindings, &[], true, false)
             .unwrap();
-        let remapped_spv = program.generate_spirv("cs", &remapped, &[], true).unwrap();
+        let remapped_spv = program
+            .generate_spirv("cs", &remapped, &[], true, false)
+            .unwrap();
         assert_ne!(default_spv, remapped_spv);
         assert!(spirv_has_binding_decoration(&remapped_spv, 7));
     }

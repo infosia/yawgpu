@@ -732,7 +732,7 @@ pub(crate) fn create_hal_render_pipeline(
             fragment_entry_name,
             metal_bindings,
             vertex_buffer_bindings,
-            hal_device.robust_buffer_access2(),
+            hal_device.vulkan_memory_model(),
         ) {
             Ok(selection) => selection,
             Err(message) => return (None, Some(message)),
@@ -756,7 +756,7 @@ pub(crate) fn create_hal_render_pipeline(
 /// Selects the HAL shader source for a render pipeline.
 // Render-stage source selection legitimately needs backend, descriptor, both
 // entry names, the Metal binding/vertex-buffer tables, and the
-// robustBufferAccess2 flag (F-112) — grouping them into a struct would only add
+// Vulkan Memory Model flag (F-112) — grouping them into a struct would only add
 // indirection for a single crate-private call path.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn select_render_shader_source(
@@ -766,7 +766,7 @@ pub(crate) fn select_render_shader_source(
     fragment_entry_name: Option<&str>,
     metal_bindings: &[MetalBufferBinding],
     vertex_buffer_bindings: &[MetalVertexBufferBinding],
-    unchecked_buffer_bounds: bool,
+    vulkan_memory_model: bool,
 ) -> Result<
     (
         HalShaderSource,
@@ -878,7 +878,7 @@ pub(crate) fn select_render_shader_source(
                 vertex_entry_name,
                 frontend::ShaderStage::Vertex,
                 &vertex_pipeline_constants,
-                unchecked_buffer_bounds,
+                vulkan_memory_model,
             )?;
             let fragment = match (fragment, fragment_entry_name) {
                 (Some(fragment), Some(fragment_entry_name)) => {
@@ -891,7 +891,7 @@ pub(crate) fn select_render_shader_source(
                         fragment_pipeline_constants.as_ref().ok_or_else(|| {
                             "render pipeline fragment constants were not resolved".to_owned()
                         })?,
-                        unchecked_buffer_bounds,
+                        vulkan_memory_model,
                     )?)
                 }
                 (None, None) => None,

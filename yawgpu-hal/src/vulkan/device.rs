@@ -12,11 +12,6 @@ pub(super) struct VulkanDeviceInner {
     pub(super) depth_clip_control: bool,
     /// Whether the `samplerAnisotropy` device feature was enabled at device creation.
     pub(super) sampler_anisotropy: bool,
-    /// Whether `VK_EXT_robustness2` / `robustBufferAccess2` was enabled at device
-    /// creation. When true, storage-buffer accesses are bounds-checked in
-    /// hardware, so the SPIR-V `buffer` bounds policy can be `Unchecked` rather
-    /// than the software `Restrict` clamp (CTS finding F-112).
-    pub(super) robust_buffer_access2: bool,
     /// Whether `VK_EXT_shader_demote_to_helper_invocation` /
     /// `shaderDemoteToHelperInvocation` was enabled at device creation. When
     /// true, SPIR-V `OpDemoteToHelperInvocation` (which naga emits for WGSL
@@ -25,6 +20,10 @@ pub(super) struct VulkanDeviceInner {
     pub(super) shader_demote_to_helper_invocation: bool,
     /// Whether `VK_KHR_shader_float16_int8` / `shaderFloat16` was enabled.
     pub(super) shader_float16: bool,
+    /// Whether `VK_KHR_vulkan_memory_model` / `vulkanMemoryModel` was enabled.
+    pub(super) vulkan_memory_model: bool,
+    /// Whether `VkImageFormatListCreateInfo` is available for mutable image views.
+    pub(super) image_format_list: bool,
     /// Whether `VK_KHR_16bit_storage` / `storageBuffer16BitAccess` was enabled.
     pub(super) storage_buffer16_bit_access: bool,
     /// Whether `VK_KHR_16bit_storage` / `uniformAndStorageBuffer16BitAccess` was enabled.
@@ -49,6 +48,8 @@ impl fmt::Debug for VulkanDeviceInner {
                 &self.shader_demote_to_helper_invocation,
             )
             .field("shader_float16", &self.shader_float16)
+            .field("vulkan_memory_model", &self.vulkan_memory_model)
+            .field("image_format_list", &self.image_format_list)
             .field(
                 "storage_buffer16_bit_access",
                 &self.storage_buffer16_bit_access,
@@ -91,12 +92,11 @@ impl VulkanDevice {
         &self.queue
     }
 
-    /// Returns true when `VK_EXT_robustness2` / `robustBufferAccess2` was enabled
-    /// at device creation. When true, callers may emit SPIR-V with an `Unchecked`
-    /// buffer bounds policy and rely on hardware robustness (CTS finding F-112).
+    /// Returns true when `VK_KHR_vulkan_memory_model` / `vulkanMemoryModel` was
+    /// enabled at device creation.
     #[must_use]
-    pub fn robust_buffer_access2(&self) -> bool {
-        self.inner.robust_buffer_access2
+    pub fn vulkan_memory_model(&self) -> bool {
+        self.inner.vulkan_memory_model
     }
 
     /// Allocates a buffer of the given size on this device.

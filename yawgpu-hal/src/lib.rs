@@ -417,21 +417,15 @@ impl HalDevice {
         }
     }
 
-    /// Returns true when `VK_EXT_robustness2` / `robustBufferAccess2` was enabled
-    /// at device creation (Vulkan only).
-    ///
-    /// When true, yawgpu-core emits SPIR-V with an `Unchecked` storage-buffer
-    /// bounds policy and relies on hardware robustness, because the software
-    /// `Restrict` clamp breaks workgroup-atomic read-read coherence on the NVIDIA
-    /// driver (CTS finding F-112). All non-Vulkan backends (Noop, Metal, GLES)
-    /// return `false`, keeping the software `Restrict` clamp.
+    /// Returns true when `VK_KHR_vulkan_memory_model` / `vulkanMemoryModel` was
+    /// enabled at device creation (Vulkan only).
     #[must_use]
-    pub fn robust_buffer_access2(&self) -> bool {
+    pub fn vulkan_memory_model(&self) -> bool {
         match self {
             #[cfg(feature = "noop")]
             Self::Noop(_) => false,
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(device) => device.robust_buffer_access2(),
+            Self::Vulkan(device) => device.vulkan_memory_model(),
             #[cfg(feature = "metal")]
             Self::Metal(_) => false,
             #[cfg(feature = "gles")]
@@ -1171,10 +1165,10 @@ mod tests {
     }
 
     #[test]
-    fn hal_device_robust_buffer_access2_noop_returns_false() -> Result<(), HalError> {
+    fn hal_device_vulkan_memory_model_noop_returns_false() -> Result<(), HalError> {
         let device = noop_device()?;
 
-        assert!(!device.robust_buffer_access2());
+        assert!(!device.vulkan_memory_model());
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 use super::*;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
-use crate::{HalTextureAspect, HalTextureViewDimension};
+use crate::{HalTextureAspect, HalTextureDimension, HalTextureViewDimension};
 
 /// Stores vulkan compute pipeline data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -1269,6 +1269,12 @@ enum DescriptorInfo {
     Image(usize),
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DescriptorImageView {
+    view: vk::ImageView,
+    owned: bool,
+}
+
 struct DescriptorUpdateScratch<'a> {
     device: &'a ash::Device,
     buffer_infos: &'a mut Vec<vk::DescriptorBufferInfo>,
@@ -1324,11 +1330,13 @@ fn descriptor_info(
             let HalTexture::Vulkan(texture) = &bound.texture else {
                 return Err(shader_error("descriptor texture is not Vulkan-backed"));
             };
-            let image_view = create_sampled_texture_image_view(scratch.device, texture, bound)?;
-            scratch.image_views.push(image_view);
+            let image_view = create_storage_texture_image_view(scratch.device, texture, bound)?;
+            if image_view.owned {
+                scratch.image_views.push(image_view.view);
+            }
             scratch.image_infos.push(
                 vk::DescriptorImageInfo::default()
-                    .image_view(image_view)
+                    .image_view(image_view.view)
                     .image_layout(vk::ImageLayout::GENERAL),
             );
             Ok(DescriptorInfo::Image(scratch.image_infos.len() - 1))
@@ -1376,6 +1384,94 @@ fn create_sampled_texture_image_view(
         .subresource_range(sampled_texture_subresource_range(bound));
     unsafe { device.create_image_view(&view_info, None) }
         .map_err(|_| texture_error("sampled texture view creation failed"))
+}
+
+fn create_storage_texture_image_view(
+    device: &ash::Device,
+    texture: &VulkanTexture,
+    bound: &HalBoundTexture,
+) -> Result<DescriptorImageView, HalError> {
+    let inner = texture.inner()?;
+    let view_type = sampled_texture_view_type(bound.dimension);
+    let subresource_range = sampled_texture_subresource_range(bound);
+    if storage_texture_uses_cached_bgra8_view(texture, inner, bound, view_type, subresource_range) {
+        return Ok(DescriptorImageView {
+            view: inner.bgra8_storage_view,
+            owned: false,
+        });
+    }
+
+    let view_format = storage_texture_view_format(bound.format);
+    let (format, _) = map_texture_format(view_format)?;
+    let view_info = vk::ImageViewCreateInfo::default()
+        .image(inner.image)
+        .view_type(view_type)
+        .format(format)
+        .subresource_range(subresource_range);
+    let view = unsafe { device.create_image_view(&view_info, None) }
+        .map_err(|_| texture_error("storage texture view creation failed"))?;
+    Ok(DescriptorImageView { view, owned: true })
+}
+
+fn storage_texture_uses_cached_bgra8_view(
+    texture: &VulkanTexture,
+    inner: &VulkanTextureInner,
+    bound: &HalBoundTexture,
+    view_type: vk::ImageViewType,
+    subresource_range: vk::ImageSubresourceRange,
+) -> bool {
+    storage_texture_can_use_cached_bgra8_view(
+        bound.format,
+        inner.bgra8_storage_view,
+        view_type,
+        default_texture_image_view_type(texture),
+        subresource_range,
+        color_subresource_range(inner.mip_level_count, inner.array_layers),
+    )
+}
+
+fn storage_texture_can_use_cached_bgra8_view(
+    bound_format: HalTextureFormat,
+    cached_view: vk::ImageView,
+    view_type: vk::ImageViewType,
+    default_view_type: vk::ImageViewType,
+    subresource_range: vk::ImageSubresourceRange,
+    canonical_range: vk::ImageSubresourceRange,
+) -> bool {
+    bound_format == HalTextureFormat::Bgra8Unorm
+        && cached_view != vk::ImageView::null()
+        && view_type == default_view_type
+        && image_subresource_ranges_equal(subresource_range, canonical_range)
+}
+
+fn storage_texture_view_format(format: HalTextureFormat) -> HalTextureFormat {
+    if format == HalTextureFormat::Bgra8Unorm {
+        HalTextureFormat::Rgba8Unorm
+    } else {
+        format
+    }
+}
+
+fn default_texture_image_view_type(texture: &VulkanTexture) -> vk::ImageViewType {
+    match texture.dimension {
+        HalTextureDimension::D1 => vk::ImageViewType::TYPE_1D,
+        HalTextureDimension::D2 if texture.depth_or_array_layers > 1 => {
+            vk::ImageViewType::TYPE_2D_ARRAY
+        }
+        HalTextureDimension::D2 => vk::ImageViewType::TYPE_2D,
+        HalTextureDimension::D3 => vk::ImageViewType::TYPE_3D,
+    }
+}
+
+fn image_subresource_ranges_equal(
+    lhs: vk::ImageSubresourceRange,
+    rhs: vk::ImageSubresourceRange,
+) -> bool {
+    lhs.aspect_mask == rhs.aspect_mask
+        && lhs.base_mip_level == rhs.base_mip_level
+        && lhs.level_count == rhs.level_count
+        && lhs.base_array_layer == rhs.base_array_layer
+        && lhs.layer_count == rhs.layer_count
 }
 
 /// Selects the `HalTextureFormat` whose `VkFormat` a sampled image view must
@@ -1661,6 +1757,7 @@ pub(super) fn descriptor_buffer_info(
 mod tests {
     use super::*;
     use crate::{noop, HalTextureDescriptor, HalTextureDimension, HalTextureUsage};
+    use ash::vk::Handle;
 
     fn dummy_bound_texture(format: HalTextureFormat, aspect: HalTextureAspect) -> HalBoundTexture {
         let device = noop::NoopDevice::new();
@@ -1796,5 +1893,71 @@ mod tests {
             sampled_texture_view_format(HalTextureFormat::Stencil8, HalTextureFormat::Stencil8),
             HalTextureFormat::Stencil8
         );
+    }
+
+    #[test]
+    fn storage_view_format_remaps_bgra8unorm_to_rgba8unorm() {
+        assert_eq!(
+            storage_texture_view_format(HalTextureFormat::Bgra8Unorm),
+            HalTextureFormat::Rgba8Unorm
+        );
+        assert_eq!(
+            storage_texture_view_format(HalTextureFormat::Rgba8Unorm),
+            HalTextureFormat::Rgba8Unorm
+        );
+        assert_eq!(
+            storage_texture_view_format(HalTextureFormat::Bgra8UnormSrgb),
+            HalTextureFormat::Bgra8UnormSrgb
+        );
+    }
+
+    #[test]
+    fn cached_bgra8_storage_view_requires_canonical_range_and_view_type() {
+        let cached = vk::ImageView::from_raw(1);
+        let canonical = color_subresource_range(2, 3);
+
+        assert!(storage_texture_can_use_cached_bgra8_view(
+            HalTextureFormat::Bgra8Unorm,
+            cached,
+            vk::ImageViewType::TYPE_2D_ARRAY,
+            vk::ImageViewType::TYPE_2D_ARRAY,
+            canonical,
+            canonical,
+        ));
+        assert!(!storage_texture_can_use_cached_bgra8_view(
+            HalTextureFormat::Rgba8Unorm,
+            cached,
+            vk::ImageViewType::TYPE_2D_ARRAY,
+            vk::ImageViewType::TYPE_2D_ARRAY,
+            canonical,
+            canonical,
+        ));
+        assert!(!storage_texture_can_use_cached_bgra8_view(
+            HalTextureFormat::Bgra8Unorm,
+            vk::ImageView::null(),
+            vk::ImageViewType::TYPE_2D_ARRAY,
+            vk::ImageViewType::TYPE_2D_ARRAY,
+            canonical,
+            canonical,
+        ));
+        assert!(!storage_texture_can_use_cached_bgra8_view(
+            HalTextureFormat::Bgra8Unorm,
+            cached,
+            vk::ImageViewType::CUBE,
+            vk::ImageViewType::TYPE_2D_ARRAY,
+            canonical,
+            canonical,
+        ));
+
+        let mut subrange = canonical;
+        subrange.base_mip_level = 1;
+        assert!(!storage_texture_can_use_cached_bgra8_view(
+            HalTextureFormat::Bgra8Unorm,
+            cached,
+            vk::ImageViewType::TYPE_2D_ARRAY,
+            vk::ImageViewType::TYPE_2D_ARRAY,
+            subrange,
+            canonical,
+        ));
     }
 }
