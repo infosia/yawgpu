@@ -372,6 +372,26 @@ advertised on Metal (native `half`) and on Vulkan when the device exposes
 works in storage/uniform buffers, not just arithmetic); it is not available
 on the Tier-2 GLES backend.
 
+### Native shader passthrough (vendor, opt-in, unsafe)
+
+For engines that ship **precompiled native shaders**, the opt-in
+`shader-passthrough` cargo feature (default **off**) lets you create a
+`WGPUShaderModule` directly from raw **SPIR-V** (Vulkan) or raw **MSL** (Metal),
+bypassing WGSL and Tint entirely:
+
+- SPIR-V uses the standard `WGPUShaderSourceSPIRV` chain (Vulkan only); MSL uses
+  the vendor `YaWGPUShaderSourceMSL` chain (Metal only). A module is rejected if
+  used on the other backend.
+- This is a **vendor escape hatch that leaves the WebGPU spec behind** — the
+  bytes reach the driver verbatim with no validation or reflection, so it is
+  inherently **unsafe** and the caller owns correctness. It is never exercised by
+  the CTS.
+- Because there is no reflection, an **explicit pipeline layout is required**
+  (no `layout: "auto"`), binding slots are taken from that layout, and the
+  caller's shader must match yawgpu's deterministic slot ABI (documented in
+  [`yawgpu.h`](yawgpu/ffi/webgpu-headers/yawgpu.h)). Compute and render
+  (vertex + fragment) pipelines are supported on both Tier-1 backends.
+
 ## Quality
 
 - **Validation-tested**: the WebGPU validation rules are exercised by an

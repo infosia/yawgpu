@@ -140,6 +140,35 @@ typedef struct YaWGPUShaderSourceMSL {
     YaWGPUMslEntryPoint const* entryPoints;
 } YaWGPUShaderSourceMSL;
 
+/**
+ * Metal binding-slot ABI for passthrough MSL.
+ *
+ * Shader passthrough requires an explicit pipeline layout. yawgpu derives Metal
+ * argument indices from that layout, never from shader reflection, so the MSL
+ * source must use the exact `[[buffer(n)]]`, `[[texture(n)]]`, and
+ * `[[sampler(n)]]` indices described here.
+ *
+ * For compute pipelines, yawgpu gathers every binding layout entry from every
+ * bind group layout, sorts entries by `(group, binding)`, then assigns
+ * zero-based counters independently by resource kind in that order:
+ * buffers use `[[buffer(0)]]`, `[[buffer(1)]]`, ...; sampled and storage
+ * textures use `[[texture(0)]]`, ...; samplers use `[[sampler(0)]]`, ....
+ * An external texture consumes two consecutive texture slots plus one buffer
+ * slot for its params.
+ *
+ * For render pipelines, vertex and fragment stages each have their own
+ * independent buffer/texture/sampler counters. Entries are still considered in
+ * `(group, binding)` order, but only entries visible to a stage consume slots
+ * in that stage's function. For example, a buffer visible only to fragment can
+ * be `[[buffer(0)]]` in the fragment entry point even when the vertex entry
+ * point also has its own `[[buffer(0)]]`.
+ *
+ * Example compute layout:
+ * - group 0 binding 0: storage buffer  -> `device T* data [[buffer(0)]]`
+ * - group 0 binding 1: sampled texture -> `texture2d<float> tex [[texture(0)]]`
+ * - group 0 binding 2: sampler         -> `sampler samp [[sampler(0)]]`
+ */
+
 /** Default initializer for @ref YaWGPUMslEntryPoint. */
 #define YAWGPU_MSL_ENTRY_POINT_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUMslEntryPoint, { \
     /*.name=*/WGPU_STRING_VIEW_INIT _wgpu_COMMA \

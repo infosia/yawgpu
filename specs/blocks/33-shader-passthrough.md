@@ -247,12 +247,13 @@ buffers ABI shape; per-stage bindings and vertex attributes are later work.
   branch + mismatch (SP3) + auto-layout reject; conv routing of standard
   `WGPUShaderSourceSPIRV` (SP1); real-GPU `e2e_vulkan_shader_passthrough.rs`
   reusing the existing `compute_spirv()` fixture (SP2).
-- **B3** **Render pipelines** (vertex+fragment) for both backends:
-  `HalShaderSource::MslStages` / per-stage `SpirV`; e2e triangle→texture readback
-  on Metal and Vulkan.
-- **B4** **Docs + edge validation**: the Metal binding-index algorithm + worked
-  MSL example in `yawgpu.h`; README "Shaders" note (vendor, off-by-default,
-  unsafe); reject-matrix unit tests; spec rules ☑.
+- **B3** ✅ **DONE** (split **B3a** Metal MSL render `f8debc3` + **B3b** Vulkan
+  SPIR-V render `39317ff`) **Render pipelines** (vertex+fragment) for both
+  backends: `HalShaderSource::MslStages` / `SpirVStages`; e2e triangle→texture
+  readback on Metal and Vulkan. (No-bindings/no-vertex-buffers ABI shape.)
+- **B4** ✅ **DONE** **Docs**: the Metal binding-slot ABI algorithm + worked MSL
+  example in `yawgpu.h`; README "Shaders" → "Native shader passthrough" note
+  (vendor, off-by-default, unsafe); spec rules ☑.
 - **B5** **Phase Review** (fresh no-context subagent over the cumulative diff;
   fix CRITICAL/MAJOR before COMPLETE).
 
