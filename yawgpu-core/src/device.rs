@@ -357,6 +357,13 @@ impl Device {
                 Ok(inner) => (inner, None),
                 Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
             },
+            #[cfg(feature = "shader-passthrough")]
+            ShaderModuleSource::MslPassthrough { source, entries } => {
+                match ShaderModule::from_msl(source, entries) {
+                    Ok(inner) => (inner, None),
+                    Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
+                }
+            }
             ShaderModuleSource::Invalid(message) => {
                 (ShaderModuleSourceKind::Invalid, Some(message))
             }

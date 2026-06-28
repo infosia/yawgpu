@@ -202,7 +202,7 @@ pub(crate) enum MslVertexFormat {
 
 /// Enumerates shader stage values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ShaderStage {
+pub enum ShaderStage {
     /// Vertex variant.
     Vertex,
     /// Fragment variant.
@@ -469,4 +469,16 @@ pub(crate) enum ReflectedOverrideValue {
     Number(f64),
     /// Bool variant.
     Bool(bool),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shader_stage_public_variants_are_distinct() {
+        assert_ne!(ShaderStage::Vertex, ShaderStage::Fragment);
+        assert_ne!(ShaderStage::Fragment, ShaderStage::Compute);
+        assert_eq!(format!("{:?}", ShaderStage::Compute), "Compute");
+    }
 }

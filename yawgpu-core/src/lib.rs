@@ -85,8 +85,12 @@ pub use sampler::{
     AddressMode, CompareFunction, FilterMode, MipmapFilterMode, ResolvedSamplerDescriptor, Sampler,
     SamplerDescriptor,
 };
+#[cfg(feature = "shader-passthrough")]
+pub use shader::MslEntryPoint;
 pub use shader::{CompilationMessage, CompilationSeverity, ShaderModule, ShaderModuleSource};
 pub use shader_tint::ReflectedModule;
+#[cfg(feature = "shader-passthrough")]
+pub use shader_types::ShaderStage;
 pub use texture::{Texture, TextureDescriptor, TextureDimension, TextureUsage};
 pub use texture_view::{
     ComponentSwizzle, TextureAspect, TextureComponentSwizzle, TextureView, TextureViewDescriptor,

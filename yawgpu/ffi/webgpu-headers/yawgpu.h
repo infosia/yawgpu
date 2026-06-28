@@ -17,6 +17,8 @@
  * \par Sections
  * - **Instance backend select** (always available): explicit backend
  *   pick-list, chained into `WGPUInstanceDescriptor`.
+ * - **Shader passthrough** (compile-time macro): raw native shader source
+ *   chained into `WGPUShaderModuleDescriptor`.
  * - **External texture creation** (always available): vendor creation API for
  *   WebGPU external textures.
  *
@@ -97,6 +99,61 @@ typedef struct YaWGPUInstanceBackendSelect {
     /** One of the `YAWGPU_INSTANCE_BACKEND_*` constants. */
     uint32_t backend;
 } YaWGPUInstanceBackendSelect;
+
+/** @} */
+
+/**
+ * \defgroup ShaderPassthrough Shader Passthrough
+ * \brief Vendor shader-source chain entries for native shader code.
+ *
+ * @{
+ */
+
+/** Defined when yawgpu's shader-passthrough declarations are available. */
+#define YAWGPU_HAS_SHADER_PASSTHROUGH 1
+
+/**
+ * `WGPUSType` tag identifying a @ref YaWGPUShaderSourceMSL in a
+ * chained-struct list.
+ */
+#define YAWGPU_STYPE_SHADER_SOURCE_MSL ((WGPUSType)0x70000004u)
+
+/** Entry point metadata for a raw MSL shader module. */
+typedef struct YaWGPUMslEntryPoint {
+    /** Entry point function name. */
+    WGPUStringView name;
+    /** Exactly one of Vertex, Fragment, or Compute. */
+    WGPUShaderStage stage;
+    /** Compute workgroup size; ignored for non-compute entries. */
+    uint32_t workgroupSize[3];
+} YaWGPUMslEntryPoint;
+
+/** Raw MSL shader source chained onto `WGPUShaderModuleDescriptor`. */
+typedef struct YaWGPUShaderSourceMSL {
+    /** Chain header. `sType` must be @ref YAWGPU_STYPE_SHADER_SOURCE_MSL. */
+    WGPUChainedStruct chain;
+    /** MSL source code. */
+    WGPUStringView code;
+    /** Number of entries pointed to by `entryPoints`. */
+    size_t entryPointCount;
+    /** Caller-provided entry point metadata. */
+    YaWGPUMslEntryPoint const* entryPoints;
+} YaWGPUShaderSourceMSL;
+
+/** Default initializer for @ref YaWGPUMslEntryPoint. */
+#define YAWGPU_MSL_ENTRY_POINT_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUMslEntryPoint, { \
+    /*.name=*/WGPU_STRING_VIEW_INIT _wgpu_COMMA \
+    /*.stage=*/WGPUShaderStage_None _wgpu_COMMA \
+    /*.workgroupSize=*/{0 _wgpu_COMMA 0 _wgpu_COMMA 0} _wgpu_COMMA \
+})
+
+/** Default initializer for @ref YaWGPUShaderSourceMSL. */
+#define YAWGPU_SHADER_SOURCE_MSL_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUShaderSourceMSL, { \
+    /*.chain=*/{NULL _wgpu_COMMA YAWGPU_STYPE_SHADER_SOURCE_MSL} _wgpu_COMMA \
+    /*.code=*/WGPU_STRING_VIEW_INIT _wgpu_COMMA \
+    /*.entryPointCount=*/0 _wgpu_COMMA \
+    /*.entryPoints=*/NULL _wgpu_COMMA \
+})
 
 /** @} */
 

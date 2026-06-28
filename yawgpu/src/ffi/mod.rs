@@ -80,6 +80,8 @@ use crate::{
     YaWGPUGlesContextBackend, YAWGPU_GLES_CONTEXT_BACKEND_DEFAULT, YAWGPU_GLES_CONTEXT_BACKEND_EGL,
     YAWGPU_GLES_CONTEXT_BACKEND_WGL, YAWGPU_STYPE_GLES_CONTEXT_BACKEND,
 };
+#[cfg(test)]
+use crate::{YaWGPUMslEntryPoint, YaWGPUShaderSourceMSL, YAWGPU_STYPE_SHADER_SOURCE_MSL};
 use std::collections::{BTreeMap, HashMap};
 use std::os::raw::c_void;
 use std::sync::{Arc, Mutex, Weak};
@@ -2616,6 +2618,153 @@ mod tests {
         let adapter = request_noop_adapter(instance);
         let device = request_noop_device(instance, adapter);
         (instance, adapter, device)
+    }
+
+    fn msl_shader_descriptor(
+        source: &mut YaWGPUShaderSourceMSL,
+    ) -> native::WGPUShaderModuleDescriptor {
+        native::WGPUShaderModuleDescriptor {
+            nextInChain: (&mut source.chain) as *mut native::WGPUChainedStruct,
+            label: empty_string_view(),
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn wgpuDeviceCreateShaderModule_msl_passthrough_noop_returns_non_error_module() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let entry_name = b"cs";
+            let code = b"kernel void cs() {}";
+            let entry = YaWGPUMslEntryPoint {
+                name: string_view(entry_name),
+                stage: native::WGPUShaderStage_Compute,
+                workgroupSize: [1, 1, 1],
+            };
+            let mut source = YaWGPUShaderSourceMSL {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: YAWGPU_STYPE_SHADER_SOURCE_MSL,
+                },
+                code: string_view(code),
+                entryPointCount: 1,
+                entryPoints: &entry,
+            };
+            let descriptor = msl_shader_descriptor(&mut source);
+
+            let module = wgpuDeviceCreateShaderModule(device, &descriptor);
+
+            assert!(!module.is_null());
+            let module_impl = borrow_handle(module, "WGPUShaderModule");
+            assert!(!module_impl._core.is_error());
+            wgpuShaderModuleRelease(module);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn wgpuDeviceCreateShaderModule_msl_passthrough_rejects_multi_stage_entry() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let entry = YaWGPUMslEntryPoint {
+                name: string_view(b"cs"),
+                stage: native::WGPUShaderStage_Vertex | native::WGPUShaderStage_Compute,
+                workgroupSize: [1, 1, 1],
+            };
+            let mut source = YaWGPUShaderSourceMSL {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: YAWGPU_STYPE_SHADER_SOURCE_MSL,
+                },
+                code: string_view(b"kernel void cs() {}"),
+                entryPointCount: 1,
+                entryPoints: &entry,
+            };
+            let descriptor = msl_shader_descriptor(&mut source);
+
+            let module = wgpuDeviceCreateShaderModule(device, &descriptor);
+
+            assert!(!module.is_null());
+            let module_impl = borrow_handle(module, "WGPUShaderModule");
+            assert!(module_impl._core.is_error());
+            assert_eq!(
+                module_impl._core.diagnostic(),
+                Some("MSL entry point stage must be exactly one shader stage")
+            );
+            wgpuShaderModuleRelease(module);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn wgpuDeviceCreateShaderModule_msl_passthrough_rejects_zero_stage_entry() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let entry = YaWGPUMslEntryPoint {
+                name: string_view(b"cs"),
+                stage: native::WGPUShaderStage_None,
+                workgroupSize: [1, 1, 1],
+            };
+            let mut source = YaWGPUShaderSourceMSL {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: YAWGPU_STYPE_SHADER_SOURCE_MSL,
+                },
+                code: string_view(b"kernel void cs() {}"),
+                entryPointCount: 1,
+                entryPoints: &entry,
+            };
+            let descriptor = msl_shader_descriptor(&mut source);
+
+            let module = wgpuDeviceCreateShaderModule(device, &descriptor);
+
+            assert!(!module.is_null());
+            let module_impl = borrow_handle(module, "WGPUShaderModule");
+            assert!(module_impl._core.is_error());
+            assert_eq!(
+                module_impl._core.diagnostic(),
+                Some("MSL entry point stage must be exactly one shader stage")
+            );
+            wgpuShaderModuleRelease(module);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[cfg(not(feature = "shader-passthrough"))]
+    #[test]
+    fn wgpuDeviceCreateShaderModule_msl_passthrough_feature_off_returns_error_module() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let entry = YaWGPUMslEntryPoint {
+                name: string_view(b"cs"),
+                stage: native::WGPUShaderStage_Compute,
+                workgroupSize: [1, 1, 1],
+            };
+            let mut source = YaWGPUShaderSourceMSL {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: YAWGPU_STYPE_SHADER_SOURCE_MSL,
+                },
+                code: string_view(b"kernel void cs() {}"),
+                entryPointCount: 1,
+                entryPoints: &entry,
+            };
+            let descriptor = msl_shader_descriptor(&mut source);
+
+            let module = wgpuDeviceCreateShaderModule(device, &descriptor);
+
+            assert!(!module.is_null());
+            let module_impl = borrow_handle(module, "WGPUShaderModule");
+            assert!(module_impl._core.is_error());
+            assert_eq!(
+                module_impl._core.diagnostic(),
+                Some("shader passthrough not enabled")
+            );
+            wgpuShaderModuleRelease(module);
+            release_handles(instance, adapter, device);
+        }
     }
 
     #[test]
