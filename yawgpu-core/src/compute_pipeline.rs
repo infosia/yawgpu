@@ -16,6 +16,8 @@ use crate::pipeline_id::next_pipeline_id;
 use crate::pipeline_layout::*;
 use crate::shader::*;
 use crate::texture_view::*;
+#[cfg(feature = "shader-passthrough")]
+use crate::ShaderStage;
 
 /// Describes compute pipeline descriptor.
 #[derive(Debug, Clone)]
@@ -155,7 +157,13 @@ impl ComputePipeline {
         let resolved = if is_error {
             None
         } else {
-            resolve_compute_pipeline_descriptor(&descriptor, limits, features, pipeline_id).ok()
+            resolve_compute_pipeline_descriptor_for_source(
+                &descriptor,
+                limits,
+                features,
+                pipeline_id,
+            )
+            .ok()
         };
         let (entry_name, bindings, workgroup, bind_group_layouts) = resolved.unwrap_or_else(|| {
             (
@@ -233,6 +241,19 @@ pub(crate) type ResolvedPipelineParts = (
     Vec<Arc<BindGroupLayout>>,
 );
 
+fn resolve_compute_pipeline_descriptor_for_source(
+    descriptor: &ComputePipelineDescriptor,
+    limits: Limits,
+    features: &FeatureSet,
+    pipeline_id: u64,
+) -> Result<ResolvedPipelineParts, String> {
+    #[cfg(feature = "shader-passthrough")]
+    if let Some((_source, entries)) = descriptor.shader_module.msl_passthrough() {
+        return resolve_msl_passthrough_compute_pipeline_descriptor(descriptor, entries);
+    }
+    resolve_compute_pipeline_descriptor(descriptor, limits, features, pipeline_id)
+}
+
 /// Creates HAL compute pipeline and reports validation errors through the owning device.
 pub(crate) fn create_hal_compute_pipeline(
     hal_device: Option<&HalDevice>,
@@ -296,6 +317,20 @@ pub(crate) fn select_compute_shader_source(
     let pipeline_constants = pipeline_constant_map(constants);
     match backend {
         HalBackend::Metal => {
+            #[cfg(feature = "shader-passthrough")]
+            if let Some((source, _entries)) = shader_module.msl_passthrough() {
+                if !constants.is_empty() {
+                    return Err(
+                        "pipeline-overridable constants are not supported with shader passthrough"
+                            .to_owned(),
+                    );
+                }
+                return Ok((
+                    HalShaderSource::Msl(source.to_owned()),
+                    entry_name.to_owned(),
+                    Vec::new(),
+                ));
+            }
             let module = shader_module
                 .reflected()
                 .ok_or_else(|| "compute pipeline requires a reflected shader module".to_owned())?;
@@ -318,6 +353,10 @@ pub(crate) fn select_compute_shader_source(
             ))
         }
         HalBackend::Vulkan => {
+            #[cfg(feature = "shader-passthrough")]
+            if shader_module.msl_passthrough().is_some() {
+                return Err("MSL passthrough shader requires the Metal backend".to_owned());
+            }
             if let Some(message) = vulkan_external_texture_rejection(metal_bindings) {
                 return Err(message);
             }
@@ -790,7 +829,7 @@ pub(crate) fn validate_compute_pipeline_descriptor(
     limits: Limits,
     features: &FeatureSet,
 ) -> Option<String> {
-    resolve_compute_pipeline_descriptor(descriptor, limits, features, 0).err()
+    resolve_compute_pipeline_descriptor_for_source(descriptor, limits, features, 0).err()
 }
 
 /// Records resolve into the command stream.
@@ -820,6 +859,59 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
         pipeline_id,
     )?;
     Ok((entry_name, bindings, Some(workgroup), bind_group_layouts))
+}
+
+/// Records resolve into the command stream for raw MSL passthrough compute.
+#[cfg(feature = "shader-passthrough")]
+pub(crate) fn resolve_msl_passthrough_compute_pipeline_descriptor(
+    descriptor: &ComputePipelineDescriptor,
+    entries: &[MslEntryPoint],
+) -> Result<ResolvedPipelineParts, String> {
+    if descriptor.shader_module.is_error() {
+        return Err("compute pipeline shader module must not be an error module".to_owned());
+    }
+    if !descriptor.constants.is_empty() {
+        return Err(
+            "pipeline-overridable constants are not supported with shader passthrough".to_owned(),
+        );
+    }
+    let ComputePipelineLayout::Explicit(layout) = &descriptor.layout else {
+        return Err("shader passthrough requires an explicit pipeline layout".to_owned());
+    };
+    if layout.is_error() {
+        return Err("compute pipeline layout must not be an error pipeline layout".to_owned());
+    }
+    let Some(entry_name) = descriptor
+        .entry_point
+        .as_deref()
+        .filter(|name| !name.is_empty())
+    else {
+        return Err(
+            "MSL passthrough compute entry point not found or missing workgroup size".to_owned(),
+        );
+    };
+    let Some(entry) = entries
+        .iter()
+        .find(|entry| entry.name == entry_name && entry.stage == ShaderStage::Compute)
+    else {
+        return Err(
+            "MSL passthrough compute entry point not found or missing workgroup size".to_owned(),
+        );
+    };
+    if entry.workgroup_size.contains(&0) {
+        return Err(
+            "MSL passthrough compute entry point not found or missing workgroup size".to_owned(),
+        );
+    }
+    Ok((
+        entry_name.to_owned(),
+        Vec::new(),
+        Some(ResolvedComputeWorkgroup {
+            size: entry.workgroup_size,
+            storage_size: 0,
+        }),
+        layout.bind_group_layouts().to_vec(),
+    ))
 }
 
 /// Records resolve into the command stream.
@@ -2282,6 +2374,164 @@ mod tests {
         );
         let bindings = metal_buffer_binding_map(&[layout]);
         assert_eq!(validate_metal_slot_ranges(&bindings), Ok(()));
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    fn msl_passthrough_module(device: &Device, entries: Vec<MslEntryPoint>) -> Arc<ShaderModule> {
+        Arc::new(
+            device.create_shader_module(ShaderModuleSource::MslPassthrough {
+                source: "kernel void cs() {}".to_owned(),
+                entries,
+            }),
+        )
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    fn msl_compute_entry(name: &str, workgroup_size: [u32; 3]) -> MslEntryPoint {
+        MslEntryPoint {
+            name: name.to_owned(),
+            stage: ShaderStage::Compute,
+            workgroup_size,
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    fn empty_pipeline_layout(device: &Device) -> Arc<PipelineLayout> {
+        Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: Vec::new(),
+            immediate_size: 0,
+            error: None,
+        }))
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    fn msl_passthrough_descriptor(
+        shader_module: Arc<ShaderModule>,
+        layout: ComputePipelineLayout,
+    ) -> ComputePipelineDescriptor {
+        ComputePipelineDescriptor {
+            layout,
+            shader_module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn msl_passthrough_compute_pipeline_builds_on_noop_with_explicit_layout() {
+        let device = noop_device();
+        let module = msl_passthrough_module(&device, vec![msl_compute_entry("cs", [4, 1, 1])]);
+        let layout = empty_pipeline_layout(&device);
+
+        let pipeline = device.create_compute_pipeline(msl_passthrough_descriptor(
+            module,
+            ComputePipelineLayout::Explicit(layout),
+        ));
+
+        assert!(!pipeline.is_error());
+        assert_eq!(pipeline.entry_name(), "cs");
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn select_compute_shader_source_rejects_msl_passthrough_on_vulkan() {
+        let device = noop_device();
+        let module = msl_passthrough_module(&device, vec![msl_compute_entry("cs", [1, 1, 1])]);
+
+        let err = select_compute_shader_source(HalBackend::Vulkan, &module, "cs", &[], &[], false)
+            .expect_err("MSL passthrough must reject Vulkan");
+
+        assert_eq!(err, "MSL passthrough shader requires the Metal backend");
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn msl_passthrough_compute_pipeline_rejects_auto_layout() {
+        let device = noop_device();
+        let module = msl_passthrough_module(&device, vec![msl_compute_entry("cs", [1, 1, 1])]);
+
+        let err = validate_compute_pipeline_descriptor(
+            &msl_passthrough_descriptor(module, ComputePipelineLayout::Auto),
+            device.limits(),
+            &FeatureSet::default(),
+        )
+        .expect("auto layout should fail");
+
+        assert_eq!(
+            err,
+            "shader passthrough requires an explicit pipeline layout"
+        );
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn msl_passthrough_compute_pipeline_requires_matching_compute_workgroup() {
+        let device = noop_device();
+        let layout = ComputePipelineLayout::Explicit(empty_pipeline_layout(&device));
+        let missing = msl_passthrough_module(
+            &device,
+            vec![MslEntryPoint {
+                name: "vs".to_owned(),
+                stage: ShaderStage::Vertex,
+                workgroup_size: [0, 0, 0],
+            }],
+        );
+
+        let err = validate_compute_pipeline_descriptor(
+            &msl_passthrough_descriptor(missing, layout.clone()),
+            device.limits(),
+            &FeatureSet::default(),
+        )
+        .expect("missing compute metadata should fail");
+        assert_eq!(
+            err,
+            "MSL passthrough compute entry point not found or missing workgroup size"
+        );
+
+        let zero = Arc::new(ShaderModule::new(
+            ShaderModuleSourceKind::MslPassthrough {
+                source: "kernel void cs() {}".to_owned(),
+                entries: vec![msl_compute_entry("cs", [1, 0, 1])],
+            },
+            None,
+        ));
+        let err = validate_compute_pipeline_descriptor(
+            &msl_passthrough_descriptor(zero, layout),
+            device.limits(),
+            &FeatureSet::default(),
+        )
+        .expect("zero workgroup metadata should fail");
+        assert_eq!(
+            err,
+            "MSL passthrough compute entry point not found or missing workgroup size"
+        );
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn msl_passthrough_compute_pipeline_rejects_pipeline_constants() {
+        let device = noop_device();
+        let module = msl_passthrough_module(&device, vec![msl_compute_entry("cs", [1, 1, 1])]);
+        let layout = ComputePipelineLayout::Explicit(empty_pipeline_layout(&device));
+        let mut descriptor = msl_passthrough_descriptor(module, layout);
+        descriptor.constants.push(PipelineConstant {
+            key: "x".to_owned(),
+            value: 1.0,
+        });
+
+        let err = validate_compute_pipeline_descriptor(
+            &descriptor,
+            device.limits(),
+            &FeatureSet::default(),
+        )
+        .expect("constants should fail");
+
+        assert_eq!(
+            err,
+            "pipeline-overridable constants are not supported with shader passthrough"
+        );
     }
 
     // ---- Regression A (F-078): explicit two-group compute pipeline must not error ----

@@ -46,6 +46,8 @@ pub const YAWGPU_GLES_CONTEXT_BACKEND_EGL: u32 = 1;
 pub const YAWGPU_GLES_CONTEXT_BACKEND_WGL: u32 = 2;
 /// SType value for `YaWGPUGlesContextBackend`.
 pub const YAWGPU_STYPE_GLES_CONTEXT_BACKEND: native::WGPUSType = 0x7000_0002;
+/// SType value for `YaWGPUShaderSourceMSL`.
+pub const YAWGPU_STYPE_SHADER_SOURCE_MSL: native::WGPUSType = 0x7000_0004;
 /// Constant value for yawgpu RGBA external textures.
 pub const YAWGPU_EXTERNAL_TEXTURE_FORMAT_RGBA: u32 = 0;
 /// Constant value for yawgpu NV12 external textures.
@@ -126,6 +128,34 @@ pub struct YaWGPUExtent2D {
     pub width: u32,
     /// Height.
     pub height: u32,
+}
+
+/// Entry point metadata for raw MSL shader source.
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct YaWGPUMslEntryPoint {
+    /// Entry point name.
+    pub name: native::WGPUStringView,
+    /// Exactly one `WGPUShaderStage_*` bit.
+    pub stage: native::WGPUShaderStage,
+    /// Compute workgroup size.
+    pub workgroupSize: [u32; 3],
+}
+
+/// Raw MSL shader source chained onto `WGPUShaderModuleDescriptor`.
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct YaWGPUShaderSourceMSL {
+    /// Extension chain.
+    pub chain: native::WGPUChainedStruct,
+    /// MSL source code.
+    pub code: native::WGPUStringView,
+    /// Number of entries pointed to by `entryPoints`.
+    pub entryPointCount: usize,
+    /// Caller-provided entry point metadata.
+    pub entryPoints: *const YaWGPUMslEntryPoint,
 }
 
 /// yawgpu external texture creation descriptor.

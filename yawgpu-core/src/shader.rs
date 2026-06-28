@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use crate::bind_group_layout::*;
 use crate::frontend;
+#[cfg(feature = "shader-passthrough")]
+use crate::ShaderStage;
 
 /// Stores one shader compilation message for compilation-info callbacks.
 #[derive(Clone, Debug)]
@@ -41,8 +43,28 @@ pub(crate) const SHADER_STAGE_COMPUTE: u64 = 4;
 pub enum ShaderModuleSource {
     /// Wgsl variant.
     Wgsl(String),
+    /// Raw MSL source and caller-provided entry metadata.
+    #[cfg(feature = "shader-passthrough")]
+    MslPassthrough {
+        /// MSL source code.
+        source: String,
+        /// Entry points declared by the caller.
+        entries: Vec<MslEntryPoint>,
+    },
     /// Invalid variant.
     Invalid(String),
+}
+
+/// Describes one entry point in a raw MSL shader module.
+#[cfg(feature = "shader-passthrough")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MslEntryPoint {
+    /// Entry point function name.
+    pub name: String,
+    /// Shader stage for this entry point.
+    pub stage: ShaderStage,
+    /// Compute workgroup size for compute entries.
+    pub workgroup_size: [u32; 3],
 }
 
 /// Stores shader module data used by validation and backend submission.
@@ -69,6 +91,14 @@ pub(crate) enum ShaderModuleSourceKind {
         _source: String,
         /// Reflected variant.
         reflected: Box<frontend::ReflectedModule>,
+    },
+    /// Raw MSL source and caller-provided entry metadata.
+    #[cfg(feature = "shader-passthrough")]
+    MslPassthrough {
+        /// MSL source code.
+        source: String,
+        /// Entry points declared by the caller.
+        entries: Vec<MslEntryPoint>,
     },
     /// Invalid variant.
     Invalid,
@@ -103,6 +133,24 @@ impl ShaderModule {
         })
     }
 
+    /// Constructs this object from raw MSL passthrough source.
+    #[cfg(feature = "shader-passthrough")]
+    pub(crate) fn from_msl(
+        source: String,
+        entries: Vec<MslEntryPoint>,
+    ) -> Result<ShaderModuleSourceKind, String> {
+        if source.is_empty() {
+            return Err("MSL shader source must not be empty".to_owned());
+        }
+        if entries
+            .iter()
+            .any(|entry| entry.stage == ShaderStage::Compute && entry.workgroup_size.contains(&0))
+        {
+            return Err("MSL compute entry point workgroup size must be at least one".to_owned());
+        }
+        Ok(ShaderModuleSourceKind::MslPassthrough { source, entries })
+    }
+
     /// Returns true when this object is error.
     #[must_use]
     pub fn is_error(&self) -> bool {
@@ -126,6 +174,18 @@ impl ShaderModule {
     pub(crate) fn reflected(&self) -> Option<&frontend::ReflectedModule> {
         match &self.inner._source {
             ShaderModuleSourceKind::Wgsl { reflected, .. } => Some(reflected),
+            _ => None,
+        }
+    }
+
+    /// Returns raw MSL passthrough source and entry metadata when available.
+    #[cfg(feature = "shader-passthrough")]
+    #[must_use]
+    pub fn msl_passthrough(&self) -> Option<(&str, &[MslEntryPoint])> {
+        match &self.inner._source {
+            ShaderModuleSourceKind::MslPassthrough { source, entries } => {
+                Some((source.as_str(), entries.as_slice()))
+            }
             _ => None,
         }
     }
@@ -272,5 +332,74 @@ mod tests {
 
         assert!(!module.is_error());
         assert_eq!(module.diagnostic(), None);
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    fn msl_entry(name: &str, workgroup_size: [u32; 3]) -> MslEntryPoint {
+        MslEntryPoint {
+            name: name.to_owned(),
+            stage: ShaderStage::Compute,
+            workgroup_size,
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn from_msl_accepts_source_and_entries() {
+        let source = "kernel void cs() {}".to_owned();
+        let entries = vec![msl_entry("cs", [1, 2, 3])];
+
+        match ShaderModule::from_msl(source.clone(), entries.clone()).expect("valid MSL") {
+            ShaderModuleSourceKind::MslPassthrough {
+                source: stored,
+                entries: stored_entries,
+            } => {
+                assert_eq!(stored, source);
+                assert_eq!(stored_entries, entries);
+            }
+            other => panic!("unexpected source kind: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn from_msl_rejects_empty_source_and_zero_compute_workgroup() {
+        assert_eq!(
+            ShaderModule::from_msl(String::new(), vec![msl_entry("cs", [1, 1, 1])])
+                .expect_err("empty source should fail"),
+            "MSL shader source must not be empty"
+        );
+        assert_eq!(
+            ShaderModule::from_msl(
+                "kernel void cs() {}".to_owned(),
+                vec![msl_entry("cs", [1, 0, 1])]
+            )
+            .expect_err("zero workgroup component should fail"),
+            "MSL compute entry point workgroup size must be at least one"
+        );
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn msl_passthrough_accessor_reports_only_msl_modules() {
+        let msl = ShaderModule::new(
+            ShaderModule::from_msl(
+                "kernel void cs() {}".to_owned(),
+                vec![msl_entry("cs", [1, 1, 1])],
+            )
+            .expect("valid MSL"),
+            None,
+        );
+        let (source, entries) = msl.msl_passthrough().expect("MSL accessor");
+        assert_eq!(source, "kernel void cs() {}");
+        assert_eq!(entries[0].name, "cs");
+
+        let device = noop_device();
+        let wgsl = device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@compute @workgroup_size(1) fn cs() {}".to_owned(),
+        ));
+        let invalid = ShaderModule::new(ShaderModuleSourceKind::Invalid, Some("bad".to_owned()));
+        assert!(wgsl.msl_passthrough().is_none());
+        assert!(invalid.msl_passthrough().is_none());
     }
 }
