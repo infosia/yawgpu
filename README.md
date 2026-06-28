@@ -35,8 +35,9 @@ backends — is original code. Because Tint is also the compiler the WebGPU CTS'
 reference implementation (Dawn) uses, yawgpu's shader translation matches the
 conformance oracle **by construction** — the same WGSL compiles to the same MSL
 and SPIR-V the oracle emits. That is the foundation of yawgpu's conformance
-story: it runs the WebGPU CTS's entire `api` surface at parity with Dawn on both
-Metal and native Vulkan (see
+story: it runs the **entire ported WebGPU CTS** with **zero failures and zero
+crashes** on both native Metal and native Vulkan — over 1.6 million subcases,
+matching the Dawn oracle (see
 [Independent conformance](#independent-conformance--webgpu-native-cts)).
 
 This is a deliberately different point in the design space from a thin C
@@ -401,7 +402,9 @@ bypassing WGSL and Tint entirely:
   [WebGPU Conformance Test Suite](https://github.com/gpuweb/cts) through
   [webgpu-native-cts](https://github.com/infosia/webgpu-native-cts), which ports
   the CTS onto the `webgpu.h` C ABI and runs each case against a real GPU
-  (Metal and native Vulkan), with **Dawn** as the conformance oracle — see
+  (Metal and native Vulkan), with **Dawn** as the conformance oracle. The full
+  ported suite runs **`fail = 0`, `crash = 0`** on both native backends
+  (1,676,746 subcases on Metal) — see
   [Independent conformance](#independent-conformance--webgpu-native-cts) below.
 - **Unit-tested public API**: every public function across the three crates
   has a direct unit test.
@@ -463,25 +466,38 @@ suite that ports the upstream WebGPU CTS and links *directly* against the
 subprocess (`--isolate`) against a real GPU. **Dawn**, Google's C++ reference
 implementation, is the **oracle** every result is judged against.
 
-The suite covers the **entire `api` surface** — all 126 `api/validation` and 70
-`api/operation` files — plus the `shader/validation` tree, and yawgpu runs it
-**at parity with Dawn on both Tier-1 backends, on native hardware**:
+Across the **entire ported suite** — 642 spec files spanning `api/validation`,
+`api/operation`, `shader/validation`, and `shader/execution` — yawgpu runs
+**`fail = 0`, `crash = 0`** on both Tier-1 backends, **on native hardware**,
+matching the Dawn oracle:
 
-| Backend (host) | `api/validation` | `api/operation` | `shader/validation` |
+| Backend (host) | subcases passing | fail | crash |
 |---|---|---|---|
-| **Metal** — Apple Silicon | matches Dawn | matches Dawn | matches Dawn |
-| **Vulkan** — native / MoltenVK | matches Dawn | matches Dawn | clean (compile-time, device-independent) |
+| **Dawn** (oracle) | reference | **0** | **0** |
+| **yawgpu — native Metal** (Apple Silicon) | **1,676,746** | **0** | **0** |
+| **yawgpu — native Vulkan** (NVIDIA RTX 5060 Ti) | same suite, fail-free | **0** | **0** |
 
-Shader conformance falls out **by construction**: yawgpu compiles WGSL with the
-same Tint compiler Dawn uses, so the translated MSL / SPIR-V matches the
-oracle's without a separate shader code path to keep in sync.
+On native Metal that is **1,676,746 subcases passing** — `api/*` 450,926 +
+`shader/execution` 725,445 + `shader/validation` 500,375 — with zero failures and
+zero crashes. Native Vulkan runs the same suite with the identical
+`fail = 0 / crash = 0` verdict.
 
-The lone exception across the whole `api` surface is a single draw-validation
-case where yawgpu is *stricter* than Dawn — it rejects a draw Dawn allows — a
-deliberate, documented choice, not a defect.
+Shader conformance falls out **by construction**: since the naga→Tint migration,
+yawgpu compiles WGSL with the same Tint compiler Dawn uses, so the translated
+MSL / SPIR-V is byte-equivalent to the oracle's — the entire `shader/*` surface
+is Dawn-equivalent with no separate shader code path to keep in sync.
+
+The only carried items are documented **non-defects**, not failures: a single
+draw-validation case where yawgpu is deliberately *stricter* than Dawn (it
+rejects a draw Dawn allows), plus four Vulkan-only `xfail`s that are
+NVIDIA-hardware / external-texture / denormal-interval behaviours rather than
+yawgpu bugs. (MoltenVK on macOS is a non-authoritative Vulkan path — it shows a
+few Vulkan→Metal translation artifacts that are green on both native Metal and
+native Vulkan.)
 
 Per-case results and any cross-backend differences are tracked in the suite's
-[`docs/FINDINGS.md`](https://github.com/infosia/webgpu-native-cts/blob/main/docs/FINDINGS.md).
+[`docs/FINDINGS.md`](https://github.com/infosia/webgpu-native-cts/blob/main/docs/FINDINGS.md)
+(numbers above are the Tint-baseline sweep, 2026-06-28).
 
 ## License
 
