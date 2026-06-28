@@ -112,6 +112,293 @@ fn metal_msl_passthrough_compute_doubles_storage_buffer() {
     }
 }
 
+const RENDER_W: u32 = 4;
+const RENDER_H: u32 = 4;
+const RENDER_BPR: u32 = 256;
+const RENDER_READBACK: usize = RENDER_BPR as usize * RENDER_H as usize;
+
+// Hand-written MSL render: a full-screen triangle from [[vertex_id]] (no vertex
+// buffers, no bind groups) whose fragment outputs a solid color. Two entry
+// points in one module — vmain (vertex) + fmain (fragment).
+const SOLID_RENDER_MSL: &str = r#"#include <metal_stdlib>
+using namespace metal;
+
+struct VOut { float4 position [[position]]; };
+
+vertex VOut vmain(uint vid [[vertex_id]]) {
+    float2 p;
+    switch (vid) {
+        case 0: p = float2(-1.0, -1.0); break;
+        case 1: p = float2(3.0, -1.0); break;
+        default: p = float2(-1.0, 3.0); break;
+    }
+    VOut o;
+    o.position = float4(p, 0.0, 1.0);
+    return o;
+}
+
+fragment float4 fmain() {
+    return float4(0.25, 0.5, 0.75, 1.0);
+}
+"#;
+
+#[test]
+#[ignore = "manual real-backend test"]
+fn metal_msl_passthrough_render_draws_solid_color() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let color = create_color_texture(device);
+        let color_view = yawgpu::wgpuTextureCreateView(color, std::ptr::null());
+        let readback = create_buffer_sized(
+            device,
+            RENDER_READBACK as u64,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+
+        let module = create_msl_render_module(device, SOLID_RENDER_MSL);
+        let layout = create_empty_pipeline_layout(device);
+        let pipeline = create_render_pipeline_passthrough(device, module, layout);
+
+        let color_attachment = native::WGPURenderPassColorAttachment {
+            nextInChain: std::ptr::null_mut(),
+            view: color_view,
+            depthSlice: native::WGPU_DEPTH_SLICE_UNDEFINED,
+            resolveTarget: std::ptr::null(),
+            loadOp: native::WGPULoadOp_Clear,
+            storeOp: native::WGPUStoreOp_Store,
+            clearValue: native::WGPUColor {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        };
+        let attachments = [color_attachment];
+        let pass_descriptor = native::WGPURenderPassDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            colorAttachmentCount: attachments.len(),
+            colorAttachments: attachments.as_ptr(),
+            depthStencilAttachment: std::ptr::null(),
+            occlusionQuerySet: std::ptr::null(),
+            timestampWrites: std::ptr::null(),
+        };
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_descriptor);
+        yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+
+        let src = native::WGPUTexelCopyTextureInfo {
+            texture: color,
+            mipLevel: 0,
+            origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+            aspect: native::WGPUTextureAspect_All,
+        };
+        let dst = native::WGPUTexelCopyBufferInfo {
+            layout: native::WGPUTexelCopyBufferLayout {
+                offset: 0,
+                bytesPerRow: RENDER_BPR,
+                rowsPerImage: RENDER_H,
+            },
+            buffer: readback,
+        };
+        let extent = native::WGPUExtent3D {
+            width: RENDER_W,
+            height: RENDER_H,
+            depthOrArrayLayers: 1,
+        };
+        yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &src, &dst, &extent);
+        let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        yawgpu::wgpuCommandBufferRelease(command_buffer);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+
+        let pixels = read_bytes(instance, readback, RENDER_READBACK);
+        // 0.25, 0.5, 0.75, 1.0 → RGBA8 (64, 128, 191, 255); allow ±2 rounding.
+        let near = |a: u8, b: u8| (i32::from(a) - i32::from(b)).abs() <= 2;
+        assert!(
+            near(pixels[0], 64) && near(pixels[1], 128) && near(pixels[2], 191) && pixels[3] == 255,
+            "raw MSL passthrough render produced the wrong pixel: {:?}",
+            &pixels[0..4]
+        );
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "unexpected device errors: {:?}",
+            errors.lock().expect("error lock")
+        );
+
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuRenderPipelineRelease(pipeline);
+        yawgpu::wgpuPipelineLayoutRelease(layout);
+        yawgpu::wgpuShaderModuleRelease(module);
+        yawgpu::wgpuTextureViewRelease(color_view);
+        yawgpu::wgpuTextureRelease(color);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+unsafe fn create_msl_render_module(
+    device: native::WGPUDevice,
+    source: &str,
+) -> native::WGPUShaderModule {
+    let entries = [
+        YaWGPUMslEntryPoint {
+            name: string_view("vmain"),
+            stage: native::WGPUShaderStage_Vertex,
+            workgroupSize: [1, 1, 1],
+        },
+        YaWGPUMslEntryPoint {
+            name: string_view("fmain"),
+            stage: native::WGPUShaderStage_Fragment,
+            workgroupSize: [1, 1, 1],
+        },
+    ];
+    let mut msl = YaWGPUShaderSourceMSL {
+        chain: native::WGPUChainedStruct {
+            next: std::ptr::null_mut(),
+            sType: YAWGPU_STYPE_SHADER_SOURCE_MSL,
+        },
+        code: string_view(source),
+        entryPointCount: entries.len(),
+        entryPoints: entries.as_ptr(),
+    };
+    let descriptor = native::WGPUShaderModuleDescriptor {
+        nextInChain: (&mut msl.chain) as *mut _,
+        label: empty_string_view(),
+    };
+    let module = yawgpu::wgpuDeviceCreateShaderModule(device, &descriptor);
+    assert!(!module.is_null());
+    module
+}
+
+unsafe fn create_empty_pipeline_layout(device: native::WGPUDevice) -> native::WGPUPipelineLayout {
+    let descriptor = native::WGPUPipelineLayoutDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        bindGroupLayoutCount: 0,
+        bindGroupLayouts: std::ptr::null(),
+        immediateSize: 0,
+    };
+    let layout = yawgpu::wgpuDeviceCreatePipelineLayout(device, &descriptor);
+    assert!(!layout.is_null());
+    layout
+}
+
+unsafe fn create_render_pipeline_passthrough(
+    device: native::WGPUDevice,
+    module: native::WGPUShaderModule,
+    layout: native::WGPUPipelineLayout,
+) -> native::WGPURenderPipeline {
+    let color_target = native::WGPUColorTargetState {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        blend: std::ptr::null(),
+        writeMask: native::WGPUColorWriteMask_All,
+    };
+    let fragment = native::WGPUFragmentState {
+        nextInChain: std::ptr::null_mut(),
+        module,
+        entryPoint: string_view("fmain"),
+        constantCount: 0,
+        constants: std::ptr::null(),
+        targetCount: 1,
+        targets: &color_target,
+    };
+    let descriptor = native::WGPURenderPipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout,
+        vertex: native::WGPUVertexState {
+            nextInChain: std::ptr::null_mut(),
+            module,
+            entryPoint: string_view("vmain"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            bufferCount: 0,
+            buffers: std::ptr::null(),
+        },
+        primitive: native::WGPUPrimitiveState {
+            nextInChain: std::ptr::null_mut(),
+            topology: native::WGPUPrimitiveTopology_TriangleList,
+            stripIndexFormat: native::WGPUIndexFormat_Undefined,
+            frontFace: native::WGPUFrontFace_Undefined,
+            cullMode: native::WGPUCullMode_Undefined,
+            unclippedDepth: 0,
+        },
+        depthStencil: std::ptr::null(),
+        multisample: native::WGPUMultisampleState {
+            nextInChain: std::ptr::null_mut(),
+            count: 1,
+            mask: 0xFFFF_FFFF,
+            alphaToCoverageEnabled: 0,
+        },
+        fragment: &fragment,
+    };
+    let pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(device, &descriptor);
+    assert!(!pipeline.is_null());
+    pipeline
+}
+
+unsafe fn create_color_texture(device: native::WGPUDevice) -> native::WGPUTexture {
+    let descriptor = native::WGPUTextureDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage: native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+        dimension: native::WGPUTextureDimension_2D,
+        size: native::WGPUExtent3D {
+            width: RENDER_W,
+            height: RENDER_H,
+            depthOrArrayLayers: 1,
+        },
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        mipLevelCount: 1,
+        sampleCount: 1,
+        viewFormatCount: 0,
+        viewFormats: std::ptr::null(),
+    };
+    let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+    assert!(!texture.is_null());
+    texture
+}
+
+unsafe fn read_bytes(
+    instance: native::WGPUInstance,
+    buffer: native::WGPUBuffer,
+    len: usize,
+) -> Vec<u8> {
+    let mut status = native::WGPUMapAsyncStatus_Error;
+    let callback_info = native::WGPUBufferMapCallbackInfo {
+        nextInChain: std::ptr::null_mut(),
+        mode: native::WGPUCallbackMode_AllowProcessEvents,
+        callback: Some(map_callback),
+        userdata1: (&mut status as *mut native::WGPUMapAsyncStatus).cast(),
+        userdata2: std::ptr::null_mut(),
+    };
+    let future =
+        yawgpu::wgpuBufferMapAsync(buffer, native::WGPUMapMode_Read, 0, len, callback_info);
+    wait(instance, future);
+    assert_eq!(status, native::WGPUMapAsyncStatus_Success);
+    let ptr = yawgpu::wgpuBufferGetConstMappedRange(buffer, 0, len);
+    assert!(!ptr.is_null());
+    let bytes = std::slice::from_raw_parts(ptr.cast::<u8>(), len).to_vec();
+    yawgpu::wgpuBufferUnmap(buffer);
+    bytes
+}
+
 unsafe fn create_msl_module(
     device: native::WGPUDevice,
     source: &str,

@@ -516,7 +516,13 @@ impl RenderPipeline {
         let resolved = if is_error {
             None
         } else {
-            resolve_render_pipeline_descriptor(&descriptor, limits, features, pipeline_id).ok()
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                limits,
+                features,
+                pipeline_id,
+            )
+            .ok()
         };
         let (vertex_entry_name, fragment_entry_name, bind_group_layouts) =
             resolved.unwrap_or_else(|| {
@@ -687,11 +693,33 @@ pub(crate) fn validate_render_pipeline_descriptor(
     limits: Limits,
     features: &FeatureSet,
 ) -> Option<String> {
-    resolve_render_pipeline_descriptor(descriptor, limits, features, 0).err()
+    resolve_render_pipeline_descriptor_for_source(descriptor, limits, features, 0).err()
 }
 
 /// Alias for resolved render pipeline parts.
 pub(crate) type ResolvedRenderPipelineParts = (String, Option<String>, Vec<Arc<BindGroupLayout>>);
+
+fn resolve_render_pipeline_descriptor_for_source(
+    descriptor: &RenderPipelineDescriptor,
+    limits: Limits,
+    features: &FeatureSet,
+    pipeline_id: u64,
+) -> Result<ResolvedRenderPipelineParts, String> {
+    #[cfg(feature = "shader-passthrough")]
+    if render_pipeline_uses_msl_passthrough(descriptor) {
+        return resolve_msl_passthrough_render_pipeline_descriptor(descriptor);
+    }
+    resolve_render_pipeline_descriptor(descriptor, limits, features, pipeline_id)
+}
+
+#[cfg(feature = "shader-passthrough")]
+fn render_pipeline_uses_msl_passthrough(descriptor: &RenderPipelineDescriptor) -> bool {
+    descriptor.vertex.shader.module.msl_passthrough().is_some()
+        || descriptor
+            .fragment
+            .as_ref()
+            .is_some_and(|fragment| fragment.shader.module.msl_passthrough().is_some())
+}
 
 /// Creates HAL render pipeline and reports validation errors through the owning device.
 pub(crate) fn create_hal_render_pipeline(
@@ -782,6 +810,52 @@ pub(crate) fn select_render_shader_source(
         fragment.map(|fragment| pipeline_constant_map(&fragment.shader.constants));
     match backend {
         HalBackend::Metal => {
+            #[cfg(feature = "shader-passthrough")]
+            if descriptor
+                .vertex
+                .shader
+                .module
+                .spirv_passthrough()
+                .is_some()
+                || fragment
+                    .is_some_and(|fragment| fragment.shader.module.spirv_passthrough().is_some())
+            {
+                return Err("SPIR-V passthrough shader requires the Vulkan backend".to_owned());
+            }
+            #[cfg(feature = "shader-passthrough")]
+            if let Some((vertex_source, _entries)) =
+                descriptor.vertex.shader.module.msl_passthrough()
+            {
+                let fragment_source = match fragment {
+                    Some(fragment) => {
+                        let Some((source, _entries)) = fragment.shader.module.msl_passthrough()
+                        else {
+                            return Err(
+                                "render shader passthrough requires all stages to be passthrough modules"
+                                    .to_owned(),
+                            );
+                        };
+                        Some(source.to_owned())
+                    }
+                    None => None,
+                };
+                return Ok((
+                    HalShaderSource::MslStages {
+                        vertex: vertex_source.to_owned(),
+                        fragment: fragment_source,
+                    },
+                    vertex_entry_name.to_owned(),
+                    fragment_entry_name.map(str::to_owned),
+                    Vec::new(),
+                ));
+            }
+            #[cfg(feature = "shader-passthrough")]
+            if fragment.is_some_and(|fragment| fragment.shader.module.msl_passthrough().is_some()) {
+                return Err(
+                    "render shader passthrough requires all stages to be passthrough modules"
+                        .to_owned(),
+                );
+            }
             let module =
                 descriptor.vertex.shader.module.reflected().ok_or_else(|| {
                     "render pipeline requires a reflected shader module".to_owned()
@@ -868,6 +942,10 @@ pub(crate) fn select_render_shader_source(
             ))
         }
         HalBackend::Vulkan => {
+            #[cfg(feature = "shader-passthrough")]
+            if render_pipeline_uses_msl_passthrough(descriptor) {
+                return Err("MSL passthrough shader requires the Metal backend".to_owned());
+            }
             if let Some(message) = vulkan_external_texture_rejection(metal_bindings) {
                 return Err(message);
             }
@@ -1416,6 +1494,76 @@ pub(crate) fn resolve_render_pipeline_descriptor(
     )?;
 
     Ok((vertex_entry, fragment_entry, bind_group_layouts))
+}
+
+/// Records resolve into the command stream for raw MSL passthrough render.
+#[cfg(feature = "shader-passthrough")]
+pub(crate) fn resolve_msl_passthrough_render_pipeline_descriptor(
+    descriptor: &RenderPipelineDescriptor,
+) -> Result<ResolvedRenderPipelineParts, String> {
+    if descriptor.vertex.shader.module.is_error()
+        || descriptor
+            .fragment
+            .as_ref()
+            .is_some_and(|fragment| fragment.shader.module.is_error())
+    {
+        return Err("render pipeline shader module must not be an error module".to_owned());
+    }
+    if !descriptor.vertex.shader.constants.is_empty()
+        || descriptor
+            .fragment
+            .as_ref()
+            .is_some_and(|fragment| !fragment.shader.constants.is_empty())
+    {
+        return Err(
+            "pipeline-overridable constants are not supported with shader passthrough".to_owned(),
+        );
+    }
+    if descriptor.vertex.shader.module.msl_passthrough().is_none()
+        || descriptor
+            .fragment
+            .as_ref()
+            .is_some_and(|fragment| fragment.shader.module.msl_passthrough().is_none())
+    {
+        return Err(
+            "render shader passthrough requires all stages to be passthrough modules".to_owned(),
+        );
+    }
+    let RenderPipelineLayout::Explicit(layout) = &descriptor.layout else {
+        return Err("shader passthrough requires an explicit pipeline layout".to_owned());
+    };
+    if layout.is_error() {
+        return Err("render pipeline layout must not be an error pipeline layout".to_owned());
+    }
+    validate_render_presence(descriptor)?;
+    let Some(vertex_entry) = descriptor
+        .vertex
+        .shader
+        .entry_point
+        .as_deref()
+        .filter(|entry| !entry.is_empty())
+    else {
+        return Err("MSL passthrough vertex entry point is required".to_owned());
+    };
+    let fragment_entry = descriptor
+        .fragment
+        .as_ref()
+        .map(|fragment| {
+            fragment
+                .shader
+                .entry_point
+                .as_deref()
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| "MSL passthrough fragment entry point is required".to_owned())
+        })
+        .transpose()?;
+
+    Ok((
+        vertex_entry.to_owned(),
+        fragment_entry,
+        layout.bind_group_layouts().to_vec(),
+    ))
 }
 
 fn validate_bind_groups_plus_vertex_buffers(
@@ -2302,6 +2450,8 @@ mod tests {
     use super::*;
     use crate::pass::bind_group_layouts_compatible;
     use crate::test_helpers::*;
+    #[cfg(feature = "shader-passthrough")]
+    use crate::{Device, ShaderStage};
     use crate::{ErrorFilter, TextureViewDimension};
 
     use std::sync::Arc;
@@ -3114,6 +3264,291 @@ mod tests {
         assert_eq!(vertex_entry, expected_vertex_entry);
         assert_eq!(fragment_entry.as_deref(), Some(expected_fragment_entry));
         assert!(bindings.is_empty());
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    fn msl_render_module(
+        device: &Device,
+        source: &str,
+        entries: Vec<MslEntryPoint>,
+    ) -> Arc<ShaderModule> {
+        Arc::new(
+            device.create_shader_module(ShaderModuleSource::MslPassthrough {
+                source: source.to_owned(),
+                entries,
+            }),
+        )
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    fn msl_render_entry(name: &str, stage: ShaderStage) -> MslEntryPoint {
+        MslEntryPoint {
+            name: name.to_owned(),
+            stage,
+            workgroup_size: [0, 0, 0],
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    fn explicit_empty_render_layout(device: &Device) -> Arc<PipelineLayout> {
+        Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: Vec::new(),
+            immediate_size: 0,
+            error: None,
+        }))
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    fn msl_render_passthrough_descriptor(device: &Device) -> RenderPipelineDescriptor {
+        let vertex = msl_render_module(
+            device,
+            "vertex msl source",
+            vec![msl_render_entry("vs", ShaderStage::Vertex)],
+        );
+        let fragment = msl_render_module(
+            device,
+            "fragment msl source",
+            vec![msl_render_entry("fs", ShaderStage::Fragment)],
+        );
+        let mut descriptor = render_pipeline_descriptor(vertex);
+        descriptor.layout = RenderPipelineLayout::Explicit(explicit_empty_render_layout(device));
+        descriptor
+            .fragment
+            .as_mut()
+            .expect("fragment should exist")
+            .shader
+            .module = fragment;
+        descriptor
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn resolve_msl_passthrough_render_pipeline_uses_explicit_layout_and_entries() {
+        let device = noop_device();
+        let descriptor = msl_render_passthrough_descriptor(&device);
+
+        let (vertex_entry, fragment_entry, layouts) =
+            resolve_msl_passthrough_render_pipeline_descriptor(&descriptor)
+                .expect("MSL render passthrough resolve");
+
+        assert_eq!(vertex_entry, "vs");
+        assert_eq!(fragment_entry.as_deref(), Some("fs"));
+        assert_eq!(layouts.len(), 0);
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn msl_passthrough_render_pipeline_builds_on_noop_with_explicit_layout() {
+        let device = noop_device();
+        let descriptor = msl_render_passthrough_descriptor(&device);
+
+        let pipeline = device.create_render_pipeline(descriptor);
+
+        assert!(!pipeline.is_error());
+        assert_eq!(pipeline.vertex_entry_name(), "vs");
+        assert_eq!(pipeline.fragment_entry_name(), Some("fs"));
+        assert!(pipeline.bind_group_layouts().is_empty());
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn msl_passthrough_render_pipeline_rejects_auto_layout() {
+        let device = noop_device();
+        let mut descriptor = msl_render_passthrough_descriptor(&device);
+        descriptor.layout = RenderPipelineLayout::Auto;
+
+        let err = validate_render_pipeline_descriptor(
+            &descriptor,
+            device.limits(),
+            &FeatureSet::default(),
+        )
+        .expect("auto layout should fail");
+
+        assert_eq!(
+            err,
+            "shader passthrough requires an explicit pipeline layout"
+        );
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn msl_passthrough_render_pipeline_rejects_pipeline_constants() {
+        let device = noop_device();
+        let mut descriptor = msl_render_passthrough_descriptor(&device);
+        descriptor.vertex.shader.constants.push(PipelineConstant {
+            key: "x".to_owned(),
+            value: 1.0,
+        });
+
+        let err = validate_render_pipeline_descriptor(
+            &descriptor,
+            device.limits(),
+            &FeatureSet::default(),
+        )
+        .expect("constants should fail");
+
+        assert_eq!(
+            err,
+            "pipeline-overridable constants are not supported with shader passthrough"
+        );
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn msl_passthrough_render_pipeline_rejects_mixed_fragment_module() {
+        let device = noop_device();
+        let mut descriptor = msl_render_passthrough_descriptor(&device);
+        descriptor
+            .fragment
+            .as_mut()
+            .expect("fragment should exist")
+            .shader
+            .module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }".to_owned(),
+        )));
+
+        let err = validate_render_pipeline_descriptor(
+            &descriptor,
+            device.limits(),
+            &FeatureSet::default(),
+        )
+        .expect("mixed passthrough/reflected stages should fail");
+
+        assert_eq!(
+            err,
+            "render shader passthrough requires all stages to be passthrough modules"
+        );
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn msl_passthrough_render_pipeline_rejects_mixed_vertex_module() {
+        let device = noop_device();
+        let vertex = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(); }".to_owned(),
+        )));
+        let fragment = msl_render_module(
+            &device,
+            "fragment msl source",
+            vec![msl_render_entry("fs", ShaderStage::Fragment)],
+        );
+        let mut descriptor = render_pipeline_descriptor(vertex);
+        descriptor.layout = RenderPipelineLayout::Explicit(explicit_empty_render_layout(&device));
+        descriptor
+            .fragment
+            .as_mut()
+            .expect("fragment should exist")
+            .shader
+            .module = fragment;
+
+        let err = validate_render_pipeline_descriptor(
+            &descriptor,
+            device.limits(),
+            &FeatureSet::default(),
+        )
+        .expect("mixed reflected/passthrough stages should fail");
+
+        assert_eq!(
+            err,
+            "render shader passthrough requires all stages to be passthrough modules"
+        );
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn msl_passthrough_render_pipeline_rejects_vertex_only_without_depth_or_fragment() {
+        let device = noop_device();
+        let mut descriptor = msl_render_passthrough_descriptor(&device);
+        descriptor.fragment = None;
+        descriptor.depth_stencil = None;
+
+        let err = validate_render_pipeline_descriptor(
+            &descriptor,
+            device.limits(),
+            &FeatureSet::default(),
+        )
+        .expect("vertex-only render pipeline should fail");
+
+        assert_eq!(
+            err,
+            "render pipeline requires a fragment state or depthStencil state"
+        );
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn select_render_shader_source_metal_uses_msl_passthrough_stages_verbatim() {
+        let device = noop_device();
+        let descriptor = msl_render_passthrough_descriptor(&device);
+
+        let (source, vertex_entry, fragment_entry, bindings) = select_render_shader_source(
+            HalBackend::Metal,
+            &descriptor,
+            "vs",
+            Some("fs"),
+            &[],
+            &[],
+            false,
+        )
+        .expect("MSL passthrough should select Metal MSL stages");
+
+        let HalShaderSource::MslStages { vertex, fragment } = source else {
+            panic!("Metal should select plain MSL stages");
+        };
+        assert_eq!(vertex, "vertex msl source");
+        assert_eq!(fragment.as_deref(), Some("fragment msl source"));
+        assert_eq!(vertex_entry, "vs");
+        assert_eq!(fragment_entry.as_deref(), Some("fs"));
+        assert!(bindings.is_empty());
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn select_render_shader_source_rejects_msl_passthrough_on_vulkan() {
+        let device = noop_device();
+        let descriptor = msl_render_passthrough_descriptor(&device);
+
+        let err = select_render_shader_source(
+            HalBackend::Vulkan,
+            &descriptor,
+            "vs",
+            Some("fs"),
+            &[],
+            &[],
+            false,
+        )
+        .expect_err("MSL passthrough must reject Vulkan");
+
+        assert_eq!(err, "MSL passthrough shader requires the Metal backend");
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn select_render_shader_source_rejects_spirv_passthrough_on_metal() {
+        let device = noop_device();
+        let vertex = Arc::new(
+            device.create_shader_module(ShaderModuleSource::SpirvPassthrough(vec![
+                0x0723_0203,
+                0,
+                0,
+                0,
+                0,
+            ])),
+        );
+        let descriptor = render_pipeline_descriptor(vertex);
+
+        let err = select_render_shader_source(
+            HalBackend::Metal,
+            &descriptor,
+            "vs",
+            Some("fs"),
+            &[],
+            &[],
+            false,
+        )
+        .expect_err("SPIR-V passthrough must reject Metal");
+
+        assert_eq!(err, "SPIR-V passthrough shader requires the Vulkan backend");
     }
 
     #[cfg(feature = "gles")]

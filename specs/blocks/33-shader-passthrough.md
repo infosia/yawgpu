@@ -179,6 +179,23 @@ Pipeline creation generalizes the backend branch (compute first, render later):
 - **SP5** with the feature **off**, the `WGPUShaderSourceSPIRV` chain yields an
   error module ("shader passthrough not enabled"). ☑ (UT)
 
+### Render passthrough (P13.4) — Metal MSL — **B3a DONE**
+
+- **RP1** at Metal render pipeline creation, MSL vertex and fragment sources are
+  passed verbatim as `HalShaderSource::MslStages`; no Tint involvement. ☑ (UT +
+  e2e Metal — `e2e_metal_shader_passthrough.rs`, vertex_id triangle → solid color)
+- **RP2** an MSL render passthrough pipeline against an **`auto`** pipeline
+  layout ⇒ error; an explicit `WGPUPipelineLayout` is required. ☑ (UT)
+- **RP3** all present render stages must be passthrough modules; mixing a
+  passthrough stage with a reflected WGSL stage ⇒ error. ☑ (UT)
+- **RP4** an MSL render passthrough module used on the **Vulkan** backend ⇒
+  device error ("MSL passthrough shader requires the Metal backend"). ☑ (UT)
+- **RP5** on **Noop** the create succeeds and a render pipeline builds with no
+  compiled shader. ☑ (UT)
+
+SPIR-V render passthrough is B3b; B3a intentionally covers only the Metal MSL
+render plumbing and only the no-bindings/no-vertex-buffers ABI shape.
+
 ### Common / handle behaviour (P13.3)
 
 - **CB1** both passthrough handles are ordinary `WGPUShaderModule`s
