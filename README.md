@@ -9,9 +9,9 @@ that browsers expose to WebAssembly — without a browser, a JavaScript engine,
 or a web runtime.
 
 On top of the standard `webgpu.h`, yawgpu ships a small companion header
-[`yawgpu.h`](yawgpu/ffi/webgpu-headers/yawgpu.h) that adds a vendor extension
-for backend selection. See **[Vendor extensions](#vendor-extensions-yawgpuh)**
-below.
+[`yawgpu.h`](yawgpu/ffi/webgpu-headers/yawgpu.h) for backend selection and a
+handful of yawgpu-specific calls. See
+**[The `yawgpu.h` companion header](#the-yawgpuh-companion-header)** below.
 
 ## What makes it different
 
@@ -32,8 +32,12 @@ Metal, SPIR-V for Vulkan, GLSL ES for GLES) and to reflect their interface.
 yawgpu drives Tint (a C++ library) from Rust through a small C shim in the
 `yawgpu-tint` crate. Everything else — validation, the object model, the
 backends — is original code. Because Tint is also the compiler the WebGPU CTS's
-reference (Dawn) uses, yawgpu's shader translation matches the conformance oracle
-by construction.
+reference implementation (Dawn) uses, yawgpu's shader translation matches the
+conformance oracle **by construction** — the same WGSL compiles to the same MSL
+and SPIR-V the oracle emits. That is the foundation of yawgpu's conformance
+story: it runs the WebGPU CTS's entire `api` surface at parity with Dawn on both
+Metal and native Vulkan (see
+[Independent conformance](#independent-conformance--webgpu-native-cts)).
 
 This is a deliberately different point in the design space from a thin C
 shim layered over an existing Rust GPU engine: yawgpu owns the whole
@@ -47,7 +51,7 @@ yawgpu is a small Cargo workspace of layered crates:
 ```
         C / C++ application
                 │  webgpu.h  (standard WebGPU C ABI)
-                │  yawgpu.h  (vendor extension: backend selection)
+                │  yawgpu.h  (companion header: backend selection)
                 ▼
 ┌───────────────────────────────────────────────┐
 │ yawgpu        C ABI layer                       │  cdylib + staticlib + rlib
@@ -103,15 +107,18 @@ A backend is chosen at instance-creation time through `YaWGPUInstanceBackendSele
 (see below) — applications that only ever want validation can run entirely
 on Noop with no GPU present.
 
-## Vendor extensions (`yawgpu.h`)
+## The `yawgpu.h` companion header
 
-`yawgpu.h` is a companion header that sits next to `webgpu.h` and exposes
-the yawgpu-specific surface area. It follows a strict naming convention so
-that vendor symbols never collide with the standard WebGPU C API:
+yawgpu is overwhelmingly the **standard** WebGPU C API — the goal is
+Dawn-equivalent behaviour, not a divergent surface. `yawgpu.h` is a small
+companion header that sits next to `webgpu.h` for the few things the standard
+API has no place for: choosing a HAL backend at instance-creation time, plus a
+couple of yawgpu-specific calls. It follows a strict naming convention so these
+symbols never collide with the standard WebGPU C API:
 
 | Kind | Prefix | Example |
 |---|---|---|
-| Functions | `yawgpu*` | *(reserved for future vendor calls)* |
+| Functions | `yawgpu*` | `yawgpuDeviceCreateExternalTexture` |
 | Types / structs / enums / handles | `YaWGPU*` | `YaWGPUInstanceBackendSelect` |
 | Constants / macros / SType tags | `YAWGPU_*` / `YAWGPU_STYPE_*` | `YAWGPU_STYPE_INSTANCE_BACKEND_SELECT` |
 
@@ -180,6 +187,18 @@ no chain entry) defers to `YAWGPU_GLES_BACKEND`; otherwise the
 default EGL path is taken. `YAWGPU_GLES_CONTEXT_BACKEND_WGL` is
 Windows-only and falls back to EGL on non-Windows hosts. The entry
 is ignored when the resolved instance backend is not GLES.
+
+### External textures (Metal, experimental)
+
+`yawgpuDeviceCreateExternalTexture` creates a WebGPU `WGPUExternalTexture` from
+one plane (RGBA) or two planes (NV12 — a luma `Y` plane plus an interleaved
+chroma `UV` plane with YUV→RGB conversion), lowered through the same Tint
+multiplanar path Dawn uses. It is currently implemented on **Metal only** and is
+experimental. On Vulkan the descriptor is still valid WebGPU, but yawgpu rejects
+the pipeline **deterministically in core** — before any SPIR-V reaches the
+driver — because driver acceptance of the lowered `texture_external` SPIR-V is
+GPU-divergent; the device-independent rejection keeps behaviour stable across
+drivers.
 
 ## Using it from C
 
@@ -377,14 +396,17 @@ on the Tier-2 GLES backend.
   - **macOS** — builds, unit tests, real-GPU end-to-end tests, and the C
     examples all verified (Metal and Vulkan/MoltenVK).
   - **Windows (MSVC)** — builds and passes the full unit-test suite, and the
-    **Vulkan backend is verified real-GPU** against a native driver (NVIDIA):
-    the in-repo `e2e_vulkan_*` suite (basic, buffer, texture, compute, render,
-    depth, f16, OOM, and the threading audit) passes against the live driver.
-    The one exception is the external-texture case: `texture_external` has no
-    Vulkan lowering, and a native NVIDIA driver compiles the resulting pipeline
-    instead of rejecting it (Mesa on Linux does reject it), so the
-    `GPUInternalError` that suite expects is driver-dependent — tracked
-    separately. The windowed C examples are runtime-verified against native
+    **Vulkan backend is verified real-GPU** against a native driver (NVIDIA).
+    On this Windows native-Vulkan host the **entire webgpu-native-cts `api`
+    surface runs with zero failures** — full Dawn parity, no remaining
+    backend-specific divergences. The in-repo `e2e_vulkan_*` suite (basic,
+    buffer, texture, compute, render, depth, f16, OOM, and the threading audit)
+    likewise passes against the live driver.
+    The external-texture suite passes too: external textures are a Metal-only
+    capability, and on Vulkan yawgpu rejects the pipeline **deterministically**
+    in core — before any SPIR-V reaches the driver — so the expected
+    `GPUInternalError` is stable across NVIDIA, Mesa, and MoltenVK alike rather
+    than driver-dependent. The windowed C examples are runtime-verified against native
     Vulkan drivers, and the windowed `triangle` example additionally runs
     through the OpenGL ES backend via the WGL fallback (host GL driver, opt-in).
   - **Linux (`x86_64-unknown-linux-gnu`)** — the CI host (`ubuntu-latest`):
@@ -422,17 +444,21 @@ subprocess (`--isolate`) against a real GPU. **Dawn**, Google's C++ reference
 implementation, is the **oracle** every result is judged against.
 
 The suite covers the **entire `api` surface** — all 126 `api/validation` and 70
-`api/operation` files — and yawgpu runs it **green on both Tier-1 backends, on
-native hardware**:
+`api/operation` files — plus the `shader/validation` tree, and yawgpu runs it
+**at parity with Dawn on both Tier-1 backends, on native hardware**:
 
-| Backend (host) | `api` surface |
-|---|---|
-| **Metal** — Apple Silicon | matches Dawn — all cases pass |
-| **Vulkan** — native (NVIDIA) | matches Dawn — all cases pass |
+| Backend (host) | `api/validation` | `api/operation` | `shader/validation` |
+|---|---|---|---|
+| **Metal** — Apple Silicon | matches Dawn | matches Dawn | matches Dawn |
+| **Vulkan** — native / MoltenVK | matches Dawn | matches Dawn | clean (compile-time, device-independent) |
 
-The lone exception is a single draw-validation case where yawgpu is
-*stricter* than Dawn — it rejects a draw Dawn allows — a deliberate, documented
-choice, not a defect.
+Shader conformance falls out **by construction**: yawgpu compiles WGSL with the
+same Tint compiler Dawn uses, so the translated MSL / SPIR-V matches the
+oracle's without a separate shader code path to keep in sync.
+
+The lone exception across the whole `api` surface is a single draw-validation
+case where yawgpu is *stricter* than Dawn — it rejects a draw Dawn allows — a
+deliberate, documented choice, not a defect.
 
 Per-case results and any cross-backend differences are tracked in the suite's
 [`docs/FINDINGS.md`](https://github.com/infosia/webgpu-native-cts/blob/main/docs/FINDINGS.md).
