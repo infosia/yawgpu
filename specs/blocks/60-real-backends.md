@@ -251,6 +251,89 @@ Vulkan version is unchanged (1.1; `VK_EXT_robustness2` is available as an
 extension on 1.1+). yawgpu already enables Vulkan-1.0 `robustBufferAccess`, so
 OOB writes remain bounded regardless. No naga change is required.
 
+## CTS finding F-127 — Tint-era robustness via the Vulkan Memory Model (2026-06-28)
+
+**Supersedes the F-112 `VK_EXT_robustness2` decision above** (now retired). The
+naga→Tint frontend migration invalidated F-112's mechanism: naga had a
+**per-address-space** `BoundsCheckPolicy`, so F-112 could set `buffer = Unchecked`
+in isolation. Tint's SPIR-V writer
+(`third_party/dawn/src/tint/lang/spirv/writer/common/options.h`) exposes only a
+**single whole-shader** `disable_robustness` flag (no per-address-space toggle).
+yawgpu had been driving `disable_robustness = robust_buffer_access2()`, which on a
+robustBufferAccess2 device (NVIDIA) disabled robustness for the **entire** shader —
+so uniform (sub-`robustUniformBufferAccessSizeAlignment`), workgroup, function, and
+private out-of-bounds accesses, and OOB writes, all lost clamping
+(`shader,execution,robust_access:linear_memory` → 216 fail; webgpu-native-cts
+`docs/FINDINGS.md` F-127).
+
+The original F-112 workaround (disable buffer robustness to dodge the NVIDIA
+workgroup-atomic coherence violation that the software `OpArrayLength` clamp
+triggers) is fundamentally incompatible with Tint's all-or-nothing robustness:
+clamping cannot be kept for uniform/workgroup/private while removed for storage.
+
+**Decision (mirrors Dawn).** Enable the **Vulkan Memory Model** and keep SPIR-V
+robustness fully **ON**. Dawn does exactly this — `PhysicalDeviceVk.cpp` defaults
+`Toggle::UseVulkanMemoryModel` on when the extension is available and passes
+`tintOptions.extensions.use_vulkan_memory_model` to Tint (`ShaderModuleVk.cpp`),
+with full robustness. yawgpu now:
+
+- **yawgpu-hal** enables `VK_KHR_vulkan_memory_model` + `vulkanMemoryModel`
+  (`vulkanMemoryModelDeviceScope` when reported), available from Vulkan-1.2 core or
+  the extension on 1.1; exposes `VulkanDevice::vulkan_memory_model()`. The
+  `VK_EXT_robustness2` / `robustBufferAccess2` enablement and the
+  `robust_buffer_access2()` accessor are **removed** (the Vulkan-1.0
+  `robustBufferAccess` vertex-robustness enablement, F-068, is unaffected).
+- **yawgpu-tint** threads a `use_vulkan_memory_model` flag through
+  `generate_spirv` (shim + binding) → `options.extensions.use_vulkan_memory_model`
+  on the SPIR-V path.
+- **yawgpu-core** `ReflectedModule::generate_spirv` always passes `robust = true`
+  and forwards the device's `vulkan_memory_model()` bit through
+  `select_{compute,render}_shader_source`. MSL/Metal is untouched.
+
+**Verification (native NVIDIA RTX 5060 Ti, Vulkan 1.4).**
+`robust_access:linear_memory:*` → **pass=1626 fail=0** (was 216 fail). The change
+also *improves* coherence: `coherence:corr:atomic_workgroup;intra_workgroup` (the
+original F-112 subcase) now **passes** under VMM + full robustness, where the old
+robustness-off config failed it deterministically (~1600 weak behaviors/run).
+
+**`coherence:corr:atomic_storage;intra_workgroup` is a driver limitation, not a
+yawgpu defect.** It fails on this GPU under **every** configuration, including the
+**Dawn oracle** (3/3 runs, ~800 disallowed weak behaviors each) and the pre-fix
+yawgpu config — i.e. the RTX 5060 Ti's memory subsystem exhibits the WebGPU-
+disallowed weak read-read behavior regardless of the implementation. Per the
+project's oracle-cross-check rule (cf. F-128), a case the Dawn oracle fails
+identically is not attributable to yawgpu; it is carried as an `xfail` in
+webgpu-native-cts `expectations/yawgpu-vulkan.txt`, not chased in the library. The
+F-112 finding's historical "`coherence:* 27/27`" no longer reproduces on the
+current driver/CTS.
+
+## CTS finding F-138 — `bgra8unorm` storage-texture view format mismatch (2026-06-28)
+
+`textureStore` to a `bgra8unorm` write-only storage texture wrote wrong/zero bytes
+on native Vulkan (`expected 51, got 0`); every other store format passed. Dawn (same
+Tint) passes. Root cause is **not** in Tint or the VkFormat map: Tint's
+`Bgra8UnormPolyfill` (`third_party/dawn/src/tint/lang/spirv/.../bgra8unorm_polyfill.cc`)
+already rewrites a `bgra8unorm` storage texture to an **`rgba8unorm`** storage image
+plus a `(2,1,0,3)` channel swizzle, so the emitted SPIR-V writes RGBA-ordered bytes
+through an image **declared `rgba8unorm`**. yawgpu bound that storage texture through
+a VkImageView created with the **BGRA** VkFormat, and the backing image lacked
+`MUTABLE_FORMAT`, so Vulkan reinterpreted the shader's RGBA bytes as BGRA.
+
+**Decision (mirrors Dawn `TextureVk.cpp` `mHandleForBGRA8UnormStorage`).** For a
+`bgra8unorm` texture with `STORAGE_BINDING` usage, create the backing image with
+`VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` (plus a `VkImageFormatListCreateInfo` listing
+`B8G8R8A8_UNORM` + `R8G8B8A8_UNORM` when `VK_KHR_image_format_list` / Vulkan 1.2 is
+available) and bind storage through a dedicated `R8G8B8A8_UNORM` view
+(`yawgpu-hal/src/vulkan/texture.rs` caches one for the canonical whole-resource range
+on `VulkanTextureInner`; `pipeline.rs` `create_storage_texture_image_view` reuses it
+or builds a remapped on-the-fly view for non-canonical subresource ranges).
+HAL-only — no core or shim change. Non-BGRA storage textures are unaffected.
+
+Verification (native NVIDIA Vulkan): the `bgra8unorm` cases of
+`shader,execution,expression,call,builtin,textureStore:*` → `fail=0`; plus an
+in-repo `e2e_vulkan` regression that stores to a `bgra8unorm` storage texture and
+reads back the expected byte order.
+
 ## CTS finding F-135 — Vulkan entry loaded per `VulkanInstance` → device-creation churn leak (2026-06-23)
 
 webgpu-native-cts `docs/FINDINGS.md` F-135 (`specs/investigate-yawgpu-device-create-leak.md`)

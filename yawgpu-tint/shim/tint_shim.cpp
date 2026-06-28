@@ -994,6 +994,7 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
                                 const YawgpuTintOverrideValue* ov,
                                 size_t n_ov,
                                 bool disable_robustness,
+                                bool use_vulkan_memory_model,
                                 uint32_t** words_out,
                                 size_t* n_words_out,
                                 char** err) {
@@ -1020,6 +1021,7 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
         tint::spirv::writer::Options options;
         options.entry_point_name = entry_point;
         options.disable_robustness = disable_robustness;
+        options.extensions.use_vulkan_memory_model = use_vulkan_memory_model;
         options.bindings = all_remaps_empty(bindings)
                                ? tint::GenerateBindings(ir.Get(), entry_point, false, false)
                                : make_bindings(bindings);

@@ -70,6 +70,7 @@ pub(super) struct VulkanTextureInner {
     pub(super) device: Arc<VulkanDeviceInner>,
     pub(super) image: vk::Image,
     pub(super) view: vk::ImageView,
+    pub(super) bgra8_storage_view: vk::ImageView,
     pub(super) memory: Option<vk::DeviceMemory>,
     pub(super) owns_image: bool,
     pub(super) mip_level_count: u32,
@@ -80,6 +81,11 @@ pub(super) struct VulkanTextureInner {
 impl Drop for VulkanTextureInner {
     fn drop(&mut self) {
         unsafe {
+            if self.bgra8_storage_view != vk::ImageView::null() {
+                self.device
+                    .device
+                    .destroy_image_view(self.bgra8_storage_view, None);
+            }
             self.device.device.destroy_image_view(self.view, None);
             if self.owns_image {
                 self.device.device.destroy_image(self.image, None);
@@ -121,6 +127,48 @@ fn texture_usage_needs_view(usage: HalTextureUsage) -> bool {
     usage.texture_binding || usage.storage_binding || usage.render_attachment
 }
 
+fn bgra8_storage_view_format(
+    format: HalTextureFormat,
+    usage: HalTextureUsage,
+) -> Option<vk::Format> {
+    (format == HalTextureFormat::Bgra8Unorm && usage.storage_binding)
+        .then_some(vk::Format::R8G8B8A8_UNORM)
+}
+
+fn bgra8_storage_view_format_list(
+    format: HalTextureFormat,
+    usage: HalTextureUsage,
+) -> Option<[vk::Format; 2]> {
+    bgra8_storage_view_format(format, usage)
+        .map(|rgba_format| [vk::Format::B8G8R8A8_UNORM, rgba_format])
+}
+
+fn texture_image_flags(
+    dimension: HalTextureDimension,
+    bgra8_storage_view: bool,
+) -> vk::ImageCreateFlags {
+    let mut flags = match dimension {
+        HalTextureDimension::D3 => vk::ImageCreateFlags::TYPE_2D_ARRAY_COMPATIBLE,
+        HalTextureDimension::D1 | HalTextureDimension::D2 => vk::ImageCreateFlags::empty(),
+    };
+    if bgra8_storage_view {
+        flags |= vk::ImageCreateFlags::MUTABLE_FORMAT;
+    }
+    flags
+}
+
+fn default_texture_image_view_type(
+    dimension: HalTextureDimension,
+    depth_or_array_layers: u32,
+) -> vk::ImageViewType {
+    match dimension {
+        HalTextureDimension::D1 => vk::ImageViewType::TYPE_1D,
+        HalTextureDimension::D2 if depth_or_array_layers > 1 => vk::ImageViewType::TYPE_2D_ARRAY,
+        HalTextureDimension::D2 => vk::ImageViewType::TYPE_2D,
+        HalTextureDimension::D3 => vk::ImageViewType::TYPE_3D,
+    }
+}
+
 /// Creates texture and reports validation errors through the owning device.
 pub(super) fn create_texture(
     device: Arc<VulkanDeviceInner>,
@@ -148,11 +196,14 @@ pub(super) fn create_texture(
         HalTextureDimension::D2 => descriptor.depth_or_array_layers,
         HalTextureDimension::D1 | HalTextureDimension::D3 => 1,
     };
-    let image_flags = match descriptor.dimension {
-        HalTextureDimension::D3 => vk::ImageCreateFlags::TYPE_2D_ARRAY_COMPATIBLE,
-        HalTextureDimension::D1 | HalTextureDimension::D2 => vk::ImageCreateFlags::empty(),
-    };
-    let image_info = vk::ImageCreateInfo::default()
+    let bgra8_storage_vk_format = bgra8_storage_view_format(descriptor.format, descriptor.usage);
+    let image_flags = texture_image_flags(descriptor.dimension, bgra8_storage_vk_format.is_some());
+    let image_format_list_formats = device
+        .image_format_list
+        .then(|| bgra8_storage_view_format_list(descriptor.format, descriptor.usage))
+        .flatten();
+    let mut image_format_list = vk::ImageFormatListCreateInfo::default();
+    let mut image_info = vk::ImageCreateInfo::default()
         .flags(image_flags)
         .image_type(image_type)
         .format(format)
@@ -164,6 +215,10 @@ pub(super) fn create_texture(
         .usage(map_texture_usage(descriptor.usage))
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .initial_layout(vk::ImageLayout::UNDEFINED);
+    if let Some(formats) = image_format_list_formats.as_ref() {
+        image_format_list = image_format_list.view_formats(formats);
+        image_info = image_info.push_next(&mut image_format_list);
+    }
     let image = unsafe { device.device.create_image(&image_info, None) }
         .map_err(|error| map_texture_error(error, "image creation failed"))?;
     let requirements = unsafe { device.device.get_image_memory_requirements(image) };
@@ -209,14 +264,8 @@ pub(super) fn create_texture(
         return Err(map_texture_error(error, "image memory bind failed"));
     }
     let view = if texture_usage_needs_view(descriptor.usage) {
-        let view_type = match descriptor.dimension {
-            HalTextureDimension::D1 => vk::ImageViewType::TYPE_1D,
-            HalTextureDimension::D2 if descriptor.depth_or_array_layers > 1 => {
-                vk::ImageViewType::TYPE_2D_ARRAY
-            }
-            HalTextureDimension::D2 => vk::ImageViewType::TYPE_2D,
-            HalTextureDimension::D3 => vk::ImageViewType::TYPE_3D,
-        };
+        let view_type =
+            default_texture_image_view_type(descriptor.dimension, descriptor.depth_or_array_layers);
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(view_type)
@@ -235,11 +284,34 @@ pub(super) fn create_texture(
     } else {
         vk::ImageView::null()
     };
+    let bgra8_storage_view = if let Some(storage_format) = bgra8_storage_vk_format {
+        let view_type =
+            default_texture_image_view_type(descriptor.dimension, descriptor.depth_or_array_layers);
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(view_type)
+            .format(storage_format)
+            .subresource_range(color_subresource_range(
+                descriptor.mip_level_count,
+                array_layers,
+            ));
+        unsafe { device.device.create_image_view(&view_info, None) }.map_err(|_| {
+            unsafe {
+                device.device.destroy_image_view(view, None);
+                device.device.destroy_image(image, None);
+                device.device.free_memory(memory, None);
+            }
+            texture_error("bgra8 storage image view creation failed")
+        })?
+    } else {
+        vk::ImageView::null()
+    };
     Ok((
         VulkanTextureInner {
             device,
             image,
             view,
+            bgra8_storage_view,
             memory: Some(memory),
             owns_image: true,
             mip_level_count: descriptor.mip_level_count,
@@ -653,5 +725,52 @@ mod tests {
             storage_binding: false,
             render_attachment: false,
         }));
+    }
+
+    #[test]
+    fn bgra8_storage_view_is_enabled_only_for_bgra8unorm_storage_textures() {
+        let storage = texture_usage(false, true, false);
+        let sampled = texture_usage(true, false, false);
+
+        assert_eq!(
+            bgra8_storage_view_format(HalTextureFormat::Bgra8Unorm, storage),
+            Some(vk::Format::R8G8B8A8_UNORM)
+        );
+        assert_eq!(
+            bgra8_storage_view_format(HalTextureFormat::Bgra8Unorm, sampled),
+            None
+        );
+        assert_eq!(
+            bgra8_storage_view_format(HalTextureFormat::Rgba8Unorm, storage),
+            None
+        );
+        assert_eq!(
+            bgra8_storage_view_format(HalTextureFormat::Bgra8UnormSrgb, storage),
+            None
+        );
+    }
+
+    #[test]
+    fn bgra8_storage_texture_adds_mutable_format_and_format_list() {
+        let storage = texture_usage(false, true, false);
+
+        assert!(texture_image_flags(HalTextureDimension::D2, true)
+            .contains(vk::ImageCreateFlags::MUTABLE_FORMAT));
+        assert_eq!(
+            bgra8_storage_view_format_list(HalTextureFormat::Bgra8Unorm, storage),
+            Some([vk::Format::B8G8R8A8_UNORM, vk::Format::R8G8B8A8_UNORM])
+        );
+    }
+
+    #[test]
+    fn non_bgra_storage_texture_keeps_default_image_flags_and_no_storage_view() {
+        let storage = texture_usage(false, true, false);
+        let flags = texture_image_flags(HalTextureDimension::D2, false);
+
+        assert!(!flags.contains(vk::ImageCreateFlags::MUTABLE_FORMAT));
+        assert_eq!(
+            bgra8_storage_view_format_list(HalTextureFormat::Rgba8Unorm, storage),
+            None
+        );
     }
 }

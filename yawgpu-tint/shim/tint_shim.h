@@ -248,6 +248,7 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
                                 const YawgpuTintOverrideValue* ov,
                                 size_t n_ov,
                                 bool disable_robustness,
+                                bool use_vulkan_memory_model,
                                 uint32_t** words_out,
                                 size_t* n_words_out,
                                 char** err);

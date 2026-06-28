@@ -676,6 +676,7 @@ pub(super) fn create_swapchain_texture(
             device,
             image,
             view,
+            bgra8_storage_view: vk::ImageView::null(),
             memory: None,
             owns_image: false,
             mip_level_count: 1,

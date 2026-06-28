@@ -268,7 +268,7 @@ pub(crate) fn create_hal_compute_pipeline(
         entry_name,
         constants,
         metal_bindings,
-        hal_device.robust_buffer_access2(),
+        hal_device.vulkan_memory_model(),
     ) {
         Ok(selection) => selection,
         Err(message) => return (None, Some(message)),
@@ -291,7 +291,7 @@ pub(crate) fn select_compute_shader_source(
     entry_name: &str,
     constants: &[PipelineConstant],
     metal_bindings: &[MetalBufferBinding],
-    unchecked_buffer_bounds: bool,
+    vulkan_memory_model: bool,
 ) -> Result<(HalShaderSource, String, Vec<HalDescriptorBinding>), String> {
     let pipeline_constants = pipeline_constant_map(constants);
     match backend {
@@ -328,7 +328,7 @@ pub(crate) fn select_compute_shader_source(
                 entry_name,
                 frontend::ShaderStage::Compute,
                 &pipeline_constants,
-                unchecked_buffer_bounds,
+                vulkan_memory_model,
             )?;
             Ok((
                 HalShaderSource::SpirV(spirv),

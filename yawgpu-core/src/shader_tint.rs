@@ -56,18 +56,23 @@ pub(crate) fn parse_and_validate_wgsl_gated(
 
 impl ReflectedModule {
     /// Generates spirv for the validated shader module.
+    ///
+    /// `vulkan_memory_model` enables Tint's SPV_KHR_vulkan_memory_model output
+    /// when the Vulkan backend enabled `VK_KHR_vulkan_memory_model` /
+    /// `vulkanMemoryModel`. SPIR-V robustness stays enabled.
     pub(crate) fn generate_spirv(
         &self,
         entry_name: &str,
         _stage: ShaderStage,
         pipeline_constants: &PipelineConstants,
-        unchecked_buffer_bounds: bool,
+        vulkan_memory_model: bool,
     ) -> Result<Vec<u32>, String> {
         self.program.generate_spirv(
             entry_name,
             &yawgpu_tint::Bindings::default(),
             &override_values(pipeline_constants),
-            !unchecked_buffer_bounds,
+            true,
+            vulkan_memory_model,
         )
     }
 
@@ -269,6 +274,7 @@ impl ReflectedModule {
             &yawgpu_tint::Bindings::default(),
             &overrides,
             true,
+            false,
         )?;
         let literal_size = spirv_local_size(&spirv)
             .ok_or_else(|| "compute entry point workgroup size reflection failed".to_owned())?;
@@ -1397,6 +1403,37 @@ fn fs() -> @location(0) vec4<f32> {
             .unwrap();
         assert_eq!(vertex.first().copied(), Some(0x0723_0203));
         assert_eq!(fragment.first().copied(), Some(0x0723_0203));
+    }
+
+    #[test]
+    fn generate_spirv_keeps_robustness_with_vulkan_memory_model_toggle() {
+        let module = parse_and_validate_wgsl(
+            r#"
+struct Data {
+  values: array<u32>,
+}
+
+@group(0) @binding(0) var<storage, read_write> data: Data;
+
+@compute @workgroup_size(1)
+fn cs() {
+  data.values[0] = data.values[0] + 1u;
+}
+"#,
+        )
+        .unwrap();
+
+        for vulkan_memory_model in [false, true] {
+            let spirv = module
+                .generate_spirv(
+                    "cs",
+                    ShaderStage::Compute,
+                    &PipelineConstants::default(),
+                    vulkan_memory_model,
+                )
+                .unwrap();
+            assert_eq!(spirv.first().copied(), Some(0x0723_0203));
+        }
     }
 
     #[cfg(feature = "gles")]
