@@ -468,19 +468,19 @@ implementation, is the **oracle** every result is judged against.
 
 Across the **entire ported suite** — 642 spec files spanning `api/validation`,
 `api/operation`, `shader/validation`, and `shader/execution` — yawgpu runs
-**`fail = 0`, `crash = 0`** on both Tier-1 backends, **on native hardware**,
-matching the Dawn oracle:
+**`fail = 0`, `crash = 0`** on native hardware, matching the Dawn oracle. The
+native-Metal sweep, by tree:
 
-| Backend (host) | subcases passing | fail | crash |
-|---|---|---|---|
-| **Dawn** (oracle) | reference | **0** | **0** |
-| **yawgpu — native Metal** (Apple Silicon) | **1,676,746** | **0** | **0** |
-| **yawgpu — native Vulkan** (NVIDIA RTX 5060 Ti) | same suite, fail-free | **0** | **0** |
+| area | pass | skip | fail | crash |
+|---|---:|---:|---:|---:|
+| `api/*` (`api/validation` + `api/operation`) | 450,926 | — | **0** | 0 |
+| `shader/execution` | 725,445 | 119,141 | **0** | 0 |
+| `shader/validation` | 500,375 | 166,767 | **0** | 0 |
+| **total** | **1,676,746** | — | **0** | **0** |
 
-On native Metal that is **1,676,746 subcases passing** — `api/*` 450,926 +
-`shader/execution` 725,445 + `shader/validation` 500,375 — with zero failures and
-zero crashes. Native Vulkan runs the same suite with the identical
-`fail = 0 / crash = 0` verdict.
+**Native Vulkan** (Windows / NVIDIA RTX 5060 Ti) is confirmed **identical** — the
+same `fail = 0 / crash = 0` across every tree. The **Dawn** oracle is likewise
+`fail = 0 / crash = 0`.
 
 Shader conformance falls out **by construction**: since the naga→Tint migration,
 yawgpu compiles WGSL with the same Tint compiler Dawn uses, so the translated
