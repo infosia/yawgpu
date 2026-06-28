@@ -165,27 +165,27 @@ Pipeline creation generalizes the backend branch (compute first, render later):
 - **MP7** with the feature **off**, the `YAWGPU_STYPE_SHADER_SOURCE_MSL` chain
   yields an error module ("shader passthrough not enabled"). ☑ (UT)
 
-### SPIR-V passthrough (P13.2) — Vulkan
+### SPIR-V passthrough (P13.2) — Vulkan — **B2 DONE**
 
 - **SP1** the standard `WGPUShaderSourceSPIRV` chain routes to the SPIR-V
-  passthrough core path. Empty / non-word-multiple / bad magic ⇒ error module.
-  ☐ (UT)
+  passthrough core path. Empty / bad magic (`0x07230203`) ⇒ error module.
+  ☑ (UT)
 - **SP2** at Vulkan pipeline creation the words are passed **verbatim** (never
   re-emitted); descriptor bindings come from the explicit layout; `auto` layout
-  ⇒ error. ☐ (UT noop + e2e Vulkan)
-- **SP3** a SPIR-V module used on the **Metal** backend ⇒ device error. ☐ (UT)
+  ⇒ error. ☑ (UT noop + e2e Vulkan — `e2e_vulkan_shader_passthrough.rs`)
+- **SP3** a SPIR-V module used on the **Metal** backend ⇒ device error. ☑ (UT)
 - **SP4** on **Noop** the create succeeds and a pipeline builds with no compiled
-  shader. ☐ (UT)
+  shader. ☑ (UT)
 - **SP5** with the feature **off**, the `WGPUShaderSourceSPIRV` chain yields an
-  error module ("shader passthrough not enabled"). ☐ (UT)
+  error module ("shader passthrough not enabled"). ☑ (UT)
 
 ### Common / handle behaviour (P13.3)
 
 - **CB1** both passthrough handles are ordinary `WGPUShaderModule`s
   (`is_error`/`diagnostic`/`GetCompilationInfo`/`AddRef`/`Release` per block 30).
-  ☑ (UT — MSL; SPIR-V with B2)
+  ☑ (UT — MSL + SPIR-V)
 - **CB2** error create returns a `Release`-safe error handle; first-match-wins
-  error semantics. ☑ (UT — MSL; SPIR-V with B2)
+  error semantics. ☑ (UT — MSL + SPIR-V)
 
 ## Feature gating
 
@@ -211,7 +211,7 @@ Pipeline creation generalizes the backend branch (compute first, render later):
   auto-layout reject (MP3) + workgroup-size threading (MP4 noop); `yawgpu.h`
   `YaWGPUShaderSourceMSL` + conv routing (MP7) + FFI unit test; real-GPU
   `e2e_metal_shader_passthrough.rs` compute (MP4).
-- **B2** **Vulkan SPIR-V compute, end-to-end.** Core `SpirvPassthrough` + magic
+- **B2** ✅ **DONE** **Vulkan SPIR-V compute, end-to-end.** Core `SpirvPassthrough` + magic
   validation + accessor + unit tests (SP1/SP4/SP5); compute-pipeline Vulkan
   branch + mismatch (SP3) + auto-layout reject; conv routing of standard
   `WGPUShaderSourceSPIRV` (SP1); real-GPU `e2e_vulkan_shader_passthrough.rs`

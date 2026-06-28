@@ -2629,6 +2629,134 @@ mod tests {
         }
     }
 
+    fn spirv_shader_descriptor(
+        source: &mut native::WGPUShaderSourceSPIRV,
+    ) -> native::WGPUShaderModuleDescriptor {
+        native::WGPUShaderModuleDescriptor {
+            nextInChain: (&mut source.chain) as *mut native::WGPUChainedStruct,
+            label: empty_string_view(),
+        }
+    }
+
+    fn valid_spirv_words() -> Vec<u32> {
+        vec![0x0723_0203, 0, 0, 0, 0]
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn wgpuDeviceCreateShaderModule_spirv_passthrough_noop_returns_non_error_module() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let words = valid_spirv_words();
+            let mut source = native::WGPUShaderSourceSPIRV {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_ShaderSourceSPIRV,
+                },
+                codeSize: words.len() as u32,
+                code: words.as_ptr(),
+            };
+            let descriptor = spirv_shader_descriptor(&mut source);
+
+            let module = wgpuDeviceCreateShaderModule(device, &descriptor);
+
+            assert!(!module.is_null());
+            let module_impl = borrow_handle(module, "WGPUShaderModule");
+            assert!(!module_impl._core.is_error());
+            wgpuShaderModuleRelease(module);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn wgpuDeviceCreateShaderModule_spirv_passthrough_bad_magic_returns_error_module() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let words = [1_u32, 2, 3];
+            let mut source = native::WGPUShaderSourceSPIRV {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_ShaderSourceSPIRV,
+                },
+                codeSize: words.len() as u32,
+                code: words.as_ptr(),
+            };
+            let descriptor = spirv_shader_descriptor(&mut source);
+
+            let module = wgpuDeviceCreateShaderModule(device, &descriptor);
+
+            assert!(!module.is_null());
+            let module_impl = borrow_handle(module, "WGPUShaderModule");
+            assert!(module_impl._core.is_error());
+            assert_eq!(
+                module_impl._core.diagnostic(),
+                Some("SPIR-V shader source has an invalid magic word")
+            );
+            wgpuShaderModuleRelease(module);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn wgpuDeviceCreateShaderModule_spirv_passthrough_null_code_returns_error_module() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let mut source = native::WGPUShaderSourceSPIRV {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_ShaderSourceSPIRV,
+                },
+                codeSize: 4,
+                code: std::ptr::null(),
+            };
+            let descriptor = spirv_shader_descriptor(&mut source);
+
+            let module = wgpuDeviceCreateShaderModule(device, &descriptor);
+
+            assert!(!module.is_null());
+            let module_impl = borrow_handle(module, "WGPUShaderModule");
+            assert!(module_impl._core.is_error());
+            assert_eq!(
+                module_impl._core.diagnostic(),
+                Some("SPIR-V shader source code must be valid")
+            );
+            wgpuShaderModuleRelease(module);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[cfg(not(feature = "shader-passthrough"))]
+    #[test]
+    fn wgpuDeviceCreateShaderModule_spirv_passthrough_feature_off_returns_error_module() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let words = valid_spirv_words();
+            let mut source = native::WGPUShaderSourceSPIRV {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_ShaderSourceSPIRV,
+                },
+                codeSize: words.len() as u32,
+                code: words.as_ptr(),
+            };
+            let descriptor = spirv_shader_descriptor(&mut source);
+
+            let module = wgpuDeviceCreateShaderModule(device, &descriptor);
+
+            assert!(!module.is_null());
+            let module_impl = borrow_handle(module, "WGPUShaderModule");
+            assert!(module_impl._core.is_error());
+            assert_eq!(
+                module_impl._core.diagnostic(),
+                Some("shader passthrough not enabled")
+            );
+            wgpuShaderModuleRelease(module);
+            release_handles(instance, adapter, device);
+        }
+    }
+
     #[cfg(feature = "shader-passthrough")]
     #[test]
     fn wgpuDeviceCreateShaderModule_msl_passthrough_noop_returns_non_error_module() {

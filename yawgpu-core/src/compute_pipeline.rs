@@ -248,6 +248,10 @@ fn resolve_compute_pipeline_descriptor_for_source(
     pipeline_id: u64,
 ) -> Result<ResolvedPipelineParts, String> {
     #[cfg(feature = "shader-passthrough")]
+    if descriptor.shader_module.spirv_passthrough().is_some() {
+        return resolve_spirv_passthrough_compute_pipeline_descriptor(descriptor);
+    }
+    #[cfg(feature = "shader-passthrough")]
     if let Some((_source, entries)) = descriptor.shader_module.msl_passthrough() {
         return resolve_msl_passthrough_compute_pipeline_descriptor(descriptor, entries);
     }
@@ -318,6 +322,10 @@ pub(crate) fn select_compute_shader_source(
     match backend {
         HalBackend::Metal => {
             #[cfg(feature = "shader-passthrough")]
+            if shader_module.spirv_passthrough().is_some() {
+                return Err("SPIR-V passthrough shader requires the Vulkan backend".to_owned());
+            }
+            #[cfg(feature = "shader-passthrough")]
             if let Some((source, _entries)) = shader_module.msl_passthrough() {
                 if !constants.is_empty() {
                     return Err(
@@ -353,6 +361,20 @@ pub(crate) fn select_compute_shader_source(
             ))
         }
         HalBackend::Vulkan => {
+            #[cfg(feature = "shader-passthrough")]
+            if let Some(words) = shader_module.spirv_passthrough() {
+                if !constants.is_empty() {
+                    return Err(
+                        "pipeline-overridable constants are not supported with shader passthrough"
+                            .to_owned(),
+                    );
+                }
+                return Ok((
+                    HalShaderSource::SpirV(words.to_vec()),
+                    entry_name.to_owned(),
+                    hal_descriptor_bindings(metal_bindings),
+                ));
+            }
             #[cfg(feature = "shader-passthrough")]
             if shader_module.msl_passthrough().is_some() {
                 return Err("MSL passthrough shader requires the Metal backend".to_owned());
@@ -908,6 +930,43 @@ pub(crate) fn resolve_msl_passthrough_compute_pipeline_descriptor(
         Vec::new(),
         Some(ResolvedComputeWorkgroup {
             size: entry.workgroup_size,
+            storage_size: 0,
+        }),
+        layout.bind_group_layouts().to_vec(),
+    ))
+}
+
+/// Records resolve into the command stream for raw SPIR-V passthrough compute.
+#[cfg(feature = "shader-passthrough")]
+pub(crate) fn resolve_spirv_passthrough_compute_pipeline_descriptor(
+    descriptor: &ComputePipelineDescriptor,
+) -> Result<ResolvedPipelineParts, String> {
+    if descriptor.shader_module.is_error() {
+        return Err("compute pipeline shader module must not be an error module".to_owned());
+    }
+    if !descriptor.constants.is_empty() {
+        return Err(
+            "pipeline-overridable constants are not supported with shader passthrough".to_owned(),
+        );
+    }
+    let ComputePipelineLayout::Explicit(layout) = &descriptor.layout else {
+        return Err("shader passthrough requires an explicit pipeline layout".to_owned());
+    };
+    if layout.is_error() {
+        return Err("compute pipeline layout must not be an error pipeline layout".to_owned());
+    }
+    let Some(entry_name) = descriptor
+        .entry_point
+        .as_deref()
+        .filter(|name| !name.is_empty())
+    else {
+        return Err("SPIR-V passthrough compute entry point is required".to_owned());
+    };
+    Ok((
+        entry_name.to_owned(),
+        Vec::new(),
+        Some(ResolvedComputeWorkgroup {
+            size: [1, 1, 1],
             storage_size: 0,
         }),
         layout.bind_group_layouts().to_vec(),
@@ -2377,6 +2436,18 @@ mod tests {
     }
 
     #[cfg(feature = "shader-passthrough")]
+    fn valid_spirv_words() -> Vec<u32> {
+        vec![0x0723_0203, 0, 0, 0, 0]
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    fn spirv_passthrough_module(device: &Device) -> Arc<ShaderModule> {
+        Arc::new(
+            device.create_shader_module(ShaderModuleSource::SpirvPassthrough(valid_spirv_words())),
+        )
+    }
+
+    #[cfg(feature = "shader-passthrough")]
     fn msl_passthrough_module(device: &Device, entries: Vec<MslEntryPoint>) -> Arc<ShaderModule> {
         Arc::new(
             device.create_shader_module(ShaderModuleSource::MslPassthrough {
@@ -2405,6 +2476,20 @@ mod tests {
     }
 
     #[cfg(feature = "shader-passthrough")]
+    fn spirv_passthrough_descriptor(
+        shader_module: Arc<ShaderModule>,
+        layout: ComputePipelineLayout,
+    ) -> ComputePipelineDescriptor {
+        ComputePipelineDescriptor {
+            layout,
+            shader_module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
     fn msl_passthrough_descriptor(
         shader_module: Arc<ShaderModule>,
         layout: ComputePipelineLayout,
@@ -2416,6 +2501,133 @@ mod tests {
             constants: Vec::new(),
             error: None,
         }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn spirv_passthrough_compute_pipeline_builds_on_noop_with_explicit_layout() {
+        let device = noop_device();
+        let module = spirv_passthrough_module(&device);
+        let layout = empty_pipeline_layout(&device);
+
+        let pipeline = device.create_compute_pipeline(spirv_passthrough_descriptor(
+            module,
+            ComputePipelineLayout::Explicit(layout),
+        ));
+
+        assert!(!pipeline.is_error());
+        assert_eq!(pipeline.entry_name(), "cs");
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn resolve_spirv_passthrough_compute_pipeline_uses_explicit_layout_and_placeholder_workgroup() {
+        let device = noop_device();
+        let module = spirv_passthrough_module(&device);
+        let layout = empty_pipeline_layout(&device);
+        let descriptor = spirv_passthrough_descriptor(
+            module,
+            ComputePipelineLayout::Explicit(Arc::clone(&layout)),
+        );
+
+        let (entry, bindings, workgroup, layouts) =
+            resolve_spirv_passthrough_compute_pipeline_descriptor(&descriptor)
+                .expect("SPIR-V passthrough resolve");
+
+        assert_eq!(entry, "cs");
+        assert!(bindings.is_empty());
+        assert_eq!(
+            workgroup,
+            Some(ResolvedComputeWorkgroup {
+                size: [1, 1, 1],
+                storage_size: 0,
+            })
+        );
+        assert_eq!(layouts.len(), layout.bind_group_layouts().len());
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn select_compute_shader_source_rejects_spirv_passthrough_on_metal() {
+        let device = noop_device();
+        let module = spirv_passthrough_module(&device);
+
+        let err = select_compute_shader_source(HalBackend::Metal, &module, "cs", &[], &[], false)
+            .expect_err("SPIR-V passthrough must reject Metal");
+
+        assert_eq!(err, "SPIR-V passthrough shader requires the Vulkan backend");
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn select_compute_shader_source_uses_spirv_passthrough_on_vulkan() {
+        let device = noop_device();
+        let module = spirv_passthrough_module(&device);
+        let layout = make_layout(&device, vec![buf_entry(7, SHADER_STAGE_COMPUTE)]);
+        let metal_bindings = metal_buffer_binding_map(&[layout]);
+
+        let (source, entry, descriptor_bindings) = select_compute_shader_source(
+            HalBackend::Vulkan,
+            &module,
+            "cs",
+            &[],
+            &metal_bindings,
+            false,
+        )
+        .expect("SPIR-V passthrough should select Vulkan source");
+
+        let HalShaderSource::SpirV(words) = source else {
+            panic!("Vulkan should select SPIR-V passthrough words");
+        };
+        assert_eq!(words, valid_spirv_words());
+        assert_eq!(entry, "cs");
+        assert_eq!(descriptor_bindings.len(), 1);
+        assert_eq!(descriptor_bindings[0].group, 0);
+        assert_eq!(descriptor_bindings[0].binding, 7);
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn spirv_passthrough_compute_pipeline_rejects_auto_layout() {
+        let device = noop_device();
+        let module = spirv_passthrough_module(&device);
+
+        let err = validate_compute_pipeline_descriptor(
+            &spirv_passthrough_descriptor(module, ComputePipelineLayout::Auto),
+            device.limits(),
+            &FeatureSet::default(),
+        )
+        .expect("auto layout should fail");
+
+        assert_eq!(
+            err,
+            "shader passthrough requires an explicit pipeline layout"
+        );
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn spirv_passthrough_compute_pipeline_rejects_pipeline_constants() {
+        let device = noop_device();
+        let module = spirv_passthrough_module(&device);
+        let layout = ComputePipelineLayout::Explicit(empty_pipeline_layout(&device));
+        let mut descriptor = spirv_passthrough_descriptor(module, layout);
+        descriptor.constants.push(PipelineConstant {
+            key: "x".to_owned(),
+            value: 1.0,
+        });
+
+        let err = validate_compute_pipeline_descriptor(
+            &descriptor,
+            device.limits(),
+            &FeatureSet::default(),
+        )
+        .expect("constants should fail");
+
+        assert_eq!(
+            err,
+            "pipeline-overridable constants are not supported with shader passthrough"
+        );
     }
 
     #[cfg(feature = "shader-passthrough")]
