@@ -34,6 +34,9 @@ cmake_path(GET CMAKE_SOURCE_DIR PARENT_PATH YAWGPU_ROOT)
 set(YAWGPU_PROFILE "debug" CACHE STRING "Cargo profile used for libyawgpu")
 set_property(CACHE YAWGPU_PROFILE PROPERTY STRINGS debug release)
 set(YAWGPU_FEATURE "" CACHE STRING "Optional yawgpu cargo feature: metal or vulkan")
+# Opt-in: also build libyawgpu with the `shader-passthrough` vendor feature and
+# enable the `triangle_passthrough` example (SPIR-V/MSL native shader passthrough).
+option(YAWGPU_SHADER_PASSTHROUGH "Build the shader-passthrough example (adds the shader-passthrough cargo feature)" OFF)
 
 if(YAWGPU_PROFILE STREQUAL "release")
     set(YAWGPU_CARGO_PROFILE_ARG --release)
@@ -46,6 +49,9 @@ endif()
 set(YAWGPU_CARGO_FEATURES)
 if(NOT YAWGPU_FEATURE STREQUAL "")
     list(APPEND YAWGPU_CARGO_FEATURES ${YAWGPU_FEATURE})
+endif()
+if(YAWGPU_SHADER_PASSTHROUGH)
+    list(APPEND YAWGPU_CARGO_FEATURES shader-passthrough)
 endif()
 list(REMOVE_DUPLICATES YAWGPU_CARGO_FEATURES)
 
@@ -87,6 +93,26 @@ add_custom_target(yawgpu_cargo_build
     COMMENT "Building libyawgpu with Cargo (target dir: ${YAWGPU_TARGET_ROOT})"
     VERBATIM
 )
+
+# libyawgpu references the Tint shim as @rpath/libtint_shim.<ext>, but cargo
+# emits it into a hashed build-script output dir rather than next to libyawgpu.
+# Copy it alongside libyawgpu (already on the examples' rpath) so every example
+# loads it without a manual DYLD_LIBRARY_PATH. Windows is handled by build.rs.
+if(APPLE OR (UNIX AND NOT WIN32))
+    if(APPLE)
+        set(YAWGPU_TINT_SHIM_NAME "libtint_shim.dylib")
+    else()
+        set(YAWGPU_TINT_SHIM_NAME "libtint_shim.so")
+    endif()
+    add_custom_command(TARGET yawgpu_cargo_build POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+            -DTARGET_DIR=${YAWGPU_TARGET_DIR}
+            -DSHIM_NAME=${YAWGPU_TINT_SHIM_NAME}
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_tint_shim.cmake"
+        COMMENT "Copying Tint shim next to libyawgpu"
+        VERBATIM
+    )
+endif()
 
 add_library(yawgpu_c_api SHARED IMPORTED GLOBAL)
 set_target_properties(yawgpu_c_api PROPERTIES
@@ -147,4 +173,7 @@ if(YAWGPU_WINDOWED_EXAMPLES)
     add_subdirectory(surface_smoke)
     add_subdirectory(triangle)
     add_subdirectory(hello_triangle)
+    if(YAWGPU_SHADER_PASSTHROUGH)
+        add_subdirectory(triangle_passthrough)
+    endif()
 endif()

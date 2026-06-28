@@ -1,0 +1,44 @@
+// MSL passthrough demo — vertex + fragment stages in one source file.
+//
+// yawgpu's MSL passthrough takes the source verbatim plus an explicit
+// `entry_points: [(name, stage, workgroup_size)]` list, so a single MSL
+// module can host both stages just by declaring them with the right
+// function-qualifier keywords (`vertex` / `fragment` / `kernel`). The
+// pipeline descriptor's `vertex.entryPoint` and `fragment.entryPoint`
+// then pick the function names from this module.
+//
+// Metal's clip space matches WebGPU (+Y is up), so no Y-axis flip is
+// needed in `vs_main` (cf. `triangle.vert.glsl`, which negates Y to
+// compensate for Vulkan's flipped convention).
+
+#include <metal_stdlib>
+using namespace metal;
+
+struct VertexOut {
+    float4 position [[position]];
+    float3 color;
+};
+
+vertex VertexOut vs_main(uint vertex_id [[vertex_id]]) {
+    // Same three positions as the WGSL reference:
+    //   vertex 0 -> (-1, -1), vertex 1 -> (0, +1), vertex 2 -> (+1, -1).
+    float x = float(int(vertex_id) - 1);
+    float y = float(int(vertex_id & 1u) * 2 - 1);
+
+    // Per-vertex RGB so the fragment stage receives an interpolated
+    // gradient (red at vertex 0, green at vertex 1, blue at vertex 2).
+    constexpr float3 colors[3] = {
+        float3(1.0, 0.0, 0.0),
+        float3(0.0, 1.0, 0.0),
+        float3(0.0, 0.0, 1.0),
+    };
+
+    VertexOut out;
+    out.position = float4(x, y, 0.0, 1.0);
+    out.color = colors[vertex_id];
+    return out;
+}
+
+fragment float4 fs_main(VertexOut in [[stage_in]]) {
+    return float4(in.color, 1.0);
+}

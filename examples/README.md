@@ -49,3 +49,14 @@ GLFW, and Linux windowed examples are not enabled in this phase.
 `triangle` opens a window, draws an RGB-corner gradient triangle (red / green / blue at the three vertices, smoothly interpolated across the surface) on a black background for about 60 frames or until the window is closed, and then exits with status 0.
 
 `hello_triangle` is the Dawn HelloTriangle port and has the same prerequisites as `triangle`. It draws the same RGB-corner gradient triangle for about 60 frames, but feeds positions **and** per-vertex colors from a real (interleaved) vertex buffer instead of deriving them in the shader from P9.3's `@builtin(vertex_index)`.
+
+`triangle_passthrough` draws the same RGB-corner gradient triangle, but feeds the GPU **native shader bytecode** instead of WGSL, through yawgpu's opt-in `shader-passthrough` vendor feature: hand-written **SPIR-V** (`triangle.{vert,frag}.spv`, compiled from the bundled GLSL with `glslangValidator -V`) on Vulkan, and hand-written **MSL** (`triangle.msl`) on Metal. It is **opt-in** — configure with `-DYAWGPU_SHADER_PASSTHROUGH=ON`, which both adds the `shader-passthrough` cargo feature to `libyawgpu` and enables this example:
+
+```sh
+cmake -S examples -B examples/build -DYAWGPU_FEATURE=metal -DYAWGPU_SHADER_PASSTHROUGH=ON
+cmake --build examples/build
+YAWGPU_BACKEND=metal  ./examples/build/triangle_passthrough/triangle_passthrough
+YAWGPU_BACKEND=vulkan ./examples/build/triangle_passthrough/triangle_passthrough   # with -DYAWGPU_FEATURE=vulkan
+```
+
+It self-skips (exit 0) on backends other than Metal / Vulkan, since passthrough has no Noop shader compiler to feed.
