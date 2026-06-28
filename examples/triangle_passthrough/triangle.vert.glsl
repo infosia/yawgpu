@@ -21,13 +21,14 @@ void main() {
     // Three positions derived from gl_VertexIndex, matching the WGSL
     // reference (`@vertex fn vs_main(@builtin(vertex_index) i): @builtin(position)`):
     //   vertex 0 -> (-1, -1), vertex 1 -> (0, +1), vertex 2 -> (+1, -1).
-    // The Y component is negated below to compensate for Vulkan's
-    // clip-space convention (+Y points down in clip space, vs WebGPU /
-    // Metal where +Y points up). With the negation, all three backends
-    // display the same triangle pointing up.
+    // Write coordinates in the WebGPU convention (+Y up), exactly like the
+    // MSL and WGSL versions — do NOT flip Y here. yawgpu's Vulkan backend
+    // already flips clip-space Y for us with a negative-height viewport
+    // (see yawgpu-hal vulkan encode.rs), so a manual flip would double-flip
+    // and render the triangle upside down.
     float x = float(int(gl_VertexIndex) - 1);
     float y = float(int(gl_VertexIndex & 1) * 2 - 1);
-    gl_Position = vec4(x, -y, 0.0, 1.0);
+    gl_Position = vec4(x, y, 0.0, 1.0);
 
     // Per-vertex RGB so the fragment stage receives an interpolated
     // gradient (red at vertex 0, green at vertex 1, blue at vertex 2).

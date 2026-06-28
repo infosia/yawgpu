@@ -63,10 +63,12 @@
 //
 // Visual equivalence across backends
 // ----------------------------------
-// Vulkan's clip space has +Y pointing down, while WGSL/Metal both
-// have +Y up. The hand-written GLSL vertex shader negates Y to
-// compensate; the hand-written MSL vertex shader does not. As a
-// result the rendered triangle points up on all three backends.
+// All shader sources write positions in the WebGPU clip-space convention
+// (+Y up) — the GLSL/SPIR-V vertex shader does NOT flip Y. yawgpu's Vulkan
+// backend flips clip-space Y itself with a negative-height viewport (the
+// same flip Tint/WGSL rely on), so a passthrough shader must be authored
+// like any WebGPU shader, not like a raw Vulkan one. The triangle points
+// up on both backends as a result.
 
 #include "framework.h"
 
