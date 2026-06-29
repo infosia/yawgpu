@@ -316,6 +316,7 @@ link against `libyawgpu` and exercise the standard `webgpu.h` API:
 | `surface_smoke` | Opening a window and presenting cleared frames | core |
 | `triangle` | A classic windowed RGB-gradient triangle (vertex-index shader) | core |
 | `hello_triangle` | The same RGB-gradient triangle fed from an interleaved (position + color) vertex buffer | core |
+| `triangle_passthrough` | The same triangle fed **native bytecode** (SPIR-V / MSL) via the opt-in `shader-passthrough` feature | `-DYAWGPU_SHADER_PASSTHROUGH=ON` |
 
 Pick a backend at runtime with `YAWGPU_BACKEND`:
 
@@ -351,6 +352,30 @@ $env:YAWGPU_BACKEND = "gles"
 $env:YAWGPU_GLES_BACKEND = "wgl"
 examples\build-gles\triangle\Debug\triangle.exe
 ```
+
+The `triangle_passthrough` example is **opt-in**: it feeds the GPU native
+bytecode (hand-written **SPIR-V** on Vulkan, **MSL** on Metal) through the
+`shader-passthrough` vendor feature instead of WGSL, so it is built only when
+`-DYAWGPU_SHADER_PASSTHROUGH=ON` is passed at configure time (which also adds
+the `shader-passthrough` cargo feature to `libyawgpu`):
+
+```sh
+# macOS / Metal
+cmake -S examples -B examples/build -DYAWGPU_FEATURE=metal -DYAWGPU_SHADER_PASSTHROUGH=ON
+cmake --build examples/build
+YAWGPU_BACKEND=metal ./examples/build/triangle_passthrough/triangle_passthrough
+```
+
+```powershell
+# Windows / Vulkan
+cmake -S examples -B examples/build -DYAWGPU_FEATURE=vulkan -DYAWGPU_SHADER_PASSTHROUGH=ON
+cmake --build examples/build
+$env:YAWGPU_BACKEND = "vulkan"
+examples\build\triangle_passthrough\Debug\triangle_passthrough.exe
+```
+
+It self-skips (exit 0) on backends other than Metal / Vulkan, since passthrough
+has no Noop shader compiler to feed.
 
 Windowed examples use GLFW on macOS and native Win32 on Windows. See
 [`examples/README.md`](examples/README.md) for the full build matrix.
