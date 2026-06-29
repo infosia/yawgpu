@@ -1,0 +1,143 @@
+# TBDR re-home onto Tint — integration plan
+
+> **Status:** PLAN (not started). Authored 2026-06-30.
+> Supersedes the "removed" disposition of [Block 55](../blocks/55-tiled-rendering.md)
+> with a Tint-era re-introduction path. The naga-fork TBDR feature was deleted in
+> commit `78cdf48` (2026-06-26, Tint-migration Phase 0); this plan re-homes the
+> HAL/core/FFI surface onto the **Tint** shader frontend.
+
+## 1. Framing — two halves of one feature
+
+TBDR (tile-based deferred rendering) splits cleanly along the shader-compiler
+boundary:
+
+- **Shader-compiler half** — making the WGSL→{MSL, SPIR-V} compiler emit
+  input-attachment / framebuffer-fetch. In yawgpu this is **Tint** (the vendored
+  `third_party/dawn` submodule, driven via `yawgpu-tint`). The design for the
+  Tint-side work lives in the sibling Dawn clone's `TILED.md`
+  (`dawn`, branch `feature/tiled`).
+- **HAL/core/FFI half** — transient attachments, subpass passes, subpass
+  pipelines, the vendor C ABI. yawgpu had this (naga-era) and deleted it in
+  `78cdf48`. Block 55 is the retained historical spec.
+
+**Consequence:** `git revert 78cdf48` does **not** work. The deleted code drove a
+naga fork that emitted `[[color(N)]]` for `subpass_input`/`subpassLoad` and SPIR-V
+`SubpassData`. That naga capability is gone. The logic must be **ported** to
+Tint's WGSL surface, not reverted.
+
+### WGSL surface change (user-facing)
+
+The authored WGSL changes from the naga/wgpu-tiled surface to Tint's:
+
+| Concept | naga-era (deleted) | Tint surface (target) |
+|---|---|---|
+| input-attachment type | `subpass_input<T>` | `input_attachment<T>` (`enable chromium_internal_input_attachments`) |
+| load builtin | `subpassLoad(x)` | `inputAttachmentLoad(x)` |
+| index attribute | (binding) | `@input_attachment_index(N)` |
+| framebuffer fetch | `@color(N)` | `@color(N)` (`enable chromium_experimental_framebuffer_fetch`) — same |
+
+Block 55, when un-removed, must be rewritten to the Tint surface.
+
+## 2. Confirmed decisions (user, 2026-06-30)
+
+1. **Phase from framebuffer-fetch first.** Slice 1 uses the `@color(N)`
+   framebuffer-fetch surface, which **already works on the currently-pinned
+   upstream Tint** for both MSL and SPIR-V — no Dawn fork required. Multi-subpass
+   `input_attachment` (deferred rendering) comes in later slices.
+2. **Defer the Dawn-fork dependency.** `third_party/dawn` stays pinned at upstream
+   `c8f5ca3` (chromium/7914) for now. The submodule re-pin (or patch strategy)
+   is **postponed** until the Tint-side `input_attachment` work (Dawn
+   `feature/tiled`, its own `TILED.md`) lands and Slice 2 begins. Re-pin
+   mechanism (fork branch vs build.rs patch) is an open decision at that point.
+3. **Metal + Vulkan only.** GLES Tier 2 (framebuffer-fetch / FBO-rebind) is
+   deferred to a later slice — matches Dawn `TILED.md` scope (GLES/HLSL excluded).
+   Color aspect only (no depth/stencil subpass inputs).
+
+## 3. Capability baseline on the pinned upstream Tint
+
+Verified from the Dawn `TILED.md` current-state grounding (applies to the pinned
+`c8f5ca3`):
+
+- `@color(N)` framebuffer fetch: **works on SPIR-V AND MSL upstream.** ← Slice 1 rides this.
+- `input_attachment<T>` + `inputAttachmentLoad()`: works on **SPIR-V single-sampled
+  only**; **MSL rejects it** (`msl/writer/writer.cc:65-67`). ← needs Dawn fork (Slice 2).
+- SPIR-V MSAA `input_attachment`: not present. ← needs Dawn fork (Slice 4).
+- `yawgpu-tint` already exposes `ResourceType::InputAttachment = 14` in reflection,
+  but threads **no** `@color`/input-attachment `Options`.
+
+## 4. Layered architecture (where each change lands)
+
+| Layer | File(s) | Change |
+|---|---|---|
+| **Tint (Dawn submodule)** | `third_party/dawn` | Slice 1: none (upstream `@color` suffices). Slice 2+: per Dawn `TILED.md` (deferred). |
+| **shim** | `yawgpu-tint/shim/{tint_shim.h,tint_shim.cpp}`, `src/lib.rs` | Enable `@color` framebuffer-fetch codegen path + reflect which fragment outputs are `@color`; Slice 2+ adds the `input_attachment_to_color_index` (MSL) map + `multisampled_input_attachment` (SPIR-V) `Options`. |
+| **HAL** | `yawgpu-hal/src/{command,shader,descriptors,lib}.rs`, `metal/encode.rs`, `vulkan/{encode,pipeline}.rs` | `HalDescriptorBindingKind::InputAttachment`, input-attachment slot metadata on `HalShaderSource`, Metal `[[color(N)]]` bind + Vulkan input-attachment descriptors / multi-subpass `VkRenderPass`. Port from `78cdf48`. |
+| **core** | `yawgpu-core/src/{subpass,transient_attachment,bind_group_layout,render_pipeline,device,adapter,lib}.rs` | Restore `subpass.rs` / `transient_attachment.rs`, `BindingLayoutKind::InputAttachment`, subpass pipeline + the **color-slot map computed from the pass layout** at pipeline-compile time (the naga `subpass_color_slots` analog). Port from `78cdf48`. |
+| **FFI** | `yawgpu/ffi/webgpu-headers/yawgpu.h`, `yawgpu/src/{ffi,conv}/*`, `src/lib.rs` | Restore vendor entry points + SType `0x7000_0010–1F` (reserved). Template = external-texture (`ffi/external_texture.rs`). |
+| **verify** | `yawgpu/tests/e2e_{metal,vulkan}_tiled.rs`, CTS, Block 55 rewrite | Real-GPU e2e on the M2; rewrite Block 55 to Tint surface; fork-conventions note when Dawn fork lands. |
+
+## 5. The one hard data dependency (flag in every review)
+
+Metal has no subpass-input texture type — both naga and Tint surface it as a
+`[[color(N)]]` fragment argument. So **yawgpu-core must compute the
+WGSL-binding → Metal-color-slot map from the render-pass / subpass-pass layout at
+pipeline-compile time** and feed it through the shim into Tint's MSL `Options`.
+Tint cannot infer it. This is exactly the deleted code's `subpass_color_slots`
+role. For Slice 1 (framebuffer-fetch) the `@color(N)` index *is* the color slot,
+so the map is identity and this dependency is trivial; it becomes real in Slice 2.
+
+## 6. Slice plan
+
+### Slice 1 — framebuffer-fetch `@color(N)`, single pass (no Dawn fork)
+De-risks the whole yawgpu plumbing against capability that already exists.
+1. shim: enable + reflect the `@color(N)` framebuffer-fetch path (MSL + SPIR-V);
+   surface per-output `@color` usage in reflection.
+2. core: `BindingLayoutKind`/fragment-output validation for `@color`; advertise a
+   feature bit (`tiled` cargo feature, default off — matches Block 55).
+3. HAL Metal: bind prior color slot as `[[color(N)]]` programmable-blend input.
+4. HAL Vulkan: self-dependency / tile-image (or single-subpass input attachment)
+   for `@color`.
+5. FFI: minimal vendor surface to drive a framebuffer-fetch pipeline.
+6. e2e: `e2e_{metal,vulkan}_tiled.rs` framebuffer-fetch smoke (real GPU, M2).
+7. Rewrite Block 55 (un-remove) to the Tint `@color` surface for this slice.
+
+### Slice 2 — `input_attachment<T>` multi-subpass deferred (needs Dawn fork)
+**Gated on Dawn `feature/tiled` MSL lowering landing + the deferred re-pin
+decision.** Restores transient attachments, multi-subpass passes, subpass
+pipelines, the 3-subpass deferred example. Port HAL/core from `78cdf48`, adapt to
+Tint `input_attachment` + the color-slot map (§5).
+
+### Slice 3 — transient / memoryless attachments
+Vulkan `LAZILY_ALLOCATED` + `TRANSIENT_ATTACHMENT|INPUT_ATTACHMENT`; Metal
+`MTLStorageMode::Memoryless`. The bandwidth-saving payoff. (May fold into Slice 2.)
+
+### Slice 4 — SPIR-V MSAA input attachment (most divergent Dawn work)
+Per Dawn `TILED.md` Phase 3 (`core.def` overload + `builtin_polyfill.cc` edits).
+Land last. MSL MSAA subpass input stays deferred (Metal uses `[[sample_id]]`).
+
+### Deferred (documented)
+GLES Tier A/B; depth/stencil-aspect subpass inputs; MSL MSAA subpass input;
+programmable tile dispatch; HLSL/D3D (permanently out of scope).
+
+## 7. Risks
+
+1. **naga→Tint WGSL surface change** is user-facing; Block 55 rewrite + any
+   example WGSL must move to `input_attachment`/`inputAttachmentLoad`/`@color`.
+2. **No git-revert.** Port logic from `78cdf48`; the diff won't apply to the
+   Tint-era tree.
+3. **Color-slot map** (§5) is the integration seam for Metal — same trap as the
+   old `subpass_color_slots`; verify on real GPU (Nv12 e2e–style luck-vs-correct).
+4. **Dawn fork maintenance.** Re-pinning the submodule to a `feature/tiled` fork
+   raises the rebase cost vs upstream chromium/N; decide mechanism at Slice 2.
+5. **Tint MSL `ModuleScopeVars` ordering** (Dawn `TILED.md` Option A) is the Dawn
+   fork's risk, but yawgpu's reflection must agree with whatever slot model it picks.
+
+## 8. Verification
+
+- Noop-first (CLAUDE.md principle 2) for all core validation; inline unit tests
+  per public fn (principle 1).
+- Real-GPU e2e on the M2 (Metal directly; Vulkan/MoltenVK) — Claude runs these
+  (see [[claude-runs-real-gpu-tests]]).
+- CTS: framebuffer-fetch / input-attachment are vendor/outside-WebGPU-core, so no
+  CTS regression risk; confirm the standard api trees stay green.
+- Phase Review (Clean-Review-Then-Fix) closes each slice.
