@@ -2003,6 +2003,8 @@ pub(crate) fn validate_color_targets(
         return Err("render pipeline color target count exceeds the device limit".to_owned());
     }
 
+    validate_fragment_color_inputs(fragment, fragment_entry)?;
+
     let outputs = fragment_outputs(fragment, fragment_entry)?;
     let mut color_formats = Vec::new();
     let mut has_alpha_to_coverage_target = false;
@@ -2070,6 +2072,34 @@ pub(crate) fn validate_color_targets(
         );
     }
 
+    Ok(())
+}
+
+/// Validates framebuffer-fetch color inputs against declared color targets.
+pub(crate) fn validate_fragment_color_inputs(
+    fragment: &RenderPipelineFragmentState,
+    fragment_entry: Option<&str>,
+) -> Result<(), String> {
+    let Some(entry_name) = fragment_entry else {
+        return Ok(());
+    };
+    let Some(module) = fragment.shader.module.reflected() else {
+        return Err("fragment module reflection failed".to_owned());
+    };
+    for slot in module.fragment_color_inputs(entry_name) {
+        let Some(target) = fragment.targets.get(slot as usize) else {
+            return Err(
+                "render pipeline framebuffer-fetch color input requires a declared color target"
+                    .to_owned(),
+            );
+        };
+        if target.format.is_undefined() {
+            return Err(
+                "render pipeline framebuffer-fetch color input requires a declared color target"
+                    .to_owned(),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -2769,6 +2799,24 @@ mod tests {
         }
     }
 
+    fn framebuffer_fetch_render_wgsl(slot: u32) -> String {
+        format!(
+            r#"
+enable chromium_experimental_framebuffer_fetch;
+
+@vertex
+fn vs() -> @builtin(position) vec4<f32> {{
+  return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}}
+
+@fragment
+fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
+  return prev;
+}}
+"#
+        )
+    }
+
     fn default_stencil_face_state() -> StencilFaceState {
         StencilFaceState {
             compare: CompareFunction::Always,
@@ -3141,6 +3189,70 @@ mod tests {
             None
         );
         assert!(!device.create_render_pipeline(descriptor).is_error());
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn framebuffer_fetch_color_input_with_matching_target_is_valid() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(framebuffer_fetch_render_wgsl(0))),
+        );
+        let descriptor = render_pipeline_descriptor(module);
+
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            None
+        );
+        assert!(!device.create_render_pipeline(descriptor).is_error());
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn framebuffer_fetch_color_input_without_matching_target_is_invalid() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(framebuffer_fetch_render_wgsl(1))),
+        );
+        let descriptor = render_pipeline_descriptor(module);
+
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            Some(
+                "render pipeline framebuffer-fetch color input requires a declared color target"
+                    .to_owned()
+            )
+        );
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_render_pipeline(descriptor);
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid pipeline should be scoped");
+        assert!(pipeline.is_error());
+        assert_eq!(
+            error.message,
+            "render pipeline framebuffer-fetch color input requires a declared color target"
+        );
+    }
+
+    #[cfg(not(feature = "tiled"))]
+    #[test]
+    fn framebuffer_fetch_shader_module_requires_tiled_feature() {
+        let device = noop_device();
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let module =
+            device.create_shader_module(ShaderModuleSource::Wgsl(framebuffer_fetch_render_wgsl(0)));
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid shader should be scoped");
+
+        assert!(module.is_error());
+        assert!(error
+            .message
+            .contains("chromium_experimental_framebuffer_fetch"));
     }
 
     #[test]

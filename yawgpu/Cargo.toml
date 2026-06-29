@@ -11,6 +11,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 gles = ["yawgpu-core/gles", "yawgpu-hal/gles", "yawgpu-test/gles"]
 metal = ["yawgpu-hal/metal", "yawgpu-test/metal"]
 shader-passthrough = ["yawgpu-core/shader-passthrough"]
+tiled = ["yawgpu-core/tiled"]
 vulkan = ["yawgpu-hal/vulkan", "yawgpu-test/vulkan"]
 
 [dependencies]
