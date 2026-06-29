@@ -10,6 +10,42 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <delayimp.h>
+
+// Windows resolves implicitly-linked DLLs before main() runs, so a missing
+// yawgpu.dll (or its tint_shim.dll dependency) would terminate the process with
+// status 0xC0000135 and no console output. The examples instead delay-load
+// yawgpu.dll (see /DELAYLOAD in examples/CMakeLists.txt) and install this
+// failure hook, which fires on the first yawgpu call if the DLL cannot be
+// loaded and prints an actionable message instead of failing silently.
+static FARPROC WINAPI yawgpu_delayload_fail_hook(unsigned dliNotify,
+                                                 PDelayLoadInfo pdli) {
+    if (dliNotify == dliFailLoadLib) {
+        fprintf(stderr,
+                "\n[yawgpu example] FATAL: could not load '%s' (Win32 error %lu).\n"
+                "  This example needs yawgpu.dll and its tint_shim.dll dependency\n"
+                "  next to the executable (the CMake build copies both), or on\n"
+                "  PATH. If you moved the binary, copy yawgpu.dll and tint_shim.dll\n"
+                "  beside it, or add target-vulkan\\debug (or \\release) to PATH,\n"
+                "  then re-run.\n\n",
+                pdli->szDll, pdli->dwLastError);
+        fflush(stderr);
+        ExitProcess((UINT)0xC0000135); // STATUS_DLL_NOT_FOUND — does not return
+    }
+    return NULL;
+}
+
+// Modern delayimp.h declares the hook pointer `const`, so it is overridden by
+// *defining* this well-known symbol (delayimp.lib references it) rather than
+// assigning at runtime.
+const PfnDliHook __pfnDliFailureHook2 = yawgpu_delayload_fail_hook;
+
+// Anchors this translation unit — and thus the hook definition above — into
+// every example's link, including non-windowed examples that call no other
+// Win32 helper here. (The hook is wired purely by the definition; this call
+// just guarantees the object file is pulled in.)
+void yawgpu_install_dll_diagnostics(void) {}
+
 // Concrete definition of the opaque YawgpuWindow from framework.h.
 struct YawgpuWindow {
     HWND hwnd;

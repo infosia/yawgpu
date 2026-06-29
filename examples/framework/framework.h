@@ -58,6 +58,12 @@ unsigned int yawgpu_uncaptured_error_count(void);
 // case) as "defer to YAWGPU_GLES_BACKEND", preserving the existing
 // behaviour byte-for-byte for callers that don't set the new var.
 WGPUInstance yawgpu_instance_create(void);
+// Windows: installs a delay-load failure handler so a missing yawgpu.dll (or
+// its tint_shim.dll dependency) prints an actionable message instead of the
+// loader terminating the process with status 0xC0000135 before any output.
+// Must run before the first yawgpu API call; yawgpu_instance_create() calls it.
+// No-op on non-Windows platforms (their loaders already report the failure).
+void yawgpu_install_dll_diagnostics(void);
 // Drives wgpuInstanceRequestAdapter to completion and returns the adapter.
 WGPUAdapter yawgpu_request_adapter(WGPUInstance instance);
 // Drives wgpuAdapterRequestDevice to completion and returns the device.

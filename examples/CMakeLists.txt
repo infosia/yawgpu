@@ -79,6 +79,9 @@ endif()
 if(WIN32)
     set(YAWGPU_SHARED_LIB "${YAWGPU_TARGET_DIR}/yawgpu.dll")
     set(YAWGPU_IMPORT_LIB "${YAWGPU_TARGET_DIR}/yawgpu.dll.lib")
+    # The default Tint-linked yawgpu.dll loads tint_shim.dll at runtime; build.rs
+    # places it next to yawgpu.dll in the target dir. Copied per-example below.
+    set(YAWGPU_TINT_SHIM "${YAWGPU_TARGET_DIR}/tint_shim.dll")
 elseif(APPLE)
     set(YAWGPU_SHARED_LIB "${YAWGPU_TARGET_DIR}/libyawgpu.dylib")
 else()
@@ -155,10 +158,19 @@ function(yawgpu_add_example TARGET_NAME)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${YAWGPU_SHARED_LIB}"
                 "$<TARGET_FILE_DIR:${TARGET_NAME}>/yawgpu.dll"
+            COMMAND ${CMAKE_COMMAND}
+                -DSRC=${YAWGPU_TINT_SHIM}
+                -DDEST_DIR=$<TARGET_FILE_DIR:${TARGET_NAME}>
+                -P "${CMAKE_SOURCE_DIR}/cmake/copy_runtime_dll.cmake"
         )
     endif()
     if(MSVC)
         target_compile_options(${TARGET_NAME} PRIVATE /W4)
+        # Delay-load yawgpu.dll so the framework's failure hook can report a
+        # missing yawgpu.dll / tint_shim.dll instead of the loader killing the
+        # process pre-main with status 0xC0000135 and no output.
+        target_link_options(${TARGET_NAME} PRIVATE /DELAYLOAD:yawgpu.dll)
+        target_link_libraries(${TARGET_NAME} PRIVATE delayimp)
     else()
         target_compile_options(${TARGET_NAME} PRIVATE -Wall -Wextra -Wpedantic)
     endif()
