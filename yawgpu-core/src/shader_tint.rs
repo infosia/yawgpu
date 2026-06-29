@@ -393,6 +393,22 @@ impl ReflectedModule {
             .collect()
     }
 
+    /// Returns the `@color(N)` framebuffer-fetch slots read by the given fragment entry point.
+    ///
+    /// Slots are ascending. Returns empty if the shader uses no framebuffer fetch.
+    pub(crate) fn fragment_color_inputs(&self, entry_point: &str) -> Vec<u32> {
+        let mut slots = self
+            .program
+            .entry_point_inputs(entry_point)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|variable| variable.color)
+            .collect::<Vec<_>>();
+        slots.sort_unstable();
+        slots.dedup();
+        slots
+    }
+
     /// Returns overrides reflected by the validated shader module.
     pub(crate) fn overrides(&self) -> Vec<ReflectedOverride> {
         self.program
@@ -1227,6 +1243,24 @@ fn fs() -> @builtin(frag_depth) f32 {
                 sample_mask: false,
             }]
         );
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn reflects_fragment_color_inputs_from_tint() {
+        let module = parse_and_validate_wgsl(
+            r#"
+enable chromium_experimental_framebuffer_fetch;
+
+@fragment
+fn fs(@color(1) prev1: vec4<f32>, @color(0) prev0: vec4<f32>) -> @location(0) vec4<f32> {
+  return prev0 + prev1;
+}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(module.fragment_color_inputs("fs"), vec![0, 1]);
     }
 
     #[test]
