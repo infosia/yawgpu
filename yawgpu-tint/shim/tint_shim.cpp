@@ -421,10 +421,32 @@ const tint::inspector::EntryPoint* find_entry_point(const YawgpuTintProgram* pro
     return nullptr;
 }
 
+std::unordered_map<uint32_t, tint::BindingPoint> color_bindings_for_entry_point(
+    const YawgpuTintProgram* program,
+    const char* ep) {
+    std::unordered_map<uint32_t, tint::BindingPoint> bindings;
+    const auto* entry = find_entry_point(program, ep);
+    if (entry == nullptr || entry->stage != tint::inspector::PipelineStage::kFragment) {
+        return bindings;
+    }
+
+    uint32_t binding = 0;
+    for (const auto& input : entry->input_variables) {
+        if (input.attributes.color.has_value()) {
+            // Placeholder framebuffer-fetch binding scheme; HAL will finalize layout wiring.
+            bindings.emplace(input.attributes.color.value(),
+                             tint::BindingPoint{.group = 66u, .binding = binding++});
+        }
+    }
+    return bindings;
+}
+
 void fill_stage_variable(const tint::inspector::StageVariable& variable,
                          YawgpuTintStageVariable* out) {
     out->has_location = variable.attributes.location.has_value();
     out->location = variable.attributes.location.value_or(0);
+    out->has_color = variable.attributes.color.has_value();
+    out->color = variable.attributes.color.value_or(0);
     out->component_type = static_cast<uint8_t>(variable.component_type);
     out->composition_type = static_cast<uint8_t>(variable.composition_type);
     out->interpolation_type = static_cast<uint8_t>(variable.interpolation_type);
@@ -642,6 +664,7 @@ void yawgpu_tint_initialize(void) {
 YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               size_t wgsl_len,
                                               bool shader_f16,
+                                              bool allow_framebuffer_fetch,
                                               const uint32_t* lang_features,
                                               size_t n_lang_features,
                                               char** err) {
@@ -670,6 +693,10 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
         }
         if (shader_f16) {
             options.allowed_features.extensions.insert(tint::wgsl::Extension::kF16);
+        }
+        if (allow_framebuffer_fetch) {
+            options.allowed_features.extensions.insert(
+                tint::wgsl::Extension::kChromiumExperimentalFramebufferFetch);
         }
         tint::Program parsed = tint::wgsl::reader::Parse(out->file.get(), options);
         if (!parsed.IsValid()) {
@@ -1025,6 +1052,8 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
         options.bindings = all_remaps_empty(bindings)
                                ? tint::GenerateBindings(ir.Get(), entry_point, false, false)
                                : make_bindings(bindings);
+        options.colour_index_to_binding_point =
+            color_bindings_for_entry_point(program, entry_point.c_str());
         auto override_cfg = make_override_config(program, ov, n_ov);
         if (override_cfg != tint::Success) {
             set_error(err, override_cfg.Failure());

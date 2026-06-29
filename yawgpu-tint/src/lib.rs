@@ -43,6 +43,8 @@ mod imp {
     struct RawStageVariable {
         has_location: bool,
         location: u32,
+        has_color: bool,
+        color: u32,
         component_type: u8,
         composition_type: u8,
         interpolation_type: u8,
@@ -162,6 +164,7 @@ mod imp {
             wgsl: *const c_char,
             wgsl_len: usize,
             shader_f16: bool,
+            allow_framebuffer_fetch: bool,
             lang_features: *const u32,
             n_lang_features: usize,
             err: *mut *mut c_char,
@@ -345,6 +348,7 @@ mod imp {
                     wgsl.as_ptr().cast::<c_char>(),
                     wgsl.len(),
                     shader_f16,
+                    cfg!(feature = "tiled"),
                     language_features.as_ptr(),
                     language_features.len(),
                     &mut err,
@@ -441,6 +445,8 @@ mod imp {
                 let mut raw = RawStageVariable {
                     has_location: false,
                     location: 0,
+                    has_color: false,
+                    color: 0,
                     component_type: 0,
                     composition_type: 0,
                     interpolation_type: 0,
@@ -843,6 +849,8 @@ mod imp {
     pub struct StageVariable {
         /// Location attribute, when the variable is location-based IO.
         pub location: Option<u32>,
+        /// Color attribute, when the variable is framebuffer-fetch IO.
+        pub color: Option<u32>,
         /// Scalar component type.
         pub component_type: ComponentType,
         /// Scalar or vector composition.
@@ -857,6 +865,7 @@ mod imp {
         fn try_from_raw(raw: RawStageVariable) -> Result<Self, String> {
             Ok(Self {
                 location: raw.has_location.then_some(raw.location),
+                color: raw.has_color.then_some(raw.color),
                 component_type: ComponentType::try_from_raw(raw.component_type)?,
                 composition_type: CompositionType::try_from_raw(raw.composition_type)?,
                 interpolation_type: InterpolationType::try_from_raw(raw.interpolation_type)?,
@@ -1841,6 +1850,8 @@ mod imp {
     pub struct StageVariable {
         /// Location attribute, when the variable is location-based IO.
         pub location: Option<u32>,
+        /// Color attribute, when the variable is framebuffer-fetch IO.
+        pub color: Option<u32>,
         /// Scalar component type.
         pub component_type: ComponentType,
         /// Scalar or vector composition.
@@ -2388,6 +2399,17 @@ fn fs(in: VsOut) -> @location(0) vec4f {
 "#
     }
 
+    fn framebuffer_fetch_wgsl() -> &'static str {
+        r#"
+enable chromium_experimental_framebuffer_fetch;
+
+@fragment
+fn fs(@color(0) prev: vec4<f32>) -> @location(0) vec4<f32> {
+  return prev;
+}
+"#
+    }
+
     fn spirv_has_binding_decoration(words: &[u32], binding: u32) -> bool {
         words.windows(4).any(|w| {
             let opcode = w[0] & 0xffff;
@@ -2586,6 +2608,58 @@ fn cs() {
                 .unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));
         }
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn framebuffer_fetch_reflects_color_and_generates_code() {
+        let program = Program::parse(framebuffer_fetch_wgsl(), false, &[]).unwrap();
+        let inputs = program.entry_point_inputs("fs").unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].color, Some(0));
+
+        let msl = program
+            .generate_msl(
+                "fs",
+                &Bindings::default(),
+                &[],
+                0,
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+            )
+            .unwrap();
+        assert!(msl.source.contains("[[color(0)]]"), "MSL:\n{}", msl.source);
+
+        let spirv = program
+            .generate_spirv("fs", &Bindings::default(), &[], true, false)
+            .unwrap();
+        assert!(!spirv.is_empty());
+        assert_eq!(spirv.first().copied(), Some(0x0723_0203));
+    }
+
+    #[cfg(not(feature = "tiled"))]
+    #[test]
+    fn framebuffer_fetch_enable_requires_tiled_feature() {
+        let err = Program::parse(framebuffer_fetch_wgsl(), false, &[]).unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn framebuffer_fetch_requires_enable() {
+        let err = Program::parse(
+            r#"
+@fragment
+fn fs(@color(0) prev: vec4<f32>) -> @location(0) vec4<f32> {
+  return prev;
+}
+"#,
+            false,
+            &[],
+        )
+        .unwrap_err();
+        assert!(!err.is_empty());
     }
 
     #[test]
