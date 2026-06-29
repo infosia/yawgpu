@@ -37,11 +37,13 @@ typedef struct YawgpuTintProgram YawgpuTintProgram;
 YAWGPU_TINT_API void yawgpu_tint_initialize(void);
 
 /* Parse + validate WGSL. Returns NULL on failure with *err set.
- * If shader_f16 is true, Tint allows only the f16 WGSL extension.
+ * If shader_f16 is true, Tint allows the f16 WGSL extension.
+ * If allow_framebuffer_fetch is true, Tint allows the framebuffer-fetch WGSL extension.
  * lang_features contains WGPUWGSLLanguageFeatureName numeric values. */
 YAWGPU_TINT_API YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               size_t wgsl_len,
                                               bool shader_f16,
+                                              bool allow_framebuffer_fetch,
                                               const uint32_t* lang_features,
                                               size_t n_lang_features,
                                               char** err);
@@ -77,6 +79,8 @@ YAWGPU_TINT_API bool yawgpu_tint_entry_point_get(const YawgpuTintProgram*, size_
 typedef struct {
     bool has_location;
     uint32_t location;
+    bool has_color;
+    uint32_t color;
     uint8_t component_type;
     uint8_t composition_type;
     uint8_t interpolation_type;
