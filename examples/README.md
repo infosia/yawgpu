@@ -33,10 +33,11 @@ $env:YAWGPU_BACKEND = "vulkan"
 examples\build\triangle\Debug\triangle.exe
 ```
 
-The CMake build copies `yawgpu.dll` next to each example executable on Windows.
+The CMake build copies `yawgpu.dll` (and, for the default Tint-linked build,
+its `tint_shim.dll` dependency) next to each example executable on Windows.
 If running binaries from another directory, put the corresponding
 `target-vulkan\debug` or `target-vulkan\release` directory on `PATH`, or copy
-`yawgpu.dll` beside the executable. Windows windowed examples use native Win32
+both `yawgpu.dll` and `tint_shim.dll` beside the executable. Windows windowed examples use native Win32
 windowing and do not require GLFW; macOS/Linux windowed examples still require
 GLFW, and Linux windowed examples are not enabled in this phase.
 

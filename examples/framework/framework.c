@@ -141,7 +141,18 @@ static uint32_t gles_context_backend_from_environment(void) {
     return YAWGPU_GLES_CONTEXT_BACKEND_DEFAULT;
 }
 
+#ifndef _WIN32
+// On non-Windows platforms the dynamic loader already surfaces a clear error
+// for a missing shared library, and there is no delay-load mechanism, so the
+// diagnostics installer is a no-op. (The Windows implementation lives in
+// framework_windows.c.)
+void yawgpu_install_dll_diagnostics(void) {}
+#endif
+
 WGPUInstance yawgpu_instance_create(void) {
+    // Surface a friendly message if yawgpu.dll / tint_shim.dll is missing,
+    // before the first (delay-loaded) yawgpu call below.
+    yawgpu_install_dll_diagnostics();
     // Optional second chain entry: only consumed when the resolved instance
     // backend is GLES, ignored otherwise. The library treats DEFAULT as
     // "fall through to YAWGPU_GLES_BACKEND", so leaving the env var unset
