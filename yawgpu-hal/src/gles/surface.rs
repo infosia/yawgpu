@@ -440,15 +440,23 @@ fn blit_back_buffer_to_window(
             });
         }
         gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+        // The back-buffer texture holds the frame in WebGPU framebuffer order
+        // (row 0 = top), but the default framebuffer presented by the windowing
+        // system uses OpenGL's bottom-left origin (y = 0 = bottom). Blitting
+        // src (0,0)->(w,h) to dst (0,0)->(w,h) would map the WebGPU-top row to
+        // the screen bottom, flipping the image vertically. Flip the dst Y range
+        // (y0 = height, y1 = 0) so the presented image matches the Vulkan/Metal
+        // backends. (Confirmed on real GLES: offscreen render + readback is
+        // already top-left correct, so the flip belongs only at present.)
         gl.blit_framebuffer(
             0,
             0,
             width,
             height,
             0,
-            0,
-            width,
             height,
+            width,
+            0,
             glow::COLOR_BUFFER_BIT,
             glow::NEAREST,
         );
