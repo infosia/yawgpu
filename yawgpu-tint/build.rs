@@ -14,6 +14,10 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=YAWGPU_DAWN_DIR");
+    println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
+    println!("cargo:rerun-if-env-changed=ANDROID_NDK_ROOT");
+    println!("cargo:rerun-if-env-changed=NDK_HOME");
+    println!("cargo:rerun-if-env-changed=ANDROID_PLATFORM");
     println!("cargo:rerun-if-changed=shim/tint_shim.cpp");
     println!("cargo:rerun-if-changed=shim/tint_shim.h");
     println!("cargo:rerun-if-changed=shim/CMakeLists.txt");
@@ -32,10 +36,13 @@ fn main() {
     // `build_target("tint_shim")` builds only the shim and its transitive Tint
     // dependencies (the Dawn subdirectory is added EXCLUDE_FROM_ALL in the shim
     // CMakeLists), keeping the build to the minimal reader+writers+inspector.
-    let dst = cmake::Config::new("shim")
-        .define("YAWGPU_DAWN_DIR", &dawn_dir)
-        .build_target("tint_shim")
-        .build();
+    let mut cfg = cmake::Config::new("shim");
+    cfg.define("YAWGPU_DAWN_DIR", &dawn_dir)
+        .build_target("tint_shim");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        configure_android_cmake(&mut cfg);
+    }
+    let dst = cfg.build();
 
     // The cmake crate places the configured build tree under `<OUT_DIR>/build`.
     let build_dir = dst.join("build");
@@ -67,6 +74,69 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", build_dir.display());
     }
     println!("cargo:rustc-cfg=have_tint");
+}
+
+fn configure_android_cmake(cfg: &mut cmake::Config) {
+    if let Some(toolchain) = android_ndk_toolchain_file() {
+        cfg.define("CMAKE_TOOLCHAIN_FILE", toolchain);
+    } else {
+        println!(
+            "cargo:warning=Android cross-compilation of Tint needs ANDROID_NDK_HOME \
+             pointing at an NDK with build/cmake/android.toolchain.cmake \
+             (ANDROID_NDK_ROOT and NDK_HOME are also checked)"
+        );
+    }
+
+    match env::var("CARGO_CFG_TARGET_ARCH")
+        .ok()
+        .as_deref()
+        .and_then(android_abi_for_arch)
+    {
+        Some(abi) => {
+            cfg.define("ANDROID_ABI", abi);
+        }
+        None => {
+            let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "<unset>".into());
+            println!(
+                "cargo:warning=unsupported Android target arch `{arch}`; \
+                 not defining ANDROID_ABI"
+            );
+        }
+    }
+
+    let platform = env::var("ANDROID_PLATFORM").unwrap_or_else(|_| "android-24".into());
+    cfg.define("ANDROID_PLATFORM", platform);
+}
+
+fn android_ndk_toolchain_file() -> Option<PathBuf> {
+    for var in ["ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "NDK_HOME"] {
+        let Ok(root) = env::var(var) else {
+            continue;
+        };
+        if root.is_empty() {
+            continue;
+        }
+
+        let toolchain = PathBuf::from(root)
+            .join("build")
+            .join("cmake")
+            .join("android.toolchain.cmake");
+        if toolchain.is_file() {
+            return Some(toolchain);
+        }
+    }
+    None
+}
+
+fn android_abi_for_arch(arch: &str) -> Option<&'static str> {
+    match arch {
+        "aarch64" => Some("arm64-v8a"),
+        "arm" => Some("armeabi-v7a"),
+        "x86_64" => Some("x86_64"),
+        "x86" => Some("x86"),
+        "riscv64" => Some("riscv64"),
+        _ => None,
+    }
 }
 
 /// Copies the built `tint_shim.dll` next to the Cargo target artifacts so it is
@@ -138,5 +208,20 @@ fn resolve_dawn_dir() -> Option<PathBuf> {
         Some(vendored)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::android_abi_for_arch;
+
+    #[test]
+    fn android_abi_for_arch_maps_supported_targets() {
+        assert_eq!(android_abi_for_arch("aarch64"), Some("arm64-v8a"));
+        assert_eq!(android_abi_for_arch("arm"), Some("armeabi-v7a"));
+        assert_eq!(android_abi_for_arch("x86_64"), Some("x86_64"));
+        assert_eq!(android_abi_for_arch("x86"), Some("x86"));
+        assert_eq!(android_abi_for_arch("riscv64"), Some("riscv64"));
+        assert_eq!(android_abi_for_arch("wasm32"), None);
     }
 }

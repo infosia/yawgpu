@@ -241,9 +241,20 @@ selection), link the library, and call the standard `wgpu*` functions.
 ### Cross-building for Android
 
 Both the Vulkan and OpenGL ES backends cross-build for
-`aarch64-linux-android` (verified 2026-05-25 from a macOS arm64
-host with NDK r30). Vulkan is the Tier 1 path on real Android
-devices; GLES is the Tier 2 fallback.
+`aarch64-linux-android` (verified 2026-06-29 from a macOS arm64
+host with NDK r30, `30.0.14904198`). Vulkan is the Tier 1 path on
+real Android devices; GLES is the Tier 2 fallback.
+
+The Tint shader compiler is built from C++ for the Android target
+(see the prerequisite above), so the build needs the NDK's CMake
+toolchain in addition to the Rust cross-compile environment. yawgpu
+handles this automatically: `yawgpu-tint/build.rs` detects an Android
+target and hands the `cmake` build the NDK's `android.toolchain.cmake`
+plus the ABI derived from the target arch (`aarch64` → `arm64-v8a`)
+and `ANDROID_PLATFORM` (`android-24` by default, override with the
+`ANDROID_PLATFORM` env var). The only thing it needs from you is the
+NDK location — `ANDROID_NDK_HOME` (or `ANDROID_NDK_ROOT` / `NDK_HOME`),
+which the environment block below already sets.
 
 ```sh
 rustup target add aarch64-linux-android
@@ -274,12 +285,16 @@ raise it if a dependency demands a newer one.
 ### Cross-building for iOS
 
 The Metal backend cross-builds for both real iOS devices and
-the Apple-Silicon iOS simulator (verified 2026-05-25 from a
+the Apple-Silicon iOS simulator (verified 2026-06-29 from a
 macOS arm64 host with Xcode 26.5 / iOS SDK 26.5). No extra
 toolchain setup is required — the Apple `cc` / linker found
 via `xcrun` handles sysroot resolution automatically, and
 `build.rs`'s bindgen pass picks up the right Apple SDK on its
-own.
+own. The Tint shader compiler (built from C++ — see the
+prerequisite above) likewise cross-compiles with no extra
+setup: the `cmake` crate auto-detects the iOS target, so the
+emitted `libtint_shim.dylib` is a genuine iOS binary
+(`LC_BUILD_VERSION platform=IOS`) linked into `libyawgpu`.
 
 ```sh
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim
