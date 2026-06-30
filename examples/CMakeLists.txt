@@ -187,9 +187,6 @@ add_subdirectory(enumerate_adapters)
 add_subdirectory(compute)
 add_subdirectory(device_info)
 add_subdirectory(capture)
-if(YAWGPU_TILED)
-    add_subdirectory(tiled_deferred)
-endif()
 if(YAWGPU_WINDOWED_EXAMPLES)
     add_subdirectory(surface_smoke)
     add_subdirectory(triangle)
@@ -197,4 +194,13 @@ if(YAWGPU_WINDOWED_EXAMPLES)
     if(YAWGPU_SHADER_PASSTHROUGH)
         add_subdirectory(triangle_passthrough)
     endif()
+    # tiled_deferred presents to a window by default (and offscreen with --verify),
+    # so it needs the windowing framework (GLFW).
+    if(YAWGPU_TILED)
+        add_subdirectory(tiled_deferred)
+    endif()
+elseif(YAWGPU_TILED)
+    message(STATUS "YAWGPU_TILED set but windowed examples are off; tiled_deferred "
+                   "needs GLFW for its window — install GLFW or run with --verify after "
+                   "enabling windowed examples")
 endif()
