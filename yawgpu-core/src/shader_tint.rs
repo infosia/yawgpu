@@ -112,6 +112,7 @@ impl ReflectedModule {
             binding_map,
             pipeline_constants,
             &[],
+            &[],
             false,
             false,
             0xFFFF_FFFF,
@@ -134,6 +135,7 @@ impl ReflectedModule {
             entry_name,
             binding_map,
             pipeline_constants,
+            &[],
             &vertex_buffers,
             false,
             force_point_size,
@@ -146,6 +148,7 @@ impl ReflectedModule {
         &self,
         entry_name: &str,
         binding_map: &MslBindingMap,
+        subpass_color_slots: &[((u32, u32), u32)],
         pipeline_constants: &PipelineConstants,
         sample_mask: u32,
     ) -> Result<GeneratedMsl, String> {
@@ -153,6 +156,7 @@ impl ReflectedModule {
             entry_name,
             binding_map,
             pipeline_constants,
+            subpass_color_slots,
             &[],
             false,
             false,
@@ -166,13 +170,17 @@ impl ReflectedModule {
         entry_name: &str,
         binding_map: &MslBindingMap,
         pipeline_constants: &PipelineConstants,
+        subpass_color_slots: &[((u32, u32), u32)],
         vertex_buffers: &[yawgpu_tint::VertexBuffer],
         disable_robustness: bool,
         emit_vertex_point_size: bool,
         fixed_sample_mask: u32,
     ) -> Result<GeneratedMsl, String> {
-        let bindings =
-            tint_bindings_for_msl(binding_map, &self.resource_bindings_for_entry(entry_name)?)?;
+        let bindings = tint_bindings_for_msl(
+            binding_map,
+            &self.resource_bindings_for_entry(entry_name)?,
+            subpass_color_slots,
+        )?;
         let binding_buffer_sizes_slot = msl_buffer_sizes_slot(binding_map)?;
         let buffer_sizes_slot = if vertex_buffers.is_empty() {
             binding_buffer_sizes_slot
@@ -532,6 +540,7 @@ fn tint_vertex_format(format: MslVertexFormat) -> yawgpu_tint::VertexFormat {
 fn tint_bindings_for_msl(
     binding_map: &MslBindingMap,
     resource_bindings: &[ReflectedResourceBinding],
+    subpass_color_slots: &[((u32, u32), u32)],
 ) -> Result<yawgpu_tint::Bindings, String> {
     let resources = resource_bindings
         .iter()
@@ -624,6 +633,16 @@ fn tint_bindings_for_msl(
             }
         }
     }
+    bindings.input_attachment_color_index = subpass_color_slots
+        .iter()
+        .map(
+            |&((group, binding), color_slot)| yawgpu_tint::InputAttachmentColorIndex {
+                group,
+                binding,
+                color_slot,
+            },
+        )
+        .collect();
     Ok(bindings)
 }
 
@@ -1190,6 +1209,64 @@ fn fs() -> @location(0) vec4<f32> {
                         multisampled: false,
                     }
         }));
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn generate_render_fragment_msl_maps_input_attachment_to_non_identity_color_slot() {
+        let module = parse_and_validate_wgsl(
+            r#"
+enable chromium_internal_input_attachments;
+
+@group(0) @binding(0) @input_attachment_index(0) var ia: input_attachment<f32>;
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+  return inputAttachmentLoad(ia);
+}
+"#,
+        )
+        .unwrap();
+
+        let generated = module
+            .generate_render_fragment_msl(
+                "fs",
+                &MslBindingMap {
+                    resources: Vec::new(),
+                },
+                &[((0, 0), 1)],
+                &PipelineConstants::default(),
+                0xFFFF_FFFF,
+            )
+            .unwrap();
+
+        assert!(
+            generated
+                .source
+                .contains("tint_input_attachment_1 [[color(1)]]"),
+            "MSL:\n{}",
+            generated.source
+        );
+        assert!(
+            !generated
+                .source
+                .contains("tint_input_attachment_1 [[color(0)]]"),
+            "MSL:\n{}",
+            generated.source
+        );
+
+        let err = module
+            .generate_render_fragment_msl(
+                "fs",
+                &MslBindingMap {
+                    resources: Vec::new(),
+                },
+                &[],
+                &PipelineConstants::default(),
+                0xFFFF_FFFF,
+            )
+            .expect_err("input attachment MSL generation should require a color-slot map");
+        assert!(!err.is_empty());
     }
 
     #[test]
