@@ -29,6 +29,8 @@ mod sampler;
 mod shader;
 mod shader_tint;
 mod shader_types;
+#[cfg(feature = "tiled")]
+mod subpass;
 #[cfg(test)]
 mod test_helpers;
 mod texture;
@@ -37,6 +39,8 @@ mod wgsl_language_features;
 
 pub(crate) use crate::shader_tint as frontend;
 
+#[cfg(feature = "tiled")]
+pub use adapter::TiledCapabilities;
 pub use adapter::{Adapter, Feature, FeatureLevel};
 pub use bind_group::{BindGroup, BindGroupEntry, BindGroupResource};
 pub use bind_group_layout::{
@@ -91,6 +95,12 @@ pub use shader::{CompilationMessage, CompilationSeverity, ShaderModule, ShaderMo
 pub use shader_tint::ReflectedModule;
 #[cfg(feature = "shader-passthrough")]
 pub use shader_types::ShaderStage;
+#[cfg(feature = "tiled")]
+pub use subpass::{
+    AttachmentLayout, SubpassDependency, SubpassDependencyType, SubpassInputAttachment,
+    SubpassLayoutDesc, SubpassPassLayout, SubpassPassLayoutDescriptor,
+    DEPTH_STENCIL_ATTACHMENT_INDEX,
+};
 pub use texture::{Texture, TextureDescriptor, TextureDimension, TextureUsage};
 pub use texture_view::{
     ComponentSwizzle, TextureAspect, TextureComponentSwizzle, TextureView, TextureViewDescriptor,
