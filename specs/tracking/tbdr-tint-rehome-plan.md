@@ -206,10 +206,22 @@ Vulkan `LAZILY_ALLOCATED` + `TRANSIENT_ATTACHMENT|INPUT_ATTACHMENT`; Metal
 Per Dawn `TILED.md` Phase 3 (`core.def` overload + `builtin_polyfill.cc` edits).
 Land last. MSL MSAA subpass input stays deferred (Metal uses `[[sample_id]]`).
 
-**OPEN Dawn-side finding (2026-06-30, blocks Slice 4 — flagged to user).** The
-2-arg `inputAttachmentLoad(ia, sample_index)` overload does **not resolve in
+**RESOLVED 2026-06-30 (pin `8dce6b2387`, commit `2b817dd`).** Root cause was exactly
+as diagnosed: `inputAttachmentLoad` is declared in **both** `core.def` (core IR table)
+and `wgsl.def` (the WGSL frontend/resolver table); the 2-arg MSAA overload had been
+added only to `core.def`, so the resolver — which uses the `wgsl.def`-derived table —
+rejected it (the builtin-polyfill unit tests build IR directly and bypass the resolver,
+which is why they didn't catch it). The fork's `e99bd175e0` + `8dce6b2387` mirror the
+overload into `wgsl.def` + regenerate. **End-to-end verified in yawgpu-tint** after a
+clean rebuild: the 2-arg shader parses and `generate_spirv(multisampled_input_attachment
+=true)` emits valid SPIR-V (186 words, magic `0x07230203`) carrying a Sample image-operand
+(multisampled SubpassData path). Slice 4 is now unblocked. (Historical detail of the
+original finding below, kept for the diagnosis trail.)
+
+**Original finding (now RESOLVED above).** The
+2-arg `inputAttachmentLoad(ia, sample_index)` overload did **not resolve in
 yawgpu-tint's WGSL frontend** at the pinned commit `a05085e54f`, even though the
-generated core intrinsic table looks correct. Repro: a fragment shader with
+generated core intrinsic table looked correct. Repro: a fragment shader with
 `enable chromium_internal_input_attachments;` calling `inputAttachmentLoad(ia, sid)`
 fails `Program::parse` with *"no matching call … 1 candidate function"* (only the
 1-arg overload is listed). Verified on a guaranteed-clean rebuild
