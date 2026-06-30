@@ -36,6 +36,8 @@ pub(super) struct VulkanDeviceInner {
     /// anisotropic filtering. Used to clamp `VkSamplerCreateInfo.maxAnisotropy`
     /// per WebGPU semantics (clamp, never error).
     pub(super) max_sampler_anisotropy: f32,
+    #[cfg(feature = "tiled")]
+    pub(super) subpass_render_pass_cache: Mutex<BTreeMap<HalSubpassPassLayout, vk::RenderPass>>,
     pub(super) allocations: AtomicU64,
 }
 
@@ -67,6 +69,12 @@ impl fmt::Debug for VulkanDeviceInner {
 impl Drop for VulkanDeviceInner {
     fn drop(&mut self) {
         unsafe {
+            #[cfg(feature = "tiled")]
+            if let Ok(mut cache) = self.subpass_render_pass_cache.lock() {
+                for (_, render_pass) in std::mem::take(&mut *cache) {
+                    self.device.destroy_render_pass(render_pass, None);
+                }
+            }
             self.device.destroy_device(None);
         }
     }

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt;
 use std::ptr::NonNull;
@@ -19,6 +20,8 @@ use crate::{
     HalShaderSource, HalStencilOperation, HalSurfaceConfiguration, HalTexture, HalTextureCopy,
     HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
+#[cfg(feature = "tiled")]
+use crate::{HalSubpassDependencyType, HalSubpassPassLayout};
 
 const BACKEND: &str = "vulkan";
 /// Minimum Vulkan API version yawgpu requests at vkCreateInstance.
@@ -568,6 +571,8 @@ impl VulkanAdapter {
             storage_input_output16: storage_16bit_features.storage_input_output16,
             storage_push_constant16: storage_16bit_features.storage_push_constant16,
             max_sampler_anisotropy,
+            #[cfg(feature = "tiled")]
+            subpass_render_pass_cache: Mutex::new(BTreeMap::new()),
             allocations: AtomicU64::new(0),
         });
         Ok(VulkanDevice {
