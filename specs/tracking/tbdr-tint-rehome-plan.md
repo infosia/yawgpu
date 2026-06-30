@@ -44,11 +44,15 @@ Block 55, when un-removed, must be rewritten to the Tint surface.
    framebuffer-fetch surface, which **already works on the currently-pinned
    upstream Tint** for both MSL and SPIR-V — no Dawn fork required. Multi-subpass
    `input_attachment` (deferred rendering) comes in later slices.
-2. **Defer the Dawn-fork dependency.** `third_party/dawn` stays pinned at upstream
-   `c8f5ca3` (chromium/7914) for now. The submodule re-pin (or patch strategy)
-   is **postponed** until the Tint-side `input_attachment` work (Dawn
-   `feature/tiled`, its own `TILED.md`) lands and Slice 2 begins. Re-pin
-   mechanism (fork branch vs build.rs patch) is an open decision at that point.
+2. **Dawn-fork dependency — channel pinned (2026-06-30).** `third_party/dawn` was
+   re-pointed from upstream `dawn.googlesource.com` to the **`infosia/dawn` fork's
+   `feature/tiled` branch** (commit `f586cbd`; `.gitmodules` `branch = feature/tiled`).
+   The pinned commit is still `c8f5ca3` (== chromium/7914) because `feature/tiled`
+   carries **no TBDR/Tint commits yet** — only an untracked `TILED.md` plan. The
+   Tint-side work (MSL `input_attachment` lowering per the Dawn `TILED.md`) must be
+   implemented + committed to `feature/tiled`, then the pin bumped via
+   `git submodule update --remote`. **Until then, Slice 2 remains blocked on the
+   Tint capability itself**, not on the pin.
 3. **Metal + Vulkan only.** GLES Tier 2 (framebuffer-fetch / FBO-rebind) is
    deferred to a later slice — matches Dawn `TILED.md` scope (GLES/HLSL excluded).
    Color aspect only (no depth/stencil subpass inputs).
