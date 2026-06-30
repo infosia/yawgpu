@@ -293,10 +293,13 @@ fn binding_target(bindings: &[HalDescriptorBinding], binding: u32) -> Result<u32
         }
         HalDescriptorBindingKind::Texture
         | HalDescriptorBindingKind::StorageTexture { .. }
-        | HalDescriptorBindingKind::Sampler => Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "texture and sampler descriptors are not valid buffer bindings",
-        }),
+        | HalDescriptorBindingKind::Sampler
+        | HalDescriptorBindingKind::InputAttachment { .. } => {
+            Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "texture and sampler descriptors are not valid buffer bindings",
+            })
+        }
     }
 }
 
@@ -1459,6 +1462,7 @@ mod tests {
         crate::HalRenderPass {
             pipeline: None,
             color_targets,
+            framebuffer_fetch_color_slots: Vec::new(),
             depth_stencil_attachment: None,
             bind_buffers: Vec::new(),
             bind_textures: Vec::new(),

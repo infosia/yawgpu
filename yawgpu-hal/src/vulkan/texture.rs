@@ -121,8 +121,8 @@ impl Drop for VulkanSamplerInner {
 /// True iff `usage` requires a `VkImageView` to be created alongside the
 /// `VkImage`. View-compatible bits per VUID-VkImageViewCreateInfo-image-04441
 /// (SAMPLED / STORAGE / *_ATTACHMENT). yawgpu's render_attachment maps to
-/// COLOR_ATTACHMENT, so the three caller-facing usage bits cover all
-/// view-compatible image-usage flags map_texture_usage can emit.
+/// COLOR_ATTACHMENT plus INPUT_ATTACHMENT, so the three caller-facing usage
+/// bits cover all view-compatible image-usage flags map_texture_usage can emit.
 fn texture_usage_needs_view(usage: HalTextureUsage) -> bool {
     usage.texture_binding || usage.storage_binding || usage.render_attachment
 }

@@ -390,6 +390,7 @@ pub(crate) fn select_compute_shader_source(
                 frontend::ShaderStage::Compute,
                 &pipeline_constants,
                 vulkan_memory_model,
+                0,
             )?;
             Ok((
                 HalShaderSource::SpirV(spirv),

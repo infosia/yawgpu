@@ -966,13 +966,29 @@ pub(super) fn encode_render_pass(
             vk_device.cmd_reset_query_pool(command_buffer, query_set.pool(), query_index, 1);
         }
     }
-    for texture in color_textures.iter().flatten() {
+    for (slot, texture) in color_textures
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, texture)| texture.map(|texture| (slot, texture)))
+    {
+        let framebuffer_fetch = pass
+            .framebuffer_fetch_color_slots
+            .iter()
+            .any(|&fetch_slot| usize::try_from(fetch_slot).ok() == Some(slot));
+        let (layout, layout_id) = if framebuffer_fetch {
+            (vk::ImageLayout::GENERAL, IMAGE_LAYOUT_GENERAL)
+        } else {
+            (
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                IMAGE_LAYOUT_COLOR_ATTACHMENT,
+            )
+        };
         transition_image(
             vk_device,
             command_buffer,
             texture.inner()?,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            IMAGE_LAYOUT_COLOR_ATTACHMENT,
+            layout,
+            layout_id,
         );
     }
     for texture in resolve_textures.iter().flatten() {
@@ -1005,6 +1021,7 @@ pub(super) fn encode_render_pass(
             &resolve_formats,
             &pass.color_targets,
             pass.depth_stencil_attachment.as_ref(),
+            &pass.framebuffer_fetch_color_slots,
         )?,
         Some(_) => return Err(shader_error("render pipeline is not Vulkan-backed")),
     };
@@ -1024,13 +1041,16 @@ pub(super) fn encode_render_pass(
         .collect();
     let depth_stencil_attachment =
         depth_stencil_texture.zip(pass.depth_stencil_attachment.as_ref());
-    let (framebuffer, mut image_views) = create_framebuffer(
+    let framebuffer_resources = create_framebuffer(
         vk_device,
         render_pass,
         &color_attachments,
         &resolve_attachments,
         depth_stencil_attachment,
     )?;
+    let framebuffer = framebuffer_resources.framebuffer;
+    let mut image_views = framebuffer_resources.image_views;
+    let color_attachment_views = framebuffer_resources.color_attachment_views;
     let mut descriptor_pool = None;
     let mut descriptor_sets = Vec::new();
     if let Some(crate::HalRenderPipeline::Vulkan(pipeline)) = &pass.pipeline {
@@ -1053,7 +1073,13 @@ pub(super) fn encode_render_pass(
         } else {
             Vec::new()
         };
-        match update_render_descriptor_sets(vk_device, pipeline, pass, &descriptor_sets) {
+        match update_render_descriptor_sets(
+            vk_device,
+            pipeline,
+            pass,
+            &color_attachment_views,
+            &descriptor_sets,
+        ) {
             Ok(descriptor_image_views) => image_views.extend(descriptor_image_views),
             Err(error) => {
                 unsafe {
@@ -1598,6 +1624,7 @@ fn create_render_pass_for_targets(
     resolve_formats: &[Option<HalTextureFormat>],
     color_targets: &[Option<HalRenderColorTarget>],
     depth_stencil: Option<&HalRenderDepthStencilAttachment>,
+    framebuffer_fetch_color_slots: &[u32],
 ) -> Result<vk::RenderPass, HalError> {
     if color_formats.len() != color_targets.len() {
         return Err(shader_error("render pass color target count mismatch"));
@@ -1610,7 +1637,9 @@ fn create_render_pass_for_targets(
     }
     let mut attachments = Vec::new();
     let mut color_references = Vec::new();
-    for (color_format, color_target) in color_formats.iter().copied().zip(color_targets) {
+    for (slot, (color_format, color_target)) in
+        color_formats.iter().copied().zip(color_targets).enumerate()
+    {
         let (Some(color_format), Some(color_target)) = (color_format, color_target) else {
             color_references.push(
                 vk::AttachmentReference::default()
@@ -1619,15 +1648,31 @@ fn create_render_pass_for_targets(
             );
             continue;
         };
+        let color_slot =
+            u32::try_from(slot).map_err(|_| shader_error("color attachment slot is too large"))?;
+        let framebuffer_fetch = framebuffer_fetch_color_slots.contains(&color_slot);
         let index = u32::try_from(attachments.len())
             .map_err(|_| shader_error("color attachment index is too large"))?;
-        attachments.push(vk_color_attachment_description(color_format, color_target)?);
+        attachments.push(vk_color_attachment_description(
+            color_format,
+            color_target,
+            framebuffer_fetch,
+        )?);
         color_references.push(
             vk::AttachmentReference::default()
                 .attachment(index)
-                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+                .layout(render_color_attachment_layout(framebuffer_fetch)),
         );
     }
+    let color_target_present = color_targets
+        .iter()
+        .map(Option::is_some)
+        .collect::<Vec<_>>();
+    let input_references = input_attachment_references(
+        framebuffer_fetch_color_slots,
+        &color_target_present,
+        color_references.as_slice(),
+    )?;
     let mut resolve_references = Vec::new();
     for (resolve_format, color_target) in resolve_formats.iter().copied().zip(color_targets) {
         if let (Some(resolve_format), Some(color_target)) = (resolve_format, color_target) {
@@ -1667,6 +1712,11 @@ fn create_render_pass_for_targets(
     let subpass = vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
         .color_attachments(&color_references);
+    let subpass = if input_references.is_empty() {
+        subpass
+    } else {
+        subpass.input_attachments(&input_references)
+    };
     let subpass = if resolve_references
         .iter()
         .any(|reference| reference.attachment != vk::ATTACHMENT_UNUSED)
@@ -1680,40 +1730,8 @@ fn create_render_pass_for_targets(
     } else {
         subpass
     };
-    let dependency_in = vk::SubpassDependency::default()
-        .src_subpass(vk::SUBPASS_EXTERNAL)
-        .dst_subpass(0)
-        .src_stage_mask(
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-        )
-        .dst_stage_mask(
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-        )
-        .src_access_mask(vk::AccessFlags::empty())
-        .dst_access_mask(
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-        );
-    let dependency_out = vk::SubpassDependency::default()
-        .src_subpass(0)
-        .dst_subpass(vk::SUBPASS_EXTERNAL)
-        .src_stage_mask(
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-        )
-        .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
-        .src_access_mask(
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-        )
-        .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
     let subpasses = [subpass];
-    let dependencies = [dependency_in, dependency_out];
+    let dependencies = render_pass_dependencies(!input_references.is_empty());
     let render_pass_info = vk::RenderPassCreateInfo::default()
         .attachments(&attachments)
         .subpasses(&subpasses)
@@ -1725,6 +1743,7 @@ fn create_render_pass_for_targets(
 fn vk_color_attachment_description(
     format: HalTextureFormat,
     target: &HalRenderColorTarget,
+    framebuffer_fetch: bool,
 ) -> Result<vk::AttachmentDescription, HalError> {
     let (format, _) = map_texture_format(format)?;
     let crate::HalTexture::Vulkan(texture) = &target.texture else {
@@ -1737,8 +1756,107 @@ fn vk_color_attachment_description(
         .store_op(vk_store_op(target.store))
         .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
         .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-        .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .initial_layout(if framebuffer_fetch {
+            vk::ImageLayout::GENERAL
+        } else {
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+        })
         .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL))
+}
+
+pub(super) fn input_attachment_references(
+    framebuffer_fetch_color_slots: &[u32],
+    color_target_present: &[bool],
+    color_references: &[vk::AttachmentReference],
+) -> Result<Vec<vk::AttachmentReference>, HalError> {
+    let mut max_slot = None;
+    for &slot in framebuffer_fetch_color_slots {
+        let index = usize::try_from(slot)
+            .map_err(|_| shader_error("input attachment slot is too large"))?;
+        if !color_target_present.get(index).copied().unwrap_or(false) {
+            return Err(shader_error("input attachment color target is missing"));
+        }
+        max_slot = Some(max_slot.map_or(slot, |max: u32| max.max(slot)));
+    }
+    let Some(max_slot) = max_slot else {
+        return Ok(Vec::new());
+    };
+    let len = usize::try_from(max_slot)
+        .ok()
+        .and_then(|slot| slot.checked_add(1))
+        .ok_or_else(|| shader_error("input attachment slot is too large"))?;
+    let mut refs = vec![
+        vk::AttachmentReference::default()
+            .attachment(vk::ATTACHMENT_UNUSED)
+            .layout(vk::ImageLayout::UNDEFINED);
+        len
+    ];
+    for &slot in framebuffer_fetch_color_slots {
+        let index = usize::try_from(slot)
+            .map_err(|_| shader_error("input attachment slot is too large"))?;
+        let color_ref = color_references
+            .get(index)
+            .ok_or_else(|| shader_error("input attachment color reference is missing"))?;
+        refs[index] = vk::AttachmentReference::default()
+            .attachment(color_ref.attachment)
+            .layout(vk::ImageLayout::GENERAL);
+    }
+    Ok(refs)
+}
+
+pub(super) fn render_color_attachment_layout(framebuffer_fetch: bool) -> vk::ImageLayout {
+    if framebuffer_fetch {
+        vk::ImageLayout::GENERAL
+    } else {
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+    }
+}
+
+pub(super) fn render_pass_dependencies(framebuffer_fetch: bool) -> Vec<vk::SubpassDependency> {
+    let dependency_in = vk::SubpassDependency::default()
+        .src_subpass(vk::SUBPASS_EXTERNAL)
+        .dst_subpass(0)
+        .src_stage_mask(render_attachment_stage_flags())
+        .dst_stage_mask(render_attachment_stage_flags())
+        .src_access_mask(vk::AccessFlags::empty())
+        .dst_access_mask(render_attachment_access_flags());
+    let dependency_out = vk::SubpassDependency::default()
+        .src_subpass(0)
+        .dst_subpass(vk::SUBPASS_EXTERNAL)
+        .src_stage_mask(render_attachment_stage_flags())
+        .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
+        .src_access_mask(render_attachment_access_flags())
+        .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
+    if framebuffer_fetch {
+        vec![
+            dependency_in,
+            framebuffer_fetch_self_dependency(),
+            dependency_out,
+        ]
+    } else {
+        vec![dependency_in, dependency_out]
+    }
+}
+
+fn render_attachment_stage_flags() -> vk::PipelineStageFlags {
+    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+        | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+        | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS
+}
+
+fn render_attachment_access_flags() -> vk::AccessFlags {
+    vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+}
+
+fn framebuffer_fetch_self_dependency() -> vk::SubpassDependency {
+    vk::SubpassDependency::default()
+        .src_subpass(0)
+        .dst_subpass(0)
+        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .dst_stage_mask(vk::PipelineStageFlags::FRAGMENT_SHADER)
+        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+        .dst_access_mask(vk::AccessFlags::INPUT_ATTACHMENT_READ)
+        .dependency_flags(vk::DependencyFlags::BY_REGION)
 }
 
 fn vk_resolve_attachment_description(
@@ -1795,6 +1913,13 @@ fn vk_render_depth_stencil_attachment_description(
         .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL))
 }
 
+/// Stores framebuffer resources created for one Vulkan render pass.
+pub(super) struct FramebufferResources {
+    framebuffer: vk::Framebuffer,
+    image_views: Vec<vk::ImageView>,
+    color_attachment_views: Vec<Option<vk::ImageView>>,
+}
+
 /// Creates framebuffer and reports validation errors through the owning device.
 pub(super) fn create_framebuffer(
     device: &ash::Device,
@@ -1802,15 +1927,26 @@ pub(super) fn create_framebuffer(
     color_attachments: &[Option<(&VulkanTexture, &HalRenderColorTarget)>],
     resolve_attachments: &[(&VulkanTexture, &HalRenderColorTarget)],
     depth_stencil_attachment: Option<(&VulkanTexture, &HalRenderDepthStencilAttachment)>,
-) -> Result<(vk::Framebuffer, Vec<vk::ImageView>), HalError> {
+) -> Result<FramebufferResources, HalError> {
     let mut attachments = Vec::new();
+    let mut color_attachment_views = Vec::with_capacity(color_attachments.len());
     for (texture, target) in color_attachments.iter().flatten() {
         match create_color_attachment_image_view(device, texture, target) {
-            Ok(view) => attachments.push(view),
+            Ok(view) => {
+                attachments.push(view);
+                color_attachment_views.push(Some(view));
+            }
             Err(error) => {
                 destroy_image_views(device, &attachments);
                 return Err(error);
             }
+        }
+    }
+    if color_attachment_views.len() != color_attachments.len() {
+        color_attachment_views.clear();
+        let mut color_iter = attachments.iter().copied();
+        for attachment in color_attachments {
+            color_attachment_views.push(attachment.as_ref().and_then(|_| color_iter.next()));
         }
     }
     for (texture, target) in resolve_attachments {
@@ -1846,7 +1982,11 @@ pub(super) fn create_framebuffer(
             return Err(shader_error("framebuffer creation failed"));
         }
     };
-    Ok((framebuffer, attachments))
+    Ok(FramebufferResources {
+        framebuffer,
+        image_views: attachments,
+        color_attachment_views,
+    })
 }
 
 fn create_color_attachment_image_view(
@@ -1914,7 +2054,7 @@ fn create_attachment_image_view(
 }
 
 fn color_attachment_image_view_usage() -> vk::ImageUsageFlags {
-    vk::ImageUsageFlags::COLOR_ATTACHMENT
+    vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::INPUT_ATTACHMENT
 }
 
 fn depth_stencil_attachment_image_view_usage() -> vk::ImageUsageFlags {
@@ -2620,8 +2760,9 @@ mod tests {
             store: false,
             clear_color: [0.0, 0.0, 0.0, 1.0],
         };
-        let color = vk_color_attachment_description(HalTextureFormat::Rgba8Unorm, &color_target)
-            .expect("color attachment description");
+        let color =
+            vk_color_attachment_description(HalTextureFormat::Rgba8Unorm, &color_target, false)
+                .expect("color attachment description");
         assert_eq!(color.load_op, vk::AttachmentLoadOp::LOAD);
         assert_eq!(color.store_op, vk::AttachmentStoreOp::DONT_CARE);
         assert_eq!(
@@ -2744,7 +2885,7 @@ mod tests {
     fn render_attachment_image_view_usage_is_limited_to_attachment_role() {
         assert_eq!(
             color_attachment_image_view_usage(),
-            vk::ImageUsageFlags::COLOR_ATTACHMENT
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::INPUT_ATTACHMENT
         );
         assert_eq!(
             depth_stencil_attachment_image_view_usage(),

@@ -271,7 +271,7 @@ pub(super) fn create_render_pipeline(
             return Err(shader_error("render pipeline layout creation failed"));
         }
     };
-    let render_pass = match create_render_pass(&device, descriptor) {
+    let render_pass = match create_render_pass(&device, descriptor, bindings) {
         Ok(render_pass) => render_pass,
         Err(error) => {
             unsafe {
@@ -347,13 +347,15 @@ pub(super) fn create_shader_module(
 pub(super) fn create_render_pass(
     device: &VulkanDeviceInner,
     descriptor: &HalRenderPipelineDescriptor,
+    bindings: &[HalDescriptorBinding],
 ) -> Result<vk::RenderPass, HalError> {
-    create_render_pass_for_descriptor(&device.device, descriptor)
+    create_render_pass_for_descriptor(&device.device, descriptor, bindings)
 }
 
 fn create_render_pass_for_descriptor(
     device: &ash::Device,
     descriptor: &HalRenderPipelineDescriptor,
+    bindings: &[HalDescriptorBinding],
 ) -> Result<vk::RenderPass, HalError> {
     if !descriptor.color_targets.iter().any(Option::is_some) && descriptor.depth_stencil.is_none() {
         return Err(shader_error(
@@ -362,7 +364,8 @@ fn create_render_pass_for_descriptor(
     }
     let mut attachments = Vec::new();
     let mut color_references = Vec::new();
-    for color_target in &descriptor.color_targets {
+    let framebuffer_fetch_color_slots = framebuffer_fetch_color_slots(bindings);
+    for (slot, color_target) in descriptor.color_targets.iter().enumerate() {
         let Some(color_target) = color_target else {
             color_references.push(
                 vk::AttachmentReference::default()
@@ -372,6 +375,9 @@ fn create_render_pass_for_descriptor(
             continue;
         };
         let (format, _) = map_texture_format(color_target.format)?;
+        let color_slot =
+            u32::try_from(slot).map_err(|_| shader_error("color attachment slot is too large"))?;
+        let framebuffer_fetch = framebuffer_fetch_color_slots.contains(&color_slot);
         let index = u32::try_from(attachments.len())
             .map_err(|_| shader_error("color attachment index is too large"))?;
         attachments.push(
@@ -382,15 +388,25 @@ fn create_render_pass_for_descriptor(
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                 .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .initial_layout(super::encode::render_color_attachment_layout(
+                    framebuffer_fetch,
+                ))
                 .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
         );
-        color_references.push(
-            vk::AttachmentReference::default()
-                .attachment(index)
-                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
-        );
+        color_references.push(vk::AttachmentReference::default().attachment(index).layout(
+            super::encode::render_color_attachment_layout(framebuffer_fetch),
+        ));
     }
+    let color_target_present = descriptor
+        .color_targets
+        .iter()
+        .map(Option::is_some)
+        .collect::<Vec<_>>();
+    let input_references = super::encode::input_attachment_references(
+        &framebuffer_fetch_color_slots,
+        &color_target_present,
+        &color_references,
+    )?;
     let depth_reference = if let Some(depth_stencil) = descriptor.depth_stencil {
         let (format, _) = map_texture_format(depth_stencil.format)?;
         let has_depth = format_has_depth_aspect(depth_stencil.format);
@@ -435,31 +451,18 @@ fn create_render_pass_for_descriptor(
     let vk_subpass = vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
         .color_attachments(&color_references);
+    let vk_subpass = if input_references.is_empty() {
+        vk_subpass
+    } else {
+        vk_subpass.input_attachments(&input_references)
+    };
     let vk_subpass = if let Some(depth_reference) = depth_reference.as_ref() {
         vk_subpass.depth_stencil_attachment(depth_reference)
     } else {
         vk_subpass
     };
-    let has_color = descriptor.color_targets.iter().any(Option::is_some);
-    let has_depth_stencil = descriptor.depth_stencil.is_some();
-    let attachment_stage = attachment_pipeline_stages(has_color, has_depth_stencil);
-    let attachment_access = attachment_access_flags(has_color, has_depth_stencil);
-    let dependency_in = vk::SubpassDependency::default()
-        .src_subpass(vk::SUBPASS_EXTERNAL)
-        .dst_subpass(0)
-        .src_stage_mask(attachment_stage)
-        .dst_stage_mask(attachment_stage)
-        .src_access_mask(vk::AccessFlags::empty())
-        .dst_access_mask(attachment_access);
-    let dependency_out = vk::SubpassDependency::default()
-        .src_subpass(0)
-        .dst_subpass(vk::SUBPASS_EXTERNAL)
-        .src_stage_mask(attachment_stage)
-        .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
-        .src_access_mask(attachment_access)
-        .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
     let vk_subpasses = [vk_subpass];
-    let dependencies = [dependency_in, dependency_out];
+    let dependencies = super::encode::render_pass_dependencies(!input_references.is_empty());
     let render_pass_info = vk::RenderPassCreateInfo::default()
         .attachments(&attachments)
         .subpasses(&vk_subpasses)
@@ -468,27 +471,17 @@ fn create_render_pass_for_descriptor(
         .map_err(|_| shader_error("render pass creation failed"))
 }
 
-fn attachment_pipeline_stages(has_color: bool, has_depth_stencil: bool) -> vk::PipelineStageFlags {
-    let mut stages = vk::PipelineStageFlags::empty();
-    if has_color {
-        stages |= vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT;
-    }
-    if has_depth_stencil {
-        stages |= vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-            | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS;
-    }
-    stages
-}
-
-fn attachment_access_flags(has_color: bool, has_depth_stencil: bool) -> vk::AccessFlags {
-    let mut access = vk::AccessFlags::empty();
-    if has_color {
-        access |= vk::AccessFlags::COLOR_ATTACHMENT_WRITE;
-    }
-    if has_depth_stencil {
-        access |= vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;
-    }
-    access
+fn framebuffer_fetch_color_slots(bindings: &[HalDescriptorBinding]) -> Vec<u32> {
+    let mut slots = bindings
+        .iter()
+        .filter_map(|binding| match binding.kind {
+            HalDescriptorBindingKind::InputAttachment { color_slot } => Some(color_slot),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    slots.sort_unstable();
+    slots.dedup();
+    slots
 }
 
 fn vk_sample_count(sample_count: u32) -> Result<vk::SampleCountFlags, HalError> {
@@ -939,12 +932,13 @@ pub(super) fn descriptor_type(kind: HalDescriptorBindingKind) -> vk::DescriptorT
         HalDescriptorBindingKind::Texture => vk::DescriptorType::SAMPLED_IMAGE,
         HalDescriptorBindingKind::StorageTexture { .. } => vk::DescriptorType::STORAGE_IMAGE,
         HalDescriptorBindingKind::Sampler => vk::DescriptorType::SAMPLER,
+        HalDescriptorBindingKind::InputAttachment { .. } => vk::DescriptorType::INPUT_ATTACHMENT,
     }
 }
 
 /// Returns the descriptor set layout stage flags for one binding.
 ///
-/// All current binding kinds use the pipeline-wide default stage flags.
+/// Input attachments are fragment-stage only per Vulkan descriptor layout rules.
 fn binding_stage_flags(
     kind: HalDescriptorBindingKind,
     default: vk::ShaderStageFlags,
@@ -955,6 +949,7 @@ fn binding_stage_flags(
         | HalDescriptorBindingKind::Texture
         | HalDescriptorBindingKind::StorageTexture { .. }
         | HalDescriptorBindingKind::Sampler => default,
+        HalDescriptorBindingKind::InputAttachment { .. } => vk::ShaderStageFlags::FRAGMENT,
     }
 }
 
@@ -1194,6 +1189,7 @@ pub(super) fn update_render_descriptor_sets(
     device: &ash::Device,
     pipeline: &VulkanRenderPipeline,
     pass: &HalRenderPass,
+    color_attachment_views: &[Option<vk::ImageView>],
     descriptor_sets: &[vk::DescriptorSet],
 ) -> Result<Vec<vk::ImageView>, HalError> {
     if pipeline.inner.descriptor_bindings.is_empty() {
@@ -1212,14 +1208,30 @@ pub(super) fn update_render_descriptor_sets(
                 image_views: &mut image_views,
             };
             for descriptor in &pipeline.inner.descriptor_bindings {
-                let info = descriptor_info(
-                    descriptor,
-                    &pass.bind_buffers,
-                    &pass.bind_textures,
-                    &pass.bind_samplers,
-                    &mut scratch,
-                    "render",
-                )?;
+                let info = match descriptor.kind {
+                    HalDescriptorBindingKind::InputAttachment { color_slot } => {
+                        let view = usize::try_from(color_slot)
+                            .ok()
+                            .and_then(|slot| color_attachment_views.get(slot).copied().flatten())
+                            .ok_or_else(|| {
+                                shader_error("render input attachment color target is missing")
+                            })?;
+                        scratch.image_infos.push(
+                            vk::DescriptorImageInfo::default()
+                                .image_view(view)
+                                .image_layout(vk::ImageLayout::GENERAL),
+                        );
+                        DescriptorInfo::Image(scratch.image_infos.len() - 1)
+                    }
+                    _ => descriptor_info(
+                        descriptor,
+                        &pass.bind_buffers,
+                        &pass.bind_textures,
+                        &pass.bind_samplers,
+                        &mut scratch,
+                        "render",
+                    )?,
+                };
                 write_specs.push((
                     info,
                     descriptor.group,
@@ -1360,6 +1372,9 @@ fn descriptor_info(
                 .push(vk::DescriptorImageInfo::default().sampler(sampler.sampler));
             Ok(DescriptorInfo::Image(scratch.image_infos.len() - 1))
         }
+        HalDescriptorBindingKind::InputAttachment { .. } => Err(shader_error(
+            "input attachment descriptor requires render color attachment views",
+        )),
     }
 }
 
@@ -1675,6 +1690,15 @@ pub(super) fn create_descriptor_pool(
         .iter()
         .filter(|binding| matches!(binding.kind, HalDescriptorBindingKind::Sampler))
         .count();
+    let input_attachment_count = bindings
+        .iter()
+        .filter(|binding| {
+            matches!(
+                binding.kind,
+                HalDescriptorBindingKind::InputAttachment { .. }
+            )
+        })
+        .count();
     let mut pool_sizes = Vec::new();
     if uniform_count > 0 {
         pool_sizes.push(
@@ -1724,6 +1748,17 @@ pub(super) fn create_descriptor_pool(
                 .descriptor_count(
                     u32::try_from(sampler_count)
                         .map_err(|_| shader_error("sampler descriptor count is too large"))?,
+                ),
+        );
+    }
+    if input_attachment_count > 0 {
+        pool_sizes.push(
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::INPUT_ATTACHMENT)
+                .descriptor_count(
+                    u32::try_from(input_attachment_count).map_err(|_| {
+                        shader_error("input attachment descriptor count is too large")
+                    })?,
                 ),
         );
     }

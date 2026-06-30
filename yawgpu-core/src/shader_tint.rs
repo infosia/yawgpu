@@ -66,6 +66,7 @@ impl ReflectedModule {
         _stage: ShaderStage,
         pipeline_constants: &PipelineConstants,
         vulkan_memory_model: bool,
+        framebuffer_fetch_descriptor_set: u32,
     ) -> Result<Vec<u32>, String> {
         self.program.generate_spirv(
             entry_name,
@@ -73,6 +74,7 @@ impl ReflectedModule {
             &override_values(pipeline_constants),
             true,
             vulkan_memory_model,
+            framebuffer_fetch_descriptor_set,
         )
     }
 
@@ -275,6 +277,7 @@ impl ReflectedModule {
             &overrides,
             true,
             false,
+            0,
         )?;
         let literal_size = spirv_local_size(&spirv)
             .ok_or_else(|| "compute entry point workgroup size reflection failed".to_owned())?;
@@ -1394,6 +1397,7 @@ fn cs() {}
             ShaderStage::Compute,
             &PipelineConstants::default(),
             false,
+            0,
         )
         .unwrap();
         assert_eq!(compute.first().copied(), Some(0x0723_0203));
@@ -1425,6 +1429,7 @@ fn fs() -> @location(0) vec4<f32> {
                 ShaderStage::Vertex,
                 &PipelineConstants::default(),
                 false,
+                0,
             )
             .unwrap();
         let fragment = render
@@ -1433,6 +1438,7 @@ fn fs() -> @location(0) vec4<f32> {
                 ShaderStage::Fragment,
                 &PipelineConstants::default(),
                 false,
+                0,
             )
             .unwrap();
         assert_eq!(vertex.first().copied(), Some(0x0723_0203));
@@ -1464,6 +1470,7 @@ fn cs() {
                     ShaderStage::Compute,
                     &PipelineConstants::default(),
                     vulkan_memory_model,
+                    0,
                 )
                 .unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));
