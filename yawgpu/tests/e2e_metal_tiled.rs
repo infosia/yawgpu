@@ -18,10 +18,11 @@ use std::os::raw::c_void;
 
 use yawgpu::{
     native, YaWGPUAttachmentLayout, YaWGPUInstanceBackendSelect, YaWGPUSubpassColorAttachment,
-    YaWGPUSubpassDependency, YaWGPUSubpassDependencyType_ColorToInput, YaWGPUSubpassInputAttachment,
-    YaWGPUSubpassLayout, YaWGPUSubpassPassLayout, YaWGPUSubpassPassLayoutDescriptor,
-    YaWGPUSubpassRenderPassDescriptor, YaWGPUSubpassRenderPipelineDescriptor,
-    YAWGPU_INSTANCE_BACKEND_METAL, YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
+    YaWGPUSubpassDependency, YaWGPUSubpassDependencyType_ColorToInput,
+    YaWGPUSubpassInputAttachment, YaWGPUSubpassLayout, YaWGPUSubpassPassLayout,
+    YaWGPUSubpassPassLayoutDescriptor, YaWGPUSubpassRenderPassDescriptor,
+    YaWGPUSubpassRenderPipelineDescriptor, YAWGPU_INSTANCE_BACKEND_METAL,
+    YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
 };
 use yawgpu_test::{real_backend_skip_reason, wait, RealBackend};
 
@@ -184,10 +185,7 @@ unsafe extern "C" fn request_device_callback(
     *(userdata1 as *mut native::WGPUDevice) = device;
 }
 
-unsafe fn run_deferred(
-    device: native::WGPUDevice,
-    queue: native::WGPUQueue,
-) -> native::WGPUBuffer {
+unsafe fn run_deferred(device: native::WGPUDevice, queue: native::WGPUQueue) -> native::WGPUBuffer {
     let layout = create_two_subpass_input_layout(device);
     let pipeline0 = create_subpass_pipeline(device, layout, 0, WRITE_SHADER, 0, None);
     let pipeline1 = create_subpass_pipeline(device, layout, 1, LOAD_SHADER, 1, None);
@@ -228,11 +226,8 @@ unsafe fn run_deferred(
     yawgpu::yawgpuSubpassRenderPassEncoderNextSubpass(pass);
     yawgpu::yawgpuSubpassRenderPassEncoderSetPipeline(pass, pipeline1);
     // The input attachment (group 0 / binding 0) is bound implicitly by the pass's
-    // color attachment 0 — the bind group omits it, so an empty group satisfies the
-    // pipeline's group-0 layout.
-    let bgl = yawgpu::wgpuRenderPipelineGetBindGroupLayout(pipeline1, 0);
-    let bind_group = create_empty_bind_group(device, bgl);
-    yawgpu::yawgpuSubpassRenderPassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+    // color attachment 0 — no bind group is needed (draw validation skips
+    // input-attachment-only groups).
     yawgpu::yawgpuSubpassRenderPassEncoderDraw(pass, 3, 1, 0, 0);
     yawgpu::yawgpuSubpassRenderPassEncoderEnd(pass);
     yawgpu::yawgpuSubpassRenderPassEncoderRelease(pass);
@@ -243,8 +238,6 @@ unsafe fn run_deferred(
 
     yawgpu::wgpuCommandBufferRelease(command_buffer);
     yawgpu::wgpuCommandEncoderRelease(encoder);
-    yawgpu::wgpuBindGroupRelease(bind_group);
-    yawgpu::wgpuBindGroupLayoutRelease(bgl);
     yawgpu::wgpuTextureViewRelease(final_view);
     yawgpu::wgpuTextureViewRelease(gbuffer_view);
     yawgpu::wgpuTextureRelease(final_tex);
@@ -387,7 +380,10 @@ unsafe fn create_subpass_pipeline(
     };
     let pipeline = yawgpu::yawgpuDeviceCreateSubpassRenderPipeline(device, &descriptor);
     yawgpu::wgpuShaderModuleRelease(shader);
-    assert!(!pipeline.is_null(), "subpass pipeline {subpass_index} creation failed");
+    assert!(
+        !pipeline.is_null(),
+        "subpass pipeline {subpass_index} creation failed"
+    );
     pipeline
 }
 
@@ -398,7 +394,12 @@ unsafe fn record_t2b(
 ) {
     let source = texture_copy_info(texture);
     let destination = buffer_copy_info(buffer);
-    yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &source, &destination, &texture_extent());
+    yawgpu::wgpuCommandEncoderCopyTextureToBuffer(
+        encoder,
+        &source,
+        &destination,
+        &texture_extent(),
+    );
 }
 
 fn subpass_color_attachment(view: native::WGPUTextureView) -> YaWGPUSubpassColorAttachment {
@@ -455,22 +456,6 @@ unsafe fn create_texture(
     let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
     assert!(!texture.is_null());
     texture
-}
-
-unsafe fn create_empty_bind_group(
-    device: native::WGPUDevice,
-    layout: native::WGPUBindGroupLayout,
-) -> native::WGPUBindGroup {
-    let descriptor = native::WGPUBindGroupDescriptor {
-        nextInChain: std::ptr::null_mut(),
-        label: empty_string_view(),
-        layout,
-        entryCount: 0,
-        entries: std::ptr::null(),
-    };
-    let group = yawgpu::wgpuDeviceCreateBindGroup(device, &descriptor);
-    assert!(!group.is_null());
-    group
 }
 
 unsafe fn create_buffer(
@@ -610,7 +595,9 @@ fn string_view(value: &str) -> native::WGPUStringView {
 }
 
 fn contains_pixel(pixels: &[u8], rgba: [u8; 4]) -> bool {
-    pixels.chunks_exact(BYTES_PER_PIXEL).any(|pixel| pixel == rgba)
+    pixels
+        .chunks_exact(BYTES_PER_PIXEL)
+        .any(|pixel| pixel == rgba)
 }
 
 fn distinct_pixels(pixels: &[u8]) -> Vec<[u8; 4]> {

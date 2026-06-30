@@ -225,9 +225,8 @@ unsafe fn run_deferred(device: native::WGPUDevice, queue: native::WGPUQueue) -> 
     yawgpu::yawgpuSubpassRenderPassEncoderDraw(pass, 3, 1, 0, 0);
     yawgpu::yawgpuSubpassRenderPassEncoderNextSubpass(pass);
     yawgpu::yawgpuSubpassRenderPassEncoderSetPipeline(pass, pipeline1);
-    let bgl = yawgpu::wgpuRenderPipelineGetBindGroupLayout(pipeline1, 0);
-    let bind_group = create_empty_bind_group(device, bgl);
-    yawgpu::yawgpuSubpassRenderPassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+    // The input attachment is bound implicitly by the pass — no bind group needed
+    // (draw validation skips input-attachment-only groups).
     yawgpu::yawgpuSubpassRenderPassEncoderDraw(pass, 3, 1, 0, 0);
     yawgpu::yawgpuSubpassRenderPassEncoderEnd(pass);
     yawgpu::yawgpuSubpassRenderPassEncoderRelease(pass);
@@ -238,8 +237,6 @@ unsafe fn run_deferred(device: native::WGPUDevice, queue: native::WGPUQueue) -> 
 
     yawgpu::wgpuCommandBufferRelease(command_buffer);
     yawgpu::wgpuCommandEncoderRelease(encoder);
-    yawgpu::wgpuBindGroupRelease(bind_group);
-    yawgpu::wgpuBindGroupLayoutRelease(bgl);
     yawgpu::wgpuTextureViewRelease(final_view);
     yawgpu::wgpuTextureViewRelease(gbuffer_view);
     yawgpu::wgpuTextureRelease(final_tex);
@@ -454,22 +451,6 @@ unsafe fn create_texture(
     let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
     assert!(!texture.is_null());
     texture
-}
-
-unsafe fn create_empty_bind_group(
-    device: native::WGPUDevice,
-    layout: native::WGPUBindGroupLayout,
-) -> native::WGPUBindGroup {
-    let descriptor = native::WGPUBindGroupDescriptor {
-        nextInChain: std::ptr::null_mut(),
-        label: empty_string_view(),
-        layout,
-        entryCount: 0,
-        entries: std::ptr::null(),
-    };
-    let group = yawgpu::wgpuDeviceCreateBindGroup(device, &descriptor);
-    assert!(!group.is_null());
-    group
 }
 
 unsafe fn create_buffer(
