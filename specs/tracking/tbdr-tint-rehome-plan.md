@@ -166,8 +166,24 @@ broken into sub-slices, mirroring how Slice 1 ran (shim → core → HAL → FFI
     (`new_subpass`, `SubpassPipelineCompatibility`, the deleted `subpass_color_slots`
     analog) + codegen wiring: feed the WGSL-binding → color-slot map into the shim's
     `input_attachment_to_color_index` (§5 seam). Needs 2.3a.
+    **RE-PLAN (2026-06-30, after reading the 78cdf48 source):** the color-slot map
+    is computed *inside* `create_hal_subpass_render_pipeline`, the core→HAL seam —
+    `subpass_color_slots: Vec<((group,binding), source_attachment)>` derives from the
+    subpass's `input_attachments` (Metal slot = `input.source_attachment`, NOT
+    identity), is threaded through `select_render_shader_source` into MSL codegen,
+    AND drives `create_subpass_render_pipeline` (HAL). So the map + codegen + HAL
+    pipeline object are **one cohesive unit and do not split cleanly into a core-only
+    2.3b + HAL-only 2.4**. Revised approach: do **2.3b as a Metal-first vertical**
+    (core map + codegen + Metal HAL subpass pipeline + real-Metal e2e), mirroring how
+    Slice 1.3 landed Metal FB-fetch with near-zero HAL; then a **Vulkan vertical**
+    (multi-subpass `VkRenderPass` + INPUT_ATTACHMENT descriptors, adapting the new
+    Slice-1.4 `HalDescriptorBindingKind::InputAttachment { color_slot }` shape — note
+    the deleted code used the older `HalBufferBindingKind::InputAttachment`, which no
+    longer exists). The map computation can still be unit-tested in isolation
+    (`compute_subpass_color_slots`) before the HAL hookup.
   - **2.3c** — `SubpassRenderPass` runtime encoder (begin / `next_subpass` / draw /
-    `set_bind_group` / `end` + `resolve_subpass_render_pass_resources`). Needs 2.3a+b.
+    `set_bind_group` / `end` + `resolve_subpass_render_pass_resources`) + the device
+    entry points that create pass layouts / subpass passes. Needs 2.3a+b.
   - **transient_attachment.rs** (146 lines) folds in where the attachment type is
     needed (likely 2.3a data + 2.4/2.5 HAL storage modes).
 - **2.4 HAL Metal** — `[[color(N)]]` bind via the map; `MTLStorageMode::Memoryless`
