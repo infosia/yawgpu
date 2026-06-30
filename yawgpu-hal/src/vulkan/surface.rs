@@ -70,9 +70,18 @@ pub(super) enum RetireOp {
 
 #[derive(Debug)]
 pub(super) enum RetainedResource {
-    Buffer { _inner: Arc<VulkanBufferInner> },
-    Texture { _inner: Arc<VulkanTextureInner> },
-    QuerySet { _inner: Arc<VulkanQuerySetInner> },
+    Buffer {
+        _inner: Arc<VulkanBufferInner>,
+    },
+    Texture {
+        _inner: Arc<VulkanTextureInner>,
+    },
+    QuerySet {
+        _inner: Arc<VulkanQuerySetInner>,
+    },
+    RenderPipeline {
+        _inner: Arc<VulkanRenderPipelineInner>,
+    },
 }
 
 #[derive(Debug)]

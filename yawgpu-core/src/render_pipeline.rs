@@ -21,7 +21,10 @@ use crate::pipeline_layout::*;
 use crate::sampler::*;
 use crate::shader::*;
 #[cfg(feature = "tiled")]
-use crate::subpass::{compute_subpass_color_slots, SubpassPassLayout};
+use crate::subpass::{
+    compute_subpass_color_slots, hal_subpass_pass_layout, SubpassPassLayout,
+    SubpassPassLayoutDescriptor,
+};
 use crate::texture::*;
 
 /// Stores attachment signature data used by validation and backend submission.
@@ -691,6 +694,8 @@ impl RenderPipeline {
                 &metal_bindings,
                 &vertex_buffer_bindings,
                 &bind_group_layouts,
+                descriptor.pass_layout.descriptor(),
+                descriptor.subpass_index,
                 &subpass_color_slots,
             )
         };
@@ -971,7 +976,7 @@ fn create_hal_render_pipeline_with_subpass_color_slots(
             ),
         );
     }
-    let (shader, vertex_entry_point, fragment_entry_point, descriptor_bindings) =
+    let (shader, vertex_entry_point, fragment_entry_point, mut descriptor_bindings) =
         match select_render_shader_source(
             hal_device.backend(),
             descriptor,
@@ -986,6 +991,12 @@ fn create_hal_render_pipeline_with_subpass_color_slots(
             Ok(selection) => selection,
             Err(message) => return (None, Some(message)),
         };
+    if matches!(hal_device.backend(), HalBackend::Vulkan) && !subpass_color_slots.is_empty() {
+        match input_attachment_hal_bindings(bind_group_layouts, subpass_color_slots) {
+            Ok(input_attachment_bindings) => descriptor_bindings.extend(input_attachment_bindings),
+            Err(message) => return (None, Some(message)),
+        }
+    }
     let hal_descriptor = match hal_render_pipeline_descriptor(descriptor, vertex_buffer_bindings) {
         Ok(descriptor) => descriptor,
         Err(message) => return (None, Some(message)),
@@ -1013,6 +1024,8 @@ pub(crate) fn create_hal_subpass_render_pipeline(
     metal_bindings: &[MetalBufferBinding],
     vertex_buffer_bindings: &[MetalVertexBufferBinding],
     bind_group_layouts: &[Arc<BindGroupLayout>],
+    pass_layout: &SubpassPassLayoutDescriptor,
+    subpass_index: u32,
     subpass_color_slots: &[((u32, u32), u32)],
 ) -> (Option<HalRenderPipeline>, Option<String>) {
     if descriptor.fragment.is_none() {
@@ -1021,16 +1034,127 @@ pub(crate) fn create_hal_subpass_render_pipeline(
             Some("subpass render pipeline requires a fragment stage".to_owned()),
         );
     }
-    create_hal_render_pipeline_with_subpass_color_slots(
-        hal_device,
-        descriptor,
-        vertex_entry_name,
-        fragment_entry_name,
-        metal_bindings,
-        vertex_buffer_bindings,
-        bind_group_layouts,
-        subpass_color_slots,
-    )
+    let Some(hal_device) = hal_device else {
+        return (None, None);
+    };
+    if matches!(hal_device.backend(), HalBackend::Noop) {
+        return (Some(HalRenderPipeline::Noop), None);
+    }
+    match hal_device.backend() {
+        HalBackend::Vulkan => create_hal_vulkan_subpass_render_pipeline(
+            hal_device,
+            descriptor,
+            vertex_entry_name,
+            fragment_entry_name,
+            metal_bindings,
+            vertex_buffer_bindings,
+            bind_group_layouts,
+            pass_layout,
+            subpass_index,
+            subpass_color_slots,
+        ),
+        _ => create_hal_render_pipeline_with_subpass_color_slots(
+            Some(hal_device),
+            descriptor,
+            vertex_entry_name,
+            fragment_entry_name,
+            metal_bindings,
+            vertex_buffer_bindings,
+            bind_group_layouts,
+            subpass_color_slots,
+        ),
+    }
+}
+
+#[cfg(feature = "tiled")]
+#[allow(clippy::too_many_arguments)]
+fn create_hal_vulkan_subpass_render_pipeline(
+    hal_device: &HalDevice,
+    descriptor: &RenderPipelineDescriptor,
+    vertex_entry_name: &str,
+    fragment_entry_name: Option<&str>,
+    metal_bindings: &[MetalBufferBinding],
+    vertex_buffer_bindings: &[MetalVertexBufferBinding],
+    bind_group_layouts: &[Arc<BindGroupLayout>],
+    pass_layout: &SubpassPassLayoutDescriptor,
+    subpass_index: u32,
+    subpass_color_slots: &[((u32, u32), u32)],
+) -> (Option<HalRenderPipeline>, Option<String>) {
+    let (shader, vertex_entry_point, fragment_entry_point, mut descriptor_bindings) =
+        match select_render_shader_source(
+            hal_device.backend(),
+            descriptor,
+            vertex_entry_name,
+            fragment_entry_name,
+            metal_bindings,
+            vertex_buffer_bindings,
+            subpass_color_slots,
+            hal_device.vulkan_memory_model(),
+            bind_group_layouts,
+        ) {
+            Ok(selection) => selection,
+            Err(message) => return (None, Some(message)),
+        };
+    match input_attachment_hal_bindings(bind_group_layouts, subpass_color_slots) {
+        Ok(input_attachment_bindings) => descriptor_bindings.extend(input_attachment_bindings),
+        Err(message) => return (None, Some(message)),
+    }
+    let hal_descriptor = match hal_render_pipeline_descriptor(descriptor, vertex_buffer_bindings) {
+        Ok(descriptor) => descriptor,
+        Err(message) => return (None, Some(message)),
+    };
+    let hal_pass_layout = hal_subpass_pass_layout(pass_layout);
+    match hal_device.create_subpass_render_pipeline(
+        shader,
+        &vertex_entry_point,
+        fragment_entry_point.as_deref(),
+        &hal_descriptor,
+        &descriptor_bindings,
+        &hal_pass_layout,
+        subpass_index,
+    ) {
+        Ok(pipeline) => (Some(pipeline), None),
+        Err(error) => (None, Some(error.to_string())),
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn input_attachment_hal_bindings(
+    bind_group_layouts: &[Arc<BindGroupLayout>],
+    subpass_color_slots: &[((u32, u32), u32)],
+) -> Result<Vec<HalDescriptorBinding>, String> {
+    let mut bindings = Vec::new();
+    for (group_index, layout) in bind_group_layouts.iter().enumerate() {
+        let group = u32::try_from(group_index)
+            .map_err(|_| "input attachment bind group index is too large".to_owned())?;
+        for entry in layout.entries() {
+            if matches!(entry.kind, Some(BindingLayoutKind::InputAttachment { .. })) {
+                let color_slot = subpass_color_slots
+                    .iter()
+                    .find_map(|&((input_group, input_binding), source_attachment)| {
+                        (input_group == group && input_binding == entry.binding)
+                            .then_some(source_attachment)
+                    })
+                    .ok_or_else(|| {
+                        "subpass input attachment binding is missing from subpass layout".to_owned()
+                    })?;
+                bindings.push(HalDescriptorBinding {
+                    group,
+                    binding: entry.binding,
+                    kind: HalDescriptorBindingKind::InputAttachment { color_slot },
+                });
+            }
+        }
+    }
+    Ok(bindings)
+}
+
+#[cfg(not(feature = "tiled"))]
+fn input_attachment_hal_bindings(
+    _bind_group_layouts: &[Arc<BindGroupLayout>],
+    _subpass_color_slots: &[((u32, u32), u32)],
+) -> Result<Vec<HalDescriptorBinding>, String> {
+    Ok(Vec::new())
 }
 
 /// Selects the HAL shader source for a render pipeline.
@@ -4603,6 +4727,90 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
                 sample_type: TextureSampleType::Float,
                 multisampled: false,
             })
+        );
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn input_attachment_hal_bindings_use_subpass_source_attachment_as_color_slot() {
+        let device = noop_device();
+        let group0 = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: SHADER_STAGE_FRAGMENT,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::InputAttachment {
+                        sample_type: TextureSampleType::Float,
+                        multisampled: false,
+                    }),
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: SHADER_STAGE_FRAGMENT,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: 0,
+                    }),
+                },
+            ],
+            error: None,
+        }));
+        let group1 = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 3,
+                visibility: SHADER_STAGE_FRAGMENT,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::InputAttachment {
+                    sample_type: TextureSampleType::Float,
+                    multisampled: false,
+                }),
+            }],
+            error: None,
+        }));
+        let subpass_color_slots = [((0, 0), 2), ((1, 3), 5)];
+
+        let bindings =
+            input_attachment_hal_bindings(&[group0, group1], &subpass_color_slots).unwrap();
+
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0].group, 0);
+        assert_eq!(bindings[0].binding, 0);
+        assert!(matches!(
+            bindings[0].kind,
+            HalDescriptorBindingKind::InputAttachment { color_slot: 2 }
+        ));
+        assert_eq!(bindings[1].group, 1);
+        assert_eq!(bindings[1].binding, 3);
+        assert!(matches!(
+            bindings[1].kind,
+            HalDescriptorBindingKind::InputAttachment { color_slot: 5 }
+        ));
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn input_attachment_hal_bindings_require_subpass_mapping() {
+        let device = noop_device();
+        let group0 = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_FRAGMENT,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::InputAttachment {
+                    sample_type: TextureSampleType::Float,
+                    multisampled: false,
+                }),
+            }],
+            error: None,
+        }));
+
+        assert_eq!(
+            input_attachment_hal_bindings(&[group0], &[])
+                .expect_err("missing mapping must be rejected"),
+            "subpass input attachment binding is missing from subpass layout"
         );
     }
 
