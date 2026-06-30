@@ -101,6 +101,26 @@ De-risks the whole yawgpu plumbing against capability that already exists.
 6. e2e: `e2e_{metal,vulkan}_tiled.rs` framebuffer-fetch smoke (real GPU, M2).
 7. Rewrite Block 55 (un-remove) to the Tint `@color` surface for this slice.
 
+### Slice 1 status (2026-06-30)
+- **1.1 shim** (commit `1aee426`): `tiled` feature gates `@color` parse; reflection
+  exposes `@color(N)`; SPIR-V framebuffer-fetch descriptor set threaded from core.
+- **1.2 core** (`79c117c`): `tiled` propagation + `fragment_color_inputs` +
+  `@color(N)`-vs-color-target validation. Noop-verified.
+- **1.3 Metal** (`f7ae68d`): **zero HAL changes** — once core emits `[[color(N)]]`
+  MSL, Metal programmable blending works. Real-Metal e2e green on the M2.
+- **1.4 Vulkan**: full input-attachment infra built (dedicated set
+  `S = bind_group_count`, `binding = N`; VkRenderPass self-read input refs in
+  GENERAL layout + by-region self-dependency; INPUT_ATTACHMENT descriptor; shared
+  render-pass construction between pipeline-time and draw-time passes).
+  **Spec-valid (Vulkan validation clean).**
+  - **MoltenVK GAP (finding):** MoltenVK does not map the input-attachment self-read
+    (color attachment == input attachment) to Metal's tile read — it returns zero.
+    The setup is validation-clean and the native-Metal `[[color(N)]]` analog (1.3)
+    is verified, so the Vulkan path is **correct-by-construction but pixel-unverified
+    on this Mac** (no native Vulkan HW). `e2e_vulkan_framebuffer_fetch` **skips on
+    macOS/MoltenVK** and runs+verifies on native Vulkan (Linux/Windows). Consistent
+    with [[moltenvk-shader-execution-limits]] (MoltenVK is not an authoritative oracle).
+
 ### Slice 2 — `input_attachment<T>` multi-subpass deferred (needs Dawn fork)
 **Gated on Dawn `feature/tiled` MSL lowering landing + the deferred re-pin
 decision.** Restores transient attachments, multi-subpass passes, subpass
