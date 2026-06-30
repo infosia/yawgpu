@@ -534,7 +534,7 @@ impl HalDevice {
                 command::HalNoopSubpassRenderPass::new(),
             )),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(_) => Err(command::subpass_not_implemented_error()),
+            Self::Vulkan(_) => Ok(HalSubpassRenderPass::Vulkan),
             #[cfg(feature = "metal")]
             Self::Metal(_) => Ok(HalSubpassRenderPass::Metal),
             #[cfg(feature = "gles")]
@@ -556,9 +556,7 @@ impl HalDevice {
                 Ok(())
             }
             #[cfg(feature = "vulkan")]
-            (Self::Vulkan(_), HalSubpassRenderPass::Vulkan) => {
-                Err(command::subpass_not_implemented_error())
-            }
+            (Self::Vulkan(_), HalSubpassRenderPass::Vulkan) => Ok(()),
             #[cfg(feature = "metal")]
             (Self::Metal(_), HalSubpassRenderPass::Metal) => Ok(()),
             _ => Err(HalError::BufferOperationFailed {
@@ -576,9 +574,7 @@ impl HalDevice {
             #[cfg(feature = "noop")]
             (Self::Noop(_), HalSubpassRenderPass::Noop(_)) => Ok(()),
             #[cfg(feature = "vulkan")]
-            (Self::Vulkan(_), HalSubpassRenderPass::Vulkan) => {
-                Err(command::subpass_not_implemented_error())
-            }
+            (Self::Vulkan(_), HalSubpassRenderPass::Vulkan) => Ok(()),
             #[cfg(feature = "metal")]
             (Self::Metal(_), HalSubpassRenderPass::Metal) => Ok(()),
             _ => Err(HalError::BufferOperationFailed {

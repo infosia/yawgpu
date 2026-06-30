@@ -333,6 +333,168 @@ pub(super) fn create_render_pipeline(
     })
 }
 
+/// Creates a subpass-compatible render pipeline.
+#[cfg(feature = "tiled")]
+#[allow(dead_code, clippy::too_many_arguments)]
+pub(super) fn create_subpass_render_pipeline(
+    device: Arc<VulkanDeviceInner>,
+    shader: HalShaderSource,
+    vertex_entry_point: &str,
+    fragment_entry_point: Option<&str>,
+    descriptor: &HalRenderPipelineDescriptor,
+    bindings: &[HalDescriptorBinding],
+    pass_layout: &HalSubpassPassLayout,
+    subpass_index: u32,
+) -> Result<VulkanRenderPipeline, HalError> {
+    let HalShaderSource::SpirVStages { vertex, fragment } = shader else {
+        return Err(shader_error(
+            "Vulkan subpass render pipeline requires render SPIR-V stages",
+        ));
+    };
+    let vertex_entry = CString::new(vertex_entry_point)
+        .map_err(|_| shader_error("vertex entry point contains NUL"))?;
+    let fragment_entry = fragment_entry_point
+        .map(CString::new)
+        .transpose()
+        .map_err(|_| shader_error("fragment entry point contains NUL"))?;
+    let vertex_shader_module = create_shader_module(&device, &vertex)?;
+    let fragment_shader_module = match fragment
+        .as_deref()
+        .map(|code| create_shader_module(&device, code))
+        .transpose()
+    {
+        Ok(module) => module,
+        Err(error) => {
+            unsafe {
+                device
+                    .device
+                    .destroy_shader_module(vertex_shader_module, None);
+            }
+            return Err(error);
+        }
+    };
+    if fragment_entry.is_some() != fragment_shader_module.is_some() {
+        unsafe {
+            if let Some(fragment_shader_module) = fragment_shader_module {
+                device
+                    .device
+                    .destroy_shader_module(fragment_shader_module, None);
+            }
+            device
+                .device
+                .destroy_shader_module(vertex_shader_module, None);
+        }
+        return Err(shader_error(
+            "Vulkan subpass render pipeline fragment entry and SPIR-V stage must match",
+        ));
+    }
+    let shader_stage_flags = if fragment_shader_module.is_some() {
+        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT
+    } else {
+        vk::ShaderStageFlags::VERTEX
+    };
+    let descriptor_set_layouts =
+        match create_descriptor_set_layouts(&device, bindings, shader_stage_flags) {
+            Ok(layouts) => layouts,
+            Err(error) => {
+                unsafe {
+                    if let Some(fragment_shader_module) = fragment_shader_module {
+                        device
+                            .device
+                            .destroy_shader_module(fragment_shader_module, None);
+                    }
+                    device
+                        .device
+                        .destroy_shader_module(vertex_shader_module, None);
+                }
+                return Err(error);
+            }
+        };
+    let pipeline_layout_info =
+        vk::PipelineLayoutCreateInfo::default().set_layouts(&descriptor_set_layouts);
+    let pipeline_layout = match unsafe {
+        device
+            .device
+            .create_pipeline_layout(&pipeline_layout_info, None)
+    } {
+        Ok(layout) => layout,
+        Err(_) => {
+            unsafe {
+                destroy_descriptor_set_layouts(&device.device, &descriptor_set_layouts);
+                if let Some(fragment_shader_module) = fragment_shader_module {
+                    device
+                        .device
+                        .destroy_shader_module(fragment_shader_module, None);
+                }
+                device
+                    .device
+                    .destroy_shader_module(vertex_shader_module, None);
+            }
+            return Err(shader_error("render pipeline layout creation failed"));
+        }
+    };
+    let render_pass = match create_subpass_render_pass_for_layout(&device.device, pass_layout) {
+        Ok(render_pass) => render_pass,
+        Err(error) => {
+            unsafe {
+                device.device.destroy_pipeline_layout(pipeline_layout, None);
+                destroy_descriptor_set_layouts(&device.device, &descriptor_set_layouts);
+                if let Some(fragment_shader_module) = fragment_shader_module {
+                    device
+                        .device
+                        .destroy_shader_module(fragment_shader_module, None);
+                }
+                device
+                    .device
+                    .destroy_shader_module(vertex_shader_module, None);
+            }
+            return Err(error);
+        }
+    };
+    let pipeline = match create_graphics_pipeline(
+        &device,
+        descriptor,
+        pipeline_layout,
+        render_pass,
+        subpass_index,
+        vertex_shader_module,
+        fragment_shader_module,
+        &vertex_entry,
+        fragment_entry.as_deref(),
+    ) {
+        Ok(pipeline) => pipeline,
+        Err(error) => {
+            unsafe {
+                device.device.destroy_render_pass(render_pass, None);
+                device.device.destroy_pipeline_layout(pipeline_layout, None);
+                destroy_descriptor_set_layouts(&device.device, &descriptor_set_layouts);
+                if let Some(fragment_shader_module) = fragment_shader_module {
+                    device
+                        .device
+                        .destroy_shader_module(fragment_shader_module, None);
+                }
+                device
+                    .device
+                    .destroy_shader_module(vertex_shader_module, None);
+            }
+            return Err(error);
+        }
+    };
+    Ok(VulkanRenderPipeline {
+        inner: Arc::new(VulkanRenderPipelineInner {
+            device,
+            pipeline,
+            pipeline_layout,
+            render_pass,
+            render_pass_owned: true,
+            descriptor_set_layouts,
+            descriptor_bindings: bindings.to_vec(),
+            vertex_shader_module,
+            fragment_shader_module,
+        }),
+    })
+}
+
 /// Creates shader module and reports validation errors through the owning device.
 pub(super) fn create_shader_module(
     device: &VulkanDeviceInner,
@@ -482,6 +644,199 @@ fn framebuffer_fetch_color_slots(bindings: &[HalDescriptorBinding]) -> Vec<u32> 
     slots.sort_unstable();
     slots.dedup();
     slots
+}
+
+#[cfg(feature = "tiled")]
+fn create_subpass_render_pass_for_layout(
+    device: &ash::Device,
+    layout: &HalSubpassPassLayout,
+) -> Result<vk::RenderPass, HalError> {
+    let mut attachments = Vec::new();
+    for (index, attachment) in layout.color_attachments.iter().enumerate() {
+        let (format, _) = map_texture_format(attachment.format)?;
+        let used_as_input = layout.subpasses.iter().any(|subpass| {
+            subpass
+                .input_attachments
+                .iter()
+                .any(|input| input.source_attachment as usize == index)
+        });
+        attachments.push(
+            vk::AttachmentDescription::default()
+                .format(format)
+                .samples(vk_sample_count(attachment.sample_count)?)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(super::encode::render_color_attachment_layout(used_as_input))
+                .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+        );
+    }
+    if let Some(attachment) = layout.depth_stencil_attachment {
+        let (format, _) = map_texture_format(attachment.format)?;
+        let has_depth = format_has_depth_aspect(attachment.format);
+        let has_stencil = format_has_stencil_aspect(attachment.format);
+        attachments.push(
+            vk::AttachmentDescription::default()
+                .format(format)
+                .samples(vk_sample_count(attachment.sample_count)?)
+                .load_op(if has_depth {
+                    vk::AttachmentLoadOp::CLEAR
+                } else {
+                    vk::AttachmentLoadOp::DONT_CARE
+                })
+                .store_op(if has_depth {
+                    vk::AttachmentStoreOp::STORE
+                } else {
+                    vk::AttachmentStoreOp::DONT_CARE
+                })
+                .stencil_load_op(if has_stencil {
+                    vk::AttachmentLoadOp::CLEAR
+                } else {
+                    vk::AttachmentLoadOp::DONT_CARE
+                })
+                .stencil_store_op(if has_stencil {
+                    vk::AttachmentStoreOp::STORE
+                } else {
+                    vk::AttachmentStoreOp::DONT_CARE
+                })
+                .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+        );
+    }
+    let depth_index = u32::try_from(layout.color_attachments.len())
+        .map_err(|_| shader_error("subpass depth attachment index is too large"))?;
+    let color_refs = layout
+        .subpasses
+        .iter()
+        .map(|subpass| {
+            subpass
+                .color_attachment_indices
+                .iter()
+                .map(|&attachment| {
+                    vk::AttachmentReference::default()
+                        .attachment(attachment)
+                        .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let input_refs = layout
+        .subpasses
+        .iter()
+        .map(|subpass| {
+            subpass
+                .input_attachments
+                .iter()
+                .map(|input| {
+                    vk::AttachmentReference::default()
+                        .attachment(if input.source_attachment == u32::MAX {
+                            depth_index
+                        } else {
+                            input.source_attachment
+                        })
+                        .layout(if input.source_attachment == u32::MAX {
+                            vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                        } else {
+                            vk::ImageLayout::GENERAL
+                        })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let depth_refs = layout
+        .subpasses
+        .iter()
+        .map(|subpass| {
+            subpass.uses_depth_stencil.then(|| {
+                vk::AttachmentReference::default()
+                    .attachment(depth_index)
+                    .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut subpasses = Vec::new();
+    for index in 0..layout.subpasses.len() {
+        let mut description = vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&color_refs[index])
+            .input_attachments(&input_refs[index]);
+        if let Some(depth_ref) = depth_refs[index].as_ref() {
+            description = description.depth_stencil_attachment(depth_ref);
+        }
+        subpasses.push(description);
+    }
+    let dependencies = subpass_dependencies_for_layout(layout);
+    let render_pass_info = vk::RenderPassCreateInfo::default()
+        .attachments(&attachments)
+        .subpasses(&subpasses)
+        .dependencies(&dependencies);
+    unsafe { device.create_render_pass(&render_pass_info, None) }
+        .map_err(|_| shader_error("subpass render pass creation failed"))
+}
+
+#[cfg(feature = "tiled")]
+fn subpass_dependencies_for_layout(layout: &HalSubpassPassLayout) -> Vec<vk::SubpassDependency> {
+    let render_stage = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+        | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+        | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS;
+    let render_access =
+        vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;
+    let mut dependencies = vec![vk::SubpassDependency::default()
+        .src_subpass(vk::SUBPASS_EXTERNAL)
+        .dst_subpass(0)
+        .src_stage_mask(render_stage)
+        .dst_stage_mask(render_stage)
+        .src_access_mask(vk::AccessFlags::empty())
+        .dst_access_mask(render_access)];
+    dependencies.extend(layout.dependencies.iter().map(|dependency| {
+        let (src_stage, src_access, dst_stage, dst_access) = match dependency.dependency_type {
+            HalSubpassDependencyType::ColorToInput => (
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::AccessFlags::INPUT_ATTACHMENT_READ,
+            ),
+            HalSubpassDependencyType::DepthToInput => (
+                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::AccessFlags::INPUT_ATTACHMENT_READ,
+            ),
+            HalSubpassDependencyType::ColorDepthToInput => (
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::AccessFlags::INPUT_ATTACHMENT_READ,
+            ),
+        };
+        vk::SubpassDependency::default()
+            .src_subpass(dependency.src_subpass)
+            .dst_subpass(dependency.dst_subpass)
+            .src_stage_mask(src_stage)
+            .dst_stage_mask(dst_stage)
+            .src_access_mask(src_access)
+            .dst_access_mask(dst_access)
+            .dependency_flags(if dependency.by_region {
+                vk::DependencyFlags::BY_REGION
+            } else {
+                vk::DependencyFlags::empty()
+            })
+    }));
+    dependencies.push(
+        vk::SubpassDependency::default()
+            .src_subpass(layout.subpasses.len().saturating_sub(1) as u32)
+            .dst_subpass(vk::SUBPASS_EXTERNAL)
+            .src_stage_mask(render_stage)
+            .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
+            .src_access_mask(render_access)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ),
+    );
+    dependencies
 }
 
 fn vk_sample_count(sample_count: u32) -> Result<vk::SampleCountFlags, HalError> {
@@ -1276,7 +1631,7 @@ pub(super) fn update_render_descriptor_sets(
 }
 
 #[derive(Debug, Clone, Copy)]
-enum DescriptorInfo {
+pub(super) enum DescriptorInfo {
     Buffer(usize),
     Image(usize),
 }
@@ -1287,14 +1642,14 @@ struct DescriptorImageView {
     owned: bool,
 }
 
-struct DescriptorUpdateScratch<'a> {
-    device: &'a ash::Device,
-    buffer_infos: &'a mut Vec<vk::DescriptorBufferInfo>,
-    image_infos: &'a mut Vec<vk::DescriptorImageInfo>,
-    image_views: &'a mut Vec<vk::ImageView>,
+pub(super) struct DescriptorUpdateScratch<'a> {
+    pub(super) device: &'a ash::Device,
+    pub(super) buffer_infos: &'a mut Vec<vk::DescriptorBufferInfo>,
+    pub(super) image_infos: &'a mut Vec<vk::DescriptorImageInfo>,
+    pub(super) image_views: &'a mut Vec<vk::ImageView>,
 }
 
-fn descriptor_info(
+pub(super) fn descriptor_info(
     descriptor: &HalDescriptorBinding,
     buffers: &[HalBoundBuffer],
     textures: &[HalBoundTexture],
@@ -1550,7 +1905,7 @@ fn sampled_texture_aspect_flags(
     }
 }
 
-fn destroy_descriptor_image_views(device: &ash::Device, views: &[vk::ImageView]) {
+pub(super) fn destroy_descriptor_image_views(device: &ash::Device, views: &[vk::ImageView]) {
     unsafe {
         for &view in views {
             device.destroy_image_view(view, None);
