@@ -201,6 +201,59 @@ driver — because driver acceptance of the lowered `texture_external` SPIR-V is
 GPU-divergent; the device-independent rejection keeps behaviour stable across
 drivers.
 
+### Tiled rendering (TBDR / multi-subpass) — `tiled`
+
+On tile-based deferred renderers (Apple GPUs; mobile Vulkan on Adreno / Mali /
+PowerVR) a multi-pass G-buffer pipeline can keep intermediate attachments **in
+tile memory** instead of round-tripping to system RAM. WebGPU's core API has no
+concept of subpasses; this extension exposes them as additive vendor entry
+points behind the **`tiled` cargo feature** (default off; the `yawgpu.h`
+declarations are guarded by `YAWGPU_HAS_TILED`). Metal **and** Vulkan are
+supported — and unlike the same-subpass `@color` framebuffer-fetch self-read, a
+genuine multi-subpass input attachment **executes on MoltenVK** too.
+
+The WGSL surface is Tint's (not the older naga `subpass_input` / `subpassLoad`):
+declare an input attachment with `enable chromium_internal_input_attachments;
+@group(g) @binding(b) @input_attachment_index(n) var x: input_attachment<T>;` and
+read it with `inputAttachmentLoad(x)`; single-pass framebuffer fetch uses
+`@color(N)` (`enable chromium_experimental_framebuffer_fetch`). The shape is:
+
+- **Capabilities** — `yawgpuAdapterGetTiledCapabilities` reports `maxSubpasses`,
+  `maxSubpassColorAttachments`, `maxInputAttachments`, and an
+  `estimatedTileMemoryBytes` hint; the `YaWGPUFeatureName_MultiSubpass` vendor
+  feature plugs into the standard `wgpuAdapterHasFeature` /
+  `WGPUDeviceDescriptor.requiredFeatures` flow.
+- **Subpass pass layout** — a reusable `YaWGPUSubpassPassLayout`
+  (`yawgpuDeviceCreateSubpassPassLayout`) describes attachment formats,
+  per-subpass color usage, input-attachment source mapping, and dependencies
+  once; both pipeline creation and pass begin reference it. It is the single
+  source of truth for Vulkan `VkRenderPass` compatibility.
+- **Subpass-aware render pipelines** — `yawgpuDeviceCreateSubpassRenderPipeline`
+  wraps `WGPURenderPipelineDescriptor` with a `(passLayout, subpassIndex)` pair.
+- **Subpass-input bindings** — chain `YaWGPUInputAttachmentBindingLayout` onto a
+  bind-group-layout entry to mark a `(group, binding)` as an input attachment.
+  The *resource* feeding it is wired automatically from the pass layout's source
+  mapping — the caller never creates a bind group or view for it (a draw needs no
+  bind group for an input-attachment-only group).
+- **Subpass render pass encoder** — `yawgpuCommandEncoderBeginSubpassRenderPass`
+  → record draws → `yawgpuSubpassRenderPassEncoderNextSubpass` → more draws →
+  `…End`. Mirrors the WebGPU render-pass-encoder shape with a `nextSubpass` step
+  in the middle.
+
+**Portable color-target contract.** Metal lowers an `input_attachment` to a
+`[[color(N)]]` fragment input (programmable blending) while Vulkan uses a
+`SubpassData` `INPUT_ATTACHMENT` descriptor, so yawgpu hides the difference: the
+fragment writes its **global** `@location(slot)`, `fragment.targets` lists only
+the subpass's *written* color attachments, and the core supplies the
+input-attachment color setup per backend. The same C code + shaders run
+unchanged on both backends.
+
+`examples/tiled_deferred` records a two-subpass pass (G-buffer → lighting) that
+reads two input attachments (albedo + normal) from tile memory; build it with
+`-DYAWGPU_TILED=ON` (see [Examples](#examples)). Persistent attachments only for
+now; transient / memoryless attachments and MSAA input attachments are not yet
+implemented.
+
 ## Using it from C
 
 **Prerequisite — the Tint shader compiler.** yawgpu's shader frontend is Tint,
@@ -332,6 +385,7 @@ link against `libyawgpu` and exercise the standard `webgpu.h` API:
 | `triangle` | A classic windowed RGB-gradient triangle (vertex-index shader) | core |
 | `hello_triangle` | The same RGB-gradient triangle fed from an interleaved (position + color) vertex buffer | core |
 | `triangle_passthrough` | The same triangle fed **native bytecode** (SPIR-V / MSL) via the opt-in `shader-passthrough` feature | `-DYAWGPU_SHADER_PASSTHROUGH=ON` |
+| `tiled_deferred` | Two-subpass deferred shading — a G-buffer (albedo + normal) read back through **input attachments** from tile memory ([`tiled` vendor extension](#tiled-rendering-tbdr--multi-subpass--tiled)); windowed, or `--verify` for an offscreen PNG | `-DYAWGPU_TILED=ON` (Metal / Vulkan) |
 
 Pick a backend at runtime with `YAWGPU_BACKEND`:
 
