@@ -1216,7 +1216,7 @@ pub(crate) fn validate_pipeline_bind_groups(
     limits: Limits,
 ) -> Result<(), String> {
     for (index, required_layout) in required_layouts.iter().enumerate() {
-        if required_layout.entries().is_empty() {
+        if pipeline_bind_group_layout_is_implicitly_satisfied(required_layout) {
             continue;
         }
         let index = u32::try_from(index)
@@ -1227,6 +1227,26 @@ pub(crate) fn validate_pipeline_bind_groups(
         validate_bound_bind_group(required_layout, bound, limits)?;
     }
     Ok(())
+}
+
+fn pipeline_bind_group_layout_is_implicitly_satisfied(layout: &BindGroupLayout) -> bool {
+    if layout.entries().is_empty() {
+        return true;
+    }
+
+    #[cfg(feature = "tiled")]
+    {
+        layout
+            .entries()
+            .iter()
+            .all(|entry| matches!(entry.kind, Some(BindingLayoutKind::InputAttachment { .. })))
+    }
+
+    #[cfg(not(feature = "tiled"))]
+    {
+        let _ = layout;
+        false
+    }
 }
 
 /// Validates a single bound bind group against its required layout.
@@ -1482,6 +1502,19 @@ mod tests {
                 ty: BufferBindingType::Uniform,
                 has_dynamic_offset: false,
                 min_binding_size: 16,
+            }),
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    fn input_attachment_layout_entry(binding: u32) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: 4,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::InputAttachment {
+                sample_type: TextureSampleType::Float,
+                multisampled: false,
             }),
         }
     }
@@ -2089,6 +2122,31 @@ mod tests {
         assert_eq!(
             validate_viewport_bounds(-double_max - 1.0, 0.0, max, max, limits),
             Err("render pass viewport rectangle exceeds device bounds".to_owned())
+        );
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn validate_pipeline_bind_groups_skips_input_attachment_only_layout() {
+        let device = noop_device();
+        let input_only_layout =
+            Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+                entries: vec![input_attachment_layout_entry(0)],
+                error: None,
+            }));
+        let mixed_layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![input_attachment_layout_entry(0), uniform_layout_entry(1)],
+            error: None,
+        }));
+        let bound_groups = BTreeMap::new();
+
+        assert_eq!(
+            validate_pipeline_bind_groups(&[input_only_layout], &bound_groups, device.limits()),
+            Ok(())
+        );
+        assert_eq!(
+            validate_pipeline_bind_groups(&[mixed_layout], &bound_groups, device.limits()),
+            Err("pipeline requires a missing bind group".to_owned())
         );
     }
 
