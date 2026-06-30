@@ -340,3 +340,24 @@ programmable tile dispatch; HLSL/D3D (permanently out of scope).
 - CTS: framebuffer-fetch / input-attachment are vendor/outside-WebGPU-core, so no
   CTS regression risk; confirm the standard api trees stay green.
 - Phase Review (Clean-Review-Then-Fix) closes each slice.
+
+## 9. Status (2026-06-30) — core feature COMPLETE
+
+The TBDR multi-subpass deferred-rendering feature is **implemented and real-GPU verified on
+both backends**, behind the default-off `tiled` cargo feature:
+
+- **Slices 2.1–2.7** done: shim Options, `InputAttachment` binding kind, subpass pass-layout +
+  validation, the §5 color-slot map + codegen, subpass render pipeline + device entries, the
+  `SubpassRenderPass` encoder, Metal + Vulkan HAL execution, the full vendor C ABI, and the
+  portable input-attachment color-target auto-derivation + the auto-skip of input-attachment-only
+  bind groups.
+- **Verified:** `e2e_metal_tiled` passes on the M2; `e2e_vulkan_tiled` is validation-clean
+  (0 VUIDs, Khronos layers) AND pixel-correct on MoltenVK.
+- **Block 55** rewritten to the completed Tint surface + portable contract.
+
+**Remaining (optional extension):** Slice 4 — SPIR-V **MSAA** input attachment (Vulkan-only;
+Metal MSAA subpass input is Dawn-deferred via `[[sample_id]]`). The Dawn fork's 2-arg
+`inputAttachmentLoad(ia, sample_index)` + `multisampled_input_attachment` option are ready;
+the `generate_spirv` param exists (Slice 2.1). Verification caveat: MoltenVK MSAA input-attachment
+execution is uncertain, so it may land validation-clean + spec-valid but pixel-unverified on this
+Mac (native-Vulkan-gated, like the original Slice-1.4 disposition).
