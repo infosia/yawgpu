@@ -1,27 +1,28 @@
-//! Real-Metal e2e for TBDR multi-subpass deferred rendering (Slice 2.7a).
+//! Real-Vulkan e2e for TBDR multi-subpass deferred rendering (Slice 2.7b).
 //!
-//! Two color attachments, two subpasses. Subpass 0 writes attachment 0 (the
-//! "g-buffer") = (0.5, 0.0, 0.0, 1.0). Subpass 1 reads attachment 0 as an
-//! `input_attachment` (Metal `[[color(0)]]` programmable-blend tile read) and
-//! writes attachment 1 (the final target) = loaded + (0.0, 0.25, 0.0, 0.0). The
-//! fragment writes its subpass's GLOBAL color slot via `@location(N)`. Reading the
-//! input requires real GPU execution + readback, so the value (128, 64, 0, 255) at
-//! the final attachment proves the input_attachment color-slot map + Metal
-//! programmable blending work end to end.
+//! Same 2-attachment / 2-subpass deferred pass as the Metal e2e: subpass 0 writes
+//! the g-buffer; subpass 1 reads it as an `input_attachment` (Vulkan `SubpassData`
+//! INPUT_ATTACHMENT descriptor) and writes the final attachment. Must be
+//! **validation-clean** (no device errors) and produce the correct readback. Unlike
+//! the `@color` framebuffer-fetch self-read (same-subpass color==input, which MoltenVK
+//! does NOT execute — Slice 1.4), this is a genuine multi-subpass input attachment
+//! (subpass 1 reads what subpass 0 wrote), which MoltenVK DOES map to Metal's tile
+//! read — so the pixel assertion runs on MoltenVK too, not just native Vulkan.
 //!
-//! Gated on `metal` + `tiled`; run with:
-//! `cargo test -p yawgpu --features metal,tiled --test e2e_metal_tiled -- --ignored`
+//! Gated on `vulkan` + `tiled`; run with:
+//! `cargo test -p yawgpu --features vulkan,tiled --test e2e_vulkan_tiled -- --ignored`
 
-#![cfg(all(feature = "metal", feature = "tiled"))]
+#![cfg(all(feature = "vulkan", feature = "tiled"))]
 
 use std::os::raw::c_void;
 
 use yawgpu::{
     native, YaWGPUAttachmentLayout, YaWGPUInstanceBackendSelect, YaWGPUSubpassColorAttachment,
-    YaWGPUSubpassDependency, YaWGPUSubpassDependencyType_ColorToInput, YaWGPUSubpassInputAttachment,
-    YaWGPUSubpassLayout, YaWGPUSubpassPassLayout, YaWGPUSubpassPassLayoutDescriptor,
-    YaWGPUSubpassRenderPassDescriptor, YaWGPUSubpassRenderPipelineDescriptor,
-    YAWGPU_INSTANCE_BACKEND_METAL, YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
+    YaWGPUSubpassDependency, YaWGPUSubpassDependencyType_ColorToInput,
+    YaWGPUSubpassInputAttachment, YaWGPUSubpassLayout, YaWGPUSubpassPassLayout,
+    YaWGPUSubpassPassLayoutDescriptor, YaWGPUSubpassRenderPassDescriptor,
+    YaWGPUSubpassRenderPipelineDescriptor, YAWGPU_INSTANCE_BACKEND_VULKAN,
+    YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
 };
 use yawgpu_test::{real_backend_skip_reason, wait, RealBackend};
 
@@ -32,7 +33,6 @@ const BYTES_PER_ROW: u32 = 256;
 const ROW_BYTES: usize = WIDTH as usize * BYTES_PER_PIXEL;
 const READBACK_SIZE: usize = BYTES_PER_ROW as usize * HEIGHT as usize;
 
-// Fullscreen triangle covering the 16x16 target (clip-space, no vertex buffer).
 const WRITE_SHADER: &str = r#"
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -64,15 +64,15 @@ fn fs() -> @location(1) vec4<f32> {
 "#;
 
 #[test]
-#[ignore = "requires a real Metal device"]
-fn metal_tiled_deferred_reads_input_attachment() {
-    if real_backend_skip_reason(RealBackend::Metal).is_some() {
-        eprintln!("skipping: no real Metal device");
+#[ignore = "requires a real Vulkan device"]
+fn vulkan_tiled_deferred_reads_input_attachment() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        eprintln!("skipping: no real Vulkan device");
         return;
     }
 
     unsafe {
-        let instance = create_metal_instance();
+        let instance = create_vulkan_instance();
         let adapter = request_adapter(instance);
         let device = request_device(instance, adapter);
         let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -86,20 +86,21 @@ fn metal_tiled_deferred_reads_input_attachment() {
         let readback = run_deferred(device, queue);
         let pixels = read_unpacked_texture_buffer(instance, readback);
 
+        // The setup must be validation-clean on every Vulkan device.
+        assert!(
+            errors.lock().expect("lock").is_empty(),
+            "device errors: {:?}",
+            errors.lock().expect("lock")
+        );
+
         // Final attachment = g-buffer (0.5, 0, 0) + (0, 0.25, 0) = (0.5, 0.25, 0, 1).
-        // Reading the g-buffer back as an input attachment proves the color-slot map
-        // + Metal programmable-blend tile read work end to end.
+        // A genuine multi-subpass input attachment executes on MoltenVK too.
         let expected = [128u8, 64, 0, 255];
         assert!(
             contains_pixel(&pixels, expected),
             "expected {:?} from the input-attachment read; distinct = {:?}",
             expected,
             distinct_pixels(&pixels)
-        );
-        assert!(
-            errors.lock().expect("lock").is_empty(),
-            "device errors: {:?}",
-            errors.lock().expect("lock")
         );
 
         yawgpu::wgpuBufferRelease(readback);
@@ -110,13 +111,13 @@ fn metal_tiled_deferred_reads_input_attachment() {
     }
 }
 
-unsafe fn create_metal_instance() -> native::WGPUInstance {
+unsafe fn create_vulkan_instance() -> native::WGPUInstance {
     let mut backend = YaWGPUInstanceBackendSelect {
         chain: native::WGPUChainedStruct {
             next: std::ptr::null_mut(),
             sType: YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
         },
-        backend: YAWGPU_INSTANCE_BACKEND_METAL,
+        backend: YAWGPU_INSTANCE_BACKEND_VULKAN,
     };
     let descriptor = native::WGPUInstanceDescriptor {
         nextInChain: (&mut backend.chain) as *mut native::WGPUChainedStruct,
@@ -184,10 +185,7 @@ unsafe extern "C" fn request_device_callback(
     *(userdata1 as *mut native::WGPUDevice) = device;
 }
 
-unsafe fn run_deferred(
-    device: native::WGPUDevice,
-    queue: native::WGPUQueue,
-) -> native::WGPUBuffer {
+unsafe fn run_deferred(device: native::WGPUDevice, queue: native::WGPUQueue) -> native::WGPUBuffer {
     let layout = create_two_subpass_input_layout(device);
     let pipeline0 = create_subpass_pipeline(device, layout, 0, WRITE_SHADER, 0, None);
     let pipeline1 = create_subpass_pipeline(device, layout, 1, LOAD_SHADER, 1, None);
@@ -227,9 +225,6 @@ unsafe fn run_deferred(
     yawgpu::yawgpuSubpassRenderPassEncoderDraw(pass, 3, 1, 0, 0);
     yawgpu::yawgpuSubpassRenderPassEncoderNextSubpass(pass);
     yawgpu::yawgpuSubpassRenderPassEncoderSetPipeline(pass, pipeline1);
-    // The input attachment (group 0 / binding 0) is bound implicitly by the pass's
-    // color attachment 0 — the bind group omits it, so an empty group satisfies the
-    // pipeline's group-0 layout.
     let bgl = yawgpu::wgpuRenderPipelineGetBindGroupLayout(pipeline1, 0);
     let bind_group = create_empty_bind_group(device, bgl);
     yawgpu::yawgpuSubpassRenderPassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
@@ -321,10 +316,6 @@ unsafe fn create_subpass_pipeline(
     read_slot: Option<u32>,
 ) -> native::WGPURenderPipeline {
     let shader = create_wgsl_module(device, shader_src);
-    // Targets are indexed by GLOBAL color slot. The written slot is active; an
-    // input-attachment-read slot needs the format declared (so Metal knows the
-    // `[[color(N)]]` input's pixel format) but writeMask None; any other slot is
-    // disabled (format Undefined).
     let max_slot = read_slot.map_or(write_slot, |r| r.max(write_slot));
     let targets: Vec<native::WGPUColorTargetState> = (0..=max_slot)
         .map(|slot| {
@@ -387,7 +378,10 @@ unsafe fn create_subpass_pipeline(
     };
     let pipeline = yawgpu::yawgpuDeviceCreateSubpassRenderPipeline(device, &descriptor);
     yawgpu::wgpuShaderModuleRelease(shader);
-    assert!(!pipeline.is_null(), "subpass pipeline {subpass_index} creation failed");
+    assert!(
+        !pipeline.is_null(),
+        "subpass pipeline {subpass_index} creation failed"
+    );
     pipeline
 }
 
@@ -398,7 +392,12 @@ unsafe fn record_t2b(
 ) {
     let source = texture_copy_info(texture);
     let destination = buffer_copy_info(buffer);
-    yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &source, &destination, &texture_extent());
+    yawgpu::wgpuCommandEncoderCopyTextureToBuffer(
+        encoder,
+        &source,
+        &destination,
+        &texture_extent(),
+    );
 }
 
 fn subpass_color_attachment(view: native::WGPUTextureView) -> YaWGPUSubpassColorAttachment {
@@ -610,7 +609,9 @@ fn string_view(value: &str) -> native::WGPUStringView {
 }
 
 fn contains_pixel(pixels: &[u8], rgba: [u8; 4]) -> bool {
-    pixels.chunks_exact(BYTES_PER_PIXEL).any(|pixel| pixel == rgba)
+    pixels
+        .chunks_exact(BYTES_PER_PIXEL)
+        .any(|pixel| pixel == rgba)
 }
 
 fn distinct_pixels(pixels: &[u8]) -> Vec<[u8; 4]> {

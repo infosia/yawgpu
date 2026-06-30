@@ -1551,22 +1551,36 @@ fn create_subpass_render_pass_with_attachments(
         .subpasses
         .iter()
         .map(|subpass| {
-            subpass
-                .color_attachment_indices
+            let max_written_slot = subpass.color_attachment_indices.iter().copied().max();
+            let max_input_slot = subpass
+                .input_attachments
                 .iter()
-                .map(|&attachment| {
-                    let layout = if subpass
-                        .input_attachments
-                        .iter()
-                        .any(|input| input.source_attachment == attachment)
-                    {
-                        vk::ImageLayout::GENERAL
+                .map(|input| input.source_attachment)
+                .filter(|&source_attachment| source_attachment != u32::MAX)
+                .max();
+            let Some(max_color_slot) = max_written_slot.max(max_input_slot) else {
+                return Vec::new();
+            };
+            (0..=max_color_slot)
+                .map(|attachment| {
+                    if subpass.color_attachment_indices.contains(&attachment) {
+                        let layout = if subpass
+                            .input_attachments
+                            .iter()
+                            .any(|input| input.source_attachment == attachment)
+                        {
+                            vk::ImageLayout::GENERAL
+                        } else {
+                            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+                        };
+                        vk::AttachmentReference::default()
+                            .attachment(attachment)
+                            .layout(layout)
                     } else {
-                        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
-                    };
-                    vk::AttachmentReference::default()
-                        .attachment(attachment)
-                        .layout(layout)
+                        vk::AttachmentReference::default()
+                            .attachment(vk::ATTACHMENT_UNUSED)
+                            .layout(vk::ImageLayout::UNDEFINED)
+                    }
                 })
                 .collect::<Vec<_>>()
         })

@@ -23,7 +23,7 @@ use crate::shader::*;
 #[cfg(feature = "tiled")]
 use crate::subpass::{
     compute_subpass_color_slots, hal_subpass_pass_layout, SubpassPassLayout,
-    SubpassPassLayoutDescriptor,
+    SubpassPassLayoutDescriptor, DEPTH_STENCIL_ATTACHMENT_INDEX,
 };
 use crate::texture::*;
 
@@ -1053,16 +1053,75 @@ pub(crate) fn create_hal_subpass_render_pipeline(
             subpass_index,
             subpass_color_slots,
         ),
-        _ => create_hal_render_pipeline_with_subpass_color_slots(
-            Some(hal_device),
+        _ => create_hal_non_vulkan_subpass_render_pipeline(
+            hal_device,
             descriptor,
             vertex_entry_name,
             fragment_entry_name,
             metal_bindings,
             vertex_buffer_bindings,
             bind_group_layouts,
+            pass_layout,
+            subpass_index,
             subpass_color_slots,
         ),
+    }
+}
+
+#[cfg(feature = "tiled")]
+#[allow(clippy::too_many_arguments)]
+fn create_hal_non_vulkan_subpass_render_pipeline(
+    hal_device: &HalDevice,
+    descriptor: &RenderPipelineDescriptor,
+    vertex_entry_name: &str,
+    fragment_entry_name: Option<&str>,
+    metal_bindings: &[MetalBufferBinding],
+    vertex_buffer_bindings: &[MetalVertexBufferBinding],
+    bind_group_layouts: &[Arc<BindGroupLayout>],
+    pass_layout: &SubpassPassLayoutDescriptor,
+    subpass_index: u32,
+    subpass_color_slots: &[((u32, u32), u32)],
+) -> (Option<HalRenderPipeline>, Option<String>) {
+    if matches!(hal_device.backend(), HalBackend::Metal) {
+        if let Err(message) = validate_metal_slot_ranges(metal_bindings) {
+            return (None, Some(message));
+        }
+    }
+    let (shader, vertex_entry_point, fragment_entry_point, descriptor_bindings) =
+        match select_render_shader_source(
+            hal_device.backend(),
+            descriptor,
+            vertex_entry_name,
+            fragment_entry_name,
+            metal_bindings,
+            vertex_buffer_bindings,
+            subpass_color_slots,
+            hal_device.vulkan_memory_model(),
+            bind_group_layouts,
+        ) {
+            Ok(selection) => selection,
+            Err(message) => return (None, Some(message)),
+        };
+    let hal_descriptor = match hal_subpass_render_pipeline_descriptor(
+        descriptor,
+        vertex_buffer_bindings,
+        pass_layout,
+        subpass_index,
+        subpass_color_slots,
+        hal_device.backend(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(message) => return (None, Some(message)),
+    };
+    match hal_device.create_render_pipeline(
+        shader,
+        &vertex_entry_point,
+        fragment_entry_point.as_deref(),
+        &hal_descriptor,
+        &descriptor_bindings,
+    ) {
+        Ok(pipeline) => (Some(pipeline), None),
+        Err(error) => (None, Some(error.to_string())),
     }
 }
 
@@ -1099,7 +1158,14 @@ fn create_hal_vulkan_subpass_render_pipeline(
         Ok(input_attachment_bindings) => descriptor_bindings.extend(input_attachment_bindings),
         Err(message) => return (None, Some(message)),
     }
-    let hal_descriptor = match hal_render_pipeline_descriptor(descriptor, vertex_buffer_bindings) {
+    let hal_descriptor = match hal_subpass_render_pipeline_descriptor(
+        descriptor,
+        vertex_buffer_bindings,
+        pass_layout,
+        subpass_index,
+        subpass_color_slots,
+        HalBackend::Vulkan,
+    ) {
         Ok(descriptor) => descriptor,
         Err(message) => return (None, Some(message)),
     };
@@ -1656,6 +1722,76 @@ pub(crate) fn hal_render_pipeline_descriptor(
         cull_mode: hal_cull_mode(descriptor.primitive.cull_mode),
         unclipped_depth: descriptor.primitive.unclipped_depth,
     })
+}
+
+#[cfg(feature = "tiled")]
+fn hal_subpass_render_pipeline_descriptor(
+    descriptor: &RenderPipelineDescriptor,
+    bindings: &[MetalVertexBufferBinding],
+    pass_layout: &SubpassPassLayoutDescriptor,
+    subpass_index: u32,
+    subpass_color_slots: &[((u32, u32), u32)],
+    backend: HalBackend,
+) -> Result<HalRenderPipelineDescriptor, String> {
+    let mut hal = hal_render_pipeline_descriptor(descriptor, bindings)?;
+    let Some(fragment) = descriptor.fragment.as_ref() else {
+        return Ok(hal);
+    };
+    let Some(subpass) = pass_layout.subpasses.get(subpass_index as usize) else {
+        return Ok(hal);
+    };
+    let max_written_slot = subpass.color_attachment_indices.iter().copied().max();
+    let max_input_slot = subpass_color_slots
+        .iter()
+        .map(|&(_, source_attachment)| source_attachment)
+        .filter(|&source_attachment| source_attachment != DEPTH_STENCIL_ATTACHMENT_INDEX)
+        .max();
+    let Some(max_color_slot) = max_written_slot.max(max_input_slot) else {
+        hal.color_targets.clear();
+        return Ok(hal);
+    };
+    let span = usize::try_from(max_color_slot)
+        .map_err(|_| "subpass color attachment slot is too large".to_owned())?
+        .checked_add(1)
+        .ok_or_else(|| "subpass color attachment slot count overflows".to_owned())?;
+    let flat_targets = fragment.targets.len() > subpass.color_attachment_indices.len();
+    let mut color_targets = vec![None; span];
+    if flat_targets {
+        for (slot, target) in hal.color_targets.iter().copied().enumerate().take(span) {
+            color_targets[slot] = target;
+        }
+    } else {
+        for (local_slot, &global_slot) in subpass.color_attachment_indices.iter().enumerate() {
+            let global_slot = usize::try_from(global_slot)
+                .map_err(|_| "subpass color attachment slot is too large".to_owned())?;
+            if global_slot >= color_targets.len() {
+                return Err("subpass color attachment slot exceeds derived target span".to_owned());
+            }
+            color_targets[global_slot] = hal.color_targets.get(local_slot).copied().flatten();
+        }
+    }
+    if matches!(backend, HalBackend::Metal) {
+        for &(_, source_attachment) in subpass_color_slots {
+            if source_attachment == DEPTH_STENCIL_ATTACHMENT_INDEX {
+                continue;
+            }
+            let slot = usize::try_from(source_attachment)
+                .map_err(|_| "subpass input attachment slot is too large".to_owned())?;
+            let attachment = pass_layout.color_attachments.get(slot).ok_or_else(|| {
+                "subpass input attachment source color slot is out of range".to_owned()
+            })?;
+            if slot >= color_targets.len() {
+                color_targets.resize(slot + 1, None);
+            }
+            color_targets[slot] = Some(HalColorTargetState {
+                format: hal_texture_format(attachment.format),
+                blend: None,
+                write_mask: 0,
+            });
+        }
+    }
+    hal.color_targets = color_targets;
+    Ok(hal)
 }
 
 fn hal_front_face(front_face: FrontFace) -> HalFrontFace {
@@ -3465,6 +3601,113 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
 
         assert_eq!(hal.color_targets.len(), 2);
         assert_eq!(hal.color_targets[0], None);
+        assert_eq!(
+            hal.color_targets[1].map(|target| target.format),
+            Some(hal_texture_format(rgba8_unorm()))
+        );
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn hal_subpass_render_pipeline_descriptor_scatters_written_targets_to_global_slots() {
+        let device = noop_device();
+        let module = render_shader_module(&device);
+        let descriptor = render_pipeline_descriptor(module);
+        let pass_layout = SubpassPassLayoutDescriptor {
+            color_attachments: vec![
+                AttachmentLayout {
+                    format: rgba8_unorm(),
+                    sample_count: 1,
+                },
+                AttachmentLayout {
+                    format: rgba8_unorm(),
+                    sample_count: 1,
+                },
+            ],
+            depth_stencil_attachment: None,
+            subpasses: vec![SubpassLayoutDesc {
+                color_attachment_indices: vec![1],
+                uses_depth_stencil: false,
+                input_attachments: vec![SubpassInputAttachment {
+                    group: 0,
+                    binding: 0,
+                    source_subpass: 0,
+                    source_attachment: 0,
+                }],
+            }],
+            dependencies: Vec::new(),
+            error: None,
+        };
+
+        let hal = hal_subpass_render_pipeline_descriptor(
+            &descriptor,
+            &[],
+            &pass_layout,
+            0,
+            &[((0, 0), 0)],
+            HalBackend::Vulkan,
+        )
+        .expect("HAL subpass descriptor");
+
+        assert_eq!(hal.color_targets.len(), 2);
+        assert_eq!(hal.color_targets[0], None);
+        assert_eq!(
+            hal.color_targets[1].map(|target| target.format),
+            Some(hal_texture_format(rgba8_unorm()))
+        );
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn hal_subpass_render_pipeline_descriptor_fills_metal_input_color_targets() {
+        let device = noop_device();
+        let module = render_shader_module(&device);
+        let descriptor = render_pipeline_descriptor(module);
+        let pass_layout = SubpassPassLayoutDescriptor {
+            color_attachments: vec![
+                AttachmentLayout {
+                    format: rgba8_unorm(),
+                    sample_count: 1,
+                },
+                AttachmentLayout {
+                    format: rgba8_unorm(),
+                    sample_count: 1,
+                },
+            ],
+            depth_stencil_attachment: None,
+            subpasses: vec![SubpassLayoutDesc {
+                color_attachment_indices: vec![1],
+                uses_depth_stencil: false,
+                input_attachments: vec![SubpassInputAttachment {
+                    group: 0,
+                    binding: 0,
+                    source_subpass: 0,
+                    source_attachment: 0,
+                }],
+            }],
+            dependencies: Vec::new(),
+            error: None,
+        };
+
+        let hal = hal_subpass_render_pipeline_descriptor(
+            &descriptor,
+            &[],
+            &pass_layout,
+            0,
+            &[((0, 0), 0)],
+            HalBackend::Metal,
+        )
+        .expect("HAL subpass descriptor");
+
+        assert_eq!(hal.color_targets.len(), 2);
+        assert_eq!(
+            hal.color_targets[0],
+            Some(HalColorTargetState {
+                format: hal_texture_format(rgba8_unorm()),
+                blend: None,
+                write_mask: 0,
+            })
+        );
         assert_eq!(
             hal.color_targets[1].map(|target| target.format),
             Some(hal_texture_format(rgba8_unorm()))
