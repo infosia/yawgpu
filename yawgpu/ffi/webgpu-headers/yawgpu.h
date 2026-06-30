@@ -21,6 +21,9 @@
  *   chained into `WGPUShaderModuleDescriptor`.
  * - **External texture creation** (always available): vendor creation API for
  *   WebGPU external textures.
+ * - **Tiled / multi-subpass creation** (`YAWGPU_HAS_TILED`): capability query,
+ *   input-attachment bind-group layouts, subpass pass layouts, and subpass
+ *   render pipeline creation.
  *
  * For all behavior not redefined here, yawgpu mirrors `webgpu.h`.
  */
@@ -284,6 +287,221 @@ WGPU_EXPORT WGPUExternalTexture yawgpuDeviceCreateExternalTexture(
     YaWGPUExternalTextureDescriptor const * descriptor) WGPU_FUNCTION_ATTRIBUTE;
 
 /** @} */
+
+#if defined(YAWGPU_HAS_TILED)
+/**
+ * \defgroup TiledCreate Tiled / Multi-Subpass Creation
+ * \brief Creation-side vendor API for subpass pass layouts and compatible
+ * render pipelines.
+ *
+ * @{
+ */
+
+/** Feature name for multi-subpass render passes. */
+#define YaWGPUFeatureName_MultiSubpass ((WGPUFeatureName)0x70010001u)
+
+/** Tiled rendering capabilities exposed by an adapter. */
+typedef struct YaWGPUTiledCapabilities {
+    /** Chain pointer, currently unused. */
+    WGPUChainedStruct const* nextInChain;
+    /** Maximum subpasses in one pass layout. */
+    uint32_t maxSubpasses;
+    /** Maximum color attachments in one subpass. */
+    uint32_t maxSubpassColorAttachments;
+    /** Maximum input attachments in one subpass. */
+    uint32_t maxInputAttachments;
+    /** Estimated tile-memory budget in bytes. */
+    uint32_t estimatedTileMemoryBytes;
+} YaWGPUTiledCapabilities;
+
+/** Default initializer for @ref YaWGPUTiledCapabilities. */
+#define YAWGPU_TILED_CAPABILITIES_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUTiledCapabilities, { \
+    /*.nextInChain=*/NULL _wgpu_COMMA \
+    /*.maxSubpasses=*/0 _wgpu_COMMA \
+    /*.maxSubpassColorAttachments=*/0 _wgpu_COMMA \
+    /*.maxInputAttachments=*/0 _wgpu_COMMA \
+    /*.estimatedTileMemoryBytes=*/0 _wgpu_COMMA \
+})
+
+/** Populates @p capabilities with tiled rendering limits. */
+WGPU_EXPORT WGPUStatus yawgpuAdapterGetTiledCapabilities(
+    WGPUAdapter adapter,
+    YaWGPUTiledCapabilities* capabilities) WGPU_FUNCTION_ATTRIBUTE;
+
+/** `WGPUSType` tag for @ref YaWGPUInputAttachmentBindingLayout. */
+#define YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT ((WGPUSType)0x70000010u)
+
+/** Chained bind-group-layout entry for an input attachment. */
+typedef struct YaWGPUInputAttachmentBindingLayout {
+    /** Chain header. */
+    WGPUChainedStruct chain;
+    /** Texture sample type matching the producing attachment. */
+    WGPUTextureSampleType sampleType;
+    /** Non-zero when the source attachment is multisampled. */
+    WGPUBool multisampled;
+} YaWGPUInputAttachmentBindingLayout;
+
+/** Default initializer for @ref YaWGPUInputAttachmentBindingLayout. */
+#define YAWGPU_INPUT_ATTACHMENT_BINDING_LAYOUT_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUInputAttachmentBindingLayout, { \
+    /*.chain=*/{NULL _wgpu_COMMA YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT} _wgpu_COMMA \
+    /*.sampleType=*/WGPUTextureSampleType_Float _wgpu_COMMA \
+    /*.multisampled=*/0 _wgpu_COMMA \
+})
+
+/** Opaque handle to a subpass pass layout. */
+typedef struct YaWGPUSubpassPassLayoutImpl* YaWGPUSubpassPassLayout;
+
+/** One attachment slot in a subpass pass layout. */
+typedef struct YaWGPUAttachmentLayout {
+    /** Attachment format. */
+    WGPUTextureFormat format;
+    /** Sample count. */
+    uint32_t sampleCount;
+} YaWGPUAttachmentLayout;
+
+/** Default initializer for @ref YaWGPUAttachmentLayout. */
+#define YAWGPU_ATTACHMENT_LAYOUT_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUAttachmentLayout, { \
+    /*.format=*/WGPUTextureFormat_Undefined _wgpu_COMMA \
+    /*.sampleCount=*/1 _wgpu_COMMA \
+})
+
+/** Subpass dependency type. */
+typedef enum YaWGPUSubpassDependencyType {
+    /** Color writes read as input attachments. */
+    YaWGPUSubpassDependencyType_ColorToInput = 0x00000000,
+    /** Depth-stencil writes read as input attachments. */
+    YaWGPUSubpassDependencyType_DepthToInput = 0x00000001,
+    /** Color and depth-stencil writes read as input attachments. */
+    YaWGPUSubpassDependencyType_ColorDepthToInput = 0x00000002,
+    /** Internal: forces the enum to 32 bits. */
+    YaWGPUSubpassDependencyType_Force32 = 0x7FFFFFFF
+} YaWGPUSubpassDependencyType;
+
+/** One dependency edge between two subpasses. */
+typedef struct YaWGPUSubpassDependency {
+    /** Producing subpass index. */
+    uint32_t srcSubpass;
+    /** Consuming subpass index. */
+    uint32_t dstSubpass;
+    /** Dependency kind. */
+    YaWGPUSubpassDependencyType dependencyType;
+    /** Non-zero for by-region dependencies. */
+    WGPUBool byRegion;
+} YaWGPUSubpassDependency;
+
+/** Sentinel input-attachment source for the depth-stencil slot. */
+#define YAWGPU_DEPTH_STENCIL_ATTACHMENT_INDEX 0xFFFFFFFFu
+
+/** One input-attachment binding declared by a subpass. */
+typedef struct YaWGPUSubpassInputAttachment {
+    /** Bind group index. */
+    uint32_t group;
+    /** Binding number inside the bind group. */
+    uint32_t binding;
+    /** Producing subpass index. */
+    uint32_t sourceSubpass;
+    /** Pass-level color attachment index, or depth-stencil sentinel. */
+    uint32_t sourceAttachment;
+} YaWGPUSubpassInputAttachment;
+
+/** Static description of one subpass. */
+typedef struct YaWGPUSubpassLayout {
+    /** Pass-level color attachment indices written by this subpass. */
+    uint32_t const* colorAttachmentIndices;
+    /** Number of color attachment indices. */
+    size_t colorAttachmentIndexCount;
+    /** Non-zero when this subpass uses the depth-stencil slot. */
+    WGPUBool usesDepthStencil;
+    /** Input attachment bindings read by this subpass. */
+    YaWGPUSubpassInputAttachment const* inputAttachments;
+    /** Number of input attachment bindings. */
+    size_t inputAttachmentCount;
+} YaWGPUSubpassLayout;
+
+/** Default initializer for @ref YaWGPUSubpassLayout. */
+#define YAWGPU_SUBPASS_LAYOUT_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUSubpassLayout, { \
+    /*.colorAttachmentIndices=*/NULL _wgpu_COMMA \
+    /*.colorAttachmentIndexCount=*/0 _wgpu_COMMA \
+    /*.usesDepthStencil=*/0 _wgpu_COMMA \
+    /*.inputAttachments=*/NULL _wgpu_COMMA \
+    /*.inputAttachmentCount=*/0 _wgpu_COMMA \
+})
+
+/** Descriptor for creating a subpass pass layout. */
+typedef struct YaWGPUSubpassPassLayoutDescriptor {
+    /** Chain pointer, currently unused. */
+    WGPUChainedStruct const* nextInChain;
+    /** Optional debug label. */
+    WGPUStringView label;
+    /** Pass-level color attachment table. */
+    YaWGPUAttachmentLayout const* colorAttachments;
+    /** Number of pass-level color attachments. */
+    size_t colorAttachmentCount;
+    /** Optional depth-stencil attachment layout. */
+    YaWGPUAttachmentLayout const* depthStencilAttachment;
+    /** Per-subpass layouts. */
+    YaWGPUSubpassLayout const* subpasses;
+    /** Number of subpasses. */
+    size_t subpassCount;
+    /** Dependency edges. */
+    YaWGPUSubpassDependency const* dependencies;
+    /** Number of dependency edges. */
+    size_t dependencyCount;
+} YaWGPUSubpassPassLayoutDescriptor;
+
+/** Default initializer for @ref YaWGPUSubpassPassLayoutDescriptor. */
+#define YAWGPU_SUBPASS_PASS_LAYOUT_DESCRIPTOR_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUSubpassPassLayoutDescriptor, { \
+    /*.nextInChain=*/NULL _wgpu_COMMA \
+    /*.label=*/WGPU_STRING_VIEW_INIT _wgpu_COMMA \
+    /*.colorAttachments=*/NULL _wgpu_COMMA \
+    /*.colorAttachmentCount=*/0 _wgpu_COMMA \
+    /*.depthStencilAttachment=*/NULL _wgpu_COMMA \
+    /*.subpasses=*/NULL _wgpu_COMMA \
+    /*.subpassCount=*/0 _wgpu_COMMA \
+    /*.dependencies=*/NULL _wgpu_COMMA \
+    /*.dependencyCount=*/0 _wgpu_COMMA \
+})
+
+/** Creates a subpass pass layout. */
+WGPU_EXPORT YaWGPUSubpassPassLayout yawgpuDeviceCreateSubpassPassLayout(
+    WGPUDevice device,
+    YaWGPUSubpassPassLayoutDescriptor const* descriptor) WGPU_FUNCTION_ATTRIBUTE;
+
+/** Increments the refcount of a subpass pass layout. */
+WGPU_EXPORT void yawgpuSubpassPassLayoutAddRef(
+    YaWGPUSubpassPassLayout layout) WGPU_FUNCTION_ATTRIBUTE;
+
+/** Decrements the refcount of a subpass pass layout. */
+WGPU_EXPORT void yawgpuSubpassPassLayoutRelease(
+    YaWGPUSubpassPassLayout layout) WGPU_FUNCTION_ATTRIBUTE;
+
+/** Descriptor for creating a subpass-compatible render pipeline. */
+typedef struct YaWGPUSubpassRenderPipelineDescriptor {
+    /** Chain pointer, currently unused. */
+    WGPUChainedStruct const* nextInChain;
+    /** Base WebGPU render pipeline descriptor. */
+    WGPURenderPipelineDescriptor base;
+    /** Compatible pass layout. */
+    YaWGPUSubpassPassLayout passLayout;
+    /** Compatible subpass index. */
+    uint32_t subpassIndex;
+} YaWGPUSubpassRenderPipelineDescriptor;
+
+/** Default initializer for @ref YaWGPUSubpassRenderPipelineDescriptor. */
+#define YAWGPU_SUBPASS_RENDER_PIPELINE_DESCRIPTOR_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUSubpassRenderPipelineDescriptor, { \
+    /*.nextInChain=*/NULL _wgpu_COMMA \
+    /*.base=*/WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT _wgpu_COMMA \
+    /*.passLayout=*/NULL _wgpu_COMMA \
+    /*.subpassIndex=*/0 _wgpu_COMMA \
+})
+
+/** Creates a render pipeline targeting a subpass. */
+WGPU_EXPORT WGPURenderPipeline yawgpuDeviceCreateSubpassRenderPipeline(
+    WGPUDevice device,
+    YaWGPUSubpassRenderPipelineDescriptor const* descriptor) WGPU_FUNCTION_ATTRIBUTE;
+
+/** @} */
+#endif
 
 /**
  * \defgroup GlesContextBackend GLES Context Backend

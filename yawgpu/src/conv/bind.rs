@@ -186,6 +186,18 @@ fn map_bind_group_layout_entry(
         kind = Some(core::BindingLayoutKind::ExternalTexture);
     }
 
+    #[cfg(feature = "tiled")]
+    if let Some(input_attachment) = unsafe { input_attachment_binding_layout(entry.nextInChain) } {
+        present_count += 1;
+        if !standard_binding_layout_fields_empty(entry) {
+            set_first_error(
+                error,
+                "input attachment binding layout must not set standard binding layout fields",
+            );
+        }
+        kind = map_input_attachment_binding_layout(input_attachment, error);
+    }
+
     if entry.buffer.type_ != native::WGPUBufferBindingType_BindingNotUsed {
         present_count += 1;
         kind = map_buffer_binding_layout(entry.buffer, error);
@@ -215,6 +227,23 @@ fn map_bind_group_layout_entry(
         kind,
     }
 }
+
+#[cfg(feature = "tiled")]
+unsafe fn input_attachment_binding_layout<'a>(
+    mut chain: *const native::WGPUChainedStruct,
+) -> Option<&'a crate::YaWGPUInputAttachmentBindingLayout> {
+    while let Some(node) = chain.as_ref() {
+        if node.sType == crate::YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT {
+            return Some(
+                &*(node as *const native::WGPUChainedStruct
+                    as *const crate::YaWGPUInputAttachmentBindingLayout),
+            );
+        }
+        chain = node.next;
+    }
+    None
+}
+
 unsafe fn external_texture_binding_layout<'a>(
     mut chain: *const native::WGPUChainedStruct,
 ) -> Option<&'a native::WGPUExternalTextureBindingLayout> {
@@ -251,6 +280,33 @@ fn standard_binding_layout_fields_empty(entry: &native::WGPUBindGroupLayoutEntry
         && entry.texture.sampleType == native::WGPUTextureSampleType_BindingNotUsed
         && entry.storageTexture.access == native::WGPUStorageTextureAccess_BindingNotUsed
 }
+
+#[cfg(feature = "tiled")]
+fn map_input_attachment_binding_layout(
+    layout: &crate::YaWGPUInputAttachmentBindingLayout,
+    error: &mut Option<String>,
+) -> Option<core::BindingLayoutKind> {
+    let sample_type = match layout.sampleType {
+        native::WGPUTextureSampleType_Undefined | native::WGPUTextureSampleType_Float => {
+            core::TextureSampleType::Float
+        }
+        native::WGPUTextureSampleType_Depth => core::TextureSampleType::Depth,
+        native::WGPUTextureSampleType_Sint => core::TextureSampleType::Sint,
+        native::WGPUTextureSampleType_Uint => core::TextureSampleType::Uint,
+        native::WGPUTextureSampleType_UnfilterableFloat => {
+            core::TextureSampleType::UnfilterableFloat
+        }
+        _ => {
+            set_first_error(error, "invalid input attachment sample type");
+            return None;
+        }
+    };
+    Some(core::BindingLayoutKind::InputAttachment {
+        sample_type,
+        multisampled: layout.multisampled != 0,
+    })
+}
+
 fn map_buffer_binding_layout(
     layout: native::WGPUBufferBindingLayout,
     error: &mut Option<String>,
@@ -355,6 +411,77 @@ fn map_bgl_texture_view_dimension(
             set_first_error(error, "invalid texture view dimension");
             None
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "tiled")]
+mod tests {
+    use super::*;
+
+    fn empty_string_view() -> native::WGPUStringView {
+        native::WGPUStringView {
+            data: std::ptr::null(),
+            length: 0,
+        }
+    }
+
+    #[test]
+    fn input_attachment_binding_layout_maps_to_input_attachment_kind() {
+        let mut input = crate::YaWGPUInputAttachmentBindingLayout {
+            chain: native::WGPUChainedStruct {
+                next: std::ptr::null_mut(),
+                sType: crate::YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT,
+            },
+            sampleType: native::WGPUTextureSampleType_Depth,
+            multisampled: 1,
+        };
+        let entry = native::WGPUBindGroupLayoutEntry {
+            nextInChain: (&mut input.chain) as *mut native::WGPUChainedStruct,
+            binding: 7,
+            visibility: native::WGPUShaderStage_Fragment,
+            buffer: native::WGPUBufferBindingLayout {
+                nextInChain: std::ptr::null_mut(),
+                type_: native::WGPUBufferBindingType_BindingNotUsed,
+                hasDynamicOffset: 0,
+                minBindingSize: 0,
+            },
+            sampler: native::WGPUSamplerBindingLayout {
+                nextInChain: std::ptr::null_mut(),
+                type_: native::WGPUSamplerBindingType_BindingNotUsed,
+            },
+            texture: native::WGPUTextureBindingLayout {
+                nextInChain: std::ptr::null_mut(),
+                sampleType: native::WGPUTextureSampleType_BindingNotUsed,
+                viewDimension: native::WGPUTextureViewDimension_Undefined,
+                multisampled: 0,
+            },
+            storageTexture: native::WGPUStorageTextureBindingLayout {
+                nextInChain: std::ptr::null_mut(),
+                access: native::WGPUStorageTextureAccess_BindingNotUsed,
+                format: native::WGPUTextureFormat_Undefined,
+                viewDimension: native::WGPUTextureViewDimension_Undefined,
+            },
+            bindingArraySize: 0,
+        };
+        let descriptor = native::WGPUBindGroupLayoutDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            entryCount: 1,
+            entries: &entry,
+        };
+
+        let mapped = unsafe { map_bind_group_layout_descriptor(&descriptor) };
+
+        assert!(mapped.error.is_none());
+        assert_eq!(mapped.entries.len(), 1);
+        assert!(matches!(
+            mapped.entries[0].kind,
+            Some(core::BindingLayoutKind::InputAttachment {
+                sample_type: core::TextureSampleType::Depth,
+                multisampled: true
+            })
+        ));
     }
 }
 

@@ -149,6 +149,101 @@ pub unsafe fn map_render_pass_descriptor(
     }
 }
 
+/// Converts a subpass pass layout descriptor to the core representation.
+///
+/// # Safety
+///
+/// Any non-null pointer/count pairs in `descriptor` must point to live arrays
+/// of at least the declared count for the duration of this call.
+#[cfg(feature = "tiled")]
+#[must_use]
+pub unsafe fn map_subpass_pass_layout_descriptor(
+    descriptor: &crate::YaWGPUSubpassPassLayoutDescriptor,
+) -> core::SubpassPassLayoutDescriptor {
+    let mut error = None;
+    let color_attachments = slice_or_error(
+        descriptor.colorAttachments,
+        descriptor.colorAttachmentCount,
+        "subpass pass layout colorAttachments must not be null when count is non-zero",
+        &mut error,
+    )
+    .iter()
+    .map(|attachment| core::AttachmentLayout {
+        format: map_texture_format(attachment.format),
+        sample_count: attachment.sampleCount,
+    })
+    .collect();
+    let depth_stencil_attachment =
+        descriptor
+            .depthStencilAttachment
+            .as_ref()
+            .map(|layout| core::AttachmentLayout {
+                format: map_texture_format(layout.format),
+                sample_count: layout.sampleCount,
+            });
+    let subpasses = slice_or_error(
+        descriptor.subpasses,
+        descriptor.subpassCount,
+        "subpass pass layout subpasses must not be null when count is non-zero",
+        &mut error,
+    )
+    .iter()
+    .map(|subpass| core::SubpassLayoutDesc {
+        color_attachment_indices: slice_or_error(
+            subpass.colorAttachmentIndices,
+            subpass.colorAttachmentIndexCount,
+            "subpass colorAttachmentIndices must not be null when count is non-zero",
+            &mut error,
+        )
+        .to_vec(),
+        uses_depth_stencil: subpass.usesDepthStencil != 0,
+        input_attachments: slice_or_error(
+            subpass.inputAttachments,
+            subpass.inputAttachmentCount,
+            "subpass inputAttachments must not be null when count is non-zero",
+            &mut error,
+        )
+        .iter()
+        .map(|input| core::SubpassInputAttachment {
+            group: input.group,
+            binding: input.binding,
+            source_subpass: input.sourceSubpass,
+            source_attachment: input.sourceAttachment,
+        })
+        .collect(),
+    })
+    .collect();
+    let dependencies = slice_or_error(
+        descriptor.dependencies,
+        descriptor.dependencyCount,
+        "subpass pass layout dependencies must not be null when count is non-zero",
+        &mut error,
+    )
+    .iter()
+    .map(|dependency| core::SubpassDependency {
+        src_subpass: dependency.srcSubpass,
+        dst_subpass: dependency.dstSubpass,
+        dependency_type: match dependency.dependencyType {
+            crate::YaWGPUSubpassDependencyType_DepthToInput => {
+                core::SubpassDependencyType::DepthToInput
+            }
+            crate::YaWGPUSubpassDependencyType_ColorDepthToInput => {
+                core::SubpassDependencyType::ColorDepthToInput
+            }
+            _ => core::SubpassDependencyType::ColorToInput,
+        },
+        by_region: dependency.byRegion != 0,
+    })
+    .collect();
+    core::SubpassPassLayoutDescriptor {
+        color_attachments,
+        depth_stencil_attachment,
+        subpasses,
+        dependencies,
+        error,
+    }
+}
+
 unsafe fn render_pass_max_draw_count(mut chain: *const native::WGPUChainedStruct) -> u64 {
     const DEFAULT_MAX_DRAW_COUNT: u64 = 50_000_000;
     while let Some(node) = unsafe { chain.as_ref() } {
@@ -162,6 +257,23 @@ unsafe fn render_pass_max_draw_count(mut chain: *const native::WGPUChainedStruct
         chain = node.next;
     }
     DEFAULT_MAX_DRAW_COUNT
+}
+
+#[cfg(feature = "tiled")]
+unsafe fn slice_or_error<'a, T>(
+    ptr: *const T,
+    count: usize,
+    message: &str,
+    error: &mut Option<String>,
+) -> &'a [T] {
+    if count == 0 {
+        return &[];
+    }
+    if ptr.is_null() {
+        set_first_error(error, message);
+        return &[];
+    }
+    std::slice::from_raw_parts(ptr, count)
 }
 
 unsafe fn texture_component_swizzle(

@@ -34,6 +34,9 @@ pub mod shader;
 pub mod surface;
 /// Texture module.
 pub mod texture;
+#[cfg(feature = "tiled")]
+/// Tiled rendering creation module.
+pub mod tiled;
 
 #[cfg(test)]
 use adapter::*;
@@ -108,6 +111,8 @@ use crate::conv::{
     map_uncaptured_error_callback_info, release_handle, string_view, string_view_to_str,
     DeviceLostCallbackInfo, UncapturedErrorCallbackInfo,
 };
+#[cfg(feature = "tiled")]
+use crate::conv::{map_subpass_pass_layout_descriptor, map_subpass_render_pipeline_descriptor};
 use yawgpu_hal::{
     HalInstance, HalPresentMode, HalSurface, HalSurfaceConfiguration, HalTextureFormat,
     HalTextureUsage,
@@ -238,6 +243,14 @@ pub struct WGPURenderPipelineImpl {
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
     pub(crate) bind_group_layout_handles: Mutex<Vec<Option<Arc<WGPUBindGroupLayoutImpl>>>>,
+}
+
+/// Owns the core object and retained handles for a yawgpu subpass pass layout handle.
+#[cfg(feature = "tiled")]
+pub struct YaWGPUSubpassPassLayoutImpl {
+    pub(crate) _core: Arc<core::SubpassPassLayout>,
+    pub(crate) _device: Arc<core::Device>,
+    pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }
 
 /// Enumerates shader module cache key values.
