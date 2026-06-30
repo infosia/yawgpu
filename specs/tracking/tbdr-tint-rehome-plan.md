@@ -146,6 +146,12 @@ broken into sub-slices, mirroring how Slice 1 ran (shim → core → HAL → FFI
   `multisampled_input_attachment` (SPIR-V, module flag). Reflect `input_attachment<T>`
   module-scope vars + their `@input_attachment_index(N)` so core can build the map.
   Mirrors Slice 1.1; replaces the FB-fetch placeholder path for the handle surface.
+  **DONE** (commit `cd12955`): `YawgpuTintInputAttachmentColorIndex` array on the
+  bindings struct → `Options::input_attachment_to_color_index`; `multisampled_input_attachment`
+  bool on `generate_spirv` (yawgpu-core single-sampled call sites pass `false`);
+  `ResourceBinding::input_attachment_index` reflected. Tests: MSL `[[color(0)]]`
+  lowering via the map, missing-slot → clean `Err`, single-sampled SPIR-V, MSAA-flag
+  reaches the writer. All workspace + tiled gates green.
 - **2.2 core** — restore `BindingLayoutKind::InputAttachment` (handle binding, distinct
   from the `@color` FB-fetch path); bind-group-layout validation; compute the
   WGSL-binding → Metal color-slot map from the subpass/pass layout at pipeline-compile
@@ -171,6 +177,27 @@ Vulkan `LAZILY_ALLOCATED` + `TRANSIENT_ATTACHMENT|INPUT_ATTACHMENT`; Metal
 ### Slice 4 — SPIR-V MSAA input attachment (most divergent Dawn work)
 Per Dawn `TILED.md` Phase 3 (`core.def` overload + `builtin_polyfill.cc` edits).
 Land last. MSL MSAA subpass input stays deferred (Metal uses `[[sample_id]]`).
+
+**OPEN Dawn-side finding (2026-06-30, blocks Slice 4 — flagged to user).** The
+2-arg `inputAttachmentLoad(ia, sample_index)` overload does **not resolve in
+yawgpu-tint's WGSL frontend** at the pinned commit `a05085e54f`, even though the
+generated core intrinsic table looks correct. Repro: a fragment shader with
+`enable chromium_internal_input_attachments;` calling `inputAttachmentLoad(ia, sid)`
+fails `Program::parse` with *"no matching call … 1 candidate function"* (only the
+1-arg overload is listed). Verified on a guaranteed-clean rebuild
+(`cargo clean -p yawgpu-tint`), so it is **not** a stale-build artifact. Static
+audit of the pinned `third_party/dawn` tree shows the table is *well-formed*:
+`core.def:1599` has the overload; the regen commit `e716902f99` is an ancestor of
+the pin; `core/intrinsic/data.cc` builtin `[110] inputAttachmentLoad` has
+`num overloads = 2` at `OverloadIndex(548)`; overload `[549]` has
+`num_parameters = 2` with `kParameters[445]=kInputAttachment` +
+`[446]=kSampleIndex` and `kSupportsFragmentPipeline`. So the table the resolver
+links *contains* a valid 2-arg overload, yet the resolver surfaces only one — a
+**Dawn-side resolver/table issue for the user to investigate in their Dawn checkout**
+(e.g. via `tint_unittests --gtest_filter='*InputAttachment*'`), per the
+do-not-drive-Dawn boundary. Slice 2.1's `multisampled_input_attachment` plumbing is
+verified at the *flag-reaches-the-writer* level (the writer's arity/option-mismatch
+`Failure`); the end-to-end 2-arg MSAA path stays parked until this resolves.
 
 ### Deferred (documented)
 GLES Tier A/B; depth/stencil-aspect subpass inputs; MSL MSAA subpass input;
