@@ -84,7 +84,6 @@ pub struct SubpassPassLayoutDescriptor {
 /// Maps each input attachment of `subpass_index` to its Metal `[[color(N)]]`
 /// slot: key = the input's `(group, binding)`, value = the source color
 /// attachment index it reads (`SubpassInputAttachment::source_attachment`).
-#[allow(dead_code)]
 pub(crate) fn compute_subpass_color_slots(
     layout: &SubpassPassLayoutDescriptor,
     subpass_index: u32,
@@ -426,6 +425,33 @@ mod tests {
         assert_eq!(
             validate_subpass_pass_layout_descriptor(&device, &valid_two_subpass_deferred_layout()),
             None
+        );
+    }
+
+    #[test]
+    fn create_subpass_pass_layout_returns_error_layout_and_sinks_validation_message() {
+        let device = noop_device();
+
+        device.push_error_scope(crate::error::ErrorFilter::Validation);
+        let valid = device.create_subpass_pass_layout(valid_two_subpass_deferred_layout());
+        let scoped = device.pop_error_scope().expect("scope should exist");
+
+        assert!(!valid.is_error());
+        assert_eq!(scoped, None);
+
+        let mut invalid = valid_two_subpass_deferred_layout();
+        invalid.subpasses.clear();
+        device.push_error_scope(crate::error::ErrorFilter::Validation);
+        let error_layout = device.create_subpass_pass_layout(invalid);
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid layout should be scoped");
+
+        assert!(error_layout.is_error());
+        assert_eq!(
+            error.message,
+            "subpass pass layout requires at least one subpass"
         );
     }
 
