@@ -729,10 +729,25 @@ fn resource_binding_kind(
             Ok(ReflectedResourceBindingKind::ExternalTexture)
         }
         yawgpu_tint::ResourceType::ReadOnlyTexelBuffer
-        | yawgpu_tint::ResourceType::ReadWriteTexelBuffer
-        | yawgpu_tint::ResourceType::InputAttachment => {
+        | yawgpu_tint::ResourceType::ReadWriteTexelBuffer => {
             Err("tint: unsupported reflected resource binding type".to_owned())
         }
+        #[cfg(feature = "tiled")]
+        yawgpu_tint::ResourceType::InputAttachment => Ok(input_attachment_binding_kind(binding)),
+        #[cfg(not(feature = "tiled"))]
+        yawgpu_tint::ResourceType::InputAttachment => {
+            Err("tint: unsupported reflected resource binding type".to_owned())
+        }
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn input_attachment_binding_kind(
+    binding: &yawgpu_tint::ResourceBinding,
+) -> ReflectedResourceBindingKind {
+    ReflectedResourceBindingKind::InputAttachment {
+        sample_kind: sampled_kind(binding.sampled_kind),
+        multisampled: binding.resource_type == yawgpu_tint::ResourceType::MultisampledTexture,
     }
 }
 
@@ -1143,6 +1158,35 @@ fn cs() {
                         sample_kind: Some(ReflectedTypeScalarClass::Float),
                         sample_usage: ReflectedTextureSampleUsage::Gather,
                         view_dimension: ReflectedTextureViewDimension::D2,
+                        multisampled: false,
+                    }
+        }));
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn reflects_input_attachment_binding_from_tint() {
+        let module = parse_and_validate_wgsl(
+            r#"
+enable chromium_internal_input_attachments;
+
+@group(0) @binding(0) @input_attachment_index(0) var ia: input_attachment<f32>;
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+  return inputAttachmentLoad(ia);
+}
+"#,
+        )
+        .unwrap();
+
+        let fragment = module.resource_bindings_for_entry("fs").unwrap();
+        assert!(fragment.iter().any(|binding| {
+            binding.group == 0
+                && binding.binding == 0
+                && binding.kind
+                    == ReflectedResourceBindingKind::InputAttachment {
+                        sample_kind: Some(ReflectedTypeScalarClass::Float),
                         multisampled: false,
                     }
         }));

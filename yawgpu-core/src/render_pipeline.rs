@@ -4182,6 +4182,41 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
         assert_eq!(scoped, None);
     }
 
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn input_attachment_render_pipeline_auto_layout_reflects_binding_kind() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "enable chromium_internal_input_attachments;
+
+                @group(0) @binding(0) @input_attachment_index(0) var ia: input_attachment<f32>;
+
+                @vertex
+                fn vs() -> @builtin(position) vec4<f32> {
+                    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+                }
+
+                @fragment
+                fn fs() -> @location(0) vec4<f32> {
+                    return inputAttachmentLoad(ia);
+                }"
+                .to_owned(),
+            )),
+        );
+
+        let pipeline = device.create_render_pipeline(render_pipeline_descriptor(module));
+
+        assert!(!pipeline.is_error());
+        assert_eq!(
+            pipeline.bind_group_layouts()[0].entries()[0].kind,
+            Some(BindingLayoutKind::InputAttachment {
+                sample_type: TextureSampleType::Float,
+                multisampled: false,
+            })
+        );
+    }
+
     /// The Vulkan render path rejects external textures deterministically — the
     /// descriptor is valid WebGPU (no validation error) but the backend has no
     /// SPIR-V lowering, so `select_render_shader_source` returns a backend error

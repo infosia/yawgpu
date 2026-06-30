@@ -1502,8 +1502,30 @@ pub(crate) fn reflected_binding_layout_kind(
             format: reflected_storage_texture_format(format)?,
             view_dimension: reflected_texture_view_dimension(*view_dimension),
         }),
+        #[cfg(feature = "tiled")]
+        frontend::ReflectedResourceBindingKind::InputAttachment {
+            sample_kind,
+            multisampled,
+        } => Ok(BindingLayoutKind::InputAttachment {
+            sample_type: reflected_input_attachment_sample_type(*sample_kind)?,
+            multisampled: *multisampled,
+        }),
         frontend::ReflectedResourceBindingKind::ExternalTexture => {
             Ok(BindingLayoutKind::ExternalTexture)
+        }
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn reflected_input_attachment_sample_type(
+    sample_kind: Option<frontend::ReflectedTypeScalarClass>,
+) -> Result<TextureSampleType, String> {
+    match sample_kind {
+        Some(frontend::ReflectedTypeScalarClass::Float) => Ok(TextureSampleType::Float),
+        Some(frontend::ReflectedTypeScalarClass::Sint) => Ok(TextureSampleType::Sint),
+        Some(frontend::ReflectedTypeScalarClass::Uint) => Ok(TextureSampleType::Uint),
+        Some(frontend::ReflectedTypeScalarClass::Bool) | None => {
+            Err("pipeline auto layout input attachment sample type is unsupported".to_owned())
         }
     }
 }
@@ -1719,6 +1741,21 @@ pub(crate) fn validate_shader_binding_compat(
                 )
             }
         }
+        #[cfg(feature = "tiled")]
+        (
+            frontend::ReflectedResourceBindingKind::InputAttachment { .. },
+            BindingLayoutKind::InputAttachment { .. },
+        ) => {
+            let expected = reflected_binding_layout_kind(binding)?;
+            if shader_binding_layout_kinds_compatible(expected, layout_kind) {
+                Ok(())
+            } else {
+                Err(
+                    "pipeline layout binding kind is incompatible with the shader binding"
+                        .to_owned(),
+                )
+            }
+        }
         _ => Err("compute pipeline layout binding type is incompatible".to_owned()),
     }
 }
@@ -1772,6 +1809,20 @@ pub(crate) fn shader_binding_layout_kinds_compatible(
                 && view_dimension == actual_view_dimension
         }
         (BindingLayoutKind::ExternalTexture, BindingLayoutKind::ExternalTexture) => true,
+        #[cfg(feature = "tiled")]
+        (
+            BindingLayoutKind::InputAttachment {
+                sample_type,
+                multisampled,
+            },
+            BindingLayoutKind::InputAttachment {
+                sample_type: actual_sample_type,
+                multisampled: actual_multisampled,
+            },
+        ) => {
+            sample_types_compatible(actual_sample_type, sample_type)
+                && multisampled == actual_multisampled
+        }
         _ => false,
     }
 }
