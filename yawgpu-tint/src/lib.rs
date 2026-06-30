@@ -72,6 +72,7 @@ mod imp {
         size: u64,
         has_array_size: bool,
         array_size: u32,
+        input_attachment_index: u32,
     }
 
     #[repr(C)]
@@ -105,6 +106,14 @@ mod imp {
     }
 
     #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct RawInputAttachmentColorIndex {
+        group: u32,
+        binding: u32,
+        color_slot: u32,
+    }
+
+    #[repr(C)]
     struct RawBindings {
         uniform: *const RawBindingRemap,
         n_uniform: usize,
@@ -118,6 +127,8 @@ mod imp {
         n_sampler: usize,
         external_texture: *const RawExternalTextureRemap,
         n_external_texture: usize,
+        input_attachment_color_index: *const RawInputAttachmentColorIndex,
+        n_input_attachment_color_index: usize,
     }
 
     #[repr(C)]
@@ -242,6 +253,7 @@ mod imp {
             disable_robustness: bool,
             use_vulkan_memory_model: bool,
             framebuffer_fetch_descriptor_set: u32,
+            multisampled_input_attachment: bool,
             words_out: *mut *mut u32,
             n_words_out: *mut usize,
             err: *mut *mut c_char,
@@ -491,6 +503,7 @@ mod imp {
                     size: 0,
                     has_array_size: false,
                     array_size: 0,
+                    input_attachment_index: 0,
                 };
                 // SAFETY: pointers are valid for the duration of the call.
                 let ok =
@@ -651,6 +664,7 @@ mod imp {
         }
 
         /// Generates SPIR-V words for `entry_point`.
+        #[allow(clippy::too_many_arguments)]
         pub fn generate_spirv(
             &self,
             entry_point: &str,
@@ -659,6 +673,7 @@ mod imp {
             robust: bool,
             use_vulkan_memory_model: bool,
             framebuffer_fetch_descriptor_set: u32,
+            multisampled_input_attachment: bool,
         ) -> Result<Vec<u32>, String> {
             let ep = cstring(entry_point, "entry point")?;
             let raw_bindings_owned = bindings.as_raw();
@@ -678,6 +693,7 @@ mod imp {
                     !robust,
                     use_vulkan_memory_model,
                     framebuffer_fetch_descriptor_set,
+                    multisampled_input_attachment,
                     &mut words,
                     &mut len,
                     &mut err,
@@ -961,6 +977,8 @@ mod imp {
         pub size: u64,
         /// Binding array size when present.
         pub array_size: Option<u32>,
+        /// Input-attachment index for input attachment resources; otherwise zero.
+        pub input_attachment_index: u32,
     }
 
     impl ResourceBinding {
@@ -976,6 +994,7 @@ mod imp {
                 sample_usage: TextureSampleUsage::try_from_raw(raw.sample_usage)?,
                 size: raw.size,
                 array_size: raw.has_array_size.then_some(raw.array_size),
+                input_attachment_index: raw.input_attachment_index,
             })
         }
     }
@@ -1355,6 +1374,27 @@ mod imp {
         }
     }
 
+    /// An input_attachment mapping from the WGSL binding point to a Metal color slot.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct InputAttachmentColorIndex {
+        /// WGSL bind group of the input attachment.
+        pub group: u32,
+        /// WGSL binding of the input attachment.
+        pub binding: u32,
+        /// Metal color slot used for `[[color(N)]]` lowering.
+        pub color_slot: u32,
+    }
+
+    impl InputAttachmentColorIndex {
+        fn as_raw(self) -> RawInputAttachmentColorIndex {
+            RawInputAttachmentColorIndex {
+                group: self.group,
+                binding: self.binding,
+                color_slot: self.color_slot,
+            }
+        }
+    }
+
     /// Resource binding remap sets grouped by resource class.
     #[derive(Debug, Clone, Default)]
     pub struct Bindings {
@@ -1370,6 +1410,8 @@ mod imp {
         pub sampler: Vec<BindingRemap>,
         /// External texture remaps to Metal plane and metadata slots.
         pub external_texture: Vec<ExternalTextureRemap>,
+        /// Input attachment remaps to Metal color slots.
+        pub input_attachment_color_index: Vec<InputAttachmentColorIndex>,
     }
 
     struct RawBindingsOwned<'a> {
@@ -1379,6 +1421,7 @@ mod imp {
         storage_texture: Vec<RawBindingRemap>,
         sampler: Vec<RawBindingRemap>,
         external_texture: Vec<RawExternalTextureRemap>,
+        input_attachment_color_index: Vec<RawInputAttachmentColorIndex>,
         _marker: PhantomData<&'a Bindings>,
     }
 
@@ -1421,6 +1464,12 @@ mod imp {
                     .copied()
                     .map(ExternalTextureRemap::as_raw)
                     .collect(),
+                input_attachment_color_index: self
+                    .input_attachment_color_index
+                    .iter()
+                    .copied()
+                    .map(InputAttachmentColorIndex::as_raw)
+                    .collect(),
                 _marker: PhantomData,
             }
         }
@@ -1441,6 +1490,8 @@ mod imp {
                 n_sampler: self.sampler.len(),
                 external_texture: self.external_texture.as_ptr(),
                 n_external_texture: self.external_texture.len(),
+                input_attachment_color_index: self.input_attachment_color_index.as_ptr(),
+                n_input_attachment_color_index: self.input_attachment_color_index.len(),
             }
         }
     }
@@ -1758,6 +1809,7 @@ mod imp {
         }
 
         /// Generates SPIR-V words for `entry_point`.
+        #[allow(clippy::too_many_arguments)]
         pub fn generate_spirv(
             &self,
             _entry_point: &str,
@@ -1766,6 +1818,7 @@ mod imp {
             _robust: bool,
             _use_vulkan_memory_model: bool,
             _framebuffer_fetch_descriptor_set: u32,
+            _multisampled_input_attachment: bool,
         ) -> Result<Vec<u32>, String> {
             Err(UNAVAILABLE.to_owned())
         }
@@ -1969,6 +2022,8 @@ mod imp {
         pub size: u64,
         /// Binding array size when present.
         pub array_size: Option<u32>,
+        /// Input-attachment index for input attachment resources; otherwise zero.
+        pub input_attachment_index: u32,
     }
 
     /// Tint resource binding class.
@@ -2211,6 +2266,17 @@ mod imp {
         pub params_slot: u32,
     }
 
+    /// An input_attachment mapping from the WGSL binding point to a Metal color slot.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct InputAttachmentColorIndex {
+        /// WGSL bind group of the input attachment.
+        pub group: u32,
+        /// WGSL binding of the input attachment.
+        pub binding: u32,
+        /// Metal color slot used for `[[color(N)]]` lowering.
+        pub color_slot: u32,
+    }
+
     /// Resource binding remap sets grouped by resource class.
     #[derive(Debug, Clone, Default)]
     pub struct Bindings {
@@ -2226,6 +2292,8 @@ mod imp {
         pub sampler: Vec<BindingRemap>,
         /// External texture remaps to Metal plane and metadata slots.
         pub external_texture: Vec<ExternalTextureRemap>,
+        /// Input attachment remaps to Metal color slots.
+        pub input_attachment_color_index: Vec<InputAttachmentColorIndex>,
     }
 
     /// Vertex input attribute used by Tint vertex pulling.
@@ -2414,6 +2482,19 @@ fn fs(@color(0) prev: vec4<f32>) -> @location(0) vec4<f32> {
 "#
     }
 
+    fn input_attachment_wgsl() -> &'static str {
+        r#"
+enable chromium_internal_input_attachments;
+
+@group(0) @binding(0) @input_attachment_index(0) var ia: input_attachment<f32>;
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+  return inputAttachmentLoad(ia);
+}
+"#
+    }
+
     fn spirv_has_binding_decoration(words: &[u32], binding: u32) -> bool {
         words.windows(4).any(|w| {
             let opcode = w[0] & 0xffff;
@@ -2485,11 +2566,11 @@ fn main() {
             .unwrap();
         assert!(msl.source.contains("kernel"), "MSL:\n{}", msl.source);
         let spirv = program
-            .generate_spirv("cs", &bindings, &[], true, false, 0)
+            .generate_spirv("cs", &bindings, &[], true, false, 0, false)
             .unwrap();
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
         let spirv_with_vulkan_memory_model = program
-            .generate_spirv("cs", &bindings, &[], true, true, 0)
+            .generate_spirv("cs", &bindings, &[], true, true, 0, false)
             .unwrap();
         assert_eq!(
             spirv_with_vulkan_memory_model.first().copied(),
@@ -2512,7 +2593,7 @@ fn main() {
 "#;
         let program = Program::parse(wgsl, false, &[]).unwrap();
         let err = program
-            .generate_spirv("main", &Bindings::default(), &[], true, false, 0)
+            .generate_spirv("main", &Bindings::default(), &[], true, false, 0, false)
             .unwrap_err();
         assert!(!err.is_empty());
     }
@@ -2608,7 +2689,7 @@ fn cs() {
                 .unwrap();
             assert!(!msl.source.is_empty());
             let spirv = program
-                .generate_spirv(ep, &bindings, &[], true, false, 0)
+                .generate_spirv(ep, &bindings, &[], true, false, 0, false)
                 .unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));
         }
@@ -2637,16 +2718,104 @@ fn cs() {
         assert!(msl.source.contains("[[color(0)]]"), "MSL:\n{}", msl.source);
 
         let spirv = program
-            .generate_spirv("fs", &Bindings::default(), &[], true, false, 0)
+            .generate_spirv("fs", &Bindings::default(), &[], true, false, 0, false)
             .unwrap();
         assert!(!spirv.is_empty());
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn input_attachment_reflects_index_and_generates_msl() {
+        let program = Program::parse(input_attachment_wgsl(), false, &[]).unwrap();
+        let bindings = program.resource_bindings("fs").unwrap();
+        let input_attachment = bindings
+            .iter()
+            .find(|binding| binding.resource_type == ResourceType::InputAttachment)
+            .unwrap();
+        assert_eq!(input_attachment.group, 0);
+        assert_eq!(input_attachment.binding, 0);
+        assert_eq!(input_attachment.input_attachment_index, 0);
+
+        let msl = program
+            .generate_msl(
+                "fs",
+                &Bindings {
+                    input_attachment_color_index: vec![InputAttachmentColorIndex {
+                        group: 0,
+                        binding: 0,
+                        color_slot: 0,
+                    }],
+                    ..Bindings::default()
+                },
+                &[],
+                0,
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+            )
+            .unwrap();
+        assert!(msl.source.contains("[[color(0)]]"), "MSL:\n{}", msl.source);
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn input_attachment_msl_missing_color_slot_returns_err() {
+        let program = Program::parse(input_attachment_wgsl(), false, &[]).unwrap();
+        let err = match program.generate_msl(
+            "fs",
+            &Bindings::default(),
+            &[],
+            0,
+            true,
+            false,
+            &[],
+            0xFFFF_FFFF,
+        ) {
+            Ok(_) => panic!("expected input attachment MSL generation to fail without color slot"),
+            Err(err) => err,
+        };
+        assert!(!err.is_empty());
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn input_attachment_generates_spirv() {
+        let program = Program::parse(input_attachment_wgsl(), false, &[]).unwrap();
+        let spirv = program
+            .generate_spirv("fs", &Bindings::default(), &[], true, false, 0, false)
+            .unwrap();
+        assert!(!spirv.is_empty());
+        assert_eq!(spirv.first().copied(), Some(0x0723_0203));
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn multisampled_input_attachment_flag_reaches_spirv_writer() {
+        let program = Program::parse(input_attachment_wgsl(), false, &[]).unwrap();
+        let err =
+            match program.generate_spirv("fs", &Bindings::default(), &[], true, false, 0, true) {
+                Ok(_) => panic!("expected multisampled input attachment generation to fail"),
+                Err(err) => err,
+            };
+        assert!(
+            err.contains("requires an explicit sample index"),
+            "SPIR-V error:\n{err}"
+        );
     }
 
     #[cfg(not(feature = "tiled"))]
     #[test]
     fn framebuffer_fetch_enable_requires_tiled_feature() {
         let err = Program::parse(framebuffer_fetch_wgsl(), false, &[]).unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[cfg(not(feature = "tiled"))]
+    #[test]
+    fn input_attachment_enable_requires_tiled_feature() {
+        let err = Program::parse(input_attachment_wgsl(), false, &[]).unwrap_err();
         assert!(!err.is_empty());
     }
 
@@ -3092,10 +3261,10 @@ fn cs() { _ = u.value; }
         assert_ne!(default_msl, remapped_msl);
 
         let default_spv = program
-            .generate_spirv("cs", &default_bindings, &[], true, false, 0)
+            .generate_spirv("cs", &default_bindings, &[], true, false, 0, false)
             .unwrap();
         let remapped_spv = program
-            .generate_spirv("cs", &remapped, &[], true, false, 0)
+            .generate_spirv("cs", &remapped, &[], true, false, 0, false)
             .unwrap();
         assert_ne!(default_spv, remapped_spv);
         assert!(spirv_has_binding_decoration(&remapped_spv, 7));

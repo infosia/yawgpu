@@ -135,7 +135,9 @@ YAWGPU_TINT_API bool yawgpu_tint_diagnostic_get(const YawgpuTintProgram*, size_t
  *   38=kRgb10A2Unorm, 39=kRg11B10Ufloat, 40=kNone.
  * sample_usage:
  *   0=load, 1=sample, 2=gather. Strongest usage per texture binding for the
- *   requested entry point, computed from Tint sem call graph and AST calls. */
+ *   requested entry point, computed from Tint sem call graph and AST calls.
+ * input_attachment_index:
+ *   Meaningful only when resource_type == 14 kInputAttachment; otherwise 0. */
 typedef struct {
     uint32_t group, binding;
     uint8_t resource_type;
@@ -144,6 +146,7 @@ typedef struct {
     uint64_t size;
     bool has_array_size;
     uint32_t array_size;
+    uint32_t input_attachment_index;
 } YawgpuTintResourceBinding;
 
 YAWGPU_TINT_API size_t yawgpu_tint_resource_binding_count(const YawgpuTintProgram*, const char* ep);
@@ -186,6 +189,12 @@ typedef struct {
 } YawgpuTintExternalTextureRemap;
 
 typedef struct {
+    uint32_t group;        /* WGSL @group of the input_attachment var */
+    uint32_t binding;      /* WGSL @binding of the input_attachment var */
+    uint32_t color_slot;   /* Metal [[color(N)]] slot to lower it to */
+} YawgpuTintInputAttachmentColorIndex;
+
+typedef struct {
     const YawgpuTintBindingRemap* uniform;
     size_t n_uniform;
     const YawgpuTintBindingRemap* storage;
@@ -198,6 +207,8 @@ typedef struct {
     size_t n_sampler;
     const YawgpuTintExternalTextureRemap* external_texture;
     size_t n_external_texture;
+    const YawgpuTintInputAttachmentColorIndex* input_attachment_color_index;
+    size_t n_input_attachment_color_index;
 } YawgpuTintBindings;
 
 typedef struct {
@@ -254,6 +265,7 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
                                 bool disable_robustness,
                                 bool use_vulkan_memory_model,
                                 uint32_t framebuffer_fetch_descriptor_set,
+                                bool multisampled_input_attachment,
                                 uint32_t** words_out,
                                 size_t* n_words_out,
                                 char** err);
