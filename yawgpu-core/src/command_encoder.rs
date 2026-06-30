@@ -15,6 +15,8 @@ use crate::pass::*;
 use crate::query_set::*;
 use crate::render_pass::*;
 use crate::render_pipeline::*;
+#[cfg(feature = "tiled")]
+use crate::subpass::*;
 use crate::texture::*;
 use crate::texture_view::*;
 
@@ -156,6 +158,9 @@ pub(crate) enum CommandExecution {
     ComputePass(ComputePassCommand),
     /// Render pass variant.
     RenderPass(RenderPassCommand),
+    #[cfg(feature = "tiled")]
+    /// Subpass render pass variant.
+    SubpassRenderPass(SubpassRenderPassCommand),
 }
 
 /// Stores the data needed to replay a ComputePassCommand.
@@ -201,6 +206,17 @@ pub(crate) struct RenderPassCommand {
     pub(crate) occlusion_query_set: Option<QuerySet>,
     pub(crate) occlusion_query_index: Option<u32>,
     pub(crate) draw: Option<RenderDrawExecution>,
+}
+
+/// Stores the data needed to replay a subpass render pass.
+#[cfg(feature = "tiled")]
+#[derive(Debug, Clone)]
+pub(crate) struct SubpassRenderPassCommand {
+    pub(crate) layout: Arc<SubpassPassLayout>,
+    pub(crate) extent: Extent3d,
+    pub(crate) color_attachments: Vec<SubpassColorAttachmentBinding>,
+    pub(crate) depth_stencil_attachment: Option<SubpassDepthStencilAttachmentBinding>,
+    pub(crate) draws: Vec<SubpassDrawExecution>,
 }
 
 /// Stores the data needed to replay a query-set resolve.
@@ -378,6 +394,71 @@ impl CommandEncoder {
                 },
             },
             immediate_error,
+        )
+    }
+
+    /// Begins a tiled subpass render pass.
+    #[cfg(feature = "tiled")]
+    #[must_use]
+    pub fn begin_subpass_render_pass(
+        &self,
+        device: &Device,
+        descriptor: SubpassRenderPassDescriptor,
+    ) -> (SubpassRenderPass, Option<String>) {
+        let mut state = self.inner.state.lock();
+        let token = PassToken {
+            kind: PassKind::Render,
+            id: state.next_pass_id,
+        };
+        state.next_pass_id = state.next_pass_id.saturating_add(1);
+        if state.lifecycle != CommandEncoderLifecycle::Recording {
+            return (
+                SubpassRenderPass::new(self.clone(), token, descriptor, None, true),
+                Some("command encoder cannot record after finish".to_owned()),
+            );
+        }
+        if state.open_pass.is_some() {
+            record_first_error_locked(
+                &mut state,
+                "command encoder cannot begin a pass while another pass is open",
+            );
+            return (
+                SubpassRenderPass::new(self.clone(), token, descriptor, None, true),
+                None,
+            );
+        }
+        if state.has_recorded_command {
+            record_first_error_locked(
+                &mut state,
+                "subpass render pass must be the first command encoder operation",
+            );
+            return (
+                SubpassRenderPass::new(self.clone(), token, descriptor, None, true),
+                None,
+            );
+        }
+
+        let validation_error =
+            validate_subpass_render_pass_descriptor(&descriptor, &self.inner.features)
+                .or_else(|| resolve_subpass_render_pass_resources(device, &descriptor).err());
+        let mut hal = None;
+        let mut is_error = validation_error.is_some();
+        if let Some(message) = validation_error {
+            record_first_error_locked(&mut state, message);
+        } else {
+            match device.hal().begin_subpass_render_pass() {
+                Ok(pass) => hal = Some(pass),
+                Err(error) => {
+                    is_error = true;
+                    record_first_error_locked(&mut state, error.to_string());
+                }
+            }
+        }
+        state.has_recorded_command = true;
+        state.open_pass = Some(token);
+        (
+            SubpassRenderPass::new(self.clone(), token, descriptor, hal, is_error),
+            None,
         )
     }
 
@@ -871,6 +952,16 @@ impl CommandEncoder {
             .lock()
             .command_ops
             .push(CommandExecution::RenderPass(command));
+    }
+
+    /// Appends a finished subpass-render-pass command to the encoder's command list.
+    #[cfg(feature = "tiled")]
+    pub(crate) fn record_subpass_render_pass(&self, command: SubpassRenderPassCommand) {
+        self.inner
+            .state
+            .lock()
+            .command_ops
+            .push(CommandExecution::SubpassRenderPass(command));
     }
 
     /// Restores user store ops on the most recently recorded render-pass command.

@@ -99,9 +99,10 @@ pub use shader_tint::ReflectedModule;
 pub use shader_types::ShaderStage;
 #[cfg(feature = "tiled")]
 pub use subpass::{
-    AttachmentLayout, SubpassDependency, SubpassDependencyType, SubpassInputAttachment,
-    SubpassLayoutDesc, SubpassPassLayout, SubpassPassLayoutDescriptor,
-    DEPTH_STENCIL_ATTACHMENT_INDEX,
+    AttachmentLayout, SubpassAttachmentResource, SubpassColorAttachmentBinding, SubpassDependency,
+    SubpassDependencyType, SubpassDepthStencilAttachmentBinding, SubpassInputAttachment,
+    SubpassLayoutDesc, SubpassPassLayout, SubpassPassLayoutDescriptor, SubpassRenderPass,
+    SubpassRenderPassDescriptor, DEPTH_STENCIL_ATTACHMENT_INDEX,
 };
 pub use texture::{Texture, TextureDescriptor, TextureDimension, TextureUsage};
 pub use texture_view::{
