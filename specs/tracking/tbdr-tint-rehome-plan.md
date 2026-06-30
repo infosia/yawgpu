@@ -221,6 +221,25 @@ broken into sub-slices, mirroring how Slice 1 ran (shim → core → HAL → FFI
     - **2.3c-4 (Vulkan execution)** — multi-subpass `VkRenderPass` + INPUT_ATTACHMENT
       descriptors (adapt Slice-1.4 infra) + `retain_copy_resources` fix.
 
+  **Slice 2.7a (real-Metal e2e) DONE** (commit `56d7d41`): a 2-attachment / 2-subpass
+  deferred pass on the M2 — subpass 0 writes the g-buffer, subpass 1 reads it as an
+  `input_attachment` via Metal `[[color(0)]]` programmable blending (the §5 color-slot
+  map) and writes the final attachment; readback = `[128,64,0,255]` = (0.5,0.25,0,1),
+  device-error-free. **The §5 color-slot seam is GPU-verified.** Bug it caught + fixed:
+  the core encoder calls the ENUM methods `HalSubpassRenderPass::{next_subpass,end}`,
+  whose Metal arms still returned the not-implemented `Err` (2.3c-3 had fixed only the
+  parallel, unused `HalDevice` methods) → now `Ok(())`.
+
+  **Explicit-setup contract (user decision 2026-06-30: keep explicit, revisit
+  ergonomics later).** Using an `input_attachment` currently requires the C client to:
+  (1) declare the input-attachment slot's format in the subpass pipeline's color targets
+  with `writeMask = None` (so Metal/Vulkan know the `[[color(N)]]` / input-attachment
+  pixel format — redundant with the pass layout, which also has it); and (2) set an
+  **empty** bind group for a group whose only entry is the (implicitly-bound)
+  input attachment. Both are documented contract, not bugs. Candidate future ergonomics:
+  auto-derive the input format from the pass layout + auto-skip input-attachment-only
+  groups in draw validation. Block 55 documents this contract.
+
   **Slice-order realization (2026-06-30):** the real Metal/Vulkan subpass e2e tests are
   C-FFI integration tests (`yawgpu/tests/e2e_*.rs` use `yawgpu::native`), so they CANNOT
   run until the vendor FFI exists. Revised order: **2.3c-3 (done) → 2.6 FFI → 2.7a Metal
