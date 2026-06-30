@@ -350,6 +350,8 @@ typedef struct YaWGPUInputAttachmentBindingLayout {
 
 /** Opaque handle to a subpass pass layout. */
 typedef struct YaWGPUSubpassPassLayoutImpl* YaWGPUSubpassPassLayout;
+/** Opaque handle to a subpass render pass encoder. */
+typedef struct YaWGPUSubpassRenderPassEncoderImpl* YaWGPUSubpassRenderPassEncoder;
 
 /** One attachment slot in a subpass pass layout. */
 typedef struct YaWGPUAttachmentLayout {
@@ -499,6 +501,161 @@ typedef struct YaWGPUSubpassRenderPipelineDescriptor {
 WGPU_EXPORT WGPURenderPipeline yawgpuDeviceCreateSubpassRenderPipeline(
     WGPUDevice device,
     YaWGPUSubpassRenderPipelineDescriptor const* descriptor) WGPU_FUNCTION_ATTRIBUTE;
+
+/** Concrete persistent binding for one pass-level color attachment slot. */
+typedef struct YaWGPUSubpassColorAttachment {
+    /** Persistent texture view. */
+    WGPUTextureView view;
+    /** Optional MSAA resolve target. May be NULL. */
+    WGPUTextureView resolveTarget;
+    /** Load op applied before the first writing subpass. */
+    WGPULoadOp loadOp;
+    /** Store op applied after the last writing subpass. */
+    WGPUStoreOp storeOp;
+    /** Clear color, used when @ref loadOp is `WGPULoadOp_Clear`. */
+    WGPUColor clearValue;
+} YaWGPUSubpassColorAttachment;
+
+/** Default initializer for @ref YaWGPUSubpassColorAttachment. */
+#define YAWGPU_SUBPASS_COLOR_ATTACHMENT_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUSubpassColorAttachment, { \
+    /*.view=*/NULL _wgpu_COMMA \
+    /*.resolveTarget=*/NULL _wgpu_COMMA \
+    /*.loadOp=*/WGPULoadOp_Load _wgpu_COMMA \
+    /*.storeOp=*/WGPUStoreOp_Store _wgpu_COMMA \
+    /*.clearValue=*/{0, 0, 0, 0} _wgpu_COMMA \
+})
+
+/** Concrete persistent binding for the pass-level depth-stencil attachment. */
+typedef struct YaWGPUSubpassDepthStencilAttachment {
+    /** Persistent texture view. */
+    WGPUTextureView view;
+    /** Load op for the depth aspect. */
+    WGPULoadOp depthLoadOp;
+    /** Store op for the depth aspect. */
+    WGPUStoreOp depthStoreOp;
+    /** Clear depth, used when @ref depthLoadOp is `WGPULoadOp_Clear`. */
+    float depthClearValue;
+    /** Load op for the stencil aspect. */
+    WGPULoadOp stencilLoadOp;
+    /** Store op for the stencil aspect. */
+    WGPUStoreOp stencilStoreOp;
+    /** Clear stencil, used when @ref stencilLoadOp is `WGPULoadOp_Clear`. */
+    uint32_t stencilClearValue;
+} YaWGPUSubpassDepthStencilAttachment;
+
+/** Default initializer for @ref YaWGPUSubpassDepthStencilAttachment. */
+#define YAWGPU_SUBPASS_DEPTH_STENCIL_ATTACHMENT_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUSubpassDepthStencilAttachment, { \
+    /*.view=*/NULL _wgpu_COMMA \
+    /*.depthLoadOp=*/WGPULoadOp_Load _wgpu_COMMA \
+    /*.depthStoreOp=*/WGPUStoreOp_Store _wgpu_COMMA \
+    /*.depthClearValue=*/1.0f _wgpu_COMMA \
+    /*.stencilLoadOp=*/WGPULoadOp_Load _wgpu_COMMA \
+    /*.stencilStoreOp=*/WGPUStoreOp_Store _wgpu_COMMA \
+    /*.stencilClearValue=*/0 _wgpu_COMMA \
+})
+
+/** Descriptor for beginning a subpass render pass. */
+typedef struct YaWGPUSubpassRenderPassDescriptor {
+    /** Chain pointer, currently unused. */
+    WGPUChainedStruct const* nextInChain;
+    /** Optional debug label. */
+    WGPUStringView label;
+    /** Pass layout describing the subpass topology. */
+    YaWGPUSubpassPassLayout passLayout;
+    /** Render area in pixels. */
+    WGPUExtent3D extent;
+    /** Per-slot persistent color attachment bindings. */
+    YaWGPUSubpassColorAttachment const* colorAttachments;
+    /** Number of color attachment bindings. */
+    size_t colorAttachmentCount;
+    /** Optional persistent depth-stencil binding. */
+    YaWGPUSubpassDepthStencilAttachment const* depthStencilAttachment;
+} YaWGPUSubpassRenderPassDescriptor;
+
+/** Default initializer for @ref YaWGPUSubpassRenderPassDescriptor. */
+#define YAWGPU_SUBPASS_RENDER_PASS_DESCRIPTOR_INIT _wgpu_MAKE_INIT_STRUCT(YaWGPUSubpassRenderPassDescriptor, { \
+    /*.nextInChain=*/NULL _wgpu_COMMA \
+    /*.label=*/WGPU_STRING_VIEW_INIT _wgpu_COMMA \
+    /*.passLayout=*/NULL _wgpu_COMMA \
+    /*.extent=*/{0, 0, 1} _wgpu_COMMA \
+    /*.colorAttachments=*/NULL _wgpu_COMMA \
+    /*.colorAttachmentCount=*/0 _wgpu_COMMA \
+    /*.depthStencilAttachment=*/NULL _wgpu_COMMA \
+})
+
+/** Begins a subpass render pass on the command encoder. */
+WGPU_EXPORT YaWGPUSubpassRenderPassEncoder yawgpuCommandEncoderBeginSubpassRenderPass(
+    WGPUCommandEncoder encoder,
+    YaWGPUSubpassRenderPassDescriptor const* descriptor) WGPU_FUNCTION_ATTRIBUTE;
+
+/** Advances to the next subpass. */
+WGPU_EXPORT void yawgpuSubpassRenderPassEncoderNextSubpass(
+    YaWGPUSubpassRenderPassEncoder encoder) WGPU_FUNCTION_ATTRIBUTE;
+/** Ends the subpass render pass. */
+WGPU_EXPORT void yawgpuSubpassRenderPassEncoderEnd(
+    YaWGPUSubpassRenderPassEncoder encoder) WGPU_FUNCTION_ATTRIBUTE;
+/** Sets the subpass render pipeline. */
+WGPU_EXPORT void yawgpuSubpassRenderPassEncoderSetPipeline(
+    YaWGPUSubpassRenderPassEncoder encoder,
+    WGPURenderPipeline pipeline) WGPU_FUNCTION_ATTRIBUTE;
+/** Sets or clears a bind group. */
+WGPU_EXPORT void yawgpuSubpassRenderPassEncoderSetBindGroup(
+    YaWGPUSubpassRenderPassEncoder encoder,
+    uint32_t groupIndex,
+    WGPUBindGroup group,
+    size_t dynamicOffsetCount,
+    uint32_t const* dynamicOffsets) WGPU_FUNCTION_ATTRIBUTE;
+/** Sets or clears a vertex buffer. */
+WGPU_EXPORT void yawgpuSubpassRenderPassEncoderSetVertexBuffer(
+    YaWGPUSubpassRenderPassEncoder encoder,
+    uint32_t slot,
+    WGPUBuffer buffer,
+    uint64_t offset,
+    uint64_t size) WGPU_FUNCTION_ATTRIBUTE;
+/** Sets the index buffer. */
+WGPU_EXPORT void yawgpuSubpassRenderPassEncoderSetIndexBuffer(
+    YaWGPUSubpassRenderPassEncoder encoder,
+    WGPUBuffer buffer,
+    WGPUIndexFormat format,
+    uint64_t offset,
+    uint64_t size) WGPU_FUNCTION_ATTRIBUTE;
+/** Records a non-indexed draw. */
+WGPU_EXPORT void yawgpuSubpassRenderPassEncoderDraw(
+    YaWGPUSubpassRenderPassEncoder encoder,
+    uint32_t vertexCount,
+    uint32_t instanceCount,
+    uint32_t firstVertex,
+    uint32_t firstInstance) WGPU_FUNCTION_ATTRIBUTE;
+/** Records an indexed draw. */
+WGPU_EXPORT void yawgpuSubpassRenderPassEncoderDrawIndexed(
+    YaWGPUSubpassRenderPassEncoder encoder,
+    uint32_t indexCount,
+    uint32_t instanceCount,
+    uint32_t firstIndex,
+    int32_t baseVertex,
+    uint32_t firstInstance) WGPU_FUNCTION_ATTRIBUTE;
+/** Sets the viewport. */
+WGPU_EXPORT void yawgpuSubpassRenderPassEncoderSetViewport(
+    YaWGPUSubpassRenderPassEncoder encoder,
+    float x,
+    float y,
+    float width,
+    float height,
+    float minDepth,
+    float maxDepth) WGPU_FUNCTION_ATTRIBUTE;
+/** Sets the scissor rectangle. */
+WGPU_EXPORT void yawgpuSubpassRenderPassEncoderSetScissorRect(
+    YaWGPUSubpassRenderPassEncoder encoder,
+    uint32_t x,
+    uint32_t y,
+    uint32_t width,
+    uint32_t height) WGPU_FUNCTION_ATTRIBUTE;
+/** Increments the refcount of a subpass render pass encoder. */
+WGPU_EXPORT void yawgpuSubpassRenderPassEncoderAddRef(
+    YaWGPUSubpassRenderPassEncoder encoder) WGPU_FUNCTION_ATTRIBUTE;
+/** Decrements the refcount of a subpass render pass encoder. */
+WGPU_EXPORT void yawgpuSubpassRenderPassEncoderRelease(
+    YaWGPUSubpassRenderPassEncoder encoder) WGPU_FUNCTION_ATTRIBUTE;
 
 /** @} */
 #endif
