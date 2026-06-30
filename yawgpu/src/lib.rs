@@ -23,6 +23,8 @@ pub use ffi::sampler::*;
 pub use ffi::shader::*;
 pub use ffi::surface::*;
 pub use ffi::texture::*;
+#[cfg(feature = "tiled")]
+pub use ffi::tiled::*;
 pub use ffi::*;
 
 /// Constant value for the yawgpu Noop instance backend.
@@ -60,6 +62,32 @@ pub const YAWGPU_EXTERNAL_TEXTURE_ROTATION_ROTATE_90_DEGREES: u32 = 1;
 pub const YAWGPU_EXTERNAL_TEXTURE_ROTATION_ROTATE_180_DEGREES: u32 = 2;
 /// Constant value for 270-degree external texture rotation.
 pub const YAWGPU_EXTERNAL_TEXTURE_ROTATION_ROTATE_270_DEGREES: u32 = 3;
+/// Feature value for tiled multi-subpass render passes.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUFeatureName_MultiSubpass: native::WGPUFeatureName = 0x7001_0001;
+/// SType value for `YaWGPUInputAttachmentBindingLayout`.
+#[cfg(feature = "tiled")]
+pub const YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT: native::WGPUSType = 0x7000_0010;
+/// Depth-stencil source attachment sentinel.
+#[cfg(feature = "tiled")]
+pub const YAWGPU_DEPTH_STENCIL_ATTACHMENT_INDEX: u32 = u32::MAX;
+/// Color-to-input dependency.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUSubpassDependencyType_ColorToInput: YaWGPUSubpassDependencyType = 0;
+/// Depth-to-input dependency.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUSubpassDependencyType_DepthToInput: YaWGPUSubpassDependencyType = 1;
+/// Color-and-depth-to-input dependency.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUSubpassDependencyType_ColorDepthToInput: YaWGPUSubpassDependencyType = 2;
+/// Force this enum to 32 bits in C.
+#[cfg(feature = "tiled")]
+#[allow(non_upper_case_globals)]
+pub const YaWGPUSubpassDependencyType_Force32: YaWGPUSubpassDependencyType = 0x7FFF_FFFF;
 
 /// yawgpu vendor extension for selecting a backend at instance creation.
 ///
@@ -189,6 +217,148 @@ pub struct YaWGPUExternalTextureDescriptor {
     pub mirrored: native::WGPUBool,
     /// One of `YAWGPU_EXTERNAL_TEXTURE_ROTATION_*`.
     pub rotation: u32,
+}
+
+/// yawgpu vendor extension result for querying tiled rendering capabilities.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct YaWGPUTiledCapabilities {
+    /// Extension chain.
+    pub nextInChain: *const native::WGPUChainedStruct,
+    /// Maximum number of subpasses in one tiled render pass.
+    pub maxSubpasses: u32,
+    /// Maximum number of color attachments in a subpass.
+    pub maxSubpassColorAttachments: u32,
+    /// Maximum number of input attachments in a subpass.
+    pub maxInputAttachments: u32,
+    /// Estimated tile memory budget, in bytes.
+    pub estimatedTileMemoryBytes: u32,
+}
+
+/// yawgpu input attachment binding layout chain entry.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct YaWGPUInputAttachmentBindingLayout {
+    /// Chain header.
+    pub chain: native::WGPUChainedStruct,
+    /// Input attachment sample type.
+    pub sampleType: native::WGPUTextureSampleType,
+    /// Whether the input attachment is multisampled.
+    pub multisampled: native::WGPUBool,
+}
+
+/// yawgpu subpass pass layout handle.
+#[cfg(feature = "tiled")]
+pub type YaWGPUSubpassPassLayout = *const YaWGPUSubpassPassLayoutImpl;
+/// Subpass dependency type.
+#[cfg(feature = "tiled")]
+pub type YaWGPUSubpassDependencyType = u32;
+
+/// yawgpu subpass attachment layout.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct YaWGPUAttachmentLayout {
+    /// Format.
+    pub format: native::WGPUTextureFormat,
+    /// Sample count.
+    pub sampleCount: u32,
+}
+
+/// yawgpu subpass dependency.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct YaWGPUSubpassDependency {
+    /// Source subpass.
+    pub srcSubpass: u32,
+    /// Destination subpass.
+    pub dstSubpass: u32,
+    /// Dependency type.
+    pub dependencyType: YaWGPUSubpassDependencyType,
+    /// Whether the dependency is by-region.
+    pub byRegion: native::WGPUBool,
+}
+
+/// yawgpu subpass input attachment.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct YaWGPUSubpassInputAttachment {
+    /// Bind group.
+    pub group: u32,
+    /// Binding.
+    pub binding: u32,
+    /// Source subpass.
+    pub sourceSubpass: u32,
+    /// Source attachment.
+    pub sourceAttachment: u32,
+}
+
+/// yawgpu subpass layout descriptor.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct YaWGPUSubpassLayout {
+    /// Color attachment indices.
+    pub colorAttachmentIndices: *const u32,
+    /// Color attachment index count.
+    pub colorAttachmentIndexCount: usize,
+    /// Whether this subpass uses depth-stencil.
+    pub usesDepthStencil: native::WGPUBool,
+    /// Input attachments.
+    pub inputAttachments: *const YaWGPUSubpassInputAttachment,
+    /// Input attachment count.
+    pub inputAttachmentCount: usize,
+}
+
+/// yawgpu subpass pass layout descriptor.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct YaWGPUSubpassPassLayoutDescriptor {
+    /// Extension chain.
+    pub nextInChain: *const native::WGPUChainedStruct,
+    /// Label.
+    pub label: native::WGPUStringView,
+    /// Color attachments.
+    pub colorAttachments: *const YaWGPUAttachmentLayout,
+    /// Color attachment count.
+    pub colorAttachmentCount: usize,
+    /// Depth-stencil attachment.
+    pub depthStencilAttachment: *const YaWGPUAttachmentLayout,
+    /// Subpasses.
+    pub subpasses: *const YaWGPUSubpassLayout,
+    /// Subpass count.
+    pub subpassCount: usize,
+    /// Dependencies.
+    pub dependencies: *const YaWGPUSubpassDependency,
+    /// Dependency count.
+    pub dependencyCount: usize,
+}
+
+/// yawgpu subpass render pipeline descriptor.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+pub struct YaWGPUSubpassRenderPipelineDescriptor {
+    /// Extension chain.
+    pub nextInChain: *const native::WGPUChainedStruct,
+    /// Base render pipeline descriptor.
+    pub base: native::WGPURenderPipelineDescriptor,
+    /// Compatible pass layout.
+    pub passLayout: YaWGPUSubpassPassLayout,
+    /// Compatible subpass index.
+    pub subpassIndex: u32,
 }
 
 /// Native module.
