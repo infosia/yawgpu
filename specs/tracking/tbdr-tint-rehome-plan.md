@@ -212,11 +212,20 @@ broken into sub-slices, mirroring how Slice 1 ran (shim → core → HAL → FFI
       + `resolve_subpass_render_pass_resources` (persistent only) + the command-encoder
       entry to begin one + `SubpassRenderPassCommand` recording. Records into the 2.3c-1
       HAL pass; Noop-testable lifecycle (begin/next_subpass/draw/end + validation).
-    - **2.3c-3 (Metal execution + real e2e)** — implement the Metal arm (single
-      `MTLRenderCommandEncoder`, ordered draws, `[[color(N)]]` tile read, `next_subpass`
-      ≈ barrier); 3-subpass deferred real-Metal e2e on the M2.
+    - **2.3c-3 (Metal execution) DONE** (commit `5a7fb23`, yawgpu-hal Metal): single
+      `MTLRenderCommandEncoder`, ordered draws, `[[color(N)]]` programmable-blend read,
+      `next_subpass` is a no-op on Metal; `begin` Metal arm now `Ok(Metal)`;
+      `subpass_render_pass_descriptor` (union+dedup color slots, persistent only) +
+      `encode_subpass_render_pass` (draws via existing helpers). Device-free unit tests.
+      **Real-GPU verification deferred to the post-FFI e2e** (all e2e tests use the C ABI).
     - **2.3c-4 (Vulkan execution)** — multi-subpass `VkRenderPass` + INPUT_ATTACHMENT
       descriptors (adapt Slice-1.4 infra) + `retain_copy_resources` fix.
+
+  **Slice-order realization (2026-06-30):** the real Metal/Vulkan subpass e2e tests are
+  C-FFI integration tests (`yawgpu/tests/e2e_*.rs` use `yawgpu::native`), so they CANNOT
+  run until the vendor FFI exists. Revised order: **2.3c-3 (done) → 2.6 FFI → 2.7a Metal
+  e2e (Claude runs) → 2.3c-4 Vulkan HAL → 2.7b Vulkan e2e.** The Metal HAL execution
+  (2.3c-3) therefore stays GPU-unverified until 2.7a.
   - **transient_attachment.rs** (146 lines) folds in where the attachment type is
     needed (likely 2.3a data + 2.4/2.5 HAL storage modes).
 - **2.4 HAL Metal** — `[[color(N)]]` bind via the map; `MTLStorageMode::Memoryless`
