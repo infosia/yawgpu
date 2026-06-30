@@ -220,7 +220,10 @@ unsafe fn create_render_pipeline(
         fragment: &fragment,
     };
     let pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(device, &descriptor);
-    assert!(!pipeline.is_null(), "framebuffer-fetch pipeline creation failed");
+    assert!(
+        !pipeline.is_null(),
+        "framebuffer-fetch pipeline creation failed"
+    );
     pipeline
 }
 
@@ -326,7 +329,10 @@ unsafe fn create_wgsl_module(device: native::WGPUDevice, source: &str) -> native
         label: empty_string_view(),
     };
     let module = yawgpu::wgpuDeviceCreateShaderModule(device, &descriptor);
-    assert!(!module.is_null(), "framebuffer-fetch shader module creation failed");
+    assert!(
+        !module.is_null(),
+        "framebuffer-fetch shader module creation failed"
+    );
     module
 }
 
@@ -419,7 +425,9 @@ fn texture_extent() -> native::WGPUExtent3D {
 }
 
 fn contains_pixel(pixels: &[u8], rgba: [u8; 4]) -> bool {
-    pixels.chunks_exact(BYTES_PER_PIXEL).any(|pixel| pixel == rgba)
+    pixels
+        .chunks_exact(BYTES_PER_PIXEL)
+        .any(|pixel| pixel == rgba)
 }
 
 fn distinct_pixels(pixels: &[u8]) -> Vec<[u8; 4]> {
