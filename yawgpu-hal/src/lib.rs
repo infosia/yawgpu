@@ -681,6 +681,60 @@ impl HalDevice {
                 .map(HalRenderPipeline::Gles),
         }
     }
+
+    /// Creates a subpass-compatible render pipeline.
+    #[cfg(feature = "tiled")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_subpass_render_pipeline(
+        &self,
+        shader: HalShaderSource,
+        vertex_entry_point: &str,
+        fragment_entry_point: Option<&str>,
+        descriptor: &HalRenderPipelineDescriptor,
+        bindings: &[HalDescriptorBinding],
+        pass_layout: &HalSubpassPassLayout,
+        subpass_index: u32,
+    ) -> Result<HalRenderPipeline, HalError> {
+        #[cfg(not(any(feature = "gles", feature = "metal", feature = "vulkan")))]
+        let _ = (
+            shader,
+            vertex_entry_point,
+            fragment_entry_point,
+            descriptor,
+            bindings,
+            pass_layout,
+            subpass_index,
+        );
+        let _ = (pass_layout, subpass_index);
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => Ok(HalRenderPipeline::Noop),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(device) => device
+                .create_subpass_render_pipeline(
+                    shader,
+                    vertex_entry_point,
+                    fragment_entry_point,
+                    descriptor,
+                    bindings,
+                    pass_layout,
+                    subpass_index,
+                )
+                .map(HalRenderPipeline::Vulkan),
+            #[cfg(feature = "metal")]
+            Self::Metal(device) => device
+                .create_render_pipeline(
+                    shader,
+                    vertex_entry_point,
+                    fragment_entry_point,
+                    descriptor,
+                    bindings,
+                )
+                .map(HalRenderPipeline::Metal),
+            #[cfg(feature = "gles")]
+            Self::Gles(_) => Err(HalError::BackendUnavailable { backend: "gles" }),
+        }
+    }
 }
 
 /// Enumerates HAL surface values.

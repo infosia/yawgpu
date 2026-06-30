@@ -4,7 +4,7 @@ use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::{
     HalDescriptorBindingKind, HalSubpassAttachmentLayout, HalSubpassAttachmentResource,
     HalSubpassDependencyType, HalSubpassDepthStencilAttachment, HalSubpassDraw,
-    HalSubpassRenderPassCommand,
+    HalSubpassPassLayout, HalSubpassRenderPassCommand,
 };
 use crate::{
     HalRenderColorTarget, HalRenderDepthStencilAttachment, HalTextureAspect, HalTextureClear,
@@ -373,6 +373,9 @@ fn retain_copy_resources(copy: &HalCopy, retained: &mut Vec<RetainedResource>) {
             }
         }
         HalCopy::RenderPass(pass) => {
+            if let Some(pipeline) = &pass.pipeline {
+                retain_hal_render_pipeline(pipeline, retained);
+            }
             if let Some(query_set) = &pass.occlusion_query_set {
                 retain_hal_query_set(query_set, retained);
             }
@@ -428,6 +431,18 @@ fn retain_hal_query_set(query_set: &HalQuerySet, retained: &mut Vec<RetainedReso
     });
 }
 
+fn retain_hal_render_pipeline(
+    pipeline: &crate::HalRenderPipeline,
+    retained: &mut Vec<RetainedResource>,
+) {
+    let crate::HalRenderPipeline::Vulkan(pipeline) = pipeline else {
+        return;
+    };
+    retained.push(RetainedResource::RenderPipeline {
+        _inner: Arc::clone(&pipeline.inner),
+    });
+}
+
 #[cfg(feature = "tiled")]
 fn retain_subpass_resources(
     pass: &HalSubpassRenderPassCommand,
@@ -440,6 +455,7 @@ fn retain_subpass_resources(
         retain_subpass_attachment_resource(&attachment.resource, retained);
     }
     for draw in &pass.draws {
+        retain_hal_render_pipeline(&draw.pipeline, retained);
         for bound in &draw.bind_buffers {
             retain_hal_buffer(&bound.buffer, retained);
         }
@@ -1459,10 +1475,79 @@ fn create_subpass_render_pass(
             .ok_or_else(|| shader_error("subpass depth-stencil attachment binding missing"))?;
         attachments.push(vk_depth_stencil_attachment_description(layout, binding)?);
     }
-    let depth_index = u32::try_from(pass.layout.color_attachments.len())
+    create_subpass_render_pass_with_attachments(device, &pass.layout, &attachments)
+}
+
+#[cfg(feature = "tiled")]
+pub(super) fn create_subpass_render_pass_for_layout(
+    device: &ash::Device,
+    layout: &HalSubpassPassLayout,
+) -> Result<vk::RenderPass, HalError> {
+    let mut attachments = Vec::new();
+    for (index, attachment) in layout.color_attachments.iter().enumerate() {
+        let (format, _) = map_texture_format(attachment.format)?;
+        let used_as_input = layout.subpasses.iter().any(|subpass| {
+            subpass
+                .input_attachments
+                .iter()
+                .any(|input| input.source_attachment as usize == index)
+        });
+        attachments.push(
+            vk::AttachmentDescription::default()
+                .format(format)
+                .samples(vk_sample_count(attachment.sample_count)?)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(render_color_attachment_layout(used_as_input))
+                .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+        );
+    }
+    if let Some(attachment) = layout.depth_stencil_attachment {
+        let (format, _) = map_texture_format(attachment.format)?;
+        let has_depth = format_has_depth_aspect(attachment.format);
+        let has_stencil = format_has_stencil_aspect(attachment.format);
+        attachments.push(
+            vk::AttachmentDescription::default()
+                .format(format)
+                .samples(vk_sample_count(attachment.sample_count)?)
+                .load_op(if has_depth {
+                    vk::AttachmentLoadOp::CLEAR
+                } else {
+                    vk::AttachmentLoadOp::DONT_CARE
+                })
+                .store_op(if has_depth {
+                    vk::AttachmentStoreOp::STORE
+                } else {
+                    vk::AttachmentStoreOp::DONT_CARE
+                })
+                .stencil_load_op(if has_stencil {
+                    vk::AttachmentLoadOp::CLEAR
+                } else {
+                    vk::AttachmentLoadOp::DONT_CARE
+                })
+                .stencil_store_op(if has_stencil {
+                    vk::AttachmentStoreOp::STORE
+                } else {
+                    vk::AttachmentStoreOp::DONT_CARE
+                })
+                .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+        );
+    }
+    create_subpass_render_pass_with_attachments(device, layout, &attachments)
+}
+
+#[cfg(feature = "tiled")]
+fn create_subpass_render_pass_with_attachments(
+    device: &ash::Device,
+    layout: &HalSubpassPassLayout,
+    attachments: &[vk::AttachmentDescription],
+) -> Result<vk::RenderPass, HalError> {
+    let depth_index = u32::try_from(layout.color_attachments.len())
         .map_err(|_| shader_error("subpass depth attachment index is too large"))?;
-    let color_refs = pass
-        .layout
+    let color_refs = layout
         .subpasses
         .iter()
         .map(|subpass| {
@@ -1486,8 +1571,7 @@ fn create_subpass_render_pass(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    let input_refs = pass
-        .layout
+    let input_refs = layout
         .subpasses
         .iter()
         .map(|subpass| {
@@ -1510,8 +1594,7 @@ fn create_subpass_render_pass(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    let depth_refs = pass
-        .layout
+    let depth_refs = layout
         .subpasses
         .iter()
         .map(|subpass| {
@@ -1523,7 +1606,7 @@ fn create_subpass_render_pass(
         })
         .collect::<Vec<_>>();
     let mut subpasses = Vec::new();
-    for index in 0..pass.layout.subpasses.len() {
+    for index in 0..layout.subpasses.len() {
         let mut description = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .color_attachments(&color_refs[index])
@@ -1533,9 +1616,9 @@ fn create_subpass_render_pass(
         }
         subpasses.push(description);
     }
-    let dependencies = subpass_dependencies(pass);
+    let dependencies = subpass_dependencies(layout);
     let render_pass_info = vk::RenderPassCreateInfo::default()
-        .attachments(&attachments)
+        .attachments(attachments)
         .subpasses(&subpasses)
         .dependencies(&dependencies);
     unsafe { device.create_render_pass(&render_pass_info, None) }
@@ -1543,7 +1626,7 @@ fn create_subpass_render_pass(
 }
 
 #[cfg(feature = "tiled")]
-fn subpass_dependencies(pass: &HalSubpassRenderPassCommand) -> Vec<vk::SubpassDependency> {
+fn subpass_dependencies(layout: &HalSubpassPassLayout) -> Vec<vk::SubpassDependency> {
     let mut dependencies = vec![vk::SubpassDependency::default()
         .src_subpass(vk::SUBPASS_EXTERNAL)
         .dst_subpass(0)
@@ -1551,7 +1634,7 @@ fn subpass_dependencies(pass: &HalSubpassRenderPassCommand) -> Vec<vk::SubpassDe
         .dst_stage_mask(render_attachment_stage_flags())
         .src_access_mask(vk::AccessFlags::empty())
         .dst_access_mask(render_attachment_access_flags())];
-    dependencies.extend(pass.layout.dependencies.iter().map(|dependency| {
+    dependencies.extend(layout.dependencies.iter().map(|dependency| {
         let (src_stage, src_access, dst_stage, dst_access) = match dependency.dependency_type {
             HalSubpassDependencyType::ColorToInput => (
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
@@ -1591,7 +1674,7 @@ fn subpass_dependencies(pass: &HalSubpassRenderPassCommand) -> Vec<vk::SubpassDe
     }));
     dependencies.push(
         vk::SubpassDependency::default()
-            .src_subpass(pass.layout.subpasses.len().saturating_sub(1) as u32)
+            .src_subpass(layout.subpasses.len().saturating_sub(1) as u32)
             .dst_subpass(vk::SUBPASS_EXTERNAL)
             .src_stage_mask(render_attachment_stage_flags())
             .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
@@ -3173,7 +3256,7 @@ mod tests {
             draws: Vec::new(),
         };
 
-        let dependencies = subpass_dependencies(&pass);
+        let dependencies = subpass_dependencies(&pass.layout);
         let dependency = dependencies
             .iter()
             .find(|dependency| dependency.src_subpass == 0 && dependency.dst_subpass == 1)

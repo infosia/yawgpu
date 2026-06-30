@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use ash::vk;
 
+#[cfg(feature = "tiled")]
+use crate::HalSubpassPassLayout;
 use crate::{
     HalAddressMode, HalBlendFactor, HalBlendOperation, HalBoundBuffer, HalBoundSampler,
     HalBoundTexture, HalBuffer, HalBufferBindingKind, HalBufferClear, HalBufferCopy,
@@ -20,8 +22,6 @@ use crate::{
     HalShaderSource, HalStencilOperation, HalSurfaceConfiguration, HalTexture, HalTextureCopy,
     HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
-#[cfg(feature = "tiled")]
-use crate::{HalSubpassDependencyType, HalSubpassPassLayout};
 
 const BACKEND: &str = "vulkan";
 /// Minimum Vulkan API version yawgpu requests at vkCreateInstance.
@@ -471,6 +471,9 @@ impl VulkanAdapter {
         // device reports support (the spec mandates every Vulkan 1.0 device exposes
         // this feature, so the guard is defensive rather than required).
         let robust_buffer_access = supported_features.robust_buffer_access == vk::TRUE;
+        // WebGPU render pipelines can configure blend/write masks per color target.
+        // Vulkan requires independentBlend for differing per-attachment blend state.
+        let independent_blend = supported_features.independent_blend == vk::TRUE;
         let depth_clamp = supported_features.depth_clamp == vk::TRUE;
         let depth_clip_control = depth_clamp && depth_clip_enable_extension;
         let mut enabled_features = vk::PhysicalDeviceFeatures::default();
@@ -486,6 +489,9 @@ impl VulkanAdapter {
         }
         if robust_buffer_access {
             enabled_features.robust_buffer_access = vk::TRUE;
+        }
+        if independent_blend {
+            enabled_features.independent_blend = vk::TRUE;
         }
         if shader_demote_to_helper_invocation {
             extension_names.push(vk::EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_NAME.as_ptr());
@@ -922,21 +928,30 @@ mod tests {
     /// reports the feature as available (vk::TRUE), it must be forwarded into
     /// `enabled_features`; when absent, it must remain FALSE.
     #[test]
-    fn vulkan_create_device_enables_robust_buffer_access_when_supported() {
+    fn vulkan_create_device_enables_supported_core_features() {
         // Simulate the feature-enable logic in create_device without a real GPU.
         for (supported, expected_enabled) in [(vk::TRUE, vk::TRUE), (vk::FALSE, vk::FALSE)] {
             let supported_features = vk::PhysicalDeviceFeatures {
                 robust_buffer_access: supported,
+                independent_blend: supported,
                 ..Default::default()
             };
             let robust_buffer_access = supported_features.robust_buffer_access == vk::TRUE;
+            let independent_blend = supported_features.independent_blend == vk::TRUE;
             let mut enabled_features = vk::PhysicalDeviceFeatures::default();
             if robust_buffer_access {
                 enabled_features.robust_buffer_access = vk::TRUE;
             }
+            if independent_blend {
+                enabled_features.independent_blend = vk::TRUE;
+            }
             assert_eq!(
                 enabled_features.robust_buffer_access, expected_enabled,
                 "robust_buffer_access should be {expected_enabled} when supported={supported}"
+            );
+            assert_eq!(
+                enabled_features.independent_blend, expected_enabled,
+                "independent_blend should be {expected_enabled} when supported={supported}"
             );
         }
     }
