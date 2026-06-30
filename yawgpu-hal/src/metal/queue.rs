@@ -123,8 +123,14 @@ impl MetalQueue {
                         result?;
                     }
                     #[cfg(feature = "tiled")]
-                    HalCopy::SubpassRenderPass(_) => {
-                        return Err(crate::command::subpass_not_implemented_error());
+                    HalCopy::SubpassRenderPass(pass) => {
+                        let descriptor = subpass_render_pass_descriptor(pass)?;
+                        let encoder = command_buffer
+                            .renderCommandEncoderWithDescriptor(&descriptor)
+                            .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                        let result = encode_subpass_render_pass(&encoder, pass);
+                        encoder.endEncoding();
+                        result?;
                     }
                 }
             }
