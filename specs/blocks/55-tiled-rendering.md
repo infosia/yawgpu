@@ -1,16 +1,43 @@
 # Block 55 — Tiled rendering (TBDR mobile extension)
 
-> **REMOVED 2026-06-26 (Tint migration Phase 0); PARTIALLY REVIVED 2026-06-30 onto Tint.**
-> The naga-era extension was deleted (see `specs/tracking/tint-migration-plan.md`).
-> It is being re-homed onto the Tint frontend per
-> `specs/tracking/tbdr-tint-rehome-plan.md`. **Slice 1 (live):** the `@color(N)`
-> **framebuffer-fetch** surface behind the default-off `tiled` cargo feature —
-> Metal verified on real GPU, Vulkan spec-valid (input-attachment self-read; MoltenVK
-> execution gap documented in the plan). **Note the WGSL surface moved to Tint's:**
-> `input_attachment<T>` / `inputAttachmentLoad()` / `@color(N)` (NOT the naga-era
-> `subpass_input`/`subpassLoad` shown below). The transient-attachment / multi-subpass
-> / subpass-pipeline content below is the **deferred Slice 2+ roadmap** (Dawn-fork-gated),
-> retained here as historical + forward design — not the current implementation.
+> **REMOVED 2026-06-26 (Tint migration Phase 0); RE-HOMED onto Tint 2026-06-30 —
+> multi-subpass deferred rendering COMPLETE + real-GPU verified on Metal AND Vulkan.**
+> The naga-era extension was deleted (see `specs/tracking/tint-migration-plan.md`) and
+> rebuilt on the Tint frontend per `specs/tracking/tbdr-tint-rehome-plan.md`, behind the
+> default-off `tiled` cargo feature.
+>
+> **WGSL surface (Tint, NOT the naga-era `subpass_input`/`subpassLoad` shown in some
+> examples below):**
+> - input attachments: `enable chromium_internal_input_attachments;`
+>   `@group(g) @binding(b) @input_attachment_index(n) var x: input_attachment<T>;`
+>   read via `inputAttachmentLoad(x)`.
+> - framebuffer fetch (single-pass self-read): `enable chromium_experimental_framebuffer_fetch;`
+>   `@fragment fn fs(@color(N) prev: vec4<f32>) -> ...`.
+> - the fragment writes its **GLOBAL** color slot via `@location(slot)`.
+>
+> **Portable color-target contract (auto-derivation):** a subpass pipeline's
+> `fragment.targets` carries only the subpass's **written** color attachments; input
+> attachments are **omitted** and the core supplies them per backend — Metal lowers
+> `input_attachment` to a read-only `[[color(N)]]` target (programmable blending), Vulkan
+> to an `INPUT_ATTACHMENT` descriptor (`VK_ATTACHMENT_UNUSED` color ref). The §5
+> WGSL-binding → color-slot map (= the input's `source_attachment`) is computed from the
+> pass layout at pipeline-compile time.
+>
+> **Implemented + verified:** capabilities/`MultiSubpass` feature; `input_attachment`
+> binding kind; reusable subpass pass layout; multi-subpass render pass + per-subpass
+> encoder; subpass-aware render pipeline; the full vendor C ABI; `@color(N)`
+> framebuffer-fetch. `e2e_metal_tiled` passes on the M2; `e2e_vulkan_tiled` is
+> validation-clean (0 VUIDs, Khronos layers) and pixel-correct on MoltenVK (a genuine
+> multi-subpass input attachment executes there, unlike the `@color` self-read).
+>
+> **Deferred (the body below describes some of these as design):** transient/memoryless
+> attachments (persistent attachments only for now); SPIR-V **MSAA** input attachment
+> (Slice 4 — the Dawn fork's 2-arg `inputAttachmentLoad(ia, sample_index)` is ready);
+> depth/stencil-aspect subpass inputs; programmable tile dispatch (removed); the
+> empty-bind-group ergonomics nicety (a client currently sets an empty bind group for an
+> input-attachment-only group). Some examples below still show the naga-era
+> `subpass_input`/`subpassLoad` surface — read them as design intent under the Tint
+> surface above.
 
 Phase 14. **Vendor extension** (not a Dawn port): tile-based deferred
 rendering primitives for mobile GPUs — transient/memoryless attachments,
@@ -500,9 +527,11 @@ defined when a real backend implementation lands.
 - **T7** `YaWGPUInputAttachmentBindingLayout` chained on a BGL entry marks a
   `(group, binding)` as input-attachment; the resource is auto-wired from the
   pass layout (Vulkan `INPUT_ATTACHMENT`, Metal implicit). Caller binds no view. ☐ (UT noop + e2e)
-- **T8** WGSL using `subpass_input<T>` + `subpassLoad` compiles on both backends
-  (entry-point `@color(N)` on Metal; global form Vulkan-only). ☐ (e2e)
-- **T9** a `subpass_input<i32>` bound against an `f32` attachment ⇒ pipeline
+- **T8** WGSL using `input_attachment<T>` + `inputAttachmentLoad()` (Tint surface)
+  compiles + executes on both backends: Metal lowers it to a `[[color(source)]]`
+  fragment input (auto-derived color-slot map), Vulkan to a `SubpassData`
+  `INPUT_ATTACHMENT` descriptor. ☑ (e2e_metal_tiled + e2e_vulkan_tiled)
+- **T9** an `input_attachment<i32>` bound against an `f32` attachment ⇒ pipeline
   layout / derivation error. ☐ (UT)
 
 ### Subpass pass layout (P14.4a)
@@ -574,8 +603,10 @@ No new async surface. Submission/work-done reuse block 50's queue machinery.
 ## Known limitations (carried into v1, documented)
 
 1. **Eager-dispatch ordering** — subpass pass must be the first encoder op (T13).
-2. **MSL subpass-input globals unsupported** — `@color(N)` entry-point form only;
-   the global `var g: subpass_input<f32>;` form works on Vulkan only.
+2. **MSL `input_attachment` globals — now supported** (was naga-era Vulkan-only). The
+   Dawn fork's MSL backend lowers a module-scope `var g: input_attachment<T>;` to a
+   `[[color(N)]]` fragment input via the `Options::input_attachment_to_color_index` map,
+   so the global form works on Metal too (verified by `e2e_metal_tiled`).
 3. **Timestamp / occlusion queries inside subpass passes are out of scope for
    v1** (the standard render pass covers the common case).
 4. **GLES / DX12** — not applicable (yawgpu has no such backends).
