@@ -1,6 +1,9 @@
 use super::*;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
-use crate::{HalTextureAspect, HalTextureDimension, HalTextureViewDimension, HalViewport};
+use crate::{
+    HalBoundIndexBuffer, HalBoundIndirectBuffer, HalScissorRect, HalTextureAspect,
+    HalTextureDimension, HalTextureViewDimension, HalViewport,
+};
 
 /// Records encode into the command stream.
 pub(super) fn encode_buffer_copy(
@@ -760,6 +763,97 @@ fn mtl_store_action(store: bool) -> MTLStoreAction {
     }
 }
 
+/// Returns subpass render pass descriptor.
+#[cfg(feature = "tiled")]
+pub(super) fn subpass_render_pass_descriptor(
+    pass: &HalSubpassRenderPassCommand,
+) -> Result<Retained<MTLRenderPassDescriptor>, HalError> {
+    let descriptor = MTLRenderPassDescriptor::renderPassDescriptor();
+    if pass.layout.subpasses.is_empty() {
+        return Err(texture_error(
+            "subpass render pass requires at least one subpass",
+        ));
+    }
+    let color_attachments = descriptor.colorAttachments();
+    for attachment_index in subpass_color_attachment_indices(pass) {
+        let slot = to_ns(u64::from(attachment_index))?;
+        let binding = pass
+            .color_attachments
+            .get(attachment_index as usize)
+            .ok_or_else(|| texture_error("subpass color attachment binding missing"))?;
+        let color = unsafe { color_attachments.objectAtIndexedSubscript(slot) };
+        color.setTexture(Some(subpass_attachment_texture(&binding.resource)?));
+        color.setLoadAction(mtl_load_action(binding.load_op));
+        color.setStoreAction(mtl_store_action(binding.store));
+        let [r, g, b, a] = binding.clear_color;
+        color.setClearColor(MTLClearColor {
+            red: r,
+            green: g,
+            blue: b,
+            alpha: a,
+        });
+    }
+    if let Some(layout_depth_stencil) = &pass.layout.depth_stencil_attachment {
+        let uses_depth_stencil = pass
+            .layout
+            .subpasses
+            .iter()
+            .any(|subpass| subpass.uses_depth_stencil);
+        if uses_depth_stencil {
+            if let Some(depth) = &pass.depth_stencil_attachment {
+                let format = layout_depth_stencil.format;
+                if format_has_depth_aspect(format) {
+                    let depth_attachment = descriptor.depthAttachment();
+                    depth_attachment.setTexture(Some(subpass_attachment_texture(&depth.resource)?));
+                    depth_attachment.setLoadAction(mtl_load_action(depth.depth_load_op));
+                    depth_attachment.setStoreAction(mtl_store_action(depth.depth_store));
+                    depth_attachment.setClearDepth(f64::from(depth.depth_clear_value));
+                }
+                if format_has_stencil_aspect(format) {
+                    let stencil_attachment = descriptor.stencilAttachment();
+                    stencil_attachment
+                        .setTexture(Some(subpass_attachment_texture(&depth.resource)?));
+                    stencil_attachment.setLoadAction(mtl_load_action(depth.stencil_load_op));
+                    stencil_attachment.setStoreAction(mtl_store_action(depth.stencil_store));
+                    stencil_attachment.setClearStencil(depth.stencil_clear_value);
+                }
+            }
+        }
+    }
+    Ok(descriptor)
+}
+
+#[cfg(feature = "tiled")]
+fn subpass_color_attachment_indices(pass: &HalSubpassRenderPassCommand) -> Vec<u32> {
+    let mut indices = pass
+        .layout
+        .subpasses
+        .iter()
+        .flat_map(|subpass| subpass.color_attachment_indices.iter().copied())
+        .collect::<Vec<_>>();
+    indices.sort_unstable();
+    indices.dedup();
+    indices
+}
+
+#[cfg(feature = "tiled")]
+fn subpass_attachment_texture(
+    resource: &HalSubpassAttachmentResource,
+) -> Result<&ProtocolObject<dyn MTLTextureTrait>, HalError> {
+    #[allow(unreachable_patterns)]
+    match resource {
+        HalSubpassAttachmentResource::Persistent { texture, .. } => {
+            let HalTexture::Metal(texture) = texture else {
+                return Err(texture_error("subpass attachment is not Metal-backed"));
+            };
+            texture.inner()
+        }
+        _ => Err(texture_error(
+            "transient subpass attachments not yet supported",
+        )),
+    }
+}
+
 /// Records encode into the command stream.
 pub(super) fn encode_render_pass(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
@@ -773,6 +867,80 @@ pub(super) fn encode_render_pass(
             "render pipeline is not Metal-backed".to_owned(),
         ));
     };
+    let state = RenderEncodeState {
+        pipeline,
+        bind_buffers: &pass.bind_buffers,
+        bind_textures: &pass.bind_textures,
+        bind_external_textures: &pass.bind_external_textures,
+        bind_samplers: &pass.bind_samplers,
+        vertex_buffers: &pass.vertex_buffers,
+        index_buffer: pass.index_buffer.as_deref(),
+        indirect_buffer: pass.indirect_buffer.as_deref(),
+        viewport: pass.viewport,
+        scissor_rect: pass.scissor_rect,
+        blend_constant: pass.blend_constant,
+        stencil_reference: pass.stencil_reference,
+        occlusion_query_index: pass.occlusion_query_index,
+        draw,
+    };
+    encode_render_state(encoder, &state)
+}
+
+/// Records subpass encode into the command stream.
+#[cfg(feature = "tiled")]
+pub(super) fn encode_subpass_render_pass(
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    pass: &HalSubpassRenderPassCommand,
+) -> Result<(), HalError> {
+    for draw in &pass.draws {
+        let HalRenderPipeline::Metal(pipeline) = &draw.pipeline else {
+            return Err(shader_error(
+                "subpass render pipeline is not Metal-backed".to_owned(),
+            ));
+        };
+        let state = RenderEncodeState {
+            pipeline,
+            bind_buffers: &draw.bind_buffers,
+            bind_textures: &draw.bind_textures,
+            bind_external_textures: &[],
+            bind_samplers: &draw.bind_samplers,
+            vertex_buffers: &draw.vertex_buffers,
+            index_buffer: None,
+            indirect_buffer: None,
+            viewport: draw.viewport,
+            scissor_rect: draw.scissor_rect,
+            blend_constant: [0.0, 0.0, 0.0, 0.0],
+            stencil_reference: 0,
+            occlusion_query_index: None,
+            draw: draw.draw,
+        };
+        encode_render_state(encoder, &state)?;
+    }
+    Ok(())
+}
+
+struct RenderEncodeState<'a> {
+    pipeline: &'a MetalRenderPipeline,
+    bind_buffers: &'a [HalBoundBuffer],
+    bind_textures: &'a [HalBoundTexture],
+    bind_external_textures: &'a [HalBoundExternalTexture],
+    bind_samplers: &'a [HalBoundSampler],
+    vertex_buffers: &'a [HalBoundBuffer],
+    index_buffer: Option<&'a HalBoundIndexBuffer>,
+    indirect_buffer: Option<&'a HalBoundIndirectBuffer>,
+    viewport: Option<HalViewport>,
+    scissor_rect: Option<HalScissorRect>,
+    blend_constant: [f32; 4],
+    stencil_reference: u32,
+    occlusion_query_index: Option<u32>,
+    draw: HalDraw,
+}
+
+fn encode_render_state(
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    state: &RenderEncodeState<'_>,
+) -> Result<(), HalError> {
+    let pipeline = state.pipeline;
     encoder.setRenderPipelineState(&pipeline.inner);
     encoder.setDepthStencilState(Some(&pipeline.depth_stencil_state));
     encoder.setFrontFacingWinding(mtl_front_face(pipeline.front_face));
@@ -782,7 +950,7 @@ pub(super) fn encode_render_pass(
     } else {
         MTLDepthClipMode::Clip
     });
-    if let Some(viewport) = pass.viewport {
+    if let Some(viewport) = state.viewport {
         encoder.setViewport(MTLViewport {
             originX: f64::from(viewport.x),
             originY: f64::from(viewport.y),
@@ -792,7 +960,7 @@ pub(super) fn encode_render_pass(
             zfar: f64::from(viewport.max_depth),
         });
     }
-    if let Some(rect) = pass.scissor_rect {
+    if let Some(rect) = state.scissor_rect {
         encoder.setScissorRect(MTLScissorRect {
             x: to_ns(u64::from(rect.x))?,
             y: to_ns(u64::from(rect.y))?,
@@ -806,13 +974,13 @@ pub(super) fn encode_render_pass(
         pipeline.depth_bias_clamp,
     );
     encoder.setBlendColorRed_green_blue_alpha(
-        pass.blend_constant[0],
-        pass.blend_constant[1],
-        pass.blend_constant[2],
-        pass.blend_constant[3],
+        state.blend_constant[0],
+        state.blend_constant[1],
+        state.blend_constant[2],
+        state.blend_constant[3],
     );
-    encoder.setStencilReferenceValue(pass.stencil_reference);
-    if let Some(query_index) = pass.occlusion_query_index {
+    encoder.setStencilReferenceValue(state.stencil_reference);
+    if let Some(query_index) = state.occlusion_query_index {
         encoder.setVisibilityResultMode_offset(
             MTLVisibilityResultMode::Counting,
             to_ns(u64::from(query_index) * 8)?,
@@ -820,25 +988,24 @@ pub(super) fn encode_render_pass(
     } else {
         encoder.setVisibilityResultMode_offset(MTLVisibilityResultMode::Disabled, 0);
     }
-    for binding in &pass.bind_buffers {
+    for binding in state.bind_buffers {
         encode_render_bind_buffer(encoder, binding)?;
     }
-    encode_render_buffer_sizes(encoder, pipeline, &pass.bind_buffers, &pass.vertex_buffers)?;
-    encode_render_frag_depth_clamp(encoder, pipeline, pass.viewport)?;
-    for binding in &pass.bind_textures {
+    encode_render_buffer_sizes(encoder, pipeline, state.bind_buffers, state.vertex_buffers)?;
+    encode_render_frag_depth_clamp(encoder, pipeline, state.viewport)?;
+    for binding in state.bind_textures {
         encode_render_bind_texture(encoder, binding)?;
     }
-    for binding in &pass.bind_external_textures {
+    for binding in state.bind_external_textures {
         encode_render_bind_external_texture(encoder, binding)?;
     }
-    for binding in &pass.bind_samplers {
+    for binding in state.bind_samplers {
         encode_render_bind_sampler(encoder, binding)?;
     }
-    for binding in &pass.vertex_buffers {
+    for binding in state.vertex_buffers {
         encode_render_vertex_buffer(encoder, binding)?;
     }
-    encode_render_draw(encoder, pass, pipeline.primitive_topology, draw)?;
-    Ok(())
+    encode_render_draw(encoder, state, pipeline.primitive_topology, state.draw)
 }
 
 fn mtl_front_face(front_face: HalFrontFace) -> MTLWinding {
@@ -1252,7 +1419,7 @@ fn encode_render_vertex_buffer(
 
 fn encode_render_draw(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
-    pass: &HalRenderPass,
+    state: &RenderEncodeState<'_>,
     topology: HalPrimitiveTopology,
     draw: HalDraw,
 ) -> Result<(), HalError> {
@@ -1278,7 +1445,8 @@ fn encode_render_draw(
             base_vertex,
             first_instance,
         } => {
-            let (buffer, index_type, index_offset) = metal_index_buffer(pass, first_index)?;
+            let (buffer, index_type, index_offset) =
+                metal_index_buffer(state.index_buffer, first_index)?;
             unsafe {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount_baseVertex_baseInstance(
                     map_primitive_topology(topology),
@@ -1293,7 +1461,7 @@ fn encode_render_draw(
             }
         }
         HalDraw::Indirect { offset } => {
-            let buffer = metal_indirect_buffer(pass)?;
+            let buffer = metal_indirect_buffer(state.indirect_buffer)?;
             unsafe {
                 encoder.drawPrimitives_indirectBuffer_indirectBufferOffset(
                     map_primitive_topology(topology),
@@ -1303,8 +1471,9 @@ fn encode_render_draw(
             }
         }
         HalDraw::IndexedIndirect { offset } => {
-            let (index_buffer, index_type, index_offset) = metal_index_buffer(pass, 0)?;
-            let indirect_buffer = metal_indirect_buffer(pass)?;
+            let (index_buffer, index_type, index_offset) =
+                metal_index_buffer(state.index_buffer, 0)?;
+            let indirect_buffer = metal_indirect_buffer(state.indirect_buffer)?;
             unsafe {
                 encoder.drawIndexedPrimitives_indexType_indexBuffer_indexBufferOffset_indirectBuffer_indirectBufferOffset(
                     map_primitive_topology(topology),
@@ -1321,13 +1490,10 @@ fn encode_render_draw(
 }
 
 fn metal_index_buffer(
-    pass: &HalRenderPass,
+    bound: Option<&HalBoundIndexBuffer>,
     first_index: u32,
 ) -> Result<(&ProtocolObject<dyn MTLBufferTrait>, MTLIndexType, u64), HalError> {
-    let bound = pass
-        .index_buffer
-        .as_ref()
-        .ok_or_else(|| buffer_error("render index buffer is missing"))?;
+    let bound = bound.ok_or_else(|| buffer_error("render index buffer is missing"))?;
     let HalBuffer::Metal(buffer) = &bound.buffer else {
         return Err(buffer_error("render index buffer is not Metal-backed"));
     };
@@ -1347,12 +1513,9 @@ fn metal_index_buffer(
 }
 
 fn metal_indirect_buffer(
-    pass: &HalRenderPass,
+    bound: Option<&HalBoundIndirectBuffer>,
 ) -> Result<&ProtocolObject<dyn MTLBufferTrait>, HalError> {
-    let bound = pass
-        .indirect_buffer
-        .as_ref()
-        .ok_or_else(|| buffer_error("render indirect buffer is missing"))?;
+    let bound = bound.ok_or_else(|| buffer_error("render indirect buffer is missing"))?;
     let HalBuffer::Metal(buffer) = &bound.buffer else {
         return Err(buffer_error("render indirect buffer is not Metal-backed"));
     };
@@ -1370,6 +1533,11 @@ fn metal_index_type(format: HalIndexFormat) -> MTLIndexType {
 mod tests {
     use super::super::test_helpers::*;
     use super::*;
+    #[cfg(feature = "tiled")]
+    use crate::{
+        HalSubpassAttachmentLayout, HalSubpassColorAttachment, HalSubpassInputAttachment,
+        HalSubpassLayout, HalSubpassPassLayout, HalSubpassRenderPassCommand,
+    };
 
     /// Constructs a minimal `MetalBuffer` stub usable in unit tests.
     /// `inner` is `None` so GPU calls will fail, but `size()` works.
@@ -1524,5 +1692,87 @@ mod tests {
         let view = metal_texture_view(&texture, &binding)
             .expect("multisampled D2 texture view should allocate");
         assert_eq!(view.textureType(), MTLTextureType::Type2DMultisample);
+    }
+
+    #[cfg(feature = "tiled")]
+    fn subpass_attachment(texture: HalTexture) -> HalSubpassColorAttachment {
+        HalSubpassColorAttachment {
+            resource: HalSubpassAttachmentResource::Persistent {
+                texture,
+                resolve_target: None,
+            },
+            load_op: HalRenderLoadOp::Clear,
+            store: true,
+            clear_color: [0.25, 0.5, 0.75, 1.0],
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    fn two_subpass_shared_color_command(
+        color_attachments: Vec<HalSubpassColorAttachment>,
+    ) -> HalSubpassRenderPassCommand {
+        HalSubpassRenderPassCommand {
+            layout: HalSubpassPassLayout {
+                color_attachments: vec![HalSubpassAttachmentLayout {
+                    format: HalTextureFormat::Rgba8Unorm,
+                    sample_count: 1,
+                }],
+                depth_stencil_attachment: None,
+                subpasses: vec![
+                    HalSubpassLayout {
+                        color_attachment_indices: vec![0],
+                        uses_depth_stencil: false,
+                        input_attachments: Vec::new(),
+                    },
+                    HalSubpassLayout {
+                        color_attachment_indices: vec![0],
+                        uses_depth_stencil: false,
+                        input_attachments: vec![HalSubpassInputAttachment {
+                            group: 0,
+                            binding: 0,
+                            source_subpass: 0,
+                            source_attachment: 0,
+                        }],
+                    },
+                ],
+                dependencies: Vec::new(),
+            },
+            extent: HalExtent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            color_attachments,
+            depth_stencil_attachment: None,
+            draws: Vec::new(),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "tiled")]
+    fn subpass_color_attachment_indices_dedupes_shared_color_slot() {
+        let command = two_subpass_shared_color_command(Vec::new());
+
+        assert_eq!(subpass_color_attachment_indices(&command), vec![0]);
+    }
+
+    #[test]
+    #[cfg(all(feature = "noop", feature = "tiled"))]
+    fn subpass_render_pass_descriptor_rejects_unsupported_attachment_resource() {
+        let texture = crate::noop::NoopDevice::new()
+            .create_texture(&texture_descriptor())
+            .expect("Noop texture allocation should succeed");
+        let command =
+            two_subpass_shared_color_command(vec![subpass_attachment(HalTexture::Noop(texture))]);
+
+        let error = subpass_render_pass_descriptor(&command)
+            .expect_err("unsupported attachment resource should be rejected");
+        assert!(matches!(
+            error,
+            HalError::BufferOperationFailed {
+                backend: "metal",
+                message: "subpass attachment is not Metal-backed"
+            }
+        ));
     }
 }

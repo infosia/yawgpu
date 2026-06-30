@@ -31,11 +31,13 @@ use crate::{
     HalCopy, HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalDraw, HalError,
     HalExtent3d, HalFilterMode, HalFrontFace, HalIndexFormat, HalMipmapFilterMode,
     HalMslBufferSizeBinding, HalPresentMode, HalPrimitiveTopology, HalQueryKind, HalQuerySet,
-    HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor, HalResolveQuerySet, HalSampler,
-    HalSamplerDescriptor, HalShaderSource, HalStencilFaceState, HalStencilOperation,
-    HalSurfaceConfiguration, HalTexture, HalTextureClear, HalTextureCopy, HalTextureDescriptor,
-    HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
+    HalRenderLoadOp, HalRenderPass, HalRenderPipeline, HalRenderPipelineDescriptor,
+    HalResolveQuerySet, HalSampler, HalSamplerDescriptor, HalShaderSource, HalStencilFaceState,
+    HalStencilOperation, HalSurfaceConfiguration, HalTexture, HalTextureClear, HalTextureCopy,
+    HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
+#[cfg(feature = "tiled")]
+use crate::{HalSubpassAttachmentResource, HalSubpassRenderPassCommand};
 
 const BACKEND: &str = "metal";
 

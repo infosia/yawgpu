@@ -536,7 +536,7 @@ impl HalDevice {
             #[cfg(feature = "vulkan")]
             Self::Vulkan(_) => Err(command::subpass_not_implemented_error()),
             #[cfg(feature = "metal")]
-            Self::Metal(_) => Err(command::subpass_not_implemented_error()),
+            Self::Metal(_) => Ok(HalSubpassRenderPass::Metal),
             #[cfg(feature = "gles")]
             Self::Gles(_) => Err(HalError::BackendUnavailable { backend: "gles" }),
         }
@@ -560,9 +560,7 @@ impl HalDevice {
                 Err(command::subpass_not_implemented_error())
             }
             #[cfg(feature = "metal")]
-            (Self::Metal(_), HalSubpassRenderPass::Metal) => {
-                Err(command::subpass_not_implemented_error())
-            }
+            (Self::Metal(_), HalSubpassRenderPass::Metal) => Ok(()),
             _ => Err(HalError::BufferOperationFailed {
                 backend: "subpass",
                 message: "subpass pass backend does not match device",
@@ -582,9 +580,7 @@ impl HalDevice {
                 Err(command::subpass_not_implemented_error())
             }
             #[cfg(feature = "metal")]
-            (Self::Metal(_), HalSubpassRenderPass::Metal) => {
-                Err(command::subpass_not_implemented_error())
-            }
+            (Self::Metal(_), HalSubpassRenderPass::Metal) => Ok(()),
             _ => Err(HalError::BufferOperationFailed {
                 backend: "subpass",
                 message: "subpass pass backend does not match device",
