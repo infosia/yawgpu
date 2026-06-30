@@ -181,6 +181,18 @@ broken into sub-slices, mirroring how Slice 1 ran (shim → core → HAL → FFI
     the deleted code used the older `HalBufferBindingKind::InputAttachment`, which no
     longer exists). The map computation can still be unit-tested in isolation
     (`compute_subpass_color_slots`) before the HAL hookup.
+    - **2.3b (core map + codegen) DONE** (commit `f07ce2d`): `compute_subpass_color_slots`
+      + `ReflectedModule::generate_render_fragment_msl` threads the map into
+      `Bindings.input_attachment_color_index`; `select_render_shader_source` takes
+      `subpass_color_slots` (existing callers pass `&[]`). Tests prove NON-identity
+      application (`source_attachment=1` → MSL `[[color(1)]]`, not `[[color(0)]]`;
+      empty map → clean `Err`). Noop-tested.
+    - **2.3b-2 (NEXT) — subpass pipeline object + device entry + Metal HAL.** Restore
+      `SubpassRenderPipelineDescriptor` / `new_subpass` / `SubpassPipelineCompatibility`,
+      a device entry to create a `SubpassPassLayout` + a subpass render pipeline (which
+      calls `compute_subpass_color_slots` and feeds `select_render_shader_source`), and
+      the Metal HAL hookup (likely near-zero, like Slice 1.3). Real-Metal e2e waits on
+      the 2.3c encoder.
   - **2.3c** — `SubpassRenderPass` runtime encoder (begin / `next_subpass` / draw /
     `set_bind_group` / `end` + `resolve_subpass_render_pass_resources`) + the device
     entry points that create pass layouts / subpass passes. Needs 2.3a+b.
