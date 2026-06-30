@@ -43,7 +43,15 @@ GLFW, and Linux windowed examples are not enabled in this phase.
 
 `capture` renders a solid color to an offscreen RGBA8 texture, copies it via T2B to a readback buffer, and writes `red.png` in the binary's current working directory.
 
-`tiled_deferred` demonstrates yawgpu's tiled extension from C: it records a two-subpass offscreen pass, reads a G-buffer through a subpass input, copies the persistent output texture to a readback buffer, validates the center pixel, and writes `tiled_deferred.png`. Build it with `-DYAWGPU_EXTENSIONS=tiled` on a backend with native subpass-input reads such as Metal or Vulkan; MoltenVK does not support this path. Without that extension the example builds as a stub that prints `tiled extension not enabled`.
+`tiled_deferred` demonstrates yawgpu's `tiled` (TBDR / multi-subpass) vendor extension from C. It records a **two-subpass** offscreen pass: subpass 0 writes a G-buffer (albedo + a packed normal) to two color attachments, then subpass 1 reads them back as **input attachments** (Metal `[[color(N)]]` programmable-blend tile reads; Vulkan `SubpassData` `INPUT_ATTACHMENT` descriptors — tile memory, never a round-trip through main memory) and writes the shaded result. It copies the final target to a readback buffer, prints the center pixel, and writes `tiled_deferred.png`. The same C code + shaders run on **both Metal and Vulkan** (including MoltenVK, which executes genuine multi-subpass input attachments) and produce identical output — the portable contract: the fragment writes its global `@location`, `fragment.targets` lists only the written slots, and no bind group is set for the input-attachment-only group. Opt-in (off by default):
+
+```sh
+cmake -S examples -B examples/build -DYAWGPU_FEATURE=metal  -DYAWGPU_TILED=ON   # or -DYAWGPU_FEATURE=vulkan
+cmake --build examples/build --target tiled_deferred
+YAWGPU_BACKEND=metal  ./examples/build/tiled_deferred/tiled_deferred
+```
+
+`-DYAWGPU_TILED=ON` adds the `tiled` cargo feature to `libyawgpu` and enables this example.
 
 `surface_smoke` opens a window, clears the swapchain to a slate color for about 60 frames or until the window is closed, and then exits.
 

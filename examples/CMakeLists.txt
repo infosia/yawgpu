@@ -37,6 +37,9 @@ set(YAWGPU_FEATURE "" CACHE STRING "Optional yawgpu cargo feature: metal or vulk
 # Opt-in: also build libyawgpu with the `shader-passthrough` vendor feature and
 # enable the `triangle_passthrough` example (SPIR-V/MSL native shader passthrough).
 option(YAWGPU_SHADER_PASSTHROUGH "Build the shader-passthrough example (adds the shader-passthrough cargo feature)" OFF)
+# Opt-in: also build libyawgpu with the `tiled` vendor feature and enable the
+# `tiled_deferred` example (multi-subpass deferred rendering via input attachments).
+option(YAWGPU_TILED "Build the tiled-deferred example (adds the tiled cargo feature)" OFF)
 
 if(YAWGPU_PROFILE STREQUAL "release")
     set(YAWGPU_CARGO_PROFILE_ARG --release)
@@ -52,6 +55,9 @@ if(NOT YAWGPU_FEATURE STREQUAL "")
 endif()
 if(YAWGPU_SHADER_PASSTHROUGH)
     list(APPEND YAWGPU_CARGO_FEATURES shader-passthrough)
+endif()
+if(YAWGPU_TILED)
+    list(APPEND YAWGPU_CARGO_FEATURES tiled)
 endif()
 list(REMOVE_DUPLICATES YAWGPU_CARGO_FEATURES)
 
@@ -181,6 +187,9 @@ add_subdirectory(enumerate_adapters)
 add_subdirectory(compute)
 add_subdirectory(device_info)
 add_subdirectory(capture)
+if(YAWGPU_TILED)
+    add_subdirectory(tiled_deferred)
+endif()
 if(YAWGPU_WINDOWED_EXAMPLES)
     add_subdirectory(surface_smoke)
     add_subdirectory(triangle)
