@@ -241,6 +241,7 @@ mod imp {
             n_ov: usize,
             disable_robustness: bool,
             use_vulkan_memory_model: bool,
+            framebuffer_fetch_descriptor_set: u32,
             words_out: *mut *mut u32,
             n_words_out: *mut usize,
             err: *mut *mut c_char,
@@ -657,6 +658,7 @@ mod imp {
             overrides: &[OverrideValue],
             robust: bool,
             use_vulkan_memory_model: bool,
+            framebuffer_fetch_descriptor_set: u32,
         ) -> Result<Vec<u32>, String> {
             let ep = cstring(entry_point, "entry point")?;
             let raw_bindings_owned = bindings.as_raw();
@@ -675,6 +677,7 @@ mod imp {
                     raw_overrides.len(),
                     !robust,
                     use_vulkan_memory_model,
+                    framebuffer_fetch_descriptor_set,
                     &mut words,
                     &mut len,
                     &mut err,
@@ -1762,6 +1765,7 @@ mod imp {
             _overrides: &[OverrideValue],
             _robust: bool,
             _use_vulkan_memory_model: bool,
+            _framebuffer_fetch_descriptor_set: u32,
         ) -> Result<Vec<u32>, String> {
             Err(UNAVAILABLE.to_owned())
         }
@@ -2481,11 +2485,11 @@ fn main() {
             .unwrap();
         assert!(msl.source.contains("kernel"), "MSL:\n{}", msl.source);
         let spirv = program
-            .generate_spirv("cs", &bindings, &[], true, false)
+            .generate_spirv("cs", &bindings, &[], true, false, 0)
             .unwrap();
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
         let spirv_with_vulkan_memory_model = program
-            .generate_spirv("cs", &bindings, &[], true, true)
+            .generate_spirv("cs", &bindings, &[], true, true, 0)
             .unwrap();
         assert_eq!(
             spirv_with_vulkan_memory_model.first().copied(),
@@ -2508,7 +2512,7 @@ fn main() {
 "#;
         let program = Program::parse(wgsl, false, &[]).unwrap();
         let err = program
-            .generate_spirv("main", &Bindings::default(), &[], true, false)
+            .generate_spirv("main", &Bindings::default(), &[], true, false, 0)
             .unwrap_err();
         assert!(!err.is_empty());
     }
@@ -2604,7 +2608,7 @@ fn cs() {
                 .unwrap();
             assert!(!msl.source.is_empty());
             let spirv = program
-                .generate_spirv(ep, &bindings, &[], true, false)
+                .generate_spirv(ep, &bindings, &[], true, false, 0)
                 .unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));
         }
@@ -2633,7 +2637,7 @@ fn cs() {
         assert!(msl.source.contains("[[color(0)]]"), "MSL:\n{}", msl.source);
 
         let spirv = program
-            .generate_spirv("fs", &Bindings::default(), &[], true, false)
+            .generate_spirv("fs", &Bindings::default(), &[], true, false, 0)
             .unwrap();
         assert!(!spirv.is_empty());
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
@@ -3088,10 +3092,10 @@ fn cs() { _ = u.value; }
         assert_ne!(default_msl, remapped_msl);
 
         let default_spv = program
-            .generate_spirv("cs", &default_bindings, &[], true, false)
+            .generate_spirv("cs", &default_bindings, &[], true, false, 0)
             .unwrap();
         let remapped_spv = program
-            .generate_spirv("cs", &remapped, &[], true, false)
+            .generate_spirv("cs", &remapped, &[], true, false, 0)
             .unwrap();
         assert_ne!(default_spv, remapped_spv);
         assert!(spirv_has_binding_decoration(&remapped_spv, 7));

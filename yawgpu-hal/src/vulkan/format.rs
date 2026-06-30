@@ -118,7 +118,7 @@ pub(super) fn map_texture_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
         flags |= vk::ImageUsageFlags::STORAGE;
     }
     if usage.render_attachment {
-        flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
+        flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::INPUT_ATTACHMENT;
     }
     flags
 }

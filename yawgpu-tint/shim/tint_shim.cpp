@@ -423,19 +423,20 @@ const tint::inspector::EntryPoint* find_entry_point(const YawgpuTintProgram* pro
 
 std::unordered_map<uint32_t, tint::BindingPoint> color_bindings_for_entry_point(
     const YawgpuTintProgram* program,
-    const char* ep) {
+    const char* ep,
+    uint32_t framebuffer_fetch_descriptor_set) {
     std::unordered_map<uint32_t, tint::BindingPoint> bindings;
     const auto* entry = find_entry_point(program, ep);
     if (entry == nullptr || entry->stage != tint::inspector::PipelineStage::kFragment) {
         return bindings;
     }
 
-    uint32_t binding = 0;
     for (const auto& input : entry->input_variables) {
         if (input.attributes.color.has_value()) {
-            // Placeholder framebuffer-fetch binding scheme; HAL will finalize layout wiring.
-            bindings.emplace(input.attributes.color.value(),
-                             tint::BindingPoint{.group = 66u, .binding = binding++});
+            uint32_t slot = input.attributes.color.value();
+            bindings.emplace(
+                slot,
+                tint::BindingPoint{.group = framebuffer_fetch_descriptor_set, .binding = slot});
         }
     }
     return bindings;
@@ -1022,6 +1023,7 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
                                 size_t n_ov,
                                 bool disable_robustness,
                                 bool use_vulkan_memory_model,
+                                uint32_t framebuffer_fetch_descriptor_set,
                                 uint32_t** words_out,
                                 size_t* n_words_out,
                                 char** err) {
@@ -1053,7 +1055,8 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
                                ? tint::GenerateBindings(ir.Get(), entry_point, false, false)
                                : make_bindings(bindings);
         options.colour_index_to_binding_point =
-            color_bindings_for_entry_point(program, entry_point.c_str());
+            color_bindings_for_entry_point(
+                program, entry_point.c_str(), framebuffer_fetch_descriptor_set);
         auto override_cfg = make_override_config(program, ov, n_ov);
         if (override_cfg != tint::Success) {
             set_error(err, override_cfg.Failure());

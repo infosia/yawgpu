@@ -4,9 +4,10 @@ use std::sync::Arc;
 use yawgpu_hal::{
     HalBackend, HalBlendComponent, HalBlendFactor, HalBlendOperation, HalBlendState,
     HalColorTargetState, HalCompareFunction, HalCullMode, HalDepthStencilState,
-    HalDescriptorBinding, HalDevice, HalFrontFace, HalPrimitiveTopology, HalRenderPipeline,
-    HalRenderPipelineDescriptor, HalShaderSource, HalStencilFaceState, HalStencilOperation,
-    HalVertexAttribute, HalVertexBufferLayout, HalVertexFormat, HalVertexStepMode,
+    HalDescriptorBinding, HalDescriptorBindingKind, HalDevice, HalFrontFace, HalPrimitiveTopology,
+    HalRenderPipeline, HalRenderPipelineDescriptor, HalShaderSource, HalStencilFaceState,
+    HalStencilOperation, HalVertexAttribute, HalVertexBufferLayout, HalVertexFormat,
+    HalVertexStepMode,
 };
 
 use crate::bind_group_layout::*;
@@ -493,6 +494,7 @@ pub(crate) struct RenderPipelineInner {
     pub(crate) vertex_buffer_bindings: Vec<MetalVertexBufferBinding>,
     pub(crate) hal: Option<HalRenderPipeline>,
     pub(crate) bind_group_layouts: Vec<Arc<BindGroupLayout>>,
+    pub(crate) framebuffer_fetch_color_slots: Vec<u32>,
     pub(crate) is_error: bool,
 }
 
@@ -543,6 +545,10 @@ impl RenderPipeline {
         let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
         let vertex_buffer_bindings =
             metal_vertex_buffer_binding_map(&descriptor.vertex.buffers, &metal_bindings);
+        let framebuffer_fetch_color_slots = render_pipeline_framebuffer_fetch_color_slots(
+            &descriptor,
+            fragment_entry_name.as_deref(),
+        );
         let (hal, backend_error) = if is_error {
             (None, None)
         } else {
@@ -553,6 +559,7 @@ impl RenderPipeline {
                 fragment_entry_name.as_deref(),
                 &metal_bindings,
                 &vertex_buffer_bindings,
+                &bind_group_layouts,
             )
         };
         let is_error = is_error || backend_error.is_some();
@@ -571,6 +578,7 @@ impl RenderPipeline {
                     vertex_buffer_bindings,
                     hal,
                     bind_group_layouts,
+                    framebuffer_fetch_color_slots,
                     is_error,
                 }),
             },
@@ -746,6 +754,7 @@ pub(crate) fn create_hal_render_pipeline(
     fragment_entry_name: Option<&str>,
     metal_bindings: &[MetalBufferBinding],
     vertex_buffer_bindings: &[MetalVertexBufferBinding],
+    bind_group_layouts: &[Arc<BindGroupLayout>],
 ) -> (Option<HalRenderPipeline>, Option<String>) {
     let Some(hal_device) = hal_device else {
         return (None, None);
@@ -778,6 +787,7 @@ pub(crate) fn create_hal_render_pipeline(
             metal_bindings,
             vertex_buffer_bindings,
             hal_device.vulkan_memory_model(),
+            bind_group_layouts,
         ) {
             Ok(selection) => selection,
             Err(message) => return (None, Some(message)),
@@ -812,6 +822,7 @@ pub(crate) fn select_render_shader_source(
     metal_bindings: &[MetalBufferBinding],
     vertex_buffer_bindings: &[MetalVertexBufferBinding],
     vulkan_memory_model: bool,
+    bind_group_layouts: &[Arc<BindGroupLayout>],
 ) -> Result<
     (
         HalShaderSource,
@@ -1007,12 +1018,26 @@ pub(crate) fn select_render_shader_source(
             let vertex_module = descriptor.vertex.shader.module.reflected().ok_or_else(|| {
                 "render pipeline requires a reflected vertex shader module".to_owned()
             })?;
+            let framebuffer_fetch_descriptor_set =
+                framebuffer_fetch_descriptor_set(bind_group_layouts)?;
             let vertex = vertex_module.generate_spirv(
                 vertex_entry_name,
                 frontend::ShaderStage::Vertex,
                 &vertex_pipeline_constants,
                 vulkan_memory_model,
+                framebuffer_fetch_descriptor_set,
             )?;
+            let fragment_color_slots = match (fragment, fragment_entry_name) {
+                (Some(fragment), Some(fragment_entry_name)) => fragment
+                    .shader
+                    .module
+                    .reflected()
+                    .ok_or_else(|| {
+                        "render pipeline requires a reflected fragment shader module".to_owned()
+                    })?
+                    .fragment_color_inputs(fragment_entry_name),
+                _ => Vec::new(),
+            };
             let fragment = match (fragment, fragment_entry_name) {
                 (Some(fragment), Some(fragment_entry_name)) => {
                     let fragment_module = fragment.shader.module.reflected().ok_or_else(|| {
@@ -1025,6 +1050,7 @@ pub(crate) fn select_render_shader_source(
                             "render pipeline fragment constants were not resolved".to_owned()
                         })?,
                         vulkan_memory_model,
+                        framebuffer_fetch_descriptor_set,
                     )?)
                 }
                 (None, None) => None,
@@ -1034,11 +1060,19 @@ pub(crate) fn select_render_shader_source(
                     );
                 }
             };
+            let mut descriptor_bindings = hal_descriptor_bindings(metal_bindings);
+            descriptor_bindings.extend(fragment_color_slots.into_iter().map(|slot| {
+                HalDescriptorBinding {
+                    group: framebuffer_fetch_descriptor_set,
+                    binding: slot,
+                    kind: HalDescriptorBindingKind::InputAttachment { color_slot: slot },
+                }
+            }));
             Ok((
                 HalShaderSource::SpirVStages { vertex, fragment },
                 vertex_entry_name.to_owned(),
                 fragment_entry_name.map(str::to_owned),
-                hal_descriptor_bindings(metal_bindings),
+                descriptor_bindings,
             ))
         }
         #[cfg(feature = "gles")]
@@ -2101,6 +2135,29 @@ pub(crate) fn validate_fragment_color_inputs(
         }
     }
     Ok(())
+}
+
+/// Returns the dedicated Vulkan descriptor set used for framebuffer-fetch inputs.
+pub(crate) fn framebuffer_fetch_descriptor_set(
+    bind_group_layouts: &[Arc<BindGroupLayout>],
+) -> Result<u32, String> {
+    u32::try_from(bind_group_layouts.len())
+        .map_err(|_| "framebuffer-fetch descriptor set index is too large".to_owned())
+}
+
+fn render_pipeline_framebuffer_fetch_color_slots(
+    descriptor: &RenderPipelineDescriptor,
+    fragment_entry: Option<&str>,
+) -> Vec<u32> {
+    let Some(fragment_entry) = fragment_entry else {
+        return Vec::new();
+    };
+    descriptor
+        .fragment
+        .as_ref()
+        .and_then(|fragment| fragment.shader.module.reflected())
+        .map(|module| module.fragment_color_inputs(fragment_entry))
+        .unwrap_or_default()
 }
 
 pub(crate) fn color_attachment_bytes_per_sample(
@@ -3421,6 +3478,7 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
             &[],
             &[],
             false,
+            &[],
         )
         .expect("separate WGSL modules should generate per-stage MSL");
 
@@ -3856,6 +3914,7 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
             &[],
             &[],
             false,
+            &[],
         )
         .expect("MSL passthrough should select Metal MSL stages");
 
@@ -3883,6 +3942,7 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
             &[],
             &[],
             false,
+            &[],
         )
         .expect_err("MSL passthrough must reject Vulkan");
 
@@ -3903,6 +3963,7 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
             &[],
             &[],
             false,
+            &[],
         )
         .expect("SPIR-V passthrough should select Vulkan SPIR-V stages");
 
@@ -3930,6 +3991,7 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
             &[],
             &[],
             false,
+            &[],
         )
         .expect_err("SPIR-V passthrough must reject Metal");
 
@@ -3970,6 +4032,7 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
             &[],
             &[],
             false,
+            &[],
         )
         .expect("WGSL should generate GLES GLSL stages");
 
@@ -4162,6 +4225,7 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
             &external,
             &[],
             false,
+            &[],
         )
         .expect_err("Vulkan must reject external textures");
         assert_eq!(

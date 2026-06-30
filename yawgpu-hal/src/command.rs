@@ -147,6 +147,11 @@ pub enum HalDescriptorBindingKind {
     },
     /// Sampler variant.
     Sampler,
+    /// Input attachment self-read from the render pass color target at `color_slot`.
+    InputAttachment {
+        /// Color attachment slot read by this input attachment.
+        color_slot: u32,
+    },
 }
 
 /// Enumerates HAL storage texture access values.
@@ -326,6 +331,8 @@ pub struct HalRenderPass {
     pub pipeline: Option<HalRenderPipeline>,
     /// Color targets in attachment slot order; `None` is an empty slot.
     pub color_targets: Vec<Option<HalRenderColorTarget>>,
+    /// Color attachment slots read as framebuffer-fetch input attachments.
+    pub framebuffer_fetch_color_slots: Vec<u32>,
     /// Optional depth-stencil attachment.
     pub depth_stencil_attachment: Option<HalRenderDepthStencilAttachment>,
     /// Bind buffers.

@@ -1153,6 +1153,11 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
     Some(HalCopy::RenderPass(HalRenderPass {
         pipeline,
         color_targets: hal_render_color_targets(&pass.color_attachments)?,
+        framebuffer_fetch_color_slots: pass
+            .pipeline
+            .as_ref()
+            .map(|pipeline| pipeline.inner.framebuffer_fetch_color_slots.clone())
+            .unwrap_or_default(),
         depth_stencil_attachment: hal_render_depth_stencil_attachment(
             pass.depth_stencil_attachment.as_ref(),
         )?,

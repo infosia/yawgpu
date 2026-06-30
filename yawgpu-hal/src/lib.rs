@@ -1351,6 +1351,7 @@ mod tests {
         queue.submit_copies(&[HalCopy::RenderPass(HalRenderPass {
             pipeline: None,
             color_targets: Vec::new(),
+            framebuffer_fetch_color_slots: Vec::new(),
             depth_stencil_attachment: Some(HalRenderDepthStencilAttachment {
                 texture: depth,
                 format: HalTextureFormat::Depth32Float,
