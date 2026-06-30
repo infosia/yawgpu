@@ -240,6 +240,20 @@ broken into sub-slices, mirroring how Slice 1 ran (shim → core → HAL → FFI
   auto-derive the input format from the pass layout + auto-skip input-attachment-only
   groups in draw validation. Block 55 documents this contract.
 
+  **UPDATE (user chose auto-derive; commit `f80fc0d`):** input-format auto-derivation is
+  DONE — it was REQUIRED for portability, not optional (Metal lowers `input_attachment` to a
+  `[[color(N)]]` color target, Vulkan to an INPUT_ATTACHMENT descriptor, so a portable client
+  can't write backend-specific targets). New portable contract: WGSL writes GLOBAL
+  `@location(slot)`; `fragment.targets` carries ONLY the written slots; input slots are
+  omitted and the core supplies them per backend (Metal read-only color target from the pass
+  layout; Vulkan `VK_ATTACHMENT_UNUSED` color ref + descriptor). **Both real-GPU e2es pass:
+  `e2e_metal_tiled` on the M2; `e2e_vulkan_tiled` validation-clean (0 VUIDs, Khronos layers)
+  AND pixel-correct on MoltenVK** — a genuine multi-subpass input attachment executes on
+  MoltenVK (unlike the Slice-1.4 `@color` self-read). **TBDR multi-subpass is complete +
+  GPU-verified on both backends.** Only deferred ergonomics nicety: auto-skip
+  input-attachment-only bind groups in draw validation (client currently sets an empty bind
+  group); not a blocker.
+
   **Slice-order realization (2026-06-30):** the real Metal/Vulkan subpass e2e tests are
   C-FFI integration tests (`yawgpu/tests/e2e_*.rs` use `yawgpu::native`), so they CANNOT
   run until the vendor FFI exists. Revised order: **2.3c-3 (done) → 2.6 FFI → 2.7a Metal
