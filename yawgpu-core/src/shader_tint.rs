@@ -75,6 +75,7 @@ impl ReflectedModule {
             true,
             vulkan_memory_model,
             framebuffer_fetch_descriptor_set,
+            false,
         )
     }
 
@@ -278,6 +279,7 @@ impl ReflectedModule {
             true,
             false,
             0,
+            false,
         )?;
         let literal_size = spirv_local_size(&spirv)
             .ok_or_else(|| "compute entry point workgroup size reflection failed".to_owned())?;

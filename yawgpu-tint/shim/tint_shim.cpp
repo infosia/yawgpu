@@ -89,7 +89,7 @@ bool all_remaps_empty(const YawgpuTintBindings* bindings) {
     return bindings == nullptr ||
            (bindings->n_uniform == 0 && bindings->n_storage == 0 && bindings->n_texture == 0 &&
             bindings->n_storage_texture == 0 && bindings->n_sampler == 0 &&
-            bindings->n_external_texture == 0);
+            bindings->n_external_texture == 0 && bindings->n_input_attachment_color_index == 0);
 }
 
 void fill_binding_map(tint::BindingMap& map,
@@ -596,6 +596,7 @@ void fill_resource_binding(const tint::inspector::ResourceBinding& binding,
     out->size = binding.size;
     out->has_array_size = binding.array_size.has_value();
     out->array_size = binding.array_size.value_or(0);
+    out->input_attachment_index = binding.input_attachment_index;
 }
 
 double override_default_value(const tint::sem::GlobalVariable* global,
@@ -698,6 +699,8 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
         if (allow_framebuffer_fetch) {
             options.allowed_features.extensions.insert(
                 tint::wgsl::Extension::kChromiumExperimentalFramebufferFetch);
+            options.allowed_features.extensions.insert(
+                tint::wgsl::Extension::kChromiumInternalInputAttachments);
         }
         tint::Program parsed = tint::wgsl::reader::Parse(out->file.get(), options);
         if (!parsed.IsValid()) {
@@ -888,6 +891,13 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         options.bindings = all_remaps_empty(bindings)
                                ? tint::GenerateBindings(ir.Get(), entry_point, true, true)
                                : make_bindings(bindings);
+        if (bindings != nullptr && bindings->input_attachment_color_index != nullptr) {
+            for (size_t i = 0; i < bindings->n_input_attachment_color_index; ++i) {
+                const auto& e = bindings->input_attachment_color_index[i];
+                options.input_attachment_to_color_index[tint::BindingPoint{e.group, e.binding}] =
+                    e.color_slot;
+            }
+        }
         options.immediate_binding_point =
             choose_immediate_binding_point(options.bindings, buffer_sizes_slot);
         const tint::inspector::EntryPoint* ep_info = find_entry_point(program, entry_point.c_str());
@@ -1024,6 +1034,7 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
                                 bool disable_robustness,
                                 bool use_vulkan_memory_model,
                                 uint32_t framebuffer_fetch_descriptor_set,
+                                bool multisampled_input_attachment,
                                 uint32_t** words_out,
                                 size_t* n_words_out,
                                 char** err) {
@@ -1051,6 +1062,7 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
         options.entry_point_name = entry_point;
         options.disable_robustness = disable_robustness;
         options.extensions.use_vulkan_memory_model = use_vulkan_memory_model;
+        options.multisampled_input_attachment = multisampled_input_attachment;
         options.bindings = all_remaps_empty(bindings)
                                ? tint::GenerateBindings(ir.Get(), entry_point, false, false)
                                : make_bindings(bindings);
