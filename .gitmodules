@@ -1,3 +1,4 @@
 [submodule "third_party/dawn"]
 	path = third_party/dawn
-	url = https://dawn.googlesource.com/dawn/
+	url = https://github.com/infosia/dawn.git
+	branch = feature/tiled
