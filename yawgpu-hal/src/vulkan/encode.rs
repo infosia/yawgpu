@@ -90,6 +90,10 @@ pub(super) fn record_and_submit_copies(
                         render_passes.push(render_pass);
                     }
                 }
+                #[cfg(feature = "tiled")]
+                HalCopy::SubpassRenderPass(_) => {
+                    return Err(crate::command::subpass_not_implemented_error());
+                }
             }
         }
         unsafe {
@@ -376,6 +380,8 @@ fn retain_copy_resources(copy: &HalCopy, retained: &mut Vec<RetainedResource>) {
                 retain_hal_buffer(&bound.buffer, retained);
             }
         }
+        #[cfg(feature = "tiled")]
+        HalCopy::SubpassRenderPass(_) => {}
     }
 }
 
@@ -421,6 +427,8 @@ fn surface_pending_from_copy(copy: &HalCopy) -> Option<Arc<Mutex<SurfacePendingS
         | HalCopy::ClearTexture(_)
         | HalCopy::ResolveQuerySet(_)
         | HalCopy::ComputePass(_) => None,
+        #[cfg(feature = "tiled")]
+        HalCopy::SubpassRenderPass(_) => None,
         HalCopy::BufferToTexture(copy) | HalCopy::TextureToBuffer(copy) => {
             surface_pending_from_hal_texture(&copy.texture)
         }

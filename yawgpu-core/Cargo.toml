@@ -7,7 +7,7 @@ license.workspace = true
 [features]
 gles = ["yawgpu-hal/gles"]
 shader-passthrough = []
-tiled = ["yawgpu-tint/tiled"]
+tiled = ["yawgpu-tint/tiled", "yawgpu-hal/tiled"]
 
 [dependencies]
 yawgpu-hal = { path = "../yawgpu-hal" }

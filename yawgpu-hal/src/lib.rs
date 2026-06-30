@@ -20,6 +20,13 @@ pub use command::{
     HalScissorRect, HalStorageTextureAccess, HalTextureAspect, HalTextureClear, HalTextureCopy,
     HalTextureViewDimension, HalViewport,
 };
+#[cfg(feature = "tiled")]
+pub use command::{
+    HalSubpassAttachmentLayout, HalSubpassAttachmentResource, HalSubpassColorAttachment,
+    HalSubpassDependency, HalSubpassDependencyType, HalSubpassDepthStencilAttachment,
+    HalSubpassDraw, HalSubpassInputAttachment, HalSubpassLayout, HalSubpassPassLayout,
+    HalSubpassRenderPass, HalSubpassRenderPassCommand,
+};
 pub use descriptors::{
     HalBlendComponent, HalBlendFactor, HalBlendOperation, HalBlendState, HalColorTargetState,
     HalCullMode, HalDepthStencilState, HalExtent3d, HalFrontFace, HalOrigin3d,
@@ -515,6 +522,73 @@ impl HalDevice {
             Self::Metal(device) => device.create_query_set(kind, count).map(HalQuerySet::Metal),
             #[cfg(feature = "gles")]
             Self::Gles(_) => Ok(HalQuerySet::Gles { count }),
+        }
+    }
+
+    /// Begins a subpass render pass.
+    #[cfg(feature = "tiled")]
+    pub fn begin_subpass_render_pass(&self) -> Result<HalSubpassRenderPass, HalError> {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => Ok(HalSubpassRenderPass::Noop(
+                command::HalNoopSubpassRenderPass::new(),
+            )),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => Err(command::subpass_not_implemented_error()),
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => Err(command::subpass_not_implemented_error()),
+            #[cfg(feature = "gles")]
+            Self::Gles(_) => Err(HalError::BackendUnavailable { backend: "gles" }),
+        }
+    }
+
+    /// Advances a subpass render pass.
+    #[cfg(feature = "tiled")]
+    pub fn next_subpass_render_pass(
+        &self,
+        pass: &mut HalSubpassRenderPass,
+    ) -> Result<(), HalError> {
+        #[allow(unreachable_patterns)]
+        match (self, pass) {
+            #[cfg(feature = "noop")]
+            (Self::Noop(_), HalSubpassRenderPass::Noop(pass)) => {
+                pass.next_subpass();
+                Ok(())
+            }
+            #[cfg(feature = "vulkan")]
+            (Self::Vulkan(_), HalSubpassRenderPass::Vulkan) => {
+                Err(command::subpass_not_implemented_error())
+            }
+            #[cfg(feature = "metal")]
+            (Self::Metal(_), HalSubpassRenderPass::Metal) => {
+                Err(command::subpass_not_implemented_error())
+            }
+            _ => Err(HalError::BufferOperationFailed {
+                backend: "subpass",
+                message: "subpass pass backend does not match device",
+            }),
+        }
+    }
+
+    /// Ends a subpass render pass.
+    #[cfg(feature = "tiled")]
+    pub fn end_subpass_render_pass(&self, pass: HalSubpassRenderPass) -> Result<(), HalError> {
+        #[allow(unreachable_patterns)]
+        match (self, pass) {
+            #[cfg(feature = "noop")]
+            (Self::Noop(_), HalSubpassRenderPass::Noop(_)) => Ok(()),
+            #[cfg(feature = "vulkan")]
+            (Self::Vulkan(_), HalSubpassRenderPass::Vulkan) => {
+                Err(command::subpass_not_implemented_error())
+            }
+            #[cfg(feature = "metal")]
+            (Self::Metal(_), HalSubpassRenderPass::Metal) => {
+                Err(command::subpass_not_implemented_error())
+            }
+            _ => Err(HalError::BufferOperationFailed {
+                backend: "subpass",
+                message: "subpass pass backend does not match device",
+            }),
         }
     }
 
@@ -1240,6 +1314,57 @@ mod tests {
 
         assert!(matches!(pipeline, HalRenderPipeline::Noop));
         Ok(())
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn hal_device_subpass_render_pass_noop_advances_and_ends() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let mut pass = device.begin_subpass_render_pass()?;
+
+        match &pass {
+            HalSubpassRenderPass::Noop(pass) => assert_eq!(pass.active_subpass(), 0),
+            #[cfg(any(feature = "vulkan", feature = "metal"))]
+            _ => panic!("unexpected non-Noop subpass pass"),
+        }
+        device.next_subpass_render_pass(&mut pass)?;
+        match &pass {
+            HalSubpassRenderPass::Noop(pass) => assert_eq!(pass.active_subpass(), 1),
+            #[cfg(any(feature = "vulkan", feature = "metal"))]
+            _ => panic!("unexpected non-Noop subpass pass"),
+        }
+        device.end_subpass_render_pass(pass)
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn hal_subpass_render_pass_command_constructs_with_empty_draws() {
+        let command = HalSubpassRenderPassCommand {
+            layout: HalSubpassPassLayout {
+                color_attachments: vec![HalSubpassAttachmentLayout {
+                    format: HalTextureFormat::Rgba8Unorm,
+                    sample_count: 1,
+                }],
+                depth_stencil_attachment: None,
+                subpasses: vec![HalSubpassLayout {
+                    color_attachment_indices: vec![0],
+                    uses_depth_stencil: false,
+                    input_attachments: Vec::new(),
+                }],
+                dependencies: Vec::new(),
+            },
+            extent: HalExtent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            color_attachments: Vec::new(),
+            depth_stencil_attachment: None,
+            draws: Vec::new(),
+        };
+
+        assert_eq!(command.layout.subpasses.len(), 1);
+        assert!(command.draws.is_empty());
     }
 
     #[test]

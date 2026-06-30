@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 default = ["noop"]
 noop = []
+tiled = []
 vulkan = ["dep:ash"]
 metal = ["dep:objc2", "dep:objc2-core-foundation", "dep:objc2-foundation", "dep:objc2-metal", "dep:objc2-quartz-core"]
 gles = ["dep:glow", "dep:khronos-egl", "dep:libloading", "dep:parking_lot", "dep:windows-sys"]
