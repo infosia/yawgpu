@@ -112,7 +112,10 @@ use crate::conv::{
     DeviceLostCallbackInfo, UncapturedErrorCallbackInfo,
 };
 #[cfg(feature = "tiled")]
-use crate::conv::{map_subpass_pass_layout_descriptor, map_subpass_render_pipeline_descriptor};
+use crate::conv::{
+    map_subpass_pass_layout_descriptor, map_subpass_render_pass_descriptor,
+    map_subpass_render_pipeline_descriptor,
+};
 use yawgpu_hal::{
     HalInstance, HalPresentMode, HalSurface, HalSurfaceConfiguration, HalTextureFormat,
     HalTextureUsage,
@@ -250,6 +253,15 @@ pub struct WGPURenderPipelineImpl {
 pub struct YaWGPUSubpassPassLayoutImpl {
     pub(crate) _core: Arc<core::SubpassPassLayout>,
     pub(crate) _device: Arc<core::Device>,
+    pub(crate) _instance: Arc<WGPUInstanceImpl>,
+}
+
+/// Owns the core object and retained handles for a yawgpu subpass render pass encoder handle.
+#[cfg(feature = "tiled")]
+pub struct YaWGPUSubpassRenderPassEncoderImpl {
+    pub(crate) core: Arc<core::SubpassRenderPass>,
+    pub(crate) device: Arc<core::Device>,
+    pub(crate) _parent: Arc<core::CommandEncoder>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
 }
 

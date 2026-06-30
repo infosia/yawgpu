@@ -254,6 +254,9 @@ pub struct YaWGPUInputAttachmentBindingLayout {
 /// yawgpu subpass pass layout handle.
 #[cfg(feature = "tiled")]
 pub type YaWGPUSubpassPassLayout = *const YaWGPUSubpassPassLayoutImpl;
+/// yawgpu subpass render pass encoder handle.
+#[cfg(feature = "tiled")]
+pub type YaWGPUSubpassRenderPassEncoder = *const YaWGPUSubpassRenderPassEncoderImpl;
 /// Subpass dependency type.
 #[cfg(feature = "tiled")]
 pub type YaWGPUSubpassDependencyType = u32;
@@ -359,6 +362,68 @@ pub struct YaWGPUSubpassRenderPipelineDescriptor {
     pub passLayout: YaWGPUSubpassPassLayout,
     /// Compatible subpass index.
     pub subpassIndex: u32,
+}
+
+/// yawgpu subpass color attachment binding.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct YaWGPUSubpassColorAttachment {
+    /// Persistent texture view.
+    pub view: native::WGPUTextureView,
+    /// Optional resolve target.
+    pub resolveTarget: native::WGPUTextureView,
+    /// Load op.
+    pub loadOp: native::WGPULoadOp,
+    /// Store op.
+    pub storeOp: native::WGPUStoreOp,
+    /// Clear color.
+    pub clearValue: native::WGPUColor,
+}
+
+/// yawgpu subpass depth-stencil attachment binding.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct YaWGPUSubpassDepthStencilAttachment {
+    /// Persistent texture view.
+    pub view: native::WGPUTextureView,
+    /// Depth load op.
+    pub depthLoadOp: native::WGPULoadOp,
+    /// Depth store op.
+    pub depthStoreOp: native::WGPUStoreOp,
+    /// Depth clear value.
+    pub depthClearValue: f32,
+    /// Stencil load op.
+    pub stencilLoadOp: native::WGPULoadOp,
+    /// Stencil store op.
+    pub stencilStoreOp: native::WGPUStoreOp,
+    /// Stencil clear value.
+    pub stencilClearValue: u32,
+}
+
+/// yawgpu subpass render pass descriptor.
+#[cfg(feature = "tiled")]
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct YaWGPUSubpassRenderPassDescriptor {
+    /// Extension chain.
+    pub nextInChain: *const native::WGPUChainedStruct,
+    /// Label.
+    pub label: native::WGPUStringView,
+    /// Compatible pass layout.
+    pub passLayout: YaWGPUSubpassPassLayout,
+    /// Pass extent.
+    pub extent: native::WGPUExtent3D,
+    /// Color attachments.
+    pub colorAttachments: *const YaWGPUSubpassColorAttachment,
+    /// Color attachment count.
+    pub colorAttachmentCount: usize,
+    /// Optional depth-stencil attachment.
+    pub depthStencilAttachment: *const YaWGPUSubpassDepthStencilAttachment,
 }
 
 /// Native module.

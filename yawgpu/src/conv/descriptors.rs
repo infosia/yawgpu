@@ -244,6 +244,108 @@ pub unsafe fn map_subpass_pass_layout_descriptor(
     }
 }
 
+/// Converts a subpass render pass descriptor to the core representation.
+///
+/// # Safety
+///
+/// Any non-null pointer/count pairs in `descriptor` must point to live arrays
+/// of at least the declared count for the duration of this call. Nested
+/// texture view and pass layout handles must be live yawgpu handles.
+#[cfg(feature = "tiled")]
+#[must_use]
+pub unsafe fn map_subpass_render_pass_descriptor(
+    descriptor: &crate::YaWGPUSubpassRenderPassDescriptor,
+) -> core::SubpassRenderPassDescriptor {
+    let mut error = None;
+    let pass_layout = Arc::clone(
+        &clone_handle::<crate::YaWGPUSubpassPassLayoutImpl>(
+            descriptor.passLayout,
+            "YaWGPUSubpassPassLayout",
+        )
+        ._core,
+    );
+    let color_attachments = slice_or_error(
+        descriptor.colorAttachments,
+        descriptor.colorAttachmentCount,
+        "subpass render pass colorAttachments must not be null when count is non-zero",
+        &mut error,
+    )
+    .iter()
+    .filter_map(|attachment| map_subpass_color_attachment(attachment, &mut error))
+    .collect();
+    let depth_stencil_attachment = descriptor
+        .depthStencilAttachment
+        .as_ref()
+        .and_then(|attachment| map_subpass_depth_stencil_attachment(attachment, &mut error));
+
+    core::SubpassRenderPassDescriptor {
+        pass_layout,
+        extent: map_extent_3d(descriptor.extent),
+        color_attachments,
+        depth_stencil_attachment,
+        error,
+    }
+}
+
+#[cfg(feature = "tiled")]
+unsafe fn map_subpass_color_attachment(
+    attachment: &crate::YaWGPUSubpassColorAttachment,
+    error: &mut Option<String>,
+) -> Option<core::SubpassColorAttachmentBinding> {
+    let view = if attachment.view.is_null() {
+        set_first_error(error, "subpass color attachment view must not be null");
+        return None;
+    } else {
+        Arc::clone(&clone_handle::<WGPUTextureViewImpl>(attachment.view, "WGPUTextureView")._core)
+    };
+    let resolve_target = if attachment.resolveTarget.is_null() {
+        None
+    } else {
+        Some(Arc::clone(
+            &clone_handle::<WGPUTextureViewImpl>(attachment.resolveTarget, "WGPUTextureView")._core,
+        ))
+    };
+
+    Some(core::SubpassColorAttachmentBinding {
+        resource: core::SubpassAttachmentResource::Persistent {
+            view,
+            resolve_target,
+        },
+        load_op: map_load_op(attachment.loadOp),
+        store_op: map_store_op(attachment.storeOp),
+        clear_value: map_color(attachment.clearValue),
+    })
+}
+
+#[cfg(feature = "tiled")]
+unsafe fn map_subpass_depth_stencil_attachment(
+    attachment: &crate::YaWGPUSubpassDepthStencilAttachment,
+    error: &mut Option<String>,
+) -> Option<core::SubpassDepthStencilAttachmentBinding> {
+    let view = if attachment.view.is_null() {
+        set_first_error(
+            error,
+            "subpass depth-stencil attachment view must not be null",
+        );
+        return None;
+    } else {
+        Arc::clone(&clone_handle::<WGPUTextureViewImpl>(attachment.view, "WGPUTextureView")._core)
+    };
+
+    Some(core::SubpassDepthStencilAttachmentBinding {
+        resource: core::SubpassAttachmentResource::Persistent {
+            view,
+            resolve_target: None,
+        },
+        depth_load_op: map_load_op(attachment.depthLoadOp),
+        depth_store_op: map_store_op(attachment.depthStoreOp),
+        depth_clear_value: attachment.depthClearValue,
+        stencil_load_op: map_load_op(attachment.stencilLoadOp),
+        stencil_store_op: map_store_op(attachment.stencilStoreOp),
+        stencil_clear_value: attachment.stencilClearValue,
+    })
+}
+
 unsafe fn render_pass_max_draw_count(mut chain: *const native::WGPUChainedStruct) -> u64 {
     const DEFAULT_MAX_DRAW_COUNT: u64 = 50_000_000;
     while let Some(node) = unsafe { chain.as_ref() } {
