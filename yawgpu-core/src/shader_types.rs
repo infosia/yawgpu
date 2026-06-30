@@ -400,6 +400,14 @@ pub(crate) enum ReflectedResourceBindingKind {
         /// View dimension variant.
         view_dimension: ReflectedTextureViewDimension,
     },
+    /// Input attachment variant.
+    #[cfg(feature = "tiled")]
+    InputAttachment {
+        /// Sample kind variant.
+        sample_kind: Option<ReflectedTypeScalarClass>,
+        /// Multisampled variant.
+        multisampled: bool,
+    },
     /// External texture variant.
     ExternalTexture,
 }

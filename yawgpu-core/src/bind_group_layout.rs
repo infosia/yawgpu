@@ -93,6 +93,15 @@ pub(crate) fn validate_bind_group_layout_descriptor(
                     );
                 }
             }
+            #[cfg(feature = "tiled")]
+            BindingLayoutKind::InputAttachment { .. } => {
+                if entry.visibility & !SHADER_STAGE_FRAGMENT != 0 {
+                    return Some(
+                        "input attachment bindings must only be visible to the fragment stage"
+                            .to_owned(),
+                    );
+                }
+            }
             BindingLayoutKind::StorageTexture {
                 access,
                 format,
@@ -209,6 +218,14 @@ pub enum BindingLayoutKind {
         sample_type: TextureSampleType,
         /// View dimension variant.
         view_dimension: TextureViewDimension,
+        /// Multisampled variant.
+        multisampled: bool,
+    },
+    /// Input attachment variant.
+    #[cfg(feature = "tiled")]
+    InputAttachment {
+        /// Sample type variant.
+        sample_type: TextureSampleType,
         /// Multisampled variant.
         multisampled: bool,
     },
@@ -557,6 +574,47 @@ mod tests {
                 &FeatureSet::default()
             ),
             Some("too many uniform buffers for one shader stage".to_owned())
+        );
+    }
+
+    #[cfg(feature = "tiled")]
+    fn input_attachment_entry(visibility: u64) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding: 0,
+            visibility,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::InputAttachment {
+                sample_type: TextureSampleType::Float,
+                multisampled: false,
+            }),
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn input_attachment_layout_fragment_only_visibility_validates() {
+        assert_eq!(
+            validate_bind_group_layout_descriptor(
+                &[input_attachment_entry(SHADER_STAGE_FRAGMENT)],
+                Limits::DEFAULT,
+                &FeatureSet::default()
+            ),
+            None
+        );
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn input_attachment_layout_non_fragment_visibility_is_rejected() {
+        assert_eq!(
+            validate_bind_group_layout_descriptor(
+                &[input_attachment_entry(
+                    SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT
+                )],
+                Limits::DEFAULT,
+                &FeatureSet::default()
+            ),
+            Some("input attachment bindings must only be visible to the fragment stage".to_owned())
         );
     }
 
