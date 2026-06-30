@@ -187,12 +187,14 @@ broken into sub-slices, mirroring how Slice 1 ran (shim → core → HAL → FFI
       `subpass_color_slots` (existing callers pass `&[]`). Tests prove NON-identity
       application (`source_attachment=1` → MSL `[[color(1)]]`, not `[[color(0)]]`;
       empty map → clean `Err`). Noop-tested.
-    - **2.3b-2 (NEXT) — subpass pipeline object + device entry + Metal HAL.** Restore
-      `SubpassRenderPipelineDescriptor` / `new_subpass` / `SubpassPipelineCompatibility`,
-      a device entry to create a `SubpassPassLayout` + a subpass render pipeline (which
-      calls `compute_subpass_color_slots` and feeds `select_render_shader_source`), and
-      the Metal HAL hookup (likely near-zero, like Slice 1.3). Real-Metal e2e waits on
-      the 2.3c encoder.
+    - **2.3b-2 (subpass pipeline object + device entry) DONE** (commit `47d18b2`):
+      `SubpassRenderPipelineDescriptor` / `RenderPipeline::new_subpass` /
+      `SubpassPipelineCompatibility` + `Device::create_subpass_pass_layout` +
+      `Device::create_subpass_render_pipeline`. **Confirmed Metal needs NO new HAL** —
+      the subpass path reuses the regular `create_render_pipeline` via a shared
+      `create_hal_render_pipeline_with_subpass_color_slots` (regular path passes `&[]`,
+      subpass path passes the computed slots). `resolve` gained an `Option<&[u32]>`
+      subpass color-attachment-indices param to validate fragment outputs. Noop-tested.
   - **2.3c** — `SubpassRenderPass` runtime encoder (begin / `next_subpass` / draw /
     `set_bind_group` / `end` + `resolve_subpass_render_pass_resources`) + the device
     entry points that create pass layouts / subpass passes. Needs 2.3a+b.
