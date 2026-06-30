@@ -197,7 +197,26 @@ broken into sub-slices, mirroring how Slice 1 ran (shim → core → HAL → FFI
       subpass color-attachment-indices param to validate fragment outputs. Noop-tested.
   - **2.3c** — `SubpassRenderPass` runtime encoder (begin / `next_subpass` / draw /
     `set_bind_group` / `end` + `resolve_subpass_render_pass_resources`) + the device
-    entry points that create pass layouts / subpass passes. Needs 2.3a+b.
+    entry points. Needs 2.3a+b. Split (encoder spans HAL types + core + per-backend
+    execution; transient deferred — persistent attachments only):
+    - **2.3c-1 (HAL types + Noop) DONE** (commit `823154f`, yawgpu-hal only): restored
+      `HalSubpassRenderPass{Noop,Vulkan,Metal}` + `HalSubpassRenderPassCommand` + the
+      supporting `HalSubpass*` structs (persistent only) + `HalDevice::{begin,next,end}_
+      subpass_render_pass` (Noop functional; **Metal/Vulkan return a clean HalError** —
+      execution deferred) + the `HalCopy::SubpassRenderPass` command variant (Noop no-op).
+      Feature chain wired: `yawgpu-hal/tiled` + yawgpu-core tiled implies it. NOTE for
+      2.3c-4: Vulkan `retain_copy_resources` must retain the attachment views (no-op now,
+      unreachable while begin errors).
+    - **2.3c-2 (NEXT) — core `SubpassRenderPass` encoder** (yawgpu-core): the runtime
+      object + `SubpassRenderPassDescriptor` + `validate_subpass_render_pass_descriptor`
+      + `resolve_subpass_render_pass_resources` (persistent only) + the command-encoder
+      entry to begin one + `SubpassRenderPassCommand` recording. Records into the 2.3c-1
+      HAL pass; Noop-testable lifecycle (begin/next_subpass/draw/end + validation).
+    - **2.3c-3 (Metal execution + real e2e)** — implement the Metal arm (single
+      `MTLRenderCommandEncoder`, ordered draws, `[[color(N)]]` tile read, `next_subpass`
+      ≈ barrier); 3-subpass deferred real-Metal e2e on the M2.
+    - **2.3c-4 (Vulkan execution)** — multi-subpass `VkRenderPass` + INPUT_ATTACHMENT
+      descriptors (adapt Slice-1.4 infra) + `retain_copy_resources` fix.
   - **transient_attachment.rs** (146 lines) folds in where the attachment type is
     needed (likely 2.3a data + 2.4/2.5 HAL storage modes).
 - **2.4 HAL Metal** — `[[color(N)]]` bind via the map; `MTLStorageMode::Memoryless`
