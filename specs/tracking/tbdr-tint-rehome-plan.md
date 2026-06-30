@@ -156,8 +156,20 @@ broken into sub-slices, mirroring how Slice 1 ran (shim → core → HAL → FFI
   from the `@color` FB-fetch path); bind-group-layout validation; compute the
   WGSL-binding → Metal color-slot map from the subpass/pass layout at pipeline-compile
   (the §5 seam) and feed it into the shim. Port from `78cdf48` core diff.
-- **2.3 core — subpass/transient** — restore `subpass.rs` + `transient_attachment.rs`,
-  subpass render pipelines, the multi-subpass pass object. Port from `78cdf48`.
+- **2.3 core — subpass/transient** — restore `subpass.rs` (1775 deleted lines) +
+  `transient_attachment.rs`. Too large for one handoff; split:
+  - **2.3a** — subpass *layout types* + validation (`SubpassPassLayout`,
+    `SubpassPassLayoutDescriptor`, `SubpassInputAttachment`/`SubpassDependency`,
+    `validate_subpass_pass_layout_descriptor`, `TiledCapabilities`). Static data +
+    validation only; Noop-testable; no encoder, no HAL, no codegen.
+  - **2.3b** — subpass *render pipeline* + the **color-slot map** computation
+    (`new_subpass`, `SubpassPipelineCompatibility`, the deleted `subpass_color_slots`
+    analog) + codegen wiring: feed the WGSL-binding → color-slot map into the shim's
+    `input_attachment_to_color_index` (§5 seam). Needs 2.3a.
+  - **2.3c** — `SubpassRenderPass` runtime encoder (begin / `next_subpass` / draw /
+    `set_bind_group` / `end` + `resolve_subpass_render_pass_resources`). Needs 2.3a+b.
+  - **transient_attachment.rs** (146 lines) folds in where the attachment type is
+    needed (likely 2.3a data + 2.4/2.5 HAL storage modes).
 - **2.4 HAL Metal** — `[[color(N)]]` bind via the map; `MTLStorageMode::Memoryless`
   transient attachments. Port from `78cdf48` metal diff.
 - **2.5 HAL Vulkan** — multi-subpass `VkRenderPass`, input-attachment descriptors
