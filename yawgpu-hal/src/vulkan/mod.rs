@@ -1,3 +1,4 @@
+#[cfg(feature = "tiled")]
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt;
@@ -408,10 +409,20 @@ impl VulkanAdapter {
                 .instance
                 .get_physical_device_properties(self.physical_device)
         };
-        let vulkan_memory_model_available = vulkan_memory_model_available(
-            device_properties.api_version,
-            vulkan_memory_model_extension,
-        );
+        // Promotion-to-core decisions must use the *effective enabled* Vulkan
+        // version, not the physical device's *maximum supported* version
+        // (`device_properties.api_version`). The effective version is
+        // `min(YAWGPU_VULKAN_API_VERSION, device_max)`: yawgpu requests 1.1 at
+        // vkCreateInstance, so even a 1.3-capable device runs as 1.1 here and a
+        // feature promoted to core in 1.2 (e.g. vulkanMemoryModel,
+        // VkImageFormatListCreateInfo) is NOT core — its extension name must still
+        // be enabled. Deciding on device_max would chain the feature struct into
+        // VkDeviceCreateInfo.pNext without enabling the parent extension
+        // (VUID-VkDeviceCreateInfo-pNext-pNext).
+        let effective_api_version =
+            YAWGPU_VULKAN_API_VERSION.min(device_properties.api_version);
+        let vulkan_memory_model_available =
+            vulkan_memory_model_available(effective_api_version, vulkan_memory_model_extension);
         let mut vulkan_memory_model_supported_features =
             vk::PhysicalDeviceVulkanMemoryModelFeatures::default();
         if vulkan_memory_model_available {
@@ -428,7 +439,7 @@ impl VulkanAdapter {
         let vulkan_memory_model_device_scope = vulkan_memory_model
             && vulkan_memory_model_supported_features.vulkan_memory_model_device_scope == vk::TRUE;
         let image_format_list =
-            image_format_list_available(device_properties.api_version, image_format_list_extension);
+            image_format_list_available(effective_api_version, image_format_list_extension);
         let mut shader_float16_int8_features =
             vk::PhysicalDeviceShaderFloat16Int8Features::default();
         let mut storage_16bit_supported_features =
@@ -504,7 +515,7 @@ impl VulkanAdapter {
         }
         if vulkan_memory_model
             && vulkan_memory_model_extension_required(
-                device_properties.api_version,
+                effective_api_version,
                 vulkan_memory_model_extension,
             )
         {
@@ -977,6 +988,51 @@ mod tests {
             vk::API_VERSION_1_1,
             false
         ));
+    }
+
+    /// Regression: promotion-to-core must be decided on the *effective enabled*
+    /// version `min(YAWGPU_VULKAN_API_VERSION, device_max)`, not the device's
+    /// *maximum supported* version. A 1.3-capable device runs as 1.1 here, so the
+    /// memory model is never core and its extension name must be enabled whenever
+    /// the device exposes the extension + feature — otherwise the feature struct is
+    /// chained into VkDeviceCreateInfo.pNext without the parent extension
+    /// (VUID-VkDeviceCreateInfo-pNext-pNext). Mirrors the create_device decision and
+    /// the `extension_names_from_pointers` test style; no real GPU required.
+    #[test]
+    fn vulkan_memory_model_extension_name_pushed_at_yawgpu_baseline() {
+        let device_max = vk::API_VERSION_1_3;
+        let extension_present = true;
+        let vulkan_memory_model = true; // available + feature reported TRUE
+        let effective_api_version = YAWGPU_VULKAN_API_VERSION.min(device_max);
+
+        // Deciding on the effective version pushes the extension name.
+        let mut extension_names: Vec<*const c_char> = Vec::new();
+        if vulkan_memory_model
+            && vulkan_memory_model_extension_required(effective_api_version, extension_present)
+        {
+            extension_names.push(vk::KHR_VULKAN_MEMORY_MODEL_NAME.as_ptr());
+        }
+        assert!(
+            extension_names_from_pointers(&extension_names)
+                .contains(&vk::KHR_VULKAN_MEMORY_MODEL_NAME),
+            "extension name must be enabled at the 1.1 baseline"
+        );
+
+        // Deciding on the raw device-max would wrongly skip it (the original bug).
+        let mut wrong: Vec<*const c_char> = Vec::new();
+        if vulkan_memory_model
+            && vulkan_memory_model_extension_required(device_max, extension_present)
+        {
+            wrong.push(vk::KHR_VULKAN_MEMORY_MODEL_NAME.as_ptr());
+        }
+        assert!(
+            extension_names_from_pointers(&wrong).is_empty(),
+            "device-max (1.3) wrongly treats the memory model as core"
+        );
+
+        // VkImageFormatListCreateInfo shares the same >= (1,2) promotion shape and
+        // the same latent bug: available at the 1.1 baseline only via the extension.
+        assert!(image_format_list_available(effective_api_version, extension_present));
     }
 
     #[test]

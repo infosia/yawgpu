@@ -95,10 +95,13 @@ fn vulkan_tiled_deferred_reads_input_attachment() {
 
         // Final attachment = g-buffer (0.5, 0, 0) + (0, 0.25, 0) = (0.5, 0.25, 0, 1).
         // A genuine multi-subpass input attachment executes on MoltenVK too.
+        // 0.5 → rgba8unorm = 0.5 * 255 = 127.5 is the exact unorm tie midpoint, so R
+        // is device-defined as 127 (truncate, native NVIDIA) or 128 (round, MoltenVK);
+        // accept either with a ±1 per-channel tolerance.
         let expected = [128u8, 64, 0, 255];
         assert!(
-            contains_pixel(&pixels, expected),
-            "expected {:?} from the input-attachment read; distinct = {:?}",
+            approx_contains_pixel(&pixels, expected, 1),
+            "expected {:?} (±1) from the input-attachment read; distinct = {:?}",
             expected,
             distinct_pixels(&pixels)
         );
@@ -589,10 +592,14 @@ fn string_view(value: &str) -> native::WGPUStringView {
     }
 }
 
-fn contains_pixel(pixels: &[u8], rgba: [u8; 4]) -> bool {
-    pixels
-        .chunks_exact(BYTES_PER_PIXEL)
-        .any(|pixel| pixel == rgba)
+/// Returns true when any pixel matches `expected` within `tol` per channel.
+fn approx_contains_pixel(pixels: &[u8], expected: [u8; 4], tol: u8) -> bool {
+    pixels.chunks_exact(BYTES_PER_PIXEL).any(|pixel| {
+        pixel
+            .iter()
+            .zip(expected.iter())
+            .all(|(&actual, &want)| actual.abs_diff(want) <= tol)
+    })
 }
 
 fn distinct_pixels(pixels: &[u8]) -> Vec<[u8; 4]> {
