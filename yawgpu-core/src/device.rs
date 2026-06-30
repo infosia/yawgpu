@@ -558,6 +558,55 @@ impl Device {
         pipeline
     }
 
+    /// Validates and creates a subpass render pipeline, routing failures to the active error scope.
+    #[cfg(feature = "tiled")]
+    #[must_use]
+    pub fn create_subpass_render_pipeline(
+        &self,
+        descriptor: SubpassRenderPipelineDescriptor,
+    ) -> RenderPipeline {
+        if self.is_lost() {
+            return RenderPipeline::new_subpass(
+                descriptor,
+                true,
+                self.limits(),
+                &self.inner.features,
+                None,
+            )
+            .0;
+        }
+        let error = descriptor.error.clone().or_else(|| {
+            if descriptor.pass_layout.is_error() {
+                Some("subpass render pipeline pass layout must not be an error layout".to_owned())
+            } else if descriptor.subpass_index as usize
+                >= descriptor.pass_layout.descriptor().subpasses.len()
+            {
+                Some("subpass render pipeline subpassIndex is out of range".to_owned())
+            } else {
+                validate_subpass_render_pipeline_descriptor(
+                    &descriptor,
+                    self.limits(),
+                    &self.inner.features,
+                )
+            }
+        });
+        let is_error = error.is_some();
+        if let Some(message) = error {
+            self.dispatch_error(ErrorKind::Validation, message);
+        }
+        let (pipeline, backend_error) = RenderPipeline::new_subpass(
+            descriptor,
+            is_error,
+            self.limits(),
+            &self.inner.features,
+            Some(&self.inner.hal),
+        );
+        if let Some(message) = backend_error {
+            self.dispatch_error(ErrorKind::Internal, message);
+        }
+        pipeline
+    }
+
     /// Creates a render pipeline, returning any error directly instead of routing it to an error scope.
     #[must_use]
     pub fn create_render_pipeline_without_error_dispatch(

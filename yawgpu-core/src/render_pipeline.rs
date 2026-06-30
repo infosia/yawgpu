@@ -20,6 +20,8 @@ use crate::pipeline_id::next_pipeline_id;
 use crate::pipeline_layout::*;
 use crate::sampler::*;
 use crate::shader::*;
+#[cfg(feature = "tiled")]
+use crate::subpass::{compute_subpass_color_slots, SubpassPassLayout};
 use crate::texture::*;
 
 /// Stores attachment signature data used by validation and backend submission.
@@ -495,7 +497,35 @@ pub(crate) struct RenderPipelineInner {
     pub(crate) hal: Option<HalRenderPipeline>,
     pub(crate) bind_group_layouts: Vec<Arc<BindGroupLayout>>,
     pub(crate) framebuffer_fetch_color_slots: Vec<u32>,
+    #[cfg(feature = "tiled")]
+    #[allow(dead_code)]
+    pub(crate) subpass_compatibility: Option<SubpassPipelineCompatibility>,
     pub(crate) is_error: bool,
+}
+
+/// Describes subpass-pipeline compatibility metadata.
+#[cfg(feature = "tiled")]
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct SubpassPipelineCompatibility {
+    /// Compatible subpass pass layout.
+    pub(crate) pass_layout: Arc<SubpassPassLayout>,
+    /// Compatible subpass index.
+    pub(crate) subpass_index: u32,
+}
+
+/// Describes a subpass render pipeline descriptor.
+#[cfg(feature = "tiled")]
+#[derive(Debug, Clone)]
+pub struct SubpassRenderPipelineDescriptor {
+    /// Base render pipeline descriptor.
+    pub base: RenderPipelineDescriptor,
+    /// Compatible subpass pass layout.
+    pub pass_layout: Arc<SubpassPassLayout>,
+    /// Compatible subpass index.
+    pub subpass_index: u32,
+    /// Descriptor error from FFI conversion.
+    pub error: Option<String>,
 }
 
 /// Stores binding metadata.
@@ -522,6 +552,7 @@ impl RenderPipeline {
                 &descriptor,
                 limits,
                 features,
+                None,
                 pipeline_id,
             )
             .ok()
@@ -579,6 +610,108 @@ impl RenderPipeline {
                     hal,
                     bind_group_layouts,
                     framebuffer_fetch_color_slots,
+                    #[cfg(feature = "tiled")]
+                    subpass_compatibility: None,
+                    is_error,
+                }),
+            },
+            backend_error,
+        )
+    }
+
+    /// Creates a new subpass-compatible render pipeline.
+    #[cfg(feature = "tiled")]
+    pub(crate) fn new_subpass(
+        descriptor: SubpassRenderPipelineDescriptor,
+        is_error: bool,
+        limits: Limits,
+        features: &FeatureSet,
+        hal_device: Option<&HalDevice>,
+    ) -> (Self, Option<String>) {
+        let pipeline_id = next_pipeline_id();
+        let compatibility = SubpassPipelineCompatibility {
+            pass_layout: Arc::clone(&descriptor.pass_layout),
+            subpass_index: descriptor.subpass_index,
+        };
+        let subpass_color_attachment_indices = descriptor
+            .pass_layout
+            .descriptor()
+            .subpasses
+            .get(descriptor.subpass_index as usize)
+            .map(|subpass| subpass.color_attachment_indices.as_slice());
+        let resolved = if is_error {
+            None
+        } else {
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor.base,
+                limits,
+                features,
+                subpass_color_attachment_indices,
+                pipeline_id,
+            )
+            .ok()
+        };
+        let (vertex_entry_name, fragment_entry_name, bind_group_layouts) =
+            resolved.unwrap_or_else(|| {
+                (
+                    descriptor
+                        .base
+                        .vertex
+                        .shader
+                        .entry_point
+                        .clone()
+                        .unwrap_or_default(),
+                    descriptor
+                        .base
+                        .fragment
+                        .as_ref()
+                        .and_then(|fragment| fragment.shader.entry_point.clone()),
+                    Vec::new(),
+                )
+            });
+        let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
+        let vertex_buffer_bindings =
+            metal_vertex_buffer_binding_map(&descriptor.base.vertex.buffers, &metal_bindings);
+        let framebuffer_fetch_color_slots = render_pipeline_framebuffer_fetch_color_slots(
+            &descriptor.base,
+            fragment_entry_name.as_deref(),
+        );
+        let subpass_color_slots = compute_subpass_color_slots(
+            descriptor.pass_layout.descriptor(),
+            descriptor.subpass_index,
+        );
+        let (hal, backend_error) = if is_error {
+            (None, None)
+        } else {
+            create_hal_subpass_render_pipeline(
+                hal_device,
+                &descriptor.base,
+                &vertex_entry_name,
+                fragment_entry_name.as_deref(),
+                &metal_bindings,
+                &vertex_buffer_bindings,
+                &bind_group_layouts,
+                &subpass_color_slots,
+            )
+        };
+        let is_error = is_error || backend_error.is_some();
+        (
+            Self {
+                inner: Arc::new(RenderPipelineInner {
+                    _layout: descriptor.base.layout,
+                    _vertex: descriptor.base.vertex,
+                    _primitive: descriptor.base.primitive,
+                    _depth_stencil: descriptor.base.depth_stencil,
+                    _multisample: descriptor.base.multisample,
+                    _fragment: descriptor.base.fragment,
+                    vertex_entry_name,
+                    fragment_entry_name,
+                    metal_bindings,
+                    vertex_buffer_bindings,
+                    hal,
+                    bind_group_layouts,
+                    framebuffer_fetch_color_slots,
+                    subpass_compatibility: Some(compatibility),
                     is_error,
                 }),
             },
@@ -693,6 +826,13 @@ impl RenderPipeline {
         let back_writes = cull != CullMode::Back && stencil_face_writes(depth.stencil_back);
         front_writes || back_writes
     }
+
+    /// Returns subpass compatibility metadata.
+    #[cfg(feature = "tiled")]
+    #[allow(dead_code)]
+    pub(crate) fn subpass_compatibility(&self) -> Option<&SubpassPipelineCompatibility> {
+        self.inner.subpass_compatibility.as_ref()
+    }
 }
 
 /// Validates render pipeline descriptor and returns a descriptive error on failure.
@@ -701,7 +841,30 @@ pub(crate) fn validate_render_pipeline_descriptor(
     limits: Limits,
     features: &FeatureSet,
 ) -> Option<String> {
-    resolve_render_pipeline_descriptor_for_source(descriptor, limits, features, 0).err()
+    resolve_render_pipeline_descriptor_for_source(descriptor, limits, features, None, 0).err()
+}
+
+/// Validates subpass render pipeline descriptor and returns a descriptive error on failure.
+#[cfg(feature = "tiled")]
+pub(crate) fn validate_subpass_render_pipeline_descriptor(
+    descriptor: &SubpassRenderPipelineDescriptor,
+    limits: Limits,
+    features: &FeatureSet,
+) -> Option<String> {
+    let subpass_color_attachment_indices = descriptor
+        .pass_layout
+        .descriptor()
+        .subpasses
+        .get(descriptor.subpass_index as usize)
+        .map(|subpass| subpass.color_attachment_indices.as_slice());
+    resolve_render_pipeline_descriptor_for_source(
+        &descriptor.base,
+        limits,
+        features,
+        subpass_color_attachment_indices,
+        0,
+    )
+    .err()
 }
 
 /// Alias for resolved render pipeline parts.
@@ -711,13 +874,20 @@ fn resolve_render_pipeline_descriptor_for_source(
     descriptor: &RenderPipelineDescriptor,
     limits: Limits,
     features: &FeatureSet,
+    subpass_color_attachment_indices: Option<&[u32]>,
     pipeline_id: u64,
 ) -> Result<ResolvedRenderPipelineParts, String> {
     #[cfg(feature = "shader-passthrough")]
     if render_pipeline_uses_shader_passthrough(descriptor) {
         return resolve_shader_passthrough_render_pipeline_descriptor(descriptor);
     }
-    resolve_render_pipeline_descriptor(descriptor, limits, features, pipeline_id)
+    resolve_render_pipeline_descriptor(
+        descriptor,
+        limits,
+        features,
+        subpass_color_attachment_indices,
+        pipeline_id,
+    )
 }
 
 #[cfg(feature = "shader-passthrough")]
@@ -756,6 +926,29 @@ pub(crate) fn create_hal_render_pipeline(
     vertex_buffer_bindings: &[MetalVertexBufferBinding],
     bind_group_layouts: &[Arc<BindGroupLayout>],
 ) -> (Option<HalRenderPipeline>, Option<String>) {
+    create_hal_render_pipeline_with_subpass_color_slots(
+        hal_device,
+        descriptor,
+        vertex_entry_name,
+        fragment_entry_name,
+        metal_bindings,
+        vertex_buffer_bindings,
+        bind_group_layouts,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_hal_render_pipeline_with_subpass_color_slots(
+    hal_device: Option<&HalDevice>,
+    descriptor: &RenderPipelineDescriptor,
+    vertex_entry_name: &str,
+    fragment_entry_name: Option<&str>,
+    metal_bindings: &[MetalBufferBinding],
+    vertex_buffer_bindings: &[MetalVertexBufferBinding],
+    bind_group_layouts: &[Arc<BindGroupLayout>],
+    subpass_color_slots: &[((u32, u32), u32)],
+) -> (Option<HalRenderPipeline>, Option<String>) {
     let Some(hal_device) = hal_device else {
         return (None, None);
     };
@@ -786,7 +979,7 @@ pub(crate) fn create_hal_render_pipeline(
             fragment_entry_name,
             metal_bindings,
             vertex_buffer_bindings,
-            &[],
+            subpass_color_slots,
             hal_device.vulkan_memory_model(),
             bind_group_layouts,
         ) {
@@ -807,6 +1000,37 @@ pub(crate) fn create_hal_render_pipeline(
         Ok(pipeline) => (Some(pipeline), None),
         Err(error) => (None, Some(error.to_string())),
     }
+}
+
+/// Creates HAL subpass render pipeline through the regular HAL render-pipeline path.
+#[cfg(feature = "tiled")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_hal_subpass_render_pipeline(
+    hal_device: Option<&HalDevice>,
+    descriptor: &RenderPipelineDescriptor,
+    vertex_entry_name: &str,
+    fragment_entry_name: Option<&str>,
+    metal_bindings: &[MetalBufferBinding],
+    vertex_buffer_bindings: &[MetalVertexBufferBinding],
+    bind_group_layouts: &[Arc<BindGroupLayout>],
+    subpass_color_slots: &[((u32, u32), u32)],
+) -> (Option<HalRenderPipeline>, Option<String>) {
+    if descriptor.fragment.is_none() {
+        return (
+            None,
+            Some("subpass render pipeline requires a fragment stage".to_owned()),
+        );
+    }
+    create_hal_render_pipeline_with_subpass_color_slots(
+        hal_device,
+        descriptor,
+        vertex_entry_name,
+        fragment_entry_name,
+        metal_bindings,
+        vertex_buffer_bindings,
+        bind_group_layouts,
+        subpass_color_slots,
+    )
 }
 
 /// Selects the HAL shader source for a render pipeline.
@@ -1533,6 +1757,7 @@ pub(crate) fn resolve_render_pipeline_descriptor(
     descriptor: &RenderPipelineDescriptor,
     limits: Limits,
     features: &FeatureSet,
+    subpass_color_attachment_indices: Option<&[u32]>,
     pipeline_id: u64,
 ) -> Result<ResolvedRenderPipelineParts, String> {
     if let RenderPipelineLayout::Explicit(layout) = &descriptor.layout {
@@ -1568,7 +1793,13 @@ pub(crate) fn resolve_render_pipeline_descriptor(
     }
     validate_fragment_depth_output(descriptor, fragment_entry.as_deref(), features)?;
     validate_inter_stage_interface(descriptor, &vertex_entry, fragment_entry.as_deref(), limits)?;
-    validate_color_targets(descriptor, fragment_entry.as_deref(), limits, features)?;
+    validate_color_targets(
+        descriptor,
+        fragment_entry.as_deref(),
+        limits,
+        features,
+        subpass_color_attachment_indices,
+    )?;
     validate_render_pipeline_layout(descriptor, &vertex_entry, fragment_entry.as_deref())?;
     validate_multisample_state(descriptor, fragment_entry.as_deref())?;
     let bind_group_layouts = effective_render_bind_group_layouts(
@@ -2029,6 +2260,7 @@ pub(crate) fn validate_color_targets(
     fragment_entry: Option<&str>,
     limits: Limits,
     features: &FeatureSet,
+    subpass_color_attachment_indices: Option<&[u32]>,
 ) -> Result<(), String> {
     let Some(fragment) = &descriptor.fragment else {
         return Ok(());
@@ -2073,7 +2305,14 @@ pub(crate) fn validate_color_targets(
             has_alpha_to_coverage_target = true;
         }
 
-        let output = outputs.get(&(index as u32));
+        // Subpass pipelines accept both subpass-local and flat attachment-slot
+        // `@location` conventions. The flat slot is supplied by the subpass's
+        // `color_attachment_indices`; regular pipelines use the local index.
+        let subpass_local = index as u32;
+        let flat = subpass_color_attachment_indices
+            .and_then(|indices| indices.get(index).copied())
+            .unwrap_or(subpass_local);
+        let output = outputs.get(&subpass_local).or_else(|| outputs.get(&flat));
         match output {
             Some(output) => {
                 validate_fragment_output_compat(*output, caps)?;
@@ -2598,6 +2837,11 @@ pub(crate) fn validate_multisample_state(
 mod tests {
     use super::*;
     use crate::pass::bind_group_layouts_compatible;
+    #[cfg(feature = "tiled")]
+    use crate::subpass::{
+        AttachmentLayout, SubpassDependency, SubpassDependencyType, SubpassInputAttachment,
+        SubpassLayoutDesc, SubpassPassLayoutDescriptor,
+    };
     use crate::test_helpers::*;
     #[cfg(feature = "shader-passthrough")]
     use crate::{Device, ShaderStage};
@@ -2875,6 +3119,85 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
 }}
 "#
         )
+    }
+
+    #[cfg(feature = "tiled")]
+    fn subpass_attachment_layout(format: TextureFormat) -> AttachmentLayout {
+        AttachmentLayout {
+            format,
+            sample_count: 1,
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    fn valid_two_subpass_deferred_layout_descriptor() -> SubpassPassLayoutDescriptor {
+        SubpassPassLayoutDescriptor {
+            color_attachments: vec![
+                subpass_attachment_layout(rgba8_unorm()),
+                subpass_attachment_layout(rgba8_unorm()),
+            ],
+            depth_stencil_attachment: None,
+            subpasses: vec![
+                SubpassLayoutDesc {
+                    color_attachment_indices: vec![0],
+                    uses_depth_stencil: false,
+                    input_attachments: Vec::new(),
+                },
+                SubpassLayoutDesc {
+                    color_attachment_indices: vec![1],
+                    uses_depth_stencil: false,
+                    input_attachments: vec![SubpassInputAttachment {
+                        group: 0,
+                        binding: 0,
+                        source_subpass: 0,
+                        source_attachment: 0,
+                    }],
+                },
+            ],
+            dependencies: vec![SubpassDependency {
+                src_subpass: 0,
+                dst_subpass: 1,
+                dependency_type: SubpassDependencyType::ColorToInput,
+                by_region: true,
+            }],
+            error: None,
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    fn render_shader_module_with_fragment_location(
+        device: &crate::device::Device,
+        location: u32,
+    ) -> Arc<ShaderModule> {
+        Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(format!(
+                "@vertex
+             fn vs() -> @builtin(position) vec4<f32> {{
+                 return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+             }}
+
+             @fragment
+             fn fs() -> @location({location}) vec4<f32> {{
+                 return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+             }}"
+            ))),
+        )
+    }
+
+    #[cfg(feature = "tiled")]
+    fn subpass_pipeline_descriptor_for_subpass_one(
+        device: &crate::device::Device,
+        pass_layout: Arc<SubpassPassLayout>,
+        location: u32,
+    ) -> SubpassRenderPipelineDescriptor {
+        SubpassRenderPipelineDescriptor {
+            base: render_pipeline_descriptor(render_shader_module_with_fragment_location(
+                device, location,
+            )),
+            pass_layout,
+            subpass_index: 1,
+            error: None,
+        }
     }
 
     fn default_stencil_face_state() -> StencilFaceState {
@@ -3294,6 +3617,63 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
             error.message,
             "render pipeline framebuffer-fetch color input requires a declared color target"
         );
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_render_pipeline_records_compatibility_for_subpass_one() {
+        let device = noop_device();
+        let pass_layout = Arc::new(
+            device.create_subpass_pass_layout(valid_two_subpass_deferred_layout_descriptor()),
+        );
+        let descriptor =
+            subpass_pipeline_descriptor_for_subpass_one(&device, Arc::clone(&pass_layout), 0);
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_subpass_render_pipeline(descriptor);
+        let scoped = device.pop_error_scope().expect("scope should exist");
+
+        assert!(!pipeline.is_error());
+        assert_eq!(scoped, None);
+        let compatibility = pipeline
+            .subpass_compatibility()
+            .expect("subpass pipeline should record compatibility");
+        assert!(compatibility.pass_layout.same(&pass_layout));
+        assert_eq!(compatibility.subpass_index, 1);
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_render_pipeline_rejects_fragment_output_outside_subpass_colors() {
+        let device = noop_device();
+        let pass_layout = Arc::new(
+            device.create_subpass_pass_layout(valid_two_subpass_deferred_layout_descriptor()),
+        );
+        let descriptor = subpass_pipeline_descriptor_for_subpass_one(&device, pass_layout, 3);
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_subpass_render_pipeline(descriptor);
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("invalid subpass pipeline should be scoped");
+
+        assert!(pipeline.is_error());
+        assert_eq!(
+            error.message,
+            "render pipeline color target without shader output must use writeMask 0"
+        );
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn regular_render_pipeline_has_no_subpass_compatibility() {
+        let device = noop_device();
+        let pipeline = device
+            .create_render_pipeline(render_pipeline_descriptor(render_shader_module(&device)));
+
+        assert!(!pipeline.is_error());
+        assert!(pipeline.subpass_compatibility().is_none());
     }
 
     #[cfg(not(feature = "tiled"))]

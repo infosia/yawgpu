@@ -78,6 +78,8 @@ pub use render_pass::{
     RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor,
     RenderPassEncoder, RenderPassTimestampWrites,
 };
+#[cfg(feature = "tiled")]
+pub use render_pipeline::SubpassRenderPipelineDescriptor;
 pub use render_pipeline::{
     BlendComponent, BlendFactor, BlendOperation, BlendState, ColorTargetState, CullMode,
     DepthStencilState, FrontFace, IndexFormat, MultisampleState, PrimitiveState, PrimitiveTopology,
