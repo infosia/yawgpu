@@ -44,15 +44,24 @@ Block 55, when un-removed, must be rewritten to the Tint surface.
    framebuffer-fetch surface, which **already works on the currently-pinned
    upstream Tint** for both MSL and SPIR-V — no Dawn fork required. Multi-subpass
    `input_attachment` (deferred rendering) comes in later slices.
-2. **Dawn-fork dependency — channel pinned (2026-06-30).** `third_party/dawn` was
-   re-pointed from upstream `dawn.googlesource.com` to the **`infosia/dawn` fork's
-   `feature/tiled` branch** (commit `f586cbd`; `.gitmodules` `branch = feature/tiled`).
-   The pinned commit is still `c8f5ca3` (== chromium/7914) because `feature/tiled`
-   carries **no TBDR/Tint commits yet** — only an untracked `TILED.md` plan. The
-   Tint-side work (MSL `input_attachment` lowering per the Dawn `TILED.md`) must be
-   implemented + committed to `feature/tiled`, then the pin bumped via
-   `git submodule update --remote`. **Until then, Slice 2 remains blocked on the
-   Tint capability itself**, not on the pin.
+2. **Dawn-fork dependency — channel pinned (2026-06-30), pin bumped (2026-06-30).**
+   `third_party/dawn` was re-pointed from upstream `dawn.googlesource.com` to the
+   **`infosia/dawn` fork's `feature/tiled` branch** (commit `f586cbd`; `.gitmodules`
+   `branch = feature/tiled`). **The Tint-side TBDR work has now landed on the fork**
+   (the user implemented it; 7 commits `c8f5ca3 → a05085e54f`) and the pin was bumped
+   to `a05085e54f` (commit `0d53746`, clean `yawgpu-tint --features tiled` rebuild
+   green). What landed:
+   - **MSL** `input_attachment` → `[[color(N)]]` via a fork-only raise transform,
+     driven by the new additive `Options::input_attachment_to_color_index`
+     (`unordered_map<BindingPoint, uint32_t>`) — **the §5 color-slot map is now a
+     real Tint Options field** yawgpu must populate from the pass layout.
+   - **SPIR-V MSAA** `input_attachment` via `Options::multisampled_input_attachment`
+     (module-wide flag) + a 2-arg `inputAttachmentLoad(ia, sample_index)` overload.
+   - Fork conventions / divergence map: `docs/tint/tbdr-fork-conventions.md`
+     (`// tint-tbdr:` markers; `git grep tint-tbdr:` enumerates the rebase surface).
+
+   **Slice 2 and Slice 4 are now unblocked on the Tint side.** Remaining work is the
+   yawgpu HAL/core/FFI port (this plan, §6).
 3. **Metal + Vulkan only.** GLES Tier 2 (framebuffer-fetch / FBO-rebind) is
    deferred to a later slice — matches Dawn `TILED.md` scope (GLES/HLSL excluded).
    Color aspect only (no depth/stencil subpass inputs).
@@ -125,11 +134,35 @@ De-risks the whole yawgpu plumbing against capability that already exists.
     macOS/MoltenVK** and runs+verifies on native Vulkan (Linux/Windows). Consistent
     with [[moltenvk-shader-execution-limits]] (MoltenVK is not an authoritative oracle).
 
-### Slice 2 — `input_attachment<T>` multi-subpass deferred (needs Dawn fork)
-**Gated on Dawn `feature/tiled` MSL lowering landing + the deferred re-pin
-decision.** Restores transient attachments, multi-subpass passes, subpass
-pipelines, the 3-subpass deferred example. Port HAL/core from `78cdf48`, adapt to
-Tint `input_attachment` + the color-slot map (§5).
+### Slice 2 — `input_attachment<T>` multi-subpass deferred (Dawn fork landed 2026-06-30)
+**UNBLOCKED** (pin at `a05085e54f`). Restores transient attachments, multi-subpass
+passes, subpass pipelines, the 3-subpass deferred example. Port HAL/core from
+`78cdf48`, adapt to Tint `input_attachment` + the color-slot map (§5, now the real
+`Options::input_attachment_to_color_index` Tint field). Too large for one handoff —
+broken into sub-slices, mirroring how Slice 1 ran (shim → core → HAL → FFI → e2e):
+
+- **2.1 shim** — thread the two new Tint Options through the C ABI:
+  `input_attachment_to_color_index` (MSL, per-`BindingPoint` → color slot) and
+  `multisampled_input_attachment` (SPIR-V, module flag). Reflect `input_attachment<T>`
+  module-scope vars + their `@input_attachment_index(N)` so core can build the map.
+  Mirrors Slice 1.1; replaces the FB-fetch placeholder path for the handle surface.
+- **2.2 core** — restore `BindingLayoutKind::InputAttachment` (handle binding, distinct
+  from the `@color` FB-fetch path); bind-group-layout validation; compute the
+  WGSL-binding → Metal color-slot map from the subpass/pass layout at pipeline-compile
+  (the §5 seam) and feed it into the shim. Port from `78cdf48` core diff.
+- **2.3 core — subpass/transient** — restore `subpass.rs` + `transient_attachment.rs`,
+  subpass render pipelines, the multi-subpass pass object. Port from `78cdf48`.
+- **2.4 HAL Metal** — `[[color(N)]]` bind via the map; `MTLStorageMode::Memoryless`
+  transient attachments. Port from `78cdf48` metal diff.
+- **2.5 HAL Vulkan** — multi-subpass `VkRenderPass`, input-attachment descriptors
+  (Slice 1.4 already built the single self-read infra — extend, don't duplicate),
+  `LAZILY_ALLOCATED` transient attachments. Port from `78cdf48` vulkan diff.
+- **2.6 FFI** — restore the vendor entry points / SType range for declaring subpasses
+  + transient attachments + input-attachment bind-group entries. Template =
+  external-texture (`ffi/external_texture.rs`). Port from `78cdf48` ffi diff.
+- **2.7 e2e + Block 55** — real-GPU `e2e_metal_tiled.rs` (3-subpass deferred) on the
+  M2; `e2e_vulkan_tiled.rs` (skips MoltenVK per Slice 1.4 finding); rewrite Block 55
+  to the full Tint `input_attachment` surface.
 
 ### Slice 3 — transient / memoryless attachments
 Vulkan `LAZILY_ALLOCATED` + `TRANSIENT_ATTACHMENT|INPUT_ATTACHMENT`; Metal
