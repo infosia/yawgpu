@@ -122,6 +122,10 @@ impl MetalQueue {
                         encoder.endEncoding();
                         result?;
                     }
+                    #[cfg(feature = "tiled")]
+                    HalCopy::SubpassRenderPass(_) => {
+                        return Err(crate::command::subpass_not_implemented_error());
+                    }
                 }
             }
             command_buffer.commit();
