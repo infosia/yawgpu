@@ -69,7 +69,7 @@ impl HalSubpassRenderPass {
             #[cfg(feature = "vulkan")]
             Self::Vulkan => Err(subpass_not_implemented_error()),
             #[cfg(feature = "metal")]
-            Self::Metal => Err(subpass_not_implemented_error()),
+            Self::Metal => Ok(()),
         }
     }
 
@@ -81,12 +81,12 @@ impl HalSubpassRenderPass {
             #[cfg(feature = "vulkan")]
             Self::Vulkan => Err(subpass_not_implemented_error()),
             #[cfg(feature = "metal")]
-            Self::Metal => Err(subpass_not_implemented_error()),
+            Self::Metal => Ok(()),
         }
     }
 }
 
-#[cfg(all(feature = "tiled", any(feature = "metal", feature = "vulkan")))]
+#[cfg(all(feature = "tiled", feature = "vulkan"))]
 pub(crate) fn subpass_not_implemented_error() -> HalError {
     HalError::BufferOperationFailed {
         backend: "subpass",
