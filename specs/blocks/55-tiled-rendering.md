@@ -1,6 +1,16 @@
 # Block 55 — Tiled rendering (TBDR mobile extension)
 
-> **REMOVED 2026-06-26 (Tint migration Phase 0).** This vendor extension was deleted from yawgpu. This block is retained as historical record. See `specs/tracking/tint-migration-plan.md`.
+> **REMOVED 2026-06-26 (Tint migration Phase 0); PARTIALLY REVIVED 2026-06-30 onto Tint.**
+> The naga-era extension was deleted (see `specs/tracking/tint-migration-plan.md`).
+> It is being re-homed onto the Tint frontend per
+> `specs/tracking/tbdr-tint-rehome-plan.md`. **Slice 1 (live):** the `@color(N)`
+> **framebuffer-fetch** surface behind the default-off `tiled` cargo feature —
+> Metal verified on real GPU, Vulkan spec-valid (input-attachment self-read; MoltenVK
+> execution gap documented in the plan). **Note the WGSL surface moved to Tint's:**
+> `input_attachment<T>` / `inputAttachmentLoad()` / `@color(N)` (NOT the naga-era
+> `subpass_input`/`subpassLoad` shown below). The transient-attachment / multi-subpass
+> / subpass-pipeline content below is the **deferred Slice 2+ roadmap** (Dawn-fork-gated),
+> retained here as historical + forward design — not the current implementation.
 
 Phase 14. **Vendor extension** (not a Dawn port): tile-based deferred
 rendering primitives for mobile GPUs — transient/memoryless attachments,
