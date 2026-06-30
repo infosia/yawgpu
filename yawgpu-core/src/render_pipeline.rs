@@ -786,6 +786,7 @@ pub(crate) fn create_hal_render_pipeline(
             fragment_entry_name,
             metal_bindings,
             vertex_buffer_bindings,
+            &[],
             hal_device.vulkan_memory_model(),
             bind_group_layouts,
         ) {
@@ -821,6 +822,7 @@ pub(crate) fn select_render_shader_source(
     fragment_entry_name: Option<&str>,
     metal_bindings: &[MetalBufferBinding],
     vertex_buffer_bindings: &[MetalVertexBufferBinding],
+    subpass_color_slots: &[((u32, u32), u32)],
     vulkan_memory_model: bool,
     bind_group_layouts: &[Arc<BindGroupLayout>],
 ) -> Result<
@@ -925,6 +927,7 @@ pub(crate) fn select_render_shader_source(
                     Some(fragment_module.generate_render_fragment_msl(
                         fragment_entry_name,
                         &msl_fragment_binding_map,
+                        subpass_color_slots,
                         fragment_pipeline_constants,
                         descriptor.multisample.mask,
                     )?)
@@ -3477,6 +3480,7 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
             Some("fs"),
             &[],
             &[],
+            &[],
             false,
             &[],
         )
@@ -3913,6 +3917,7 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
             Some("fs"),
             &[],
             &[],
+            &[],
             false,
             &[],
         )
@@ -3941,6 +3946,7 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
             Some("fs"),
             &[],
             &[],
+            &[],
             false,
             &[],
         )
@@ -3960,6 +3966,7 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
             &descriptor,
             "vs",
             Some("fs"),
+            &[],
             &[],
             &[],
             false,
@@ -3988,6 +3995,7 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
             &descriptor,
             "vs",
             Some("fs"),
+            &[],
             &[],
             &[],
             false,
@@ -4029,6 +4037,7 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
             &descriptor,
             "vs",
             Some("fs"),
+            &[],
             &[],
             &[],
             false,
@@ -4258,6 +4267,7 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
             "vs",
             Some("fs"),
             &external,
+            &[],
             &[],
             false,
             &[],

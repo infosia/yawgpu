@@ -81,6 +81,27 @@ pub struct SubpassPassLayoutDescriptor {
     pub error: Option<String>,
 }
 
+/// Maps each input attachment of `subpass_index` to its Metal `[[color(N)]]`
+/// slot: key = the input's `(group, binding)`, value = the source color
+/// attachment index it reads (`SubpassInputAttachment::source_attachment`).
+#[allow(dead_code)]
+pub(crate) fn compute_subpass_color_slots(
+    layout: &SubpassPassLayoutDescriptor,
+    subpass_index: u32,
+) -> Vec<((u32, u32), u32)> {
+    layout
+        .subpasses
+        .get(subpass_index as usize)
+        .map(|subpass| {
+            subpass
+                .input_attachments
+                .iter()
+                .map(|input| ((input.group, input.binding), input.source_attachment))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Stores a reusable subpass pass layout.
 #[derive(Debug, Clone)]
 pub struct SubpassPassLayout {
@@ -429,5 +450,35 @@ mod tests {
             ),
             Some("subpass count exceeds tiled capabilities".to_owned())
         );
+    }
+
+    #[test]
+    fn compute_subpass_color_slots_maps_input_binding_to_source_attachment_one() {
+        let mut descriptor = valid_two_subpass_deferred_layout();
+        descriptor.subpasses[1].input_attachments[0].source_attachment = 1;
+
+        assert_eq!(
+            compute_subpass_color_slots(&descriptor, 1),
+            vec![((0, 0), 1)]
+        );
+    }
+
+    #[test]
+    fn compute_subpass_color_slots_maps_input_binding_to_source_attachment_two() {
+        let mut descriptor = valid_two_subpass_deferred_layout();
+        descriptor.color_attachments.push(attachment_layout());
+        descriptor.subpasses[1].input_attachments[0].source_attachment = 2;
+
+        assert_eq!(
+            compute_subpass_color_slots(&descriptor, 1),
+            vec![((0, 0), 2)]
+        );
+    }
+
+    #[test]
+    fn compute_subpass_color_slots_returns_empty_for_out_of_range_subpass() {
+        let descriptor = valid_two_subpass_deferred_layout();
+
+        assert_eq!(compute_subpass_color_slots(&descriptor, 2), Vec::new());
     }
 }
