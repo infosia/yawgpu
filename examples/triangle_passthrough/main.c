@@ -559,6 +559,9 @@ static bool render_frame(const PassthroughApp *app) {
 }
 
 int main(int argc, char **argv) {
+    // Keep the window open until the user closes it; with --verify, auto-exit
+    // after a few frames (for headless / CI runs).
+    const bool verify = (argc > 1 && strcmp(argv[1], "--verify") == 0);
     PassthroughApp app = {0};
     if (!app_init(&app, argc > 0 ? argv[0] : NULL)) {
         app_destroy(&app);
@@ -568,9 +571,9 @@ int main(int argc, char **argv) {
         // if not, treat it as a skip.
         return app.window ? EXIT_FAILURE : EXIT_SUCCESS;
     }
-    // Bounded to 60 frames so the example exits without user interaction
-    // (closing the window ends it sooner), matching `examples/triangle`.
-    for (uint32_t frame = 0; frame < 60 && !yawgpu_window_should_close(app.window); ++frame) {
+    // Runs until the window is closed (or, with --verify, after 60 frames).
+    for (uint32_t frame = 0;
+         !yawgpu_window_should_close(app.window) && !(verify && frame >= 60); ++frame) {
         if (!render_frame(&app)) {
             app_destroy(&app);
             return EXIT_FAILURE;

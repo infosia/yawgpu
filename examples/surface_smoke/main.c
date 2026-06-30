@@ -215,14 +215,18 @@ static bool surface_smoke_render_frame(const SurfaceSmokeApp *app) {
     return true;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    // Keep the window open until the user closes it; with --verify, auto-exit
+    // after a few frames (for headless / CI runs).
+    const bool verify = (argc > 1 && strcmp(argv[1], "--verify") == 0);
     SurfaceSmokeApp app = {0};
     if (!surface_smoke_app_init(&app)) {
         surface_smoke_app_destroy(&app);
         return EXIT_FAILURE;
     }
 
-    for (uint32_t frame = 0; frame < 60 && !yawgpu_window_should_close(app.window); ++frame) {
+    for (uint32_t frame = 0;
+         !yawgpu_window_should_close(app.window) && !(verify && frame >= 60); ++frame) {
         if (!surface_smoke_render_frame(&app)) {
             surface_smoke_app_destroy(&app);
             return EXIT_FAILURE;

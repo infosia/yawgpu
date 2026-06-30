@@ -366,6 +366,9 @@ int main(int argc, char **argv) {
     // Let the framework resolve `shader.wgsl` next to this binary regardless
     // of cwd. Safe to call with NULL.
     yawgpu_set_argv0(argc > 0 ? argv[0] : NULL);
+    // Keep the window open until the user closes it; with --verify, auto-exit
+    // after a few frames (for headless / CI runs).
+    const bool verify = (argc > 1 && strcmp(argv[1], "--verify") == 0);
 
     HelloTriangleApp app = {0};
     if (!hello_triangle_app_init(&app)) {
@@ -373,7 +376,8 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-    for (uint32_t frame = 0; frame < 60 && !yawgpu_window_should_close(app.window); ++frame) {
+    for (uint32_t frame = 0;
+         !yawgpu_window_should_close(app.window) && !(verify && frame >= 60); ++frame) {
         if (!hello_triangle_render_frame(&app)) {
             hello_triangle_app_destroy(&app);
             return EXIT_FAILURE;

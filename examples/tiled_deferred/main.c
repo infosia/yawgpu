@@ -360,8 +360,8 @@ static int run_windowed(YawgpuContext *ctx, WGPUQueue queue,
     Deferred df = deferred_create(ctx->device, (uint32_t)w, (uint32_t)h, format,
                                   gbuffer_module, lighting_module);
 
-    printf("presenting deferred-shaded frames; close the window (or ~600 frames) to exit\n");
-    for (uint32_t frame = 0; frame < 600 && !yawgpu_window_should_close(window); ++frame) {
+    printf("presenting deferred-shaded frames; close the window to exit\n");
+    while (!yawgpu_window_should_close(window)) {
         WGPUSurfaceTexture current = {0};
         wgpuSurfaceGetCurrentTexture(surface, &current);
         if (current.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal ||
