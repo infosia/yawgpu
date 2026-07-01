@@ -28,7 +28,7 @@ unsafe impl Sync for ReflectedModule {}
 
 /// Returns parse and validate wgsl.
 pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ReflectedModule, String> {
-    parse_and_validate_wgsl_gated(src, true, true, true)
+    parse_and_validate_wgsl_gated(src, true, true, true, true)
 }
 
 /// Returns parse and validate wgsl using the supplied feature gates.
@@ -37,12 +37,14 @@ pub(crate) fn parse_and_validate_wgsl_gated(
     shader_f16: bool,
     subgroups: bool,
     dual_source_blending: bool,
+    clip_distances: bool,
 ) -> Result<ReflectedModule, String> {
     let program = yawgpu_tint::Program::parse(
         src,
         shader_f16,
         subgroups,
         dual_source_blending,
+        clip_distances,
         crate::SUPPORTED_WGSL_LANGUAGE_FEATURES,
     )?;
     let warnings = program
@@ -442,6 +444,19 @@ impl ReflectedModule {
             .unwrap_or_default()
             .into_iter()
             .any(|variable| variable.blend_src == Some(1))
+    }
+
+    /// Returns the vertex clip-distances array size reflected for `entry_point`.
+    pub(crate) fn vertex_clip_distances_size(&self, entry_point: &str) -> u32 {
+        self.program
+            .entry_points()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|entry| {
+                entry.stage == yawgpu_tint::PipelineStage::Vertex && entry.name == entry_point
+            })
+            .and_then(|entry| entry.clip_distances_size)
+            .unwrap_or(0)
     }
 
     /// Returns overrides reflected by the validated shader module.
@@ -1435,11 +1450,33 @@ fn fs_plain() -> @location(0) vec4f {
             false,
             false,
             true,
+            false,
         )
         .unwrap();
 
         assert!(module.fragment_writes_blend_src_1("fs_dual"));
         assert!(!module.fragment_writes_blend_src_1("fs_plain"));
+    }
+
+    #[test]
+    fn parse_and_validate_wgsl_gates_clip_distances_extension() {
+        let source = r#"
+enable clip_distances;
+
+struct Out {
+  @builtin(position) pos: vec4f,
+  @builtin(clip_distances) clip: array<f32, 1>,
+}
+
+@vertex
+fn main() -> Out {
+  return Out(vec4f(), array<f32, 1>(0.0));
+}
+"#;
+
+        assert!(parse_and_validate_wgsl_gated(source, true, true, true, false).is_err());
+        let module = parse_and_validate_wgsl_gated(source, true, true, true, true).unwrap();
+        assert_eq!(module.vertex_clip_distances_size("main"), 1);
     }
 
     #[test]

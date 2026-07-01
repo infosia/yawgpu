@@ -398,6 +398,8 @@ void fill_entry_point(const tint::inspector::EntryPoint& ep, YawgpuTintEntryPoin
     out->primitive_index_used = ep.primitive_index_used;
     out->subgroup_invocation_id_used = ep.subgroup_invocation_id_used;
     out->subgroup_size_used = ep.subgroup_size_used;
+    out->has_clip_distances = ep.clip_distances_size.has_value();
+    out->clip_distances_size = ep.clip_distances_size.value_or(0);
 }
 
 uint8_t diagnostic_severity(tint::diag::Severity severity) {
@@ -674,6 +676,7 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               bool shader_f16,
                                               bool subgroups,
                                               bool dual_source_blending,
+                                              bool clip_distances,
                                               bool allow_framebuffer_fetch,
                                               const uint32_t* lang_features,
                                               size_t n_lang_features,
@@ -710,6 +713,9 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
         if (dual_source_blending) {
             options.allowed_features.extensions.insert(
                 tint::wgsl::Extension::kDualSourceBlending);
+        }
+        if (clip_distances) {
+            options.allowed_features.extensions.insert(tint::wgsl::Extension::kClipDistances);
         }
         if (allow_framebuffer_fetch) {
             options.allowed_features.extensions.insert(

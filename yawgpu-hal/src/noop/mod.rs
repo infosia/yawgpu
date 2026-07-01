@@ -80,6 +80,12 @@ impl NoopAdapter {
         true
     }
 
+    /// Returns true when WGSL clip distances are supported.
+    #[must_use]
+    pub(super) fn supports_clip_distances(&self) -> bool {
+        true
+    }
+
     /// Returns true when indirect draws support non-zero first instance values.
     #[must_use]
     pub(super) fn supports_indirect_first_instance(&self) -> bool {
@@ -489,6 +495,13 @@ mod tests {
         let adapter = NoopAdapter::synthetic();
 
         assert!(adapter.supports_dual_source_blending());
+    }
+
+    #[test]
+    fn noop_adapter_supports_clip_distances_returns_true() {
+        let adapter = NoopAdapter::synthetic();
+
+        assert!(adapter.supports_clip_distances());
     }
 
     #[test]
