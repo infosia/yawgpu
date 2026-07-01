@@ -1101,10 +1101,10 @@ pub(super) fn encode_subpass_render_pass(
         device.device.cmd_end_render_pass(command_buffer);
     }
     for (_, texture) in persistent_textures {
-        texture
-            .inner()?
-            .layout
-            .store(IMAGE_LAYOUT_TRANSFER_SRC, AtomicOrdering::Relaxed);
+        texture.inner()?.layout.store(
+            subpass_color_tracked_layout(texture.transient),
+            AtomicOrdering::Relaxed,
+        );
     }
     Ok(RenderPassTemps {
         descriptor_pools,
@@ -1424,6 +1424,20 @@ fn subpass_attachment_views(
     Ok((views, persistent_textures))
 }
 
+/// Returns whether the bound Vulkan texture is transient (memoryless), used to
+/// choose the color attachment's render-pass `finalLayout`. Falls back to
+/// non-transient when the resource is not a Vulkan-backed persistent texture,
+/// matching the pre-existing default rather than erroring here.
+#[cfg(feature = "tiled")]
+fn subpass_binding_transient(resource: &HalSubpassAttachmentResource) -> bool {
+    match resource {
+        HalSubpassAttachmentResource::Persistent { texture, .. } => match texture {
+            crate::HalTexture::Vulkan(texture) => texture.transient,
+            _ => false,
+        },
+    }
+}
+
 #[cfg(feature = "tiled")]
 fn subpass_attachment_view(
     resource: &HalSubpassAttachmentResource,
@@ -1456,6 +1470,7 @@ fn create_subpass_render_pass(
                 .iter()
                 .any(|input| input.source_attachment as usize == index)
         });
+        let transient = subpass_binding_transient(&binding.resource);
         attachments.push(
             vk::AttachmentDescription::default()
                 .format(format)
@@ -1465,7 +1480,7 @@ fn create_subpass_render_pass(
                 .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                 .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
                 .initial_layout(render_color_attachment_layout(used_as_input))
-                .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+                .final_layout(subpass_color_final_layout(transient)),
         );
     }
     if let Some(layout) = pass.layout.depth_stencil_attachment {
@@ -2646,6 +2661,33 @@ pub(super) fn render_color_attachment_layout(framebuffer_fetch: bool) -> vk::Ima
     }
 }
 
+/// Returns the render-pass `finalLayout` for a subpass color attachment.
+///
+/// Non-transient attachments carry `TRANSFER_SRC` usage and end in
+/// `TRANSFER_SRC_OPTIMAL` so the post-pass copy needs no barrier. Transient
+/// attachments lack `TRANSFER_SRC` usage, so they must end in
+/// `COLOR_ATTACHMENT_OPTIMAL` to satisfy
+/// VUID-vkCmdBeginRenderPass-initialLayout-00898.
+#[cfg(feature = "tiled")]
+fn subpass_color_final_layout(transient: bool) -> vk::ImageLayout {
+    if transient {
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+    } else {
+        vk::ImageLayout::TRANSFER_SRC_OPTIMAL
+    }
+}
+
+/// Returns the tracked layout state stored after a subpass render pass for a
+/// color attachment, consistent with [`subpass_color_final_layout`].
+#[cfg(feature = "tiled")]
+fn subpass_color_tracked_layout(transient: bool) -> u8 {
+    if transient {
+        IMAGE_LAYOUT_COLOR_ATTACHMENT
+    } else {
+        IMAGE_LAYOUT_TRANSFER_SRC
+    }
+}
+
 pub(super) fn render_pass_dependencies(framebuffer_fetch: bool) -> Vec<vk::SubpassDependency> {
     let dependency_in = vk::SubpassDependency::default()
         .src_subpass(vk::SUBPASS_EXTERNAL)
@@ -3160,6 +3202,32 @@ mod tests {
         HalSubpassLayout, HalSubpassPassLayout,
     };
 
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_color_final_layout_uses_color_attachment_for_transient() {
+        assert_eq!(
+            subpass_color_final_layout(true),
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+        );
+        assert_eq!(
+            subpass_color_final_layout(false),
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL
+        );
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_color_tracked_layout_matches_final_layout_choice() {
+        assert_eq!(
+            subpass_color_tracked_layout(true),
+            IMAGE_LAYOUT_COLOR_ATTACHMENT
+        );
+        assert_eq!(
+            subpass_color_tracked_layout(false),
+            IMAGE_LAYOUT_TRANSFER_SRC
+        );
+    }
+
     fn dummy_texture(format: HalTextureFormat) -> HalTexture {
         let device = noop::NoopDevice::new();
         HalTexture::Noop(
@@ -3200,6 +3268,7 @@ mod tests {
             sample_count: 1,
             bytes_per_pixel: 4,
             format,
+            transient: false,
         }
     }
 

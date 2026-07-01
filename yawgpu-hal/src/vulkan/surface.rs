@@ -701,6 +701,7 @@ pub(super) fn create_swapchain_texture(
         sample_count: 1,
         bytes_per_pixel,
         format,
+        transient: false,
     })
 }
 

@@ -139,6 +139,7 @@ impl VulkanDevice {
             sample_count: descriptor.sample_count,
             bytes_per_pixel,
             format: descriptor.format,
+            transient: descriptor.usage.transient,
         })
     }
 

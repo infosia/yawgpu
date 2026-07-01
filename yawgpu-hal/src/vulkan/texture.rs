@@ -29,6 +29,11 @@ pub struct VulkanTexture {
     pub(super) sample_count: u32,
     pub(super) bytes_per_pixel: u32,
     pub(super) format: HalTextureFormat,
+    /// True when the texture was created with `TransientAttachment` usage, so it
+    /// lacks `TRANSFER_SRC` image usage and must not end a render pass in
+    /// `TRANSFER_SRC_OPTIMAL`. Only read by the tiled subpass render-pass path.
+    #[cfg_attr(not(feature = "tiled"), allow(dead_code))]
+    pub(super) transient: bool,
 }
 
 impl VulkanTexture {
