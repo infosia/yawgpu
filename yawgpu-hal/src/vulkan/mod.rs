@@ -399,6 +399,17 @@ impl VulkanAdapter {
         }) == vk::TRUE
     }
 
+    /// Returns true when WGSL primitive index is supported by this physical device.
+    #[must_use]
+    pub(super) fn supports_primitive_index(&self) -> bool {
+        (unsafe {
+            self.instance
+                .instance
+                .get_physical_device_features(self.physical_device)
+                .geometry_shader
+        }) == vk::TRUE
+    }
+
     /// Returns true when indirect draws support non-zero first instance values.
     #[must_use]
     pub(super) fn supports_indirect_first_instance(&self) -> bool {
@@ -601,6 +612,7 @@ impl VulkanAdapter {
         let independent_blend = supported_features.independent_blend == vk::TRUE;
         let dual_src_blend = supported_features.dual_src_blend == vk::TRUE;
         let shader_clip_distance = supported_features.shader_clip_distance == vk::TRUE;
+        let geometry_shader = supported_features.geometry_shader == vk::TRUE;
         let draw_indirect_first_instance =
             supported_features.draw_indirect_first_instance == vk::TRUE;
         let depth_clamp = supported_features.depth_clamp == vk::TRUE;
@@ -636,6 +648,9 @@ impl VulkanAdapter {
         }
         if shader_clip_distance {
             enabled_features.shader_clip_distance = vk::TRUE;
+        }
+        if geometry_shader {
+            enabled_features.geometry_shader = vk::TRUE;
         }
         if draw_indirect_first_instance {
             enabled_features.draw_indirect_first_instance = vk::TRUE;
@@ -1115,6 +1130,7 @@ mod tests {
                 independent_blend: supported,
                 dual_src_blend: supported,
                 shader_clip_distance: supported,
+                geometry_shader: supported,
                 draw_indirect_first_instance: supported,
                 sample_rate_shading: supported,
                 ..Default::default()
@@ -1123,6 +1139,7 @@ mod tests {
             let independent_blend = supported_features.independent_blend == vk::TRUE;
             let dual_src_blend = supported_features.dual_src_blend == vk::TRUE;
             let shader_clip_distance = supported_features.shader_clip_distance == vk::TRUE;
+            let geometry_shader = supported_features.geometry_shader == vk::TRUE;
             let draw_indirect_first_instance =
                 supported_features.draw_indirect_first_instance == vk::TRUE;
             #[cfg(feature = "tiled")]
@@ -1139,6 +1156,9 @@ mod tests {
             }
             if shader_clip_distance {
                 enabled_features.shader_clip_distance = vk::TRUE;
+            }
+            if geometry_shader {
+                enabled_features.geometry_shader = vk::TRUE;
             }
             if draw_indirect_first_instance {
                 enabled_features.draw_indirect_first_instance = vk::TRUE;
@@ -1162,6 +1182,10 @@ mod tests {
             assert_eq!(
                 enabled_features.shader_clip_distance, expected_enabled,
                 "shader_clip_distance should be {expected_enabled} when supported={supported}"
+            );
+            assert_eq!(
+                enabled_features.geometry_shader, expected_enabled,
+                "geometry_shader should be {expected_enabled} when supported={supported}"
             );
             assert_eq!(
                 enabled_features.draw_indirect_first_instance, expected_enabled,

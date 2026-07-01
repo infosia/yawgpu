@@ -183,6 +183,12 @@ impl MetalAdapter {
         true
     }
 
+    /// Returns true when WGSL primitive index is supported.
+    #[must_use]
+    pub(super) fn supports_primitive_index(&self) -> bool {
+        self.device.supportsFamily(MTLGPUFamily::Apple7)
+    }
+
     /// Returns true when indirect draws support non-zero first instance values.
     #[must_use]
     pub(super) fn supports_indirect_first_instance(&self) -> bool {

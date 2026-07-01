@@ -81,6 +81,7 @@ impl Adapter {
         add_float32_blendable_feature(&mut features, &self.inner.hal);
         add_dual_source_blending_feature(&mut features, &self.inner.hal);
         add_clip_distances_feature(&mut features, &self.inner.hal);
+        add_primitive_index_feature(&mut features, &self.inner.hal);
         add_indirect_first_instance_feature(&mut features, &self.inner.hal);
         #[cfg(feature = "tiled")]
         add_tiled_features(&mut features, self.backend());
@@ -210,6 +211,8 @@ pub enum Feature {
     DualSourceBlending,
     /// WGSL clip distances support.
     ClipDistances,
+    /// WGSL primitive index support.
+    PrimitiveIndex,
     /// Non-zero first instance support in indirect draws.
     IndirectFirstInstance,
     /// Texture component swizzle support.
@@ -307,6 +310,12 @@ fn add_dual_source_blending_feature(features: &mut FeatureSet, hal: &HalAdapter)
 fn add_clip_distances_feature(features: &mut FeatureSet, hal: &HalAdapter) {
     if hal.supports_clip_distances() {
         features.insert(Feature::ClipDistances);
+    }
+}
+
+fn add_primitive_index_feature(features: &mut FeatureSet, hal: &HalAdapter) {
+    if hal.supports_primitive_index() {
+        features.insert(Feature::PrimitiveIndex);
     }
 }
 
@@ -541,6 +550,13 @@ mod tests {
             .expect_err("successful requestDevice should consume adapter");
         assert!(matches!(error, Error::Validation(message) if message.contains("consumed")));
         assert_eq!(device.queue().label(), "queue label");
+    }
+
+    #[test]
+    fn noop_adapter_advertises_primitive_index() {
+        let adapter = noop_adapter();
+
+        assert!(adapter.has_feature(Feature::PrimitiveIndex));
     }
 
     #[cfg(feature = "tiled")]

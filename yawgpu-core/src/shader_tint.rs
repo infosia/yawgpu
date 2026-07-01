@@ -28,7 +28,7 @@ unsafe impl Sync for ReflectedModule {}
 
 /// Returns parse and validate wgsl.
 pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ReflectedModule, String> {
-    parse_and_validate_wgsl_gated(src, true, true, true, true)
+    parse_and_validate_wgsl_gated(src, true, true, true, true, true)
 }
 
 /// Returns parse and validate wgsl using the supplied feature gates.
@@ -38,6 +38,7 @@ pub(crate) fn parse_and_validate_wgsl_gated(
     subgroups: bool,
     dual_source_blending: bool,
     clip_distances: bool,
+    primitive_index: bool,
 ) -> Result<ReflectedModule, String> {
     let program = yawgpu_tint::Program::parse(
         src,
@@ -45,6 +46,7 @@ pub(crate) fn parse_and_validate_wgsl_gated(
         subgroups,
         dual_source_blending,
         clip_distances,
+        primitive_index,
         crate::SUPPORTED_WGSL_LANGUAGE_FEATURES,
     )?;
     let warnings = program
@@ -1451,6 +1453,7 @@ fn fs_plain() -> @location(0) vec4f {
             false,
             true,
             false,
+            false,
         )
         .unwrap();
 
@@ -1474,9 +1477,24 @@ fn main() -> Out {
 }
 "#;
 
-        assert!(parse_and_validate_wgsl_gated(source, true, true, true, false).is_err());
-        let module = parse_and_validate_wgsl_gated(source, true, true, true, true).unwrap();
+        assert!(parse_and_validate_wgsl_gated(source, true, true, true, false, false).is_err());
+        let module = parse_and_validate_wgsl_gated(source, true, true, true, true, false).unwrap();
         assert_eq!(module.vertex_clip_distances_size("main"), 1);
+    }
+
+    #[test]
+    fn parse_and_validate_wgsl_gates_primitive_index_extension() {
+        let source = r#"
+enable primitive_index;
+
+@fragment
+fn main(@builtin(primitive_index) idx: u32) -> @location(0) vec4f {
+  return vec4f(f32(idx), 0.0, 0.0, 1.0);
+}
+"#;
+
+        assert!(parse_and_validate_wgsl_gated(source, true, true, true, true, false).is_err());
+        assert!(parse_and_validate_wgsl_gated(source, true, true, true, true, true).is_ok());
     }
 
     #[test]

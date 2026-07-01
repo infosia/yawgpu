@@ -26,6 +26,7 @@ pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
         native::WGPUFeatureName_Float32Blendable => core::Feature::Float32Blendable,
         native::WGPUFeatureName_DualSourceBlending => core::Feature::DualSourceBlending,
         native::WGPUFeatureName_ClipDistances => core::Feature::ClipDistances,
+        native::WGPUFeatureName_PrimitiveIndex => core::Feature::PrimitiveIndex,
         native::WGPUFeatureName_IndirectFirstInstance => core::Feature::IndirectFirstInstance,
         native::WGPUFeatureName_TextureComponentSwizzle => core::Feature::TextureComponentSwizzle,
         native::WGPUFeatureName_TextureFormatsTier1 => core::Feature::TextureFormatsTier1,
@@ -62,6 +63,7 @@ pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
         core::Feature::Float32Blendable => native::WGPUFeatureName_Float32Blendable,
         core::Feature::DualSourceBlending => native::WGPUFeatureName_DualSourceBlending,
         core::Feature::ClipDistances => native::WGPUFeatureName_ClipDistances,
+        core::Feature::PrimitiveIndex => native::WGPUFeatureName_PrimitiveIndex,
         core::Feature::IndirectFirstInstance => native::WGPUFeatureName_IndirectFirstInstance,
         core::Feature::TextureComponentSwizzle => native::WGPUFeatureName_TextureComponentSwizzle,
         core::Feature::TextureFormatsTier1 => native::WGPUFeatureName_TextureFormatsTier1,
@@ -135,6 +137,18 @@ mod tests {
         assert_eq!(
             map_feature_to_native(core::Feature::ClipDistances),
             native::WGPUFeatureName_ClipDistances
+        );
+    }
+
+    #[test]
+    fn maps_primitive_index_feature_round_trip() {
+        assert_eq!(
+            map_feature(native::WGPUFeatureName_PrimitiveIndex),
+            core::Feature::PrimitiveIndex
+        );
+        assert_eq!(
+            map_feature_to_native(core::Feature::PrimitiveIndex),
+            native::WGPUFeatureName_PrimitiveIndex
         );
     }
 

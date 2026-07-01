@@ -41,6 +41,7 @@ YAWGPU_TINT_API void yawgpu_tint_initialize(void);
  * If subgroups is true, Tint allows the subgroups WGSL extension.
  * If dual_source_blending is true, Tint allows the dual-source-blending WGSL extension.
  * If clip_distances is true, Tint allows the clip-distances WGSL extension.
+ * If primitive_index is true, Tint allows the primitive-index WGSL extension.
  * If allow_framebuffer_fetch is true, Tint allows the framebuffer-fetch WGSL extension.
  * lang_features contains WGPUWGSLLanguageFeatureName numeric values. */
 YAWGPU_TINT_API YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
@@ -49,6 +50,7 @@ YAWGPU_TINT_API YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               bool subgroups,
                                               bool dual_source_blending,
                                               bool clip_distances,
+                                              bool primitive_index,
                                               bool allow_framebuffer_fetch,
                                               const uint32_t* lang_features,
                                               size_t n_lang_features,

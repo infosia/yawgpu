@@ -128,6 +128,12 @@ impl GlesAdapter {
         false
     }
 
+    /// Returns true when WGSL primitive index is supported.
+    #[must_use]
+    pub(crate) fn supports_primitive_index(&self) -> bool {
+        false
+    }
+
     /// Returns true when indirect draws support non-zero first instance values.
     #[must_use]
     pub(crate) fn supports_indirect_first_instance(&self) -> bool {
