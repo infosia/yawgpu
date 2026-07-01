@@ -54,6 +54,15 @@ YAWGPU_BACKEND=metal  ./examples/build/tiled_deferred/tiled_deferred --verify   
 
 `-DYAWGPU_TILED=ON` adds the `tiled` cargo feature to `libyawgpu` and enables this example.
 
+`tiled_msaa` demonstrates **per-sample MSAA subpass input** (a `tiled` vendor surface, **Vulkan-only**). It records a **three-subpass** pass: subpass 0 draws a centred triangle into a 4× MSAA color attachment (its diagonal edges alias without MSAA); subpass 1 reads that attachment **per sample** via the 2-arg `inputAttachmentLoad(scene, @builtin(sample_index))` — `sample_index` lowers to SPIR-V `SampleId`, promoting the fragment to per-sample invocation (Vulkan `sampleRateShading`) — applies a per-sample tint, and writes a 4× MSAA intermediate; subpass 2 reads that intermediate as a multisampled input, averages its four samples in-shader (a **custom resolve**), and writes the single-sample, anti-aliased output. The multisampled input attachments are declared via an **explicit pipeline layout** whose input-attachment binding is `multisampled` (WGSL cannot express an input attachment's multisampled-ness in the type). By default it opens a window; with `--verify` it renders one frame offscreen, prints the center pixel, and writes `tiled_msaa.png`. It errors on non-Vulkan backends. Opt-in via `-DYAWGPU_TILED=ON`; needs GLFW like the other windowed examples:
+
+```sh
+cmake -S examples -B examples/build -DYAWGPU_FEATURE=vulkan -DYAWGPU_TILED=ON
+cmake --build examples/build --target tiled_msaa
+YAWGPU_BACKEND=vulkan ./examples/build/tiled_msaa/tiled_msaa            # windowed
+YAWGPU_BACKEND=vulkan ./examples/build/tiled_msaa/tiled_msaa --verify   # offscreen + tiled_msaa.png
+```
+
 `surface_smoke` opens a window, clears the swapchain to a slate color for about 60 frames or until the window is closed, and then exits.
 
 `triangle` opens a window, draws an RGB-corner gradient triangle (red / green / blue at the three vertices, smoothly interpolated across the surface) on a black background for about 60 frames or until the window is closed, and then exits with status 0.
