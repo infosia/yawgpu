@@ -152,6 +152,19 @@ impl MetalAdapter {
         true
     }
 
+    /// Returns true when WGSL `subgroups` is supported.
+    #[must_use]
+    pub(super) fn supports_subgroups(&self) -> bool {
+        self.device.supportsFamily(MTLGPUFamily::Apple6)
+            || self.device.supportsFamily(MTLGPUFamily::Metal3)
+    }
+
+    /// Returns the supported subgroup size range.
+    #[must_use]
+    pub(super) fn subgroup_size_range(&self) -> Option<(u32, u32)> {
+        self.supports_subgroups().then_some((32, 32))
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<MetalDevice, HalError> {
         let queue = self

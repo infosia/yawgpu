@@ -357,6 +357,55 @@ impl VulkanAdapter {
         shader_float16_supported(extension_present, features.shader_float16)
     }
 
+    /// Returns true when WGSL `subgroups` is supported by this physical device.
+    #[must_use]
+    pub(super) fn supports_subgroups(&self) -> bool {
+        self.subgroup_size_range().is_some()
+    }
+
+    /// Returns the supported subgroup size range for this physical device.
+    #[must_use]
+    pub(super) fn subgroup_size_range(&self) -> Option<(u32, u32)> {
+        let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+        let mut size_control = vk::PhysicalDeviceSubgroupSizeControlProperties::default();
+        let mut properties2 = vk::PhysicalDeviceProperties2::default()
+            .push_next(&mut subgroup)
+            .push_next(&mut size_control);
+        unsafe {
+            self.instance
+                .instance
+                .get_physical_device_properties2(self.physical_device, &mut properties2);
+        }
+
+        if !subgroups_supported(subgroup.supported_operations, subgroup.supported_stages) {
+            return None;
+        }
+
+        let api_version = unsafe {
+            self.instance
+                .instance
+                .get_physical_device_properties(self.physical_device)
+                .api_version
+        };
+        let size_control_available = subgroup_size_control_available(
+            api_version,
+            self.has_device_extension(vk::EXT_SUBGROUP_SIZE_CONTROL_NAME),
+        );
+        if size_control_available
+            && size_control.min_subgroup_size != 0
+            && size_control.max_subgroup_size != 0
+        {
+            Some((
+                size_control.min_subgroup_size,
+                size_control.max_subgroup_size,
+            ))
+        } else if subgroup.subgroup_size != 0 {
+            Some((subgroup.subgroup_size, subgroup.subgroup_size))
+        } else {
+            None
+        }
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<VulkanDevice, HalError> {
         let queue_family_index = self
@@ -419,8 +468,7 @@ impl VulkanAdapter {
         // be enabled. Deciding on device_max would chain the feature struct into
         // VkDeviceCreateInfo.pNext without enabling the parent extension
         // (VUID-VkDeviceCreateInfo-pNext-pNext).
-        let effective_api_version =
-            YAWGPU_VULKAN_API_VERSION.min(device_properties.api_version);
+        let effective_api_version = YAWGPU_VULKAN_API_VERSION.min(device_properties.api_version);
         let vulkan_memory_model_available =
             vulkan_memory_model_available(effective_api_version, vulkan_memory_model_extension);
         let mut vulkan_memory_model_supported_features =
@@ -656,6 +704,19 @@ fn shader_float16_supported(extension_present: bool, shader_float16: vk::Bool32)
     extension_present && shader_float16 == vk::TRUE
 }
 
+fn subgroups_supported(
+    supported_operations: vk::SubgroupFeatureFlags,
+    supported_stages: vk::ShaderStageFlags,
+) -> bool {
+    let required_operations = vk::SubgroupFeatureFlags::BASIC
+        | vk::SubgroupFeatureFlags::VOTE
+        | vk::SubgroupFeatureFlags::ARITHMETIC
+        | vk::SubgroupFeatureFlags::BALLOT
+        | vk::SubgroupFeatureFlags::SHUFFLE;
+    supported_operations.contains(required_operations)
+        && supported_stages.contains(vk::ShaderStageFlags::COMPUTE)
+}
+
 fn vulkan_memory_model_available(api_version: u32, extension_present: bool) -> bool {
     let major = vk::api_version_major(api_version);
     let minor = vk::api_version_minor(api_version);
@@ -672,6 +733,12 @@ fn image_format_list_available(api_version: u32, extension_present: bool) -> boo
     let major = vk::api_version_major(api_version);
     let minor = vk::api_version_minor(api_version);
     (major, minor) >= (1, 2) || extension_present
+}
+
+fn subgroup_size_control_available(api_version: u32, extension_present: bool) -> bool {
+    let major = vk::api_version_major(api_version);
+    let minor = vk::api_version_minor(api_version);
+    (major, minor) >= (1, 3) || extension_present
 }
 
 fn enabled_16bit_storage_features(
@@ -1053,7 +1120,10 @@ mod tests {
 
         // VkImageFormatListCreateInfo shares the same >= (1,2) promotion shape and
         // the same latent bug: available at the 1.1 baseline only via the extension.
-        assert!(image_format_list_available(effective_api_version, extension_present));
+        assert!(image_format_list_available(
+            effective_api_version,
+            extension_present
+        ));
     }
 
     #[test]
@@ -1110,10 +1180,42 @@ mod tests {
     }
 
     #[test]
+    fn vulkan_subgroups_require_webgpu_operations_and_compute_stage() {
+        let required_operations = vk::SubgroupFeatureFlags::BASIC
+            | vk::SubgroupFeatureFlags::VOTE
+            | vk::SubgroupFeatureFlags::ARITHMETIC
+            | vk::SubgroupFeatureFlags::BALLOT
+            | vk::SubgroupFeatureFlags::SHUFFLE;
+        assert!(subgroups_supported(
+            required_operations,
+            vk::ShaderStageFlags::COMPUTE
+        ));
+        assert!(subgroups_supported(
+            required_operations | vk::SubgroupFeatureFlags::QUAD,
+            vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT
+        ));
+        assert!(!subgroups_supported(
+            required_operations & !vk::SubgroupFeatureFlags::SHUFFLE,
+            vk::ShaderStageFlags::COMPUTE
+        ));
+        assert!(!subgroups_supported(
+            required_operations,
+            vk::ShaderStageFlags::FRAGMENT
+        ));
+    }
+
+    #[test]
     fn vulkan_image_format_list_is_available_from_core_1_2_or_extension() {
         assert!(image_format_list_available(vk::API_VERSION_1_2, false));
         assert!(image_format_list_available(vk::API_VERSION_1_1, true));
         assert!(!image_format_list_available(vk::API_VERSION_1_1, false));
+    }
+
+    #[test]
+    fn vulkan_subgroup_size_control_is_available_from_core_1_3_or_extension() {
+        assert!(subgroup_size_control_available(vk::API_VERSION_1_3, false));
+        assert!(subgroup_size_control_available(vk::API_VERSION_1_1, true));
+        assert!(!subgroup_size_control_available(vk::API_VERSION_1_2, false));
     }
 
     /// Device creation enables only the `VK_KHR_16bit_storage` sub-features

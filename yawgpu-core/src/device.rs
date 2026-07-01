@@ -352,11 +352,14 @@ impl Device {
             );
         }
         let shader_f16 = self.inner.features.contains(&Feature::ShaderF16);
+        let subgroups = self.inner.features.contains(&Feature::Subgroups);
         let (inner, error) = match source {
-            ShaderModuleSource::Wgsl(source) => match ShaderModule::from_wgsl(source, shader_f16) {
-                Ok(inner) => (inner, None),
-                Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
-            },
+            ShaderModuleSource::Wgsl(source) => {
+                match ShaderModule::from_wgsl(source, shader_f16, subgroups) {
+                    Ok(inner) => (inner, None),
+                    Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
+                }
+            }
             #[cfg(feature = "shader-passthrough")]
             ShaderModuleSource::SpirvPassthrough(words) => match ShaderModule::from_spirv(words) {
                 Ok(inner) => (inner, None),

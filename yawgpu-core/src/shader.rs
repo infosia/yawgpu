@@ -134,8 +134,9 @@ impl ShaderModule {
     pub(crate) fn from_wgsl(
         source: String,
         shader_f16: bool,
+        subgroups: bool,
     ) -> Result<ShaderModuleSourceKind, String> {
-        let reflected = frontend::parse_and_validate_wgsl_gated(&source, shader_f16)?;
+        let reflected = frontend::parse_and_validate_wgsl_gated(&source, shader_f16, subgroups)?;
         Ok(ShaderModuleSourceKind::Wgsl {
             _source: source,
             reflected: Box::new(reflected),
@@ -352,6 +353,40 @@ mod tests {
             .expect("Noop adapter should create shader-f16 device");
         let valid =
             device_with_f16.create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
+
+        assert!(!valid.is_error());
+        assert_eq!(valid.diagnostic(), None);
+    }
+
+    #[test]
+    fn shader_module_creation_gates_subgroups_usage_on_required_feature() {
+        let source = r#"
+enable subgroups;
+
+@compute @workgroup_size(1)
+fn cs() {
+  let x = subgroupAdd(1u);
+  _ = x;
+}
+"#;
+        let device_without_subgroups = noop_device();
+        device_without_subgroups.push_error_scope(ErrorFilter::Validation);
+        let invalid = device_without_subgroups
+            .create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
+        let scoped = device_without_subgroups
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("subgroups usage should be scoped");
+
+        assert!(invalid.is_error());
+        assert!(!scoped.message.is_empty());
+
+        let adapter = noop_adapter();
+        let device_with_subgroups = adapter
+            .create_device(None, &[Feature::Subgroups], "", "")
+            .expect("Noop adapter should create subgroups device");
+        let valid =
+            device_with_subgroups.create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
 
         assert!(!valid.is_error());
         assert_eq!(valid.diagnostic(), None);

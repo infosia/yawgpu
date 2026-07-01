@@ -38,11 +38,13 @@ YAWGPU_TINT_API void yawgpu_tint_initialize(void);
 
 /* Parse + validate WGSL. Returns NULL on failure with *err set.
  * If shader_f16 is true, Tint allows the f16 WGSL extension.
+ * If subgroups is true, Tint allows the subgroups WGSL extension.
  * If allow_framebuffer_fetch is true, Tint allows the framebuffer-fetch WGSL extension.
  * lang_features contains WGPUWGSLLanguageFeatureName numeric values. */
 YAWGPU_TINT_API YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               size_t wgsl_len,
                                               bool shader_f16,
+                                              bool subgroups,
                                               bool allow_framebuffer_fetch,
                                               const uint32_t* lang_features,
                                               size_t n_lang_features,

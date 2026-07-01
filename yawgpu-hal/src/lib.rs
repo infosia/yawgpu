@@ -353,6 +353,36 @@ impl HalAdapter {
         }
     }
 
+    /// Returns true when WGSL `subgroups` is supported.
+    #[must_use]
+    pub fn supports_subgroups(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.supports_subgroups(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_subgroups(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_subgroups(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_subgroups(),
+        }
+    }
+
+    /// Returns the supported subgroup size range, or `None` when unsupported.
+    #[must_use]
+    pub fn subgroup_size_range(&self) -> Option<(u32, u32)> {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.subgroup_size_range(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.subgroup_size_range(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.subgroup_size_range(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.subgroup_size_range(),
+        }
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<HalDevice, HalError> {
         match self {
@@ -1277,6 +1307,18 @@ mod tests {
             .expect("Noop adapter exists");
 
         assert!(adapter.supports_shader_float16());
+    }
+
+    #[test]
+    fn hal_adapter_supports_subgroups_noop_returns_nominal_range() {
+        let adapter = HalInstance::new_noop()
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter exists");
+
+        assert!(adapter.supports_subgroups());
+        assert_eq!(adapter.subgroup_size_range(), Some((4, 4)));
     }
 
     #[test]
