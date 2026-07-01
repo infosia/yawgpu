@@ -3004,8 +3004,8 @@ pub(crate) fn validate_inter_stage_interface(
     // …) also consume `maxInterStageShaderVariables` slots, so count them with
     // the user-defined inputs (F-063).
     let input_builtins = inter_stage_input_builtin_count(fragment, fragment_entry)?;
-    validate_inter_stage_limits(&outputs, clip_slots, limits, "output")?;
-    validate_inter_stage_limits(&inputs, input_builtins, limits, "input")?;
+    validate_inter_stage_limits(&outputs, clip_slots, clip_slots, limits, "output")?;
+    validate_inter_stage_limits(&inputs, input_builtins, 0, limits, "input")?;
     let point_list_slots = u32::from(matches!(
         descriptor.primitive.topology,
         PrimitiveTopology::PointList
@@ -3077,6 +3077,7 @@ fn effective_sampling(
 fn validate_inter_stage_limits(
     locations: &BTreeMap<u32, frontend::ReflectedIoLocation>,
     extra_builtins: u32,
+    reserved_top_locations: u32,
     limits: Limits,
     label: &str,
 ) -> Result<(), String> {
@@ -3087,10 +3088,10 @@ fn validate_inter_stage_limits(
             "render pipeline inter-stage {label} count exceeds the device limit"
         ));
     }
-    if locations
-        .keys()
-        .any(|location| *location >= limits.max_inter_stage_shader_variables)
-    {
+    let max_location = limits
+        .max_inter_stage_shader_variables
+        .saturating_sub(reserved_top_locations);
+    if locations.keys().any(|location| *location >= max_location) {
         return Err(format!(
             "render pipeline inter-stage {label} location exceeds the device limit"
         ));
@@ -3686,6 +3687,55 @@ fn vs() -> VsOut {{
 
 struct FsIn {{
 {inputs}}}
+
+@fragment
+fn fs(input: FsIn) -> @location(0) vec4f {{
+  _ = input;
+  return vec4f();
+}}
+"#
+        )
+    }
+
+    fn clip_inter_stage_location_wgsl(location: u32, clip_distances_size: u32) -> String {
+        let clip_field = if clip_distances_size == 0 {
+            String::new()
+        } else {
+            format!("  @builtin(clip_distances) clip: array<f32, {clip_distances_size}>,\n")
+        };
+        let clip_value = if clip_distances_size == 0 {
+            String::new()
+        } else {
+            let clip_values = (0..clip_distances_size)
+                .map(|_| "0.0")
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("    array<f32, {clip_distances_size}>({clip_values}),\n")
+        };
+        let clip_enable = if clip_distances_size == 0 {
+            String::new()
+        } else {
+            "enable clip_distances;\n".to_owned()
+        };
+        format!(
+            r#"
+{clip_enable}
+struct VsOut {{
+  @builtin(position) pos: vec4f,
+{clip_field}  @location({location}) value: f32,
+}}
+
+@vertex
+fn vs() -> VsOut {{
+  return VsOut(
+    vec4f(),
+{clip_value}    0.0,
+  );
+}}
+
+struct FsIn {{
+  @location({location}) value: f32,
+}}
 
 @fragment
 fn fs(input: FsIn) -> @location(0) vec4f {{
@@ -4735,6 +4785,49 @@ fn fs(input: FsIn) -> @location(0) vec4f {{
         assert_eq!(
             validate_inter_stage_interface(&descriptor, "vs", Some("fs"), device.limits()),
             Err("render pipeline inter-stage output count exceeds the device limit".to_owned())
+        );
+    }
+
+    #[test]
+    fn validate_inter_stage_interface_reserves_top_locations_for_clip_distances() {
+        let device = clip_distances_device();
+        let limits = device.limits();
+        let top_location = limits.max_inter_stage_shader_variables - 1;
+        let reserved_top_location = top_location - 1;
+
+        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            clip_inter_stage_location_wgsl(top_location, 0),
+        )));
+        assert!(!module.is_error());
+        let descriptor = render_pipeline_descriptor(module);
+        assert_eq!(
+            validate_inter_stage_interface(&descriptor, "vs", Some("fs"), limits),
+            Ok(())
+        );
+
+        for clip_distances_size in 1..=4 {
+            let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+                clip_inter_stage_location_wgsl(top_location, clip_distances_size),
+            )));
+            assert!(!module.is_error());
+            let descriptor = render_pipeline_descriptor(module);
+            assert_eq!(
+                validate_inter_stage_interface(&descriptor, "vs", Some("fs"), limits),
+                Err(
+                    "render pipeline inter-stage output location exceeds the device limit"
+                        .to_owned()
+                )
+            );
+        }
+
+        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            clip_inter_stage_location_wgsl(reserved_top_location, 1),
+        )));
+        assert!(!module.is_error());
+        let descriptor = render_pipeline_descriptor(module);
+        assert_eq!(
+            validate_inter_stage_interface(&descriptor, "vs", Some("fs"), limits),
+            Ok(())
         );
     }
 

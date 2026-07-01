@@ -8,7 +8,17 @@ Spec: [Block 68](../blocks/68-clip-distances.md). Goal: Dawn parity for
 | Slice | Scope | State |
 |---|---|---|
 | 1 | Feature plumbing + Tint gate + inter-stage limit (Noop + HAL cap) | **DONE** (2026-07-01) |
-| 2 | Real-GPU e2e + CTS | TODO |
+| 2 | Real-GPU e2e + CTS | **DONE** (2026-07-01) |
+
+**Slice 2 — real Metal e2e + CTS-verified.** `e2e_metal_clip_distances.rs`:
+negative clip distance culls (clear) vs positive keeps (red), 2/2 on M2. CTS
+`shader,validation,extension,clip_distances` 4/0 and
+`capability_checks,features,clip_distances` **240/0** (skip=128 limit-device
+cases). CTS found a 2nd gap Slice 1 missed — clip distances also **lower the max
+vertex-output location** (`maxInterStageShaderVariables - 1 - clipDistanceSlots`,
+`clip_distances.spec.cpp:147`; point-list does NOT reduce the location ceiling),
+20 fails; fixed by a `reserved_top_locations` param on `validate_inter_stage_limits`
+(clip_slots for outputs, 0 for inputs). Re-verified 0 fail.
 | 3 | Docs + Phase Review | TODO |
 
 ## Key facts (verified 2026-07-01)
