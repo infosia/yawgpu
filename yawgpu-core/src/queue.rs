@@ -8,7 +8,8 @@ use yawgpu_hal::{
     HalBufferTextureLayout, HalBufferUsage, HalComputeDispatch, HalComputePass, HalCopy, HalDevice,
     HalDraw, HalIndexFormat, HalQueue, HalRenderColorTarget, HalRenderDepthStencilAttachment,
     HalRenderLoadOp, HalRenderPass, HalResolveQuerySet, HalScissorRect, HalTextureAspect,
-    HalTextureClear, HalTextureCopy, HalTextureViewDimension, HalViewport,
+    HalTextureClear, HalTextureComponentSwizzle, HalTextureCopy, HalTextureViewDimension,
+    HalViewport,
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
@@ -31,7 +32,9 @@ use crate::render_pipeline::*;
 use crate::subpass::*;
 use crate::texture::hal_texture_format;
 use crate::texture::*;
-use crate::texture_view::{TextureAspect, TextureView, TextureViewDimension};
+use crate::texture_view::{
+    ComponentSwizzle, TextureAspect, TextureComponentSwizzle, TextureView, TextureViewDimension,
+};
 
 /// Stores queue data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -1519,6 +1522,26 @@ fn hal_texture_view_dimension(dimension: TextureViewDimension) -> HalTextureView
     }
 }
 
+fn hal_texture_component_swizzle(swizzle: TextureComponentSwizzle) -> HalTextureComponentSwizzle {
+    fn component(component: ComponentSwizzle) -> yawgpu_hal::HalComponentSwizzle {
+        match component {
+            ComponentSwizzle::Zero => yawgpu_hal::HalComponentSwizzle::Zero,
+            ComponentSwizzle::One => yawgpu_hal::HalComponentSwizzle::One,
+            ComponentSwizzle::R => yawgpu_hal::HalComponentSwizzle::R,
+            ComponentSwizzle::G => yawgpu_hal::HalComponentSwizzle::G,
+            ComponentSwizzle::B => yawgpu_hal::HalComponentSwizzle::B,
+            ComponentSwizzle::A => yawgpu_hal::HalComponentSwizzle::A,
+        }
+    }
+
+    HalTextureComponentSwizzle {
+        r: component(swizzle.r),
+        g: component(swizzle.g),
+        b: component(swizzle.b),
+        a: component(swizzle.a),
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct HalBoundResources {
     pub(crate) buffers: Vec<HalBoundBuffer>,
@@ -1584,6 +1607,7 @@ pub(crate) fn hal_bind_resources(
                     base_array_layer: texture_view.base_array_layer(),
                     array_layer_count: texture_view.array_layer_count(),
                     aspect: hal_texture_aspect(texture_view.aspect()),
+                    swizzle: hal_texture_component_swizzle(texture_view.swizzle()),
                     storage_access: None,
                 });
             }
@@ -1605,6 +1629,7 @@ pub(crate) fn hal_bind_resources(
                     base_array_layer: texture_view.base_array_layer(),
                     array_layer_count: texture_view.array_layer_count(),
                     aspect: hal_texture_aspect(texture_view.aspect()),
+                    swizzle: hal_texture_component_swizzle(texture_view.swizzle()),
                     storage_access: Some(hal_storage_texture_access(access)),
                 });
             }

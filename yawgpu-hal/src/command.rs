@@ -3,7 +3,7 @@ use crate::HalError;
 use crate::HalQuerySet;
 use crate::{
     HalBuffer, HalComputePipeline, HalExtent3d, HalOrigin3d, HalRenderPipeline, HalSampler,
-    HalTexture, HalTextureFormat,
+    HalTexture, HalTextureComponentSwizzle, HalTextureFormat,
 };
 
 /// Stores Noop subpass render pass state.
@@ -341,6 +341,8 @@ pub struct HalBoundTexture {
     pub array_layer_count: u32,
     /// Texture aspect exposed by the view.
     pub aspect: HalTextureAspect,
+    /// Component swizzle exposed by the view.
+    pub swizzle: HalTextureComponentSwizzle,
     /// Storage texture access mode when this binding is a storage texture.
     pub storage_access: Option<HalStorageTextureAccess>,
 }
@@ -1030,6 +1032,7 @@ mod tests {
             base_array_layer: 6,
             array_layer_count: 7,
             aspect: HalTextureAspect::DepthOnly,
+            swizzle: HalTextureComponentSwizzle::default(),
             storage_access: Some(HalStorageTextureAccess::ReadOnly),
         };
 
@@ -1046,6 +1049,7 @@ mod tests {
         assert_eq!(binding.base_array_layer, 6);
         assert_eq!(binding.array_layer_count, 7);
         assert_eq!(binding.aspect, HalTextureAspect::DepthOnly);
+        assert_eq!(binding.swizzle, HalTextureComponentSwizzle::default());
         assert_eq!(
             binding.storage_access,
             Some(HalStorageTextureAccess::ReadOnly)

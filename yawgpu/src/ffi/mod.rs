@@ -4463,7 +4463,7 @@ mod tests {
             };
 
             wgpuAdapterGetFeatures(adapter, &mut features);
-            assert_eq!(features.featureCount, 21);
+            assert_eq!(features.featureCount, 22);
             let values = std::slice::from_raw_parts(features.features, features.featureCount);
             assert!(values.contains(&native::WGPUFeatureName_CoreFeaturesAndLimits));
             assert!(values.contains(&native::WGPUFeatureName_TextureCompressionBC));
@@ -4484,6 +4484,7 @@ mod tests {
             assert!(values.contains(&native::WGPUFeatureName_ClipDistances));
             assert!(values.contains(&native::WGPUFeatureName_PrimitiveIndex));
             assert!(values.contains(&native::WGPUFeatureName_IndirectFirstInstance));
+            assert!(values.contains(&native::WGPUFeatureName_TextureComponentSwizzle));
             assert!(values.contains(&native::WGPUFeatureName_TextureFormatsTier1));
             assert!(values.contains(&native::WGPUFeatureName_TextureFormatsTier2));
 

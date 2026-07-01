@@ -92,6 +92,12 @@ impl GlesAdapter {
         false
     }
 
+    /// Returns true when texture view component swizzling is supported.
+    #[must_use]
+    pub fn supports_texture_component_swizzle(&self) -> bool {
+        false
+    }
+
     /// Returns true when WGSL `shader-f16` is supported.
     #[must_use]
     pub(crate) fn supports_shader_float16(&self) -> bool {

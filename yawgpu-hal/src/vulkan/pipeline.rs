@@ -1,6 +1,9 @@
 use super::*;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
-use crate::{HalTextureAspect, HalTextureDimension, HalTextureViewDimension};
+use crate::{
+    HalComponentSwizzle, HalTextureAspect, HalTextureComponentSwizzle, HalTextureDimension,
+    HalTextureViewDimension,
+};
 
 /// Stores vulkan compute pipeline data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -1559,6 +1562,7 @@ fn create_sampled_texture_image_view(
         .image(texture.inner()?.image)
         .view_type(sampled_texture_view_type(bound.dimension))
         .format(format)
+        .components(component_mapping(&bound.swizzle))
         .subresource_range(sampled_texture_subresource_range(bound));
     unsafe { device.create_image_view(&view_info, None) }
         .map_err(|_| texture_error("sampled texture view creation failed"))
@@ -1585,6 +1589,7 @@ fn create_storage_texture_image_view(
         .image(inner.image)
         .view_type(view_type)
         .format(format)
+        .components(component_mapping(&bound.swizzle))
         .subresource_range(subresource_range);
     let view = unsafe { device.create_image_view(&view_info, None) }
         .map_err(|_| texture_error("storage texture view creation failed"))?;
@@ -1606,6 +1611,25 @@ fn storage_texture_uses_cached_bgra8_view(
         subresource_range,
         color_subresource_range(inner.mip_level_count, inner.array_layers),
     )
+}
+
+fn component_mapping(swizzle: &HalTextureComponentSwizzle) -> vk::ComponentMapping {
+    fn component(component: HalComponentSwizzle) -> vk::ComponentSwizzle {
+        match component {
+            HalComponentSwizzle::Zero => vk::ComponentSwizzle::ZERO,
+            HalComponentSwizzle::One => vk::ComponentSwizzle::ONE,
+            HalComponentSwizzle::R => vk::ComponentSwizzle::R,
+            HalComponentSwizzle::G => vk::ComponentSwizzle::G,
+            HalComponentSwizzle::B => vk::ComponentSwizzle::B,
+            HalComponentSwizzle::A => vk::ComponentSwizzle::A,
+        }
+    }
+
+    vk::ComponentMapping::default()
+        .r(component(swizzle.r))
+        .g(component(swizzle.g))
+        .b(component(swizzle.b))
+        .a(component(swizzle.a))
 }
 
 fn storage_texture_can_use_cached_bgra8_view(
@@ -1993,6 +2017,7 @@ mod tests {
             base_array_layer: 1,
             array_layer_count: 1,
             aspect,
+            swizzle: HalTextureComponentSwizzle::default(),
             storage_access: None,
         }
     }
@@ -2004,6 +2029,21 @@ mod tests {
         assert!(is_strip_topology(HalPrimitiveTopology::LineStrip));
         assert!(!is_strip_topology(HalPrimitiveTopology::TriangleList));
         assert!(is_strip_topology(HalPrimitiveTopology::TriangleStrip));
+    }
+
+    #[test]
+    fn component_mapping_maps_texture_component_swizzle() {
+        let mapping = component_mapping(&HalTextureComponentSwizzle {
+            r: HalComponentSwizzle::Zero,
+            g: HalComponentSwizzle::One,
+            b: HalComponentSwizzle::B,
+            a: HalComponentSwizzle::A,
+        });
+
+        assert_eq!(mapping.r, vk::ComponentSwizzle::ZERO);
+        assert_eq!(mapping.g, vk::ComponentSwizzle::ONE);
+        assert_eq!(mapping.b, vk::ComponentSwizzle::B);
+        assert_eq!(mapping.a, vk::ComponentSwizzle::A);
     }
 
     #[test]

@@ -3,6 +3,48 @@ use crate::{
     HalStencilOperation, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
 
+/// Enumerates HAL texture component swizzle values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HalComponentSwizzle {
+    /// Zero constant.
+    Zero,
+    /// One constant.
+    One,
+    /// Red channel.
+    R,
+    /// Green channel.
+    G,
+    /// Blue channel.
+    B,
+    /// Alpha channel.
+    A,
+}
+
+/// Describes HAL texture component swizzle values for a view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HalTextureComponentSwizzle {
+    /// Red output channel source.
+    pub r: HalComponentSwizzle,
+    /// Green output channel source.
+    pub g: HalComponentSwizzle,
+    /// Blue output channel source.
+    pub b: HalComponentSwizzle,
+    /// Alpha output channel source.
+    pub a: HalComponentSwizzle,
+}
+
+impl Default for HalTextureComponentSwizzle {
+    fn default() -> Self {
+        Self {
+            r: HalComponentSwizzle::R,
+            g: HalComponentSwizzle::G,
+            b: HalComponentSwizzle::B,
+            a: HalComponentSwizzle::A,
+        }
+    }
+}
+
 /// Describes HAL render pipeline descriptor.
 #[derive(Debug, Clone)]
 pub struct HalRenderPipelineDescriptor {
@@ -212,6 +254,19 @@ mod tests {
             depth_fail_op: HalStencilOperation::Replace,
             pass_op: HalStencilOperation::IncrementClamp,
         }
+    }
+
+    #[test]
+    fn hal_texture_component_swizzle_default_is_identity() {
+        assert_eq!(
+            HalTextureComponentSwizzle::default(),
+            HalTextureComponentSwizzle {
+                r: HalComponentSwizzle::R,
+                g: HalComponentSwizzle::G,
+                b: HalComponentSwizzle::B,
+                a: HalComponentSwizzle::A,
+            }
+        );
     }
 
     #[test]

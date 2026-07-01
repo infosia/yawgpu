@@ -18,9 +18,9 @@ use objc2_metal::{
     MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerAddressMode,
     MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerMipFilter, MTLSamplerState,
     MTLScissorRect, MTLSize, MTLStencilDescriptor, MTLStencilOperation, MTLStorageMode,
-    MTLStoreAction, MTLTexture as MTLTextureTrait, MTLTextureDescriptor, MTLTextureType,
-    MTLTextureUsage, MTLVertexDescriptor, MTLVertexFormat, MTLVertexStepFunction, MTLViewport,
-    MTLVisibilityResultMode, MTLWinding,
+    MTLStoreAction, MTLTexture as MTLTextureTrait, MTLTextureDescriptor, MTLTextureSwizzle,
+    MTLTextureSwizzleChannels, MTLTextureType, MTLTextureUsage, MTLVertexDescriptor,
+    MTLVertexFormat, MTLVertexStepFunction, MTLViewport, MTLVisibilityResultMode, MTLWinding,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
@@ -144,6 +144,13 @@ impl MetalAdapter {
     #[must_use]
     pub fn supports_texture_compression_astc_sliced_3d(&self) -> bool {
         false
+    }
+
+    /// Returns true when texture view component swizzling is supported.
+    #[must_use]
+    pub fn supports_texture_component_swizzle(&self) -> bool {
+        self.device.supportsFamily(MTLGPUFamily::Mac2)
+            || self.device.supportsFamily(MTLGPUFamily::Apple2)
     }
 
     /// Returns true when WGSL `shader-f16` is supported.
@@ -304,6 +311,24 @@ mod tests {
             .next()
             .expect("at least one Metal adapter");
         assert!(!adapter.name().is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_adapter_supports_texture_component_swizzle_matches_supported_families() {
+        let adapter = MetalInstance::new()
+            .expect("create Metal instance")
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Metal adapter");
+
+        assert_eq!(
+            adapter.supports_texture_component_swizzle(),
+            adapter.device.supportsFamily(MTLGPUFamily::Mac2)
+                || adapter.device.supportsFamily(MTLGPUFamily::Apple2)
+        );
     }
 
     #[test]

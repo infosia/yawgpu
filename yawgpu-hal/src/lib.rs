@@ -29,9 +29,10 @@ pub use command::{
 };
 pub use descriptors::{
     HalBlendComponent, HalBlendFactor, HalBlendOperation, HalBlendState, HalColorTargetState,
-    HalCullMode, HalDepthStencilState, HalExtent3d, HalFrontFace, HalOrigin3d,
-    HalRenderPipelineDescriptor, HalSamplerDescriptor, HalStencilFaceState, HalTextureDescriptor,
-    HalTextureDimension, HalVertexAttribute, HalVertexBufferLayout,
+    HalComponentSwizzle, HalCullMode, HalDepthStencilState, HalExtent3d, HalFrontFace, HalOrigin3d,
+    HalRenderPipelineDescriptor, HalSamplerDescriptor, HalStencilFaceState,
+    HalTextureComponentSwizzle, HalTextureDescriptor, HalTextureDimension, HalVertexAttribute,
+    HalVertexBufferLayout,
 };
 pub use error::HalError;
 pub use format::{
@@ -335,6 +336,21 @@ impl HalAdapter {
             Self::Metal(adapter) => adapter.supports_texture_compression_astc_sliced_3d(),
             #[cfg(feature = "gles")]
             Self::Gles(adapter) => adapter.supports_texture_compression_astc_sliced_3d(),
+        }
+    }
+
+    /// Returns true when texture view component swizzling is supported.
+    #[must_use]
+    pub fn supports_texture_component_swizzle(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.supports_texture_component_swizzle(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_texture_component_swizzle(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_texture_component_swizzle(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_texture_component_swizzle(),
         }
     }
 
@@ -1475,6 +1491,17 @@ mod tests {
             .expect("Noop adapter exists");
 
         assert!(adapter.supports_indirect_first_instance());
+    }
+
+    #[test]
+    fn hal_adapter_supports_texture_component_swizzle_noop_returns_true() {
+        let adapter = HalInstance::new_noop()
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter exists");
+
+        assert!(adapter.supports_texture_component_swizzle());
     }
 
     #[test]
