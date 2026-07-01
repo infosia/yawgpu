@@ -487,6 +487,11 @@ impl VulkanAdapter {
         let independent_blend = supported_features.independent_blend == vk::TRUE;
         let depth_clamp = supported_features.depth_clamp == vk::TRUE;
         let depth_clip_control = depth_clamp && depth_clip_enable_extension;
+        // Per-sample MSAA subpass input reads `@builtin(sample_index)`, which
+        // lowers to SPIR-V `SampleId` and auto-promotes the fragment shader to
+        // per-sample execution; Vulkan requires sampleRateShading for that.
+        #[cfg(feature = "tiled")]
+        let sample_rate_shading = supported_features.sample_rate_shading == vk::TRUE;
         let mut enabled_features = vk::PhysicalDeviceFeatures::default();
         if occlusion_query_precise {
             enabled_features.occlusion_query_precise = vk::TRUE;
@@ -503,6 +508,10 @@ impl VulkanAdapter {
         }
         if independent_blend {
             enabled_features.independent_blend = vk::TRUE;
+        }
+        #[cfg(feature = "tiled")]
+        if sample_rate_shading {
+            enabled_features.sample_rate_shading = vk::TRUE;
         }
         if shader_demote_to_helper_invocation {
             extension_names.push(vk::EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_NAME.as_ptr());
@@ -945,16 +954,23 @@ mod tests {
             let supported_features = vk::PhysicalDeviceFeatures {
                 robust_buffer_access: supported,
                 independent_blend: supported,
+                sample_rate_shading: supported,
                 ..Default::default()
             };
             let robust_buffer_access = supported_features.robust_buffer_access == vk::TRUE;
             let independent_blend = supported_features.independent_blend == vk::TRUE;
+            #[cfg(feature = "tiled")]
+            let sample_rate_shading = supported_features.sample_rate_shading == vk::TRUE;
             let mut enabled_features = vk::PhysicalDeviceFeatures::default();
             if robust_buffer_access {
                 enabled_features.robust_buffer_access = vk::TRUE;
             }
             if independent_blend {
                 enabled_features.independent_blend = vk::TRUE;
+            }
+            #[cfg(feature = "tiled")]
+            if sample_rate_shading {
+                enabled_features.sample_rate_shading = vk::TRUE;
             }
             assert_eq!(
                 enabled_features.robust_buffer_access, expected_enabled,
@@ -963,6 +979,11 @@ mod tests {
             assert_eq!(
                 enabled_features.independent_blend, expected_enabled,
                 "independent_blend should be {expected_enabled} when supported={supported}"
+            );
+            #[cfg(feature = "tiled")]
+            assert_eq!(
+                enabled_features.sample_rate_shading, expected_enabled,
+                "sample_rate_shading should be {expected_enabled} when supported={supported}"
             );
         }
     }
