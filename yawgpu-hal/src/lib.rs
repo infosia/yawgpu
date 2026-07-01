@@ -383,6 +383,21 @@ impl HalAdapter {
         }
     }
 
+    /// Returns true when float32 color target blending is supported.
+    #[must_use]
+    pub fn supports_float32_blendable(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.supports_float32_blendable(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_float32_blendable(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_float32_blendable(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_float32_blendable(),
+        }
+    }
+
     /// Returns the supported subgroup size range, or `None` when unsupported.
     #[must_use]
     pub fn subgroup_size_range(&self) -> Option<(u32, u32)> {
@@ -1345,6 +1360,17 @@ mod tests {
             .expect("Noop adapter exists");
 
         assert!(adapter.supports_depth_clip_control());
+    }
+
+    #[test]
+    fn hal_adapter_supports_float32_blendable_noop_returns_true() {
+        let adapter = HalInstance::new_noop()
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter exists");
+
+        assert!(adapter.supports_float32_blendable());
     }
 
     #[test]

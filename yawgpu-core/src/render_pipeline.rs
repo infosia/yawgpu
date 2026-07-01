@@ -4333,6 +4333,48 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
     }
 
     #[test]
+    fn rgba32_float_color_target_with_blend_requires_float32_blendable_feature() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }
+                 @fragment fn fs() -> @location(0) vec4f { return vec4f(); }"
+                    .to_owned(),
+            )),
+        );
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.fragment.as_mut().expect("fragment").targets[0] = ColorTargetState {
+            format: TextureFormat::from_raw(TextureFormat::RGBA32_FLOAT),
+            blend: Some(BlendState {
+                color: BlendComponent {
+                    operation: BlendOperation::Add,
+                    src_factor: BlendFactor::One,
+                    dst_factor: BlendFactor::Zero,
+                },
+                alpha: BlendComponent {
+                    operation: BlendOperation::Add,
+                    src_factor: BlendFactor::One,
+                    dst_factor: BlendFactor::Zero,
+                },
+            }),
+            write_mask: 0xF,
+        };
+
+        let empty = FeatureSet::new();
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &empty),
+            Some("render pipeline color target format must be blendable".to_owned())
+        );
+
+        let mut enabled = FeatureSet::new();
+        enabled.insert(Feature::Float32Blendable);
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &enabled),
+            None
+        );
+    }
+
+    #[test]
     fn validate_inter_stage_interface_rejects_missing_fragment_input() {
         let device = noop_device();
         let vertex = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(

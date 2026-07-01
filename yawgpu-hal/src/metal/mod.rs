@@ -33,8 +33,8 @@ use crate::{
     HalMslBufferSizeBinding, HalPresentMode, HalPrimitiveTopology, HalQueryKind, HalQuerySet,
     HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor, HalResolveQuerySet, HalSampler,
     HalSamplerDescriptor, HalShaderSource, HalStencilFaceState, HalStencilOperation,
-    HalSurfaceConfiguration, HalTexture, HalTextureClear, HalTextureCopy,
-    HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
+    HalSurfaceConfiguration, HalTexture, HalTextureClear, HalTextureCopy, HalTextureDescriptor,
+    HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
 #[cfg(feature = "tiled")]
 use crate::{HalSubpassAttachmentResource, HalSubpassRenderPassCommand};
@@ -162,6 +162,12 @@ impl MetalAdapter {
     /// Returns true when depth clip control is supported.
     #[must_use]
     pub(super) fn supports_depth_clip_control(&self) -> bool {
+        true
+    }
+
+    /// Returns true when float32 color target blending is supported.
+    #[must_use]
+    pub(super) fn supports_float32_blendable(&self) -> bool {
         true
     }
 

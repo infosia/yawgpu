@@ -23,6 +23,7 @@ pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
         native::WGPUFeatureName_ShaderF16 => core::Feature::ShaderF16,
         native::WGPUFeatureName_Subgroups => core::Feature::Subgroups,
         native::WGPUFeatureName_DepthClipControl => core::Feature::DepthClipControl,
+        native::WGPUFeatureName_Float32Blendable => core::Feature::Float32Blendable,
         native::WGPUFeatureName_TextureComponentSwizzle => core::Feature::TextureComponentSwizzle,
         native::WGPUFeatureName_TextureFormatsTier1 => core::Feature::TextureFormatsTier1,
         native::WGPUFeatureName_TextureFormatsTier2 => core::Feature::TextureFormatsTier2,
@@ -55,6 +56,7 @@ pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
         core::Feature::ShaderF16 => native::WGPUFeatureName_ShaderF16,
         core::Feature::Subgroups => native::WGPUFeatureName_Subgroups,
         core::Feature::DepthClipControl => native::WGPUFeatureName_DepthClipControl,
+        core::Feature::Float32Blendable => native::WGPUFeatureName_Float32Blendable,
         core::Feature::TextureComponentSwizzle => native::WGPUFeatureName_TextureComponentSwizzle,
         core::Feature::TextureFormatsTier1 => native::WGPUFeatureName_TextureFormatsTier1,
         core::Feature::TextureFormatsTier2 => native::WGPUFeatureName_TextureFormatsTier2,
@@ -91,6 +93,18 @@ mod tests {
         assert_eq!(
             map_feature_to_native(core::Feature::DepthClipControl),
             native::WGPUFeatureName_DepthClipControl
+        );
+    }
+
+    #[test]
+    fn maps_float32_blendable_feature_round_trip() {
+        assert_eq!(
+            map_feature(native::WGPUFeatureName_Float32Blendable),
+            core::Feature::Float32Blendable
+        );
+        assert_eq!(
+            map_feature_to_native(core::Feature::Float32Blendable),
+            native::WGPUFeatureName_Float32Blendable
         );
     }
 }
