@@ -9,7 +9,7 @@ Metal + Vulkan backends.
 | Slice | Scope | State |
 |---|---|---|
 | 1 | Feature plumbing + validation gate (Noop + HAL caps) | **DONE** (2026-07-01) |
-| 2 | Real-GPU execution e2e (Metal + Vulkan) | TODO |
+| 2 | Real-GPU execution e2e (Metal + Vulkan) | **DONE** (2026-07-01) |
 | 3 | WGSL language-feature reporting + subgroup uniformity | TODO |
 | 4 | Docs + example + Phase Review | TODO |
 
@@ -58,6 +58,23 @@ BALLOT|SHUFFLE ops + COMPUTE stage, size from
 GLES = unsupported. Verified: `cargo test --workspace` green (Noop), `--features
 tiled` build green, default clippy green, `-p yawgpu-hal --features metal` green.
 Real-GPU advertisement/sizes on Metal + MoltenVK are confirmed in Slice 2.
+
+## Slice 2 — landed
+
+`yawgpu/tests/e2e_{metal,vulkan}_subgroups.rs` (3 tests each, `#[ignore]`
+manual real-backend): adapter advertises `Subgroups` + non-zero size range; an
+`enable subgroups;` compute reads `@builtin(subgroup_size)` and does
+`subgroupAdd(1u)` over a full 64-lane workgroup — readback asserts the runtime
+size is uniform, within the adapter's reported `subgroupMin/MaxSize`, and that
+`subgroupAdd(1u) == subgroup_size` for every full subgroup; a device without the
+feature rejects the shader to the error sink. **Verified green on real M2 Metal
+(3/3) and MoltenVK (3/3).** No HAL device-creation changes were needed — basic
+Vulkan 1.1 compute subgroup ops run on MoltenVK without a size-control toggle.
+MSL `simd_sum` / SPIR-V `GroupNonUniformArithmetic` both exercised.
+
+Pre-existing lint debt noted (out of scope): `yawgpu-hal/src/metal/mod.rs:34`
+imports `HalRenderPipeline` unused (from tiled commit 5a7fb23); invisible to the
+default clippy gate because `metal` is not a default feature.
 
 ## Notes / open questions
 
