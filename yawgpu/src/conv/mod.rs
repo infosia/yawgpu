@@ -418,6 +418,7 @@ mod tests {
             native::WGPUFeatureName_TimestampQuery,
             native::WGPUFeatureName_ShaderF16,
             native::WGPUFeatureName_DualSourceBlending,
+            native::WGPUFeatureName_IndirectFirstInstance,
             native::WGPUFeatureName_TextureComponentSwizzle,
             native::WGPUFeatureName_TextureFormatsTier1,
             native::WGPUFeatureName_TextureFormatsTier2,

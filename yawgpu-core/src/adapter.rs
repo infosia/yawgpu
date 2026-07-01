@@ -80,6 +80,7 @@ impl Adapter {
         add_depth_clip_control_feature(&mut features, &self.inner.hal);
         add_float32_blendable_feature(&mut features, &self.inner.hal);
         add_dual_source_blending_feature(&mut features, &self.inner.hal);
+        add_indirect_first_instance_feature(&mut features, &self.inner.hal);
         #[cfg(feature = "tiled")]
         add_tiled_features(&mut features, self.backend());
 
@@ -206,6 +207,8 @@ pub enum Feature {
     Float32Blendable,
     /// Dual-source blending support.
     DualSourceBlending,
+    /// Non-zero first instance support in indirect draws.
+    IndirectFirstInstance,
     /// Texture component swizzle support.
     TextureComponentSwizzle,
     /// Texture formats tier1 variant.
@@ -295,6 +298,12 @@ fn add_float32_blendable_feature(features: &mut FeatureSet, hal: &HalAdapter) {
 fn add_dual_source_blending_feature(features: &mut FeatureSet, hal: &HalAdapter) {
     if hal.supports_dual_source_blending() {
         features.insert(Feature::DualSourceBlending);
+    }
+}
+
+fn add_indirect_first_instance_feature(features: &mut FeatureSet, hal: &HalAdapter) {
+    if hal.supports_indirect_first_instance() {
+        features.insert(Feature::IndirectFirstInstance);
     }
 }
 
@@ -449,6 +458,15 @@ mod tests {
 
         let features = noop_adapter().features();
         assert!(features.contains(&Feature::DualSourceBlending));
+    }
+
+    #[test]
+    fn indirect_first_instance_feature_is_adapter_gated_and_noop_advertises() {
+        let base = supported_features();
+        assert!(!base.contains(&Feature::IndirectFirstInstance));
+
+        let features = noop_adapter().features();
+        assert!(features.contains(&Feature::IndirectFirstInstance));
     }
 
     #[test]

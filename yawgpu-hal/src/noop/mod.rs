@@ -80,6 +80,12 @@ impl NoopAdapter {
         true
     }
 
+    /// Returns true when indirect draws support non-zero first instance values.
+    #[must_use]
+    pub(super) fn supports_indirect_first_instance(&self) -> bool {
+        true
+    }
+
     /// Returns the supported subgroup size range.
     #[must_use]
     pub(super) fn subgroup_size_range(&self) -> Option<(u32, u32)> {
@@ -483,6 +489,13 @@ mod tests {
         let adapter = NoopAdapter::synthetic();
 
         assert!(adapter.supports_dual_source_blending());
+    }
+
+    #[test]
+    fn noop_adapter_supports_indirect_first_instance_returns_true() {
+        let adapter = NoopAdapter::synthetic();
+
+        assert!(adapter.supports_indirect_first_instance());
     }
 
     #[test]

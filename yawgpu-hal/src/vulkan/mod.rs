@@ -388,6 +388,17 @@ impl VulkanAdapter {
         }) == vk::TRUE
     }
 
+    /// Returns true when indirect draws support non-zero first instance values.
+    #[must_use]
+    pub(super) fn supports_indirect_first_instance(&self) -> bool {
+        (unsafe {
+            self.instance
+                .instance
+                .get_physical_device_features(self.physical_device)
+                .draw_indirect_first_instance
+        }) == vk::TRUE
+    }
+
     /// Returns true when float32 color target blending is supported by this physical device.
     #[must_use]
     pub(super) fn supports_float32_blendable(&self) -> bool {
@@ -578,6 +589,8 @@ impl VulkanAdapter {
         // Vulkan requires independentBlend for differing per-attachment blend state.
         let independent_blend = supported_features.independent_blend == vk::TRUE;
         let dual_src_blend = supported_features.dual_src_blend == vk::TRUE;
+        let draw_indirect_first_instance =
+            supported_features.draw_indirect_first_instance == vk::TRUE;
         let depth_clamp = supported_features.depth_clamp == vk::TRUE;
         // VK_EXT_depth_clip_enable gives independent clip control; without it,
         // core depthClampEnable already yields WebGPU unclippedDepth semantics.
@@ -608,6 +621,9 @@ impl VulkanAdapter {
         }
         if dual_src_blend {
             enabled_features.dual_src_blend = vk::TRUE;
+        }
+        if draw_indirect_first_instance {
+            enabled_features.draw_indirect_first_instance = vk::TRUE;
         }
         #[cfg(feature = "tiled")]
         if sample_rate_shading {
@@ -1083,12 +1099,15 @@ mod tests {
                 robust_buffer_access: supported,
                 independent_blend: supported,
                 dual_src_blend: supported,
+                draw_indirect_first_instance: supported,
                 sample_rate_shading: supported,
                 ..Default::default()
             };
             let robust_buffer_access = supported_features.robust_buffer_access == vk::TRUE;
             let independent_blend = supported_features.independent_blend == vk::TRUE;
             let dual_src_blend = supported_features.dual_src_blend == vk::TRUE;
+            let draw_indirect_first_instance =
+                supported_features.draw_indirect_first_instance == vk::TRUE;
             #[cfg(feature = "tiled")]
             let sample_rate_shading = supported_features.sample_rate_shading == vk::TRUE;
             let mut enabled_features = vk::PhysicalDeviceFeatures::default();
@@ -1100,6 +1119,9 @@ mod tests {
             }
             if dual_src_blend {
                 enabled_features.dual_src_blend = vk::TRUE;
+            }
+            if draw_indirect_first_instance {
+                enabled_features.draw_indirect_first_instance = vk::TRUE;
             }
             #[cfg(feature = "tiled")]
             if sample_rate_shading {
@@ -1116,6 +1138,10 @@ mod tests {
             assert_eq!(
                 enabled_features.dual_src_blend, expected_enabled,
                 "dual_src_blend should be {expected_enabled} when supported={supported}"
+            );
+            assert_eq!(
+                enabled_features.draw_indirect_first_instance, expected_enabled,
+                "draw_indirect_first_instance should be {expected_enabled} when supported={supported}"
             );
             #[cfg(feature = "tiled")]
             assert_eq!(
