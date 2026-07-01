@@ -198,7 +198,7 @@ fn unsupported_required_feature_fails_request_device() {
         let device = request_device(
             fixture.instance,
             fixture.adapter,
-            &[native::WGPUFeatureName_ClipDistances],
+            &[native::WGPUFeatureName_PrimitiveIndex],
         );
 
         assert_eq!(device.status, native::WGPURequestDeviceStatus_Error);

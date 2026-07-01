@@ -122,6 +122,12 @@ impl GlesAdapter {
         false
     }
 
+    /// Returns true when WGSL clip distances are supported.
+    #[must_use]
+    pub(crate) fn supports_clip_distances(&self) -> bool {
+        false
+    }
+
     /// Returns true when indirect draws support non-zero first instance values.
     #[must_use]
     pub(crate) fn supports_indirect_first_instance(&self) -> bool {

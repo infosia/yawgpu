@@ -40,6 +40,7 @@ YAWGPU_TINT_API void yawgpu_tint_initialize(void);
  * If shader_f16 is true, Tint allows the f16 WGSL extension.
  * If subgroups is true, Tint allows the subgroups WGSL extension.
  * If dual_source_blending is true, Tint allows the dual-source-blending WGSL extension.
+ * If clip_distances is true, Tint allows the clip-distances WGSL extension.
  * If allow_framebuffer_fetch is true, Tint allows the framebuffer-fetch WGSL extension.
  * lang_features contains WGPUWGSLLanguageFeatureName numeric values. */
 YAWGPU_TINT_API YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
@@ -47,6 +48,7 @@ YAWGPU_TINT_API YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               bool shader_f16,
                                               bool subgroups,
                                               bool dual_source_blending,
+                                              bool clip_distances,
                                               bool allow_framebuffer_fetch,
                                               const uint32_t* lang_features,
                                               size_t n_lang_features,
@@ -65,6 +67,8 @@ typedef struct {
     bool frag_depth_used, sample_mask_used;
     bool input_sample_mask_used, front_facing_used, sample_index_used;
     bool primitive_index_used, subgroup_invocation_id_used, subgroup_size_used;
+    bool has_clip_distances;
+    uint32_t clip_distances_size;
 } YawgpuTintEntryPoint;
 
 YAWGPU_TINT_API size_t yawgpu_tint_entry_point_count(const YawgpuTintProgram*);

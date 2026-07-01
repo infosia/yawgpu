@@ -354,9 +354,16 @@ impl Device {
         let shader_f16 = self.inner.features.contains(&Feature::ShaderF16);
         let subgroups = self.inner.features.contains(&Feature::Subgroups);
         let dual_source_blending = self.inner.features.contains(&Feature::DualSourceBlending);
+        let clip_distances = self.inner.features.contains(&Feature::ClipDistances);
         let (inner, error) = match source {
             ShaderModuleSource::Wgsl(source) => {
-                match ShaderModule::from_wgsl(source, shader_f16, subgroups, dual_source_blending) {
+                match ShaderModule::from_wgsl(
+                    source,
+                    shader_f16,
+                    subgroups,
+                    dual_source_blending,
+                    clip_distances,
+                ) {
                     Ok(inner) => (inner, None),
                     Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
                 }

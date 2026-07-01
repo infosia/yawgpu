@@ -2997,14 +2997,21 @@ pub(crate) fn validate_inter_stage_interface(
     };
     let outputs = inter_stage_outputs(&descriptor.vertex, vertex_entry)?;
     let inputs = inter_stage_inputs(fragment, fragment_entry)?;
+    let clip_distances_size = vertex_clip_distances_size(&descriptor.vertex, vertex_entry)?;
+    validate_clip_distances_size(clip_distances_size)?;
+    let clip_slots = clip_distances_size.div_ceil(4);
     // Fragment stage-input `@builtin`s (front_facing, sample_index, sample_mask,
     // …) also consume `maxInterStageShaderVariables` slots, so count them with
     // the user-defined inputs (F-063).
     let input_builtins = inter_stage_input_builtin_count(fragment, fragment_entry)?;
-    validate_inter_stage_limits(&outputs, 0, limits, "output")?;
+    validate_inter_stage_limits(&outputs, clip_slots, limits, "output")?;
     validate_inter_stage_limits(&inputs, input_builtins, limits, "input")?;
-    if matches!(descriptor.primitive.topology, PrimitiveTopology::PointList)
-        && outputs.len() >= limits.max_inter_stage_shader_variables as usize
+    let point_list_slots = u32::from(matches!(
+        descriptor.primitive.topology,
+        PrimitiveTopology::PointList
+    ));
+    if outputs.len() as u64 + u64::from(clip_slots) + u64::from(point_list_slots)
+        > u64::from(limits.max_inter_stage_shader_variables)
     {
         return Err(
             "render pipeline point-list inter-stage output count reaches the device limit"
@@ -3091,6 +3098,15 @@ fn validate_inter_stage_limits(
     Ok(())
 }
 
+fn validate_clip_distances_size(clip_distances_size: u32) -> Result<(), String> {
+    if clip_distances_size > 8 {
+        return Err(
+            "render pipeline vertex clip-distances array size exceeds the device limit".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn inter_stage_outputs(
     vertex: &RenderPipelineVertexState,
     vertex_entry: &str,
@@ -3129,6 +3145,16 @@ fn inter_stage_inputs(
                 .collect()
         })
         .unwrap_or_default())
+}
+
+fn vertex_clip_distances_size(
+    vertex: &RenderPipelineVertexState,
+    vertex_entry: &str,
+) -> Result<u32, String> {
+    let Some(module) = vertex.shader.module.reflected() else {
+        return Err("vertex module reflection failed".to_owned());
+    };
+    Ok(module.vertex_clip_distances_size(vertex_entry))
 }
 
 /// Returns the number of fragment stage-input `@builtin`s that consume an
@@ -3618,6 +3644,55 @@ fn fs() -> Out {
 "#
                 .to_owned(),
             )),
+        )
+    }
+
+    fn clip_distances_device() -> Device {
+        noop_adapter()
+            .create_device(None, &[Feature::ClipDistances], "", "")
+            .expect("Noop adapter should create clip-distances device")
+    }
+
+    fn clip_inter_stage_wgsl(user_locations: u32, clip_distances_size: u32) -> String {
+        let outputs = (0..user_locations)
+            .map(|location| format!("  @location({location}) v{location}: f32,\n"))
+            .collect::<String>();
+        let output_values = (0..user_locations)
+            .map(|_| "    0.0,\n".to_owned())
+            .collect::<String>();
+        let inputs = (0..user_locations)
+            .map(|location| format!("  @location({location}) v{location}: f32,\n"))
+            .collect::<String>();
+        let clip_values = (0..clip_distances_size)
+            .map(|_| "0.0")
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            r#"
+enable clip_distances;
+
+struct VsOut {{
+  @builtin(position) pos: vec4f,
+  @builtin(clip_distances) clip: array<f32, {clip_distances_size}>,
+{outputs}}}
+
+@vertex
+fn vs() -> VsOut {{
+  return VsOut(
+    vec4f(),
+    array<f32, {clip_distances_size}>({clip_values}),
+{output_values}  );
+}}
+
+struct FsIn {{
+{inputs}}}
+
+@fragment
+fn fs(input: FsIn) -> @location(0) vec4f {{
+  _ = input;
+  return vec4f();
+}}
+"#
         )
     }
 
@@ -4631,6 +4706,48 @@ fn fs() -> Out {
             validate_inter_stage_interface(&descriptor, "main", Some("main"), device.limits()),
             Err("render pipeline fragment input has no matching vertex output".to_owned())
         );
+    }
+
+    #[test]
+    fn validate_inter_stage_interface_counts_clip_distance_slots_at_limit() {
+        let device = clip_distances_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(clip_inter_stage_wgsl(14, 5))),
+        );
+        assert!(!module.is_error());
+        let descriptor = render_pipeline_descriptor(module);
+
+        assert_eq!(
+            validate_inter_stage_interface(&descriptor, "vs", Some("fs"), device.limits()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_inter_stage_interface_rejects_clip_distance_slot_overflow() {
+        let device = clip_distances_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(clip_inter_stage_wgsl(15, 5))),
+        );
+        assert!(!module.is_error());
+        let descriptor = render_pipeline_descriptor(module);
+
+        assert_eq!(
+            validate_inter_stage_interface(&descriptor, "vs", Some("fs"), device.limits()),
+            Err("render pipeline inter-stage output count exceeds the device limit".to_owned())
+        );
+    }
+
+    #[test]
+    fn validate_clip_distances_size_rejects_over_spec_limit() {
+        assert_eq!(
+            validate_clip_distances_size(9),
+            Err(
+                "render pipeline vertex clip-distances array size exceeds the device limit"
+                    .to_owned()
+            )
+        );
+        assert_eq!(validate_clip_distances_size(8), Ok(()));
     }
 
     #[test]

@@ -136,12 +136,14 @@ impl ShaderModule {
         shader_f16: bool,
         subgroups: bool,
         dual_source_blending: bool,
+        clip_distances: bool,
     ) -> Result<ShaderModuleSourceKind, String> {
         let reflected = frontend::parse_and_validate_wgsl_gated(
             &source,
             shader_f16,
             subgroups,
             dual_source_blending,
+            clip_distances,
         )?;
         Ok(ShaderModuleSourceKind::Wgsl {
             _source: source,
@@ -430,6 +432,44 @@ fn fs() -> Out {
             .create_device(None, &[Feature::DualSourceBlending], "", "")
             .expect("Noop adapter should create dual-source-blending device");
         let valid = device_with_dual_source
+            .create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
+
+        assert!(!valid.is_error());
+        assert_eq!(valid.diagnostic(), None);
+    }
+
+    #[test]
+    fn shader_module_creation_gates_clip_distances_usage_on_required_feature() {
+        let source = r#"
+enable clip_distances;
+
+struct Out {
+  @builtin(position) pos: vec4f,
+  @builtin(clip_distances) clip: array<f32, 1>,
+}
+
+@vertex
+fn vs() -> Out {
+  return Out(vec4f(), array<f32, 1>(0.0));
+}
+"#;
+        let device_without_clip_distances = noop_device();
+        device_without_clip_distances.push_error_scope(ErrorFilter::Validation);
+        let invalid = device_without_clip_distances
+            .create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
+        let scoped = device_without_clip_distances
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("clip-distances usage should be scoped");
+
+        assert!(invalid.is_error());
+        assert!(!scoped.message.is_empty());
+
+        let adapter = noop_adapter();
+        let device_with_clip_distances = adapter
+            .create_device(None, &[Feature::ClipDistances], "", "")
+            .expect("Noop adapter should create clip-distances device");
+        let valid = device_with_clip_distances
             .create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
 
         assert!(!valid.is_error());

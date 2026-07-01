@@ -177,6 +177,12 @@ impl MetalAdapter {
         true
     }
 
+    /// Returns true when WGSL clip distances are supported.
+    #[must_use]
+    pub(super) fn supports_clip_distances(&self) -> bool {
+        true
+    }
+
     /// Returns true when indirect draws support non-zero first instance values.
     #[must_use]
     pub(super) fn supports_indirect_first_instance(&self) -> bool {
