@@ -533,6 +533,14 @@ negative). Request `WGPUFeatureName_ClipDistances`; the clip distances consume
 advertised on Metal and on Vulkan devices reporting `shaderClipDistance`, not on
 the Tier-2 GLES backend.
 
+The **`primitive-index`** optional feature lets a fragment shader read
+`@builtin(primitive_index) idx: u32` (via `enable primitive_index;`) — the index
+of the primitive that generated the fragment. Request
+`WGPUFeatureName_PrimitiveIndex`; Tint lowers it to Metal `[[primitive_id]]` /
+SPIR-V `PrimitiveId`. Advertised on Apple7+ Metal GPUs and on Vulkan devices
+reporting `geometryShader` (the `PrimitiveId` builtin needs the `Geometry`
+capability), not on the Tier-2 GLES backend.
+
 ### Native shader passthrough (vendor, opt-in, unsafe)
 
 For engines that ship **precompiled native shaders**, the opt-in
