@@ -1,6 +1,7 @@
 # Block 62 — `subgroups` optional feature
 
-Status: **IN PROGRESS** (Slice 1). Owner: subgroups initiative.
+Status: **Slices 1–3 DONE, real-GPU verified** (Metal M2 + MoltenVK). Slice 4
+(docs + Phase Review) in progress. Owner: subgroups initiative.
 
 The WebGPU `subgroups` optional feature (`WGPUFeatureName_Subgroups = 0x12`)
 exposes SIMD-lane ("subgroup" / "wave" / "SIMD-group") built-ins and collective
