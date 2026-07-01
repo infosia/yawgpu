@@ -294,7 +294,93 @@ impl VulkanAdapter {
     /// Returns the backend-reported supported limits.
     #[must_use]
     pub(crate) fn limits(&self) -> HalLimits {
-        HalLimits::DEFAULT
+        let properties = unsafe {
+            self.instance
+                .instance
+                .get_physical_device_properties(self.physical_device)
+        };
+        let vk = properties.limits;
+        let max_buffer_size = self.max_memory_allocation_size();
+
+        // Ported from Dawn PhysicalDeviceVk.cpp:744-918.
+        // Deferred: NVIDIA's 2GB-4 storage buffer cap and Dawn's
+        // maxFragmentCombinedOutputResources redistribution.
+        HalLimits {
+            max_texture_dimension_1d: vk.max_image_dimension1_d,
+            max_texture_dimension_2d: vk
+                .max_image_dimension2_d
+                .min(vk.max_image_dimension_cube)
+                .min(vk.max_framebuffer_width)
+                .min(vk.max_framebuffer_height)
+                .min(vk.max_viewport_dimensions[0])
+                .min(vk.max_viewport_dimensions[1]),
+            max_texture_dimension_3d: vk.max_image_dimension3_d,
+            max_texture_array_layers: vk.max_image_array_layers,
+            max_bind_groups: vk.max_bound_descriptor_sets.min(4),
+            // Dawn advertised tier max (Limits.cpp:74-75), not the internal
+            // kMax*=16 array ceiling; keeping <= maxUniformBuffersPerShaderStage
+            // (12) keeps the CTS atMaximum single-stage case consistent.
+            max_dynamic_uniform_buffers_per_pipeline_layout: vk
+                .max_descriptor_set_uniform_buffers_dynamic
+                .min(10),
+            max_dynamic_storage_buffers_per_pipeline_layout: vk
+                .max_descriptor_set_storage_buffers_dynamic
+                .min(8),
+            max_sampled_textures_per_shader_stage: vk
+                .max_per_stage_descriptor_sampled_images
+                .min(48),
+            max_samplers_per_shader_stage: vk.max_per_stage_descriptor_samplers.min(16),
+            max_storage_buffers_per_shader_stage: vk
+                .max_per_stage_descriptor_storage_buffers
+                .min(16),
+            max_storage_textures_per_shader_stage: vk
+                .max_per_stage_descriptor_storage_images
+                .min(8),
+            max_uniform_buffers_per_shader_stage: vk
+                .max_per_stage_descriptor_uniform_buffers
+                .min(12),
+            max_uniform_buffer_binding_size: u64::from(vk.max_uniform_buffer_range / 16 * 16),
+            max_storage_buffer_binding_size: u64::from(vk.max_storage_buffer_range),
+            min_uniform_buffer_offset_alignment: vk.min_uniform_buffer_offset_alignment as u32,
+            min_storage_buffer_offset_alignment: vk.min_storage_buffer_offset_alignment as u32,
+            max_vertex_buffers: vk.max_vertex_input_bindings.min(8),
+            max_buffer_size,
+            max_vertex_attributes: vk.max_vertex_input_attributes.min(30),
+            max_vertex_buffer_array_stride: vk
+                .max_vertex_input_binding_stride
+                .min(vk.max_vertex_input_attribute_offset + 1)
+                .min(2048),
+            max_inter_stage_shader_variables: vk
+                .max_vertex_output_components
+                .min(vk.max_fragment_input_components)
+                / 4
+                - 2,
+            max_color_attachments: vk.max_color_attachments.min(8),
+            max_compute_workgroup_storage_size: vk.max_compute_shared_memory_size,
+            max_compute_invocations_per_workgroup: vk.max_compute_work_group_invocations,
+            max_compute_workgroup_size_x: vk.max_compute_work_group_size[0],
+            max_compute_workgroup_size_y: vk.max_compute_work_group_size[1],
+            max_compute_workgroup_size_z: vk.max_compute_work_group_size[2],
+            max_compute_workgroups_per_dimension: vk.max_compute_work_group_count[0]
+                .min(vk.max_compute_work_group_count[1])
+                .min(vk.max_compute_work_group_count[2]),
+            ..HalLimits::DEFAULT
+        }
+    }
+
+    fn max_memory_allocation_size(&self) -> u64 {
+        let mut maintenance3 = vk::PhysicalDeviceMaintenance3Properties::default();
+        let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut maintenance3);
+        unsafe {
+            self.instance
+                .instance
+                .get_physical_device_properties2(self.physical_device, &mut properties2);
+        }
+        if maintenance3.max_memory_allocation_size == 0 {
+            2 * 1024 * 1024 * 1024
+        } else {
+            maintenance3.max_memory_allocation_size
+        }
     }
 
     /// Returns true when BC texture compression is supported by this physical device.
@@ -1075,6 +1161,22 @@ mod tests {
             .next()
             .expect("at least one Vulkan adapter");
         assert!(!adapter.name().is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_adapter_limits_reports_real_device_limits() {
+        let adapter = VulkanInstance::new()
+            .expect("create Vulkan instance")
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Vulkan adapter");
+        let limits = adapter.limits();
+
+        assert!(limits.max_texture_dimension_2d >= 8192);
+        assert!(limits.max_compute_invocations_per_workgroup >= 256);
     }
 
     #[test]

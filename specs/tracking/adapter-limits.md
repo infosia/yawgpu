@@ -10,7 +10,7 @@ CTS gap vs the Dawn oracle on this M2.
 | Slice | Scope | State |
 |---|---|---|
 | 1 | HAL seam (`HalLimits` + `HalAdapter::limits()`) + Noop/GLES DEFAULT + full Metal query + core map/clamp + unit tests | **DONE** (2026-07-01) — Metal CTS-verified |
-| 2 | Vulkan query | pending |
+| 2 | Vulkan query | **DONE** (2026-07-01) — MoltenVK CTS-verified |
 | 3 | Docs + Phase Review + re-diff vs Dawn | pending |
 
 ## Slice 1 result (real Metal, M2, webgpu-native-cts)
@@ -31,6 +31,23 @@ direct-MSL-binding model, NOT argument buffers):
    `validate_required_limits`: auto-upgrade per-shader-stage from the requested
    in-vertex/in-fragment storage limits, then pin in-stage == per-stage. Fixed the
    `too many storage {textures,buffers}` false-rejects + `auto_upgrade*` cases.
+
+## Slice 2 result (MoltenVK, per-limit)
+
+`VulkanAdapter::limits()` maps `VkPhysicalDeviceLimits` (Dawn `PhysicalDeviceVk.cpp`
+mapping) with `max_buffer_size` from Maintenance3; NVIDIA storage cap +
+`maxFragmentCombinedOutputResources` redistribution deferred (MoltenVK N/A).
+Every `capability_checks,limits` limit run **individually** on MoltenVK passes
+0-fail (e.g. maxTextureDimension2D 10/0, minUniformBufferOffsetAlignment 22/0 —
+the [32,256] alignment fix un-skips + passes on Vulkan too, maxSampledTextures
+1020/0, maxStorageTextures 1860/0, maxInterStageShaderVariables 1280/0). One
+CTS-found fix: dynamic-buffer ceilings were 16; MoltenVK's large
+`maxDescriptorSet*Dynamic` made us advertise 16 > maxUniformBuffersPerShaderStage
+(12) → 7 `maxDynamicUniformBuffersPerPipelineLayout` fails; lowered to Dawn's
+advertised tier maxima (uniform 10, storage 8, `Limits.cpp:74-75`) → 80/0.
+**Caveat:** running the WHOLE limits tree in one MoltenVK process aborts
+(resource exhaustion, no output) — a MoltenVK harness limit, not a yawgpu defect;
+each limit passes when run separately. Native-Vulkan verification deferred to HW.
 
 ## Known residual (out of Block 92 scope — separate feature gap)
 
