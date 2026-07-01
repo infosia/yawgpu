@@ -430,6 +430,8 @@ pub struct HalTextureUsage {
     pub storage_binding: bool,
     /// Render attachment.
     pub render_attachment: bool,
+    /// Transient attachment.
+    pub transient: bool,
 }
 
 /// Enumerates HAL buffer usage.

@@ -1083,6 +1083,7 @@ fn hal_surface_usage(usage: native::WGPUTextureUsage) -> HalTextureUsage {
         texture_binding: usage & native::WGPUTextureUsage_TextureBinding != 0,
         storage_binding: usage & native::WGPUTextureUsage_StorageBinding != 0,
         render_attachment: usage & native::WGPUTextureUsage_RenderAttachment != 0,
+        transient: false,
     }
 }
 

@@ -62,6 +62,7 @@ mod tests {
             texture_binding: true,
             storage_binding: false,
             render_attachment: true,
+            transient: false,
         };
         let config = HalSurfaceConfiguration::new(
             HalTextureFormat::Rgba8Unorm,

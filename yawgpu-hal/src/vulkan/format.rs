@@ -110,7 +110,11 @@ pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<(vk::Format
 
 /// Converts texture usage into the corresponding yawgpu representation.
 pub(super) fn map_texture_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
-    let mut flags = vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST;
+    let mut flags = if usage.transient {
+        vk::ImageUsageFlags::TRANSIENT_ATTACHMENT
+    } else {
+        vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST
+    };
     if usage.texture_binding {
         flags |= vk::ImageUsageFlags::SAMPLED;
     }
@@ -258,6 +262,42 @@ mod tests {
 
         assert!(flags.contains(vk::BufferUsageFlags::TRANSFER_SRC));
         assert!(flags.contains(vk::BufferUsageFlags::TRANSFER_DST));
+    }
+
+    #[test]
+    fn map_texture_usage_transient_attachment_excludes_transfer_bits() {
+        let flags = map_texture_usage(HalTextureUsage {
+            copy_src: false,
+            copy_dst: false,
+            texture_binding: false,
+            storage_binding: false,
+            render_attachment: true,
+            transient: true,
+        });
+
+        assert!(flags.contains(vk::ImageUsageFlags::TRANSIENT_ATTACHMENT));
+        assert!(flags.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT));
+        assert!(flags.contains(vk::ImageUsageFlags::INPUT_ATTACHMENT));
+        assert!(!flags.contains(vk::ImageUsageFlags::TRANSFER_SRC));
+        assert!(!flags.contains(vk::ImageUsageFlags::TRANSFER_DST));
+    }
+
+    #[test]
+    fn map_texture_usage_non_transient_render_attachment_keeps_transfer_bits() {
+        let flags = map_texture_usage(HalTextureUsage {
+            copy_src: false,
+            copy_dst: false,
+            texture_binding: false,
+            storage_binding: false,
+            render_attachment: true,
+            transient: false,
+        });
+
+        assert!(flags.contains(vk::ImageUsageFlags::TRANSFER_SRC));
+        assert!(flags.contains(vk::ImageUsageFlags::TRANSFER_DST));
+        assert!(flags.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT));
+        assert!(flags.contains(vk::ImageUsageFlags::INPUT_ATTACHMENT));
+        assert!(!flags.contains(vk::ImageUsageFlags::TRANSIENT_ATTACHMENT));
     }
 
     #[test]

@@ -819,6 +819,7 @@ mod external_texture_tests {
                     texture_binding: true,
                     storage_binding: false,
                     render_attachment: false,
+                    transient: false,
                 },
             })
             .expect("Noop texture")
@@ -966,6 +967,7 @@ mod tests {
                         texture_binding: false,
                         storage_binding: false,
                         render_attachment: true,
+                        transient: false,
                     },
                 })
                 .expect("Noop texture allocation should succeed"),

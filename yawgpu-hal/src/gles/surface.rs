@@ -237,6 +237,7 @@ fn back_buffer_descriptor(config: HalSurfaceConfiguration) -> HalTextureDescript
             texture_binding: false,
             storage_binding: false,
             render_attachment: true,
+            transient: false,
         },
     }
 }
@@ -492,6 +493,7 @@ mod tests {
                     texture_binding: false,
                     storage_binding: false,
                     render_attachment: true,
+                    transient: false,
                 },
                 320,
                 240,
@@ -510,6 +512,7 @@ mod tests {
             texture_binding: false,
             storage_binding: false,
             render_attachment: true,
+            transient: false,
         };
         let format = HalSurfaceConfiguration::new(
             HalTextureFormat::Depth24Plus,

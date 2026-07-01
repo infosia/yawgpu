@@ -222,11 +222,26 @@ pub(super) fn create_texture(
     let image = unsafe { device.device.create_image(&image_info, None) }
         .map_err(|error| map_texture_error(error, "image creation failed"))?;
     let requirements = unsafe { device.device.get_image_memory_requirements(image) };
-    let memory_type_index = find_memory_type_index(
-        &device.memory_properties,
-        requirements.memory_type_bits,
-        vk::MemoryPropertyFlags::DEVICE_LOCAL,
-    )
+    let memory_type_index = if descriptor.usage.transient {
+        find_memory_type_index(
+            &device.memory_properties,
+            requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::LAZILY_ALLOCATED,
+        )
+        .or_else(|| {
+            find_memory_type_index(
+                &device.memory_properties,
+                requirements.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+        })
+    } else {
+        find_memory_type_index(
+            &device.memory_properties,
+            requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )
+    }
     .ok_or_else(|| {
         unsafe {
             device.device.destroy_image(image, None);
@@ -698,6 +713,7 @@ mod tests {
             texture_binding,
             storage_binding,
             render_attachment,
+            transient: false,
         }
     }
 
@@ -724,6 +740,7 @@ mod tests {
             texture_binding: false,
             storage_binding: false,
             render_attachment: false,
+            transient: false,
         }));
     }
 

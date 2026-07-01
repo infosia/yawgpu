@@ -125,7 +125,9 @@ pub(super) fn create_texture(
         texture_descriptor.setMipmapLevelCount(to_ns(u64::from(descriptor.mip_level_count))?);
         texture_descriptor.setSampleCount(to_ns(u64::from(descriptor.sample_count))?);
     }
-    texture_descriptor.setStorageMode(if descriptor.sample_count > 1 {
+    texture_descriptor.setStorageMode(if descriptor.usage.transient {
+        MTLStorageMode::Memoryless
+    } else if descriptor.sample_count > 1 {
         MTLStorageMode::Private
     } else {
         MTLStorageMode::Shared

@@ -1120,6 +1120,7 @@ mod tests {
                 texture_binding: false,
                 storage_binding: false,
                 render_attachment: true,
+                transient: false,
             },
         }
     }
@@ -1139,6 +1140,7 @@ mod tests {
                 texture_binding: false,
                 storage_binding: false,
                 render_attachment: true,
+                transient: false,
             },
         }
     }
@@ -1167,6 +1169,7 @@ mod tests {
                 texture_binding: false,
                 storage_binding: false,
                 render_attachment: true,
+                transient: false,
             },
             640,
             480,
