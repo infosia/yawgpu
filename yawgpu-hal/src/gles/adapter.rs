@@ -116,6 +116,12 @@ impl GlesAdapter {
         false
     }
 
+    /// Returns true when dual-source blending is supported.
+    #[must_use]
+    pub(crate) fn supports_dual_source_blending(&self) -> bool {
+        false
+    }
+
     /// Returns the supported subgroup size range.
     #[must_use]
     pub(crate) fn subgroup_size_range(&self) -> Option<(u32, u32)> {

@@ -194,12 +194,11 @@ fn unsupported_required_feature_fails_request_device() {
     unsafe {
         let fixture = Fixture::new(native::WGPUFeatureLevel_Core);
         // A standard WebGPU feature yawgpu does not yet implement, so the Noop
-        // adapter does not advertise it and requesting it must fail. (Swap for
-        // another still-unimplemented feature if dual-source blending lands.)
+        // adapter does not advertise it and requesting it must fail.
         let device = request_device(
             fixture.instance,
             fixture.adapter,
-            &[native::WGPUFeatureName_DualSourceBlending],
+            &[native::WGPUFeatureName_ClipDistances],
         );
 
         assert_eq!(device.status, native::WGPURequestDeviceStatus_Error);

@@ -28,7 +28,7 @@ unsafe impl Sync for ReflectedModule {}
 
 /// Returns parse and validate wgsl.
 pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ReflectedModule, String> {
-    parse_and_validate_wgsl_gated(src, true, true)
+    parse_and_validate_wgsl_gated(src, true, true, true)
 }
 
 /// Returns parse and validate wgsl using the supplied feature gates.
@@ -36,11 +36,13 @@ pub(crate) fn parse_and_validate_wgsl_gated(
     src: &str,
     shader_f16: bool,
     subgroups: bool,
+    dual_source_blending: bool,
 ) -> Result<ReflectedModule, String> {
     let program = yawgpu_tint::Program::parse(
         src,
         shader_f16,
         subgroups,
+        dual_source_blending,
         crate::SUPPORTED_WGSL_LANGUAGE_FEATURES,
     )?;
     let warnings = program

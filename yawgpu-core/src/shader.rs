@@ -135,8 +135,14 @@ impl ShaderModule {
         source: String,
         shader_f16: bool,
         subgroups: bool,
+        dual_source_blending: bool,
     ) -> Result<ShaderModuleSourceKind, String> {
-        let reflected = frontend::parse_and_validate_wgsl_gated(&source, shader_f16, subgroups)?;
+        let reflected = frontend::parse_and_validate_wgsl_gated(
+            &source,
+            shader_f16,
+            subgroups,
+            dual_source_blending,
+        )?;
         Ok(ShaderModuleSourceKind::Wgsl {
             _source: source,
             reflected: Box::new(reflected),
@@ -387,6 +393,44 @@ fn cs() {
             .expect("Noop adapter should create subgroups device");
         let valid =
             device_with_subgroups.create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
+
+        assert!(!valid.is_error());
+        assert_eq!(valid.diagnostic(), None);
+    }
+
+    #[test]
+    fn shader_module_creation_gates_dual_source_blending_usage_on_required_feature() {
+        let source = r#"
+enable dual_source_blending;
+
+struct Out {
+  @blend_src(0) @location(0) a: vec4f,
+  @blend_src(1) @location(0) b: vec4f,
+}
+
+@fragment
+fn fs() -> Out {
+  return Out(vec4f(), vec4f());
+}
+"#;
+        let device_without_dual_source = noop_device();
+        device_without_dual_source.push_error_scope(ErrorFilter::Validation);
+        let invalid = device_without_dual_source
+            .create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
+        let scoped = device_without_dual_source
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("dual-source blending usage should be scoped");
+
+        assert!(invalid.is_error());
+        assert!(!scoped.message.is_empty());
+
+        let adapter = noop_adapter();
+        let device_with_dual_source = adapter
+            .create_device(None, &[Feature::DualSourceBlending], "", "")
+            .expect("Noop adapter should create dual-source-blending device");
+        let valid = device_with_dual_source
+            .create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
 
         assert!(!valid.is_error());
         assert_eq!(valid.diagnostic(), None);

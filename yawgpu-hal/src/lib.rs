@@ -398,6 +398,21 @@ impl HalAdapter {
         }
     }
 
+    /// Returns true when dual-source blending is supported.
+    #[must_use]
+    pub fn supports_dual_source_blending(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.supports_dual_source_blending(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_dual_source_blending(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_dual_source_blending(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_dual_source_blending(),
+        }
+    }
+
     /// Returns the supported subgroup size range, or `None` when unsupported.
     #[must_use]
     pub fn subgroup_size_range(&self) -> Option<(u32, u32)> {
@@ -1371,6 +1386,17 @@ mod tests {
             .expect("Noop adapter exists");
 
         assert!(adapter.supports_float32_blendable());
+    }
+
+    #[test]
+    fn hal_adapter_supports_dual_source_blending_noop_returns_true() {
+        let adapter = HalInstance::new_noop()
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter exists");
+
+        assert!(adapter.supports_dual_source_blending());
     }
 
     #[test]
