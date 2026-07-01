@@ -1,6 +1,8 @@
 # Block 66 — `indirect-first-instance` optional feature
 
-Status: **IN PROGRESS** (Slice 1). Owner: Dawn-parity feature backfill.
+Status: **Slices 1–2 DONE, CTS-verified** on real Metal (draw:arguments
+540/180-skip → 720/0). Slice 3 (docs + Phase Review) in progress. Owner:
+Dawn-parity feature backfill.
 
 The WebGPU `indirect-first-instance` optional feature
 (`WGPUFeatureName_IndirectFirstInstance = 0x0A`) allows a **non-zero

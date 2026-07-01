@@ -517,6 +517,13 @@ single color target. It maps to Metal `MTLBlendFactor::Source1*` and Vulkan
 `VK_BLEND_FACTOR_SRC1_*` (`dualSrcBlend`); advertised on Metal and on Vulkan
 devices reporting `dualSrcBlend`, not on the Tier-2 GLES backend.
 
+The **`indirect-first-instance`** optional feature allows a non-zero
+`firstInstance` in the arguments of `drawIndirect` / `drawIndexedIndirect`
+(without it, an indirect draw's `firstInstance` must be zero). Request
+`WGPUFeatureName_IndirectFirstInstance`; advertised on Metal (indirect draws
+honor `baseInstance` natively) and on Vulkan devices reporting
+`drawIndirectFirstInstance`, not on the Tier-2 GLES backend.
+
 ### Native shader passthrough (vendor, opt-in, unsafe)
 
 For engines that ship **precompiled native shaders**, the opt-in
