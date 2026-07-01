@@ -29,7 +29,7 @@ use crate::{
     HalBoundSampler, HalBoundTexture, HalBuffer, HalBufferClear, HalBufferTextureCopy,
     HalBufferUsage, HalColorTargetState, HalCompareFunction, HalComputeDispatch, HalComputePass,
     HalCopy, HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalDraw, HalError,
-    HalExtent3d, HalFilterMode, HalFrontFace, HalIndexFormat, HalMipmapFilterMode,
+    HalExtent3d, HalFilterMode, HalFrontFace, HalIndexFormat, HalLimits, HalMipmapFilterMode,
     HalMslBufferSizeBinding, HalPresentMode, HalPrimitiveTopology, HalQueryKind, HalQuerySet,
     HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor, HalResolveQuerySet, HalSampler,
     HalSamplerDescriptor, HalShaderSource, HalStencilFaceState, HalStencilOperation,
@@ -40,6 +40,192 @@ use crate::{
 use crate::{HalSubpassAttachmentResource, HalSubpassRenderPassCommand};
 
 const BACKEND: &str = "metal";
+const MAX_VERTEX_BUFFERS: u32 = 8;
+const RESERVED_BUFFER_LENGTH_SLOT: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetalGpuFamily {
+    Apple1,
+    Apple2,
+    Apple3,
+    Apple4,
+    Apple5,
+    Apple6,
+    Apple7,
+    Apple8,
+    Apple9,
+    Mac1,
+    Mac2,
+}
+
+impl MetalGpuFamily {
+    fn is_apple(self) -> bool {
+        matches!(
+            self,
+            Self::Apple1
+                | Self::Apple2
+                | Self::Apple3
+                | Self::Apple4
+                | Self::Apple5
+                | Self::Apple6
+                | Self::Apple7
+                | Self::Apple8
+                | Self::Apple9
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MetalDeviceLimits {
+    max_vertex_attribs_per_descriptor: u32,
+    max_buffer_argument_entries_per_func: u32,
+    max_sampler_state_argument_entries_per_func: u32,
+    max_threads_per_threadgroup: u32,
+    max_total_threadgroup_memory: u32,
+    max_fragment_inputs: u32,
+    max_fragment_input_components: u32,
+    max_1d_texture_size: u32,
+    max_2d_texture_size: u32,
+    max_3d_texture_size: u32,
+    max_texture_array_layers: u32,
+    min_buffer_offset_alignment: u32,
+    max_color_render_targets: u32,
+    max_total_render_target_size: u32,
+}
+
+impl MetalDeviceLimits {
+    fn for_family(family: MetalGpuFamily) -> Self {
+        let index = family as usize;
+        Self {
+            max_vertex_attribs_per_descriptor: [31; 11][index],
+            max_buffer_argument_entries_per_func: [31; 11][index],
+            max_sampler_state_argument_entries_per_func: [16; 11][index],
+            max_threads_per_threadgroup: [
+                512, 512, 512, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024,
+            ][index],
+            max_total_threadgroup_memory: [
+                16_352, 16_352, 16_384, 32_768, 32_768, 32_768, 32_768, 32_768, 32_768, 32_768,
+                32_768,
+            ][index],
+            max_fragment_inputs: [60, 60, 60, 124, 124, 124, 124, 124, 124, 32, 32][index],
+            max_fragment_input_components: [60, 60, 60, 124, 124, 124, 124, 124, 124, 124, 124]
+                [index],
+            max_1d_texture_size: [
+                8192, 8192, 16_384, 16_384, 16_384, 16_384, 16_384, 16_384, 16_384, 16_384, 16_384,
+            ][index],
+            max_2d_texture_size: [
+                8192, 8192, 16_384, 16_384, 16_384, 16_384, 16_384, 16_384, 16_384, 16_384, 16_384,
+            ][index],
+            max_3d_texture_size: [2048; 11][index],
+            max_texture_array_layers: [2048; 11][index],
+            min_buffer_offset_alignment: [4, 4, 4, 4, 4, 4, 4, 4, 4, 256, 256][index],
+            max_color_render_targets: [4, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8][index],
+            max_total_render_target_size: [16, 32, 32, 64, 64, 64, 64, 64, 64, 128, 128][index],
+        }
+    }
+}
+
+fn clamp_metal_maximums(limits: HalLimits) -> HalLimits {
+    let default = HalLimits::DEFAULT;
+    HalLimits {
+        max_texture_dimension_1d: limits
+            .max_texture_dimension_1d
+            .max(default.max_texture_dimension_1d),
+        max_texture_dimension_2d: limits
+            .max_texture_dimension_2d
+            .max(default.max_texture_dimension_2d),
+        max_texture_dimension_3d: limits
+            .max_texture_dimension_3d
+            .max(default.max_texture_dimension_3d),
+        max_texture_array_layers: limits
+            .max_texture_array_layers
+            .max(default.max_texture_array_layers),
+        max_bind_groups: limits.max_bind_groups.max(default.max_bind_groups),
+        max_bind_groups_plus_vertex_buffers: limits
+            .max_bind_groups_plus_vertex_buffers
+            .max(default.max_bind_groups_plus_vertex_buffers),
+        max_bindings_per_bind_group: limits
+            .max_bindings_per_bind_group
+            .max(default.max_bindings_per_bind_group),
+        max_dynamic_uniform_buffers_per_pipeline_layout: limits
+            .max_dynamic_uniform_buffers_per_pipeline_layout
+            .max(default.max_dynamic_uniform_buffers_per_pipeline_layout),
+        max_dynamic_storage_buffers_per_pipeline_layout: limits
+            .max_dynamic_storage_buffers_per_pipeline_layout
+            .max(default.max_dynamic_storage_buffers_per_pipeline_layout),
+        max_sampled_textures_per_shader_stage: limits
+            .max_sampled_textures_per_shader_stage
+            .max(default.max_sampled_textures_per_shader_stage),
+        max_samplers_per_shader_stage: limits
+            .max_samplers_per_shader_stage
+            .max(default.max_samplers_per_shader_stage),
+        max_storage_buffers_per_shader_stage: limits
+            .max_storage_buffers_per_shader_stage
+            .max(default.max_storage_buffers_per_shader_stage),
+        max_storage_textures_per_shader_stage: limits
+            .max_storage_textures_per_shader_stage
+            .max(default.max_storage_textures_per_shader_stage),
+        max_storage_buffers_in_vertex_stage: limits
+            .max_storage_buffers_in_vertex_stage
+            .max(default.max_storage_buffers_in_vertex_stage),
+        max_storage_buffers_in_fragment_stage: limits
+            .max_storage_buffers_in_fragment_stage
+            .max(default.max_storage_buffers_in_fragment_stage),
+        max_storage_textures_in_vertex_stage: limits
+            .max_storage_textures_in_vertex_stage
+            .max(default.max_storage_textures_in_vertex_stage),
+        max_storage_textures_in_fragment_stage: limits
+            .max_storage_textures_in_fragment_stage
+            .max(default.max_storage_textures_in_fragment_stage),
+        max_uniform_buffers_per_shader_stage: limits
+            .max_uniform_buffers_per_shader_stage
+            .max(default.max_uniform_buffers_per_shader_stage),
+        max_uniform_buffer_binding_size: limits
+            .max_uniform_buffer_binding_size
+            .max(default.max_uniform_buffer_binding_size),
+        max_storage_buffer_binding_size: limits
+            .max_storage_buffer_binding_size
+            .max(default.max_storage_buffer_binding_size),
+        min_uniform_buffer_offset_alignment: limits.min_uniform_buffer_offset_alignment,
+        min_storage_buffer_offset_alignment: limits.min_storage_buffer_offset_alignment,
+        max_vertex_buffers: limits.max_vertex_buffers.max(default.max_vertex_buffers),
+        max_buffer_size: limits.max_buffer_size.max(default.max_buffer_size),
+        max_vertex_attributes: limits
+            .max_vertex_attributes
+            .max(default.max_vertex_attributes),
+        max_vertex_buffer_array_stride: limits
+            .max_vertex_buffer_array_stride
+            .max(default.max_vertex_buffer_array_stride),
+        max_inter_stage_shader_variables: limits
+            .max_inter_stage_shader_variables
+            .max(default.max_inter_stage_shader_variables),
+        max_color_attachments: limits
+            .max_color_attachments
+            .max(default.max_color_attachments),
+        max_color_attachment_bytes_per_sample: limits
+            .max_color_attachment_bytes_per_sample
+            .max(default.max_color_attachment_bytes_per_sample),
+        max_compute_workgroup_storage_size: limits
+            .max_compute_workgroup_storage_size
+            .max(default.max_compute_workgroup_storage_size),
+        max_compute_invocations_per_workgroup: limits
+            .max_compute_invocations_per_workgroup
+            .max(default.max_compute_invocations_per_workgroup),
+        max_compute_workgroup_size_x: limits
+            .max_compute_workgroup_size_x
+            .max(default.max_compute_workgroup_size_x),
+        max_compute_workgroup_size_y: limits
+            .max_compute_workgroup_size_y
+            .max(default.max_compute_workgroup_size_y),
+        max_compute_workgroup_size_z: limits
+            .max_compute_workgroup_size_z
+            .max(default.max_compute_workgroup_size_z),
+        max_compute_workgroups_per_dimension: limits
+            .max_compute_workgroups_per_dimension
+            .max(default.max_compute_workgroups_per_dimension),
+        max_immediate_size: limits.max_immediate_size,
+    }
+}
 
 /// Stores metal instance data used by validation and backend submission.
 pub struct MetalInstance;
@@ -108,6 +294,102 @@ impl MetalAdapter {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns the backend-reported supported limits.
+    #[must_use]
+    pub(crate) fn limits(&self) -> HalLimits {
+        let family = self.gpu_family();
+        let mtl = MetalDeviceLimits::for_family(family);
+        let mut limits = HalLimits::DEFAULT;
+
+        // Ported from Dawn PhysicalDeviceMTL.mm InitializeSupportedLimitsImpl
+        // lines 815-973, including the kMTLLimits table and buffer argument
+        // split arithmetic.
+        limits.max_texture_dimension_1d = mtl.max_1d_texture_size;
+        limits.max_texture_dimension_2d = mtl.max_2d_texture_size;
+        limits.max_texture_dimension_3d = mtl.max_3d_texture_size;
+        limits.max_texture_array_layers = mtl.max_texture_array_layers;
+        limits.max_color_attachments = mtl.max_color_render_targets;
+        limits.max_color_attachment_bytes_per_sample = mtl.max_total_render_target_size;
+
+        let max_buffers_per_stage =
+            mtl.max_buffer_argument_entries_per_func - RESERVED_BUFFER_LENGTH_SLOT;
+        let base_max_buffers_per_stage = limits.max_storage_buffers_per_shader_stage
+            + limits.max_uniform_buffers_per_shader_stage
+            + MAX_VERTEX_BUFFERS;
+        if max_buffers_per_stage > base_max_buffers_per_stage {
+            limits.max_storage_buffers_per_shader_stage +=
+                max_buffers_per_stage - base_max_buffers_per_stage;
+        }
+
+        // yawgpu binds Metal textures via the direct MSL argument table, whose
+        // per-stage namespace is 31 slots (see yawgpu-core MAX_TEXTURE_SLOT = 30),
+        // not Dawn's argument-buffer budget of maxTextureArgumentEntriesPerFunc.
+        // Metal additionally caps read_write (storage) textures at 8 per stage.
+        const MAX_TEXTURE_SLOTS: u32 = 31;
+        const MAX_READ_WRITE_TEXTURES: u32 = 8;
+        limits.max_sampled_textures_per_shader_stage = MAX_TEXTURE_SLOTS;
+        limits.max_storage_textures_per_shader_stage = MAX_READ_WRITE_TEXTURES;
+
+        limits.max_samplers_per_shader_stage = mtl.max_sampler_state_argument_entries_per_func;
+        limits.max_dynamic_uniform_buffers_per_pipeline_layout = 11;
+        limits.max_dynamic_storage_buffers_per_pipeline_layout = 11;
+        limits.max_vertex_attributes =
+            limits.max_vertex_buffers * mtl.max_vertex_attribs_per_descriptor;
+        limits.max_inter_stage_shader_variables = if family.is_apple() {
+            mtl.max_fragment_inputs
+                .min(mtl.max_fragment_input_components / 4)
+        } else {
+            mtl.max_fragment_inputs.saturating_sub(4)
+        };
+        limits.max_compute_workgroup_storage_size = mtl.max_total_threadgroup_memory;
+        limits.max_compute_invocations_per_workgroup = mtl.max_threads_per_threadgroup;
+        limits.max_compute_workgroup_size_x = mtl.max_threads_per_threadgroup;
+        limits.max_compute_workgroup_size_y = mtl.max_threads_per_threadgroup;
+        limits.max_compute_workgroup_size_z = mtl.max_threads_per_threadgroup;
+        limits.min_uniform_buffer_offset_alignment = mtl.min_buffer_offset_alignment;
+        limits.min_storage_buffer_offset_alignment = mtl.min_buffer_offset_alignment;
+
+        let max_buffer_length = self.device.maxBufferLength() as u64;
+        let max_binding_size = max_buffer_length.min(u64::from(u32::MAX));
+        limits.max_buffer_size = max_buffer_length;
+        limits.max_uniform_buffer_binding_size = max_binding_size;
+        limits.max_storage_buffer_binding_size = max_binding_size;
+
+        limits.max_storage_buffers_in_fragment_stage = limits.max_storage_buffers_per_shader_stage;
+        limits.max_storage_textures_in_fragment_stage =
+            limits.max_storage_textures_per_shader_stage;
+        limits.max_storage_buffers_in_vertex_stage = limits.max_storage_buffers_per_shader_stage;
+        limits.max_storage_textures_in_vertex_stage = limits.max_storage_textures_per_shader_stage;
+
+        clamp_metal_maximums(limits)
+    }
+
+    fn gpu_family(&self) -> MetalGpuFamily {
+        if self.device.supportsFamily(MTLGPUFamily::Apple9) {
+            MetalGpuFamily::Apple9
+        } else if self.device.supportsFamily(MTLGPUFamily::Apple8) {
+            MetalGpuFamily::Apple8
+        } else if self.device.supportsFamily(MTLGPUFamily::Apple7) {
+            MetalGpuFamily::Apple7
+        } else if self.device.supportsFamily(MTLGPUFamily::Apple6) {
+            MetalGpuFamily::Apple6
+        } else if self.device.supportsFamily(MTLGPUFamily::Apple5) {
+            MetalGpuFamily::Apple5
+        } else if self.device.supportsFamily(MTLGPUFamily::Apple4) {
+            MetalGpuFamily::Apple4
+        } else if self.device.supportsFamily(MTLGPUFamily::Apple3) {
+            MetalGpuFamily::Apple3
+        } else if self.device.supportsFamily(MTLGPUFamily::Apple2) {
+            MetalGpuFamily::Apple2
+        } else if self.device.supportsFamily(MTLGPUFamily::Apple1) {
+            MetalGpuFamily::Apple1
+        } else if self.device.supportsFamily(MTLGPUFamily::Mac2) {
+            MetalGpuFamily::Mac2
+        } else {
+            MetalGpuFamily::Mac1
+        }
     }
 
     /// Returns the IORegistry ID for this adapter's Metal device.
@@ -311,6 +593,22 @@ mod tests {
             .next()
             .expect("at least one Metal adapter");
         assert!(!adapter.name().is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_adapter_limits_reports_real_device_limits() {
+        let adapter = MetalInstance::new()
+            .expect("create Metal instance")
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Metal adapter");
+        let limits = adapter.limits();
+
+        assert!(limits.max_texture_dimension_2d >= 8192);
+        assert!(limits.max_compute_invocations_per_workgroup >= 256);
     }
 
     #[test]

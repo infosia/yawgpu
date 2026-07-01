@@ -43,6 +43,126 @@ pub use format::{
 pub use present::{HalPresentMode, HalSurfaceConfiguration};
 pub use shader::{HalMslBufferSizeBinding, HalShaderSource, HalShaderStage};
 
+/// Stores backend-reported supported adapter limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HalLimits {
+    /// Max texture dimension 1d.
+    pub max_texture_dimension_1d: u32,
+    /// Max texture dimension 2d.
+    pub max_texture_dimension_2d: u32,
+    /// Max texture dimension 3d.
+    pub max_texture_dimension_3d: u32,
+    /// Max texture array layers.
+    pub max_texture_array_layers: u32,
+    /// Max bind groups.
+    pub max_bind_groups: u32,
+    /// Max bind groups plus vertex buffers.
+    pub max_bind_groups_plus_vertex_buffers: u32,
+    /// Max bindings per bind group.
+    pub max_bindings_per_bind_group: u32,
+    /// Max dynamic uniform buffers per pipeline layout.
+    pub max_dynamic_uniform_buffers_per_pipeline_layout: u32,
+    /// Max dynamic storage buffers per pipeline layout.
+    pub max_dynamic_storage_buffers_per_pipeline_layout: u32,
+    /// Max sampled textures per shader stage.
+    pub max_sampled_textures_per_shader_stage: u32,
+    /// Max samplers per shader stage.
+    pub max_samplers_per_shader_stage: u32,
+    /// Max storage buffers per shader stage.
+    pub max_storage_buffers_per_shader_stage: u32,
+    /// Max storage textures per shader stage.
+    pub max_storage_textures_per_shader_stage: u32,
+    /// Max storage buffers usable in the vertex stage.
+    pub max_storage_buffers_in_vertex_stage: u32,
+    /// Max storage buffers usable in the fragment stage.
+    pub max_storage_buffers_in_fragment_stage: u32,
+    /// Max storage textures usable in the vertex stage.
+    pub max_storage_textures_in_vertex_stage: u32,
+    /// Max storage textures usable in the fragment stage.
+    pub max_storage_textures_in_fragment_stage: u32,
+    /// Max uniform buffers per shader stage.
+    pub max_uniform_buffers_per_shader_stage: u32,
+    /// Max uniform buffer binding size.
+    pub max_uniform_buffer_binding_size: u64,
+    /// Max storage buffer binding size.
+    pub max_storage_buffer_binding_size: u64,
+    /// Min uniform buffer offset alignment.
+    pub min_uniform_buffer_offset_alignment: u32,
+    /// Min storage buffer offset alignment.
+    pub min_storage_buffer_offset_alignment: u32,
+    /// Max vertex buffers.
+    pub max_vertex_buffers: u32,
+    /// Max buffer size.
+    pub max_buffer_size: u64,
+    /// Max vertex attributes.
+    pub max_vertex_attributes: u32,
+    /// Max vertex buffer array stride.
+    pub max_vertex_buffer_array_stride: u32,
+    /// Max inter stage shader variables.
+    pub max_inter_stage_shader_variables: u32,
+    /// Max color attachments.
+    pub max_color_attachments: u32,
+    /// Max color attachment bytes per sample.
+    pub max_color_attachment_bytes_per_sample: u32,
+    /// Max compute workgroup storage size.
+    pub max_compute_workgroup_storage_size: u32,
+    /// Max compute invocations per workgroup.
+    pub max_compute_invocations_per_workgroup: u32,
+    /// Max compute workgroup size x.
+    pub max_compute_workgroup_size_x: u32,
+    /// Max compute workgroup size y.
+    pub max_compute_workgroup_size_y: u32,
+    /// Max compute workgroup size z.
+    pub max_compute_workgroup_size_z: u32,
+    /// Max compute workgroups per dimension.
+    pub max_compute_workgroups_per_dimension: u32,
+    /// Max immediate size.
+    pub max_immediate_size: u32,
+}
+
+impl HalLimits {
+    /// Constant value for default.
+    pub const DEFAULT: Self = Self {
+        max_texture_dimension_1d: 8192,
+        max_texture_dimension_2d: 8192,
+        max_texture_dimension_3d: 2048,
+        max_texture_array_layers: 256,
+        max_bind_groups: 4,
+        max_bind_groups_plus_vertex_buffers: 24,
+        max_bindings_per_bind_group: 1000,
+        max_dynamic_uniform_buffers_per_pipeline_layout: 8,
+        max_dynamic_storage_buffers_per_pipeline_layout: 4,
+        max_sampled_textures_per_shader_stage: 16,
+        max_samplers_per_shader_stage: 16,
+        max_storage_buffers_per_shader_stage: 8,
+        max_storage_textures_per_shader_stage: 4,
+        max_storage_buffers_in_vertex_stage: 8,
+        max_storage_buffers_in_fragment_stage: 8,
+        max_storage_textures_in_vertex_stage: 4,
+        max_storage_textures_in_fragment_stage: 4,
+        max_uniform_buffers_per_shader_stage: 12,
+        max_uniform_buffer_binding_size: 65_536,
+        max_storage_buffer_binding_size: 128 * 1024 * 1024,
+        min_uniform_buffer_offset_alignment: 256,
+        min_storage_buffer_offset_alignment: 256,
+        max_vertex_buffers: 8,
+        max_buffer_size: 256 * 1024 * 1024,
+        max_vertex_attributes: 16,
+        max_vertex_buffer_array_stride: 2048,
+        max_inter_stage_shader_variables: 16,
+        max_color_attachments: 8,
+        max_color_attachment_bytes_per_sample: 32,
+        max_compute_workgroup_storage_size: 16_384,
+        max_compute_invocations_per_workgroup: 256,
+        max_compute_workgroup_size_x: 256,
+        max_compute_workgroup_size_y: 256,
+        max_compute_workgroup_size_z: 64,
+        max_compute_workgroups_per_dimension: 65_535,
+        max_immediate_size: 0,
+    };
+}
+
 /// Noop module.
 #[cfg(feature = "noop")]
 pub mod noop;
@@ -261,6 +381,21 @@ impl HalAdapter {
             Self::Metal(_) => HalBackend::Metal,
             #[cfg(feature = "gles")]
             Self::Gles(_) => HalBackend::Gles,
+        }
+    }
+
+    /// Returns the backend-reported supported limits.
+    #[must_use]
+    pub fn limits(&self) -> HalLimits {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.limits(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.limits(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.limits(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.limits(),
         }
     }
 
@@ -1807,6 +1942,29 @@ mod tests {
 
         assert_eq!(buffer.size(), 4096);
         Ok(())
+    }
+
+    #[test]
+    fn hal_limits_default_matches_webgpu_core_floor() {
+        let limits = HalLimits::DEFAULT;
+
+        assert_eq!(limits.max_bind_groups, 4);
+        assert_eq!(limits.max_texture_dimension_2d, 8192);
+        assert_eq!(limits.max_uniform_buffer_binding_size, 65_536);
+        assert_eq!(limits.max_storage_buffer_binding_size, 128 * 1024 * 1024);
+        assert_eq!(limits.min_uniform_buffer_offset_alignment, 256);
+        assert_eq!(limits.max_immediate_size, 0);
+    }
+
+    #[test]
+    fn hal_adapter_limits_noop_returns_default() {
+        let adapter = HalInstance::new_noop()
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("noop adapter");
+
+        assert_eq!(adapter.limits(), HalLimits::DEFAULT);
     }
 
     #[test]

@@ -2,7 +2,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    HalBufferUsage, HalCopy, HalError, HalQueryKind, HalTextureDescriptor, HalTextureDimension,
+    HalBufferUsage, HalCopy, HalError, HalLimits, HalQueryKind, HalTextureDescriptor,
+    HalTextureDimension,
 };
 
 /// Stores noop instance data used by validation and backend submission.
@@ -48,6 +49,12 @@ impl NoopAdapter {
     #[must_use]
     pub fn name(&self) -> &'static str {
         self.name
+    }
+
+    /// Returns the backend-reported supported limits.
+    #[must_use]
+    pub(crate) fn limits(&self) -> HalLimits {
+        HalLimits::DEFAULT
     }
 
     /// Returns true when WGSL `shader-f16` is supported.
