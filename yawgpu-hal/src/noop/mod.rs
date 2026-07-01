@@ -62,6 +62,12 @@ impl NoopAdapter {
         true
     }
 
+    /// Returns true when depth clip control is supported.
+    #[must_use]
+    pub(super) fn supports_depth_clip_control(&self) -> bool {
+        true
+    }
+
     /// Returns the supported subgroup size range.
     #[must_use]
     pub(super) fn subgroup_size_range(&self) -> Option<(u32, u32)> {
@@ -444,6 +450,13 @@ mod tests {
 
         assert!(adapter.supports_subgroups());
         assert_eq!(adapter.subgroup_size_range(), Some((4, 4)));
+    }
+
+    #[test]
+    fn noop_adapter_supports_depth_clip_control_returns_true() {
+        let adapter = NoopAdapter::synthetic();
+
+        assert!(adapter.supports_depth_clip_control());
     }
 
     #[test]

@@ -10,6 +10,7 @@ use yawgpu_hal::{
     HalVertexStepMode,
 };
 
+use crate::adapter::Feature;
 use crate::bind_group_layout::*;
 use crate::compute_pipeline::*;
 use crate::device::FeatureSet;
@@ -2169,7 +2170,7 @@ pub(crate) fn resolve_render_pipeline_descriptor(
     }
     validate_vertex_state(&descriptor.vertex, &vertex_entry, limits)?;
     validate_render_presence(descriptor)?;
-    validate_primitive_state(descriptor.primitive)?;
+    validate_primitive_state(descriptor.primitive, features)?;
     if let Some(depth_stencil) = descriptor.depth_stencil {
         validate_depth_bias_state(descriptor.primitive.topology, depth_stencil)?;
         validate_depth_stencil_aspects(depth_stencil, features)?;
@@ -2492,9 +2493,14 @@ pub(crate) fn validate_render_constants(stage: &RenderPipelineShaderStage) -> Re
 }
 
 /// Validates primitive state and returns a descriptive error on failure.
-pub(crate) fn validate_primitive_state(primitive: PrimitiveState) -> Result<(), String> {
-    if primitive.unclipped_depth {
-        return Err("render pipeline unclippedDepth is not supported".to_owned());
+pub(crate) fn validate_primitive_state(
+    primitive: PrimitiveState,
+    features: &FeatureSet,
+) -> Result<(), String> {
+    if primitive.unclipped_depth && !features.contains(&Feature::DepthClipControl) {
+        return Err(
+            "render pipeline unclippedDepth requires the depth-clip-control feature".to_owned(),
+        );
     }
     if primitive.strip_index_format.is_some()
         && !matches!(
@@ -3231,6 +3237,42 @@ mod tests {
     use crate::{ErrorFilter, TextureViewDimension};
 
     use std::sync::Arc;
+
+    fn primitive_state(unclipped_depth: bool) -> PrimitiveState {
+        PrimitiveState {
+            topology: PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: FrontFace::Ccw,
+            cull_mode: CullMode::None,
+            unclipped_depth,
+        }
+    }
+
+    #[test]
+    fn validate_primitive_state_gates_unclipped_depth_on_depth_clip_control_feature() {
+        let empty = FeatureSet::new();
+        assert_eq!(
+            validate_primitive_state(primitive_state(false), &empty),
+            Ok(())
+        );
+        assert_eq!(
+            validate_primitive_state(primitive_state(true), &empty),
+            Err(
+                "render pipeline unclippedDepth requires the depth-clip-control feature".to_owned()
+            )
+        );
+
+        let mut features = FeatureSet::new();
+        features.insert(Feature::DepthClipControl);
+        assert_eq!(
+            validate_primitive_state(primitive_state(false), &features),
+            Ok(())
+        );
+        assert_eq!(
+            validate_primitive_state(primitive_state(true), &features),
+            Ok(())
+        );
+    }
 
     #[test]
     fn vertex_format_from_raw_pins_known_zero_and_unknown_values() {

@@ -368,6 +368,21 @@ impl HalAdapter {
         }
     }
 
+    /// Returns true when depth clip control is supported.
+    #[must_use]
+    pub fn supports_depth_clip_control(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.supports_depth_clip_control(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_depth_clip_control(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_depth_clip_control(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_depth_clip_control(),
+        }
+    }
+
     /// Returns the supported subgroup size range, or `None` when unsupported.
     #[must_use]
     pub fn subgroup_size_range(&self) -> Option<(u32, u32)> {
@@ -1319,6 +1334,17 @@ mod tests {
 
         assert!(adapter.supports_subgroups());
         assert_eq!(adapter.subgroup_size_range(), Some((4, 4)));
+    }
+
+    #[test]
+    fn hal_adapter_supports_depth_clip_control_noop_returns_true() {
+        let adapter = HalInstance::new_noop()
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter exists");
+
+        assert!(adapter.supports_depth_clip_control());
     }
 
     #[test]

@@ -77,6 +77,7 @@ impl Adapter {
         add_texture_compression_features(&mut features, &self.inner.hal);
         add_shader_float16_feature(&mut features, &self.inner.hal);
         add_subgroups_feature(&mut features, &self.inner.hal);
+        add_depth_clip_control_feature(&mut features, &self.inner.hal);
         #[cfg(feature = "tiled")]
         add_tiled_features(&mut features, self.backend());
 
@@ -197,6 +198,8 @@ pub enum Feature {
     ShaderF16,
     /// WGSL `subgroups` support.
     Subgroups,
+    /// Depth clip control support.
+    DepthClipControl,
     /// Texture component swizzle support.
     TextureComponentSwizzle,
     /// Texture formats tier1 variant.
@@ -268,6 +271,12 @@ fn add_shader_float16_feature(features: &mut FeatureSet, hal: &HalAdapter) {
 fn add_subgroups_feature(features: &mut FeatureSet, hal: &HalAdapter) {
     if hal.supports_subgroups() {
         features.insert(Feature::Subgroups);
+    }
+}
+
+fn add_depth_clip_control_feature(features: &mut FeatureSet, hal: &HalAdapter) {
+    if hal.supports_depth_clip_control() {
+        features.insert(Feature::DepthClipControl);
     }
 }
 
@@ -395,6 +404,15 @@ mod tests {
         assert!(features.contains(&Feature::Subgroups));
         assert_eq!(adapter.subgroup_min_size(), 4);
         assert_eq!(adapter.subgroup_max_size(), 4);
+    }
+
+    #[test]
+    fn depth_clip_control_feature_is_adapter_gated_and_noop_advertises() {
+        let base = supported_features();
+        assert!(!base.contains(&Feature::DepthClipControl));
+
+        let features = noop_adapter().features();
+        assert!(features.contains(&Feature::DepthClipControl));
     }
 
     #[test]
