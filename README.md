@@ -474,6 +474,20 @@ advertised on Metal (native `half`) and on Vulkan when the device exposes
 works in storage/uniform buffers, not just arithmetic); it is not available
 on the Tier-2 GLES backend.
 
+SIMD-lane collective operations are supported through the standard WebGPU
+**`subgroups`** optional feature: request `WGPUFeatureName_Subgroups` in the
+device's `requiredFeatures`, then use `enable subgroups;` in WGSL to access the
+`@builtin(subgroup_size)` / `@builtin(subgroup_invocation_id)` inputs and the
+subgroup built-ins (`subgroupAdd`, `subgroupBallot`, `subgroupBroadcast`,
+`subgroupShuffle`, the quad ops, …). Shaders that use them without the feature
+requested are rejected with a validation error. `WGPUAdapterInfo::subgroupMinSize`
+/ `subgroupMaxSize` report the hardware SIMD width. It is advertised on Metal
+(Apple-family GPU6+ or Metal3, mapped to MSL SIMD-group functions) and on Vulkan
+when the device reports the required subgroup operations in the compute stage
+(mapped to SPIR-V `GroupNonUniform*`); it is not available on the Tier-2 GLES
+backend. The `subgroup_id` and `subgroup_uniformity` WGSL language features are
+reported by `wgpuInstanceGetWGSLLanguageFeatures`, matching Dawn.
+
 ### Native shader passthrough (vendor, opt-in, unsafe)
 
 For engines that ship **precompiled native shaders**, the opt-in
