@@ -10,8 +10,12 @@ pub const WGSL_LANGUAGE_FEATURE_UNRESTRICTED_POINTER_PARAMETERS: u32 = 3;
 pub const WGSL_LANGUAGE_FEATURE_POINTER_COMPOSITE_ACCESS: u32 = 4;
 /// `WGPUWGSLLanguageFeatureName_UniformBufferStandardLayout`.
 pub const WGSL_LANGUAGE_FEATURE_UNIFORM_BUFFER_STANDARD_LAYOUT: u32 = 5;
+/// `WGPUWGSLLanguageFeatureName_SubgroupId`.
+pub const WGSL_LANGUAGE_FEATURE_SUBGROUP_ID: u32 = 6;
 /// `WGPUWGSLLanguageFeatureName_TextureAndSamplerLet`.
 pub const WGSL_LANGUAGE_FEATURE_TEXTURE_AND_SAMPLER_LET: u32 = 7;
+/// `WGPUWGSLLanguageFeatureName_SubgroupUniformity`.
+pub const WGSL_LANGUAGE_FEATURE_SUBGROUP_UNIFORMITY: u32 = 8;
 /// `WGPUWGSLLanguageFeatureName_TextureFormatsTier1`.
 pub const WGSL_LANGUAGE_FEATURE_TEXTURE_FORMATS_TIER1: u32 = 9;
 /// `WGPUWGSLLanguageFeatureName_LinearIndexing`.
@@ -25,7 +29,9 @@ pub const SUPPORTED_WGSL_LANGUAGE_FEATURES: &[u32] = &[
     WGSL_LANGUAGE_FEATURE_UNRESTRICTED_POINTER_PARAMETERS,
     WGSL_LANGUAGE_FEATURE_POINTER_COMPOSITE_ACCESS,
     WGSL_LANGUAGE_FEATURE_UNIFORM_BUFFER_STANDARD_LAYOUT,
+    WGSL_LANGUAGE_FEATURE_SUBGROUP_ID,
     WGSL_LANGUAGE_FEATURE_TEXTURE_AND_SAMPLER_LET,
+    WGSL_LANGUAGE_FEATURE_SUBGROUP_UNIFORMITY,
     WGSL_LANGUAGE_FEATURE_TEXTURE_FORMATS_TIER1,
     WGSL_LANGUAGE_FEATURE_LINEAR_INDEXING,
 ];
@@ -36,8 +42,11 @@ mod tests {
 
     #[test]
     fn supported_wgsl_language_features_match_canonical_api_values() {
-        assert_eq!(SUPPORTED_WGSL_LANGUAGE_FEATURES, &[1, 2, 3, 4, 5, 7, 9, 10]);
-        assert!(!SUPPORTED_WGSL_LANGUAGE_FEATURES.contains(&6));
-        assert!(!SUPPORTED_WGSL_LANGUAGE_FEATURES.contains(&8));
+        assert_eq!(
+            SUPPORTED_WGSL_LANGUAGE_FEATURES,
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        );
+        assert!(SUPPORTED_WGSL_LANGUAGE_FEATURES.contains(&6));
+        assert!(SUPPORTED_WGSL_LANGUAGE_FEATURES.contains(&8));
     }
 }

@@ -10,7 +10,7 @@ Metal + Vulkan backends.
 |---|---|---|
 | 1 | Feature plumbing + validation gate (Noop + HAL caps) | **DONE** (2026-07-01) |
 | 2 | Real-GPU execution e2e (Metal + Vulkan) | **DONE** (2026-07-01) |
-| 3 | WGSL language-feature reporting + subgroup uniformity | TODO |
+| 3 | WGSL language-feature reporting + subgroup uniformity | **DONE** (2026-07-01) |
 | 4 | Docs + example + Phase Review | TODO |
 
 ## Key facts (verified 2026-07-01)
@@ -75,6 +75,21 @@ MSL `simd_sum` / SPIR-V `GroupNonUniformArithmetic` both exercised.
 Pre-existing lint debt noted (out of scope): `yawgpu-hal/src/metal/mod.rs:34`
 imports `HalRenderPipeline` unused (from tiled commit 5a7fb23); invisible to the
 default clippy gate because `metal` is not a default feature.
+
+## Slice 3 — landed
+
+Dawn parity confirmed by source: `feature_status.cc` marks `kSubgroupId` /
+`kSubgroupUniformity` as `kShippedWithKillswitch`, and `Instance.cpp`
+(`GetAllowedWGSLLanguageFeatures`) exposes `kShipped` + `kShippedWithKillswitch`
+unconditionally. So yawgpu now reports both `subgroup_id` (6) and
+`subgroup_uniformity` (8) in `wgpuInstanceGetWGSLLanguageFeatures`:
+`SUPPORTED_WGSL_LANGUAGE_FEATURES == [1..=10]`. The shim's `to_tint_language_
+feature` 6/8 mapping (Slice 1) means both are also passed to Tint's
+`allowed_features` on every parse — identical to Dawn's instance-level
+`mTintLanguageFeatures`. Uniformity analysis is Tint-internal (same compiler as
+the CTS oracle) → parity by construction. The `enable subgroups;` device-feature
+gate is unchanged. Unit tests flipped from "absent/rejected" to
+"present/accepted" in wgsl_language_features.rs, shader_tint.rs, ffi/instance.rs.
 
 ## Notes / open questions
 
