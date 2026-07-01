@@ -683,8 +683,18 @@ impl RenderPipeline {
             descriptor.pass_layout.descriptor(),
             descriptor.subpass_index,
         );
-        let (hal, backend_error) = if is_error {
-            (None, None)
+        let multisampling_error = if is_error {
+            None
+        } else {
+            validate_subpass_pipeline_multisampling(
+                &descriptor.base,
+                descriptor.pass_layout.descriptor(),
+                descriptor.subpass_index,
+                &bind_group_layouts,
+            )
+        };
+        let (hal, backend_error) = if is_error || multisampling_error.is_some() {
+            (None, multisampling_error)
         } else {
             create_hal_subpass_render_pipeline(
                 hal_device,
@@ -1223,6 +1233,108 @@ fn input_attachment_hal_bindings(
     Ok(Vec::new())
 }
 
+/// Returns `true` when any bind group layout declares a multisampled input
+/// attachment, so the Vulkan fragment SPIR-V must emit multisampled
+/// `SubpassData` (the 2-arg `inputAttachmentLoad(ia, sample_index)` overload).
+#[cfg(feature = "tiled")]
+fn pipeline_has_multisampled_input_attachment(
+    bind_group_layouts: &[Arc<BindGroupLayout>],
+) -> bool {
+    bind_group_layouts.iter().any(|layout| {
+        layout.entries().iter().any(|entry| {
+            matches!(
+                entry.kind,
+                Some(BindingLayoutKind::InputAttachment {
+                    multisampled: true,
+                    ..
+                })
+            )
+        })
+    })
+}
+
+#[cfg(not(feature = "tiled"))]
+fn pipeline_has_multisampled_input_attachment(_b: &[Arc<BindGroupLayout>]) -> bool {
+    false
+}
+
+/// Validates MSAA consistency between a subpass render pipeline, its bind group
+/// layouts, and the subpass attachment sample counts. Returns `Some(message)`
+/// on the first violation, `None` when consistent.
+#[cfg(feature = "tiled")]
+fn validate_subpass_pipeline_multisampling(
+    base: &RenderPipelineDescriptor,
+    pass_layout: &SubpassPassLayoutDescriptor,
+    subpass_index: u32,
+    bind_group_layouts: &[Arc<BindGroupLayout>],
+) -> Option<String> {
+    let subpass = pass_layout.subpasses.get(subpass_index as usize)?;
+
+    // C-1 — each input attachment's multisampled flag must match the sample count
+    // of the source attachment it reads.
+    for input in &subpass.input_attachments {
+        let Some(layout) = bind_group_layouts.get(input.group as usize) else {
+            continue;
+        };
+        let Some(multisampled) = layout.entries().iter().find_map(|entry| {
+            if entry.binding != input.binding {
+                return None;
+            }
+            match entry.kind {
+                Some(BindingLayoutKind::InputAttachment { multisampled, .. }) => Some(multisampled),
+                _ => None,
+            }
+        }) else {
+            continue;
+        };
+        let source_sample_count = if input.source_attachment == DEPTH_STENCIL_ATTACHMENT_INDEX {
+            pass_layout
+                .depth_stencil_attachment
+                .as_ref()
+                .map(|attachment| attachment.sample_count)
+        } else {
+            pass_layout
+                .color_attachments
+                .get(input.source_attachment as usize)
+                .map(|attachment| attachment.sample_count)
+        };
+        let Some(source_sample_count) = source_sample_count else {
+            continue;
+        };
+        if multisampled != (source_sample_count > 1) {
+            return Some(
+                "subpass input attachment multisampled flag must match its source attachment sample count"
+                    .to_owned(),
+            );
+        }
+    }
+
+    // C-2 — every attachment written by the subpass must match the pipeline's
+    // rasterization sample count.
+    for &color_index in &subpass.color_attachment_indices {
+        if let Some(attachment) = pass_layout.color_attachments.get(color_index as usize) {
+            if attachment.sample_count != base.multisample.count {
+                return Some(
+                    "subpass render pipeline multisample count must match the subpass attachment sample count"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    if subpass.uses_depth_stencil {
+        if let Some(attachment) = &pass_layout.depth_stencil_attachment {
+            if attachment.sample_count != base.multisample.count {
+                return Some(
+                    "subpass render pipeline multisample count must match the subpass attachment sample count"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+
+    None
+}
+
 /// Selects the HAL shader source for a render pipeline.
 // Render-stage source selection legitimately needs backend, descriptor, both
 // entry names, the Metal binding/vertex-buffer tables, and the
@@ -1443,7 +1555,10 @@ pub(crate) fn select_render_shader_source(
                 &vertex_pipeline_constants,
                 vulkan_memory_model,
                 framebuffer_fetch_descriptor_set,
+                false,
             )?;
+            let multisampled_input_attachment =
+                pipeline_has_multisampled_input_attachment(bind_group_layouts);
             let fragment_color_slots = match (fragment, fragment_entry_name) {
                 (Some(fragment), Some(fragment_entry_name)) => fragment
                     .shader
@@ -1468,6 +1583,7 @@ pub(crate) fn select_render_shader_source(
                         })?,
                         vulkan_memory_model,
                         framebuffer_fetch_descriptor_set,
+                        multisampled_input_attachment,
                     )?)
                 }
                 (None, None) => None,
@@ -4970,6 +5086,171 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
                 sample_type: TextureSampleType::Float,
                 multisampled: false,
             })
+        );
+    }
+
+    #[cfg(feature = "tiled")]
+    fn input_attachment_layout(
+        device: &crate::Device,
+        binding: u32,
+        multisampled: bool,
+    ) -> Arc<BindGroupLayout> {
+        Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding,
+                visibility: SHADER_STAGE_FRAGMENT,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::InputAttachment {
+                    sample_type: TextureSampleType::Float,
+                    multisampled,
+                }),
+            }],
+            error: None,
+        }))
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn pipeline_has_multisampled_input_attachment_detects_only_multisampled_input() {
+        let device = noop_device();
+        let multisampled = input_attachment_layout(&device, 0, true);
+        let single_sampled = input_attachment_layout(&device, 0, false);
+        let buffer = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_FRAGMENT,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: 0,
+                }),
+            }],
+            error: None,
+        }));
+
+        assert!(pipeline_has_multisampled_input_attachment(&[multisampled]));
+        assert!(!pipeline_has_multisampled_input_attachment(&[single_sampled]));
+        assert!(!pipeline_has_multisampled_input_attachment(&[buffer]));
+        assert!(!pipeline_has_multisampled_input_attachment(&[]));
+    }
+
+    #[cfg(feature = "tiled")]
+    fn msaa_subpass_pass_layout(
+        source_sample_count: u32,
+        written_sample_count: u32,
+    ) -> SubpassPassLayoutDescriptor {
+        SubpassPassLayoutDescriptor {
+            color_attachments: vec![
+                AttachmentLayout {
+                    format: rgba8_unorm(),
+                    sample_count: source_sample_count,
+                },
+                AttachmentLayout {
+                    format: rgba8_unorm(),
+                    sample_count: written_sample_count,
+                },
+            ],
+            depth_stencil_attachment: None,
+            subpasses: vec![
+                SubpassLayoutDesc {
+                    color_attachment_indices: vec![0],
+                    uses_depth_stencil: false,
+                    input_attachments: Vec::new(),
+                },
+                SubpassLayoutDesc {
+                    color_attachment_indices: vec![1],
+                    uses_depth_stencil: false,
+                    input_attachments: vec![SubpassInputAttachment {
+                        group: 0,
+                        binding: 0,
+                        source_subpass: 0,
+                        source_attachment: 0,
+                    }],
+                },
+            ],
+            dependencies: Vec::new(),
+            error: None,
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn validate_subpass_pipeline_multisampling_accepts_consistent_msaa() {
+        let device = noop_device();
+        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }
+             @fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }"
+                .to_owned(),
+        )));
+        let mut base = render_pipeline_descriptor(module);
+        base.multisample.count = 4;
+        let layout = input_attachment_layout(&device, 0, true);
+
+        assert_eq!(
+            validate_subpass_pipeline_multisampling(
+                &base,
+                &msaa_subpass_pass_layout(4, 4),
+                1,
+                &[layout],
+            ),
+            None
+        );
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn validate_subpass_pipeline_multisampling_rejects_flag_mismatch_c1() {
+        let device = noop_device();
+        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }
+             @fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }"
+                .to_owned(),
+        )));
+        let mut base = render_pipeline_descriptor(module);
+        base.multisample.count = 4;
+        // Source attachment is 4x but the layout declares single-sampled input.
+        let layout = input_attachment_layout(&device, 0, false);
+
+        assert_eq!(
+            validate_subpass_pipeline_multisampling(
+                &base,
+                &msaa_subpass_pass_layout(4, 4),
+                1,
+                &[layout],
+            ),
+            Some(
+                "subpass input attachment multisampled flag must match its source attachment sample count"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn validate_subpass_pipeline_multisampling_rejects_count_mismatch_c2() {
+        let device = noop_device();
+        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }
+             @fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }"
+                .to_owned(),
+        )));
+        let mut base = render_pipeline_descriptor(module);
+        // Pipeline rasterizes single-sampled but the written attachment is 4x.
+        base.multisample.count = 1;
+        let layout = input_attachment_layout(&device, 0, true);
+
+        assert_eq!(
+            validate_subpass_pipeline_multisampling(
+                &base,
+                &msaa_subpass_pass_layout(4, 4),
+                1,
+                &[layout],
+            ),
+            Some(
+                "subpass render pipeline multisample count must match the subpass attachment sample count"
+                    .to_owned()
+            )
         );
     }
 
