@@ -10,7 +10,16 @@ WebGPU `float32-blendable` optional feature
 |---|---|---|
 | 1 | Feature plumbing + caps gate (Noop + HAL cap) | **DONE** (2026-07-01) |
 | 2 | Real-GPU execution e2e (Metal + Vulkan) | **DONE** (2026-07-01) |
-| 3 | Docs + Phase Review | TODO |
+| 3 | Docs + Phase Review | **DONE** (2026-07-01) |
+
+**Phase COMPLETE** — no-context Phase Review of `8603c22..HEAD` returned no
+CRITICAL/MAJOR. Caps gate applies `.blendable()` to exactly R32/RG32/RGBA32_FLOAT
+only when the feature is enabled (via `apply_feature_upgrades`, hit by every
+`caps()` caller) — matches Dawn `Format.cpp:336`; Vulkan cap byte-for-byte
+matches Dawn `PhysicalDeviceVk.cpp:444`; gate tier-independent + Noop-testable;
+e2e additive A+B non-vacuous and float32-specific. Two MINORs, both no-action
+(per-backend caps GPU-dependent → covered by e2e; a2c-on-float32 only arises in
+already-rejected multisample configs).
 
 ## Key facts (verified 2026-07-01)
 
