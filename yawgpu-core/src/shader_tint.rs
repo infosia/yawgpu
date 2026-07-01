@@ -434,6 +434,16 @@ impl ReflectedModule {
         slots
     }
 
+    /// Returns true when the fragment entry point writes a second dual-source
+    /// blend output (`@location(0) @blend_src(1)`).
+    pub(crate) fn fragment_writes_blend_src_1(&self, entry_point: &str) -> bool {
+        self.program
+            .entry_point_outputs(entry_point)
+            .unwrap_or_default()
+            .into_iter()
+            .any(|variable| variable.blend_src == Some(1))
+    }
+
     /// Returns overrides reflected by the validated shader module.
     pub(crate) fn overrides(&self) -> Vec<ReflectedOverride> {
         self.program
@@ -1399,6 +1409,37 @@ fn fs(@color(1) prev1: vec4<f32>, @color(0) prev0: vec4<f32>) -> @location(0) ve
         .unwrap();
 
         assert_eq!(module.fragment_color_inputs("fs"), vec![0, 1]);
+    }
+
+    #[test]
+    fn reflects_fragment_blend_src_1_output_from_tint() {
+        let module = parse_and_validate_wgsl_gated(
+            r#"
+enable dual_source_blending;
+
+struct DualSourceOut {
+  @location(0) @blend_src(0) a: vec4f,
+  @location(0) @blend_src(1) b: vec4f,
+}
+
+@fragment
+fn fs_dual() -> DualSourceOut {
+  return DualSourceOut(vec4f(), vec4f());
+}
+
+@fragment
+fn fs_plain() -> @location(0) vec4f {
+  return vec4f();
+}
+"#,
+            false,
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert!(module.fragment_writes_blend_src_1("fs_dual"));
+        assert!(!module.fragment_writes_blend_src_1("fs_plain"));
     }
 
     #[test]

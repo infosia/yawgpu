@@ -2662,6 +2662,15 @@ pub(crate) fn validate_color_targets(
     validate_fragment_color_inputs(fragment, fragment_entry)?;
 
     let outputs = fragment_outputs(fragment, fragment_entry)?;
+    let fragment_writes_blend_src_1 = match fragment_entry {
+        Some(entry_name) => fragment
+            .shader
+            .module
+            .reflected()
+            .ok_or_else(|| "fragment module reflection failed".to_owned())?
+            .fragment_writes_blend_src_1(entry_name),
+        None => false,
+    };
     let mut color_formats = Vec::new();
     let mut has_alpha_to_coverage_target = false;
     for (index, target) in fragment.targets.iter().enumerate() {
@@ -2688,6 +2697,12 @@ pub(crate) fn validate_color_targets(
                 if !features.contains(&Feature::DualSourceBlending) {
                     return Err(
                         "render pipeline dual-source blend factors require the dual-source-blending feature"
+                            .to_owned(),
+                    );
+                }
+                if !fragment_writes_blend_src_1 {
+                    return Err(
+                        "render pipeline dual-source blend factors require the fragment shader to write a @blend_src(1) output"
                             .to_owned(),
                     );
                 }
@@ -3261,8 +3276,8 @@ mod tests {
     };
     use crate::test_helpers::*;
     #[cfg(feature = "shader-passthrough")]
-    use crate::{Device, ShaderStage};
-    use crate::{ErrorFilter, TextureViewDimension};
+    use crate::ShaderStage;
+    use crate::{Device, ErrorFilter, TextureViewDimension};
 
     use std::sync::Arc;
 
@@ -3571,6 +3586,38 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
   return prev;
 }}
 "#
+        )
+    }
+
+    fn dual_source_device() -> Device {
+        noop_adapter()
+            .create_device(None, &[Feature::DualSourceBlending], "", "")
+            .expect("Noop adapter should create dual-source-blending device")
+    }
+
+    fn dual_source_render_shader_module(device: &Device) -> Arc<ShaderModule> {
+        Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r#"
+enable dual_source_blending;
+
+@vertex
+fn vs() -> @builtin(position) vec4f {
+  return vec4f();
+}
+
+struct Out {
+  @location(0) @blend_src(0) a: vec4f,
+  @location(0) @blend_src(1) b: vec4f,
+}
+
+@fragment
+fn fs() -> Out {
+  return Out(vec4f(), vec4f());
+}
+"#
+                .to_owned(),
+            )),
         )
     }
 
@@ -4413,14 +4460,8 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
 
     #[test]
     fn dual_source_blend_factor_requires_feature_and_accepts_when_enabled() {
-        let device = noop_device();
-        let module = Arc::new(
-            device.create_shader_module(ShaderModuleSource::Wgsl(
-                "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }
-                 @fragment fn fs() -> @location(0) vec4f { return vec4f(); }"
-                    .to_owned(),
-            )),
-        );
+        let device = dual_source_device();
+        let module = dual_source_render_shader_module(&device);
         let mut descriptor = render_pipeline_descriptor(module);
         descriptor.fragment.as_mut().expect("fragment").targets[0].blend = Some(BlendState {
             color: BlendComponent {
@@ -4452,19 +4493,38 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
     }
 
     #[test]
-    fn dual_source_blending_requires_single_color_target() {
+    fn dual_source_blend_factor_requires_fragment_blend_src_1_output() {
         let device = noop_device();
-        let module = Arc::new(
-            device.create_shader_module(ShaderModuleSource::Wgsl(
-                "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }
-                 struct Out {
-                   @location(0) a: vec4f,
-                   @location(1) b: vec4f,
-                 }
-                 @fragment fn fs() -> Out { return Out(vec4f(), vec4f()); }"
-                    .to_owned(),
-            )),
+        let module = render_shader_module(&device);
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.fragment.as_mut().expect("fragment").targets[0].blend = Some(BlendState {
+            color: BlendComponent {
+                operation: BlendOperation::Add,
+                src_factor: BlendFactor::Src1,
+                dst_factor: BlendFactor::Zero,
+            },
+            alpha: BlendComponent {
+                operation: BlendOperation::Add,
+                src_factor: BlendFactor::One,
+                dst_factor: BlendFactor::Zero,
+            },
+        });
+
+        let mut enabled = FeatureSet::new();
+        enabled.insert(Feature::DualSourceBlending);
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &enabled),
+            Some(
+                "render pipeline dual-source blend factors require the fragment shader to write a @blend_src(1) output"
+                    .to_owned()
+            )
         );
+    }
+
+    #[test]
+    fn dual_source_blending_requires_single_color_target() {
+        let device = dual_source_device();
+        let module = dual_source_render_shader_module(&device);
         let mut descriptor = render_pipeline_descriptor(module);
         let fragment = descriptor.fragment.as_mut().expect("fragment");
         fragment.target_count = 2;

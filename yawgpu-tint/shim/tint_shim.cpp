@@ -452,6 +452,8 @@ void fill_stage_variable(const tint::inspector::StageVariable& variable,
     out->location = variable.attributes.location.value_or(0);
     out->has_color = variable.attributes.color.has_value();
     out->color = variable.attributes.color.value_or(0);
+    out->has_blend_src = variable.attributes.blend_src.has_value();
+    out->blend_src = variable.attributes.blend_src.value_or(0);
     out->component_type = static_cast<uint8_t>(variable.component_type);
     out->composition_type = static_cast<uint8_t>(variable.composition_type);
     out->interpolation_type = static_cast<uint8_t>(variable.interpolation_type);
