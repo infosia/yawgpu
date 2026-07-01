@@ -1,8 +1,9 @@
 use super::*;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::{
-    HalBoundIndexBuffer, HalBoundIndirectBuffer, HalScissorRect, HalTextureAspect,
-    HalTextureDimension, HalTextureViewDimension, HalViewport,
+    HalBoundIndexBuffer, HalBoundIndirectBuffer, HalComponentSwizzle, HalScissorRect,
+    HalTextureAspect, HalTextureComponentSwizzle, HalTextureDimension, HalTextureViewDimension,
+    HalViewport,
 };
 
 /// Records encode into the command stream.
@@ -1337,13 +1338,36 @@ fn metal_texture_view(
     unsafe {
         texture
             .inner()?
-            .newTextureViewWithPixelFormat_textureType_levels_slices(
+            .newTextureViewWithPixelFormat_textureType_levels_slices_swizzle(
                 pixel_format,
                 texture_type,
                 level_range,
                 slice_range,
+                metal_texture_swizzle_channels(&binding.swizzle),
             )
             .ok_or_else(|| texture_error("texture view allocation failed"))
+    }
+}
+
+fn metal_texture_swizzle_channels(
+    swizzle: &HalTextureComponentSwizzle,
+) -> MTLTextureSwizzleChannels {
+    fn component(component: HalComponentSwizzle) -> MTLTextureSwizzle {
+        match component {
+            HalComponentSwizzle::Zero => MTLTextureSwizzle::Zero,
+            HalComponentSwizzle::One => MTLTextureSwizzle::One,
+            HalComponentSwizzle::R => MTLTextureSwizzle::Red,
+            HalComponentSwizzle::G => MTLTextureSwizzle::Green,
+            HalComponentSwizzle::B => MTLTextureSwizzle::Blue,
+            HalComponentSwizzle::A => MTLTextureSwizzle::Alpha,
+        }
+    }
+
+    MTLTextureSwizzleChannels {
+        red: component(swizzle.r),
+        green: component(swizzle.g),
+        blue: component(swizzle.b),
+        alpha: component(swizzle.a),
     }
 }
 
@@ -1664,6 +1688,21 @@ mod tests {
     }
 
     #[test]
+    fn metal_texture_swizzle_channels_maps_texture_component_swizzle() {
+        let channels = metal_texture_swizzle_channels(&HalTextureComponentSwizzle {
+            r: HalComponentSwizzle::Zero,
+            g: HalComponentSwizzle::One,
+            b: HalComponentSwizzle::B,
+            a: HalComponentSwizzle::A,
+        });
+
+        assert_eq!(channels.red, MTLTextureSwizzle::Zero);
+        assert_eq!(channels.green, MTLTextureSwizzle::One);
+        assert_eq!(channels.blue, MTLTextureSwizzle::Blue);
+        assert_eq!(channels.alpha, MTLTextureSwizzle::Alpha);
+    }
+
+    #[test]
     #[ignore = "manual real Metal backend test"]
     fn metal_texture_view_uses_multisample_type_for_msaa_d2_source() {
         let device = metal_device();
@@ -1686,6 +1725,7 @@ mod tests {
             base_array_layer: 0,
             array_layer_count: 1,
             aspect: HalTextureAspect::All,
+            swizzle: HalTextureComponentSwizzle::default(),
             storage_access: None,
         };
 

@@ -83,6 +83,7 @@ impl Adapter {
         add_clip_distances_feature(&mut features, &self.inner.hal);
         add_primitive_index_feature(&mut features, &self.inner.hal);
         add_indirect_first_instance_feature(&mut features, &self.inner.hal);
+        add_texture_component_swizzle_feature(&mut features, &self.inner.hal);
         #[cfg(feature = "tiled")]
         add_tiled_features(&mut features, self.backend());
 
@@ -325,6 +326,12 @@ fn add_indirect_first_instance_feature(features: &mut FeatureSet, hal: &HalAdapt
     }
 }
 
+fn add_texture_component_swizzle_feature(features: &mut FeatureSet, hal: &HalAdapter) {
+    if hal.supports_texture_component_swizzle() {
+        features.insert(Feature::TextureComponentSwizzle);
+    }
+}
+
 /// Returns true when tiled rendering features are supported by `backend`.
 #[cfg(feature = "tiled")]
 #[must_use]
@@ -494,6 +501,15 @@ mod tests {
 
         let features = noop_adapter().features();
         assert!(features.contains(&Feature::IndirectFirstInstance));
+    }
+
+    #[test]
+    fn texture_component_swizzle_feature_is_adapter_gated_and_noop_advertises() {
+        let base = supported_features();
+        assert!(!base.contains(&Feature::TextureComponentSwizzle));
+
+        let features = noop_adapter().features();
+        assert!(features.contains(&Feature::TextureComponentSwizzle));
     }
 
     #[test]

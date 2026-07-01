@@ -98,6 +98,12 @@ impl NoopAdapter {
         true
     }
 
+    /// Returns true when texture view component swizzling is supported.
+    #[must_use]
+    pub(super) fn supports_texture_component_swizzle(&self) -> bool {
+        true
+    }
+
     /// Returns the supported subgroup size range.
     #[must_use]
     pub(super) fn subgroup_size_range(&self) -> Option<(u32, u32)> {
@@ -522,6 +528,13 @@ mod tests {
         let adapter = NoopAdapter::synthetic();
 
         assert!(adapter.supports_indirect_first_instance());
+    }
+
+    #[test]
+    fn noop_adapter_supports_texture_component_swizzle_returns_true() {
+        let adapter = NoopAdapter::synthetic();
+
+        assert!(adapter.supports_texture_component_swizzle());
     }
 
     #[test]

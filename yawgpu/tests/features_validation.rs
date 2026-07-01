@@ -193,12 +193,12 @@ fn get_features_round_trip_and_free_members() {
 fn unsupported_required_feature_fails_request_device() {
     unsafe {
         let fixture = Fixture::new(native::WGPUFeatureLevel_Core);
-        // The Noop adapter does not advertise texture component swizzle, so
-        // requesting it must fail.
+        // Unknown feature values map to `Other` and are not advertised by Noop,
+        // so requesting one must fail.
         let device = request_device(
             fixture.instance,
             fixture.adapter,
-            &[native::WGPUFeatureName_TextureComponentSwizzle],
+            &[0xFFFF_FFFEu32 as native::WGPUFeatureName],
         );
 
         assert_eq!(device.status, native::WGPURequestDeviceStatus_Error);

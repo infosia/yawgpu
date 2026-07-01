@@ -339,6 +339,12 @@ impl VulkanAdapter {
         false
     }
 
+    /// Returns true when texture view component swizzling is supported by this physical device.
+    #[must_use]
+    pub fn supports_texture_component_swizzle(&self) -> bool {
+        true
+    }
+
     /// Returns true when WGSL `shader-f16` is supported by this physical device.
     #[must_use]
     pub(super) fn supports_shader_float16(&self) -> bool {
@@ -1063,6 +1069,20 @@ mod tests {
             .next()
             .expect("at least one Vulkan adapter");
         assert!(!adapter.name().is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_adapter_supports_texture_component_swizzle_returns_true() {
+        let adapter = VulkanInstance::new()
+            .expect("create Vulkan instance")
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Vulkan adapter");
+
+        assert!(adapter.supports_texture_component_swizzle());
     }
 
     #[test]

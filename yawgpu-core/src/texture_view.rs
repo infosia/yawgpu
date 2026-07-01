@@ -486,6 +486,29 @@ mod tests {
             error,
             Some("texture component swizzle requires the texture-component-swizzle feature")
         );
+
+        let adapter = noop_adapter();
+        let device = adapter
+            .create_device(None, &[Feature::TextureComponentSwizzle], "", "")
+            .expect("Noop adapter should support texture component swizzle");
+        let texture = device.create_texture(layered_mipped_texture_descriptor());
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: Some(TextureComponentSwizzle {
+                r: ComponentSwizzle::G,
+                ..TextureComponentSwizzle::default()
+            }),
+        });
+        assert_eq!(error, None);
+        assert!(!view.is_error());
+        assert_eq!(view.swizzle().r, ComponentSwizzle::G);
     }
 
     #[test]
