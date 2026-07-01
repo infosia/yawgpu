@@ -7,7 +7,7 @@ use super::device::GlesDevice;
 use super::egl::{EglConfig, EglContext, EglSurface};
 use super::instance::{EglInstanceState, GlesInstanceInner};
 use super::BACKEND;
-use crate::HalError;
+use crate::{HalError, HalLimits};
 
 /// Stores GLES adapter data used by validation and backend submission.
 #[derive(Clone)]
@@ -60,6 +60,12 @@ impl GlesAdapter {
             #[cfg(windows)]
             GlesAdapterInner::Wgl { .. } => "yawgpu GLES Adapter (WGL)",
         }
+    }
+
+    /// Returns the backend-reported supported limits.
+    #[must_use]
+    pub(crate) fn limits(&self) -> HalLimits {
+        HalLimits::DEFAULT
     }
 
     /// Returns true when BC texture compression is supported.

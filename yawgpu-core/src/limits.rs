@@ -117,6 +117,118 @@ impl Limits {
         max_immediate_size: 0,
     };
 
+    /// Converts backend-reported HAL limits into core limits.
+    pub(crate) fn from_hal(hal: yawgpu_hal::HalLimits) -> Self {
+        let default = Self::DEFAULT;
+        let max_storage_buffers_per_shader_stage = hal
+            .max_storage_buffers_per_shader_stage
+            .max(default.max_storage_buffers_per_shader_stage);
+        let max_storage_textures_per_shader_stage = hal
+            .max_storage_textures_per_shader_stage
+            .max(default.max_storage_textures_per_shader_stage);
+
+        Self {
+            max_texture_dimension_1d: hal
+                .max_texture_dimension_1d
+                .max(default.max_texture_dimension_1d),
+            max_texture_dimension_2d: hal
+                .max_texture_dimension_2d
+                .max(default.max_texture_dimension_2d),
+            max_texture_dimension_3d: hal
+                .max_texture_dimension_3d
+                .max(default.max_texture_dimension_3d),
+            max_texture_array_layers: hal
+                .max_texture_array_layers
+                .max(default.max_texture_array_layers),
+            max_bind_groups: hal.max_bind_groups.max(default.max_bind_groups),
+            max_bind_groups_plus_vertex_buffers: hal
+                .max_bind_groups_plus_vertex_buffers
+                .max(default.max_bind_groups_plus_vertex_buffers),
+            max_bindings_per_bind_group: hal
+                .max_bindings_per_bind_group
+                .max(default.max_bindings_per_bind_group),
+            max_dynamic_uniform_buffers_per_pipeline_layout: hal
+                .max_dynamic_uniform_buffers_per_pipeline_layout
+                .max(default.max_dynamic_uniform_buffers_per_pipeline_layout),
+            max_dynamic_storage_buffers_per_pipeline_layout: hal
+                .max_dynamic_storage_buffers_per_pipeline_layout
+                .max(default.max_dynamic_storage_buffers_per_pipeline_layout),
+            max_sampled_textures_per_shader_stage: hal
+                .max_sampled_textures_per_shader_stage
+                .max(default.max_sampled_textures_per_shader_stage),
+            max_samplers_per_shader_stage: hal
+                .max_samplers_per_shader_stage
+                .max(default.max_samplers_per_shader_stage),
+            max_storage_buffers_per_shader_stage,
+            max_storage_textures_per_shader_stage,
+            max_storage_buffers_in_vertex_stage: hal
+                .max_storage_buffers_in_vertex_stage
+                .max(default.max_storage_buffers_in_vertex_stage)
+                .min(max_storage_buffers_per_shader_stage),
+            max_storage_buffers_in_fragment_stage: hal
+                .max_storage_buffers_in_fragment_stage
+                .max(default.max_storage_buffers_in_fragment_stage)
+                .min(max_storage_buffers_per_shader_stage),
+            max_storage_textures_in_vertex_stage: hal
+                .max_storage_textures_in_vertex_stage
+                .max(default.max_storage_textures_in_vertex_stage)
+                .min(max_storage_textures_per_shader_stage),
+            max_storage_textures_in_fragment_stage: hal
+                .max_storage_textures_in_fragment_stage
+                .max(default.max_storage_textures_in_fragment_stage)
+                .min(max_storage_textures_per_shader_stage),
+            max_uniform_buffers_per_shader_stage: hal
+                .max_uniform_buffers_per_shader_stage
+                .max(default.max_uniform_buffers_per_shader_stage),
+            max_uniform_buffer_binding_size: hal
+                .max_uniform_buffer_binding_size
+                .max(default.max_uniform_buffer_binding_size),
+            max_storage_buffer_binding_size: hal
+                .max_storage_buffer_binding_size
+                .max(default.max_storage_buffer_binding_size),
+            min_uniform_buffer_offset_alignment: hal
+                .min_uniform_buffer_offset_alignment
+                .max(32)
+                .min(default.min_uniform_buffer_offset_alignment),
+            min_storage_buffer_offset_alignment: hal
+                .min_storage_buffer_offset_alignment
+                .max(32)
+                .min(default.min_storage_buffer_offset_alignment),
+            max_vertex_buffers: hal.max_vertex_buffers.max(default.max_vertex_buffers),
+            max_buffer_size: hal.max_buffer_size.max(default.max_buffer_size),
+            max_vertex_attributes: hal.max_vertex_attributes.max(default.max_vertex_attributes),
+            max_vertex_buffer_array_stride: hal
+                .max_vertex_buffer_array_stride
+                .max(default.max_vertex_buffer_array_stride),
+            max_inter_stage_shader_variables: hal
+                .max_inter_stage_shader_variables
+                .max(default.max_inter_stage_shader_variables),
+            max_color_attachments: hal.max_color_attachments.max(default.max_color_attachments),
+            max_color_attachment_bytes_per_sample: hal
+                .max_color_attachment_bytes_per_sample
+                .max(default.max_color_attachment_bytes_per_sample),
+            max_compute_workgroup_storage_size: hal
+                .max_compute_workgroup_storage_size
+                .max(default.max_compute_workgroup_storage_size),
+            max_compute_invocations_per_workgroup: hal
+                .max_compute_invocations_per_workgroup
+                .max(default.max_compute_invocations_per_workgroup),
+            max_compute_workgroup_size_x: hal
+                .max_compute_workgroup_size_x
+                .max(default.max_compute_workgroup_size_x),
+            max_compute_workgroup_size_y: hal
+                .max_compute_workgroup_size_y
+                .max(default.max_compute_workgroup_size_y),
+            max_compute_workgroup_size_z: hal
+                .max_compute_workgroup_size_z
+                .max(default.max_compute_workgroup_size_z),
+            max_compute_workgroups_per_dimension: hal
+                .max_compute_workgroups_per_dimension
+                .max(default.max_compute_workgroups_per_dimension),
+            max_immediate_size: hal.max_immediate_size,
+        }
+    }
+
     /// Validates required limits and returns a descriptive error on failure.
     pub(crate) fn validate_required_limits(self, required: Option<&Self>) -> Result<Self, String> {
         // Block 00: for the synthetic Noop adapter, supported limits equal
@@ -201,6 +313,26 @@ impl Limits {
         maximum!(max_compute_workgroup_size_y);
         maximum!(max_compute_workgroup_size_z);
         maximum!(max_compute_workgroups_per_dimension);
+
+        // Dawn EnforceLimitSpecInvariants: yawgpu exposes core feature level,
+        // so per-stage storage limits first raise the per-shader-stage limit
+        // and then all stage-specific storage limits are pinned to it.
+        effective.max_storage_buffers_per_shader_stage = effective
+            .max_storage_buffers_per_shader_stage
+            .max(effective.max_storage_buffers_in_vertex_stage)
+            .max(effective.max_storage_buffers_in_fragment_stage);
+        effective.max_storage_textures_per_shader_stage = effective
+            .max_storage_textures_per_shader_stage
+            .max(effective.max_storage_textures_in_vertex_stage)
+            .max(effective.max_storage_textures_in_fragment_stage);
+        effective.max_storage_buffers_in_vertex_stage =
+            effective.max_storage_buffers_per_shader_stage;
+        effective.max_storage_buffers_in_fragment_stage =
+            effective.max_storage_buffers_per_shader_stage;
+        effective.max_storage_textures_in_vertex_stage =
+            effective.max_storage_textures_per_shader_stage;
+        effective.max_storage_textures_in_fragment_stage =
+            effective.max_storage_textures_per_shader_stage;
 
         // Relationship checks are evaluated on the *effective* limits (after
         // per-field maximum/alignment clamping to the spec default floor).
@@ -386,6 +518,54 @@ mod tests {
         assert_eq!(limits.max_compute_workgroup_size_x, 256);
         assert_eq!(limits.max_compute_workgroup_size_y, 256);
         assert_eq!(limits.max_immediate_size, 0);
+    }
+
+    #[test]
+    fn from_hal_clamps_default_floor_and_alignment_ceiling() {
+        let mut hal = yawgpu_hal::HalLimits::DEFAULT;
+        hal.max_texture_dimension_2d = Limits::DEFAULT.max_texture_dimension_2d - 1;
+        hal.min_uniform_buffer_offset_alignment =
+            Limits::DEFAULT.min_uniform_buffer_offset_alignment * 2;
+
+        let limits = Limits::from_hal(hal);
+
+        assert_eq!(
+            limits.max_texture_dimension_2d,
+            Limits::DEFAULT.max_texture_dimension_2d
+        );
+        assert_eq!(
+            limits.min_uniform_buffer_offset_alignment,
+            Limits::DEFAULT.min_uniform_buffer_offset_alignment
+        );
+    }
+
+    #[test]
+    fn from_hal_preserves_better_alignment_and_above_default_maximum() {
+        let mut hal = yawgpu_hal::HalLimits::DEFAULT;
+        hal.max_texture_dimension_2d = Limits::DEFAULT.max_texture_dimension_2d * 2;
+        hal.min_uniform_buffer_offset_alignment = 4;
+        hal.min_storage_buffer_offset_alignment = 32;
+
+        let limits = Limits::from_hal(hal);
+
+        assert_eq!(
+            limits.max_texture_dimension_2d,
+            Limits::DEFAULT.max_texture_dimension_2d * 2
+        );
+        assert_eq!(limits.min_uniform_buffer_offset_alignment, 32);
+        assert_eq!(limits.min_storage_buffer_offset_alignment, 32);
+    }
+
+    #[test]
+    fn from_hal_normalizes_stage_specific_storage_limits_to_per_shader_stage() {
+        let mut hal = yawgpu_hal::HalLimits::DEFAULT;
+        hal.max_storage_textures_per_shader_stage = 4;
+        hal.max_storage_textures_in_fragment_stage = 8;
+
+        let limits = Limits::from_hal(hal);
+
+        assert_eq!(limits.max_storage_textures_per_shader_stage, 4);
+        assert_eq!(limits.max_storage_textures_in_fragment_stage, 4);
     }
 
     #[test]
@@ -640,5 +820,43 @@ mod tests {
             effective_worse.max_storage_buffers_in_vertex_stage,
             Limits::DEFAULT.max_storage_buffers_in_vertex_stage,
         );
+    }
+
+    #[test]
+    fn storage_textures_in_fragment_stage_auto_upgrades_and_pins_core_limits() {
+        let mut supported = Limits::DEFAULT;
+        supported.max_storage_textures_per_shader_stage = 8;
+        supported.max_storage_textures_in_vertex_stage = 8;
+        supported.max_storage_textures_in_fragment_stage = 8;
+
+        let mut required = Limits::DEFAULT;
+        required.max_storage_textures_in_fragment_stage = 6;
+
+        let effective = supported
+            .validate_required_limits(Some(&required))
+            .expect("fragment storage texture request within supported limits should validate");
+
+        assert_eq!(effective.max_storage_textures_per_shader_stage, 6);
+        assert_eq!(effective.max_storage_textures_in_fragment_stage, 6);
+        assert_eq!(effective.max_storage_textures_in_vertex_stage, 6);
+    }
+
+    #[test]
+    fn storage_buffers_per_shader_stage_request_pins_core_stage_limits() {
+        let mut supported = Limits::DEFAULT;
+        supported.max_storage_buffers_per_shader_stage = 10;
+        supported.max_storage_buffers_in_vertex_stage = 10;
+        supported.max_storage_buffers_in_fragment_stage = 10;
+
+        let mut required = Limits::DEFAULT;
+        required.max_storage_buffers_per_shader_stage = 10;
+
+        let effective = supported
+            .validate_required_limits(Some(&required))
+            .expect("per-shader-stage storage buffer request should validate");
+
+        assert_eq!(effective.max_storage_buffers_per_shader_stage, 10);
+        assert_eq!(effective.max_storage_buffers_in_vertex_stage, 10);
+        assert_eq!(effective.max_storage_buffers_in_fragment_stage, 10);
     }
 }

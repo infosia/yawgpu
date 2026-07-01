@@ -17,7 +17,7 @@ use crate::{
     HalBufferTextureCopy, HalBufferUsage, HalColorClearKind, HalColorTargetState,
     HalCompareFunction, HalComputeDispatch, HalComputePass, HalCopy, HalCullMode,
     HalDepthStencilState, HalDescriptorBinding, HalDescriptorBindingKind, HalDraw, HalError,
-    HalExtent3d, HalFilterMode, HalFrontFace, HalIndexFormat, HalMipmapFilterMode,
+    HalExtent3d, HalFilterMode, HalFrontFace, HalIndexFormat, HalLimits, HalMipmapFilterMode,
     HalPrimitiveTopology, HalQueryKind, HalQuerySet, HalRenderLoadOp, HalRenderPass,
     HalRenderPipelineDescriptor, HalResolveQuerySet, HalSampler, HalSamplerDescriptor,
     HalShaderSource, HalStencilOperation, HalSurfaceConfiguration, HalTexture, HalTextureCopy,
@@ -289,6 +289,12 @@ impl VulkanAdapter {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns the backend-reported supported limits.
+    #[must_use]
+    pub(crate) fn limits(&self) -> HalLimits {
+        HalLimits::DEFAULT
     }
 
     /// Returns true when BC texture compression is supported by this physical device.

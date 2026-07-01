@@ -59,9 +59,7 @@ impl Adapter {
     /// Returns the limits.
     #[must_use]
     pub fn limits(&self) -> Limits {
-        // Block 00: the synthetic Noop adapter's supported limits are the
-        // WebGPU spec defaults by design.
-        Limits::DEFAULT
+        Limits::from_hal(self.inner.hal.limits())
     }
 
     /// Returns the feature level.
