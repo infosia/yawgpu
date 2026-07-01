@@ -1549,16 +1549,23 @@ pub(crate) fn select_render_shader_source(
             })?;
             let framebuffer_fetch_descriptor_set =
                 framebuffer_fetch_descriptor_set(bind_group_layouts)?;
+            // `multisampled_input_attachment` is a module-wide Tint SPIR-V option,
+            // so it must be identical for every stage generated from the module —
+            // Tint validates the whole module's `inputAttachmentLoad` overloads
+            // against it even when generating the vertex entry point. Compute it
+            // once and pass it to both stages (a vertex/fragment pair that share a
+            // module with a 2-arg `inputAttachmentLoad(ia, sample_index)` would
+            // otherwise fail the vertex generation).
+            let multisampled_input_attachment =
+                pipeline_has_multisampled_input_attachment(bind_group_layouts);
             let vertex = vertex_module.generate_spirv(
                 vertex_entry_name,
                 frontend::ShaderStage::Vertex,
                 &vertex_pipeline_constants,
                 vulkan_memory_model,
                 framebuffer_fetch_descriptor_set,
-                false,
+                multisampled_input_attachment,
             )?;
-            let multisampled_input_attachment =
-                pipeline_has_multisampled_input_attachment(bind_group_layouts);
             let fragment_color_slots = match (fragment, fragment_entry_name) {
                 (Some(fragment), Some(fragment_entry_name)) => fragment
                     .shader
