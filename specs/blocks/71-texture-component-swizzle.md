@@ -1,8 +1,11 @@
 # Block 71 — `texture-component-swizzle` optional feature
 
-Status: **Slices 1–2 DONE, CTS-verified** on Metal (validation 8/0 + operation
-529/0, after 2 CTS-found fixes: depth R001 base + use-site gate). Slice 3 (docs +
-Phase Review) in progress. Owner: Dawn-parity feature backfill.
+Status: **COMPLETE** — CTS-verified on Metal (validation 8/0 + operation 529/0,
+after 2 CTS-found fixes: depth R001 base + use-site gate), Phase Review clean (no
+CRITICAL/MAJOR; HAL maps total, depth R001 backend-agnostic, all use-sites
+covered). Known deferral: the depth-format swizzle path is CTS-verified on Metal
+only — native-Vulkan/MoltenVK verification of the depth R001 path is deferred to
+native HW. Owner: Dawn-parity feature backfill.
 **Last of the WebGPU standard optional-feature backfill; the only one that is a
 texture-view feature (real HAL view work), not a shader/pipeline feature.**
 

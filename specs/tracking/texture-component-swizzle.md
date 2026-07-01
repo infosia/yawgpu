@@ -10,7 +10,7 @@ standard optional-feature backfill; the only texture-view (real HAL) one.**
 |---|---|---|
 | 1 | Advertise + validate + HAL threading & application | **DONE** (2026-07-01) |
 | 2 | CTS verification (Metal) | **DONE** (2026-07-01) — validation 8/0 + operation 529/0 after 2 CTS-found fixes (depth R001 + use-site gate) |
-| 3 | Docs + Phase Review | TODO |
+| 3 | Docs + Phase Review | **DONE** (2026-07-01) — Phase Review clean (no CRITICAL/MAJOR); Vulkan depth-swizzle verification deferred to native HW |
 
 ## Key facts (verified 2026-07-01, HAL map via Explore)
 
