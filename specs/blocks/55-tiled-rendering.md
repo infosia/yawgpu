@@ -30,9 +30,15 @@
 > validation-clean (0 VUIDs, Khronos layers) and pixel-correct on MoltenVK (a genuine
 > multi-subpass input attachment executes there, unlike the `@color` self-read).
 >
-> **Deferred (the body below describes some of these as design):** transient/memoryless
-> attachments (persistent attachments only for now); SPIR-V **MSAA** input attachment
-> (Slice 4 — the Dawn fork's 2-arg `inputAttachmentLoad(ia, sample_index)` is ready);
+> **Transient / memoryless attachments — DONE (Slice 3).** A texture created with
+> `WGPUTextureUsage_TransientAttachment` is allocated on-tile / no-DRAM-backing
+> (Metal `MTLStorageMode::Memoryless`, Vulkan `LAZILY_ALLOCATED` + `TRANSIENT_ATTACHMENT`
+> image usage). Used as a subpass G-buffer with `storeOp = Discard`, it never spills to
+> memory — the TBDR bandwidth payoff. Verified on the M2 (Metal) and MoltenVK. See
+> "Transient attachment" below for the (usage-bit) contract.
+>
+> **Deferred (the body below describes some of these as design):** SPIR-V **MSAA**
+> input attachment (Slice 4 — the Dawn fork's 2-arg `inputAttachmentLoad(ia, sample_index)` is ready);
 > depth/stencil-aspect subpass inputs; programmable tile dispatch (removed); the
 > empty-bind-group ergonomics nicety (a client currently sets an empty bind group for an
 > input-attachment-only group). Some examples below still show the naga-era
@@ -91,36 +97,32 @@ WGPUStatus yawgpuAdapterGetTiledCapabilities(
 /* 0x70010004 reserved — see "Programmable tile dispatch — removed". */
 ```
 
-### Transient attachment — first-class Arc resource (B2)
+### Transient attachment — a texture usage bit (B2, implemented — Slice 3)
 
-```c
-typedef struct YaWGPUTransientAttachmentImpl* YaWGPUTransientAttachment;
+Rather than a separate first-class resource, a transient attachment is an ordinary
+`WGPUTexture` created with the **`WGPUTextureUsage_TransientAttachment`** usage bit
+(`0x20`, already present in `webgpu.h`). No new object, view type, or entry point —
+its `WGPUTextureView` is used as a subpass color/input attachment through the normal
+`YaWGPUSubpassColorAttachment` path.
 
-typedef enum YaWGPUTransientSizeMode {
-    YaWGPUTransientSizeMode_MatchTarget = 0x00000000, /* follow render target */
-    YaWGPUTransientSizeMode_Explicit    = 0x00000001,
-    YaWGPUTransientSizeMode_Force32      = 0x7FFFFFFF
-} YaWGPUTransientSizeMode;
+Contract:
+- **Usage.** A transient texture may *only* additionally be `RENDER_ATTACHMENT`
+  (core-validated). It is never sampled, copied, or used as a storage/texture
+  binding — there is no way to observe its uninitialized content.
+- **Storage (HAL).** The backend keeps it on-tile with no DRAM backing: Metal
+  `MTLStorageMode::Memoryless`; Vulkan `TRANSIENT_ATTACHMENT` image usage (no
+  `TRANSFER_*` bits) backed by `LAZILY_ALLOCATED` device memory, falling back to
+  `DEVICE_LOCAL` when no lazily-allocated memory type exists.
+- **Load/store.** `loadOp` must be `Clear` (or the subpass fully writes it) and
+  **`storeOp` must be `Discard`** — a memoryless attachment has no memory to store
+  into (Metal rejects a non-`DontCare` store on a Memoryless texture).
+- **Lazy zero-init.** Transient textures are excluded from Stage-1 lazy
+  zero-initialization: a memoryless texture cannot be a copy destination, and it has
+  no observable uninitialized content. (`texture_lazy_init_eligible` returns false.)
 
-typedef struct YaWGPUTransientAttachmentDescriptor {
-    WGPUChainedStruct const*    nextInChain;
-    WGPUStringView              label;
-    WGPUTextureFormat           format;
-    YaWGPUTransientSizeMode sizeMode;
-    uint32_t                    width;   /* Explicit only */
-    uint32_t                    height;  /* Explicit only */
-    uint32_t                    sampleCount;
-} YaWGPUTransientAttachmentDescriptor;
-
-YaWGPUTransientAttachment yawgpuDeviceCreateTransientAttachment(
-    WGPUDevice device, YaWGPUTransientAttachmentDescriptor const* descriptor);
-void yawgpuTransientAttachmentAddRef(YaWGPUTransientAttachment attachment);
-void yawgpuTransientAttachmentRelease(YaWGPUTransientAttachment attachment);
-```
-
-A transient attachment is **only** usable inside a subpass render pass — as a
-color/depth slot resource or as an input-attachment source. It is never bound
-by the caller through a bind group, so it does not expose a `WGPUTextureView`.
+Typical use: a deferred G-buffer written in subpass 0 and consumed as an input
+attachment in subpass 1 (see `examples/tiled_deferred`) never round-trips to system
+memory.
 
 ### Subpass-input binding layout — chained on the BGL entry (B3)
 
