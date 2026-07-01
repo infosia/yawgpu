@@ -9,7 +9,7 @@ WebGPU `float32-blendable` optional feature
 | Slice | Scope | State |
 |---|---|---|
 | 1 | Feature plumbing + caps gate (Noop + HAL cap) | **DONE** (2026-07-01) |
-| 2 | Real-GPU execution e2e (Metal + Vulkan) | TODO |
+| 2 | Real-GPU execution e2e (Metal + Vulkan) | **DONE** (2026-07-01) |
 | 3 | Docs + Phase Review | TODO |
 
 ## Key facts (verified 2026-07-01)
