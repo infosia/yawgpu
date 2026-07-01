@@ -85,6 +85,8 @@ typedef struct {
     uint32_t location;
     bool has_color;
     uint32_t color;
+    bool has_blend_src;
+    uint32_t blend_src;
     uint8_t component_type;
     uint8_t composition_type;
     uint8_t interpolation_type;

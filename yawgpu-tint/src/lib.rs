@@ -45,6 +45,8 @@ mod imp {
         location: u32,
         has_color: bool,
         color: u32,
+        has_blend_src: bool,
+        blend_src: u32,
         component_type: u8,
         composition_type: u8,
         interpolation_type: u8,
@@ -466,6 +468,8 @@ mod imp {
                     location: 0,
                     has_color: false,
                     color: 0,
+                    has_blend_src: false,
+                    blend_src: 0,
                     component_type: 0,
                     composition_type: 0,
                     interpolation_type: 0,
@@ -876,6 +880,8 @@ mod imp {
         pub location: Option<u32>,
         /// Color attribute, when the variable is framebuffer-fetch IO.
         pub color: Option<u32>,
+        /// Blend source attribute, when the variable is a dual-source blending output.
+        pub blend_src: Option<u32>,
         /// Scalar component type.
         pub component_type: ComponentType,
         /// Scalar or vector composition.
@@ -891,6 +897,7 @@ mod imp {
             Ok(Self {
                 location: raw.has_location.then_some(raw.location),
                 color: raw.has_color.then_some(raw.color),
+                blend_src: raw.has_blend_src.then_some(raw.blend_src),
                 component_type: ComponentType::try_from_raw(raw.component_type)?,
                 composition_type: CompositionType::try_from_raw(raw.composition_type)?,
                 interpolation_type: InterpolationType::try_from_raw(raw.interpolation_type)?,
@@ -1917,6 +1924,8 @@ mod imp {
         pub location: Option<u32>,
         /// Color attribute, when the variable is framebuffer-fetch IO.
         pub color: Option<u32>,
+        /// Blend source attribute, when the variable is a dual-source blending output.
+        pub blend_src: Option<u32>,
         /// Scalar component type.
         pub component_type: ComponentType,
         /// Scalar or vector composition.
@@ -3450,7 +3459,10 @@ fn fs() -> Out {
 }
 "#;
         assert!(Program::parse(wgsl, false, false, false, &[]).is_err());
-        assert!(Program::parse(wgsl, false, false, true, &[]).is_ok());
+        let program = Program::parse(wgsl, false, false, true, &[]).unwrap();
+        let outputs = program.entry_point_outputs("fs").unwrap();
+        assert!(outputs.iter().any(|variable| variable.blend_src == Some(0)));
+        assert!(outputs.iter().any(|variable| variable.blend_src == Some(1)));
     }
 
     #[test]

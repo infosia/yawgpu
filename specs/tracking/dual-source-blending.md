@@ -40,3 +40,19 @@ action (rustfmt diff noise; single-target keys off Src1 factors per stated scope
   call site in sync).
 - Vulkan device-feature enable mirrors `independent_blend` (`mod.rs:568/594`).
 - Template: `subgroups` shader gate + `float32-blendable` blend validation.
+
+## CTS finding (post-COMPLETE) — RESOLVED
+
+External webgpu-native-cts (Dawn oracle, real Metal) found 8 fails in
+`api,validation,render_pipeline,fragment_state:dual_source_blending,use_blend_src`
+(`useBlendSrc1=false`): a pipeline using a `src1*` blend factor whose fragment
+shader does NOT write `@location(0) @blend_src(1)` must be a pipeline-creation
+ValidationError (CTS success = `!isDualSourceBlendFactor || useBlendSrc1`), but
+yawgpu let it reach the Metal compiler → uncaptured error. Fixed: reflect
+`StageVariable.attributes.blend_src` through the shim → Rust →
+`ReflectedModule::fragment_writes_blend_src_1`, and reject in core when a
+dual-source factor is used without a `@blend_src(1)` output. **CTS re-verified:
+`fragment_state:*` pass=3729 fail=0 on real Metal** (was 3721/8). Our own e2e
+missed it (it used a well-formed dual-source shader); the pipeline
+shader-output/factor interface check is core's job, not Tint's. Shows the value
+of running the external CTS against every new feature.
