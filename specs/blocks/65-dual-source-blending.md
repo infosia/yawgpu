@@ -1,7 +1,8 @@
 # Block 65 — `dual-source-blending` optional feature
 
-Status: **Slices 1–2 DONE, real-GPU verified** (Metal M2 + MoltenVK). Slice 3
-(docs + Phase Review) in progress. Owner: Dawn-parity feature backfill.
+Status: **COMPLETE** — all slices done, real-GPU verified (Metal M2 + MoltenVK),
+Phase Review clean (no CRITICAL/MAJOR; the C-shim signature sync was verified
+character-by-character across .h/.cpp/Rust extern). Owner: Dawn-parity backfill.
 
 The WebGPU `dual-source-blending` optional feature
 (`WGPUFeatureName_DualSourceBlending = 0x11`) lets a fragment shader emit a
