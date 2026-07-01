@@ -6,8 +6,11 @@
 //! clear color); with `unclippedDepth = true` (the feature enabled) depth
 //! clipping is disabled, the depth is clamped, and the triangle rasterizes red.
 //! Reading back the two color targets proves the two paths differ exactly as the
-//! spec requires — i.e. the already-wired Vulkan `VkPipelineRasterizationDepthClipStateCreateInfoEXT` HAL path is
-//! actually reached through the newly-added core feature gate.
+//! spec requires — i.e. the already-wired Vulkan HAL path is actually reached
+//! through the newly-added core feature gate. Which HAL path runs depends on the
+//! device: with `VK_EXT_depth_clip_enable` it uses
+//! `VkPipelineRasterizationDepthClipStateCreateInfoEXT`; without it (e.g.
+//! MoltenVK) it uses core `depthClampEnable`, which yields the same semantics.
 #![cfg(feature = "vulkan")]
 
 use std::os::raw::c_void;
