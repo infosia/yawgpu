@@ -15,6 +15,13 @@ mirrors wgpu, whose creation API (`Device::create_external_texture(desc, planes)
 `wgpu/src/api/device.rs:370`) is likewise a non-canonical, create-from-plane-views
 method (the JS `GPUDevice.importExternalTexture(video)` is web-only).
 
+`yawgpu.h` defines **`YAWGPU_HAS_EXTERNAL_TEXTURE 1`** (always) so C clients can
+`#ifdef`-detect the vendor creation entry point, mirroring `YAWGPU_HAS_SHADER_PASSTHROUGH`.
+This is the same "standard-header surface + intentionally ungated" shape as the
+`WGPUTextureUsage_TransientAttachment` bit (see Block 55): both live in the base
+`webgpu.h`, are honored unconditionally, and are *not* behind a cargo feature — a
+deliberate choice, not a missing gate.
+
 **Backend support — Metal-only, matching wgpu.** External-texture *sampling*
 (the codegen that lowers `texture_external` to plane textures + a params buffer)
 is implemented on **Metal only**, exactly as in wgpu — wgpu's external-texture

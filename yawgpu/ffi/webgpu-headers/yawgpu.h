@@ -198,8 +198,18 @@ typedef struct YaWGPUShaderSourceMSL {
  * exposes a Dawn-shaped creation descriptor so runtime parameter packing can
  * match Tint's multiplanar external-texture transform.
  *
+ * Unlike @ref YAWGPU_HAS_TILED (an opt-in the client `#define`s to reveal the
+ * tiled declarations), external-texture creation is **always available** — it is
+ * not behind a cargo feature. `YAWGPU_HAS_EXTERNAL_TEXTURE` is provided purely so
+ * clients can `#ifdef`-detect it, mirroring @ref YAWGPU_HAS_SHADER_PASSTHROUGH.
+ *
  * @{
  */
+
+/** Defined (always) when yawgpu's external-texture creation declarations are
+ *  available. External-texture creation is not gated by a cargo feature; this
+ *  macro exists only for symmetric `#ifdef` feature-detection. */
+#define YAWGPU_HAS_EXTERNAL_TEXTURE 1
 
 /** `WGPUSType` tag reserved for future chained external-texture extensions. */
 #define YAWGPU_STYPE_EXTERNAL_TEXTURE_DESCRIPTOR ((WGPUSType)0x70000003u)

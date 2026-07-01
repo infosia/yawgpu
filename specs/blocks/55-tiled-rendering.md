@@ -105,6 +105,15 @@ Rather than a separate first-class resource, a transient attachment is an ordina
 its `WGPUTextureView` is used as a subpass color/input attachment through the normal
 `YaWGPUSubpassColorAttachment` path.
 
+> **Intentionally NOT `tiled`-gated.** Unlike the multi-subpass / input-attachment
+> machinery (all `cfg(feature = "tiled")`), the `TransientAttachment` usage bit and
+> its memoryless HAL honoring (Metal `Memoryless` / Vulkan `LAZILY_ALLOCATED`) are
+> always compiled in. `TransientAttachment` is a **standard `webgpu.h` usage bit**
+> (base header, not the vendor `yawgpu.h`), and memoryless allocation is a transparent
+> optimization useful even without subpasses (e.g. an MSAA target that is resolved and
+> discarded). Gating it would make a standard usage bit's behavior conditional, which
+> diverges from upstream. Decision 2026-07-01 (user): keep ungated.
+
 Contract:
 - **Usage.** A transient texture may *only* additionally be `RENDER_ATTACHMENT`
   (core-validated). It is never sampled, copied, or used as a storage/texture
