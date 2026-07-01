@@ -420,7 +420,7 @@ static int run_windowed(YawgpuContext *ctx, WGPUQueue queue,
     Msaa m = msaa_create(ctx->device, (uint32_t)w, (uint32_t)h, format, scene_module,
                          persample_module, resolve_module);
 
-    printf("presenting an MSAA-resolved triangle; close the window to exit\n");
+    printf("presenting MSAA-resolved radiating lines; close the window to exit\n");
     while (!yawgpu_window_should_close(window)) {
         WGPUSurfaceTexture current = {0};
         wgpuSurfaceGetCurrentTexture(surface, &current);
