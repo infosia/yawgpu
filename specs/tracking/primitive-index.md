@@ -9,7 +9,7 @@ optional-feature backfill.**
 | Slice | Scope | State |
 |---|---|---|
 | 1 | Feature plumbing + Tint gate (Noop + HAL cap) | **DONE** (2026-07-01) |
-| 2 | Real-GPU e2e + CTS | TODO |
+| 2 | Real-GPU e2e + CTS | **DONE** (2026-07-01) — Metal e2e 2/2; CTS maxInterStageShaderVariables 1128/0 + shader_io builtins 706/0 + fragment_builtins exec 238/0, no primitive_index fails |
 | 3 | Docs + Phase Review | TODO |
 
 ## Key facts (verified 2026-07-01)
