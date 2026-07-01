@@ -1,6 +1,9 @@
 # Block 68 — `clip-distances` optional feature
 
-Status: **IN PROGRESS** (Slice 1). Owner: Dawn-parity feature backfill.
+Status: **Slices 1–2 DONE, real-GPU + CTS verified** on Metal (M2 e2e + CTS
+clip_distances 240/0 + 4/0; MoltenVK advertises but can't compile clip_distances —
+its limitation, Vulkan execution deferred to native HW). Slice 3 (docs + Phase
+Review) in progress. Owner: Dawn-parity feature backfill.
 
 The WebGPU `clip-distances` optional feature
 (`WGPUFeatureName_ClipDistances = 0x10`) lets a vertex shader emit

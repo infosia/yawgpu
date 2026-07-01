@@ -524,6 +524,15 @@ The **`indirect-first-instance`** optional feature allows a non-zero
 honor `baseInstance` natively) and on Vulkan devices reporting
 `drawIndirectFirstInstance`, not on the Tier-2 GLES backend.
 
+The **`clip-distances`** optional feature lets a vertex shader emit
+`@builtin(clip_distances) array<f32, N>` (N ≤ 8) via `enable clip_distances;`,
+adding user-defined clip planes (a fragment is culled where any clip distance is
+negative). Request `WGPUFeatureName_ClipDistances`; the clip distances consume
+`maxInterStageShaderVariables` slots (`ceil(N/4)`) and lower the max vertex-output
+`@location`. Tint lowers it to Metal `[[clip_distance]]` / SPIR-V `ClipDistance`;
+advertised on Metal and on Vulkan devices reporting `shaderClipDistance`, not on
+the Tier-2 GLES backend.
+
 ### Native shader passthrough (vendor, opt-in, unsafe)
 
 For engines that ship **precompiled native shaders**, the opt-in

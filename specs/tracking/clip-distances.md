@@ -19,6 +19,16 @@ vertex-output location** (`maxInterStageShaderVariables - 1 - clipDistanceSlots`
 `clip_distances.spec.cpp:147`; point-list does NOT reduce the location ceiling),
 20 fails; fixed by a `reserved_top_locations` param on `validate_inter_stage_limits`
 (clip_slots for outputs, 0 for inputs). Re-verified 0 fail.
+
+**MoltenVK limitation (not a yawgpu defect).** MoltenVK advertises
+`shaderClipDistance` (so yawgpu advertises the feature, matching Dawn), but its
+SPIR-V→MSL compiler cannot lower the `ClipDistance` builtin —
+`[mvk-error] VK_ERROR_INITIALIZATION_FAILED: Shader library compile failed`. The
+yawgpu Vulkan HAL is correct (enables `shaderClipDistance`; Tint emits valid
+SPIR-V). So **no Vulkan e2e is shipped** (MoltenVK can't run it); Metal e2e + the
+CTS validation suite are the verification, and authoritative Vulkan *execution*
+verification needs native Vulkan hardware (deferred to a Windows/Linux run). Same
+class as [[moltenvk-shader-execution-limits]] — MoltenVK is not a shader-codegen oracle.
 | 3 | Docs + Phase Review | TODO |
 
 ## Key facts (verified 2026-07-01)
