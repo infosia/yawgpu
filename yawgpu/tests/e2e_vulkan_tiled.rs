@@ -83,7 +83,7 @@ fn vulkan_tiled_deferred_reads_input_attachment() {
         );
         let queue = yawgpu::wgpuDeviceGetQueue(device);
 
-        let readback = run_deferred(device, queue);
+        let readback = run_deferred(device, queue, native::WGPUTextureUsage_RenderAttachment);
         let pixels = read_unpacked_texture_buffer(instance, readback);
 
         // The setup must be validation-clean on every Vulkan device.
@@ -102,6 +102,65 @@ fn vulkan_tiled_deferred_reads_input_attachment() {
         assert!(
             approx_contains_pixel(&pixels, expected, 1),
             "expected {:?} (±1) from the input-attachment read; distinct = {:?}",
+            expected,
+            distinct_pixels(&pixels)
+        );
+
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+/// Slice 3a: the g-buffer subpass intermediate is a **transient** attachment. On
+/// Vulkan the image is created with `TRANSIENT_ATTACHMENT` usage (no transfer bits)
+/// backed by `LAZILY_ALLOCATED` memory — the TBDR bandwidth payoff — and subpass 1
+/// must still read it as an input attachment. This must be validation-clean under
+/// the Khronos layers on every device; on MoltenVK (Apple) the lazily-allocated
+/// image maps to memoryless and the read is also pixel-correct.
+#[test]
+#[ignore = "requires a real Vulkan device"]
+fn vulkan_tiled_deferred_reads_transient_input_attachment() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        eprintln!("skipping: no real Vulkan device");
+        return;
+    }
+
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = std::sync::Arc::clone(&errors);
+        yawgpu::testing_set_uncaptured_error_callback(
+            device,
+            Some(move |error| captured.lock().expect("lock").push(format!("{error:?}"))),
+        );
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let readback = run_deferred(
+            device,
+            queue,
+            native::WGPUTextureUsage_RenderAttachment
+                | native::WGPUTextureUsage_TransientAttachment,
+        );
+        let pixels = read_unpacked_texture_buffer(instance, readback);
+
+        // Validation-clean on every Vulkan device — the LAZILY_ALLOCATED image must
+        // carry no transfer usage and its transient attachment must round-trip the
+        // multi-subpass render pass.
+        assert!(
+            errors.lock().expect("lock").is_empty(),
+            "device errors: {:?}",
+            errors.lock().expect("lock")
+        );
+
+        let expected = [128u8, 64, 0, 255];
+        assert!(
+            approx_contains_pixel(&pixels, expected, 1),
+            "expected {:?} (±1) from the transient input-attachment read; distinct = {:?}",
             expected,
             distinct_pixels(&pixels)
         );
@@ -188,12 +247,16 @@ unsafe extern "C" fn request_device_callback(
     *(userdata1 as *mut native::WGPUDevice) = device;
 }
 
-unsafe fn run_deferred(device: native::WGPUDevice, queue: native::WGPUQueue) -> native::WGPUBuffer {
+unsafe fn run_deferred(
+    device: native::WGPUDevice,
+    queue: native::WGPUQueue,
+    gbuffer_usage: native::WGPUTextureUsage,
+) -> native::WGPUBuffer {
     let layout = create_two_subpass_input_layout(device);
     let pipeline0 = create_subpass_pipeline(device, layout, 0, WRITE_SHADER, 0, None);
     let pipeline1 = create_subpass_pipeline(device, layout, 1, LOAD_SHADER, 1, None);
 
-    let gbuffer = create_texture(device, native::WGPUTextureUsage_RenderAttachment);
+    let gbuffer = create_texture(device, gbuffer_usage);
     let final_tex = create_texture(
         device,
         native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
@@ -201,10 +264,13 @@ unsafe fn run_deferred(device: native::WGPUDevice, queue: native::WGPUQueue) -> 
     let gbuffer_view = yawgpu::wgpuTextureCreateView(gbuffer, std::ptr::null());
     let final_view = yawgpu::wgpuTextureCreateView(final_tex, std::ptr::null());
 
-    let attachments = [
-        subpass_color_attachment(gbuffer_view),
-        subpass_color_attachment(final_view),
-    ];
+    // A transient (LAZILY_ALLOCATED) attachment has no memory to store into, so its
+    // storeOp must be Discard — the g-buffer is consumed in-pass by subpass 1.
+    let mut gbuffer_attachment = subpass_color_attachment(gbuffer_view);
+    if gbuffer_usage & native::WGPUTextureUsage_TransientAttachment != 0 {
+        gbuffer_attachment.storeOp = native::WGPUStoreOp_Discard;
+    }
+    let attachments = [gbuffer_attachment, subpass_color_attachment(final_view)];
     let pass_descriptor = YaWGPUSubpassRenderPassDescriptor {
         nextInChain: std::ptr::null(),
         label: empty_string_view(),

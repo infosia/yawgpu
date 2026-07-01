@@ -152,8 +152,12 @@ impl Texture {
         is_error: bool,
         features: FeatureSet,
     ) -> Self {
-        let init_enabled =
-            texture_lazy_init_eligible(descriptor.format, &features, descriptor.sample_count);
+        let init_enabled = texture_lazy_init_eligible(
+            descriptor.format,
+            descriptor.usage,
+            &features,
+            descriptor.sample_count,
+        );
         Self {
             inner: Arc::new(TextureInner {
                 hal,
@@ -235,7 +239,12 @@ impl Texture {
 
     /// Returns whether this texture participates in Stage 1 lazy zero-initialization.
     pub(crate) fn is_lazy_init_eligible(&self) -> bool {
-        texture_lazy_init_eligible(self.format(), &self.inner.features, self.sample_count())
+        texture_lazy_init_eligible(
+            self.format(),
+            self.usage(),
+            &self.inner.features,
+            self.sample_count(),
+        )
     }
 
     /// Returns whether a subresource has been initialized.
@@ -468,9 +477,18 @@ impl TextureInitState {
 
 fn texture_lazy_init_eligible(
     format: TextureFormat,
+    usage: TextureUsage,
     features: &FeatureSet,
     sample_count: u32,
 ) -> bool {
+    // A transient (memoryless) attachment has no observable uninitialized
+    // content (render-attachment-only, never sampled/copied) and its backing
+    // storage cannot be a copy destination (Metal Memoryless rejects blits), so
+    // it never participates in lazy zero-init.
+    if usage.contains(TextureUsage::TRANSIENT_ATTACHMENT) {
+        return false;
+    }
+
     sample_count == 1
         && format.caps(features).is_some_and(|caps| {
             caps.aspects.color
@@ -1043,6 +1061,26 @@ mod tests {
         assert!(!depth_stencil.is_lazy_init_eligible());
         assert!(!compressed.is_lazy_init_eligible());
         assert!(!multisampled.is_lazy_init_eligible());
+    }
+
+    #[test]
+    fn texture_lazy_init_eligible_rejects_transient_attachment() {
+        let device = noop_device();
+        let transient = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::TRANSIENT_ATTACHMENT,
+            format: TextureFormat::from_raw(TextureFormat::RGBA8_UNORM),
+            sample_count: 1,
+            ..valid_texture_descriptor()
+        });
+        let render_attachment = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT,
+            format: TextureFormat::from_raw(TextureFormat::RGBA8_UNORM),
+            sample_count: 1,
+            ..valid_texture_descriptor()
+        });
+
+        assert!(!transient.is_lazy_init_eligible());
+        assert!(render_attachment.is_lazy_init_eligible());
     }
 
     #[test]
