@@ -25,6 +25,7 @@ pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
         native::WGPUFeatureName_DepthClipControl => core::Feature::DepthClipControl,
         native::WGPUFeatureName_Float32Blendable => core::Feature::Float32Blendable,
         native::WGPUFeatureName_DualSourceBlending => core::Feature::DualSourceBlending,
+        native::WGPUFeatureName_IndirectFirstInstance => core::Feature::IndirectFirstInstance,
         native::WGPUFeatureName_TextureComponentSwizzle => core::Feature::TextureComponentSwizzle,
         native::WGPUFeatureName_TextureFormatsTier1 => core::Feature::TextureFormatsTier1,
         native::WGPUFeatureName_TextureFormatsTier2 => core::Feature::TextureFormatsTier2,
@@ -59,6 +60,7 @@ pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
         core::Feature::DepthClipControl => native::WGPUFeatureName_DepthClipControl,
         core::Feature::Float32Blendable => native::WGPUFeatureName_Float32Blendable,
         core::Feature::DualSourceBlending => native::WGPUFeatureName_DualSourceBlending,
+        core::Feature::IndirectFirstInstance => native::WGPUFeatureName_IndirectFirstInstance,
         core::Feature::TextureComponentSwizzle => native::WGPUFeatureName_TextureComponentSwizzle,
         core::Feature::TextureFormatsTier1 => native::WGPUFeatureName_TextureFormatsTier1,
         core::Feature::TextureFormatsTier2 => native::WGPUFeatureName_TextureFormatsTier2,
@@ -119,6 +121,18 @@ mod tests {
         assert_eq!(
             map_feature_to_native(core::Feature::DualSourceBlending),
             native::WGPUFeatureName_DualSourceBlending
+        );
+    }
+
+    #[test]
+    fn maps_indirect_first_instance_feature_round_trip() {
+        assert_eq!(
+            map_feature(native::WGPUFeatureName_IndirectFirstInstance),
+            core::Feature::IndirectFirstInstance
+        );
+        assert_eq!(
+            map_feature_to_native(core::Feature::IndirectFirstInstance),
+            native::WGPUFeatureName_IndirectFirstInstance
         );
     }
 }

@@ -177,6 +177,12 @@ impl MetalAdapter {
         true
     }
 
+    /// Returns true when indirect draws support non-zero first instance values.
+    #[must_use]
+    pub(super) fn supports_indirect_first_instance(&self) -> bool {
+        true
+    }
+
     /// Returns the supported subgroup size range.
     #[must_use]
     pub(super) fn subgroup_size_range(&self) -> Option<(u32, u32)> {

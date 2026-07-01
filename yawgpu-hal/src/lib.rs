@@ -413,6 +413,21 @@ impl HalAdapter {
         }
     }
 
+    /// Returns true when indirect draws support non-zero first instance values.
+    #[must_use]
+    pub fn supports_indirect_first_instance(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.supports_indirect_first_instance(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_indirect_first_instance(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_indirect_first_instance(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_indirect_first_instance(),
+        }
+    }
+
     /// Returns the supported subgroup size range, or `None` when unsupported.
     #[must_use]
     pub fn subgroup_size_range(&self) -> Option<(u32, u32)> {
@@ -1397,6 +1412,17 @@ mod tests {
             .expect("Noop adapter exists");
 
         assert!(adapter.supports_dual_source_blending());
+    }
+
+    #[test]
+    fn hal_adapter_supports_indirect_first_instance_noop_returns_true() {
+        let adapter = HalInstance::new_noop()
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter exists");
+
+        assert!(adapter.supports_indirect_first_instance());
     }
 
     #[test]
