@@ -541,6 +541,16 @@ SPIR-V `PrimitiveId`. Advertised on Apple7+ Metal GPUs and on Vulkan devices
 reporting `geometryShader` (the `PrimitiveId` builtin needs the `Geometry`
 capability), not on the Tier-2 GLES backend.
 
+The **`texture-component-swizzle`** optional feature lets a texture *view* remap
+its `r/g/b/a` components (each → one of `r/g/b/a/0/1`) via a
+`WGPUTextureComponentSwizzleDescriptor` on the view descriptor; reads through the
+view see the swizzled channels. Request `WGPUFeatureName_TextureComponentSwizzle`;
+a non-identity swizzle is allowed only on **sampled** views (not on render-pass
+attachments, resolve targets, or storage bindings). It maps to Metal
+`MTLTextureSwizzleChannels` / Vulkan `VkComponentMapping` (depth/stencil formats
+compose over an `R,0,0,1` base). Advertised on Metal (Mac2 / Apple2 GPUs) and
+unconditionally on Vulkan, not on the Tier-2 GLES backend.
+
 ### Native shader passthrough (vendor, opt-in, unsafe)
 
 For engines that ship **precompiled native shaders**, the opt-in
