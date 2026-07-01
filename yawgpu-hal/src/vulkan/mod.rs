@@ -350,11 +350,11 @@ impl VulkanAdapter {
                 .max_vertex_input_binding_stride
                 .min(vk.max_vertex_input_attribute_offset + 1)
                 .min(2048),
-            max_inter_stage_shader_variables: vk
+            max_inter_stage_shader_variables: (vk
                 .max_vertex_output_components
                 .min(vk.max_fragment_input_components)
-                / 4
-                - 2,
+                / 4)
+                .saturating_sub(2),
             max_color_attachments: vk.max_color_attachments.min(8),
             max_compute_workgroup_storage_size: vk.max_compute_shared_memory_size,
             max_compute_invocations_per_workgroup: vk.max_compute_work_group_invocations,
