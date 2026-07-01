@@ -1,8 +1,10 @@
 # Block 92 — real hardware-queried adapter limits (Dawn/CTS parity)
 
-Status: **Slice 1 DONE** (2026-07-01, Metal CTS-verified: `capability_checks,limits`
-pass 6601→9290 / fail 0, Dawn oracle 9280). Slices 2 (Vulkan) + 3 (docs/review)
-pending. Owner: CTS-Dawn-parity.
+Status: **COMPLETE** (2026-07-02). All 3 slices done + Phase Review clean. Real
+Metal + MoltenVK hardware-queried limits. Final CTS on real Metal vs Dawn oracle:
+`capability_checks,limits` 9290/1795/0 (Dawn 9280/1805, yawgpu ≥ Dawn);
+`capability_checks,features` 2424/88/0 (byte-identical to Dawn). Owner:
+CTS-Dawn-parity. Commits 5dda1f6, 21a6860, d2803dc, fddb0da.
 
 ## Motivation
 

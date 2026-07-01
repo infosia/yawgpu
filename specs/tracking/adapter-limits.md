@@ -11,7 +11,7 @@ CTS gap vs the Dawn oracle on this M2.
 |---|---|---|
 | 1 | HAL seam (`HalLimits` + `HalAdapter::limits()`) + Noop/GLES DEFAULT + full Metal query + core map/clamp + unit tests | **DONE** (2026-07-01) — Metal CTS-verified |
 | 2 | Vulkan query | **DONE** (2026-07-01) — MoltenVK CTS-verified |
-| 3 | Docs + Phase Review + re-diff vs Dawn | pending |
+| 3 | Phase Review + re-diff vs Dawn | **DONE** (2026-07-02) — review clean, capability_checks at Dawn parity |
 
 ## Slice 1 result (real Metal, M2, webgpu-native-cts)
 
@@ -49,12 +49,34 @@ advertised tier maxima (uniform 10, storage 8, `Limits.cpp:74-75`) → 80/0.
 (resource exhaustion, no output) — a MoltenVK harness limit, not a yawgpu defect;
 each limit passes when run separately. Native-Vulkan verification deferred to HW.
 
-## Known residual (out of Block 92 scope — separate feature gap)
+## Phase Review (2026-07-02) — clean
 
-`capability_checks,features` still skips 42 more than Dawn (130 vs 88): M2-supported
-**ASTC / ETC2** texture-compression formats yawgpu's Metal HAL does not advertise
-(`texture format requires an unsupported feature`). Distinct from limits; track as
-a texture-compression-feature backfill.
+No-context review of the cumulative diff found 1 MAJOR + 3 MINOR. MAJOR (Vulkan
+in-stage storage left at DEFAULT → native-Vulkan device>adapter) fixed by pinning
+`in_stage == per_stage` in `from_hal` (commit fddb0da). MINOR: Vulkan inter-stage
+`saturating_sub(2)`; removed redundant `clamp_metal_maximums`. MINOR (Vulkan
+`max_color_attachment_bytes_per_sample` not queried) kept as the documented
+in-code deferral. Field mapping / Metal family table / invariant verified clean.
+
+## Final CTS parity (real Metal M2, vs Dawn oracle, 2026-07-02)
+
+| tree | yawgpu | Dawn | verdict |
+|---|---|---|---|
+| `capability_checks,limits`   | pass 9290 / skip 1795 / fail 0 | 9280 / 1805 | yawgpu ≥ Dawn |
+| `capability_checks,features` | pass 2424 / skip 88 / fail 0   | 2424 / 88   | **byte-identical** |
+
+Zero "yawgpu-skips-but-Dawn-runs" cases remain in either tree. **Block 92 COMPLETE.**
+
+## Follow-on that landed with this work (features parity, commit d2803dc)
+
+The features re-diff surfaced a separate gap (not limits): Metal did not advertise
+`texture-compression-astc-sliced-3d` / `-bc-sliced-3d` (hardcoded false), and
+`apply_feature_implications` wrongly auto-added the base BC/ASTC feature from the
+sliced-3d feature. Advertised both sliced-3d features (Dawn PhysicalDeviceMTL.mm
+613-637: BC/BCSliced3D on `supportsBCTextureCompression`, ASTC/ASTCSliced3D on
+Apple3; plain ASTC moved Apple2→Apple3) and dropped the sliced-3d→base
+implications → features tree reached exact Dawn parity (astc/bc_sliced_3d
+byte-identical: 56/56, 28/28).
 
 ## Baseline (webgpu-native-cts, same M2, 2026-07-01)
 
