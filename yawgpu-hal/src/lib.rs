@@ -428,6 +428,21 @@ impl HalAdapter {
         }
     }
 
+    /// Returns true when WGSL primitive index is supported.
+    #[must_use]
+    pub fn supports_primitive_index(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.supports_primitive_index(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_primitive_index(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_primitive_index(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_primitive_index(),
+        }
+    }
+
     /// Returns true when indirect draws support non-zero first instance values.
     #[must_use]
     pub fn supports_indirect_first_instance(&self) -> bool {
@@ -1438,6 +1453,17 @@ mod tests {
             .expect("Noop adapter exists");
 
         assert!(adapter.supports_clip_distances());
+    }
+
+    #[test]
+    fn hal_adapter_supports_primitive_index_noop_returns_true() {
+        let adapter = HalInstance::new_noop()
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter exists");
+
+        assert!(adapter.supports_primitive_index());
     }
 
     #[test]

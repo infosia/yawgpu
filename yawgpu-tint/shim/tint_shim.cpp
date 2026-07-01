@@ -677,6 +677,7 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               bool subgroups,
                                               bool dual_source_blending,
                                               bool clip_distances,
+                                              bool primitive_index,
                                               bool allow_framebuffer_fetch,
                                               const uint32_t* lang_features,
                                               size_t n_lang_features,
@@ -716,6 +717,9 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
         }
         if (clip_distances) {
             options.allowed_features.extensions.insert(tint::wgsl::Extension::kClipDistances);
+        }
+        if (primitive_index) {
+            options.allowed_features.extensions.insert(tint::wgsl::Extension::kPrimitiveIndex);
         }
         if (allow_framebuffer_fetch) {
             options.allowed_features.extensions.insert(

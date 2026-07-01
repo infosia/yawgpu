@@ -137,6 +137,7 @@ impl ShaderModule {
         subgroups: bool,
         dual_source_blending: bool,
         clip_distances: bool,
+        primitive_index: bool,
     ) -> Result<ShaderModuleSourceKind, String> {
         let reflected = frontend::parse_and_validate_wgsl_gated(
             &source,
@@ -144,6 +145,7 @@ impl ShaderModule {
             subgroups,
             dual_source_blending,
             clip_distances,
+            primitive_index,
         )?;
         Ok(ShaderModuleSourceKind::Wgsl {
             _source: source,
@@ -470,6 +472,39 @@ fn vs() -> Out {
             .create_device(None, &[Feature::ClipDistances], "", "")
             .expect("Noop adapter should create clip-distances device");
         let valid = device_with_clip_distances
+            .create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
+
+        assert!(!valid.is_error());
+        assert_eq!(valid.diagnostic(), None);
+    }
+
+    #[test]
+    fn shader_module_creation_gates_primitive_index_usage_on_required_feature() {
+        let source = r#"
+enable primitive_index;
+
+@fragment
+fn fs(@builtin(primitive_index) idx: u32) -> @location(0) vec4f {
+  return vec4f(f32(idx), 0.0, 0.0, 1.0);
+}
+"#;
+        let device_without_primitive_index = noop_device();
+        device_without_primitive_index.push_error_scope(ErrorFilter::Validation);
+        let invalid = device_without_primitive_index
+            .create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
+        let scoped = device_without_primitive_index
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("primitive-index usage should be scoped");
+
+        assert!(invalid.is_error());
+        assert!(!scoped.message.is_empty());
+
+        let adapter = noop_adapter();
+        let device_with_primitive_index = adapter
+            .create_device(None, &[Feature::PrimitiveIndex], "", "")
+            .expect("Noop adapter should create primitive-index device");
+        let valid = device_with_primitive_index
             .create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
 
         assert!(!valid.is_error());
