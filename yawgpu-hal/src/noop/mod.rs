@@ -74,6 +74,12 @@ impl NoopAdapter {
         true
     }
 
+    /// Returns true when dual-source blending is supported.
+    #[must_use]
+    pub(super) fn supports_dual_source_blending(&self) -> bool {
+        true
+    }
+
     /// Returns the supported subgroup size range.
     #[must_use]
     pub(super) fn subgroup_size_range(&self) -> Option<(u32, u32)> {
@@ -470,6 +476,13 @@ mod tests {
         let adapter = NoopAdapter::synthetic();
 
         assert!(adapter.supports_float32_blendable());
+    }
+
+    #[test]
+    fn noop_adapter_supports_dual_source_blending_returns_true() {
+        let adapter = NoopAdapter::synthetic();
+
+        assert!(adapter.supports_dual_source_blending());
     }
 
     #[test]

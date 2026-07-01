@@ -671,6 +671,7 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               size_t wgsl_len,
                                               bool shader_f16,
                                               bool subgroups,
+                                              bool dual_source_blending,
                                               bool allow_framebuffer_fetch,
                                               const uint32_t* lang_features,
                                               size_t n_lang_features,
@@ -703,6 +704,10 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
         }
         if (subgroups) {
             options.allowed_features.extensions.insert(tint::wgsl::Extension::kSubgroups);
+        }
+        if (dual_source_blending) {
+            options.allowed_features.extensions.insert(
+                tint::wgsl::Extension::kDualSourceBlending);
         }
         if (allow_framebuffer_fetch) {
             options.allowed_features.extensions.insert(

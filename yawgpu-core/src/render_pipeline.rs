@@ -1238,9 +1238,7 @@ fn input_attachment_hal_bindings(
 /// attachment, so the Vulkan fragment SPIR-V must emit multisampled
 /// `SubpassData` (the 2-arg `inputAttachmentLoad(ia, sample_index)` overload).
 #[cfg(feature = "tiled")]
-fn pipeline_has_multisampled_input_attachment(
-    bind_group_layouts: &[Arc<BindGroupLayout>],
-) -> bool {
+fn pipeline_has_multisampled_input_attachment(bind_group_layouts: &[Arc<BindGroupLayout>]) -> bool {
     bind_group_layouts.iter().any(|layout| {
         layout.entries().iter().any(|entry| {
             matches!(
@@ -2686,6 +2684,17 @@ pub(crate) fn validate_color_targets(
         }
         if let Some(blend) = target.blend {
             validate_blend_state(blend)?;
+            if blend_state_uses_dual_source(blend) {
+                if !features.contains(&Feature::DualSourceBlending) {
+                    return Err(
+                        "render pipeline dual-source blend factors require the dual-source-blending feature"
+                            .to_owned(),
+                    );
+                }
+                if fragment.target_count != 1 || index != 0 {
+                    return Err("dual-source blending requires a single color target".to_owned());
+                }
+            }
         }
         if target.blend.is_some() && !caps.is_blendable {
             return Err("render pipeline color target format must be blendable".to_owned());
@@ -2860,6 +2869,25 @@ fn color_attachment_byte_cost_and_alignment(format: TextureFormat) -> Option<(u3
 pub(crate) fn validate_blend_state(blend: BlendState) -> Result<(), String> {
     validate_blend_component(blend.color)?;
     validate_blend_component(blend.alpha)
+}
+
+fn blend_state_uses_dual_source(blend: BlendState) -> bool {
+    blend_component_uses_dual_source(blend.color) || blend_component_uses_dual_source(blend.alpha)
+}
+
+fn blend_component_uses_dual_source(component: BlendComponent) -> bool {
+    blend_factor_is_dual_source(component.src_factor)
+        || blend_factor_is_dual_source(component.dst_factor)
+}
+
+fn blend_factor_is_dual_source(factor: BlendFactor) -> bool {
+    matches!(
+        factor,
+        BlendFactor::Src1
+            | BlendFactor::OneMinusSrc1
+            | BlendFactor::Src1Alpha
+            | BlendFactor::OneMinusSrc1Alpha
+    )
 }
 
 fn validate_blend_component(component: BlendComponent) -> Result<(), String> {
@@ -3705,6 +3733,15 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
     }
 
     #[test]
+    fn blend_factor_is_dual_source_identifies_src1_factors() {
+        assert!(!blend_factor_is_dual_source(BlendFactor::Src));
+        assert!(blend_factor_is_dual_source(BlendFactor::Src1));
+        assert!(blend_factor_is_dual_source(BlendFactor::OneMinusSrc1));
+        assert!(blend_factor_is_dual_source(BlendFactor::Src1Alpha));
+        assert!(blend_factor_is_dual_source(BlendFactor::OneMinusSrc1Alpha));
+    }
+
+    #[test]
     fn hal_render_pipeline_descriptor_maps_color_target_blend_and_write_mask() {
         let device = noop_device();
         let module = render_shader_module(&device);
@@ -4370,6 +4407,142 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
         enabled.insert(Feature::Float32Blendable);
         assert_eq!(
             validate_render_pipeline_descriptor(&descriptor, device.limits(), &enabled),
+            None
+        );
+    }
+
+    #[test]
+    fn dual_source_blend_factor_requires_feature_and_accepts_when_enabled() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }
+                 @fragment fn fs() -> @location(0) vec4f { return vec4f(); }"
+                    .to_owned(),
+            )),
+        );
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.fragment.as_mut().expect("fragment").targets[0].blend = Some(BlendState {
+            color: BlendComponent {
+                operation: BlendOperation::Add,
+                src_factor: BlendFactor::Src1,
+                dst_factor: BlendFactor::OneMinusSrc1,
+            },
+            alpha: BlendComponent {
+                operation: BlendOperation::Add,
+                src_factor: BlendFactor::One,
+                dst_factor: BlendFactor::Zero,
+            },
+        });
+
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &FeatureSet::new()),
+            Some(
+                "render pipeline dual-source blend factors require the dual-source-blending feature"
+                    .to_owned()
+            )
+        );
+
+        let mut enabled = FeatureSet::new();
+        enabled.insert(Feature::DualSourceBlending);
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &enabled),
+            None
+        );
+    }
+
+    #[test]
+    fn dual_source_blending_requires_single_color_target() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }
+                 struct Out {
+                   @location(0) a: vec4f,
+                   @location(1) b: vec4f,
+                 }
+                 @fragment fn fs() -> Out { return Out(vec4f(), vec4f()); }"
+                    .to_owned(),
+            )),
+        );
+        let mut descriptor = render_pipeline_descriptor(module);
+        let fragment = descriptor.fragment.as_mut().expect("fragment");
+        fragment.target_count = 2;
+        fragment.targets = vec![
+            ColorTargetState {
+                format: rgba8_unorm(),
+                blend: Some(BlendState {
+                    color: BlendComponent {
+                        operation: BlendOperation::Add,
+                        src_factor: BlendFactor::Src1Alpha,
+                        dst_factor: BlendFactor::OneMinusSrc1Alpha,
+                    },
+                    alpha: BlendComponent {
+                        operation: BlendOperation::Add,
+                        src_factor: BlendFactor::One,
+                        dst_factor: BlendFactor::Zero,
+                    },
+                }),
+                write_mask: 0xF,
+            },
+            ColorTargetState {
+                format: rgba8_unorm(),
+                blend: None,
+                write_mask: 0xF,
+            },
+        ];
+
+        let mut enabled = FeatureSet::new();
+        enabled.insert(Feature::DualSourceBlending);
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &enabled),
+            Some("dual-source blending requires a single color target".to_owned())
+        );
+    }
+
+    #[test]
+    fn two_non_dual_source_color_targets_are_valid() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }
+                 struct Out {
+                   @location(0) a: vec4f,
+                   @location(1) b: vec4f,
+                 }
+                 @fragment fn fs() -> Out { return Out(vec4f(), vec4f()); }"
+                    .to_owned(),
+            )),
+        );
+        let mut descriptor = render_pipeline_descriptor(module);
+        let fragment = descriptor.fragment.as_mut().expect("fragment");
+        fragment.target_count = 2;
+        fragment.targets = vec![
+            ColorTargetState {
+                format: rgba8_unorm(),
+                blend: Some(BlendState {
+                    color: BlendComponent {
+                        operation: BlendOperation::Add,
+                        src_factor: BlendFactor::SrcAlpha,
+                        dst_factor: BlendFactor::OneMinusSrcAlpha,
+                    },
+                    alpha: BlendComponent {
+                        operation: BlendOperation::Add,
+                        src_factor: BlendFactor::One,
+                        dst_factor: BlendFactor::Zero,
+                    },
+                }),
+                write_mask: 0xF,
+            },
+            ColorTargetState {
+                format: rgba8_unorm(),
+                blend: None,
+                write_mask: 0xF,
+            },
+        ];
+
+        assert_eq!(
+            validate_render_pipeline_descriptor(&descriptor, device.limits(), &FeatureSet::new()),
             None
         );
     }
@@ -5221,7 +5394,9 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
         }));
 
         assert!(pipeline_has_multisampled_input_attachment(&[multisampled]));
-        assert!(!pipeline_has_multisampled_input_attachment(&[single_sampled]));
+        assert!(!pipeline_has_multisampled_input_attachment(&[
+            single_sampled
+        ]));
         assert!(!pipeline_has_multisampled_input_attachment(&[buffer]));
         assert!(!pipeline_has_multisampled_input_attachment(&[]));
     }
@@ -5269,11 +5444,13 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
     #[test]
     fn validate_subpass_pipeline_multisampling_accepts_consistent_msaa() {
         let device = noop_device();
-        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
-            "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }
              @fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }"
-                .to_owned(),
-        )));
+                    .to_owned(),
+            )),
+        );
         let mut base = render_pipeline_descriptor(module);
         base.multisample.count = 4;
         let layout = input_attachment_layout(&device, 0, true);
@@ -5293,11 +5470,13 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
     #[test]
     fn validate_subpass_pipeline_multisampling_rejects_flag_mismatch_c1() {
         let device = noop_device();
-        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
-            "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }
              @fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }"
-                .to_owned(),
-        )));
+                    .to_owned(),
+            )),
+        );
         let mut base = render_pipeline_descriptor(module);
         base.multisample.count = 4;
         // Source attachment is 4x but the layout declares single-sampled input.
@@ -5321,11 +5500,13 @@ fn fs(@color({slot}) prev: vec4<f32>) -> @location(0) vec4<f32> {{
     #[test]
     fn validate_subpass_pipeline_multisampling_rejects_count_mismatch_c2() {
         let device = noop_device();
-        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
-            "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }
              @fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }"
-                .to_owned(),
-        )));
+                    .to_owned(),
+            )),
+        );
         let mut base = render_pipeline_descriptor(module);
         // Pipeline rasterizes single-sampled but the written attachment is 4x.
         base.multisample.count = 1;

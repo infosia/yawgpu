@@ -79,6 +79,7 @@ impl Adapter {
         add_subgroups_feature(&mut features, &self.inner.hal);
         add_depth_clip_control_feature(&mut features, &self.inner.hal);
         add_float32_blendable_feature(&mut features, &self.inner.hal);
+        add_dual_source_blending_feature(&mut features, &self.inner.hal);
         #[cfg(feature = "tiled")]
         add_tiled_features(&mut features, self.backend());
 
@@ -203,6 +204,8 @@ pub enum Feature {
     DepthClipControl,
     /// Float32 color target blend support.
     Float32Blendable,
+    /// Dual-source blending support.
+    DualSourceBlending,
     /// Texture component swizzle support.
     TextureComponentSwizzle,
     /// Texture formats tier1 variant.
@@ -286,6 +289,12 @@ fn add_depth_clip_control_feature(features: &mut FeatureSet, hal: &HalAdapter) {
 fn add_float32_blendable_feature(features: &mut FeatureSet, hal: &HalAdapter) {
     if hal.supports_float32_blendable() {
         features.insert(Feature::Float32Blendable);
+    }
+}
+
+fn add_dual_source_blending_feature(features: &mut FeatureSet, hal: &HalAdapter) {
+    if hal.supports_dual_source_blending() {
+        features.insert(Feature::DualSourceBlending);
     }
 }
 
@@ -431,6 +440,15 @@ mod tests {
 
         let features = noop_adapter().features();
         assert!(features.contains(&Feature::Float32Blendable));
+    }
+
+    #[test]
+    fn dual_source_blending_feature_is_adapter_gated_and_noop_advertises() {
+        let base = supported_features();
+        assert!(!base.contains(&Feature::DualSourceBlending));
+
+        let features = noop_adapter().features();
+        assert!(features.contains(&Feature::DualSourceBlending));
     }
 
     #[test]
