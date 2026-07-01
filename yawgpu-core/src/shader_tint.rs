@@ -75,6 +75,7 @@ impl ReflectedModule {
     /// `multisampled_input_attachment` makes Tint emit multisampled
     /// `SubpassData` input attachments (the 2-arg `inputAttachmentLoad(ia,
     /// sample_index)` overload) so per-sample MSAA subpass input works.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn generate_spirv(
         &self,
         entry_name: &str,
@@ -83,6 +84,7 @@ impl ReflectedModule {
         vulkan_memory_model: bool,
         framebuffer_fetch_descriptor_set: u32,
         multisampled_input_attachment: bool,
+        polyfill_pixel_center: Option<u32>,
     ) -> Result<Vec<u32>, String> {
         self.program.generate_spirv(
             entry_name,
@@ -92,6 +94,7 @@ impl ReflectedModule {
             vulkan_memory_model,
             framebuffer_fetch_descriptor_set,
             multisampled_input_attachment,
+            polyfill_pixel_center,
         )
     }
 
@@ -304,6 +307,7 @@ impl ReflectedModule {
             false,
             0,
             false,
+            None,
         )?;
         let literal_size = spirv_local_size(&spirv)
             .ok_or_else(|| "compute entry point workgroup size reflection failed".to_owned())?;
@@ -436,6 +440,76 @@ impl ReflectedModule {
         slots.sort_unstable();
         slots.dedup();
         slots
+    }
+
+    /// Returns whether the given fragment entry point needs the Vulkan
+    /// pixel-center polyfill for `@builtin(position)`.
+    ///
+    /// WebGPU requires `@builtin(position)` in a fragment shader to always be
+    /// the pixel-center (fragment) coordinate, never a sample position. Under
+    /// Vulkan sample-rate shading the SPIR-V `FragCoord` builtin instead
+    /// reflects the covered sample's location, so it must be reconstructed.
+    /// This mirrors Dawn's `RenderPipeline::NeedsPixelCenterPolyfill`
+    /// (`UseSampleRateShading() && UsesFragPosition()`): the polyfill is needed
+    /// only when the fragment reads `@builtin(position)` AND sample-rate shading
+    /// is active — i.e. `sample_count > 1` and the fragment uses a
+    /// `@interpolate(_, sample)` input, `@builtin(sample_index)`, or framebuffer
+    /// fetch (all of which force per-sample fragment invocation).
+    pub(crate) fn fragment_needs_pixel_center_polyfill(
+        &self,
+        entry_point: &str,
+        sample_count: u32,
+    ) -> bool {
+        if sample_count <= 1 {
+            return false;
+        }
+        let Some(entry) = self
+            .program
+            .entry_points()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|entry| {
+                entry.name == entry_point && entry.stage == yawgpu_tint::PipelineStage::Fragment
+            })
+        else {
+            return false;
+        };
+        if !entry.frag_position_used {
+            return false;
+        }
+        let inputs = self
+            .program
+            .entry_point_inputs(entry_point)
+            .unwrap_or_default();
+        let uses_sample_interpolant = inputs
+            .iter()
+            .any(|variable| {
+                variable.interpolation_sampling == yawgpu_tint::InterpolationSampling::Sample
+            });
+        let uses_framebuffer_fetch = inputs.iter().any(|variable| variable.color.is_some());
+        uses_sample_interpolant || entry.sample_index_used || uses_framebuffer_fetch
+    }
+
+    /// Returns the lowest inter-stage `@location` index not used by the given
+    /// vertex entry point's outputs.
+    ///
+    /// The pixel-center polyfill adds a `center_pos` inter-stage varying carried
+    /// from the vertex stage to the fragment stage, so it needs a free location.
+    /// Fragment inputs are a subset of vertex outputs, so a location free in the
+    /// vertex outputs is also free in the fragment inputs (matching Dawn, which
+    /// scans the vertex stage's used inter-stage variables). The search is
+    /// bounded by the output count, so a free index in `0..=len` always exists.
+    pub(crate) fn free_inter_stage_location(&self, vertex_entry_point: &str) -> u32 {
+        let used = self
+            .program
+            .entry_point_outputs(vertex_entry_point)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|variable| variable.location)
+            .collect::<HashSet<u32>>();
+        (0..=used.len() as u32)
+            .find(|location| !used.contains(location))
+            .unwrap_or(used.len() as u32)
     }
 
     /// Returns true when the fragment entry point writes a second dual-source
@@ -1630,6 +1704,7 @@ fn cs() {}
             false,
             0,
             false,
+            None,
         )
         .unwrap();
         assert_eq!(compute.first().copied(), Some(0x0723_0203));
@@ -1663,6 +1738,7 @@ fn fs() -> @location(0) vec4<f32> {
                 false,
                 0,
                 false,
+                None,
             )
             .unwrap();
         let fragment = render
@@ -1673,10 +1749,66 @@ fn fs() -> @location(0) vec4<f32> {
                 false,
                 0,
                 false,
+                None,
             )
             .unwrap();
         assert_eq!(vertex.first().copied(), Some(0x0723_0203));
         assert_eq!(fragment.first().copied(), Some(0x0723_0203));
+    }
+
+    #[test]
+    fn fragment_pixel_center_polyfill_decision_and_free_location() {
+        let module = parse_and_validate_wgsl(
+            r#"
+struct VOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) @interpolate(perspective, sample) uv: vec2<f32>,
+};
+
+@vertex
+fn vs() -> VOut {
+  var o: VOut;
+  o.pos = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+  o.uv = vec2<f32>(0.0, 0.0);
+  return o;
+}
+
+// Reads @builtin(position) with a sample-interpolated input -> needs polyfill.
+@fragment
+fn fs(v: VOut) -> @location(0) vec4<f32> {
+  return vec4<f32>(v.pos.xy, v.uv);
+}
+
+// Reads @builtin(position) but only a center-interpolated input -> no
+// sample-rate shading, so no polyfill.
+@fragment
+fn fs_center(@builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>)
+    -> @location(0) vec4<f32> {
+  return vec4<f32>(pos.xy, uv);
+}
+
+// Sample-rate shading but does not read @builtin(position) -> no polyfill.
+@fragment
+fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
+    -> @location(0) vec4<f32> {
+  return vec4<f32>(uv, 0.0, 1.0);
+}
+"#,
+        )
+        .unwrap();
+
+        // Position + sample interpolant + multisample -> polyfill needed.
+        assert!(module.fragment_needs_pixel_center_polyfill("fs", 4));
+        // Single-sampled: never per-sample, so no polyfill regardless.
+        assert!(!module.fragment_needs_pixel_center_polyfill("fs", 1));
+        // Position but no sample-rate trigger -> no polyfill.
+        assert!(!module.fragment_needs_pixel_center_polyfill("fs_center", 4));
+        // Sample-rate shading but no @builtin(position) read -> no polyfill.
+        assert!(!module.fragment_needs_pixel_center_polyfill("fs_no_pos", 4));
+
+        // Vertex outputs occupy location 0, so location 1 is the first free
+        // inter-stage location for the center_pos varying.
+        assert_eq!(module.free_inter_stage_location("vs"), 1);
     }
 
     #[test]
@@ -1706,6 +1838,7 @@ fn cs() {
                     vulkan_memory_model,
                     0,
                     false,
+                    None,
                 )
                 .unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));

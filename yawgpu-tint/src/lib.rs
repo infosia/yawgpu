@@ -36,6 +36,7 @@ mod imp {
         primitive_index_used: bool,
         subgroup_invocation_id_used: bool,
         subgroup_size_used: bool,
+        frag_position_used: bool,
         has_clip_distances: bool,
         clip_distances_size: u32,
     }
@@ -262,6 +263,8 @@ mod imp {
             use_vulkan_memory_model: bool,
             framebuffer_fetch_descriptor_set: u32,
             multisampled_input_attachment: bool,
+            has_polyfill_pixel_center: bool,
+            polyfill_pixel_center: u32,
             words_out: *mut *mut u32,
             n_words_out: *mut usize,
             err: *mut *mut c_char,
@@ -411,6 +414,7 @@ mod imp {
                     primitive_index_used: false,
                     subgroup_invocation_id_used: false,
                     subgroup_size_used: false,
+                    frag_position_used: false,
                     has_clip_distances: false,
                     clip_distances_size: 0,
                 };
@@ -694,6 +698,7 @@ mod imp {
             use_vulkan_memory_model: bool,
             framebuffer_fetch_descriptor_set: u32,
             multisampled_input_attachment: bool,
+            polyfill_pixel_center: Option<u32>,
         ) -> Result<Vec<u32>, String> {
             let ep = cstring(entry_point, "entry point")?;
             let raw_bindings_owned = bindings.as_raw();
@@ -714,6 +719,8 @@ mod imp {
                     use_vulkan_memory_model,
                     framebuffer_fetch_descriptor_set,
                     multisampled_input_attachment,
+                    polyfill_pixel_center.is_some(),
+                    polyfill_pixel_center.unwrap_or(0),
                     &mut words,
                     &mut len,
                     &mut err,
@@ -861,6 +868,10 @@ mod imp {
         pub subgroup_invocation_id_used: bool,
         /// Whether the entry point reads subgroup_size.
         pub subgroup_size_used: bool,
+        /// Whether the fragment entry point reads `@builtin(position)`
+        /// (FragCoord). Drives the Vulkan pixel-center polyfill decision under
+        /// sample-rate shading.
+        pub frag_position_used: bool,
         /// Size of the vertex clip-distances builtin array, when present.
         pub clip_distances_size: Option<u32>,
     }
@@ -881,6 +892,7 @@ mod imp {
                 primitive_index_used: raw.primitive_index_used,
                 subgroup_invocation_id_used: raw.subgroup_invocation_id_used,
                 subgroup_size_used: raw.subgroup_size_used,
+                frag_position_used: raw.frag_position_used,
                 clip_distances_size: raw.has_clip_distances.then_some(raw.clip_distances_size),
             })
         }
@@ -1849,6 +1861,7 @@ mod imp {
             _use_vulkan_memory_model: bool,
             _framebuffer_fetch_descriptor_set: u32,
             _multisampled_input_attachment: bool,
+            _polyfill_pixel_center: Option<u32>,
         ) -> Result<Vec<u32>, String> {
             Err(UNAVAILABLE.to_owned())
         }
@@ -1919,6 +1932,10 @@ mod imp {
         pub subgroup_invocation_id_used: bool,
         /// Whether the entry point reads subgroup_size.
         pub subgroup_size_used: bool,
+        /// Whether the fragment entry point reads `@builtin(position)`
+        /// (FragCoord). Drives the Vulkan pixel-center polyfill decision under
+        /// sample-rate shading.
+        pub frag_position_used: bool,
         /// Size of the vertex clip-distances builtin array, when present.
         pub clip_distances_size: Option<u32>,
     }
@@ -2622,11 +2639,11 @@ fn main() {
             .unwrap();
         assert!(msl.source.contains("kernel"), "MSL:\n{}", msl.source);
         let spirv = program
-            .generate_spirv("cs", &bindings, &[], true, false, 0, false)
+            .generate_spirv("cs", &bindings, &[], true, false, 0, false, None)
             .unwrap();
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
         let spirv_with_vulkan_memory_model = program
-            .generate_spirv("cs", &bindings, &[], true, true, 0, false)
+            .generate_spirv("cs", &bindings, &[], true, true, 0, false, None)
             .unwrap();
         assert_eq!(
             spirv_with_vulkan_memory_model.first().copied(),
@@ -2649,7 +2666,7 @@ fn main() {
 "#;
         let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
         let err = program
-            .generate_spirv("main", &Bindings::default(), &[], true, false, 0, false)
+            .generate_spirv("main", &Bindings::default(), &[], true, false, 0, false, None)
             .unwrap_err();
         assert!(!err.is_empty());
     }
@@ -2746,7 +2763,7 @@ fn cs() {
                 .unwrap();
             assert!(!msl.source.is_empty());
             let spirv = program
-                .generate_spirv(ep, &bindings, &[], true, false, 0, false)
+                .generate_spirv(ep, &bindings, &[], true, false, 0, false, None)
                 .unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));
         }
@@ -2784,7 +2801,7 @@ fn cs() {
         assert!(msl.source.contains("[[color(0)]]"), "MSL:\n{}", msl.source);
 
         let spirv = program
-            .generate_spirv("fs", &Bindings::default(), &[], true, false, 0, false)
+            .generate_spirv("fs", &Bindings::default(), &[], true, false, 0, false, None)
             .unwrap();
         assert!(!spirv.is_empty());
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
@@ -2863,6 +2880,85 @@ fn cs() {
         assert!(!err.is_empty());
     }
 
+    #[test]
+    fn frag_position_used_reflection_and_pixel_center_polyfill() {
+        // A fragment that reads @builtin(position) alongside a
+        // @interpolate(_, sample) input (forces sample-rate shading), plus a
+        // second fragment that does not read position.
+        let program = Program::parse(
+            r#"
+struct VOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) @interpolate(perspective, sample) uv: vec2<f32>,
+};
+
+@vertex
+fn vs() -> VOut {
+  var o: VOut;
+  o.pos = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+  o.uv = vec2<f32>(0.0, 0.0);
+  return o;
+}
+
+@fragment
+fn fs(v: VOut) -> @location(0) vec4<f32> {
+  return vec4<f32>(v.pos.xy, v.uv);
+}
+
+@fragment
+fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
+    -> @location(0) vec4<f32> {
+  return vec4<f32>(uv, 0.0, 1.0);
+}
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+
+        // Reflection: frag_position_used tracks whether the fragment reads
+        // @builtin(position).
+        let entries = program.entry_points().unwrap();
+        let fs = entries.iter().find(|e| e.name == "fs").unwrap();
+        let fs_no_pos = entries.iter().find(|e| e.name == "fs_no_pos").unwrap();
+        assert!(fs.frag_position_used, "fs reads @builtin(position)");
+        assert!(
+            !fs_no_pos.frag_position_used,
+            "fs_no_pos does not read @builtin(position)"
+        );
+
+        // The pixel-center polyfill option must reach the SPIR-V writer and
+        // change the emitted module (Tint reconstructs the pixel center from a
+        // center-sampled interpolant at the given free location). Without the
+        // option, FragCoord would leak the per-sample position under sample-rate
+        // shading — the CTS-found bug this guards against.
+        let without = program
+            .generate_spirv("fs", &Bindings::default(), &[], true, false, 0, false, None)
+            .unwrap();
+        let with = program
+            .generate_spirv(
+                "fs",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                0,
+                false,
+                Some(1),
+            )
+            .unwrap();
+        assert_eq!(without.first().copied(), Some(0x0723_0203));
+        assert_eq!(with.first().copied(), Some(0x0723_0203));
+        assert_ne!(
+            without, with,
+            "polyfill_pixel_center must alter the emitted SPIR-V"
+        );
+    }
+
     #[cfg(feature = "tiled")]
     #[test]
     fn input_attachment_generates_spirv() {
@@ -2877,7 +2973,7 @@ fn cs() {
         )
         .unwrap();
         let spirv = program
-            .generate_spirv("fs", &Bindings::default(), &[], true, false, 0, false)
+            .generate_spirv("fs", &Bindings::default(), &[], true, false, 0, false, None)
             .unwrap();
         assert!(!spirv.is_empty());
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
@@ -2897,7 +2993,7 @@ fn cs() {
         )
         .unwrap();
         let err =
-            match program.generate_spirv("fs", &Bindings::default(), &[], true, false, 0, true) {
+            match program.generate_spirv("fs", &Bindings::default(), &[], true, false, 0, true, None) {
                 Ok(_) => panic!("expected multisampled input attachment generation to fail"),
                 Err(err) => err,
             };
@@ -2935,7 +3031,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
         )
         .unwrap();
         let spirv = program
-            .generate_spirv("fs", &Bindings::default(), &[], true, false, 0, true)
+            .generate_spirv("fs", &Bindings::default(), &[], true, false, 0, true, None)
             .unwrap();
         assert!(!spirv.is_empty());
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
@@ -2981,14 +3077,14 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
         .unwrap();
         // Generating the vertex entry with the module-wide flag TRUE succeeds …
         let vertex = program
-            .generate_spirv("vs", &Bindings::default(), &[], true, false, 0, true)
+            .generate_spirv("vs", &Bindings::default(), &[], true, false, 0, true, None)
             .unwrap();
         assert_eq!(vertex.first().copied(), Some(0x0723_0203));
         // … while FALSE fails, because the module contains a 2-arg load. This is
         // why yawgpu-core must pass the flag to the vertex stage too, not just the
         // fragment.
         assert!(program
-            .generate_spirv("vs", &Bindings::default(), &[], true, false, 0, false)
+            .generate_spirv("vs", &Bindings::default(), &[], true, false, 0, false, None)
             .is_err());
     }
 
@@ -3475,10 +3571,10 @@ fn cs() { _ = u.value; }
         assert_ne!(default_msl, remapped_msl);
 
         let default_spv = program
-            .generate_spirv("cs", &default_bindings, &[], true, false, 0, false)
+            .generate_spirv("cs", &default_bindings, &[], true, false, 0, false, None)
             .unwrap();
         let remapped_spv = program
-            .generate_spirv("cs", &remapped, &[], true, false, 0, false)
+            .generate_spirv("cs", &remapped, &[], true, false, 0, false, None)
             .unwrap();
         assert_ne!(default_spv, remapped_spv);
         assert!(spirv_has_binding_decoration(&remapped_spv, 7));

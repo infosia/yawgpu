@@ -2160,3 +2160,38 @@ naga fork is worse than under-validation":
   `af_addition 10, i32_comparison 96, f32_comparison 96}` all 0 fail/0 crash; naga gate EXIT 0
   (only `wgsl-operators` snapshots changed — a short-circuit RHS `any(vec3(false))` now folds to
   `false`); yawgpu workspace test 65 ok/0 fail.
+
+---
+
+## F-085 (position sub-part) — yawgpu Vulkan: `@builtin(position)` leaked the sample position under sample-rate shading — RESOLVED
+
+- **Finding:** `shader,execution,shader_io,fragment_builtins:inputs,position:*`
+  (`sampleCount=4; interpolation={perspective,linear},sample`, 4 cases) failed on native Vulkan
+  (NVIDIA RTX 5060 Ti): `@builtin(position).xy` returned the per-sample location (e.g. `0.375`,
+  `0.125` — the 4× MSAA sample offsets) instead of the required pixel center (`0.5`). These 4
+  were previously bundled into **F-085** and xfail'd in `expectations/yawgpu-vulkan.txt` as
+  "spec in flux" (gpuweb#4777), but the **current Dawn oracle passes them** (`fail=0`) via a
+  pixel-center polyfill — so this was a real yawgpu gap vs the oracle, not spec-in-flux.
+  Surfaced during the Block 71 native-Vulkan swizzle verification.
+- **Root cause:** WebGPU requires `@builtin(position)` to always be the pixel-center (fragment)
+  coordinate, never a sample position (`fragment_builtins.spec.cpp:1011`). Under Vulkan
+  sample-rate shading (forced by an `@interpolate(_, sample)` input) the SPIR-V `FragCoord`
+  builtin reflects the covered sample's location. yawgpu and Dawn share Tint, but yawgpu's shim
+  did not set Tint's `polyfill_pixel_center` option, so Tint never reconstructed the center.
+- **Fix (yawgpu `<this commit>`):** thread Tint's `polyfill_pixel_center` (reconstructs xy as
+  `floor(xy)+0.5`, z/w from a center-sampled `center_pos` varying) through the yawgpu-tint shim,
+  gated on `fragment_needs_pixel_center_polyfill` (`sample_count > 1` && reads position &&
+  sample-interpolant | `sample_index` | framebuffer-fetch — mirrors Dawn's
+  `RenderPipeline::NeedsPixelCenterPolyfill`). Because Tint's reconstructed z is NDC-space, it
+  re-applies the viewport depth range via `depth_range_offsets {0, 4}` — delivered as a fragment
+  push constant `[min_depth, max_depth]` (new Vulkan HAL push-constant range +
+  `cmd_push_constants` at draw). The polyfill consumes one free inter-stage location for
+  `center_pos`.
+- **Verification (native Vulkan, RTX 5060 Ti):** `inputs,position` **pass=32 fail=0** (was 28/4);
+  full `fragment_builtins` `fail=0 xfail=88 xpass=0` with the updated
+  `expectations/yawgpu-vulkan.txt` (the 4 position xfails dropped; the 88 `sample_mask` remain —
+  Dawn-equal, still F-085 spec-in-flux). No regression across the landed features (swizzle
+  32832/0, primitive-index 250/0, draw 744/0, dual-source 13834/0, clip-distances 4/0). Noop
+  `cargo test --workspace` green incl. the new
+  `fragment_pixel_center_polyfill_decision_and_free_location` unit test. Companion write-up:
+  webgpu-native-cts `docs/FINDINGS.md` F-085 (position sub-part split out).

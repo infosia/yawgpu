@@ -524,6 +524,7 @@ mod tests {
             front_face: crate::HalFrontFace::Ccw,
             cull_mode: crate::HalCullMode::None,
             unclipped_depth: false,
+            needs_frag_depth_range_push_constant: false,
         }
     }
 

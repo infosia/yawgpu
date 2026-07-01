@@ -68,6 +68,11 @@ pub struct HalRenderPipelineDescriptor {
     pub cull_mode: HalCullMode,
     /// Enables unclipped depth.
     pub unclipped_depth: bool,
+    /// Whether the fragment shader was compiled with the `@builtin(position)`
+    /// pixel-center polyfill and therefore needs the viewport depth range
+    /// (`min_depth`, `max_depth`) delivered as a fragment push constant. Only
+    /// meaningful on the Vulkan backend; other backends ignore it.
+    pub needs_frag_depth_range_push_constant: bool,
 }
 
 /// Enumerates HAL front-facing winding values.

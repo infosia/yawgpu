@@ -1008,10 +1008,30 @@ fn create_hal_render_pipeline_with_subpass_color_slots(
             Err(message) => return (None, Some(message)),
         }
     }
-    let hal_descriptor = match hal_render_pipeline_descriptor(descriptor, vertex_buffer_bindings) {
+    let mut hal_descriptor = match hal_render_pipeline_descriptor(descriptor, vertex_buffer_bindings)
+    {
         Ok(descriptor) => descriptor,
         Err(message) => return (None, Some(message)),
     };
+    // On Vulkan, the `@builtin(position)` pixel-center polyfill (applied when the
+    // fragment reads position under sample-rate shading) reconstructs the depth
+    // in NDC space and needs the viewport depth range delivered as a fragment
+    // push constant. Flag it so the HAL declares the push-constant range and
+    // writes the viewport min/max depth at draw time. Matches the SPIR-V
+    // generation decision in `select_render_shader_source`.
+    if matches!(hal_device.backend(), HalBackend::Vulkan) {
+        if let (Some(fragment), Some(fragment_entry_name)) =
+            (descriptor.fragment.as_ref(), fragment_entry_name)
+        {
+            if let Some(fragment_module) = fragment.shader.module.reflected() {
+                hal_descriptor.needs_frag_depth_range_push_constant = fragment_module
+                    .fragment_needs_pixel_center_polyfill(
+                        fragment_entry_name,
+                        descriptor.multisample.count,
+                    );
+            }
+        }
+    }
     match hal_device.create_render_pipeline(
         shader,
         &vertex_entry_point,
@@ -1557,6 +1577,26 @@ pub(crate) fn select_render_shader_source(
             // otherwise fail the vertex generation).
             let multisampled_input_attachment =
                 pipeline_has_multisampled_input_attachment(bind_group_layouts);
+            // Pixel-center polyfill for `@builtin(position)` under sample-rate
+            // shading (see `ReflectedModule::fragment_needs_pixel_center_polyfill`).
+            // The polyfill carries a `center_pos` inter-stage varying from the
+            // vertex stage to the fragment stage, so the SAME free location must
+            // be passed to both stages' SPIR-V generation. Computed once here,
+            // before the vertex stage is generated. Mirrors Dawn's Vulkan backend.
+            let polyfill_pixel_center = match (fragment, fragment_entry_name) {
+                (Some(fragment), Some(fragment_entry_name)) => fragment
+                    .shader
+                    .module
+                    .reflected()
+                    .filter(|fragment_module| {
+                        fragment_module.fragment_needs_pixel_center_polyfill(
+                            fragment_entry_name,
+                            descriptor.multisample.count,
+                        )
+                    })
+                    .map(|_| vertex_module.free_inter_stage_location(vertex_entry_name)),
+                _ => None,
+            };
             let vertex = vertex_module.generate_spirv(
                 vertex_entry_name,
                 frontend::ShaderStage::Vertex,
@@ -1564,6 +1604,7 @@ pub(crate) fn select_render_shader_source(
                 vulkan_memory_model,
                 framebuffer_fetch_descriptor_set,
                 multisampled_input_attachment,
+                polyfill_pixel_center,
             )?;
             let fragment_color_slots = match (fragment, fragment_entry_name) {
                 (Some(fragment), Some(fragment_entry_name)) => fragment
@@ -1590,6 +1631,7 @@ pub(crate) fn select_render_shader_source(
                         vulkan_memory_model,
                         framebuffer_fetch_descriptor_set,
                         multisampled_input_attachment,
+                        polyfill_pixel_center,
                     )?)
                 }
                 (None, None) => None,
@@ -1843,6 +1885,8 @@ pub(crate) fn hal_render_pipeline_descriptor(
         front_face: hal_front_face(descriptor.primitive.front_face),
         cull_mode: hal_cull_mode(descriptor.primitive.cull_mode),
         unclipped_depth: descriptor.primitive.unclipped_depth,
+        // Set by the caller once the shader stages are generated (Vulkan only).
+        needs_frag_depth_range_push_constant: false,
     })
 }
 
