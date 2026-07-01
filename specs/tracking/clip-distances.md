@@ -29,7 +29,7 @@ SPIR-V). So **no Vulkan e2e is shipped** (MoltenVK can't run it); Metal e2e + th
 CTS validation suite are the verification, and authoritative Vulkan *execution*
 verification needs native Vulkan hardware (deferred to a Windows/Linux run). Same
 class as [[moltenvk-shader-execution-limits]] — MoltenVK is not a shader-codegen oracle.
-| 3 | Docs + Phase Review | TODO |
+| 3 | Docs + Phase Review | **DONE** (2026-07-01) — Phase Review clean (no CRITICAL/MAJOR) |
 
 ## Key facts (verified 2026-07-01)
 
