@@ -161,15 +161,13 @@ static Msaa msaa_create(WGPUDevice device, uint32_t w, uint32_t h,
                         WGPUShaderModule persample_module,
                         WGPUShaderModule resolve_module) {
     Msaa m = {.width = w, .height = h};
-    // The scene + intermediate are 4x MSAA subpass intermediates, consumed as
-    // multisampled input attachments and never stored (storeOp = Discard below).
-    // Ideally they'd also be TransientAttachment (memoryless / on-tile — the TBDR
-    // payoff, as in tiled_deferred), but the tiled Vulkan render pass currently
-    // sets every color attachment's finalLayout = TRANSFER_SRC_OPTIMAL, which a
-    // TRANSIENT_ATTACHMENT image cannot satisfy (VUID-vkCmdBeginRenderPass-
-    // initialLayout-00898). Use plain RenderAttachment here so the example stays
-    // validation-clean; switch to transient once that finalLayout bug is fixed.
-    WGPUTextureUsage attach_usage = WGPUTextureUsage_RenderAttachment;
+    // The scene + intermediate are 4x MSAA subpass intermediates: written, consumed
+    // in-pass as multisampled input attachments, and never stored (storeOp =
+    // Discard below). Mark them TransientAttachment so the backend keeps them
+    // on-tile / memoryless (Vulkan LAZILY_ALLOCATED) — the TBDR bandwidth payoff:
+    // the MSAA samples never spill to DRAM.
+    WGPUTextureUsage attach_usage =
+        WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TransientAttachment;
     m.scene = make_target(device, w, h, WGPUTextureFormat_RGBA8Unorm, attach_usage, SAMPLE_COUNT);
     m.hdr = make_target(device, w, h, WGPUTextureFormat_RGBA8Unorm, attach_usage, SAMPLE_COUNT);
     m.scene_view = wgpuTextureCreateView(m.scene, NULL);
