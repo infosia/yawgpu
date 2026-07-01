@@ -366,13 +366,15 @@ impl VulkanAdapter {
     /// Returns true when depth clip control is supported by this physical device.
     #[must_use]
     pub(super) fn supports_depth_clip_control(&self) -> bool {
-        let depth_clamp = unsafe {
+        // WebGPU unclippedDepth maps to core Vulkan depthClampEnable, which
+        // implicitly disables depth clipping; VK_EXT_depth_clip_enable is only
+        // an optional enhancement for independent clip control.
+        (unsafe {
             self.instance
                 .instance
                 .get_physical_device_features(self.physical_device)
                 .depth_clamp
-        } == vk::TRUE;
-        depth_clamp && self.has_device_extension(vk::EXT_DEPTH_CLIP_ENABLE_NAME)
+        }) == vk::TRUE
     }
 
     /// Returns the supported subgroup size range for this physical device.
@@ -547,6 +549,8 @@ impl VulkanAdapter {
         // Vulkan requires independentBlend for differing per-attachment blend state.
         let independent_blend = supported_features.independent_blend == vk::TRUE;
         let depth_clamp = supported_features.depth_clamp == vk::TRUE;
+        // VK_EXT_depth_clip_enable gives independent clip control; without it,
+        // core depthClampEnable already yields WebGPU unclippedDepth semantics.
         let depth_clip_control = depth_clamp && depth_clip_enable_extension;
         // Per-sample MSAA subpass input reads `@builtin(sample_index)`, which
         // lowers to SPIR-V `SampleId` and auto-promotes the fragment shader to
@@ -557,8 +561,10 @@ impl VulkanAdapter {
         if occlusion_query_precise {
             enabled_features.occlusion_query_precise = vk::TRUE;
         }
-        if depth_clip_control {
+        if depth_clamp {
             enabled_features.depth_clamp = vk::TRUE;
+        }
+        if depth_clip_control {
             extension_names.push(vk::EXT_DEPTH_CLIP_ENABLE_NAME.as_ptr());
         }
         if sampler_anisotropy {

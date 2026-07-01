@@ -8,8 +8,8 @@ WebGPU `depth-clip-control` optional feature
 
 | Slice | Scope | State |
 |---|---|---|
-| 1 | Feature plumbing + gate flip (Noop + HAL cap) | IN PROGRESS |
-| 2 | Real-GPU execution e2e (Metal + Vulkan) | TODO |
+| 1 | Feature plumbing + gate flip (Noop + HAL cap) | **DONE** (2026-07-01) |
+| 2 | Real-GPU execution e2e (Metal + Vulkan) | **DONE** (2026-07-01) |
 | 3 | Docs + Phase Review | TODO |
 
 ## Key facts (verified 2026-07-01)
@@ -32,6 +32,25 @@ WebGPU `depth-clip-control` optional feature
   `adapter.rs` Feature enum + `add_*_feature` + `features()`,
   `yawgpu-hal/src/lib.rs` dispatch + 4 backend impls,
   `yawgpu/src/conv/feature.rs`. No shim / FFI-struct changes.
+
+## Slice 2 — landed (+ HAL fix the e2e uncovered)
+
+`e2e_{metal,vulkan}_depth_clip_control.rs` (2 tests each): adapter advertises the
+feature; a full-screen triangle emitted entirely beyond the far plane (clip-space
+z=1.5, w=1) is **clipped → clear black** with `unclippedDepth=false` and
+**clamped → red** with `unclippedDepth=true`, proving the A/B behavior at
+readback. **Metal 2/2 + MoltenVK 2/2 on real GPU.**
+
+The MoltenVK run exposed a HAL over-restriction (Noop-invisible): the Vulkan cap
+query + device-feature enablement required `VK_EXT_depth_clip_enable`, which
+MoltenVK lacks — so it did not advertise the feature and `unclippedDepth`
+aborted. Fix (matches Dawn `PhysicalDeviceVk.cpp:368`): advertise on core
+`depthClamp` alone (unclippedDepth ⇒ `depthClampEnable`, which implicitly
+disables clipping; the extension is only an optional independent-clip
+enhancement), and enable the `depthClamp` device feature whenever supported (not
+gated on the extension) so the no-extension `depth_clamp_and_clip` path is
+VUID-valid. `depth_clamp_and_clip` (pipeline.rs) was already correct for both
+paths.
 
 ## Notes
 
