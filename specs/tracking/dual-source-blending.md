@@ -8,7 +8,7 @@ Spec: [Block 65](../blocks/65-dual-source-blending.md). Goal: Dawn parity for
 | Slice | Scope | State |
 |---|---|---|
 | 1 | Feature plumbing + Tint gate + validation (Noop + HAL cap) | **DONE** (2026-07-01) |
-| 2 | Real-GPU execution e2e (Metal + Vulkan) | TODO |
+| 2 | Real-GPU execution e2e (Metal + Vulkan) | **DONE** (2026-07-01) |
 | 3 | Docs + Phase Review | TODO |
 
 ## Key facts (verified 2026-07-01)
