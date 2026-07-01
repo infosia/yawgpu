@@ -324,11 +324,9 @@ impl Limits {
 
         // Relationship checks are evaluated on the *effective* limits (after
         // per-field maximum/alignment clamping to the spec default floor).
-        // Evaluating against `required` causes false rejections: e.g. requesting
-        // only maxComputeInvocationsPerWorkgroup=100 (worse-than-default) leaves
-        // maxComputeWorkgroupSizeX at its (default) 256 in `required`, making the
-        // relationship check fire even though the device would deliver
-        // invocations=256 (clamped to default), which satisfies the constraint.
+        // Evaluating against `required` causes false rejections for single-field
+        // worse-than-default requests because the device reports clamped
+        // effective limits.
         // The CTS `adapter,requestDevice:limit,worse_than_default` confirms that
         // any single-field worse-than-default Maximum request must succeed.
         validate_required_limit_relationships(effective)?;
@@ -346,24 +344,6 @@ impl Limits {
 }
 
 fn validate_required_limit_relationships(limits: Limits) -> Result<(), String> {
-    if limits.max_compute_workgroup_size_x > limits.max_compute_invocations_per_workgroup {
-        return Err(
-            "required max_compute_workgroup_size_x exceeds max_compute_invocations_per_workgroup"
-                .to_owned(),
-        );
-    }
-    if limits.max_compute_workgroup_size_y > limits.max_compute_invocations_per_workgroup {
-        return Err(
-            "required max_compute_workgroup_size_y exceeds max_compute_invocations_per_workgroup"
-                .to_owned(),
-        );
-    }
-    if limits.max_compute_workgroup_size_z > limits.max_compute_invocations_per_workgroup {
-        return Err(
-            "required max_compute_workgroup_size_z exceeds max_compute_invocations_per_workgroup"
-                .to_owned(),
-        );
-    }
     if limits.max_bind_groups > limits.max_bind_groups_plus_vertex_buffers {
         return Err(
             "required max_bind_groups exceeds max_bind_groups_plus_vertex_buffers".to_owned(),
@@ -385,12 +365,6 @@ fn validate_required_limit_relationships(limits: Limits) -> Result<(), String> {
             "required min_storage_buffer_offset_alignment must be a power of two and at least 32"
                 .to_owned(),
         );
-    }
-    if limits.max_uniform_buffer_binding_size > limits.max_buffer_size {
-        return Err("required max_uniform_buffer_binding_size exceeds max_buffer_size".to_owned());
-    }
-    if limits.max_storage_buffer_binding_size > limits.max_buffer_size {
-        return Err("required max_storage_buffer_binding_size exceeds max_buffer_size".to_owned());
     }
     if limits.max_bindings_per_bind_group == 0 {
         return Err("required max_bindings_per_bind_group must be at least one".to_owned());
@@ -418,6 +392,29 @@ mod tests {
 
     #[test]
     fn validate_required_limits_rejects_relationship_violations() {
+        // maxBindGroups cannot exceed maxBindGroupsPlusVertexBuffers.
+        let mut supported = Limits::DEFAULT;
+        supported.max_bind_groups = Limits::DEFAULT.max_bind_groups_plus_vertex_buffers + 1;
+        let mut required = Limits::DEFAULT;
+        required.max_bind_groups = supported.max_bind_groups;
+        assert_eq!(
+            supported.validate_required_limits(Some(&required)),
+            Err("required max_bind_groups exceeds max_bind_groups_plus_vertex_buffers".to_owned())
+        );
+
+        // maxVertexBuffers cannot exceed maxBindGroupsPlusVertexBuffers.
+        let mut supported = Limits::DEFAULT;
+        supported.max_vertex_buffers = Limits::DEFAULT.max_bind_groups_plus_vertex_buffers + 1;
+        let mut required = Limits::DEFAULT;
+        required.max_vertex_buffers = supported.max_vertex_buffers;
+        assert_eq!(
+            supported.validate_required_limits(Some(&required)),
+            Err(
+                "required max_vertex_buffers exceeds max_bind_groups_plus_vertex_buffers"
+                    .to_owned()
+            )
+        );
+
         // Alignment relationship: a non-power-of-two alignment value is
         // rejected.  The effective alignment = min(required, default) = 48,
         // which is not a power of two — the check still fires after clamping.
@@ -461,6 +458,50 @@ mod tests {
         assert!(
             supported.validate_required_limits(Some(&required)).is_ok(),
             "worse-than-default maxColorAttachmentBytesPerSample must succeed"
+        );
+    }
+
+    #[test]
+    fn binding_sizes_above_default_max_buffer_size_are_preserved() {
+        let requested_size = Limits::DEFAULT.max_buffer_size * 2;
+
+        let mut supported = Limits::DEFAULT;
+        supported.max_uniform_buffer_binding_size = requested_size;
+        let mut required = Limits::DEFAULT;
+        required.max_uniform_buffer_binding_size = requested_size;
+        let effective = supported
+            .validate_required_limits(Some(&required))
+            .expect("uniform buffer binding size above default maxBufferSize should succeed");
+        assert_eq!(effective.max_uniform_buffer_binding_size, requested_size);
+        assert_eq!(effective.max_buffer_size, Limits::DEFAULT.max_buffer_size);
+
+        let mut supported = Limits::DEFAULT;
+        supported.max_storage_buffer_binding_size = requested_size;
+        let mut required = Limits::DEFAULT;
+        required.max_storage_buffer_binding_size = requested_size;
+        let effective = supported
+            .validate_required_limits(Some(&required))
+            .expect("storage buffer binding size above default maxBufferSize should succeed");
+        assert_eq!(effective.max_storage_buffer_binding_size, requested_size);
+        assert_eq!(effective.max_buffer_size, Limits::DEFAULT.max_buffer_size);
+    }
+
+    #[test]
+    fn compute_workgroup_axis_above_default_invocations_is_allowed() {
+        let mut supported = Limits::DEFAULT;
+        supported.max_compute_workgroup_size_x = 1024;
+
+        let mut required = Limits::DEFAULT;
+        required.max_compute_workgroup_size_x = 1024;
+
+        let effective = supported
+            .validate_required_limits(Some(&required))
+            .expect("requestDevice should not reject per-axis workgroup size above invocations");
+
+        assert_eq!(effective.max_compute_workgroup_size_x, 1024);
+        assert_eq!(
+            effective.max_compute_invocations_per_workgroup,
+            Limits::DEFAULT.max_compute_invocations_per_workgroup
         );
     }
 
