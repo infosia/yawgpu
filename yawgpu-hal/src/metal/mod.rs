@@ -125,108 +125,6 @@ impl MetalDeviceLimits {
     }
 }
 
-fn clamp_metal_maximums(limits: HalLimits) -> HalLimits {
-    let default = HalLimits::DEFAULT;
-    HalLimits {
-        max_texture_dimension_1d: limits
-            .max_texture_dimension_1d
-            .max(default.max_texture_dimension_1d),
-        max_texture_dimension_2d: limits
-            .max_texture_dimension_2d
-            .max(default.max_texture_dimension_2d),
-        max_texture_dimension_3d: limits
-            .max_texture_dimension_3d
-            .max(default.max_texture_dimension_3d),
-        max_texture_array_layers: limits
-            .max_texture_array_layers
-            .max(default.max_texture_array_layers),
-        max_bind_groups: limits.max_bind_groups.max(default.max_bind_groups),
-        max_bind_groups_plus_vertex_buffers: limits
-            .max_bind_groups_plus_vertex_buffers
-            .max(default.max_bind_groups_plus_vertex_buffers),
-        max_bindings_per_bind_group: limits
-            .max_bindings_per_bind_group
-            .max(default.max_bindings_per_bind_group),
-        max_dynamic_uniform_buffers_per_pipeline_layout: limits
-            .max_dynamic_uniform_buffers_per_pipeline_layout
-            .max(default.max_dynamic_uniform_buffers_per_pipeline_layout),
-        max_dynamic_storage_buffers_per_pipeline_layout: limits
-            .max_dynamic_storage_buffers_per_pipeline_layout
-            .max(default.max_dynamic_storage_buffers_per_pipeline_layout),
-        max_sampled_textures_per_shader_stage: limits
-            .max_sampled_textures_per_shader_stage
-            .max(default.max_sampled_textures_per_shader_stage),
-        max_samplers_per_shader_stage: limits
-            .max_samplers_per_shader_stage
-            .max(default.max_samplers_per_shader_stage),
-        max_storage_buffers_per_shader_stage: limits
-            .max_storage_buffers_per_shader_stage
-            .max(default.max_storage_buffers_per_shader_stage),
-        max_storage_textures_per_shader_stage: limits
-            .max_storage_textures_per_shader_stage
-            .max(default.max_storage_textures_per_shader_stage),
-        max_storage_buffers_in_vertex_stage: limits
-            .max_storage_buffers_in_vertex_stage
-            .max(default.max_storage_buffers_in_vertex_stage),
-        max_storage_buffers_in_fragment_stage: limits
-            .max_storage_buffers_in_fragment_stage
-            .max(default.max_storage_buffers_in_fragment_stage),
-        max_storage_textures_in_vertex_stage: limits
-            .max_storage_textures_in_vertex_stage
-            .max(default.max_storage_textures_in_vertex_stage),
-        max_storage_textures_in_fragment_stage: limits
-            .max_storage_textures_in_fragment_stage
-            .max(default.max_storage_textures_in_fragment_stage),
-        max_uniform_buffers_per_shader_stage: limits
-            .max_uniform_buffers_per_shader_stage
-            .max(default.max_uniform_buffers_per_shader_stage),
-        max_uniform_buffer_binding_size: limits
-            .max_uniform_buffer_binding_size
-            .max(default.max_uniform_buffer_binding_size),
-        max_storage_buffer_binding_size: limits
-            .max_storage_buffer_binding_size
-            .max(default.max_storage_buffer_binding_size),
-        min_uniform_buffer_offset_alignment: limits.min_uniform_buffer_offset_alignment,
-        min_storage_buffer_offset_alignment: limits.min_storage_buffer_offset_alignment,
-        max_vertex_buffers: limits.max_vertex_buffers.max(default.max_vertex_buffers),
-        max_buffer_size: limits.max_buffer_size.max(default.max_buffer_size),
-        max_vertex_attributes: limits
-            .max_vertex_attributes
-            .max(default.max_vertex_attributes),
-        max_vertex_buffer_array_stride: limits
-            .max_vertex_buffer_array_stride
-            .max(default.max_vertex_buffer_array_stride),
-        max_inter_stage_shader_variables: limits
-            .max_inter_stage_shader_variables
-            .max(default.max_inter_stage_shader_variables),
-        max_color_attachments: limits
-            .max_color_attachments
-            .max(default.max_color_attachments),
-        max_color_attachment_bytes_per_sample: limits
-            .max_color_attachment_bytes_per_sample
-            .max(default.max_color_attachment_bytes_per_sample),
-        max_compute_workgroup_storage_size: limits
-            .max_compute_workgroup_storage_size
-            .max(default.max_compute_workgroup_storage_size),
-        max_compute_invocations_per_workgroup: limits
-            .max_compute_invocations_per_workgroup
-            .max(default.max_compute_invocations_per_workgroup),
-        max_compute_workgroup_size_x: limits
-            .max_compute_workgroup_size_x
-            .max(default.max_compute_workgroup_size_x),
-        max_compute_workgroup_size_y: limits
-            .max_compute_workgroup_size_y
-            .max(default.max_compute_workgroup_size_y),
-        max_compute_workgroup_size_z: limits
-            .max_compute_workgroup_size_z
-            .max(default.max_compute_workgroup_size_z),
-        max_compute_workgroups_per_dimension: limits
-            .max_compute_workgroups_per_dimension
-            .max(default.max_compute_workgroups_per_dimension),
-        max_immediate_size: limits.max_immediate_size,
-    }
-}
-
 /// Stores metal instance data used by validation and backend submission.
 pub struct MetalInstance;
 
@@ -363,7 +261,7 @@ impl MetalAdapter {
         limits.max_storage_buffers_in_vertex_stage = limits.max_storage_buffers_per_shader_stage;
         limits.max_storage_textures_in_vertex_stage = limits.max_storage_textures_per_shader_stage;
 
-        clamp_metal_maximums(limits)
+        limits
     }
 
     fn gpu_family(&self) -> MetalGpuFamily {

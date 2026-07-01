@@ -161,22 +161,10 @@ impl Limits {
                 .max(default.max_samplers_per_shader_stage),
             max_storage_buffers_per_shader_stage,
             max_storage_textures_per_shader_stage,
-            max_storage_buffers_in_vertex_stage: hal
-                .max_storage_buffers_in_vertex_stage
-                .max(default.max_storage_buffers_in_vertex_stage)
-                .min(max_storage_buffers_per_shader_stage),
-            max_storage_buffers_in_fragment_stage: hal
-                .max_storage_buffers_in_fragment_stage
-                .max(default.max_storage_buffers_in_fragment_stage)
-                .min(max_storage_buffers_per_shader_stage),
-            max_storage_textures_in_vertex_stage: hal
-                .max_storage_textures_in_vertex_stage
-                .max(default.max_storage_textures_in_vertex_stage)
-                .min(max_storage_textures_per_shader_stage),
-            max_storage_textures_in_fragment_stage: hal
-                .max_storage_textures_in_fragment_stage
-                .max(default.max_storage_textures_in_fragment_stage)
-                .min(max_storage_textures_per_shader_stage),
+            max_storage_buffers_in_vertex_stage: max_storage_buffers_per_shader_stage,
+            max_storage_buffers_in_fragment_stage: max_storage_buffers_per_shader_stage,
+            max_storage_textures_in_vertex_stage: max_storage_textures_per_shader_stage,
+            max_storage_textures_in_fragment_stage: max_storage_textures_per_shader_stage,
             max_uniform_buffers_per_shader_stage: hal
                 .max_uniform_buffers_per_shader_stage
                 .max(default.max_uniform_buffers_per_shader_stage),
@@ -557,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn from_hal_normalizes_stage_specific_storage_limits_to_per_shader_stage() {
+    fn from_hal_pins_stage_specific_storage_limits_to_per_shader_stage() {
         let mut hal = yawgpu_hal::HalLimits::DEFAULT;
         hal.max_storage_textures_per_shader_stage = 4;
         hal.max_storage_textures_in_fragment_stage = 8;
