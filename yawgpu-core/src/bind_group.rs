@@ -522,6 +522,11 @@ pub(crate) fn validate_bind_group_storage_texture(
     if texture_view.is_error() {
         return Some("bind group texture view must not be an error texture view".to_owned());
     }
+    if !texture_view.swizzle().is_identity() {
+        return Some(
+            "storage-texture binding must not use a component-swizzled texture view".to_owned(),
+        );
+    }
     // Destroyed-texture check is intentionally deferred to queue.submit time
     // (WebGPU spec §17.3 "Queue submit validation"). See the same comment in
     // validate_bind_group_texture.
@@ -705,6 +710,103 @@ mod tests {
                 TextureViewDimension::D2,
             ),
             Some("bind group texture usage does not satisfy the layout".to_owned())
+        );
+    }
+
+    #[test]
+    fn bind_group_storage_texture_rejects_component_swizzled_view() {
+        let adapter = noop_adapter();
+        let device = adapter
+            .create_device(None, &[Feature::TextureComponentSwizzle], "", "")
+            .expect("Noop adapter should support texture component swizzle");
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::STORAGE_BINDING,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: Some(TextureComponentSwizzle {
+                r: ComponentSwizzle::G,
+                ..TextureComponentSwizzle::default()
+            }),
+        });
+        assert_eq!(error, None);
+
+        assert_eq!(
+            validate_bind_group_storage_texture(
+                &device,
+                &device,
+                &view,
+                rgba8_unorm(),
+                TextureViewDimension::D2,
+            ),
+            Some(
+                "storage-texture binding must not use a component-swizzled texture view".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn bind_group_sampled_texture_accepts_component_swizzled_view() {
+        let adapter = noop_adapter();
+        let device = adapter
+            .create_device(None, &[Feature::TextureComponentSwizzle], "", "")
+            .expect("Noop adapter should support texture component swizzle");
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::TEXTURE_BINDING | TextureUsage::RENDER_ATTACHMENT,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: Some(TextureComponentSwizzle {
+                r: ComponentSwizzle::G,
+                ..TextureComponentSwizzle::default()
+            }),
+        });
+        assert_eq!(error, None);
+
+        assert_eq!(
+            validate_bind_group_texture(
+                &device,
+                &device,
+                &view,
+                TextureSampleType::UnfilterableFloat,
+                TextureViewDimension::D2,
+                false,
+            ),
+            None
         );
     }
 
