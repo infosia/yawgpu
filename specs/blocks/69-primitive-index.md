@@ -1,9 +1,10 @@
 # Block 69 — `primitive-index` optional feature
 
-Status: **Slices 1–2 DONE, real-GPU + CTS verified** on Metal (M2 e2e 2/2; CTS
+Status: **COMPLETE** — real-GPU + CTS verified on Metal (M2 e2e 2/2; CTS
 maxInterStageShaderVariables 1128/0, shader_io builtins 706/0, fragment_builtins
-exec 238/0). Slice 3 (docs + Phase Review) in progress. Owner: Dawn-parity
-feature backfill. **Last of the WebGPU standard optional-feature backfill.**
+exec 238/0), Phase Review clean (no CRITICAL/MAJOR; the 7-bool shim signature
+verified char-by-char, ~45 Program::parse call sites in sync, no over-reach).
+Owner: Dawn-parity feature backfill.
 
 The WebGPU `primitive-index` optional feature
 (`WGPUFeatureName_PrimitiveIndex = 0x15`) lets a fragment shader read
