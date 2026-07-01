@@ -127,10 +127,17 @@ static Deferred deferred_create(WGPUDevice device, uint32_t w, uint32_t h,
                                 WGPUShaderModule gbuffer_module,
                                 WGPUShaderModule lighting_module) {
     Deferred df = {.width = w, .height = h};
+    // The albedo + normal G-buffers are pure subpass intermediates: written in
+    // subpass 0, consumed as input attachments in subpass 1, never stored. Mark
+    // them TransientAttachment so the backend keeps them on-tile / memoryless
+    // (Metal MTLStorageMode::Memoryless, Vulkan LAZILY_ALLOCATED) — the TBDR
+    // bandwidth payoff: they never spill to DRAM.
     df.albedo = make_target(device, w, h, WGPUTextureFormat_RGBA8Unorm,
-                            WGPUTextureUsage_RenderAttachment);
+                            WGPUTextureUsage_RenderAttachment |
+                                WGPUTextureUsage_TransientAttachment);
     df.normal = make_target(device, w, h, WGPUTextureFormat_RGBA8Unorm,
-                            WGPUTextureUsage_RenderAttachment);
+                            WGPUTextureUsage_RenderAttachment |
+                                WGPUTextureUsage_TransientAttachment);
     df.albedo_view = wgpuTextureCreateView(df.albedo, NULL);
     df.normal_view = wgpuTextureCreateView(df.normal, NULL);
 
@@ -200,13 +207,15 @@ static void deferred_destroy(Deferred *df) {
 static void record_deferred(WGPUCommandEncoder encoder, const Deferred *df,
                             WGPUTextureView final_view) {
     YaWGPUSubpassColorAttachment attachments[3] = {
+        // Transient G-buffers: consumed in-pass by subpass 1, so storeOp = Discard
+        // (a memoryless attachment has no DRAM to store into).
         {.view = df->albedo_view,
          .loadOp = WGPULoadOp_Clear,
-         .storeOp = WGPUStoreOp_Store,
+         .storeOp = WGPUStoreOp_Discard,
          .clearValue = {0, 0, 0, 1}},
         {.view = df->normal_view,
          .loadOp = WGPULoadOp_Clear,
-         .storeOp = WGPUStoreOp_Store,
+         .storeOp = WGPUStoreOp_Discard,
          .clearValue = {0, 0, 0, 1}},
         {.view = final_view,
          .loadOp = WGPULoadOp_Clear,
