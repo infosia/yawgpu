@@ -2,8 +2,9 @@
 // extension (Vulkan-only).
 //
 // Three subpasses in one render pass, all on-tile:
-//   * subpass 0 (scene, 4x MSAA): draws a centred triangle whose diagonal edges
-//     alias without MSAA, into a multisampled color attachment.
+//   * subpass 0 (scene, 4x MSAA): draws thin colored lines radiating from the
+//     centre (aliasing is most visible on thin near-diagonal lines) into a
+//     multisampled color attachment.
 //   * subpass 1 (per-sample, 4x MSAA): reads the scene attachment PER SAMPLE via
 //     `inputAttachmentLoad(scene, @builtin(sample_index))` — SampleId promotes the
 //     fragment to per-sample invocation (Vulkan `sampleRateShading`) — applies a
@@ -34,6 +35,7 @@ enum {
     BYTES_PER_PIXEL = 4,
     ROW_ALIGN = 256, // CopyTextureToBuffer requires 256-byte-aligned rows.
     SAMPLE_COUNT = 4,
+    SCENE_LINE_COUNT = 60, // must match LINE_COUNT in scene.wgsl
 };
 
 static WGPUStringView sv(const char *s) { return yawgpu_string_view(s); }
@@ -121,6 +123,7 @@ static WGPURenderPipeline make_pipeline(WGPUDevice device,
                                         uint32_t subpass_index, WGPUShaderModule module,
                                         uint32_t written_slot, WGPUTextureFormat format,
                                         uint32_t sample_count,
+                                        WGPUPrimitiveTopology topology,
                                         WGPUPipelineLayout pipeline_layout) {
     WGPUColorTargetState targets[8];
     size_t n_targets = (size_t)written_slot + 1;
@@ -142,7 +145,7 @@ static WGPURenderPipeline make_pipeline(WGPUDevice device,
         .label = sv_empty(),
         .layout = pipeline_layout, // NULL = auto (subpass 0); explicit for the reads
         .vertex = {.module = module, .entryPoint = sv("vs")},
-        .primitive = {.topology = WGPUPrimitiveTopology_TriangleList},
+        .primitive = {.topology = topology},
         .multisample = {.count = sample_count, .mask = 0xFFFFFFFFu},
         .fragment = &fragment,
     };
@@ -225,13 +228,17 @@ static Msaa msaa_create(WGPUDevice device, uint32_t w, uint32_t h,
     }
 
     m.input_layout = make_input_attachment_layout(device);
+    // Subpass 0 draws lines; the per-sample and resolve subpasses draw full-screen
+    // triangles.
     m.scene_pipeline = make_pipeline(device, m.layout, 0, scene_module, 0,
-                                     WGPUTextureFormat_RGBA8Unorm, SAMPLE_COUNT, NULL);
+                                     WGPUTextureFormat_RGBA8Unorm, SAMPLE_COUNT,
+                                     WGPUPrimitiveTopology_LineList, NULL);
     m.persample_pipeline = make_pipeline(device, m.layout, 1, persample_module, 1,
                                          WGPUTextureFormat_RGBA8Unorm, SAMPLE_COUNT,
-                                         m.input_layout);
+                                         WGPUPrimitiveTopology_TriangleList, m.input_layout);
     m.resolve_pipeline = make_pipeline(device, m.layout, 2, resolve_module, 2,
-                                       final_format, 1, m.input_layout);
+                                       final_format, 1,
+                                       WGPUPrimitiveTopology_TriangleList, m.input_layout);
     return m;
 }
 
@@ -274,7 +281,8 @@ static void record_msaa(WGPUCommandEncoder encoder, const Msaa *m,
     YaWGPUSubpassRenderPassEncoder pass =
         yawgpuCommandEncoderBeginSubpassRenderPass(encoder, &pass_desc);
     yawgpuSubpassRenderPassEncoderSetPipeline(pass, m->scene_pipeline);
-    yawgpuSubpassRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+    // LINE_COUNT lines = LINE_COUNT * 2 vertices (a line list).
+    yawgpuSubpassRenderPassEncoderDraw(pass, SCENE_LINE_COUNT * 2, 1, 0, 0);
     yawgpuSubpassRenderPassEncoderNextSubpass(pass);
     yawgpuSubpassRenderPassEncoderSetPipeline(pass, m->persample_pipeline);
     yawgpuSubpassRenderPassEncoderDraw(pass, 3, 1, 0, 0);
