@@ -8,8 +8,13 @@ Spec: [Block 66](../blocks/66-indirect-first-instance.md). Goal: Dawn parity for
 | Slice | Scope | State |
 |---|---|---|
 | 1 | Feature plumbing + Vulkan device-feature enable (Noop + HAL cap) | **DONE** (2026-07-01) |
-| 2 | Real-GPU verification via CTS draw:arguments | TODO |
+| 2 | Real-GPU verification via CTS draw:arguments | **DONE** (2026-07-01) |
 | 3 | Docs + Phase Review | TODO |
+
+**Slice 2 — CTS-verified on real Metal.** `api,operation,rendering,draw:arguments`
+went from **pass=540 skip=180** → **pass=720 skip=0 fail=0**: the 180
+`first_instance!=0;indirect=true` cases (previously skipped "indirect-first-instance
+feature is not supported") now run and pass. No in-repo e2e needed.
 
 ## Key facts (verified 2026-07-01)
 
