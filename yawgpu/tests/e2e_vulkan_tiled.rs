@@ -17,10 +17,10 @@
 use std::os::raw::c_void;
 
 use yawgpu::{
-    native, YaWGPUAttachmentLayout, YaWGPUInputAttachmentBindingLayout, YaWGPUInstanceBackendSelect,
-    YaWGPUSubpassColorAttachment, YaWGPUSubpassDependency, YaWGPUSubpassDependencyType_ColorToInput,
-    YaWGPUSubpassInputAttachment, YaWGPUSubpassLayout, YaWGPUSubpassPassLayout,
-    YaWGPUSubpassPassLayoutDescriptor, YaWGPUSubpassRenderPassDescriptor,
+    native, YaWGPUAttachmentLayout, YaWGPUInputAttachmentBindingLayout,
+    YaWGPUInstanceBackendSelect, YaWGPUSubpassColorAttachment, YaWGPUSubpassDependency,
+    YaWGPUSubpassDependencyType_ColorToInput, YaWGPUSubpassInputAttachment, YaWGPUSubpassLayout,
+    YaWGPUSubpassPassLayout, YaWGPUSubpassPassLayoutDescriptor, YaWGPUSubpassRenderPassDescriptor,
     YaWGPUSubpassRenderPipelineDescriptor, YAWGPU_INSTANCE_BACKEND_VULKAN,
     YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT, YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
 };
@@ -299,15 +299,8 @@ unsafe fn run_msaa_deferred(
     let layout = create_three_subpass_msaa_layout(device);
 
     // Subpass 0 has no input attachment → auto layout is fine.
-    let pipeline0 = create_msaa_subpass_pipeline(
-        device,
-        layout,
-        0,
-        MSAA_WRITE_SHADER,
-        0,
-        4,
-        std::ptr::null(),
-    );
+    let pipeline0 =
+        create_msaa_subpass_pipeline(device, layout, 0, MSAA_WRITE_SHADER, 0, 4, std::ptr::null());
     // Subpasses 1 & 2 read a multisampled input attachment → explicit pipeline
     // layout declaring `@group(0) @binding(0)` as `multisampled: 1`.
     let bgl = create_msaa_input_bind_group_layout(device);
@@ -398,9 +391,7 @@ unsafe fn run_msaa_deferred(
     readback
 }
 
-unsafe fn create_three_subpass_msaa_layout(
-    device: native::WGPUDevice,
-) -> YaWGPUSubpassPassLayout {
+unsafe fn create_three_subpass_msaa_layout(device: native::WGPUDevice) -> YaWGPUSubpassPassLayout {
     let colors = [
         YaWGPUAttachmentLayout {
             format: native::WGPUTextureFormat_RGBA8Unorm,

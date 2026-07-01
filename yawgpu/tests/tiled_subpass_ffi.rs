@@ -2,10 +2,11 @@
 
 use yawgpu::{
     native, YaWGPUAttachmentLayout, YaWGPUInputAttachmentBindingLayout,
-    YaWGPUSubpassColorAttachment, YaWGPUSubpassDependency, YaWGPUSubpassDependencyType_ColorToInput,
-    YaWGPUSubpassInputAttachment, YaWGPUSubpassLayout, YaWGPUSubpassPassLayoutDescriptor,
-    YaWGPUSubpassRenderPassDescriptor, YaWGPUSubpassRenderPipelineDescriptor,
-    YaWGPUTiledCapabilities, YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT,
+    YaWGPUSubpassColorAttachment, YaWGPUSubpassDependency,
+    YaWGPUSubpassDependencyType_ColorToInput, YaWGPUSubpassInputAttachment, YaWGPUSubpassLayout,
+    YaWGPUSubpassPassLayoutDescriptor, YaWGPUSubpassRenderPassDescriptor,
+    YaWGPUSubpassRenderPipelineDescriptor, YaWGPUTiledCapabilities,
+    YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT,
 };
 use yawgpu_test::ValidationTest;
 
@@ -191,8 +192,7 @@ fn noop_msaa_subpass_input_pipeline_creates_with_explicit_multisampled_layout() 
         // reads the g-buffer per-sample via the 2-arg load.
         let bgl = create_msaa_input_bind_group_layout(test.device());
         let pipeline_layout = create_pipeline_layout(test.device(), bgl);
-        let pipeline1 =
-            create_msaa_input_read_pipeline(test.device(), layout, pipeline_layout);
+        let pipeline1 = create_msaa_input_read_pipeline(test.device(), layout, pipeline_layout);
         assert!(!pipeline1.is_null());
 
         yawgpu::wgpuRenderPipelineRelease(pipeline1);
