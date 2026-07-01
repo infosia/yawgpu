@@ -9,7 +9,17 @@ Spec: [Block 65](../blocks/65-dual-source-blending.md). Goal: Dawn parity for
 |---|---|---|
 | 1 | Feature plumbing + Tint gate + validation (Noop + HAL cap) | **DONE** (2026-07-01) |
 | 2 | Real-GPU execution e2e (Metal + Vulkan) | **DONE** (2026-07-01) |
-| 3 | Docs + Phase Review | TODO |
+| 3 | Docs + Phase Review | **DONE** (2026-07-01) |
+
+**Phase COMPLETE** — no-context Phase Review of `d89b0bf..HEAD` returned no
+CRITICAL/MAJOR. The C-shim `dual_source_blending` param sits in the identical
+5th position across tint_shim.h / .cpp / the Rust `extern "C"` decl (verified
+char-by-char — no wrong-bool UB); all 40+ `Program::parse` call sites updated to
+the new arity. Tint gate rejects/accepts `enable dual_source_blending;` on the
+device feature; validation checks both color+alpha and src+dst factors
+(tier-independent) + single-target rule; Vulkan `dualSrcBlend` enabled
+when-supported; e2e C0·C1 distinguishes from Src-misread (C0·C0). Two MINORs, no
+action (rustfmt diff noise; single-target keys off Src1 factors per stated scope).
 
 ## Key facts (verified 2026-07-01)
 
