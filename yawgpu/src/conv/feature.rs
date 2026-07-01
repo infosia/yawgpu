@@ -22,6 +22,7 @@ pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
         native::WGPUFeatureName_TimestampQuery => core::Feature::TimestampQuery,
         native::WGPUFeatureName_ShaderF16 => core::Feature::ShaderF16,
         native::WGPUFeatureName_Subgroups => core::Feature::Subgroups,
+        native::WGPUFeatureName_DepthClipControl => core::Feature::DepthClipControl,
         native::WGPUFeatureName_TextureComponentSwizzle => core::Feature::TextureComponentSwizzle,
         native::WGPUFeatureName_TextureFormatsTier1 => core::Feature::TextureFormatsTier1,
         native::WGPUFeatureName_TextureFormatsTier2 => core::Feature::TextureFormatsTier2,
@@ -53,6 +54,7 @@ pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
         core::Feature::TimestampQuery => native::WGPUFeatureName_TimestampQuery,
         core::Feature::ShaderF16 => native::WGPUFeatureName_ShaderF16,
         core::Feature::Subgroups => native::WGPUFeatureName_Subgroups,
+        core::Feature::DepthClipControl => native::WGPUFeatureName_DepthClipControl,
         core::Feature::TextureComponentSwizzle => native::WGPUFeatureName_TextureComponentSwizzle,
         core::Feature::TextureFormatsTier1 => native::WGPUFeatureName_TextureFormatsTier1,
         core::Feature::TextureFormatsTier2 => native::WGPUFeatureName_TextureFormatsTier2,
@@ -77,6 +79,18 @@ mod tests {
         assert_eq!(
             map_feature_to_native(core::Feature::Subgroups),
             native::WGPUFeatureName_Subgroups
+        );
+    }
+
+    #[test]
+    fn maps_depth_clip_control_feature_round_trip() {
+        assert_eq!(
+            map_feature(native::WGPUFeatureName_DepthClipControl),
+            core::Feature::DepthClipControl
+        );
+        assert_eq!(
+            map_feature_to_native(core::Feature::DepthClipControl),
+            native::WGPUFeatureName_DepthClipControl
         );
     }
 }

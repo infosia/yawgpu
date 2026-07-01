@@ -31,9 +31,9 @@ use crate::{
     HalCopy, HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalDraw, HalError,
     HalExtent3d, HalFilterMode, HalFrontFace, HalIndexFormat, HalMipmapFilterMode,
     HalMslBufferSizeBinding, HalPresentMode, HalPrimitiveTopology, HalQueryKind, HalQuerySet,
-    HalRenderLoadOp, HalRenderPass, HalRenderPipeline, HalRenderPipelineDescriptor,
-    HalResolveQuerySet, HalSampler, HalSamplerDescriptor, HalShaderSource, HalStencilFaceState,
-    HalStencilOperation, HalSurfaceConfiguration, HalTexture, HalTextureClear, HalTextureCopy,
+    HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor, HalResolveQuerySet, HalSampler,
+    HalSamplerDescriptor, HalShaderSource, HalStencilFaceState, HalStencilOperation,
+    HalSurfaceConfiguration, HalTexture, HalTextureClear, HalTextureCopy,
     HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
 #[cfg(feature = "tiled")]
@@ -157,6 +157,12 @@ impl MetalAdapter {
     pub(super) fn supports_subgroups(&self) -> bool {
         self.device.supportsFamily(MTLGPUFamily::Apple6)
             || self.device.supportsFamily(MTLGPUFamily::Metal3)
+    }
+
+    /// Returns true when depth clip control is supported.
+    #[must_use]
+    pub(super) fn supports_depth_clip_control(&self) -> bool {
+        true
     }
 
     /// Returns the supported subgroup size range.

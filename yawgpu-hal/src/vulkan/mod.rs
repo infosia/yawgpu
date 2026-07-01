@@ -363,6 +363,18 @@ impl VulkanAdapter {
         self.subgroup_size_range().is_some()
     }
 
+    /// Returns true when depth clip control is supported by this physical device.
+    #[must_use]
+    pub(super) fn supports_depth_clip_control(&self) -> bool {
+        let depth_clamp = unsafe {
+            self.instance
+                .instance
+                .get_physical_device_features(self.physical_device)
+                .depth_clamp
+        } == vk::TRUE;
+        depth_clamp && self.has_device_extension(vk::EXT_DEPTH_CLIP_ENABLE_NAME)
+    }
+
     /// Returns the supported subgroup size range for this physical device.
     #[must_use]
     pub(super) fn subgroup_size_range(&self) -> Option<(u32, u32)> {
