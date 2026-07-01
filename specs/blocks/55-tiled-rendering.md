@@ -37,8 +37,15 @@
 > memory — the TBDR bandwidth payoff. Verified on the M2 (Metal) and MoltenVK. See
 > "Transient attachment" below for the (usage-bit) contract.
 >
-> **Deferred (the body below describes some of these as design):** SPIR-V **MSAA**
-> input attachment (Slice 4 — the Dawn fork's 2-arg `inputAttachmentLoad(ia, sample_index)` is ready);
+> **Per-sample MSAA input attachment (Vulkan) — DONE, real-GPU verified on native NVIDIA.**
+> A subpass pipeline whose input-attachment binding is declared `multisampled` reads a
+> multisampled source per-sample via the 2-arg `inputAttachmentLoad(ia, sample_index)`
+> over `@builtin(sample_index)`; yawgpu derives the module-wide MSAA SPIR-V option from
+> the pipeline layout and enables the Vulkan `sampleRateShading` feature. Metal MSAA
+> subpass input stays Dawn-deferred (`[[sample_id]]`); hardware subpass resolve is not
+> wired (the MSAA path resolves in shader). See `specs/tracking/tbdr-tint-rehome-plan.md` §9.
+>
+> **Deferred (the body below describes some of these as design):**
 > depth/stencil-aspect subpass inputs; programmable tile dispatch (removed); the
 > empty-bind-group ergonomics nicety (a client currently sets an empty bind group for an
 > input-attachment-only group). Some examples below still show the naga-era
