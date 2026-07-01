@@ -1,10 +1,12 @@
 # Block 92 — real hardware-queried adapter limits (Dawn/CTS parity)
 
 Status: **COMPLETE** (2026-07-02). All 3 slices done + Phase Review clean. Real
-Metal + MoltenVK hardware-queried limits. Final CTS on real Metal vs Dawn oracle:
-`capability_checks,limits` 9290/1795/0 (Dawn 9280/1805, yawgpu ≥ Dawn);
-`capability_checks,features` 2424/88/0 (byte-identical to Dawn). Owner:
-CTS-Dawn-parity. Commits 5dda1f6, 21a6860, d2803dc, fddb0da.
+Metal + MoltenVK + native-Vulkan hardware-queried limits. Final CTS on real Metal
+vs Dawn oracle: `capability_checks,limits` 9290/1795/0 (Dawn 9280/1805, yawgpu ≥
+Dawn); `capability_checks,features` 2424/88/0 (byte-identical to Dawn). Native
+Vulkan (RTX 5060 Ti, 2026-07-02): `limits` 9149/1936/0, `features` 2240/272/0 —
+fail=0, whole tree in one process. Owner: CTS-Dawn-parity. Commits 5dda1f6,
+21a6860, d2803dc, fddb0da.
 
 ## Motivation
 
@@ -137,7 +139,8 @@ Apply the `maxFragmentCombinedOutputResources` redistribution (`:796-825`).
    `--features vulkan`. *Claude then:* CTS `capability_checks,{limits,features}`
    on **MoltenVK**, triage, re-verify. (MoltenVK reports MoltenVK's own limits;
    verify against the Vulkan `build-dawn` isn't apples-to-apples — compare yawgpu
-   Vulkan skip-set shrink, and native-Vulkan is deferred.)
+   Vulkan skip-set shrink.) **Native-Vulkan verification DONE 2026-07-02**
+   (RTX 5060 Ti): `limits` 9149/1936/0, `features` 2240/272/0 — fail=0.
 
 3. **Docs + Phase Review.** README limits note; Block 92 finalize; no-context
    Phase Review; re-diff yawgpu-Metal vs Dawn-Metal skip sets to confirm the

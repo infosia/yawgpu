@@ -10,7 +10,7 @@ CTS gap vs the Dawn oracle on this M2.
 | Slice | Scope | State |
 |---|---|---|
 | 1 | HAL seam (`HalLimits` + `HalAdapter::limits()`) + Noop/GLES DEFAULT + full Metal query + core map/clamp + unit tests | **DONE** (2026-07-01) — Metal CTS-verified |
-| 2 | Vulkan query | **DONE** (2026-07-01) — MoltenVK CTS-verified |
+| 2 | Vulkan query | **DONE** (2026-07-01) — MoltenVK CTS-verified; **native Vulkan CTS-verified 2026-07-02** (RTX 5060 Ti, whole tree 9149/0) |
 | 3 | Phase Review + re-diff vs Dawn | **DONE** (2026-07-02) — review clean, capability_checks at Dawn parity |
 
 ## Slice 1 result (real Metal, M2, webgpu-native-cts)
@@ -45,9 +45,27 @@ CTS-found fix: dynamic-buffer ceilings were 16; MoltenVK's large
 `maxDescriptorSet*Dynamic` made us advertise 16 > maxUniformBuffersPerShaderStage
 (12) → 7 `maxDynamicUniformBuffersPerPipelineLayout` fails; lowered to Dawn's
 advertised tier maxima (uniform 10, storage 8, `Limits.cpp:74-75`) → 80/0.
-**Caveat:** running the WHOLE limits tree in one MoltenVK process aborts
-(resource exhaustion, no output) — a MoltenVK harness limit, not a yawgpu defect;
-each limit passes when run separately. Native-Vulkan verification deferred to HW.
+**Caveat (MoltenVK only):** running the WHOLE limits tree in one MoltenVK process
+aborts (resource exhaustion, no output) — a MoltenVK harness limit, not a yawgpu
+defect; each limit passes when run separately. Confirmed a harness artifact by the
+native-Vulkan run below, which completes all 9149 cases in a single process.
+
+## Slice 2 result (native Vulkan, RTX 5060 Ti, webgpu-native-cts, 2026-07-02)
+
+The deferred native-Vulkan verification, run from HEAD `3a30443` (Block 92 COMPLETE)
+with fresh `yawgpu.dll`/`tint_shim.dll`:
+
+| tree | native Vulkan | ref: Metal M2 |
+|---|---|---|
+| `capability_checks,limits`   | pass 9149 / skip 1936 / fail 0 | 9290 / 1795 / 0 |
+| `capability_checks,features` | pass 2240 / skip  272 / fail 0 | 2424 /   88 / 0 |
+
+**fail=0 / crash=0 / xpass=0** on both trees — the `VkPhysicalDeviceLimits` mapping
++ the Phase-Review in-stage-storage pin (`fddb0da`) are clean on real Vulkan. The
+whole `limits` tree completes in one process (no MoltenVK abort). The higher skip
+count vs Metal is hardware (limits equal to DEFAULT on this GPU, and Vulkan-unsupported
+features, land in CTS `==default` / unsupported skips) — no yawgpu-skips-but-Dawn-runs
+gap (zero fail/xpass).
 
 ## Phase Review (2026-07-02) — clean
 
@@ -112,3 +130,7 @@ yawgpu skips ~3040 at-limit/betterValue cases Dawn runs, because
   oracle, prebuilt `libwebgpu_dawn.dylib` at
   `~/Documents/workspace/C/dawn/out/Release`); root-caused to
   default-limit reporting. Wrote Block 92. Slice 1 handoff dispatched.
+- 2026-07-02: ran the deferred native-Vulkan CTS verification (RTX 5060 Ti, fresh
+  DLL from HEAD `3a30443`): `capability_checks,limits` 9149/1936/0 (whole tree, one
+  process) and `capability_checks,features` 2240/272/0 — both fail=0. See "Slice 2
+  result (native Vulkan …)".
