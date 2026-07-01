@@ -2195,3 +2195,33 @@ naga fork is worse than under-validation":
   `cargo test --workspace` green incl. the new
   `fragment_pixel_center_polyfill_decision_and_free_location` unit test. Companion write-up:
   webgpu-native-cts `docs/FINDINGS.md` F-085 (position sub-part split out).
+
+## Block 92 (native-Vulkan) — yawgpu Vulkan advertised `maxBufferSize = u64::MAX` on NVIDIA — RESOLVED
+
+- **Finding:** `api,operation,adapter,requestDevice` failed 3 cases on native Vulkan (NVIDIA
+  RTX 5060 Ti), all `maxBufferSize`: `limits,supported:limit="maxBufferSize"` (device reported
+  the default `268435456` while the required/advertised value was `18446744073709551615` =
+  `u64::MAX`) and `limit,better_than_supported:limit="maxBufferSize"` (2 subcases — cannot
+  request a value "better than" `u64::MAX`, so the expected rejection never fired). The **Dawn
+  oracle passes all 3 on the same NVIDIA GPU** (`build-dawn` `requestDevice:* pass=289 fail=0`),
+  so this was a real yawgpu divergence, not a driver/oracle issue. Surfaced during the Block 92
+  native-Vulkan verification while confirming F-142 on hardware (a distinct, sibling defect —
+  F-142 was over-strict relationship rejects; this is a bogus advertised value). Not mirrored in
+  webgpu-native-cts `docs/FINDINGS.md` (out of scope this pass).
+- **Root cause:** the Block 92 Vulkan limits mapping (`yawgpu-hal/src/vulkan/mod.rs`) computed
+  `maxBufferSize` from `VkPhysicalDeviceMaintenance3Properties.maxMemoryAllocationSize` alone,
+  passing it through verbatim unless `0`. NVIDIA reports `maxMemoryAllocationSize = u64::MAX`
+  (its "no limit" encoding), so the adapter advertised a non-finite buffer limit. Dawn instead
+  prefers `VkPhysicalDeviceMaintenance4Properties.maxBufferSize` (the real finite max), only
+  falling back to Maintenance3 (`PhysicalDeviceVk.cpp:888`).
+- **Fix (yawgpu `<this commit>`):** chain both `PhysicalDeviceMaintenance4Properties` and
+  `Maintenance3Properties` into the `get_physical_device_properties2` query and select via a pure
+  `select_max_buffer_size(m4, m3)` helper — prefer Maintenance4 `maxBufferSize`, else Maintenance3
+  `maxMemoryAllocationSize`, else 2 GiB (`ASSUMED_MAX_BUFFER_SIZE`). Mirrors Dawn. HAL-only; the
+  core `max(default 256 MiB)` floor is unchanged.
+- **Verification (native Vulkan, RTX 5060 Ti):** the 3 `maxBufferSize` cases **pass=5 fail=0**;
+  full `requestDevice:*` **289/596/0** (byte-matches the Dawn oracle count); `capability_checks,
+  limits,*` **9159/1926/0** — fail=0 with +10 pass (the now-finite `maxBufferSize` un-skips the
+  at-limit `createBuffer,at_over` cases, formerly 9149/1936). Noop `cargo test --workspace` green
+  incl. the new `vulkan_select_max_buffer_size_prefers_maintenance4_then_maintenance3_then_default`
+  unit test; `clippy -p yawgpu-hal --features vulkan -D warnings` clean.

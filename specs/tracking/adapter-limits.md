@@ -67,6 +67,19 @@ count vs Metal is hardware (limits equal to DEFAULT on this GPU, and Vulkan-unsu
 features, land in CTS `==default` / unsupported skips) — no yawgpu-skips-but-Dawn-runs
 gap (zero fail/xpass).
 
+### native-Vulkan `maxBufferSize` fix (found verifying F-142 on hardware)
+
+Confirming F-142 (`requestDevice` limit-relationship rejects) on native Vulkan
+surfaced a separate Block 92 defect: the Vulkan mapping read `maxBufferSize` from
+`Maintenance3.maxMemoryAllocationSize` only, which NVIDIA reports as `u64::MAX`, so
+the adapter advertised a non-finite buffer limit and `requestDevice` failed 3
+`maxBufferSize` cases (Dawn passes them). Fixed to prefer
+`Maintenance4.maxBufferSize` (finite), Dawn-parity `PhysicalDeviceVk.cpp:888`
+(`select_max_buffer_size` helper + inline unit test, HAL-only). Post-fix native
+Vulkan: `requestDevice:*` 289/596/0 (matches Dawn), `capability_checks,limits,*`
+9159/1926/0 (fail=0; +10 pass as the finite limit un-skips at-limit `createBuffer`
+cases). Full write-up: `cts-coverage.md` → "Block 92 (native-Vulkan) — … maxBufferSize".
+
 ## Phase Review (2026-07-02) — clean
 
 No-context review of the cumulative diff found 1 MAJOR + 3 MINOR. MAJOR (Vulkan
