@@ -447,7 +447,14 @@ mod tests {
                     instance,
                     native::WGPUWGSLLanguageFeatureName_SubgroupId,
                 ),
-                native::WGPUBool::from(false)
+                native::WGPUBool::from(true)
+            );
+            assert_eq!(
+                wgpuInstanceHasWGSLLanguageFeature(
+                    instance,
+                    native::WGPUWGSLLanguageFeatureName_SubgroupUniformity,
+                ),
+                native::WGPUBool::from(true)
             );
 
             wgpuSupportedWGSLLanguageFeaturesFreeMembers(features);

@@ -1778,24 +1778,20 @@ fn cs(@builtin(global_invocation_index) index: u32) {
     }
 
     #[test]
-    fn supported_wgsl_language_features_reject_subgroup_id() {
+    fn supported_wgsl_language_features_allow_subgroup_language_features() {
         if !yawgpu_tint::HAVE_TINT {
             return;
         }
 
-        let err = parse_and_validate_wgsl(
+        parse_and_validate_wgsl(
             r#"
 requires subgroup_id;
+requires subgroup_uniformity;
 
 @compute @workgroup_size(1)
 fn cs() {}
 "#,
         )
-        .expect_err("subgroup_id is intentionally not in yawgpu's supported WGSL set");
-
-        assert!(
-            err.contains("subgroup_id"),
-            "error should mention subgroup_id: {err}"
-        );
+        .expect("subgroup_id and subgroup_uniformity are in yawgpu's supported WGSL set");
     }
 }
