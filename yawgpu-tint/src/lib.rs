@@ -2830,6 +2830,48 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
     }
 
+    /// A vertex + fragment pair sharing one module where the fragment uses the
+    /// 2-arg `inputAttachmentLoad(ia, sample_index)`. `multisampled_input_attachment`
+    /// is a MODULE-WIDE option: Tint validates the whole module's overloads even
+    /// when generating the *vertex* entry point, so generating `"vs"` must be
+    /// given the same `true` flag (else it fails). This guards the yawgpu-core
+    /// invariant that both stages of a subpass pipeline receive the flag.
+    #[cfg(feature = "tiled")]
+    fn multisampled_input_attachment_vs_fs_wgsl() -> &'static str {
+        r#"
+enable chromium_internal_input_attachments;
+
+@group(0) @binding(0) @input_attachment_index(0) var ia: input_attachment<f32>;
+
+@vertex
+fn vs() -> @builtin(position) vec4<f32> {
+  return vec4<f32>(0.0);
+}
+
+@fragment
+fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
+  return inputAttachmentLoad(ia, s);
+}
+"#
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn multisampled_input_attachment_vertex_stage_requires_module_wide_flag() {
+        let program = Program::parse(multisampled_input_attachment_vs_fs_wgsl(), false, &[]).unwrap();
+        // Generating the vertex entry with the module-wide flag TRUE succeeds …
+        let vertex = program
+            .generate_spirv("vs", &Bindings::default(), &[], true, false, 0, true)
+            .unwrap();
+        assert_eq!(vertex.first().copied(), Some(0x0723_0203));
+        // … while FALSE fails, because the module contains a 2-arg load. This is
+        // why yawgpu-core must pass the flag to the vertex stage too, not just the
+        // fragment.
+        assert!(program
+            .generate_spirv("vs", &Bindings::default(), &[], true, false, 0, false)
+            .is_err());
+    }
+
     #[cfg(not(feature = "tiled"))]
     #[test]
     fn framebuffer_fetch_enable_requires_tiled_feature() {
