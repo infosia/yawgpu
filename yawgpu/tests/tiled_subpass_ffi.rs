@@ -2,7 +2,8 @@
 
 use yawgpu::{
     native, YaWGPUAttachmentLayout, YaWGPUInputAttachmentBindingLayout,
-    YaWGPUSubpassColorAttachment, YaWGPUSubpassLayout, YaWGPUSubpassPassLayoutDescriptor,
+    YaWGPUSubpassColorAttachment, YaWGPUSubpassDependency, YaWGPUSubpassDependencyType_ColorToInput,
+    YaWGPUSubpassInputAttachment, YaWGPUSubpassLayout, YaWGPUSubpassPassLayoutDescriptor,
     YaWGPUSubpassRenderPassDescriptor, YaWGPUSubpassRenderPipelineDescriptor,
     YaWGPUTiledCapabilities, YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT,
 };
@@ -165,6 +166,295 @@ fn input_attachment_bind_group_layout_entry_is_accepted_by_c_api() {
         assert!(!layout.is_null());
         yawgpu::wgpuBindGroupLayoutRelease(layout);
     });
+}
+
+/// End-to-end proof (Noop, no GPU) that a subpass render pipeline reading a
+/// **multisampled** (sampleCount 4) input attachment can be created with an
+/// explicit pipeline layout whose input-attachment entry is `multisampled: 1`.
+/// This exercises the relaxed shader↔layout compatibility (the Tint reflection
+/// always reports `multisampled: false` for `input_attachment<T>`) together with
+/// the MSAA flag derivation that lets the 2-arg `inputAttachmentLoad(g, s)`
+/// compile. Creation only — no pass execution / readback.
+#[test]
+fn noop_msaa_subpass_input_pipeline_creates_with_explicit_multisampled_layout() {
+    let test = ValidationTest::new();
+
+    test.expect_no_validation_error(|| unsafe {
+        let layout = create_two_subpass_msaa_input_layout(test.device());
+
+        // Subpass 0: trivial MSAA write to attachment [0].
+        let pipeline0 = create_msaa_write_pipeline(test.device(), layout);
+        assert!(!pipeline0.is_null());
+
+        // Subpass 1: explicit pipeline layout with an input-attachment entry at
+        // @group(0) @binding(0) declared `multisampled: 1`, and a fragment that
+        // reads the g-buffer per-sample via the 2-arg load.
+        let bgl = create_msaa_input_bind_group_layout(test.device());
+        let pipeline_layout = create_pipeline_layout(test.device(), bgl);
+        let pipeline1 =
+            create_msaa_input_read_pipeline(test.device(), layout, pipeline_layout);
+        assert!(!pipeline1.is_null());
+
+        yawgpu::wgpuRenderPipelineRelease(pipeline1);
+        yawgpu::wgpuPipelineLayoutRelease(pipeline_layout);
+        yawgpu::wgpuBindGroupLayoutRelease(bgl);
+        yawgpu::wgpuRenderPipelineRelease(pipeline0);
+        yawgpu::yawgpuSubpassPassLayoutRelease(layout);
+    });
+}
+
+unsafe fn create_two_subpass_msaa_input_layout(
+    device: native::WGPUDevice,
+) -> yawgpu::YaWGPUSubpassPassLayout {
+    let colors = [
+        YaWGPUAttachmentLayout {
+            format: native::WGPUTextureFormat_RGBA8Unorm,
+            sampleCount: 4,
+        },
+        YaWGPUAttachmentLayout {
+            format: native::WGPUTextureFormat_RGBA8Unorm,
+            sampleCount: 4,
+        },
+    ];
+    let subpass0_colors = [0u32];
+    let subpass1_colors = [1u32];
+    let input = YaWGPUSubpassInputAttachment {
+        group: 0,
+        binding: 0,
+        sourceSubpass: 0,
+        sourceAttachment: 0,
+    };
+    let subpasses = [
+        YaWGPUSubpassLayout {
+            colorAttachmentIndices: subpass0_colors.as_ptr(),
+            colorAttachmentIndexCount: subpass0_colors.len(),
+            usesDepthStencil: 0,
+            inputAttachments: std::ptr::null(),
+            inputAttachmentCount: 0,
+        },
+        YaWGPUSubpassLayout {
+            colorAttachmentIndices: subpass1_colors.as_ptr(),
+            colorAttachmentIndexCount: subpass1_colors.len(),
+            usesDepthStencil: 0,
+            inputAttachments: &input,
+            inputAttachmentCount: 1,
+        },
+    ];
+    let dependency = YaWGPUSubpassDependency {
+        srcSubpass: 0,
+        dstSubpass: 1,
+        dependencyType: YaWGPUSubpassDependencyType_ColorToInput,
+        byRegion: 1,
+    };
+    let descriptor = YaWGPUSubpassPassLayoutDescriptor {
+        nextInChain: std::ptr::null(),
+        label: empty_string_view(),
+        colorAttachments: colors.as_ptr(),
+        colorAttachmentCount: colors.len(),
+        depthStencilAttachment: std::ptr::null(),
+        subpasses: subpasses.as_ptr(),
+        subpassCount: subpasses.len(),
+        dependencies: &dependency,
+        dependencyCount: 1,
+    };
+    let layout = yawgpu::yawgpuDeviceCreateSubpassPassLayout(device, &descriptor);
+    assert!(!layout.is_null());
+    layout
+}
+
+unsafe fn create_msaa_input_bind_group_layout(
+    device: native::WGPUDevice,
+) -> native::WGPUBindGroupLayout {
+    let mut input = YaWGPUInputAttachmentBindingLayout {
+        chain: native::WGPUChainedStruct {
+            next: std::ptr::null_mut(),
+            sType: YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT,
+        },
+        sampleType: native::WGPUTextureSampleType_Float,
+        multisampled: 1,
+    };
+    let entry = native::WGPUBindGroupLayoutEntry {
+        nextInChain: (&mut input.chain) as *mut native::WGPUChainedStruct,
+        binding: 0,
+        visibility: native::WGPUShaderStage_Fragment,
+        buffer: native::WGPUBufferBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            type_: native::WGPUBufferBindingType_BindingNotUsed,
+            hasDynamicOffset: 0,
+            minBindingSize: 0,
+        },
+        sampler: native::WGPUSamplerBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            type_: native::WGPUSamplerBindingType_BindingNotUsed,
+        },
+        texture: native::WGPUTextureBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            sampleType: native::WGPUTextureSampleType_BindingNotUsed,
+            viewDimension: native::WGPUTextureViewDimension_Undefined,
+            multisampled: 0,
+        },
+        storageTexture: native::WGPUStorageTextureBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            access: native::WGPUStorageTextureAccess_BindingNotUsed,
+            format: native::WGPUTextureFormat_Undefined,
+            viewDimension: native::WGPUTextureViewDimension_Undefined,
+        },
+        bindingArraySize: 0,
+    };
+    let descriptor = native::WGPUBindGroupLayoutDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        entryCount: 1,
+        entries: &entry,
+    };
+    let bgl = yawgpu::wgpuDeviceCreateBindGroupLayout(device, &descriptor);
+    assert!(!bgl.is_null());
+    bgl
+}
+
+unsafe fn create_pipeline_layout(
+    device: native::WGPUDevice,
+    bgl: native::WGPUBindGroupLayout,
+) -> native::WGPUPipelineLayout {
+    let descriptor = native::WGPUPipelineLayoutDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        bindGroupLayoutCount: 1,
+        bindGroupLayouts: &bgl,
+        immediateSize: 0,
+    };
+    let layout = yawgpu::wgpuDeviceCreatePipelineLayout(device, &descriptor);
+    assert!(!layout.is_null());
+    layout
+}
+
+unsafe fn create_msaa_write_pipeline(
+    device: native::WGPUDevice,
+    layout: yawgpu::YaWGPUSubpassPassLayout,
+) -> native::WGPURenderPipeline {
+    let shader = create_wgsl_module(
+        device,
+        "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }
+         @fragment fn fs() -> @location(0) vec4f { return vec4f(0.5, 0.0, 0.0, 1.0); }",
+    );
+    let color_target = native::WGPUColorTargetState {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        blend: std::ptr::null(),
+        writeMask: native::WGPUColorWriteMask_All,
+    };
+    let fragment = native::WGPUFragmentState {
+        nextInChain: std::ptr::null_mut(),
+        module: shader,
+        entryPoint: string_view("fs"),
+        constantCount: 0,
+        constants: std::ptr::null(),
+        targetCount: 1,
+        targets: &color_target,
+    };
+    let base = native::WGPURenderPipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout: std::ptr::null(),
+        vertex: native::WGPUVertexState {
+            nextInChain: std::ptr::null_mut(),
+            module: shader,
+            entryPoint: string_view("vs"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            bufferCount: 0,
+            buffers: std::ptr::null(),
+        },
+        primitive: default_primitive(),
+        depthStencil: std::ptr::null(),
+        multisample: multisample_state_4(),
+        fragment: &fragment,
+    };
+    let descriptor = YaWGPUSubpassRenderPipelineDescriptor {
+        nextInChain: std::ptr::null(),
+        base,
+        passLayout: layout,
+        subpassIndex: 0,
+    };
+    let pipeline = yawgpu::yawgpuDeviceCreateSubpassRenderPipeline(device, &descriptor);
+    yawgpu::wgpuShaderModuleRelease(shader);
+    pipeline
+}
+
+unsafe fn create_msaa_input_read_pipeline(
+    device: native::WGPUDevice,
+    layout: yawgpu::YaWGPUSubpassPassLayout,
+    pipeline_layout: native::WGPUPipelineLayout,
+) -> native::WGPURenderPipeline {
+    let shader = create_wgsl_module(
+        device,
+        "enable chromium_internal_input_attachments;
+         @group(0) @binding(0) @input_attachment_index(0) var g: input_attachment<f32>;
+         @vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }
+         @fragment fn fs(@builtin(sample_index) s: u32) -> @location(1) vec4f {
+             return inputAttachmentLoad(g, s);
+         }",
+    );
+    // Subpass 1 writes @location(1); slot 0 is unused by this pipeline.
+    let targets = [
+        native::WGPUColorTargetState {
+            nextInChain: std::ptr::null_mut(),
+            format: native::WGPUTextureFormat_Undefined,
+            blend: std::ptr::null(),
+            writeMask: native::WGPUColorWriteMask_None,
+        },
+        native::WGPUColorTargetState {
+            nextInChain: std::ptr::null_mut(),
+            format: native::WGPUTextureFormat_RGBA8Unorm,
+            blend: std::ptr::null(),
+            writeMask: native::WGPUColorWriteMask_All,
+        },
+    ];
+    let fragment = native::WGPUFragmentState {
+        nextInChain: std::ptr::null_mut(),
+        module: shader,
+        entryPoint: string_view("fs"),
+        constantCount: 0,
+        constants: std::ptr::null(),
+        targetCount: targets.len(),
+        targets: targets.as_ptr(),
+    };
+    let base = native::WGPURenderPipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout: pipeline_layout,
+        vertex: native::WGPUVertexState {
+            nextInChain: std::ptr::null_mut(),
+            module: shader,
+            entryPoint: string_view("vs"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            bufferCount: 0,
+            buffers: std::ptr::null(),
+        },
+        primitive: default_primitive(),
+        depthStencil: std::ptr::null(),
+        multisample: multisample_state_4(),
+        fragment: &fragment,
+    };
+    let descriptor = YaWGPUSubpassRenderPipelineDescriptor {
+        nextInChain: std::ptr::null(),
+        base,
+        passLayout: layout,
+        subpassIndex: 1,
+    };
+    let pipeline = yawgpu::yawgpuDeviceCreateSubpassRenderPipeline(device, &descriptor);
+    yawgpu::wgpuShaderModuleRelease(shader);
+    pipeline
+}
+
+fn multisample_state_4() -> native::WGPUMultisampleState {
+    native::WGPUMultisampleState {
+        nextInChain: std::ptr::null_mut(),
+        count: 4,
+        mask: 0xFFFF_FFFF,
+        alphaToCoverageEnabled: 0,
+    }
 }
 
 #[test]

@@ -1812,17 +1812,22 @@ pub(crate) fn shader_binding_layout_kinds_compatible(
         (BindingLayoutKind::ExternalTexture, BindingLayoutKind::ExternalTexture) => true,
         #[cfg(feature = "tiled")]
         (
-            BindingLayoutKind::InputAttachment {
-                sample_type,
-                multisampled,
-            },
+            BindingLayoutKind::InputAttachment { sample_type, .. },
             BindingLayoutKind::InputAttachment {
                 sample_type: actual_sample_type,
-                multisampled: actual_multisampled,
+                ..
             },
         ) => {
+            // Compare only `sample_type`. The shader-reflected `multisampled`
+            // for an input attachment is not meaningful under Tint (always
+            // `false` — WGSL/`input_attachment<T>` cannot carry multisampled-ness;
+            // it is a module-wide SPIR-V generate option). The explicit pipeline
+            // layout is therefore the sole authority for input-attachment
+            // multisampled-ness. Sample-count consistency against the pass layout
+            // is still enforced separately by rule C-1 in
+            // `validate_subpass_pipeline_multisampling`, so relaxing the
+            // shader↔layout kind check loses no real validation.
             sample_types_compatible(actual_sample_type, sample_type)
-                && multisampled == actual_multisampled
         }
         _ => false,
     }
@@ -2231,6 +2236,41 @@ mod tests {
         assert!(!sampler_types_compatible(
             SamplerBindingType::Filtering,
             SamplerBindingType::Comparison
+        ));
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn input_attachment_compat_ignores_multisampled_and_checks_sample_type() {
+        // The shader-reflected `multisampled` for an input attachment is always
+        // `false` under Tint, so the compat check must ignore `multisampled` and
+        // compare only `sample_type`. C-1 owns the sample-count consistency.
+        let ia = |sample_type, multisampled| BindingLayoutKind::InputAttachment {
+            sample_type,
+            multisampled,
+        };
+
+        // Reflection (Float, false) vs explicit layout (Float, true) — compatible.
+        assert!(shader_binding_layout_kinds_compatible(
+            ia(TextureSampleType::Float, false),
+            ia(TextureSampleType::Float, true),
+        ));
+        // And the reverse.
+        assert!(shader_binding_layout_kinds_compatible(
+            ia(TextureSampleType::Float, true),
+            ia(TextureSampleType::Float, false),
+        ));
+        // Matching sample types are compatible regardless of the two flags.
+        for (a, b) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert!(shader_binding_layout_kinds_compatible(
+                ia(TextureSampleType::Uint, a),
+                ia(TextureSampleType::Uint, b),
+            ));
+        }
+        // Incompatible only on sample type (shader Float vs layout Sint).
+        assert!(!shader_binding_layout_kinds_compatible(
+            ia(TextureSampleType::Float, false),
+            ia(TextureSampleType::Sint, true),
         ));
     }
 
