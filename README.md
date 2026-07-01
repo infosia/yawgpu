@@ -250,9 +250,15 @@ unchanged on both backends.
 
 `examples/tiled_deferred` records a two-subpass pass (G-buffer → lighting) that
 reads two input attachments (albedo + normal) from tile memory; build it with
-`-DYAWGPU_TILED=ON` (see [Examples](#examples)). Persistent attachments only for
-now; transient / memoryless attachments and MSAA input attachments are not yet
-implemented.
+`-DYAWGPU_TILED=ON` (see [Examples](#examples)). Attachments carrying the
+`TransientAttachment` usage bit are **memoryless / on-tile** — Metal
+`Memoryless`, Vulkan `LAZILY_ALLOCATED` — with no DRAM backing (their `storeOp`
+must be `Discard`); the deferred G-buffer uses this to keep the intermediate
+attachments entirely in tile memory. `examples/tiled_msaa` adds **per-sample
+MSAA subpass input** (Vulkan-only): a three-subpass pass that reads a 4× MSAA
+attachment per sample via `inputAttachmentLoad(scene, @builtin(sample_index))`
+and does a custom in-shader resolve, with the MSAA intermediates kept
+memoryless.
 
 ## Using it from C
 
@@ -385,7 +391,8 @@ link against `libyawgpu` and exercise the standard `webgpu.h` API:
 | `triangle` | A classic windowed RGB-gradient triangle (vertex-index shader) | core |
 | `hello_triangle` | The same RGB-gradient triangle fed from an interleaved (position + color) vertex buffer | core |
 | `triangle_passthrough` | The same triangle fed **native bytecode** (SPIR-V / MSL) via the opt-in `shader-passthrough` feature | `-DYAWGPU_SHADER_PASSTHROUGH=ON` |
-| `tiled_deferred` | Two-subpass deferred shading — a G-buffer (albedo + normal) read back through **input attachments** from tile memory ([`tiled` vendor extension](#tiled-rendering-tbdr--multi-subpass--tiled)); windowed, or `--verify` for an offscreen PNG | `-DYAWGPU_TILED=ON` (Metal / Vulkan) |
+| `tiled_deferred` | Two-subpass deferred shading — a G-buffer (albedo + normal) read back through **input attachments** from tile memory, with the G-buffer kept **memoryless** (`TransientAttachment`) ([`tiled` vendor extension](#tiled-rendering-tbdr--multi-subpass--tiled)); windowed, or `--verify` for an offscreen PNG | `-DYAWGPU_TILED=ON` (Metal / Vulkan) |
+| `tiled_msaa` | **Per-sample MSAA subpass input** — a three-subpass pass reading a 4× MSAA attachment per sample (`inputAttachmentLoad(scene, @builtin(sample_index))`) for a custom in-shader resolve, MSAA intermediates memoryless; windowed, or `--verify` for an offscreen PNG | `-DYAWGPU_TILED=ON` (Vulkan-only) |
 
 Pick a backend at runtime with `YAWGPU_BACKEND`:
 
