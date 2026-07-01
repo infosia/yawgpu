@@ -391,7 +391,7 @@ impl VulkanAdapter {
             api_version,
             self.has_device_extension(vk::EXT_SUBGROUP_SIZE_CONTROL_NAME),
         );
-        if size_control_available
+        let range = if size_control_available
             && size_control.min_subgroup_size != 0
             && size_control.max_subgroup_size != 0
         {
@@ -403,7 +403,8 @@ impl VulkanAdapter {
             Some((subgroup.subgroup_size, subgroup.subgroup_size))
         } else {
             None
-        }
+        }?;
+        validated_subgroup_size_range(range.0, range.1)
     }
 
     /// Creates a device (and its default queue) on this adapter.
@@ -709,12 +710,21 @@ fn subgroups_supported(
     supported_stages: vk::ShaderStageFlags,
 ) -> bool {
     let required_operations = vk::SubgroupFeatureFlags::BASIC
-        | vk::SubgroupFeatureFlags::VOTE
-        | vk::SubgroupFeatureFlags::ARITHMETIC
         | vk::SubgroupFeatureFlags::BALLOT
-        | vk::SubgroupFeatureFlags::SHUFFLE;
-    supported_operations.contains(required_operations)
-        && supported_stages.contains(vk::ShaderStageFlags::COMPUTE)
+        | vk::SubgroupFeatureFlags::SHUFFLE
+        | vk::SubgroupFeatureFlags::SHUFFLE_RELATIVE
+        | vk::SubgroupFeatureFlags::ARITHMETIC
+        | vk::SubgroupFeatureFlags::QUAD;
+    let required_stages = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT;
+    // Deviation from Dawn: yawgpu does not require subgroup size control until it creates varying-size subgroup pipelines.
+    supported_operations.contains(required_operations) && supported_stages.contains(required_stages)
+}
+
+fn validated_subgroup_size_range(min: u32, max: u32) -> Option<(u32, u32)> {
+    if min < 4 || max > 128 {
+        return None;
+    }
+    Some((min, max))
 }
 
 fn vulkan_memory_model_available(api_version: u32, extension_present: bool) -> bool {
@@ -1180,27 +1190,35 @@ mod tests {
     }
 
     #[test]
-    fn vulkan_subgroups_require_webgpu_operations_and_compute_stage() {
+    fn vulkan_subgroups_require_webgpu_operations_and_compute_fragment_stages() {
         let required_operations = vk::SubgroupFeatureFlags::BASIC
-            | vk::SubgroupFeatureFlags::VOTE
-            | vk::SubgroupFeatureFlags::ARITHMETIC
             | vk::SubgroupFeatureFlags::BALLOT
-            | vk::SubgroupFeatureFlags::SHUFFLE;
-        assert!(subgroups_supported(
-            required_operations,
-            vk::ShaderStageFlags::COMPUTE
-        ));
-        assert!(subgroups_supported(
-            required_operations | vk::SubgroupFeatureFlags::QUAD,
-            vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT
-        ));
+            | vk::SubgroupFeatureFlags::SHUFFLE
+            | vk::SubgroupFeatureFlags::SHUFFLE_RELATIVE
+            | vk::SubgroupFeatureFlags::ARITHMETIC
+            | vk::SubgroupFeatureFlags::QUAD;
+        let required_stages = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT;
+
+        assert!(subgroups_supported(required_operations, required_stages));
         assert!(!subgroups_supported(
             required_operations & !vk::SubgroupFeatureFlags::SHUFFLE,
-            vk::ShaderStageFlags::COMPUTE
+            required_stages
+        ));
+        assert!(!subgroups_supported(
+            required_operations & !vk::SubgroupFeatureFlags::SHUFFLE_RELATIVE,
+            required_stages
+        ));
+        assert!(!subgroups_supported(
+            required_operations & !vk::SubgroupFeatureFlags::QUAD,
+            required_stages
         ));
         assert!(!subgroups_supported(
             required_operations,
-            vk::ShaderStageFlags::FRAGMENT
+            required_stages & !vk::ShaderStageFlags::COMPUTE
+        ));
+        assert!(!subgroups_supported(
+            required_operations,
+            required_stages & !vk::ShaderStageFlags::FRAGMENT
         ));
     }
 
@@ -1216,6 +1234,13 @@ mod tests {
         assert!(subgroup_size_control_available(vk::API_VERSION_1_3, false));
         assert!(subgroup_size_control_available(vk::API_VERSION_1_1, true));
         assert!(!subgroup_size_control_available(vk::API_VERSION_1_2, false));
+    }
+
+    #[test]
+    fn vulkan_subgroup_size_range_rejects_values_outside_webgpu_bounds() {
+        assert_eq!(validated_subgroup_size_range(4, 64), Some((4, 64)));
+        assert_eq!(validated_subgroup_size_range(1, 64), None);
+        assert_eq!(validated_subgroup_size_range(4, 256), None);
     }
 
     /// Device creation enables only the `VK_KHR_16bit_storage` sub-features

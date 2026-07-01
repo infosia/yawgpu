@@ -11,7 +11,7 @@ Metal + Vulkan backends.
 | 1 | Feature plumbing + validation gate (Noop + HAL caps) | **DONE** (2026-07-01) |
 | 2 | Real-GPU execution e2e (Metal + Vulkan) | **DONE** (2026-07-01) |
 | 3 | WGSL language-feature reporting + subgroup uniformity | **DONE** (2026-07-01) |
-| 4 | Docs + example + Phase Review | TODO |
+| 4 | Docs + Phase Review | **DONE** (2026-07-01) |
 
 ## Key facts (verified 2026-07-01)
 
@@ -90,6 +90,25 @@ feature` 6/8 mapping (Slice 1) means both are also passed to Tint's
 the CTS oracle) → parity by construction. The `enable subgroups;` device-feature
 gate is unchanged. Unit tests flipped from "absent/rejected" to
 "present/accepted" in wgsl_language_features.rs, shader_tint.rs, ffi/instance.rs.
+
+## Slice 4 — landed + Phase Review
+
+README `Shaders` section documents the feature; Block 62 finalized. No dedicated
+`examples/` demo (matches shader-f16, which is e2e-verified only). The mandatory
+no-context Phase Review of `c64d033..HEAD` found:
+- **MAJOR (resolved)** — Vulkan `subgroups_supported` dropped `QUAD` + `FRAGMENT`
+  + `SHUFFLE_RELATIVE`, over-advertising vs Block 62 / README. Fixed to match
+  Dawn's `hasBaseSubgroupSupport` (COMPUTE|FRAGMENT stages; BASIC|BALLOT|SHUFFLE|
+  SHUFFLE_RELATIVE|ARITHMETIC|QUAD ops) + `[4,128]` size guard. **MoltenVK e2e
+  re-verified green (3/3)** after tightening — Apple/MoltenVK reports the full
+  set. Intentional deviation: size-control extension not required for
+  advertisement (documented).
+- **MINOR (documented)** — Metal size range hardcoded `(32,32)` (Apple M2 = 32;
+  non-Apple Metal refinement deferred). Noted in Block 62.
+- All other sections clean (gate tier-independence, FFI param-order threading,
+  Slice-3 no-gate-bypass, e2e non-vacuous, unit-test coverage).
+
+Phase is **COMPLETE** — no open CRITICAL/MAJOR.
 
 ## Notes / open questions
 

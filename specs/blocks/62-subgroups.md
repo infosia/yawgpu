@@ -66,12 +66,26 @@ backend:
   full subgroup op set (ballot/broadcast/shuffle/reduce/quad). Size range: Apple
   GPUs have a fixed SIMD width of 32 (`threadExecutionWidth`), so
   min == max == 32; on Mac2 discrete GPUs read `threadExecutionWidth`.
+  **Known simplification (Phase-Review MINOR):** the implementation currently
+  reports a fixed `(32, 32)` for every supported Metal device rather than reading
+  `threadExecutionWidth` — that width is a compute-pipeline-state property, not a
+  cheap `MTLDevice` query, and the verified hardware (Apple M2) is 32. An AMD Mac
+  (SIMD width 64) would under-report; refine when a non-Apple Metal GPU is in
+  scope.
 - **Vulkan** — supported when `VkPhysicalDeviceSubgroupProperties` reports the
   required operation groups (`BASIC | VOTE | ARITHMETIC | BALLOT | SHUFFLE |
   QUAD`) in `supportedOperations`, and both `COMPUTE` and `FRAGMENT` in
   `supportedStages`. Size range: `minSubgroupSize`/`maxSubgroupSize` from
   `VkPhysicalDeviceSubgroupSizeControlProperties` when available (Vulkan 1.3 /
-  `VK_EXT_subgroup_size_control`), else `subgroupSize` for both.
+  `VK_EXT_subgroup_size_control`), else `subgroupSize` for both, and rejected
+  (unsupported) if it falls outside WebGPU's `[4, 128]` bounds (Dawn's
+  `allowSubgroupSizeRanges`). The advertisement query matches Dawn's
+  `hasBaseSubgroupSupport`: `COMPUTE | FRAGMENT` stages and `BASIC | BALLOT |
+  SHUFFLE | SHUFFLE_RELATIVE | ARITHMETIC | QUAD` operations. **Deviation from
+  Dawn:** yawgpu does not additionally require `VK_EXT_subgroup_size_control`
+  for advertisement, because it does not yet create varying-subgroup-size
+  pipelines (`ALLOW_VARYING_SUBGROUP_SIZE`); the op/stage set is the
+  spec-meaningful requirement.
 - **Noop** — reports **supported**, size range 4..=4 (nominal). This keeps the
   accept-path validation unit-testable with no GPU, mirroring `shader-f16`'s
   Noop=`true`. Noop never executes, so a nominal width is harmless.
