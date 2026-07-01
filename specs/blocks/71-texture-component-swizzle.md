@@ -1,6 +1,8 @@
 # Block 71 — `texture-component-swizzle` optional feature
 
-Status: **IN PROGRESS** (Slice 1). Owner: Dawn-parity feature backfill.
+Status: **Slices 1–2 DONE, CTS-verified** on Metal (validation 8/0 + operation
+529/0, after 2 CTS-found fixes: depth R001 base + use-site gate). Slice 3 (docs +
+Phase Review) in progress. Owner: Dawn-parity feature backfill.
 **Last of the WebGPU standard optional-feature backfill; the only one that is a
 texture-view feature (real HAL view work), not a shader/pipeline feature.**
 
