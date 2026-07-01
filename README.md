@@ -488,6 +488,16 @@ when the device reports the required subgroup operations in the compute stage
 backend. The `subgroup_id` and `subgroup_uniformity` WGSL language features are
 reported by `wgpuInstanceGetWGSLLanguageFeatures`, matching Dawn.
 
+Beyond the shader-authoring features above, yawgpu also supports the standard
+**`depth-clip-control`** optional feature (a rasterization-stage flag, not a
+shader feature): request `WGPUFeatureName_DepthClipControl`, then set
+`primitive.unclippedDepth = true` on a render pipeline to disable near/far depth
+clipping (fragments outside the `[0, 1]` NDC depth range are kept and clamped
+instead of the primitive being clipped). It maps to Metal `MTLDepthClipMode.clamp`
+and Vulkan core `depthClampEnable`; without the feature requested, `unclippedDepth`
+is rejected. It is advertised on Metal and on Vulkan devices that report
+`depthClamp` (matching Dawn); it is not available on the Tier-2 GLES backend.
+
 ### Native shader passthrough (vendor, opt-in, unsafe)
 
 For engines that ship **precompiled native shaders**, the opt-in
