@@ -25,6 +25,7 @@ use crate::{
 };
 
 const BACKEND: &str = "vulkan";
+const ASSUMED_MAX_BUFFER_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 /// Minimum Vulkan API version yawgpu requests at vkCreateInstance.
 /// Documented in specs/blocks/60-real-backends.md § Minimum Vulkan version.
 const YAWGPU_VULKAN_API_VERSION: u32 = vk::API_VERSION_1_1;
@@ -300,7 +301,7 @@ impl VulkanAdapter {
                 .get_physical_device_properties(self.physical_device)
         };
         let vk = properties.limits;
-        let max_buffer_size = self.max_memory_allocation_size();
+        let max_buffer_size = self.max_buffer_size();
 
         // Ported from Dawn PhysicalDeviceVk.cpp:744-918.
         // Deferred: NVIDIA's 2GB-4 storage buffer cap and Dawn's
@@ -368,19 +369,21 @@ impl VulkanAdapter {
         }
     }
 
-    fn max_memory_allocation_size(&self) -> u64 {
+    fn max_buffer_size(&self) -> u64 {
+        let mut maintenance4 = vk::PhysicalDeviceMaintenance4Properties::default();
         let mut maintenance3 = vk::PhysicalDeviceMaintenance3Properties::default();
-        let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut maintenance3);
+        let mut properties2 = vk::PhysicalDeviceProperties2::default()
+            .push_next(&mut maintenance4)
+            .push_next(&mut maintenance3);
         unsafe {
             self.instance
                 .instance
                 .get_physical_device_properties2(self.physical_device, &mut properties2);
         }
-        if maintenance3.max_memory_allocation_size == 0 {
-            2 * 1024 * 1024 * 1024
-        } else {
-            maintenance3.max_memory_allocation_size
-        }
+        select_max_buffer_size(
+            maintenance4.max_buffer_size,
+            maintenance3.max_memory_allocation_size,
+        )
     }
 
     /// Returns true when BC texture compression is supported by this physical device.
@@ -920,6 +923,22 @@ fn validated_subgroup_size_range(min: u32, max: u32) -> Option<(u32, u32)> {
         return None;
     }
     Some((min, max))
+}
+
+/// Selects the Vulkan-backed WebGPU `maxBufferSize`.
+///
+/// Dawn prefers `VkPhysicalDeviceMaintenance4Properties::maxBufferSize`
+/// (`PhysicalDeviceVk.cpp:888`) because NVIDIA can report the Maintenance3
+/// `maxMemoryAllocationSize` as `u64::MAX`, which is not a usable finite
+/// WebGPU buffer limit.
+fn select_max_buffer_size(maintenance4: u64, maintenance3: u64) -> u64 {
+    if maintenance4 != 0 {
+        maintenance4
+    } else if maintenance3 != 0 {
+        maintenance3
+    } else {
+        ASSUMED_MAX_BUFFER_SIZE
+    }
 }
 
 fn vulkan_memory_model_available(api_version: u32, extension_present: bool) -> bool {
@@ -1496,6 +1515,16 @@ mod tests {
         assert!(subgroup_size_control_available(vk::API_VERSION_1_3, false));
         assert!(subgroup_size_control_available(vk::API_VERSION_1_1, true));
         assert!(!subgroup_size_control_available(vk::API_VERSION_1_2, false));
+    }
+
+    #[test]
+    fn vulkan_select_max_buffer_size_prefers_maintenance4_then_maintenance3_then_default() {
+        let finite_m4 = 8 * 1024 * 1024 * 1024;
+        let finite_m3 = 4 * 1024 * 1024 * 1024;
+
+        assert_eq!(select_max_buffer_size(finite_m4, u64::MAX), finite_m4);
+        assert_eq!(select_max_buffer_size(0, finite_m3), finite_m3);
+        assert_eq!(select_max_buffer_size(0, 0), ASSUMED_MAX_BUFFER_SIZE);
     }
 
     #[test]
