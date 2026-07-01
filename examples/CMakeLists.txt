@@ -194,13 +194,15 @@ if(YAWGPU_WINDOWED_EXAMPLES)
     if(YAWGPU_SHADER_PASSTHROUGH)
         add_subdirectory(triangle_passthrough)
     endif()
-    # tiled_deferred presents to a window by default (and offscreen with --verify),
-    # so it needs the windowing framework (GLFW).
+    # tiled_deferred / tiled_msaa present to a window by default (and offscreen
+    # with --verify), so they need the windowing framework (GLFW).
     if(YAWGPU_TILED)
         add_subdirectory(tiled_deferred)
+        # tiled_msaa demonstrates per-sample MSAA subpass input (Vulkan-only).
+        add_subdirectory(tiled_msaa)
     endif()
 elseif(YAWGPU_TILED)
     message(STATUS "YAWGPU_TILED set but windowed examples are off; tiled_deferred "
-                   "needs GLFW for its window — install GLFW or run with --verify after "
-                   "enabling windowed examples")
+                   "/ tiled_msaa need GLFW for their window — install GLFW or run with "
+                   "--verify after enabling windowed examples")
 endif()
