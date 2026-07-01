@@ -411,10 +411,14 @@ Vulkan tiled render pass wires color/input/depth refs but not resolve; `resolve_
 is validated-but-ignored on Vulkan. The MSAA e2e/example resolve in shader instead, so
 no new HAL/ABI surface was needed. Hardware subpass resolve is a separate future item.
 
-**Pre-existing issue observed (NOT Slice 4):** the transient e2e
-(`vulkan_tiled_deferred_reads_transient_input_attachment`) emits 2×
-`VUID-vkCmdBeginRenderPass-initialLayout-00898` — the render pass sets every color
+**Transient finalLayout VUID — FIXED.** The transient e2e
+(`vulkan_tiled_deferred_reads_transient_input_attachment`) previously emitted 2×
+`VUID-vkCmdBeginRenderPass-initialLayout-00898` — the render pass set every color
 attachment's `finalLayout = TRANSFER_SRC_OPTIMAL` (`vulkan/encode.rs`), but a
-`TRANSIENT_ATTACHMENT` image cannot carry `TRANSFER_SRC` usage. Introduced with Slice
-3a (`a0f3521`), unrelated to MSAA. Fix: pick `finalLayout` per attachment (transient /
-never-copied color attachments should not use `TRANSFER_SRC_OPTIMAL`).
+`TRANSIENT_ATTACHMENT` image cannot carry `TRANSFER_SRC` usage (introduced with Slice
+3a `a0f3521`, unrelated to MSAA). Fixed: `VulkanTexture` records `transient`, and
+transient color attachments use `COLOR_ATTACHMENT_OPTIMAL` for both the render-pass
+`finalLayout` and the post-pass tracked layout (`subpass_color_final_layout` /
+`subpass_color_tracked_layout`); non-transient attachments are unchanged. All three
+`e2e_vulkan_tiled` tests are now validation-clean (0 VUIDs) on native NVIDIA, and
+`examples/tiled_msaa` uses transient (memoryless) MSAA attachments.
