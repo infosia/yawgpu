@@ -69,6 +69,10 @@ typedef struct {
     bool frag_depth_used, sample_mask_used;
     bool input_sample_mask_used, front_facing_used, sample_index_used;
     bool primitive_index_used, subgroup_invocation_id_used, subgroup_size_used;
+    /* Whether the fragment entry point reads @builtin(position) (FragCoord).
+     * Needed to decide the Vulkan pixel-center polyfill under sample-rate
+     * shading; mirrors tint::inspector::EntryPoint::frag_position_used. */
+    bool frag_position_used;
     bool has_clip_distances;
     uint32_t clip_distances_size;
 } YawgpuTintEntryPoint;
@@ -278,6 +282,8 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
                                 bool use_vulkan_memory_model,
                                 uint32_t framebuffer_fetch_descriptor_set,
                                 bool multisampled_input_attachment,
+                                bool has_polyfill_pixel_center,
+                                uint32_t polyfill_pixel_center,
                                 uint32_t** words_out,
                                 size_t* n_words_out,
                                 char** err);

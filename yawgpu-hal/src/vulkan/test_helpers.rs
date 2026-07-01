@@ -74,6 +74,7 @@ pub(crate) fn render_descriptor() -> HalRenderPipelineDescriptor {
         front_face: HalFrontFace::Ccw,
         cull_mode: HalCullMode::None,
         unclipped_depth: false,
+        needs_frag_depth_range_push_constant: false,
     }
 }
 

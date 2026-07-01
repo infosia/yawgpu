@@ -392,6 +392,7 @@ pub(crate) fn select_compute_shader_source(
                 vulkan_memory_model,
                 0,
                 false,
+                None,
             )?;
             Ok((
                 HalShaderSource::SpirV(spirv),

@@ -2016,6 +2016,21 @@ pub(super) fn encode_render_pass(
             });
             vk_device.cmd_set_viewport(command_buffer, 0, &[viewport]);
             vk_device.cmd_set_scissor(command_buffer, 0, &[scissor]);
+            // Deliver the viewport depth range to the `@builtin(position)`
+            // pixel-center polyfill fragment shader (two f32s: min at byte 0,
+            // max at byte 4). The pipeline layout declared a matching range.
+            if pipeline.inner.needs_frag_depth_range_push_constant {
+                let mut depth_range = [0u8; 8];
+                depth_range[0..4].copy_from_slice(&viewport.min_depth.to_ne_bytes());
+                depth_range[4..8].copy_from_slice(&viewport.max_depth.to_ne_bytes());
+                vk_device.cmd_push_constants(
+                    command_buffer,
+                    pipeline.inner.pipeline_layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    &depth_range,
+                );
+            }
             vk_device.cmd_set_blend_constants(command_buffer, &pass.blend_constant);
             vk_device.cmd_set_stencil_reference(
                 command_buffer,

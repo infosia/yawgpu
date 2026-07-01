@@ -5,6 +5,12 @@ use crate::{
     HalTextureViewDimension,
 };
 
+/// Byte size of the `@builtin(position)` pixel-center polyfill push constant:
+/// two `f32`s carrying the viewport `min_depth` (offset 0) and `max_depth`
+/// (offset 4). Must match the Tint `depth_range_offsets` `{0, 4}` used when
+/// compiling the polyfilled fragment shader.
+pub(super) const FRAG_DEPTH_RANGE_PUSH_CONSTANT_BYTES: u32 = 8;
+
 /// Stores vulkan compute pipeline data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct VulkanComputePipeline {
@@ -59,6 +65,10 @@ pub(super) struct VulkanRenderPipelineInner {
     pub(super) descriptor_bindings: Vec<HalDescriptorBinding>,
     pub(super) vertex_shader_module: vk::ShaderModule,
     pub(super) fragment_shader_module: Option<vk::ShaderModule>,
+    /// Whether the fragment shader needs the viewport depth range delivered as a
+    /// fragment push constant (the `@builtin(position)` pixel-center polyfill).
+    /// When set, the draw path pushes `[min_depth, max_depth]` before drawing.
+    pub(super) needs_frag_depth_range_push_constant: bool,
 }
 
 impl Drop for VulkanRenderPipelineInner {
@@ -251,8 +261,21 @@ pub(super) fn create_render_pipeline(
                 return Err(error);
             }
         };
-    let pipeline_layout_info =
+    // The `@builtin(position)` pixel-center polyfill reconstructs depth in NDC
+    // space and reads the viewport depth range from a fragment push constant:
+    // two f32s (min at byte 0, max at byte 4), matching the Tint
+    // `depth_range_offsets` set for these shaders. Declare a matching range over
+    // the graphics stages (the vertex stage may also declare the block; Dawn
+    // likewise covers all stages via `kImmediateShaderStages`).
+    let push_constant_ranges = [vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+        .offset(0)
+        .size(FRAG_DEPTH_RANGE_PUSH_CONSTANT_BYTES)];
+    let mut pipeline_layout_info =
         vk::PipelineLayoutCreateInfo::default().set_layouts(&descriptor_set_layouts);
+    if descriptor.needs_frag_depth_range_push_constant {
+        pipeline_layout_info = pipeline_layout_info.push_constant_ranges(&push_constant_ranges);
+    }
     let pipeline_layout = match unsafe {
         device
             .device
@@ -332,6 +355,7 @@ pub(super) fn create_render_pipeline(
             descriptor_bindings: bindings.to_vec(),
             vertex_shader_module,
             fragment_shader_module,
+            needs_frag_depth_range_push_constant: descriptor.needs_frag_depth_range_push_constant,
         }),
     })
 }
@@ -413,8 +437,21 @@ pub(super) fn create_subpass_render_pipeline(
                 return Err(error);
             }
         };
-    let pipeline_layout_info =
+    // The `@builtin(position)` pixel-center polyfill reconstructs depth in NDC
+    // space and reads the viewport depth range from a fragment push constant:
+    // two f32s (min at byte 0, max at byte 4), matching the Tint
+    // `depth_range_offsets` set for these shaders. Declare a matching range over
+    // the graphics stages (the vertex stage may also declare the block; Dawn
+    // likewise covers all stages via `kImmediateShaderStages`).
+    let push_constant_ranges = [vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+        .offset(0)
+        .size(FRAG_DEPTH_RANGE_PUSH_CONSTANT_BYTES)];
+    let mut pipeline_layout_info =
         vk::PipelineLayoutCreateInfo::default().set_layouts(&descriptor_set_layouts);
+    if descriptor.needs_frag_depth_range_push_constant {
+        pipeline_layout_info = pipeline_layout_info.push_constant_ranges(&push_constant_ranges);
+    }
     let pipeline_layout = match unsafe {
         device
             .device
@@ -495,6 +532,7 @@ pub(super) fn create_subpass_render_pipeline(
             descriptor_bindings: bindings.to_vec(),
             vertex_shader_module,
             fragment_shader_module,
+            needs_frag_depth_range_push_constant: descriptor.needs_frag_depth_range_push_constant,
         }),
     })
 }

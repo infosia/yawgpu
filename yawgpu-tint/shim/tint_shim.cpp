@@ -398,6 +398,7 @@ void fill_entry_point(const tint::inspector::EntryPoint& ep, YawgpuTintEntryPoin
     out->primitive_index_used = ep.primitive_index_used;
     out->subgroup_invocation_id_used = ep.subgroup_invocation_id_used;
     out->subgroup_size_used = ep.subgroup_size_used;
+    out->frag_position_used = ep.frag_position_used;
     out->has_clip_distances = ep.clip_distances_size.has_value();
     out->clip_distances_size = ep.clip_distances_size.value_or(0);
 }
@@ -1060,6 +1061,8 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
                                 bool use_vulkan_memory_model,
                                 uint32_t framebuffer_fetch_descriptor_set,
                                 bool multisampled_input_attachment,
+                                bool has_polyfill_pixel_center,
+                                uint32_t polyfill_pixel_center,
                                 uint32_t** words_out,
                                 size_t* n_words_out,
                                 char** err) {
@@ -1088,6 +1091,23 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
         options.disable_robustness = disable_robustness;
         options.extensions.use_vulkan_memory_model = use_vulkan_memory_model;
         options.multisampled_input_attachment = multisampled_input_attachment;
+        // Pixel-center polyfill for @builtin(position): under Vulkan sample-rate
+        // shading FragCoord.xy/z/w reflect the sample location, but WebGPU
+        // requires the pixel-center (fragment) position. When set, Tint's SPIR-V
+        // shader_io raise reconstructs the pixel center from a center-sampled
+        // interpolant at this free inter-stage location (matches Dawn's Vulkan
+        // backend, which sets the same option).
+        if (has_polyfill_pixel_center) {
+            options.polyfill_pixel_center = polyfill_pixel_center;
+            // The pixel-center reconstruction maps the recovered NDC depth into
+            // the viewport depth range (min/max depth), which are supplied at
+            // draw time as push constants. Two f32 immediates at byte offsets 0
+            // (min) and 4 (max); the Vulkan HAL declares a matching fragment
+            // push-constant range and writes the viewport min/max depth. Matches
+            // Dawn's ClampFragDepthArgs layout.
+            options.depth_range_offsets =
+                tint::spirv::writer::Options::RangeOffsets{/*min=*/0u, /*max=*/4u};
+        }
         options.bindings = all_remaps_empty(bindings)
                                ? tint::GenerateBindings(ir.Get(), entry_point, false, false)
                                : make_bindings(bindings);
