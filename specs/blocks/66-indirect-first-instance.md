@@ -1,7 +1,7 @@
 # Block 66 — `indirect-first-instance` optional feature
 
-Status: **Slices 1–2 DONE, CTS-verified** on real Metal (draw:arguments
-540/180-skip → 720/0). Slice 3 (docs + Phase Review) in progress. Owner:
+Status: **COMPLETE** — all slices done, CTS-verified on real Metal (draw:arguments
+540/180-skip → 720/0), Phase Review clean (no CRITICAL/MAJOR/MINOR). Owner:
 Dawn-parity feature backfill.
 
 The WebGPU `indirect-first-instance` optional feature
