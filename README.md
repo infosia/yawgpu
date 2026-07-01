@@ -506,6 +506,17 @@ on those formats is rejected without it. It is advertised on Metal and on Vulkan
 devices whose float32 formats report `COLOR_ATTACHMENT_BLEND` (matching Dawn); it
 is not available on the Tier-2 GLES backend.
 
+The **`dual-source-blending`** optional feature lets a fragment shader emit a
+**second color output** — `enable dual_source_blending;` with
+`@location(0) @blend_src(0)` / `@blend_src(1)` — and use the `src1` /
+`one-minus-src1` / `src1-alpha` / `one-minus-src1-alpha` blend factors, so the
+blend equation can reference a second source (e.g. subpixel-AA font blending).
+Request `WGPUFeatureName_DualSourceBlending`; without it, both the WGSL enable and
+the `src1` blend factors are rejected, and a dual-source pipeline must have a
+single color target. It maps to Metal `MTLBlendFactor::Source1*` and Vulkan
+`VK_BLEND_FACTOR_SRC1_*` (`dualSrcBlend`); advertised on Metal and on Vulkan
+devices reporting `dualSrcBlend`, not on the Tier-2 GLES backend.
+
 ### Native shader passthrough (vendor, opt-in, unsafe)
 
 For engines that ship **precompiled native shaders**, the opt-in
