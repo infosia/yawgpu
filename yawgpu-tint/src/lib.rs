@@ -2805,6 +2805,31 @@ fn cs() {
         );
     }
 
+    #[cfg(feature = "tiled")]
+    fn multisampled_input_attachment_wgsl() -> &'static str {
+        r#"
+enable chromium_internal_input_attachments;
+
+@group(0) @binding(0) @input_attachment_index(0) var ia: input_attachment<f32>;
+
+@fragment
+fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
+  return inputAttachmentLoad(ia, s);
+}
+"#
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn multisampled_input_attachment_generates_spirv() {
+        let program = Program::parse(multisampled_input_attachment_wgsl(), false, &[]).unwrap();
+        let spirv = program
+            .generate_spirv("fs", &Bindings::default(), &[], true, false, 0, true)
+            .unwrap();
+        assert!(!spirv.is_empty());
+        assert_eq!(spirv.first().copied(), Some(0x0723_0203));
+    }
+
     #[cfg(not(feature = "tiled"))]
     #[test]
     fn framebuffer_fetch_enable_requires_tiled_feature() {

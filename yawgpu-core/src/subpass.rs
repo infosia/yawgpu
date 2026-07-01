@@ -884,6 +884,25 @@ fn validate_subpass_pass_layout_descriptor_with_caps(
                 return Some("subpass color attachment index is out of range".to_owned());
             }
         }
+        // C-3 — every attachment written by a subpass (its color attachments plus
+        // the depth-stencil, when used) must share a single sample count.
+        let mut written_sample_counts = subpass
+            .color_attachment_indices
+            .iter()
+            .filter_map(|&color_index| descriptor.color_attachments.get(color_index as usize))
+            .map(|attachment| attachment.sample_count)
+            .chain(
+                subpass
+                    .uses_depth_stencil
+                    .then_some(descriptor.depth_stencil_attachment.as_ref())
+                    .flatten()
+                    .map(|attachment| attachment.sample_count),
+            );
+        if let Some(first) = written_sample_counts.next() {
+            if written_sample_counts.any(|count| count != first) {
+                return Some("subpass attachments must share a single sample count".to_owned());
+            }
+        }
         for input in &subpass.input_attachments {
             if input.source_subpass >= subpass_index as u32 {
                 return Some(
@@ -1335,6 +1354,21 @@ mod tests {
         assert_eq!(
             validate_subpass_pass_layout_descriptor_with_caps(&descriptor, caps()),
             Some("subpass pass layout requires at least one subpass".to_owned())
+        );
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_pass_layout_rejects_mixed_sample_counts_within_subpass() {
+        let mut descriptor = valid_two_subpass_deferred_layout();
+        // The first subpass now writes two attachments with differing sample
+        // counts, which violates C-3.
+        descriptor.color_attachments[1].sample_count = 4;
+        descriptor.subpasses[0].color_attachment_indices = vec![0, 1];
+
+        assert_eq!(
+            validate_subpass_pass_layout_descriptor_with_caps(&descriptor, caps()),
+            Some("subpass attachments must share a single sample count".to_owned())
         );
     }
 

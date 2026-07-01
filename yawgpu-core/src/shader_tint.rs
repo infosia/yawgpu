@@ -60,6 +60,10 @@ impl ReflectedModule {
     /// `vulkan_memory_model` enables Tint's SPV_KHR_vulkan_memory_model output
     /// when the Vulkan backend enabled `VK_KHR_vulkan_memory_model` /
     /// `vulkanMemoryModel`. SPIR-V robustness stays enabled.
+    ///
+    /// `multisampled_input_attachment` makes Tint emit multisampled
+    /// `SubpassData` input attachments (the 2-arg `inputAttachmentLoad(ia,
+    /// sample_index)` overload) so per-sample MSAA subpass input works.
     pub(crate) fn generate_spirv(
         &self,
         entry_name: &str,
@@ -67,6 +71,7 @@ impl ReflectedModule {
         pipeline_constants: &PipelineConstants,
         vulkan_memory_model: bool,
         framebuffer_fetch_descriptor_set: u32,
+        multisampled_input_attachment: bool,
     ) -> Result<Vec<u32>, String> {
         self.program.generate_spirv(
             entry_name,
@@ -75,7 +80,7 @@ impl ReflectedModule {
             true,
             vulkan_memory_model,
             framebuffer_fetch_descriptor_set,
-            false,
+            multisampled_input_attachment,
         )
     }
 
@@ -1521,6 +1526,7 @@ fn cs() {}
             &PipelineConstants::default(),
             false,
             0,
+            false,
         )
         .unwrap();
         assert_eq!(compute.first().copied(), Some(0x0723_0203));
@@ -1553,6 +1559,7 @@ fn fs() -> @location(0) vec4<f32> {
                 &PipelineConstants::default(),
                 false,
                 0,
+                false,
             )
             .unwrap();
         let fragment = render
@@ -1562,6 +1569,7 @@ fn fs() -> @location(0) vec4<f32> {
                 &PipelineConstants::default(),
                 false,
                 0,
+                false,
             )
             .unwrap();
         assert_eq!(vertex.first().copied(), Some(0x0723_0203));
@@ -1594,6 +1602,7 @@ fn cs() {
                     &PipelineConstants::default(),
                     vulkan_memory_model,
                     0,
+                    false,
                 )
                 .unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));
