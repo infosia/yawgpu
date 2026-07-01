@@ -10,7 +10,14 @@ WebGPU `depth-clip-control` optional feature
 |---|---|---|
 | 1 | Feature plumbing + gate flip (Noop + HAL cap) | **DONE** (2026-07-01) |
 | 2 | Real-GPU execution e2e (Metal + Vulkan) | **DONE** (2026-07-01) |
-| 3 | Docs + Phase Review | TODO |
+| 3 | Docs + Phase Review | **DONE** (2026-07-01) |
+
+**Phase COMPLETE** — no-context Phase Review of `eef10e6^..HEAD` returned no
+CRITICAL/MAJOR. Gate flip tier-independent + single funnel (no bypass); Vulkan
+`depthClamp`-only advertisement confirmed exact Dawn parity + VUID-sound
+(depthClamp enabled whenever supported); e2e A/B non-vacuous. Three MINOR doc
+nits fixed (e2e header + tracking note precision; metal unused-import removal was
+already folded in).
 
 ## Key facts (verified 2026-07-01)
 
@@ -56,4 +63,6 @@ paths.
 
 - Slice 2 e2e must actually differentiate the two paths (draw a primitive with
   depth outside [0,1]; clipped→absent vs clamped→present) — not just "no error".
-  A depth attachment + depth test makes the difference observable at readback.
+  No depth attachment is needed: near/far clipping happens in the rasterizer, so a
+  beyond-far-plane triangle is absent (clear color) when clipped and present when
+  clamped — observable at color readback.

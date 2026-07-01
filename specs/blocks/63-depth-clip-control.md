@@ -1,7 +1,7 @@
 # Block 63 — `depth-clip-control` optional feature
 
-Status: **Slices 1–2 DONE, real-GPU verified** (Metal M2 + MoltenVK). Slice 3
-(docs + Phase Review) in progress. Owner: Dawn-parity feature backfill.
+Status: **COMPLETE** — all slices done, real-GPU verified (Metal M2 + MoltenVK),
+Phase Review clean (no CRITICAL/MAJOR). Owner: Dawn-parity feature backfill.
 
 The WebGPU `depth-clip-control` optional feature
 (`WGPUFeatureName_DepthClipControl = 0x02`) lets a render pipeline set
