@@ -370,12 +370,6 @@ impl Adapter {
 
 /// Returns apply feature implications.
 pub(crate) fn apply_feature_implications(features: &mut FeatureSet) {
-    if features.contains(&Feature::TextureCompressionBcSliced3d) {
-        features.insert(Feature::TextureCompressionBc);
-    }
-    if features.contains(&Feature::TextureCompressionAstcSliced3d) {
-        features.insert(Feature::TextureCompressionAstc);
-    }
     if features.contains(&Feature::TextureFormatsTier2) {
         features.insert(Feature::TextureFormatsTier1);
     }
@@ -433,6 +427,32 @@ mod tests {
         assert!(features.contains(&Feature::TextureCompressionEtc2));
         assert!(features.contains(&Feature::TextureCompressionAstc));
         assert!(features.contains(&Feature::TextureCompressionAstcSliced3d));
+    }
+
+    #[test]
+    fn feature_implications_keep_sliced_3d_compression_independent() {
+        let mut features = FeatureSet::new();
+        features.insert(Feature::TextureCompressionBcSliced3d);
+        features.insert(Feature::TextureCompressionAstcSliced3d);
+
+        apply_feature_implications(&mut features);
+
+        assert!(features.contains(&Feature::TextureCompressionBcSliced3d));
+        assert!(!features.contains(&Feature::TextureCompressionBc));
+        assert!(features.contains(&Feature::TextureCompressionAstcSliced3d));
+        assert!(!features.contains(&Feature::TextureCompressionAstc));
+    }
+
+    #[test]
+    fn feature_implications_preserve_texture_format_tiers() {
+        let mut features = FeatureSet::new();
+        features.insert(Feature::TextureFormatsTier2);
+
+        apply_feature_implications(&mut features);
+
+        assert!(features.contains(&Feature::TextureFormatsTier2));
+        assert!(features.contains(&Feature::TextureFormatsTier1));
+        assert!(features.contains(&Feature::Rg11b10UfloatRenderable));
     }
 
     #[test]

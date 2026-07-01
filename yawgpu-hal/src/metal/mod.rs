@@ -407,7 +407,7 @@ impl MetalAdapter {
     /// Returns true when 3D BC texture compression is supported.
     #[must_use]
     pub fn supports_texture_compression_bc_sliced_3d(&self) -> bool {
-        false
+        self.device.supportsBCTextureCompression()
     }
 
     /// Returns true when ETC2/EAC texture compression is supported.
@@ -419,13 +419,13 @@ impl MetalAdapter {
     /// Returns true when ASTC LDR texture compression is supported.
     #[must_use]
     pub fn supports_texture_compression_astc(&self) -> bool {
-        self.device.supportsFamily(MTLGPUFamily::Apple2)
+        self.device.supportsFamily(MTLGPUFamily::Apple3)
     }
 
     /// Returns true when 3D ASTC texture compression is supported.
     #[must_use]
     pub fn supports_texture_compression_astc_sliced_3d(&self) -> bool {
-        false
+        self.device.supportsFamily(MTLGPUFamily::Apple3)
     }
 
     /// Returns true when texture view component swizzling is supported.
@@ -626,6 +626,26 @@ mod tests {
             adapter.supports_texture_component_swizzle(),
             adapter.device.supportsFamily(MTLGPUFamily::Mac2)
                 || adapter.device.supportsFamily(MTLGPUFamily::Apple2)
+        );
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_adapter_supports_astc_compression_on_apple8_m2() {
+        let adapter = MetalInstance::new()
+            .expect("create Metal instance")
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Metal adapter");
+
+        assert!(adapter.device.supportsFamily(MTLGPUFamily::Apple8));
+        assert!(adapter.supports_texture_compression_astc());
+        assert!(adapter.supports_texture_compression_astc_sliced_3d());
+        assert_eq!(
+            adapter.supports_texture_compression_bc_sliced_3d(),
+            adapter.supports_texture_compression_bc()
         );
     }
 
