@@ -273,9 +273,38 @@ broken into sub-slices, mirroring how Slice 1 ran (shim → core → HAL → FFI
   M2; `e2e_vulkan_tiled.rs` (skips MoltenVK per Slice 1.4 finding); rewrite Block 55
   to the full Tint `input_attachment` surface.
 
-### Slice 3 — transient / memoryless attachments
-Vulkan `LAZILY_ALLOCATED` + `TRANSIENT_ATTACHMENT|INPUT_ATTACHMENT`; Metal
-`MTLStorageMode::Memoryless`. The bandwidth-saving payoff. (May fold into Slice 2.)
+### Slice 3 — transient / memoryless attachments — DONE (2026-07-01)
+The bandwidth-saving payoff, on both Tier-1 backends, behind the `tiled`-independent
+`TRANSIENT_ATTACHMENT` usage bit (already in core + `webgpu.h`).
+
+- **3a** (commit `a0f3521`): the HAL honors `TextureUsage::TRANSIENT_ATTACHMENT` —
+  Metal `MTLStorageMode::Memoryless`; Vulkan `TRANSIENT_ATTACHMENT` image usage
+  (no `TRANSFER_*`) + `LAZILY_ALLOCATED` memory (fallback `DEVICE_LOCAL`). Added a
+  `transient` field to `HalTextureUsage`; unit tests for the core mapping + the
+  Vulkan usage-flag translation.
+- **3b** (commit `c814af5`): root-caused on real Metal — lazy zero-init clears a new
+  color texture with a buffer→texture copy, which **aborts on a memoryless texture**
+  (`destinationTexture cannot be Memoryless`). Fix: exclude `TRANSIENT_ATTACHMENT`
+  from `texture_lazy_init_eligible` (transient has no observable uninitialized content
+  and cannot be a copy destination). Added real-GPU e2e: the 2-subpass deferred
+  G-buffer is created transient and read back through the input attachment with the
+  identical result on **both** the M2 Metal backend (Memoryless) and MoltenVK
+  (`LAZILY_ALLOCATED`, `storeOp` Discard).
+- **example** (commit `38e3fa1`): `tiled_deferred`'s albedo + normal G-buffers are
+  now transient (`storeOp = Discard`); verified shading correctly on the M2 Metal.
+
+**Design choice:** the earlier naga-era first-class `YaWGPUTransientAttachment` Arc
+resource was **not** revived — the usage-bit model is simpler, needs no new FFI, and
+a memoryless view feeds the existing `Persistent` subpass-attachment path directly.
+Block 55 "Transient attachment" is rewritten to this contract. **Store contract:** a
+transient attachment must use `storeOp = Discard` (Metal rejects a store on a
+Memoryless texture). Not yet enforced by a core validation rule — candidate follow-up.
+
+**Pre-existing note (unrelated to Slice 3):** under `MTL_DEBUG_LAYER=1` the collapsed
+Metal subpass emulation trips a `setRenderPipelineState` assertion (subpass 0's
+pipeline leaves color attachment 1 as `MTLPixelFormatInvalid` vs the framebuffer's
+format) — fires for the non-transient tiled test too; Metal tolerates it without the
+debug layer (pixels correct). Tracked as a tiled-emulation item, not a Slice-3 bug.
 
 ### Slice 4 — SPIR-V MSAA input attachment (most divergent Dawn work)
 Per Dawn `TILED.md` Phase 3 (`core.def` overload + `builtin_polyfill.cc` edits).
