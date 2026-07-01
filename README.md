@@ -498,6 +498,14 @@ and Vulkan core `depthClampEnable`; without the feature requested, `unclippedDep
 is rejected. It is advertised on Metal and on Vulkan devices that report
 `depthClamp` (matching Dawn); it is not available on the Tier-2 GLES backend.
 
+The **`float32-blendable`** optional feature (another rasterization-stage
+capability) lets a render pipeline attach a **blend state to 32-bit-float color
+targets** (`r32float` / `rg32float` / `rgba32float`), which are otherwise
+renderable but not blendable. Request `WGPUFeatureName_Float32Blendable`; a blend
+on those formats is rejected without it. It is advertised on Metal and on Vulkan
+devices whose float32 formats report `COLOR_ATTACHMENT_BLEND` (matching Dawn); it
+is not available on the Tier-2 GLES backend.
+
 ### Native shader passthrough (vendor, opt-in, unsafe)
 
 For engines that ship **precompiled native shaders**, the opt-in

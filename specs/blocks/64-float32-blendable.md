@@ -1,6 +1,7 @@
 # Block 64 — `float32-blendable` optional feature
 
-Status: **IN PROGRESS** (Slice 1). Owner: Dawn-parity feature backfill.
+Status: **Slices 1–2 DONE, real-GPU verified** (Metal M2 + MoltenVK). Slice 3
+(docs + Phase Review) in progress. Owner: Dawn-parity feature backfill.
 
 The WebGPU `float32-blendable` optional feature
 (`WGPUFeatureName_Float32Blendable = 0x0F`) allows a render pipeline to attach a
