@@ -1542,6 +1542,25 @@ fn hal_texture_component_swizzle(swizzle: TextureComponentSwizzle) -> HalTexture
     }
 }
 
+fn texture_view_hal_component_swizzle(
+    texture_view: &TextureView,
+) -> Option<HalTextureComponentSwizzle> {
+    let mut swizzle = texture_view.swizzle();
+    let caps = texture_view
+        .texture()
+        .view_format_caps(texture_view.format())?;
+    if caps.aspects.depth || caps.aspects.stencil {
+        let depth_base = TextureComponentSwizzle {
+            r: ComponentSwizzle::R,
+            g: ComponentSwizzle::Zero,
+            b: ComponentSwizzle::Zero,
+            a: ComponentSwizzle::One,
+        };
+        swizzle = TextureComponentSwizzle::compose(depth_base, swizzle);
+    }
+    Some(hal_texture_component_swizzle(swizzle))
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct HalBoundResources {
     pub(crate) buffers: Vec<HalBoundBuffer>,
@@ -1607,7 +1626,7 @@ pub(crate) fn hal_bind_resources(
                     base_array_layer: texture_view.base_array_layer(),
                     array_layer_count: texture_view.array_layer_count(),
                     aspect: hal_texture_aspect(texture_view.aspect()),
-                    swizzle: hal_texture_component_swizzle(texture_view.swizzle()),
+                    swizzle: texture_view_hal_component_swizzle(texture_view)?,
                     storage_access: None,
                 });
             }
@@ -1629,7 +1648,7 @@ pub(crate) fn hal_bind_resources(
                     base_array_layer: texture_view.base_array_layer(),
                     array_layer_count: texture_view.array_layer_count(),
                     aspect: hal_texture_aspect(texture_view.aspect()),
-                    swizzle: hal_texture_component_swizzle(texture_view.swizzle()),
+                    swizzle: texture_view_hal_component_swizzle(texture_view)?,
                     storage_access: Some(hal_storage_texture_access(access)),
                 });
             }
@@ -1826,6 +1845,38 @@ mod tests {
                 })
                 .expect("external texture"),
         )
+    }
+
+    fn sampled_depth_view(
+        device: &Device,
+        swizzle: Option<TextureComponentSwizzle>,
+    ) -> TextureView {
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::TEXTURE_BINDING,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: depth32_float(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D2),
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+            aspect: None,
+            usage: None,
+            swizzle,
+        });
+        assert_eq!(error, None);
+        view
     }
 
     fn depth_only_render_pass_descriptor(view: Arc<TextureView>) -> RenderPassDescriptor {
@@ -2276,6 +2327,48 @@ fn fs() -> @location(0) vec4<f32> {
         assert_eq!(queue.label(), "initial");
         queue.set_label("renamed");
         assert_eq!(queue.label(), "renamed");
+    }
+
+    #[test]
+    fn texture_view_hal_component_swizzle_composes_depth_views_over_r001_base() {
+        let adapter = noop_adapter();
+        let device_result =
+            adapter.create_device(None, &[Feature::TextureComponentSwizzle], "", "");
+        assert!(device_result.is_ok());
+        let device = match device_result {
+            Ok(device) => device,
+            Err(_) => return,
+        };
+
+        let identity_view = sampled_depth_view(&device, None);
+        assert_eq!(
+            texture_view_hal_component_swizzle(&identity_view),
+            Some(HalTextureComponentSwizzle {
+                r: yawgpu_hal::HalComponentSwizzle::R,
+                g: yawgpu_hal::HalComponentSwizzle::Zero,
+                b: yawgpu_hal::HalComponentSwizzle::Zero,
+                a: yawgpu_hal::HalComponentSwizzle::One,
+            })
+        );
+
+        let bbbb_view = sampled_depth_view(
+            &device,
+            Some(TextureComponentSwizzle {
+                r: ComponentSwizzle::B,
+                g: ComponentSwizzle::B,
+                b: ComponentSwizzle::B,
+                a: ComponentSwizzle::B,
+            }),
+        );
+        assert_eq!(
+            texture_view_hal_component_swizzle(&bbbb_view),
+            Some(HalTextureComponentSwizzle {
+                r: yawgpu_hal::HalComponentSwizzle::Zero,
+                g: yawgpu_hal::HalComponentSwizzle::Zero,
+                b: yawgpu_hal::HalComponentSwizzle::Zero,
+                a: yawgpu_hal::HalComponentSwizzle::Zero,
+            })
+        );
     }
 
     #[test]

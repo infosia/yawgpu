@@ -53,6 +53,28 @@ impl TextureComponentSwizzle {
     pub fn is_identity(&self) -> bool {
         *self == Self::default()
     }
+
+    /// Composes `user` over `base`.
+    #[must_use]
+    pub fn compose(base: Self, user: Self) -> Self {
+        fn component(base: TextureComponentSwizzle, user: ComponentSwizzle) -> ComponentSwizzle {
+            match user {
+                ComponentSwizzle::Zero => ComponentSwizzle::Zero,
+                ComponentSwizzle::One => ComponentSwizzle::One,
+                ComponentSwizzle::R => base.r,
+                ComponentSwizzle::G => base.g,
+                ComponentSwizzle::B => base.b,
+                ComponentSwizzle::A => base.a,
+            }
+        }
+
+        Self {
+            r: component(base, user.r),
+            g: component(base, user.g),
+            b: component(base, user.b),
+            a: component(base, user.a),
+        }
+    }
 }
 
 /// Enumerates texture view dimension values.
@@ -284,7 +306,6 @@ pub(crate) fn validate_texture_view_descriptor(
     if usage.bits() & !texture.usage().bits() != 0 {
         return Some("texture view usage must be a subset of the texture usage");
     }
-
     if mip_level_count == 0 {
         return Some("texture view mipLevelCount must be greater than zero");
     }
@@ -412,6 +433,43 @@ mod tests {
     }
 
     #[test]
+    fn texture_component_swizzle_compose_maps_user_channels_through_base() {
+        let depth_base = TextureComponentSwizzle {
+            r: ComponentSwizzle::R,
+            g: ComponentSwizzle::Zero,
+            b: ComponentSwizzle::Zero,
+            a: ComponentSwizzle::One,
+        };
+
+        assert_eq!(
+            TextureComponentSwizzle::compose(depth_base, TextureComponentSwizzle::default()),
+            TextureComponentSwizzle {
+                r: ComponentSwizzle::R,
+                g: ComponentSwizzle::Zero,
+                b: ComponentSwizzle::Zero,
+                a: ComponentSwizzle::One,
+            }
+        );
+        assert_eq!(
+            TextureComponentSwizzle::compose(
+                depth_base,
+                TextureComponentSwizzle {
+                    r: ComponentSwizzle::B,
+                    g: ComponentSwizzle::B,
+                    b: ComponentSwizzle::B,
+                    a: ComponentSwizzle::B,
+                },
+            ),
+            TextureComponentSwizzle {
+                r: ComponentSwizzle::Zero,
+                g: ComponentSwizzle::Zero,
+                b: ComponentSwizzle::Zero,
+                a: ComponentSwizzle::Zero,
+            }
+        );
+    }
+
+    #[test]
     fn texture_view_descriptor_fields_round_trip() {
         let texture = noop_device().create_texture(layered_mipped_texture_descriptor());
 
@@ -508,6 +566,87 @@ mod tests {
         });
         assert_eq!(error, None);
         assert!(!view.is_error());
+        assert_eq!(view.swizzle().r, ComponentSwizzle::G);
+    }
+
+    #[test]
+    fn texture_component_swizzle_allows_attachment_or_storage_view_usage_at_creation() {
+        let adapter = noop_adapter();
+        let device_result =
+            adapter.create_device(None, &[Feature::TextureComponentSwizzle], "", "");
+        assert!(device_result.is_ok());
+        let device = match device_result {
+            Ok(device) => device,
+            Err(_) => return,
+        };
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::TEXTURE_BINDING
+                | TextureUsage::RENDER_ATTACHMENT
+                | TextureUsage::STORAGE_BINDING,
+            ..layered_mipped_texture_descriptor()
+        });
+        let swizzle = TextureComponentSwizzle {
+            r: ComponentSwizzle::G,
+            ..TextureComponentSwizzle::default()
+        };
+
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: Some(swizzle),
+        });
+        assert_eq!(error, None);
+        assert_eq!(view.usage(), texture.usage());
+        assert_eq!(view.swizzle().r, ComponentSwizzle::G);
+
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+            aspect: None,
+            usage: Some(TextureUsage::RENDER_ATTACHMENT),
+            swizzle: Some(swizzle),
+        });
+        assert_eq!(error, None);
+        assert_eq!(view.usage(), TextureUsage::RENDER_ATTACHMENT);
+        assert_eq!(view.swizzle().r, ComponentSwizzle::G);
+
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+            aspect: None,
+            usage: Some(TextureUsage::STORAGE_BINDING),
+            swizzle: Some(swizzle),
+        });
+        assert_eq!(error, None);
+        assert_eq!(view.usage(), TextureUsage::STORAGE_BINDING);
+        assert_eq!(view.swizzle().r, ComponentSwizzle::G);
+
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: Some(TextureUsage::TEXTURE_BINDING),
+            swizzle: Some(swizzle),
+        });
+        assert_eq!(error, None);
         assert_eq!(view.swizzle().r, ComponentSwizzle::G);
     }
 

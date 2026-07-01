@@ -1670,6 +1670,11 @@ pub(crate) fn validate_render_attachment_common(
     if view.is_error() {
         return Err(format!("{label} view must not be an error view"));
     }
+    if !view.swizzle().is_identity() {
+        return Err(format!(
+            "{label} must not use a component-swizzled texture view"
+        ));
+    }
     if view.dimension() != TextureViewDimension::D3 && view.array_layer_count() != 1 {
         return Err(format!("{label} view arrayLayerCount must be one"));
     }
@@ -1708,6 +1713,11 @@ pub(crate) fn validate_resolve_target(
     }
     if resolve_target.is_error() {
         return Err("render pass resolveTarget view must not be an error view".to_owned());
+    }
+    if !resolve_target.swizzle().is_identity() {
+        return Err(
+            "render pass resolveTarget must not use a component-swizzled texture view".to_owned(),
+        );
     }
     if !resolve_texture
         .usage()
@@ -2478,6 +2488,121 @@ mod tests {
     }
 
     #[test]
+    fn render_pass_color_attachment_rejects_component_swizzled_view() {
+        let device = noop_adapter()
+            .create_device(None, &[crate::Feature::TextureComponentSwizzle], "", "")
+            .expect("Noop adapter should support texture component swizzle");
+        let view = swizzled_render_attachment_view(&device, rgba8_unorm(), 1);
+        let descriptor = noop_render_pass_descriptor(view, None);
+
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Err(
+                "render pass color attachment must not use a component-swizzled texture view"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn render_pass_depth_stencil_attachment_rejects_component_swizzled_view() {
+        let device = noop_adapter()
+            .create_device(None, &[crate::Feature::TextureComponentSwizzle], "", "")
+            .expect("Noop adapter should support texture component swizzle");
+        let view = swizzled_render_attachment_view(
+            &device,
+            TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS),
+            1,
+        );
+        let descriptor = RenderPassDescriptor {
+            max_color_attachments: device.limits().max_color_attachments,
+            color_attachments: Vec::new(),
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view,
+                depth_load_op: LoadOp::Clear,
+                depth_store_op: StoreOp::Store,
+                depth_clear_value: 0.5,
+                depth_read_only: false,
+                stencil_load_op: LoadOp::Undefined,
+                stencil_store_op: StoreOp::Undefined,
+                stencil_clear_value: 0,
+                stencil_read_only: true,
+            }),
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            max_draw_count: 50_000_000,
+        };
+
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Err(
+                "render pass depth-stencil attachment must not use a component-swizzled texture view"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn render_pass_resolve_target_rejects_component_swizzled_view() {
+        let device = noop_adapter()
+            .create_device(None, &[crate::Feature::TextureComponentSwizzle], "", "")
+            .expect("Noop adapter should support texture component swizzle");
+        let color = render_attachment_view_with_format(&device, rgba8_unorm(), 4);
+        let resolve = swizzled_render_attachment_view(&device, rgba8_unorm(), 1);
+        let mut descriptor = noop_render_pass_descriptor(color, None);
+        descriptor.color_attachments[0]
+            .as_mut()
+            .expect("color attachment")
+            .resolve_target = Some(resolve);
+
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Err(
+                "render pass resolveTarget must not use a component-swizzled texture view"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn render_pass_identity_swizzle_attachment_is_valid() {
+        let device = noop_adapter()
+            .create_device(None, &[crate::Feature::TextureComponentSwizzle], "", "")
+            .expect("Noop adapter should support texture component swizzle");
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: Some(TextureComponentSwizzle::default()),
+        });
+        assert_eq!(error, None);
+        let descriptor = noop_render_pass_descriptor(Arc::new(view), None);
+
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn render_pass_color_executions_preserve_reinterpreted_view_formats() {
         let device = noop_device();
         let texture_format = TextureFormat::from_raw(TextureFormat::RGBA8_UNORM_SRGB);
@@ -2578,6 +2703,42 @@ mod tests {
             aspect: None,
             usage: None,
             swizzle: None,
+        });
+        assert_eq!(error, None);
+        Arc::new(view)
+    }
+
+    fn swizzled_render_attachment_view(
+        device: &Device,
+        format: TextureFormat,
+        sample_count: u32,
+    ) -> Arc<TextureView> {
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format,
+            mip_level_count: 1,
+            sample_count,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: Some(TextureComponentSwizzle {
+                r: ComponentSwizzle::G,
+                ..TextureComponentSwizzle::default()
+            }),
         });
         assert_eq!(error, None);
         Arc::new(view)

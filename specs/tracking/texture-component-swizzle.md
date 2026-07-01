@@ -9,7 +9,7 @@ standard optional-feature backfill; the only texture-view (real HAL) one.**
 | Slice | Scope | State |
 |---|---|---|
 | 1 | Advertise + validate + HAL threading & application | **DONE** (2026-07-01) |
-| 2 | Real-GPU e2e + CTS | TODO |
+| 2 | CTS verification (Metal) | **DONE** (2026-07-01) — validation 8/0 + operation 529/0 after 2 CTS-found fixes (depth R001 + use-site gate) |
 | 3 | Docs + Phase Review | TODO |
 
 ## Key facts (verified 2026-07-01, HAL map via Explore)
