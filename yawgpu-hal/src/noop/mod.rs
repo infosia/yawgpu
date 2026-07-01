@@ -56,6 +56,18 @@ impl NoopAdapter {
         true
     }
 
+    /// Returns true when WGSL `subgroups` is supported.
+    #[must_use]
+    pub(super) fn supports_subgroups(&self) -> bool {
+        true
+    }
+
+    /// Returns the supported subgroup size range.
+    #[must_use]
+    pub(super) fn subgroup_size_range(&self) -> Option<(u32, u32)> {
+        Some((4, 4))
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<NoopDevice, HalError> {
         Ok(NoopDevice::new())
@@ -424,6 +436,14 @@ mod tests {
         let adapter = NoopAdapter::synthetic();
 
         assert!(adapter.supports_shader_float16());
+    }
+
+    #[test]
+    fn noop_adapter_supports_subgroups_returns_nominal_range() {
+        let adapter = NoopAdapter::synthetic();
+
+        assert!(adapter.supports_subgroups());
+        assert_eq!(adapter.subgroup_size_range(), Some((4, 4)));
     }
 
     #[test]

@@ -1882,8 +1882,8 @@ fn adapter_info_from_core(adapter: &core::Adapter) -> native::WGPUAdapterInfo {
         adapterType: adapter_type,
         vendorID: 0,
         deviceID: 0,
-        subgroupMinSize: 0,
-        subgroupMaxSize: 0,
+        subgroupMinSize: adapter.subgroup_min_size(),
+        subgroupMaxSize: adapter.subgroup_max_size(),
     }
 }
 
@@ -4463,7 +4463,7 @@ mod tests {
             };
 
             wgpuAdapterGetFeatures(adapter, &mut features);
-            assert_eq!(features.featureCount, 14);
+            assert_eq!(features.featureCount, 15);
             let values = std::slice::from_raw_parts(features.features, features.featureCount);
             assert!(values.contains(&native::WGPUFeatureName_CoreFeaturesAndLimits));
             assert!(values.contains(&native::WGPUFeatureName_TextureCompressionBC));
@@ -4477,6 +4477,7 @@ mod tests {
             assert!(values.contains(&native::WGPUFeatureName_Float32Filterable));
             assert!(values.contains(&native::WGPUFeatureName_TimestampQuery));
             assert!(values.contains(&native::WGPUFeatureName_ShaderF16));
+            assert!(values.contains(&native::WGPUFeatureName_Subgroups));
             assert!(values.contains(&native::WGPUFeatureName_TextureFormatsTier1));
             assert!(values.contains(&native::WGPUFeatureName_TextureFormatsTier2));
 
@@ -4503,6 +4504,10 @@ mod tests {
 
             assert_eq!(
                 wgpuAdapterHasFeature(adapter, native::WGPUFeatureName_TimestampQuery),
+                1
+            );
+            assert_eq!(
+                wgpuAdapterHasFeature(adapter, native::WGPUFeatureName_Subgroups),
                 1
             );
             assert_eq!(
@@ -4533,6 +4538,8 @@ mod tests {
             assert_eq!(info.adapterType, native::WGPUAdapterType_CPU);
             assert_eq!(info.vendorID, 0);
             assert_eq!(info.deviceID, 0);
+            assert_eq!(info.subgroupMinSize, 4);
+            assert_eq!(info.subgroupMaxSize, 4);
             assert_eq!(
                 wgpuAdapterGetInfo(adapter, std::ptr::null_mut()),
                 native::WGPUStatus_Error

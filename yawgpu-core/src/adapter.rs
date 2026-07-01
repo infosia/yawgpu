@@ -76,6 +76,7 @@ impl Adapter {
         let mut features = supported_features();
         add_texture_compression_features(&mut features, &self.inner.hal);
         add_shader_float16_feature(&mut features, &self.inner.hal);
+        add_subgroups_feature(&mut features, &self.inner.hal);
         #[cfg(feature = "tiled")]
         add_tiled_features(&mut features, self.backend());
 
@@ -88,6 +89,24 @@ impl Adapter {
     #[must_use]
     pub fn has_feature(&self, feature: Feature) -> bool {
         self.features().contains(&feature)
+    }
+
+    /// Returns the minimum subgroup size, or zero when subgroups are unsupported.
+    #[must_use]
+    pub fn subgroup_min_size(&self) -> u32 {
+        self.inner
+            .hal
+            .subgroup_size_range()
+            .map_or(0, |(min, _)| min)
+    }
+
+    /// Returns the maximum subgroup size, or zero when subgroups are unsupported.
+    #[must_use]
+    pub fn subgroup_max_size(&self) -> u32 {
+        self.inner
+            .hal
+            .subgroup_size_range()
+            .map_or(0, |(_, max)| max)
     }
 
     /// Creates a device and its queue from this adapter, honoring the requested limits and features.
@@ -176,6 +195,8 @@ pub enum Feature {
     TimestampQuery,
     /// WGSL `shader-f16` support.
     ShaderF16,
+    /// WGSL `subgroups` support.
+    Subgroups,
     /// Texture component swizzle support.
     TextureComponentSwizzle,
     /// Texture formats tier1 variant.
@@ -241,6 +262,12 @@ fn add_texture_compression_features(features: &mut FeatureSet, hal: &HalAdapter)
 fn add_shader_float16_feature(features: &mut FeatureSet, hal: &HalAdapter) {
     if hal.supports_shader_float16() {
         features.insert(Feature::ShaderF16);
+    }
+}
+
+fn add_subgroups_feature(features: &mut FeatureSet, hal: &HalAdapter) {
+    if hal.supports_subgroups() {
+        features.insert(Feature::Subgroups);
     }
 }
 
@@ -356,6 +383,18 @@ mod tests {
 
         let features = noop_adapter().features();
         assert!(features.contains(&Feature::ShaderF16));
+    }
+
+    #[test]
+    fn subgroups_feature_is_adapter_gated_and_noop_advertises() {
+        let base = supported_features();
+        assert!(!base.contains(&Feature::Subgroups));
+
+        let adapter = noop_adapter();
+        let features = adapter.features();
+        assert!(features.contains(&Feature::Subgroups));
+        assert_eq!(adapter.subgroup_min_size(), 4);
+        assert_eq!(adapter.subgroup_max_size(), 4);
     }
 
     #[test]

@@ -28,16 +28,21 @@ unsafe impl Sync for ReflectedModule {}
 
 /// Returns parse and validate wgsl.
 pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ReflectedModule, String> {
-    parse_and_validate_wgsl_gated(src, true)
+    parse_and_validate_wgsl_gated(src, true, true)
 }
 
-/// Returns parse and validate wgsl using the supplied `shader-f16` gate.
+/// Returns parse and validate wgsl using the supplied feature gates.
 pub(crate) fn parse_and_validate_wgsl_gated(
     src: &str,
     shader_f16: bool,
+    subgroups: bool,
 ) -> Result<ReflectedModule, String> {
-    let program =
-        yawgpu_tint::Program::parse(src, shader_f16, crate::SUPPORTED_WGSL_LANGUAGE_FEATURES)?;
+    let program = yawgpu_tint::Program::parse(
+        src,
+        shader_f16,
+        subgroups,
+        crate::SUPPORTED_WGSL_LANGUAGE_FEATURES,
+    )?;
     let warnings = program
         .diagnostics()?
         .into_iter()

@@ -98,6 +98,18 @@ impl GlesAdapter {
         false
     }
 
+    /// Returns true when WGSL `subgroups` is supported.
+    #[must_use]
+    pub(crate) fn supports_subgroups(&self) -> bool {
+        false
+    }
+
+    /// Returns the supported subgroup size range.
+    #[must_use]
+    pub(crate) fn subgroup_size_range(&self) -> Option<(u32, u32)> {
+        None
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<GlesDevice, HalError> {
         match &self.inner {
