@@ -377,6 +377,24 @@ impl VulkanAdapter {
         }) == vk::TRUE
     }
 
+    /// Returns true when float32 color target blending is supported by this physical device.
+    #[must_use]
+    pub(super) fn supports_float32_blendable(&self) -> bool {
+        let blendable = |format: vk::Format| {
+            let props = unsafe {
+                self.instance
+                    .instance
+                    .get_physical_device_format_properties(self.physical_device, format)
+            };
+            props
+                .optimal_tiling_features
+                .contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND)
+        };
+        blendable(vk::Format::R32_SFLOAT)
+            && blendable(vk::Format::R32G32_SFLOAT)
+            && blendable(vk::Format::R32G32B32A32_SFLOAT)
+    }
+
     /// Returns the supported subgroup size range for this physical device.
     #[must_use]
     pub(super) fn subgroup_size_range(&self) -> Option<(u32, u32)> {

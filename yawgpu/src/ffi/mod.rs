@@ -4463,7 +4463,7 @@ mod tests {
             };
 
             wgpuAdapterGetFeatures(adapter, &mut features);
-            assert_eq!(features.featureCount, 16);
+            assert_eq!(features.featureCount, 17);
             let values = std::slice::from_raw_parts(features.features, features.featureCount);
             assert!(values.contains(&native::WGPUFeatureName_CoreFeaturesAndLimits));
             assert!(values.contains(&native::WGPUFeatureName_TextureCompressionBC));
@@ -4479,6 +4479,7 @@ mod tests {
             assert!(values.contains(&native::WGPUFeatureName_ShaderF16));
             assert!(values.contains(&native::WGPUFeatureName_Subgroups));
             assert!(values.contains(&native::WGPUFeatureName_DepthClipControl));
+            assert!(values.contains(&native::WGPUFeatureName_Float32Blendable));
             assert!(values.contains(&native::WGPUFeatureName_TextureFormatsTier1));
             assert!(values.contains(&native::WGPUFeatureName_TextureFormatsTier2));
 

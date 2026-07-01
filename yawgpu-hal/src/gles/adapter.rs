@@ -110,6 +110,12 @@ impl GlesAdapter {
         false
     }
 
+    /// Returns true when float32 color target blending is supported.
+    #[must_use]
+    pub(crate) fn supports_float32_blendable(&self) -> bool {
+        false
+    }
+
     /// Returns the supported subgroup size range.
     #[must_use]
     pub(crate) fn subgroup_size_range(&self) -> Option<(u32, u32)> {

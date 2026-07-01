@@ -686,6 +686,14 @@ impl TextureFormat {
         {
             caps.filterable = true;
         }
+        if features.contains(&Feature::Float32Blendable)
+            && matches!(
+                self.0,
+                TextureFormat::R32_FLOAT | TextureFormat::RG32_FLOAT | TextureFormat::RGBA32_FLOAT
+            )
+        {
+            *caps = caps.blendable();
+        }
     }
 
     /// Returns true when the format belongs to a BC compressed family.
@@ -1352,5 +1360,36 @@ mod tests {
             assert!(caps.renderable);
             assert!(caps.is_blendable);
         }
+    }
+
+    #[test]
+    fn float32_color_formats_are_blendable_only_with_feature() {
+        let empty = FeatureSet::default();
+        let mut enabled = FeatureSet::default();
+        enabled.insert(Feature::Float32Blendable);
+
+        for raw in [
+            TextureFormat::R32_FLOAT,
+            TextureFormat::RG32_FLOAT,
+            TextureFormat::RGBA32_FLOAT,
+        ] {
+            let base_caps = TextureFormat::from_raw(raw)
+                .caps(&empty)
+                .expect("float32 color format should have caps");
+            let enabled_caps = TextureFormat::from_raw(raw)
+                .caps(&enabled)
+                .expect("float32 color format should have caps");
+
+            assert!(!base_caps.is_blendable);
+            assert!(enabled_caps.is_blendable);
+        }
+
+        let base_caps = TextureFormat::from_raw(TextureFormat::R16_FLOAT)
+            .caps(&empty)
+            .expect("non-float32 format should have caps");
+        let enabled_caps = TextureFormat::from_raw(TextureFormat::R16_FLOAT)
+            .caps(&enabled)
+            .expect("non-float32 format should have caps");
+        assert_eq!(base_caps.is_blendable, enabled_caps.is_blendable);
     }
 }
