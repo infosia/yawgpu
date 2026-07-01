@@ -141,7 +141,12 @@ fn metal_dual_source_blend_multiplies_two_outputs() {
             },
             buffer: color_readback,
         };
-        yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &color_src, &color_dst, &texture_extent());
+        yawgpu::wgpuCommandEncoderCopyTextureToBuffer(
+            encoder,
+            &color_src,
+            &color_dst,
+            &texture_extent(),
+        );
         let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
         yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
         yawgpu::wgpuCommandBufferRelease(command_buffer);
