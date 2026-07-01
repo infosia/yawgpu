@@ -1981,6 +1981,7 @@ mod tests {
                             texture_binding: true,
                             storage_binding: false,
                             render_attachment: false,
+                            transient: false,
                         },
                     })
                     .expect("Noop texture allocation should succeed"),

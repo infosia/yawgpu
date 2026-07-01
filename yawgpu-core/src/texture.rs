@@ -913,13 +913,14 @@ pub(crate) fn hal_texture_format(format: TextureFormat) -> HalTextureFormat {
 
 /// Returns HAL texture usage.
 pub(crate) fn hal_texture_usage(usage: TextureUsage) -> HalTextureUsage {
-    // TransientAttachment folds into render_attachment; yawgpu does not apply the memoryless optimization.
+    // TransientAttachment remains a render attachment; the HAL honors it with memoryless storage.
     HalTextureUsage {
         copy_src: usage.contains(TextureUsage::COPY_SRC),
         copy_dst: usage.contains(TextureUsage::COPY_DST),
         texture_binding: usage.contains(TextureUsage::TEXTURE_BINDING),
         storage_binding: usage.contains(TextureUsage::STORAGE_BINDING),
         render_attachment: usage.contains(TextureUsage::RENDER_ATTACHMENT),
+        transient: usage.contains(TextureUsage::TRANSIENT_ATTACHMENT),
     }
 }
 
@@ -1448,6 +1449,11 @@ mod tests {
         assert!(!hal.texture_binding);
         assert!(!hal.storage_binding);
         assert!(hal.render_attachment);
+        assert!(hal.transient);
+
+        let plain = hal_texture_usage(TextureUsage::RENDER_ATTACHMENT);
+        assert!(plain.render_attachment);
+        assert!(!plain.transient);
     }
 
     #[test]
