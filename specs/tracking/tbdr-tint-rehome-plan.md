@@ -384,9 +384,37 @@ both backends**, behind the default-off `tiled` cargo feature:
   (0 VUIDs, Khronos layers) AND pixel-correct on MoltenVK.
 - **Block 55** rewritten to the completed Tint surface + portable contract.
 
-**Remaining (optional extension):** Slice 4 — SPIR-V **MSAA** input attachment (Vulkan-only;
-Metal MSAA subpass input is Dawn-deferred via `[[sample_id]]`). The Dawn fork's 2-arg
-`inputAttachmentLoad(ia, sample_index)` + `multisampled_input_attachment` option are ready;
-the `generate_spirv` param exists (Slice 2.1). Verification caveat: MoltenVK MSAA input-attachment
-execution is uncertain, so it may land validation-clean + spec-valid but pixel-unverified on this
-Mac (native-Vulkan-gated, like the original Slice-1.4 disposition).
+**Slice 4 — per-sample MSAA input attachment (Vulkan) — DONE (real-GPU verified on
+native NVIDIA).** Metal MSAA subpass input stays Dawn-deferred (`[[sample_id]]`). Landed:
+
+- **4.1** thread the module-wide `multisampled_input_attachment` Tint option from the
+  pipeline layout (`pipeline_has_multisampled_input_attachment` scans the bind-group
+  layouts for `InputAttachment { multisampled: true }`) into `generate_spirv` — for
+  **both** stages (the option is module-wide: Tint validates the whole module's
+  `inputAttachmentLoad` overloads even when generating the vertex entry).
+- **4.1b** the shader↔layout compat check is multisampled-agnostic for input
+  attachments (Tint always reflects `multisampled: false`), so the explicit layout is
+  the authority; rule C-1 owns sample-count consistency.
+- **4.2** core rules C-1 (layout flag ⟺ source sample count), C-2 (pipeline
+  `multisample.count` == subpass attachment sample count), C-3 (a subpass's written
+  attachments share one sample count).
+- **4.3** Vulkan `sampleRateShading` device feature enabled when supported
+  (tiled-gated); `@builtin(sample_index)` → `SampleId` → per-sample invocation.
+- **4.5** `e2e_vulkan_tiled::vulkan_tiled_msaa_deferred_reads_input_attachment` — a
+  3-subpass in-shader-resolve pass (no hardware subpass resolve): 4x MSAA g-buffer →
+  per-sample read+write 4x → single-sample in-shader average. **Validation-clean
+  (0 VUIDs) AND pixel-correct on native NVIDIA.** MoltenVK MSAA input-attachment
+  execution remains unverified (native-Vulkan-gated, per the Slice-1.4 disposition).
+
+**Deliberately NOT done:** hardware subpass resolve (`pResolveAttachments`) — the
+Vulkan tiled render pass wires color/input/depth refs but not resolve; `resolve_target`
+is validated-but-ignored on Vulkan. The MSAA e2e/example resolve in shader instead, so
+no new HAL/ABI surface was needed. Hardware subpass resolve is a separate future item.
+
+**Pre-existing issue observed (NOT Slice 4):** the transient e2e
+(`vulkan_tiled_deferred_reads_transient_input_attachment`) emits 2×
+`VUID-vkCmdBeginRenderPass-initialLayout-00898` — the render pass sets every color
+attachment's `finalLayout = TRANSFER_SRC_OPTIMAL` (`vulkan/encode.rs`), but a
+`TRANSIENT_ATTACHMENT` image cannot carry `TRANSFER_SRC` usage. Introduced with Slice
+3a (`a0f3521`), unrelated to MSAA. Fix: pick `finalLayout` per attachment (transient /
+never-copied color attachments should not use `TRANSFER_SRC_OPTIMAL`).
