@@ -939,7 +939,7 @@ pub(super) fn encode_subpass_render_pass(
     pass: &HalSubpassRenderPassCommand,
 ) -> Result<(), HalError> {
     for draw in &pass.draws {
-        let HalRenderPipeline::Metal(pipeline) = &draw.pipeline else {
+        let crate::HalRenderPipeline::Metal(pipeline) = &draw.pipeline else {
             return Err(shader_error(
                 "subpass render pipeline is not Metal-backed".to_owned(),
             ));
@@ -959,10 +959,15 @@ pub(super) fn encode_subpass_render_pass(
             stencil_reference: 0,
             occlusion_query_index: None,
             draw: draw.draw,
-            // Subpass draws (tiled/TBDR) don't carry a per-draw immediate
-            // snapshot today (Block 94 is out of scope for the tiled path);
-            // a pipeline that uses immediates in this path gets an all-zero
-            // block, matching what the pre-S2 no-op delivered.
+            // The tiled subpass vendor extension has no `SetImmediates`
+            // surface (the subpass encoder records no immediates scratch),
+            // and core validation rejects subpass pipelines whose stages
+            // use `var<immediate>` data at creation
+            // (`validate_subpass_pipeline_has_no_immediates`, Block 94
+            // Phase Review MAJOR 2) -- so no pipeline reaching this path
+            // reads user immediates and the empty snapshot is never
+            // observable. Only the internal frag-depth clamp range (which
+            // reads no user bytes) can still be composed and delivered.
             immediate_data: &[],
         };
         encode_render_state(encoder, &state)?;

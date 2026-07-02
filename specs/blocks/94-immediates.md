@@ -94,21 +94,25 @@ internal immediates today: the block is just the user prefix.
   visibility) threaded from shader codegen exactly like
   `fragment_frag_depth_clamp_slot` is today.
 - **Noop**: validates/records, executes as no-op.
-- **Metal**: on draw/dispatch (when dirty — pipeline change or
-  `SetImmediates` since last delivery), `set{Vertex,Fragment}Bytes` /
+- **Metal**: on every draw/dispatch, `set{Vertex,Fragment}Bytes` /
   `setBytes` (compute) of the combined block at the pipeline's immediate
-  slot, per stage that uses immediates. Replaces (absorbs)
+  slot, per stage that uses immediates. (S2/S3 simplification: delivery is
+  unconditional per draw/dispatch — the per-draw snapshot HAL contract
+  makes dirty tracking unnecessary and stale-slot-safe; revisit only if
+  profiling shows it matters.) Replaces (absorbs)
   `encode_render_frag_depth_clamp`'s standalone delivery for pipelines that
   also use user immediates; pipelines with clamp-only keep working.
 - **Vulkan**: user+internal immediates become the push-constant block. The
   SPIR-V writer's immediate/push-constant offsets must match the same
-  layout (read how Dawn drives `tint::spirv::writer::Options` immediates;
-  note whether yawgpu currently wires the Vulkan frag-depth clamp at all —
-  F-139 suggests the clamp is Metal-only today — and keep that behaviour
-  unchanged apart from the user prefix). `VkPipelineLayout` gains a
-  `VkPushConstantRange` covering the block (stage flags per usage);
-  `vkCmdPushConstants` on dirty at draw/dispatch. `maxPushConstantsSize >=
-  128` (Vulkan minimum) covers 64 user + internal.
+  layout (Dawn drives `tint::spirv::writer::Options` the same way). The
+  frag-depth *clamp* stays un-wired on Vulkan (F-139 posture); the
+  pre-existing pixel-center-polyfill depth-range pair — a separate
+  internal immediate that predates Block 94 — is what S3 rebased after
+  the user region. `VkPipelineLayout` gains a `VkPushConstantRange`
+  covering the block (stage flags per usage); `vkCmdPushConstants` per
+  draw/dispatch (same unconditional-delivery simplification as Metal).
+  `maxPushConstantsSize >= 128` (Vulkan minimum) covers 64 user +
+  internal; the real device value is debug-asserted.
 - **GLES**: not implemented (limit 0; Tier-2 catalogue row in Block 67).
 
 ## Slices

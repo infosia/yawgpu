@@ -190,8 +190,11 @@ pub struct HalComputePass {
     /// `[0, layout.immediate_size)` (Block 94). Compute pipelines have no
     /// internal immediates today, so this is exactly the user prefix
     /// (`specs/blocks/94-immediates.md` "Immediates block layout").
-    /// Delivery is backend-specific and lands in S2 (Metal) / S3 (Vulkan);
-    /// Noop and (today) Metal/Vulkan/GLES all ignore this field.
+    /// Metal (S2, `setBytes` at the pipeline's immediate slot) and Vulkan
+    /// (S3, `vkCmdPushConstants`) deliver it per dispatch; Noop records it
+    /// and GLES ignores it (unreachable -- GLES advertises
+    /// `maxImmediateSize = 0`, so core validation never lets user
+    /// immediates reach it).
     pub immediate_data: Vec<u8>,
     /// Dispatch command.
     pub dispatch: HalComputeDispatch,
@@ -458,13 +461,17 @@ pub struct HalRenderPass {
     /// Draw.
     pub draw: Option<HalDraw>,
     /// The pipeline's immediates block for this draw: user bytes
-    /// `[0, layout.immediate_size)` today (Block 94). The fragment
-    /// frag-depth-clamp internal constants (`ClampFragDepthArgs`,
-    /// `dawn/native/ImmediatesLayout.h:47-50`) that follow the user prefix
-    /// per `specs/blocks/94-immediates.md` "Immediates block layout" are a
-    /// Metal-delivery concern threaded in S2, not carried here. Delivery is
-    /// backend-specific and lands in S2 (Metal) / S3 (Vulkan); Noop and
-    /// (today) Metal/Vulkan/GLES all ignore this field.
+    /// `[0, layout.immediate_size)` (Block 94). The internal constants that
+    /// follow the user prefix per `specs/blocks/94-immediates.md`
+    /// "Immediates block layout" (Metal frag-depth clamp / Vulkan
+    /// pixel-center depth range, `ClampFragDepthArgs`,
+    /// `dawn/native/ImmediatesLayout.h:47-50`) are composed at delivery
+    /// from pipeline metadata plus the pass viewport, not carried here.
+    /// Metal (S2, `set{Vertex,Fragment}Bytes` at the pipeline's immediate
+    /// slot) and Vulkan (S3, `vkCmdPushConstants`) deliver the combined
+    /// block per draw; Noop records it and GLES ignores it (unreachable --
+    /// GLES advertises `maxImmediateSize = 0`, so core validation never
+    /// lets user immediates reach it).
     pub immediate_data: Vec<u8>,
 }
 

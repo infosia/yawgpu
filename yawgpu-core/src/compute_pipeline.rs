@@ -174,20 +174,19 @@ impl ComputePipeline {
             )
         });
         let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
-        // Effective user-immediate budget for HAL codegen. Mirrors the
-        // validation-side resolution (`resolve_compute_pipeline_immediate_size`,
-        // Dawn `CreateDefault`'s stage-usage rule for auto layouts); the auto
-        // arm's `maxImmediateSize` bound is not re-checked here because HAL
-        // creation only runs for pipelines that already passed validation, and
-        // any reflection failure resolves to 0 on that same already-error path.
-        let user_immediate_size = match &descriptor.layout {
-            ComputePipelineLayout::Explicit(layout) => layout.immediate_size(),
-            ComputePipelineLayout::Auto => descriptor
-                .shader_module
-                .reflected()
-                .and_then(|module| module.immediate_data_size(&entry_name).ok())
-                .unwrap_or(0),
-        };
+        // Effective user-immediate budget for HAL codegen. Same shared
+        // resolver the validation path wraps
+        // (`resolve_compute_pipeline_immediate_size`); the auto arm's
+        // `maxImmediateSize` bound is not re-checked here because HAL
+        // creation only runs for pipelines that already passed validation,
+        // and any reflection failure resolves to 0 on that same
+        // already-error path.
+        let user_immediate_size = compute_pipeline_layout_immediate_size(
+            &descriptor.layout,
+            descriptor.shader_module.reflected(),
+            &entry_name,
+        )
+        .unwrap_or(0);
         let (hal, backend_error) = if is_error {
             (None, None)
         } else {
@@ -1198,18 +1197,42 @@ fn resolved_pipeline_constant_map(
     )
 }
 
-/// Resolves the pipeline's effective user-immediate byte budget (Blocks
-/// 93/94). An explicit layout contributes its declared `immediateSize`. An
-/// auto (default) layout mirrors Dawn's default-layout rule
+/// Returns the pipeline's effective user-immediate budget in bytes (Blocks
+/// 93/94) WITHOUT the auto-layout `maxImmediateSize` bound (mirrors the
+/// render path's `render_pipeline_layout_immediate_size` /
+/// `resolve_render_pipeline_immediate_size` split). An explicit layout
+/// contributes its declared `immediateSize` (no reflection needed). An auto
+/// (default) layout mirrors Dawn's default-layout rule
 /// (`dawn/native/PipelineLayout.cpp:549,588-590,616` --
 /// `PipelineLayoutBase::CreateDefault` sets the synthesized descriptor's
 /// `immediateSize` to the max of the stages' reflected immediate usage;
 /// compute has a single stage): the budget is `entry_name`'s own reflected
-/// immediate data size. Dawn then routes that default descriptor through
-/// the ordinary validated `CreatePipelineLayout` (`PipelineLayout.cpp:634`),
-/// whose `immediateSize <= maxImmediateSize` bound
-/// (`PipelineLayout.cpp:144-147`) is mirrored here for the auto arm, with
-/// the same error message `createPipelineLayout` uses
+/// immediate data size, requiring `module` to be `Some`.
+///
+/// Callers: [`resolve_compute_pipeline_immediate_size`] (validation -- adds
+/// the auto-arm `maxImmediateSize` bound) and `ComputePipeline::new` (HAL
+/// codegen -- runs only for pipelines that already passed validation, so
+/// the bound is not re-checked there).
+pub(crate) fn compute_pipeline_layout_immediate_size(
+    layout: &ComputePipelineLayout,
+    module: Option<&frontend::ReflectedModule>,
+    entry_name: &str,
+) -> Result<u32, String> {
+    match layout {
+        ComputePipelineLayout::Explicit(layout) => Ok(layout.immediate_size()),
+        ComputePipelineLayout::Auto => module
+            .ok_or_else(|| "compute pipeline requires a reflected shader module".to_owned())?
+            .immediate_data_size(entry_name),
+    }
+}
+
+/// Resolves the pipeline's effective user-immediate byte budget for
+/// validation (Blocks 93/94): [`compute_pipeline_layout_immediate_size`]
+/// plus, for auto layouts, the `immediateSize <= maxImmediateSize` bound
+/// Dawn applies because `CreateDefault`'s synthesized descriptor goes
+/// through the ordinary validated `CreatePipelineLayout`
+/// (`dawn/native/PipelineLayout.cpp:634` -> `:144-147`), with the same
+/// error message `createPipelineLayout` uses
 /// (`validate_pipeline_layout_descriptor`); explicit layouts were already
 /// bounds-checked at their own creation.
 pub(crate) fn resolve_compute_pipeline_immediate_size(
@@ -1218,16 +1241,11 @@ pub(crate) fn resolve_compute_pipeline_immediate_size(
     entry_name: &str,
     limits: Limits,
 ) -> Result<u32, String> {
-    match layout {
-        ComputePipelineLayout::Explicit(layout) => Ok(layout.immediate_size()),
-        ComputePipelineLayout::Auto => {
-            let size = module.immediate_data_size(entry_name)?;
-            if size > limits.max_immediate_size {
-                return Err("pipeline layout immediateSize exceeds the device limit".to_owned());
-            }
-            Ok(size)
-        }
+    let size = compute_pipeline_layout_immediate_size(layout, Some(module), entry_name)?;
+    if matches!(layout, ComputePipelineLayout::Auto) && size > limits.max_immediate_size {
+        return Err("pipeline layout immediateSize exceeds the device limit".to_owned());
     }
+    Ok(size)
 }
 
 /// Validates that `entry_name`'s reflected immediate data size -- the total

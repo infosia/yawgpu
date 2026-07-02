@@ -873,14 +873,55 @@ pub(crate) fn validate_subpass_render_pipeline_descriptor(
         .subpasses
         .get(descriptor.subpass_index as usize)
         .map(|subpass| subpass.color_attachment_indices.as_slice());
-    resolve_render_pipeline_descriptor_for_source(
+    let (vertex_entry, fragment_entry, _) = match resolve_render_pipeline_descriptor_for_source(
         &descriptor.base,
         limits,
         features,
         subpass_color_attachment_indices,
         0,
+    ) {
+        Ok(resolved) => resolved,
+        Err(message) => return Some(message),
+    };
+    validate_subpass_pipeline_has_no_immediates(
+        &descriptor.base,
+        &vertex_entry,
+        fragment_entry.as_deref(),
     )
     .err()
+}
+
+/// Rejects subpass pipelines whose shader stages statically use
+/// `var<immediate>` data (Block 94 Phase Review MAJOR 2). The tiled subpass
+/// vendor extension has no `SetImmediates` surface -- the subpass encoder
+/// records no immediates scratch and the Metal subpass draw path
+/// (`encode_subpass_render_pass`) therefore has no snapshot to deliver --
+/// so such a pipeline would silently read zeroes. Never silently wrong:
+/// fail pipeline creation deterministically instead, as a documented
+/// tiled-feature limitation (the standard render-pass path fully supports
+/// immediates).
+#[cfg(feature = "tiled")]
+fn validate_subpass_pipeline_has_no_immediates(
+    descriptor: &RenderPipelineDescriptor,
+    vertex_entry: &str,
+    fragment_entry: Option<&str>,
+) -> Result<(), String> {
+    const MESSAGE: &str = "subpass render pipelines do not support immediate data (var<immediate>)";
+    // Passthrough (unreflected) modules bypass Tint reflection entirely and
+    // are outside-spec vendor input; only WGSL-reflected stages are checked.
+    if let Some(vertex_module) = descriptor.vertex.shader.module.reflected() {
+        if vertex_module.immediate_data_size(vertex_entry)? > 0 {
+            return Err(MESSAGE.to_owned());
+        }
+    }
+    if let (Some(fragment), Some(fragment_entry)) = (&descriptor.fragment, fragment_entry) {
+        if let Some(fragment_module) = fragment.shader.module.reflected() {
+            if fragment_module.immediate_data_size(fragment_entry)? > 0 {
+                return Err(MESSAGE.to_owned());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Alias for resolved render pipeline parts.
@@ -4704,6 +4745,60 @@ fn fs(input: FsIn) -> @location(0) vec4f {{
         assert_eq!(
             error.message,
             "render pipeline color target without shader output must use writeMask 0"
+        );
+    }
+
+    /// Block 94 Phase Review MAJOR 2: the tiled subpass vendor extension has
+    /// no `SetImmediates` surface, so a subpass pipeline whose fragment
+    /// stage statically uses `var<immediate>` data is rejected at creation
+    /// (deterministic validation error) instead of silently reading zeroes
+    /// at draw time.
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_render_pipeline_rejects_immediate_data_usage() {
+        let device = noop_device();
+        assert_eq!(device.limits().max_immediate_size, 64);
+        let pass_layout = Arc::new(
+            device.create_subpass_pass_layout(valid_two_subpass_deferred_layout_descriptor()),
+        );
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r#"
+requires immediate_address_space;
+
+var<immediate> pc : vec4f;
+
+@vertex
+fn vs() -> @builtin(position) vec4<f32> {
+  return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+  return pc;
+}
+"#
+                .to_owned(),
+            )),
+        );
+        let descriptor = SubpassRenderPipelineDescriptor {
+            base: render_pipeline_descriptor(module),
+            pass_layout,
+            subpass_index: 1,
+            error: None,
+        };
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_subpass_render_pipeline(descriptor);
+        let error = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("subpass pipeline using var<immediate> should be scoped");
+
+        assert!(pipeline.is_error());
+        assert_eq!(
+            error.message,
+            "subpass render pipelines do not support immediate data (var<immediate>)"
         );
     }
 

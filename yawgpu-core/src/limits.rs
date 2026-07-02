@@ -225,6 +225,13 @@ impl Limits {
 
     /// Validates required limits and returns a descriptive error on failure.
     pub(crate) fn validate_required_limits(self, required: Option<&Self>) -> Result<Self, String> {
+        // Whether the caller actually supplied requirements. A null/absent
+        // descriptor is NOT a set of asks (Block 67 "decline only
+        // unsatisfiable ASKS"): fields whose spec default may exceed a
+        // Tier-2 backend's supported value (`max_immediate_size`, GLES
+        // supports 0) must skip their over-ask check entirely in that case
+        // rather than fail default device creation.
+        let required_specified = required.is_some();
         // Block 00: for the synthetic Noop adapter, supported limits equal
         // the WebGPU spec defaults, so comparisons against `self` collapse to
         // comparisons against `DEFAULT` intentionally.
@@ -337,7 +344,14 @@ impl Limits {
         // any single-field worse-than-default Maximum request must succeed.
         validate_required_limit_relationships(effective)?;
 
-        if required.max_immediate_size > self.max_immediate_size {
+        // `max_immediate_size` over-ask check only when the caller actually
+        // specified requirements: `Limits::DEFAULT` (64) exceeds a Tier-2
+        // GLES adapter's supported 0, so treating an absent descriptor as
+        // "requires 64" would deterministically fail default device creation
+        // there. The device's effective value is the adapter's supported
+        // value either way (never the ask -- CTS
+        // `maxImmediateSize always uses supported limit`).
+        if required_specified && required.max_immediate_size > self.max_immediate_size {
             return Err(format!(
                 "required limit max_immediate_size={} exceeds supported {}",
                 required.max_immediate_size, self.max_immediate_size
@@ -552,6 +566,42 @@ mod tests {
             zero_supported.validate_required_limits(Some(&required)),
             Err("required limit max_immediate_size=4 exceeds supported 0".to_owned())
         );
+    }
+
+    /// Block 94 Phase Review CRITICAL 1 regression: default device creation
+    /// (no required limits) must succeed on an adapter that supports
+    /// `max_immediate_size == 0` (GLES, Tier 2) even though
+    /// `Limits::DEFAULT` is 64 -- an absent descriptor is NOT an ask.
+    /// Explicit asks keep their over-ask semantics: 64 against a
+    /// zero-supported adapter still errors, and an explicit 0 always passes.
+    /// The effective device limit is the adapter's supported value in every
+    /// case.
+    #[test]
+    fn unspecified_max_immediate_size_is_not_a_requirement() {
+        let mut zero_supported = Limits::DEFAULT;
+        zero_supported.max_immediate_size = 0;
+
+        // Null/absent descriptor: no ask, creation succeeds, effective 0.
+        let effective = zero_supported
+            .validate_required_limits(None)
+            .expect("default device creation must succeed on a zero-supported adapter");
+        assert_eq!(effective.max_immediate_size, 0);
+
+        // Explicit ask of the spec default (64) is a real over-ask: rejected.
+        let mut required = Limits::DEFAULT;
+        required.max_immediate_size = 64;
+        assert_eq!(
+            zero_supported.validate_required_limits(Some(&required)),
+            Err("required limit max_immediate_size=64 exceeds supported 0".to_owned())
+        );
+
+        // Explicit 0 (the FFI mapping of WGPU_LIMIT_U32_UNDEFINED) passes.
+        let mut required = Limits::DEFAULT;
+        required.max_immediate_size = 0;
+        let effective = zero_supported
+            .validate_required_limits(Some(&required))
+            .expect("an explicit max_immediate_size of 0 is always satisfiable");
+        assert_eq!(effective.max_immediate_size, 0);
     }
 
     #[test]

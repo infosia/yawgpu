@@ -244,7 +244,14 @@ pub fn map_limits(value: &native::WGPULimits) -> core::Limits {
         value.maxComputeWorkgroupsPerDimension,
         default.max_compute_workgroups_per_dimension,
     );
-    limits.max_immediate_size = limit_u32(value.maxImmediateSize, default.max_immediate_size);
+    // An unset maxImmediateSize is NOT a requirement. Mapping "undefined" to
+    // the core default (64, Block 94 S3) would make every null/unset
+    // descriptor implicitly *require* 64, which deterministically fails
+    // device creation on adapters that support 0 (GLES, Tier 2 -- Block 67
+    // "decline only unsatisfiable asks"). Requiring 0 always passes the
+    // over-ask check and the device's effective value is the adapter's
+    // supported value regardless (CTS "always uses supported limit").
+    limits.max_immediate_size = limit_u32(value.maxImmediateSize, 0);
     limits
 }
 

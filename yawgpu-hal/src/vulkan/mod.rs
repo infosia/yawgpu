@@ -303,6 +303,20 @@ impl VulkanAdapter {
         let vk = properties.limits;
         let max_buffer_size = self.max_buffer_size();
 
+        // Block 94 S3: the combined immediates push-constant block is at
+        // most 64 user bytes + the 8-byte pixel-center depth-range pair =
+        // 72 bytes. Every conformant Vulkan implementation satisfies this
+        // by a wide margin -- the spec-required minimum for
+        // `maxPushConstantsSize` is 128 (Vulkan 1.3 spec, "Limit Requirements"
+        // table 53) -- so this is a debug-only tripwire against a broken
+        // driver report, not a runtime capability gate.
+        debug_assert!(
+            vk.max_push_constants_size >= 72,
+            "Vulkan maxPushConstantsSize {} < 72 (64 user immediates + 8 depth-range); \
+             the spec minimum is 128",
+            vk.max_push_constants_size
+        );
+
         // Ported from Dawn PhysicalDeviceVk.cpp:744-918.
         // Deferred: NVIDIA's 2GB-4 storage buffer cap and Dawn's
         // maxFragmentCombinedOutputResources redistribution.

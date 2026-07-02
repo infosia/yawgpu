@@ -1157,6 +1157,24 @@ mod tests {
         assert_eq!(map_limits(&native), limits);
     }
 
+    /// An unset `maxImmediateSize` (`WGPU_LIMIT_U32_UNDEFINED`) must map to
+    /// a no-requirement `0`, NOT the core default (64) -- otherwise every
+    /// null/unset descriptor implicitly *requires* 64 and default device
+    /// creation deterministically fails on adapters that support 0 (GLES,
+    /// Tier 2; Block 94 Phase Review CRITICAL 1). Requiring 0 always passes
+    /// the required-limits over-ask check on a zero-supported adapter.
+    #[test]
+    fn map_limits_maps_undefined_max_immediate_size_to_no_requirement() {
+        let mut value = distinct_limits();
+        value.maxImmediateSize = native::WGPU_LIMIT_U32_UNDEFINED;
+
+        let mapped = map_limits(&value);
+
+        assert_eq!(mapped.max_immediate_size, 0);
+        // An explicitly-set value still round-trips as a real requirement.
+        assert_eq!(map_limits(&distinct_limits()).max_immediate_size, 132);
+    }
+
     #[test]
     fn map_features_to_native_allocates_feature_array_and_free_supported_features_releases_it() {
         let features = [

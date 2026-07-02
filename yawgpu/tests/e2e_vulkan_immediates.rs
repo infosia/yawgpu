@@ -5,15 +5,19 @@
 //! Run manually on a Vulkan machine:
 //!   cargo test -p yawgpu --features vulkan --test e2e_vulkan_immediates -- --ignored
 
+#[cfg(feature = "vulkan")]
 use std::os::raw::c_void;
+#[cfg(feature = "vulkan")]
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "vulkan")]
 use yawgpu::native;
 #[cfg(feature = "vulkan")]
 use yawgpu::{
     YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_VULKAN,
     YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
 };
+#[cfg(feature = "vulkan")]
 use yawgpu_test::wait;
 #[cfg(feature = "vulkan")]
 use yawgpu_test::{real_backend_skip_reason, RealBackend};

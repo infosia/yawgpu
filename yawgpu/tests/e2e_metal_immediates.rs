@@ -5,15 +5,19 @@
 //! Run manually on a Metal machine:
 //!   cargo test -p yawgpu --features metal --test e2e_metal_immediates -- --ignored
 
+#[cfg(feature = "metal")]
 use std::os::raw::c_void;
+#[cfg(feature = "metal")]
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "metal")]
 use yawgpu::native;
 #[cfg(feature = "metal")]
 use yawgpu::{
     YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_METAL,
     YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
 };
+#[cfg(feature = "metal")]
 use yawgpu_test::wait;
 #[cfg(feature = "metal")]
 use yawgpu_test::{real_backend_skip_reason, RealBackend};
