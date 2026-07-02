@@ -44,6 +44,11 @@ pub struct ReflectedModule {
     /// name. Caches the `Result` (including the "entry point not found"
     /// error) so a repeated call never re-crosses the FFI boundary.
     resource_bindings_cache: Mutex<HashMap<String, Result<Vec<ReflectedResourceBinding>, String>>>,
+    /// Per-entry-point immediate data size (bytes), memoized by entry-point
+    /// name on first [`Self::immediate_data_size`] call for that name.
+    /// Caches the `Result` (including the "entry point not found" error) so
+    /// a repeated call never re-crosses the FFI boundary.
+    immediate_data_size_cache: Mutex<HashMap<String, Result<u32, String>>>,
     /// Memoized [`Self::fragment_builtins`] backing data (all fragment
     /// entry points), computed once.
     fragment_builtins_cache: OnceLock<Vec<ReflectedFragmentBuiltins>>,
@@ -114,6 +119,7 @@ pub(crate) fn parse_and_validate_wgsl_gated(
         entry_points_cache: OnceLock::new(),
         entry_point_io_cache: Mutex::new(HashMap::new()),
         resource_bindings_cache: Mutex::new(HashMap::new()),
+        immediate_data_size_cache: Mutex::new(HashMap::new()),
         fragment_builtins_cache: OnceLock::new(),
         overrides_cache: OnceLock::new(),
     })
@@ -571,6 +577,35 @@ impl ReflectedModule {
             .into_iter()
             .map(reflected_resource_binding)
             .collect()
+    }
+
+    /// Returns `entry_point`'s immediate data size in bytes -- the total
+    /// byte size of all `var<immediate>` (WGSL `immediate_address_space`
+    /// language feature) globals it statically accesses. `0` means the
+    /// entry point declares/uses no immediates (including a module that
+    /// merely declares one unused by the entry point). Errors if
+    /// `entry_point` does not name an entry point in the module.
+    ///
+    /// Memoized per entry-point name (including the "entry point not found"
+    /// error), so a repeated call for the same entry point never re-crosses
+    /// the FFI boundary.
+    pub(crate) fn immediate_data_size(&self, entry_point: &str) -> Result<u32, String> {
+        // See the matching comment on `entry_point_io`'s lock above: a
+        // poisoned lock does not imply an inconsistent cache, so recover
+        // rather than panic (no panics in library code, CLAUDE.md).
+        let mut cache = self
+            .immediate_data_size_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = cache.get(entry_point) {
+            return cached.clone();
+        }
+        let computed = self
+            .program
+            .immediate_data_size(entry_point)
+            .map_err(|e| e.to_string());
+        cache.insert(entry_point.to_owned(), computed.clone());
+        computed
     }
 
     /// Returns fragment builtins reflected by the validated shader module for
@@ -1530,6 +1565,41 @@ fn fs() -> @location(0) vec4<f32> {
         );
         let err_again = module
             .resource_bindings_for_entry("does_not_exist")
+            .expect_err("unknown entry point should error on a cached lookup too");
+        assert_eq!(err_again, err);
+    }
+
+    #[test]
+    fn reflects_immediate_data_size() {
+        let module = parse_and_validate_wgsl(
+            r#"
+requires immediate_address_space;
+
+var<immediate> unused_imm : u32;
+var<immediate> used_imm : vec4f;
+
+@compute @workgroup_size(1)
+fn uses_immediate() {
+  let v = used_imm;
+  _ = v;
+}
+
+@compute @workgroup_size(1)
+fn no_immediate() {}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(module.immediate_data_size("uses_immediate").unwrap(), 16);
+        assert_eq!(module.immediate_data_size("no_immediate").unwrap(), 0);
+
+        // A non-existent entry point errors rather than silently returning 0;
+        // the error is memoized the same as a hit.
+        let err = module
+            .immediate_data_size("does_not_exist")
+            .expect_err("unknown entry point should error");
+        let err_again = module
+            .immediate_data_size("does_not_exist")
             .expect_err("unknown entry point should error on a cached lookup too");
         assert_eq!(err_again, err);
     }

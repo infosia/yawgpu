@@ -20,6 +20,8 @@ pub const WGSL_LANGUAGE_FEATURE_SUBGROUP_UNIFORMITY: u32 = 8;
 pub const WGSL_LANGUAGE_FEATURE_TEXTURE_FORMATS_TIER1: u32 = 9;
 /// `WGPUWGSLLanguageFeatureName_LinearIndexing`.
 pub const WGSL_LANGUAGE_FEATURE_LINEAR_INDEXING: u32 = 10;
+/// `WGPUWGSLLanguageFeatureName_ImmediateAddressSpace`.
+pub const WGSL_LANGUAGE_FEATURE_IMMEDIATE_ADDRESS_SPACE: u32 = 11;
 
 /// WGSL language features yawgpu's frontend supports (compiles and executes),
 /// reported via `wgpuInstanceGetWGSLLanguageFeatures` and allowed by the Tint shim.
@@ -34,6 +36,7 @@ pub const SUPPORTED_WGSL_LANGUAGE_FEATURES: &[u32] = &[
     WGSL_LANGUAGE_FEATURE_SUBGROUP_UNIFORMITY,
     WGSL_LANGUAGE_FEATURE_TEXTURE_FORMATS_TIER1,
     WGSL_LANGUAGE_FEATURE_LINEAR_INDEXING,
+    WGSL_LANGUAGE_FEATURE_IMMEDIATE_ADDRESS_SPACE,
 ];
 
 #[cfg(test)]
@@ -44,7 +47,7 @@ mod tests {
     fn supported_wgsl_language_features_match_canonical_api_values() {
         assert_eq!(
             SUPPORTED_WGSL_LANGUAGE_FEATURES,
-            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
         );
         assert!(SUPPORTED_WGSL_LANGUAGE_FEATURES.contains(&6));
         assert!(SUPPORTED_WGSL_LANGUAGE_FEATURES.contains(&8));

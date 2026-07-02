@@ -456,6 +456,14 @@ mod tests {
                 ),
                 native::WGPUBool::from(true)
             );
+            assert_eq!(
+                wgpuInstanceHasWGSLLanguageFeature(
+                    instance,
+                    native::WGPUWGSLLanguageFeatureName_ImmediateAddressSpace,
+                ),
+                native::WGPUBool::from(true)
+            );
+            assert!(values.contains(&native::WGPUWGSLLanguageFeatureName_ImmediateAddressSpace));
 
             wgpuSupportedWGSLLanguageFeaturesFreeMembers(features);
             wgpuInstanceRelease(instance);

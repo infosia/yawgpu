@@ -2227,6 +2227,21 @@ pub(crate) fn resolve_render_pipeline_descriptor(
         subpass_color_attachment_indices,
     )?;
     validate_render_pipeline_layout(descriptor, &vertex_entry, fragment_entry.as_deref())?;
+    let immediate_size_budget = render_pipeline_layout_immediate_size(&descriptor.layout);
+    validate_render_stage_immediate_size(
+        &descriptor.vertex.shader,
+        &vertex_entry,
+        immediate_size_budget,
+    )?;
+    if let (Some(fragment), Some(fragment_entry)) =
+        (&descriptor.fragment, fragment_entry.as_deref())
+    {
+        validate_render_stage_immediate_size(
+            &fragment.shader,
+            fragment_entry,
+            immediate_size_budget,
+        )?;
+    }
     validate_multisample_state(descriptor, fragment_entry.as_deref())?;
     let bind_group_layouts = effective_render_bind_group_layouts(
         descriptor,
@@ -3238,6 +3253,31 @@ pub(crate) fn validate_render_pipeline_layout(
     validate_pipeline_layout_stage_bindings(layout, &requirements)
 }
 
+/// Returns the pipeline layout's immediate-data budget in bytes (Block 93):
+/// `0` for an auto (default) layout -- auto layouts reserve no immediate
+/// space -- or the explicit layout's `immediateSize` otherwise.
+pub(crate) fn render_pipeline_layout_immediate_size(layout: &RenderPipelineLayout) -> u32 {
+    match layout {
+        RenderPipelineLayout::Auto => 0,
+        RenderPipelineLayout::Explicit(layout) => layout.immediate_size(),
+    }
+}
+
+/// Validates that `entry_point`'s reflected immediate data size fits within
+/// `immediate_size_budget` (Block 93). Thin wrapper around
+/// [`validate_stage_immediate_size`] that resolves `stage`'s reflected
+/// module first, matching [`stage_resource_bindings`]'s shape.
+pub(crate) fn validate_render_stage_immediate_size(
+    stage: &RenderPipelineShaderStage,
+    entry_point: &str,
+    immediate_size_budget: u32,
+) -> Result<(), String> {
+    let Some(module) = stage.module.reflected() else {
+        return Err("render pipeline stage requires a reflected shader module".to_owned());
+    };
+    validate_stage_immediate_size(module, entry_point, immediate_size_budget)
+}
+
 /// Returns effective render bind group layouts.
 pub(crate) fn effective_render_bind_group_layouts(
     descriptor: &RenderPipelineDescriptor,
@@ -3348,6 +3388,48 @@ mod tests {
             cull_mode: CullMode::None,
             unclipped_depth,
         }
+    }
+
+    /// Block 93 render analog: a vertex entry point that statically touches
+    /// a `var<immediate>` is rejected at pipeline creation because every
+    /// pipeline layout has `immediateSize == 0` today, including the auto
+    /// (default) layout used by `render_pipeline_descriptor`. Fires
+    /// identically on Noop (backend-independent core validation).
+    #[test]
+    fn render_pipeline_rejects_vertex_entry_point_immediate_data_size_exceeding_layout_budget() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r#"
+requires immediate_address_space;
+
+var<immediate> pc : vec4f;
+
+@vertex
+fn vs() -> @builtin(position) vec4<f32> {
+  return pc;
+}
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+  return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+}
+"#
+                .to_owned(),
+            )),
+        );
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_render_pipeline(render_pipeline_descriptor(module));
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("vertex stage touching an over-budget immediate should be scoped");
+        assert!(pipeline.is_error());
+        assert_eq!(
+            scoped.message,
+            "shader entry point immediate data size exceeds the pipeline layout's immediateSize"
+        );
     }
 
     #[test]

@@ -876,6 +876,11 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
     let workgroup = resolve_compute_workgroup(module, &entry_name, &constants, limits)?;
     let bindings = module.resource_bindings_for_entry(&entry_name)?;
     validate_compute_pipeline_layout(&descriptor.layout, &bindings)?;
+    validate_stage_immediate_size(
+        module,
+        &entry_name,
+        compute_pipeline_layout_immediate_size(&descriptor.layout),
+    )?;
     let bind_group_layouts = effective_compute_bind_group_layouts(
         &descriptor.layout,
         &bindings,
@@ -1155,6 +1160,38 @@ fn resolved_pipeline_constant_map(
             .iter()
             .map(|constant| (constant.key.clone(), constant.value)),
     )
+}
+
+/// Returns the pipeline layout's immediate-data budget in bytes (Block 93):
+/// `0` for an auto (default) layout -- auto layouts reserve no immediate
+/// space -- or the explicit layout's `immediateSize` otherwise.
+pub(crate) fn compute_pipeline_layout_immediate_size(layout: &ComputePipelineLayout) -> u32 {
+    match layout {
+        ComputePipelineLayout::Auto => 0,
+        ComputePipelineLayout::Explicit(layout) => layout.immediate_size(),
+    }
+}
+
+/// Validates that `entry_name`'s reflected immediate data size -- the total
+/// byte size of all `var<immediate>` (WGSL `immediate_address_space`
+/// language feature) globals it statically accesses -- fits within
+/// `immediate_size_budget` (the owning pipeline layout's `immediateSize`).
+/// Backend-independent (Block 93): fires identically regardless of HAL,
+/// including Noop. A module that merely declares an immediate unused by
+/// `entry_name` reflects a size of `0` and always passes.
+pub(crate) fn validate_stage_immediate_size(
+    module: &frontend::ReflectedModule,
+    entry_name: &str,
+    immediate_size_budget: u32,
+) -> Result<(), String> {
+    let required = module.immediate_data_size(entry_name)?;
+    if required > immediate_size_budget {
+        return Err(
+            "shader entry point immediate data size exceeds the pipeline layout's immediateSize"
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 /// Validates compute pipeline layout and returns a descriptive error on failure.
@@ -1923,6 +1960,102 @@ mod tests {
             scoped.message,
             "compute pipeline shader module must not be an error module"
         );
+    }
+
+    /// Block 93: an entry point that statically touches a `var<immediate>`
+    /// is rejected at pipeline creation because every pipeline layout has
+    /// `immediateSize == 0` today (`maxImmediateSize = 0`, `HalLimits::DEFAULT`
+    /// on every backend) -- both for an explicit layout (only immediateSize
+    /// 0 is even constructible under that device limit) and for the auto
+    /// (default) layout. This fires identically on Noop (backend-independent
+    /// core validation).
+    #[test]
+    fn compute_pipeline_rejects_entry_point_immediate_data_size_exceeding_layout_budget() {
+        let device = noop_device();
+        let shader = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r#"
+requires immediate_address_space;
+
+var<immediate> pc : u32;
+
+@compute @workgroup_size(1)
+fn cs() {
+  let v = pc;
+  _ = v;
+}
+"#
+                .to_owned(),
+            )),
+        );
+
+        let explicit_layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: Vec::new(),
+            immediate_size: 0,
+            error: None,
+        }));
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(explicit_layout),
+            shader_module: shader.clone(),
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        });
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("pipeline touching an over-budget immediate should be scoped");
+        assert!(pipeline.is_error());
+        assert_eq!(
+            scoped.message,
+            "shader entry point immediate data size exceeds the pipeline layout's immediateSize"
+        );
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let auto_pipeline = device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Auto,
+            shader_module: shader,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        });
+        let scoped_auto = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("auto-layout pipeline touching an immediate should be scoped");
+        assert!(auto_pipeline.is_error());
+        assert_eq!(scoped_auto.message, scoped.message);
+    }
+
+    /// A module that only *declares* a `var<immediate>` global -- never
+    /// touched by the entry point -- reflects an immediate data size of `0`
+    /// and must create successfully, matching the layout's `immediateSize`
+    /// budget of `0`.
+    #[test]
+    fn compute_pipeline_allows_declared_but_unused_immediate() {
+        let device = noop_device();
+        let shader = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r#"
+requires immediate_address_space;
+
+var<immediate> unused_pc : u32;
+
+@compute @workgroup_size(1)
+fn cs() {}
+"#
+                .to_owned(),
+            )),
+        );
+        let pipeline = device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Auto,
+            shader_module: shader,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        });
+        assert!(!pipeline.is_error());
     }
 
     #[test]

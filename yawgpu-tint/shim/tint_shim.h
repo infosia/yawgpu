@@ -126,6 +126,21 @@ YAWGPU_TINT_API bool yawgpu_tint_entry_point_output_get(const YawgpuTintProgram*
                                         size_t i,
                                         YawgpuTintStageVariable* out);
 
+/* Returns `ep`'s immediate data size in bytes -- the total byte size of all
+   var<immediate> (WGSL `immediate_address_space` language feature) globals
+   that entry point statically accesses, per Tint's
+   `inspector::EntryPoint::immediate_data_size`. On success `*out` holds the
+   size (0 if the entry point declares/uses no immediates). On failure (NULL
+   argument or `ep` not found among the program's entry points) returns
+   false and, if `err` is non-NULL, sets `*err` to an owned diagnostic string
+   (caller frees with `yawgpu_tint_string_free`) -- unlike
+   yawgpu_tint_workgroup_storage_size, a lookup failure is never silently
+   coerced to a `0` success. */
+YAWGPU_TINT_API bool yawgpu_tint_immediate_data_size(const YawgpuTintProgram*,
+                                        const char* ep,
+                                        uint32_t* out,
+                                        char** err);
+
 /* Program diagnostics collected during successful parsing.
  * severity: 0=note/info, 1=warning. Error diagnostics fail program creation. */
 typedef struct {

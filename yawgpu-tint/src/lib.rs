@@ -1355,6 +1355,12 @@ mod real {
             out: *mut u32,
             err: *mut *mut c_char,
         ) -> bool;
+        fn yawgpu_tint_immediate_data_size(
+            program: *const RawProgram,
+            ep: *const c_char,
+            out: *mut u32,
+            err: *mut *mut c_char,
+        ) -> bool;
         fn yawgpu_tint_generate_glsl(
             program: *const RawProgram,
             ep: *const c_char,
@@ -1936,6 +1942,29 @@ mod real {
             Ok(out)
         }
 
+        /// Returns `entry_point`'s immediate data size in bytes -- the total
+        /// byte size of all `var<immediate>` (WGSL `immediate_address_space`
+        /// language feature) globals it statically accesses, per Tint's
+        /// `inspector::EntryPoint::immediate_data_size`. `0` means the entry
+        /// point declares/uses no immediates (including modules that merely
+        /// declare an unused `var<immediate>`). Fails if `entry_point` does
+        /// not name an entry point in the module -- unlike
+        /// [`Self::workgroup_storage_size`], that failure is never silently
+        /// coerced to `Ok(0)`.
+        pub fn immediate_data_size(&self, entry_point: &str) -> Result<u32, TintError> {
+            let ep = cstring(entry_point, "entry point").map_err(TintError::Reflection)?;
+            let mut out = 0u32;
+            let mut err = ptr::null_mut();
+            // SAFETY: `ep`, `out`, and `err` point to valid memory for the call.
+            let ok = unsafe {
+                yawgpu_tint_immediate_data_size(self.raw, ep.as_ptr(), &mut out, &mut err)
+            };
+            if !ok {
+                return Err(TintError::Reflection(take_error(err)));
+            }
+            Ok(out)
+        }
+
         /// Generates GLSL ES 3.1 for `entry_point`.
         ///
         /// `first_instance_offset`, when `Some`, is passed through to Tint's
@@ -2192,6 +2221,11 @@ mod stub {
             Err(TintError::Unavailable)
         }
 
+        /// Returns `entry_point`'s immediate data size in bytes.
+        pub fn immediate_data_size(&self, _entry_point: &str) -> Result<u32, TintError> {
+            Err(TintError::Unavailable)
+        }
+
         /// Generates GLSL ES 3.1 for `entry_point`.
         pub fn generate_glsl(
             &self,
@@ -2349,6 +2383,37 @@ fn main() {
                 .unwrap(),
             32
         );
+    }
+
+    #[test]
+    fn reflects_immediate_data_size() {
+        let wgsl = r#"
+requires immediate_address_space;
+
+var<immediate> unused_imm : u32;
+var<immediate> used_imm : vec4f;
+
+@compute @workgroup_size(1)
+fn uses_immediate() {
+  let v = used_imm;
+  _ = v;
+}
+
+@compute @workgroup_size(1)
+fn no_immediate() {}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[11]).unwrap();
+        // Entry point that statically accesses `used_imm` (a vec4f = 16 bytes);
+        // `unused_imm` is declared but never touched by this entry point, so
+        // it does not contribute to the size (matches Dawn's
+        // ImmediateDataSizeTwoConstants inspector test).
+        assert_eq!(program.immediate_data_size("uses_immediate").unwrap(), 16);
+        // Entry point that touches no immediate-address-space variable at all.
+        assert_eq!(program.immediate_data_size("no_immediate").unwrap(), 0);
+        // A nonexistent entry point is a real error, never silently `Ok(0)`
+        // (the flaw this query deliberately avoids -- see
+        // `workgroup_storage_size`'s doc comment).
+        assert!(program.immediate_data_size("does_not_exist").is_err());
     }
 
     #[test]

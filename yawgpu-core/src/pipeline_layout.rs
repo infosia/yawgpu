@@ -56,6 +56,16 @@ impl PipelineLayout {
     pub fn bind_group_layouts(&self) -> &[Arc<BindGroupLayout>] {
         &self.inner._bind_group_layouts
     }
+
+    /// Returns the layout's immediate-data budget in bytes (the
+    /// `immediateSize` this layout was created with; `0` for auto/default
+    /// layouts). Used by compute/render pipeline creation to enforce the
+    /// `immediate_address_space` pipeline-creation rule (Block 93): an entry
+    /// point's reflected immediate data size must not exceed this budget.
+    #[must_use]
+    pub(crate) fn immediate_size(&self) -> u32 {
+        self.inner._immediate_size
+    }
 }
 
 /// Validates pipeline layout descriptor and returns a descriptive error on failure.

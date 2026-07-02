@@ -895,6 +895,8 @@ std::optional<tint::wgsl::LanguageFeature> to_tint_language_feature(uint32_t fea
             return tint::wgsl::LanguageFeature::kTextureFormatsTier1;
         case 10:
             return tint::wgsl::LanguageFeature::kLinearIndexing;
+        case 11:
+            return tint::wgsl::LanguageFeature::kImmediateAddressSpace;
         default:
             return std::nullopt;
     }
@@ -1494,6 +1496,29 @@ bool yawgpu_tint_entry_point_output_get(const YawgpuTintProgram* program,
         return false;
     }
     fill_stage_variable(entry->output_variables[i], out);
+    return true;
+}
+
+bool yawgpu_tint_immediate_data_size(const YawgpuTintProgram* program,
+                                     const char* ep,
+                                     uint32_t* out,
+                                     char** err) {
+    if (err != nullptr) {
+        *err = nullptr;
+    }
+    if (out != nullptr) {
+        *out = 0;
+    }
+    if (program == nullptr || ep == nullptr || out == nullptr) {
+        set_error_string(err, "invalid NULL argument");
+        return false;
+    }
+    const auto* entry = find_entry_point(program, ep);
+    if (entry == nullptr) {
+        set_error_string(err, "entry point '" + std::string(ep) + "' not found");
+        return false;
+    }
+    *out = entry->immediate_data_size;
     return true;
 }
 
