@@ -41,6 +41,31 @@ mod imp {
         clip_distances_size: u32,
     }
 
+    // ABI drift guard: mirrors the `static_assert`s on `YawgpuTintEntryPoint`
+    // in tint_shim.cpp. If either side's field order/size changes without
+    // updating the other, this fails to compile. See tint_shim.h's "Dawn rev
+    // bump" checklist.
+    const _: () = {
+        assert!(core::mem::size_of::<RawEntryPoint>() == 40);
+        assert!(core::mem::offset_of!(RawEntryPoint, name) == 0);
+        assert!(core::mem::offset_of!(RawEntryPoint, stage) == 8);
+        assert!(core::mem::offset_of!(RawEntryPoint, has_workgroup_size) == 9);
+        assert!(core::mem::offset_of!(RawEntryPoint, wg_x) == 12);
+        assert!(core::mem::offset_of!(RawEntryPoint, wg_y) == 16);
+        assert!(core::mem::offset_of!(RawEntryPoint, wg_z) == 20);
+        assert!(core::mem::offset_of!(RawEntryPoint, frag_depth_used) == 24);
+        assert!(core::mem::offset_of!(RawEntryPoint, sample_mask_used) == 25);
+        assert!(core::mem::offset_of!(RawEntryPoint, input_sample_mask_used) == 26);
+        assert!(core::mem::offset_of!(RawEntryPoint, front_facing_used) == 27);
+        assert!(core::mem::offset_of!(RawEntryPoint, sample_index_used) == 28);
+        assert!(core::mem::offset_of!(RawEntryPoint, primitive_index_used) == 29);
+        assert!(core::mem::offset_of!(RawEntryPoint, subgroup_invocation_id_used) == 30);
+        assert!(core::mem::offset_of!(RawEntryPoint, subgroup_size_used) == 31);
+        assert!(core::mem::offset_of!(RawEntryPoint, frag_position_used) == 32);
+        assert!(core::mem::offset_of!(RawEntryPoint, has_clip_distances) == 33);
+        assert!(core::mem::offset_of!(RawEntryPoint, clip_distances_size) == 36);
+    };
+
     #[repr(C)]
     #[derive(Clone, Copy)]
     struct RawStageVariable {
@@ -56,12 +81,34 @@ mod imp {
         interpolation_sampling: u8,
     }
 
+    // ABI drift guard: mirrors `YawgpuTintStageVariable`'s static_asserts.
+    const _: () = {
+        assert!(core::mem::size_of::<RawStageVariable>() == 28);
+        assert!(core::mem::offset_of!(RawStageVariable, has_location) == 0);
+        assert!(core::mem::offset_of!(RawStageVariable, location) == 4);
+        assert!(core::mem::offset_of!(RawStageVariable, has_color) == 8);
+        assert!(core::mem::offset_of!(RawStageVariable, color) == 12);
+        assert!(core::mem::offset_of!(RawStageVariable, has_blend_src) == 16);
+        assert!(core::mem::offset_of!(RawStageVariable, blend_src) == 20);
+        assert!(core::mem::offset_of!(RawStageVariable, component_type) == 24);
+        assert!(core::mem::offset_of!(RawStageVariable, composition_type) == 25);
+        assert!(core::mem::offset_of!(RawStageVariable, interpolation_type) == 26);
+        assert!(core::mem::offset_of!(RawStageVariable, interpolation_sampling) == 27);
+    };
+
     #[repr(C)]
     #[derive(Clone, Copy)]
     struct RawDiagnostic {
         message: *const c_char,
         severity: u8,
     }
+
+    // ABI drift guard: mirrors `YawgpuTintDiagnostic`'s static_asserts.
+    const _: () = {
+        assert!(core::mem::size_of::<RawDiagnostic>() == 16);
+        assert!(core::mem::offset_of!(RawDiagnostic, message) == 0);
+        assert!(core::mem::offset_of!(RawDiagnostic, severity) == 8);
+    };
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -80,6 +127,23 @@ mod imp {
         input_attachment_index: u32,
     }
 
+    // ABI drift guard: mirrors `YawgpuTintResourceBinding`'s static_asserts.
+    const _: () = {
+        assert!(core::mem::size_of::<RawResourceBinding>() == 40);
+        assert!(core::mem::offset_of!(RawResourceBinding, group) == 0);
+        assert!(core::mem::offset_of!(RawResourceBinding, binding) == 4);
+        assert!(core::mem::offset_of!(RawResourceBinding, resource_type) == 8);
+        assert!(core::mem::offset_of!(RawResourceBinding, dim) == 9);
+        assert!(core::mem::offset_of!(RawResourceBinding, sampled_kind) == 10);
+        assert!(core::mem::offset_of!(RawResourceBinding, sampler_type) == 11);
+        assert!(core::mem::offset_of!(RawResourceBinding, texel_format) == 12);
+        assert!(core::mem::offset_of!(RawResourceBinding, sample_usage) == 13);
+        assert!(core::mem::offset_of!(RawResourceBinding, size) == 16);
+        assert!(core::mem::offset_of!(RawResourceBinding, has_array_size) == 24);
+        assert!(core::mem::offset_of!(RawResourceBinding, array_size) == 28);
+        assert!(core::mem::offset_of!(RawResourceBinding, input_attachment_index) == 32);
+    };
+
     #[repr(C)]
     #[derive(Clone, Copy)]
     struct RawOverride {
@@ -91,6 +155,17 @@ mod imp {
         default_value: f64,
     }
 
+    // ABI drift guard: mirrors `YawgpuTintOverride`'s static_asserts.
+    const _: () = {
+        assert!(core::mem::size_of::<RawOverride>() == 24);
+        assert!(core::mem::offset_of!(RawOverride, name) == 0);
+        assert!(core::mem::offset_of!(RawOverride, id) == 8);
+        assert!(core::mem::offset_of!(RawOverride, has_explicit_id) == 10);
+        assert!(core::mem::offset_of!(RawOverride, type_class) == 11);
+        assert!(core::mem::offset_of!(RawOverride, has_default) == 12);
+        assert!(core::mem::offset_of!(RawOverride, default_value) == 16);
+    };
+
     #[repr(C)]
     #[derive(Clone, Copy)]
     struct RawBindingRemap {
@@ -99,6 +174,15 @@ mod imp {
         dst_group: u32,
         dst_binding: u32,
     }
+
+    // ABI drift guard: mirrors `YawgpuTintBindingRemap`'s static_asserts.
+    const _: () = {
+        assert!(core::mem::size_of::<RawBindingRemap>() == 16);
+        assert!(core::mem::offset_of!(RawBindingRemap, group) == 0);
+        assert!(core::mem::offset_of!(RawBindingRemap, binding) == 4);
+        assert!(core::mem::offset_of!(RawBindingRemap, dst_group) == 8);
+        assert!(core::mem::offset_of!(RawBindingRemap, dst_binding) == 12);
+    };
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -110,6 +194,17 @@ mod imp {
         params_slot: u32,
     }
 
+    // ABI drift guard: mirrors `YawgpuTintExternalTextureRemap`'s
+    // static_asserts.
+    const _: () = {
+        assert!(core::mem::size_of::<RawExternalTextureRemap>() == 20);
+        assert!(core::mem::offset_of!(RawExternalTextureRemap, src_group) == 0);
+        assert!(core::mem::offset_of!(RawExternalTextureRemap, src_binding) == 4);
+        assert!(core::mem::offset_of!(RawExternalTextureRemap, plane0_slot) == 8);
+        assert!(core::mem::offset_of!(RawExternalTextureRemap, plane1_slot) == 12);
+        assert!(core::mem::offset_of!(RawExternalTextureRemap, params_slot) == 16);
+    };
+
     #[repr(C)]
     #[derive(Clone, Copy)]
     struct RawInputAttachmentColorIndex {
@@ -117,6 +212,15 @@ mod imp {
         binding: u32,
         color_slot: u32,
     }
+
+    // ABI drift guard: mirrors `YawgpuTintInputAttachmentColorIndex`'s
+    // static_asserts.
+    const _: () = {
+        assert!(core::mem::size_of::<RawInputAttachmentColorIndex>() == 12);
+        assert!(core::mem::offset_of!(RawInputAttachmentColorIndex, group) == 0);
+        assert!(core::mem::offset_of!(RawInputAttachmentColorIndex, binding) == 4);
+        assert!(core::mem::offset_of!(RawInputAttachmentColorIndex, color_slot) == 8);
+    };
 
     #[repr(C)]
     struct RawBindings {
@@ -136,11 +240,39 @@ mod imp {
         n_input_attachment_color_index: usize,
     }
 
+    // ABI drift guard: mirrors `YawgpuTintBindings`'s static_asserts. All
+    // fields are pointer/`usize` pairs (8 bytes each on every yawgpu target),
+    // so the size and offsets are platform-stable.
+    const _: () = {
+        assert!(core::mem::size_of::<RawBindings>() == 112);
+        assert!(core::mem::offset_of!(RawBindings, uniform) == 0);
+        assert!(core::mem::offset_of!(RawBindings, n_uniform) == 8);
+        assert!(core::mem::offset_of!(RawBindings, storage) == 16);
+        assert!(core::mem::offset_of!(RawBindings, n_storage) == 24);
+        assert!(core::mem::offset_of!(RawBindings, texture) == 32);
+        assert!(core::mem::offset_of!(RawBindings, n_texture) == 40);
+        assert!(core::mem::offset_of!(RawBindings, storage_texture) == 48);
+        assert!(core::mem::offset_of!(RawBindings, n_storage_texture) == 56);
+        assert!(core::mem::offset_of!(RawBindings, sampler) == 64);
+        assert!(core::mem::offset_of!(RawBindings, n_sampler) == 72);
+        assert!(core::mem::offset_of!(RawBindings, external_texture) == 80);
+        assert!(core::mem::offset_of!(RawBindings, n_external_texture) == 88);
+        assert!(core::mem::offset_of!(RawBindings, input_attachment_color_index) == 96);
+        assert!(core::mem::offset_of!(RawBindings, n_input_attachment_color_index) == 104);
+    };
+
     #[repr(C)]
     struct RawOverrideValue {
         name: *const c_char,
         value: f64,
     }
+
+    // ABI drift guard: mirrors `YawgpuTintOverrideValue`'s static_asserts.
+    const _: () = {
+        assert!(core::mem::size_of::<RawOverrideValue>() == 16);
+        assert!(core::mem::offset_of!(RawOverrideValue, name) == 0);
+        assert!(core::mem::offset_of!(RawOverrideValue, value) == 8);
+    };
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -149,6 +281,14 @@ mod imp {
         offset: u32,
         shader_location: u32,
     }
+
+    // ABI drift guard: mirrors `YawgpuTintVertexAttribute`'s static_asserts.
+    const _: () = {
+        assert!(core::mem::size_of::<RawVertexAttribute>() == 12);
+        assert!(core::mem::offset_of!(RawVertexAttribute, format) == 0);
+        assert!(core::mem::offset_of!(RawVertexAttribute, offset) == 4);
+        assert!(core::mem::offset_of!(RawVertexAttribute, shader_location) == 8);
+    };
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -160,6 +300,17 @@ mod imp {
         attributes: *const RawVertexAttribute,
         n_attributes: usize,
     }
+
+    // ABI drift guard: mirrors `YawgpuTintVertexBuffer`'s static_asserts.
+    const _: () = {
+        assert!(core::mem::size_of::<RawVertexBuffer>() == 32);
+        assert!(core::mem::offset_of!(RawVertexBuffer, slot) == 0);
+        assert!(core::mem::offset_of!(RawVertexBuffer, metal_index) == 4);
+        assert!(core::mem::offset_of!(RawVertexBuffer, array_stride) == 8);
+        assert!(core::mem::offset_of!(RawVertexBuffer, step_mode) == 12);
+        assert!(core::mem::offset_of!(RawVertexBuffer, attributes) == 16);
+        assert!(core::mem::offset_of!(RawVertexBuffer, n_attributes) == 24);
+    };
 
     #[repr(C)]
     struct RawMslOutput {
@@ -173,6 +324,20 @@ mod imp {
         has_frag_depth_clamp: bool,
         frag_depth_clamp_slot: u32,
     }
+
+    // ABI drift guard: mirrors `YawgpuTintMslOutput`'s static_asserts.
+    const _: () = {
+        assert!(core::mem::size_of::<RawMslOutput>() == 64);
+        assert!(core::mem::offset_of!(RawMslOutput, msl) == 0);
+        assert!(core::mem::offset_of!(RawMslOutput, entry_point) == 8);
+        assert!(core::mem::offset_of!(RawMslOutput, needs_storage_buffer_sizes) == 16);
+        assert!(core::mem::offset_of!(RawMslOutput, buffer_size_bindings) == 24);
+        assert!(core::mem::offset_of!(RawMslOutput, n_buffer_size_bindings) == 32);
+        assert!(core::mem::offset_of!(RawMslOutput, workgroup_allocations) == 40);
+        assert!(core::mem::offset_of!(RawMslOutput, n_workgroup_allocations) == 48);
+        assert!(core::mem::offset_of!(RawMslOutput, has_frag_depth_clamp) == 56);
+        assert!(core::mem::offset_of!(RawMslOutput, frag_depth_clamp_slot) == 60);
+    };
 
     extern "C" {
         fn yawgpu_tint_initialize();

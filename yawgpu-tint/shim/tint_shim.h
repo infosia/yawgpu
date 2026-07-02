@@ -4,6 +4,18 @@
  * `yawgpu_tint_string_free`. Returned `uint32_t*` arrays must be freed with
  * `yawgpu_tint_u32_free`. Failures are reported as false/NULL with `*err` set
  * to a heap-allocated diagnostic string when an error out-parameter is present.
+ *
+ * When bumping the Dawn submodule rev:
+ *   1) Rebuild -- the static_asserts in tint_shim.cpp (grouped near the top,
+ *      right after the includes) catch enum-ordinal and struct-layout drift
+ *      against the numeric tables documented below and against `RawXxx`
+ *      structs on the Rust side.
+ *   2) If an assert fires, update the ordinal/offset tables here (the header
+ *      comments below) AND the corresponding `raw_enum!` mappings /
+ *      `RawXxx` struct + layout asserts in `yawgpu-tint/src/lib.rs`
+ *      together -- these three places (this header's comments, the C++
+ *      static_asserts, the Rust definitions) must always agree.
+ *   3) Re-run the `yawgpu-tint` unit tests (`cargo test -p yawgpu-tint`).
  */
 #ifndef YAWGPU_TINT_SHIM_H
 #define YAWGPU_TINT_SHIM_H

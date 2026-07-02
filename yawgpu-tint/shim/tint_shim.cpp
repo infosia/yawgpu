@@ -46,6 +46,564 @@
 
 #include "tint_shim.h"
 
+// ---------------------------------------------------------------------------
+// ABI drift guards -- enum ordinals.
+//
+// The reflection structs below export several Tint enums as raw `uint8_t`
+// ordinals via `static_cast` (see fill_entry_point, fill_stage_variable,
+// fill_resource_binding, fill_override further down). `yawgpu-tint`'s Rust
+// side (`yawgpu-tint/src/lib.rs`, `raw_enum!` blocks) re-hardcodes the same
+// numeric values by hand -- there is no bindgen or shared enum definition.
+// Tint gives no ABI stability guarantee for these enums across Dawn
+// revisions: a reorder, insertion, or removal of a variant would silently
+// corrupt reflection (wrong texture dimension, wrong resource type, ...)
+// with no compile error anywhere in the pipeline.
+//
+// The static_asserts below pin every ordinal this shim casts to `uint8_t` to
+// the exact value the Rust `raw_enum!` mappings expect. If Dawn reorders a
+// Tint enum, one of these fires and the C++ build breaks instead of shipping
+// silently-wrong reflection. Each block is labeled with the header-comment
+// table it protects (`tint_shim.h:83-156`) and the fill_* function that
+// performs the cast.
+//
+// See "Dawn rev bump" at the top of tint_shim.h for the fix procedure when
+// one of these fires.
+// ---------------------------------------------------------------------------
+
+// Message shared by every ordinal guard below; undef'd at the end of this
+// section so it doesn't leak into the rest of the translation unit.
+#define YAWGPU_TINT_ORDINAL_MSG \
+    "tint enum ordinal changed; update tint_shim.h + yawgpu-tint raw_enum! mappings"
+
+// tint::inspector::EntryPoint::stage -- tint_shim.h:62-63 ("0=kVertex,
+// 1=kFragment, 2=kCompute"); cast in fill_entry_point (~L388).
+// Source: third_party/dawn/src/tint/lang/wgsl/inspector/entry_point.h,
+// `enum class PipelineStage`.
+static_assert(static_cast<uint8_t>(tint::inspector::PipelineStage::kVertex) == 0,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::PipelineStage::kFragment) == 1,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::PipelineStage::kCompute) == 2,
+              YAWGPU_TINT_ORDINAL_MSG);
+
+// tint::inspector::StageVariable::component_type -- tint_shim.h:84-85
+// ("0=kF32, 1=kU32, 2=kI32, 3=kF16, 4=kUnknown"); cast in fill_stage_variable
+// (~L460). Source: entry_point.h, `enum class ComponentType`.
+static_assert(static_cast<uint8_t>(tint::inspector::ComponentType::kF32) == 0,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ComponentType::kU32) == 1,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ComponentType::kI32) == 2,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ComponentType::kF16) == 3,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ComponentType::kUnknown) == 4,
+              YAWGPU_TINT_ORDINAL_MSG);
+
+// tint::inspector::StageVariable::composition_type -- tint_shim.h:86-87
+// ("0=kScalar, 1=kVec2, 2=kVec3, 3=kVec4, 4=kUnknown"); cast in
+// fill_stage_variable (~L461). Source: entry_point.h, `enum class
+// CompositionType`.
+static_assert(static_cast<uint8_t>(tint::inspector::CompositionType::kScalar) == 0,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::CompositionType::kVec2) == 1,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::CompositionType::kVec3) == 2,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::CompositionType::kVec4) == 3,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::CompositionType::kUnknown) == 4,
+              YAWGPU_TINT_ORDINAL_MSG);
+
+// tint::inspector::StageVariable::interpolation_type -- tint_shim.h:88-89
+// ("0=kPerspective, 1=kLinear, 2=kFlat, 3=kUnknown"); cast in
+// fill_stage_variable (~L462). Source: entry_point.h, `enum class
+// InterpolationType`.
+static_assert(static_cast<uint8_t>(tint::inspector::InterpolationType::kPerspective) == 0,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::InterpolationType::kLinear) == 1,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::InterpolationType::kFlat) == 2,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::InterpolationType::kUnknown) == 3,
+              YAWGPU_TINT_ORDINAL_MSG);
+
+// tint::inspector::StageVariable::interpolation_sampling -- tint_shim.h:90-92
+// ("0=kNone, 1=kCenter, 2=kCentroid, 3=kSample, 4=kFirst, 5=kEither,
+// 6=kUnknown"); cast in fill_stage_variable (~L463). Source: entry_point.h,
+// `enum class InterpolationSampling`.
+static_assert(static_cast<uint8_t>(tint::inspector::InterpolationSampling::kNone) == 0,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::InterpolationSampling::kCenter) == 1,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::InterpolationSampling::kCentroid) == 2,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::InterpolationSampling::kSample) == 3,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::InterpolationSampling::kFirst) == 4,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::InterpolationSampling::kEither) == 5,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::InterpolationSampling::kUnknown) == 6,
+              YAWGPU_TINT_ORDINAL_MSG);
+
+// tint::inspector::ResourceBinding::resource_type -- tint_shim.h:128-133
+// ("0=kUniformBuffer, ... 14=kInputAttachment"); cast in
+// fill_resource_binding (~L599). Source: resource_binding.h, `enum class
+// ResourceType` (nested in `struct ResourceBinding`).
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::ResourceType::kUniformBuffer) == 0,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::ResourceType::kStorageBuffer) == 1,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(
+                  tint::inspector::ResourceBinding::ResourceType::kReadOnlyStorageBuffer) == 2,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::ResourceType::kSampler) == 3,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::ResourceType::kSampledTexture) == 4,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(
+                  tint::inspector::ResourceBinding::ResourceType::kMultisampledTexture) == 5,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(
+                  tint::inspector::ResourceBinding::ResourceType::kWriteOnlyStorageTexture) == 6,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(
+                  tint::inspector::ResourceBinding::ResourceType::kReadOnlyStorageTexture) == 7,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(
+                  tint::inspector::ResourceBinding::ResourceType::kReadWriteStorageTexture) == 8,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::ResourceType::kDepthTexture) == 9,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(
+                  tint::inspector::ResourceBinding::ResourceType::kDepthMultisampledTexture) == 10,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::ResourceType::kExternalTexture) == 11,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(
+                  tint::inspector::ResourceBinding::ResourceType::kReadOnlyTexelBuffer) == 12,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(
+                  tint::inspector::ResourceBinding::ResourceType::kReadWriteTexelBuffer) == 13,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::ResourceType::kInputAttachment) == 14,
+    YAWGPU_TINT_ORDINAL_MSG);
+
+// tint::inspector::ResourceBinding::dim -- tint_shim.h:134-135 ("0=k1d,
+// 1=k2d, 2=k2dArray, 3=k3d, 4=kCube, 5=kCubeArray, 6=kNone"); cast in
+// fill_resource_binding (~L600). Source: resource_binding.h, `enum class
+// TextureDimension` (nested in `struct ResourceBinding`).
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::TextureDimension::k1d) == 0,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::TextureDimension::k2d) == 1,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TextureDimension::k2dArray) == 2,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::TextureDimension::k3d) == 3,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TextureDimension::kCube) == 4,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TextureDimension::kCubeArray) == 5,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TextureDimension::kNone) == 6,
+    YAWGPU_TINT_ORDINAL_MSG);
+
+// tint::inspector::ResourceBinding::sampled_kind -- tint_shim.h:136-138
+// ("0=kFloat, 1=kUInt, 2=kSInt, 3=kFilterable, 4=kUnfilterable,
+// 5=kUnknownFilterable"); cast in fill_resource_binding (~L601). Source:
+// resource_binding.h, `enum class SampledKind` (nested in `struct
+// ResourceBinding`).
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::SampledKind::kFloat) == 0,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::SampledKind::kUInt) == 1,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::SampledKind::kSInt) == 2,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::SampledKind::kFilterable) == 3,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::SampledKind::kUnfilterable) == 4,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::SampledKind::kUnknownFilterable) == 5,
+    YAWGPU_TINT_ORDINAL_MSG);
+
+// tint::inspector::ResourceBinding::sampler_type -- tint_shim.h:139-140
+// ("0=kComparison, 1=kFiltering, 2=kNonFiltering, 3=kUnknownFiltering"); cast
+// in fill_resource_binding (~L602). Source: resource_binding.h, `enum class
+// SamplerType` (nested in `struct ResourceBinding`).
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::SamplerType::kComparison) == 0,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::SamplerType::kFiltering) == 1,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::SamplerType::kNonFiltering) == 2,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::SamplerType::kUnknownFiltering) == 3,
+    YAWGPU_TINT_ORDINAL_MSG);
+
+// tint::inspector::ResourceBinding::image_format (texel_format) --
+// tint_shim.h:141-151 (0=kR8Snorm .. 40=kNone, ~40 variants); cast in
+// fill_resource_binding (~L603). Source: resource_binding.h, `enum class
+// TexelFormat` (nested in `struct ResourceBinding`).
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kR8Snorm) == 0,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kR8Uint) == 1,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kR8Sint) == 2,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRg8Unorm) == 3,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRg8Snorm) == 4,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRg8Uint) == 5,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRg8Sint) == 6,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kR16Unorm) == 7,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kR16Snorm) == 8,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kR16Uint) == 9,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kR16Sint) == 10,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kR16Float) == 11,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRg16Unorm) == 12,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRg16Snorm) == 13,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRg16Uint) == 14,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRg16Sint) == 15,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRg16Float) == 16,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kBgra8Unorm) == 17,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRgba8Unorm) == 18,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRgba8Snorm) == 19,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRgba8Uint) == 20,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRgba8Sint) == 21,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRgba16Unorm) == 22,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRgba16Snorm) == 23,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRgba16Uint) == 24,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRgba16Sint) == 25,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRgba16Float) == 26,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kR32Uint) == 27,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kR32Sint) == 28,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kR32Float) == 29,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRg32Uint) == 30,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRg32Sint) == 31,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRg32Float) == 32,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRgba32Uint) == 33,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRgba32Sint) == 34,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRgba32Float) == 35,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kR8Unorm) == 36,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRgb10A2Uint) == 37,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRgb10A2Unorm) == 38,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(
+    static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kRg11B10Ufloat) == 39,
+    YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::ResourceBinding::TexelFormat::kNone) == 40,
+              YAWGPU_TINT_ORDINAL_MSG);
+
+// tint::inspector::Override::type_class -- tint_shim.h:174-175 ("0=kBool,
+// 1=kFloat32, 2=kUint32, 3=kInt32, 4=kFloat16"); cast in fill_override
+// (~L652). Source: entry_point.h, `enum class Type` (nested in `struct
+// Override`).
+static_assert(static_cast<uint8_t>(tint::inspector::Override::Type::kBool) == 0,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::Override::Type::kFloat32) == 1,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::Override::Type::kUint32) == 2,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::Override::Type::kInt32) == 3,
+              YAWGPU_TINT_ORDINAL_MSG);
+static_assert(static_cast<uint8_t>(tint::inspector::Override::Type::kFloat16) == 4,
+              YAWGPU_TINT_ORDINAL_MSG);
+
+#undef YAWGPU_TINT_ORDINAL_MSG
+
+// ---------------------------------------------------------------------------
+// ABI drift guards -- FFI struct layout.
+//
+// The `YawgpuTintXxx` structs declared in tint_shim.h are hand-mirrored on
+// the Rust side as `#[repr(C)]` `RawXxx` structs (yawgpu-tint/src/lib.rs).
+// There is no bindgen keeping the two definitions in sync, so a field
+// reorder or insertion on either side would silently desynchronize the
+// layout. These asserts pin `sizeof`/`offsetof` for every FFI struct on this
+// (64-bit LP64/LLP64) target; the matching Rust-side asserts live next to
+// each `RawXxx` definition in lib.rs. All FFI structs here use only 8-byte
+// pointers/`size_t`, 1-byte `bool`, and standard scalar alignment, which is
+// identical between the Itanium (macOS/Linux) and Microsoft (Windows, LLP64)
+// 64-bit ABIs, so these constants hold on every yawgpu target platform.
+// ---------------------------------------------------------------------------
+
+static_assert(sizeof(YawgpuTintEntryPoint) == 40, "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, name) == 0, "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, stage) == 8, "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, has_workgroup_size) == 9,
+              "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, wg_x) == 12, "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, wg_y) == 16, "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, wg_z) == 20, "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, frag_depth_used) == 24,
+              "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, sample_mask_used) == 25,
+              "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, input_sample_mask_used) == 26,
+              "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, front_facing_used) == 27,
+              "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, sample_index_used) == 28,
+              "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, primitive_index_used) == 29,
+              "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, subgroup_invocation_id_used) == 30,
+              "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, subgroup_size_used) == 31,
+              "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, frag_position_used) == 32,
+              "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, has_clip_distances) == 33,
+              "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, clip_distances_size) == 36,
+              "YawgpuTintEntryPoint layout changed");
+
+static_assert(sizeof(YawgpuTintStageVariable) == 28, "YawgpuTintStageVariable layout changed");
+static_assert(offsetof(YawgpuTintStageVariable, has_location) == 0,
+              "YawgpuTintStageVariable layout changed");
+static_assert(offsetof(YawgpuTintStageVariable, location) == 4,
+              "YawgpuTintStageVariable layout changed");
+static_assert(offsetof(YawgpuTintStageVariable, has_color) == 8,
+              "YawgpuTintStageVariable layout changed");
+static_assert(offsetof(YawgpuTintStageVariable, color) == 12,
+              "YawgpuTintStageVariable layout changed");
+static_assert(offsetof(YawgpuTintStageVariable, has_blend_src) == 16,
+              "YawgpuTintStageVariable layout changed");
+static_assert(offsetof(YawgpuTintStageVariable, blend_src) == 20,
+              "YawgpuTintStageVariable layout changed");
+static_assert(offsetof(YawgpuTintStageVariable, component_type) == 24,
+              "YawgpuTintStageVariable layout changed");
+static_assert(offsetof(YawgpuTintStageVariable, composition_type) == 25,
+              "YawgpuTintStageVariable layout changed");
+static_assert(offsetof(YawgpuTintStageVariable, interpolation_type) == 26,
+              "YawgpuTintStageVariable layout changed");
+static_assert(offsetof(YawgpuTintStageVariable, interpolation_sampling) == 27,
+              "YawgpuTintStageVariable layout changed");
+
+static_assert(sizeof(YawgpuTintDiagnostic) == 16, "YawgpuTintDiagnostic layout changed");
+static_assert(offsetof(YawgpuTintDiagnostic, message) == 0,
+              "YawgpuTintDiagnostic layout changed");
+static_assert(offsetof(YawgpuTintDiagnostic, severity) == 8,
+              "YawgpuTintDiagnostic layout changed");
+
+static_assert(sizeof(YawgpuTintResourceBinding) == 40,
+              "YawgpuTintResourceBinding layout changed");
+static_assert(offsetof(YawgpuTintResourceBinding, group) == 0,
+              "YawgpuTintResourceBinding layout changed");
+static_assert(offsetof(YawgpuTintResourceBinding, binding) == 4,
+              "YawgpuTintResourceBinding layout changed");
+static_assert(offsetof(YawgpuTintResourceBinding, resource_type) == 8,
+              "YawgpuTintResourceBinding layout changed");
+static_assert(offsetof(YawgpuTintResourceBinding, dim) == 9,
+              "YawgpuTintResourceBinding layout changed");
+static_assert(offsetof(YawgpuTintResourceBinding, sampled_kind) == 10,
+              "YawgpuTintResourceBinding layout changed");
+static_assert(offsetof(YawgpuTintResourceBinding, sampler_type) == 11,
+              "YawgpuTintResourceBinding layout changed");
+static_assert(offsetof(YawgpuTintResourceBinding, texel_format) == 12,
+              "YawgpuTintResourceBinding layout changed");
+static_assert(offsetof(YawgpuTintResourceBinding, sample_usage) == 13,
+              "YawgpuTintResourceBinding layout changed");
+static_assert(offsetof(YawgpuTintResourceBinding, size) == 16,
+              "YawgpuTintResourceBinding layout changed");
+static_assert(offsetof(YawgpuTintResourceBinding, has_array_size) == 24,
+              "YawgpuTintResourceBinding layout changed");
+static_assert(offsetof(YawgpuTintResourceBinding, array_size) == 28,
+              "YawgpuTintResourceBinding layout changed");
+static_assert(offsetof(YawgpuTintResourceBinding, input_attachment_index) == 32,
+              "YawgpuTintResourceBinding layout changed");
+
+static_assert(sizeof(YawgpuTintOverride) == 24, "YawgpuTintOverride layout changed");
+static_assert(offsetof(YawgpuTintOverride, name) == 0, "YawgpuTintOverride layout changed");
+static_assert(offsetof(YawgpuTintOverride, id) == 8, "YawgpuTintOverride layout changed");
+static_assert(offsetof(YawgpuTintOverride, has_explicit_id) == 10,
+              "YawgpuTintOverride layout changed");
+static_assert(offsetof(YawgpuTintOverride, type_class) == 11,
+              "YawgpuTintOverride layout changed");
+static_assert(offsetof(YawgpuTintOverride, has_default) == 12,
+              "YawgpuTintOverride layout changed");
+static_assert(offsetof(YawgpuTintOverride, default_value) == 16,
+              "YawgpuTintOverride layout changed");
+
+static_assert(sizeof(YawgpuTintBindingRemap) == 16, "YawgpuTintBindingRemap layout changed");
+static_assert(offsetof(YawgpuTintBindingRemap, group) == 0,
+              "YawgpuTintBindingRemap layout changed");
+static_assert(offsetof(YawgpuTintBindingRemap, binding) == 4,
+              "YawgpuTintBindingRemap layout changed");
+static_assert(offsetof(YawgpuTintBindingRemap, dst_group) == 8,
+              "YawgpuTintBindingRemap layout changed");
+static_assert(offsetof(YawgpuTintBindingRemap, dst_binding) == 12,
+              "YawgpuTintBindingRemap layout changed");
+
+static_assert(sizeof(YawgpuTintExternalTextureRemap) == 20,
+              "YawgpuTintExternalTextureRemap layout changed");
+static_assert(offsetof(YawgpuTintExternalTextureRemap, src_group) == 0,
+              "YawgpuTintExternalTextureRemap layout changed");
+static_assert(offsetof(YawgpuTintExternalTextureRemap, src_binding) == 4,
+              "YawgpuTintExternalTextureRemap layout changed");
+static_assert(offsetof(YawgpuTintExternalTextureRemap, plane0_slot) == 8,
+              "YawgpuTintExternalTextureRemap layout changed");
+static_assert(offsetof(YawgpuTintExternalTextureRemap, plane1_slot) == 12,
+              "YawgpuTintExternalTextureRemap layout changed");
+static_assert(offsetof(YawgpuTintExternalTextureRemap, params_slot) == 16,
+              "YawgpuTintExternalTextureRemap layout changed");
+
+static_assert(sizeof(YawgpuTintInputAttachmentColorIndex) == 12,
+              "YawgpuTintInputAttachmentColorIndex layout changed");
+static_assert(offsetof(YawgpuTintInputAttachmentColorIndex, group) == 0,
+              "YawgpuTintInputAttachmentColorIndex layout changed");
+static_assert(offsetof(YawgpuTintInputAttachmentColorIndex, binding) == 4,
+              "YawgpuTintInputAttachmentColorIndex layout changed");
+static_assert(offsetof(YawgpuTintInputAttachmentColorIndex, color_slot) == 8,
+              "YawgpuTintInputAttachmentColorIndex layout changed");
+
+static_assert(sizeof(YawgpuTintBindings) == 112, "YawgpuTintBindings layout changed");
+static_assert(offsetof(YawgpuTintBindings, uniform) == 0, "YawgpuTintBindings layout changed");
+static_assert(offsetof(YawgpuTintBindings, n_uniform) == 8, "YawgpuTintBindings layout changed");
+static_assert(offsetof(YawgpuTintBindings, storage) == 16, "YawgpuTintBindings layout changed");
+static_assert(offsetof(YawgpuTintBindings, n_storage) == 24, "YawgpuTintBindings layout changed");
+static_assert(offsetof(YawgpuTintBindings, texture) == 32, "YawgpuTintBindings layout changed");
+static_assert(offsetof(YawgpuTintBindings, n_texture) == 40, "YawgpuTintBindings layout changed");
+static_assert(offsetof(YawgpuTintBindings, storage_texture) == 48,
+              "YawgpuTintBindings layout changed");
+static_assert(offsetof(YawgpuTintBindings, n_storage_texture) == 56,
+              "YawgpuTintBindings layout changed");
+static_assert(offsetof(YawgpuTintBindings, sampler) == 64, "YawgpuTintBindings layout changed");
+static_assert(offsetof(YawgpuTintBindings, n_sampler) == 72, "YawgpuTintBindings layout changed");
+static_assert(offsetof(YawgpuTintBindings, external_texture) == 80,
+              "YawgpuTintBindings layout changed");
+static_assert(offsetof(YawgpuTintBindings, n_external_texture) == 88,
+              "YawgpuTintBindings layout changed");
+static_assert(offsetof(YawgpuTintBindings, input_attachment_color_index) == 96,
+              "YawgpuTintBindings layout changed");
+static_assert(offsetof(YawgpuTintBindings, n_input_attachment_color_index) == 104,
+              "YawgpuTintBindings layout changed");
+
+static_assert(sizeof(YawgpuTintOverrideValue) == 16, "YawgpuTintOverrideValue layout changed");
+static_assert(offsetof(YawgpuTintOverrideValue, name) == 0,
+              "YawgpuTintOverrideValue layout changed");
+static_assert(offsetof(YawgpuTintOverrideValue, value) == 8,
+              "YawgpuTintOverrideValue layout changed");
+
+static_assert(sizeof(YawgpuTintVertexAttribute) == 12, "YawgpuTintVertexAttribute layout changed");
+static_assert(offsetof(YawgpuTintVertexAttribute, format) == 0,
+              "YawgpuTintVertexAttribute layout changed");
+static_assert(offsetof(YawgpuTintVertexAttribute, offset) == 4,
+              "YawgpuTintVertexAttribute layout changed");
+static_assert(offsetof(YawgpuTintVertexAttribute, shader_location) == 8,
+              "YawgpuTintVertexAttribute layout changed");
+
+static_assert(sizeof(YawgpuTintVertexBuffer) == 32, "YawgpuTintVertexBuffer layout changed");
+static_assert(offsetof(YawgpuTintVertexBuffer, slot) == 0,
+              "YawgpuTintVertexBuffer layout changed");
+static_assert(offsetof(YawgpuTintVertexBuffer, metal_index) == 4,
+              "YawgpuTintVertexBuffer layout changed");
+static_assert(offsetof(YawgpuTintVertexBuffer, array_stride) == 8,
+              "YawgpuTintVertexBuffer layout changed");
+static_assert(offsetof(YawgpuTintVertexBuffer, step_mode) == 12,
+              "YawgpuTintVertexBuffer layout changed");
+static_assert(offsetof(YawgpuTintVertexBuffer, attributes) == 16,
+              "YawgpuTintVertexBuffer layout changed");
+static_assert(offsetof(YawgpuTintVertexBuffer, n_attributes) == 24,
+              "YawgpuTintVertexBuffer layout changed");
+
+static_assert(sizeof(YawgpuTintMslOutput) == 64, "YawgpuTintMslOutput layout changed");
+static_assert(offsetof(YawgpuTintMslOutput, msl) == 0, "YawgpuTintMslOutput layout changed");
+static_assert(offsetof(YawgpuTintMslOutput, entry_point) == 8,
+              "YawgpuTintMslOutput layout changed");
+static_assert(offsetof(YawgpuTintMslOutput, needs_storage_buffer_sizes) == 16,
+              "YawgpuTintMslOutput layout changed");
+static_assert(offsetof(YawgpuTintMslOutput, buffer_size_bindings) == 24,
+              "YawgpuTintMslOutput layout changed");
+static_assert(offsetof(YawgpuTintMslOutput, n_buffer_size_bindings) == 32,
+              "YawgpuTintMslOutput layout changed");
+static_assert(offsetof(YawgpuTintMslOutput, workgroup_allocations) == 40,
+              "YawgpuTintMslOutput layout changed");
+static_assert(offsetof(YawgpuTintMslOutput, n_workgroup_allocations) == 48,
+              "YawgpuTintMslOutput layout changed");
+static_assert(offsetof(YawgpuTintMslOutput, has_frag_depth_clamp) == 56,
+              "YawgpuTintMslOutput layout changed");
+static_assert(offsetof(YawgpuTintMslOutput, frag_depth_clamp_slot) == 60,
+              "YawgpuTintMslOutput layout changed");
+
 struct YawgpuTintProgram {
     // Must outlive `program`: Tint Source objects keep pointers into this file.
     std::unique_ptr<tint::Source::File> file;
