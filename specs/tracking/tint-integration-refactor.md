@@ -180,6 +180,30 @@ practice; revisit only if profiling says otherwise).
   the same cost, so per-call lowering is not a divergence-from-Dawn defect.
   Revisit only if upstream grows an IR clone.
 
+- **R5 DONE** (`182626a`) — stub dedup (data types declared once at crate
+  root, −522 lines net; fixed a latent stub divergence: `Override.
+  has_explicit_id` missing from the stub copy); `BindingRemap`/
+  `ExternalTextureRemap`/`InputAttachmentColorIndex`/`VertexAttribute` are
+  `#[repr(C)]` passed directly (Raw* mirrors deleted, layout guards now
+  unconditional); RAII guards replace hand-freed error ladders on both sides
+  (fixed a latent C++ leak-on-exception); `TintError` typed enum (Display
+  byte-identical to the old Strings); **F3 resolved: provably safe** —
+  `tint::Program` is immutable-after-construction (program.h:78-154),
+  `ProgramToLoweredIR` only reads it, and Dawn runs it on a shared const
+  Program from async pipeline workers without locks (ShaderModuleMTL.mm:
+  373-397); `unsafe impl Send/Sync` moved into yawgpu-tint with the citation
+  trail, ReflectedModule's own unsafe impls removed.
+- **R6 DONE** (`108894c`) — F2 was TWO real Tier-2 bugs, both silently wrong:
+  (1) firstInstance dropped (naga uniform name never emitted by Tint) — now
+  threads Tint `first_instance_offset` and reads `tint_immediates[0]` (Dawn
+  GL parity); (2) Tint `GenerateBindings` **renumbers** `layout(binding=N)`
+  sequentially in declaration order while the HAL binds at raw WGSL numbers —
+  now pinned with an explicit identity `BindingRemap`
+  (`tint_bindings_for_glsl`); the naga `_block_N` name-parse remap deleted
+  (wrong against Tint's declaration-counter block naming). Contract pinned by
+  generated-GLSL text unit tests in all three crates. **Real ANGLE hardware
+  confirmation pending** (Tier 2 manual step; not GPU-reachable on this Mac).
+
 ## Log
 
 - 2026-07-02: three-way deep review (yawgpu-tint crate / core frontend / HAL
@@ -187,4 +211,8 @@ practice; revisit only if profiling says otherwise).
   review claim: Metal vertex-pulling metadata is live under Tint, not naga
   residue.
 - 2026-07-02: R1–R4 implemented (Claude-dispatched sonnet coding agents; one
-  CTS-caught regression in R4 fixed before commit). R5/R6 pending.
+  CTS-caught regression in R4 fixed before commit).
+- 2026-07-02: Dawn pin bumped to fork `feature/tiled` `d25c666de` (user
+  request; MSAA inputAttachmentLoad MSL reject) — first real exercise of the
+  R1 drift guards across a rev bump, clean.
+- 2026-07-02: R5–R6 implemented. All six slices landed; Phase Review next.
