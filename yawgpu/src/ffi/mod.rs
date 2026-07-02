@@ -5666,6 +5666,66 @@ mod tests {
         }
     }
 
+    /// Block 94 S1: `wgpuRenderPassEncoderSetImmediates` happy path, a
+    /// null-`data`-with-nonzero-`size` FFI-boundary error, and a core
+    /// validation error (unaligned offset) -- all route through the device
+    /// error sink, matching `wgpuQueueWriteBuffer`'s null/size convention.
+    #[test]
+    fn wgpuRenderPassEncoderSetImmediates_happy_path_and_validation_error_routing() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let pipeline = noop_render_pipeline(device);
+            let (texture, view) = noop_render_attachment(device);
+            let attachment = render_pass_color_attachment(view);
+            let attachments = [attachment];
+            let descriptor = noop_render_pass_descriptor(&attachments, std::ptr::null());
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass = wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+
+            wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+            let bytes = [1_u8, 2, 3, 4];
+            wgpuRenderPassEncoderSetImmediates(pass, 0, bytes.as_ptr().cast(), bytes.len());
+            wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+            wgpuRenderPassEncoderEnd(pass);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!command_buffer.is_null());
+
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuRenderPassEncoderRelease(pass);
+            wgpuCommandEncoderRelease(encoder);
+
+            // Null data with a non-zero size is an FFI-boundary validation error.
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass = wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+            wgpuRenderPassEncoderSetImmediates(pass, 0, std::ptr::null(), 4);
+            wgpuRenderPassEncoderEnd(pass);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert_validation_error_contains(instance, device, "data must not be null");
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuRenderPassEncoderRelease(pass);
+            wgpuCommandEncoderRelease(encoder);
+
+            // Core `ValidateSetImmediates` errors (unaligned offset) route
+            // the same way and invalidate the command buffer.
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass = wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+            wgpuRenderPassEncoderSetImmediates(pass, 1, bytes.as_ptr().cast(), bytes.len());
+            wgpuRenderPassEncoderEnd(pass);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert_validation_error_contains(instance, device, "4-byte aligned");
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuRenderPassEncoderRelease(pass);
+            wgpuCommandEncoderRelease(encoder);
+
+            wgpuTextureViewRelease(view);
+            wgpuTextureRelease(texture);
+            wgpuRenderPipelineRelease(pipeline);
+            release_handles(instance, adapter, device);
+        }
+    }
+
     #[test]
     fn wgpuRenderPassEncoder_state_setters_occlusion_and_execute_bundles() {
         unsafe {
@@ -5770,6 +5830,61 @@ mod tests {
         }
     }
 
+    /// Block 94 S1: `wgpuComputePassEncoderSetImmediates` happy path (data
+    /// within the Noop device's `maxImmediateSize`), a null-`data`-with-
+    /// nonzero-`size` FFI-boundary error, and a core validation error
+    /// (unaligned offset) -- all three route through the device error sink,
+    /// matching `wgpuQueueWriteBuffer`'s null/size convention.
+    #[test]
+    fn wgpuComputePassEncoderSetImmediates_happy_path_and_validation_error_routing() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let pipeline = noop_compute_pipeline(device);
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass = wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+
+            wgpuComputePassEncoderSetPipeline(pass, pipeline);
+            let bytes = [1_u8, 2, 3, 4];
+            wgpuComputePassEncoderSetImmediates(pass, 0, bytes.as_ptr().cast(), bytes.len());
+            wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
+            wgpuComputePassEncoderEnd(pass);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!command_buffer.is_null());
+
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuComputePassEncoderRelease(pass);
+            wgpuCommandEncoderRelease(encoder);
+
+            // Null data with a non-zero size is an FFI-boundary validation error.
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass = wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+            wgpuComputePassEncoderSetImmediates(pass, 0, std::ptr::null(), 4);
+            wgpuComputePassEncoderEnd(pass);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert_validation_error_contains(instance, device, "data must not be null");
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuComputePassEncoderRelease(pass);
+            wgpuCommandEncoderRelease(encoder);
+
+            // Core `ValidateSetImmediates` errors (unaligned offset) route
+            // the same way and invalidate the command buffer.
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass = wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+            wgpuComputePassEncoderSetImmediates(pass, 1, bytes.as_ptr().cast(), bytes.len());
+            wgpuComputePassEncoderEnd(pass);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert_validation_error_contains(instance, device, "4-byte aligned");
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuComputePassEncoderRelease(pass);
+            wgpuCommandEncoderRelease(encoder);
+
+            wgpuComputePipelineRelease(pipeline);
+            release_handles(instance, adapter, device);
+        }
+    }
+
     #[test]
     fn wgpuRenderBundleEncoder_lifecycle_finish_and_debug_markers_and_release_addref() {
         unsafe {
@@ -5844,6 +5959,53 @@ mod tests {
             wgpuBufferRelease(vertex);
             wgpuBindGroupRelease(bind_group);
             wgpuBindGroupLayoutRelease(bind_group_layout);
+            wgpuRenderPipelineRelease(pipeline);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    /// Block 94 S1: `wgpuRenderBundleEncoderSetImmediates` happy path, a
+    /// null-`data`-with-nonzero-`size` FFI-boundary error, and a core
+    /// validation error (unaligned offset) -- all route through the device
+    /// error sink, matching `wgpuQueueWriteBuffer`'s null/size convention.
+    #[test]
+    fn wgpuRenderBundleEncoderSetImmediates_happy_path_and_validation_error_routing() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let pipeline = noop_render_pipeline(device);
+            let formats = [native::WGPUTextureFormat_RGBA8Unorm];
+            let descriptor = render_bundle_encoder_descriptor(&formats);
+            let encoder = wgpuDeviceCreateRenderBundleEncoder(device, &descriptor);
+
+            wgpuRenderBundleEncoderSetPipeline(encoder, pipeline);
+            let bytes = [1_u8, 2, 3, 4];
+            wgpuRenderBundleEncoderSetImmediates(encoder, 0, bytes.as_ptr().cast(), bytes.len());
+            wgpuRenderBundleEncoderDraw(encoder, 3, 1, 0, 0);
+            let bundle = wgpuRenderBundleEncoderFinish(encoder, std::ptr::null());
+            assert!(!bundle.is_null());
+
+            wgpuRenderBundleRelease(bundle);
+            wgpuRenderBundleEncoderRelease(encoder);
+
+            // Null data with a non-zero size is an FFI-boundary validation error.
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let encoder = wgpuDeviceCreateRenderBundleEncoder(device, &descriptor);
+            wgpuRenderBundleEncoderSetImmediates(encoder, 0, std::ptr::null(), 4);
+            let bundle = wgpuRenderBundleEncoderFinish(encoder, std::ptr::null());
+            assert_validation_error_contains(instance, device, "data must not be null");
+            wgpuRenderBundleRelease(bundle);
+            wgpuRenderBundleEncoderRelease(encoder);
+
+            // Core `ValidateSetImmediates` errors (unaligned offset) route
+            // the same way and invalidate the finished bundle.
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let encoder = wgpuDeviceCreateRenderBundleEncoder(device, &descriptor);
+            wgpuRenderBundleEncoderSetImmediates(encoder, 1, bytes.as_ptr().cast(), bytes.len());
+            let bundle = wgpuRenderBundleEncoderFinish(encoder, std::ptr::null());
+            assert_validation_error_contains(instance, device, "4-byte aligned");
+            wgpuRenderBundleRelease(bundle);
+            wgpuRenderBundleEncoderRelease(encoder);
+
             wgpuRenderPipelineRelease(pipeline);
             release_handles(instance, adapter, device);
         }

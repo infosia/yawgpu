@@ -2058,6 +2058,85 @@ fn cs() {}
         assert!(!pipeline.is_error());
     }
 
+    /// Block 94 S1 exercises the Block 93 `<=` rule non-vacuously now that
+    /// Noop advertises `maxImmediateSize = 64`: a pipeline layout with
+    /// `immediate_size: 16` accepts an entry point whose reflected
+    /// `var<immediate>` usage is exactly 16 bytes and rejects one that
+    /// reflects 32 bytes. Previously every constructible `immediate_size`
+    /// was `0` (the device ceiling), so only the "touches any immediate at
+    /// all" edge of this check was reachable (see
+    /// `compute_pipeline_rejects_entry_point_immediate_data_size_exceeding_layout_budget`
+    /// above); this closes the previously-vacuous non-zero-budget path.
+    #[test]
+    fn compute_pipeline_layout_immediate_size_16_accepts_16_byte_entry_and_rejects_32_byte_entry() {
+        let device = noop_device();
+        assert_eq!(device.limits().max_immediate_size, 64);
+        let layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: Vec::new(),
+            immediate_size: 16,
+            error: None,
+        }));
+
+        let fits_shader = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r#"
+requires immediate_address_space;
+
+var<immediate> pc : vec4f;
+
+@compute @workgroup_size(1)
+fn cs() {
+  let v = pc;
+  _ = v;
+}
+"#
+                .to_owned(),
+            )),
+        );
+        let fits_pipeline = device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(Arc::clone(&layout)),
+            shader_module: fits_shader,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        });
+        assert!(!fits_pipeline.is_error());
+
+        let overflows_shader = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r#"
+requires immediate_address_space;
+
+var<immediate> pc : mat2x4f;
+
+@compute @workgroup_size(1)
+fn cs() {
+  let v = pc;
+  _ = v;
+}
+"#
+                .to_owned(),
+            )),
+        );
+        device.push_error_scope(ErrorFilter::Validation);
+        let overflows_pipeline = device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(layout),
+            shader_module: overflows_shader,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        });
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("pipeline touching a 32-byte immediate over a 16-byte budget should be scoped");
+        assert!(overflows_pipeline.is_error());
+        assert_eq!(
+            scoped.message,
+            "shader entry point immediate data size exceeds the pipeline layout's immediateSize"
+        );
+    }
+
     #[test]
     fn shader_binding_compat_defers_unspecified_min_binding_size() {
         let binding = frontend::ReflectedResourceBinding {

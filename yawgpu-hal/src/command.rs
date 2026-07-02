@@ -186,6 +186,13 @@ pub struct HalComputePass {
     pub bind_samplers: Vec<HalBoundSampler>,
     /// Bind external textures.
     pub bind_external_textures: Vec<HalBoundExternalTexture>,
+    /// The pipeline's immediates block for this dispatch: user bytes
+    /// `[0, layout.immediate_size)` (Block 94). Compute pipelines have no
+    /// internal immediates today, so this is exactly the user prefix
+    /// (`specs/blocks/94-immediates.md` "Immediates block layout").
+    /// Delivery is backend-specific and lands in S2 (Metal) / S3 (Vulkan);
+    /// Noop and (today) Metal/Vulkan/GLES all ignore this field.
+    pub immediate_data: Vec<u8>,
     /// Dispatch command.
     pub dispatch: HalComputeDispatch,
 }
@@ -450,6 +457,15 @@ pub struct HalRenderPass {
     pub occlusion_query_index: Option<u32>,
     /// Draw.
     pub draw: Option<HalDraw>,
+    /// The pipeline's immediates block for this draw: user bytes
+    /// `[0, layout.immediate_size)` today (Block 94). The fragment
+    /// frag-depth-clamp internal constants (`ClampFragDepthArgs`,
+    /// `dawn/native/ImmediatesLayout.h:47-50`) that follow the user prefix
+    /// per `specs/blocks/94-immediates.md` "Immediates block layout" are a
+    /// Metal-delivery concern threaded in S2, not carried here. Delivery is
+    /// backend-specific and lands in S2 (Metal) / S3 (Vulkan); Noop and
+    /// (today) Metal/Vulkan/GLES all ignore this field.
+    pub immediate_data: Vec<u8>,
 }
 
 /// Stores HAL viewport state.

@@ -1915,6 +1915,7 @@ mod tests {
             occlusion_query_set: None,
             occlusion_query_index: None,
             draw: None,
+            immediate_data: Vec::new(),
         })])?;
 
         let submitted = match &queue {
@@ -1931,6 +1932,100 @@ mod tests {
                             && (attachment.depth_clear_value - 0.25).abs() < f32::EPSILON
                             && attachment.stencil_clear_value == 3
                     )
+        ));
+        Ok(())
+    }
+
+    /// Block 94 S1: the Noop backend "accepts and records, executes as
+    /// no-op" for `HalRenderPass::immediate_data` -- the field round-trips
+    /// through `submit_copies` without error or mutation, but Noop performs
+    /// no actual delivery (that lands in S2/S3 for Metal/Vulkan).
+    #[test]
+    fn hal_queue_submit_copies_noop_records_render_pass_immediate_data() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let queue = device.queue();
+        let depth = device.create_texture(&depth_texture_descriptor())?;
+
+        queue.submit_copies(&[HalCopy::RenderPass(HalRenderPass {
+            pipeline: None,
+            color_targets: Vec::new(),
+            framebuffer_fetch_color_slots: Vec::new(),
+            depth_stencil_attachment: Some(HalRenderDepthStencilAttachment {
+                texture: depth,
+                format: HalTextureFormat::Depth32Float,
+                mip_level: 0,
+                array_layer: 0,
+                depth_load_op: HalRenderLoadOp::Clear,
+                depth_store: true,
+                depth_clear_value: 0.25,
+                depth_read_only: false,
+                stencil_load_op: HalRenderLoadOp::Clear,
+                stencil_store: false,
+                stencil_clear_value: 3,
+                stencil_read_only: true,
+            }),
+            bind_buffers: Vec::new(),
+            bind_textures: Vec::new(),
+            bind_samplers: Vec::new(),
+            bind_external_textures: Vec::new(),
+            vertex_buffers: Vec::new(),
+            index_buffer: None,
+            indirect_buffer: None,
+            viewport: None,
+            scissor_rect: None,
+            blend_constant: [0.0; 4],
+            stencil_reference: 0,
+            occlusion_query_set: None,
+            occlusion_query_index: None,
+            draw: None,
+            immediate_data: vec![1, 2, 3, 4],
+        })])?;
+
+        let submitted = match &queue {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            #[cfg(any(feature = "vulkan", feature = "metal", feature = "gles"))]
+            _ => Vec::new(),
+        };
+        assert!(matches!(
+            submitted.as_slice(),
+            [HalCopy::RenderPass(pass)] if pass.immediate_data == vec![1, 2, 3, 4]
+        ));
+        Ok(())
+    }
+
+    /// Block 94 S1: same Noop "accepts and no-ops" contract as above, for
+    /// `HalComputePass::immediate_data`.
+    #[test]
+    fn hal_queue_submit_copies_noop_records_compute_pass_immediate_data() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let queue = device.queue();
+        let pipeline = device.create_compute_pipeline(
+            HalShaderSource::Msl(String::new()),
+            "main",
+            (1, 1, 1),
+            &[],
+        )?;
+
+        queue.submit_copies(&[HalCopy::ComputePass(HalComputePass {
+            pipeline,
+            bind_buffers: Vec::new(),
+            bind_textures: Vec::new(),
+            bind_samplers: Vec::new(),
+            bind_external_textures: Vec::new(),
+            immediate_data: vec![5, 6, 7, 8],
+            dispatch: HalComputeDispatch::Direct {
+                workgroups: (1, 1, 1),
+            },
+        })])?;
+
+        let submitted = match &queue {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            #[cfg(any(feature = "vulkan", feature = "metal", feature = "gles"))]
+            _ => Vec::new(),
+        };
+        assert!(matches!(
+            submitted.as_slice(),
+            [HalCopy::ComputePass(pass)] if pass.immediate_data == vec![5, 6, 7, 8]
         ));
         Ok(())
     }
@@ -1957,14 +2052,23 @@ mod tests {
     }
 
     #[test]
-    fn hal_adapter_limits_noop_returns_default() {
+    fn hal_adapter_limits_noop_reports_max_immediate_size_64_else_default() {
         let adapter = HalInstance::new_noop()
             .enumerate_adapters()
             .into_iter()
             .next()
             .expect("noop adapter");
 
-        assert_eq!(adapter.limits(), HalLimits::DEFAULT);
+        // Block 94 S1: Noop is the first backend to flip `max_immediate_size`
+        // to Dawn's `kMaxImmediateDataBytes` (64); every other limit stays at
+        // the shared `HalLimits::DEFAULT` floor.
+        assert_eq!(
+            adapter.limits(),
+            HalLimits {
+                max_immediate_size: 64,
+                ..HalLimits::DEFAULT
+            }
+        );
     }
 
     #[test]

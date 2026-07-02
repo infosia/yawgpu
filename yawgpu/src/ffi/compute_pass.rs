@@ -126,6 +126,36 @@ pub unsafe extern "C" fn wgpuComputePassEncoderSetBindGroup(
     );
 }
 
+/// Overwrites part of the compute pass's user-immediates scratch.
+///
+/// # Safety
+///
+/// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder.
+/// `data` must point to `size` bytes when `size` is non-zero (mirrors
+/// `wgpuQueueWriteBuffer`'s null/size contract).
+/// Returns WGPU compute pass encoder set immediates.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuComputePassEncoderSetImmediates(
+    compute_pass_encoder: native::WGPUComputePassEncoder,
+    offset: u32,
+    data: *const c_void,
+    size: usize,
+) {
+    let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
+    if size > 0 && data.is_null() {
+        pass.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "compute pass set immediates data must not be null when size is non-zero",
+        );
+        return;
+    }
+    let data = std::slice::from_raw_parts(data.cast::<u8>(), size);
+    dispatch_optional_error(
+        &pass.device,
+        pass.core.set_immediates(offset, data, pass.device.limits()),
+    );
+}
+
 /// Records a compute dispatch.
 ///
 /// # Safety

@@ -79,6 +79,19 @@ pub(crate) struct RenderBundleInner {
     pub(crate) buffer_uses: Vec<BufferScopeUse>,
     pub(crate) texture_uses: Vec<TextureScopeUse>,
     pub(crate) draws: Vec<RenderBundleDraw>,
+    /// The bundle's user-immediates scratch (Block 94) as it stood when the
+    /// encoder finished -- i.e. after replaying every `SetImmediates` call
+    /// recorded into the bundle, in order -- paired with
+    /// `final_immediate_data_written` flagging which 4-byte words those
+    /// calls actually wrote. `RenderPassEncoder::execute_bundles` overlays
+    /// ONLY the written words onto the outer pass's own scratch (Dawn's
+    /// shared-tracker replay: a word the bundle never wrote is left
+    /// untouched in the outer pass; a bundle with no `SetImmediates` calls
+    /// leaves the outer scratch fully intact). See the citation there.
+    pub(crate) final_immediate_data: Vec<u8>,
+    /// Which 4-byte words of `final_immediate_data` were explicitly written
+    /// by the bundle's `SetImmediates` calls.
+    pub(crate) final_immediate_data_written: ImmediateWrittenMask,
 }
 
 /// Stores one render bundle draw with the state snapshotted at record time.
@@ -90,6 +103,19 @@ pub(crate) struct RenderBundleDraw {
     pub(crate) index_buffer: Option<BoundIndexBuffer>,
     pub(crate) indirect_buffer: Option<BoundIndirectBuffer>,
     pub(crate) draw: RenderDrawExecution,
+    /// Snapshot of the bundle's own user-immediates scratch (Block 94) at
+    /// draw time. Unlike `bind_groups` / `vertex_buffers` this snapshot is
+    /// NOT self-contained: only the words flagged in
+    /// `immediate_data_written` are meaningful. At `execute_bundles` replay
+    /// time those words are overlaid onto the outer pass's current scratch,
+    /// so a bundle draw recorded before any bundle-local `SetImmediates`
+    /// sees the OUTER pass's immediates (Dawn: one shared per-pass
+    /// immediates tracker that bundle replay never clears; see the citation
+    /// on `RenderPassEncoder::execute_bundles`).
+    pub(crate) immediate_data: Vec<u8>,
+    /// Which 4-byte words of `immediate_data` had been explicitly written
+    /// by the bundle's own `SetImmediates` calls as of this draw.
+    pub(crate) immediate_data_written: ImmediateWrittenMask,
 }
 
 impl RenderBundleEncoder {
@@ -149,6 +175,8 @@ impl RenderBundleEncoder {
                         Vec::new(),
                         Vec::new(),
                         Vec::new(),
+                        Vec::new(),
+                        0,
                     ),
                     None,
                 );
@@ -163,6 +191,8 @@ impl RenderBundleEncoder {
                         Vec::new(),
                         Vec::new(),
                         Vec::new(),
+                        Vec::new(),
+                        0,
                     ),
                     Some("render bundle encoder cannot be finished more than once".to_owned()),
                 );
@@ -183,6 +213,8 @@ impl RenderBundleEncoder {
         let buffer_uses = state.pass_state.scope_buffer_uses.clone();
         let texture_uses = state.pass_state.scope_texture_uses.clone();
         let draws = state.draws.clone();
+        let final_immediate_data = state.pass_state.immediate_data.clone();
+        let final_immediate_data_written = state.pass_state.immediate_data_written;
         (
             RenderBundle::new(
                 self.inner.descriptor.attachment_signature(),
@@ -192,6 +224,8 @@ impl RenderBundleEncoder {
                 buffer_uses,
                 texture_uses,
                 draws,
+                final_immediate_data,
+                final_immediate_data_written,
             ),
             error,
         )
@@ -257,6 +291,30 @@ impl RenderBundleEncoder {
             } else {
                 state.bind_groups.remove(&index);
             }
+            Ok(None)
+        })
+    }
+
+    /// Overwrites `[offset, offset + data.len())` of the bundle's own
+    /// user-immediates scratch (Block 94) and flags the covered 4-byte
+    /// words as written. Bundles are recorded standalone (they cannot see
+    /// any outer pass), so the scratch content itself only becomes final at
+    /// replay time: at `ExecuteBundles` the explicitly-written words are
+    /// overlaid onto the outer pass's current scratch, and everything the
+    /// bundle never wrote is inherited from the outer pass (Dawn's single
+    /// shared per-pass immediates tracker; see
+    /// [`RenderPassEncoder::execute_bundles`](crate::render_pass::RenderPassEncoder::execute_bundles)).
+    /// Validation failures route to [`Self::record_bundle_command`] as a
+    /// captured validation error, never a panic.
+    pub fn set_immediates(&self, offset: u32, data: &[u8], limits: Limits) -> Option<String> {
+        self.record_bundle_command(|state| {
+            let size =
+                u32::try_from(data.len()).map_err(|_| "immediates size is too large".to_owned())?;
+            validate_set_immediates(offset, size, limits)?;
+            if size == 0 {
+                return Ok(None);
+            }
+            record_set_immediates(state, offset, data);
             Ok(None)
         })
     }
@@ -532,6 +590,7 @@ impl RenderBundleEncoder {
 
 impl RenderBundle {
     /// Creates a new instance.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         attachment_signature: AttachmentSignature,
         is_error: bool,
@@ -540,6 +599,8 @@ impl RenderBundle {
         buffer_uses: Vec<BufferScopeUse>,
         texture_uses: Vec<TextureScopeUse>,
         draws: Vec<RenderBundleDraw>,
+        final_immediate_data: Vec<u8>,
+        final_immediate_data_written: ImmediateWrittenMask,
     ) -> Self {
         Self {
             inner: Arc::new(RenderBundleInner {
@@ -550,6 +611,8 @@ impl RenderBundle {
                 buffer_uses,
                 texture_uses,
                 draws,
+                final_immediate_data,
+                final_immediate_data_written,
             }),
         }
     }
@@ -587,6 +650,18 @@ impl RenderBundle {
     pub(crate) fn draws(&self) -> &[RenderBundleDraw] {
         &self.inner.draws
     }
+
+    /// Returns the bundle's user-immediates scratch as it stood when the
+    /// encoder finished (Block 94). See [`RenderBundleInner::final_immediate_data`].
+    pub(crate) fn final_immediate_data(&self) -> &[u8] {
+        &self.inner.final_immediate_data
+    }
+
+    /// Returns which 4-byte words of [`Self::final_immediate_data`] were
+    /// explicitly written by the bundle's `SetImmediates` calls (Block 94).
+    pub(crate) fn final_immediate_data_written(&self) -> ImmediateWrittenMask {
+        self.inner.final_immediate_data_written
+    }
 }
 
 fn render_bundle_draw_snapshot(
@@ -602,6 +677,8 @@ fn render_bundle_draw_snapshot(
         index_buffer: state.index_buffer.clone(),
         indirect_buffer,
         draw,
+        immediate_data: state.immediate_data.clone(),
+        immediate_data_written: state.immediate_data_written,
     }
 }
 
@@ -799,6 +876,158 @@ mod tests {
         let (bundle, error) = bundle_encoder.finish();
         assert_eq!(error, None);
         assert!(!bundle.is_error());
+    }
+
+    /// Block 94 S1 happy path: a bundle's `SetImmediates` call is recorded
+    /// into the bundle's own draw snapshots and into `final_immediate_data`,
+    /// each paired with the written-words mask that
+    /// `RenderPassEncoder::execute_bundles` uses to overlay ONLY the
+    /// explicitly written ranges onto the outer pass (Dawn shared-tracker
+    /// semantics).
+    #[test]
+    fn render_bundle_encoder_set_immediates_happy_path_records_draw_snapshot_and_final_state() {
+        let device = noop_device();
+        assert_eq!(device.limits().max_immediate_size, 64);
+        let pipeline = noop_render_pipeline(&device);
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
+        assert_eq!(error, None);
+
+        assert_eq!(bundle_encoder.set_pipeline(pipeline), None);
+        assert_eq!(
+            bundle_encoder.set_immediates(0, &[1, 2, 3, 4], device.limits()),
+            None
+        );
+        assert_eq!(bundle_encoder.draw(3, 1, 0, 0, device.limits()), None);
+        let (bundle, error) = bundle_encoder.finish();
+        assert_eq!(error, None);
+        assert!(!bundle.is_error());
+
+        assert_eq!(bundle.draws().len(), 1);
+        assert_eq!(bundle.draws()[0].immediate_data.len(), 64);
+        assert_eq!(&bundle.draws()[0].immediate_data[0..4], &[1, 2, 3, 4]);
+        // Only word 0 (bytes 0..4) was explicitly written.
+        assert_eq!(bundle.draws()[0].immediate_data_written, 0b1);
+        assert_eq!(bundle.final_immediate_data().len(), 64);
+        assert_eq!(&bundle.final_immediate_data()[0..4], &[1, 2, 3, 4]);
+        assert_eq!(bundle.final_immediate_data_written(), 0b1);
+    }
+
+    /// Block 94 S1: each `ValidateSetImmediates` rule
+    /// (`dawn/native/ProgrammableEncoder.cpp:128-146`) fires as a captured
+    /// validation error on `finish()` that marks the bundle an error, never
+    /// a panic -- mirroring how `set_bind_group` validation errors are
+    /// routed for this same encoder.
+    #[test]
+    fn render_bundle_encoder_set_immediates_rejects_unaligned_offset_size_and_out_of_limit() {
+        let device = noop_device();
+
+        let unaligned_offset = || {
+            let (bundle_encoder, _) = RenderBundleEncoder::new(
+                render_bundle_encoder_descriptor(),
+                device.limits(),
+                device.features(),
+            );
+            assert_eq!(
+                bundle_encoder.set_immediates(1, &[1, 2, 3, 4], device.limits()),
+                None
+            );
+            bundle_encoder.finish().1
+        };
+        assert_eq!(
+            unaligned_offset(),
+            Some("immediates offset must be 4-byte aligned".to_owned())
+        );
+
+        let unaligned_size = || {
+            let (bundle_encoder, _) = RenderBundleEncoder::new(
+                render_bundle_encoder_descriptor(),
+                device.limits(),
+                device.features(),
+            );
+            assert_eq!(
+                bundle_encoder.set_immediates(0, &[1, 2, 3], device.limits()),
+                None
+            );
+            bundle_encoder.finish().1
+        };
+        assert_eq!(
+            unaligned_size(),
+            Some("immediates size must be 4-byte aligned".to_owned())
+        );
+
+        let offset_out_of_limit = || {
+            let (bundle_encoder, _) = RenderBundleEncoder::new(
+                render_bundle_encoder_descriptor(),
+                device.limits(),
+                device.features(),
+            );
+            assert_eq!(
+                bundle_encoder.set_immediates(68, &[], device.limits()),
+                None
+            );
+            bundle_encoder.finish().1
+        };
+        assert_eq!(
+            offset_out_of_limit(),
+            Some("immediates offset exceeds the device limit".to_owned())
+        );
+
+        let range_out_of_limit = || {
+            let (bundle_encoder, _) = RenderBundleEncoder::new(
+                render_bundle_encoder_descriptor(),
+                device.limits(),
+                device.features(),
+            );
+            assert_eq!(
+                bundle_encoder.set_immediates(60, &[0; 8], device.limits()),
+                None
+            );
+            bundle_encoder.finish().1
+        };
+        assert_eq!(
+            range_out_of_limit(),
+            Some("immediates offset plus size exceeds the device limit".to_owned())
+        );
+    }
+
+    /// Block 94 S1: a `size == 0` write is validated but otherwise a no-op
+    /// inside a render bundle too, matching the compute/render pass encoders.
+    #[test]
+    fn render_bundle_encoder_set_immediates_zero_size_is_validated_but_a_noop() {
+        let device = noop_device();
+
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
+        assert_eq!(error, None);
+        assert_eq!(bundle_encoder.set_immediates(0, &[], device.limits()), None);
+        let (bundle, error) = bundle_encoder.finish();
+        assert_eq!(error, None);
+        assert!(!bundle.is_error());
+        assert!(bundle.final_immediate_data().iter().all(|byte| *byte == 0));
+        // A zero-size write marks nothing as written: at replay this bundle
+        // must leave the outer pass scratch fully intact.
+        assert_eq!(bundle.final_immediate_data_written(), 0);
+
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
+        assert_eq!(error, None);
+        assert_eq!(bundle_encoder.set_immediates(1, &[], device.limits()), None);
+        let (bundle, error) = bundle_encoder.finish();
+        assert!(bundle.is_error());
+        assert_eq!(
+            error,
+            Some("immediates offset must be 4-byte aligned".to_owned())
+        );
     }
 
     #[test]

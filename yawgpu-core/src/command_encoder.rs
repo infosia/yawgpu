@@ -169,6 +169,12 @@ pub(crate) struct ComputePassCommand {
     pub(crate) pipeline: Arc<ComputePipeline>,
     pub(crate) bind_groups: BTreeMap<u32, BoundBindGroup>,
     pub(crate) dispatch: ComputeDispatch,
+    /// Snapshot of the pass's user-immediates scratch (Block 94) at dispatch
+    /// time -- always [`crate::pass::MAX_IMMEDIATE_DATA_BYTES`] bytes long.
+    /// Threaded to the HAL as `HalComputePass::immediate_data`; the
+    /// pipeline's actual budget is its pipeline layout's `immediate_size`
+    /// bytes of this prefix (Block 93).
+    pub(crate) immediate_data: Vec<u8>,
 }
 
 /// Enumerates compute dispatch execution values.
@@ -206,6 +212,10 @@ pub(crate) struct RenderPassCommand {
     pub(crate) occlusion_query_set: Option<QuerySet>,
     pub(crate) occlusion_query_index: Option<u32>,
     pub(crate) draw: Option<RenderDrawExecution>,
+    /// Snapshot of the pass's user-immediates scratch (Block 94) at draw
+    /// time -- always [`crate::pass::MAX_IMMEDIATE_DATA_BYTES`] bytes long.
+    /// Threaded to the HAL as `HalRenderPass::immediate_data`.
+    pub(crate) immediate_data: Vec<u8>,
 }
 
 /// Stores the data needed to replay a subpass render pass.

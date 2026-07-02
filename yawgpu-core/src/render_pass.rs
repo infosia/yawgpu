@@ -311,6 +311,7 @@ impl RenderPassEncoder {
                     first_vertex,
                     first_instance,
                 }),
+                immediate_data: state.immediate_data.clone(),
             });
             Ok(())
         })
@@ -377,6 +378,7 @@ impl RenderPassEncoder {
                     base_vertex,
                     first_instance,
                 }),
+                immediate_data: state.immediate_data.clone(),
             });
             Ok(())
         })
@@ -439,6 +441,7 @@ impl RenderPassEncoder {
                 draw: Some(RenderDrawExecution::Indirect {
                     offset: indirect_offset,
                 }),
+                immediate_data: state.immediate_data.clone(),
             });
             Ok(())
         })
@@ -510,6 +513,7 @@ impl RenderPassEncoder {
                 draw: Some(RenderDrawExecution::IndexedIndirect {
                     offset: indirect_offset,
                 }),
+                immediate_data: state.immediate_data.clone(),
             });
             Ok(())
         })
@@ -578,6 +582,29 @@ impl RenderPassEncoder {
         })
     }
 
+    /// Overwrites `[offset, offset + data.len())` of the pass's user-immediates
+    /// scratch (Block 94). Mirrors the placement/state/error conventions of
+    /// [`Self::set_bind_group`]: validation failures route to
+    /// [`PassEncoderInner::record_pass_command`] as a captured validation
+    /// error that invalidates the encoder, never a panic. Contents persist
+    /// across pipeline changes within the pass (Dawn:
+    /// `dawn/native/ImmediatesTracker.h:81-87`). A `size == 0` write is
+    /// validated (offset alignment/bounds still apply) but otherwise a no-op,
+    /// matching Dawn's `RenderEncoderBase::APISetImmediates`
+    /// (`dawn/native/RenderEncoderBase.cpp:746-770`).
+    pub fn set_immediates(&self, offset: u32, data: &[u8], limits: Limits) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            let size =
+                u32::try_from(data.len()).map_err(|_| "immediates size is too large".to_owned())?;
+            validate_set_immediates(offset, size, limits)?;
+            if size == 0 {
+                return Ok(());
+            }
+            record_set_immediates(state, offset, data);
+            Ok(())
+        })
+    }
+
     /// Replays the given render bundles into this pass after validation.
     pub fn execute_bundles(&self, bundles: &[Arc<RenderBundle>]) -> Option<String> {
         self.inner.record_pass_command(|state| {
@@ -621,6 +648,22 @@ impl RenderPassEncoder {
                     state.draw_count = state.draw_count.saturating_add(1);
                     let (color_attachments, depth_stencil_attachment) =
                         state.load_attachments_for_draw();
+                    // Block 94: Dawn replays a bundle's `SetImmediates`
+                    // commands into the SAME per-pass immediates object the
+                    // outer pass uses (see the citation on the post-loop
+                    // overlay below), so a bundle draw's effective
+                    // immediates are the outer pass's current scratch with
+                    // the bundle's own writes up to this draw overlaid --
+                    // NOT a self-contained snapshot like `bind_groups` /
+                    // `vertex_buffers`. A draw recorded before any
+                    // bundle-local `SetImmediates` therefore sees the outer
+                    // pass's content unchanged.
+                    let mut effective_immediate_data = state.immediate_data.clone();
+                    overlay_written_immediates(
+                        &mut effective_immediate_data,
+                        &draw.immediate_data,
+                        draw.immediate_data_written,
+                    );
                     self.inner.parent.record_render_pass(RenderPassCommand {
                         pipeline: Some(Arc::clone(&draw.pipeline)),
                         color_attachments,
@@ -637,8 +680,35 @@ impl RenderPassEncoder {
                         occlusion_query_set: state.occlusion_query_set.clone(),
                         occlusion_query_index: state.open_occlusion_query,
                         draw: Some(draw.draw),
+                        immediate_data: effective_immediate_data,
                     });
                 }
+                // Dawn replays a bundle's `SetImmediates` commands into the
+                // SAME per-pass immediates object the outer pass uses: one
+                // `immediates` tracker declared once per render pass
+                // (`dawn/native/metal/CommandBufferMTL.mm:1801`) and shared
+                // by the main command loop and its `EncodeRenderBundleCommand`
+                // bundle-replay lambda (same file, `case Command::SetImmediates`
+                // at both line 1705-1711 -- direct pass -- and 2017-2023 --
+                // bundle replay, both call `immediates.SetImmediates`).
+                // Replay therefore OVERLAYS only the byte ranges the bundle
+                // explicitly wrote onto the outer scratch: a bundle with no
+                // `SetImmediates` leaves it fully intact, and the bundle's
+                // written ranges stay visible to draws recorded in the outer
+                // pass *after* `ExecuteBundles` returns -- unlike `pipeline`
+                // / `bind_groups` / `vertex_buffers`, whose *validation*
+                // requirement Dawn does reset on `ExecuteBundles`
+                // (`mCommandBufferState = CommandBufferStateTracker{}`,
+                // `dawn/native/RenderPassEncoder.cpp:365`) and which
+                // `clear_render_state()` below mirrors for this crate's
+                // encoder-state bookkeeping. Multiple bundles chain in list
+                // order, matching Dawn's linear replay.
+                overlay_written_immediates(
+                    &mut state.immediate_data,
+                    bundle.final_immediate_data(),
+                    bundle.final_immediate_data_written(),
+                );
+                state.immediate_data_written |= bundle.final_immediate_data_written();
             }
             state.clear_render_state();
             Ok(())
@@ -1412,6 +1482,385 @@ mod tests {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
+    }
+
+    /// Block 94 S1 happy path: `SetImmediates` within the Noop device's
+    /// `max_immediate_size` (64) records into the draw's immediates
+    /// snapshot, and contents persist across a `set_pipeline` swap
+    /// (Dawn: `dawn/native/ImmediatesTracker.h:81-87` -- the scratch is
+    /// pass-scoped, not pipeline-scoped).
+    #[test]
+    fn render_pass_encoder_set_immediates_happy_path_and_persists_across_set_pipeline() {
+        let device = noop_device();
+        assert_eq!(device.limits().max_immediate_size, 64);
+        let pipeline_a = noop_render_pipeline(&device);
+        let pipeline_b = noop_render_pipeline(&device);
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline_a), None);
+        assert_eq!(pass.set_immediates(0, &[1, 2, 3, 4], device.limits()), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        // Swap pipelines: the immediates scratch must survive.
+        assert_eq!(pass.set_pipeline(pipeline_b), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 2);
+        for op in command_buffer.command_ops() {
+            let CommandExecution::RenderPass(command) = op else {
+                panic!("expected render pass command");
+            };
+            assert_eq!(command.immediate_data.len(), 64);
+            assert_eq!(&command.immediate_data[0..4], &[1, 2, 3, 4]);
+            assert!(command.immediate_data[4..].iter().all(|byte| *byte == 0));
+        }
+    }
+
+    /// Block 94 S1: each `ValidateSetImmediates` rule
+    /// (`dawn/native/ProgrammableEncoder.cpp:128-146`) fires as a captured
+    /// validation error that invalidates the encoder, never a panic.
+    #[test]
+    fn render_pass_encoder_set_immediates_rejects_unaligned_offset_size_and_out_of_limit() {
+        let device = noop_device();
+        let view = || noop_render_attachment(&device);
+
+        let unaligned_offset = || {
+            let encoder = device.create_command_encoder();
+            let (pass, _) = encoder.begin_render_pass(&noop_render_pass_descriptor(view(), None));
+            assert_eq!(pass.set_immediates(1, &[1, 2, 3, 4], device.limits()), None);
+            assert_eq!(pass.end(), None);
+            encoder.finish().1
+        };
+        assert_eq!(
+            unaligned_offset(),
+            Some("immediates offset must be 4-byte aligned".to_owned())
+        );
+
+        let unaligned_size = || {
+            let encoder = device.create_command_encoder();
+            let (pass, _) = encoder.begin_render_pass(&noop_render_pass_descriptor(view(), None));
+            assert_eq!(pass.set_immediates(0, &[1, 2, 3], device.limits()), None);
+            assert_eq!(pass.end(), None);
+            encoder.finish().1
+        };
+        assert_eq!(
+            unaligned_size(),
+            Some("immediates size must be 4-byte aligned".to_owned())
+        );
+
+        let offset_out_of_limit = || {
+            let encoder = device.create_command_encoder();
+            let (pass, _) = encoder.begin_render_pass(&noop_render_pass_descriptor(view(), None));
+            assert_eq!(pass.set_immediates(68, &[], device.limits()), None);
+            assert_eq!(pass.end(), None);
+            encoder.finish().1
+        };
+        assert_eq!(
+            offset_out_of_limit(),
+            Some("immediates offset exceeds the device limit".to_owned())
+        );
+
+        let range_out_of_limit = || {
+            let encoder = device.create_command_encoder();
+            let (pass, _) = encoder.begin_render_pass(&noop_render_pass_descriptor(view(), None));
+            assert_eq!(pass.set_immediates(60, &[0; 8], device.limits()), None);
+            assert_eq!(pass.end(), None);
+            encoder.finish().1
+        };
+        assert_eq!(
+            range_out_of_limit(),
+            Some("immediates offset plus size exceeds the device limit".to_owned())
+        );
+    }
+
+    /// Block 94 S1: a `size == 0` write is validated (offset alignment/bounds
+    /// still apply) but is otherwise a no-op: it neither errors on a valid
+    /// offset nor mutates the scratch, matching Dawn's
+    /// `RenderEncoderBase::APISetImmediates` (`dawn/native/RenderEncoderBase.cpp:746-770`).
+    #[test]
+    fn render_pass_encoder_set_immediates_zero_size_is_validated_but_a_noop() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let view = noop_render_attachment(&device);
+
+        let encoder = device.create_command_encoder();
+        let (pass, _) = encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.set_immediates(0, &[], device.limits()), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        let CommandExecution::RenderPass(command) = &command_buffer.command_ops()[0] else {
+            panic!("expected render pass command");
+        };
+        assert!(command.immediate_data.iter().all(|byte| *byte == 0));
+
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, _) = encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(pass.set_immediates(1, &[], device.limits()), None);
+        assert_eq!(pass.end(), None);
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("immediates offset must be 4-byte aligned".to_owned())
+        );
+    }
+
+    /// Block 94 S1 render-bundle record + replay: a bundle's `SetImmediates`
+    /// write is overlaid onto the outer pass scratch at replay (visible to
+    /// the bundle's own draws), and the written range persists onto the
+    /// *outer* pass so a direct draw recorded after `ExecuteBundles`
+    /// returns sees it without the outer pass ever calling
+    /// `set_immediates` itself -- see the citation on
+    /// `RenderPassEncoder::execute_bundles` for why that mirrors Dawn's
+    /// single shared per-pass immediates tracker.
+    #[test]
+    fn render_pass_encoder_execute_bundles_replays_and_inherits_bundle_immediates() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
+        assert_eq!(error, None);
+        assert_eq!(bundle_encoder.set_pipeline(Arc::clone(&pipeline)), None);
+        assert_eq!(
+            bundle_encoder.set_immediates(0, &[9, 9, 9, 9], device.limits()),
+            None
+        );
+        assert_eq!(bundle_encoder.draw(3, 1, 0, 0, device.limits()), None);
+        let (bundle, error) = bundle_encoder.finish();
+        assert_eq!(error, None);
+        assert!(!bundle.is_error());
+
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.execute_bundles(&[Arc::new(bundle)]), None);
+        // `clear_render_state()` cleared the pipeline after `ExecuteBundles`
+        // (Dawn: `mCommandBufferState = CommandBufferStateTracker{}` in
+        // `RenderPassEncoder.cpp`'s `APIExecuteBundles`); re-set it to draw
+        // directly without calling `set_immediates` again.
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 2);
+
+        let CommandExecution::RenderPass(bundle_draw) = &command_buffer.command_ops()[0] else {
+            panic!("expected bundle-replayed render pass command");
+        };
+        assert_eq!(&bundle_draw.immediate_data[0..4], &[9, 9, 9, 9]);
+
+        let CommandExecution::RenderPass(outer_draw) = &command_buffer.command_ops()[1] else {
+            panic!("expected outer render pass command");
+        };
+        assert_eq!(&outer_draw.immediate_data[0..4], &[9, 9, 9, 9]);
+    }
+
+    /// Block 94 bundle-immediates inheritance (Dawn shared-tracker overlay
+    /// semantics): a bundle that never calls `SetImmediates` inherits the
+    /// OUTER pass's immediates for its replayed draws and leaves the outer
+    /// scratch fully untouched after `ExecuteBundles` -- no wipe to zeros.
+    #[test]
+    fn render_pass_encoder_execute_bundles_bundle_without_immediates_inherits_outer_content() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
+        assert_eq!(error, None);
+        assert_eq!(bundle_encoder.set_pipeline(Arc::clone(&pipeline)), None);
+        assert_eq!(bundle_encoder.draw(3, 1, 0, 0, device.limits()), None);
+        let (bundle, error) = bundle_encoder.finish();
+        assert_eq!(error, None);
+        assert!(!bundle.is_error());
+
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(Arc::clone(&pipeline)), None);
+        assert_eq!(pass.set_immediates(0, &[7, 7, 7, 7], device.limits()), None);
+        assert_eq!(pass.execute_bundles(&[Arc::new(bundle)]), None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 2);
+
+        // The bundle draw inherits the outer pass's immediates.
+        let CommandExecution::RenderPass(bundle_draw) = &command_buffer.command_ops()[0] else {
+            panic!("expected bundle-replayed render pass command");
+        };
+        assert_eq!(&bundle_draw.immediate_data[0..4], &[7, 7, 7, 7]);
+        assert!(bundle_draw.immediate_data[4..]
+            .iter()
+            .all(|byte| *byte == 0));
+
+        // The outer scratch survives the bundle untouched.
+        let CommandExecution::RenderPass(outer_draw) = &command_buffer.command_ops()[1] else {
+            panic!("expected outer render pass command");
+        };
+        assert_eq!(&outer_draw.immediate_data[0..4], &[7, 7, 7, 7]);
+        assert!(outer_draw.immediate_data[4..].iter().all(|byte| *byte == 0));
+    }
+
+    /// Block 94 bundle-immediates overlay: outer sets bytes `0..4`, the
+    /// bundle sets only bytes `8..12` -- the replayed bundle draw sees BOTH
+    /// (outer `0..4` inherited, bundle `8..12` overlaid), and the outer
+    /// scratch after `ExecuteBundles` retains `0..4` and gains `8..12`.
+    #[test]
+    fn render_pass_encoder_execute_bundles_overlays_disjoint_ranges_both_directions() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
+        assert_eq!(error, None);
+        assert_eq!(bundle_encoder.set_pipeline(Arc::clone(&pipeline)), None);
+        assert_eq!(
+            bundle_encoder.set_immediates(8, &[9, 9, 9, 9], device.limits()),
+            None
+        );
+        assert_eq!(bundle_encoder.draw(3, 1, 0, 0, device.limits()), None);
+        let (bundle, error) = bundle_encoder.finish();
+        assert_eq!(error, None);
+        assert!(!bundle.is_error());
+
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(Arc::clone(&pipeline)), None);
+        assert_eq!(pass.set_immediates(0, &[1, 2, 3, 4], device.limits()), None);
+        assert_eq!(pass.execute_bundles(&[Arc::new(bundle)]), None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 2);
+
+        // The replayed bundle draw sees outer 0..4 AND bundle 8..12.
+        let CommandExecution::RenderPass(bundle_draw) = &command_buffer.command_ops()[0] else {
+            panic!("expected bundle-replayed render pass command");
+        };
+        assert_eq!(&bundle_draw.immediate_data[0..4], &[1, 2, 3, 4]);
+        assert_eq!(&bundle_draw.immediate_data[4..8], &[0, 0, 0, 0]);
+        assert_eq!(&bundle_draw.immediate_data[8..12], &[9, 9, 9, 9]);
+
+        // The outer scratch after execute retains 0..4 and gains 8..12.
+        let CommandExecution::RenderPass(outer_draw) = &command_buffer.command_ops()[1] else {
+            panic!("expected outer render pass command");
+        };
+        assert_eq!(&outer_draw.immediate_data[0..4], &[1, 2, 3, 4]);
+        assert_eq!(&outer_draw.immediate_data[4..8], &[0, 0, 0, 0]);
+        assert_eq!(&outer_draw.immediate_data[8..12], &[9, 9, 9, 9]);
+    }
+
+    /// Block 94 bundle-immediates chaining: two bundles executed in one
+    /// `ExecuteBundles` call compose in list order (Dawn's linear replay
+    /// into one shared tracker) -- the second bundle's draws see the first
+    /// bundle's writes plus the outer pass's, and the outer scratch ends
+    /// with all three layered.
+    #[test]
+    fn render_pass_encoder_execute_bundles_two_bundles_compose_in_order() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+
+        let make_bundle = |offset: u32, value: u8| {
+            let (bundle_encoder, error) = RenderBundleEncoder::new(
+                render_bundle_encoder_descriptor(),
+                device.limits(),
+                device.features(),
+            );
+            assert_eq!(error, None);
+            assert_eq!(bundle_encoder.set_pipeline(Arc::clone(&pipeline)), None);
+            assert_eq!(
+                bundle_encoder.set_immediates(offset, &[value; 4], device.limits()),
+                None
+            );
+            assert_eq!(bundle_encoder.draw(3, 1, 0, 0, device.limits()), None);
+            let (bundle, error) = bundle_encoder.finish();
+            assert_eq!(error, None);
+            assert!(!bundle.is_error());
+            Arc::new(bundle)
+        };
+        let bundle_a = make_bundle(4, 5);
+        let bundle_b = make_bundle(8, 6);
+
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(Arc::clone(&pipeline)), None);
+        assert_eq!(pass.set_immediates(0, &[1, 1, 1, 1], device.limits()), None);
+        assert_eq!(pass.execute_bundles(&[bundle_a, bundle_b]), None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 3);
+
+        // Bundle A's draw: outer 0..4 + A's 4..8, nothing at 8..12 yet.
+        let CommandExecution::RenderPass(draw_a) = &command_buffer.command_ops()[0] else {
+            panic!("expected bundle A render pass command");
+        };
+        assert_eq!(&draw_a.immediate_data[0..4], &[1, 1, 1, 1]);
+        assert_eq!(&draw_a.immediate_data[4..8], &[5, 5, 5, 5]);
+        assert_eq!(&draw_a.immediate_data[8..12], &[0, 0, 0, 0]);
+
+        // Bundle B's draw: composes over A's overlay in list order.
+        let CommandExecution::RenderPass(draw_b) = &command_buffer.command_ops()[1] else {
+            panic!("expected bundle B render pass command");
+        };
+        assert_eq!(&draw_b.immediate_data[0..4], &[1, 1, 1, 1]);
+        assert_eq!(&draw_b.immediate_data[4..8], &[5, 5, 5, 5]);
+        assert_eq!(&draw_b.immediate_data[8..12], &[6, 6, 6, 6]);
+
+        // The outer scratch ends with all three layered.
+        let CommandExecution::RenderPass(outer_draw) = &command_buffer.command_ops()[2] else {
+            panic!("expected outer render pass command");
+        };
+        assert_eq!(&outer_draw.immediate_data[0..4], &[1, 1, 1, 1]);
+        assert_eq!(&outer_draw.immediate_data[4..8], &[5, 5, 5, 5]);
+        assert_eq!(&outer_draw.immediate_data[8..12], &[6, 6, 6, 6]);
     }
 
     #[test]

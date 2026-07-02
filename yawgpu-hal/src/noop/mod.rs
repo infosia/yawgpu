@@ -52,9 +52,20 @@ impl NoopAdapter {
     }
 
     /// Returns the backend-reported supported limits.
+    ///
+    /// `max_immediate_size` is `64` (Dawn's `kMaxImmediateDataBytes`,
+    /// `dawn/common/Constants.h:58`) starting Block 94 slice S1: the Noop
+    /// backend "executes" `SetImmediates` trivially (it records and no-ops),
+    /// so it clears the "advertise only what compiles AND executes" bar
+    /// first. Metal/Vulkan/GLES stay at the `HalLimits::DEFAULT` floor of
+    /// `0` until their own delivery slices (S2/S3; GLES stays `0`
+    /// permanently, see `specs/blocks/67-gles-backend.md`).
     #[must_use]
     pub(crate) fn limits(&self) -> HalLimits {
-        HalLimits::DEFAULT
+        HalLimits {
+            max_immediate_size: 64,
+            ..HalLimits::DEFAULT
+        }
     }
 
     /// Returns true when WGSL `shader-f16` is supported.

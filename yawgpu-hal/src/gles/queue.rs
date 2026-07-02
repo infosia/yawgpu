@@ -1547,6 +1547,7 @@ mod tests {
             occlusion_query_set: None,
             occlusion_query_index: None,
             draw: None,
+            immediate_data: Vec::new(),
         }
     }
 

@@ -54,7 +54,31 @@ pub(crate) struct PassEncoderState {
     pub(crate) scope_texture_uses: Vec<TextureScopeUse>,
     pub(crate) draw_count: u64,
     pub(crate) max_draw_count: u64,
+    pub(crate) immediate_data: Vec<u8>,
+    pub(crate) immediate_data_written: ImmediateWrittenMask,
 }
+
+/// The absolute ceiling of the per-pass user-immediates scratch, in bytes:
+/// Dawn's `kMaxImmediateDataBytes` (`dawn/common/Constants.h:58`). Every
+/// backend's `Limits::max_immediate_size` is expected to stay `<=` this
+/// value (Noop is the first backend to reach it, Block 94 slice S1); the
+/// scratch buffer is always allocated at this fixed size so `SetImmediates`
+/// never needs to grow it mid-pass.
+pub(crate) const MAX_IMMEDIATE_DATA_BYTES: usize = 64;
+
+/// Per-4-byte-word "written by an explicit `SetImmediates`" bitmask over the
+/// user-immediates scratch: bit `i` covers bytes `[4 * i, 4 * i + 4)`.
+/// Word granularity is exact because `validate_set_immediates` enforces
+/// 4-byte alignment on both `offset` and `size` (Dawn's own `ImmediateMask`
+/// is the same idea at `kImmediateElementByteSize` granularity,
+/// `dawn/native/ImmediatesLayout.h:61-67`). Render bundles use this to
+/// replay Dawn's shared-tracker semantics: a bundle overlays only the byte
+/// ranges it explicitly wrote onto the outer pass's scratch, inheriting the
+/// rest (see `RenderPassEncoder::execute_bundles`).
+pub(crate) type ImmediateWrittenMask = u16;
+
+// The mask must have one bit per 4-byte word of the scratch.
+const _: () = assert!(MAX_IMMEDIATE_DATA_BYTES / 4 <= ImmediateWrittenMask::BITS as usize);
 
 /// Groups pass encoder creation metadata.
 #[derive(Debug)]
@@ -99,6 +123,13 @@ impl PassEncoderState {
             scope_texture_uses: Vec::new(),
             draw_count: 0,
             max_draw_count: init.max_draw_count,
+            // Dawn: `ImmediateDataContent::mData` is zero-initialized
+            // (`dawn/native/ImmediatesTracker.h:70`) -- the per-pass
+            // user-immediates scratch starts at zero and is never reset for
+            // the lifetime of the pass; only `SetImmediates` overwrites it,
+            // byte-range by byte-range.
+            immediate_data: vec![0u8; MAX_IMMEDIATE_DATA_BYTES],
+            immediate_data_written: 0,
         }
     }
 
@@ -246,6 +277,7 @@ impl PassEncoderInner {
                 occlusion_query_set: None,
                 occlusion_query_index: None,
                 draw: None,
+                immediate_data: state.immediate_data.clone(),
             })
         } else {
             None
@@ -1459,6 +1491,103 @@ pub(crate) fn validate_scissor_rect(
         return Err("render pass scissor rectangle exceeds attachment size".to_owned());
     }
     Ok(())
+}
+
+/// Validates a `SetImmediates(offset, size)` command (Block 94), shared by
+/// the compute pass, render pass, and render bundle encoders -- exactly
+/// like [`validate_set_bind_group`] is shared across the same three
+/// encoders. Authoritative source: Dawn's
+/// `ProgrammableEncoder::ValidateSetImmediates`
+/// (`dawn/native/ProgrammableEncoder.cpp:128-146`): 4-byte alignment on
+/// both `offset` and `size`, then an overflow-safe range check against
+/// `limits.max_immediate_size` -- the *device's* effective limit (mirrors
+/// `GetDevice()->GetLimits()` there), not the adapter's supported limit.
+/// Dawn checks `offset > max` then `size > max - offset` instead of
+/// `offset + size > max` specifically to avoid a `u32` overflow on the
+/// addition; this mirrors that structure.
+///
+/// Additionally clamps `limits.max_immediate_size` to
+/// [`MAX_IMMEDIATE_DATA_BYTES`] (Dawn's own absolute ceiling on every
+/// backend's advertised limit) so [`record_set_immediates`]'s scratch-buffer
+/// write can never go out of bounds even if a `Limits` value were somehow
+/// misconfigured above that ceiling.
+pub(crate) fn validate_set_immediates(
+    offset: u32,
+    size: u32,
+    limits: Limits,
+) -> Result<(), String> {
+    if !offset.is_multiple_of(4) {
+        return Err("immediates offset must be 4-byte aligned".to_owned());
+    }
+    if !size.is_multiple_of(4) {
+        return Err("immediates size must be 4-byte aligned".to_owned());
+    }
+    let max_immediate_size = limits
+        .max_immediate_size
+        .min(MAX_IMMEDIATE_DATA_BYTES as u32);
+    if offset > max_immediate_size {
+        return Err("immediates offset exceeds the device limit".to_owned());
+    }
+    if size > max_immediate_size - offset {
+        return Err("immediates offset plus size exceeds the device limit".to_owned());
+    }
+    Ok(())
+}
+
+/// Overwrites `state.immediate_data[offset, offset + data.len())` after
+/// validation. Mirrors Dawn's `UserImmediatesTrackerBase::SetImmediates`
+/// (`dawn/native/ImmediatesTracker.h:81-87`): a byte-range overwrite into
+/// the pass-scoped scratch buffer described on
+/// [`MAX_IMMEDIATE_DATA_BYTES`] -- bytes outside `[offset, offset +
+/// data.len())` are left untouched (whatever was last written there, or
+/// zero from pass begin).
+///
+/// Callers must call [`validate_set_immediates`] first and skip this call
+/// entirely when `data` is empty (Dawn: `ComputePassEncoder::APISetImmediates`
+/// / `RenderEncoderBase::APISetImmediates` both validate unconditionally but
+/// then early-return on `size == 0` without recording a command --
+/// `dawn/native/ComputePassEncoder.cpp:562-565`,
+/// `dawn/native/RenderEncoderBase.cpp:754-757`). This function relies on
+/// that invariant (`offset + data.len() <= limits.max_immediate_size <=
+/// MAX_IMMEDIATE_DATA_BYTES`) for the slice bounds and never panics as long
+/// as it holds.
+pub(crate) fn record_set_immediates(state: &mut PassEncoderState, offset: u32, data: &[u8]) {
+    let start = offset as usize;
+    let end = start + data.len();
+    state.immediate_data[start..end].copy_from_slice(data);
+    state.immediate_data_written |= written_words_mask(start, data.len());
+}
+
+/// Returns the [`ImmediateWrittenMask`] covering the byte range
+/// `[offset, offset + len)` of the user-immediates scratch. Both values
+/// must be 4-byte aligned and in-bounds (guaranteed by
+/// [`validate_set_immediates`]); same bit math as Dawn's
+/// `GetImmediateBlockBits` (`dawn/native/ImmediatesLayout.h:61-67`).
+pub(crate) fn written_words_mask(offset: usize, len: usize) -> ImmediateWrittenMask {
+    let first_word = offset / 4;
+    let word_count = len / 4;
+    // Compute in u32: `word_count` can be the full 16 words, where
+    // `1u16 << 16` would overflow.
+    (((1u32 << word_count) - 1) << first_word) as ImmediateWrittenMask
+}
+
+/// Copies the 4-byte words of `src` flagged in `written` over `dest`,
+/// leaving unflagged words of `dest` untouched. Both slices must be
+/// [`MAX_IMMEDIATE_DATA_BYTES`] long. This implements Dawn's shared-tracker
+/// bundle-replay semantics as an overlay: a render bundle contributes only
+/// the byte ranges its own `SetImmediates` calls wrote, inheriting the rest
+/// from the destination (the outer pass scratch).
+pub(crate) fn overlay_written_immediates(
+    dest: &mut [u8],
+    src: &[u8],
+    written: ImmediateWrittenMask,
+) {
+    for word in 0..(MAX_IMMEDIATE_DATA_BYTES / 4) {
+        if written & (1 << word) != 0 {
+            let start = word * 4;
+            dest[start..start + 4].copy_from_slice(&src[start..start + 4]);
+        }
+    }
 }
 
 #[cfg(test)]

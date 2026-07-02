@@ -103,6 +103,7 @@ impl ComputePassEncoder {
                 dispatch: ComputeDispatch::Direct {
                     workgroups: (x, y, z),
                 },
+                immediate_data: state.immediate_data.clone(),
             });
             Ok(())
         })
@@ -148,7 +149,31 @@ impl ComputePassEncoder {
                     buffer: indirect_buffer,
                     offset: indirect_offset,
                 },
+                immediate_data: state.immediate_data.clone(),
             });
+            Ok(())
+        })
+    }
+
+    /// Overwrites `[offset, offset + data.len())` of the pass's user-immediates
+    /// scratch (Block 94). Mirrors the placement/state/error conventions of
+    /// [`Self::set_bind_group`]: validation failures route to
+    /// [`PassEncoderInner::record_pass_command`] as a captured validation
+    /// error that invalidates the encoder, never a panic. Contents persist
+    /// across pipeline changes within the pass (Dawn:
+    /// `dawn/native/ImmediatesTracker.h:81-87`). A `size == 0` write is
+    /// validated (offset alignment/bounds still apply) but otherwise a no-op,
+    /// matching Dawn's `ComputePassEncoder::APISetImmediates`
+    /// (`dawn/native/ComputePassEncoder.cpp:554-578`).
+    pub fn set_immediates(&self, offset: u32, data: &[u8], limits: Limits) -> Option<String> {
+        self.inner.record_pass_command(|state| {
+            let size =
+                u32::try_from(data.len()).map_err(|_| "immediates size is too large".to_owned())?;
+            validate_set_immediates(offset, size, limits)?;
+            if size == 0 {
+                return Ok(());
+            }
+            record_set_immediates(state, offset, data);
             Ok(())
         })
     }
@@ -265,6 +290,137 @@ mod tests {
             }
             ComputeDispatch::Direct { .. } => panic!("expected indirect dispatch"),
         }
+    }
+
+    /// Block 94 S1 happy path: `SetImmediates` within the Noop device's
+    /// `max_immediate_size` (64) records into the dispatch's immediates
+    /// snapshot, and contents persist across a `set_pipeline` swap
+    /// (Dawn: `dawn/native/ImmediatesTracker.h:81-87` -- the scratch is
+    /// pass-scoped, not pipeline-scoped).
+    #[test]
+    fn compute_pass_set_immediates_happy_path_and_persists_across_set_pipeline() {
+        let device = noop_device();
+        assert_eq!(device.limits().max_immediate_size, 64);
+        let pipeline_a = noop_compute_pipeline(&device);
+        let pipeline_b = noop_compute_pipeline(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline_a), None);
+        assert_eq!(pass.set_immediates(0, &[1, 2, 3, 4], device.limits()), None);
+        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+        // Swap pipelines: the immediates scratch must survive.
+        assert_eq!(pass.set_pipeline(pipeline_b), None);
+        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 2);
+        for op in command_buffer.command_ops() {
+            let CommandExecution::ComputePass(command) = op else {
+                panic!("expected compute pass command");
+            };
+            assert_eq!(command.immediate_data.len(), 64);
+            assert_eq!(&command.immediate_data[0..4], &[1, 2, 3, 4]);
+            assert!(command.immediate_data[4..].iter().all(|byte| *byte == 0));
+        }
+    }
+
+    /// Block 94 S1: each `ValidateSetImmediates` rule
+    /// (`dawn/native/ProgrammableEncoder.cpp:128-146`) fires as a captured
+    /// validation error that invalidates the encoder, never a panic.
+    #[test]
+    fn compute_pass_set_immediates_rejects_unaligned_offset_size_and_out_of_limit() {
+        let device = noop_device();
+
+        let unaligned_offset = || {
+            let encoder = device.create_command_encoder();
+            let (pass, _) = encoder.begin_compute_pass();
+            assert_eq!(pass.set_immediates(1, &[1, 2, 3, 4], device.limits()), None);
+            assert_eq!(pass.end(), None);
+            encoder.finish().1
+        };
+        assert_eq!(
+            unaligned_offset(),
+            Some("immediates offset must be 4-byte aligned".to_owned())
+        );
+
+        let unaligned_size = || {
+            let encoder = device.create_command_encoder();
+            let (pass, _) = encoder.begin_compute_pass();
+            assert_eq!(pass.set_immediates(0, &[1, 2, 3], device.limits()), None);
+            assert_eq!(pass.end(), None);
+            encoder.finish().1
+        };
+        assert_eq!(
+            unaligned_size(),
+            Some("immediates size must be 4-byte aligned".to_owned())
+        );
+
+        let offset_out_of_limit = || {
+            let encoder = device.create_command_encoder();
+            let (pass, _) = encoder.begin_compute_pass();
+            assert_eq!(pass.set_immediates(68, &[], device.limits()), None);
+            assert_eq!(pass.end(), None);
+            encoder.finish().1
+        };
+        assert_eq!(
+            offset_out_of_limit(),
+            Some("immediates offset exceeds the device limit".to_owned())
+        );
+
+        let range_out_of_limit = || {
+            let encoder = device.create_command_encoder();
+            let (pass, _) = encoder.begin_compute_pass();
+            assert_eq!(pass.set_immediates(60, &[0; 8], device.limits()), None);
+            assert_eq!(pass.end(), None);
+            encoder.finish().1
+        };
+        assert_eq!(
+            range_out_of_limit(),
+            Some("immediates offset plus size exceeds the device limit".to_owned())
+        );
+    }
+
+    /// Block 94 S1: a `size == 0` write is validated (offset alignment/bounds
+    /// still apply, per Dawn's `ValidateSetImmediates` running before the
+    /// `size == 0` early return -- `dawn/native/ComputePassEncoder.cpp:559-565`)
+    /// but is otherwise a no-op: it neither errors on a valid offset nor
+    /// mutates the scratch.
+    #[test]
+    fn compute_pass_set_immediates_zero_size_is_validated_but_a_noop() {
+        let device = noop_device();
+        let pipeline = noop_compute_pipeline(&device);
+
+        // Valid offset, zero size: succeeds and leaves the scratch untouched.
+        let encoder = device.create_command_encoder();
+        let (pass, _) = encoder.begin_compute_pass();
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.set_immediates(0, &[], device.limits()), None);
+        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+        assert_eq!(pass.end(), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        let CommandExecution::ComputePass(command) = &command_buffer.command_ops()[0] else {
+            panic!("expected compute pass command");
+        };
+        assert!(command.immediate_data.iter().all(|byte| *byte == 0));
+
+        // Invalid (unaligned) offset with zero size: still validated and
+        // rejected, matching Dawn's unconditional `ValidateSetImmediates`.
+        let encoder = device.create_command_encoder();
+        let (pass, _) = encoder.begin_compute_pass();
+        assert_eq!(pass.set_immediates(1, &[], device.limits()), None);
+        assert_eq!(pass.end(), None);
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("immediates offset must be 4-byte aligned".to_owned())
+        );
     }
 
     #[test]

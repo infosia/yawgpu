@@ -33,9 +33,13 @@ void wgpuRenderBundleEncoderSetImmediates(enc, uint32_t offset, void const* data
 
 ## Behaviour contract
 
-- **Limit**: `maxImmediateSize = 64` on Metal and Vulkan adapters and on Noop;
-  `Limits::DEFAULT.max_immediate_size` becomes 64 (Dawn's base tier — the
-  existing tests asserting 0 update accordingly). GLES (Tier 2) stays 0 and
+- **Limit**: `maxImmediateSize = 64` on Metal and Vulkan adapters and on
+  Noop — but **each backend flips to 64 only in the slice that makes it
+  execute** (the "advertise only what compiles AND executes" bar): Noop in
+  S1, Metal in S2, Vulkan in S3. `Limits::DEFAULT.max_immediate_size`
+  becomes 64 (Dawn's base tier) only at the end of S3, when every Tier-1
+  backend delivers; existing tests asserting 0 update in the slice that
+  flips them. GLES (Tier 2) stays 0 and
   the deviation is catalogued in `specs/blocks/67-gles-backend.md` (its
   `tint_immediates` uniform slot is reserved for internal `first_instance`;
   `SetImmediates` on GLES surfaces the usual Tier-2 `HalError` if ever
@@ -104,16 +108,18 @@ internal immediates today: the block is just the user prefix.
 
 ## Slices
 
-1. **S1 — core + FFI + Noop (Noop-first, no GPU)**: limits (core DEFAULT /
-   Noop / Metal / Vulkan HalLimits → 64), `SetImmediates` FFI ×3, core
-   encoder state + validation + render-bundle record/replay, HAL command
-   enum + Noop no-op, unit tests at every layer. CTS check (validation-only
-   trees): `createPipelineLayout` 115/3, `pipeline,immediates` 30/0.
-2. **S2 — Metal execution**: block composition (user prefix + clamp),
-   MSL `depth_range_offsets` rebase, encoder delivery + dirty tracking,
-   real-Metal e2e (compute readback of `var<immediate>` + render clamp
-   regression).
-3. **S3 — Vulkan execution**: SPIR-V/push-constant path,
+1. **S1 — core + FFI + Noop (Noop-first, no GPU)**: Noop HalLimits
+   `max_immediate_size` → 64 (Metal/Vulkan/GLES and core `DEFAULT` stay 0),
+   `SetImmediates` FFI ×3, core encoder state + validation + render-bundle
+   record/replay, HAL command enum + Noop no-op, unit tests at every layer
+   (the Block 93 pipeline rule now testable with non-zero budgets on Noop).
+2. **S2 — Metal execution**: Metal HalLimits → 64; block composition (user
+   prefix + clamp), MSL `depth_range_offsets` rebase, encoder delivery +
+   dirty tracking, real-Metal e2e (compute readback of `var<immediate>` +
+   render clamp regression). CTS check (validation trees, Metal):
+   `createPipelineLayout` 115/3, `pipeline,immediates` 30/0.
+3. **S3 — Vulkan execution**: Vulkan HalLimits → 64 and core
+   `Limits::DEFAULT` → 64; SPIR-V/push-constant path,
    `VkPushConstantRange`, MoltenVK e2e + clamp/F-139 posture unchanged.
 4. **S4 — CTS port un-stub** (webgpu-native-cts repo): implement the stubbed
    bodies of `encoding/cmds/setImmediates.spec.cpp` (3) and

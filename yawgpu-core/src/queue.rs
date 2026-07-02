@@ -1247,6 +1247,7 @@ pub(crate) fn hal_compute_pass_execution(pass: &ComputePassCommand) -> Option<Ha
         bind_textures: bindings.textures,
         bind_samplers: bindings.samplers,
         bind_external_textures: bindings.external_textures,
+        immediate_data: pass.immediate_data.clone(),
         dispatch: hal_compute_dispatch(&pass.dispatch)?,
     }))
 }
@@ -1354,6 +1355,7 @@ pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalC
         occlusion_query_set: pass.occlusion_query_set.as_ref().and_then(QuerySet::hal),
         occlusion_query_index: pass.occlusion_query_index,
         draw,
+        immediate_data: pass.immediate_data.clone(),
     }))
 }
 

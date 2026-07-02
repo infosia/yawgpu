@@ -70,6 +70,38 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetBindGroup(
     );
 }
 
+/// Overwrites part of the render bundle's own user-immediates scratch.
+///
+/// # Safety
+///
+/// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
+/// `data` must point to `size` bytes when `size` is non-zero (mirrors
+/// `wgpuQueueWriteBuffer`'s null/size contract).
+/// Returns WGPU render bundle encoder set immediates.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleEncoderSetImmediates(
+    render_bundle_encoder: native::WGPURenderBundleEncoder,
+    offset: u32,
+    data: *const c_void,
+    size: usize,
+) {
+    let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+    if size > 0 && data.is_null() {
+        encoder.device.dispatch_error(
+            core::ErrorKind::Validation,
+            "render bundle set immediates data must not be null when size is non-zero",
+        );
+        return;
+    }
+    let data = std::slice::from_raw_parts(data.cast::<u8>(), size);
+    dispatch_optional_error(
+        &encoder.device,
+        encoder
+            .core
+            .set_immediates(offset, data, encoder.device.limits()),
+    );
+}
+
 /// Sets or clears a render bundle vertex buffer.
 ///
 /// # Safety
