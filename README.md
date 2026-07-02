@@ -651,47 +651,50 @@ implementation, is the **oracle** every result is judged against.
 Across the **entire ported suite** — 642 spec files spanning `api/validation`,
 `api/operation`, `shader/validation`, and `shader/execution` — yawgpu runs on
 real hardware with **zero open implementation defects**, matching the Dawn
-oracle. The per-tree sweeps below are **raw** (no expectations applied), so the
-documented non-defects carried as `xfail` show in `fail` with a dagger note
-rather than being masked.
+oracle. Because yawgpu reports real hardware limits and exposes `subgroups`, it
+runs the same case set as Dawn (its skip count is at Dawn's level), so the sweep
+exercises the cases the oracle does. The per-tree sweeps below are **raw** (no
+expectations applied), so the documented non-defects carried as `xfail` show in
+`fail` with a dagger note rather than being masked.
 
 **Native Metal** (macOS / Apple, Tint frontend), per-subcase:
 
 | area | pass | skip | fail | crash |
 |---|---:|---:|---:|---:|
-| `api/validation` | 274,833 | 79,782 | 2† | 0 |
-| `api/operation` | 176,093 | 53,500 | 0 | 0 |
-| `shader/execution` | 725,445 | 119,141 | 0 | 0 |
-| `shader/validation` | 500,375 | 166,767 | 0 | 0 |
-| **total** | **1,676,746** | **419,190** | **2†** | **0** |
+| `api/validation` | 292,960 | 61,655 | 2† | 0 |
+| `api/operation` | 228,600 | 993 | 0 | 0 |
+| `shader/execution` | 822,209 | 22,377 | 0 | 0 |
+| `shader/validation` | 646,773 | 20,369 | 0 | 0 |
+| **total** | **1,990,542** | **105,394** | **2†** | **0** |
 
 † The only fails are the same 2 `draw,index_buffer_format_dirtying` cases the
 Dawn oracle rejects identically — a CTS port-oracle quirk, not a yawgpu defect.
-yawgpu's fail profile on Metal is byte-identical to Dawn's.
+yawgpu's fail profile on Metal is byte-identical to Dawn's, at Dawn's coverage
+level (skip 105,394 vs the oracle's 104,942).
 
 **Native Vulkan** (Windows 11 / NVIDIA RTX 5060 Ti, Tint frontend), per-subcase:
 
 | area | pass | skip | fail | crash |
 |---|---:|---:|---:|---:|
-| `api/validation` | 227,889 | 126,728 | 4‡ | 0 |
-| `api/operation` | 176,095 | 53,500 | 0 | 0 |
-| `shader/execution` | 468,980 | 375,489 | 117‡ | 0 |
-| `shader/validation` | 500,375 | 166,767 | 0 | 0 |
-| **total** | **1,373,339** | **722,484** | **121‡** | **0** |
+| `api/validation` | 235,547 | 119,070 | 4‡ | 0 |
+| `api/operation` | 209,108 | 20,487 | 0 | 0 |
+| `shader/execution` | 515,870 | 328,603 | 113‡ | 0 |
+| `shader/validation` | 646,773 | 20,369 | 0 | 0 |
+| **total** | **1,607,298** | **488,529** | **117‡** | **0** |
 
-‡ All 121 fails are documented non-defects, each cross-checked against a
+‡ All 117 fails are documented non-defects, each cross-checked against a
 Dawn-Vulkan oracle on the same GPU and carried as `xfail`, so the suite exits
-`fail = 0` once expectations are applied: Vulkan per-sample
-`@interpolate(…,sample)` fragment builtins (spec-in-flux), a denormal `fwidth`
+`fail = 0` once expectations are applied: the Vulkan per-sample `sample_mask`
+fragment builtin (spec-in-flux; Dawn diverges identically), a denormal `fwidth`
 interval artifact the Dawn-Vulkan oracle reproduces identically,
 `external_texture` rejected on Vulkan by design, the same 2
 `index_buffer_format_dirtying` cases as Metal, and an NVIDIA memory-model weak
 behaviour Dawn also fails. No crash across the full sweep.
 
-Shader conformance falls out **by construction**: since the naga→Tint migration,
-yawgpu compiles WGSL with the same Tint compiler Dawn uses, so the translated
-MSL / SPIR-V is byte-equivalent to the oracle's — the entire `shader/*` surface
-is Dawn-equivalent with no separate shader code path to keep in sync.
+Shader conformance falls out **by construction**: yawgpu compiles WGSL with the
+same Tint compiler Dawn uses, so the translated MSL / SPIR-V is byte-equivalent
+to the oracle's — the entire `shader/*` surface is Dawn-equivalent with no
+separate shader code path to keep in sync.
 
 Every carried item above is a documented **non-defect**, cross-checked against
 the Dawn oracle on the same GPU, not a yawgpu bug. (MoltenVK on macOS is a
@@ -700,7 +703,7 @@ artifacts that are green on both native Metal and native Vulkan.)
 
 Per-case results and any cross-backend differences are tracked in the suite's
 [`docs/FINDINGS.md`](https://github.com/infosia/webgpu-native-cts/blob/main/docs/FINDINGS.md)
-(numbers above are the Tint-baseline sweep, 2026-06-28).
+(yawgpu-Metal sweep 2026-07-02; yawgpu-Vulkan sweep 2026-06-28).
 
 ## License
 
