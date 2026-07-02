@@ -51,17 +51,18 @@ pub struct ReflectedModule {
     overrides_cache: OnceLock<Vec<ReflectedOverride>>,
 }
 
-// SAFETY: the wrapped `yawgpu_tint::Program` (an opaque Tint handle) is treated as
-// immutable after parsing — reflection and codegen only read from it — so it is safe
-// to send/share across threads. The remaining fields are ordinary owned Rust data
-// (`OnceLock`/`Mutex` around `String`/`Vec`/`HashMap`), which are already `Send` +
-// `Sync` on their own; the `Mutex` around each cache also serializes concurrent
-// reflection FFI calls into `program` from the Rust side, matching the shim-side
-// `reflection_mutex` added for the same reason (refactor finding F3).
-unsafe impl Send for ReflectedModule {}
-
-// SAFETY: See the `Send` impl above.
-unsafe impl Sync for ReflectedModule {}
+// `ReflectedModule` is `Send + Sync` via ordinary auto-trait derivation, with
+// no `unsafe impl` needed here (refactor finding F3,
+// `specs/tracking/tint-integration-refactor.md`): `yawgpu_tint::Program`
+// itself now carries `unsafe impl Send`/`Sync` (see its SAFETY comment in
+// `yawgpu-tint/src/lib.rs`, which cites the Tint/Dawn source evidence this
+// was previously asserted here without), and every other field is ordinary
+// owned Rust data (`OnceLock`/`Mutex` around `String`/`Vec`/`HashMap`) that
+// is already `Send + Sync` on its own. The `Mutex` around each cache still
+// serializes concurrent *reflection* calls into `program` from the Rust
+// side, matching the shim-side `reflection_mutex` (same finding) — that
+// mutex is about avoiding redundant `Inspector` rebuilds (F5), not filling a
+// soundness gap.
 
 /// Returns parse and validate wgsl.
 ///
@@ -90,9 +91,11 @@ pub(crate) fn parse_and_validate_wgsl_gated(
         clip_distances,
         primitive_index,
         crate::SUPPORTED_WGSL_LANGUAGE_FEATURES,
-    )?;
+    )
+    .map_err(|e| e.to_string())?;
     let warnings = program
-        .diagnostics()?
+        .diagnostics()
+        .map_err(|e| e.to_string())?
         .into_iter()
         .filter(|diagnostic| diagnostic.severity == yawgpu_tint::DiagnosticSeverity::Warning)
         .map(|diagnostic| CompilationMessage {
@@ -137,16 +140,18 @@ impl ReflectedModule {
         multisampled_input_attachment: bool,
         polyfill_pixel_center: Option<u32>,
     ) -> Result<Vec<u32>, String> {
-        self.program.generate_spirv(
-            entry_name,
-            &yawgpu_tint::Bindings::default(),
-            &override_values(pipeline_constants),
-            true,
-            vulkan_memory_model,
-            framebuffer_fetch_descriptor_set,
-            multisampled_input_attachment,
-            polyfill_pixel_center,
-        )
+        self.program
+            .generate_spirv(
+                entry_name,
+                &yawgpu_tint::Bindings::default(),
+                &override_values(pipeline_constants),
+                true,
+                vulkan_memory_model,
+                framebuffer_fetch_descriptor_set,
+                multisampled_input_attachment,
+                polyfill_pixel_center,
+            )
+            .map_err(|e| e.to_string())
     }
 
     /// Generates GLSL ES for the validated shader module.
@@ -157,11 +162,14 @@ impl ReflectedModule {
         _stage: ShaderStage,
         pipeline_constants: &PipelineConstants,
     ) -> Result<GeneratedGlsl, String> {
-        let source = self.program.generate_glsl(
-            entry_name,
-            &yawgpu_tint::Bindings::default(),
-            &override_values(pipeline_constants),
-        )?;
+        let source = self
+            .program
+            .generate_glsl(
+                entry_name,
+                &yawgpu_tint::Bindings::default(),
+                &override_values(pipeline_constants),
+            )
+            .map_err(|e| e.to_string())?;
         Ok(GeneratedGlsl {
             source,
             entry_point: entry_name.to_owned(),
@@ -265,18 +273,21 @@ impl ReflectedModule {
         if buffer_sizes_slot > u32::from(u8::MAX) {
             return Err("MSL generated buffer slot exceeds the supported slot range".to_owned());
         }
-        let output = self.program.generate_msl(
-            entry_name,
-            &bindings,
-            &override_values(pipeline_constants),
-            buffer_sizes_slot,
-            // The wrapper takes `robust` (robustness ENABLED), which is the
-            // negation of this fn's `disable_robustness`.
-            !disable_robustness,
-            emit_vertex_point_size,
-            vertex_buffers,
-            fixed_sample_mask,
-        )?;
+        let output = self
+            .program
+            .generate_msl(
+                entry_name,
+                &bindings,
+                &override_values(pipeline_constants),
+                buffer_sizes_slot,
+                // The wrapper takes `robust` (robustness ENABLED), which is the
+                // negation of this fn's `disable_robustness`.
+                !disable_robustness,
+                emit_vertex_point_size,
+                vertex_buffers,
+                fixed_sample_mask,
+            )
+            .map_err(|e| e.to_string())?;
         let buffer_size_bindings = output
             .buffer_size_bindings
             .into_iter()
@@ -353,7 +364,10 @@ impl ReflectedModule {
         Ok(Some(ReflectedWorkgroupSize {
             entry_point: entry_point.to_owned(),
             literal_size,
-            workgroup_storage_size: self.program.workgroup_storage_size(&[])?,
+            workgroup_storage_size: self
+                .program
+                .workgroup_storage_size(&[])
+                .map_err(|e| e.to_string())?,
         }))
     }
 
@@ -394,11 +408,15 @@ impl ReflectedModule {
         let overrides = override_values(pipeline_constants);
         let literal_size = self
             .program
-            .resolved_workgroup_size(entry_point, &overrides)?;
+            .resolved_workgroup_size(entry_point, &overrides)
+            .map_err(|e| e.to_string())?;
         Ok(ReflectedWorkgroupSize {
             entry_point: entry_point.to_owned(),
             literal_size,
-            workgroup_storage_size: self.program.workgroup_storage_size(&overrides)?,
+            workgroup_storage_size: self
+                .program
+                .workgroup_storage_size(&overrides)
+                .map_err(|e| e.to_string())?,
         })
     }
 
@@ -495,7 +513,8 @@ impl ReflectedModule {
         }
 
         self.program
-            .resource_bindings(entry_point)?
+            .resource_bindings(entry_point)
+            .map_err(|e| e.to_string())?
             .into_iter()
             .map(reflected_resource_binding)
             .collect()

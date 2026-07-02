@@ -2,6 +2,7 @@
 // Parse, ProgramToLoweredIR, GenerateBindings, SubstituteOverrides, and writer
 // option setup.
 
+#include <cassert>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -992,12 +993,28 @@ void fill_entry_point(const tint::inspector::EntryPoint& ep, YawgpuTintEntryPoin
     out->clip_distances_size = ep.clip_distances_size.value_or(0);
 }
 
+// Maps a Tint diagnostic severity to the shim's outgoing
+// `YawgpuTintDiagnostic::severity` (0=note, 1=warning; see tint_shim.h's
+// `severity` field docs -- the Rust side's `DiagnosticSeverity` enum has
+// exactly these two variants). Only ever called for diagnostics already
+// filtered to exclude `Severity::Error` (the loop in
+// `yawgpu_tint_program_create` `continue`s past `Severity::Error` before
+// recording it, since an Error diagnostic fails program creation entirely
+// and is reported through `err` instead, never through the diagnostics
+// list). The `assert` documents and enforces that invariant instead of
+// silently reusing the Note encoding (0) for an Error diagnostic that should
+// never reach here -- if it ever did, degrading it to Note would be an
+// observable diagnostics bug, not a harmless default.
 uint8_t diagnostic_severity(tint::diag::Severity severity) {
     switch (severity) {
         case tint::diag::Severity::Warning:
             return 1;
         case tint::diag::Severity::Note:
+            return 0;
         case tint::diag::Severity::Error:
+            assert(false &&
+                   "diagnostic_severity called with Severity::Error; callers must filter Error "
+                   "diagnostics before recording them");
             return 0;
     }
     return 0;
@@ -1271,6 +1288,42 @@ const CachedEntryReflection& get_or_build_entry_reflection_locked(const YawgpuTi
     return result.first->second;
 }
 
+// Frees whichever of `out`'s heap-allocated fields are still set when this
+// guard goes out of scope, unless `dismiss()` was already called.
+// `yawgpu_tint_generate_msl` populates `out`'s four independently-allocated
+// fields (msl, entry_point, buffer_size_bindings, workgroup_allocations) one
+// at a time; without this guard every partial-failure branch had to
+// hand-free whichever subset was already allocated (refactor finding F9,
+// `specs/tracking/tint-integration-refactor.md`). The guard also makes an
+// exception unwinding mid-populate leak-free, which the old hand-written
+// free ladders did not cover (they only ran on an explicit `return false`).
+struct MslOutputGuard {
+    YawgpuTintMslOutput* out;
+    bool dismissed = false;
+
+    explicit MslOutputGuard(YawgpuTintMslOutput* o) : out(o) {}
+
+    // Call once every field is populated and the function is about to
+    // return success, so the destructor no longer frees them.
+    void dismiss() { dismissed = true; }
+
+    ~MslOutputGuard() {
+        if (dismissed || out == nullptr) {
+            return;
+        }
+        std::free(out->msl);
+        std::free(out->entry_point);
+        std::free(out->buffer_size_bindings);
+        std::free(out->workgroup_allocations);
+        out->msl = nullptr;
+        out->entry_point = nullptr;
+        out->buffer_size_bindings = nullptr;
+        out->workgroup_allocations = nullptr;
+        out->n_buffer_size_bindings = 0;
+        out->n_workgroup_allocations = 0;
+    }
+};
+
 }  // namespace
 
 extern "C" {
@@ -1503,6 +1556,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         out->has_frag_depth_clamp = false;
         out->frag_depth_clamp_slot = 0;
     }
+    MslOutputGuard out_guard(out);
     try {
         if (program == nullptr || out == nullptr) {
             set_error_string(err, "invalid NULL argument");
@@ -1610,8 +1664,6 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         }
         out->entry_point = dup_string(remapped_entry_point);
         if (out->entry_point == nullptr) {
-            std::free(out->msl);
-            out->msl = nullptr;
             set_error_string(err, "failed to allocate MSL entry point output");
             return false;
         }
@@ -1621,11 +1673,8 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         out->buffer_size_bindings = dup_binding_pairs(ordered_size_bindings);
         out->n_buffer_size_bindings = ordered_size_bindings.size();
         if (!ordered_size_bindings.empty() && out->buffer_size_bindings == nullptr) {
-            std::free(out->msl);
-            std::free(out->entry_point);
-            out->msl = nullptr;
-            out->entry_point = nullptr;
-            out->n_buffer_size_bindings = 0;
+            // `out_guard`'s destructor frees/resets every field (including
+            // `n_buffer_size_bindings`) on the way out.
             set_error_string(err, "failed to allocate MSL buffer size bindings");
             return false;
         }
@@ -1637,14 +1686,6 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
             out->workgroup_allocations = static_cast<uint32_t*>(
                 std::malloc(result->workgroup_allocations.size() * sizeof(uint32_t)));
             if (out->workgroup_allocations == nullptr) {
-                std::free(out->msl);
-                std::free(out->entry_point);
-                std::free(out->buffer_size_bindings);
-                out->msl = nullptr;
-                out->entry_point = nullptr;
-                out->buffer_size_bindings = nullptr;
-                out->n_buffer_size_bindings = 0;
-                out->n_workgroup_allocations = 0;
                 set_error_string(err, "failed to allocate MSL workgroup allocations");
                 return false;
             }
@@ -1652,6 +1693,9 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
                         result->workgroup_allocations.data(),
                         result->workgroup_allocations.size() * sizeof(uint32_t));
         }
+        // Every field is populated; disarm the guard so success does not
+        // free what we are about to return.
+        out_guard.dismiss();
         return true;
     } catch (const std::exception& e) {
         set_error_string(err, e.what());
