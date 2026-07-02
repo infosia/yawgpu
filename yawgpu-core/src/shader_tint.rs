@@ -456,11 +456,9 @@ impl ReflectedModule {
             .program
             .entry_point_inputs(entry_point)
             .unwrap_or_default();
-        let uses_sample_interpolant = inputs
-            .iter()
-            .any(|variable| {
-                variable.interpolation_sampling == yawgpu_tint::InterpolationSampling::Sample
-            });
+        let uses_sample_interpolant = inputs.iter().any(|variable| {
+            variable.interpolation_sampling == yawgpu_tint::InterpolationSampling::Sample
+        });
         let uses_framebuffer_fetch = inputs.iter().any(|variable| variable.color.is_some());
         uses_sample_interpolant || entry.sample_index_used || uses_framebuffer_fetch
     }

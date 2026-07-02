@@ -1008,11 +1008,11 @@ fn create_hal_render_pipeline_with_subpass_color_slots(
             Err(message) => return (None, Some(message)),
         }
     }
-    let mut hal_descriptor = match hal_render_pipeline_descriptor(descriptor, vertex_buffer_bindings)
-    {
-        Ok(descriptor) => descriptor,
-        Err(message) => return (None, Some(message)),
-    };
+    let mut hal_descriptor =
+        match hal_render_pipeline_descriptor(descriptor, vertex_buffer_bindings) {
+            Ok(descriptor) => descriptor,
+            Err(message) => return (None, Some(message)),
+        };
     // On Vulkan, the `@builtin(position)` pixel-center polyfill (applied when the
     // fragment reads position under sample-rate shading) reconstructs the depth
     // in NDC space and needs the viewport depth range delivered as a fragment

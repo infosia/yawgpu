@@ -2831,7 +2831,16 @@ fn main() {
 "#;
         let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
         let err = program
-            .generate_spirv("main", &Bindings::default(), &[], true, false, 0, false, None)
+            .generate_spirv(
+                "main",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                0,
+                false,
+                None,
+            )
             .unwrap_err();
         assert!(!err.is_empty());
     }
@@ -3157,11 +3166,19 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
             &[],
         )
         .unwrap();
-        let err =
-            match program.generate_spirv("fs", &Bindings::default(), &[], true, false, 0, true, None) {
-                Ok(_) => panic!("expected multisampled input attachment generation to fail"),
-                Err(err) => err,
-            };
+        let err = match program.generate_spirv(
+            "fs",
+            &Bindings::default(),
+            &[],
+            true,
+            false,
+            0,
+            true,
+            None,
+        ) {
+            Ok(_) => panic!("expected multisampled input attachment generation to fail"),
+            Err(err) => err,
+        };
         assert!(
             err.contains("requires an explicit sample index"),
             "SPIR-V error:\n{err}"
