@@ -4,22 +4,60 @@
 //! render path emits per-stage shader sources for pipeline creation.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use crate::shader::{CompilationMessage, CompilationSeverity};
 pub(crate) use crate::shader_types::*;
 
 /// Stores reflected shader module data used by validation and backend submission.
+///
+/// Reflection (entry points, per-entry IO, per-entry resource bindings,
+/// fragment builtins, overrides) is memoized lazily on first access: each
+/// shader module is parsed once but reflected repeatedly by pipeline
+/// validation (a render pipeline resolve queries the same entry point's IO
+/// and resource bindings from several independent validators), and every
+/// accessor previously re-crossed the Tint FFI boundary on each call — see
+/// finding F5 in `specs/tracking/tint-integration-refactor.md`. The caches
+/// are filled lazily (not at construction) so `createShaderModule` — which
+/// never touches most of this data for shaders that are never used in a
+/// pipeline — does not get more expensive.
 #[derive(Debug)]
 pub struct ReflectedModule {
     /// Tint program.
     pub program: yawgpu_tint::Program,
     /// Non-fatal compilation warnings.
     pub(crate) warnings: Vec<CompilationMessage>,
+    /// Raw Tint entry-point reflection, memoized once. Backing store for
+    /// [`Self::entry_points`], [`Self::entry_point_io`], and
+    /// [`Self::fragment_builtins`], which all need per-entry fields (stage,
+    /// `frag_depth_used`, …) that the simplified [`ReflectedEntryPoint`]
+    /// does not carry.
+    raw_entry_points: OnceLock<Vec<yawgpu_tint::EntryPoint>>,
+    /// Memoized [`Self::entry_points`] result.
+    entry_points_cache: OnceLock<Vec<ReflectedEntryPoint>>,
+    /// Per-entry-point IO reflection, memoized by entry-point name on first
+    /// [`Self::entry_point_io`] call for that name. `None` means the entry
+    /// point does not exist (also memoized, so a repeated miss is free).
+    entry_point_io_cache: Mutex<HashMap<String, Option<ReflectedEntryPointIo>>>,
+    /// Per-entry-point resource-binding reflection, memoized by entry-point
+    /// name on first [`Self::resource_bindings_for_entry`] call for that
+    /// name. Caches the `Result` (including the "entry point not found"
+    /// error) so a repeated call never re-crosses the FFI boundary.
+    resource_bindings_cache: Mutex<HashMap<String, Result<Vec<ReflectedResourceBinding>, String>>>,
+    /// Memoized [`Self::fragment_builtins`] backing data (all fragment
+    /// entry points), computed once.
+    fragment_builtins_cache: OnceLock<Vec<ReflectedFragmentBuiltins>>,
+    /// Memoized [`Self::overrides`] result.
+    overrides_cache: OnceLock<Vec<ReflectedOverride>>,
 }
 
 // SAFETY: the wrapped `yawgpu_tint::Program` (an opaque Tint handle) is treated as
 // immutable after parsing — reflection and codegen only read from it — so it is safe
-// to send/share across threads.
+// to send/share across threads. The remaining fields are ordinary owned Rust data
+// (`OnceLock`/`Mutex` around `String`/`Vec`/`HashMap`), which are already `Send` +
+// `Sync` on their own; the `Mutex` around each cache also serializes concurrent
+// reflection FFI calls into `program` from the Rust side, matching the shim-side
+// `reflection_mutex` added for the same reason (refactor finding F3).
 unsafe impl Send for ReflectedModule {}
 
 // SAFETY: See the `Send` impl above.
@@ -66,7 +104,16 @@ pub(crate) fn parse_and_validate_wgsl_gated(
             length: 0,
         })
         .collect();
-    Ok(ReflectedModule { program, warnings })
+    Ok(ReflectedModule {
+        program,
+        warnings,
+        raw_entry_points: OnceLock::new(),
+        entry_points_cache: OnceLock::new(),
+        entry_point_io_cache: Mutex::new(HashMap::new()),
+        resource_bindings_cache: Mutex::new(HashMap::new()),
+        fragment_builtins_cache: OnceLock::new(),
+        overrides_cache: OnceLock::new(),
+    })
 }
 
 impl ReflectedModule {
@@ -253,17 +300,25 @@ impl ReflectedModule {
         })
     }
 
+    /// Returns the raw Tint entry-point reflection, memoized on first access.
+    fn raw_entry_points(&self) -> &[yawgpu_tint::EntryPoint] {
+        self.raw_entry_points
+            .get_or_init(|| self.program.entry_points().unwrap_or_default())
+    }
+
     /// Returns entry points reflected by the validated shader module.
     pub(crate) fn entry_points(&self) -> Vec<ReflectedEntryPoint> {
-        self.program
-            .entry_points()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|entry| ReflectedEntryPoint {
-                name: entry.name,
-                stage: shader_stage(entry.stage),
+        self.entry_points_cache
+            .get_or_init(|| {
+                self.raw_entry_points()
+                    .iter()
+                    .map(|entry| ReflectedEntryPoint {
+                        name: entry.name.clone(),
+                        stage: shader_stage(entry.stage),
+                    })
+                    .collect()
             })
-            .collect()
+            .clone()
     }
 
     /// Returns compute workgroup size reflected by the validated shader module.
@@ -329,51 +384,93 @@ impl ReflectedModule {
         })
     }
 
-    /// Returns entry point io reflected by the validated shader module.
-    pub(crate) fn entry_point_io(&self) -> Vec<ReflectedEntryPointIo> {
-        self.program
-            .entry_points()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|entry| {
-                let is_compute = entry.stage == yawgpu_tint::PipelineStage::Compute;
-                ReflectedEntryPointIo {
-                    inputs: if is_compute {
-                        Vec::new()
-                    } else {
-                        self.program
-                            .entry_point_inputs(&entry.name)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter_map(reflected_io_location)
-                            .collect()
-                    },
-                    outputs: if is_compute {
-                        Vec::new()
-                    } else {
-                        self.program
-                            .entry_point_outputs(&entry.name)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter_map(reflected_io_location)
-                            .collect()
-                    },
-                    input_inter_stage_builtins: input_inter_stage_builtin_count(&entry),
-                    entry_point: entry.name,
-                }
-            })
-            .collect()
+    /// Returns entry point IO reflected by the validated shader module for a
+    /// single `entry_point`, or `None` if no entry point with that name
+    /// exists. Memoized per entry-point name: every render-pipeline
+    /// validator that needs IO reflection (vertex inputs, inter-stage
+    /// outputs/inputs, inter-stage builtin count, fragment outputs) looks up
+    /// exactly one entry point, so this only ever reflects each entry point
+    /// once regardless of how many validators ask for it.
+    pub(crate) fn entry_point_io(&self, entry_point: &str) -> Option<ReflectedEntryPointIo> {
+        let mut cache = self
+            .entry_point_io_cache
+            .lock()
+            .expect("entry_point_io_cache mutex poisoned");
+        if let Some(cached) = cache.get(entry_point) {
+            return cached.clone();
+        }
+        let computed = self.build_entry_point_io(entry_point);
+        cache.insert(entry_point.to_owned(), computed.clone());
+        computed
+    }
+
+    fn build_entry_point_io(&self, entry_point: &str) -> Option<ReflectedEntryPointIo> {
+        let entry = self
+            .raw_entry_points()
+            .iter()
+            .find(|entry| entry.name == entry_point)?;
+        let is_compute = entry.stage == yawgpu_tint::PipelineStage::Compute;
+        Some(ReflectedEntryPointIo {
+            inputs: if is_compute {
+                Vec::new()
+            } else {
+                self.program
+                    .entry_point_inputs(&entry.name)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(reflected_io_location)
+                    .collect()
+            },
+            outputs: if is_compute {
+                Vec::new()
+            } else {
+                self.program
+                    .entry_point_outputs(&entry.name)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(reflected_io_location)
+                    .collect()
+            },
+            input_inter_stage_builtins: input_inter_stage_builtin_count(entry),
+            entry_point: entry.name.clone(),
+        })
     }
 
     /// Returns resource bindings for entry reflected by the validated shader module.
+    ///
+    /// Memoized per entry-point name (including the "entry point not found"
+    /// error), so a repeated call for the same entry point never re-crosses
+    /// the FFI boundary.
     pub(crate) fn resource_bindings_for_entry(
         &self,
         entry_point: &str,
     ) -> Result<Vec<ReflectedResourceBinding>, String> {
+        let mut cache = self
+            .resource_bindings_cache
+            .lock()
+            .expect("resource_bindings_cache mutex poisoned");
+        if let Some(cached) = cache.get(entry_point) {
+            return cached.clone();
+        }
+        let computed = self.build_resource_bindings_for_entry(entry_point);
+        cache.insert(entry_point.to_owned(), computed.clone());
+        computed
+    }
+
+    fn build_resource_bindings_for_entry(
+        &self,
+        entry_point: &str,
+    ) -> Result<Vec<ReflectedResourceBinding>, String> {
+        // Tint's `GetResourceBindings` silently returns an empty vector for an
+        // unknown entry point rather than erroring, so this existence check is
+        // load-bearing for the "entry point not found" error surface below —
+        // it must run before, not after, the FFI call. It reads the raw
+        // entry-point cache (already filled at parse time on the shim side,
+        // see `YawgpuTintProgram::entry_points`) rather than re-crossing the
+        // FFI boundary with a fresh `entry_points()` call.
         let entry_exists = self
-            .program
-            .entry_points()?
-            .into_iter()
+            .raw_entry_points()
+            .iter()
             .any(|entry| entry.name == entry_point);
         if !entry_exists {
             return Err("shader entry point was not found for resource reflection".to_owned());
@@ -386,19 +483,26 @@ impl ReflectedModule {
             .collect()
     }
 
-    /// Returns fragment builtins reflected by the validated shader module.
-    pub(crate) fn fragment_builtins(&self) -> Vec<ReflectedFragmentBuiltins> {
-        self.program
-            .entry_points()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|entry| entry.stage == yawgpu_tint::PipelineStage::Fragment)
-            .map(|entry| ReflectedFragmentBuiltins {
-                entry_point: entry.name,
-                frag_depth: entry.frag_depth_used,
-                sample_mask: entry.sample_mask_used,
+    /// Returns fragment builtins reflected by the validated shader module for
+    /// a single `entry_point`, or `None` if no fragment entry point with that
+    /// name exists. Both call sites (`frag_depth` / `sample_mask` output
+    /// checks) look up exactly one entry point.
+    pub(crate) fn fragment_builtins(&self, entry_point: &str) -> Option<ReflectedFragmentBuiltins> {
+        self.fragment_builtins_cache
+            .get_or_init(|| {
+                self.raw_entry_points()
+                    .iter()
+                    .filter(|entry| entry.stage == yawgpu_tint::PipelineStage::Fragment)
+                    .map(|entry| ReflectedFragmentBuiltins {
+                        entry_point: entry.name.clone(),
+                        frag_depth: entry.frag_depth_used,
+                        sample_mask: entry.sample_mask_used,
+                    })
+                    .collect::<Vec<_>>()
             })
-            .collect()
+            .iter()
+            .find(|builtins| builtins.entry_point == entry_point)
+            .cloned()
     }
 
     /// Returns the `@color(N)` framebuffer-fetch slots read by the given fragment entry point.
@@ -438,15 +542,9 @@ impl ReflectedModule {
         if sample_count <= 1 {
             return false;
         }
-        let Some(entry) = self
-            .program
-            .entry_points()
-            .unwrap_or_default()
-            .into_iter()
-            .find(|entry| {
-                entry.name == entry_point && entry.stage == yawgpu_tint::PipelineStage::Fragment
-            })
-        else {
+        let Some(entry) = self.raw_entry_points().iter().find(|entry| {
+            entry.name == entry_point && entry.stage == yawgpu_tint::PipelineStage::Fragment
+        }) else {
             return false;
         };
         if !entry.frag_position_used {
@@ -497,10 +595,8 @@ impl ReflectedModule {
 
     /// Returns the vertex clip-distances array size reflected for `entry_point`.
     pub(crate) fn vertex_clip_distances_size(&self, entry_point: &str) -> u32 {
-        self.program
-            .entry_points()
-            .unwrap_or_default()
-            .into_iter()
+        self.raw_entry_points()
+            .iter()
             .find(|entry| {
                 entry.stage == yawgpu_tint::PipelineStage::Vertex && entry.name == entry_point
             })
@@ -508,14 +604,18 @@ impl ReflectedModule {
             .unwrap_or(0)
     }
 
-    /// Returns overrides reflected by the validated shader module.
+    /// Returns overrides reflected by the validated shader module, memoized once.
     pub(crate) fn overrides(&self) -> Vec<ReflectedOverride> {
-        self.program
-            .overrides()
-            .unwrap_or_default()
-            .into_iter()
-            .map(reflected_override)
-            .collect()
+        self.overrides_cache
+            .get_or_init(|| {
+                self.program
+                    .overrides()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(reflected_override)
+                    .collect()
+            })
+            .clone()
     }
 }
 
@@ -1230,6 +1330,22 @@ fn fs() -> @location(0) vec4<f32> {
                 && binding.binding == 2
                 && binding.kind == ReflectedResourceBindingKind::Sampler { comparison: false }
         }));
+
+        // A non-existent entry point errors rather than silently returning
+        // an empty binding list; the error is memoized the same as a hit
+        // (edge case for the per-entry cache added in the
+        // tint-integration-refactor R3 slice).
+        let err = module
+            .resource_bindings_for_entry("does_not_exist")
+            .expect_err("unknown entry point should error");
+        assert_eq!(
+            err,
+            "shader entry point was not found for resource reflection"
+        );
+        let err_again = module
+            .resource_bindings_for_entry("does_not_exist")
+            .expect_err("unknown entry point should error on a cached lookup too");
+        assert_eq!(err_again, err);
     }
 
     #[test]
@@ -1387,8 +1503,7 @@ fn fs(
         )
         .unwrap();
 
-        let io = module.entry_point_io();
-        let vs = io.iter().find(|entry| entry.entry_point == "vs").unwrap();
+        let vs = module.entry_point_io("vs").unwrap();
         assert_eq!(vs.inputs.len(), 2);
         let vs_value = vs.inputs.iter().find(|input| input.location == 0).unwrap();
         assert_eq!(vs_value.ty.scalar, ReflectedTypeScalarClass::Float);
@@ -1401,7 +1516,7 @@ fn fs(
         assert_eq!(vs.outputs.len(), 2);
         assert_eq!(vs.input_inter_stage_builtins, 0);
 
-        let fs = io.iter().find(|entry| entry.entry_point == "fs").unwrap();
+        let fs = module.entry_point_io("fs").unwrap();
         assert_eq!(fs.inputs.len(), 2);
         assert!(fs.outputs.iter().any(|output| {
             output.location == 0
@@ -1409,6 +1524,12 @@ fn fs(
                 && output.ty.components == 4
         }));
         assert_eq!(fs.input_inter_stage_builtins, 3);
+
+        // Missing entry point: `None`, memoized the same as a hit (edge case
+        // for the per-entry cache added in the tint-integration-refactor R3
+        // slice).
+        assert_eq!(module.entry_point_io("does_not_exist"), None);
+        assert_eq!(module.entry_point_io("does_not_exist"), None);
     }
 
     #[test]
@@ -1446,13 +1567,24 @@ fn fs() -> @builtin(frag_depth) f32 {
         .unwrap();
 
         assert_eq!(
-            module.fragment_builtins(),
-            vec![ReflectedFragmentBuiltins {
+            module.fragment_builtins("fs"),
+            Some(ReflectedFragmentBuiltins {
                 entry_point: "fs".to_owned(),
                 frag_depth: true,
                 sample_mask: false,
-            }]
+            })
         );
+        // Repeated lookup hits the memoized cache and a non-existent entry
+        // point returns `None` rather than erroring.
+        assert_eq!(
+            module.fragment_builtins("fs"),
+            Some(ReflectedFragmentBuiltins {
+                entry_point: "fs".to_owned(),
+                frag_depth: true,
+                sample_mask: false,
+            })
+        );
+        assert_eq!(module.fragment_builtins("does_not_exist"), None);
     }
 
     #[cfg(feature = "tiled")]

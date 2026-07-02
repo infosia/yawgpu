@@ -8,9 +8,11 @@
 #include <algorithm>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -604,6 +606,18 @@ static_assert(offsetof(YawgpuTintMslOutput, has_frag_depth_clamp) == 56,
 static_assert(offsetof(YawgpuTintMslOutput, frag_depth_clamp_slot) == 60,
               "YawgpuTintMslOutput layout changed");
 
+// Reflection results for one entry point, cached after the first
+// yawgpu_tint_resource_binding_count/_get call for that entry point (see F5 in
+// specs/tracking/tint-integration-refactor.md). `ResourceBinding` and the
+// (group, binding) -> sample-usage map are value types with no pointers back
+// into the `Inspector` that produced them (the only owned string,
+// `variable_name`, is unused by `fill_resource_binding`), so this cache can
+// safely outlive the `Inspector` instance used to build it.
+struct CachedEntryReflection {
+    std::vector<tint::inspector::ResourceBinding> bindings;
+    std::map<std::pair<uint32_t, uint32_t>, uint8_t> texture_sample_usages;
+};
+
 struct YawgpuTintProgram {
     // Must outlive `program`: Tint Source objects keep pointers into this file.
     std::unique_ptr<tint::Source::File> file;
@@ -612,6 +626,22 @@ struct YawgpuTintProgram {
     std::vector<tint::inspector::Override> overrides;
     std::vector<std::string> diagnostic_messages;
     std::vector<uint8_t> diagnostic_severities;
+
+    // Per-entry-point resource-binding reflection cache (F5). Filled lazily on
+    // first access by `get_or_build_entry_reflection_locked`; computing it
+    // requires constructing a fresh `tint::inspector::Inspector` and running
+    // both `GetResourceBindings()` and the ~100-line `texture_sample_usages()`
+    // sem-walk, so without this cache every accessor call re-did that work
+    // (O(N^2) total cost for N bindings queried one at a time by
+    // yawgpu-core). `mutable` because the reflection accessors take
+    // `const YawgpuTintProgram*` (reflection does not change the parsed
+    // program). The mutex both guards the cache and serializes reflection
+    // access to this program across threads -- Tint's Inspector/IR
+    // construction on a shared `tint::Program` is not proven safe for
+    // concurrent use from multiple threads (refactor finding F3), so this
+    // also closes that gap for the resource-binding path.
+    mutable std::mutex reflection_mutex;
+    mutable std::unordered_map<std::string, CachedEntryReflection> resource_bindings_by_ep;
 };
 
 namespace {
@@ -1219,6 +1249,27 @@ void fill_override(const tint::Program& program,
     out->default_value = ov.is_initialized ? override_default_value(global, ov.type) : 0.0;
 }
 
+// Returns the cached resource-binding reflection for `ep`, building it on
+// first access. Caller must hold `program->reflection_mutex`. The returned
+// reference stays valid for the program's lifetime (unordered_map element
+// references are not invalidated by later inserts/rehashes), but callers
+// should still only dereference it while still holding the lock, since the
+// lock is also what serializes concurrent Inspector/sem-walk construction
+// for this program (F3).
+const CachedEntryReflection& get_or_build_entry_reflection_locked(const YawgpuTintProgram* program,
+                                                                   const std::string& ep) {
+    auto it = program->resource_bindings_by_ep.find(ep);
+    if (it != program->resource_bindings_by_ep.end()) {
+        return it->second;
+    }
+    CachedEntryReflection entry;
+    tint::inspector::Inspector inspector(program->program);
+    entry.bindings = inspector.GetResourceBindings(ep);
+    entry.texture_sample_usages = texture_sample_usages(program->program, ep);
+    auto result = program->resource_bindings_by_ep.emplace(ep, std::move(entry));
+    return result.first->second;
+}
+
 }  // namespace
 
 extern "C" {
@@ -1389,8 +1440,8 @@ size_t yawgpu_tint_resource_binding_count(const YawgpuTintProgram* program, cons
     if (program == nullptr) {
         return 0;
     }
-    tint::inspector::Inspector inspector(program->program);
-    return inspector.GetResourceBindings(cstr_or_empty(ep)).size();
+    std::lock_guard<std::mutex> lock(program->reflection_mutex);
+    return get_or_build_entry_reflection_locked(program, cstr_or_empty(ep)).bindings.size();
 }
 
 bool yawgpu_tint_resource_binding_get(const YawgpuTintProgram* program,
@@ -1400,15 +1451,15 @@ bool yawgpu_tint_resource_binding_get(const YawgpuTintProgram* program,
     if (program == nullptr || out == nullptr) {
         return false;
     }
-    tint::inspector::Inspector inspector(program->program);
-    auto bindings = inspector.GetResourceBindings(cstr_or_empty(ep));
-    if (i >= bindings.size()) {
+    std::lock_guard<std::mutex> lock(program->reflection_mutex);
+    const auto& cached = get_or_build_entry_reflection_locked(program, cstr_or_empty(ep));
+    if (i >= cached.bindings.size()) {
         return false;
     }
-    auto usages = texture_sample_usages(program->program, cstr_or_empty(ep));
-    auto key = std::make_pair(bindings[i].bind_group, bindings[i].binding);
-    auto found = usages.find(key);
-    fill_resource_binding(bindings[i], found != usages.end() ? found->second : 0, out);
+    const auto& binding = cached.bindings[i];
+    auto key = std::make_pair(binding.bind_group, binding.binding);
+    auto found = cached.texture_sample_usages.find(key);
+    fill_resource_binding(binding, found != cached.texture_sample_usages.end() ? found->second : 0, out);
     return true;
 }
 

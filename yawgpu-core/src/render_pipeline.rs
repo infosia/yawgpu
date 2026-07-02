@@ -2450,9 +2450,7 @@ pub(crate) fn vertex_inputs(
         return Err("vertex module reflection failed".to_owned());
     };
     Ok(module
-        .entry_point_io()
-        .into_iter()
-        .find(|io| io.entry_point == vertex_entry)
+        .entry_point_io(vertex_entry)
         .map(|io| {
             io.inputs
                 .into_iter()
@@ -2671,9 +2669,8 @@ pub(crate) fn validate_fragment_depth_output(
         return Err("fragment module reflection failed".to_owned());
     };
     let outputs_frag_depth = module
-        .fragment_builtins()
-        .into_iter()
-        .any(|builtins| builtins.entry_point == entry_name && builtins.frag_depth);
+        .fragment_builtins(entry_name)
+        .is_some_and(|builtins| builtins.frag_depth);
     if outputs_frag_depth
         && !descriptor
             .depth_stencil
@@ -2992,9 +2989,7 @@ pub(crate) fn fragment_outputs(
         return Err("fragment module reflection failed".to_owned());
     };
     Ok(module
-        .entry_point_io()
-        .into_iter()
-        .find(|io| io.entry_point == entry_name)
+        .entry_point_io(entry_name)
         .map(|io| {
             io.outputs
                 .into_iter()
@@ -3160,9 +3155,7 @@ fn inter_stage_outputs(
         return Err("vertex module reflection failed".to_owned());
     };
     Ok(module
-        .entry_point_io()
-        .into_iter()
-        .find(|io| io.entry_point == vertex_entry)
+        .entry_point_io(vertex_entry)
         .map(|io| {
             io.outputs
                 .into_iter()
@@ -3180,9 +3173,7 @@ fn inter_stage_inputs(
         return Err("fragment module reflection failed".to_owned());
     };
     Ok(module
-        .entry_point_io()
-        .into_iter()
-        .find(|io| io.entry_point == fragment_entry)
+        .entry_point_io(fragment_entry)
         .map(|io| {
             io.inputs
                 .into_iter()
@@ -3212,9 +3203,7 @@ fn inter_stage_input_builtin_count(
         return Err("fragment module reflection failed".to_owned());
     };
     Ok(module
-        .entry_point_io()
-        .into_iter()
-        .find(|io| io.entry_point == fragment_entry)
+        .entry_point_io(fragment_entry)
         .map(|io| io.input_inter_stage_builtins)
         .unwrap_or(0))
 }
@@ -3322,9 +3311,8 @@ pub(crate) fn validate_multisample_state(
                 .reflected()
                 .ok_or_else(|| "fragment module reflection failed".to_owned())?;
             if module
-                .fragment_builtins()
-                .into_iter()
-                .any(|builtins| builtins.entry_point == entry_name && builtins.sample_mask)
+                .fragment_builtins(entry_name)
+                .is_some_and(|builtins| builtins.sample_mask)
             {
                 return Err(
                     "render pipeline alphaToCoverage conflicts with fragment sample_mask output"
