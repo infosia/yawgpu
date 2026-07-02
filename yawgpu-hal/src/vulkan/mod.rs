@@ -365,6 +365,14 @@ impl VulkanAdapter {
             max_compute_workgroups_per_dimension: vk.max_compute_work_group_count[0]
                 .min(vk.max_compute_work_group_count[1])
                 .min(vk.max_compute_work_group_count[2]),
+            // Block 94 S3: Vulkan now executes SetImmediates (push-constant
+            // delivery in encode.rs), so it advertises Dawn's base-tier
+            // `maxImmediateSize` (`kMaxImmediateDataBytes`,
+            // dawn/common/Constants.h). The Vulkan-minimum
+            // `maxPushConstantsSize >= 128` always covers the 64-byte user
+            // region plus the 8-byte internal depth-range constants. GLES
+            // (Tier 2) stays 0 via `HalLimits::DEFAULT`.
+            max_immediate_size: 64,
             ..HalLimits::DEFAULT
         }
     }
@@ -1196,6 +1204,9 @@ mod tests {
 
         assert!(limits.max_texture_dimension_2d >= 8192);
         assert!(limits.max_compute_invocations_per_workgroup >= 256);
+        // Block 94 S3: Vulkan now executes SetImmediates, so it advertises
+        // Dawn's base-tier maxImmediateSize.
+        assert_eq!(limits.max_immediate_size, 64);
     }
 
     #[test]

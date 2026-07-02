@@ -535,42 +535,26 @@ fn encode_compute_buffer_sizes(
 }
 
 /// Composes the combined Metal immediates block for one shader stage
-/// (Block 94 S2): user immediate bytes at `[0, user_len)` -- where
-/// `user_len` is `immediates.frag_depth_clamp_offset` when the clamp range
-/// is also present, else the whole `block_size` -- with the fragment
-/// frag-depth clamp range (from the pass viewport) written at
+/// (Block 94 S2) via the backend-shared
+/// [`crate::immediates::compose_immediates_block`]: user immediate bytes
+/// first, the fragment frag-depth clamp range (from the pass viewport,
+/// defaulting to the full `[0.0, 1.0]` range) at
 /// `immediates.frag_depth_clamp_offset` when present. Mirrors Dawn's
-/// `RenderImmediates`/`ComputeImmediates` layout (`ImmediatesLayout.h`):
-/// user data first, pipeline-internal constants appended directly after.
-///
-/// `user_data` is the pass's full immediate scratch snapshot (up to the
-/// device's `maxImmediateSize` bytes, Block 94); only the prefix the
-/// pipeline's layout reserves (`immediates.block_size`, minus 8 when clamp
-/// is present) is copied. Pure function -- no Metal calls -- so it is
-/// directly unit-testable without a real device.
+/// `RenderImmediates`/`ComputeImmediates` layout (`ImmediatesLayoutMTL.h`).
 fn compose_metal_immediates_block(
     user_data: &[u8],
     immediates: HalMslImmediates,
     viewport: Option<HalViewport>,
 ) -> Vec<u8> {
-    let block_size = immediates.block_size as usize;
-    let mut block = vec![0u8; block_size];
-    let user_len = immediates
-        .frag_depth_clamp_offset
-        .map_or(block_size, |offset| (offset as usize).min(block_size));
-    let copy_len = user_len.min(user_data.len());
-    block[..copy_len].copy_from_slice(&user_data[..copy_len]);
-    if let Some(offset) = immediates.frag_depth_clamp_offset {
-        let offset = offset as usize;
-        let range = viewport.map_or([0.0f32, 1.0], |viewport| {
-            [viewport.min_depth, viewport.max_depth]
-        });
-        if offset + 8 <= block.len() {
-            block[offset..offset + 4].copy_from_slice(&range[0].to_ne_bytes());
-            block[offset + 4..offset + 8].copy_from_slice(&range[1].to_ne_bytes());
-        }
-    }
-    block
+    let range = viewport.map_or([0.0f32, 1.0], |viewport| {
+        [viewport.min_depth, viewport.max_depth]
+    });
+    crate::immediates::compose_immediates_block(
+        user_data,
+        immediates.block_size,
+        immediates.frag_depth_clamp_offset,
+        range,
+    )
 }
 
 fn encode_compute_immediates(

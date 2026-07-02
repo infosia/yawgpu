@@ -949,6 +949,25 @@ pub(super) fn encode_compute_pass(
                 &[],
             );
         }
+        // Deliver the user immediates push-constant block (Block 94 S3).
+        // Compute pipelines have no internal immediates, so the block is
+        // exactly the pass's user prefix; the pipeline layout declared a
+        // matching compute-stage range.
+        if let Some(immediates) = pipeline.inner.immediates {
+            let block = crate::immediates::compose_immediates_block(
+                &pass.immediate_data,
+                immediates.block_size,
+                immediates.depth_range_offset,
+                [0.0, 1.0],
+            );
+            device.cmd_push_constants(
+                command_buffer,
+                pipeline.inner.pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                &block,
+            );
+        }
         match &pass.dispatch {
             HalComputeDispatch::Direct { workgroups } => {
                 device.cmd_dispatch(command_buffer, workgroups.0, workgroups.1, workgroups.2);
@@ -2017,19 +2036,26 @@ pub(super) fn encode_render_pass(
             });
             vk_device.cmd_set_viewport(command_buffer, 0, &[viewport]);
             vk_device.cmd_set_scissor(command_buffer, 0, &[scissor]);
-            // Deliver the viewport depth range to the `@builtin(position)`
-            // pixel-center polyfill fragment shader (two f32s: min at byte 0,
-            // max at byte 4). The pipeline layout declared a matching range.
-            if pipeline.inner.needs_frag_depth_range_push_constant {
-                let mut depth_range = [0u8; 8];
-                depth_range[0..4].copy_from_slice(&viewport.min_depth.to_ne_bytes());
-                depth_range[4..8].copy_from_slice(&viewport.max_depth.to_ne_bytes());
+            // Deliver the combined immediates push-constant block (Block 94
+            // S3): the pass's user immediate bytes first, then -- for the
+            // `@builtin(position)` pixel-center polyfill -- the viewport
+            // depth-range pair (min/max f32s) at `depth_range_offset`. The
+            // pipeline layout declared a matching range over the whole
+            // block; a polyfill-only pipeline (no user immediates) composes
+            // exactly the bare 8-byte pair delivered before Block 94.
+            if let Some(immediates) = pipeline.inner.immediates {
+                let block = crate::immediates::compose_immediates_block(
+                    &pass.immediate_data,
+                    immediates.block_size,
+                    immediates.depth_range_offset,
+                    [viewport.min_depth, viewport.max_depth],
+                );
                 vk_device.cmd_push_constants(
                     command_buffer,
                     pipeline.inner.pipeline_layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     0,
-                    &depth_range,
+                    &block,
                 );
             }
             vk_device.cmd_set_blend_constants(command_buffer, &pass.blend_constant);

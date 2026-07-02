@@ -493,6 +493,7 @@ mod tests {
             cull_mode: crate::HalCullMode::None,
             unclipped_depth: false,
             needs_frag_depth_range_push_constant: false,
+            user_immediate_size: 0,
         }
     }
 

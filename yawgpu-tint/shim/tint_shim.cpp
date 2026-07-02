@@ -1797,6 +1797,7 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
                                 bool multisampled_input_attachment,
                                 bool has_polyfill_pixel_center,
                                 uint32_t polyfill_pixel_center,
+                                uint32_t user_immediate_size,
                                 uint32_t** words_out,
                                 size_t* n_words_out,
                                 char** err) {
@@ -1835,12 +1836,21 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
             options.polyfill_pixel_center = polyfill_pixel_center;
             // The pixel-center reconstruction maps the recovered NDC depth into
             // the viewport depth range (min/max depth), which are supplied at
-            // draw time as push constants. Two f32 immediates at byte offsets 0
-            // (min) and 4 (max); the Vulkan HAL declares a matching fragment
-            // push-constant range and writes the viewport min/max depth. Matches
+            // draw time as push constants. Two f32 immediates directly after
+            // the pipeline layout's reserved user-immediate region
+            // (`user_immediate_size`, Block 94; min at +0, max at +4) -- the
+            // same Dawn rule the MSL path mirrors (`ShaderModuleVk.cpp:349-355`
+            // rebases `depth_range_offsets` via
+            // `GetImmediateByteOffsetInPipeline(&RenderImmediates::
+            // clampFragDepth, ...)`, i.e. after the compacted user prefix;
+            // Tint's SPIR-V raise feeds these into the same
+            // `PrepareImmediateData` used for MSL,
+            // `spirv/writer/raise/raise.cc:105-116`). The Vulkan HAL declares
+            // a matching push-constant range over the combined block and
+            // writes the viewport min/max depth at these offsets. Matches
             // Dawn's ClampFragDepthArgs layout.
-            options.depth_range_offsets =
-                tint::spirv::writer::Options::RangeOffsets{/*min=*/0u, /*max=*/4u};
+            options.depth_range_offsets = tint::spirv::writer::Options::RangeOffsets{
+                /*min=*/user_immediate_size, /*max=*/user_immediate_size + 4u};
         }
         options.bindings = all_remaps_empty(bindings)
                                ? tint::GenerateBindings(ir.Get(), entry_point, false, false)

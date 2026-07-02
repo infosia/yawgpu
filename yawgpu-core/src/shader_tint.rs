@@ -135,6 +135,14 @@ impl ReflectedModule {
     /// `multisampled_input_attachment` makes Tint emit multisampled
     /// `SubpassData` input attachments (the 2-arg `inputAttachmentLoad(ia,
     /// sample_index)` overload) so per-sample MSAA subpass input works.
+    ///
+    /// `user_immediate_size` is the owning pipeline layout's reserved
+    /// user-immediate byte budget (Block 94, 0..=64; see
+    /// [`Self::generate_msl`]). It only affects output when
+    /// `polyfill_pixel_center` is `Some`: the internal depth-range
+    /// immediates land at push-constant byte offsets
+    /// `{user_immediate_size, user_immediate_size + 4}`, directly after
+    /// the user region.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn generate_spirv(
         &self,
@@ -145,6 +153,7 @@ impl ReflectedModule {
         framebuffer_fetch_descriptor_set: u32,
         multisampled_input_attachment: bool,
         polyfill_pixel_center: Option<u32>,
+        user_immediate_size: u32,
     ) -> Result<Vec<u32>, String> {
         self.program
             .generate_spirv(
@@ -156,6 +165,7 @@ impl ReflectedModule {
                 framebuffer_fetch_descriptor_set,
                 multisampled_input_attachment,
                 polyfill_pixel_center,
+                user_immediate_size,
             )
             .map_err(|e| e.to_string())
     }
@@ -2091,6 +2101,7 @@ fn cs() {}
             0,
             false,
             None,
+            0,
         )
         .unwrap();
         assert_eq!(compute.first().copied(), Some(0x0723_0203));
@@ -2125,6 +2136,7 @@ fn fs() -> @location(0) vec4<f32> {
                 0,
                 false,
                 None,
+                0,
             )
             .unwrap();
         let fragment = render
@@ -2136,6 +2148,7 @@ fn fs() -> @location(0) vec4<f32> {
                 0,
                 false,
                 None,
+                0,
             )
             .unwrap();
         assert_eq!(vertex.first().copied(), Some(0x0723_0203));
@@ -2225,6 +2238,7 @@ fn cs() {
                     0,
                     false,
                     None,
+                    0,
                 )
                 .unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));

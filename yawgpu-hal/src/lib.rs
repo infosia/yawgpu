@@ -8,6 +8,8 @@ mod command;
 mod descriptors;
 mod error;
 mod format;
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+mod immediates;
 mod present;
 mod shader;
 
@@ -873,21 +875,35 @@ impl HalDevice {
     }
 
     /// Creates a compute pipeline from the given shader, entry point, and bindings.
+    ///
+    /// `user_immediate_size` is the pipeline layout's reserved user-immediate
+    /// byte budget (Block 94, 0..=64). Vulkan sizes the compute push-constant
+    /// range with it; Metal instead carries its immediates metadata inside
+    /// [`HalShaderSource::MslWithBufferSizes`], and Noop/GLES ignore it.
     pub fn create_compute_pipeline(
         &self,
         shader: HalShaderSource,
         entry_point: &str,
         workgroup_size: (u32, u32, u32),
         bindings: &[HalDescriptorBinding],
+        user_immediate_size: u32,
     ) -> Result<HalComputePipeline, HalError> {
         #[cfg(not(any(feature = "gles", feature = "metal", feature = "vulkan")))]
         let _ = (shader, entry_point, workgroup_size, bindings);
+        #[cfg(not(feature = "vulkan"))]
+        let _ = user_immediate_size;
         match self {
             #[cfg(feature = "noop")]
             Self::Noop(_) => Ok(HalComputePipeline::Noop),
             #[cfg(feature = "vulkan")]
             Self::Vulkan(device) => device
-                .create_compute_pipeline(shader, entry_point, workgroup_size, bindings)
+                .create_compute_pipeline(
+                    shader,
+                    entry_point,
+                    workgroup_size,
+                    bindings,
+                    user_immediate_size,
+                )
                 .map(HalComputePipeline::Vulkan),
             #[cfg(feature = "metal")]
             Self::Metal(device) => device
@@ -1465,6 +1481,7 @@ mod tests {
             cull_mode: HalCullMode::None,
             unclipped_depth: false,
             needs_frag_depth_range_push_constant: false,
+            user_immediate_size: 0,
         }
     }
 
@@ -1705,6 +1722,7 @@ mod tests {
             "main",
             (1, 1, 1),
             &[],
+            0,
         )?;
 
         assert!(matches!(pipeline, HalComputePipeline::Noop));
@@ -2004,6 +2022,7 @@ mod tests {
             "main",
             (1, 1, 1),
             &[],
+            0,
         )?;
 
         queue.submit_copies(&[HalCopy::ComputePass(HalComputePass {
@@ -2048,6 +2067,12 @@ mod tests {
         assert_eq!(limits.max_uniform_buffer_binding_size, 65_536);
         assert_eq!(limits.max_storage_buffer_binding_size, 128 * 1024 * 1024);
         assert_eq!(limits.min_uniform_buffer_offset_alignment, 256);
+        // Deliberately BELOW the core `Limits::DEFAULT` floor (64, Block 94
+        // S3): `HalLimits::DEFAULT` is the "advertise only what executes"
+        // baseline that GLES (Tier 2, no SetImmediates execution) reports
+        // verbatim; each Tier-1 adapter overrides it to 64 in its own
+        // `limits()`, and core `from_hal` copies this field without a
+        // `.max(default)` so the 0 sticks for GLES.
         assert_eq!(limits.max_immediate_size, 0);
     }
 

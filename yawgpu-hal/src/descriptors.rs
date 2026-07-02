@@ -73,6 +73,14 @@ pub struct HalRenderPipelineDescriptor {
     /// (`min_depth`, `max_depth`) delivered as a fragment push constant. Only
     /// meaningful on the Vulkan backend; other backends ignore it.
     pub needs_frag_depth_range_push_constant: bool,
+    /// The pipeline layout's reserved user-immediate byte budget (Block 94,
+    /// 0..=64). Only meaningful on the Vulkan backend, where the combined
+    /// immediates push-constant block is `user_immediate_size` user bytes
+    /// followed by the 8-byte internal depth-range pair when
+    /// `needs_frag_depth_range_push_constant` is set. Metal instead carries
+    /// its immediates metadata inside [`crate::HalShaderSource`]
+    /// (`HalMslImmediates`); other backends ignore this field.
+    pub user_immediate_size: u32,
 }
 
 /// Enumerates HAL front-facing winding values.

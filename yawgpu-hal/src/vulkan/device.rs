@@ -169,14 +169,24 @@ impl VulkanDevice {
     }
 
     /// Creates a compute pipeline from the given shader, entry point, and bindings.
+    ///
+    /// `user_immediate_size` is the pipeline layout's reserved user-immediate
+    /// byte budget (Block 94 S3); it sizes the compute push-constant range.
     pub fn create_compute_pipeline(
         &self,
         shader: HalShaderSource,
         entry_point: &str,
         _workgroup_size: (u32, u32, u32),
         bindings: &[HalDescriptorBinding],
+        user_immediate_size: u32,
     ) -> Result<VulkanComputePipeline, HalError> {
-        create_compute_pipeline(Arc::clone(&self.inner), shader, entry_point, bindings)
+        create_compute_pipeline(
+            Arc::clone(&self.inner),
+            shader,
+            entry_point,
+            bindings,
+            user_immediate_size,
+        )
     }
 
     /// Creates a render pipeline from the given shaders, vertex layout, and color targets.
@@ -308,6 +318,7 @@ mod tests {
                 "main",
                 (1, 1, 1),
                 &[],
+                0,
             )
             .expect("create compute pipeline");
         assert_ne!(pipeline.inner.pipeline, vk::Pipeline::null());

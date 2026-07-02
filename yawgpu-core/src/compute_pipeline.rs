@@ -324,6 +324,7 @@ pub(crate) fn create_hal_compute_pipeline(
         &entry_point,
         (workgroup.size[0], workgroup.size[1], workgroup.size[2]),
         &descriptor_bindings,
+        user_immediate_size,
     ) {
         Ok(pipeline) => (Some(pipeline), None),
         Err(error) => (None, Some(error.to_string())),
@@ -429,6 +430,7 @@ pub(crate) fn select_compute_shader_source(
                 0,
                 false,
                 None,
+                user_immediate_size,
             )?;
             Ok((
                 HalShaderSource::SpirV(spirv),
@@ -2468,6 +2470,41 @@ fn cs() {
         assert_eq!(immediates.block_size, 16);
         assert_eq!(immediates.frag_depth_clamp_offset, None);
         assert_eq!(entry, "tint_cs");
+        assert!(bindings.is_empty());
+    }
+
+    /// Block 94 S3 Vulkan counterpart of the Metal threading test above: a
+    /// compute entry point using a user `var<immediate>` generates SPIR-V
+    /// with the layout's user-immediate budget threaded through (Tint lowers
+    /// the immediate to the push-constant block; the Vulkan HAL sizes the
+    /// `VkPushConstantRange` from the same budget at pipeline creation).
+    #[test]
+    fn select_compute_shader_source_vulkan_generates_spirv_with_user_immediate() {
+        let device = noop_device();
+        let module = device.create_shader_module(ShaderModuleSource::Wgsl(
+            r#"
+requires immediate_address_space;
+
+var<immediate> params : vec4f;
+
+@compute @workgroup_size(1)
+fn cs() {
+  let v = params;
+  _ = v;
+}
+"#
+            .to_owned(),
+        ));
+
+        let (source, entry, bindings) =
+            select_compute_shader_source(HalBackend::Vulkan, &module, "cs", &[], &[], false, 16)
+                .expect("compute pipeline with a user immediate should select Vulkan SPIR-V");
+
+        let HalShaderSource::SpirV(words) = source else {
+            panic!("Vulkan backend must select SpirV");
+        };
+        assert_eq!(words.first().copied(), Some(0x0723_0203));
+        assert_eq!(entry, "cs");
         assert!(bindings.is_empty());
     }
 

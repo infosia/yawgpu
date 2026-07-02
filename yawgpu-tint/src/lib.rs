@@ -1348,6 +1348,7 @@ mod real {
             multisampled_input_attachment: bool,
             has_polyfill_pixel_center: bool,
             polyfill_pixel_center: u32,
+            user_immediate_size: u32,
             words_out: *mut *mut u32,
             n_words_out: *mut usize,
             err: *mut *mut c_char,
@@ -1866,6 +1867,15 @@ mod real {
         }
 
         /// Generates SPIR-V words for `entry_point`.
+        ///
+        /// `user_immediate_size` is the owning pipeline layout's reserved
+        /// user-immediate byte budget (Block 94, 0..=64) -- same meaning as
+        /// in [`Self::generate_msl`]. It only affects output when
+        /// `polyfill_pixel_center` is `Some`: the internal depth-range
+        /// immediates are placed at byte offsets `{user_immediate_size,
+        /// user_immediate_size + 4}` of the push-constant block, directly
+        /// after the user region (mirrors Dawn
+        /// `ShaderModuleVk.cpp:349-355`).
         #[allow(clippy::too_many_arguments)]
         pub fn generate_spirv(
             &self,
@@ -1877,6 +1887,7 @@ mod real {
             framebuffer_fetch_descriptor_set: u32,
             multisampled_input_attachment: bool,
             polyfill_pixel_center: Option<u32>,
+            user_immediate_size: u32,
         ) -> Result<Vec<u32>, TintError> {
             let ep = cstring(entry_point, "entry point").map_err(TintError::Codegen)?;
             let raw_bindings = bindings.as_raw();
@@ -1898,6 +1909,7 @@ mod real {
                     multisampled_input_attachment,
                     polyfill_pixel_center.is_some(),
                     polyfill_pixel_center.unwrap_or(0),
+                    user_immediate_size,
                     &mut words,
                     &mut len,
                     &mut err,
@@ -2230,6 +2242,7 @@ mod stub {
             _framebuffer_fetch_descriptor_set: u32,
             _multisampled_input_attachment: bool,
             _polyfill_pixel_center: Option<u32>,
+            _user_immediate_size: u32,
         ) -> Result<Vec<u32>, TintError> {
             Err(TintError::Unavailable)
         }
@@ -2456,11 +2469,11 @@ fn no_immediate() {}
             .unwrap();
         assert!(msl.source.contains("kernel"), "MSL:\n{}", msl.source);
         let spirv = program
-            .generate_spirv("cs", &bindings, &[], true, false, 0, false, None)
+            .generate_spirv("cs", &bindings, &[], true, false, 0, false, None, 0)
             .unwrap();
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
         let spirv_with_vulkan_memory_model = program
-            .generate_spirv("cs", &bindings, &[], true, true, 0, false, None)
+            .generate_spirv("cs", &bindings, &[], true, true, 0, false, None, 0)
             .unwrap();
         assert_eq!(
             spirv_with_vulkan_memory_model.first().copied(),
@@ -2657,6 +2670,7 @@ fn main() {
                 0,
                 false,
                 None,
+                0,
             )
             .unwrap_err();
         assert!(!err.to_string().is_empty());
@@ -2756,7 +2770,7 @@ fn cs() {
                 .unwrap();
             assert!(!msl.source.is_empty());
             let spirv = program
-                .generate_spirv(ep, &bindings, &[], true, false, 0, false, None)
+                .generate_spirv(ep, &bindings, &[], true, false, 0, false, None, 0)
                 .unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));
         }
@@ -2795,7 +2809,17 @@ fn cs() {
         assert!(msl.source.contains("[[color(0)]]"), "MSL:\n{}", msl.source);
 
         let spirv = program
-            .generate_spirv("fs", &Bindings::default(), &[], true, false, 0, false, None)
+            .generate_spirv(
+                "fs",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                0,
+                false,
+                None,
+                0,
+            )
             .unwrap();
         assert!(!spirv.is_empty());
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
@@ -2933,7 +2957,17 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
         // option, FragCoord would leak the per-sample position under sample-rate
         // shading — the CTS-found bug this guards against.
         let without = program
-            .generate_spirv("fs", &Bindings::default(), &[], true, false, 0, false, None)
+            .generate_spirv(
+                "fs",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                0,
+                false,
+                None,
+                0,
+            )
             .unwrap();
         let with = program
             .generate_spirv(
@@ -2945,6 +2979,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
                 0,
                 false,
                 Some(1),
+                0,
             )
             .unwrap();
         assert_eq!(without.first().copied(), Some(0x0723_0203));
@@ -2953,6 +2988,109 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
             without, with,
             "polyfill_pixel_center must alter the emitted SPIR-V"
         );
+    }
+
+    /// Block 94 S3: a fragment that needs the pixel-center polyfill's
+    /// internal depth-range immediates AND declares a user `var<immediate>`
+    /// generates SPIR-V only when `user_immediate_size` rebases the
+    /// depth-range offsets past the user region -- with the pre-S3 hardcoded
+    /// `{0, 4}` shape (budget 0) Tint's `PrepareImmediateData` rejects the
+    /// overlap outright, proving the threaded offset is load-bearing.
+    /// Mirrors the MSL probe
+    /// `fragment_msl_user_immediate_and_frag_depth_clamp_share_slot_with_non_colliding_offsets`.
+    #[test]
+    fn spirv_user_immediate_and_polyfill_depth_range_get_non_colliding_offsets() {
+        let wgsl = r#"
+requires immediate_address_space;
+
+var<immediate> params : vec4f;
+
+struct VOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) @interpolate(perspective, sample) uv: vec2<f32>,
+};
+
+@vertex
+fn vs() -> VOut {
+  var o: VOut;
+  o.pos = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+  o.uv = vec2<f32>(0.0, 0.0);
+  return o;
+}
+
+@fragment
+fn fs(v: VOut) -> @location(0) vec4<f32> {
+  return vec4<f32>(v.pos.xy, v.uv) + params;
+}
+
+@compute @workgroup_size(1)
+fn cs() {
+  let v = params;
+  _ = v;
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[11]).unwrap();
+
+        // `params` is a vec4f (16 bytes): with the matching layout budget the
+        // depth-range pair lands at bytes {16, 20} and generation succeeds.
+        let spirv = program
+            .generate_spirv(
+                "fs",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                0,
+                false,
+                Some(1),
+                16,
+            )
+            .unwrap();
+        assert_eq!(spirv.first().copied(), Some(0x0723_0203));
+
+        // Budget 0 places the depth-range pair at {0, 4}, inside `params` --
+        // Tint's PrepareImmediateData rejects the overlap with a hard error
+        // rather than silently mislaying either block.
+        let collision = program.generate_spirv(
+            "fs",
+            &Bindings::default(),
+            &[],
+            true,
+            false,
+            0,
+            false,
+            Some(1),
+            0,
+        );
+        let Err(collision_err) = collision else {
+            panic!(
+                "a user_immediate_size (0) narrower than the entry's real \
+                 var<immediate> usage (16 bytes) must be rejected as a \
+                 depth-range/user-immediate offset collision"
+            );
+        };
+        assert!(
+            matches!(collision_err, TintError::Codegen(ref message) if message.contains("overlap")),
+            "expected an offset-overlap codegen error, got: {collision_err:?}"
+        );
+
+        // A compute entry using the same user immediate has no internal
+        // immediates: Tint places the user block at push-constant offset 0
+        // regardless of the budget, and generation succeeds.
+        let compute = program
+            .generate_spirv(
+                "cs",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                0,
+                false,
+                None,
+                16,
+            )
+            .unwrap();
+        assert_eq!(compute.first().copied(), Some(0x0723_0203));
     }
 
     #[cfg(feature = "tiled")]
@@ -2969,7 +3107,17 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
         )
         .unwrap();
         let spirv = program
-            .generate_spirv("fs", &Bindings::default(), &[], true, false, 0, false, None)
+            .generate_spirv(
+                "fs",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                0,
+                false,
+                None,
+                0,
+            )
             .unwrap();
         assert!(!spirv.is_empty());
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
@@ -2997,6 +3145,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
             0,
             true,
             None,
+            0,
         ) {
             Ok(_) => panic!("expected multisampled input attachment generation to fail"),
             Err(err) => err,
@@ -3036,7 +3185,17 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
         )
         .unwrap();
         let spirv = program
-            .generate_spirv("fs", &Bindings::default(), &[], true, false, 0, true, None)
+            .generate_spirv(
+                "fs",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                0,
+                true,
+                None,
+                0,
+            )
             .unwrap();
         assert!(!spirv.is_empty());
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
@@ -3082,14 +3241,34 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
         .unwrap();
         // Generating the vertex entry with the module-wide flag TRUE succeeds …
         let vertex = program
-            .generate_spirv("vs", &Bindings::default(), &[], true, false, 0, true, None)
+            .generate_spirv(
+                "vs",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                0,
+                true,
+                None,
+                0,
+            )
             .unwrap();
         assert_eq!(vertex.first().copied(), Some(0x0723_0203));
         // … while FALSE fails, because the module contains a 2-arg load. This is
         // why yawgpu-core must pass the flag to the vertex stage too, not just the
         // fragment.
         assert!(program
-            .generate_spirv("vs", &Bindings::default(), &[], true, false, 0, false, None)
+            .generate_spirv(
+                "vs",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                0,
+                false,
+                None,
+                0
+            )
             .is_err());
     }
 
@@ -3713,10 +3892,10 @@ fn cs() { _ = u.value; }
         assert_ne!(default_msl, remapped_msl);
 
         let default_spv = program
-            .generate_spirv("cs", &default_bindings, &[], true, false, 0, false, None)
+            .generate_spirv("cs", &default_bindings, &[], true, false, 0, false, None, 0)
             .unwrap();
         let remapped_spv = program
-            .generate_spirv("cs", &remapped, &[], true, false, 0, false, None)
+            .generate_spirv("cs", &remapped, &[], true, false, 0, false, None, 0)
             .unwrap();
         assert_ne!(default_spv, remapped_spv);
         assert!(spirv_has_binding_decoration(&remapped_spv, 7));
@@ -3992,7 +4171,17 @@ fn cs() {
 
         let generate_spirv = |program: &Program| {
             program
-                .generate_spirv("cs", &Bindings::default(), &[], true, false, 0, false, None)
+                .generate_spirv(
+                    "cs",
+                    &Bindings::default(),
+                    &[],
+                    true,
+                    false,
+                    0,
+                    false,
+                    None,
+                    0,
+                )
                 .unwrap()
         };
         let spirv_first = generate_spirv(&program);
@@ -4067,7 +4256,17 @@ fn fs(in: VsOut) -> @location(0) vec4f {
         for ep in ["vs", "fs"] {
             let generate_spirv = |program: &Program| {
                 program
-                    .generate_spirv(ep, &Bindings::default(), &[], true, false, 0, false, None)
+                    .generate_spirv(
+                        ep,
+                        &Bindings::default(),
+                        &[],
+                        true,
+                        false,
+                        0,
+                        false,
+                        None,
+                        0,
+                    )
                     .unwrap()
             };
             let a = generate_spirv(&program);
@@ -4200,7 +4399,17 @@ fn cs() {
 
         let generate_spirv = |program: &Program| {
             program
-                .generate_spirv("cs", &Bindings::default(), &[], true, false, 0, false, None)
+                .generate_spirv(
+                    "cs",
+                    &Bindings::default(),
+                    &[],
+                    true,
+                    false,
+                    0,
+                    false,
+                    None,
+                    0,
+                )
                 .unwrap()
         };
         let spirv_first = generate_spirv(&program);

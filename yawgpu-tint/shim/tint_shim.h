@@ -311,6 +311,12 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
                               YawgpuTintMslOutput* out,
                               char** err);
 
+/* `user_immediate_size` has the same meaning as in yawgpu_tint_generate_msl:
+   the owning pipeline layout's reserved user-immediate byte budget (Block
+   94). It only matters when `has_polyfill_pixel_center` is set -- the
+   depth-range internal immediates are placed at byte offsets
+   {user_immediate_size, user_immediate_size + 4} of the push-constant
+   block, directly after the user region (Dawn ShaderModuleVk.cpp:349-355). */
 YAWGPU_TINT_API bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
                                 const char* ep,
                                 const YawgpuTintBindings*,
@@ -322,6 +328,7 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
                                 bool multisampled_input_attachment,
                                 bool has_polyfill_pixel_center,
                                 uint32_t polyfill_pixel_center,
+                                uint32_t user_immediate_size,
                                 uint32_t** words_out,
                                 size_t* n_words_out,
                                 char** err);

@@ -30,10 +30,10 @@ fn no_required_limits_success_reports_defaults() {
         assert_eq!(limits.maxComputeInvocationsPerWorkgroup, 256);
         assert_eq!(limits.maxComputeWorkgroupSizeX, 256);
         assert_eq!(limits.maxComputeWorkgroupSizeY, 256);
-        // Block 94 S1: Noop is the first backend to flip `maxImmediateSize`
-        // to Dawn's `kMaxImmediateDataBytes` (64); every other Tier-1/Tier-2
-        // backend and the core `Limits::DEFAULT` floor stay at `0` until
-        // their own delivery slices.
+        // Block 94: every Tier-1 backend (Noop S1, Metal S2, Vulkan S3) and
+        // the core `Limits::DEFAULT` floor now advertise Dawn's
+        // `kMaxImmediateDataBytes` (64); GLES (Tier 2) stays 0 via its own
+        // adapter limits.
         assert_eq!(limits.maxImmediateSize, 64);
 
         yawgpu::wgpuDeviceRelease(result.device);
@@ -169,7 +169,8 @@ fn max_immediate_size_always_uses_supported_limit() {
 
     unsafe {
         let supported = get_adapter_limits(test.adapter());
-        // Block 94 S1: Noop advertises 64 (Dawn's `kMaxImmediateDataBytes`).
+        // Block 94: Noop (and every Tier-1 backend) advertises 64 (Dawn's
+        // `kMaxImmediateDataBytes`).
         assert_eq!(supported.maxImmediateSize, 64);
 
         let required = undefined_limits();

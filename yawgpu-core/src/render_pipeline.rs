@@ -1031,6 +1031,19 @@ fn create_hal_render_pipeline_with_subpass_color_slots(
                     );
             }
         }
+        // Block 94 S3: the pipeline's effective user-immediate byte budget
+        // (same resolution the SPIR-V codegen used above via
+        // `select_render_shader_source`) sizes the user prefix of the
+        // combined push-constant block; the depth-range pair -- when the
+        // polyfill flag above is set -- sits directly after it.
+        match render_pipeline_layout_immediate_size(
+            descriptor,
+            vertex_entry_name,
+            fragment_entry_name,
+        ) {
+            Ok(size) => hal_descriptor.user_immediate_size = size,
+            Err(message) => return (None, Some(message)),
+        }
     }
     match hal_device.create_render_pipeline(
         shader,
@@ -1632,6 +1645,16 @@ pub(crate) fn select_render_shader_source(
                     .map(|_| vertex_module.free_inter_stage_location(vertex_entry_name)),
                 _ => None,
             };
+            // The pipeline's effective user-immediate byte budget (Block 94
+            // S3, same resolution as the Metal arm): the internal depth-range
+            // immediates (pixel-center polyfill) are rebased directly after
+            // this region in the push-constant block, mirroring Dawn
+            // (`dawn/native/vulkan/ShaderModuleVk.cpp:349-355`).
+            let user_immediate_size = render_pipeline_layout_immediate_size(
+                descriptor,
+                vertex_entry_name,
+                fragment_entry_name,
+            )?;
             let vertex = vertex_module.generate_spirv(
                 vertex_entry_name,
                 frontend::ShaderStage::Vertex,
@@ -1640,6 +1663,7 @@ pub(crate) fn select_render_shader_source(
                 framebuffer_fetch_descriptor_set,
                 multisampled_input_attachment,
                 polyfill_pixel_center,
+                user_immediate_size,
             )?;
             let fragment_color_slots = match (fragment, fragment_entry_name) {
                 (Some(fragment), Some(fragment_entry_name)) => fragment
@@ -1667,6 +1691,7 @@ pub(crate) fn select_render_shader_source(
                         framebuffer_fetch_descriptor_set,
                         multisampled_input_attachment,
                         polyfill_pixel_center,
+                        user_immediate_size,
                     )?)
                 }
                 (None, None) => None,
@@ -1922,6 +1947,7 @@ pub(crate) fn hal_render_pipeline_descriptor(
         unclipped_depth: descriptor.primitive.unclipped_depth,
         // Set by the caller once the shader stages are generated (Vulkan only).
         needs_frag_depth_range_push_constant: false,
+        user_immediate_size: 0,
     })
 }
 

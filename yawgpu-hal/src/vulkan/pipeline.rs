@@ -5,11 +5,62 @@ use crate::{
     HalTextureViewDimension,
 };
 
-/// Byte size of the `@builtin(position)` pixel-center polyfill push constant:
-/// two `f32`s carrying the viewport `min_depth` (offset 0) and `max_depth`
-/// (offset 4). Must match the Tint `depth_range_offsets` `{0, 4}` used when
-/// compiling the polyfilled fragment shader.
+/// Byte size of the `@builtin(position)` pixel-center polyfill depth-range
+/// pair: two `f32`s carrying the viewport `min_depth` and `max_depth`,
+/// placed at byte offset `user_immediate_size` of the combined immediates
+/// push-constant block (matching the Tint `depth_range_offsets`
+/// `{user_immediate_size, user_immediate_size + 4}` used when compiling the
+/// polyfilled fragment shader; Dawn `ClampFragDepthArgs`).
 pub(super) const FRAG_DEPTH_RANGE_PUSH_CONSTANT_BYTES: u32 = 8;
+
+/// Combined immediates push-constant block metadata for one Vulkan pipeline
+/// (Block 94 S3). Mirrors Dawn's `ImmediatesLayoutVk.h` layout: user
+/// immediate bytes `[0, user_immediate_size)` first, the internal
+/// depth-range pair (pixel-center polyfill) appended directly after when
+/// present. The `VkPipelineLayout` declares one `VkPushConstantRange` of
+/// `block_size` bytes at offset 0 (Dawn `PipelineLayoutVk.cpp:98-104`), and
+/// every draw/dispatch delivers the composed block via
+/// `vkCmdPushConstants` (Dawn `CommandBufferVk.cpp:399-421`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct VulkanImmediates {
+    /// Total push-constant block size in bytes: the pipeline layout's
+    /// reserved user-immediate budget, plus 8 when the depth-range pair is
+    /// present.
+    pub(super) block_size: u32,
+    /// Byte offset of the 8-byte depth-range pair within the block, when
+    /// the `@builtin(position)` pixel-center polyfill needs it. Always
+    /// `None` for compute pipelines.
+    pub(super) depth_range_offset: Option<u32>,
+}
+
+/// Resolves the combined immediates block for a render pipeline from its
+/// HAL descriptor: `user_immediate_size` user bytes, plus the depth-range
+/// pair right after when `needs_frag_depth_range_push_constant` is set.
+/// `None` when the pipeline uses no immediates at all (no push-constant
+/// range is declared, byte-identical to the pre-Block-94 behaviour for
+/// pipelines without the polyfill).
+pub(super) fn vulkan_render_immediates(
+    descriptor: &HalRenderPipelineDescriptor,
+) -> Option<VulkanImmediates> {
+    let depth_range_offset = descriptor
+        .needs_frag_depth_range_push_constant
+        .then_some(descriptor.user_immediate_size);
+    let block_size = descriptor.user_immediate_size
+        + depth_range_offset.map_or(0, |_| FRAG_DEPTH_RANGE_PUSH_CONSTANT_BYTES);
+    (block_size > 0).then_some(VulkanImmediates {
+        block_size,
+        depth_range_offset,
+    })
+}
+
+/// Resolves the combined immediates block for a compute pipeline: compute
+/// has no internal immediates, so the block is exactly the user prefix.
+pub(super) fn vulkan_compute_immediates(user_immediate_size: u32) -> Option<VulkanImmediates> {
+    (user_immediate_size > 0).then_some(VulkanImmediates {
+        block_size: user_immediate_size,
+        depth_range_offset: None,
+    })
+}
 
 /// Stores vulkan compute pipeline data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -26,6 +77,9 @@ pub(super) struct VulkanComputePipelineInner {
     pub(super) descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
     pub(super) descriptor_bindings: Vec<HalDescriptorBinding>,
     pub(super) shader_module: vk::ShaderModule,
+    /// Combined immediates push-constant block (Block 94 S3). `None` when
+    /// the pipeline layout reserves no user immediates.
+    pub(super) immediates: Option<VulkanImmediates>,
 }
 
 impl Drop for VulkanComputePipelineInner {
@@ -65,10 +119,12 @@ pub(super) struct VulkanRenderPipelineInner {
     pub(super) descriptor_bindings: Vec<HalDescriptorBinding>,
     pub(super) vertex_shader_module: vk::ShaderModule,
     pub(super) fragment_shader_module: Option<vk::ShaderModule>,
-    /// Whether the fragment shader needs the viewport depth range delivered as a
-    /// fragment push constant (the `@builtin(position)` pixel-center polyfill).
-    /// When set, the draw path pushes `[min_depth, max_depth]` before drawing.
-    pub(super) needs_frag_depth_range_push_constant: bool,
+    /// Combined immediates push-constant block (Block 94 S3): user
+    /// immediate bytes first, the `@builtin(position)` pixel-center
+    /// polyfill depth-range pair at `depth_range_offset` when present. The
+    /// draw path composes and pushes the whole block before every draw.
+    /// `None` when the pipeline uses no immediates at all.
+    pub(super) immediates: Option<VulkanImmediates>,
 }
 
 impl Drop for VulkanRenderPipelineInner {
@@ -101,11 +157,17 @@ impl Drop for VulkanRenderPipelineInner {
 }
 
 /// Creates compute pipeline and reports validation errors through the owning device.
+///
+/// `user_immediate_size` is the pipeline layout's reserved user-immediate
+/// byte budget (Block 94 S3); when non-zero the `VkPipelineLayout` declares
+/// a compute-stage `VkPushConstantRange` of that size and every dispatch
+/// pushes the pass's user immediate bytes.
 pub(super) fn create_compute_pipeline(
     device: Arc<VulkanDeviceInner>,
     shader: HalShaderSource,
     entry_point: &str,
     bindings: &[HalDescriptorBinding],
+    user_immediate_size: u32,
 ) -> Result<VulkanComputePipeline, HalError> {
     let HalShaderSource::SpirV(code) = shader else {
         return Err(shader_error("Vulkan compute pipeline requires SPIR-V"));
@@ -125,8 +187,16 @@ pub(super) fn create_compute_pipeline(
                 return Err(error);
             }
         };
-    let pipeline_layout_info =
+    let immediates = vulkan_compute_immediates(user_immediate_size);
+    let push_constant_ranges = [vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::COMPUTE)
+        .offset(0)
+        .size(immediates.map_or(0, |immediates| immediates.block_size))];
+    let mut pipeline_layout_info =
         vk::PipelineLayoutCreateInfo::default().set_layouts(&descriptor_set_layouts);
+    if immediates.is_some() {
+        pipeline_layout_info = pipeline_layout_info.push_constant_ranges(&push_constant_ranges);
+    }
     let pipeline_layout = match unsafe {
         device
             .device
@@ -184,6 +254,7 @@ pub(super) fn create_compute_pipeline(
             descriptor_set_layouts,
             descriptor_bindings: bindings.to_vec(),
             shader_module,
+            immediates,
         }),
     })
 }
@@ -261,19 +332,21 @@ pub(super) fn create_render_pipeline(
                 return Err(error);
             }
         };
-    // The `@builtin(position)` pixel-center polyfill reconstructs depth in NDC
-    // space and reads the viewport depth range from a fragment push constant:
-    // two f32s (min at byte 0, max at byte 4), matching the Tint
-    // `depth_range_offsets` set for these shaders. Declare a matching range over
-    // the graphics stages (the vertex stage may also declare the block; Dawn
-    // likewise covers all stages via `kImmediateShaderStages`).
+    // Combined immediates push-constant block (Block 94 S3): user immediate
+    // bytes `[0, user_immediate_size)`, then -- for the `@builtin(position)`
+    // pixel-center polyfill -- the viewport depth-range pair (min/max f32s)
+    // directly after, matching the Tint `depth_range_offsets` set for these
+    // shaders. Declare one range of the whole block over the graphics stages
+    // (the vertex stage may also declare the block; Dawn likewise covers all
+    // stages via `kImmediateShaderStages`, `PipelineLayoutVk.cpp:98-104`).
+    let immediates = vulkan_render_immediates(descriptor);
     let push_constant_ranges = [vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
         .offset(0)
-        .size(FRAG_DEPTH_RANGE_PUSH_CONSTANT_BYTES)];
+        .size(immediates.map_or(0, |immediates| immediates.block_size))];
     let mut pipeline_layout_info =
         vk::PipelineLayoutCreateInfo::default().set_layouts(&descriptor_set_layouts);
-    if descriptor.needs_frag_depth_range_push_constant {
+    if immediates.is_some() {
         pipeline_layout_info = pipeline_layout_info.push_constant_ranges(&push_constant_ranges);
     }
     let pipeline_layout = match unsafe {
@@ -355,7 +428,7 @@ pub(super) fn create_render_pipeline(
             descriptor_bindings: bindings.to_vec(),
             vertex_shader_module,
             fragment_shader_module,
-            needs_frag_depth_range_push_constant: descriptor.needs_frag_depth_range_push_constant,
+            immediates,
         }),
     })
 }
@@ -437,19 +510,21 @@ pub(super) fn create_subpass_render_pipeline(
                 return Err(error);
             }
         };
-    // The `@builtin(position)` pixel-center polyfill reconstructs depth in NDC
-    // space and reads the viewport depth range from a fragment push constant:
-    // two f32s (min at byte 0, max at byte 4), matching the Tint
-    // `depth_range_offsets` set for these shaders. Declare a matching range over
-    // the graphics stages (the vertex stage may also declare the block; Dawn
-    // likewise covers all stages via `kImmediateShaderStages`).
+    // Combined immediates push-constant block (Block 94 S3): user immediate
+    // bytes `[0, user_immediate_size)`, then -- for the `@builtin(position)`
+    // pixel-center polyfill -- the viewport depth-range pair (min/max f32s)
+    // directly after, matching the Tint `depth_range_offsets` set for these
+    // shaders. Declare one range of the whole block over the graphics stages
+    // (the vertex stage may also declare the block; Dawn likewise covers all
+    // stages via `kImmediateShaderStages`, `PipelineLayoutVk.cpp:98-104`).
+    let immediates = vulkan_render_immediates(descriptor);
     let push_constant_ranges = [vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
         .offset(0)
-        .size(FRAG_DEPTH_RANGE_PUSH_CONSTANT_BYTES)];
+        .size(immediates.map_or(0, |immediates| immediates.block_size))];
     let mut pipeline_layout_info =
         vk::PipelineLayoutCreateInfo::default().set_layouts(&descriptor_set_layouts);
-    if descriptor.needs_frag_depth_range_push_constant {
+    if immediates.is_some() {
         pipeline_layout_info = pipeline_layout_info.push_constant_ranges(&push_constant_ranges);
     }
     let pipeline_layout = match unsafe {
@@ -532,7 +607,7 @@ pub(super) fn create_subpass_render_pipeline(
             descriptor_bindings: bindings.to_vec(),
             vertex_shader_module,
             fragment_shader_module,
-            needs_frag_depth_range_push_constant: descriptor.needs_frag_depth_range_push_constant,
+            immediates,
         }),
     })
 }
@@ -2236,5 +2311,63 @@ mod tests {
             subrange,
             canonical,
         ));
+    }
+
+    /// Block 94 S3: the render pipeline's combined push-constant block is
+    /// the user prefix plus the 8-byte depth-range pair directly after when
+    /// the pixel-center polyfill needs it; a polyfill-only pipeline (no user
+    /// immediates) keeps the pre-Block-94 bare 8-byte range at offset 0, and
+    /// a pipeline with neither declares no range at all.
+    #[test]
+    fn vulkan_render_immediates_composes_user_prefix_plus_depth_range() {
+        let mut descriptor = crate::vulkan::test_helpers::render_descriptor();
+
+        // Neither user immediates nor the polyfill: no push-constant range.
+        assert_eq!(vulkan_render_immediates(&descriptor), None);
+
+        // Polyfill only: bare 8-byte pair at offset 0 (pre-Block-94 shape).
+        descriptor.needs_frag_depth_range_push_constant = true;
+        assert_eq!(
+            vulkan_render_immediates(&descriptor),
+            Some(VulkanImmediates {
+                block_size: 8,
+                depth_range_offset: Some(0),
+            })
+        );
+
+        // User immediates + polyfill: pair rebased after the user region.
+        descriptor.user_immediate_size = 16;
+        assert_eq!(
+            vulkan_render_immediates(&descriptor),
+            Some(VulkanImmediates {
+                block_size: 24,
+                depth_range_offset: Some(16),
+            })
+        );
+
+        // User immediates only: block is exactly the user prefix.
+        descriptor.needs_frag_depth_range_push_constant = false;
+        assert_eq!(
+            vulkan_render_immediates(&descriptor),
+            Some(VulkanImmediates {
+                block_size: 16,
+                depth_range_offset: None,
+            })
+        );
+    }
+
+    /// Block 94 S3: compute pipelines have no internal immediates -- the
+    /// push-constant block is exactly the user prefix, absent when the
+    /// layout reserves none.
+    #[test]
+    fn vulkan_compute_immediates_is_bare_user_prefix() {
+        assert_eq!(vulkan_compute_immediates(0), None);
+        assert_eq!(
+            vulkan_compute_immediates(64),
+            Some(VulkanImmediates {
+                block_size: 64,
+                depth_range_offset: None,
+            })
+        );
     }
 }

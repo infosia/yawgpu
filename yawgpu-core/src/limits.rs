@@ -114,7 +114,13 @@ impl Limits {
         max_compute_workgroup_size_y: 256,
         max_compute_workgroup_size_z: 64,
         max_compute_workgroups_per_dimension: 65_535,
-        max_immediate_size: 0,
+        // Block 94 S3: Dawn's base-tier `maxImmediateSize`
+        // (`kMaxImmediateDataBytes`, Limits.cpp v1 base tier) -- flipped from
+        // 0 once every Tier-1 backend (Noop S1, Metal S2, Vulkan S3)
+        // executes SetImmediates. GLES (Tier 2) still reports 0 through its
+        // own adapter limits; `from_hal` deliberately copies the HAL value
+        // verbatim (no `.max(default)`) so that sticks.
+        max_immediate_size: 64,
     };
 
     /// Converts backend-reported HAL limits into core limits.
@@ -521,15 +527,29 @@ mod tests {
             .is_err());
     }
 
+    /// Block 94 S3: `Limits::DEFAULT.max_immediate_size` is Dawn's base-tier
+    /// 64 now that every Tier-1 backend executes SetImmediates. Requiring
+    /// more than the supported value still fails; a backend reporting 0
+    /// (GLES, Tier 2) still rejects any non-zero requirement because
+    /// `from_hal` copies the HAL value verbatim.
     #[test]
-    fn default_limits_advertise_no_immediate_data_support() {
+    fn default_limits_advertise_dawn_base_tier_immediate_size() {
         let supported = Limits::DEFAULT;
-        assert_eq!(supported.max_immediate_size, 0);
+        assert_eq!(supported.max_immediate_size, 64);
 
         let mut required = supported;
-        required.max_immediate_size = 4;
+        required.max_immediate_size = 68;
         assert_eq!(
             supported.validate_required_limits(Some(&required)),
+            Err("required limit max_immediate_size=68 exceeds supported 64".to_owned())
+        );
+
+        let mut zero_supported = Limits::DEFAULT;
+        zero_supported.max_immediate_size = 0;
+        let mut required = Limits::DEFAULT;
+        required.max_immediate_size = 4;
+        assert_eq!(
+            zero_supported.validate_required_limits(Some(&required)),
             Err("required limit max_immediate_size=4 exceeds supported 0".to_owned())
         );
     }
@@ -546,7 +566,8 @@ mod tests {
         assert_eq!(limits.max_compute_invocations_per_workgroup, 256);
         assert_eq!(limits.max_compute_workgroup_size_x, 256);
         assert_eq!(limits.max_compute_workgroup_size_y, 256);
-        assert_eq!(limits.max_immediate_size, 0);
+        // Block 94 S3: Dawn base tier (kMaxImmediateDataBytes).
+        assert_eq!(limits.max_immediate_size, 64);
     }
 
     #[test]
