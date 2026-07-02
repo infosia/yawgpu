@@ -321,62 +321,80 @@ impl ReflectedModule {
             .clone()
     }
 
-    /// Returns compute workgroup size reflected by the validated shader module.
+    /// Returns compute workgroup size reflected by the validated shader
+    /// module, or `None` if `entry_point` is not a compute entry point, or
+    /// its `@workgroup_size` is not fully literal.
     ///
-    /// This is the literal-size fast path (no SPIR-V generate-and-parse round
-    /// trip); production code does not call it yet — it still always goes
-    /// through [`Self::resolved_compute_workgroup_size`], even for the
-    /// no-override case that this fn already covers (tracked as slice R4 /
-    /// finding F6 in `specs/tracking/tint-integration-refactor.md`). Exercised
-    /// directly by `reflects_compute_workgroup_size_from_tint`.
-    #[allow(dead_code)]
-    pub(crate) fn compute_workgroup_size(
+    /// This is the literal-size fast path: Tint's Inspector only populates
+    /// `EntryPoint::workgroup_size` when every dimension resolved to a
+    /// constant during semantic analysis (`sem::Function::WorkgroupSize()`
+    /// returns `None` for a dimension that is any override-expression, even
+    /// one with a default), so a `Some` here means the size has zero
+    /// override dependence and needs no IR lowering at all — just the
+    /// already-memoized [`Self::raw_entry_points`]. The private helper
+    /// backing [`Self::resolved_compute_workgroup_size`] below (finding F6 in
+    /// `specs/tracking/tint-integration-refactor.md`), taken only when the
+    /// module declares no overrides at all — see the caller for why.
+    fn compute_workgroup_size(
         &self,
         entry_point: &str,
     ) -> Result<Option<ReflectedWorkgroupSize>, String> {
-        let entries = self.program.entry_points()?;
-        let Some(entry) = entries.into_iter().find(|entry| {
-            entry.name == entry_point && entry.stage == yawgpu_tint::PipelineStage::Compute
-        }) else {
-            return Ok(None);
-        };
-        let Some(literal_size) = entry.workgroup_size else {
+        let Some(literal_size) = self
+            .raw_entry_points()
+            .iter()
+            .find(|entry| {
+                entry.name == entry_point && entry.stage == yawgpu_tint::PipelineStage::Compute
+            })
+            .and_then(|entry| entry.workgroup_size)
+        else {
             return Ok(None);
         };
 
         Ok(Some(ReflectedWorkgroupSize {
-            entry_point: entry.name,
+            entry_point: entry_point.to_owned(),
             literal_size,
             workgroup_storage_size: self.program.workgroup_storage_size(&[])?,
         }))
     }
 
     /// Returns compute workgroup size after resolving pipeline constants.
+    ///
+    /// Short-circuits to the literal-size fast path
+    /// ([`Self::compute_workgroup_size`]) only when the module declares no
+    /// overrides at all; any override-bearing module goes through
+    /// [`yawgpu_tint::Program::resolved_workgroup_size`], a direct IR query
+    /// (lower + entry-scoped `SubstituteOverrides` + read the resolved size)
+    /// that replaced generating a full SPIR-V module just to grep
+    /// `OpExecutionMode LocalSize` back out of it (finding F6 in
+    /// `specs/tracking/tint-integration-refactor.md`).
+    ///
+    /// The "no overrides declared" gate is load-bearing for WebGPU
+    /// pipeline-creation validation, not just storage-size accuracy: an
+    /// override whose initializer fails const-eval (e.g. `override bad: u32 =
+    /// 1u / zero;` with `zero` defaulting to 0) must fail
+    /// `createComputePipeline` for an entry point that references it as a
+    /// *captured* validation error at resolve time — exactly where the old
+    /// SPIR-V round trip surfaced it — not later at HAL shader compilation,
+    /// where it would land in the device error sink as an *uncaptured* error
+    /// (CTS `compute_pipeline:overrides,entry_point,validation_error`).
+    /// Because the shim query substitutes entry-scoped (`SingleEntryPoint`
+    /// before `SubstituteOverrides`, like the generate paths), a sibling
+    /// entry point that does not reference the bad override still resolves
+    /// successfully.
     pub(crate) fn resolved_compute_workgroup_size(
         &self,
         entry_point: &str,
         pipeline_constants: &PipelineConstants,
     ) -> Result<ReflectedWorkgroupSize, String> {
-        let overrides = pipeline_constants
-            .constants
-            .iter()
-            .map(|(name, value)| yawgpu_tint::OverrideValue {
-                name: name.clone(),
-                value: *value,
-            })
-            .collect::<Vec<_>>();
-        let spirv = self.program.generate_spirv(
-            entry_point,
-            &yawgpu_tint::Bindings::default(),
-            &overrides,
-            true,
-            false,
-            0,
-            false,
-            None,
-        )?;
-        let literal_size = spirv_local_size(&spirv)
-            .ok_or_else(|| "compute entry point workgroup size reflection failed".to_owned())?;
+        if self.overrides().is_empty() {
+            if let Some(reflected) = self.compute_workgroup_size(entry_point)? {
+                return Ok(reflected);
+            }
+        }
+        let overrides = override_values(pipeline_constants);
+        let literal_size = self
+            .program
+            .resolved_workgroup_size(entry_point, &overrides)?;
         Ok(ReflectedWorkgroupSize {
             entry_point: entry_point.to_owned(),
             literal_size,
@@ -850,29 +868,6 @@ fn msl_buffer_sizes_slot(binding_map: &MslBindingMap) -> Result<u32, String> {
     Ok(next_slot)
 }
 
-fn spirv_local_size(words: &[u32]) -> Option<[u32; 3]> {
-    const OP_EXECUTION_MODE: u16 = 16;
-    const EXECUTION_MODE_LOCAL_SIZE: u32 = 17;
-
-    let mut offset = 5usize;
-    while offset < words.len() {
-        let instruction = words[offset];
-        let word_count = usize::try_from(instruction >> 16).ok()?;
-        let opcode = (instruction & 0xffff) as u16;
-        if word_count == 0 || offset.checked_add(word_count)? > words.len() {
-            return None;
-        }
-        if opcode == OP_EXECUTION_MODE
-            && word_count >= 6
-            && words[offset + 2] == EXECUTION_MODE_LOCAL_SIZE
-        {
-            return Some([words[offset + 3], words[offset + 4], words[offset + 5]]);
-        }
-        offset += word_count;
-    }
-    None
-}
-
 fn reflected_resource_binding(
     binding: yawgpu_tint::ResourceBinding,
 ) -> Result<ReflectedResourceBinding, String> {
@@ -1257,6 +1252,81 @@ fn cs() {}
             .resolved_compute_workgroup_size("cs", &constants)
             .unwrap();
         assert_eq!(resolved.literal_size, [8, 2, 1]);
+    }
+
+    #[test]
+    fn resolves_workgroup_storage_size_from_overrides_with_literal_workgroup_size() {
+        // @workgroup_size is fully literal, but the module declares an
+        // override (driving the `var<workgroup>` array length), so this must
+        // NOT take the literal fast path -- overrides have to be resolved
+        // (entry-scoped) at resolve time. Regression guard for the bug the
+        // old dead-code fast path had (it always resolved
+        // `workgroup_storage_size` with an empty override set, independent
+        // of what the caller actually passed).
+        let module = parse_and_validate_wgsl(
+            r#"
+override n: u32 = 4;
+var<workgroup> data: array<u32, n>;
+
+@compute @workgroup_size(1)
+fn cs() {
+  data[0] = 1u;
+}
+"#,
+        )
+        .unwrap();
+
+        let default_resolved = module
+            .resolved_compute_workgroup_size("cs", &PipelineConstants::default())
+            .unwrap();
+        assert_eq!(default_resolved.literal_size, [1, 1, 1]);
+        assert_eq!(default_resolved.workgroup_storage_size, 16);
+
+        let constants = PipelineConstants::from_iter([("n".to_owned(), 8.0)]);
+        let overridden = module
+            .resolved_compute_workgroup_size("cs", &constants)
+            .unwrap();
+        assert_eq!(overridden.literal_size, [1, 1, 1]);
+        assert_eq!(overridden.workgroup_storage_size, 32);
+    }
+
+    #[test]
+    fn resolved_workgroup_size_surfaces_entry_scoped_override_const_eval_errors() {
+        // Mirrors CTS
+        // `compute_pipeline:overrides,entry_point,validation_error`: an
+        // override whose initializer fails const-evaluation (1u / 0u after
+        // substituting `cu`'s default) must fail
+        // `resolved_compute_workgroup_size` -- and therefore
+        // createComputePipeline, as a captured validation error -- for the
+        // entry point that references it, while a sibling entry point that
+        // does not reference it must still resolve. Both entry points have
+        // fully literal @workgroup_size, so this also pins that the literal
+        // fast path is NOT taken when the module declares overrides.
+        let module = parse_and_validate_wgsl(
+            r#"
+override cu: u32 = 0u;
+override cx: u32 = 1u / cu;
+
+@compute @workgroup_size(1)
+fn main_pipe_error() {
+  _ = cx;
+}
+
+@compute @workgroup_size(8, 4, 1)
+fn main_ok() {}
+"#,
+        )
+        .unwrap();
+
+        let err = module
+            .resolved_compute_workgroup_size("main_pipe_error", &PipelineConstants::default())
+            .unwrap_err();
+        assert!(!err.is_empty());
+
+        let ok = module
+            .resolved_compute_workgroup_size("main_ok", &PipelineConstants::default())
+            .unwrap();
+        assert_eq!(ok.literal_size, [8, 4, 1]);
     }
 
     #[test]

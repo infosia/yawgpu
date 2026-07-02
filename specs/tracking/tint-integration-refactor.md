@@ -139,9 +139,52 @@ practice; revisit only if profiling says otherwise).
   full-tree re-sweep only at the end of the phase.
 - Phase ends with the standard no-context Phase Review.
 
+## Slice outcomes
+
+- **R1 DONE** (`3e2a346`) — every exported enum ordinal pinned by C++
+  `static_assert` (11 enums, incl. TexelFormat ×41); all 13 `#[repr(C)]` FFI
+  struct layouts guarded by mirrored sizeof/offsetof asserts on both sides;
+  Dawn-rev-bump checklist in `tint_shim.h`. Negative test confirmed the guard
+  fires. No behavior change.
+- **R2 DONE** (`fb0339c`) — F7 deletions (`statically_used` + dead guards,
+  `override_keys`/`ReflectedOverrideKey`, `ReflectedShaderStage`, `_source`
+  copy, file-wide `#![allow(dead_code)]`, caller-less `resource_bindings()` /
+  `msl_buffer_size_bindings_for_entry()`); F8 comment scrub (13 sites; gles ×2
+  reserved for R6). Also `5094bed`: pre-existing rustfmt 1.9.0 drift (6 sites,
+  present at HEAD before this work) fixed as its own style commit.
+- **R3 DONE** (`d1da82b`) — shim caches per-(program, entry) resource-binding
+  reflection + sample-usage sem-walk behind a mutex (was O(N²) Inspector
+  rebuilds); core `ReflectedModule` lazily memoizes entry points / per-entry IO
+  / per-entry resource bindings / fragment builtins / overrides;
+  `entry_point_io`/`fragment_builtins` reshaped per-entry. C ABI unchanged.
+  Metal CTS spot at parity (render_pipeline 60445/0, capability_checks
+  11714/0, compute_pipeline 11842/0).
+- **R4 DONE (F6; F4 dropped with rationale)** — new
+  `yawgpu_tint_resolved_workgroup_size` shim query (lower → `SingleEntryPoint`
+  → `SubstituteOverrides` → `Function::WorkgroupSizeAsConst()`) replaces the
+  generate-SPIR-V-then-parse-`OpExecutionMode` round trip; `spirv_local_size`
+  deleted; Vulkan compute now generates SPIR-V once per pipeline (was twice).
+  Literal fast path is taken ONLY for modules with zero overrides — an
+  override-bearing module always goes through the entry-scoped query so
+  override const-eval errors surface at resolve time as captured
+  validation errors (CTS `compute_pipeline:overrides,entry_point,
+  validation_error` regressed to uncaptured during development and was fixed;
+  the entry-scoping is pinned by unit tests both crates). Byte-compare tests
+  added: `generate_msl`/`generate_spirv` identical across repeat calls and
+  fresh parses (compute+arrayLength, render+vertex-pulling, override-driven
+  workgroup, f16).
+  **F4 (cached lowered IR) is deliberately DROPPED:** this Tint revision has
+  no whole-module `ir::Module` clone API, and Dawn itself re-runs
+  `ProgramToLoweredIR` fresh for every shader-stage compile
+  (`ShaderModuleMTL.mm:395`, `ShaderModuleVk.cpp:391`, …) — the oracle pays
+  the same cost, so per-call lowering is not a divergence-from-Dawn defect.
+  Revisit only if upstream grows an IR clone.
+
 ## Log
 
 - 2026-07-02: three-way deep review (yawgpu-tint crate / core frontend / HAL
   consumption) completed; findings F1–F9 recorded; plan authored. Corrected one
   review claim: Metal vertex-pulling metadata is live under Tint, not naga
   residue.
+- 2026-07-02: R1–R4 implemented (Claude-dispatched sonnet coding agents; one
+  CTS-caught regression in R4 fixed before commit). R5/R6 pending.

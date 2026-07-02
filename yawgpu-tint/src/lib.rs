@@ -441,6 +441,14 @@ mod imp {
             out: *mut u64,
             err: *mut *mut c_char,
         ) -> bool;
+        fn yawgpu_tint_resolved_workgroup_size(
+            program: *const RawProgram,
+            ep: *const c_char,
+            ov: *const RawOverrideValue,
+            n_ov: usize,
+            out: *mut u32,
+            err: *mut *mut c_char,
+        ) -> bool;
         fn yawgpu_tint_generate_glsl(
             program: *const RawProgram,
             ep: *const c_char,
@@ -921,6 +929,39 @@ mod imp {
                     raw_overrides.as_ptr(),
                     raw_overrides.len(),
                     &mut out,
+                    &mut err,
+                )
+            };
+            if !ok {
+                return Err(take_error(err));
+            }
+            Ok(out)
+        }
+
+        /// Returns `entry_point`'s override-resolved `@workgroup_size` as
+        /// `[x, y, z]`, without generating a full SPIR-V/MSL module (see F6 in
+        /// `specs/tracking/tint-integration-refactor.md`). Fails if
+        /// `entry_point` does not name an entry point in the module, an
+        /// override in `overrides` is invalid/unknown, or the entry point's
+        /// workgroup size does not resolve to constants (e.g. `entry_point`
+        /// is not a compute entry point).
+        pub fn resolved_workgroup_size(
+            &self,
+            entry_point: &str,
+            overrides: &[OverrideValue],
+        ) -> Result<[u32; 3], String> {
+            let ep = cstring(entry_point, "entry point")?;
+            let raw_overrides = RawOverrideValues::new(overrides)?;
+            let mut out = [0u32; 3];
+            let mut err = ptr::null_mut();
+            // SAFETY: `ep`, `out`, and `err` point to valid memory for the call.
+            let ok = unsafe {
+                yawgpu_tint_resolved_workgroup_size(
+                    self.raw,
+                    ep.as_ptr(),
+                    raw_overrides.as_ptr(),
+                    raw_overrides.len(),
+                    out.as_mut_ptr(),
                     &mut err,
                 )
             };
@@ -2034,6 +2075,15 @@ mod imp {
         /// Returns the module's total `var<workgroup>` storage size in bytes.
         pub fn workgroup_storage_size(&self, _overrides: &[OverrideValue]) -> Result<u64, String> {
             Ok(0)
+        }
+
+        /// Returns `entry_point`'s override-resolved `@workgroup_size` as `[x, y, z]`.
+        pub fn resolved_workgroup_size(
+            &self,
+            _entry_point: &str,
+            _overrides: &[OverrideValue],
+        ) -> Result<[u32; 3], String> {
+            Err(UNAVAILABLE.to_owned())
         }
 
         /// Generates GLSL ES 3.1 for `entry_point`.
@@ -3943,5 +3993,445 @@ fn cs() {
     fn legacy_smoke_wrapper_still_works() {
         let msl = wgsl_to_msl(compute_wgsl(), "cs").unwrap();
         assert!(msl.contains("kernel"));
+    }
+
+    // -----------------------------------------------------------------------
+    // R4 byte-compare regression tests (specs/tracking/tint-integration-
+    // refactor.md, F4/F6). Each `generate_msl`/`generate_spirv` call re-lowers
+    // the Tint program to IR from scratch (`lower_ir` in tint_shim.cpp) --
+    // this Tint revision has no whole-module IR clone API, and Dawn itself
+    // (`ShaderModuleMTL.mm`, `ShaderModuleVk.cpp`, `ComputePipelineWGPU.cpp`,
+    // ...) also re-runs `ProgramToLoweredIR` fresh at every shader-stage
+    // compile rather than caching+cloning IR, so this shim intentionally
+    // matches that behavior instead of inventing an unproven module-clone.
+    // These tests pin the invariant that repeated codegen calls on the same
+    // `Program`, and codegen on a freshly re-parsed `Program` for identical
+    // WGSL, produce byte-identical output -- the property the (deferred) IR
+    // cache would have had to preserve, and the property the direct
+    // `resolved_workgroup_size` query below relies on when it supersedes the
+    // deleted SPIR-V-generate-and-parse round trip.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn generate_msl_and_spirv_are_byte_identical_across_calls_runtime_array() {
+        let wgsl = r#"
+struct Data {
+  values: array<u32>,
+}
+
+@group(1) @binding(2) var<storage, read_write> data: Data;
+
+@compute @workgroup_size(1)
+fn cs() {
+  if (arrayLength(&data.values) > 0u) {
+    data.values[0] = arrayLength(&data.values);
+  }
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let fresh = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+
+        let generate_msl = |program: &Program| {
+            program
+                .generate_msl(
+                    "cs",
+                    &Bindings::default(),
+                    &[],
+                    9,
+                    true,
+                    false,
+                    &[],
+                    0xFFFF_FFFF,
+                )
+                .unwrap()
+        };
+        let first = generate_msl(&program);
+        let second = generate_msl(&program);
+        assert_eq!(first.source, second.source);
+        assert_eq!(first.entry_point, second.entry_point);
+        assert_eq!(
+            first.needs_storage_buffer_sizes,
+            second.needs_storage_buffer_sizes
+        );
+        assert_eq!(first.buffer_size_bindings, second.buffer_size_bindings);
+        assert_eq!(first.workgroup_allocations, second.workgroup_allocations);
+        assert_eq!(first.frag_depth_clamp_slot, second.frag_depth_clamp_slot);
+        let third = generate_msl(&fresh);
+        assert_eq!(first.source, third.source);
+        assert_eq!(first.entry_point, third.entry_point);
+        assert_eq!(first.buffer_size_bindings, third.buffer_size_bindings);
+        assert_eq!(first.workgroup_allocations, third.workgroup_allocations);
+
+        let generate_spirv = |program: &Program| {
+            program
+                .generate_spirv("cs", &Bindings::default(), &[], true, false, 0, false, None)
+                .unwrap()
+        };
+        let spirv_first = generate_spirv(&program);
+        let spirv_second = generate_spirv(&program);
+        assert_eq!(spirv_first, spirv_second);
+        let spirv_third = generate_spirv(&fresh);
+        assert_eq!(spirv_first, spirv_third);
+    }
+
+    #[test]
+    fn generate_msl_and_spirv_are_byte_identical_across_calls_render_vertex_pulling() {
+        let wgsl = r#"
+struct VIn {
+  @location(0) p: vec4f,
+}
+
+struct VsOut {
+  @builtin(position) pos: vec4f,
+  @location(0) uv: vec2f,
+}
+
+@vertex
+fn vs(i: VIn) -> VsOut {
+  var out: VsOut;
+  out.pos = i.p;
+  out.uv = i.p.xy;
+  return out;
+}
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4f {
+  return vec4f(in.uv, 0.0, 1.0);
+}
+"#;
+        let vertex_buffers = [VertexBuffer {
+            slot: 0,
+            metal_index: 0,
+            array_stride: 16,
+            step_mode: VertexStepMode::Vertex,
+            attributes: vec![VertexAttribute {
+                format: VertexFormat::Float32x4,
+                offset: 0,
+                shader_location: 0,
+            }],
+        }];
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let fresh = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+
+        let generate_vs_msl = |program: &Program| {
+            program
+                .generate_msl(
+                    "vs",
+                    &Bindings::default(),
+                    &[],
+                    1,
+                    true,
+                    false,
+                    &vertex_buffers,
+                    0xFFFF_FFFF,
+                )
+                .unwrap()
+        };
+        let first = generate_vs_msl(&program);
+        let second = generate_vs_msl(&program);
+        assert_eq!(first.source, second.source);
+        assert_eq!(first.buffer_size_bindings, second.buffer_size_bindings);
+        assert!(!first.source.contains("stage_in"), "MSL:\n{}", first.source);
+        let third = generate_vs_msl(&fresh);
+        assert_eq!(first.source, third.source);
+
+        for ep in ["vs", "fs"] {
+            let generate_spirv = |program: &Program| {
+                program
+                    .generate_spirv(ep, &Bindings::default(), &[], true, false, 0, false, None)
+                    .unwrap()
+            };
+            let a = generate_spirv(&program);
+            let b = generate_spirv(&program);
+            assert_eq!(a, b);
+            let c = generate_spirv(&fresh);
+            assert_eq!(a, c);
+        }
+    }
+
+    #[test]
+    fn generate_msl_is_byte_identical_across_calls_with_override_driven_workgroup_size() {
+        let wgsl = r#"
+override x: u32 = 4;
+
+@compute @workgroup_size(x, 2, 1)
+fn cs() {}
+"#;
+        let overrides = [OverrideValue {
+            name: "x".into(),
+            value: 8.0,
+        }];
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let fresh = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+
+        let generate = |program: &Program| {
+            program
+                .generate_msl(
+                    "cs",
+                    &Bindings::default(),
+                    &overrides,
+                    0,
+                    true,
+                    false,
+                    &[],
+                    0xFFFF_FFFF,
+                )
+                .unwrap()
+        };
+        let first = generate(&program);
+        let second = generate(&program);
+        assert_eq!(first.source, second.source);
+        // x=8, y=2, z=1 (override x=8 applied) -> total threads = 16; MSL
+        // emits only the total, not the individual dimensions.
+        assert!(
+            first
+                .source
+                .contains("max_total_threads_per_threadgroup(16)"),
+            "MSL:\n{}",
+            first.source
+        );
+        let third = generate(&fresh);
+        assert_eq!(first.source, third.source);
+    }
+
+    #[test]
+    fn generate_msl_and_spirv_are_byte_identical_across_calls_f16() {
+        let wgsl = r#"
+enable f16;
+@compute @workgroup_size(1)
+fn cs() {
+  let x: f16 = 1.0h;
+  _ = x;
+}
+"#;
+        let program = Program::parse(wgsl, true, false, false, false, false, &[]).unwrap();
+        let fresh = Program::parse(wgsl, true, false, false, false, false, &[]).unwrap();
+
+        let generate_msl = |program: &Program| {
+            program
+                .generate_msl(
+                    "cs",
+                    &Bindings::default(),
+                    &[],
+                    0,
+                    true,
+                    false,
+                    &[],
+                    0xFFFF_FFFF,
+                )
+                .unwrap()
+        };
+        let first = generate_msl(&program);
+        let second = generate_msl(&program);
+        assert_eq!(first.source, second.source);
+        let third = generate_msl(&fresh);
+        assert_eq!(first.source, third.source);
+
+        let generate_spirv = |program: &Program| {
+            program
+                .generate_spirv("cs", &Bindings::default(), &[], true, false, 0, false, None)
+                .unwrap()
+        };
+        let spirv_first = generate_spirv(&program);
+        let spirv_second = generate_spirv(&program);
+        assert_eq!(spirv_first, spirv_second);
+        let spirv_third = generate_spirv(&fresh);
+        assert_eq!(spirv_first, spirv_third);
+    }
+
+    // -----------------------------------------------------------------------
+    // `resolved_workgroup_size` (F6): direct IR query replacing the deleted
+    // SPIR-V-generate-and-parse round trip (`spirv_local_size` in
+    // yawgpu-core's `shader_tint.rs`). Expected [x, y, z] values below are
+    // reasoned directly from each WGSL source (or its override input), the
+    // same values the deleted SPIR-V `OpExecutionMode LocalSize` round trip
+    // used to produce.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolved_workgroup_size_matches_literal_reflection() {
+        let program = Program::parse(
+            "@compute @workgroup_size(8, 4, 1) fn cs() {}",
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            program.resolved_workgroup_size("cs", &[]).unwrap(),
+            [8, 4, 1]
+        );
+    }
+
+    #[test]
+    fn resolved_workgroup_size_resolves_named_override_driven_size() {
+        let program = Program::parse(
+            r#"
+override x: u32 = 4;
+
+@compute @workgroup_size(x, 2, 1)
+fn cs() {}
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        // No override supplied: falls back to the override's default (x=4).
+        assert_eq!(
+            program.resolved_workgroup_size("cs", &[]).unwrap(),
+            [4, 2, 1]
+        );
+        // Override supplied by WGSL identifier name.
+        assert_eq!(
+            program
+                .resolved_workgroup_size(
+                    "cs",
+                    &[OverrideValue {
+                        name: "x".into(),
+                        value: 8.0,
+                    }]
+                )
+                .unwrap(),
+            [8, 2, 1]
+        );
+    }
+
+    #[test]
+    fn resolved_workgroup_size_resolves_id_driven_override() {
+        let program = Program::parse(
+            r#"
+@id(3) override x: u32 = 4;
+
+@compute @workgroup_size(x)
+fn cs() {}
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        // Override supplied by numeric @id, y/z default to 1.
+        assert_eq!(
+            program
+                .resolved_workgroup_size(
+                    "cs",
+                    &[OverrideValue {
+                        name: "3".into(),
+                        value: 16.0,
+                    }]
+                )
+                .unwrap(),
+            [16, 1, 1]
+        );
+    }
+
+    #[test]
+    fn resolved_workgroup_size_errors_on_unknown_entry_point() {
+        let program = Program::parse(
+            "@compute @workgroup_size(1) fn cs() {}",
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let err = program.resolved_workgroup_size("missing", &[]).unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn resolved_workgroup_size_errors_on_unknown_override_name() {
+        let program = Program::parse(
+            r#"
+override x: u32 = 4;
+
+@compute @workgroup_size(x)
+fn cs() {}
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let err = program
+            .resolved_workgroup_size(
+                "cs",
+                &[OverrideValue {
+                    name: "does_not_exist".into(),
+                    value: 1.0,
+                }],
+            )
+            .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn resolved_workgroup_size_is_entry_scoped_for_override_const_eval_errors() {
+        // `cx`'s initializer const-evals to 1u / 0u once `cu`'s default is
+        // substituted. Only the entry point that references `cx` may fail;
+        // the sibling must resolve, because substitution runs after
+        // SingleEntryPoint strips unreferenced module-scope declarations --
+        // the same scoping the generate paths apply (writer Raise() runs
+        // SingleEntryPoint, then SubstituteOverrides).
+        let program = Program::parse(
+            r#"
+override cu: u32 = 0u;
+override cx: u32 = 1u / cu;
+
+@compute @workgroup_size(1)
+fn main_pipe_error() {
+  _ = cx;
+}
+
+@compute @workgroup_size(8, 4, 1)
+fn main_ok() {}
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let err = program
+            .resolved_workgroup_size("main_pipe_error", &[])
+            .unwrap_err();
+        assert!(!err.is_empty());
+        assert_eq!(
+            program.resolved_workgroup_size("main_ok", &[]).unwrap(),
+            [8, 4, 1]
+        );
+    }
+
+    #[test]
+    fn resolved_workgroup_size_errors_on_non_compute_entry_point() {
+        let program = Program::parse(
+            "@fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let err = program.resolved_workgroup_size("fs", &[]).unwrap_err();
+        assert!(!err.is_empty());
     }
 }

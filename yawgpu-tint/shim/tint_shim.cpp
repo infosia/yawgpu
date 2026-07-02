@@ -23,6 +23,7 @@
 #include "src/tint/lang/core/constant/value.h"
 #include "src/tint/lang/core/ir/reflection.h"
 #include "src/tint/lang/core/ir/referenced_module_vars.h"
+#include "src/tint/lang/core/ir/transform/single_entry_point.h"
 #include "src/tint/lang/core/ir/transform/substitute_overrides.h"
 #include "src/tint/lang/core/type/pointer.h"
 #include "src/tint/lang/glsl/writer/helpers/generate_bindings.h"
@@ -1789,6 +1790,78 @@ bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram* program,
         }
         auto wi = tint::core::ir::GetWorkgroupInfo(ir.Get());
         *out = (wi == tint::Success) ? wi->storage_size : 0;
+        return true;
+    } catch (const std::exception& e) {
+        set_error_string(err, e.what());
+        return false;
+    } catch (...) {
+        set_error_string(err, "unknown Tint exception");
+        return false;
+    }
+}
+
+bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram* program,
+                                        const char* ep,
+                                        const YawgpuTintOverrideValue* ov,
+                                        size_t n_ov,
+                                        uint32_t out[3],
+                                        char** err) {
+    if (err != nullptr) {
+        *err = nullptr;
+    }
+    if (out != nullptr) {
+        out[0] = out[1] = out[2] = 0;
+    }
+    try {
+        if (program == nullptr || ep == nullptr || out == nullptr) {
+            set_error_string(err, "invalid NULL argument");
+            return false;
+        }
+        std::string entry_point(ep);
+        auto ir = lower_ir(program);
+        if (ir != tint::Success) {
+            set_error(err, ir.Failure());
+            return false;
+        }
+        // Scope the module to `ep` BEFORE substituting overrides, exactly like
+        // the writers' raise passes do (msl/spirv/glsl Raise() runs
+        // core::ir::transform::SingleEntryPoint, then SubstituteOverrides).
+        // SingleEntryPoint deletes module-scope declarations the entry point
+        // does not reference, so an override with an erroring const
+        // initializer that only a *sibling* entry point uses must not fail
+        // this query -- while the entry point that does use it must surface
+        // the same const-eval error the generate path would (WebGPU
+        // pipeline-creation validation error). Also errors on an unknown
+        // entry point.
+        auto single = tint::core::ir::transform::SingleEntryPoint(ir.Get(), entry_point);
+        if (single != tint::Success) {
+            set_error(err, single.Failure());
+            return false;
+        }
+        auto cfg = make_override_config(program, ov, n_ov);
+        if (cfg != tint::Success) {
+            set_error(err, cfg.Failure());
+            return false;
+        }
+        auto sub = tint::core::ir::transform::SubstituteOverrides(ir.Get(), cfg.Get());
+        if (sub != tint::Success) {
+            set_error(err, sub.Failure());
+            return false;
+        }
+        const auto* ep_func = find_ir_entry_point(ir.Get(), entry_point);
+        if (ep_func == nullptr) {
+            set_error_string(err, "unknown entry point '" + entry_point + "'");
+            return false;
+        }
+        auto wg_size = ep_func->WorkgroupSizeAsConst();
+        if (!wg_size.has_value()) {
+            set_error_string(err, "entry point '" + entry_point +
+                                       "' has no resolvable workgroup size");
+            return false;
+        }
+        out[0] = (*wg_size)[0];
+        out[1] = (*wg_size)[1];
+        out[2] = (*wg_size)[2];
         return true;
     } catch (const std::exception& e) {
         set_error_string(err, e.what());

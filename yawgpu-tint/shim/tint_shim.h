@@ -308,6 +308,27 @@ YAWGPU_TINT_API bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram*
                                         uint64_t* out,
                                         char** err);
 
+/* Returns `ep`'s override-resolved @workgroup_size as out[0..2] = (x, y, z),
+   without generating a full SPIR-V/MSL module (see F6 in
+   specs/tracking/tint-integration-refactor.md -- this replaces generating
+   SPIR-V and grepping OpExecutionMode LocalSize back out of it). Lowers the
+   program to IR, scopes it to `ep` (SingleEntryPoint, exactly like the
+   writers' raise passes), applies SubstituteOverrides with `ov`, then reads
+   the resolved constant workgroup size off the IR entry-point function.
+   Because substitution runs entry-scoped, an override with an erroring const
+   initializer fails this call only when `ep` actually references it -- the
+   same visibility the generate paths have. Returns false + sets *err if `ep`
+   does not name an entry point in the module, an override value is
+   invalid/unknown, override substitution const-eval fails for `ep`, or the
+   entry point's workgroup size does not resolve to constants (e.g. `ep` is
+   not a compute entry point). */
+YAWGPU_TINT_API bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram*,
+                                          const char* ep,
+                                          const YawgpuTintOverrideValue* ov,
+                                          size_t n_ov,
+                                          uint32_t out[3],
+                                          char** err);
+
 YAWGPU_TINT_API bool yawgpu_tint_generate_glsl(const YawgpuTintProgram*,
                                const char* ep,
                                const YawgpuTintBindings*,
