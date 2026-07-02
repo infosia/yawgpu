@@ -611,6 +611,8 @@ static_assert(offsetof(YawgpuTintMslOutput, uses_immediates) == 64,
               "YawgpuTintMslOutput layout changed");
 static_assert(offsetof(YawgpuTintMslOutput, immediate_slot) == 68,
               "YawgpuTintMslOutput layout changed");
+static_assert(tint::inspector::kImmediateSlotCount <= 64,
+              "Immediate block bitmask no longer fits in uint64_t");
 
 // Reflection results for one entry point, cached after the first
 // yawgpu_tint_resource_binding_count/_get call for that entry point (see F5 in
@@ -648,6 +650,7 @@ struct YawgpuTintProgram {
     // also closes that gap for the resource-binding path.
     mutable std::mutex reflection_mutex;
     mutable std::unordered_map<std::string, CachedEntryReflection> resource_bindings_by_ep;
+    mutable std::unordered_map<std::string, uint64_t> immediate_used_slots_by_ep;
 };
 
 namespace {
@@ -1304,7 +1307,7 @@ void fill_override(const tint::Program& program,
 // lock is also what serializes concurrent Inspector/sem-walk construction
 // for this program (F3).
 const CachedEntryReflection& get_or_build_entry_reflection_locked(const YawgpuTintProgram* program,
-                                                                   const std::string& ep) {
+                                                                    const std::string& ep) {
     auto it = program->resource_bindings_by_ep.find(ep);
     if (it != program->resource_bindings_by_ep.end()) {
         return it->second;
@@ -1315,6 +1318,36 @@ const CachedEntryReflection& get_or_build_entry_reflection_locked(const YawgpuTi
     entry.texture_sample_usages = texture_sample_usages(program->program, ep);
     auto result = program->resource_bindings_by_ep.emplace(ep, std::move(entry));
     return result.first->second;
+}
+
+bool get_or_build_immediate_used_slots_locked(const YawgpuTintProgram* program,
+                                              const std::string& ep,
+                                              uint64_t* out,
+                                              char** err) {
+    auto it = program->immediate_used_slots_by_ep.find(ep);
+    if (it != program->immediate_used_slots_by_ep.end()) {
+        *out = it->second;
+        return true;
+    }
+
+    tint::inspector::Inspector inspector(program->program);
+    auto info = inspector.GetImmediateBlockInfo(ep);
+    if (inspector.has_error()) {
+        set_error_string(err, inspector.error());
+        *out = 0;
+        return false;
+    }
+
+    uint64_t bits = 0;
+    for (size_t i = 0; i < info.size(); ++i) {
+        if (info[i]) {
+            bits |= uint64_t{1} << i;
+        }
+    }
+
+    program->immediate_used_slots_by_ep.emplace(ep, bits);
+    *out = bits;
+    return true;
 }
 
 // Frees whichever of `out`'s heap-allocated fields are still set when this
@@ -1524,6 +1557,30 @@ bool yawgpu_tint_immediate_data_size(const YawgpuTintProgram* program,
     }
     *out = entry->immediate_data_size;
     return true;
+}
+
+bool yawgpu_tint_immediate_data_used_slots(const YawgpuTintProgram* program,
+                                           const char* ep,
+                                           uint64_t* out,
+                                           char** err) {
+    if (err != nullptr) {
+        *err = nullptr;
+    }
+    if (out != nullptr) {
+        *out = 0;
+    }
+    if (program == nullptr || ep == nullptr || out == nullptr) {
+        set_error_string(err, "invalid NULL argument");
+        return false;
+    }
+    const auto* entry = find_entry_point(program, ep);
+    if (entry == nullptr) {
+        set_error_string(err, "entry point '" + std::string(ep) + "' not found");
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(program->reflection_mutex);
+    return get_or_build_immediate_used_slots_locked(program, ep, out, err);
 }
 
 size_t yawgpu_tint_diagnostic_count(const YawgpuTintProgram* program) {

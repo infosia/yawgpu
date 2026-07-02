@@ -140,6 +140,15 @@ YAWGPU_TINT_API bool yawgpu_tint_immediate_data_size(const YawgpuTintProgram*,
                                         const char* ep,
                                         uint32_t* out,
                                         char** err);
+/* Returns `ep`'s required immediate-data slots as a bitmask where bit N
+   corresponds to bytes [4*N, 4*N+4). This is Tint's
+   Inspector::GetImmediateBlockInfo result converted to a u64, and excludes
+   padding slots that the shader cannot read. On failure uses the same error
+   rules as yawgpu_tint_immediate_data_size. */
+YAWGPU_TINT_API bool yawgpu_tint_immediate_data_used_slots(const YawgpuTintProgram*,
+                                        const char* ep,
+                                        uint64_t* out,
+                                        char** err);
 
 /* Program diagnostics collected during successful parsing.
  * severity: 0=note/info, 1=warning. Error diagnostics fail program creation. */

@@ -17,6 +17,7 @@ use crate::device::FeatureSet;
 use crate::format::*;
 use crate::frontend;
 use crate::limits::*;
+use crate::pass::ImmediateWrittenMask;
 use crate::pipeline_id::next_pipeline_id;
 use crate::pipeline_layout::*;
 use crate::sampler::*;
@@ -500,6 +501,7 @@ pub(crate) struct RenderPipelineInner {
     pub(crate) vertex_buffer_bindings: Vec<MetalVertexBufferBinding>,
     pub(crate) hal: Option<HalRenderPipeline>,
     pub(crate) bind_group_layouts: Vec<Arc<BindGroupLayout>>,
+    pub(crate) immediate_required_mask: ImmediateWrittenMask,
     pub(crate) framebuffer_fetch_color_slots: Vec<u32>,
     #[cfg(feature = "tiled")]
     #[allow(dead_code)]
@@ -561,7 +563,7 @@ impl RenderPipeline {
             )
             .ok()
         };
-        let (vertex_entry_name, fragment_entry_name, bind_group_layouts) =
+        let (vertex_entry_name, fragment_entry_name, bind_group_layouts, immediate_required_mask) =
             resolved.unwrap_or_else(|| {
                 (
                     descriptor
@@ -575,6 +577,7 @@ impl RenderPipeline {
                         .as_ref()
                         .and_then(|fragment| fragment.shader.entry_point.clone()),
                     Vec::new(),
+                    0,
                 )
             });
         let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
@@ -613,6 +616,7 @@ impl RenderPipeline {
                     vertex_buffer_bindings,
                     hal,
                     bind_group_layouts,
+                    immediate_required_mask,
                     framebuffer_fetch_color_slots,
                     #[cfg(feature = "tiled")]
                     subpass_compatibility: None,
@@ -655,7 +659,7 @@ impl RenderPipeline {
             )
             .ok()
         };
-        let (vertex_entry_name, fragment_entry_name, bind_group_layouts) =
+        let (vertex_entry_name, fragment_entry_name, bind_group_layouts, immediate_required_mask) =
             resolved.unwrap_or_else(|| {
                 (
                     descriptor
@@ -671,6 +675,7 @@ impl RenderPipeline {
                         .as_ref()
                         .and_then(|fragment| fragment.shader.entry_point.clone()),
                     Vec::new(),
+                    0,
                 )
             });
         let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
@@ -726,6 +731,7 @@ impl RenderPipeline {
                     vertex_buffer_bindings,
                     hal,
                     bind_group_layouts,
+                    immediate_required_mask,
                     framebuffer_fetch_color_slots,
                     subpass_compatibility: Some(compatibility),
                     is_error,
@@ -757,6 +763,11 @@ impl RenderPipeline {
     #[must_use]
     pub fn bind_group_layouts(&self) -> &[Arc<BindGroupLayout>] {
         &self.inner.bind_group_layouts
+    }
+
+    /// Returns the required user-immediate 4-byte words for draw validation.
+    pub(crate) fn immediate_required_mask(&self) -> ImmediateWrittenMask {
+        self.inner.immediate_required_mask
     }
 
     /// Returns the HAL.
@@ -873,7 +884,7 @@ pub(crate) fn validate_subpass_render_pipeline_descriptor(
         .subpasses
         .get(descriptor.subpass_index as usize)
         .map(|subpass| subpass.color_attachment_indices.as_slice());
-    let (vertex_entry, fragment_entry, _) = match resolve_render_pipeline_descriptor_for_source(
+    let (vertex_entry, fragment_entry, _, _) = match resolve_render_pipeline_descriptor_for_source(
         &descriptor.base,
         limits,
         features,
@@ -925,7 +936,12 @@ fn validate_subpass_pipeline_has_no_immediates(
 }
 
 /// Alias for resolved render pipeline parts.
-pub(crate) type ResolvedRenderPipelineParts = (String, Option<String>, Vec<Arc<BindGroupLayout>>);
+pub(crate) type ResolvedRenderPipelineParts = (
+    String,
+    Option<String>,
+    Vec<Arc<BindGroupLayout>>,
+    ImmediateWrittenMask,
+);
 
 fn resolve_render_pipeline_descriptor_for_source(
     descriptor: &RenderPipelineDescriptor,
@@ -2340,6 +2356,10 @@ pub(crate) fn resolve_render_pipeline_descriptor(
         &vertex_entry,
         immediate_size_budget,
     )?;
+    let vertex_module = descriptor.vertex.shader.module.reflected().ok_or_else(|| {
+        "render pipeline shader stage requires a reflected shader module".to_owned()
+    })?;
+    let mut immediate_required_mask = stage_immediate_required_mask(vertex_module, &vertex_entry)?;
     if let (Some(fragment), Some(fragment_entry)) =
         (&descriptor.fragment, fragment_entry.as_deref())
     {
@@ -2348,6 +2368,10 @@ pub(crate) fn resolve_render_pipeline_descriptor(
             fragment_entry,
             immediate_size_budget,
         )?;
+        let fragment_module = fragment.shader.module.reflected().ok_or_else(|| {
+            "render pipeline shader stage requires a reflected shader module".to_owned()
+        })?;
+        immediate_required_mask |= stage_immediate_required_mask(fragment_module, fragment_entry)?;
     }
     validate_multisample_state(descriptor, fragment_entry.as_deref())?;
     let bind_group_layouts = effective_render_bind_group_layouts(
@@ -2364,7 +2388,12 @@ pub(crate) fn resolve_render_pipeline_descriptor(
         limits,
     )?;
 
-    Ok((vertex_entry, fragment_entry, bind_group_layouts))
+    Ok((
+        vertex_entry,
+        fragment_entry,
+        bind_group_layouts,
+        immediate_required_mask,
+    ))
 }
 
 /// Records resolve into the command stream for raw shader passthrough render.
@@ -2438,6 +2467,7 @@ pub(crate) fn resolve_shader_passthrough_render_pipeline_descriptor(
         vertex_entry.to_owned(),
         fragment_entry,
         layout.bind_group_layouts().to_vec(),
+        0,
     ))
 }
 

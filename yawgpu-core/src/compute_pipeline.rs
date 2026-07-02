@@ -12,6 +12,7 @@ use crate::device::FeatureSet;
 use crate::format::*;
 use crate::frontend;
 use crate::limits::*;
+use crate::pass::ImmediateWrittenMask;
 use crate::pipeline_id::next_pipeline_id;
 use crate::pipeline_layout::*;
 use crate::shader::*;
@@ -69,6 +70,7 @@ pub(crate) struct ComputePipelineInner {
     pub(crate) metal_bindings: Vec<MetalBufferBinding>,
     pub(crate) hal: Option<HalComputePipeline>,
     pub(crate) bind_group_layouts: Vec<Arc<BindGroupLayout>>,
+    pub(crate) immediate_required_mask: ImmediateWrittenMask,
     pub(crate) is_error: bool,
 }
 
@@ -165,14 +167,16 @@ impl ComputePipeline {
             )
             .ok()
         };
-        let (entry_name, bindings, workgroup, bind_group_layouts) = resolved.unwrap_or_else(|| {
-            (
-                descriptor.entry_point.clone().unwrap_or_default(),
-                Vec::new(),
-                None,
-                Vec::new(),
-            )
-        });
+        let (entry_name, bindings, workgroup, bind_group_layouts, immediate_required_mask) =
+            resolved.unwrap_or_else(|| {
+                (
+                    descriptor.entry_point.clone().unwrap_or_default(),
+                    Vec::new(),
+                    None,
+                    Vec::new(),
+                    0,
+                )
+            });
         let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
         // Effective user-immediate budget for HAL codegen. Same shared
         // resolver the validation path wraps
@@ -211,6 +215,7 @@ impl ComputePipeline {
                     metal_bindings,
                     hal,
                     bind_group_layouts,
+                    immediate_required_mask,
                     is_error,
                 }),
             },
@@ -236,6 +241,11 @@ impl ComputePipeline {
         &self.inner.bind_group_layouts
     }
 
+    /// Returns the required user-immediate 4-byte words for dispatch validation.
+    pub(crate) fn immediate_required_mask(&self) -> ImmediateWrittenMask {
+        self.inner.immediate_required_mask
+    }
+
     /// Returns the HAL.
     pub(crate) fn hal(&self) -> Option<HalComputePipeline> {
         self.inner.hal.clone()
@@ -253,6 +263,7 @@ pub(crate) type ResolvedPipelineParts = (
     Vec<frontend::ReflectedResourceBinding>,
     Option<ResolvedComputeWorkgroup>,
     Vec<Arc<BindGroupLayout>>,
+    ImmediateWrittenMask,
 );
 
 fn resolve_compute_pipeline_descriptor_for_source(
@@ -916,6 +927,7 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
     let immediate_size_budget =
         resolve_compute_pipeline_immediate_size(&descriptor.layout, module, &entry_name, limits)?;
     validate_stage_immediate_size(module, &entry_name, immediate_size_budget)?;
+    let immediate_required_mask = stage_immediate_required_mask(module, &entry_name)?;
     let bind_group_layouts = effective_compute_bind_group_layouts(
         &descriptor.layout,
         &bindings,
@@ -923,7 +935,13 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
         features,
         pipeline_id,
     )?;
-    Ok((entry_name, bindings, Some(workgroup), bind_group_layouts))
+    Ok((
+        entry_name,
+        bindings,
+        Some(workgroup),
+        bind_group_layouts,
+        immediate_required_mask,
+    ))
 }
 
 /// Records resolve into the command stream for raw MSL passthrough compute.
@@ -976,6 +994,7 @@ pub(crate) fn resolve_msl_passthrough_compute_pipeline_descriptor(
             storage_size: 0,
         }),
         layout.bind_group_layouts().to_vec(),
+        0,
     ))
 }
 
@@ -1013,6 +1032,7 @@ pub(crate) fn resolve_spirv_passthrough_compute_pipeline_descriptor(
             storage_size: 0,
         }),
         layout.bind_group_layouts().to_vec(),
+        0,
     ))
 }
 
@@ -1268,6 +1288,20 @@ pub(crate) fn validate_stage_immediate_size(
         );
     }
     Ok(())
+}
+
+/// Returns the required user-immediate words for a single entry point.
+///
+/// The mask comes from Tint's `Inspector::GetImmediateBlockInfo`: each set bit
+/// is one 4-byte word that the entry point may read. Padding words are not set.
+pub(crate) fn stage_immediate_required_mask(
+    module: &frontend::ReflectedModule,
+    entry_name: &str,
+) -> Result<ImmediateWrittenMask, String> {
+    let mask = module.immediate_data_used_slots(entry_name)?;
+    u16::try_from(mask).map_err(|_| {
+        "shader entry point immediate data used slots exceed the implementation mask".to_owned()
+    })
 }
 
 /// Validates compute pipeline layout and returns a descriptive error on failure.

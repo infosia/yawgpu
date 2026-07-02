@@ -191,7 +191,11 @@ pub(crate) fn validate_compute_dispatch_state(
         return Err("compute dispatch requires a valid compute pipeline".to_owned());
     }
     validate_pipeline_bind_groups(pipeline.bind_group_layouts(), &state.bind_groups, limits)?;
-    validate_usage_scope(pipeline.bind_group_layouts(), &state.bind_groups, None)
+    validate_usage_scope(pipeline.bind_group_layouts(), &state.bind_groups, None)?;
+    validate_required_immediate_data(
+        pipeline.immediate_required_mask(),
+        state.immediate_data_written,
+    )
 }
 
 #[cfg(test)]
@@ -202,10 +206,21 @@ mod tests {
     use crate::test_helpers::*;
     use crate::{
         BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindGroupResource,
-        BindingLayoutKind, BufferBindingType, ComputePipelineLayout, Extent3d,
-        PipelineLayoutDescriptor, ShaderModuleSource, StorageTextureAccess, TextureDescriptor,
-        TextureDimension, TextureUsage, TextureViewDescriptor, TextureViewDimension,
+        BindingLayoutKind, BufferBindingType, ComputePipeline, ComputePipelineLayout, Device,
+        Extent3d, PipelineLayoutDescriptor, ShaderModuleSource, StorageTextureAccess,
+        TextureDescriptor, TextureDimension, TextureUsage, TextureViewDescriptor,
+        TextureViewDimension,
     };
+
+    fn immediate_compute_pipeline(device: &Device, wgsl: &str) -> Arc<ComputePipeline> {
+        let module =
+            Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(wgsl.to_owned())));
+        assert!(!module.is_error(), "shader module must compile");
+        let pipeline =
+            Arc::new(device.create_compute_pipeline(compute_pipeline_descriptor(module)));
+        assert!(!pipeline.is_error(), "compute pipeline must be valid");
+        pipeline
+    }
 
     #[test]
     fn compute_pass_encoder_lifecycle_and_debug_markers() {
@@ -383,6 +398,158 @@ mod tests {
             range_out_of_limit(),
             Some("immediates offset plus size exceeds the device limit".to_owned())
         );
+    }
+
+    #[test]
+    fn compute_pass_dispatch_requires_all_required_immediate_slots() {
+        let device = noop_device();
+        let pipeline = immediate_compute_pipeline(
+            &device,
+            r#"
+requires immediate_address_space;
+var<immediate> params : vec4u;
+
+@compute @workgroup_size(1)
+fn cs() {
+  _ = params;
+}
+"#,
+        );
+
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.set_immediates(0, &[1, 2, 3, 4], device.limits()), None);
+        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("Required immediate data at offset 4 was not set.".to_owned())
+        );
+    }
+
+    #[test]
+    fn compute_pass_dispatch_accepts_full_split_and_overprovisioned_immediates() {
+        let device = noop_device();
+        let vec4_pipeline = immediate_compute_pipeline(
+            &device,
+            r#"
+requires immediate_address_space;
+var<immediate> params : vec4u;
+
+@compute @workgroup_size(1)
+fn cs() {
+  _ = params;
+}
+"#,
+        );
+        let scalar_pipeline = immediate_compute_pipeline(
+            &device,
+            r#"
+requires immediate_address_space;
+var<immediate> param : u32;
+
+@compute @workgroup_size(1)
+fn cs() {
+  _ = param;
+}
+"#,
+        );
+
+        let dispatch_with_writes = |pipeline: Arc<ComputePipeline>, writes: Vec<(u32, Vec<u8>)>| {
+            let encoder = device.create_command_encoder();
+            let (pass, begin_error) = encoder.begin_compute_pass();
+            assert_eq!(begin_error, None);
+            assert_eq!(pass.set_pipeline(pipeline), None);
+            for (offset, data) in writes {
+                assert_eq!(pass.set_immediates(offset, &data, device.limits()), None);
+            }
+            assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+            assert_eq!(pass.end(), None);
+            encoder.finish()
+        };
+
+        let (command_buffer, error) =
+            dispatch_with_writes(Arc::clone(&vec4_pipeline), vec![(0, vec![1; 16])]);
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+
+        let (command_buffer, error) = dispatch_with_writes(
+            Arc::clone(&vec4_pipeline),
+            vec![(0, vec![1; 8]), (8, vec![2; 8])],
+        );
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+
+        let (command_buffer, error) = dispatch_with_writes(scalar_pipeline, vec![(0, vec![3; 16])]);
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+    }
+
+    #[test]
+    fn compute_pass_dispatch_does_not_require_declared_but_unused_immediate() {
+        let device = noop_device();
+        let pipeline = immediate_compute_pipeline(
+            &device,
+            r#"
+requires immediate_address_space;
+var<immediate> unused_param : vec4u;
+
+@compute @workgroup_size(1)
+fn cs() {}
+"#,
+        );
+
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+    }
+
+    #[test]
+    fn compute_pass_dispatch_does_not_require_immediate_padding_slots() {
+        let device = noop_device();
+        let pipeline = immediate_compute_pipeline(
+            &device,
+            r#"
+requires immediate_address_space;
+
+struct Params {
+  a : u32,
+  b : vec3<f32>,
+}
+
+var<immediate> params : Params;
+
+@compute @workgroup_size(1)
+fn cs() {
+  _ = params;
+}
+"#,
+        );
+
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.set_immediates(0, &[1; 4], device.limits()), None);
+        assert_eq!(pass.set_immediates(16, &[2; 12], device.limits()), None);
+        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
     }
 
     /// Block 94 S1: a `size == 0` write is validated (offset alignment/bounds

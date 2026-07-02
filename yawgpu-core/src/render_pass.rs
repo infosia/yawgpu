@@ -693,24 +693,22 @@ impl RenderPassEncoder {
                 // bundle replay, both call `immediates.SetImmediates`).
                 // Replay therefore OVERLAYS only the byte ranges the bundle
                 // explicitly wrote onto the outer scratch: a bundle with no
-                // `SetImmediates` leaves it fully intact, and the bundle's
-                // written ranges stay visible to draws recorded in the outer
-                // pass *after* `ExecuteBundles` returns -- unlike `pipeline`
-                // / `bind_groups` / `vertex_buffers`, whose *validation*
-                // requirement Dawn does reset on `ExecuteBundles`
+                // `SetImmediates` leaves the byte content intact, and bundle
+                // writes remain in that scratch for later HAL submission.
+                // Validation state is separate: `ExecuteBundles` invalidates
+                // the outer pass's "which immediate words were set" mask
+                // below, along with pipeline / bind group / vertex state
                 // (`mCommandBufferState = CommandBufferStateTracker{}`,
-                // `dawn/native/RenderPassEncoder.cpp:365`) and which
-                // `clear_render_state()` below mirrors for this crate's
-                // encoder-state bookkeeping. Multiple bundles chain in list
-                // order, matching Dawn's linear replay.
+                // `dawn/native/RenderPassEncoder.cpp:365`). Multiple bundles
+                // chain in list order, matching Dawn's linear replay.
                 overlay_written_immediates(
                     &mut state.immediate_data,
                     bundle.final_immediate_data(),
                     bundle.final_immediate_data_written(),
                 );
-                state.immediate_data_written |= bundle.final_immediate_data_written();
             }
             state.clear_render_state();
+            state.immediate_data_written = 0;
             Ok(())
         })
     }
@@ -754,15 +752,43 @@ mod tests {
     use crate::{
         BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
         BindGroupResource, BindingLayoutKind, ColorTargetState, CompareFunction, Device, Extent3d,
-        MultisampleState, PrimitiveState, PrimitiveTopology, RenderPipelineDescriptor,
-        RenderPipelineFragmentState, RenderPipelineLayout, RenderPipelineShaderStage,
-        RenderPipelineVertexState, ShaderModuleSource, StorageTextureAccess, Texture,
-        TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsage,
-        TextureView, TextureViewDimension, VertexAttribute, VertexBufferLayout, VertexFormat,
-        VertexStepMode,
+        MultisampleState, PrimitiveState, PrimitiveTopology, RenderPipeline,
+        RenderPipelineDescriptor, RenderPipelineFragmentState, RenderPipelineLayout,
+        RenderPipelineShaderStage, RenderPipelineVertexState, ShaderModuleSource,
+        StorageTextureAccess, Texture, TextureDescriptor, TextureDimension, TextureFormat,
+        TextureSampleType, TextureUsage, TextureView, TextureViewDimension, VertexAttribute,
+        VertexBufferLayout, VertexFormat, VertexStepMode,
     };
 
     use std::sync::Arc;
+
+    fn immediate_render_wgsl() -> &'static str {
+        r#"
+requires immediate_address_space;
+var<immediate> params : vec4f;
+
+@vertex
+fn vs() -> @builtin(position) vec4f {
+  return vec4f(params.x, 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> @location(0) vec4f {
+  return vec4f(1.0, 0.0, 0.0, 1.0);
+}
+"#
+    }
+
+    fn immediate_render_pipeline(device: &Device) -> Arc<RenderPipeline> {
+        let module = Arc::new(
+            device
+                .create_shader_module(ShaderModuleSource::Wgsl(immediate_render_wgsl().to_owned())),
+        );
+        assert!(!module.is_error(), "shader module must compile");
+        let pipeline = Arc::new(device.create_render_pipeline(render_pipeline_descriptor(module)));
+        assert!(!pipeline.is_error(), "render pipeline must be valid");
+        pipeline
+    }
 
     #[test]
     fn render_pass_encoder_lifecycle_and_debug_markers() {
@@ -1616,14 +1642,119 @@ mod tests {
         );
     }
 
+    #[test]
+    fn render_pass_draw_requires_all_required_immediate_slots() {
+        let device = noop_device();
+        let pipeline = immediate_render_pipeline(&device);
+        let view = noop_render_attachment(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.set_immediates(0, &[1, 2, 3, 4], device.limits()), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("Required immediate data at offset 4 was not set.".to_owned())
+        );
+    }
+
+    #[test]
+    fn render_bundle_draw_requires_all_required_immediate_slots() {
+        let device = noop_device();
+        let pipeline = immediate_render_pipeline(&device);
+
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
+        assert_eq!(error, None);
+        assert_eq!(bundle_encoder.set_pipeline(Arc::clone(&pipeline)), None);
+        assert_eq!(
+            bundle_encoder.set_immediates(0, &[1, 2, 3, 4], device.limits()),
+            None
+        );
+        assert_eq!(bundle_encoder.draw(3, 1, 0, 0, device.limits()), None);
+        let (bundle, error) = bundle_encoder.finish();
+        assert!(bundle.is_error());
+        assert_eq!(
+            error,
+            Some("Required immediate data at offset 4 was not set.".to_owned())
+        );
+
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
+        assert_eq!(error, None);
+        assert_eq!(bundle_encoder.set_pipeline(pipeline), None);
+        assert_eq!(
+            bundle_encoder.set_immediates(0, &[9; 16], device.limits()),
+            None
+        );
+        assert_eq!(bundle_encoder.draw(3, 1, 0, 0, device.limits()), None);
+        let (bundle, error) = bundle_encoder.finish();
+        assert_eq!(error, None);
+        assert!(!bundle.is_error());
+    }
+
+    #[test]
+    fn render_pass_execute_bundles_invalidates_immediate_written_state() {
+        let device = noop_device();
+        let pipeline = immediate_render_pipeline(&device);
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
+        assert_eq!(error, None);
+        let (bundle, error) = bundle_encoder.finish();
+        assert_eq!(error, None);
+        let bundle = Arc::new(bundle);
+
+        let run = |reset_after_execute: bool| {
+            let view = noop_render_attachment(&device);
+            let encoder = device.create_command_encoder();
+            let (pass, begin_error) =
+                encoder.begin_render_pass(&noop_render_pass_descriptor(view, None));
+            assert_eq!(begin_error, None);
+            assert_eq!(pass.set_immediates(0, &[7; 16], device.limits()), None);
+            assert_eq!(pass.execute_bundles(&[Arc::clone(&bundle)]), None);
+            assert_eq!(pass.set_pipeline(Arc::clone(&pipeline)), None);
+            if reset_after_execute {
+                assert_eq!(pass.set_immediates(0, &[8; 16], device.limits()), None);
+            }
+            assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+            assert_eq!(pass.end(), None);
+            encoder.finish()
+        };
+
+        let (command_buffer, error) = run(false);
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("Required immediate data at offset 0 was not set.".to_owned())
+        );
+
+        let (command_buffer, error) = run(true);
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+    }
+
     /// Block 94 S1 render-bundle record + replay: a bundle's `SetImmediates`
     /// write is overlaid onto the outer pass scratch at replay (visible to
-    /// the bundle's own draws), and the written range persists onto the
-    /// *outer* pass so a direct draw recorded after `ExecuteBundles`
-    /// returns sees it without the outer pass ever calling
-    /// `set_immediates` itself -- see the citation on
-    /// `RenderPassEncoder::execute_bundles` for why that mirrors Dawn's
-    /// single shared per-pass immediates tracker.
+    /// the bundle's own draws), and the byte content persists onto the
+    /// *outer* pass. This test uses a pipeline that does not read immediates,
+    /// so the later direct draw can observe the content snapshot without
+    /// re-establishing required immediate written-state.
     #[test]
     fn render_pass_encoder_execute_bundles_replays_and_inherits_bundle_immediates() {
         let device = noop_device();

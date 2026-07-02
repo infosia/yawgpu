@@ -59,7 +59,18 @@ void wgpuRenderBundleEncoderSetImmediates(enc, uint32_t offset, void const* data
   the pass. Draw/dispatch delivers the *pipeline's* view: user bytes
   `[0, layout.immediate_size)` + internal constants appended after (see
   layout below). Render bundles record the command and replay it into the
-  outer pass state, Dawn-equivalent.
+  outer pass byte scratch, Dawn-equivalent.
+- **Draw/dispatch required-slots validation**: a pipeline stores the
+  Dawn/Tint `GetImmediateBlockInfo` mask for every stage it contains, OR'd
+  across render stages. At draw/dispatch, every 4-byte word set in that
+  required mask must have been written on the current encoder since the
+  relevant validation-state reset. Missing words are captured validation
+  errors (`Required immediate data at offset N was not set.`). Padding words
+  absent from the Tint mask are not required; declared-but-unused immediate
+  variables produce an empty mask. `executeBundles` overlays bundle-written
+  bytes onto the outer render pass scratch, then invalidates the outer pass's
+  current immediate written-state along with the other render state, matching
+  Dawn's `CommandBufferStateTracker{}` reset.
 - **Pipeline layout / shader rule** stays as Block 93 (entry-point
   `immediate_data_size <= layout.immediate_size`) — now non-vacuous for
   `immediate_size` up to 64, and `createPipelineLayout` enforces

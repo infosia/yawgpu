@@ -476,6 +476,10 @@ pub(crate) fn validate_render_draw_base_state(
     if indexed && state.index_buffer.is_none() {
         return Err("render pass indexed draw requires an index buffer".to_owned());
     }
+    validate_required_immediate_data(
+        pipeline.immediate_required_mask(),
+        state.immediate_data_written,
+    )?;
     Ok(pipeline)
 }
 
@@ -1571,6 +1575,21 @@ pub(crate) fn written_words_mask(offset: usize, len: usize) -> ImmediateWrittenM
     (((1u32 << word_count) - 1) << first_word) as ImmediateWrittenMask
 }
 
+/// Validates that every required user-immediate word was explicitly written.
+pub(crate) fn validate_required_immediate_data(
+    required: ImmediateWrittenMask,
+    written: ImmediateWrittenMask,
+) -> Result<(), String> {
+    let missing = required & !written;
+    if missing == 0 {
+        return Ok(());
+    }
+    let first_missing_offset = missing.trailing_zeros() * 4;
+    Err(format!(
+        "Required immediate data at offset {first_missing_offset} was not set."
+    ))
+}
+
 /// Copies the 4-byte words of `src` flagged in `written` over `dest`,
 /// leaving unflagged words of `dest` untouched. Both slices must be
 /// [`MAX_IMMEDIATE_DATA_BYTES`] long. This implements Dawn's shared-tracker
@@ -1600,6 +1619,22 @@ mod tests {
     use crate::Device;
 
     use std::sync::Arc;
+
+    #[test]
+    fn validate_required_immediate_data_requires_subset_of_written_words() {
+        assert_eq!(validate_required_immediate_data(0b0111, 0b0111), Ok(()));
+        assert_eq!(validate_required_immediate_data(0b0111, 0b1111), Ok(()));
+        assert_eq!(validate_required_immediate_data(0, 0), Ok(()));
+
+        assert_eq!(
+            validate_required_immediate_data(0b0111, 0b0101),
+            Err("Required immediate data at offset 4 was not set.".to_owned())
+        );
+        assert_eq!(
+            validate_required_immediate_data(0b1000, 0),
+            Err("Required immediate data at offset 12 was not set.".to_owned())
+        );
+    }
 
     fn texture_use(
         texture: &Texture,

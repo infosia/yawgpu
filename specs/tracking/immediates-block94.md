@@ -93,3 +93,20 @@ un-stubbing the port's immediates trees.
   GLES uniform-array delivery path is ever wanted.
 - Whole-suite sweep tables in the CTS repo README/FINDINGS predate Blocks
   92-94; refresh at the next full sweep.
+
+## Post-S4 native-Vulkan CTS defect (2026-07-03)
+
+- **Defect:** `webgpu:api,validation,encoding,programmable,pipeline_immediate`
+  on native Windows/Vulkan reported 138/43 while Dawn reported 181/0. All
+  failures were missing expected validation errors.
+- **Root cause:** yawgpu tracked only the encoder-written immediate words and
+  the pipeline's scalar `immediate_size`; it did not retain the Dawn/Tint
+  per-word required mask (`GetImmediateBlockInfo`). Draw/dispatch therefore
+  accepted partial writes. `executeBundles` also preserved the outer render
+  pass written-state mask instead of invalidating it.
+- **Fix:** pipelines now store a required user-immediate word mask reflected
+  from Tint and OR'd across render stages. Draw/dispatch validate
+  `(written & required) == required`. `executeBundles` still overlays bundle
+  bytes into the outer scratch but resets the outer written-state mask.
+- **Local verification:** see `REPORT.md` for the exact cargo commands and
+  environment limitation encountered on this machine.

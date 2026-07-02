@@ -1374,6 +1374,12 @@ mod real {
             out: *mut u32,
             err: *mut *mut c_char,
         ) -> bool;
+        fn yawgpu_tint_immediate_data_used_slots(
+            program: *const RawProgram,
+            ep: *const c_char,
+            out: *mut u64,
+            err: *mut *mut c_char,
+        ) -> bool;
         fn yawgpu_tint_generate_glsl(
             program: *const RawProgram,
             ep: *const c_char,
@@ -2006,6 +2012,27 @@ mod real {
             Ok(out)
         }
 
+        /// Returns `entry_point`'s required immediate-data slots as a bitmask.
+        ///
+        /// Bit N corresponds to bytes `[4*N, 4*N+4)` of the user immediate
+        /// block. The mask is Tint's `Inspector::GetImmediateBlockInfo`
+        /// result: it includes non-padding words of any statically referenced
+        /// `var<immediate>` variable and excludes struct/matrix padding words.
+        /// Fails if `entry_point` does not name an entry point in the module.
+        pub fn immediate_data_used_slots(&self, entry_point: &str) -> Result<u64, TintError> {
+            let ep = cstring(entry_point, "entry point").map_err(TintError::Reflection)?;
+            let mut out = 0u64;
+            let mut err = ptr::null_mut();
+            // SAFETY: `ep`, `out`, and `err` point to valid memory for the call.
+            let ok = unsafe {
+                yawgpu_tint_immediate_data_used_slots(self.raw, ep.as_ptr(), &mut out, &mut err)
+            };
+            if !ok {
+                return Err(TintError::Reflection(take_error(err)));
+            }
+            Ok(out)
+        }
+
         /// Generates GLSL ES 3.1 for `entry_point`.
         ///
         /// `first_instance_offset`, when `Some`, is passed through to Tint's
@@ -2269,6 +2296,11 @@ mod stub {
             Err(TintError::Unavailable)
         }
 
+        /// Returns `entry_point`'s required immediate-data slots as a bitmask.
+        pub fn immediate_data_used_slots(&self, _entry_point: &str) -> Result<u64, TintError> {
+            Err(TintError::Unavailable)
+        }
+
         /// Generates GLSL ES 3.1 for `entry_point`.
         pub fn generate_glsl(
             &self,
@@ -2451,12 +2483,47 @@ fn no_immediate() {}
         // it does not contribute to the size (matches Dawn's
         // ImmediateDataSizeTwoConstants inspector test).
         assert_eq!(program.immediate_data_size("uses_immediate").unwrap(), 16);
+        assert_eq!(
+            program.immediate_data_used_slots("uses_immediate").unwrap(),
+            0b1111
+        );
         // Entry point that touches no immediate-address-space variable at all.
         assert_eq!(program.immediate_data_size("no_immediate").unwrap(), 0);
+        assert_eq!(
+            program.immediate_data_used_slots("no_immediate").unwrap(),
+            0
+        );
         // A nonexistent entry point is a real error, never silently `Ok(0)`
         // (the flaw this query deliberately avoids -- see
         // `workgroup_storage_size`'s doc comment).
         assert!(program.immediate_data_size("does_not_exist").is_err());
+        assert!(program.immediate_data_used_slots("does_not_exist").is_err());
+    }
+
+    #[test]
+    fn reflects_immediate_data_used_slots_excluding_padding() {
+        let wgsl = r#"
+requires immediate_address_space;
+
+struct S {
+  a : u32,
+  b : vec3<f32>,
+}
+
+var<immediate> params : S;
+
+@compute @workgroup_size(1)
+fn main() {
+  _ = params;
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[11]).unwrap();
+
+        assert_eq!(program.immediate_data_size("main").unwrap(), 32);
+        assert_eq!(
+            program.immediate_data_used_slots("main").unwrap(),
+            0b0111_0001
+        );
     }
 
     #[test]
