@@ -4,10 +4,10 @@ use std::sync::Arc;
 use yawgpu_hal::{
     HalBackend, HalBlendComponent, HalBlendFactor, HalBlendOperation, HalBlendState,
     HalColorTargetState, HalCompareFunction, HalCullMode, HalDepthStencilState,
-    HalDescriptorBinding, HalDescriptorBindingKind, HalDevice, HalFrontFace, HalPrimitiveTopology,
-    HalRenderPipeline, HalRenderPipelineDescriptor, HalShaderSource, HalStencilFaceState,
-    HalStencilOperation, HalVertexAttribute, HalVertexBufferLayout, HalVertexFormat,
-    HalVertexStepMode,
+    HalDescriptorBinding, HalDescriptorBindingKind, HalDevice, HalFrontFace, HalMslImmediates,
+    HalPrimitiveTopology, HalRenderPipeline, HalRenderPipelineDescriptor, HalShaderSource,
+    HalStencilFaceState, HalStencilOperation, HalVertexAttribute, HalVertexBufferLayout,
+    HalVertexFormat, HalVertexStepMode,
 };
 
 use crate::adapter::Feature;
@@ -1447,12 +1447,25 @@ pub(crate) fn select_render_shader_source(
                 msl_vertex_buffer_bindings(&descriptor.vertex.buffers, vertex_buffer_bindings)?;
             let force_point_size =
                 matches!(descriptor.primitive.topology, PrimitiveTopology::PointList);
+            // The pipeline's effective user-immediate byte budget (Block 94,
+            // 0..=64): the explicit layout's `immediate_size`, or -- for auto
+            // layouts, mirroring Dawn `CreateDefault`
+            // (`dawn/native/PipelineLayout.cpp:588-590,616`) -- the max of
+            // the stages' reflected immediate usage. This is the boundary
+            // after which the fragment frag-depth clamp range is appended
+            // (see `yawgpu_tint::Program::generate_msl`'s doc comment).
+            let user_immediate_size = render_pipeline_layout_immediate_size(
+                descriptor,
+                vertex_entry_name,
+                fragment_entry_name,
+            )?;
             let vertex = module.generate_render_vertex_msl(
                 vertex_entry_name,
                 &msl_vertex_binding_map,
                 &msl_vertex_buffers,
                 force_point_size,
                 &vertex_pipeline_constants,
+                user_immediate_size,
             )?;
             let fragment = match (
                 fragment,
@@ -1475,6 +1488,7 @@ pub(crate) fn select_render_shader_source(
                         subpass_color_slots,
                         fragment_pipeline_constants,
                         descriptor.multisample.mask,
+                        user_immediate_size,
                     )?)
                 }
                 (None, None, None) => None,
@@ -1490,6 +1504,28 @@ pub(crate) fn select_render_shader_source(
             // appended after storage-array size fields in `_mslBufferSizes`.
             let vertex_buffer_metal_indices: Vec<u32> =
                 msl_vertex_buffers.iter().map(|b| b.metal_index).collect();
+            // Vertex never carries the frag-depth clamp -- its block is just
+            // the user-immediate prefix when the vertex entry point uses any
+            // immediates.
+            let vertex_immediates = vertex
+                .immediate_slot
+                .map(|slot| HalMslImmediates::new(slot, user_immediate_size, None));
+            // Fragment's block appends the 8-byte clamp range right after
+            // the user prefix when this pipeline clamps frag_depth (Block
+            // 94 "Immediates block layout"); `frag_depth_clamp_slot` and
+            // `immediate_slot` are always the same value when both are
+            // `Some` (same combined block, same Metal slot).
+            let fragment_immediates = fragment.as_ref().and_then(|fragment| {
+                fragment.immediate_slot.map(|slot| {
+                    let frag_depth_clamp_offset = fragment
+                        .frag_depth_clamp_slot
+                        .is_some()
+                        .then_some(user_immediate_size);
+                    let block_size =
+                        frag_depth_clamp_offset.map_or(user_immediate_size, |offset| offset + 8);
+                    HalMslImmediates::new(slot, block_size, frag_depth_clamp_offset)
+                })
+            });
             Ok((
                 HalShaderSource::MslStagesWithBufferSizes {
                     vertex: vertex.source,
@@ -1507,9 +1543,8 @@ pub(crate) fn select_render_shader_source(
                             .map(|fragment| fragment.buffer_size_bindings.as_slice())
                             .unwrap_or(&[]),
                     ),
-                    fragment_frag_depth_clamp_slot: fragment
-                        .as_ref()
-                        .and_then(|fragment| fragment.frag_depth_clamp_slot),
+                    vertex_immediates,
+                    fragment_immediates,
                     vertex_buffer_metal_indices,
                 },
                 vertex.entry_point,
@@ -2227,7 +2262,12 @@ pub(crate) fn resolve_render_pipeline_descriptor(
         subpass_color_attachment_indices,
     )?;
     validate_render_pipeline_layout(descriptor, &vertex_entry, fragment_entry.as_deref())?;
-    let immediate_size_budget = render_pipeline_layout_immediate_size(&descriptor.layout);
+    let immediate_size_budget = resolve_render_pipeline_immediate_size(
+        descriptor,
+        &vertex_entry,
+        fragment_entry.as_deref(),
+        limits,
+    )?;
     validate_render_stage_immediate_size(
         &descriptor.vertex.shader,
         &vertex_entry,
@@ -3253,14 +3293,63 @@ pub(crate) fn validate_render_pipeline_layout(
     validate_pipeline_layout_stage_bindings(layout, &requirements)
 }
 
-/// Returns the pipeline layout's immediate-data budget in bytes (Block 93):
-/// `0` for an auto (default) layout -- auto layouts reserve no immediate
-/// space -- or the explicit layout's `immediateSize` otherwise.
-pub(crate) fn render_pipeline_layout_immediate_size(layout: &RenderPipelineLayout) -> u32 {
-    match layout {
-        RenderPipelineLayout::Auto => 0,
-        RenderPipelineLayout::Explicit(layout) => layout.immediate_size(),
+/// Returns the pipeline's effective user-immediate budget in bytes (Blocks
+/// 93/94) WITHOUT the auto-layout `maxImmediateSize` bound. An explicit
+/// layout contributes its declared `immediateSize`. An auto (default)
+/// layout mirrors Dawn's default-layout rule
+/// (`dawn/native/PipelineLayout.cpp:549,588-590,616` --
+/// `PipelineLayoutBase::CreateDefault` sets the synthesized descriptor's
+/// `immediateSize` to the max of the stages' reflected immediate usage,
+/// vertex and fragment sharing one immediate block).
+///
+/// Callers: `resolve_render_pipeline_immediate_size` (validation -- adds
+/// the auto-arm `maxImmediateSize` bound Dawn applies when the default
+/// descriptor goes through `CreatePipelineLayout`) and
+/// `select_render_shader_source` (HAL codegen -- runs only for pipelines
+/// that already passed validation, so the bound is not re-checked there).
+pub(crate) fn render_pipeline_layout_immediate_size(
+    descriptor: &RenderPipelineDescriptor,
+    vertex_entry: &str,
+    fragment_entry: Option<&str>,
+) -> Result<u32, String> {
+    match &descriptor.layout {
+        RenderPipelineLayout::Explicit(layout) => Ok(layout.immediate_size()),
+        RenderPipelineLayout::Auto => {
+            let vertex_module = descriptor.vertex.shader.module.reflected().ok_or_else(|| {
+                "render pipeline stage requires a reflected shader module".to_owned()
+            })?;
+            let mut size = vertex_module.immediate_data_size(vertex_entry)?;
+            if let (Some(fragment), Some(fragment_entry)) = (&descriptor.fragment, fragment_entry) {
+                let fragment_module = fragment.shader.module.reflected().ok_or_else(|| {
+                    "render pipeline stage requires a reflected shader module".to_owned()
+                })?;
+                size = size.max(fragment_module.immediate_data_size(fragment_entry)?);
+            }
+            Ok(size)
+        }
     }
+}
+
+/// Resolves the pipeline's effective user-immediate byte budget for
+/// validation (Blocks 93/94): [`render_pipeline_layout_immediate_size`]
+/// plus, for auto layouts, the `immediateSize <= maxImmediateSize` bound
+/// Dawn applies because `CreateDefault`'s synthesized descriptor goes
+/// through the ordinary validated `CreatePipelineLayout`
+/// (`dawn/native/PipelineLayout.cpp:634` -> `:144-147`), with the same
+/// error message `createPipelineLayout` uses
+/// (`validate_pipeline_layout_descriptor`). Explicit layouts were already
+/// bounds-checked at their own creation.
+pub(crate) fn resolve_render_pipeline_immediate_size(
+    descriptor: &RenderPipelineDescriptor,
+    vertex_entry: &str,
+    fragment_entry: Option<&str>,
+    limits: Limits,
+) -> Result<u32, String> {
+    let size = render_pipeline_layout_immediate_size(descriptor, vertex_entry, fragment_entry)?;
+    if matches!(descriptor.layout, RenderPipelineLayout::Auto) && size > limits.max_immediate_size {
+        return Err("pipeline layout immediateSize exceeds the device limit".to_owned());
+    }
+    Ok(size)
 }
 
 /// Validates that `entry_point`'s reflected immediate data size fits within
@@ -3391,13 +3480,17 @@ mod tests {
     }
 
     /// Block 93 render analog: a vertex entry point that statically touches
-    /// a `var<immediate>` is rejected at pipeline creation because every
-    /// pipeline layout has `immediateSize == 0` today, including the auto
-    /// (default) layout used by `render_pipeline_descriptor`. Fires
-    /// identically on Noop (backend-independent core validation).
+    /// a `var<immediate>` is rejected when the EXPLICIT pipeline layout
+    /// reserves a smaller `immediateSize` (here 0) -- but the same shader
+    /// under an AUTO layout creates successfully, because Dawn's default
+    /// layout sizes its immediate budget to the max of the stages' own
+    /// reflected usage (`dawn/native/PipelineLayout.cpp:588-590,616`),
+    /// which trivially covers each stage. Fires identically on Noop
+    /// (backend-independent core validation; Noop `maxImmediateSize` = 64).
     #[test]
     fn render_pipeline_rejects_vertex_entry_point_immediate_data_size_exceeding_layout_budget() {
         let device = noop_device();
+        assert_eq!(device.limits().max_immediate_size, 64);
         let module = Arc::new(
             device.create_shader_module(ShaderModuleSource::Wgsl(
                 r#"
@@ -3419,8 +3512,10 @@ fn fs() -> @location(0) vec4<f32> {
             )),
         );
 
+        let mut descriptor = render_pipeline_descriptor(module.clone());
+        descriptor.layout = RenderPipelineLayout::Explicit(explicit_empty_render_layout(&device));
         device.push_error_scope(ErrorFilter::Validation);
-        let pipeline = device.create_render_pipeline(render_pipeline_descriptor(module));
+        let pipeline = device.create_render_pipeline(descriptor);
         let scoped = device
             .pop_error_scope()
             .expect("scope should exist")
@@ -3430,12 +3525,24 @@ fn fs() -> @location(0) vec4<f32> {
             scoped.message,
             "shader entry point immediate data size exceeds the pipeline layout's immediateSize"
         );
+
+        // Auto layout: budget = max stage usage (16 bytes) <= maxImmediateSize,
+        // so the same shader creates successfully (Dawn CreateDefault rule).
+        device.push_error_scope(ErrorFilter::Validation);
+        let auto_pipeline = device.create_render_pipeline(render_pipeline_descriptor(module));
+        let scoped_auto = device.pop_error_scope().expect("scope should exist");
+        assert!(
+            scoped_auto.is_none(),
+            "auto-layout pipeline within maxImmediateSize must not error: {scoped_auto:?}"
+        );
+        assert!(!auto_pipeline.is_error());
     }
 
     /// Fragment-stage counterpart of the vertex test above: only the
     /// fragment entry point touches the `var<immediate>` (the vertex entry
     /// does not), so this exercises the fragment branch of the Block 93
-    /// immediate-size check in `resolve_render_pipeline_descriptor`.
+    /// immediate-size check in `resolve_render_pipeline_descriptor` --
+    /// explicit budget-0 rejection plus auto-layout success.
     #[test]
     fn render_pipeline_rejects_fragment_entry_point_immediate_data_size_exceeding_layout_budget() {
         let device = noop_device();
@@ -3460,8 +3567,10 @@ fn fs() -> @location(0) vec4<f32> {
             )),
         );
 
+        let mut descriptor = render_pipeline_descriptor(module.clone());
+        descriptor.layout = RenderPipelineLayout::Explicit(explicit_empty_render_layout(&device));
         device.push_error_scope(ErrorFilter::Validation);
-        let pipeline = device.create_render_pipeline(render_pipeline_descriptor(module));
+        let pipeline = device.create_render_pipeline(descriptor);
         let scoped = device
             .pop_error_scope()
             .expect("scope should exist")
@@ -3471,6 +3580,17 @@ fn fs() -> @location(0) vec4<f32> {
             scoped.message,
             "shader entry point immediate data size exceeds the pipeline layout's immediateSize"
         );
+
+        // Auto layout: fragment usage (16 bytes) sizes the default budget,
+        // so the same shader creates successfully.
+        device.push_error_scope(ErrorFilter::Validation);
+        let auto_pipeline = device.create_render_pipeline(render_pipeline_descriptor(module));
+        let scoped_auto = device.pop_error_scope().expect("scope should exist");
+        assert!(
+            scoped_auto.is_none(),
+            "auto-layout pipeline within maxImmediateSize must not error: {scoped_auto:?}"
+        );
+        assert!(!auto_pipeline.is_error());
     }
 
     #[test]
@@ -5051,6 +5171,80 @@ fn fs(input: FsIn) -> @location(0) vec4f {{
         assert!(bindings.is_empty());
     }
 
+    /// Block 94 S2: a pipeline layout with a non-zero `immediateSize`, whose
+    /// fragment entry point both references the user `var<immediate>` and
+    /// clamps `frag_depth`, threads `HalMslImmediates` all the way from
+    /// Tint's reflection into `HalShaderSource::MslStagesWithBufferSizes`
+    /// (mirrors how `fragment_frag_depth_clamp_slot` used to be threaded,
+    /// generalized to the combined user+clamp block).
+    #[test]
+    fn select_render_shader_source_metal_threads_immediate_metadata_to_hal_shader_source() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r#"
+requires immediate_address_space;
+
+var<immediate> pc : vec4f;
+
+@vertex
+fn vs() -> @builtin(position) vec4<f32> {
+  return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> @builtin(frag_depth) f32 {
+  return pc.x;
+}
+"#
+                .to_owned(),
+            )),
+        );
+        let mut descriptor = render_pipeline_descriptor(module);
+        // `pc` is a vec4f (16 bytes); the pipeline layout reserves exactly
+        // that much user-immediate budget.
+        descriptor.layout = RenderPipelineLayout::Explicit(Arc::new(
+            device.create_pipeline_layout(PipelineLayoutDescriptor {
+                bind_group_layouts: Vec::new(),
+                immediate_size: 16,
+                error: None,
+            }),
+        ));
+
+        let (source, ..) = select_render_shader_source(
+            HalBackend::Metal,
+            &descriptor,
+            "vs",
+            Some("fs"),
+            &[],
+            &[],
+            &[],
+            false,
+            &[],
+        )
+        .expect("render pipeline with a user immediate should select Metal MSL");
+
+        let HalShaderSource::MslStagesWithBufferSizes {
+            vertex_immediates,
+            fragment_immediates,
+            ..
+        } = source
+        else {
+            panic!("Metal backend must select MslStagesWithBufferSizes");
+        };
+
+        // The vertex entry point never references `pc`, so it carries no
+        // immediates of its own.
+        assert_eq!(vertex_immediates, None);
+        // The fragment entry point references `pc` (16 bytes) AND clamps
+        // frag_depth: one combined block, clamp appended right after the
+        // full 16-byte layout-reserved user prefix (not colliding with it).
+        let fragment_immediates =
+            fragment_immediates.expect("fragment references pc and clamps frag_depth");
+        assert_eq!(fragment_immediates.frag_depth_clamp_offset, Some(16));
+        assert_eq!(fragment_immediates.block_size, 16 + 8);
+    }
+
     #[cfg(feature = "shader-passthrough")]
     fn msl_render_module(
         device: &Device,
@@ -5087,7 +5281,6 @@ fn fs(input: FsIn) -> @location(0) vec4f {{
         )
     }
 
-    #[cfg(feature = "shader-passthrough")]
     fn explicit_empty_render_layout(device: &Device) -> Arc<PipelineLayout> {
         Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
             bind_group_layouts: Vec::new(),

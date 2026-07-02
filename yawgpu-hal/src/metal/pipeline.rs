@@ -14,6 +14,9 @@ pub struct MetalComputePipeline {
     /// The compute encoder calls `setThreadgroupMemoryLength:atIndex:` for each
     /// entry in this vec before every dispatch.
     pub(super) workgroup_memory_sizes: Vec<u32>,
+    /// Compute-stage immediates delivery metadata (Block 94 S2). `None` when
+    /// the compute entry point uses no `var<immediate>` data.
+    pub(super) immediates: Option<HalMslImmediates>,
 }
 
 unsafe impl Send for MetalComputePipeline {}
@@ -50,7 +53,14 @@ pub struct MetalRenderPipeline {
     pub(super) vertex_buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
     pub(super) fragment_buffer_sizes_slot: Option<u32>,
     pub(super) fragment_buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
-    pub(super) fragment_frag_depth_clamp_slot: Option<u32>,
+    /// Vertex-stage immediates delivery metadata (Block 94 S2). `None` when
+    /// the vertex entry point uses no `var<immediate>` data.
+    pub(super) vertex_immediates: Option<HalMslImmediates>,
+    /// Fragment-stage immediates delivery metadata (Block 94 S2); also
+    /// covers the frag-depth clamp range when this pipeline clamps
+    /// frag_depth. `None` when the fragment entry point uses no immediates
+    /// and does not clamp frag_depth.
+    pub(super) fragment_immediates: Option<HalMslImmediates>,
     /// Metal buffer indices for vertex buffers in `vertex_buffer_mappings` order.
     /// These correspond to the `buffer_sizeN` fields that Tint's MSL codegen appends
     /// after the storage-array size fields inside `_mslBufferSizes`.  The encoder
@@ -71,6 +81,7 @@ impl std::fmt::Debug for MetalRenderPipeline {
 }
 
 /// Creates compute pipeline and reports validation errors through the owning device.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_compute_pipeline(
     device: &ProtocolObject<dyn MTLDevice>,
     msl_source: &str,
@@ -79,6 +90,7 @@ pub(super) fn create_compute_pipeline(
     buffer_sizes_slot: Option<u32>,
     buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
     workgroup_memory_sizes: Vec<u32>,
+    immediates: Option<HalMslImmediates>,
 ) -> Result<MetalComputePipeline, HalError> {
     // Wrap the compile in an autoreleasepool so the autoreleased temporaries
     // produced by the objc calls (NSString, the transient library/function)
@@ -103,6 +115,7 @@ pub(super) fn create_compute_pipeline(
             buffer_sizes_slot,
             buffer_size_bindings,
             workgroup_memory_sizes,
+            immediates,
         })
     })
 }
@@ -250,7 +263,8 @@ pub(super) fn create_render_pipeline(
             vertex_buffer_size_bindings: size_metadata.vertex_bindings,
             fragment_buffer_sizes_slot: size_metadata.fragment_slot,
             fragment_buffer_size_bindings: size_metadata.fragment_bindings,
-            fragment_frag_depth_clamp_slot: size_metadata.fragment_frag_depth_clamp_slot,
+            vertex_immediates: size_metadata.vertex_immediates,
+            fragment_immediates: size_metadata.fragment_immediates,
             vertex_buffer_metal_indices: size_metadata.vertex_buffer_metal_indices,
         })
     })
@@ -383,7 +397,8 @@ struct RenderSizeMetadata {
     vertex_bindings: Vec<HalMslBufferSizeBinding>,
     fragment_slot: Option<u32>,
     fragment_bindings: Vec<HalMslBufferSizeBinding>,
-    fragment_frag_depth_clamp_slot: Option<u32>,
+    vertex_immediates: Option<HalMslImmediates>,
+    fragment_immediates: Option<HalMslImmediates>,
     /// Metal buffer indices for vertex buffers in vertex_buffer_mappings order.
     vertex_buffer_metal_indices: Vec<u32>,
 }
@@ -395,7 +410,8 @@ fn render_size_metadata(shader: &HalShaderSource) -> RenderSizeMetadata {
             vertex_buffer_size_bindings,
             fragment_buffer_sizes_slot,
             fragment_buffer_size_bindings,
-            fragment_frag_depth_clamp_slot,
+            vertex_immediates,
+            fragment_immediates,
             vertex_buffer_metal_indices,
             ..
         } => RenderSizeMetadata {
@@ -403,7 +419,8 @@ fn render_size_metadata(shader: &HalShaderSource) -> RenderSizeMetadata {
             vertex_bindings: vertex_buffer_size_bindings.clone(),
             fragment_slot: *fragment_buffer_sizes_slot,
             fragment_bindings: fragment_buffer_size_bindings.clone(),
-            fragment_frag_depth_clamp_slot: *fragment_frag_depth_clamp_slot,
+            vertex_immediates: *vertex_immediates,
+            fragment_immediates: *fragment_immediates,
             vertex_buffer_metal_indices: vertex_buffer_metal_indices.clone(),
         },
         _ => RenderSizeMetadata {
@@ -411,7 +428,8 @@ fn render_size_metadata(shader: &HalShaderSource) -> RenderSizeMetadata {
             vertex_bindings: Vec::new(),
             fragment_slot: None,
             fragment_bindings: Vec::new(),
-            fragment_frag_depth_clamp_slot: None,
+            vertex_immediates: None,
+            fragment_immediates: None,
             vertex_buffer_metal_indices: Vec::new(),
         },
     }
@@ -611,7 +629,8 @@ mod tests {
             vertex_buffer_size_bindings: Vec::new(),
             fragment_buffer_sizes_slot: None,
             fragment_buffer_size_bindings: Vec::new(),
-            fragment_frag_depth_clamp_slot: None,
+            vertex_immediates: None,
+            fragment_immediates: None,
             vertex_buffer_metal_indices: Vec::new(),
         };
         assert!(render_shader_uses_metal_vertex_descriptor(&shader));
@@ -632,7 +651,8 @@ mod tests {
             vertex_buffer_size_bindings: Vec::new(),
             fragment_buffer_sizes_slot: None,
             fragment_buffer_size_bindings: Vec::new(),
-            fragment_frag_depth_clamp_slot: None,
+            vertex_immediates: None,
+            fragment_immediates: None,
             vertex_buffer_metal_indices: Vec::new(),
         };
 

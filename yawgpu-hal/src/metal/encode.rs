@@ -478,6 +478,7 @@ pub(super) fn encode_compute_pass(
         encode_compute_buffer(encoder, binding)?;
     }
     encode_compute_buffer_sizes(encoder, pipeline, &pass.bind_buffers)?;
+    encode_compute_immediates(encoder, pipeline, &pass.immediate_data)?;
     for binding in &pass.bind_textures {
         encode_compute_texture(encoder, binding)?;
     }
@@ -528,6 +529,65 @@ fn encode_compute_buffer_sizes(
                 .ok_or_else(|| buffer_error("MSL buffer sizes data is missing"))?,
             sizes.len() * std::mem::size_of::<u32>(),
             to_ns(u64::from(slot))?,
+        );
+    }
+    Ok(())
+}
+
+/// Composes the combined Metal immediates block for one shader stage
+/// (Block 94 S2): user immediate bytes at `[0, user_len)` -- where
+/// `user_len` is `immediates.frag_depth_clamp_offset` when the clamp range
+/// is also present, else the whole `block_size` -- with the fragment
+/// frag-depth clamp range (from the pass viewport) written at
+/// `immediates.frag_depth_clamp_offset` when present. Mirrors Dawn's
+/// `RenderImmediates`/`ComputeImmediates` layout (`ImmediatesLayout.h`):
+/// user data first, pipeline-internal constants appended directly after.
+///
+/// `user_data` is the pass's full immediate scratch snapshot (up to the
+/// device's `maxImmediateSize` bytes, Block 94); only the prefix the
+/// pipeline's layout reserves (`immediates.block_size`, minus 8 when clamp
+/// is present) is copied. Pure function -- no Metal calls -- so it is
+/// directly unit-testable without a real device.
+fn compose_metal_immediates_block(
+    user_data: &[u8],
+    immediates: HalMslImmediates,
+    viewport: Option<HalViewport>,
+) -> Vec<u8> {
+    let block_size = immediates.block_size as usize;
+    let mut block = vec![0u8; block_size];
+    let user_len = immediates
+        .frag_depth_clamp_offset
+        .map_or(block_size, |offset| (offset as usize).min(block_size));
+    let copy_len = user_len.min(user_data.len());
+    block[..copy_len].copy_from_slice(&user_data[..copy_len]);
+    if let Some(offset) = immediates.frag_depth_clamp_offset {
+        let offset = offset as usize;
+        let range = viewport.map_or([0.0f32, 1.0], |viewport| {
+            [viewport.min_depth, viewport.max_depth]
+        });
+        if offset + 8 <= block.len() {
+            block[offset..offset + 4].copy_from_slice(&range[0].to_ne_bytes());
+            block[offset + 4..offset + 8].copy_from_slice(&range[1].to_ne_bytes());
+        }
+    }
+    block
+}
+
+fn encode_compute_immediates(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &MetalComputePipeline,
+    immediate_data: &[u8],
+) -> Result<(), HalError> {
+    let Some(immediates) = pipeline.immediates else {
+        return Ok(());
+    };
+    let block = compose_metal_immediates_block(immediate_data, immediates, None);
+    unsafe {
+        encoder.setBytes_length_atIndex(
+            NonNull::new(block.as_ptr().cast_mut().cast())
+                .ok_or_else(|| buffer_error("compute immediates block data is missing"))?,
+            block.len(),
+            to_ns(u64::from(immediates.slot))?,
         );
     }
     Ok(())
@@ -883,6 +943,7 @@ pub(super) fn encode_render_pass(
         stencil_reference: pass.stencil_reference,
         occlusion_query_index: pass.occlusion_query_index,
         draw,
+        immediate_data: &pass.immediate_data,
     };
     encode_render_state(encoder, &state)
 }
@@ -914,6 +975,11 @@ pub(super) fn encode_subpass_render_pass(
             stencil_reference: 0,
             occlusion_query_index: None,
             draw: draw.draw,
+            // Subpass draws (tiled/TBDR) don't carry a per-draw immediate
+            // snapshot today (Block 94 is out of scope for the tiled path);
+            // a pipeline that uses immediates in this path gets an all-zero
+            // block, matching what the pre-S2 no-op delivered.
+            immediate_data: &[],
         };
         encode_render_state(encoder, &state)?;
     }
@@ -935,6 +1001,8 @@ struct RenderEncodeState<'a> {
     stencil_reference: u32,
     occlusion_query_index: Option<u32>,
     draw: HalDraw,
+    /// The pass's immediates scratch snapshot for this draw (Block 94).
+    immediate_data: &'a [u8],
 }
 
 fn encode_render_state(
@@ -993,7 +1061,7 @@ fn encode_render_state(
         encode_render_bind_buffer(encoder, binding)?;
     }
     encode_render_buffer_sizes(encoder, pipeline, state.bind_buffers, state.vertex_buffers)?;
-    encode_render_frag_depth_clamp(encoder, pipeline, state.viewport)?;
+    encode_render_immediates(encoder, pipeline, state.immediate_data, state.viewport)?;
     for binding in state.bind_textures {
         encode_render_bind_texture(encoder, binding)?;
     }
@@ -1107,24 +1175,43 @@ fn encode_render_buffer_sizes(
     Ok(())
 }
 
-fn encode_render_frag_depth_clamp(
+/// Delivers the vertex- and/or fragment-stage combined immediates block for
+/// one draw (Block 94 S2). Delivered unconditionally per draw (no dirty
+/// tracking, mirroring the pre-S2 clamp-only delivery this absorbs) at each
+/// stage's own Metal slot; a stage with no immediates (`pipeline.
+/// {vertex,fragment}_immediates == None`) is skipped entirely. Replaces the
+/// old `encode_render_frag_depth_clamp`, which only ever delivered the bare
+/// 8-byte clamp range at the fragment stage -- clamp-only pipelines still
+/// get exactly that (the composed block is just `[0, 8)` = the clamp range
+/// when there is no user-immediate prefix).
+fn encode_render_immediates(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     pipeline: &MetalRenderPipeline,
+    immediate_data: &[u8],
     viewport: Option<HalViewport>,
 ) -> Result<(), HalError> {
-    let Some(slot) = pipeline.fragment_frag_depth_clamp_slot else {
-        return Ok(());
-    };
-    let range = viewport.map_or([0.0, 1.0], |viewport| {
-        [viewport.min_depth, viewport.max_depth]
-    });
-    unsafe {
-        encoder.setFragmentBytes_length_atIndex(
-            NonNull::new((&raw const range).cast_mut().cast())
-                .ok_or_else(|| buffer_error("MSL frag-depth clamp range data is missing"))?,
-            std::mem::size_of_val(&range),
-            to_ns(u64::from(slot))?,
-        );
+    if let Some(immediates) = pipeline.vertex_immediates {
+        // Vertex stage never carries the frag-depth clamp.
+        let block = compose_metal_immediates_block(immediate_data, immediates, None);
+        unsafe {
+            encoder.setVertexBytes_length_atIndex(
+                NonNull::new(block.as_ptr().cast_mut().cast())
+                    .ok_or_else(|| buffer_error("vertex immediates block data is missing"))?,
+                block.len(),
+                to_ns(u64::from(immediates.slot))?,
+            );
+        }
+    }
+    if let Some(immediates) = pipeline.fragment_immediates {
+        let block = compose_metal_immediates_block(immediate_data, immediates, viewport);
+        unsafe {
+            encoder.setFragmentBytes_length_atIndex(
+                NonNull::new(block.as_ptr().cast_mut().cast())
+                    .ok_or_else(|| buffer_error("fragment immediates block data is missing"))?,
+                block.len(),
+                to_ns(u64::from(immediates.slot))?,
+            );
+        }
     }
     Ok(())
 }
@@ -1814,5 +1901,79 @@ mod tests {
                 message: "subpass attachment is not Metal-backed"
             }
         ));
+    }
+
+    /// User-only block (no frag-depth clamp): the composed block is exactly
+    /// `block_size` bytes copied from the front of `user_data`.
+    #[test]
+    fn compose_metal_immediates_block_copies_user_prefix_when_no_clamp() {
+        let user_data: Vec<u8> = (0..64u8).collect();
+        let immediates = HalMslImmediates::new(30, 16, None);
+
+        let block = compose_metal_immediates_block(&user_data, immediates, None);
+
+        assert_eq!(block, user_data[0..16]);
+    }
+
+    /// User + clamp: user bytes occupy `[0, frag_depth_clamp_offset)`, the
+    /// clamp range (from the viewport) lands at
+    /// `[frag_depth_clamp_offset, frag_depth_clamp_offset + 8)`, and no user
+    /// bytes beyond the clamp offset leak into the block (Dawn
+    /// `RenderImmediates` layout: user prefix, then `ClampFragDepthArgs`).
+    #[test]
+    fn compose_metal_immediates_block_appends_clamp_range_after_user_prefix() {
+        let user_data: Vec<u8> = (0..64u8).collect();
+        let immediates = HalMslImmediates::new(30, 24, Some(16));
+        let viewport = HalViewport {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            min_depth: 0.25,
+            max_depth: 0.75,
+        };
+
+        let block = compose_metal_immediates_block(&user_data, immediates, Some(viewport));
+
+        assert_eq!(block.len(), 24);
+        assert_eq!(&block[0..16], &user_data[0..16]);
+        assert_eq!(&block[16..20], &0.25f32.to_ne_bytes());
+        assert_eq!(&block[20..24], &0.75f32.to_ne_bytes());
+    }
+
+    /// A clamp-only pipeline (no user immediates reserved,
+    /// `frag_depth_clamp_offset == Some(0)`) composes exactly the bare
+    /// 8-byte clamp range -- the pre-Block-94 behaviour
+    /// `encode_render_frag_depth_clamp` used to deliver on its own.
+    #[test]
+    fn compose_metal_immediates_block_clamp_only_pipeline_yields_bare_range() {
+        let immediates = HalMslImmediates::new(30, 8, Some(0));
+        let viewport = HalViewport {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            min_depth: 0.1,
+            max_depth: 0.9,
+        };
+
+        let block = compose_metal_immediates_block(&[], immediates, Some(viewport));
+
+        assert_eq!(block.len(), 8);
+        assert_eq!(&block[0..4], &0.1f32.to_ne_bytes());
+        assert_eq!(&block[4..8], &0.9f32.to_ne_bytes());
+    }
+
+    /// No viewport override at draw time falls back to the full depth range
+    /// `[0.0, 1.0]`, matching the pre-S2 `encode_render_frag_depth_clamp`
+    /// default.
+    #[test]
+    fn compose_metal_immediates_block_defaults_clamp_range_without_viewport() {
+        let immediates = HalMslImmediates::new(30, 8, Some(0));
+
+        let block = compose_metal_immediates_block(&[], immediates, None);
+
+        assert_eq!(&block[0..4], &0.0f32.to_ne_bytes());
+        assert_eq!(&block[4..8], &1.0f32.to_ne_bytes());
     }
 }

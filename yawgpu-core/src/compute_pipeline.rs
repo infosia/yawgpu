@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use yawgpu_hal::{
     HalBackend, HalBufferBindingKind, HalComputePipeline, HalDescriptorBinding,
-    HalDescriptorBindingKind, HalDevice, HalMslBufferSizeBinding, HalShaderSource,
-    HalStorageTextureAccess,
+    HalDescriptorBindingKind, HalDevice, HalMslBufferSizeBinding, HalMslImmediates,
+    HalShaderSource, HalStorageTextureAccess,
 };
 
 use crate::bind_group_layout::*;
@@ -174,6 +174,20 @@ impl ComputePipeline {
             )
         });
         let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
+        // Effective user-immediate budget for HAL codegen. Mirrors the
+        // validation-side resolution (`resolve_compute_pipeline_immediate_size`,
+        // Dawn `CreateDefault`'s stage-usage rule for auto layouts); the auto
+        // arm's `maxImmediateSize` bound is not re-checked here because HAL
+        // creation only runs for pipelines that already passed validation, and
+        // any reflection failure resolves to 0 on that same already-error path.
+        let user_immediate_size = match &descriptor.layout {
+            ComputePipelineLayout::Explicit(layout) => layout.immediate_size(),
+            ComputePipelineLayout::Auto => descriptor
+                .shader_module
+                .reflected()
+                .and_then(|module| module.immediate_data_size(&entry_name).ok())
+                .unwrap_or(0),
+        };
         let (hal, backend_error) = if is_error {
             (None, None)
         } else {
@@ -184,6 +198,7 @@ impl ComputePipeline {
                 &descriptor.constants,
                 workgroup,
                 &metal_bindings,
+                user_immediate_size,
             )
         };
         let is_error = is_error || backend_error.is_some();
@@ -259,6 +274,10 @@ fn resolve_compute_pipeline_descriptor_for_source(
 }
 
 /// Creates HAL compute pipeline and reports validation errors through the owning device.
+///
+/// `user_immediate_size` is the owning pipeline layout's reserved
+/// user-immediate byte budget (Block 94, `layout.immediate_size`, 0..=64).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_hal_compute_pipeline(
     hal_device: Option<&HalDevice>,
     shader_module: &ShaderModule,
@@ -266,6 +285,7 @@ pub(crate) fn create_hal_compute_pipeline(
     constants: &[PipelineConstant],
     workgroup: Option<ResolvedComputeWorkgroup>,
     metal_bindings: &[MetalBufferBinding],
+    user_immediate_size: u32,
 ) -> (Option<HalComputePipeline>, Option<String>) {
     let Some(hal_device) = hal_device else {
         return (None, None);
@@ -294,6 +314,7 @@ pub(crate) fn create_hal_compute_pipeline(
         constants,
         metal_bindings,
         hal_device.vulkan_memory_model(),
+        user_immediate_size,
     ) {
         Ok(selection) => selection,
         Err(message) => return (None, Some(message)),
@@ -310,6 +331,12 @@ pub(crate) fn create_hal_compute_pipeline(
 }
 
 /// Selects the HAL shader source for a compute pipeline.
+///
+/// `user_immediate_size` is the owning pipeline layout's reserved
+/// user-immediate byte budget (Block 94, `layout.immediate_size`, 0..=64).
+/// Compute pipelines have no pipeline-internal immediates today, so the
+/// Metal immediates block (when present) is exactly this many bytes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn select_compute_shader_source(
     backend: HalBackend,
     shader_module: &ShaderModule,
@@ -317,6 +344,7 @@ pub(crate) fn select_compute_shader_source(
     constants: &[PipelineConstant],
     metal_bindings: &[MetalBufferBinding],
     vulkan_memory_model: bool,
+    user_immediate_size: u32,
 ) -> Result<(HalShaderSource, String, Vec<HalDescriptorBinding>), String> {
     let pipeline_constants = pipeline_constant_map(constants);
     match backend {
@@ -345,8 +373,15 @@ pub(crate) fn select_compute_shader_source(
             let msl_binding_map = frontend::MslBindingMap {
                 resources: msl_resource_bindings(metal_bindings),
             };
-            let generated =
-                module.generate_msl(entry_name, &msl_binding_map, &pipeline_constants)?;
+            let generated = module.generate_msl(
+                entry_name,
+                &msl_binding_map,
+                &pipeline_constants,
+                user_immediate_size,
+            )?;
+            let immediates = generated
+                .immediate_slot
+                .map(|slot| HalMslImmediates::new(slot, user_immediate_size, None));
             Ok((
                 HalShaderSource::MslWithBufferSizes {
                     source: generated.source,
@@ -355,6 +390,7 @@ pub(crate) fn select_compute_shader_source(
                         &generated.buffer_size_bindings,
                     ),
                     workgroup_memory_sizes: generated.workgroup_memory_sizes,
+                    immediates,
                 },
                 generated.entry_point,
                 Vec::new(),
@@ -876,11 +912,9 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
     let workgroup = resolve_compute_workgroup(module, &entry_name, &constants, limits)?;
     let bindings = module.resource_bindings_for_entry(&entry_name)?;
     validate_compute_pipeline_layout(&descriptor.layout, &bindings)?;
-    validate_stage_immediate_size(
-        module,
-        &entry_name,
-        compute_pipeline_layout_immediate_size(&descriptor.layout),
-    )?;
+    let immediate_size_budget =
+        resolve_compute_pipeline_immediate_size(&descriptor.layout, module, &entry_name, limits)?;
+    validate_stage_immediate_size(module, &entry_name, immediate_size_budget)?;
     let bind_group_layouts = effective_compute_bind_group_layouts(
         &descriptor.layout,
         &bindings,
@@ -1162,13 +1196,35 @@ fn resolved_pipeline_constant_map(
     )
 }
 
-/// Returns the pipeline layout's immediate-data budget in bytes (Block 93):
-/// `0` for an auto (default) layout -- auto layouts reserve no immediate
-/// space -- or the explicit layout's `immediateSize` otherwise.
-pub(crate) fn compute_pipeline_layout_immediate_size(layout: &ComputePipelineLayout) -> u32 {
+/// Resolves the pipeline's effective user-immediate byte budget (Blocks
+/// 93/94). An explicit layout contributes its declared `immediateSize`. An
+/// auto (default) layout mirrors Dawn's default-layout rule
+/// (`dawn/native/PipelineLayout.cpp:549,588-590,616` --
+/// `PipelineLayoutBase::CreateDefault` sets the synthesized descriptor's
+/// `immediateSize` to the max of the stages' reflected immediate usage;
+/// compute has a single stage): the budget is `entry_name`'s own reflected
+/// immediate data size. Dawn then routes that default descriptor through
+/// the ordinary validated `CreatePipelineLayout` (`PipelineLayout.cpp:634`),
+/// whose `immediateSize <= maxImmediateSize` bound
+/// (`PipelineLayout.cpp:144-147`) is mirrored here for the auto arm, with
+/// the same error message `createPipelineLayout` uses
+/// (`validate_pipeline_layout_descriptor`); explicit layouts were already
+/// bounds-checked at their own creation.
+pub(crate) fn resolve_compute_pipeline_immediate_size(
+    layout: &ComputePipelineLayout,
+    module: &frontend::ReflectedModule,
+    entry_name: &str,
+    limits: Limits,
+) -> Result<u32, String> {
     match layout {
-        ComputePipelineLayout::Auto => 0,
-        ComputePipelineLayout::Explicit(layout) => layout.immediate_size(),
+        ComputePipelineLayout::Explicit(layout) => Ok(layout.immediate_size()),
+        ComputePipelineLayout::Auto => {
+            let size = module.immediate_data_size(entry_name)?;
+            if size > limits.max_immediate_size {
+                return Err("pipeline layout immediateSize exceeds the device limit".to_owned());
+            }
+            Ok(size)
+        }
     }
 }
 
@@ -1963,15 +2019,17 @@ mod tests {
     }
 
     /// Block 93: an entry point that statically touches a `var<immediate>`
-    /// is rejected at pipeline creation because every pipeline layout has
-    /// `immediateSize == 0` today (`maxImmediateSize = 0`, `HalLimits::DEFAULT`
-    /// on every backend) -- both for an explicit layout (only immediateSize
-    /// 0 is even constructible under that device limit) and for the auto
-    /// (default) layout. This fires identically on Noop (backend-independent
-    /// core validation).
+    /// is rejected when the EXPLICIT pipeline layout reserves a smaller
+    /// `immediateSize` (here 0) -- but the same shader under an AUTO layout
+    /// creates successfully, because Dawn's default layout sizes its
+    /// immediate budget to the stage's own reflected usage
+    /// (`dawn/native/PipelineLayout.cpp:549,588-590,616`), which trivially
+    /// covers it. This fires identically on Noop (backend-independent core
+    /// validation; Noop `maxImmediateSize` = 64).
     #[test]
     fn compute_pipeline_rejects_entry_point_immediate_data_size_exceeding_layout_budget() {
         let device = noop_device();
+        assert_eq!(device.limits().max_immediate_size, 64);
         let shader = Arc::new(
             device.create_shader_module(ShaderModuleSource::Wgsl(
                 r#"
@@ -2012,6 +2070,9 @@ fn cs() {
             "shader entry point immediate data size exceeds the pipeline layout's immediateSize"
         );
 
+        // Auto layout: budget = the entry's own usage (4 bytes) <=
+        // maxImmediateSize, so the same shader creates successfully (Dawn
+        // CreateDefault rule).
         device.push_error_scope(ErrorFilter::Validation);
         let auto_pipeline = device.create_compute_pipeline(ComputePipelineDescriptor {
             layout: ComputePipelineLayout::Auto,
@@ -2020,12 +2081,60 @@ fn cs() {
             constants: Vec::new(),
             error: None,
         });
-        let scoped_auto = device
+        let scoped_auto = device.pop_error_scope().expect("scope should exist");
+        assert!(
+            scoped_auto.is_none(),
+            "auto-layout pipeline within maxImmediateSize must not error: {scoped_auto:?}"
+        );
+        assert!(!auto_pipeline.is_error());
+    }
+
+    /// An auto (default) layout whose entry point uses MORE immediate bytes
+    /// than the device's `maxImmediateSize` (80 > 64) is rejected: Dawn's
+    /// `CreateDefault` routes the synthesized descriptor -- `immediateSize`
+    /// = the stage's usage -- through the ordinary validated
+    /// `CreatePipelineLayout` (`dawn/native/PipelineLayout.cpp:634` ->
+    /// `:144-147`), so the failure is the createPipelineLayout limit error,
+    /// not the Block 93 entry-vs-layout mismatch.
+    #[test]
+    fn compute_pipeline_auto_layout_rejects_entry_point_immediate_usage_exceeding_device_limit() {
+        let device = noop_device();
+        assert_eq!(device.limits().max_immediate_size, 64);
+        let shader = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r#"
+requires immediate_address_space;
+
+var<immediate> big : array<vec4u, 5>;
+
+@compute @workgroup_size(1)
+fn cs() {
+  let v = big[0];
+  _ = v;
+}
+"#
+                .to_owned(),
+            )),
+        );
+        assert!(!shader.is_error());
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Auto,
+            shader_module: shader,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        });
+        let scoped = device
             .pop_error_scope()
             .expect("scope should exist")
-            .expect("auto-layout pipeline touching an immediate should be scoped");
-        assert!(auto_pipeline.is_error());
-        assert_eq!(scoped_auto.message, scoped.message);
+            .expect("auto-layout pipeline using 80 immediate bytes should be scoped");
+        assert!(pipeline.is_error());
+        assert_eq!(
+            scoped.message,
+            "pipeline layout immediateSize exceeds the device limit"
+        );
     }
 
     /// A module that only *declares* a `var<immediate>` global -- never
@@ -2306,7 +2415,7 @@ fn cs() {
         ));
 
         let (source, entry, bindings) =
-            select_compute_shader_source(HalBackend::Gles, &wgsl, "cs", &[], &[], false)
+            select_compute_shader_source(HalBackend::Gles, &wgsl, "cs", &[], &[], false, 0)
                 .expect("WGSL should generate GLES GLSL");
 
         let HalShaderSource::Glsl {
@@ -2320,6 +2429,46 @@ fn cs() {
         assert!(bindings.is_empty());
         assert!(source.contains("#version 310 es"));
         assert!(source.contains("local_size_x = 2"));
+    }
+
+    /// Block 94 S2: a compute entry point using a user `var<immediate>`
+    /// threads `HalMslImmediates` from Tint's reflection into
+    /// `HalShaderSource::MslWithBufferSizes` -- compute pipelines have no
+    /// pipeline-internal immediates, so `block_size` equals the layout's
+    /// reserved `user_immediate_size` verbatim and
+    /// `frag_depth_clamp_offset` is always `None`.
+    #[test]
+    fn select_compute_shader_source_metal_threads_immediate_metadata_to_hal_shader_source() {
+        let device = noop_device();
+        let module = device.create_shader_module(ShaderModuleSource::Wgsl(
+            r#"
+requires immediate_address_space;
+
+var<immediate> params : vec4f;
+
+@compute @workgroup_size(1)
+fn cs() {
+  let v = params;
+  _ = v;
+}
+"#
+            .to_owned(),
+        ));
+
+        // `params` is a vec4f (16 bytes); the owning pipeline layout
+        // reserves exactly that much user-immediate budget.
+        let (source, entry, bindings) =
+            select_compute_shader_source(HalBackend::Metal, &module, "cs", &[], &[], false, 16)
+                .expect("compute pipeline with a user immediate should select Metal MSL");
+
+        let HalShaderSource::MslWithBufferSizes { immediates, .. } = source else {
+            panic!("Metal backend must select MslWithBufferSizes");
+        };
+        let immediates = immediates.expect("compute entry point references params");
+        assert_eq!(immediates.block_size, 16);
+        assert_eq!(immediates.frag_depth_clamp_offset, None);
+        assert_eq!(entry, "tint_cs");
+        assert!(bindings.is_empty());
     }
 
     #[test]
@@ -2372,7 +2521,7 @@ fn cs() {
             kind: MetalBindingKind::ExternalTexture,
         }];
         let err =
-            select_compute_shader_source(HalBackend::Vulkan, &wgsl, "cs", &[], &external, false)
+            select_compute_shader_source(HalBackend::Vulkan, &wgsl, "cs", &[], &external, false, 0)
                 .expect_err("Vulkan must reject external textures");
         assert_eq!(
             err,
@@ -2848,8 +2997,9 @@ fn cs() {
         let device = noop_device();
         let module = spirv_passthrough_module(&device);
 
-        let err = select_compute_shader_source(HalBackend::Metal, &module, "cs", &[], &[], false)
-            .expect_err("SPIR-V passthrough must reject Metal");
+        let err =
+            select_compute_shader_source(HalBackend::Metal, &module, "cs", &[], &[], false, 0)
+                .expect_err("SPIR-V passthrough must reject Metal");
 
         assert_eq!(err, "SPIR-V passthrough shader requires the Vulkan backend");
     }
@@ -2869,6 +3019,7 @@ fn cs() {
             &[],
             &metal_bindings,
             false,
+            0,
         )
         .expect("SPIR-V passthrough should select Vulkan source");
 
@@ -2948,8 +3099,9 @@ fn cs() {
         let device = noop_device();
         let module = msl_passthrough_module(&device, vec![msl_compute_entry("cs", [1, 1, 1])]);
 
-        let err = select_compute_shader_source(HalBackend::Vulkan, &module, "cs", &[], &[], false)
-            .expect_err("MSL passthrough must reject Vulkan");
+        let err =
+            select_compute_shader_source(HalBackend::Vulkan, &module, "cs", &[], &[], false, 0)
+                .expect_err("MSL passthrough must reject Vulkan");
 
         assert_eq!(err, "MSL passthrough shader requires the Metal backend");
     }

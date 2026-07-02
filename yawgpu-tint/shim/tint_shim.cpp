@@ -589,7 +589,7 @@ static_assert(offsetof(YawgpuTintVertexBuffer, attributes) == 16,
 static_assert(offsetof(YawgpuTintVertexBuffer, n_attributes) == 24,
               "YawgpuTintVertexBuffer layout changed");
 
-static_assert(sizeof(YawgpuTintMslOutput) == 64, "YawgpuTintMslOutput layout changed");
+static_assert(sizeof(YawgpuTintMslOutput) == 72, "YawgpuTintMslOutput layout changed");
 static_assert(offsetof(YawgpuTintMslOutput, msl) == 0, "YawgpuTintMslOutput layout changed");
 static_assert(offsetof(YawgpuTintMslOutput, entry_point) == 8,
               "YawgpuTintMslOutput layout changed");
@@ -606,6 +606,10 @@ static_assert(offsetof(YawgpuTintMslOutput, n_workgroup_allocations) == 48,
 static_assert(offsetof(YawgpuTintMslOutput, has_frag_depth_clamp) == 56,
               "YawgpuTintMslOutput layout changed");
 static_assert(offsetof(YawgpuTintMslOutput, frag_depth_clamp_slot) == 60,
+              "YawgpuTintMslOutput layout changed");
+static_assert(offsetof(YawgpuTintMslOutput, uses_immediates) == 64,
+              "YawgpuTintMslOutput layout changed");
+static_assert(offsetof(YawgpuTintMslOutput, immediate_slot) == 68,
               "YawgpuTintMslOutput layout changed");
 
 // Reflection results for one entry point, cached after the first
@@ -1588,6 +1592,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
                               const YawgpuTintVertexBuffer* vertex_buffers,
                               size_t n_vertex_buffers,
                               uint32_t fixed_sample_mask,
+                              uint32_t user_immediate_size,
                               YawgpuTintMslOutput* out,
                               char** err) {
     if (err != nullptr) {
@@ -1603,6 +1608,8 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         out->n_workgroup_allocations = 0;
         out->has_frag_depth_clamp = false;
         out->frag_depth_clamp_slot = 0;
+        out->uses_immediates = false;
+        out->immediate_slot = 0;
     }
     MslOutputGuard out_guard(out);
     try {
@@ -1644,9 +1651,32 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
             options.immediate_binding_point.has_value();
         uint32_t frag_depth_clamp_slot = 0;
         if (has_frag_depth_clamp) {
-            options.depth_range_offsets =
-                tint::msl::writer::Options::RangeOffsets{/*min=*/0u, /*max=*/4u};
+            // Dawn (dawn/native/metal/RenderPipelineMTL.mm:383-384,
+            // ImmediatesLayout.h's GetImmediateByteOffsetInPipeline) appends
+            // ClampFragDepthArgs immediately after the FULL layout-reserved
+            // user-immediate region -- `user_immediate_size`, the pipeline
+            // layout's `immediateSize` -- not after this entry point's own
+            // (possibly smaller) declared `var<immediate>` usage. Tint's
+            // PrepareImmediateData (prepare_immediate_data.cc) only requires
+            // the offset to be >= the end of the actual user member, so a
+            // gap between the entry's real usage and `user_immediate_size`
+            // is valid (implicit padding); this keeps the clamp offset
+            // stable across pipelines that reserve the same layout budget
+            // regardless of how much of it a given entry point touches.
+            // 4 == Dawn's kImmediateElementByteSize (dawn/common/Constants.h)
+            // -- the immediate block's word granularity; not referenced here
+            // since this shim links Tint only, not dawn::common.
+            options.depth_range_offsets = tint::msl::writer::Options::RangeOffsets{
+                /*min=*/user_immediate_size, /*max=*/user_immediate_size + 4u};
             frag_depth_clamp_slot = options.immediate_binding_point->binding;
+        }
+        const bool entry_has_user_immediates =
+            ep_info != nullptr && ep_info->immediate_data_size > 0;
+        const bool uses_immediates = (entry_has_user_immediates || has_frag_depth_clamp) &&
+                                     options.immediate_binding_point.has_value();
+        uint32_t immediate_slot = 0;
+        if (uses_immediates) {
+            immediate_slot = options.immediate_binding_point->binding;
         }
         std::vector<tint::BindingPoint> ordered_size_bindings;
         options.array_length_from_constants = generate_array_length_from_constants(
@@ -1718,6 +1748,8 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         out->needs_storage_buffer_sizes = result->needs_storage_buffer_sizes;
         out->has_frag_depth_clamp = has_frag_depth_clamp;
         out->frag_depth_clamp_slot = frag_depth_clamp_slot;
+        out->uses_immediates = uses_immediates;
+        out->immediate_slot = immediate_slot;
         out->buffer_size_bindings = dup_binding_pairs(ordered_size_bindings);
         out->n_buffer_size_bindings = ordered_size_bindings.size();
         if (!ordered_size_bindings.empty() && out->buffer_size_bindings == nullptr) {

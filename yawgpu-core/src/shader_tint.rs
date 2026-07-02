@@ -201,11 +201,19 @@ impl ReflectedModule {
     }
 
     /// Generates msl for the validated shader module.
+    ///
+    /// `user_immediate_size` is the owning pipeline layout's reserved
+    /// user-immediate byte budget (Block 94, `layout.immediate_size`,
+    /// 0..=64); it sets where any pipeline-internal immediates would be
+    /// appended after the user prefix (compute pipelines have none today,
+    /// but the offset must still be layout-consistent, see
+    /// `yawgpu_tint::Program::generate_msl`'s doc comment).
     pub(crate) fn generate_msl(
         &self,
         entry_name: &str,
         binding_map: &MslBindingMap,
         pipeline_constants: &PipelineConstants,
+        user_immediate_size: u32,
     ) -> Result<GeneratedMsl, String> {
         // Robustness ENABLED (disable_robustness = false): WebGPU requires
         // out-of-bounds safety in compute shaders too.
@@ -218,10 +226,14 @@ impl ReflectedModule {
             false,
             false,
             0xFFFF_FFFF,
+            user_immediate_size,
         )
     }
 
     /// Generates render vertex MSL for a validated shader module.
+    ///
+    /// `user_immediate_size` -- see [`Self::generate_msl`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn generate_render_vertex_msl(
         &self,
         entry_name: &str,
@@ -229,6 +241,7 @@ impl ReflectedModule {
         vertex_buffers: &[MslVertexBufferBinding],
         force_point_size: bool,
         pipeline_constants: &PipelineConstants,
+        user_immediate_size: u32,
     ) -> Result<GeneratedMsl, String> {
         let vertex_buffers = tint_vertex_buffers(vertex_buffers)?;
         // `force_point_size` makes Tint emit `[[point_size]] = 1.0` (point-list
@@ -242,10 +255,14 @@ impl ReflectedModule {
             false,
             force_point_size,
             0xFFFF_FFFF,
+            user_immediate_size,
         )
     }
 
     /// Generates render fragment MSL for a validated shader module.
+    ///
+    /// `user_immediate_size` -- see [`Self::generate_msl`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn generate_render_fragment_msl(
         &self,
         entry_name: &str,
@@ -253,6 +270,7 @@ impl ReflectedModule {
         subpass_color_slots: &[((u32, u32), u32)],
         pipeline_constants: &PipelineConstants,
         sample_mask: u32,
+        user_immediate_size: u32,
     ) -> Result<GeneratedMsl, String> {
         self.generate_stage_msl(
             entry_name,
@@ -263,6 +281,7 @@ impl ReflectedModule {
             false,
             false,
             sample_mask,
+            user_immediate_size,
         )
     }
 
@@ -277,6 +296,7 @@ impl ReflectedModule {
         disable_robustness: bool,
         emit_vertex_point_size: bool,
         fixed_sample_mask: u32,
+        user_immediate_size: u32,
     ) -> Result<GeneratedMsl, String> {
         let bindings = tint_bindings_for_msl(
             binding_map,
@@ -310,6 +330,7 @@ impl ReflectedModule {
                 emit_vertex_point_size,
                 vertex_buffers,
                 fixed_sample_mask,
+                user_immediate_size,
             )
             .map_err(|e| e.to_string())?;
         let buffer_size_bindings = output
@@ -327,6 +348,7 @@ impl ReflectedModule {
                 .then_some(buffer_sizes_slot),
             buffer_size_bindings,
             frag_depth_clamp_slot: output.frag_depth_clamp_slot,
+            immediate_slot: output.immediate_slot,
             workgroup_memory_sizes: output
                 .workgroup_allocations
                 .iter()
@@ -1693,6 +1715,7 @@ fn fs() -> @location(0) vec4<f32> {
                 &[((0, 0), 1)],
                 &PipelineConstants::default(),
                 0xFFFF_FFFF,
+                0,
             )
             .unwrap();
 
@@ -1720,6 +1743,7 @@ fn fs() -> @location(0) vec4<f32> {
                 &[],
                 &PipelineConstants::default(),
                 0xFFFF_FFFF,
+                0,
             )
             .expect_err("input attachment MSL generation should require a color-slot map");
         assert!(!err.is_empty());
@@ -1947,6 +1971,7 @@ fn main() {}
                     resources: Vec::new(),
                 },
                 &PipelineConstants::default(),
+                0,
             )
             .unwrap();
 
@@ -1988,6 +2013,7 @@ fn cs() {
                     }],
                 },
                 &PipelineConstants::default(),
+                0,
             )
             .unwrap();
 
@@ -2040,6 +2066,7 @@ fn vs(i: VIn) -> @builtin(position) vec4<f32> {
                 }],
                 false,
                 &PipelineConstants::default(),
+                0,
             )
             .unwrap();
 
@@ -2374,6 +2401,7 @@ fn cs() {
                     ],
                 },
                 &PipelineConstants::default(),
+                0,
             )
             .unwrap();
 
@@ -2428,6 +2456,7 @@ fn cs() {
                     ],
                 },
                 &PipelineConstants::default(),
+                0,
             )
             .unwrap();
 

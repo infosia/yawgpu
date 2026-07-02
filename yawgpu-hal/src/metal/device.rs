@@ -122,26 +122,33 @@ impl MetalDevice {
         workgroup_size: (u32, u32, u32),
         _bindings: &[HalDescriptorBinding],
     ) -> Result<MetalComputePipeline, HalError> {
-        let (msl_source, buffer_sizes_slot, buffer_size_bindings, workgroup_memory_sizes) =
-            match shader {
-                HalShaderSource::Msl(source) => (source, None, Vec::new(), Vec::new()),
-                HalShaderSource::MslWithBufferSizes {
-                    source,
-                    buffer_sizes_slot,
-                    buffer_size_bindings,
-                    workgroup_memory_sizes,
-                } => (
-                    source,
-                    buffer_sizes_slot,
-                    buffer_size_bindings,
-                    workgroup_memory_sizes,
-                ),
-                _ => {
-                    return Err(shader_error(
-                        "Metal compute pipeline requires MSL".to_owned(),
-                    ));
-                }
-            };
+        let (
+            msl_source,
+            buffer_sizes_slot,
+            buffer_size_bindings,
+            workgroup_memory_sizes,
+            immediates,
+        ) = match shader {
+            HalShaderSource::Msl(source) => (source, None, Vec::new(), Vec::new(), None),
+            HalShaderSource::MslWithBufferSizes {
+                source,
+                buffer_sizes_slot,
+                buffer_size_bindings,
+                workgroup_memory_sizes,
+                immediates,
+            } => (
+                source,
+                buffer_sizes_slot,
+                buffer_size_bindings,
+                workgroup_memory_sizes,
+                immediates,
+            ),
+            _ => {
+                return Err(shader_error(
+                    "Metal compute pipeline requires MSL".to_owned(),
+                ));
+            }
+        };
         create_compute_pipeline(
             &self.device,
             &msl_source,
@@ -150,6 +157,7 @@ impl MetalDevice {
             buffer_sizes_slot,
             buffer_size_bindings,
             workgroup_memory_sizes,
+            immediates,
         )
     }
 
@@ -335,6 +343,7 @@ kernel void cs(
             buffer_sizes_slot: None,
             buffer_size_bindings: Vec::new(),
             workgroup_memory_sizes: vec![32, 16],
+            immediates: None,
         };
         let device = metal_device();
         let pipeline = device

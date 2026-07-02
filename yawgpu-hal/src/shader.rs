@@ -18,6 +18,10 @@ pub enum HalShaderSource {
         /// `setThreadgroupMemoryLength:atIndex:` for each entry before dispatch.
         /// Empty when the compute shader has no workgroup variables.
         workgroup_memory_sizes: Vec<u32>,
+        /// Compute-stage immediates delivery metadata (Block 94 S2), when
+        /// the compute entry point uses `var<immediate>` user data. `None`
+        /// when the entry point declares no immediates.
+        immediates: Option<HalMslImmediates>,
     },
     /// Per-stage MSL render sources.
     MslStages {
@@ -40,8 +44,18 @@ pub enum HalShaderSource {
         fragment_buffer_sizes_slot: Option<u32>,
         /// Fragment-stage bindings whose byte lengths populate `_mslBufferSizes`.
         fragment_buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
-        /// Reserved fragment-stage immediate slot for frag-depth clamp range.
-        fragment_frag_depth_clamp_slot: Option<u32>,
+        /// Vertex-stage immediates delivery metadata (Block 94 S2), when the
+        /// vertex entry point uses `var<immediate>` user data. `None` when
+        /// the vertex entry point declares no immediates.
+        vertex_immediates: Option<HalMslImmediates>,
+        /// Fragment-stage immediates delivery metadata (Block 94 S2). Also
+        /// carries the frag-depth clamp range offset within the block when
+        /// this pipeline clamps frag_depth -- absorbs the old
+        /// `fragment_frag_depth_clamp_slot` (a clamp-only pipeline still
+        /// gets `Some` here, with `frag_depth_clamp_offset` set and no user
+        /// immediates). `None` when the fragment entry point uses no
+        /// immediates and does not clamp frag_depth.
+        fragment_immediates: Option<HalMslImmediates>,
         /// Metal buffer indices for vertex buffers, in the same order as
         /// `vertex_buffer_mappings` passed to Tint's MSL codegen. These correspond to
         /// the `buffer_sizeN` fields appended after the storage-array size fields
@@ -93,6 +107,41 @@ impl HalMslBufferSizeBinding {
     }
 }
 
+/// Metal immediates delivery descriptor for one shader stage (Block 94 S2):
+/// where to bind the combined immediates block and how large it is. Mirrors
+/// Dawn's `ImmediatesLayout.h` layout -- user immediate bytes first
+/// (`[0, block_size)`, or `[0, frag_depth_clamp_offset)` when the clamp
+/// range is also present), with pipeline-internal constants (currently only
+/// the fragment frag-depth clamp range) appended directly after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HalMslImmediates {
+    /// Metal buffer slot the combined block is delivered to via
+    /// `set{Vertex,Fragment}Bytes` / `setBytes`.
+    pub slot: u32,
+    /// Total block size in bytes delivered to this stage: the pipeline
+    /// layout's reserved user-immediate budget, plus 8 bytes when this
+    /// stage also carries the frag-depth clamp range.
+    pub block_size: u32,
+    /// Byte offset of the 8-byte frag-depth clamp range
+    /// (`[min_depth, max_depth]`, both `f32`) within the block, when this
+    /// stage clamps frag_depth. Always `None` for vertex and compute
+    /// stages.
+    pub frag_depth_clamp_offset: Option<u32>,
+}
+
+impl HalMslImmediates {
+    /// Creates a new Metal immediates delivery descriptor.
+    #[must_use]
+    pub fn new(slot: u32, block_size: u32, frag_depth_clamp_offset: Option<u32>) -> Self {
+        Self {
+            slot,
+            block_size,
+            frag_depth_clamp_offset,
+        }
+    }
+}
+
 /// Enumerates shader stages for stage-specific source formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -130,6 +179,7 @@ mod tests {
             buffer_sizes_slot: Some(3),
             buffer_size_bindings: vec![HalMslBufferSizeBinding::new(1, 2)],
             workgroup_memory_sizes: vec![32, 16],
+            immediates: Some(HalMslImmediates::new(4, 16, None)),
         };
 
         assert!(matches!(
@@ -139,6 +189,11 @@ mod tests {
                 buffer_sizes_slot: Some(3),
                 buffer_size_bindings,
                 workgroup_memory_sizes,
+                immediates: Some(HalMslImmediates {
+                    slot: 4,
+                    block_size: 16,
+                    frag_depth_clamp_offset: None,
+                }),
             } if source == "kernel void main0() {}"
                 && buffer_size_bindings == [HalMslBufferSizeBinding::new(1, 2)]
                 && workgroup_memory_sizes == [32, 16]
@@ -154,7 +209,8 @@ mod tests {
             vertex_buffer_size_bindings: vec![HalMslBufferSizeBinding::new(0, 1)],
             fragment_buffer_sizes_slot: None,
             fragment_buffer_size_bindings: Vec::new(),
-            fragment_frag_depth_clamp_slot: None,
+            vertex_immediates: None,
+            fragment_immediates: Some(HalMslImmediates::new(30, 72, Some(64))),
             vertex_buffer_metal_indices: vec![3, 5],
         };
 
@@ -167,7 +223,12 @@ mod tests {
                 vertex_buffer_size_bindings,
                 fragment_buffer_sizes_slot: None,
                 fragment_buffer_size_bindings,
-                fragment_frag_depth_clamp_slot: None,
+                vertex_immediates: None,
+                fragment_immediates: Some(HalMslImmediates {
+                    slot: 30,
+                    block_size: 72,
+                    frag_depth_clamp_offset: Some(64),
+                }),
                 vertex_buffer_metal_indices,
             } if vertex == "vertex_src"
                 && fragment.as_deref() == Some("fragment_src")
@@ -175,5 +236,19 @@ mod tests {
                 && fragment_buffer_size_bindings.is_empty()
                 && vertex_buffer_metal_indices == [3, 5]
         ));
+    }
+
+    #[test]
+    fn hal_msl_immediates_new_round_trips_fields() {
+        let immediates = HalMslImmediates::new(30, 72, Some(64));
+
+        assert_eq!(
+            immediates,
+            HalMslImmediates {
+                slot: 30,
+                block_size: 72,
+                frag_depth_clamp_offset: Some(64),
+            }
+        );
     }
 }

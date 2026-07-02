@@ -59,8 +59,14 @@ posture (yawgpu also reports `maxImmediateSize = 0` on every backend —
   so any entry point that actually touches a `var<immediate>` is rejected
   deterministically; a module that merely *declares* one (unused by the
   entry point) has size 0 and passes.
-- Default (auto) pipeline layouts reserve no immediate space
-  (`immediate_size = 0`); the rule above applies unchanged.
+- Default (auto) pipeline layouts budget the **device's
+  `maxImmediateSize`** (not 0) — CTS
+  `pipeline,immediates:pipeline_creation_immediate_size_mismatch` requires
+  a shader using up to `maxImmediateSize` to succeed under an auto layout.
+  (Historical note: this section originally said auto layouts reserve 0
+  bytes; that was unobservable — and wrong — while every backend reported
+  `maxImmediateSize = 0`, and was corrected during Block 94 S2 when the
+  Metal limit became 64 and the CTS cases started running.)
 
 ### Implementation notes
 

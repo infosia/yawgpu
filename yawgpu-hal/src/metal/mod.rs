@@ -30,9 +30,9 @@ use crate::{
     HalBufferUsage, HalColorTargetState, HalCompareFunction, HalComputeDispatch, HalComputePass,
     HalCopy, HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalDraw, HalError,
     HalExtent3d, HalFilterMode, HalFrontFace, HalIndexFormat, HalLimits, HalMipmapFilterMode,
-    HalMslBufferSizeBinding, HalPresentMode, HalPrimitiveTopology, HalQueryKind, HalQuerySet,
-    HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor, HalResolveQuerySet, HalSampler,
-    HalSamplerDescriptor, HalShaderSource, HalStencilFaceState, HalStencilOperation,
+    HalMslBufferSizeBinding, HalMslImmediates, HalPresentMode, HalPrimitiveTopology, HalQueryKind,
+    HalQuerySet, HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor, HalResolveQuerySet,
+    HalSampler, HalSamplerDescriptor, HalShaderSource, HalStencilFaceState, HalStencilOperation,
     HalSurfaceConfiguration, HalTexture, HalTextureClear, HalTextureCopy, HalTextureDescriptor,
     HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
@@ -260,6 +260,13 @@ impl MetalAdapter {
             limits.max_storage_textures_per_shader_stage;
         limits.max_storage_buffers_in_vertex_stage = limits.max_storage_buffers_per_shader_stage;
         limits.max_storage_textures_in_vertex_stage = limits.max_storage_textures_per_shader_stage;
+
+        // Block 94 S2: Metal now executes SetImmediates (encode.rs
+        // `encode_render_immediates` / `encode_compute_immediates`), so it
+        // advertises Dawn's base-tier `maxImmediateSize` (`kMaxImmediateDataBytes`,
+        // dawn/common/Constants.h) like Noop already does (S1). `HalLimits::DEFAULT`
+        // and Vulkan stay 0 until S3.
+        limits.max_immediate_size = 64;
 
         limits
     }
@@ -507,6 +514,9 @@ mod tests {
 
         assert!(limits.max_texture_dimension_2d >= 8192);
         assert!(limits.max_compute_invocations_per_workgroup >= 256);
+        // Block 94 S2: Metal now executes SetImmediates, so it advertises
+        // Dawn's base-tier maxImmediateSize like Noop.
+        assert_eq!(limits.max_immediate_size, 64);
     }
 
     #[test]

@@ -284,8 +284,18 @@ typedef struct {
     size_t n_workgroup_allocations;
     bool has_frag_depth_clamp;          /* true if this fragment EP writes frag_depth and clamp was enabled */
     uint32_t frag_depth_clamp_slot;     /* MSL buffer index of the depth-range immediate block (valid iff has_frag_depth_clamp) */
+    bool uses_immediates;               /* true if this EP uses any immediates (user var<immediate> data or the frag-depth clamp) */
+    uint32_t immediate_slot;            /* MSL buffer index of the combined immediates block (valid iff uses_immediates; equals frag_depth_clamp_slot when has_frag_depth_clamp) */
 } YawgpuTintMslOutput;
 
+/* `user_immediate_size` is the owning pipeline layout's reserved
+   user-immediate byte budget (PipelineLayout.immediateSize, 0..=64, Block
+   94) -- NOT this entry point's own smaller reflected immediate_data_size.
+   It is the byte offset after which pipeline-internal immediates (currently
+   only the fragment frag-depth clamp range) are appended, mirroring Dawn's
+   GetImmediateByteOffsetInPipeline (ImmediatesLayout.h), which places
+   ClampFragDepthArgs after the full layout-reserved user region rather than
+   after the entry point's own (possibly smaller) declared usage. */
 YAWGPU_TINT_API bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
                               const char* ep,
                               const YawgpuTintBindings*,
@@ -297,6 +307,7 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
                               const YawgpuTintVertexBuffer* vertex_buffers,
                               size_t n_vertex_buffers,
                               uint32_t fixed_sample_mask,
+                              uint32_t user_immediate_size,
                               YawgpuTintMslOutput* out,
                               char** err);
 

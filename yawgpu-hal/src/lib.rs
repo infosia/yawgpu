@@ -41,7 +41,7 @@ pub use format::{
     HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
 pub use present::{HalPresentMode, HalSurfaceConfiguration};
-pub use shader::{HalMslBufferSizeBinding, HalShaderSource, HalShaderStage};
+pub use shader::{HalMslBufferSizeBinding, HalMslImmediates, HalShaderSource, HalShaderStage};
 
 /// Stores backend-reported supported adapter limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

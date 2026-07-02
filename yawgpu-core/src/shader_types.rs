@@ -63,6 +63,12 @@ pub(crate) struct GeneratedMsl {
     pub buffer_size_bindings: Vec<MslBufferSizeBinding>,
     /// Reserved fragment immediate slot for the frag-depth clamp range.
     pub frag_depth_clamp_slot: Option<u32>,
+    /// Reserved MSL buffer slot of the combined immediates block (user
+    /// immediates, plus the frag-depth clamp range when present) for this
+    /// stage, when it uses any immediates. `None` when this stage uses no
+    /// immediates at all. Always equal to `frag_depth_clamp_slot` when the
+    /// latter is `Some` (Block 94).
+    pub immediate_slot: Option<u32>,
     /// Per-index threadgroup allocation sizes from Tint's workgroup_allocations,
     /// rounded up to a multiple of 16 for Metal.
     pub workgroup_memory_sizes: Vec<u32>,

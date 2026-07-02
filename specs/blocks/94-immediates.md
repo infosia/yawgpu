@@ -65,6 +65,11 @@ void wgpuRenderBundleEncoderSetImmediates(enc, uint32_t offset, void const* data
   `immediate_size` up to 64, and `createPipelineLayout` enforces
   `immediateSize <= maxImmediateSize` (already implemented; the 8
   `immediate_data_size` CTS cases exercise it once the limit is 64).
+  **Auto layouts budget the device's `maxImmediateSize`, not 0** (CTS
+  `pipeline_creation_immediate_size_mismatch` auto-layout subcases; Block
+  93's original auto→0 posture was corrected in S2 — verify Dawn's default
+  pipeline layout `immediateSize` and mirror it, including what that means
+  for the clamp offset of auto-layout fragment pipelines).
 
 ## Immediates block layout (per pipeline)
 

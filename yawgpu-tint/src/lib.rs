@@ -150,6 +150,13 @@ pub struct MslOutput {
     pub workgroup_allocations: Vec<u32>,
     /// MSL buffer slot of the frag-depth clamp immediate block, if this fragment entry point writes frag_depth.
     pub frag_depth_clamp_slot: Option<u32>,
+    /// MSL buffer slot of the combined immediates block (user immediates,
+    /// plus the frag-depth clamp range when present), when this entry point
+    /// uses any immediates (user `var<immediate>` data or the frag-depth
+    /// clamp). `None` when the entry point uses no immediates at all.
+    /// Always equal to `frag_depth_clamp_slot` when the latter is `Some`
+    /// (same combined block, same slot).
+    pub immediate_slot: Option<u32>,
 }
 
 /// A storage binding whose byte length is required by generated MSL.
@@ -1229,11 +1236,13 @@ mod real {
         n_workgroup_allocations: usize,
         has_frag_depth_clamp: bool,
         frag_depth_clamp_slot: u32,
+        uses_immediates: bool,
+        immediate_slot: u32,
     }
 
     // ABI drift guard: mirrors `YawgpuTintMslOutput`'s static_asserts.
     const _: () = {
-        assert!(core::mem::size_of::<RawMslOutput>() == 64);
+        assert!(core::mem::size_of::<RawMslOutput>() == 72);
         assert!(core::mem::offset_of!(RawMslOutput, msl) == 0);
         assert!(core::mem::offset_of!(RawMslOutput, entry_point) == 8);
         assert!(core::mem::offset_of!(RawMslOutput, needs_storage_buffer_sizes) == 16);
@@ -1243,6 +1252,8 @@ mod real {
         assert!(core::mem::offset_of!(RawMslOutput, n_workgroup_allocations) == 48);
         assert!(core::mem::offset_of!(RawMslOutput, has_frag_depth_clamp) == 56);
         assert!(core::mem::offset_of!(RawMslOutput, frag_depth_clamp_slot) == 60);
+        assert!(core::mem::offset_of!(RawMslOutput, uses_immediates) == 64);
+        assert!(core::mem::offset_of!(RawMslOutput, immediate_slot) == 68);
     };
 
     extern "C" {
@@ -1321,6 +1332,7 @@ mod real {
             vertex_buffers: *const RawVertexBuffer,
             n_vertex_buffers: usize,
             fixed_sample_mask: u32,
+            user_immediate_size: u32,
             out: *mut RawMslOutput,
             err: *mut *mut c_char,
         ) -> bool;
@@ -1748,6 +1760,17 @@ mod real {
         }
 
         /// Generates MSL for `entry_point`.
+        ///
+        /// `user_immediate_size` is the owning pipeline layout's reserved
+        /// user-immediate byte budget (`PipelineLayout.immediateSize`, 0..=64,
+        /// Block 94) -- NOT this entry point's own smaller reflected
+        /// `immediate_data_size`. It sets the byte boundary after which any
+        /// pipeline-internal immediates (currently only the fragment
+        /// frag-depth clamp range) are appended, mirroring Dawn's
+        /// `GetImmediateByteOffsetInPipeline` (`ImmediatesLayout.h`), which
+        /// places `ClampFragDepthArgs` after the full layout-reserved user
+        /// region rather than after the entry point's own (possibly smaller)
+        /// declared usage.
         #[allow(clippy::too_many_arguments)]
         pub fn generate_msl(
             &self,
@@ -1759,6 +1782,7 @@ mod real {
             emit_vertex_point_size: bool,
             vertex_buffers: &[VertexBuffer],
             fixed_sample_mask: u32,
+            user_immediate_size: u32,
         ) -> Result<MslOutput, TintError> {
             let ep = cstring(entry_point, "entry point").map_err(TintError::Codegen)?;
             let raw_bindings = bindings.as_raw();
@@ -1774,6 +1798,8 @@ mod real {
                 n_workgroup_allocations: 0,
                 has_frag_depth_clamp: false,
                 frag_depth_clamp_slot: 0,
+                uses_immediates: false,
+                immediate_slot: 0,
             };
             let mut err = ptr::null_mut();
             // SAFETY: all pointers are valid for the duration of the call.
@@ -1790,6 +1816,7 @@ mod real {
                     raw_vertex_buffers.as_ptr(),
                     raw_vertex_buffers.len(),
                     fixed_sample_mask,
+                    user_immediate_size,
                     &mut out,
                     &mut err,
                 )
@@ -1826,6 +1853,7 @@ mod real {
             let frag_depth_clamp_slot = out
                 .has_frag_depth_clamp
                 .then_some(out.frag_depth_clamp_slot);
+            let immediate_slot = out.uses_immediates.then_some(out.immediate_slot);
             Ok(MslOutput {
                 source: msl_guard.into_string(),
                 entry_point: entry_point_guard.into_string(),
@@ -1833,6 +1861,7 @@ mod real {
                 buffer_size_bindings,
                 workgroup_allocations,
                 frag_depth_clamp_slot,
+                immediate_slot,
             })
         }
 
@@ -2184,6 +2213,7 @@ mod stub {
             _emit_vertex_point_size: bool,
             _vertex_buffers: &[VertexBuffer],
             _fixed_sample_mask: u32,
+            _user_immediate_size: u32,
         ) -> Result<MslOutput, TintError> {
             Err(TintError::Unavailable)
         }
@@ -2422,7 +2452,7 @@ fn no_immediate() {}
             Program::parse(compute_wgsl(), false, false, false, false, false, &[]).unwrap();
         let bindings = Bindings::default();
         let msl = program
-            .generate_msl("cs", &bindings, &[], 0, true, false, &[], 0xFFFF_FFFF)
+            .generate_msl("cs", &bindings, &[], 0, true, false, &[], 0xFFFF_FFFF, 0)
             .unwrap();
         assert!(msl.source.contains("kernel"), "MSL:\n{}", msl.source);
         let spirv = program
@@ -2659,6 +2689,7 @@ fn cs() {
                 false,
                 &[],
                 0xFFFF_FFFF,
+                0,
             )
             .unwrap();
         assert!(
@@ -2698,6 +2729,7 @@ fn cs() {
                 false,
                 &[],
                 0xFFFF_FFFF,
+                0,
             )
             .unwrap();
         assert!(
@@ -2720,7 +2752,7 @@ fn cs() {
         let bindings = Bindings::default();
         for ep in ["vs", "fs"] {
             let msl = program
-                .generate_msl(ep, &bindings, &[], 0, true, false, &[], 0xFFFF_FFFF)
+                .generate_msl(ep, &bindings, &[], 0, true, false, &[], 0xFFFF_FFFF, 0)
                 .unwrap();
             assert!(!msl.source.is_empty());
             let spirv = program
@@ -2757,6 +2789,7 @@ fn cs() {
                 false,
                 &[],
                 0xFFFF_FFFF,
+                0,
             )
             .unwrap();
         assert!(msl.source.contains("[[color(0)]]"), "MSL:\n{}", msl.source);
@@ -2807,6 +2840,7 @@ fn cs() {
                 false,
                 &[],
                 0xFFFF_FFFF,
+                0,
             )
             .unwrap();
         assert!(msl.source.contains("[[color(0)]]"), "MSL:\n{}", msl.source);
@@ -2834,6 +2868,7 @@ fn cs() {
             false,
             &[],
             0xFFFF_FFFF,
+            0,
         ) {
             Ok(_) => panic!("expected input attachment MSL generation to fail without color slot"),
             Err(err) => err,
@@ -3133,6 +3168,7 @@ fn vs(i: VIn) -> @builtin(position) vec4f {
                 false,
                 &[],
                 0xFFFF_FFFF,
+                0,
             )
             .unwrap()
             .source;
@@ -3156,6 +3192,7 @@ fn vs(i: VIn) -> @builtin(position) vec4f {
                     }],
                 }],
                 0xFFFF_FFFF,
+                0,
             )
             .unwrap()
             .source;
@@ -3189,11 +3226,12 @@ fn fs() -> @location(0) vec4f {
                 false,
                 &[],
                 0xFFFF_FFFF,
+                0,
             )
             .unwrap()
             .source;
         let masked_msl = program
-            .generate_msl("fs", &Bindings::default(), &[], 0, true, false, &[], 0x1)
+            .generate_msl("fs", &Bindings::default(), &[], 0, true, false, &[], 0x1, 0)
             .unwrap()
             .source;
 
@@ -3220,6 +3258,7 @@ fn fs() -> @builtin(frag_depth) f32 {
                 false,
                 &[],
                 0xFFFF_FFFF,
+                0,
             )
             .unwrap();
         assert!(frag_depth_msl.frag_depth_clamp_slot.is_some());
@@ -3247,9 +3286,139 @@ fn fs() -> @location(0) vec4f {
                 false,
                 &[],
                 0xFFFF_FFFF,
+                0,
             )
             .unwrap();
         assert_eq!(color_msl.frag_depth_clamp_slot, None);
+    }
+
+    /// Block 94 S2: a compute entry point with a user `var<immediate>`
+    /// reports `immediate_slot` and the generated MSL declares the
+    /// combined immediate block at that exact Metal buffer slot.
+    #[test]
+    fn compute_msl_user_immediate_declares_block_at_reported_slot() {
+        let wgsl = r#"
+requires immediate_address_space;
+
+var<immediate> params : vec4f;
+
+@compute @workgroup_size(1)
+fn cs() {
+  let v = params;
+  _ = v;
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[11]).unwrap();
+        // `params` is a vec4f (16 bytes); the owning pipeline layout reserves
+        // exactly that much user-immediate budget.
+        let msl = program
+            .generate_msl(
+                "cs",
+                &Bindings::default(),
+                &[],
+                0,
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+                16,
+            )
+            .unwrap();
+
+        let slot = msl
+            .immediate_slot
+            .expect("compute entry using var<immediate> must report an immediate slot");
+        // No frag-depth clamp exists on a compute entry point.
+        assert_eq!(msl.frag_depth_clamp_slot, None);
+        assert!(
+            msl.source.contains(&format!("[[buffer({slot})]]")),
+            "MSL:\n{}",
+            msl.source
+        );
+    }
+
+    /// Block 94 S2: a fragment entry point that both writes `frag_depth`
+    /// (needing the internal clamp range) AND declares a user
+    /// `var<immediate>` gets the SAME combined-block Metal slot for both
+    /// (`immediate_slot == frag_depth_clamp_slot`), and the clamp range is
+    /// rebased to sit after the full `user_immediate_size` budget rather
+    /// than colliding with it at a hardcoded offset 0 (the pre-S2
+    /// behaviour). Rebasing the clamp offset via `user_immediate_size`
+    /// changes the generated MSL relative to the offset-0 baseline,
+    /// confirming the parameter is actually threaded through to Tint's
+    /// `depth_range_offsets`.
+    #[test]
+    fn fragment_msl_user_immediate_and_frag_depth_clamp_share_slot_with_non_colliding_offsets() {
+        let wgsl = r#"
+requires immediate_address_space;
+
+var<immediate> params : vec4f;
+
+@fragment
+fn fs() -> @builtin(frag_depth) f32 {
+  let v = params;
+  return v.x;
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[11]).unwrap();
+        // `params` is a vec4f (16 bytes): the clamp range must land at byte
+        // offset 16, not overlap `params` at `[0, 16)`.
+        let msl = program
+            .generate_msl(
+                "fs",
+                &Bindings::default(),
+                &[],
+                0,
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+                16,
+            )
+            .unwrap();
+
+        let immediate_slot = msl
+            .immediate_slot
+            .expect("fragment entry using var<immediate> must report an immediate slot");
+        let clamp_slot = msl
+            .frag_depth_clamp_slot
+            .expect("fragment entry writing frag_depth must report a clamp slot");
+        assert_eq!(
+            immediate_slot, clamp_slot,
+            "user immediates and the frag-depth clamp share one combined block/slot"
+        );
+
+        // Negative check: a `user_immediate_size` narrower than the entry's
+        // real `var<immediate>` usage (16 bytes) would place the clamp range
+        // AT or inside the user member -- exactly the collision the
+        // rebasing exists to avoid (the pre-S2 code hardcoded offset 0,
+        // which collided with any real user immediate). Tint's own
+        // `PrepareImmediateData` (prepare_immediate_data.cc) rejects this
+        // with a hard `Failure` rather than silently overlapping, and
+        // `yawgpu_tint_generate_msl` surfaces that as `Err` here -- proving
+        // the offset is genuinely load-bearing, not ignored.
+        let collision_result = program.generate_msl(
+            "fs",
+            &Bindings::default(),
+            &[],
+            0,
+            true,
+            false,
+            &[],
+            0xFFFF_FFFF,
+            0,
+        );
+        let Err(collision_err) = collision_result else {
+            panic!(
+                "a user_immediate_size (0) narrower than the entry's real \
+                 var<immediate> usage (16 bytes) must be rejected as a \
+                 clamp/user-immediate offset collision"
+            );
+        };
+        assert!(
+            matches!(collision_err, TintError::Codegen(ref message) if message.contains("overlap")),
+            "expected an offset-overlap codegen error, got: {collision_err:?}"
+        );
     }
 
     #[test]
@@ -3414,6 +3583,7 @@ fn cs() {}
                 false,
                 &[],
                 0xFFFF_FFFF,
+                0,
             )
             .unwrap()
             .source;
@@ -3430,6 +3600,7 @@ fn cs() {}
                 false,
                 &[],
                 0xFFFF_FFFF,
+                0,
             )
             .unwrap()
             .source;
@@ -3490,7 +3661,7 @@ fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
         };
 
         let msl = program
-            .generate_msl("fs", &bindings, &[], 2, true, false, &[], 0xFFFF_FFFF)
+            .generate_msl("fs", &bindings, &[], 2, true, false, &[], 0xFFFF_FFFF, 0)
             .unwrap();
         assert!(!msl.source.is_empty(), "MSL was empty");
         assert!(msl.source.contains("sampler"), "MSL:\n{}", msl.source);
@@ -3530,11 +3701,12 @@ fn cs() { _ = u.value; }
                 false,
                 &[],
                 0xFFFF_FFFF,
+                0,
             )
             .unwrap()
             .source;
         let remapped_msl = program
-            .generate_msl("cs", &remapped, &[], 0, true, false, &[], 0xFFFF_FFFF)
+            .generate_msl("cs", &remapped, &[], 0, true, false, &[], 0xFFFF_FFFF, 0)
             .unwrap()
             .source;
         assert!(remapped_msl.contains("[[buffer(7)]]"), "{remapped_msl}");
@@ -3700,6 +3872,7 @@ fn cs() {
                 false,
                 &[],
                 0xFFFF_FFFF,
+                0,
             )
             .unwrap();
         assert!(msl.source.contains("kernel"));
@@ -3743,6 +3916,7 @@ fn cs() {
                 false,
                 &[],
                 0xFFFF_FFFF,
+                0,
             )
             .unwrap();
         assert!(msl.source.contains("kernel"));
@@ -3795,6 +3969,7 @@ fn cs() {
                     false,
                     &[],
                     0xFFFF_FFFF,
+                    0,
                 )
                 .unwrap()
         };
@@ -3877,6 +4052,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
                     false,
                     &vertex_buffers,
                     0xFFFF_FFFF,
+                    0,
                 )
                 .unwrap()
         };
@@ -3928,6 +4104,7 @@ fn cs() {}
                     false,
                     &[],
                     0xFFFF_FFFF,
+                    0,
                 )
                 .unwrap()
         };
@@ -3974,6 +4151,7 @@ fn cs() {}
                 false,
                 &[],
                 0xFFFF_FFFF,
+                0,
             )
             .unwrap();
         // x=8, y=2, z=1 (override x=8 applied) -> total threads = 16.
@@ -4010,6 +4188,7 @@ fn cs() {
                     false,
                     &[],
                     0xFFFF_FFFF,
+                    0,
                 )
                 .unwrap()
         };
