@@ -3432,6 +3432,47 @@ fn fs() -> @location(0) vec4<f32> {
         );
     }
 
+    /// Fragment-stage counterpart of the vertex test above: only the
+    /// fragment entry point touches the `var<immediate>` (the vertex entry
+    /// does not), so this exercises the fragment branch of the Block 93
+    /// immediate-size check in `resolve_render_pipeline_descriptor`.
+    #[test]
+    fn render_pipeline_rejects_fragment_entry_point_immediate_data_size_exceeding_layout_budget() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r#"
+requires immediate_address_space;
+
+var<immediate> pc : vec4f;
+
+@vertex
+fn vs() -> @builtin(position) vec4<f32> {
+  return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+  return pc;
+}
+"#
+                .to_owned(),
+            )),
+        );
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_render_pipeline(render_pipeline_descriptor(module));
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("fragment stage touching an over-budget immediate should be scoped");
+        assert!(pipeline.is_error());
+        assert_eq!(
+            scoped.message,
+            "shader entry point immediate data size exceeds the pipeline layout's immediateSize"
+        );
+    }
+
     #[test]
     fn validate_primitive_state_gates_unclipped_depth_on_depth_clip_control_feature() {
         let empty = FeatureSet::new();
