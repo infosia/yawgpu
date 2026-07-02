@@ -88,13 +88,8 @@ pub(crate) struct ShaderModuleInner {
 /// Enumerates shader module source kind values.
 #[derive(Debug)]
 pub(crate) enum ShaderModuleSourceKind {
-    /// Wgsl variant.
-    Wgsl {
-        /// Source variant.
-        _source: String,
-        /// Reflected variant.
-        reflected: Box<frontend::ReflectedModule>,
-    },
+    /// Wgsl variant, wrapping the reflected shader module.
+    Wgsl(Box<frontend::ReflectedModule>),
     /// Raw SPIR-V words.
     #[cfg(feature = "shader-passthrough")]
     SpirvPassthrough {
@@ -117,7 +112,7 @@ impl ShaderModule {
     /// Creates a new instance.
     pub(crate) fn new(source: ShaderModuleSourceKind, diagnostic: Option<String>) -> Self {
         let messages = match &source {
-            ShaderModuleSourceKind::Wgsl { reflected, .. } => reflected.warnings.clone(),
+            ShaderModuleSourceKind::Wgsl(reflected) => reflected.warnings.clone(),
             _ => Vec::new(),
         };
         Self {
@@ -147,10 +142,7 @@ impl ShaderModule {
             clip_distances,
             primitive_index,
         )?;
-        Ok(ShaderModuleSourceKind::Wgsl {
-            _source: source,
-            reflected: Box::new(reflected),
-        })
+        Ok(ShaderModuleSourceKind::Wgsl(Box::new(reflected)))
     }
 
     /// Constructs this object from raw SPIR-V passthrough words.
@@ -206,7 +198,7 @@ impl ShaderModule {
     #[must_use]
     pub(crate) fn reflected(&self) -> Option<&frontend::ReflectedModule> {
         match &self.inner._source {
-            ShaderModuleSourceKind::Wgsl { reflected, .. } => Some(reflected),
+            ShaderModuleSourceKind::Wgsl(reflected) => Some(reflected),
             _ => None,
         }
     }

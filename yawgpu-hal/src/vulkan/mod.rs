@@ -602,7 +602,7 @@ impl VulkanAdapter {
             extension_names.push(vk::KHR_SWAPCHAIN_NAME.as_ptr());
         }
         let depth_clip_enable_extension = self.has_device_extension(vk::EXT_DEPTH_CLIP_ENABLE_NAME);
-        // CTS finding F-129(1): naga lowers WGSL `discard` to SPIR-V
+        // CTS finding F-129(1): Tint lowers WGSL `discard` to SPIR-V
         // `OpDemoteToHelperInvocation` so that derivatives (`fwidth`/`dpdx`/`dpdy`)
         // after a non-uniform `discard` stay well-defined. Executing that opcode
         // requires `shaderDemoteToHelperInvocation`. Enable it whenever the device

@@ -2,7 +2,6 @@
 //! reflection source, backed by Dawn's Tint via the `yawgpu-tint` shim. This is
 //! the sole shader frontend (the `crate::frontend` alias points here), and the
 //! render path emits per-stage shader sources for pipeline creation.
-#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 
@@ -27,6 +26,11 @@ unsafe impl Send for ReflectedModule {}
 unsafe impl Sync for ReflectedModule {}
 
 /// Returns parse and validate wgsl.
+///
+/// Test-only convenience wrapper around [`parse_and_validate_wgsl_gated`] with
+/// every optional-feature gate enabled; production code always calls the
+/// gated form directly so it can pass the device's actual feature set.
+#[cfg(test)]
 pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ReflectedModule, String> {
     parse_and_validate_wgsl_gated(src, true, true, true, true, true)
 }
@@ -263,6 +267,14 @@ impl ReflectedModule {
     }
 
     /// Returns compute workgroup size reflected by the validated shader module.
+    ///
+    /// This is the literal-size fast path (no SPIR-V generate-and-parse round
+    /// trip); production code does not call it yet — it still always goes
+    /// through [`Self::resolved_compute_workgroup_size`], even for the
+    /// no-override case that this fn already covers (tracked as slice R4 /
+    /// finding F6 in `specs/tracking/tint-integration-refactor.md`). Exercised
+    /// directly by `reflects_compute_workgroup_size_from_tint`.
+    #[allow(dead_code)]
     pub(crate) fn compute_workgroup_size(
         &self,
         entry_point: &str,
@@ -280,7 +292,6 @@ impl ReflectedModule {
         Ok(Some(ReflectedWorkgroupSize {
             entry_point: entry.name,
             literal_size,
-            override_keys: [None, None, None],
             workgroup_storage_size: self.program.workgroup_storage_size(&[])?,
         }))
     }
@@ -314,7 +325,6 @@ impl ReflectedModule {
         Ok(ReflectedWorkgroupSize {
             entry_point: entry_point.to_owned(),
             literal_size,
-            override_keys: [None, None, None],
             workgroup_storage_size: self.program.workgroup_storage_size(&overrides)?,
         })
     }
@@ -355,21 +365,6 @@ impl ReflectedModule {
             .collect()
     }
 
-    /// Returns resource bindings reflected by the validated shader module.
-    pub(crate) fn resource_bindings(&self) -> Vec<ReflectedResourceBinding> {
-        let mut seen = HashSet::new();
-        self.program
-            .entry_points()
-            .unwrap_or_default()
-            .into_iter()
-            .flat_map(|entry| {
-                self.resource_bindings_for_entry(&entry.name)
-                    .unwrap_or_default()
-            })
-            .filter(|binding| seen.insert((binding.group, binding.binding)))
-            .collect()
-    }
-
     /// Returns resource bindings for entry reflected by the validated shader module.
     pub(crate) fn resource_bindings_for_entry(
         &self,
@@ -389,26 +384,6 @@ impl ReflectedModule {
             .into_iter()
             .map(reflected_resource_binding)
             .collect()
-    }
-
-    /// Returns storage buffer bindings that populate MSL `_mslBufferSizes`.
-    pub(crate) fn msl_buffer_size_bindings_for_entry(
-        &self,
-        entry_point: &str,
-    ) -> Result<Vec<MslBufferSizeBinding>, String> {
-        Ok(self
-            .resource_bindings_for_entry(entry_point)?
-            .into_iter()
-            .filter_map(|binding| match binding.kind {
-                ReflectedResourceBindingKind::Buffer(
-                    ReflectedBufferType::Storage | ReflectedBufferType::ReadOnlyStorage,
-                ) => Some(MslBufferSizeBinding {
-                    group: binding.group,
-                    binding: binding.binding,
-                }),
-                _ => None,
-            })
-            .collect())
     }
 
     /// Returns fragment builtins reflected by the validated shader module.
@@ -808,7 +783,6 @@ fn reflected_resource_binding(
         binding: binding.binding,
         kind: resource_binding_kind(&binding)?,
         min_binding_size: binding.size,
-        statically_used: true,
     })
 }
 
@@ -1225,7 +1199,6 @@ fn fs() -> @location(0) vec4<f32> {
                 && binding.binding == 0
                 && binding.kind
                     == ReflectedResourceBindingKind::Buffer(ReflectedBufferType::Uniform)
-                && binding.statically_used
                 && binding.min_binding_size > 0
         }));
         assert!(compute.iter().any(|binding| {

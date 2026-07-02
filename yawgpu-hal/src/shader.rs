@@ -43,11 +43,11 @@ pub enum HalShaderSource {
         /// Reserved fragment-stage immediate slot for frag-depth clamp range.
         fragment_frag_depth_clamp_slot: Option<u32>,
         /// Metal buffer indices for vertex buffers, in the same order as
-        /// `vertex_buffer_mappings` passed to naga codegen.  These correspond to
+        /// `vertex_buffer_mappings` passed to Tint's MSL codegen. These correspond to
         /// the `buffer_sizeN` fields appended after the storage-array size fields
         /// inside `_mslBufferSizes`; the HAL encoder must write the effective byte
         /// size (buffer.size − bind_offset) of each bound vertex buffer into those
-        /// fields so naga's vertex-pulling OOB guards compare against real data.
+        /// fields so Tint's vertex-pulling OOB guards compare against real data.
         vertex_buffer_metal_indices: Vec<u32>,
     },
     /// Spir v variant.

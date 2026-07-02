@@ -14,7 +14,7 @@ pub(super) struct VulkanDeviceInner {
     pub(super) sampler_anisotropy: bool,
     /// Whether `VK_EXT_shader_demote_to_helper_invocation` /
     /// `shaderDemoteToHelperInvocation` was enabled at device creation. When
-    /// true, SPIR-V `OpDemoteToHelperInvocation` (which naga emits for WGSL
+    /// true, SPIR-V `OpDemoteToHelperInvocation` (which Tint emits for WGSL
     /// `discard`) is legal to execute, so derivatives (`fwidth`/`dpdx`/`dpdy`)
     /// after a non-uniform `discard` are well-defined (CTS finding F-129).
     pub(super) shader_demote_to_helper_invocation: bool,

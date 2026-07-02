@@ -314,7 +314,7 @@ mod tests {
     #[ignore = "manual real Metal backend test"]
     #[cfg(feature = "metal")]
     fn metal_device_create_compute_pipeline_stores_workgroup_memory_sizes() {
-        // Build the MSL source that naga would emit for a shader with two
+        // Build the MSL source that Tint would emit for a shader with two
         // var<workgroup> arguments: [[threadgroup(0)]] and [[threadgroup(1)]].
         // The sizes are pre-rounded (32, 16) as yawgpu-core would supply them.
         let source = r#"

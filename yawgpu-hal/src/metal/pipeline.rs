@@ -52,10 +52,10 @@ pub struct MetalRenderPipeline {
     pub(super) fragment_buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
     pub(super) fragment_frag_depth_clamp_slot: Option<u32>,
     /// Metal buffer indices for vertex buffers in `vertex_buffer_mappings` order.
-    /// These correspond to the `buffer_sizeN` fields that naga appends after the
-    /// storage-array size fields inside `_mslBufferSizes`.  The encoder fills these
-    /// slots with effective vertex-buffer byte sizes before every draw so that
-    /// naga's vertex-pulling OOB guards compare against real values.
+    /// These correspond to the `buffer_sizeN` fields that Tint's MSL codegen appends
+    /// after the storage-array size fields inside `_mslBufferSizes`.  The encoder
+    /// fills these slots with effective vertex-buffer byte sizes before every draw
+    /// so that Tint's vertex-pulling OOB guards compare against real values.
     pub(super) vertex_buffer_metal_indices: Vec<u32>,
 }
 
@@ -419,8 +419,8 @@ fn render_size_metadata(shader: &HalShaderSource) -> RenderSizeMetadata {
 
 fn render_shader_uses_metal_vertex_descriptor(shader: &HalShaderSource) -> bool {
     // A vertex shader that declares Metal `[[stage_in]]` input needs an
-    // `MTLVertexDescriptor` mapping its `[[attribute(N)]]`s to vertex buffers. This
-    // is what the Tint frontend emits. naga's vertex-pulling MSL instead reads
+    // `MTLVertexDescriptor` mapping its `[[attribute(N)]]`s to vertex buffers. Tint
+    // emits this in its default MSL mode. Tint's vertex-pulling MSL instead reads
     // vertex data directly from bound buffers (no `[[stage_in]]`) and must NOT get a
     // descriptor — so detect the model from the emitted source, not the variant.
     let vertex_source = match shader {
@@ -616,15 +616,15 @@ mod tests {
         };
         assert!(render_shader_uses_metal_vertex_descriptor(&shader));
 
-        // A plain MSL with no `[[stage_in]]` (e.g. naga non-pulling / no vertex
-        // inputs) must not get a descriptor.
+        // A plain MSL with no `[[stage_in]]` (e.g. no vertex inputs) must not get
+        // a descriptor.
         assert!(!render_shader_uses_metal_vertex_descriptor(
             &HalShaderSource::Msl(String::new())
         ));
     }
 
     #[test]
-    fn render_shader_skips_vertex_descriptor_for_naga_vertex_pulling_msl() {
+    fn render_shader_skips_vertex_descriptor_for_vertex_pulling_msl() {
         let shader = HalShaderSource::MslStagesWithBufferSizes {
             vertex: String::new(),
             fragment: None,

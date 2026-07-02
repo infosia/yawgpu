@@ -464,7 +464,7 @@ pub(super) fn encode_compute_pass(
     };
     encoder.setComputePipelineState(&pipeline.inner);
     // Allocate threadgroup (workgroup) memory slots required by var<workgroup>
-    // globals emitted by naga as [[threadgroup(N)]] arguments. Metal requires
+    // globals emitted by Tint as [[threadgroup(N)]] arguments. Metal requires
     // each slot to be explicitly sized before dispatch; without this every slot
     // reads as zero. Mirrors wgpu-hal/src/metal/command.rs set_compute_pipeline
     // (lines 1756-1773). The sizes are already rounded to a multiple of 16 by
@@ -1026,7 +1026,7 @@ fn mtl_cull_mode(cull_mode: HalCullMode) -> MTLCullMode {
 
 /// Composes the full vertex-stage `_mslBufferSizes` array.
 ///
-/// Layout naga emits:
+/// Layout Tint emits:
 ///   [storage-array sizes …] [buffer_sizeN per vertex_buffer_metal_indices entry]
 ///
 /// `bind_buffers` supplies the bind-group buffers (storage-array entries).

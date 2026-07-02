@@ -1984,8 +1984,9 @@ pub(super) fn encode_render_pass(
             // Flip clip-space Y with a negative-height viewport (the wgpu/Dawn
             // convention: origin at `y + height`, height negated). WebGPU clip space
             // is Y-up while the Vulkan framebuffer is Y-down; doing the flip here
-            // means neither shader frontend (naga or Tint) flips Y in-shader, so they
-            // agree. Requires Vulkan 1.1 / VK_KHR_maintenance1 (MoltenVK supports it).
+            // means the shader frontend (Tint) never has to flip Y in-shader, so
+            // generated SPIR-V agrees with the fixed-function state. Requires
+            // Vulkan 1.1 / VK_KHR_maintenance1 (MoltenVK supports it).
             let viewport = pass.viewport.map_or(
                 vk::Viewport {
                     x: 0.0,

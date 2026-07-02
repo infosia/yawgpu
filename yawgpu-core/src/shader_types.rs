@@ -211,9 +211,6 @@ pub enum ShaderStage {
     Compute,
 }
 
-/// Backward-compatible reflected shader-stage name.
-pub(crate) type ReflectedShaderStage = ShaderStage;
-
 /// Stores pipeline override constants keyed the same way as WebGPU constant entries.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct PipelineConstants {
@@ -315,15 +312,6 @@ pub(crate) struct ReflectedEntryPointIo {
     pub input_inter_stage_builtins: u32,
 }
 
-/// Identifies reflected override key.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReflectedOverrideKey {
-    /// Name.
-    pub name: Option<String>,
-    /// Id.
-    pub id: Option<u16>,
-}
-
 /// Stores reflection data for reflected workgroup size.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReflectedWorkgroupSize {
@@ -331,8 +319,6 @@ pub(crate) struct ReflectedWorkgroupSize {
     pub entry_point: String,
     /// Literal size.
     pub literal_size: [u32; 3],
-    /// Per-dimension override keys for `@workgroup_size(x, y, z)`.
-    pub override_keys: [Option<ReflectedOverrideKey>; 3],
     /// Workgroup storage size.
     pub workgroup_storage_size: u64,
 }
@@ -440,8 +426,6 @@ pub(crate) struct ReflectedResourceBinding {
     pub kind: ReflectedResourceBindingKind,
     /// Min binding size.
     pub min_binding_size: u64,
-    /// Statically used.
-    pub statically_used: bool,
 }
 
 /// Stores reflection data for reflected fragment builtins.

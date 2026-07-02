@@ -2193,13 +2193,13 @@ pub(crate) fn resolve_render_pipeline_descriptor(
     }
     let vertex_entry = resolve_render_entry(
         &descriptor.vertex.shader,
-        frontend::ReflectedShaderStage::Vertex,
+        frontend::ShaderStage::Vertex,
         "vertex",
     )?;
     let fragment_entry = if let Some(fragment) = &descriptor.fragment {
         Some(resolve_render_entry(
             &fragment.shader,
-            frontend::ReflectedShaderStage::Fragment,
+            frontend::ShaderStage::Fragment,
             "fragment",
         )?)
     } else {
@@ -2465,7 +2465,7 @@ pub(crate) fn vertex_inputs(
 /// Records resolve into the command stream.
 pub(crate) fn resolve_render_entry(
     stage: &RenderPipelineShaderStage,
-    expected_stage: frontend::ReflectedShaderStage,
+    expected_stage: frontend::ShaderStage,
     label: &str,
 ) -> Result<String, String> {
     if stage.module.is_error() {

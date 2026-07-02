@@ -984,7 +984,7 @@ pub(crate) fn resolve_compute_entry(
     let entries = module.entry_points();
     let compute_entries = entries
         .iter()
-        .filter(|entry| entry.stage == frontend::ReflectedShaderStage::Compute)
+        .filter(|entry| entry.stage == frontend::ShaderStage::Compute)
         .collect::<Vec<_>>();
 
     match entry_point {
@@ -1229,9 +1229,6 @@ pub(crate) fn validate_pipeline_layout_stage_bindings(
 ) -> Result<(), String> {
     for requirement in requirements {
         let binding = &requirement.binding;
-        if !binding.statically_used {
-            continue;
-        }
         let group = usize::try_from(binding.group)
             .map_err(|_| "shader binding group index is too large".to_owned())?;
         let Some(group_layout) = layout.bind_group_layouts().get(group) else {
@@ -1351,9 +1348,6 @@ where
     let mut groups = BTreeMap::<u32, BTreeMap<u32, BindGroupLayoutEntry>>::new();
     for requirement in requirements {
         let binding = requirement.binding;
-        if !binding.statically_used {
-            continue;
-        }
         let group = groups.entry(binding.group).or_default();
         let visibility = pipeline_stage_visibility_bit(requirement.stage);
         let derived = reflected_bind_group_layout_entry(&binding, visibility)?;
@@ -1940,7 +1934,6 @@ mod tests {
                 frontend::ReflectedBufferType::Uniform,
             ),
             min_binding_size: 4,
-            statically_used: true,
         };
 
         let layout_kind = |min_binding_size| BindingLayoutKind::Buffer {
@@ -1970,7 +1963,6 @@ mod tests {
             binding: 0,
             kind: frontend::ReflectedResourceBindingKind::ExternalTexture,
             min_binding_size: 0,
-            statically_used: true,
         };
 
         assert_eq!(
@@ -2008,7 +2000,6 @@ mod tests {
                     multisampled: false,
                 },
                 min_binding_size: 0,
-                statically_used: true,
             },
         }
     }
@@ -2028,7 +2019,6 @@ mod tests {
                     view_dimension: frontend::ReflectedTextureViewDimension::D2,
                 },
                 min_binding_size: 0,
-                statically_used: true,
             },
         }
     }
