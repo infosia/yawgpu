@@ -11,6 +11,17 @@ use crate::{
     HalVertexBufferLayout,
 };
 
+/// The GLSL uniform name Tint's GLSL writer emits for the first element of
+/// its "immediate data" emulation array when `first_instance_offset` is
+/// requested (`yawgpu-core`'s `tint_bindings_for_glsl`/`generate_glsl`
+/// request offset `0`, and GLES has no other internal immediate sharing the
+/// struct, so element `0` is always `tint_first_instance`). See
+/// `tint_shim.h`'s `yawgpu_tint_generate_glsl` docs and the
+/// `generate_glsl_first_instance_offset_only_applied_when_requested` pin in
+/// `yawgpu-tint` for the exact GLSL text this name is queried against (F2,
+/// specs/tracking/tint-integration-refactor.md slice R6).
+const FIRST_INSTANCE_UNIFORM_NAME: &str = "tint_immediates[0]";
+
 struct GlesComputePipelineInner {
     device: Arc<GlesDeviceInner>,
     program: Result<glow::Program, HalError>,
@@ -249,7 +260,6 @@ fn build_compute_program(
                     message: format!("GLES compute program link failed: {log}"),
                 });
             }
-            bind_program_blocks_from_source(gl, program, source);
             Ok(program)
         })
         .and_then(|result| result)
@@ -403,72 +413,30 @@ fn build_render_program(
                     message: format!("GLES render program link failed: {log}"),
                 });
             }
-            bind_program_blocks_from_source(gl, program, vertex_source);
-            if let Some(fragment_source) = fragment_source {
-                bind_program_blocks_from_source(gl, program, fragment_source);
-            }
+            // Tint's GLSL writer emits buffer blocks with an explicit
+            // `layout(binding = N)` matching the WGSL @binding number
+            // directly (see `yawgpu-core`'s `tint_bindings_for_glsl`, which
+            // supplies an identity remap so this always holds) -- GLES 3.1
+            // core honors that at link time, so no
+            // `glUniformBlockBinding`/`glShaderStorageBlockBinding` runtime
+            // remap is needed (F2, specs/tracking/tint-integration-refactor.md
+            // slice R6; this replaced a naga-era `_block_N`-suffix name
+            // parser that no longer matched Tint's block-naming scheme and
+            // would have silently mis-bound buffers).
+            //
+            // First-instance offset: when the vertex stage reads
+            // `@builtin(instance_index)`, `yawgpu-core` requests Tint's
+            // `first_instance_offset`, which emits a single
+            // `layout(location = 0) uniform uint tint_immediates[1]` array
+            // (see `tint_shim.h`'s `yawgpu_tint_generate_glsl` docs). Query
+            // its location by the GLSL array-element name; `queue.rs`
+            // writes the WebGPU `firstInstance` draw parameter there before
+            // each draw.
             let first_instance_location =
-                gl.get_uniform_location(program, "naga_vs_first_instance");
+                gl.get_uniform_location(program, FIRST_INSTANCE_UNIFORM_NAME);
             Ok((program, first_instance_location))
         })
         .and_then(|result| result)
-}
-
-fn bind_program_blocks_from_source(gl: &glow::Context, program: glow::Program, source: &str) {
-    for line in source.lines().map(str::trim) {
-        let words = line.split_whitespace().collect::<Vec<_>>();
-        let Some((kind, name)) = block_kind_and_name(&words) else {
-            continue;
-        };
-        let Some(binding) = block_binding_from_name(name) else {
-            continue;
-        };
-        unsafe {
-            match kind {
-                BlockKind::Uniform => {
-                    if let Some(index) = gl.get_uniform_block_index(program, name) {
-                        gl.uniform_block_binding(program, index, binding);
-                    }
-                }
-                BlockKind::Storage => {
-                    if let Some(index) = gl.get_shader_storage_block_index(program, name) {
-                        gl.shader_storage_block_binding(program, index, binding);
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BlockKind {
-    Uniform,
-    Storage,
-}
-
-fn block_kind_and_name<'a>(words: &'a [&str]) -> Option<(BlockKind, &'a str)> {
-    let (kind, index) = words
-        .iter()
-        .position(|word| *word == "uniform")
-        .map(|index| (BlockKind::Uniform, index))
-        .or_else(|| {
-            words
-                .iter()
-                .position(|word| *word == "buffer")
-                .map(|index| (BlockKind::Storage, index))
-        })?;
-    words
-        .get(index + 1)
-        .map(|name| (kind, name.trim_end_matches('{')))
-}
-
-fn block_binding_from_name(name: &str) -> Option<u32> {
-    let rest = name.split_once("_block_")?.1;
-    let digits = rest
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>();
-    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
 }
 
 fn compile_shader(
@@ -555,30 +523,14 @@ mod tests {
         ));
     }
 
+    /// F2 (specs/tracking/tint-integration-refactor.md, slice R6): pins the
+    /// GLSL uniform name this HAL queries against the exact array-element
+    /// syntax Tint's GLSL writer emits (see
+    /// `yawgpu-tint`'s `generate_glsl_first_instance_offset_only_applied_when_requested`,
+    /// which pins the shim side of this same contract: `layout(location = 0)
+    /// uniform uint tint_immediates[1];`).
     #[test]
-    fn block_binding_from_name_extracts_naga_binding_suffix() {
-        assert_eq!(block_binding_from_name("Data_block_0Compute"), Some(0));
-        assert_eq!(block_binding_from_name("Color_block_12Fragment"), Some(12));
-        assert_eq!(block_binding_from_name("Data"), None);
-        assert_eq!(block_binding_from_name("Data_block_Compute"), None);
-    }
-
-    #[test]
-    fn block_kind_and_name_parses_uniform_and_storage_lines() {
-        assert_eq!(
-            block_kind_and_name(&["layout(std140)", "uniform", "Color_block_1Fragment", "{"]),
-            Some((BlockKind::Uniform, "Color_block_1Fragment"))
-        );
-        assert_eq!(
-            block_kind_and_name(&[
-                "layout(std430)",
-                "readonly",
-                "buffer",
-                "Data_block_0Compute",
-                "{",
-            ]),
-            Some((BlockKind::Storage, "Data_block_0Compute"))
-        );
-        assert_eq!(block_kind_and_name(&["void", "main()"]), None);
+    fn first_instance_uniform_name_matches_tint_immediate_array_element_zero() {
+        assert_eq!(FIRST_INSTANCE_UNIFORM_NAME, "tint_immediates[0]");
     }
 }

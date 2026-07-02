@@ -1338,6 +1338,8 @@ mod real {
             bindings: *const RawBindings,
             ov: *const RawOverrideValue,
             n_ov: usize,
+            has_first_instance_offset: bool,
+            first_instance_offset: u32,
             glsl_out: *mut *mut c_char,
             err: *mut *mut c_char,
         ) -> bool;
@@ -1912,11 +1914,23 @@ mod real {
         }
 
         /// Generates GLSL ES 3.1 for `entry_point`.
+        ///
+        /// `first_instance_offset`, when `Some`, is passed through to Tint's
+        /// `glsl::writer::Options::first_instance_offset` (a byte offset into
+        /// Tint's internal "immediate data" map -- yawgpu-core always passes
+        /// `Some(0)` for vertex stages, since GLES does not share that map
+        /// with any other internal immediate today). This makes Tint rewrite
+        /// `@builtin(instance_index)` to add a value it reads back from a
+        /// `layout(location = 0) uniform` struct named `tint_immediates`
+        /// with a `tint_first_instance` member (see `tint_shim.h` docs on
+        /// `yawgpu_tint_generate_glsl`). `None` leaves `instance_index` as
+        /// raw `gl_InstanceID` with no immediate-data struct emitted.
         pub fn generate_glsl(
             &self,
             entry_point: &str,
             bindings: &Bindings,
             overrides: &[OverrideValue],
+            first_instance_offset: Option<u32>,
         ) -> Result<String, TintError> {
             let ep = cstring(entry_point, "entry point").map_err(TintError::Codegen)?;
             let raw_bindings = bindings.as_raw();
@@ -1931,6 +1945,8 @@ mod real {
                     &raw_bindings,
                     raw_overrides.as_ptr(),
                     raw_overrides.len(),
+                    first_instance_offset.is_some(),
+                    first_instance_offset.unwrap_or(0),
                     &mut glsl,
                     &mut err,
                 )
@@ -2154,6 +2170,7 @@ mod stub {
             _entry_point: &str,
             _bindings: &Bindings,
             _overrides: &[OverrideValue],
+            _first_instance_offset: Option<u32>,
         ) -> Result<String, TintError> {
             Err(TintError::Unavailable)
         }
@@ -2326,8 +2343,173 @@ fn main() {
             spirv_with_vulkan_memory_model.first().copied(),
             Some(0x0723_0203)
         );
-        let glsl = program.generate_glsl("cs", &bindings, &[]).unwrap();
+        let glsl = program.generate_glsl("cs", &bindings, &[], None).unwrap();
         assert!(glsl.contains("#version 310 es"), "GLSL:\n{glsl}");
+    }
+
+    fn instance_index_vertex_wgsl() -> &'static str {
+        r#"
+@vertex
+fn vs(@builtin(instance_index) ii: u32, @builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+  return vec4f(f32(ii), f32(vi), 0.0, 1.0);
+}
+"#
+    }
+
+    /// F2 drift guard (specs/tracking/tint-integration-refactor.md, slice
+    /// R6): pins the GLES contract the yawgpu-hal GLES pipeline relies on.
+    /// Without `first_instance_offset`, `instance_index` is raw
+    /// `gl_InstanceID` with no immediate-data struct emitted at all --
+    /// confirms that a HAL which never requests the offset (the naga-era
+    /// `naga_vs_first_instance` uniform lookup this replaces) makes
+    /// `firstInstance` silently no-op. With it, Tint emits a single
+    /// `layout(location = 0) uniform uint tint_immediates[1]` array (NOT a
+    /// named struct member -- Tint's internal immediate symbol name
+    /// (`tint_first_instance`) never reaches the printed GLSL text; the
+    /// raise pass indexes the immediate block by word offset only) and
+    /// reads element `[0]` to offset `gl_InstanceID`. The HAL must look
+    /// this uniform up by `glGetUniformLocation(program,
+    /// "tint_immediates[0]")` and write with `glUniform1ui`, not query a
+    /// UBO member by dotted name.
+    #[test]
+    fn generate_glsl_first_instance_offset_only_applied_when_requested() {
+        let program = Program::parse(
+            instance_index_vertex_wgsl(),
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let bindings = Bindings::default();
+
+        let glsl_without = program.generate_glsl("vs", &bindings, &[], None).unwrap();
+        assert!(
+            glsl_without.contains("gl_InstanceID"),
+            "GLSL:\n{glsl_without}"
+        );
+        assert!(
+            !glsl_without.contains("tint_immediates"),
+            "GLSL:\n{glsl_without}"
+        );
+
+        let glsl_with = program
+            .generate_glsl("vs", &bindings, &[], Some(0))
+            .unwrap();
+        // The immediate-data block is a plain array-typed uniform with an
+        // explicit location, not a UBO -- HAL must look it up by
+        // `glGetUniformLocation`, not `glGetUniformBlockIndex`.
+        assert!(
+            glsl_with.contains("layout(location = 0) uniform uint tint_immediates[1];"),
+            "GLSL:\n{glsl_with}"
+        );
+        assert!(
+            glsl_with.contains("tint_immediates[0"),
+            "expected an indexed read of element 0: {glsl_with}"
+        );
+        assert!(
+            glsl_with.contains("gl_InstanceID"),
+            "instance_index is still sourced from gl_InstanceID, just offset: {glsl_with}"
+        );
+    }
+
+    /// F2 drift guard: left as `Bindings::default()`, Tint's own
+    /// `GenerateBindings` renumbers GLSL `layout(binding = N)` sequentially
+    /// in declaration order -- it does NOT preserve non-sequential WGSL
+    /// `@binding` numbers (here `@binding(3)` becomes `layout(binding = 1)`
+    /// because it is the second buffer Tint sees). This is why
+    /// `yawgpu-core`'s `tint_bindings_for_glsl` always supplies an explicit
+    /// identity `BindingRemap` per buffer resource rather than relying on
+    /// the default: `yawgpu-hal`'s GLES backend binds buffers with
+    /// `glBindBufferRange` at the raw WGSL binding number
+    /// (`HalDescriptorBinding::binding`), so leaving this on default would
+    /// silently desync the GLSL text from the HAL's runtime bind calls for
+    /// any non-sequential binding layout.
+    #[test]
+    fn generate_glsl_default_bindings_renumber_sequentially_not_identity() {
+        let wgsl = r#"
+struct Uniforms {
+  scale: f32,
+}
+@group(0) @binding(0) var<uniform> u: Uniforms;
+@group(0) @binding(3) var<storage, read_write> data: array<u32>;
+
+@compute @workgroup_size(1)
+fn cs() {
+  data[0] = u32(u.scale);
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let bindings = Bindings::default();
+        let glsl = program.generate_glsl("cs", &bindings, &[], None).unwrap();
+        assert!(
+            glsl.contains("layout(binding = 0, std140)\nuniform"),
+            "GLSL:\n{glsl}"
+        );
+        // NOT `layout(binding = 3, ...)` -- Tint renumbers to the next free
+        // slot (1), not the original WGSL binding.
+        assert!(
+            glsl.contains("layout(binding = 1, std430)\nbuffer"),
+            "GLSL:\n{glsl}"
+        );
+        assert!(!glsl.contains("binding = 3"), "GLSL:\n{glsl}");
+    }
+
+    /// F2 drift guard: uniform/storage buffers get an explicit
+    /// `layout(binding = N)` on the GLSL block (GLES 3.1 core, no
+    /// extension needed) that the GL driver honors at link time with no
+    /// `glUniformBlockBinding` / `glShaderStorageBlockBinding` remap
+    /// required, PROVIDED Tint is given an explicit identity `BindingRemap`
+    /// (the previous test shows the default auto-numbering does not
+    /// preserve non-sequential WGSL binding numbers). This is why
+    /// `block_binding_from_name`'s naga-era `_block_N`-suffix parsing was
+    /// deleted outright rather than rewritten: Tint's block names carry an
+    /// internal counter unrelated to the WGSL binding index (both blocks
+    /// below are suffixed `_block_1` despite binding at 0 and 3), so
+    /// running that old parser against Tint's real names would have
+    /// silently mis-bound (or collided) buffers instead of leaving the
+    /// already-correct explicit binding alone.
+    #[test]
+    fn generate_glsl_explicit_binding_remap_pins_exact_gl_binding() {
+        let wgsl = r#"
+struct Uniforms {
+  scale: f32,
+}
+@group(0) @binding(0) var<uniform> u: Uniforms;
+@group(0) @binding(3) var<storage, read_write> data: array<u32>;
+
+@compute @workgroup_size(1)
+fn cs() {
+  data[0] = u32(u.scale);
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let bindings = Bindings {
+            uniform: vec![BindingRemap {
+                group: 0,
+                binding: 0,
+                dst_group: 0,
+                dst_binding: 0,
+            }],
+            storage: vec![BindingRemap {
+                group: 0,
+                binding: 3,
+                dst_group: 0,
+                dst_binding: 3,
+            }],
+            ..Default::default()
+        };
+        let glsl = program.generate_glsl("cs", &bindings, &[], None).unwrap();
+        assert!(
+            glsl.contains("layout(binding = 0, std140)\nuniform u_block_1_ubo"),
+            "GLSL:\n{glsl}"
+        );
+        assert!(
+            glsl.contains("layout(binding = 3, std430)\nbuffer data_block_1_ssbo"),
+            "GLSL:\n{glsl}"
+        );
     }
 
     #[test]

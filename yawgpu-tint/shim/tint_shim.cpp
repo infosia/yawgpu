@@ -1921,6 +1921,8 @@ bool yawgpu_tint_generate_glsl(const YawgpuTintProgram* program,
                                const YawgpuTintBindings* bindings,
                                const YawgpuTintOverrideValue* ov,
                                size_t n_ov,
+                               bool has_first_instance_offset,
+                               uint32_t first_instance_offset,
                                char** glsl_out,
                                char** err) {
     if (err != nullptr) {
@@ -1943,6 +1945,9 @@ bool yawgpu_tint_generate_glsl(const YawgpuTintProgram* program,
         tint::glsl::writer::Options options;
         options.entry_point_name = entry_point;
         options.version = tint::glsl::writer::Version();
+        if (has_first_instance_offset) {
+            options.first_instance_offset = first_instance_offset;
+        }
         if (all_remaps_empty(bindings)) {
             auto generated = tint::glsl::writer::GenerateBindings(ir.Get(), entry_point);
             options.bindings = std::move(generated.bindings);

@@ -155,19 +155,37 @@ impl ReflectedModule {
     }
 
     /// Generates GLSL ES for the validated shader module.
+    ///
+    /// Vertex stages request Tint's `first_instance_offset` (offset `0`,
+    /// GLES has no other internal immediate sharing that struct) so
+    /// `@builtin(instance_index)` is offset by the WebGPU `firstInstance`
+    /// draw parameter -- see `yawgpu_tint::Program::generate_glsl` and
+    /// `tint_shim.h`'s `yawgpu_tint_generate_glsl` docs (F2,
+    /// specs/tracking/tint-integration-refactor.md slice R6). Non-vertex
+    /// stages never read `instance_index`, so they skip it.
+    ///
+    /// Buffer bindings get an explicit identity remap (see
+    /// `tint_bindings_for_glsl`) so the GLSL `layout(binding = N)` always
+    /// matches the raw WGSL binding number that `yawgpu-hal`'s GLES backend
+    /// binds with `glBindBufferRange` -- Tint's default `GenerateBindings`
+    /// only coincides with that when bindings happen to already be dense
+    /// and sequential from 0.
     #[cfg(feature = "gles")]
     pub(crate) fn generate_glsl(
         &self,
         entry_name: &str,
-        _stage: ShaderStage,
+        stage: ShaderStage,
         pipeline_constants: &PipelineConstants,
     ) -> Result<GeneratedGlsl, String> {
+        let first_instance_offset = matches!(stage, ShaderStage::Vertex).then_some(0);
+        let bindings = tint_bindings_for_glsl(&self.resource_bindings_for_entry(entry_name)?);
         let source = self
             .program
             .generate_glsl(
                 entry_name,
-                &yawgpu_tint::Bindings::default(),
+                &bindings,
                 &override_values(pipeline_constants),
+                first_instance_offset,
             )
             .map_err(|e| e.to_string())?;
         Ok(GeneratedGlsl {
@@ -867,6 +885,50 @@ fn tint_bindings_for_msl(
         )
         .collect();
     Ok(bindings)
+}
+
+/// Returns identity Tint binding remaps for the GLES GLSL writer.
+///
+/// GLES only supports plain uniform/storage buffers at bind group 0
+/// (`yawgpu-hal/src/gles/queue.rs` rejects textures/samplers and non-zero
+/// groups at runtime). Left as `Bindings::default()`, Tint's own
+/// `GenerateBindings` auto-numbers GLSL `layout(binding = N)` sequentially
+/// in shader declaration order, which only coincides with the WGSL
+/// `@binding` number when bindings already happen to be dense and
+/// sequential starting at 0 -- e.g. `@binding(0)` + `@binding(3)` gets
+/// renumbered to `layout(binding = 0)` + `layout(binding = 1)`. Since
+/// `yawgpu-hal`'s GLES backend always binds buffers with
+/// `glBindBufferRange` at the raw WGSL binding number
+/// (`HalDescriptorBinding::binding`), the GLSL text and the HAL's runtime
+/// bind calls would silently disagree for any non-sequential binding
+/// layout. An explicit group/binding -> same group/binding remap for every
+/// buffer resource pins Tint's output to the WGSL numbers directly (F2,
+/// specs/tracking/tint-integration-refactor.md slice R6). Non-buffer
+/// resources are skipped: GLES rejects them before a generated shader
+/// would ever run.
+#[cfg(feature = "gles")]
+fn tint_bindings_for_glsl(resource_bindings: &[ReflectedResourceBinding]) -> yawgpu_tint::Bindings {
+    let mut bindings = yawgpu_tint::Bindings::default();
+    for binding in resource_bindings {
+        let remap = yawgpu_tint::BindingRemap {
+            group: binding.group,
+            binding: binding.binding,
+            dst_group: binding.group,
+            dst_binding: binding.binding,
+        };
+        match binding.kind {
+            ReflectedResourceBindingKind::Buffer(ReflectedBufferType::Uniform) => {
+                bindings.uniform.push(remap);
+            }
+            ReflectedResourceBindingKind::Buffer(
+                ReflectedBufferType::Storage | ReflectedBufferType::ReadOnlyStorage,
+            ) => {
+                bindings.storage.push(remap);
+            }
+            _ => {}
+        }
+    }
+    bindings
 }
 
 fn msl_buffer_sizes_slot(binding_map: &MslBindingMap) -> Result<u32, String> {
@@ -2052,6 +2114,96 @@ fn cs() {}
 
         assert_eq!(generated.entry_point, "cs");
         assert!(generated.source.contains("#version 310 es"));
+    }
+
+    /// F2 (specs/tracking/tint-integration-refactor.md, slice R6): only the
+    /// vertex stage requests Tint's `first_instance_offset`, since only
+    /// vertex shaders read `@builtin(instance_index)`.
+    #[cfg(feature = "gles")]
+    #[test]
+    fn generate_glsl_requests_first_instance_offset_for_vertex_stage_only() {
+        let vertex_glsl = parse_and_validate_wgsl(
+            r#"
+@vertex
+fn vs(@builtin(instance_index) ii: u32) -> @builtin(position) vec4f {
+  return vec4f(f32(ii), 0.0, 0.0, 1.0);
+}
+"#,
+        )
+        .unwrap()
+        .generate_glsl("vs", ShaderStage::Vertex, &PipelineConstants::default())
+        .unwrap();
+        // Tint's internal `tint_first_instance` symbol never reaches the
+        // printed GLSL text (see yawgpu-tint's
+        // `generate_glsl_first_instance_offset_only_applied_when_requested`)
+        // -- the offset shows up as a `tint_immediates` array read instead.
+        assert!(
+            vertex_glsl.source.contains("tint_immediates"),
+            "GLSL:\n{}",
+            vertex_glsl.source
+        );
+
+        let fragment_glsl = parse_and_validate_wgsl(
+            r#"
+@fragment
+fn fs() -> @location(0) vec4f {
+  return vec4f(0.0);
+}
+"#,
+        )
+        .unwrap()
+        .generate_glsl("fs", ShaderStage::Fragment, &PipelineConstants::default())
+        .unwrap();
+        assert!(
+            !fragment_glsl.source.contains("tint_immediates"),
+            "GLSL:\n{}",
+            fragment_glsl.source
+        );
+    }
+
+    /// F2 (specs/tracking/tint-integration-refactor.md, slice R6): pins
+    /// `tint_bindings_for_glsl`'s identity remap end-to-end through
+    /// `ReflectedModule::generate_glsl`. Without the remap, Tint's default
+    /// `GenerateBindings` would renumber the non-sequential `@binding(3)`
+    /// storage buffer to `layout(binding = 1)` (see yawgpu-tint's
+    /// `generate_glsl_default_bindings_renumber_sequentially_not_identity`),
+    /// which would desync from `yawgpu-hal`'s GLES backend -- it always
+    /// binds buffers with `glBindBufferRange` at the raw WGSL binding
+    /// number.
+    #[cfg(feature = "gles")]
+    #[test]
+    fn generate_glsl_pins_non_sequential_wgsl_binding_numbers() {
+        let generated = parse_and_validate_wgsl(
+            r#"
+struct Uniforms {
+  scale: f32,
+}
+@group(0) @binding(0) var<uniform> u: Uniforms;
+@group(0) @binding(3) var<storage, read_write> data: array<u32>;
+
+@compute @workgroup_size(1)
+fn cs() {
+  data[0] = u32(u.scale);
+}
+"#,
+        )
+        .unwrap()
+        .generate_glsl("cs", ShaderStage::Compute, &PipelineConstants::default())
+        .unwrap();
+        assert!(
+            generated
+                .source
+                .contains("layout(binding = 0, std140)\nuniform"),
+            "GLSL:\n{}",
+            generated.source
+        );
+        assert!(
+            generated
+                .source
+                .contains("layout(binding = 3, std430)\nbuffer"),
+            "GLSL:\n{}",
+            generated.source
+        );
     }
 
     #[test]
