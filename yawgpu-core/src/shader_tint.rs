@@ -330,6 +330,32 @@ impl ReflectedModule {
     }
 
     /// Returns the raw Tint entry-point reflection, memoized on first access.
+    ///
+    /// `unwrap_or_default()` (m4, code review of the Tint-integration
+    /// refactor): `self.program.entry_points()` can only return `Err` in two
+    /// cases, neither reachable here. (1) `TintError::Unavailable`, when
+    /// this build does not link Tint (`HAVE_TINT` false) -- but then
+    /// `yawgpu_tint::Program::parse` itself already returns that same error
+    /// first, in `parse_and_validate_wgsl_gated` above, so a `ReflectedModule`
+    /// is never constructed for that build in the first place. (2)
+    /// `TintError::Reflection`, from the FFI accessor
+    /// `yawgpu_tint_entry_point_get` returning `false` -- but that shim
+    /// function (`tint_shim.cpp`) only ever reads out of the
+    /// `YawgpuTintProgram::entry_points` vector, which is populated once,
+    /// unconditionally, by `yawgpu_tint_program_create` at parse time (no
+    /// `Inspector` re-construction, no scope for a fresh failure), and the
+    /// Rust-side loop in [`yawgpu_tint::Program::entry_points`] only ever
+    /// indexes `0..count` where `count` came from that same vector's
+    /// `size()` -- so the bounds check inside the shim accessor can never
+    /// trip. A widened error surface (`resource_bindings_for_entry`
+    /// reporting the underlying reflection error instead of "entry point not
+    /// found") would therefore never actually manifest; propagating a
+    /// `Result` through `raw_entry_points` and every one of its ~10 call
+    /// sites in this file was judged not worth the churn for an
+    /// unreachable path. If this ever proves reachable (e.g. a future Tint
+    /// upgrade changes the shim's failure modes), that is a bug to fix at
+    /// the shim/FFI layer, not a signal to thread `Result` through this
+    /// accessor.
     fn raw_entry_points(&self) -> &[yawgpu_tint::EntryPoint] {
         self.raw_entry_points
             .get_or_init(|| self.program.entry_points().unwrap_or_default())
@@ -446,10 +472,16 @@ impl ReflectedModule {
     /// exactly one entry point, so this only ever reflects each entry point
     /// once regardless of how many validators ask for it.
     pub(crate) fn entry_point_io(&self, entry_point: &str) -> Option<ReflectedEntryPointIo> {
+        // No panics in library code (CLAUDE.md): a poisoned lock here only
+        // means some *other* thread panicked mid-insert; the cache map
+        // itself is never left semantically inconsistent (inserts happen
+        // only after `build_entry_point_io`/`build_resource_bindings_for_entry`
+        // already returned a complete value, see below), so recovering the
+        // inner guard and carrying on is safe.
         let mut cache = self
             .entry_point_io_cache
             .lock()
-            .expect("entry_point_io_cache mutex poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(cached) = cache.get(entry_point) {
             return cached.clone();
         }
@@ -499,10 +531,13 @@ impl ReflectedModule {
         &self,
         entry_point: &str,
     ) -> Result<Vec<ReflectedResourceBinding>, String> {
+        // See the matching comment on `entry_point_io`'s lock above: a
+        // poisoned lock does not imply an inconsistent cache, so recover
+        // rather than panic (no panics in library code, CLAUDE.md).
         let mut cache = self
             .resource_bindings_cache
             .lock()
-            .expect("resource_bindings_cache mutex poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(cached) = cache.get(entry_point) {
             return cached.clone();
         }

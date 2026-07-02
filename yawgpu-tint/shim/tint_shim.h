@@ -335,20 +335,27 @@ YAWGPU_TINT_API bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram
    `tint::glsl::writer::Options::first_instance_offset`, which makes Tint's
    raise pipeline (glsl/writer/raise/offset_first_index.cc) rewrite
    `@builtin(instance_index)` to add a value read back from Tint's GLSL
-   "immediate data" emulation -- a single `layout(location = 0) uniform`
-   struct variable named `tint_immediates` (glsl/writer/printer/printer.cc
-   EmitImmediateVar), with a `tint_first_instance` member. This mirrors
-   Dawn's own OpenGL backend (dawn/native/opengl/ShaderModuleGL.cpp), which
-   sets `first_instance_offset` for vertex stages that read
-   `@builtin(instance_index)` under a non-zero firstInstance draw, and
-   uploads the value at draw time with `glUniform1uiv` addressed by
-   `glGetUniformLocation(program, "tint_immediates.tint_first_instance")`
-   (see dawn/native/opengl/CommandBufferGL.cpp). When false, no offset is
-   applied and `gl_InstanceID` is used directly with no immediate-data
-   struct emitted -- `first_instance_offset` is then ignored.
+   "immediate data" emulation -- a single plain array-typed uniform,
+   `layout(location = 0) uniform uint tint_immediates[1]`
+   (glsl/writer/printer/printer.cc EmitImmediateVar). This is NOT a named
+   struct with a `tint_first_instance` member: Tint's internal immediate
+   symbol name never reaches the printed GLSL text, and the raise pass
+   indexes the immediate block by word offset only, so the HAL must query
+   `glGetUniformLocation(program, "tint_immediates[0]")` (an indexed array
+   element, not a dotted struct-member name) and write with `glUniform1ui`.
+   See the `generate_glsl_first_instance_offset_only_applied_when_requested`
+   pin in yawgpu-tint's lib.rs for the exact GLSL text this is verified
+   against. This mirrors Dawn's own OpenGL backend
+   (dawn/native/opengl/ShaderModuleGL.cpp), which sets
+   `first_instance_offset` for vertex stages that read
+   `@builtin(instance_index)` under a non-zero firstInstance draw and
+   uploads the value at draw time (see
+   dawn/native/opengl/CommandBufferGL.cpp). When false, no offset is applied
+   and `gl_InstanceID` is used directly with no immediate-data array
+   emitted -- `first_instance_offset` is then ignored.
    `first_instance_offset` is a byte offset into Tint's internal immediate
    data map; yawgpu-core always passes 0 since GLES has no other internal
-   immediates sharing that struct today. */
+   immediates sharing that array today. */
 YAWGPU_TINT_API bool yawgpu_tint_generate_glsl(const YawgpuTintProgram*,
                                const char* ep,
                                const YawgpuTintBindings*,

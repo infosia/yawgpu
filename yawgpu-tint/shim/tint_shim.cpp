@@ -818,6 +818,30 @@ tint::VertexStepMode to_tint_step_mode(uint8_t step_mode) {
     }
 }
 
+// Builds the name -> OverrideId map from `program->overrides`, the vector
+// `yawgpu_tint_program_create` populated (single-threaded, no concurrency
+// concern) from `Inspector::Overrides()` at program-creation time. This is
+// equivalent to `Inspector::GetNamedOverrideIds()`: both walk
+// `program_.AST().GlobalVariables()` and key on the override's declared
+// identifier (`Override::name` / `GetNamedOverrideIds`'s `var->name`) with
+// the resolver-assigned `OverrideId` (`Override::id` /
+// `global->Attributes().override_id`), which is set for every override
+// variable, not just ones with an explicit `@id` attribute -- see
+// `MkOverride` and `Inspector::GetNamedOverrideIds` in
+// third_party/dawn/src/tint/lang/wgsl/inspector/inspector.cc. Building the
+// map from the cache -- instead of constructing a fresh
+// `tint::inspector::Inspector` here -- avoids doing that construction
+// without holding `program->reflection_mutex` (refactor finding F3; the
+// only mutex-free Inspector construction site, see the SAFETY comment on
+// the `Send`/`Sync` impls of `Program` in yawgpu-tint/src/lib.rs).
+std::map<std::string, tint::OverrideId> named_override_ids(const YawgpuTintProgram* program) {
+    std::map<std::string, tint::OverrideId> result;
+    for (const auto& ov : program->overrides) {
+        result[ov.name] = ov.id;
+    }
+    return result;
+}
+
 tint::diag::Result<tint::SubstituteOverridesConfig> make_override_config(
     const YawgpuTintProgram* program,
     const YawgpuTintOverrideValue* values,
@@ -827,8 +851,7 @@ tint::diag::Result<tint::SubstituteOverridesConfig> make_override_config(
         return cfg;
     }
 
-    tint::inspector::Inspector inspector(program->program);
-    auto override_names = inspector.GetNamedOverrideIds();
+    auto override_names = named_override_ids(program);
     cfg.map.reserve(count);
     for (size_t i = 0; i < count; ++i) {
         if (values == nullptr || values[i].name == nullptr || values[i].name[0] == '\0') {

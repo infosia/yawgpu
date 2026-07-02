@@ -602,7 +602,8 @@ fn run_render_draw(
         gl.use_program(Some(program));
     }
     bind_render_buffers(gl, pass, pipeline)?;
-    bind_vertex_buffers(gl, pass, pipeline, vao)?;
+    let first_instance = pass.draw.map(draw_first_instance).unwrap_or(0);
+    bind_vertex_buffers(gl, pass, pipeline, vao, first_instance)?;
     if let Some(draw) = pass.draw {
         apply_raster_state(gl, pipeline.front_face(), pipeline.cull_mode());
         apply_color_target_state(gl, pipeline.color_target(), pass.blend_constant);
@@ -843,16 +844,59 @@ fn gles_blend_factor(factor: HalBlendFactor, alpha: bool) -> u32 {
     }
 }
 
-fn set_first_instance_uniform(gl: &glow::Context, location: &glow::UniformLocation, draw: HalDraw) {
-    let first_instance = match draw {
+/// Returns the `firstInstance` draw parameter carried by `draw`, or `0` for
+/// the indirect variants, whose `firstInstance` (if any) is embedded in a
+/// GPU-side buffer read at draw time and not observable here. GLES 3.1's
+/// indirect-draw command structs (`DrawArraysIndirectCommand` /
+/// `DrawElementsIndirectCommand`) have no `baseInstance` field at all (unlike
+/// desktop GL's `ARB_base_instance`), so a non-zero indirect firstInstance
+/// cannot be honored regardless -- consistent with
+/// `GlesAdapter::supports_indirect_first_instance` always returning `false`
+/// (`adapter.rs`), which keeps `Feature::IndirectFirstInstance` off this
+/// backend's advertised feature set.
+fn draw_first_instance(draw: HalDraw) -> u32 {
+    match draw {
         HalDraw::Direct { first_instance, .. } | HalDraw::Indexed { first_instance, .. } => {
             first_instance
         }
         HalDraw::Indirect { .. } | HalDraw::IndexedIndirect { .. } => 0,
-    };
-    unsafe {
-        gl.uniform_1_u32(Some(location), first_instance);
     }
+}
+
+fn set_first_instance_uniform(gl: &glow::Context, location: &glow::UniformLocation, draw: HalDraw) {
+    unsafe {
+        gl.uniform_1_u32(Some(location), draw_first_instance(draw));
+    }
+}
+
+/// Computes the byte offset to add to an instance-stepped vertex buffer's
+/// base offset so that instance 0 of the draw reads row `first_instance`
+/// instead of row `0`.
+///
+/// GLES 3.1's `glDrawArraysInstanced`/`glDrawElementsInstanced` have no
+/// `baseInstance` parameter (that is `ARB_base_instance`, a desktop-GL-only
+/// extension), so per-instance vertex attributes always fetch starting at
+/// row `0` regardless of the WebGPU `firstInstance` draw parameter. Dawn's
+/// GL backend compensates by adding `firstInstance * arrayStride` to every
+/// instance-step vertex buffer's attribute offset at draw time
+/// (`VertexStateBufferBindingTracker::Apply`,
+/// `third_party/dawn/src/dawn/native/opengl/CommandBufferGL.cpp:259-261`);
+/// this mirrors that formula. Returns `Ok(0)` for `first_instance == 0`
+/// (the common case) without doing arithmetic.
+fn instance_step_offset(array_stride: u64, first_instance: u32) -> Result<i64, HalError> {
+    if first_instance == 0 {
+        return Ok(0);
+    }
+    let offset = u64::from(first_instance).checked_mul(array_stride).ok_or(
+        HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "vertex buffer firstInstance offset exceeds GLES limit",
+        },
+    )?;
+    i64::try_from(offset).map_err(|_| HalError::BufferOperationFailed {
+        backend: BACKEND,
+        message: "vertex buffer firstInstance offset exceeds GLES limit",
+    })
 }
 
 fn run_gles_draw(
@@ -1043,6 +1087,7 @@ fn bind_vertex_buffers(
     pass: &HalRenderPass,
     pipeline: &super::pipeline::GlesRenderPipeline,
     vao: glow::VertexArray,
+    first_instance: u32,
 ) -> Result<(), HalError> {
     unsafe {
         gl.bind_vertex_array(Some(vao));
@@ -1076,6 +1121,29 @@ fn bind_vertex_buffers(
                 backend: BACKEND,
                 message: "vertex buffer offset exceeds GLES limit",
             })?;
+        // M2 (GLES first-instance vertex fix): instance-stepped buffers get
+        // `firstInstance * arrayStride` folded into the base offset here, on
+        // every draw, because this function already re-specifies every
+        // attribute pointer against a freshly created VAO for every single
+        // `HalRenderPass` (see `submit_render_pass`'s
+        // `gl.create_vertex_array()` -- one HAL render pass models exactly
+        // one draw call, unlike Dawn's persistent-VAO GL backend). That
+        // means there is no cross-draw GL state to go stale, so unlike
+        // Dawn's `VertexStateBufferBindingTracker` (which dirty-tracks
+        // `mFirstInstance` because its VAO persists across draws within a
+        // render pass) this HAL needs no `first_instance` dirty bit: a
+        // subsequent draw with a different (or zero) `first_instance`
+        // recomputes this offset from scratch.
+        let buffer_offset = if matches!(layout.step_mode, HalVertexStepMode::Instance) {
+            buffer_offset
+                .checked_add(instance_step_offset(layout.array_stride, first_instance)?)
+                .ok_or(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "vertex buffer firstInstance offset exceeds GLES limit",
+                })?
+        } else {
+            buffer_offset
+        };
         unsafe {
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffer));
         }
@@ -1655,6 +1723,80 @@ mod tests {
             HalError::BufferOperationFailed {
                 backend: "gles",
                 message: "GLES render pass does not support texture/sampler bindings",
+            }
+        ));
+    }
+
+    #[test]
+    fn draw_first_instance_reads_direct_and_indexed_and_zeroes_indirect() {
+        assert_eq!(
+            draw_first_instance(HalDraw::Direct {
+                vertex_count: 3,
+                instance_count: 1,
+                first_vertex: 0,
+                first_instance: 7,
+            }),
+            7
+        );
+        assert_eq!(
+            draw_first_instance(HalDraw::Indexed {
+                index_count: 3,
+                instance_count: 1,
+                first_index: 0,
+                base_vertex: 0,
+                first_instance: 9,
+            }),
+            9
+        );
+        // Indirect variants carry firstInstance inside a GPU-side buffer,
+        // not observable at record time; GLES 3.1's indirect-draw structs
+        // additionally have no baseInstance field at all, so this is always
+        // 0 (see `GlesAdapter::supports_indirect_first_instance`).
+        assert_eq!(draw_first_instance(HalDraw::Indirect { offset: 0 }), 0);
+        assert_eq!(
+            draw_first_instance(HalDraw::IndexedIndirect { offset: 0 }),
+            0
+        );
+    }
+
+    #[test]
+    fn instance_step_offset_is_zero_for_first_instance_zero() {
+        assert_eq!(instance_step_offset(32, 0).expect("no overflow"), 0);
+        assert_eq!(instance_step_offset(0, 5).expect("no overflow"), 0);
+    }
+
+    #[test]
+    fn instance_step_offset_multiplies_stride_by_first_instance() {
+        // Mirrors Dawn's `offset += mFirstInstance * vertexBuffer.arrayStride`
+        // (CommandBufferGL.cpp:259-261).
+        assert_eq!(instance_step_offset(16, 3).expect("no overflow"), 48);
+        assert_eq!(
+            instance_step_offset(1, u32::MAX).expect("no overflow"),
+            i64::from(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn instance_step_offset_rejects_overflow() {
+        let error = instance_step_offset(u64::MAX, 2).expect_err("must overflow u64 multiply");
+        assert!(matches!(
+            error,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message: "vertex buffer firstInstance offset exceeds GLES limit",
+            }
+        ));
+
+        // Product fits in u64 (2^64 - 2^32) but not i64 (glow's
+        // pointer-offset APIs take `i32`, but the intermediate byte offset
+        // here is `i64`).
+        let error = instance_step_offset(u64::from(u32::MAX) + 1, u32::MAX)
+            .expect_err("must overflow i64 conversion");
+        assert!(matches!(
+            error,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message: "vertex buffer firstInstance offset exceeds GLES limit",
             }
         ));
     }

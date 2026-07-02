@@ -113,10 +113,21 @@ pub struct Program {
 //     unguarded — the oracle relies on exactly the read-only contract this
 //     comment documents.
 // The reflection accessors (`entry_points`, `resource_bindings`, ...) go
-// through the C++ shim's `reflection_mutex`, which also serializes
+// through the C++ shim's `reflection_mutex`, which serializes
 // `tint::inspector::Inspector` construction (a genuinely separate object
 // built fresh per call, not proven read-only by the above) — see
-// `tint_shim.cpp`'s `YawgpuTintProgram::reflection_mutex`.
+// `tint_shim.cpp`'s `YawgpuTintProgram::reflection_mutex`. Override
+// substitution (`generate_msl`, `generate_spirv`, `workgroup_storage_size`,
+// `resolved_workgroup_size`, `generate_glsl` — all codegen paths, not
+// `reflection_mutex`-guarded) used to be the one exception: it built an
+// `Inspector` on the shared `Program` outside the mutex. As of the F3 fix
+// (`make_override_config` in `tint_shim.cpp`), it instead reads
+// `YawgpuTintProgram::overrides`, a `const`-after-construction vector filled
+// once, single-threaded, by `yawgpu_tint_program_create` before the
+// `Program` is ever shared across threads — so there is no longer any
+// mutex-free `Inspector` construction anywhere in the shim, and every
+// codegen path (including override substitution) now falls under the
+// read-only `const tint::Program` contract proved above.
 #[cfg(have_tint)]
 unsafe impl Send for Program {}
 
@@ -1097,7 +1108,7 @@ mod real {
     }
 
     #[repr(C)]
-    struct RawBindings {
+    struct RawBindings<'a> {
         uniform: *const BindingRemap,
         n_uniform: usize,
         storage: *const BindingRemap,
@@ -1112,6 +1123,15 @@ mod real {
         n_external_texture: usize,
         input_attachment_color_index: *const InputAttachmentColorIndex,
         n_input_attachment_color_index: usize,
+        // Ties this struct's lifetime to the borrowed `Bindings` (m2, code
+        // review of the Tint-integration refactor): every pointer field
+        // above points straight into `Bindings`'s own `Vec<BindingRemap>`
+        // etc. (see the `as_raw` doc comment below), so the borrow must be
+        // compiler-enforced the same way `RawVertexBuffers<'a>` enforces it
+        // for `VertexBuffer`, not left as an unbounded raw-pointer bundle.
+        // Zero-sized, so it does not perturb any of the `offset_of!`
+        // asserts below (repr(C) never reserves space for a trailing ZST).
+        _borrow: std::marker::PhantomData<&'a Bindings>,
     }
 
     // ABI drift guard: mirrors `YawgpuTintBindings`'s static_asserts. All
@@ -1140,8 +1160,10 @@ mod real {
         // direct-FFI PODs since refactor R5 — no `RawXxx` mirror, no per-call
         // copy). Valid for as long as the `&Bindings` caller passed in stays
         // borrowed, which every call site here does (built and used within a
-        // single `Program` method body).
-        fn as_raw(&self) -> RawBindings {
+        // single `Program` method body) — and, since m2, compiler-enforced
+        // via `RawBindings<'a>`'s `PhantomData<&'a Bindings>` rather than
+        // left as an implicit convention.
+        fn as_raw(&self) -> RawBindings<'_> {
             RawBindings {
                 uniform: self.uniform.as_ptr(),
                 n_uniform: self.uniform.len(),
@@ -1157,6 +1179,7 @@ mod real {
                 n_external_texture: self.external_texture.len(),
                 input_attachment_color_index: self.input_attachment_color_index.as_ptr(),
                 n_input_attachment_color_index: self.input_attachment_color_index.len(),
+                _borrow: std::marker::PhantomData,
             }
         }
     }
@@ -1289,7 +1312,7 @@ mod real {
         fn yawgpu_tint_generate_msl(
             program: *const RawProgram,
             ep: *const c_char,
-            bindings: *const RawBindings,
+            bindings: *const RawBindings<'_>,
             ov: *const RawOverrideValue,
             n_ov: usize,
             buffer_sizes_slot: u32,
@@ -1304,7 +1327,7 @@ mod real {
         fn yawgpu_tint_generate_spirv(
             program: *const RawProgram,
             ep: *const c_char,
-            bindings: *const RawBindings,
+            bindings: *const RawBindings<'_>,
             ov: *const RawOverrideValue,
             n_ov: usize,
             disable_robustness: bool,
@@ -1335,7 +1358,7 @@ mod real {
         fn yawgpu_tint_generate_glsl(
             program: *const RawProgram,
             ep: *const c_char,
-            bindings: *const RawBindings,
+            bindings: *const RawBindings<'_>,
             ov: *const RawOverrideValue,
             n_ov: usize,
             has_first_instance_offset: bool,
@@ -1921,10 +1944,15 @@ mod real {
         /// `Some(0)` for vertex stages, since GLES does not share that map
         /// with any other internal immediate today). This makes Tint rewrite
         /// `@builtin(instance_index)` to add a value it reads back from a
-        /// `layout(location = 0) uniform` struct named `tint_immediates`
-        /// with a `tint_first_instance` member (see `tint_shim.h` docs on
-        /// `yawgpu_tint_generate_glsl`). `None` leaves `instance_index` as
-        /// raw `gl_InstanceID` with no immediate-data struct emitted.
+        /// plain array-typed uniform, `layout(location = 0) uniform uint
+        /// tint_immediates[1]` -- NOT a named struct with a
+        /// `tint_first_instance` member; query it as
+        /// `glGetUniformLocation(program, "tint_immediates[0]")` (see
+        /// `tint_shim.h` docs on `yawgpu_tint_generate_glsl`, and the
+        /// `generate_glsl_first_instance_offset_only_applied_when_requested`
+        /// test below, which pins the exact GLSL text). `None` leaves
+        /// `instance_index` as raw `gl_InstanceID` with no immediate-data
+        /// array emitted.
         pub fn generate_glsl(
             &self,
             entry_point: &str,
@@ -3855,6 +3883,45 @@ fn cs() {}
     }
 
     #[test]
+    fn generate_msl_resolves_id_specified_override_referenced_by_name() {
+        // Companion to
+        // `resolved_workgroup_size_resolves_id_specified_override_referenced_by_name`,
+        // covering the same name -> OverrideId map lookup (F3 fix) through
+        // `generate_msl`'s override-substitution path instead.
+        let wgsl = r#"
+@id(3) override x: u32 = 4;
+
+@compute @workgroup_size(x, 2, 1)
+fn cs() {}
+"#;
+        let overrides = [OverrideValue {
+            name: "x".into(),
+            value: 8.0,
+        }];
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let output = program
+            .generate_msl(
+                "cs",
+                &Bindings::default(),
+                &overrides,
+                0,
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+            )
+            .unwrap();
+        // x=8, y=2, z=1 (override x=8 applied) -> total threads = 16.
+        assert!(
+            output
+                .source
+                .contains("max_total_threads_per_threadgroup(16)"),
+            "MSL:\n{}",
+            output.source
+        );
+    }
+
+    #[test]
     fn generate_msl_and_spirv_are_byte_identical_across_calls_f16() {
         let wgsl = r#"
 enable f16;
@@ -3987,6 +4054,46 @@ fn cs() {}
                     "cs",
                     &[OverrideValue {
                         name: "3".into(),
+                        value: 16.0,
+                    }]
+                )
+                .unwrap(),
+            [16, 1, 1]
+        );
+    }
+
+    #[test]
+    fn resolved_workgroup_size_resolves_id_specified_override_referenced_by_name() {
+        // Same shader as `resolved_workgroup_size_resolves_id_driven_override`,
+        // but the override is supplied by its WGSL identifier ("x") rather
+        // than the numeric `@id` value. This forces resolution through the
+        // name -> OverrideId map (`make_override_config`'s
+        // `named_override_ids` lookup in tint_shim.cpp) instead of the
+        // numeric-string fast path, verifying an `@id`-attributed override
+        // is still discoverable by name (F3 fix: the map is now built from
+        // `YawgpuTintProgram::overrides`, cached at program-creation time,
+        // rather than a fresh `Inspector::GetNamedOverrideIds()` call).
+        let program = Program::parse(
+            r#"
+@id(3) override x: u32 = 4;
+
+@compute @workgroup_size(x)
+fn cs() {}
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            program
+                .resolved_workgroup_size(
+                    "cs",
+                    &[OverrideValue {
+                        name: "x".into(),
                         value: 16.0,
                     }]
                 )

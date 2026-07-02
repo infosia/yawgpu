@@ -216,3 +216,48 @@ practice; revisit only if profiling says otherwise).
   request; MSAA inputAttachmentLoad MSL reject) — first real exercise of the
   R1 drift guards across a rev bump, clean.
 - 2026-07-02: R5–R6 implemented. All six slices landed; Phase Review next.
+
+## Phase Review (2026-07-02) — 2 MAJOR + 5 MINOR, all resolved
+
+No-context adversarial review of the cumulative diff (`c5e9841..HEAD`),
+dimensions: FFI memory safety / behavior preservation / concurrency / drift-
+guard completeness. Verdict: guards complete, RAII single-free by
+construction, memoization keys complete, no deadlock. Findings:
+
+- **M1 (MAJOR, fixed)** — `make_override_config` built a mutex-free
+  `Inspector` on the shared const Program (reached from every override-
+  bearing codegen call), violating the R5 Send/Sync justification. Fixed by
+  building the name→`OverrideId` map from the program-creation-time
+  `overrides` cache (equivalence to `GetNamedOverrideIds()` verified in
+  inspector.cc — both walk `AST().GlobalVariables()`); no `Inspector` is
+  constructed outside `reflection_mutex` anywhere now. SAFETY comment
+  updated; @id-referenced-by-name override tests added.
+- **M2 (MAJOR, fixed)** — GLES instance-stepped vertex attributes ignored
+  `firstInstance` (GLES 3.1 has no baseInstance): only the
+  `@builtin(instance_index)` half was fixed by R6. Now offsets every
+  Instance-step buffer's attribute pointers by `first_instance *
+  array_stride` (Dawn GL parity, CommandBufferGL.cpp:259-261; no dirty
+  tracking needed — the GLES path builds a fresh VAO per draw). Indirect
+  stays first_instance=0 (feature not advertised; GLES indirect command
+  structs have no baseInstance field).
+- **m1–m4 (MINOR, fixed)** — tint_immediates doc contradiction (struct vs
+  the real array form); `RawBindings` lifetime tie (PhantomData like
+  `RawVertexBuffers<'a>`); poison-`expect`s →
+  `unwrap_or_else(PoisonError::into_inner)` (no panics in core); the
+  swallowed post-parse reflection error path documented as unreachable.
+- **m5 (MINOR, catalogued)** — identity-remap GLSL path bypasses
+  `GenerateBindings`, so `texture_builtins_from_uniform` is never
+  populated; unreachable today (GLES texture bindings are `HalError`) —
+  catalogued in `specs/blocks/67-gles-backend.md` mapping matrix, to be
+  wired when GLES texture bindings land.
+- **Pre-existing follow-up (not this phase, verified identical at base):**
+  `yawgpu_tint_workgroup_storage_size` swallows override-substitution
+  failures as 0, so an entry point whose sibling references a const-eval-
+  failing override skips the `maxComputeWorkgroupStorageSize` check.
+
+Post-fix gates: workspace 81 suites; real-Metal e2e compute 5/5 + render
+3/3; Metal CTS compute_pipeline + operation overrides 11843/0.
+
+**Phase COMPLETE (2026-07-02).** Outstanding non-blocking items: real-ANGLE
+confirmation of the R6 GLES contracts (Tier 2 manual step) and the
+pre-existing workgroup-storage-size follow-up above.
