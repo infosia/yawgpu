@@ -64,17 +64,33 @@ into the working tree, leaving one conflict marker inside a doc comment
 re-run green; Block 95 caches and the upstream `immediate_data_used_slots`
 reflection cache coexist on `ReflectedModule`.
 
-## Pre-existing issue surfaced (NOT Block 95, needs follow-up)
+## Pre-existing issue surfaced (NOT Block 95): CTS runner worker-mode harness bug
 
-`webgpu:api,operation,texture_view,texture_component_swizzle:*` under
-`--workers 6` mass-fails nondeterministically (6.8k–9.3k of 52k; every
-failure is downstream `queue submit cannot use an error command buffer`,
-no compile-degrade signature, all formats affected, serial runs green).
-**Reproduced identically on the pre-Block-95 dylib (6840 fails)** — a
-parallel-execution failure mode independent of compile caching, likely
-resource pressure with 6 concurrent GPU processes. Deserves its own
-investigation / CTS finding; the canary spec's runner-side `envdegrade`
-detection (their Part 2) would currently misattribute these.
+The `--workers N` fail clusters from the S3 spot run
+(`texture_component_swizzle` 6.8k–9.3k of 52k, `render_pipeline,sample_mask`
+~500, `command_buffer,programmable,immediate` 252/252, `labels` ~8 — every
+failure the downstream `queue submit cannot use an error command buffer`,
+serial runs green) were bisected after the block landed (2026-07-03,
+post-`eec8dc3`):
+
+- reproduce identically at `80bab07` and `812d228` (pre-Block-95 and
+  pre-upstream-immediates) — not introduced by any 2026-07-03 yawgpu change;
+- `programmable,immediate` is the clean probe: serial 252/0, `--workers 1`
+  252/0, a single case under `--workers 6` passes, but the full tree under
+  `--workers >= 2` fails 252/252 deterministically;
+- **two concurrent plain serial `cts` processes on the same tree are both
+  fully green** — rules out cross-process GPU/driver contention;
+- **`build-dawn` (the oracle) fails identically** — immediate 252/252 under
+  `--workers 6` (serial 252/0), sample_mask 666, labels 4 (serial 0).
+
+Conclusion: a **webgpu-native-cts runner bug in worker mode (N >= 2)**,
+backend-independent, to be fixed in the CTS repo — not a yawgpu defect and
+not compile degradation. This also means the canary spec's historical
+"75k–92k fake fails under workers" measurements were dominated by this
+harness bug, and the planned runner-side `envdegrade` detection (their
+Part 2) would misattribute these failures until the worker bug is fixed.
+The only genuine compile-service event in the S3 full `api,operation` run
+was one `MTLCompilerService` incident (8 cases, worker recovered).
 
 ## Deferred (measure-first, spec "out of scope")
 
