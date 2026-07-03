@@ -253,6 +253,15 @@ pub unsafe extern "C" fn wgpuDeviceCreateShaderModule(
         .expect("WGPUShaderModuleDescriptor must not be null");
     let source = map_shader_module_descriptor(descriptor);
     let key = shader_module_cache_key(&source);
+    // This per-device cache only stores non-error modules; a live hit is a
+    // previously valid module, and lost devices must keep returning fresh errors.
+    if !device.core.is_lost() {
+        if let Some(key) = key.as_ref() {
+            if let Some(cached) = cached_handle(&device.shader_module_cache, key) {
+                return arc_to_handle(cached);
+            }
+        }
+    }
     let shader_module = device.core.create_shader_module(source);
     let handle = Arc::new(WGPUShaderModuleImpl {
         _core: Arc::new(shader_module),

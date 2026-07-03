@@ -747,6 +747,18 @@ where
     handle
 }
 
+/// Returns the live cached handle for `key`, if any, without inserting or pruning.
+fn cached_handle<T: CacheKey>(
+    cache: &Mutex<HashMap<T, Weak<T::Handle>>>,
+    key: &T,
+) -> Option<Arc<T::Handle>> {
+    cache
+        .lock()
+        .expect("device object cache lock must not poison")
+        .get(key)
+        .and_then(Weak::upgrade)
+}
+
 trait CacheKey: Eq + std::hash::Hash {
     type Handle;
 }
@@ -900,10 +912,10 @@ unsafe fn render_pipeline_cache_key(
             .as_ref()
             .map(depth_stencil_state_cache_key),
         multisample: multisample_state_cache_key(descriptor.multisample),
-        fragment: descriptor
-            .fragment
-            .as_ref()
-            .and_then(|fragment| fragment_state_cache_key(fragment)),
+        fragment: match descriptor.fragment.as_ref() {
+            Some(fragment) => Some(fragment_state_cache_key(fragment)?),
+            None => None,
+        },
     })
 }
 
@@ -1151,10 +1163,9 @@ unsafe fn pipeline_constant_cache_keys(
     Some(keys)
 }
 
+/// Returns cache-key bits for a pipeline constant, preserving signed zero.
 fn canonical_f64_bits(value: f64) -> u64 {
-    if value == 0.0 {
-        0.0f64.to_bits()
-    } else if value.is_nan() {
+    if value.is_nan() {
         f64::NAN.to_bits()
     } else {
         value.to_bits()
@@ -1777,6 +1788,16 @@ unsafe fn create_compute_pipeline_handle(
 ) -> Arc<WGPUComputePipelineImpl> {
     let key = compute_pipeline_cache_key(descriptor);
     let device_error = validate_compute_pipeline_devices(device, descriptor);
+    // These per-device caches key sub-objects by core Arc identity and never
+    // insert error objects. A live hit therefore came from an already validated
+    // descriptor; the guards keep cross-device and lost-device behavior explicit.
+    if device_error.is_none() && !device.core.is_lost() {
+        if let Some(key) = key.as_ref() {
+            if let Some(cached) = cached_handle(&device.compute_pipeline_cache, key) {
+                return cached;
+            }
+        }
+    }
     let mut descriptor = map_compute_pipeline_descriptor(descriptor);
     if descriptor.error.is_none() {
         descriptor.error = device_error;
@@ -1812,6 +1833,16 @@ unsafe fn create_render_pipeline_handle(
 ) -> Arc<WGPURenderPipelineImpl> {
     let key = render_pipeline_cache_key(descriptor);
     let device_error = validate_render_pipeline_devices(device, descriptor);
+    // These per-device caches key sub-objects by core Arc identity and never
+    // insert error objects. A live hit therefore came from an already validated
+    // descriptor; the guards keep cross-device and lost-device behavior explicit.
+    if device_error.is_none() && !device.core.is_lost() {
+        if let Some(key) = key.as_ref() {
+            if let Some(cached) = cached_handle(&device.render_pipeline_cache, key) {
+                return cached;
+            }
+        }
+    }
     let mut descriptor = map_render_pipeline_descriptor(descriptor);
     if descriptor.error.is_none() {
         descriptor.error = device_error;
@@ -6505,6 +6536,362 @@ mod tests {
             assert_eq!(cache_len(&device_impl.shader_module_cache), 1);
             wgpuShaderModuleRelease(third);
 
+            drop(device_impl);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn shader_module_cache_hit_skips_core_compile() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let device_impl = clone_handle::<WGPUDeviceImpl>(device, "WGPUDevice");
+            let source = "@compute @workgroup_size(1) fn main() {}";
+
+            let first = create_wgsl_module(device, source);
+            let second = create_wgsl_module(device, source);
+            assert_eq!(first, second);
+            assert_eq!(device_impl.core.shader_module_creation_count(), 1);
+
+            wgpuShaderModuleRelease(first);
+            wgpuShaderModuleRelease(second);
+            let third = create_wgsl_module(device, source);
+            assert_eq!(device_impl.core.shader_module_creation_count(), 2);
+
+            wgpuShaderModuleRelease(third);
+            drop(device_impl);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn compute_pipeline_cache_hit_skips_core_compile() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let device_impl = clone_handle::<WGPUDeviceImpl>(device, "WGPUDevice");
+            let layout_desc = pipeline_layout_descriptor(&[]);
+            let pipeline_layout = wgpuDeviceCreatePipelineLayout(device, &layout_desc);
+            let module = create_wgsl_module(
+                device,
+                "@compute @workgroup_size(1) fn cs() {}
+                 @compute @workgroup_size(1) fn other() {}",
+            );
+            let descriptor = compute_pipeline_descriptor(module, pipeline_layout);
+
+            let first = wgpuDeviceCreateComputePipeline(device, &descriptor);
+            let second = wgpuDeviceCreateComputePipeline(device, &descriptor);
+            assert_eq!(first, second);
+            assert_eq!(device_impl.core.compute_pipeline_creation_count(), 1);
+
+            let mut other_descriptor = compute_pipeline_descriptor(module, pipeline_layout);
+            other_descriptor.compute.entryPoint = label_view("other");
+            let other = wgpuDeviceCreateComputePipeline(device, &other_descriptor);
+            assert_ne!(first, other);
+            assert_eq!(device_impl.core.compute_pipeline_creation_count(), 2);
+
+            wgpuComputePipelineRelease(other);
+            wgpuComputePipelineRelease(first);
+            wgpuComputePipelineRelease(second);
+            wgpuShaderModuleRelease(module);
+            wgpuPipelineLayoutRelease(pipeline_layout);
+            drop(device_impl);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn render_pipeline_cache_hit_skips_core_compile() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let device_impl = clone_handle::<WGPUDeviceImpl>(device, "WGPUDevice");
+            let layout_desc = pipeline_layout_descriptor(&[]);
+            let pipeline_layout = wgpuDeviceCreatePipelineLayout(device, &layout_desc);
+            let module = create_wgsl_module(
+                device,
+                "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }
+                 @vertex fn other() -> @builtin(position) vec4f { return vec4f(1.0); }
+                 @fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
+            );
+            let descriptor = render_pipeline_descriptor(module, module, pipeline_layout);
+
+            let first = wgpuDeviceCreateRenderPipeline(device, &descriptor);
+            let second = wgpuDeviceCreateRenderPipeline(device, &descriptor);
+            assert_eq!(first, second);
+            assert_eq!(device_impl.core.render_pipeline_creation_count(), 1);
+
+            let mut other_descriptor = render_pipeline_descriptor(module, module, pipeline_layout);
+            other_descriptor.vertex.entryPoint = label_view("other");
+            let other = wgpuDeviceCreateRenderPipeline(device, &other_descriptor);
+            assert_ne!(first, other);
+            assert_eq!(device_impl.core.render_pipeline_creation_count(), 2);
+
+            wgpuRenderPipelineRelease(other);
+            wgpuRenderPipelineRelease(first);
+            wgpuRenderPipelineRelease(second);
+            wgpuShaderModuleRelease(module);
+            wgpuPipelineLayoutRelease(pipeline_layout);
+            drop(device_impl);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn malformed_fragment_state_never_short_circuits() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let device_impl = clone_handle::<WGPUDeviceImpl>(device, "WGPUDevice");
+            let layout_desc = pipeline_layout_descriptor(&[]);
+            let pipeline_layout = wgpuDeviceCreatePipelineLayout(device, &layout_desc);
+            let module = create_wgsl_module(
+                device,
+                "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }
+                 @fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
+            );
+            let depth_stencil = native::WGPUDepthStencilState {
+                nextInChain: std::ptr::null_mut(),
+                format: native::WGPUTextureFormat_Depth24Plus,
+                depthWriteEnabled: native::WGPUOptionalBool_False,
+                depthCompare: native::WGPUCompareFunction_Less,
+                stencilFront: native::WGPUStencilFaceState {
+                    compare: native::WGPUCompareFunction_Always,
+                    failOp: native::WGPUStencilOperation_Keep,
+                    depthFailOp: native::WGPUStencilOperation_Keep,
+                    passOp: native::WGPUStencilOperation_Keep,
+                },
+                stencilBack: native::WGPUStencilFaceState {
+                    compare: native::WGPUCompareFunction_Always,
+                    failOp: native::WGPUStencilOperation_Keep,
+                    depthFailOp: native::WGPUStencilOperation_Keep,
+                    passOp: native::WGPUStencilOperation_Keep,
+                },
+                stencilReadMask: 0xFFFF_FFFF,
+                stencilWriteMask: 0xFFFF_FFFF,
+                depthBias: 0,
+                depthBiasSlopeScale: 0.0,
+                depthBiasClamp: 0.0,
+            };
+
+            let mut vertex_only = render_pipeline_descriptor(module, module, pipeline_layout);
+            vertex_only.fragment = std::ptr::null();
+            vertex_only.depthStencil = &depth_stencil;
+            let cached = wgpuDeviceCreateRenderPipeline(device, &vertex_only);
+            assert!(!cached.is_null());
+            assert_eq!(device_impl.core.render_pipeline_creation_count(), 1);
+
+            let mut null_targets_fragment = native::WGPUFragmentState {
+                nextInChain: std::ptr::null_mut(),
+                module,
+                entryPoint: label_view("fs"),
+                constantCount: 0,
+                constants: std::ptr::null(),
+                targetCount: 1,
+                targets: std::ptr::null(),
+            };
+            let mut null_targets = render_pipeline_descriptor(module, module, pipeline_layout);
+            null_targets.depthStencil = &depth_stencil;
+            null_targets.fragment = &null_targets_fragment;
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let null_targets_pipeline = wgpuDeviceCreateRenderPipeline(device, &null_targets);
+            assert_ne!(cached, null_targets_pipeline);
+            assert_validation_error_contains(
+                instance,
+                device,
+                "render pipeline fragment targets must not be null when count is non-zero",
+            );
+            assert_eq!(device_impl.core.render_pipeline_creation_count(), 2);
+
+            let mut null_constants = render_pipeline_descriptor(module, module, pipeline_layout);
+            null_constants.depthStencil = &depth_stencil;
+            null_targets_fragment.targetCount = 0;
+            null_targets_fragment.constantCount = 1;
+            null_constants.fragment = &null_targets_fragment;
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let null_constants_pipeline = wgpuDeviceCreateRenderPipeline(device, &null_constants);
+            assert_ne!(cached, null_constants_pipeline);
+            assert_validation_error_contains(
+                instance,
+                device,
+                "render pipeline fragment constants must not be null when count is non-zero",
+            );
+            assert_eq!(device_impl.core.render_pipeline_creation_count(), 3);
+
+            wgpuRenderPipelineRelease(null_constants_pipeline);
+            wgpuRenderPipelineRelease(null_targets_pipeline);
+            wgpuRenderPipelineRelease(cached);
+            wgpuShaderModuleRelease(module);
+            wgpuPipelineLayoutRelease(pipeline_layout);
+            drop(device_impl);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn auto_layout_pipeline_creates_are_never_short_circuited() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let device_impl = clone_handle::<WGPUDeviceImpl>(device, "WGPUDevice");
+            let module = create_wgsl_module(device, "@compute @workgroup_size(1) fn cs() {}");
+            let descriptor = compute_pipeline_descriptor(module, std::ptr::null_mut());
+
+            let first = wgpuDeviceCreateComputePipeline(device, &descriptor);
+            let second = wgpuDeviceCreateComputePipeline(device, &descriptor);
+
+            assert_ne!(first, second);
+            assert_eq!(device_impl.core.compute_pipeline_creation_count(), 2);
+            assert_eq!(cache_len(&device_impl.compute_pipeline_cache), 0);
+
+            wgpuComputePipelineRelease(first);
+            wgpuComputePipelineRelease(second);
+            wgpuShaderModuleRelease(module);
+            drop(device_impl);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn pipeline_cache_short_circuit_still_validates_device_mismatch() {
+        unsafe {
+            let (instance_a, adapter_a, device_a) = noop_chain();
+            let (instance_b, adapter_b, device_b) = noop_chain();
+            let device_a_impl = clone_handle::<WGPUDeviceImpl>(device_a, "WGPUDevice");
+            let layout_desc = pipeline_layout_descriptor(&[]);
+            let foreign_layout = wgpuDeviceCreatePipelineLayout(device_b, &layout_desc);
+            let foreign_module =
+                create_wgsl_module(device_b, "@compute @workgroup_size(1) fn cs() {}");
+            let descriptor = compute_pipeline_descriptor(foreign_module, foreign_layout);
+
+            wgpuDevicePushErrorScope(device_a, native::WGPUErrorFilter_Validation);
+            let first = wgpuDeviceCreateComputePipeline(device_a, &descriptor);
+            assert_validation_error_contains(
+                instance_a,
+                device_a,
+                "compute pipeline shader module must belong to the same device",
+            );
+            wgpuDevicePushErrorScope(device_a, native::WGPUErrorFilter_Validation);
+            let second = wgpuDeviceCreateComputePipeline(device_a, &descriptor);
+            assert_validation_error_contains(
+                instance_a,
+                device_a,
+                "compute pipeline shader module must belong to the same device",
+            );
+
+            assert_eq!(device_a_impl.core.compute_pipeline_creation_count(), 2);
+            assert_eq!(cache_len(&device_a_impl.compute_pipeline_cache), 0);
+
+            wgpuComputePipelineRelease(first);
+            wgpuComputePipelineRelease(second);
+            wgpuShaderModuleRelease(foreign_module);
+            wgpuPipelineLayoutRelease(foreign_layout);
+            drop(device_a_impl);
+            release_handles(instance_b, adapter_b, device_b);
+            release_handles(instance_a, adapter_a, device_a);
+        }
+    }
+
+    #[test]
+    fn compute_pipeline_async_cache_hit_completes_with_success_callback() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let device_impl = clone_handle::<WGPUDeviceImpl>(device, "WGPUDevice");
+            let layout_desc = pipeline_layout_descriptor(&[]);
+            let pipeline_layout = wgpuDeviceCreatePipelineLayout(device, &layout_desc);
+            let module = create_wgsl_module(device, "@compute @workgroup_size(1) fn cs() {}");
+            let descriptor = compute_pipeline_descriptor(module, pipeline_layout);
+            let sync_pipeline = wgpuDeviceCreateComputePipeline(device, &descriptor);
+            assert_eq!(device_impl.core.compute_pipeline_creation_count(), 1);
+
+            let mut state = ComputePipelineAsyncState::default();
+            let callback_info = native::WGPUCreateComputePipelineAsyncCallbackInfo {
+                nextInChain: std::ptr::null_mut(),
+                mode: native::WGPUCallbackMode_AllowProcessEvents,
+                callback: Some(compute_pipeline_async_callback),
+                userdata1: (&mut state as *mut ComputePipelineAsyncState).cast(),
+                userdata2: std::ptr::null_mut(),
+            };
+            let future = wgpuDeviceCreateComputePipelineAsync(device, &descriptor, callback_info);
+            assert_ne!(future.id, 0);
+            wgpuInstanceProcessEvents(instance);
+
+            assert_eq!(state.fired, 1);
+            assert_eq!(state.status, native::WGPUCreatePipelineAsyncStatus_Success);
+            assert!(!state.pipeline.is_null());
+            assert_eq!(state.pipeline, sync_pipeline);
+            assert_eq!(device_impl.core.compute_pipeline_creation_count(), 1);
+
+            wgpuComputePipelineRelease(state.pipeline);
+            wgpuComputePipelineRelease(sync_pipeline);
+            wgpuShaderModuleRelease(module);
+            wgpuPipelineLayoutRelease(pipeline_layout);
+            drop(device_impl);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn shader_module_cache_hit_skipped_when_device_lost() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let device_impl = clone_handle::<WGPUDeviceImpl>(device, "WGPUDevice");
+            let source = "@compute @workgroup_size(1) fn main() {}";
+
+            let first = create_wgsl_module(device, source);
+            let second = create_wgsl_module(device, source);
+            assert_eq!(first, second);
+            assert_eq!(device_impl.core.shader_module_creation_count(), 1);
+
+            wgpuDeviceDestroy(device);
+            let lost = create_wgsl_module(device, source);
+            assert_ne!(first, lost);
+            assert!(borrow_handle(lost, "WGPUShaderModule")._core.is_error());
+            assert_eq!(device_impl.core.shader_module_creation_count(), 2);
+
+            wgpuShaderModuleRelease(lost);
+            wgpuShaderModuleRelease(first);
+            wgpuShaderModuleRelease(second);
+            drop(device_impl);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn pipeline_cache_distinguishes_negative_zero_constants() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let device_impl = clone_handle::<WGPUDeviceImpl>(device, "WGPUDevice");
+            let layout_desc = pipeline_layout_descriptor(&[]);
+            let pipeline_layout = wgpuDeviceCreatePipelineLayout(device, &layout_desc);
+            let module = create_wgsl_module(
+                device,
+                "override x: f32;
+                 @compute @workgroup_size(1) fn cs() { let _v = x; }",
+            );
+            let plus_constant = [native::WGPUConstantEntry {
+                nextInChain: std::ptr::null_mut(),
+                key: label_view("x"),
+                value: 0.0,
+            }];
+            let minus_constant = [native::WGPUConstantEntry {
+                nextInChain: std::ptr::null_mut(),
+                key: label_view("x"),
+                value: -0.0,
+            }];
+            let mut plus_descriptor = compute_pipeline_descriptor(module, pipeline_layout);
+            plus_descriptor.compute.constantCount = plus_constant.len();
+            plus_descriptor.compute.constants = plus_constant.as_ptr();
+            let mut minus_descriptor = compute_pipeline_descriptor(module, pipeline_layout);
+            minus_descriptor.compute.constantCount = minus_constant.len();
+            minus_descriptor.compute.constants = minus_constant.as_ptr();
+
+            let plus = wgpuDeviceCreateComputePipeline(device, &plus_descriptor);
+            let minus = wgpuDeviceCreateComputePipeline(device, &minus_descriptor);
+
+            assert_ne!(plus, minus);
+            assert_eq!(device_impl.core.compute_pipeline_creation_count(), 2);
+
+            wgpuComputePipelineRelease(plus);
+            wgpuComputePipelineRelease(minus);
+            wgpuShaderModuleRelease(module);
+            wgpuPipelineLayoutRelease(pipeline_layout);
             drop(device_impl);
             release_handles(instance, adapter, device);
         }

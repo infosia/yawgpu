@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -36,6 +37,9 @@ pub(crate) struct DeviceInner {
     pub(crate) label: Mutex<String>,
     pub(crate) limits: Limits,
     pub(crate) features: FeatureSet,
+    pub(crate) shader_module_creation_count: AtomicU64,
+    pub(crate) compute_pipeline_creation_count: AtomicU64,
+    pub(crate) render_pipeline_creation_count: AtomicU64,
 }
 
 impl Device {
@@ -58,6 +62,9 @@ impl Device {
                 label: Mutex::new(label.into()),
                 limits,
                 features,
+                shader_module_creation_count: AtomicU64::new(0),
+                compute_pipeline_creation_count: AtomicU64::new(0),
+                render_pipeline_creation_count: AtomicU64::new(0),
             }),
         }
     }
@@ -77,6 +84,30 @@ impl Device {
     #[must_use]
     pub fn allocation_count(&self) -> u64 {
         self.inner.hal.allocation_count()
+    }
+
+    /// Returns the number of shader module creation executions.
+    #[must_use]
+    pub fn shader_module_creation_count(&self) -> u64 {
+        self.inner
+            .shader_module_creation_count
+            .load(Ordering::Relaxed)
+    }
+
+    /// Returns the number of compute pipeline creation executions.
+    #[must_use]
+    pub fn compute_pipeline_creation_count(&self) -> u64 {
+        self.inner
+            .compute_pipeline_creation_count
+            .load(Ordering::Relaxed)
+    }
+
+    /// Returns the number of render pipeline creation executions.
+    #[must_use]
+    pub fn render_pipeline_creation_count(&self) -> u64 {
+        self.inner
+            .render_pipeline_creation_count
+            .load(Ordering::Relaxed)
     }
 
     /// Returns the HAL.
@@ -345,6 +376,9 @@ impl Device {
     /// Compiles and validates a shader module from its WGSL source.
     #[must_use]
     pub fn create_shader_module(&self, source: ShaderModuleSource) -> ShaderModule {
+        self.inner
+            .shader_module_creation_count
+            .fetch_add(1, Ordering::Relaxed);
         if self.is_lost() {
             return ShaderModule::new(
                 ShaderModuleSourceKind::Invalid,
@@ -479,6 +513,9 @@ impl Device {
         &self,
         descriptor: ComputePipelineDescriptor,
     ) -> ComputePipeline {
+        self.inner
+            .compute_pipeline_creation_count
+            .fetch_add(1, Ordering::Relaxed);
         if self.is_lost() {
             return ComputePipeline::new(
                 descriptor,
@@ -515,6 +552,9 @@ impl Device {
         &self,
         descriptor: ComputePipelineDescriptor,
     ) -> ComputePipeline {
+        self.inner
+            .compute_pipeline_creation_count
+            .fetch_add(1, Ordering::Relaxed);
         if self.is_lost() {
             return ComputePipeline::new(
                 descriptor,
@@ -541,6 +581,9 @@ impl Device {
     /// Validates and creates a render pipeline, routing any failure to the active error scope.
     #[must_use]
     pub fn create_render_pipeline(&self, descriptor: RenderPipelineDescriptor) -> RenderPipeline {
+        self.inner
+            .render_pipeline_creation_count
+            .fetch_add(1, Ordering::Relaxed);
         if self.is_lost() {
             return RenderPipeline::new(
                 descriptor,
@@ -626,6 +669,9 @@ impl Device {
         &self,
         descriptor: RenderPipelineDescriptor,
     ) -> RenderPipeline {
+        self.inner
+            .render_pipeline_creation_count
+            .fetch_add(1, Ordering::Relaxed);
         if self.is_lost() {
             return RenderPipeline::new(
                 descriptor,
@@ -1000,6 +1046,75 @@ mod tests {
 
         assert!(pipeline.is_error());
         assert!(scoped.is_none());
+    }
+
+    #[test]
+    fn device_creation_counts_increment_per_create() {
+        let shader_device = noop_device();
+        assert_eq!(shader_device.shader_module_creation_count(), 0);
+        let shader = shader_device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@compute @workgroup_size(1) fn cs() {}".to_owned(),
+        ));
+        assert!(!shader.is_error());
+        assert_eq!(shader_device.shader_module_creation_count(), 1);
+        let invalid_shader =
+            shader_device.create_shader_module(ShaderModuleSource::Invalid("forced".to_owned()));
+        assert!(invalid_shader.is_error());
+        assert_eq!(shader_device.shader_module_creation_count(), 2);
+        shader_device.destroy();
+        let lost_shader = shader_device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@compute @workgroup_size(1) fn cs() {}".to_owned(),
+        ));
+        assert!(lost_shader.is_error());
+        assert_eq!(shader_device.shader_module_creation_count(), 3);
+
+        let compute_device = noop_device();
+        let compute_module = compute_shader_module(&compute_device);
+        assert_eq!(compute_device.compute_pipeline_creation_count(), 0);
+        let compute = compute_device
+            .create_compute_pipeline(compute_pipeline_descriptor(compute_module.clone()));
+        assert!(!compute.is_error());
+        assert_eq!(compute_device.compute_pipeline_creation_count(), 1);
+        let mut invalid_compute = compute_pipeline_descriptor(compute_module.clone());
+        invalid_compute.error = Some("forced compute pipeline error".to_owned());
+        let invalid = compute_device.create_compute_pipeline(invalid_compute);
+        assert!(invalid.is_error());
+        assert_eq!(compute_device.compute_pipeline_creation_count(), 2);
+        let without_dispatch = compute_device.create_compute_pipeline_without_error_dispatch(
+            compute_pipeline_descriptor(compute_module),
+        );
+        assert!(!without_dispatch.is_error());
+        assert_eq!(compute_device.compute_pipeline_creation_count(), 3);
+        compute_device.destroy();
+        let lost_compute = compute_device.create_compute_pipeline(compute_pipeline_descriptor(
+            Arc::new(ShaderModule::new(ShaderModuleSourceKind::Invalid, None)),
+        ));
+        assert!(lost_compute.is_error());
+        assert_eq!(compute_device.compute_pipeline_creation_count(), 4);
+
+        let render_device = noop_device();
+        let render_module = render_shader_module(&render_device);
+        assert_eq!(render_device.render_pipeline_creation_count(), 0);
+        let render =
+            render_device.create_render_pipeline(render_pipeline_descriptor(render_module.clone()));
+        assert!(!render.is_error());
+        assert_eq!(render_device.render_pipeline_creation_count(), 1);
+        let mut invalid_render = render_pipeline_descriptor(render_module.clone());
+        invalid_render.error = Some("forced render pipeline error".to_owned());
+        let invalid = render_device.create_render_pipeline(invalid_render);
+        assert!(invalid.is_error());
+        assert_eq!(render_device.render_pipeline_creation_count(), 2);
+        let without_dispatch = render_device.create_render_pipeline_without_error_dispatch(
+            render_pipeline_descriptor(render_module),
+        );
+        assert!(!without_dispatch.is_error());
+        assert_eq!(render_device.render_pipeline_creation_count(), 3);
+        render_device.destroy();
+        let lost_render = render_device.create_render_pipeline(render_pipeline_descriptor(
+            Arc::new(ShaderModule::new(ShaderModuleSourceKind::Invalid, None)),
+        ));
+        assert!(lost_render.is_error());
+        assert_eq!(render_device.render_pipeline_creation_count(), 4);
     }
 
     #[test]

@@ -180,6 +180,20 @@ practice; revisit only if profiling says otherwise).
   the same cost, so per-call lowering is not a divergence-from-Dawn defect.
   Revisit only if upstream grows an IR clone.
 
+  **F4 follow-up (Block 95, 2026-07-03):** the external CTS suite
+  (`webgpu-native-cts` `specs/compile-canary.md`) hit compile-scaling
+  collapse on full-suite Metal runs (`AGX: exceeded compiled variants
+  footprint limit`, `MTLCompilerService` death under parallel workers) and
+  attributed it to "R4 dropping the lowered-IR compile cache". That
+  attribution is wrong — the F4 cache was never implemented, so R4 removed
+  nothing; yawgpu had never skipped a duplicate compile at any layer. The
+  actual gaps (FFI dedup caches consulted only *after* the unconditional
+  core compile; no codegen memoization on `ReflectedModule`, so identical
+  auto-layout pipeline churn re-runs Tint per creation) are specced and
+  fixed in `specs/blocks/95-shader-compile-cache.md`. The F4 rationale above
+  stands: per-call *lowering inside one codegen* matches Dawn; Block 95
+  caches at the whole-codegen and FFI-handle layers instead.
+
 - **R5 DONE** (`182626a`) — stub dedup (data types declared once at crate
   root, −522 lines net; fixed a latent stub divergence: `Override.
   has_explicit_id` missing from the stub copy); `BindingRemap`/

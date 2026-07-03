@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 /// Stores binding metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct MslBindingMap {
     /// Resources.
     pub resources: Vec<MslResourceBinding>,
@@ -19,7 +19,7 @@ pub(crate) struct MslBufferSizeBinding {
 }
 
 /// Stores MSL resource binding metadata.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct MslResourceBinding {
     /// Group.
     pub group: u32,
@@ -38,7 +38,7 @@ pub(crate) struct MslResourceBinding {
 }
 
 /// Enumerates MSL resource binding kind values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum MslResourceBindingKind {
     /// Buffer variant.
     Buffer,
@@ -85,7 +85,7 @@ pub(crate) struct GeneratedGlsl {
 }
 
 /// Stores binding metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct MslVertexBufferBinding {
     /// Slot.
     pub slot: u32,
@@ -100,7 +100,7 @@ pub(crate) struct MslVertexBufferBinding {
 }
 
 /// Enumerates MSL vertex step mode values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum MslVertexStepMode {
     /// Vertex variant.
     Vertex,
@@ -109,7 +109,7 @@ pub(crate) enum MslVertexStepMode {
 }
 
 /// Stores attribute metadata.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct MslVertexAttribute {
     /// Shader location.
     pub shader_location: u32,
@@ -120,7 +120,7 @@ pub(crate) struct MslVertexAttribute {
 }
 
 /// Enumerates MSL vertex format values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum MslVertexFormat {
     /// Uint8 variant.
     Uint8,
@@ -207,7 +207,7 @@ pub(crate) enum MslVertexFormat {
 }
 
 /// Enumerates shader stage values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShaderStage {
     /// Vertex variant.
     Vertex,

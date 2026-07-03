@@ -4,10 +4,65 @@
 //! render path emits per-stage shader sources for pipeline creation.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::shader::{CompilationMessage, CompilationSeverity};
 pub(crate) use crate::shader_types::*;
+
+/// Canonical, order-insensitive, hashable form of `PipelineConstants`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CanonicalConstants(Vec<(String, u64)>);
+
+impl From<&PipelineConstants> for CanonicalConstants {
+    fn from(constants: &PipelineConstants) -> Self {
+        let mut constants = constants
+            .constants
+            .iter()
+            .map(|(name, value)| (name.clone(), value.to_bits()))
+            .collect::<Vec<_>>();
+        constants.sort_by(|(lhs, _), (rhs, _)| lhs.cmp(rhs));
+        Self(constants)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct MslCodegenKey {
+    entry_point: String,
+    binding_map: MslBindingMap,
+    constants: CanonicalConstants,
+    subpass_color_slots: Vec<((u32, u32), u32)>,
+    vertex_buffers: Vec<MslVertexBufferBinding>,
+    disable_robustness: bool,
+    emit_vertex_point_size: bool,
+    fixed_sample_mask: u32,
+    user_immediate_size: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SpirvCodegenKey {
+    entry_point: String,
+    constants: CanonicalConstants,
+    vulkan_memory_model: bool,
+    framebuffer_fetch_descriptor_set: u32,
+    multisampled_input_attachment: bool,
+    polyfill_pixel_center: Option<u32>,
+    user_immediate_size: u32,
+}
+
+#[cfg(feature = "gles")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct GlslCodegenKey {
+    entry_point: String,
+    stage: ShaderStage,
+    constants: CanonicalConstants,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WorkgroupResolveKey {
+    entry_point: String,
+    constants: CanonicalConstants,
+}
 
 /// Stores reflected shader module data used by validation and backend submission.
 ///
@@ -54,6 +109,55 @@ pub struct ReflectedModule {
     /// Caches the `Result` (including the "entry point not found" error) so
     /// a repeated call never re-crosses the FFI boundary.
     immediate_data_used_slots_cache: Mutex<HashMap<String, Result<u64, String>>>,
+    /// Per-module MSL codegen results. Values include memoized `Err`s because
+    /// failures are deterministic for a module and key, so repeated failing
+    /// pipeline creation must not re-cross Tint. Entries live as long as the
+    /// module and are bounded by distinct pipeline configs ever created from
+    /// it; if profiles demand a cap later, clear-all-at-N is the intended
+    /// escape hatch. The lock is held across Tint codegen to dedup concurrent
+    /// identical compiles; shared-program codegen is documented concurrent-safe,
+    /// so this is policy rather than soundness. The only nested cache call is
+    /// `resource_bindings_for_entry`, which uses a different mutex, and
+    /// per-generator mutexes keep unrelated generators unserialized.
+    msl_codegen_cache: Mutex<HashMap<MslCodegenKey, Result<GeneratedMsl, String>>>,
+    /// Per-module SPIR-V codegen results. Values include memoized `Err`s
+    /// because failures are deterministic for a module and key, so repeated
+    /// failing pipeline creation must not re-cross Tint. Entries live as long
+    /// as the module and are bounded by distinct pipeline configs ever created
+    /// from it; if profiles demand a cap later, clear-all-at-N is the intended
+    /// escape hatch. The lock is held across Tint codegen to dedup concurrent
+    /// identical compiles; shared-program codegen is documented concurrent-safe,
+    /// so this is policy rather than soundness. The miss branch nests no cache
+    /// call at all, and
+    /// per-generator mutexes keep unrelated generators unserialized.
+    spirv_codegen_cache: Mutex<HashMap<SpirvCodegenKey, Result<Vec<u32>, String>>>,
+    /// Per-module GLSL codegen results. Values include memoized `Err`s because
+    /// failures are deterministic for a module and key, so repeated failing
+    /// pipeline creation must not re-cross Tint. Entries live as long as the
+    /// module and are bounded by distinct pipeline configs ever created from
+    /// it; if profiles demand a cap later, clear-all-at-N is the intended
+    /// escape hatch. The lock is held across Tint codegen to dedup concurrent
+    /// identical compiles; shared-program codegen is documented concurrent-safe,
+    /// so this is policy rather than soundness. The only nested cache call is
+    /// `resource_bindings_for_entry`, which uses a different mutex, and
+    /// per-generator mutexes keep unrelated generators unserialized.
+    #[cfg(feature = "gles")]
+    glsl_codegen_cache: Mutex<HashMap<GlslCodegenKey, Result<GeneratedGlsl, String>>>,
+    /// Per-module workgroup-size resolve results. Values include memoized
+    /// `Err`s because failures are deterministic for a module and key, so
+    /// repeated failing pipeline creation must not re-cross Tint. Entries live
+    /// as long as the module and are bounded by distinct pipeline configs ever
+    /// created from it; if profiles demand a cap later, clear-all-at-N is the
+    /// intended escape hatch. The lock is held across Tint resolve to dedup
+    /// concurrent identical resolves; shared-program codegen/resolve is
+    /// documented concurrent-safe, so this is policy rather than soundness.
+    /// The miss branch nests `overrides()` / `compute_workgroup_size()` into
+    /// `raw_entry_points()`, which is a `OnceLock`, and per-generator mutexes
+    /// keep unrelated generators unserialized.
+    workgroup_resolve_cache:
+        Mutex<HashMap<WorkgroupResolveKey, Result<ReflectedWorkgroupSize, String>>>,
+    /// Counts actual Tint codegen/resolve executions, excluding cache hits.
+    codegen_misses: AtomicUsize,
     /// Memoized [`Self::fragment_builtins`] backing data (all fragment
     /// entry points), computed once.
     fragment_builtins_cache: OnceLock<Vec<ReflectedFragmentBuiltins>>,
@@ -126,12 +230,24 @@ pub(crate) fn parse_and_validate_wgsl_gated(
         resource_bindings_cache: Mutex::new(HashMap::new()),
         immediate_data_size_cache: Mutex::new(HashMap::new()),
         immediate_data_used_slots_cache: Mutex::new(HashMap::new()),
+        msl_codegen_cache: Mutex::new(HashMap::new()),
+        spirv_codegen_cache: Mutex::new(HashMap::new()),
+        #[cfg(feature = "gles")]
+        glsl_codegen_cache: Mutex::new(HashMap::new()),
+        workgroup_resolve_cache: Mutex::new(HashMap::new()),
+        codegen_misses: AtomicUsize::new(0),
         fragment_builtins_cache: OnceLock::new(),
         overrides_cache: OnceLock::new(),
     })
 }
 
 impl ReflectedModule {
+    /// Counts actual Tint codegen/resolve executions, excluding cache hits.
+    #[allow(dead_code)]
+    pub(crate) fn codegen_miss_count(&self) -> usize {
+        self.codegen_misses.load(Ordering::Relaxed)
+    }
+
     /// Generates spirv for the validated shader module.
     ///
     /// `vulkan_memory_model` enables Tint's SPV_KHR_vulkan_memory_model output
@@ -161,7 +277,25 @@ impl ReflectedModule {
         polyfill_pixel_center: Option<u32>,
         user_immediate_size: u32,
     ) -> Result<Vec<u32>, String> {
-        self.program
+        let key = SpirvCodegenKey {
+            entry_point: entry_name.to_owned(),
+            constants: CanonicalConstants::from(pipeline_constants),
+            vulkan_memory_model,
+            framebuffer_fetch_descriptor_set,
+            multisampled_input_attachment,
+            polyfill_pixel_center,
+            user_immediate_size,
+        };
+        let mut cache = self
+            .spirv_codegen_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = cache.get(&key) {
+            return cached.clone();
+        }
+        self.codegen_misses.fetch_add(1, Ordering::Relaxed);
+        let generated = self
+            .program
             .generate_spirv(
                 entry_name,
                 &yawgpu_tint::Bindings::default(),
@@ -173,7 +307,9 @@ impl ReflectedModule {
                 polyfill_pixel_center,
                 user_immediate_size,
             )
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+        cache.insert(key, generated.clone());
+        generated
     }
 
     /// Generates GLSL ES for the validated shader module.
@@ -199,21 +335,38 @@ impl ReflectedModule {
         stage: ShaderStage,
         pipeline_constants: &PipelineConstants,
     ) -> Result<GeneratedGlsl, String> {
-        let first_instance_offset = matches!(stage, ShaderStage::Vertex).then_some(0);
-        let bindings = tint_bindings_for_glsl(&self.resource_bindings_for_entry(entry_name)?);
-        let source = self
-            .program
-            .generate_glsl(
-                entry_name,
-                &bindings,
-                &override_values(pipeline_constants),
-                first_instance_offset,
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(GeneratedGlsl {
-            source,
+        let key = GlslCodegenKey {
             entry_point: entry_name.to_owned(),
-        })
+            stage,
+            constants: CanonicalConstants::from(pipeline_constants),
+        };
+        let mut cache = self
+            .glsl_codegen_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = cache.get(&key) {
+            return cached.clone();
+        }
+        self.codegen_misses.fetch_add(1, Ordering::Relaxed);
+        let generated = (|| {
+            let first_instance_offset = matches!(stage, ShaderStage::Vertex).then_some(0);
+            let bindings = tint_bindings_for_glsl(&self.resource_bindings_for_entry(entry_name)?);
+            let source = self
+                .program
+                .generate_glsl(
+                    entry_name,
+                    &bindings,
+                    &override_values(pipeline_constants),
+                    first_instance_offset,
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(GeneratedGlsl {
+                source,
+                entry_point: entry_name.to_owned(),
+            })
+        })();
+        cache.insert(key, generated.clone());
+        generated
     }
 
     /// Generates msl for the validated shader module.
@@ -259,7 +412,6 @@ impl ReflectedModule {
         pipeline_constants: &PipelineConstants,
         user_immediate_size: u32,
     ) -> Result<GeneratedMsl, String> {
-        let vertex_buffers = tint_vertex_buffers(vertex_buffers)?;
         // `force_point_size` makes Tint emit `[[point_size]] = 1.0` (point-list
         // topology requires it on Metal).
         self.generate_stage_msl(
@@ -267,7 +419,7 @@ impl ReflectedModule {
             binding_map,
             pipeline_constants,
             &[],
-            &vertex_buffers,
+            vertex_buffers,
             false,
             force_point_size,
             0xFFFF_FFFF,
@@ -308,69 +460,94 @@ impl ReflectedModule {
         binding_map: &MslBindingMap,
         pipeline_constants: &PipelineConstants,
         subpass_color_slots: &[((u32, u32), u32)],
-        vertex_buffers: &[yawgpu_tint::VertexBuffer],
+        vertex_buffers: &[MslVertexBufferBinding],
         disable_robustness: bool,
         emit_vertex_point_size: bool,
         fixed_sample_mask: u32,
         user_immediate_size: u32,
     ) -> Result<GeneratedMsl, String> {
-        let bindings = tint_bindings_for_msl(
-            binding_map,
-            &self.resource_bindings_for_entry(entry_name)?,
-            subpass_color_slots,
-        )?;
-        let binding_buffer_sizes_slot = msl_buffer_sizes_slot(binding_map)?;
-        let buffer_sizes_slot = if vertex_buffers.is_empty() {
-            binding_buffer_sizes_slot
-        } else {
-            let max_vertex_metal_index = vertex_buffers
-                .iter()
-                .map(|buffer| buffer.metal_index)
-                .max()
-                .unwrap_or(0);
-            binding_buffer_sizes_slot.max(max_vertex_metal_index.saturating_add(1))
+        let key = MslCodegenKey {
+            entry_point: entry_name.to_owned(),
+            binding_map: binding_map.clone(),
+            constants: CanonicalConstants::from(pipeline_constants),
+            subpass_color_slots: subpass_color_slots.to_vec(),
+            vertex_buffers: vertex_buffers.to_vec(),
+            disable_robustness,
+            emit_vertex_point_size,
+            fixed_sample_mask,
+            user_immediate_size,
         };
-        if buffer_sizes_slot > u32::from(u8::MAX) {
-            return Err("MSL generated buffer slot exceeds the supported slot range".to_owned());
+        let mut cache = self
+            .msl_codegen_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = cache.get(&key) {
+            return cached.clone();
         }
-        let output = self
-            .program
-            .generate_msl(
-                entry_name,
-                &bindings,
-                &override_values(pipeline_constants),
-                buffer_sizes_slot,
-                // The wrapper takes `robust` (robustness ENABLED), which is the
-                // negation of this fn's `disable_robustness`.
-                !disable_robustness,
-                emit_vertex_point_size,
-                vertex_buffers,
-                fixed_sample_mask,
-                user_immediate_size,
-            )
-            .map_err(|e| e.to_string())?;
-        let buffer_size_bindings = output
-            .buffer_size_bindings
-            .into_iter()
-            .map(|binding| MslBufferSizeBinding {
-                group: binding.group,
-                binding: binding.binding,
-            })
-            .collect::<Vec<_>>();
-        Ok(GeneratedMsl {
-            source: output.source,
-            entry_point: output.entry_point,
-            buffer_sizes_slot: (!buffer_size_bindings.is_empty() || !vertex_buffers.is_empty())
+        self.codegen_misses.fetch_add(1, Ordering::Relaxed);
+        let generated = (|| {
+            let tint_vertex_buffers = tint_vertex_buffers(vertex_buffers)?;
+            let bindings = tint_bindings_for_msl(
+                binding_map,
+                &self.resource_bindings_for_entry(entry_name)?,
+                subpass_color_slots,
+            )?;
+            let binding_buffer_sizes_slot = msl_buffer_sizes_slot(binding_map)?;
+            let buffer_sizes_slot = if tint_vertex_buffers.is_empty() {
+                binding_buffer_sizes_slot
+            } else {
+                let max_vertex_metal_index = tint_vertex_buffers
+                    .iter()
+                    .map(|buffer| buffer.metal_index)
+                    .max()
+                    .unwrap_or(0);
+                binding_buffer_sizes_slot.max(max_vertex_metal_index.saturating_add(1))
+            };
+            if buffer_sizes_slot > u32::from(u8::MAX) {
+                return Err("MSL generated buffer slot exceeds the supported slot range".to_owned());
+            }
+            let output = self
+                .program
+                .generate_msl(
+                    entry_name,
+                    &bindings,
+                    &override_values(pipeline_constants),
+                    buffer_sizes_slot,
+                    // The wrapper takes `robust` (robustness ENABLED), which is the
+                    // negation of this fn's `disable_robustness`.
+                    !disable_robustness,
+                    emit_vertex_point_size,
+                    &tint_vertex_buffers,
+                    fixed_sample_mask,
+                    user_immediate_size,
+                )
+                .map_err(|e| e.to_string())?;
+            let buffer_size_bindings = output
+                .buffer_size_bindings
+                .into_iter()
+                .map(|binding| MslBufferSizeBinding {
+                    group: binding.group,
+                    binding: binding.binding,
+                })
+                .collect::<Vec<_>>();
+            Ok(GeneratedMsl {
+                source: output.source,
+                entry_point: output.entry_point,
+                buffer_sizes_slot: (!buffer_size_bindings.is_empty()
+                    || !tint_vertex_buffers.is_empty())
                 .then_some(buffer_sizes_slot),
-            buffer_size_bindings,
-            frag_depth_clamp_slot: output.frag_depth_clamp_slot,
-            immediate_slot: output.immediate_slot,
-            workgroup_memory_sizes: output
-                .workgroup_allocations
-                .iter()
-                .map(|&size| size.div_ceil(16) * 16)
-                .collect(),
-        })
+                buffer_size_bindings,
+                frag_depth_clamp_slot: output.frag_depth_clamp_slot,
+                immediate_slot: output.immediate_slot,
+                workgroup_memory_sizes: output
+                    .workgroup_allocations
+                    .iter()
+                    .map(|&size| size.div_ceil(16) * 16)
+                    .collect(),
+            })
+        })();
+        cache.insert(key, generated.clone());
+        generated
     }
 
     /// Returns the raw Tint entry-point reflection, memoized on first access.
@@ -488,24 +665,40 @@ impl ReflectedModule {
         entry_point: &str,
         pipeline_constants: &PipelineConstants,
     ) -> Result<ReflectedWorkgroupSize, String> {
-        if self.overrides().is_empty() {
-            if let Some(reflected) = self.compute_workgroup_size(entry_point)? {
-                return Ok(reflected);
-            }
-        }
-        let overrides = override_values(pipeline_constants);
-        let literal_size = self
-            .program
-            .resolved_workgroup_size(entry_point, &overrides)
-            .map_err(|e| e.to_string())?;
-        Ok(ReflectedWorkgroupSize {
+        let key = WorkgroupResolveKey {
             entry_point: entry_point.to_owned(),
-            literal_size,
-            workgroup_storage_size: self
+            constants: CanonicalConstants::from(pipeline_constants),
+        };
+        let mut cache = self
+            .workgroup_resolve_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = cache.get(&key) {
+            return cached.clone();
+        }
+        self.codegen_misses.fetch_add(1, Ordering::Relaxed);
+        let resolved = (|| {
+            if self.overrides().is_empty() {
+                if let Some(reflected) = self.compute_workgroup_size(entry_point)? {
+                    return Ok(reflected);
+                }
+            }
+            let overrides = override_values(pipeline_constants);
+            let literal_size = self
                 .program
-                .workgroup_storage_size(&overrides)
-                .map_err(|e| e.to_string())?,
-        })
+                .resolved_workgroup_size(entry_point, &overrides)
+                .map_err(|e| e.to_string())?;
+            Ok(ReflectedWorkgroupSize {
+                entry_point: entry_point.to_owned(),
+                literal_size,
+                workgroup_storage_size: self
+                    .program
+                    .workgroup_storage_size(&overrides)
+                    .map_err(|e| e.to_string())?,
+            })
+        })();
+        cache.insert(key, resolved.clone());
+        resolved
     }
 
     /// Returns entry point IO reflected by the validated shader module for a
@@ -1409,6 +1602,12 @@ fn reflected_override(override_: yawgpu_tint::Override) -> ReflectedOverride {
 mod tests {
     use super::*;
 
+    fn empty_msl_binding_map() -> MslBindingMap {
+        MslBindingMap {
+            resources: Vec::new(),
+        }
+    }
+
     #[test]
     fn texel_format_matches_reflected_storage_texture_format_names() {
         assert_eq!(
@@ -1423,6 +1622,330 @@ mod tests {
             texel_format(yawgpu_tint::TexelFormat::Rg11B10Ufloat).unwrap(),
             "Rg11b10Ufloat"
         );
+    }
+
+    #[test]
+    fn generate_msl_memoizes_identical_requests() {
+        let module = parse_and_validate_wgsl(
+            r#"
+@compute @workgroup_size(1)
+fn cs() {}
+"#,
+        )
+        .unwrap();
+        let constants = PipelineConstants::default();
+        let binding_map = empty_msl_binding_map();
+
+        let first = module
+            .generate_msl("cs", &binding_map, &constants, 0)
+            .unwrap();
+        let second = module
+            .generate_msl("cs", &binding_map, &constants, 0)
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(module.codegen_miss_count(), 1);
+
+        let _ = module
+            .generate_msl("cs", &binding_map, &constants, 4)
+            .unwrap();
+        assert_eq!(module.codegen_miss_count(), 2);
+    }
+
+    #[test]
+    fn generate_msl_key_is_constant_order_insensitive() {
+        let module = parse_and_validate_wgsl(
+            r#"
+override x: u32 = 1;
+override y: u32 = 2;
+
+@compute @workgroup_size(1)
+fn cs() {
+  _ = x + y;
+}
+"#,
+        )
+        .unwrap();
+        let binding_map = empty_msl_binding_map();
+        let xy = PipelineConstants::from_iter([("x".to_owned(), 3.0), ("y".to_owned(), 4.0)]);
+        let yx = PipelineConstants::from_iter([("y".to_owned(), 4.0), ("x".to_owned(), 3.0)]);
+
+        let first = module.generate_msl("cs", &binding_map, &xy, 0).unwrap();
+        let second = module.generate_msl("cs", &binding_map, &yx, 0).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(module.codegen_miss_count(), 1);
+    }
+
+    #[test]
+    fn generate_msl_distinguishes_constant_values() {
+        let module = parse_and_validate_wgsl(
+            r#"
+override x: u32 = 1;
+
+@group(0) @binding(0) var<storage, read_write> data: array<u32>;
+
+@compute @workgroup_size(1)
+fn cs() {
+  data[0] = x;
+}
+"#,
+        )
+        .unwrap();
+        let binding_map = MslBindingMap {
+            resources: vec![MslResourceBinding {
+                group: 0,
+                binding: 0,
+                metal_index: 0,
+                ext_params_buffer_slot: None,
+                kind: MslResourceBindingKind::Buffer,
+            }],
+        };
+        let one = PipelineConstants::from_iter([("x".to_owned(), 1.0)]);
+        let two = PipelineConstants::from_iter([("x".to_owned(), 2.0)]);
+
+        let first = module.generate_msl("cs", &binding_map, &one, 0).unwrap();
+        let second = module.generate_msl("cs", &binding_map, &two, 0).unwrap();
+        assert_ne!(first.source, second.source);
+        assert_eq!(module.codegen_miss_count(), 2);
+    }
+
+    #[test]
+    fn generate_msl_memoizes_error_results() {
+        let module = parse_and_validate_wgsl(
+            r#"
+@compute @workgroup_size(1)
+fn cs() {}
+"#,
+        )
+        .unwrap();
+        let binding_map = empty_msl_binding_map();
+        let constants = PipelineConstants::default();
+
+        let first = module
+            .generate_msl("missing", &binding_map, &constants, 0)
+            .unwrap_err();
+        let second = module
+            .generate_msl("missing", &binding_map, &constants, 0)
+            .unwrap_err();
+        assert_eq!(first, second);
+        assert_eq!(module.codegen_miss_count(), 1);
+    }
+
+    #[test]
+    fn generate_render_vertex_msl_memoizes_with_vertex_buffers() {
+        let module = parse_and_validate_wgsl(
+            r#"
+@vertex
+fn vs(@location(0) p: vec4<f32>) -> @builtin(position) vec4<f32> {
+  return p;
+}
+"#,
+        )
+        .unwrap();
+        let constants = PipelineConstants::default();
+        let binding_map = empty_msl_binding_map();
+        let vertex_buffers = vec![MslVertexBufferBinding {
+            slot: 0,
+            metal_index: 2,
+            array_stride: 16,
+            step_mode: MslVertexStepMode::Vertex,
+            attributes: vec![MslVertexAttribute {
+                shader_location: 0,
+                offset: 0,
+                format: MslVertexFormat::Float32x4,
+            }],
+        }];
+
+        let first = module
+            .generate_render_vertex_msl("vs", &binding_map, &vertex_buffers, false, &constants, 0)
+            .unwrap();
+        let second = module
+            .generate_render_vertex_msl("vs", &binding_map, &vertex_buffers, false, &constants, 0)
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(module.codegen_miss_count(), 1);
+
+        let mut changed = vertex_buffers.clone();
+        changed[0].attributes[0].offset = 4;
+        let _ = module
+            .generate_render_vertex_msl("vs", &binding_map, &changed, false, &constants, 0)
+            .unwrap();
+        assert_eq!(module.codegen_miss_count(), 2);
+    }
+
+    #[test]
+    fn generate_render_fragment_msl_distinguishes_sample_mask() {
+        let module = parse_and_validate_wgsl(
+            r#"
+@fragment
+fn fs() -> @builtin(sample_mask) u32 {
+  return 0xffffffffu;
+}
+"#,
+        )
+        .unwrap();
+        let constants = PipelineConstants::default();
+        let binding_map = empty_msl_binding_map();
+
+        let all = module
+            .generate_render_fragment_msl("fs", &binding_map, &[], &constants, 0xFFFF_FFFF, 0)
+            .unwrap();
+        let narrow = module
+            .generate_render_fragment_msl("fs", &binding_map, &[], &constants, 0xF, 0)
+            .unwrap();
+        assert_ne!(all.source, narrow.source);
+        assert_eq!(module.codegen_miss_count(), 2);
+
+        let repeat = module
+            .generate_render_fragment_msl("fs", &binding_map, &[], &constants, 0xF, 0)
+            .unwrap();
+        assert_eq!(narrow, repeat);
+        assert_eq!(module.codegen_miss_count(), 2);
+    }
+
+    #[test]
+    fn generate_spirv_memoizes_identical_requests() {
+        let module = parse_and_validate_wgsl(
+            r#"
+@compute @workgroup_size(1)
+fn cs() {}
+"#,
+        )
+        .unwrap();
+        let constants = PipelineConstants::default();
+
+        let first = module
+            .generate_spirv(
+                "cs",
+                ShaderStage::Compute,
+                &constants,
+                false,
+                0,
+                false,
+                None,
+                0,
+            )
+            .unwrap();
+        let second = module
+            .generate_spirv(
+                "cs",
+                ShaderStage::Compute,
+                &constants,
+                false,
+                0,
+                false,
+                None,
+                0,
+            )
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(module.codegen_miss_count(), 1);
+
+        let _ = module
+            .generate_spirv(
+                "cs",
+                ShaderStage::Compute,
+                &constants,
+                true,
+                0,
+                false,
+                None,
+                0,
+            )
+            .unwrap();
+        assert_eq!(module.codegen_miss_count(), 2);
+    }
+
+    #[test]
+    fn resolved_compute_workgroup_size_memoizes_per_constants() {
+        let module = parse_and_validate_wgsl(
+            r#"
+override x: u32 = 4;
+
+@compute @workgroup_size(x, 2, 1)
+fn cs() {}
+"#,
+        )
+        .unwrap();
+        let eight = PipelineConstants::from_iter([("x".to_owned(), 8.0)]);
+        let sixteen = PipelineConstants::from_iter([("x".to_owned(), 16.0)]);
+
+        let first = module
+            .resolved_compute_workgroup_size("cs", &eight)
+            .unwrap();
+        let second = module
+            .resolved_compute_workgroup_size("cs", &eight)
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.literal_size, [8, 2, 1]);
+        assert_eq!(module.codegen_miss_count(), 1);
+
+        let changed = module
+            .resolved_compute_workgroup_size("cs", &sixteen)
+            .unwrap();
+        assert_eq!(changed.literal_size, [16, 2, 1]);
+        assert_eq!(module.codegen_miss_count(), 2);
+    }
+
+    #[test]
+    fn resolved_compute_workgroup_size_memoizes_const_eval_errors() {
+        let module = parse_and_validate_wgsl(
+            r#"
+override cu: u32 = 0u;
+override cx: u32 = 1u / cu;
+
+@compute @workgroup_size(1)
+fn main_pipe_error() {
+  _ = cx;
+}
+
+@compute @workgroup_size(8, 4, 1)
+fn main_ok() {}
+"#,
+        )
+        .unwrap();
+        let constants = PipelineConstants::default();
+
+        let first = module
+            .resolved_compute_workgroup_size("main_pipe_error", &constants)
+            .unwrap_err();
+        let second = module
+            .resolved_compute_workgroup_size("main_pipe_error", &constants)
+            .unwrap_err();
+        assert_eq!(first, second);
+        assert_eq!(module.codegen_miss_count(), 1);
+
+        let ok = module
+            .resolved_compute_workgroup_size("main_ok", &constants)
+            .unwrap();
+        assert_eq!(ok.literal_size, [8, 4, 1]);
+        assert_eq!(module.codegen_miss_count(), 2);
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn generate_glsl_memoizes_identical_requests() {
+        let module = parse_and_validate_wgsl(
+            r#"
+@compute @workgroup_size(1)
+fn cs() {}
+"#,
+        )
+        .unwrap();
+        let constants = PipelineConstants::default();
+
+        let first = module
+            .generate_glsl("cs", ShaderStage::Compute, &constants)
+            .unwrap();
+        let second = module
+            .generate_glsl("cs", ShaderStage::Compute, &constants)
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(module.codegen_miss_count(), 1);
+
+        let _ = module
+            .generate_glsl("cs", ShaderStage::Vertex, &constants)
+            .unwrap();
+        assert_eq!(module.codegen_miss_count(), 2);
     }
 
     #[test]
