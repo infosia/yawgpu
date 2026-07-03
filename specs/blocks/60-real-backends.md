@@ -447,11 +447,54 @@ failures never reached submit, so no GPU work references them. (Previously each
 failed submit leaked the command pool + temps, turning the first failure into a
 self-amplifying cascade — consistent with the observed continuous fail tail.)
 
-### Root-cause stage (deferred until the VkResult is visible)
+### Root cause (pinned 2026-07-03 with Contracts 1–3 live): `ERROR_DEVICE_LOST` from a submit-retention gap
 
-With Contracts 1–3 in place, the degrading load is re-run and the surfaced
-`VkResult` pins the failure class (`OUT_OF_DEVICE_MEMORY` / `OUT_OF_POOL_MEMORY`
-/ `OUT_OF_HOST_MEMORY` / `DEVICE_LOST`); the corresponding fix (allocation
-strategy, pool/fence reuse, or device-loss signalling to core) is specified
-then. Expected end state: full `api,validation` runs `fail=0` (modulo the 4
-known non-defects) under plain `--workers` with no cumulative HAL degradation.
+Re-running the degrading load with the VkResult surfaced
+(`--workers 4 --shard 0/16 webgpu:api,validation,*` after prior GPU activity)
+produced 6,340 × `vkQueueSubmit failed: ERROR_DEVICE_LOST` (fail=6344 − the 4
+known non-defects). Log analysis pins the real shape of the pathology:
+
+- Onset is **one real device-loss event on one worker** (first fail at log line
+  156,836 of 354,993 — essentially the same case-ordinal as the previous run's
+  156,143, i.e. deterministic in case order, not stochastic in time). After
+  onset, the same case names alternate pass(×3)/fail(×1) — the three healthy
+  workers pass, the dead worker fails every case that performs a **real
+  submit**, while validation-only cases keep passing on the lost device. That
+  is what previously masqueraded as "intermittent" failure.
+- The cases immediately preceding onset are
+  `pipeline_bind_group_compat:bgl_resource_type_mismatch:encoderType="render bundle";call="drawIndexedIndirect"`.
+- **Retention gap.** The retire ring keeps submitted-resource Arcs alive until
+  the submit's fence signals (`RetainedResource`), but
+  `collect_retained_resources` misses several GPU-referenced resources; if the
+  test destroys them right after `wgpuQueueSubmit`, the GPU reads freed
+  memory → device loss. Timing-dependent visibility (driver defers actual
+  invalidation) explains why isolated clusters pass and why onset needs
+  sustained in-process load. Missing from retention before this fix:
+  - `HalRenderPass`: `index_buffer`, `indirect_buffer`, `bind_textures`,
+    `bind_samplers`, `bind_external_textures` (plane0/plane1 textures + params
+    buffer). (`drawIndexedIndirect` = index buffer + indirect buffer, both in
+    the gap — matching the onset family.)
+  - `HalComputePass`: the **pipeline** itself, `bind_textures`,
+    `bind_samplers`, `bind_external_textures`, and the
+    `HalComputeDispatch::Indirect` argument buffer.
+  - `HalSubpassDraw` (tiled): `bind_samplers`.
+
+### Contract 4 — complete submit retention (Vulkan)
+
+Every GPU-visible resource referenced by a submitted command batch is retained
+(Arc held in the submit's `RetainedResource` set) until that submit's fence has
+signalled. Concretely `collect_retained_resources` covers, per `HalCopy` kind,
+**all** of: source/destination buffers and textures, query sets, render and
+compute **pipelines**, bind-group buffers/textures/samplers, external-texture
+planes and params buffers, vertex buffers, index buffers, and indirect
+argument buffers (draw and dispatch). `RetainedResource` gains `Sampler` and
+`ComputePipeline` variants as needed. Metal needs no analog (MTLCommandBuffer
+retains referenced objects natively); GLES executes synchronously.
+
+Follow-up (separate slice, not required for this fix): surface
+`ERROR_DEVICE_LOST` to `yawgpu-core` as a device-loss event so the WebGPU
+device-lost callback fires and harnesses can recycle a genuinely lost device
+instead of dragging a dead device through the rest of a run.
+
+Expected end state: full `api,validation` runs `fail=0` (modulo the 4 known
+non-defects) under plain `--workers` with no cumulative HAL degradation.

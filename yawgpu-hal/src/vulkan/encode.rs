@@ -383,8 +383,21 @@ fn retain_copy_resources(copy: &HalCopy, retained: &mut Vec<RetainedResource>) {
             retain_hal_texture(&copy.destination, retained);
         }
         HalCopy::ComputePass(pass) => {
+            retain_hal_compute_pipeline(&pass.pipeline, retained);
             for bound in &pass.bind_buffers {
                 retain_hal_buffer(&bound.buffer, retained);
+            }
+            for bound in &pass.bind_textures {
+                retain_hal_texture(&bound.texture, retained);
+            }
+            for bound in &pass.bind_samplers {
+                retain_hal_sampler(&bound.sampler, retained);
+            }
+            for bound in &pass.bind_external_textures {
+                retain_hal_external_texture(bound, retained);
+            }
+            if let HalComputeDispatch::Indirect { buffer } = &pass.dispatch {
+                retain_hal_buffer(&buffer.buffer, retained);
             }
         }
         HalCopy::RenderPass(pass) => {
@@ -406,8 +419,23 @@ fn retain_copy_resources(copy: &HalCopy, retained: &mut Vec<RetainedResource>) {
             for bound in &pass.bind_buffers {
                 retain_hal_buffer(&bound.buffer, retained);
             }
+            for bound in &pass.bind_textures {
+                retain_hal_texture(&bound.texture, retained);
+            }
+            for bound in &pass.bind_samplers {
+                retain_hal_sampler(&bound.sampler, retained);
+            }
+            for bound in &pass.bind_external_textures {
+                retain_hal_external_texture(bound, retained);
+            }
             for bound in &pass.vertex_buffers {
                 retain_hal_buffer(&bound.buffer, retained);
+            }
+            if let Some(index_buffer) = &pass.index_buffer {
+                retain_hal_buffer(&index_buffer.buffer, retained);
+            }
+            if let Some(indirect_buffer) = &pass.indirect_buffer {
+                retain_hal_buffer(&indirect_buffer.buffer, retained);
             }
         }
         #[cfg(feature = "tiled")]
@@ -437,12 +465,35 @@ fn retain_hal_texture(texture: &HalTexture, retained: &mut Vec<RetainedResource>
     }
 }
 
+fn retain_hal_sampler(sampler: &HalSampler, retained: &mut Vec<RetainedResource>) {
+    let HalSampler::Vulkan(sampler) = sampler else {
+        return;
+    };
+    if let Some(inner) = &sampler._inner {
+        retained.push(RetainedResource::Sampler {
+            _inner: Arc::clone(inner),
+        });
+    }
+}
+
 fn retain_hal_query_set(query_set: &HalQuerySet, retained: &mut Vec<RetainedResource>) {
     let HalQuerySet::Vulkan(query_set) = query_set else {
         return;
     };
     retained.push(RetainedResource::QuerySet {
         _inner: Arc::clone(&query_set.inner),
+    });
+}
+
+fn retain_hal_compute_pipeline(
+    pipeline: &crate::HalComputePipeline,
+    retained: &mut Vec<RetainedResource>,
+) {
+    let crate::HalComputePipeline::Vulkan(pipeline) = pipeline else {
+        return;
+    };
+    retained.push(RetainedResource::ComputePipeline {
+        _inner: Arc::clone(&pipeline.inner),
     });
 }
 
@@ -456,6 +507,15 @@ fn retain_hal_render_pipeline(
     retained.push(RetainedResource::RenderPipeline {
         _inner: Arc::clone(&pipeline.inner),
     });
+}
+
+fn retain_hal_external_texture(
+    texture: &crate::HalBoundExternalTexture,
+    retained: &mut Vec<RetainedResource>,
+) {
+    retain_hal_texture(&texture.plane0, retained);
+    retain_hal_texture(&texture.plane1, retained);
+    retain_hal_buffer(&texture.params, retained);
 }
 
 #[cfg(feature = "tiled")]
@@ -476,6 +536,9 @@ fn retain_subpass_resources(
         }
         for bound in &draw.bind_textures {
             retain_hal_texture(&bound.texture, retained);
+        }
+        for bound in &draw.bind_samplers {
+            retain_hal_sampler(&bound.sampler, retained);
         }
         for bound in &draw.vertex_buffers {
             retain_hal_buffer(&bound.buffer, retained);
@@ -3250,8 +3313,19 @@ pub(super) fn to_image_extent(extent: HalExtent3d) -> vk::Extent3D {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "vulkan")]
+    use super::super::test_helpers::{
+        compute_spirv, sampler_descriptor, texture_descriptor, vulkan_device,
+    };
     use super::*;
     use crate::{noop, HalBufferTextureLayout, HalOrigin3d, HalTextureDescriptor, HalTextureUsage};
+    #[cfg(feature = "vulkan")]
+    use crate::{
+        HalBoundExternalTexture, HalBoundIndexBuffer, HalBoundIndirectBuffer, HalBoundSampler,
+        HalBoundTexture, HalBuffer, HalBufferUsage, HalComputeDispatch, HalComputePass,
+        HalComputePipeline, HalIndexFormat, HalRenderPass, HalSampler, HalShaderSource, HalTexture,
+        HalTextureComponentSwizzle, HalTextureViewDimension,
+    };
     #[cfg(feature = "tiled")]
     use crate::{
         HalSubpassAttachmentLayout, HalSubpassAttachmentResource, HalSubpassColorAttachment,
@@ -3327,6 +3401,297 @@ mod tests {
             format,
             transient: false,
         }
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn bound_texture(texture: HalTexture) -> HalBoundTexture {
+        HalBoundTexture {
+            group: 0,
+            binding: 0,
+            metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            texture,
+            format: HalTextureFormat::Rgba8Unorm,
+            dimension: HalTextureViewDimension::D2,
+            base_mip_level: 0,
+            mip_level_count: 1,
+            base_array_layer: 0,
+            array_layer_count: 1,
+            aspect: HalTextureAspect::All,
+            swizzle: HalTextureComponentSwizzle::default(),
+            storage_access: None,
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn bound_sampler(sampler: HalSampler) -> HalBoundSampler {
+        HalBoundSampler {
+            group: 0,
+            binding: 1,
+            metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            sampler,
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn bound_external_texture(
+        plane0: HalTexture,
+        plane1: HalTexture,
+        params: HalBuffer,
+    ) -> HalBoundExternalTexture {
+        HalBoundExternalTexture {
+            group: 0,
+            binding: 2,
+            plane0,
+            plane1,
+            plane0_metal_index: 0,
+            plane1_metal_index: 1,
+            plane0_vertex_metal_index: None,
+            plane1_vertex_metal_index: None,
+            plane0_fragment_metal_index: None,
+            plane1_fragment_metal_index: None,
+            params,
+            params_metal_index: 0,
+            params_vertex_metal_index: None,
+            params_fragment_metal_index: None,
+            format: HalTextureFormat::Rgba8Unorm,
+            dimension: HalTextureViewDimension::D2,
+            params_offset: 0,
+            params_size: 16,
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn retained_buffer_count(
+        retained: &[RetainedResource],
+        target: &Arc<VulkanBufferInner>,
+    ) -> usize {
+        retained
+            .iter()
+            .filter(|resource| {
+                matches!(
+                    resource,
+                    RetainedResource::Buffer { _inner: inner } if Arc::ptr_eq(inner, target)
+                )
+            })
+            .count()
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn retained_texture_count(
+        retained: &[RetainedResource],
+        target: &Arc<VulkanTextureInner>,
+    ) -> usize {
+        retained
+            .iter()
+            .filter(|resource| {
+                matches!(
+                    resource,
+                    RetainedResource::Texture { _inner: inner } if Arc::ptr_eq(inner, target)
+                )
+            })
+            .count()
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn retained_sampler_count(
+        retained: &[RetainedResource],
+        target: &Arc<VulkanSamplerInner>,
+    ) -> usize {
+        retained
+            .iter()
+            .filter(|resource| {
+                matches!(
+                    resource,
+                    RetainedResource::Sampler { _inner: inner } if Arc::ptr_eq(inner, target)
+                )
+            })
+            .count()
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn retained_compute_pipeline_count(
+        retained: &[RetainedResource],
+        target: &Arc<VulkanComputePipelineInner>,
+    ) -> usize {
+        retained
+            .iter()
+            .filter(|resource| {
+                matches!(
+                    resource,
+                    RetainedResource::ComputePipeline { _inner: inner } if Arc::ptr_eq(inner, target)
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn collect_retained_resources_covers_render_pass_submit_inputs() {
+        let device = vulkan_device();
+        let index = device
+            .create_buffer(16, HalBufferUsage::default())
+            .expect("create index buffer");
+        let indirect = device
+            .create_buffer(16, HalBufferUsage::default())
+            .expect("create indirect buffer");
+        let params = device
+            .create_buffer(16, HalBufferUsage::default())
+            .expect("create external texture params buffer");
+        let texture = device
+            .create_texture(&texture_descriptor())
+            .expect("create bound texture");
+        let external_plane0 = device
+            .create_texture(&texture_descriptor())
+            .expect("create external plane0 texture");
+        let external_plane1 = device
+            .create_texture(&texture_descriptor())
+            .expect("create external plane1 texture");
+        let sampler = device.create_sampler(&sampler_descriptor());
+        let index_inner = Arc::clone(index.inner.as_ref().expect("index buffer inner"));
+        let indirect_inner = Arc::clone(indirect.inner.as_ref().expect("indirect buffer inner"));
+        let params_inner = Arc::clone(params.inner.as_ref().expect("params buffer inner"));
+        let texture_inner = Arc::clone(texture.inner.as_ref().expect("texture inner"));
+        let external_plane0_inner = Arc::clone(
+            external_plane0
+                .inner
+                .as_ref()
+                .expect("plane0 texture inner"),
+        );
+        let external_plane1_inner = Arc::clone(
+            external_plane1
+                .inner
+                .as_ref()
+                .expect("plane1 texture inner"),
+        );
+        let sampler_inner = Arc::clone(sampler._inner.as_ref().expect("sampler inner"));
+        let pass = HalRenderPass {
+            pipeline: None,
+            color_targets: Vec::new(),
+            framebuffer_fetch_color_slots: Vec::new(),
+            depth_stencil_attachment: None,
+            bind_buffers: Vec::new(),
+            bind_textures: vec![bound_texture(HalTexture::Vulkan(texture))],
+            bind_samplers: vec![bound_sampler(HalSampler::Vulkan(sampler))],
+            bind_external_textures: vec![bound_external_texture(
+                HalTexture::Vulkan(external_plane0),
+                HalTexture::Vulkan(external_plane1),
+                HalBuffer::Vulkan(params),
+            )],
+            vertex_buffers: Vec::new(),
+            index_buffer: Some(Box::new(HalBoundIndexBuffer {
+                buffer: HalBuffer::Vulkan(index),
+                format: HalIndexFormat::Uint16,
+                offset: 0,
+                size: 16,
+            })),
+            indirect_buffer: Some(Box::new(HalBoundIndirectBuffer {
+                buffer: HalBuffer::Vulkan(indirect),
+                offset: 0,
+            })),
+            viewport: None,
+            scissor_rect: None,
+            blend_constant: [0.0; 4],
+            stencil_reference: 0,
+            occlusion_query_set: None,
+            occlusion_query_index: None,
+            draw: None,
+            immediate_data: Vec::new(),
+        };
+
+        let retained = collect_retained_resources(&[HalCopy::RenderPass(pass)]);
+
+        assert_eq!(retained_buffer_count(&retained, &index_inner), 1);
+        assert_eq!(retained_buffer_count(&retained, &indirect_inner), 1);
+        assert_eq!(retained_buffer_count(&retained, &params_inner), 1);
+        assert_eq!(retained_texture_count(&retained, &texture_inner), 1);
+        assert_eq!(retained_texture_count(&retained, &external_plane0_inner), 1);
+        assert_eq!(retained_texture_count(&retained, &external_plane1_inner), 1);
+        assert_eq!(retained_sampler_count(&retained, &sampler_inner), 1);
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn collect_retained_resources_covers_compute_pass_submit_inputs() {
+        let device = vulkan_device();
+        let pipeline = device
+            .create_compute_pipeline(
+                HalShaderSource::SpirV(compute_spirv()),
+                "main",
+                (1, 1, 1),
+                &[],
+                0,
+            )
+            .expect("create compute pipeline");
+        let indirect = device
+            .create_buffer(16, HalBufferUsage::default())
+            .expect("create indirect buffer");
+        let params = device
+            .create_buffer(16, HalBufferUsage::default())
+            .expect("create external texture params buffer");
+        let texture = device
+            .create_texture(&texture_descriptor())
+            .expect("create bound texture");
+        let external_plane0 = device
+            .create_texture(&texture_descriptor())
+            .expect("create external plane0 texture");
+        let external_plane1 = device
+            .create_texture(&texture_descriptor())
+            .expect("create external plane1 texture");
+        let sampler = device.create_sampler(&sampler_descriptor());
+        let pipeline_inner = Arc::clone(&pipeline.inner);
+        let indirect_inner = Arc::clone(indirect.inner.as_ref().expect("indirect buffer inner"));
+        let params_inner = Arc::clone(params.inner.as_ref().expect("params buffer inner"));
+        let texture_inner = Arc::clone(texture.inner.as_ref().expect("texture inner"));
+        let external_plane0_inner = Arc::clone(
+            external_plane0
+                .inner
+                .as_ref()
+                .expect("plane0 texture inner"),
+        );
+        let external_plane1_inner = Arc::clone(
+            external_plane1
+                .inner
+                .as_ref()
+                .expect("plane1 texture inner"),
+        );
+        let sampler_inner = Arc::clone(sampler._inner.as_ref().expect("sampler inner"));
+        let pass = HalComputePass {
+            pipeline: HalComputePipeline::Vulkan(pipeline),
+            bind_buffers: Vec::new(),
+            bind_textures: vec![bound_texture(HalTexture::Vulkan(texture))],
+            bind_samplers: vec![bound_sampler(HalSampler::Vulkan(sampler))],
+            bind_external_textures: vec![bound_external_texture(
+                HalTexture::Vulkan(external_plane0),
+                HalTexture::Vulkan(external_plane1),
+                HalBuffer::Vulkan(params),
+            )],
+            immediate_data: Vec::new(),
+            dispatch: HalComputeDispatch::Indirect {
+                buffer: Box::new(HalBoundIndirectBuffer {
+                    buffer: HalBuffer::Vulkan(indirect),
+                    offset: 0,
+                }),
+            },
+        };
+
+        let retained = collect_retained_resources(&[HalCopy::ComputePass(pass)]);
+
+        assert_eq!(
+            retained_compute_pipeline_count(&retained, &pipeline_inner),
+            1
+        );
+        assert_eq!(retained_buffer_count(&retained, &indirect_inner), 1);
+        assert_eq!(retained_buffer_count(&retained, &params_inner), 1);
+        assert_eq!(retained_texture_count(&retained, &texture_inner), 1);
+        assert_eq!(retained_texture_count(&retained, &external_plane0_inner), 1);
+        assert_eq!(retained_texture_count(&retained, &external_plane1_inner), 1);
+        assert_eq!(retained_sampler_count(&retained, &sampler_inner), 1);
     }
 
     #[test]

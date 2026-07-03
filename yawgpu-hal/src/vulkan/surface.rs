@@ -76,8 +76,14 @@ pub(super) enum RetainedResource {
     Texture {
         _inner: Arc<VulkanTextureInner>,
     },
+    Sampler {
+        _inner: Arc<VulkanSamplerInner>,
+    },
     QuerySet {
         _inner: Arc<VulkanQuerySetInner>,
+    },
+    ComputePipeline {
+        _inner: Arc<VulkanComputePipelineInner>,
     },
     RenderPipeline {
         _inner: Arc<VulkanRenderPipelineInner>,
