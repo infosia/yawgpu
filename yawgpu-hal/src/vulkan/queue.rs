@@ -16,9 +16,11 @@ pub(super) struct VulkanQueueInner {
 
 impl Drop for VulkanQueueInner {
     fn drop(&mut self) {
-        if let Ok(mut retire) = self.retire.lock() {
-            let _ = retire.wait_all(&self.device.device);
-        }
+        let mut retire = self
+            .retire
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = retire.wait_all(&self.device.device);
     }
 }
 
@@ -30,7 +32,7 @@ impl VulkanQueue {
                 .device
                 .device
                 .queue_submit(self.inner.queue, &[], vk::Fence::null())
-                .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                .map_err(|error| queue_submission_error("vkQueueSubmit", error))?;
         }
         self.wait_idle()
     }
@@ -42,7 +44,7 @@ impl VulkanQueue {
                 .device
                 .device
                 .queue_wait_idle(self.inner.queue)
-                .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })
+                .map_err(|error| queue_submission_error("vkQueueWaitIdle", error))
         }
     }
 

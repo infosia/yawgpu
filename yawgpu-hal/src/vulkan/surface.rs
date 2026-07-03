@@ -95,6 +95,7 @@ pub(super) struct InFlightFrame {
 #[derive(Debug)]
 pub(super) struct RetireRing {
     frames: Vec<Option<InFlightFrame>>,
+    overflow: Vec<InFlightFrame>,
     next: usize,
 }
 
@@ -102,6 +103,7 @@ impl RetireRing {
     pub(super) fn new(size: usize) -> Self {
         Self {
             frames: (0..size).map(|_| None).collect(),
+            overflow: Vec::new(),
             next: 0,
         }
     }
@@ -114,6 +116,7 @@ impl RetireRing {
         retained: Vec<RetainedResource>,
         destroy_fence: bool,
     ) -> Result<(), HalError> {
+        self.drain_ready_overflow(device);
         let new_frame = InFlightFrame {
             fence,
             cleanup,
@@ -121,53 +124,98 @@ impl RetireRing {
             destroy_fence,
         };
         if self.frames.is_empty() {
-            wait_and_cleanup_frame(device, new_frame)?;
+            if let Err(error) = wait_for_frame(device, &new_frame) {
+                self.overflow.push(new_frame);
+                return Err(queue_submission_error("vkWaitForFences", error));
+            }
+            cleanup_frame(device, new_frame);
             return Ok(());
         }
-        if let Some(frame) = self.frames[self.next].take() {
-            if let Err(error) = wait_and_cleanup_frame(device, frame) {
-                std::mem::forget(new_frame);
-                return Err(error);
+
+        if let Some(frame) = self.frames[self.next].as_ref() {
+            if let Err(error) = wait_for_frame(device, frame) {
+                self.overflow.push(new_frame);
+                return Err(queue_submission_error("vkWaitForFences", error));
             }
+        }
+        if let Some(frame) = self.frames[self.next].take() {
+            cleanup_frame(device, frame);
         }
         self.frames[self.next] = Some(new_frame);
         self.next = (self.next + 1) % self.frames.len();
         Ok(())
     }
 
-    pub(super) fn wait_all(&mut self, device: &ash::Device) -> Result<(), HalError> {
-        for frame in &mut self.frames {
-            if let Some(frame) = frame.take() {
-                wait_and_cleanup_frame(device, frame)?;
+    fn drain_ready_overflow(&mut self, device: &ash::Device) {
+        let parked = std::mem::take(&mut self.overflow);
+        for frame in parked {
+            match unsafe { device.get_fence_status(frame.fence) } {
+                Ok(true) => cleanup_frame(device, frame),
+                Ok(false) | Err(_) => self.overflow.push(frame),
             }
         }
-        Ok(())
+    }
+
+    pub(super) fn wait_all(&mut self, device: &ash::Device) -> Result<(), HalError> {
+        let mut first_error = None;
+        for slot in &mut self.frames {
+            if let Some(frame) = slot.as_ref() {
+                match wait_for_frame(device, frame) {
+                    Ok(()) => {
+                        if let Some(frame) = slot.take() {
+                            cleanup_frame(device, frame);
+                        }
+                    }
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+            }
+        }
+        let parked = std::mem::take(&mut self.overflow);
+        for frame in parked {
+            match wait_for_frame(device, &frame) {
+                Ok(()) => cleanup_frame(device, frame),
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    self.overflow.push(frame);
+                }
+            }
+        }
+
+        if let Some(error) = first_error {
+            Err(queue_submission_error("vkWaitForFences", error))
+        } else {
+            Ok(())
+        }
     }
 }
 
-fn wait_and_cleanup_frame(device: &ash::Device, frame: InFlightFrame) -> Result<(), HalError> {
-    let fence = frame.fence;
+fn wait_for_frame(device: &ash::Device, frame: &InFlightFrame) -> Result<(), vk::Result> {
+    unsafe { device.wait_for_fences(&[frame.fence], true, u64::MAX) }
+}
+
+fn cleanup_frame(device: &ash::Device, frame: InFlightFrame) {
+    let InFlightFrame {
+        fence,
+        cleanup,
+        retained,
+        destroy_fence,
+    } = frame;
     unsafe {
-        if device.wait_for_fences(&[fence], true, u64::MAX).is_err() {
-            std::mem::forget(frame);
-            return Err(HalError::QueueSubmissionFailed { backend: BACKEND });
-        }
-        let InFlightFrame {
-            fence,
-            cleanup,
-            retained,
-            destroy_fence,
-        } = frame;
         cleanup_retire_ops(device, cleanup);
         drop(retained);
         if destroy_fence {
             device.destroy_fence(fence, None);
         }
     }
-    Ok(())
 }
 
-unsafe fn cleanup_retire_ops(device: &ash::Device, cleanup: Vec<RetireOp>) {
+pub(super) unsafe fn cleanup_retire_ops(device: &ash::Device, cleanup: Vec<RetireOp>) {
     for op in cleanup {
         match op {
             RetireOp::DescriptorPool(pool) => device.destroy_descriptor_pool(pool, None),
@@ -258,9 +306,11 @@ impl VulkanSurface {
         self.swapchain = None;
         self.config = None;
         self.current_image_index = None;
-        if let Ok(mut state) = self.pending_state.lock() {
-            state.pending_acquire = None;
-        }
+        let mut state = self
+            .pending_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.pending_acquire = None;
     }
 
     /// Returns acquire next texture.
@@ -500,22 +550,26 @@ impl VulkanSurface {
 
     pub(super) fn wait_all_in_flight_frames(&mut self) {
         if let Some(swapchain) = self.swapchain.as_ref() {
-            if let Ok(mut state) = self.pending_state.lock() {
-                let _ = state.retire.wait_all(&swapchain.device.device);
-            }
+            let mut state = self
+                .pending_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = state.retire.wait_all(&swapchain.device.device);
         }
     }
 
     fn destroy_transition_command_pool(&mut self) {
         if let Some(swapchain) = self.swapchain.as_ref() {
-            if let Ok(mut state) = self.pending_state.lock() {
-                if let Some(command_pool) = state.transition_command_pool.take() {
-                    unsafe {
-                        swapchain
-                            .device
-                            .device
-                            .destroy_command_pool(command_pool, None);
-                    }
+            let mut state = self
+                .pending_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(command_pool) = state.transition_command_pool.take() {
+                unsafe {
+                    swapchain
+                        .device
+                        .device
+                        .destroy_command_pool(command_pool, None);
                 }
             }
         }
@@ -864,6 +918,72 @@ mod tests {
         retire
             .wait_all(&device.inner.device)
             .expect("wait remaining retired frame");
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_retire_ring_retire_drains_signaled_overflow_without_shrinking_slots() {
+        let device = vulkan_device();
+        let mut retire = RetireRing::new(1);
+        let first_fence = signaled_fence(&device);
+        retire
+            .retire(
+                &device.inner.device,
+                first_fence,
+                Vec::new(),
+                Vec::new(),
+                true,
+            )
+            .expect("retire first fence");
+
+        let overflow_fence = signaled_fence(&device);
+        retire.overflow.push(InFlightFrame {
+            fence: overflow_fence,
+            cleanup: Vec::new(),
+            retained: Vec::new(),
+            destroy_fence: true,
+        });
+        let slot_count = retire.frames.len();
+        let replacement_fence = signaled_fence(&device);
+        retire
+            .retire(
+                &device.inner.device,
+                replacement_fence,
+                Vec::new(),
+                Vec::new(),
+                true,
+            )
+            .expect("retire replacement fence");
+
+        assert!(retire.overflow.is_empty());
+        assert_eq!(retire.frames.len(), slot_count);
+        assert!(retire.frames.iter().all(Option::is_some));
+        retire
+            .wait_all(&device.inner.device)
+            .expect("wait remaining retired frame");
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_retire_ring_wait_all_drains_overflow() {
+        let device = vulkan_device();
+        let mut retire = RetireRing::new(1);
+        let overflow_fence = signaled_fence(&device);
+        retire.overflow.push(InFlightFrame {
+            fence: overflow_fence,
+            cleanup: Vec::new(),
+            retained: Vec::new(),
+            destroy_fence: true,
+        });
+
+        retire
+            .wait_all(&device.inner.device)
+            .expect("wait all retired frames");
+
+        assert!(retire.overflow.is_empty());
+        assert!(retire.frames.iter().all(Option::is_none));
     }
 
     #[cfg(feature = "vulkan")]

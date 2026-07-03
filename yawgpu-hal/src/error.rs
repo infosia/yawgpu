@@ -22,11 +22,13 @@ pub enum HalError {
         /// Resource name.
         resource: &'static str,
     },
-    #[error("HAL queue submission failed: {backend}")]
+    #[error("HAL queue submission failed: {backend}: {message}")]
     /// Queue submission failed variant.
     QueueSubmissionFailed {
         /// Backend name.
         backend: &'static str,
+        /// Message variant.
+        message: String,
     },
     #[error("HAL buffer operation failed: {backend}: {message}")]
     /// Buffer operation failed variant.
@@ -68,4 +70,22 @@ pub enum HalError {
         /// Message variant.
         message: &'static str,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_submission_failed_display_includes_backend_and_message() {
+        let error = HalError::QueueSubmissionFailed {
+            backend: "vulkan",
+            message: "vkQueueSubmit failed: ERROR_OUT_OF_DEVICE_MEMORY".to_string(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "HAL queue submission failed: vulkan: vkQueueSubmit failed: ERROR_OUT_OF_DEVICE_MEMORY"
+        );
+    }
 }

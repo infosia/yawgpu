@@ -48,8 +48,11 @@ pub(super) fn rebuild_hal_error(error: &crate::HalError) -> crate::HalError {
         crate::HalError::DeviceCreationFailed { backend } => {
             crate::HalError::DeviceCreationFailed { backend }
         }
-        crate::HalError::QueueSubmissionFailed { backend } => {
-            crate::HalError::QueueSubmissionFailed { backend }
+        crate::HalError::QueueSubmissionFailed { backend, message } => {
+            crate::HalError::QueueSubmissionFailed {
+                backend,
+                message: message.clone(),
+            }
         }
         crate::HalError::BufferOperationFailed { backend, message } => {
             crate::HalError::BufferOperationFailed { backend, message }

@@ -12,6 +12,13 @@ impl std::fmt::Debug for MetalQueue {
     }
 }
 
+fn queue_submission_error(message: &'static str) -> HalError {
+    HalError::QueueSubmissionFailed {
+        backend: BACKEND,
+        message: message.to_string(),
+    }
+}
+
 impl MetalQueue {
     /// Creates a new instance.
     pub fn new() -> Result<Self, HalError> {
@@ -26,10 +33,9 @@ impl MetalQueue {
     /// Waits until all submitted queue work has completed.
     pub fn wait_idle(&self) -> Result<(), HalError> {
         autoreleasepool(|_| {
-            let command_buffer = self
-                .inner
-                .commandBuffer()
-                .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
+            let command_buffer = self.inner.commandBuffer().ok_or_else(|| {
+                queue_submission_error("wait-idle command buffer creation returned nil")
+            })?;
             command_buffer.commit();
             command_buffer.waitUntilCompleted();
             Ok(())
@@ -43,72 +49,83 @@ impl MetalQueue {
         }
 
         autoreleasepool(|_| {
-            let command_buffer = self
-                .inner
-                .commandBuffer()
-                .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
+            let command_buffer = self.inner.commandBuffer().ok_or_else(|| {
+                queue_submission_error("submit command buffer creation returned nil")
+            })?;
             for copy in copies {
                 match copy {
                     HalCopy::Buffer(copy) => {
-                        let blit = command_buffer
-                            .blitCommandEncoder()
-                            .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                        let blit = command_buffer.blitCommandEncoder().ok_or_else(|| {
+                            queue_submission_error("buffer-copy blit encoder creation returned nil")
+                        })?;
                         let result = encode_buffer_copy(&blit, copy);
                         blit.endEncoding();
                         result?;
                     }
                     HalCopy::BufferClear(clear) => {
-                        let blit = command_buffer
-                            .blitCommandEncoder()
-                            .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                        let blit = command_buffer.blitCommandEncoder().ok_or_else(|| {
+                            queue_submission_error(
+                                "buffer-clear blit encoder creation returned nil",
+                            )
+                        })?;
                         let result = encode_buffer_clear(&blit, clear);
                         blit.endEncoding();
                         result?;
                     }
                     HalCopy::ClearTexture(clear) => {
-                        let blit = command_buffer
-                            .blitCommandEncoder()
-                            .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                        let blit = command_buffer.blitCommandEncoder().ok_or_else(|| {
+                            queue_submission_error(
+                                "texture-clear blit encoder creation returned nil",
+                            )
+                        })?;
                         let result = encode_texture_clear(&blit, clear);
                         blit.endEncoding();
                         result?;
                     }
                     HalCopy::ResolveQuerySet(resolve) => {
-                        let blit = command_buffer
-                            .blitCommandEncoder()
-                            .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                        let blit = command_buffer.blitCommandEncoder().ok_or_else(|| {
+                            queue_submission_error(
+                                "query-resolve blit encoder creation returned nil",
+                            )
+                        })?;
                         let result = encode_resolve_query_set(&blit, resolve);
                         blit.endEncoding();
                         result?;
                     }
                     HalCopy::BufferToTexture(copy) => {
-                        let blit = command_buffer
-                            .blitCommandEncoder()
-                            .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                        let blit = command_buffer.blitCommandEncoder().ok_or_else(|| {
+                            queue_submission_error(
+                                "buffer-to-texture blit encoder creation returned nil",
+                            )
+                        })?;
                         let result = encode_buffer_to_texture(&blit, copy);
                         blit.endEncoding();
                         result?;
                     }
                     HalCopy::TextureToBuffer(copy) => {
-                        let blit = command_buffer
-                            .blitCommandEncoder()
-                            .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                        let blit = command_buffer.blitCommandEncoder().ok_or_else(|| {
+                            queue_submission_error(
+                                "texture-to-buffer blit encoder creation returned nil",
+                            )
+                        })?;
                         let result = encode_texture_to_buffer(&blit, copy);
                         blit.endEncoding();
                         result?;
                     }
                     HalCopy::TextureToTexture(copy) => {
-                        let blit = command_buffer
-                            .blitCommandEncoder()
-                            .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                        let blit = command_buffer.blitCommandEncoder().ok_or_else(|| {
+                            queue_submission_error(
+                                "texture-to-texture blit encoder creation returned nil",
+                            )
+                        })?;
                         let result = encode_texture_to_texture(&blit, copy);
                         blit.endEncoding();
                         result?;
                     }
                     HalCopy::ComputePass(pass) => {
-                        let encoder = command_buffer
-                            .computeCommandEncoder()
-                            .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                        let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| {
+                            queue_submission_error("compute command encoder creation returned nil")
+                        })?;
                         let result = encode_compute_pass(&encoder, pass);
                         encoder.endEncoding();
                         result?;
@@ -117,7 +134,11 @@ impl MetalQueue {
                         let descriptor = render_pass_descriptor(pass)?;
                         let encoder = command_buffer
                             .renderCommandEncoderWithDescriptor(&descriptor)
-                            .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                            .ok_or_else(|| {
+                                queue_submission_error(
+                                    "render command encoder creation returned nil",
+                                )
+                            })?;
                         let result = encode_render_pass(&encoder, pass);
                         encoder.endEncoding();
                         result?;
@@ -127,7 +148,11 @@ impl MetalQueue {
                         let descriptor = subpass_render_pass_descriptor(pass)?;
                         let encoder = command_buffer
                             .renderCommandEncoderWithDescriptor(&descriptor)
-                            .ok_or(HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                            .ok_or_else(|| {
+                                queue_submission_error(
+                                    "subpass render command encoder creation returned nil",
+                                )
+                            })?;
                         let result = encode_subpass_render_pass(&encoder, pass);
                         encoder.endEncoding();
                         result?;

@@ -38,6 +38,13 @@ const IMAGE_LAYOUT_PRESENT: u8 = 4;
 static VULKAN_ENTRY: OnceLock<ash::Entry> = OnceLock::new();
 static VULKAN_ENTRY_INIT: Mutex<()> = Mutex::new(());
 
+fn queue_submission_error(call: &'static str, error: vk::Result) -> HalError {
+    HalError::QueueSubmissionFailed {
+        backend: BACKEND,
+        message: format!("{call} failed: {error:?}"),
+    }
+}
+
 fn shared_entry() -> Result<&'static ash::Entry, HalError> {
     if let Some(entry) = VULKAN_ENTRY.get() {
         return Ok(entry);

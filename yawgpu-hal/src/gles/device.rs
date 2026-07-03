@@ -108,7 +108,10 @@ impl GlesDeviceInner {
 impl EglDeviceState {
     fn egl_instance(&self) -> Result<&EglInstanceState, HalError> {
         let GlesInstanceInner::Egl(state) = self.instance.as_ref() else {
-            return Err(HalError::QueueSubmissionFailed { backend: BACKEND });
+            return Err(HalError::QueueSubmissionFailed {
+                backend: BACKEND,
+                message: "EGL device used with non-EGL instance".to_string(),
+            });
         };
         Ok(state)
     }
@@ -124,7 +127,10 @@ impl EglDeviceState {
                 Some(self.surface),
                 Some(self.context),
             )
-            .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+            .map_err(|_| HalError::QueueSubmissionFailed {
+                backend: BACKEND,
+                message: "eglMakeCurrent failed".to_string(),
+            })?;
         Ok(f(&self.gl))
     }
 }

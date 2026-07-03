@@ -386,3 +386,72 @@ fail-free for 700 iterations **after** it, on the Windows native-Vulkan host. Th
 CTS-side carry (run device-churning families under `--isolate`; no `expectations/`
 xfail) is recorded in webgpu-native-cts and is orthogonal to this library fix.
 Implementation handoff: `specs/tracking/f135-vulkan-entry-leak-handoff.md`.
+
+## CTS finding (pending F-number) — Vulkan cumulative queue-submission degradation (2026-07-03)
+
+webgpu-native-cts `REPORT.md` (2026-07-03, yawgpu `490743e`, Windows/NVIDIA RTX
+5060 Ti): during sustained in-process `--workers` sweeps of `api,validation`, the
+Vulkan backend starts failing queue submissions intermittently mid-run (onset
+~44% into a fresh worker process, then a continuous stochastic cascade —
+6,202–19,323 `uncaptured error: HAL queue submission failed: vulkan` fails per
+shard). The device is **not** lost (the same worker keeps passing 160k+ cases
+interleaved), the same cases pass standalone, and a back-to-back Dawn/Vulkan
+control run on the identical harness path was clean — yawgpu-side confirmed,
+harness exonerated. The primary root cause (what makes the *first* submit fail)
+is **unconfirmed** because the submit path discards every underlying `VkResult`.
+
+### Contract 1 — submit-path error transparency
+
+`HalError::QueueSubmissionFailed` carries a `message: String` naming the failing
+call and the underlying backend error:
+
+```rust
+QueueSubmissionFailed { backend: &'static str, message: String }
+// Display: "HAL queue submission failed: {backend}: {message}"
+// e.g.     "HAL queue submission failed: vulkan: vkQueueSubmit failed: ERROR_OUT_OF_DEVICE_MEMORY"
+```
+
+Every construction site populates it: Vulkan submit path (`encode.rs`,
+`queue.rs`, `surface.rs`) includes the `vk::Result` debug form; Metal / GLES /
+Noop sites use a static description of the failing step. Rationale: the error
+string is what the CTS harness prints as the uncaptured device error — the
+`yawgpu` cdylib initializes no logger, so the message field (not `log::error!`)
+is the only channel that reaches the sweep logs. This is a breaking change to a
+public enum variant; all in-workspace matchers are updated in the same commit.
+
+### Contract 2 — retire-ring error path must not leak or shrink
+
+`RetireRing` (`yawgpu-hal/src/vulkan/surface.rs`) invariants on a fence-wait
+failure (previously violated via `std::mem::forget` at surface.rs:127–131 and
+151–154, which leaked the frame's fence/command pool/descriptor pools/
+framebuffers/image views/render passes **and** left the ring slot `None`
+forever):
+
+- A failed `vkWaitForFences` must **not** leak the waited frame and must **not**
+  reduce the ring's usable depth. The slot's frame is waited **by reference**
+  and only `.take()`n after a successful wait.
+- When the slot cannot be freed, the incoming frame is parked on an
+  `overflow: Vec<InFlightFrame>` drained at the start of the next
+  `retire`/`wait_all` — never forgotten.
+- Mutex-poison paths on the submit path recover the guard via
+  `PoisonError::into_inner` instead of `std::mem::forget`ing cleanup lists.
+
+### Contract 3 — per-submit objects are destroyed on a failed submit
+
+`record_and_submit_copies` creates per-submit objects (TRANSIENT command pool,
+command buffer, fence, descriptor pools, framebuffers, image views, render
+passes). On **any** error before the retire-ring registration succeeds, all
+objects created so far are destroyed immediately instead of leaked. This is
+safe: a failed `vkQueueSubmit` enqueues nothing (Vulkan spec), and earlier
+failures never reached submit, so no GPU work references them. (Previously each
+failed submit leaked the command pool + temps, turning the first failure into a
+self-amplifying cascade — consistent with the observed continuous fail tail.)
+
+### Root-cause stage (deferred until the VkResult is visible)
+
+With Contracts 1–3 in place, the degrading load is re-run and the surfaced
+`VkResult` pins the failure class (`OUT_OF_DEVICE_MEMORY` / `OUT_OF_POOL_MEMORY`
+/ `OUT_OF_HOST_MEMORY` / `DEVICE_LOST`); the corresponding fix (allocation
+strategy, pool/fence reuse, or device-loss signalling to core) is specified
+then. Expected end state: full `api,validation` runs `fail=0` (modulo the 4
+known non-defects) under plain `--workers` with no cumulative HAL degradation.

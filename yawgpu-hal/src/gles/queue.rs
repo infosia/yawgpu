@@ -81,6 +81,14 @@ impl GlesQueue {
                         HalCopy::TextureToTexture(copy) => submit_texture_to_texture(gl, copy)?,
                         HalCopy::ComputePass(pass) => submit_compute_pass(gl, pass)?,
                         HalCopy::RenderPass(pass) => submit_render_pass(gl, pass)?,
+                        #[cfg(feature = "tiled")]
+                        HalCopy::SubpassRenderPass(_) => {
+                            return Err(HalError::QueueSubmissionFailed {
+                                backend: BACKEND,
+                                message: "GLES subpass render pass submission is unsupported"
+                                    .to_string(),
+                            });
+                        }
                     }
                 }
                 unsafe {

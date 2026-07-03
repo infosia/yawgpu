@@ -344,7 +344,10 @@ impl WglDeviceState {
     ) -> Result<R, HalError> {
         let _guard = self.current_lock.lock();
         if unsafe { wglMakeCurrent(self.hdc, self.hglrc) } == 0 {
-            return Err(HalError::QueueSubmissionFailed { backend: BACKEND });
+            return Err(HalError::QueueSubmissionFailed {
+                backend: BACKEND,
+                message: "wglMakeCurrent failed".to_string(),
+            });
         }
         Ok(f(&self.gl))
     }

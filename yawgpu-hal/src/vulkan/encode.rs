@@ -22,7 +22,7 @@ pub(super) fn submit_copies(queue: &VulkanQueueInner, copies: &[HalCopy]) -> Res
             .device
             .create_command_pool(&command_pool_info, None)
     }
-    .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+    .map_err(|error| queue_submission_error("vkCreateCommandPool", error))?;
     record_and_submit_copies(queue, command_pool, copies)
 }
 
@@ -36,6 +36,8 @@ pub(super) fn record_and_submit_copies(
     let mut framebuffers = Vec::new();
     let mut image_views = Vec::new();
     let mut render_passes = Vec::new();
+    let mut fence = None;
+    let mut command_pool_cleanup = Some(command_pool);
     let surface_pending = find_surface_pending(copies);
     let result = (|| {
         let allocate_info = vk::CommandBufferAllocateInfo::default()
@@ -44,9 +46,12 @@ pub(super) fn record_and_submit_copies(
             .command_buffer_count(1);
         let command_buffers =
             unsafe { queue.device.device.allocate_command_buffers(&allocate_info) }
-                .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                .map_err(|error| queue_submission_error("vkAllocateCommandBuffers", error))?;
         let Some(&command_buffer) = command_buffers.first() else {
-            return Err(HalError::QueueSubmissionFailed { backend: BACKEND });
+            return Err(HalError::QueueSubmissionFailed {
+                backend: BACKEND,
+                message: "command buffer allocation returned no buffers".to_string(),
+            });
         };
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -55,7 +60,7 @@ pub(super) fn record_and_submit_copies(
                 .device
                 .device
                 .begin_command_buffer(command_buffer, &begin_info)
-                .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                .map_err(|error| queue_submission_error("vkBeginCommandBuffer", error))?;
         }
         for copy in copies {
             match copy {
@@ -113,7 +118,7 @@ pub(super) fn record_and_submit_copies(
                 .device
                 .device
                 .end_command_buffer(command_buffer)
-                .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                .map_err(|error| queue_submission_error("vkEndCommandBuffer", error))?;
             let command_buffers = [command_buffer];
             let mut wait_semaphores = Vec::new();
             let mut wait_stages = Vec::new();
@@ -122,7 +127,7 @@ pub(super) fn record_and_submit_copies(
             if let Some(pending_state) = surface_pending.as_ref() {
                 let mut state = pending_state
                     .lock()
-                    .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(pending) = state.pending_acquire.as_mut() {
                     if !pending.consumed {
                         wait_semaphores.push(pending.acquired_sem);
@@ -134,11 +139,12 @@ pub(super) fn record_and_submit_copies(
                 }
             }
             let fence_info = vk::FenceCreateInfo::default();
-            let fence = queue
+            let created_fence = queue
                 .device
                 .device
                 .create_fence(&fence_info, None)
-                .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                .map_err(|error| queue_submission_error("vkCreateFence", error))?;
+            fence = Some(created_fence);
             let submit_info = vk::SubmitInfo::default()
                 .wait_semaphores(&wait_semaphores)
                 .wait_dst_stage_mask(&wait_stages)
@@ -147,46 +153,59 @@ pub(super) fn record_and_submit_copies(
             queue
                 .device
                 .device
-                .queue_submit(queue.queue, &[submit_info], fence)
-                .map_err(|_| HalError::QueueSubmissionFailed { backend: BACKEND })?;
+                .queue_submit(queue.queue, &[submit_info], created_fence)
+                .map_err(|error| queue_submission_error("vkQueueSubmit", error))?;
+            fence = None;
+            let retire_fence = created_fence;
             let retained = collect_retained_resources(copies);
             let cleanup = retire_ops(
                 command_pool,
-                descriptor_pools,
-                framebuffers,
-                image_views,
-                render_passes,
+                std::mem::take(&mut descriptor_pools),
+                std::mem::take(&mut framebuffers),
+                std::mem::take(&mut image_views),
+                std::mem::take(&mut render_passes),
             );
+            command_pool_cleanup = None;
             if let Some(pending_state) = surface_retire {
-                let mut pending_state = match pending_state.lock() {
-                    Ok(pending_state) => pending_state,
-                    Err(_) => {
-                        std::mem::forget(cleanup);
-                        std::mem::forget(retained);
-                        return Err(HalError::QueueSubmissionFailed { backend: BACKEND });
-                    }
-                };
+                let mut pending_state = pending_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 pending_state.retire.retire(
                     &queue.device.device,
-                    fence,
+                    retire_fence,
                     cleanup,
                     retained,
                     true,
                 )?;
             } else {
-                let mut retire = match queue.retire.lock() {
-                    Ok(retire) => retire,
-                    Err(_) => {
-                        std::mem::forget(cleanup);
-                        std::mem::forget(retained);
-                        return Err(HalError::QueueSubmissionFailed { backend: BACKEND });
-                    }
-                };
-                retire.retire(&queue.device.device, fence, cleanup, retained, true)?;
+                let mut retire = queue
+                    .retire
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                retire.retire(&queue.device.device, retire_fence, cleanup, retained, true)?;
             }
         }
         Ok(())
     })();
+    if result.is_err() {
+        unsafe {
+            if let Some(fence) = fence.take() {
+                queue.device.device.destroy_fence(fence, None);
+            }
+            if let Some(command_pool) = command_pool_cleanup.take() {
+                cleanup_retire_ops(
+                    &queue.device.device,
+                    retire_ops(
+                        command_pool,
+                        descriptor_pools,
+                        framebuffers,
+                        image_views,
+                        render_passes,
+                    ),
+                );
+            }
+        }
+    }
     result
 }
 
@@ -201,10 +220,9 @@ pub(super) fn transition_swapchain_image_to_present(
 ) -> Result<(), HalError> {
     let inner = texture.inner()?;
     let command_pool = {
-        let mut state = pending_state.lock().map_err(|_| HalError::PresentFailed {
-            backend: BACKEND,
-            message: "surface pending state lock failed",
-        })?;
+        let mut state = pending_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(command_pool) = state.transition_command_pool {
             command_pool
         } else {
@@ -298,10 +316,7 @@ pub(super) fn transition_swapchain_image_to_present(
                 })?;
             pending_state
                 .lock()
-                .map_err(|_| HalError::PresentFailed {
-                    backend: BACKEND,
-                    message: "surface pending state lock failed",
-                })?
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .retire
                 .retire(
                     &queue.inner.device.device,

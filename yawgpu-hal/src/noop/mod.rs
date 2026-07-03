@@ -253,7 +253,10 @@ impl NoopQueue {
         }
         self.submitted_copies
             .lock()
-            .map_err(|_| HalError::QueueSubmissionFailed { backend: "noop" })?
+            .map_err(|_| HalError::QueueSubmissionFailed {
+                backend: "noop",
+                message: "submitted copies lock poisoned".to_string(),
+            })?
             .extend(copies.iter().cloned());
         Ok(())
     }
