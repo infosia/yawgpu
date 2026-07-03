@@ -2225,3 +2225,44 @@ naga fork is worse than under-validation":
   at-limit `createBuffer,at_over` cases, formerly 9149/1936). Noop `cargo test --workspace` green
   incl. the new `vulkan_select_max_buffer_size_prefers_maintenance4_then_maintenance3_then_default`
   unit test; `clippy -p yawgpu-hal --features vulkan -D warnings` clean.
+
+## Vulkan cumulative `HAL queue submission failed` under sustained load (REPORT.md 2026-07-03) — RESOLVED
+
+- **Finding:** full-suite yawgpu/Vulkan `--workers` sweeps degraded mid-run into thousands of
+  stochastic `uncaptured error: HAL queue submission failed: vulkan` fails (6,202–19,323 per
+  `api,validation` shard 0/16 run; onset ~44% into a fresh worker process, then a continuous
+  cascade), while the same cases passed standalone. A Dawn/Vulkan control run on the identical
+  harness path was clean → yawgpu-side confirmed, CTS harness exonerated (webgpu-native-cts
+  `REPORT.md`, 2026-07-03). The generic error text hid the real failure: every submit-path
+  `.map_err` discarded the underlying `VkResult`.
+- **Root cause (two layers, both yawgpu):**
+  1. **Submit-retention gap (the fault).** The retire ring retains submitted-resource Arcs until
+     the submit's fence signals, but `collect_retained_resources` missed render-pass
+     `index_buffer`/`indirect_buffer`/`bind_textures`/`bind_samplers`/`bind_external_textures`,
+     the compute **pipeline** + its bound textures/samplers/external textures + indirect dispatch
+     buffer, and tiled subpass-draw samplers. A CTS case destroying these right after
+     `wgpuQueueSubmit` let the GPU read freed memory → **one real `ERROR_DEVICE_LOST` per worker**
+     (deterministic in case order at the `pipeline_bind_group_compat … drawIndexedIndirect`
+     render-bundle cluster — index + indirect buffers were both in the gap). The dead worker then
+     failed every real-submit case while validation-only cases kept passing — the "intermittent"
+     appearance. Confirmed by surfacing the VkResult: 6,340 × `vkQueueSubmit failed:
+     ERROR_DEVICE_LOST`, same-case names alternating pass(×3)/fail(×1) across the 4 workers.
+  2. **Error-path amplifier.** On any submit failure the old code leaked the per-submit command
+     pool/fence/temp objects (`record_and_submit_copies`) and `std::mem::forget` in
+     `RetireRing`/`wait_and_cleanup_frame` leaked frames and permanently shrank the ring.
+- **Fix (yawgpu `404bc1a` + `4086f68`):** `HalError::QueueSubmissionFailed` gains `message:String`
+  naming the failing call with the `vk::Result` debug form (Contract 1); `RetireRing` overflow
+  list + by-reference fence waits, zero `mem::forget` (Contract 2); failed submits destroy all
+  per-submit objects immediately (Contract 3); `collect_retained_resources` covers the full
+  retention matrix, `RetainedResource` gains `Sampler`/`ComputePipeline` (Contract 4). Contracts:
+  `specs/blocks/60-real-backends.md` → "CTS finding (pending F-number)".
+- **Verification (native Vulkan, RTX 5060 Ti, CTS `67631c2`):** `--workers 4 --shard 0/16
+  webgpu:api,validation,*` under the prior-GPU-load trigger condition: **fail 6,344 → 4** (exactly
+  the 4 known non-defects: 2 `index_buffer_format_dirtying`, 2 `render_pipeline,misc:
+  external_texture` F-111), zero queue-submission failures, pass 229,800 → 236,140 (identical clean result on a second
+  back-to-back run under further accumulated load). 2 new ignored
+  real-Vulkan retention unit tests; 7/7 ignored vulkan HAL tests pass. Noop `cargo test
+  --workspace` + `clippy -D warnings` (workspace and `-p yawgpu-hal --features vulkan,gles,tiled`)
+  green. Raw `--workers` sweeps can now re-baseline the README table without `--isolate`.
+- **Follow-up (separate slice):** surface `ERROR_DEVICE_LOST` to `yawgpu-core` as a WebGPU
+  device-loss event so harnesses can recycle a genuinely lost device.
