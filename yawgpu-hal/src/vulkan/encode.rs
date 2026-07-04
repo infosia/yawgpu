@@ -1009,6 +1009,7 @@ pub(super) fn encode_compute_pass(
             return Err(error);
         }
     };
+    transition_sampled_textures(device, command_buffer, &pass.bind_textures, &[])?;
     transition_storage_textures(device, command_buffer, &pass.bind_textures)?;
     transfer_to_compute_barrier(device, command_buffer);
     unsafe {
@@ -1048,7 +1049,14 @@ pub(super) fn encode_compute_pass(
         }
         match &pass.dispatch {
             HalComputeDispatch::Direct { workgroups } => {
-                device.cmd_dispatch(command_buffer, workgroups.0, workgroups.1, workgroups.2);
+                // WebGPU: a dispatch with any zero workgroup count does
+                // nothing, so skip the API call. This also works around a
+                // Mesa ANV (Haswell) driver bug where a zero-dimension
+                // vkCmdDispatch hard-wedges the GPU. Indirect dispatches
+                // cannot be pre-checked CPU-side and are left as-is.
+                if workgroups.0 != 0 && workgroups.1 != 0 && workgroups.2 != 0 {
+                    device.cmd_dispatch(command_buffer, workgroups.0, workgroups.1, workgroups.2);
+                }
             }
             HalComputeDispatch::Indirect { buffer } => {
                 let HalBuffer::Vulkan(indirect_buffer) = &buffer.buffer else {
@@ -1088,6 +1096,40 @@ fn transition_storage_textures(
             buffer_texture_copy_aspect_flags(bound.format, bound.aspect),
             vk::ImageLayout::GENERAL,
             IMAGE_LAYOUT_GENERAL,
+        );
+    }
+    Ok(())
+}
+
+/// Transitions bind-group textures bound for sampled reads (non-storage
+/// bindings) to `SHADER_READ_ONLY_OPTIMAL`, the layout their descriptors
+/// declare. Textures whose image is listed in `attachment_images` are skipped:
+/// the pass's attachment transitions own their layout, and barriers cannot be
+/// recorded inside a render pass instance anyway.
+fn transition_sampled_textures(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    textures: &[HalBoundTexture],
+    attachment_images: &[vk::Image],
+) -> Result<(), HalError> {
+    for bound in textures
+        .iter()
+        .filter(|bound| bound.storage_access.is_none())
+    {
+        let crate::HalTexture::Vulkan(texture) = &bound.texture else {
+            return Err(texture_error("sampled texture is not Vulkan-backed"));
+        };
+        let inner = texture.inner()?;
+        if attachment_images.contains(&inner.image) {
+            continue;
+        }
+        transition_image_aspect(
+            device,
+            command_buffer,
+            inner,
+            buffer_texture_copy_aspect_flags(bound.format, bound.aspect),
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            IMAGE_LAYOUT_SHADER_READ_ONLY,
         );
     }
     Ok(())
@@ -1958,6 +2000,26 @@ pub(super) fn encode_render_pass(
             IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT,
         );
     }
+    // Move sampled bind-group textures to the layout their descriptors declare
+    // before the render pass instance begins (barriers are illegal inside it).
+    // Textures that are also attachments of this pass keep the attachment
+    // layout chosen above.
+    let mut attachment_images = Vec::new();
+    for texture in color_textures.iter().flatten() {
+        attachment_images.push(texture.inner()?.image);
+    }
+    for texture in resolve_textures.iter().flatten() {
+        attachment_images.push(texture.inner()?.image);
+    }
+    if let Some(texture) = depth_stencil_texture {
+        attachment_images.push(texture.inner()?.image);
+    }
+    transition_sampled_textures(
+        vk_device,
+        command_buffer,
+        &pass.bind_textures,
+        &attachment_images,
+    )?;
     let color_formats = render_pass_color_formats(&pass.color_targets);
     let resolve_formats = render_pass_resolve_formats(&pass.color_targets)?;
     let render_pass = match &pass.pipeline {

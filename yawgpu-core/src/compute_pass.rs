@@ -307,6 +307,49 @@ mod tests {
         }
     }
 
+    /// WebGPU: `dispatchWorkgroups` with any workgroup count of zero is valid
+    /// and does nothing. Core must accept and record it without a validation
+    /// error -- skipping the empty dispatch is the backends' job, never a
+    /// core-side rejection.
+    #[test]
+    fn compute_pass_dispatch_workgroups_accepts_zero_workgroup_counts() {
+        let device = noop_device();
+        let pipeline = noop_compute_pipeline(&device);
+        let bind_group = empty_bind_group(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.dispatch_workgroups(0, 1, 1, device.limits()), None);
+        assert_eq!(pass.dispatch_workgroups(1, 0, 1, device.limits()), None);
+        assert_eq!(pass.dispatch_workgroups(1, 1, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert_eq!(command_buffer.command_ops().len(), 3);
+        for (op, expected) in
+            command_buffer
+                .command_ops()
+                .iter()
+                .zip([(0, 1, 1), (1, 0, 1), (1, 1, 0)])
+        {
+            let CommandExecution::ComputePass(command) = op else {
+                panic!("expected direct compute pass command");
+            };
+            let ComputeDispatch::Direct { workgroups } = command.dispatch else {
+                panic!("expected direct dispatch");
+            };
+            assert_eq!(workgroups, expected);
+        }
+    }
+
     /// Block 94 S1 happy path: `SetImmediates` within the Noop device's
     /// `max_immediate_size` (64) records into the dispatch's immediates
     /// snapshot, and contents persist across a `set_pipeline` swap

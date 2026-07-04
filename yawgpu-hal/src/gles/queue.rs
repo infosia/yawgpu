@@ -257,7 +257,12 @@ fn submit_compute_pass(gl: &glow::Context, pass: &HalComputePass) -> Result<(), 
         }
         match &pass.dispatch {
             HalComputeDispatch::Direct { workgroups } => {
-                gl.dispatch_compute(workgroups.0, workgroups.1, workgroups.2);
+                // WebGPU: a dispatch with any zero workgroup count does
+                // nothing, so skip the API call. Indirect dispatches cannot
+                // be pre-checked CPU-side and are left as-is.
+                if workgroups.0 != 0 && workgroups.1 != 0 && workgroups.2 != 0 {
+                    gl.dispatch_compute(workgroups.0, workgroups.1, workgroups.2);
+                }
             }
             HalComputeDispatch::Indirect { buffer } => {
                 let HalBuffer::Gles(indirect_buffer) = &buffer.buffer else {

@@ -490,10 +490,15 @@ pub(super) fn encode_compute_pass(
     }
     match &pass.dispatch {
         HalComputeDispatch::Direct { workgroups } => {
-            encoder.dispatchThreadgroups_threadsPerThreadgroup(
-                to_mtl_dispatch_size(*workgroups)?,
-                to_mtl_workgroup_size(pipeline.workgroup_size)?,
-            );
+            // WebGPU: a dispatch with any zero workgroup count does nothing,
+            // so skip the API call. Indirect dispatches cannot be pre-checked
+            // CPU-side and are left as-is.
+            if workgroups.0 != 0 && workgroups.1 != 0 && workgroups.2 != 0 {
+                encoder.dispatchThreadgroups_threadsPerThreadgroup(
+                    to_mtl_dispatch_size(*workgroups)?,
+                    to_mtl_workgroup_size(pipeline.workgroup_size)?,
+                );
+            }
         }
         HalComputeDispatch::Indirect { buffer } => {
             let HalBuffer::Metal(indirect_buffer) = &buffer.buffer else {

@@ -749,11 +749,17 @@ impl VulkanAdapter {
         // VK_EXT_depth_clip_enable gives independent clip control; without it,
         // core depthClampEnable already yields WebGPU unclippedDepth semantics.
         let depth_clip_control = depth_clamp && depth_clip_enable_extension;
-        // Per-sample MSAA subpass input reads `@builtin(sample_index)`, which
-        // lowers to SPIR-V `SampleId` and auto-promotes the fragment shader to
-        // per-sample execution; Vulkan requires sampleRateShading for that.
-        #[cfg(feature = "tiled")]
+        // Tint emits `OpCapability SampleRateShading` whenever a shader uses
+        // `@builtin(sample_mask)` or `@builtin(sample_index)` (the latter also
+        // backs per-sample MSAA subpass input reads on tiled builds, where
+        // SPIR-V `SampleId` auto-promotes the fragment shader to per-sample
+        // execution); Vulkan requires sampleRateShading for that capability.
         let sample_rate_shading = supported_features.sample_rate_shading == vk::TRUE;
+        // Tint-generated fragment shaders may write storage buffers/textures;
+        // Vulkan requires fragmentStoresAndAtomics for fragment-stage storage
+        // writes (VUID-RuntimeSpirv-NonWritable-06340).
+        let fragment_stores_and_atomics =
+            supported_features.fragment_stores_and_atomics == vk::TRUE;
         let mut enabled_features = vk::PhysicalDeviceFeatures::default();
         if occlusion_query_precise {
             enabled_features.occlusion_query_precise = vk::TRUE;
@@ -785,9 +791,11 @@ impl VulkanAdapter {
         if draw_indirect_first_instance {
             enabled_features.draw_indirect_first_instance = vk::TRUE;
         }
-        #[cfg(feature = "tiled")]
         if sample_rate_shading {
             enabled_features.sample_rate_shading = vk::TRUE;
+        }
+        if fragment_stores_and_atomics {
+            enabled_features.fragment_stores_and_atomics = vk::TRUE;
         }
         if shader_demote_to_helper_invocation {
             extension_names.push(vk::EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_NAME.as_ptr());
@@ -1312,6 +1320,7 @@ mod tests {
                 geometry_shader: supported,
                 draw_indirect_first_instance: supported,
                 sample_rate_shading: supported,
+                fragment_stores_and_atomics: supported,
                 ..Default::default()
             };
             let robust_buffer_access = supported_features.robust_buffer_access == vk::TRUE;
@@ -1321,8 +1330,9 @@ mod tests {
             let geometry_shader = supported_features.geometry_shader == vk::TRUE;
             let draw_indirect_first_instance =
                 supported_features.draw_indirect_first_instance == vk::TRUE;
-            #[cfg(feature = "tiled")]
             let sample_rate_shading = supported_features.sample_rate_shading == vk::TRUE;
+            let fragment_stores_and_atomics =
+                supported_features.fragment_stores_and_atomics == vk::TRUE;
             let mut enabled_features = vk::PhysicalDeviceFeatures::default();
             if robust_buffer_access {
                 enabled_features.robust_buffer_access = vk::TRUE;
@@ -1342,9 +1352,11 @@ mod tests {
             if draw_indirect_first_instance {
                 enabled_features.draw_indirect_first_instance = vk::TRUE;
             }
-            #[cfg(feature = "tiled")]
             if sample_rate_shading {
                 enabled_features.sample_rate_shading = vk::TRUE;
+            }
+            if fragment_stores_and_atomics {
+                enabled_features.fragment_stores_and_atomics = vk::TRUE;
             }
             assert_eq!(
                 enabled_features.robust_buffer_access, expected_enabled,
@@ -1370,10 +1382,13 @@ mod tests {
                 enabled_features.draw_indirect_first_instance, expected_enabled,
                 "draw_indirect_first_instance should be {expected_enabled} when supported={supported}"
             );
-            #[cfg(feature = "tiled")]
             assert_eq!(
                 enabled_features.sample_rate_shading, expected_enabled,
                 "sample_rate_shading should be {expected_enabled} when supported={supported}"
+            );
+            assert_eq!(
+                enabled_features.fragment_stores_and_atomics, expected_enabled,
+                "fragment_stores_and_atomics should be {expected_enabled} when supported={supported}"
             );
         }
     }

@@ -15,6 +15,8 @@ pub(super) const IMAGE_LAYOUT_PRESENT: u8 = 4;
 pub(super) const IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT: u8 = 5;
 /// Constant value for image layout general.
 pub(super) const IMAGE_LAYOUT_GENERAL: u8 = 6;
+/// Constant value for image layout shader read only.
+pub(super) const IMAGE_LAYOUT_SHADER_READ_ONLY: u8 = 7;
 
 /// Stores vulkan texture data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -553,6 +555,7 @@ pub(super) fn image_layout(state: u8) -> vk::ImageLayout {
         IMAGE_LAYOUT_COLOR_ATTACHMENT => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT => vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         IMAGE_LAYOUT_GENERAL => vk::ImageLayout::GENERAL,
+        IMAGE_LAYOUT_SHADER_READ_ONLY => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         IMAGE_LAYOUT_PRESENT => vk::ImageLayout::PRESENT_SRC_KHR,
         _ => vk::ImageLayout::UNDEFINED,
     }
@@ -569,6 +572,7 @@ pub(super) fn access_mask_for_layout(layout: vk::ImageLayout) -> vk::AccessFlags
                 | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
         }
         vk::ImageLayout::GENERAL => vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => vk::AccessFlags::SHADER_READ,
         vk::ImageLayout::PRESENT_SRC_KHR => vk::AccessFlags::empty(),
         _ => vk::AccessFlags::empty(),
     }
@@ -589,6 +593,11 @@ pub(super) fn stage_mask_for_layout(layout: vk::ImageLayout) -> vk::PipelineStag
         }
         vk::ImageLayout::GENERAL => {
             vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::FRAGMENT_SHADER
+        }
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => {
+            vk::PipelineStageFlags::VERTEX_SHADER
+                | vk::PipelineStageFlags::FRAGMENT_SHADER
+                | vk::PipelineStageFlags::COMPUTE_SHADER
         }
         vk::ImageLayout::PRESENT_SRC_KHR => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
         _ => vk::PipelineStageFlags::TOP_OF_PIPE,
@@ -651,6 +660,21 @@ mod tests {
             "anisotropy should be disabled for max_anisotropy=1"
         );
         assert_eq!(max, 1.0);
+    }
+
+    /// The sampled-read tracked state must map to `SHADER_READ_ONLY_OPTIMAL`
+    /// with shader-read access covering every shader stage that can sample
+    /// (vertex, fragment, compute), matching the layout the sampled-texture
+    /// descriptors declare.
+    #[test]
+    fn shader_read_only_state_maps_to_sampled_layout_access_and_stages() {
+        let layout = image_layout(IMAGE_LAYOUT_SHADER_READ_ONLY);
+        assert_eq!(layout, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        assert_eq!(access_mask_for_layout(layout), vk::AccessFlags::SHADER_READ);
+        let stages = stage_mask_for_layout(layout);
+        assert!(stages.contains(vk::PipelineStageFlags::VERTEX_SHADER));
+        assert!(stages.contains(vk::PipelineStageFlags::FRAGMENT_SHADER));
+        assert!(stages.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
     }
 
     #[test]
