@@ -1010,7 +1010,7 @@ pub(super) fn encode_compute_pass(
         }
     };
     transition_sampled_textures(device, command_buffer, &pass.bind_textures, &[])?;
-    transition_storage_textures(device, command_buffer, &pass.bind_textures)?;
+    transition_storage_textures(device, command_buffer, &pass.bind_textures, &[])?;
     transfer_to_compute_barrier(device, command_buffer);
     unsafe {
         device.cmd_bind_pipeline(
@@ -1077,10 +1077,15 @@ pub(super) fn encode_compute_pass(
     })
 }
 
+/// Transitions bind-group textures bound for storage access to `GENERAL`, the
+/// layout their descriptors declare. Textures whose image is listed in
+/// `attachment_images` are skipped: the pass's attachment transitions own their
+/// layout, and barriers cannot be recorded inside a render pass instance anyway.
 fn transition_storage_textures(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     textures: &[HalBoundTexture],
+    attachment_images: &[vk::Image],
 ) -> Result<(), HalError> {
     for bound in textures
         .iter()
@@ -1089,11 +1094,19 @@ fn transition_storage_textures(
         let crate::HalTexture::Vulkan(texture) = &bound.texture else {
             return Err(texture_error("storage texture is not Vulkan-backed"));
         };
+        let inner = texture.inner()?;
+        if attachment_images.contains(&inner.image) {
+            continue;
+        }
+        // Use the image's own full aspect mask, not the bound view's aspect:
+        // a whole-image barrier on a combined depth-stencil image must cover
+        // both aspects (VUID-VkImageMemoryBarrier-image-03320), and the
+        // per-texture layout tracking is whole-image anyway.
         transition_image_aspect(
             device,
             command_buffer,
-            texture.inner()?,
-            buffer_texture_copy_aspect_flags(bound.format, bound.aspect),
+            inner,
+            inner.aspect_flags,
             vk::ImageLayout::GENERAL,
             IMAGE_LAYOUT_GENERAL,
         );
@@ -1123,11 +1136,18 @@ fn transition_sampled_textures(
         if attachment_images.contains(&inner.image) {
             continue;
         }
+        // Use the image's own full aspect mask, not the bound view's aspect:
+        // `bound.format` is the aspect-specific descriptor format (e.g. a
+        // Depth32Float view of a combined Depth32FloatStencil8 image), so it
+        // cannot see the image's other aspect, and a whole-image barrier on a
+        // combined depth-stencil image must cover both aspects
+        // (VUID-VkImageMemoryBarrier-image-03320). The per-texture layout
+        // tracking is whole-image anyway.
         transition_image_aspect(
             device,
             command_buffer,
             inner,
-            buffer_texture_copy_aspect_flags(bound.format, bound.aspect),
+            inner.aspect_flags,
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             IMAGE_LAYOUT_SHADER_READ_ONLY,
         );
@@ -2020,6 +2040,17 @@ pub(super) fn encode_render_pass(
         &pass.bind_textures,
         &attachment_images,
     )?;
+    // Storage-bound textures (e.g. a fragment-stage read-write storage image)
+    // need GENERAL, whose descriptors declare it. Ordered after the sampled
+    // transition so GENERAL wins for a texture bound both sampled and storage,
+    // mirroring the compute-pass encoder. Attachment images keep their
+    // attachment layout.
+    transition_storage_textures(
+        vk_device,
+        command_buffer,
+        &pass.bind_textures,
+        &attachment_images,
+    )?;
     let color_formats = render_pass_color_formats(&pass.color_targets);
     let resolve_formats = render_pass_resolve_formats(&pass.color_targets)?;
     let render_pass = match &pass.pipeline {
@@ -2630,12 +2661,9 @@ fn discarded_depth_stencil_aspects(
 }
 
 fn copy_format_aspect_flags(format: HalTextureFormat) -> vk::ImageAspectFlags {
-    let depth_stencil = depth_stencil_aspect_flags(format);
-    if depth_stencil.is_empty() {
-        vk::ImageAspectFlags::COLOR
-    } else {
-        depth_stencil
-    }
+    // A whole-format copy covers the format's full aspect mask, which is the
+    // same rule as the image's own aspect mask.
+    image_aspect_flags(format)
 }
 
 fn buffer_texture_copy_aspect_flags(

@@ -750,6 +750,8 @@ pub(super) fn create_swapchain_texture(
             owns_image: false,
             mip_level_count: 1,
             array_layers: 1,
+            // Swapchain images are always color images.
+            aspect_flags: vk::ImageAspectFlags::COLOR,
             layout: AtomicU8::new(IMAGE_LAYOUT_UNDEFINED),
         })),
         swapchain: None,

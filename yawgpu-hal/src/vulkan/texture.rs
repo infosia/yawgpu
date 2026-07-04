@@ -82,6 +82,13 @@ pub(super) struct VulkanTextureInner {
     pub(super) owns_image: bool,
     pub(super) mip_level_count: u32,
     pub(super) array_layers: u32,
+    /// The image's full aspect mask derived from its own format (DEPTH and/or
+    /// STENCIL for depth-stencil formats, COLOR otherwise). Whole-image layout
+    /// barriers must cover every aspect of a combined depth-stencil image
+    /// (VUID-VkImageMemoryBarrier-image-03320 without
+    /// separateDepthStencilLayouts), which also keeps the single tracked
+    /// `layout` state self-consistent.
+    pub(super) aspect_flags: vk::ImageAspectFlags,
     pub(super) layout: AtomicU8,
 }
 
@@ -128,8 +135,9 @@ impl Drop for VulkanSamplerInner {
 /// True iff `usage` requires a `VkImageView` to be created alongside the
 /// `VkImage`. View-compatible bits per VUID-VkImageViewCreateInfo-image-04441
 /// (SAMPLED / STORAGE / *_ATTACHMENT). yawgpu's render_attachment maps to
-/// COLOR_ATTACHMENT plus INPUT_ATTACHMENT, so the three caller-facing usage
-/// bits cover all view-compatible image-usage flags map_texture_usage can emit.
+/// COLOR_ATTACHMENT or DEPTH_STENCIL_ATTACHMENT plus INPUT_ATTACHMENT, so the
+/// three caller-facing usage bits cover all view-compatible image-usage flags
+/// map_texture_usage can emit.
 fn texture_usage_needs_view(usage: HalTextureUsage) -> bool {
     usage.texture_binding || usage.storage_binding || usage.render_attachment
 }
@@ -219,7 +227,7 @@ pub(super) fn create_texture(
         .array_layers(array_layers)
         .samples(samples)
         .tiling(vk::ImageTiling::OPTIMAL)
-        .usage(map_texture_usage(descriptor.usage))
+        .usage(map_texture_usage(descriptor.usage, descriptor.format))
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .initial_layout(vk::ImageLayout::UNDEFINED);
     if let Some(formats) = image_format_list_formats.as_ref() {
@@ -285,6 +293,10 @@ pub(super) fn create_texture(
         }
         return Err(map_texture_error(error, "image memory bind failed"));
     }
+    // The image's own full aspect mask: a depth/stencil image view must select
+    // its DEPTH/STENCIL aspects (VUID-VkImageViewCreateInfo-subresourceRange-09594);
+    // COLOR is only valid for color formats.
+    let aspect_flags = image_aspect_flags(descriptor.format);
     let view = if texture_usage_needs_view(descriptor.usage) {
         let view_type =
             default_texture_image_view_type(descriptor.dimension, descriptor.depth_or_array_layers);
@@ -292,7 +304,8 @@ pub(super) fn create_texture(
             .image(image)
             .view_type(view_type)
             .format(format)
-            .subresource_range(color_subresource_range(
+            .subresource_range(image_subresource_range(
+                aspect_flags,
                 descriptor.mip_level_count,
                 array_layers,
             ));
@@ -338,6 +351,7 @@ pub(super) fn create_texture(
             owns_image: true,
             mip_level_count: descriptor.mip_level_count,
             array_layers,
+            aspect_flags,
             layout: AtomicU8::new(IMAGE_LAYOUT_UNDEFINED),
         },
         bytes_per_pixel,
@@ -412,7 +426,7 @@ fn sample_count_flags(sample_count: u32) -> Result<vk::SampleCountFlags, HalErro
     }
 }
 
-/// Returns transition image.
+/// Transitions the whole image, covering its own full aspect mask.
 pub(super) fn transition_image(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
@@ -420,34 +434,14 @@ pub(super) fn transition_image(
     new_layout: vk::ImageLayout,
     new_state: u8,
 ) {
-    let old_state = texture.layout.swap(new_state, AtomicOrdering::Relaxed);
-    let old_layout = image_layout(old_state);
-    if old_layout == new_layout {
-        return;
-    }
-    let barrier = vk::ImageMemoryBarrier::default()
-        .old_layout(old_layout)
-        .new_layout(new_layout)
-        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .image(texture.image)
-        .subresource_range(color_subresource_range(
-            texture.mip_level_count,
-            texture.array_layers,
-        ))
-        .src_access_mask(access_mask_for_layout(old_layout))
-        .dst_access_mask(access_mask_for_layout(new_layout));
-    unsafe {
-        device.cmd_pipeline_barrier(
-            command_buffer,
-            stage_mask_for_layout(old_layout),
-            stage_mask_for_layout(new_layout),
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[barrier],
-        );
-    }
+    transition_image_aspect(
+        device,
+        command_buffer,
+        texture,
+        texture.aspect_flags,
+        new_layout,
+        new_state,
+    );
 }
 
 /// Returns transition image for the requested aspect range.
@@ -470,14 +464,11 @@ pub(super) fn transition_image_aspect(
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .image(texture.image)
-        .subresource_range(
-            vk::ImageSubresourceRange::default()
-                .aspect_mask(aspect)
-                .base_mip_level(0)
-                .level_count(texture.mip_level_count)
-                .base_array_layer(0)
-                .layer_count(texture.array_layers),
-        )
+        .subresource_range(image_subresource_range(
+            aspect,
+            texture.mip_level_count,
+            texture.array_layers,
+        ))
         .src_access_mask(access_mask_for_layout(old_layout))
         .dst_access_mask(access_mask_for_layout(new_layout));
     unsafe {
@@ -618,17 +609,42 @@ pub(super) fn image_subresource_layers(
         .layer_count(layer_count)
 }
 
+/// Returns the full aspect mask of an image created with `format`: DEPTH
+/// and/or STENCIL for depth-stencil formats, COLOR otherwise.
+pub(super) fn image_aspect_flags(format: HalTextureFormat) -> vk::ImageAspectFlags {
+    let mut flags = vk::ImageAspectFlags::empty();
+    if crate::format::format_has_depth_aspect(format) {
+        flags |= vk::ImageAspectFlags::DEPTH;
+    }
+    if crate::format::format_has_stencil_aspect(format) {
+        flags |= vk::ImageAspectFlags::STENCIL;
+    }
+    if flags.is_empty() {
+        flags = vk::ImageAspectFlags::COLOR;
+    }
+    flags
+}
+
+/// Returns a whole-image subresource range for the requested aspect mask.
+pub(super) fn image_subresource_range(
+    aspect: vk::ImageAspectFlags,
+    level_count: u32,
+    layer_count: u32,
+) -> vk::ImageSubresourceRange {
+    vk::ImageSubresourceRange::default()
+        .aspect_mask(aspect)
+        .base_mip_level(0)
+        .level_count(level_count)
+        .base_array_layer(0)
+        .layer_count(layer_count)
+}
+
 /// Returns color subresource range.
 pub(super) fn color_subresource_range(
     level_count: u32,
     layer_count: u32,
 ) -> vk::ImageSubresourceRange {
-    vk::ImageSubresourceRange::default()
-        .aspect_mask(vk::ImageAspectFlags::COLOR)
-        .base_mip_level(0)
-        .level_count(level_count)
-        .base_array_layer(0)
-        .layer_count(layer_count)
+    image_subresource_range(vk::ImageAspectFlags::COLOR, level_count, layer_count)
 }
 
 #[cfg(test)]
@@ -673,6 +689,76 @@ mod tests {
         assert_eq!(access_mask_for_layout(layout), vk::AccessFlags::SHADER_READ);
         let stages = stage_mask_for_layout(layout);
         assert!(stages.contains(vk::PipelineStageFlags::VERTEX_SHADER));
+        assert!(stages.contains(vk::PipelineStageFlags::FRAGMENT_SHADER));
+        assert!(stages.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
+    }
+
+    /// The image aspect mask must select DEPTH and/or STENCIL for every
+    /// depth-stencil format (a combined format needs both bits so whole-image
+    /// barriers satisfy VUID-VkImageMemoryBarrier-image-03320 and views
+    /// satisfy VUID-VkImageViewCreateInfo-subresourceRange-09594) and COLOR
+    /// for color formats.
+    #[test]
+    fn image_aspect_flags_covers_depth_stencil_and_color_formats() {
+        let cases = [
+            (HalTextureFormat::Depth16Unorm, vk::ImageAspectFlags::DEPTH),
+            (HalTextureFormat::Depth24Plus, vk::ImageAspectFlags::DEPTH),
+            (HalTextureFormat::Depth32Float, vk::ImageAspectFlags::DEPTH),
+            (HalTextureFormat::Stencil8, vk::ImageAspectFlags::STENCIL),
+            (
+                HalTextureFormat::Depth24PlusStencil8,
+                vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+            ),
+            (
+                HalTextureFormat::Depth32FloatStencil8,
+                vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+            ),
+            (HalTextureFormat::Rgba8Unorm, vk::ImageAspectFlags::COLOR),
+        ];
+
+        for (format, expected) in cases {
+            assert_eq!(image_aspect_flags(format), expected, "{format:?}");
+        }
+    }
+
+    /// `image_subresource_range` must carry the requested aspect mask over
+    /// the whole mip/layer range, and `color_subresource_range` stays the
+    /// COLOR-aspect specialization used by genuinely color-only views.
+    #[test]
+    fn image_subresource_range_carries_aspect_and_whole_range() {
+        let range = image_subresource_range(
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+            4,
+            6,
+        );
+        assert_eq!(
+            range.aspect_mask,
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        );
+        assert_eq!(range.base_mip_level, 0);
+        assert_eq!(range.level_count, 4);
+        assert_eq!(range.base_array_layer, 0);
+        assert_eq!(range.layer_count, 6);
+
+        let color = color_subresource_range(4, 6);
+        assert_eq!(color.aspect_mask, vk::ImageAspectFlags::COLOR);
+        assert_eq!(color.level_count, 4);
+        assert_eq!(color.layer_count, 6);
+    }
+
+    /// The storage-bound tracked state must map to `GENERAL` with shader
+    /// read/write access covering the fragment stage, matching the layout the
+    /// storage-texture descriptors declare. The fragment stage is what lets a
+    /// render pass transition a fragment-stage storage texture to `GENERAL`
+    /// before it begins (barriers are illegal inside a render pass instance).
+    #[test]
+    fn general_state_maps_to_storage_layout_access_and_fragment_stage() {
+        let layout = image_layout(IMAGE_LAYOUT_GENERAL);
+        assert_eq!(layout, vk::ImageLayout::GENERAL);
+        let access = access_mask_for_layout(layout);
+        assert!(access.contains(vk::AccessFlags::SHADER_READ));
+        assert!(access.contains(vk::AccessFlags::SHADER_WRITE));
+        let stages = stage_mask_for_layout(layout);
         assert!(stages.contains(vk::PipelineStageFlags::FRAGMENT_SHADER));
         assert!(stages.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
     }

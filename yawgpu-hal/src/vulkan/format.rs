@@ -109,7 +109,15 @@ pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<(vk::Format
 }
 
 /// Converts texture usage into the corresponding yawgpu representation.
-pub(super) fn map_texture_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
+///
+/// The mapping is format-aware: a `render_attachment` on a depth and/or stencil
+/// format maps to `DEPTH_STENCIL_ATTACHMENT`, whereas a color format maps to
+/// `COLOR_ATTACHMENT`. `INPUT_ATTACHMENT` is set for both because the tiled
+/// subpass path can read either as an input attachment.
+pub(super) fn map_texture_usage(
+    usage: HalTextureUsage,
+    format: HalTextureFormat,
+) -> vk::ImageUsageFlags {
     let mut flags = if usage.transient {
         vk::ImageUsageFlags::TRANSIENT_ATTACHMENT
     } else {
@@ -122,7 +130,13 @@ pub(super) fn map_texture_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
         flags |= vk::ImageUsageFlags::STORAGE;
     }
     if usage.render_attachment {
-        flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::INPUT_ATTACHMENT;
+        let is_depth_stencil = crate::format::format_has_depth_aspect(format)
+            || crate::format::format_has_stencil_aspect(format);
+        flags |= if is_depth_stencil {
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+        } else {
+            vk::ImageUsageFlags::COLOR_ATTACHMENT
+        } | vk::ImageUsageFlags::INPUT_ATTACHMENT;
     }
     flags
 }
@@ -266,14 +280,17 @@ mod tests {
 
     #[test]
     fn map_texture_usage_transient_attachment_excludes_transfer_bits() {
-        let flags = map_texture_usage(HalTextureUsage {
-            copy_src: false,
-            copy_dst: false,
-            texture_binding: false,
-            storage_binding: false,
-            render_attachment: true,
-            transient: true,
-        });
+        let flags = map_texture_usage(
+            HalTextureUsage {
+                copy_src: false,
+                copy_dst: false,
+                texture_binding: false,
+                storage_binding: false,
+                render_attachment: true,
+                transient: true,
+            },
+            HalTextureFormat::Rgba8Unorm,
+        );
 
         assert!(flags.contains(vk::ImageUsageFlags::TRANSIENT_ATTACHMENT));
         assert!(flags.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT));
@@ -284,20 +301,79 @@ mod tests {
 
     #[test]
     fn map_texture_usage_non_transient_render_attachment_keeps_transfer_bits() {
-        let flags = map_texture_usage(HalTextureUsage {
-            copy_src: false,
-            copy_dst: false,
-            texture_binding: false,
-            storage_binding: false,
-            render_attachment: true,
-            transient: false,
-        });
+        let flags = map_texture_usage(
+            HalTextureUsage {
+                copy_src: false,
+                copy_dst: false,
+                texture_binding: false,
+                storage_binding: false,
+                render_attachment: true,
+                transient: false,
+            },
+            HalTextureFormat::Rgba8Unorm,
+        );
 
         assert!(flags.contains(vk::ImageUsageFlags::TRANSFER_SRC));
         assert!(flags.contains(vk::ImageUsageFlags::TRANSFER_DST));
         assert!(flags.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT));
         assert!(flags.contains(vk::ImageUsageFlags::INPUT_ATTACHMENT));
         assert!(!flags.contains(vk::ImageUsageFlags::TRANSIENT_ATTACHMENT));
+    }
+
+    #[test]
+    fn map_texture_usage_color_format_render_attachment_is_color_not_depth_stencil() {
+        let flags = map_texture_usage(
+            HalTextureUsage {
+                copy_src: false,
+                copy_dst: false,
+                texture_binding: false,
+                storage_binding: false,
+                render_attachment: true,
+                transient: false,
+            },
+            HalTextureFormat::Rgba8Unorm,
+        );
+
+        assert!(flags.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT));
+        assert!(flags.contains(vk::ImageUsageFlags::INPUT_ATTACHMENT));
+        assert!(!flags.contains(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT));
+    }
+
+    #[test]
+    fn map_texture_usage_depth_stencil_format_render_attachment_is_depth_stencil_not_color() {
+        for format in [
+            HalTextureFormat::Depth16Unorm,
+            HalTextureFormat::Depth24Plus,
+            HalTextureFormat::Depth32Float,
+            HalTextureFormat::Stencil8,
+            HalTextureFormat::Depth24PlusStencil8,
+            HalTextureFormat::Depth32FloatStencil8,
+        ] {
+            let flags = map_texture_usage(
+                HalTextureUsage {
+                    copy_src: false,
+                    copy_dst: false,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: true,
+                    transient: false,
+                },
+                format,
+            );
+
+            assert!(
+                flags.contains(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT),
+                "{format:?}"
+            );
+            assert!(
+                flags.contains(vk::ImageUsageFlags::INPUT_ATTACHMENT),
+                "{format:?}"
+            );
+            assert!(
+                !flags.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT),
+                "{format:?}"
+            );
+        }
     }
 
     #[test]

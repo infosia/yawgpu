@@ -1,9 +1,14 @@
 # CTS full-sweep 2026-07-04 (first Tint-enabled native run) — three yawgpu findings
 
-Status: **OPEN — fixes for findings 1, 2, 3b landed in-tree 2026-07-04** (all Noop gates
-green; pending lavapipe + validation-layer re-verification and the native-ANV cluster
-re-runs). Finding 3a needs no yawgpu change (harness-side). Finding 4 deferred until
-after the finding-1 re-measure. Surfaced by the first full CTS sweep with a working Tint frontend on
+Status: **lavapipe-VERIFIED — three fix rounds landed 2026-07-04; all repro queries
+emit zero VUIDs under lavapipe + validation layer** (see "Re-verification" below).
+Round 1: sampled-read barriers, `sampleRateShading`/`fragmentStoresAndAtomics` enables,
+zero-dim dispatch skip. Round 2: render-pass storage-texture GENERAL transition +
+format-aware `map_texture_usage` (depth-stencil attachment usage). Round 3: combined
+depth-stencil aspect handling (image-own `aspect_flags` on `VulkanTextureInner` for the
+default view and whole-image barriers). Finding 3a verified fixed harness-side.
+Remaining: the native-ANV failing-cluster re-runs + un-quarantining the two zero-dim
+dispatch files (needs the Intel host), then the finding-4 diagnosis. Surfaced by the first full CTS sweep with a working Tint frontend on
 native Linux/Vulkan (Intel Iris 5100, Haswell, Mesa ANV), 2026-07-04. Earlier sweeps ran
 with the stub compiler, so every shader/pipeline path silently skipped — these are
 pre-existing bugs newly exposed, not regressions.
@@ -184,6 +189,88 @@ webgpu:shader,execution,expression,call,builtin,textureLoad:multisampled:stage="
 ```
 
 ---
+
+## Re-verification (2026-07-04 evening, lavapipe + VK_LAYER_KHRONOS_validation)
+
+The landed fixes were re-measured with the repro queries against the rebuilt
+`target-vulkan/release` library:
+
+- **Finding 3a — verified fixed.** With the harness-side `pumpUntil` eager
+  `done()` re-check built into webgpu-native-cts, both
+  `error_scope:current_scope` variants pass in seconds
+  (`--isolate --workers 1 --case-timeout-ms 20000`: pass=2).
+- **Finding 1 — sampled-read barrier verified effective.**
+  `read_swizzle:format="r8uint";func="textureGather"` no longer emits
+  `UNASSIGNED-CoreValidation-DrawState-InvalidImageLayout` (912 → 0) or
+  `VUID-RuntimeSpirv-NonWritable-06340` (the `fragmentStoresAndAtomics`
+  enable). **Residual:** 684× `VUID-VkDescriptorImageInfo-imageLayout-00344` +
+  684× `VUID-vkCmdDraw-None-08114` against a *different* image — the
+  fragment-stage storage texture, whose descriptor declares GENERAL while the
+  image stays in TRANSFER_DST. Root cause: `transition_storage_textures` is
+  called only by the compute-pass encoder (`encode.rs`); `encode_render_pass`
+  transitions sampled textures only. This is known-gap (a) below.
+- **Finding 2 — `sampleRateShading` enable verified effective.**
+  `VUID-VkShaderModuleCreateInfo-pCode-08740` is gone and the repro case now
+  passes on lavapipe (pass=81). **Residual:** the object-creation VUID cluster
+  (08931/01758/01209/09594/02662/03320/02251/02633 + 162 InvalidImageLayout)
+  was NOT a cascade of 08740. Full message texts pin it to one root bug:
+  `map_texture_usage` (`yawgpu-hal/src/vulkan/format.rs`) maps
+  `render_attachment` to `COLOR_ATTACHMENT | INPUT_ATTACHMENT` regardless of
+  format, so depth/stencil textures (`D32_SFLOAT_S8_UINT` in the repro) are
+  created with color-attachment usage; every downstream view/barrier/
+  framebuffer check then fails. `02251` (mip levels) to be re-measured after
+  the usage fix — likely, but not confirmed, part of the same cascade.
+
+### Rounds 2–3 outcome (same day)
+
+Round 2 (render-pass storage-texture GENERAL transition + format-aware
+`map_texture_usage`) removed the finding-1 residual entirely and collapsed the
+finding-2 cluster from 8 VUID types to 3 — `02251` (mip levels), `08931`,
+`01758`, `02662`, `01209`, `02633` were all cascades of the usage bug, as
+suspected. The 3 residuals (`09594`, `03320`, `InvalidImageLayout` on the
+stencil aspect) were all combined depth+stencil aspect bugs: the default image
+view was created with a hardcoded COLOR aspect, and whole-image layout barriers
+derived their aspect from the aspect-specific *bound* format (missing the other
+aspect of a combined image, VUID-03320). Round 3 fixed both by storing the
+image's own full aspect mask on `VulkanTextureInner` and using it for the
+default view and all whole-image transitions.
+
+**Final re-measure after round 3: all three verification queries — the
+finding-1 repro (`r8uint`/`textureGather`), the float control
+(`r8unorm`/`textureSample`), and the finding-2 repro (`sample_mask`) — emit
+zero VUID lines and pass on lavapipe + validation layer.** This meets the bar
+set below; what remains is the native-ANV cluster re-runs.
+
+## Known related gaps (noted during the 2026-07-04 implementation review)
+
+Observations from the fix-round implementation review, recorded so later CTS
+failures can be matched against them:
+
+1. **Render-pass storage textures are never transitioned to GENERAL** —
+   `transition_storage_textures` is compute-only while render-pass storage
+   descriptors declare GENERAL. *Fixed in round 2 (see above).*
+2. **Tiled subpass path** (`tiled` feature) lacks the same sampled-texture
+   transition that `encode_render_pass` now performs; sampled reads inside
+   multi-subpass passes can still hit stale layouts.
+3. **Layout tracking is per-texture, not per-subresource** — a single
+   `AtomicU8` per `VulkanTextureInner` means per-mip/per-layer layout
+   divergence (e.g. copy to mip 0 while sampling mip 1) is not representable;
+   transitions barrier the whole image. (Round 3 made whole-image barriers
+   aspect-complete, which keeps the single tracked state self-consistent, but
+   the granularity limit itself remains.)
+4. **External-texture planes get no layout transition** (Vulkan external
+   textures are currently rejected before reaching the driver, so this is
+   latent until a real Vulkan re-home; see the block-36 posture).
+5. **Copy/clear transition sites still derive barrier aspect from the copy's
+   (possibly aspect-narrowed) format** — `encode_texture_clear` and the
+   buffer↔texture / texture↔texture copy paths use
+   `buffer_texture_copy_aspect_flags(copy.format, copy.aspect)` for their
+   whole-image transitions. A `DepthOnly`/`StencilOnly` copy on a *combined*
+   depth-stencil image emits a single-aspect whole-image barrier — the same
+   VUID-03320 class round 3 fixed for the bind-group paths. The
+   `VkBufferImageCopy` subresource itself is correct; only the transition
+   aspect would need the image-own `aspect_flags`. Next candidate if CTS
+   depth/stencil copy tests show validation errors.
 
 ## Suggested order
 
