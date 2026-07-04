@@ -140,9 +140,9 @@ yawgpu skips ~3040 at-limit/betterValue cases Dawn runs, because
 ## Log
 
 - 2026-07-01: measured the Dawn-vs-yawgpu skip gap with `build-dawn/cts` (Dawn
-  oracle, prebuilt `libwebgpu_dawn.dylib` at
-  `~/Documents/workspace/C/dawn/out/Release`); root-caused to
-  default-limit reporting. Wrote Block 92. Slice 1 handoff dispatched.
+  oracle, prebuilt `libwebgpu_dawn.dylib` from a local Dawn release build);
+  root-caused to default-limit reporting. Wrote Block 92. Slice 1 handoff
+  dispatched.
 - 2026-07-02: ran the deferred native-Vulkan CTS verification (RTX 5060 Ti, fresh
   DLL from HEAD `3a30443`): `capability_checks,limits` 9149/1936/0 (whole tree, one
   process) and `capability_checks,features` 2240/272/0 — both fail=0. See "Slice 2
