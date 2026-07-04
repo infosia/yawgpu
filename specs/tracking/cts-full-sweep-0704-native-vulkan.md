@@ -301,6 +301,78 @@ scope than previously recorded:
    64-bit-texel-gather-selection theory. Still needs the Dawn-oracle
    comparison on this host before treating as a yawgpu bug.
 
+## Finding-4 root cause + driver-suspect triage (2026-07-05, native ANV, validation layer)
+
+- **Finding 4 root cause confirmed: missing sample-count capability check.**
+  hasvk reports `sampledImageIntegerSampleCounts = SAMPLE_COUNT_1_BIT` only
+  (Haswell hardware cannot sample multisampled integer images; lavapipe
+  supports 1+4, explaining the ANV-only failure). Running the finding-4 repro
+  under `VK_LAYER_KHRONOS_validation` on native ANV emits **24×
+  `VUID-VkImageCreateInfo-samples-02258`** — yawgpu calls `vkCreateImage`
+  with `samples=4` on a format whose
+  `vkGetPhysicalDeviceImageFormatProperties` does not include that sample
+  count. That is invalid API usage (UB); the downstream failure surfaces as
+  the "error command buffer" message. yawgpu-side fix: validate the requested
+  sample count against image format properties at Vulkan texture creation and
+  raise a clean `HalError`/device error instead (the cases still cannot pass
+  on this hardware — WebGPU mandates integer MSAA — so the CTS marks them as
+  host-specific expected failures; see webgpu-native-cts F-147).
+- **The other three signatures are validation-clean on native ANV** (zero
+  VUID lines, zero Validation Error lines, failures unchanged; logs in
+  `rerun-0705-swizzle/diag-*.log`): rg32* textureGather wrong-texel
+  (67 fails), `alpha_to_coverage_mask` (90 fails), vertex-stage read-only
+  storage-texture loads returning 0 (NonWritable decoration correctly
+  present — no 06341; `vertexPipelineStoresAndAtomics=false` is irrelevant
+  to reads). All three are therefore driver/hardware-suspect
+  (webgpu-native-cts F-148/F-149/F-150); no yawgpu action.
+
+## Task: vulkan — sample-count capability check at texture creation (finding 4 / CTS F-147)
+
+Goal: stop creating Vulkan images with unsupported sample counts (UB); surface
+a clean device error instead.
+
+Inputs to read:
+- this file: "Finding 4" + "Finding-4 root cause" sections
+- yawgpu-hal/src/vulkan/texture.rs (creation path), yawgpu-hal/src/vulkan/mod.rs
+  (adapter / physical-device handle plumbing)
+
+Produce:
+- At Vulkan texture creation, when `sample_count > 1`, query
+  `vkGetPhysicalDeviceImageFormatProperties` for the exact (format, type,
+  tiling, usage, flags) about to be passed to `vkCreateImage`; if the
+  requested sample count is not in the returned `sampleCounts` (or the query
+  returns FORMAT_NOT_SUPPORTED), return a `HalError` (message naming the
+  format + sample count) instead of calling `vkCreateImage`. No panics.
+- Inline unit test(s) for any new/changed public fn per CLAUDE.md principle 1
+  (the caps comparison itself should be a testable helper).
+
+Out of scope: emulating integer MSAA, other backends, core validation changes
+(WebGPU-level sampleCount rules stay as they are), spec edits, commits.
+
+Acceptance criteria:
+- [ ] `cargo test` green on Noop (no GPU), `-j 1`, output redirected to a file
+- [ ] `cargo build --release -p yawgpu --features vulkan -j 1` clean
+- [ ] no new clippy warnings (`-D warnings` gate unchanged)
+- [ ] on native ANV the F-147 repro emits **zero** `VUID-VkImageCreateInfo-samples-02258`
+      under the validation layer and fails with a clean device error naming the
+      format/sample count (verified by Claude post-handoff)
+
+Report back: files changed, how verified.
+
+**Outcome (2026-07-05): implemented and verified.** `check_sample_count_support`
+helper + capability query in `yawgpu-hal/src/vulkan/texture.rs`, new
+`HalError::TextureCreationFailed` variant; 5 new inline unit tests, hal vulkan
+test suite green, clippy clean, workspace test failure set byte-identical to
+baseline (all pre-existing Tint-stub environment failures). Native-ANV repro
+under the validation layer: **`VUID-VkImageCreateInfo-samples-02258` 24 → 0,
+zero VUID lines total**. The cases still fail (the hardware cannot do integer
+MSAA — expected, host-limitation xfail on the CTS side, F-147). Note: the
+CTS-visible failure message is still the downstream `queue submit cannot use
+an error command buffer`; the creation-time Internal device error (which
+carries the format/sample-count message) is dispatched correctly per
+`dispatch_hal_allocation_error` but is not the error the CTS case reports —
+harness-side reporting nuance, no further yawgpu action.
+
 ## Known related gaps (noted during the 2026-07-04 implementation review)
 
 Observations from the fix-round implementation review, recorded so later CTS
