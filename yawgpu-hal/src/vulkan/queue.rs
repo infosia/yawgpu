@@ -95,6 +95,9 @@ mod tests {
                 size: 4,
             })])
             .expect("submit buffer copy");
+        // submit_copies is asynchronous (the retire ring waits fences only on
+        // slot reuse), so the copy must be drained before reading back.
+        device.queue().wait_idle().expect("wait idle");
         assert_eq!(
             destination.read(0, 4).expect("read destination"),
             [1, 2, 3, 4]
