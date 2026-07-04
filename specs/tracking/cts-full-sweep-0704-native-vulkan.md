@@ -264,8 +264,42 @@ Still to do on the Intel host: the two zero-dim-dispatch quarantined files
 `api,validation,encoding,programmable,pipeline_bind_group_compat`) — the round-1
 early-out should make them safe, but the failure mode if not is a whole-machine
 freeze, so run them deliberately; finding-4 diagnosis (validation layers on the
-multisampled-sint cases); and Dawn-oracle comparisons for the three driver-suspect
-signatures above (default-alpha swizzle, rg32float gather, alpha-to-coverage).
+multisampled-sint cases); and Dawn-oracle comparisons for the remaining
+driver-suspect signatures (rg32* gather, alpha-to-coverage — the default-alpha
+swizzle signature is resolved, see below).
+
+## Swizzle cluster re-run (2026-07-05, native ANV, after ad231fb)
+
+`texture_view,texture_component_swizzle` re-run against the rebuilt library
+(HEAD f672322, `--workers 4`, no expectations file; artifacts in
+`webgpu-native-cts/build-yawgpu-release/run-linux-vulkan/rerun-0705-swizzle/`):
+**1,335 → 543 fails.** The explicit ZERO/ONE component substitution (ad231fb)
+eliminates the default-alpha class entirely — no residual has the
+`0x3F800000` missing-alpha signature, and integer-format `textureGather`
+swizzle cases (e.g. `r8sint`/`textureGather`) now pass. No Dawn-oracle
+comparison needed for this signature anymore.
+
+The 543 residuals decompose into two already-known signatures, now with wider
+scope than previously recorded:
+
+1. **342 = the six sint formats (r8/rg8/rgba8/r16/rg16/rgba16 sint) ×
+   `func="textureLoad"`, all `queue submit cannot use an error command
+   buffer`** — this is finding 4 exactly, not a widening of it: the
+   `read_swizzle` test expands the `input` subcase parameter to both
+   `texture_2d<i32>` and `texture_multisampled_2d<i32>` for
+   possibly-multisampled formats (texture_component_swizzle.spec.cpp,
+   `expand("input", ...)`), and the failing half of the subcases (57 of 114
+   per format) is precisely the `texture_multisampled_2d` input; the
+   single-sampled half passes, as do the same formats' `textureGather` cases
+   (gather never takes a multisampled input). Attribute these 342 to the
+   finding-4 diagnosis — sint + multisampled on ANV/hasvk.
+2. **201 = rg32uint/rg32sint/rg32float (67 each) × `func="textureGather"`,
+   wrong-texel value mismatches** (e.g. expected 551.814, got 431.099 — a
+   different texel, not garbage) — extends the "rg32float gather" driver-suspect
+   signature from the `builtin,textureGather` cluster to **all three rg32
+   formats** (8-byte texels), reinforcing the Haswell
+   64-bit-texel-gather-selection theory. Still needs the Dawn-oracle
+   comparison on this host before treating as a yawgpu bug.
 
 ## Known related gaps (noted during the 2026-07-04 implementation review)
 
