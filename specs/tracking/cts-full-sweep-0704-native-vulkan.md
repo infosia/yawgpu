@@ -1,14 +1,18 @@
 # CTS full-sweep 2026-07-04 (first Tint-enabled native run) — three yawgpu findings
 
-Status: **lavapipe-VERIFIED — three fix rounds landed 2026-07-04; all repro queries
-emit zero VUIDs under lavapipe + validation layer** (see "Re-verification" below).
-Round 1: sampled-read barriers, `sampleRateShading`/`fragmentStoresAndAtomics` enables,
-zero-dim dispatch skip. Round 2: render-pass storage-texture GENERAL transition +
-format-aware `map_texture_usage` (depth-stencil attachment usage). Round 3: combined
-depth-stencil aspect handling (image-own `aspect_flags` on `VulkanTextureInner` for the
-default view and whole-image barriers). Finding 3a verified fixed harness-side.
-Remaining: the native-ANV failing-cluster re-runs + un-quarantining the two zero-dim
-dispatch files (needs the Intel host), then the finding-4 diagnosis. Surfaced by the first full CTS sweep with a working Tint frontend on
+Status: **lavapipe-VERIFIED + native-ANV re-measured — four fix rounds landed
+2026-07-04; all repro queries emit zero VUIDs under lavapipe + validation layer**
+(see "Re-verification" below). Round 1: sampled-read barriers,
+`sampleRateShading`/`fragmentStoresAndAtomics` enables, zero-dim dispatch skip.
+Round 2: render-pass storage-texture GENERAL transition + format-aware
+`map_texture_usage` (depth-stencil attachment usage). Round 3: combined
+depth-stencil aspect handling (image-own `aspect_flags` on `VulkanTextureInner`
+for the default view and whole-image barriers). Round 4: `VERTEX_SHADER` in the
+GENERAL-layout stage mask. Finding 3a verified fixed harness-side. The native-ANV
+cluster re-runs (see below) confirm the finding-2 target subtree fixed and
+`readonly_depth_stencil` down to 1; the residual ANV failures are driver-suspect
+signatures pending Dawn-oracle comparison, plus finding 4. The two zero-dim
+quarantined files and the finding-4 diagnosis remain. Surfaced by the first full CTS sweep with a working Tint frontend on
 native Linux/Vulkan (Intel Iris 5100, Haswell, Mesa ANV), 2026-07-04. Earlier sweeps ran
 with the stub compiler, so every shader/pipeline path silently skipped — these are
 pre-existing bugs newly exposed, not regressions.
@@ -240,6 +244,28 @@ finding-1 repro (`r8uint`/`textureGather`), the float control
 (`r8unorm`/`textureSample`), and the finding-2 repro (`sample_mask`) — emit
 zero VUID lines and pass on lavapipe + validation layer.** This meets the bar
 set below; what remains is the native-ANV cluster re-runs.
+
+## Native-ANV cluster re-runs (2026-07-04 late evening, after all fix rounds)
+
+Conditions: Intel Iris 5100 (Haswell, hasvk ICD), no validation layers, `--workers 4`
+(`--workers 1` for the small clusters). Raw fail counts with no expectations file —
+method differs from the sweep aggregation, so compare signatures, not absolute counts.
+
+| Cluster | Sweep | Re-run | Verdict |
+|---|---|---|---|
+| `render_pipeline,sample_mask` | 1,398 | **90** | `fragment_output_mask` subtree (the finding-2 target) fully fixed. All 90 residuals are `alpha_to_coverage_mask` "alpha <= 0 result did not match zero coverage" — the separate signature already noted in the original finding. Driver-suspect; diagnose separately. |
+| `texture_view,texture_component_swizzle` | 1,335 | 1,335 | Same count, different problem: every fail involves an alpha component in the swizzle on an integer format, and the missing-alpha default comes back as the f32 1.0 bit pattern `0x3F800000` instead of integer 1. Barriers are now validation-clean, so this is a Haswell integer-sampling default-alpha quirk. Candidate yawgpu-side workaround: map swizzle components absent from the format to explicit `VK_COMPONENT_SWIZZLE_ZERO`/`ONE` in `VkComponentMapping` instead of relying on the hardware default. |
+| `builtin,textureGather` | 126 | 621 | All 621 are `format="rg32float"`: near-miss numeric mismatches (e.g. diff 0.05 vs tolerance 0.035), not garbage — looks like Haswell texel-selection/precision behaviour on 64-bit texel gathers. Needs a Dawn-oracle comparison on this host before treating as a yawgpu bug. |
+| `builtin,textureLoad` | 286 | 2,001 | 264 `multisampled` (finding-4 territory, now visibly including float formats whose MSAA alpha default reads 0) + 1,737 `storage_textures_*` where **every single fail is `stage="v"`** (vertex-stage read-only storage textures read 0). **Pre-existing, not a regression:** the pre-round-2 build (dfcf93a HAL) fails the identical vertex-stage set, and lavapipe passes all of it. Driver-suspect (Haswell vertex-stage storage-image reads). Investigating it did expose a real spec gap — `stage_mask_for_layout(GENERAL)` lacked `VERTEX_SHADER` — fixed in round 4, which does not change the ANV outcome. |
+| `memory_sync,texture,readonly_depth_stencil` | 4 | **1** | Remaining fail is `depthReadOnly=false;stencilReadOnly=true` (write depth while sampling read-only stencil) — consistent with known-gap 3 (whole-image layout tracking cannot express split per-aspect layouts; would need `separateDepthStencilLayouts`). |
+
+Still to do on the Intel host: the two zero-dim-dispatch quarantined files
+(`api,validation,encoding,cmds,compute_pass`,
+`api,validation,encoding,programmable,pipeline_bind_group_compat`) — the round-1
+early-out should make them safe, but the failure mode if not is a whole-machine
+freeze, so run them deliberately; finding-4 diagnosis (validation layers on the
+multisampled-sint cases); and Dawn-oracle comparisons for the three driver-suspect
+signatures above (default-alpha swizzle, rg32float gather, alpha-to-coverage).
 
 ## Known related gaps (noted during the 2026-07-04 implementation review)
 
