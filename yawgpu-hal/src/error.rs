@@ -70,6 +70,16 @@ pub enum HalError {
         /// Message variant.
         message: &'static str,
     },
+    #[error("HAL texture creation failed: {backend}: {message}")]
+    /// Texture creation failed variant. Carries a dynamic message so the
+    /// error can name the concrete descriptor values (e.g. the format and
+    /// sample count rejected by a device-capability check).
+    TextureCreationFailed {
+        /// Backend variant.
+        backend: &'static str,
+        /// Message describing the rejected descriptor.
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -86,6 +96,20 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "HAL queue submission failed: vulkan: vkQueueSubmit failed: ERROR_OUT_OF_DEVICE_MEMORY"
+        );
+    }
+
+    #[test]
+    fn texture_creation_failed_display_includes_backend_and_message() {
+        let error = HalError::TextureCreationFailed {
+            backend: "vulkan",
+            message: "sample count 4 not supported for R8Sint on this device".to_string(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "HAL texture creation failed: vulkan: \
+             sample count 4 not supported for R8Sint on this device"
         );
     }
 }

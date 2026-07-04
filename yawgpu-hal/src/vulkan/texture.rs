@@ -213,6 +213,36 @@ pub(super) fn create_texture(
     };
     let bgra8_storage_vk_format = bgra8_storage_view_format(descriptor.format, descriptor.usage);
     let image_flags = texture_image_flags(descriptor.dimension, bgra8_storage_vk_format.is_some());
+    let tiling = vk::ImageTiling::OPTIMAL;
+    let usage = map_texture_usage(descriptor.usage, descriptor.format);
+    // Multisampled images must only be created with a sample count the device
+    // reports for this exact (format, type, tiling, usage, flags) combination;
+    // calling vkCreateImage with an unsupported count violates
+    // VUID-VkImageCreateInfo-samples-02258 (undefined behavior). Seen on Intel
+    // Haswell (hasvk), where sampledImageIntegerSampleCounts is
+    // SAMPLE_COUNT_1_BIT only (CTS finding F-147).
+    if descriptor.sample_count > 1 {
+        let supported = unsafe {
+            device
+                ._instance
+                .instance
+                .get_physical_device_image_format_properties(
+                    device.physical_device,
+                    format,
+                    image_type,
+                    tiling,
+                    usage,
+                    image_flags,
+                )
+        }
+        .map(|properties| properties.sample_counts);
+        check_sample_count_support(
+            supported,
+            descriptor.format,
+            descriptor.sample_count,
+            samples,
+        )?;
+    }
     let image_format_list_formats = device
         .image_format_list
         .then(|| bgra8_storage_view_format_list(descriptor.format, descriptor.usage))
@@ -226,8 +256,8 @@ pub(super) fn create_texture(
         .mip_levels(descriptor.mip_level_count)
         .array_layers(array_layers)
         .samples(samples)
-        .tiling(vk::ImageTiling::OPTIMAL)
-        .usage(map_texture_usage(descriptor.usage, descriptor.format))
+        .tiling(tiling)
+        .usage(usage)
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .initial_layout(vk::ImageLayout::UNDEFINED);
     if let Some(formats) = image_format_list_formats.as_ref() {
@@ -423,6 +453,43 @@ fn sample_count_flags(sample_count: u32) -> Result<vk::SampleCountFlags, HalErro
         1 => Ok(vk::SampleCountFlags::TYPE_1),
         4 => Ok(vk::SampleCountFlags::TYPE_4),
         _ => Err(texture_error("unsupported texture sample count")),
+    }
+}
+
+/// Validates a requested multisample count against the device capability
+/// query performed before `vkCreateImage`.
+///
+/// `supported` is the outcome of `vkGetPhysicalDeviceImageFormatProperties`
+/// for the exact (format, type, tiling, usage, flags) combination about to be
+/// used: the supported `sampleCounts` mask on success, or the raw Vulkan
+/// error (`VK_ERROR_FORMAT_NOT_SUPPORTED` when the combination is not
+/// supported at all). Creating an image whose sample count is missing from
+/// that mask violates VUID-VkImageCreateInfo-samples-02258 (undefined
+/// behavior), so both the missing-bit and format-not-supported cases return a
+/// `HalError` naming the format and sample count instead (CTS finding F-147).
+fn check_sample_count_support(
+    supported: Result<vk::SampleCountFlags, vk::Result>,
+    format: HalTextureFormat,
+    sample_count: u32,
+    requested: vk::SampleCountFlags,
+) -> Result<(), HalError> {
+    match supported {
+        Ok(mask) if mask.contains(requested) => Ok(()),
+        Ok(_) | Err(vk::Result::ERROR_FORMAT_NOT_SUPPORTED) => {
+            Err(HalError::TextureCreationFailed {
+                backend: BACKEND,
+                message: format!(
+                    "sample count {sample_count} not supported for {format:?} on this device"
+                ),
+            })
+        }
+        Err(error) => Err(HalError::TextureCreationFailed {
+            backend: BACKEND,
+            message: format!(
+                "image format properties query failed for {format:?} \
+                 (sample count {sample_count}): {error:?}"
+            ),
+        }),
     }
 }
 
@@ -867,6 +934,72 @@ mod tests {
             render_attachment: false,
             transient: false,
         }));
+    }
+
+    /// Happy path: the requested sample-count bit is present in the mask
+    /// reported by the device, so image creation may proceed.
+    #[test]
+    fn check_sample_count_support_accepts_supported_bit() {
+        let supported = Ok(vk::SampleCountFlags::TYPE_1 | vk::SampleCountFlags::TYPE_4);
+        assert!(check_sample_count_support(
+            supported,
+            HalTextureFormat::R8Sint,
+            4,
+            vk::SampleCountFlags::TYPE_4,
+        )
+        .is_ok());
+    }
+
+    /// The hasvk case (CTS F-147): `sampledImageIntegerSampleCounts` is
+    /// SAMPLE_COUNT_1_BIT only, so a 4-sample sint image must be rejected
+    /// with an error naming the format and sample count — never passed on to
+    /// `vkCreateImage` (VUID-VkImageCreateInfo-samples-02258).
+    #[test]
+    fn check_sample_count_support_rejects_missing_bit_naming_format_and_count() {
+        let supported = Ok(vk::SampleCountFlags::TYPE_1);
+        let error = check_sample_count_support(
+            supported,
+            HalTextureFormat::R8Sint,
+            4,
+            vk::SampleCountFlags::TYPE_4,
+        )
+        .expect_err("missing sample-count bit must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("sample count 4"), "{message}");
+        assert!(message.contains("R8Sint"), "{message}");
+    }
+
+    /// A `VK_ERROR_FORMAT_NOT_SUPPORTED` query result means the whole
+    /// (format, type, tiling, usage, flags) combination is unsupported; it
+    /// must be rejected with the same format-and-count-naming error.
+    #[test]
+    fn check_sample_count_support_rejects_format_not_supported_query() {
+        let error = check_sample_count_support(
+            Err(vk::Result::ERROR_FORMAT_NOT_SUPPORTED),
+            HalTextureFormat::Rg32Sint,
+            4,
+            vk::SampleCountFlags::TYPE_4,
+        )
+        .expect_err("FORMAT_NOT_SUPPORTED must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("sample count 4"), "{message}");
+        assert!(message.contains("Rg32Sint"), "{message}");
+    }
+
+    /// Any other query failure (e.g. out-of-memory) must also surface as a
+    /// clean error rather than falling through to `vkCreateImage`.
+    #[test]
+    fn check_sample_count_support_rejects_other_query_errors() {
+        let error = check_sample_count_support(
+            Err(vk::Result::ERROR_OUT_OF_HOST_MEMORY),
+            HalTextureFormat::R8Sint,
+            4,
+            vk::SampleCountFlags::TYPE_4,
+        )
+        .expect_err("query failure must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("R8Sint"), "{message}");
+        assert!(message.contains("ERROR_OUT_OF_HOST_MEMORY"), "{message}");
     }
 
     #[test]
