@@ -395,6 +395,11 @@ itself a freeze-risk supervised run on the only affected hardware we have. The
 alternative is accepting permanent quarantine of indirect-zero-dim CTS files on
 Haswell (2 files today).
 
+**Decision (2026-07-05, user):** permanent quarantine — the predication workaround
+will NOT be implemented. Rationale: complexity and freeze-risk verification serve a
+single EOL GPU whose Vulkan support Mesa itself labels incomplete. This closes the
+zero-dim thread; the 0704 sweep's yawgpu-side work is complete.
+
 ## Known related gaps (noted during the 2026-07-04 implementation review)
 
 Observations from the fix-round implementation review, recorded so later CTS
