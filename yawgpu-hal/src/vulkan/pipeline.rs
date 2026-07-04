@@ -1671,11 +1671,14 @@ fn create_sampled_texture_image_view(
     // texture's format in that case; otherwise honor the view's own format.
     let view_format = sampled_texture_view_format(texture.format, bound.format);
     let (format, _) = map_texture_format(view_format)?;
+    // `view_format` (not the possibly aspect-specific `bound.format`) is the
+    // format that describes the channels the sampled view actually reads, so
+    // it drives the missing-channel swizzle substitution.
     let view_info = vk::ImageViewCreateInfo::default()
         .image(texture.inner()?.image)
         .view_type(sampled_texture_view_type(bound.dimension))
         .format(format)
-        .components(component_mapping(&bound.swizzle))
+        .components(sampled_component_mapping(&bound.swizzle, view_format))
         .subresource_range(sampled_texture_subresource_range(bound));
     unsafe { device.create_image_view(&view_info, None) }
         .map_err(|_| texture_error("sampled texture view creation failed"))
@@ -1743,6 +1746,78 @@ fn component_mapping(swizzle: &HalTextureComponentSwizzle) -> vk::ComponentMappi
         .g(component(swizzle.g))
         .b(component(swizzle.b))
         .a(component(swizzle.a))
+}
+
+/// Returns how many of the R/G/B/A source channels a color format stores
+/// (channel sets are always prefixes: R, RG, RGB, RGBA), or `None` for
+/// depth/stencil formats, whose sampled views keep their established
+/// pass-through swizzle behavior. Compressed (BC/ETC2/ASTC) formats decode to
+/// all four channels and count as RGBA; unknown/future formats also default to
+/// RGBA, which means "no substitution".
+fn color_format_channel_count(format: HalTextureFormat) -> Option<u32> {
+    if format_has_depth_aspect(format)
+        || format_has_stencil_aspect(format)
+        || format == HalTextureFormat::Unsupported
+    {
+        return None;
+    }
+    Some(match format {
+        HalTextureFormat::R8Unorm
+        | HalTextureFormat::R8Snorm
+        | HalTextureFormat::R8Uint
+        | HalTextureFormat::R8Sint
+        | HalTextureFormat::R16Unorm
+        | HalTextureFormat::R16Snorm
+        | HalTextureFormat::R16Uint
+        | HalTextureFormat::R16Sint
+        | HalTextureFormat::R16Float
+        | HalTextureFormat::R32Uint
+        | HalTextureFormat::R32Sint
+        | HalTextureFormat::R32Float => 1,
+        HalTextureFormat::Rg8Unorm
+        | HalTextureFormat::Rg8Snorm
+        | HalTextureFormat::Rg8Uint
+        | HalTextureFormat::Rg8Sint
+        | HalTextureFormat::Rg16Unorm
+        | HalTextureFormat::Rg16Snorm
+        | HalTextureFormat::Rg16Uint
+        | HalTextureFormat::Rg16Sint
+        | HalTextureFormat::Rg16Float
+        | HalTextureFormat::Rg32Uint
+        | HalTextureFormat::Rg32Sint
+        | HalTextureFormat::Rg32Float => 2,
+        HalTextureFormat::Rg11b10Ufloat | HalTextureFormat::Rgb9e5Ufloat => 3,
+        _ => 4,
+    })
+}
+
+/// Maps the WebGPU swizzle onto `VkComponentMapping` for a sampled view,
+/// substituting the WebGPU-defined default read value for source channels the
+/// view's color format does not store: missing G/B read 0, missing A reads 1
+/// (`VK_COMPONENT_SWIZZLE_ONE` is typed — integer 1 for integer formats, 1.0
+/// for float — exactly the WebGPU default). Relying on the hardware default
+/// instead is non-deterministic: ANV (Haswell) returns the f32 1.0 bit
+/// pattern for the missing alpha of integer formats.
+fn sampled_component_mapping(
+    swizzle: &HalTextureComponentSwizzle,
+    view_format: HalTextureFormat,
+) -> vk::ComponentMapping {
+    let Some(channels) = color_format_channel_count(view_format) else {
+        // Depth/stencil sampled views keep the mapping untouched.
+        return component_mapping(swizzle);
+    };
+    let substitute = |component: HalComponentSwizzle| match component {
+        HalComponentSwizzle::G if channels < 2 => HalComponentSwizzle::Zero,
+        HalComponentSwizzle::B if channels < 3 => HalComponentSwizzle::Zero,
+        HalComponentSwizzle::A if channels < 4 => HalComponentSwizzle::One,
+        other => other,
+    };
+    component_mapping(&HalTextureComponentSwizzle {
+        r: substitute(swizzle.r),
+        g: substitute(swizzle.g),
+        b: substitute(swizzle.b),
+        a: substitute(swizzle.a),
+    })
 }
 
 fn storage_texture_can_use_cached_bgra8_view(
@@ -2156,6 +2231,97 @@ mod tests {
         assert_eq!(mapping.r, vk::ComponentSwizzle::ZERO);
         assert_eq!(mapping.g, vk::ComponentSwizzle::ONE);
         assert_eq!(mapping.b, vk::ComponentSwizzle::B);
+        assert_eq!(mapping.a, vk::ComponentSwizzle::A);
+    }
+
+    #[test]
+    fn color_format_channel_count_covers_representative_format_groups() {
+        let cases = [
+            (HalTextureFormat::R8Uint, Some(1)),
+            (HalTextureFormat::Rg16Sint, Some(2)),
+            (HalTextureFormat::Rg11b10Ufloat, Some(3)),
+            (HalTextureFormat::Rgb9e5Ufloat, Some(3)),
+            (HalTextureFormat::Rgba8Unorm, Some(4)),
+            (HalTextureFormat::Bgra8Unorm, Some(4)),
+            (HalTextureFormat::Rgb10a2Unorm, Some(4)),
+            // Compressed formats decode all four channels; no substitution.
+            (HalTextureFormat::Bc1RgbaUnorm, Some(4)),
+            (HalTextureFormat::Astc4x4Unorm, Some(4)),
+            // Depth/stencil sampled views keep pass-through swizzles.
+            (HalTextureFormat::Depth32Float, None),
+            (HalTextureFormat::Stencil8, None),
+            (HalTextureFormat::Depth24PlusStencil8, None),
+        ];
+
+        for (format, expected) in cases {
+            assert_eq!(color_format_channel_count(format), expected, "{format:?}");
+        }
+    }
+
+    #[test]
+    fn sampled_component_mapping_substitutes_missing_channels_with_defaults() {
+        // Identity swizzle on an R-only format: missing G/B read 0, missing A
+        // reads (typed) 1 instead of the hardware default.
+        let mapping = sampled_component_mapping(
+            &HalTextureComponentSwizzle::default(),
+            HalTextureFormat::R8Uint,
+        );
+        assert_eq!(mapping.r, vk::ComponentSwizzle::R);
+        assert_eq!(mapping.g, vk::ComponentSwizzle::ZERO);
+        assert_eq!(mapping.b, vk::ComponentSwizzle::ZERO);
+        assert_eq!(mapping.a, vk::ComponentSwizzle::ONE);
+
+        // Swizzle 'aaaa' on an R-only format: every output reads the missing
+        // alpha default 1.
+        let mapping = sampled_component_mapping(
+            &HalTextureComponentSwizzle {
+                r: HalComponentSwizzle::A,
+                g: HalComponentSwizzle::A,
+                b: HalComponentSwizzle::A,
+                a: HalComponentSwizzle::A,
+            },
+            HalTextureFormat::R8Uint,
+        );
+        assert_eq!(mapping.r, vk::ComponentSwizzle::ONE);
+        assert_eq!(mapping.g, vk::ComponentSwizzle::ONE);
+        assert_eq!(mapping.b, vk::ComponentSwizzle::ONE);
+        assert_eq!(mapping.a, vk::ComponentSwizzle::ONE);
+    }
+
+    #[test]
+    fn sampled_component_mapping_passes_through_present_channels_and_literals() {
+        // Identity on a full RGBA format is unchanged.
+        let mapping = sampled_component_mapping(
+            &HalTextureComponentSwizzle::default(),
+            HalTextureFormat::Rgba8Unorm,
+        );
+        assert_eq!(mapping.r, vk::ComponentSwizzle::R);
+        assert_eq!(mapping.g, vk::ComponentSwizzle::G);
+        assert_eq!(mapping.b, vk::ComponentSwizzle::B);
+        assert_eq!(mapping.a, vk::ComponentSwizzle::A);
+
+        // Explicit Zero/One literals are never rewritten, even on an R-only
+        // format.
+        let mapping = sampled_component_mapping(
+            &HalTextureComponentSwizzle {
+                r: HalComponentSwizzle::Zero,
+                g: HalComponentSwizzle::One,
+                b: HalComponentSwizzle::Zero,
+                a: HalComponentSwizzle::One,
+            },
+            HalTextureFormat::R8Uint,
+        );
+        assert_eq!(mapping.r, vk::ComponentSwizzle::ZERO);
+        assert_eq!(mapping.g, vk::ComponentSwizzle::ONE);
+        assert_eq!(mapping.b, vk::ComponentSwizzle::ZERO);
+        assert_eq!(mapping.a, vk::ComponentSwizzle::ONE);
+
+        // Depth formats keep the mapping untouched (pass-through).
+        let mapping = sampled_component_mapping(
+            &HalTextureComponentSwizzle::default(),
+            HalTextureFormat::Depth32Float,
+        );
+        assert_eq!(mapping.g, vk::ComponentSwizzle::G);
         assert_eq!(mapping.a, vk::ComponentSwizzle::A);
     }
 
