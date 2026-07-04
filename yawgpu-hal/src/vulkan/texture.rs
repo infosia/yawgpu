@@ -583,7 +583,13 @@ pub(super) fn stage_mask_for_layout(layout: vk::ImageLayout) -> vk::PipelineStag
                 | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS
         }
         vk::ImageLayout::GENERAL => {
-            vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::FRAGMENT_SHADER
+            // WebGPU allows (read-only) storage textures in the vertex stage
+            // too; without VERTEX_SHADER the transfer-write → vertex-read
+            // dependency is never established and vertex-stage textureLoad
+            // observes stale data on real hardware (seen on ANV/Haswell).
+            vk::PipelineStageFlags::VERTEX_SHADER
+                | vk::PipelineStageFlags::FRAGMENT_SHADER
+                | vk::PipelineStageFlags::COMPUTE_SHADER
         }
         vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => {
             vk::PipelineStageFlags::VERTEX_SHADER
@@ -747,18 +753,22 @@ mod tests {
     }
 
     /// The storage-bound tracked state must map to `GENERAL` with shader
-    /// read/write access covering the fragment stage, matching the layout the
-    /// storage-texture descriptors declare. The fragment stage is what lets a
-    /// render pass transition a fragment-stage storage texture to `GENERAL`
-    /// before it begins (barriers are illegal inside a render pass instance).
+    /// read/write access covering every shader stage that can bind a storage
+    /// texture (vertex read-only, fragment, compute), matching the layout the
+    /// storage-texture descriptors declare. The graphics stages are what let a
+    /// render pass transition a storage texture to `GENERAL` before it begins
+    /// (barriers are illegal inside a render pass instance); omitting the
+    /// vertex stage broke transfer-write → vertex-read dependencies on real
+    /// hardware (ANV/Haswell textureLoad regressions).
     #[test]
-    fn general_state_maps_to_storage_layout_access_and_fragment_stage() {
+    fn general_state_maps_to_storage_layout_access_and_shader_stages() {
         let layout = image_layout(IMAGE_LAYOUT_GENERAL);
         assert_eq!(layout, vk::ImageLayout::GENERAL);
         let access = access_mask_for_layout(layout);
         assert!(access.contains(vk::AccessFlags::SHADER_READ));
         assert!(access.contains(vk::AccessFlags::SHADER_WRITE));
         let stages = stage_mask_for_layout(layout);
+        assert!(stages.contains(vk::PipelineStageFlags::VERTEX_SHADER));
         assert!(stages.contains(vk::PipelineStageFlags::FRAGMENT_SHADER));
         assert!(stages.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
     }
