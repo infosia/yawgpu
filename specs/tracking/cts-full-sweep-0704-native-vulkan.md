@@ -373,6 +373,28 @@ carries the format/sample-count message) is dispatched correctly per
 `dispatch_hal_allocation_error` but is not the error the CTS case reports —
 harness-side reporting nuance, no further yawgpu action.
 
+## Zero-dim dispatch supervised re-try (2026-07-05): direct fixed, INDIRECT still wedges
+
+The user re-tried the quarantined `compute_pass` file on the Haswell host with the
+round-1 early-out in place — **immediate whole-machine freeze again** (rebooted).
+Analysis: `dispatch_sizes` combines `dispatchType ∈ {direct, indirect}`; the round-1
+early-out covers only direct dispatches (by design — indirect dims live in a GPU
+buffer), so the first `vkCmdDispatchIndirect` whose args contain a zero dimension is
+the trigger. **The ANV-Haswell zero-dim wedge covers indirect dispatches too.** Both
+CTS files remain quarantined on that host.
+
+Possible durable fix (NOT yet a task — needs a scope decision): hasvk exposes
+`VK_EXT_conditional_rendering` (rev 2), which predicates `vkCmdDispatchIndirect`.
+Sketch: on affected hardware (quirk-gated), before an indirect dispatch, run a
+one-workgroup predicate shader reading the 3 indirect u32s and writing
+`pred = (x && y && z)` to a scratch buffer, barrier, then wrap the real dispatch in
+`vkCmdBeginConditionalRenderingEXT`/`End`. Zero-dim dispatches get culled before the
+broken hardware path. Costs: predicate pipeline + scratch buffer management +
+extension enable + quirk detection, and verifying it actually dodges the wedge is
+itself a freeze-risk supervised run on the only affected hardware we have. The
+alternative is accepting permanent quarantine of indirect-zero-dim CTS files on
+Haswell (2 files today).
+
 ## Known related gaps (noted during the 2026-07-04 implementation review)
 
 Observations from the fix-round implementation review, recorded so later CTS
