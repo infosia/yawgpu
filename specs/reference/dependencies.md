@@ -116,8 +116,9 @@ Rules:
   (decided); Tier 2 stays on `rev` (SHA) pins. Cargo.lock records the SHA,
   so reproducibility equals tag pinning.
 - A `naga` bump is its own slice: bump `rev` → run the full Noop
-  validation suite → log in `specs/tracking/phase-N.md`. The ported Dawn
-  tests are the regression gate.
+  validation suite → log in the area's tracking doc
+  (`specs/tracking/<topic>.md`). The ported Dawn tests are the
+  regression gate.
 - Each bump records here: new SHA, the gfx-rs upstream version it sits on,
   date, and reason.
 

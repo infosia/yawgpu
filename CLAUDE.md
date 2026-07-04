@@ -135,7 +135,9 @@ fork workflow is obsolete.)
    when the API spans multiple objects and the unit test cannot
    reach the cross-object interaction (or port the Dawn test if
    it materially closes a spec-conformance gap).
-5. Verify on Noop; log in `specs/tracking/phase-N.md`.
+5. Verify on Noop; log in the area's tracking doc
+   (`specs/tracking/<topic>.md`). Per-phase `phase-N.md` logs are no
+   longer written.
 6. Refactor for reuse/clarity before moving on.
 
 **Every phase ends with a mandatory Phase Review ("Clean Review Then

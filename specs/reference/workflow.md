@@ -7,11 +7,17 @@ Implementation is performed by a **separate coding agent**. Claude acts as
 
 | Actor | Responsibilities |
 |---|---|
-| **Claude** (planner/orchestrator) | Author & maintain `specs/` (SPEC, blocks, tracking, this doc); decompose each phase into a self-contained **task handoff**; review the coding agent's diff against acceptance criteria; run/inspect `cargo build` & `cargo test`; manage version control (`git init`, `git add`, `git commit`); update `tracking/phase-N.md` and the `dawn-test-mapping.md` status column; decide go/no-go for the next slice. |
+| **Claude** (planner/orchestrator) | Author & maintain `specs/` (SPEC, blocks, tracking, this doc); decompose each phase into a self-contained **task handoff**; review the coding agent's diff against acceptance criteria; run/inspect `cargo build` & `cargo test`; manage version control (`git init`, `git add`, `git commit`); update the area's `tracking/<topic>.md` doc and the `dawn-test-mapping.md` status column; decide go/no-go for the next slice. |
 | **Coding agent** (implementer) | Read the assigned task handoff + referenced block spec + Dawn source; write the code and the ported tests; make `cargo test` green on Noop; report what it changed. Does **not** edit `specs/`, commit, or change scope. |
 
 Claude does **not** write production code itself; it writes specs, reviews,
 and integrates. The coding agent does **not** plan or commit.
+
+Tracking convention (since 2026-07-04): work is logged in **per-topic**
+tracking docs, `tracking/<topic>.md` (e.g. `adapter-limits.md`,
+`cts-coverage.md`). Per-phase `tracking/phase-N.md` logs are no longer
+written; the historical ones were removed from the repository and its
+history.
 
 ## Per-slice loop
 
@@ -28,14 +34,14 @@ A "slice" is one Dawn test file (or, for Phase 0, one scaffold deliverable).
    - conventions in `CLAUDE.md` honoured,
    - `cargo build` + `cargo test` clean on Noop.
    On failure: return a revision handoff. Do not fix it inline.
-4. **Integrate (Claude)** — update `tracking/phase-N.md` and the status
-   column in `dawn-test-mapping.md`; `git add` + `git commit` with a message
-   referencing the phase and Dawn file.
+4. **Integrate (Claude)** — update the area's `tracking/<topic>.md` and the
+   status column in `dawn-test-mapping.md`; `git add` + `git commit` with a
+   message referencing the phase and Dawn file.
 
 ## Task handoff template
 
-Claude produces one of these per slice (kept in `tracking/phase-N.md` or
-inline when dispatching the coding agent):
+Claude produces one of these per slice (kept in the area's
+`tracking/<topic>.md` or inline when dispatching the coding agent):
 
 ```
 ## Task: <area> — port <DawnFile>ValidationTests
@@ -120,8 +126,8 @@ issues that a context-primed reviewer rationalizes away.
    - **MINOR** — naming, dead code, redundant work, doc/comment gaps,
      non-idiomatic but correct code.
 2. **Triage (Claude).** Drop false positives with a one-line written
-   reason; keep the rest. Anything dropped is recorded in
-   `tracking/phase-N.md`.
+   reason; keep the rest. Anything dropped is recorded in the area's
+   `tracking/<topic>.md`.
 3. **Fix in severity order.** CRITICAL first, then MAJOR, then MINOR.
    Production-code fixes go to the **coding agent** via a fix handoff
    (Claude does not write production code); spec fixes are Claude's.
@@ -130,11 +136,11 @@ issues that a context-primed reviewer rationalizes away.
    severity tier.
 4. **Gate.** Phase cannot be marked COMPLETE while any **CRITICAL** or
    **MAJOR** finding is open. **MINOR** may be deferred only with an
-   explicit written rationale logged in `tracking/phase-N.md` (and a
-   rule/Defer marker if it maps to one).
-5. **Log.** `tracking/phase-N.md` records: the finding list with
-   severities + file:line, triage decisions, the fix commits, and the
-   final gate result. Commit: `phase-N: phase review — <n> findings
+   explicit written rationale logged in the area's `tracking/<topic>.md`
+   (and a rule/Defer marker if it maps to one).
+5. **Log.** The area's `tracking/<topic>.md` records: the finding list
+   with severities + file:line, triage decisions, the fix commits, and
+   the final gate result. Commit: `phase-N: phase review — <n> findings
    (<c> CRITICAL / <m> MAJOR / <k> MINOR) fixed`.
 
 The Clean Review reviewer is a throwaway subagent per phase (no memory of

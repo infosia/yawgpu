@@ -10,14 +10,15 @@ Rust. See `reference/dawn-test-mapping.md` for the per-file port plan.
 Implementation is done by a **separate coding agent**; Claude plans,
 reviews, and commits. See `reference/workflow.md` for roles, the per-slice
 loop, and the task-handoff template. Each phase is decomposed into
-self-contained task handoffs recorded in `tracking/phase-N.md`.
+self-contained task handoffs recorded in per-topic tracking docs
+(`tracking/<topic>.md`).
 
 ## Phased roadmap
 
 Each phase: write `blocks/<area>.md`, emit task handoffs, the coding agent
 ports the Dawn test(s) as failing Rust tests and implements minimally on
-Noop, Claude reviews against acceptance criteria and commits, log in
-`tracking/phase-N.md`. **Each phase then ends with a mandatory Phase
+Noop, Claude reviews against acceptance criteria and commits, log in the
+area's `tracking/<topic>.md`. **Each phase then ends with a mandatory Phase
 Review ("Clean Review Then Fix")** — a fresh no-context subagent emits
 `CRITICAL`/`MAJOR`/`MINOR` findings, fixed in severity order; no phase is
 COMPLETE with an open CRITICAL/MAJOR (see `reference/workflow.md`).
