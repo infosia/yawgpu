@@ -325,6 +325,13 @@ scope than previously recorded:
   present — no 06341; `vertexPipelineStoresAndAtomics=false` is irrelevant
   to reads). All three are therefore driver/hardware-suspect
   (webgpu-native-cts F-148/F-149/F-150); no yawgpu action.
+  2026-07-05 postscript: a Dawn-oracle build on the host confirmed F-149
+  byte-identically (same 30 cases / 90 records / message → driver defect,
+  yawgpu exonerated). F-148/F-150 remain driver-suspect on the
+  validation-clean + lavapipe evidence; the user closed further ANV-host
+  investigation (a Dawn `builtin,textureGather` run froze the box — a
+  Dawn-on-hasvk hazard of its own — and the host is not worth more
+  freeze-risk digging). **The 2026-07-04 sweep triage is fully closed.**
 
 ## Task: vulkan — sample-count capability check at texture creation (finding 4 / CTS F-147)
 
