@@ -412,13 +412,6 @@ fn create_render_fbo(
     gl: &glow::Context,
     pass: &HalRenderPass,
 ) -> Result<glow::Framebuffer, HalError> {
-    validate_render_pass_color_target_slot(pass)?;
-    if pass.color_targets.iter().flatten().count() > 1 {
-        return Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "GLES render pass supports at most one color attachment",
-        });
-    }
     if pass
         .color_targets
         .iter()
@@ -430,19 +423,39 @@ fn create_render_fbo(
             message: "GLES render pass does not support multisample/resolve",
         });
     }
-    let color_target = pass
+    // T-G8 (MRT): resolve every color slot up front -- `Some` slots must be
+    // 2D GLES textures with a live GL name; `None` slots stay sparse and get
+    // `GL_NONE` in the glDrawBuffers list below. Hoisting the per-target
+    // checks before `glCreateFramebuffer` keeps every error path free of FBO
+    // cleanup.
+    let color_targets = pass
         .color_targets
         .iter()
-        .flatten()
-        .next()
-        .map(|target| match &target.texture {
-            HalTexture::Gles(texture) => Ok(texture),
-            _ => Err(HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "render pass color target is not a GLES texture",
-            }),
+        .map(|slot| {
+            let Some(target) = slot else {
+                return Ok(None);
+            };
+            let HalTexture::Gles(texture) = &target.texture else {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "render pass color target is not a GLES texture",
+                });
+            };
+            if texture.meta().target != glow::TEXTURE_2D {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "GLES render pass supports only 2D color attachments",
+                });
+            }
+            Ok(Some((target, texture, texture.raw_or_err()?)))
         })
-        .transpose()?;
+        .collect::<Result<Vec<_>, HalError>>()?;
+    // Trailing `None` slots need no glDrawBuffers entry; truncating to the
+    // last attachment keeps the list within the driver's draw-buffer limit.
+    let attachment_count = color_targets
+        .iter()
+        .rposition(Option::is_some)
+        .map_or(0, |last| last + 1);
     let depth_stencil_target = pass
         .depth_stencil_attachment
         .as_ref()
@@ -454,13 +467,16 @@ fn create_render_fbo(
             }),
         })
         .transpose()?;
-    let size_texture =
-        color_target
-            .or(depth_stencil_target)
-            .ok_or(HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "render pass requires an attachment",
-            })?;
+    let size_texture = color_targets
+        .iter()
+        .flatten()
+        .map(|(_, texture, _)| *texture)
+        .next()
+        .or(depth_stencil_target)
+        .ok_or(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "render pass requires an attachment",
+        })?;
     let width = i32_from_u32(
         size_texture.meta().width,
         "render target width exceeds GLES limit",
@@ -471,6 +487,19 @@ fn create_render_fbo(
     )?;
 
     unsafe {
+        // T-G8 (MRT): GLES 3.1 guarantees at least 4 color attachments /
+        // draw buffers; WebGPU's maxColorAttachments caps the useful range
+        // at 8. Anything beyond the driver limit cannot be attached.
+        let max_draw_buffers = gl
+            .get_parameter_i32(glow::MAX_COLOR_ATTACHMENTS)
+            .min(gl.get_parameter_i32(glow::MAX_DRAW_BUFFERS))
+            .clamp(0, 8) as usize;
+        if attachment_count > max_draw_buffers {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES render pass color attachment count exceeds the driver draw-buffer limit",
+            });
+        }
         let fbo = gl
             .create_framebuffer()
             .map_err(|_| HalError::BufferOperationFailed {
@@ -478,28 +507,24 @@ fn create_render_fbo(
                 message: "glCreateFramebuffer failed (render)",
             })?;
         gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
-        if let Some(target_texture) = color_target {
-            let color_texture = target_texture.raw_or_err()?;
-            let meta = target_texture.meta();
-            if meta.target != glow::TEXTURE_2D {
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
-                gl.delete_framebuffer(fbo);
-                return Err(HalError::BufferOperationFailed {
-                    backend: BACKEND,
-                    message: "GLES render pass supports only 2D color attachments",
-                });
-            }
+        let mut draw_buffer_list = Vec::with_capacity(attachment_count);
+        for (index, slot) in color_targets.iter().take(attachment_count).enumerate() {
+            let Some((_, _, color_texture)) = slot else {
+                // Sparse slot: nothing attached, fragment output discarded.
+                draw_buffer_list.push(glow::NONE);
+                continue;
+            };
+            let attachment = glow::COLOR_ATTACHMENT0 + index as u32;
             gl.framebuffer_texture_2d(
                 glow::DRAW_FRAMEBUFFER,
-                glow::COLOR_ATTACHMENT0,
+                attachment,
                 glow::TEXTURE_2D,
-                Some(color_texture),
+                Some(*color_texture),
                 0,
             );
-            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
-        } else {
-            gl.draw_buffers(&[]);
+            draw_buffer_list.push(attachment);
         }
+        gl.draw_buffers(&draw_buffer_list);
         if let (Some(attachment), Some(target_texture)) =
             (&pass.depth_stencil_attachment, depth_stencil_target)
         {
@@ -569,37 +594,42 @@ fn create_render_fbo(
             gl.disable(glow::SCISSOR_TEST);
         }
         let mut clear_mask = 0;
-        if let Some(color) = pass.color_targets.iter().flatten().next() {
+        // T-G8 (MRT): each attachment carries its own load op and clear
+        // value, so clears go through the per-draw-buffer `glClearBuffer*`
+        // entry points rather than a single global `glClearColor`+`glClear`.
+        // Integer attachments additionally *require* the typed
+        // `glClearBuffer{i,u}iv` variants (`glClear` is undefined for
+        // integer formats, T-G7).
+        for (index, slot) in color_targets.iter().enumerate() {
+            let Some((color, _, _)) = slot else {
+                continue;
+            };
+            if !matches!(color.load_op, HalRenderLoadOp::Clear) {
+                continue;
+            }
+            let draw_buffer = index as u32;
             let [r, g, b, a] = color.clear_color;
-            // Integer attachments have no `glClearColor`+`glClear` semantics:
-            // clearing them requires the typed `glClearBuffer{i,u}iv` entry
-            // points on the attachment's draw-buffer index (0 -- the GLES
-            // render pass supports a single color attachment). Float and
-            // normalized attachments keep the existing `glClearColor` path.
             match color_clear_kind(color.view_format) {
                 GlesClearKind::Float => {
-                    gl.clear_color(r as f32, g as f32, b as f32, a as f32);
-                    if matches!(color.load_op, HalRenderLoadOp::Clear) {
-                        clear_mask |= glow::COLOR_BUFFER_BIT;
-                    }
+                    gl.clear_buffer_f32_slice(
+                        glow::COLOR,
+                        draw_buffer,
+                        &[r as f32, g as f32, b as f32, a as f32],
+                    );
                 }
                 GlesClearKind::Sint => {
-                    if matches!(color.load_op, HalRenderLoadOp::Clear) {
-                        gl.clear_buffer_i32_slice(
-                            glow::COLOR,
-                            0,
-                            &[r as i32, g as i32, b as i32, a as i32],
-                        );
-                    }
+                    gl.clear_buffer_i32_slice(
+                        glow::COLOR,
+                        draw_buffer,
+                        &[r as i32, g as i32, b as i32, a as i32],
+                    );
                 }
                 GlesClearKind::Uint => {
-                    if matches!(color.load_op, HalRenderLoadOp::Clear) {
-                        gl.clear_buffer_u32_slice(
-                            glow::COLOR,
-                            0,
-                            &[r as u32, g as u32, b as u32, a as u32],
-                        );
-                    }
+                    gl.clear_buffer_u32_slice(
+                        glow::COLOR,
+                        draw_buffer,
+                        &[r as u32, g as u32, b as u32, a as u32],
+                    );
                 }
             }
         }
@@ -626,21 +656,6 @@ fn create_render_fbo(
         }
         Ok(fbo)
     }
-}
-
-fn validate_render_pass_color_target_slot(pass: &HalRenderPass) -> Result<(), HalError> {
-    if pass
-        .color_targets
-        .iter()
-        .position(Option::is_some)
-        .is_some_and(|slot| slot > 0)
-    {
-        return Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "GLES render pass does not support a color attachment at a non-zero slot",
-        });
-    }
-    Ok(())
 }
 
 fn run_render_draw(
@@ -1838,37 +1853,60 @@ mod tests {
         );
     }
 
-    fn noop_render_texture() -> Result<HalTexture, HalError> {
-        let instance = crate::HalInstance::new_noop();
-        let adapter = instance
-            .enumerate_adapters()
-            .into_iter()
-            .next()
-            .expect("Noop instance yields one adapter");
-        let device = adapter.create_device()?;
-        device.create_texture(&crate::HalTextureDescriptor {
-            dimension: crate::HalTextureDimension::D2,
-            format: crate::HalTextureFormat::Rgba8Unorm,
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-            mip_level_count: 1,
-            sample_count: 1,
-            usage: crate::HalTextureUsage {
-                copy_src: true,
-                copy_dst: true,
-                texture_binding: false,
-                storage_binding: false,
-                render_attachment: true,
-                transient: false,
-            },
-        })
+    fn gles_device_or_skip(label: &str) -> Option<super::super::device::GlesDevice> {
+        let instance = match super::super::instance::GlesInstance::new() {
+            Ok(instance) => instance,
+            Err(error) => {
+                eprintln!("skipping {label}; backend unavailable: {error:?}");
+                return None;
+            }
+        };
+        let Some(adapter) = instance.enumerate_adapters().into_iter().next() else {
+            eprintln!("skipping {label}; no adapter available");
+            return None;
+        };
+        match adapter.create_device() {
+            Ok(device) => Some(device),
+            Err(error) => {
+                eprintln!("skipping {label}; device unavailable: {error:?}");
+                None
+            }
+        }
     }
 
-    fn render_color_target() -> Result<crate::HalRenderColorTarget, HalError> {
-        Ok(crate::HalRenderColorTarget {
-            texture: noop_render_texture()?,
-            view_format: crate::HalTextureFormat::Rgba8Unorm,
+    fn render_attachment_texture(
+        device: &super::super::device::GlesDevice,
+        format: crate::HalTextureFormat,
+    ) -> super::super::texture::GlesTexture {
+        device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format,
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: true,
+                    copy_dst: false,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: true,
+                    transient: false,
+                },
+            })
+            .expect("GLES render-attachment texture creation must succeed")
+    }
+
+    fn color_target_for(
+        texture: super::super::texture::GlesTexture,
+        view_format: crate::HalTextureFormat,
+        clear_color: [f64; 4],
+    ) -> crate::HalRenderColorTarget {
+        crate::HalRenderColorTarget {
+            texture: HalTexture::Gles(texture),
+            view_format,
             resolve_target: None,
             resolve_view_format: None,
             mip_level: 0,
@@ -1878,8 +1916,258 @@ mod tests {
             resolve_array_layer: 0,
             load_op: HalRenderLoadOp::Clear,
             store: true,
-            clear_color: [0.0, 0.0, 0.0, 1.0],
+            clear_color,
+        }
+    }
+
+    fn texture_to_buffer_copy(
+        texture: super::super::texture::GlesTexture,
+        format: crate::HalTextureFormat,
+        buffer: super::super::buffer::GlesBuffer,
+        bytes_per_row: u32,
+    ) -> HalCopy {
+        HalCopy::TextureToBuffer(HalBufferTextureCopy {
+            buffer: HalBuffer::Gles(buffer),
+            buffer_layout: crate::HalBufferTextureLayout {
+                offset: 0,
+                bytes_per_row,
+                rows_per_image: 1,
+            },
+            texture: HalTexture::Gles(texture),
+            format,
+            aspect: crate::HalTextureAspect::All,
+            mip_level: 0,
+            origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+            extent: crate::HalExtent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
         })
+    }
+
+    #[test]
+    fn submit_render_pass_clears_two_color_attachments_independently() {
+        // T-G8 (MRT): a clear-only pass with two color attachments must
+        // clear each attachment with its own clear value through the
+        // per-draw-buffer `glClearBuffer*` path (Rgba8Unorm via
+        // glClearBufferfv on draw buffer 0, R32Uint via glClearBufferuiv on
+        // draw buffer 1).
+        let Some(device) = gles_device_or_skip("GLES two-attachment clear test") else {
+            return;
+        };
+
+        let rgba_texture = render_attachment_texture(&device, crate::HalTextureFormat::Rgba8Unorm);
+        let uint_texture = render_attachment_texture(&device, crate::HalTextureFormat::R32Uint);
+        let rgba_readback = device
+            .create_buffer(
+                4,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES readback buffer creation must succeed");
+        let uint_readback = device
+            .create_buffer(
+                4,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES readback buffer creation must succeed");
+
+        let pass = render_pass(vec![
+            Some(color_target_for(
+                rgba_texture.clone(),
+                crate::HalTextureFormat::Rgba8Unorm,
+                [1.0, 0.0, 0.0, 1.0],
+            )),
+            Some(color_target_for(
+                uint_texture.clone(),
+                crate::HalTextureFormat::R32Uint,
+                [7.0, 0.0, 0.0, 1.0],
+            )),
+        ]);
+
+        device
+            .queue()
+            .submit_copies(&[
+                HalCopy::RenderPass(pass),
+                texture_to_buffer_copy(
+                    rgba_texture,
+                    crate::HalTextureFormat::Rgba8Unorm,
+                    rgba_readback.clone(),
+                    4,
+                ),
+                texture_to_buffer_copy(
+                    uint_texture,
+                    crate::HalTextureFormat::R32Uint,
+                    uint_readback.clone(),
+                    4,
+                ),
+            ])
+            .expect("clear-only pass with two color attachments plus readbacks must succeed");
+
+        assert_eq!(
+            rgba_readback
+                .read(0, 4)
+                .expect("reading back the Rgba8Unorm texel must succeed"),
+            [255, 0, 0, 255],
+            "attachment 0 must hold its own clear color"
+        );
+        let bytes = uint_readback
+            .read(0, 4)
+            .expect("reading back the R32Uint texel must succeed");
+        assert_eq!(
+            u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            7,
+            "attachment 1 must hold its own integer clear value"
+        );
+    }
+
+    #[test]
+    fn submit_render_pass_draws_into_two_color_attachments() {
+        // T-G8 (MRT): a render pipeline with two color targets sharing one
+        // write mask / blend state must create, and a draw whose fragment
+        // stage writes `layout(location = 0) out vec4` plus
+        // `layout(location = 1) out uvec4` must land in both attachments.
+        let Some(device) = gles_device_or_skip("GLES two-attachment draw test") else {
+            return;
+        };
+
+        let rgba_texture = render_attachment_texture(&device, crate::HalTextureFormat::Rgba8Unorm);
+        let uint_texture = render_attachment_texture(&device, crate::HalTextureFormat::R32Uint);
+        let rgba_readback = device
+            .create_buffer(
+                4,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES readback buffer creation must succeed");
+        let uint_readback = device
+            .create_buffer(
+                4,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES readback buffer creation must succeed");
+
+        let pipeline = device
+            .create_render_pipeline(
+                crate::HalShaderSource::GlslStages {
+                    // Full-viewport triangle from gl_VertexID; covers the
+                    // 1x1 attachments without vertex buffers.
+                    vertex: "#version 310 es\n\
+                             void main() {\n\
+                                 vec2 pos = vec2(float((gl_VertexID & 1) << 2) - 1.0,\n\
+                                                 float((gl_VertexID & 2) << 1) - 1.0);\n\
+                                 gl_Position = vec4(pos, 0.0, 1.0);\n\
+                             }\n"
+                        .to_owned(),
+                    fragment: Some(
+                        "#version 310 es\n\
+                         precision mediump float;\n\
+                         precision highp int;\n\
+                         layout(location = 0) out vec4 frag_color0;\n\
+                         layout(location = 1) out highp uvec4 frag_color1;\n\
+                         void main() {\n\
+                             frag_color0 = vec4(0.0, 1.0, 0.0, 1.0);\n\
+                             frag_color1 = uvec4(9u, 0u, 0u, 1u);\n\
+                         }\n"
+                            .to_owned(),
+                    ),
+                },
+                "main",
+                Some("main"),
+                &crate::HalRenderPipelineDescriptor {
+                    sample_count: 1,
+                    sample_mask: u32::MAX,
+                    alpha_to_coverage_enabled: false,
+                    color_targets: vec![
+                        Some(HalColorTargetState {
+                            format: crate::HalTextureFormat::Rgba8Unorm,
+                            blend: None,
+                            write_mask: 0xf,
+                        }),
+                        Some(HalColorTargetState {
+                            format: crate::HalTextureFormat::R32Uint,
+                            blend: None,
+                            write_mask: 0xf,
+                        }),
+                    ],
+                    depth_stencil: None,
+                    vertex_buffers: Vec::new(),
+                    primitive_topology: crate::HalPrimitiveTopology::TriangleList,
+                    front_face: HalFrontFace::Ccw,
+                    cull_mode: HalCullMode::None,
+                    unclipped_depth: false,
+                    needs_frag_depth_range_push_constant: false,
+                    user_immediate_size: 0,
+                },
+                &[],
+            )
+            .expect("GLES render pipeline with two color targets must create");
+
+        let mut pass = render_pass(vec![
+            Some(color_target_for(
+                rgba_texture.clone(),
+                crate::HalTextureFormat::Rgba8Unorm,
+                [0.0, 0.0, 0.0, 0.0],
+            )),
+            Some(color_target_for(
+                uint_texture.clone(),
+                crate::HalTextureFormat::R32Uint,
+                [0.0, 0.0, 0.0, 0.0],
+            )),
+        ]);
+        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
+        pass.draw = Some(HalDraw::Direct {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        });
+
+        device
+            .queue()
+            .submit_copies(&[
+                HalCopy::RenderPass(pass),
+                texture_to_buffer_copy(
+                    rgba_texture,
+                    crate::HalTextureFormat::Rgba8Unorm,
+                    rgba_readback.clone(),
+                    4,
+                ),
+                texture_to_buffer_copy(
+                    uint_texture,
+                    crate::HalTextureFormat::R32Uint,
+                    uint_readback.clone(),
+                    4,
+                ),
+            ])
+            .expect("draw into two color attachments plus readbacks must succeed");
+
+        assert_eq!(
+            rgba_readback
+                .read(0, 4)
+                .expect("reading back the Rgba8Unorm texel must succeed"),
+            [0, 255, 0, 255],
+            "fragment output 0 must land in attachment 0"
+        );
+        let bytes = uint_readback
+            .read(0, 4)
+            .expect("reading back the R32Uint texel must succeed");
+        assert_eq!(
+            u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            9,
+            "fragment output 1 must land in attachment 1"
+        );
     }
 
     fn render_pass(
@@ -1906,30 +2194,6 @@ mod tests {
             draw: None,
             immediate_data: Vec::new(),
         }
-    }
-
-    #[test]
-    fn validate_render_pass_color_target_slot_rejects_non_zero_color_slot() -> Result<(), HalError>
-    {
-        validate_render_pass_color_target_slot(&render_pass(vec![Some(render_color_target()?)]))?;
-        validate_render_pass_color_target_slot(&render_pass(vec![
-            Some(render_color_target()?),
-            None,
-        ]))?;
-
-        let error = validate_render_pass_color_target_slot(&render_pass(vec![
-            None,
-            Some(render_color_target()?),
-        ]))
-        .expect_err("GLES must reject a render target at slot 1");
-        assert!(matches!(
-            error,
-            HalError::BufferOperationFailed {
-                backend: "gles",
-                message: "GLES render pass does not support a color attachment at a non-zero slot",
-            }
-        ));
-        Ok(())
     }
 
     #[test]

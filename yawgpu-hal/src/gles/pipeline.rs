@@ -154,6 +154,10 @@ impl GlesRenderPipeline {
                 device,
                 program: Ok(program),
                 vertex_buffers: descriptor.vertex_buffers,
+                // T-G8 (MRT): validation above guarantees every color target
+                // shares one write mask and one blend state, so the first
+                // `Some` target fully describes the global GL color state
+                // applied at draw time (GLES 3.1 has no indexed variants).
                 color_target: descriptor.color_targets.iter().copied().flatten().next(),
                 depth_stencil: descriptor.depth_stencil,
                 primitive_topology: descriptor.primitive_topology,
@@ -178,6 +182,10 @@ impl GlesRenderPipeline {
         &self.inner.vertex_buffers
     }
 
+    /// Returns the shared color-target state (first `Some` target).
+    /// Descriptor validation rejects divergent per-target write masks and
+    /// blend state on GLES 3.1, so this single state drives the global
+    /// `glColorMask`/`glBlendFunc*` calls for every attachment.
     #[must_use]
     pub(super) fn color_target(&self) -> Option<HalColorTargetState> {
         self.inner.color_target
@@ -267,23 +275,6 @@ fn build_compute_program(
 fn validate_render_pipeline_descriptor(
     descriptor: &HalRenderPipelineDescriptor,
 ) -> Result<(), HalError> {
-    if descriptor.color_targets.iter().flatten().count() > 1 {
-        return Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "GLES render pipeline supports at most one color target",
-        });
-    }
-    if descriptor
-        .color_targets
-        .iter()
-        .position(Option::is_some)
-        .is_some_and(|slot| slot > 0)
-    {
-        return Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "GLES render pipeline does not support a color attachment at a non-zero slot",
-        });
-    }
     if descriptor.sample_count > 1 {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
@@ -308,6 +299,14 @@ fn validate_render_pipeline_descriptor(
             message: "GLES render pipeline does not support unclipped depth",
         });
     }
+    // T-G8 (MRT): GLES 3.1 core has no indexed per-draw-buffer state --
+    // `glColorMaski` / `glBlendFunci` / `glEnablei(GL_BLEND, i)` arrive only
+    // with ES 3.2 / EXT_draw_buffers_indexed -- so write mask and blend state
+    // apply globally to every draw buffer. Pipelines whose color targets all
+    // share one write mask and one blend state map cleanly; divergent
+    // per-target state is a Tier-2 HAL rejection (catalogued in
+    // specs/blocks/67-gles-backend.md, "WebGPU x GLES mapping matrix").
+    let first_target = descriptor.color_targets.iter().flatten().next();
     for target in descriptor.color_targets.iter().flatten() {
         if !is_color_renderable(target.format) {
             return Err(HalError::BufferOperationFailed {
@@ -320,6 +319,20 @@ fn validate_render_pipeline_descriptor(
                 backend: BACKEND,
                 message: "GLES render pipeline does not support dual-source blend factors",
             });
+        }
+        if let Some(first) = first_target {
+            if target.write_mask != first.write_mask {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "GLES 3.1 cannot apply per-target write masks",
+                });
+            }
+            if target.blend != first.blend {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "GLES 3.1 cannot apply per-target blend state",
+                });
+            }
         }
     }
     if !descriptor.color_targets.iter().any(Option::is_some) && descriptor.depth_stencil.is_none() {
@@ -505,28 +518,74 @@ mod tests {
     }
 
     #[test]
-    fn validate_render_pipeline_descriptor_rejects_non_zero_color_slot() {
+    fn validate_render_pipeline_descriptor_accepts_multiple_and_sparse_color_targets() {
+        // T-G8 (MRT): multiple color targets and sparse (None) slots are
+        // mappable via glDrawBuffers on GLES 3.1 and must validate.
         assert!(validate_render_pipeline_descriptor(&render_descriptor(vec![
             Some(color_target())
         ]))
         .is_ok());
         assert!(validate_render_pipeline_descriptor(&render_descriptor(vec![
             Some(color_target()),
-            None,
+            Some(color_target()),
         ]))
         .is_ok());
-
-        let error = validate_render_pipeline_descriptor(&render_descriptor(vec![
+        assert!(validate_render_pipeline_descriptor(&render_descriptor(vec![
             None,
             Some(color_target()),
         ]))
-        .expect_err("GLES must reject a real color target at slot 1");
+        .is_ok());
+        assert!(validate_render_pipeline_descriptor(&render_descriptor(vec![
+            Some(color_target()),
+            None,
+            Some(color_target()),
+        ]))
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_render_pipeline_descriptor_rejects_divergent_per_target_state() {
+        // T-G8 (MRT): GLES 3.1 has no indexed glColorMaski/glBlendFunci, so
+        // write mask and blend state must be identical across all color
+        // targets; divergence is a Tier-2 HAL rejection.
+        let mut masked = color_target();
+        masked.write_mask = 0x7;
+        let error = validate_render_pipeline_descriptor(&render_descriptor(vec![
+            Some(color_target()),
+            Some(masked),
+        ]))
+        .expect_err("divergent per-target write masks must be rejected");
         assert!(matches!(
             error,
             HalError::BufferOperationFailed {
                 backend: "gles",
-                message:
-                    "GLES render pipeline does not support a color attachment at a non-zero slot",
+                message: "GLES 3.1 cannot apply per-target write masks",
+            }
+        ));
+
+        let mut blended = color_target();
+        blended.blend = Some(crate::HalBlendState {
+            color: crate::HalBlendComponent {
+                operation: crate::HalBlendOperation::Add,
+                src_factor: crate::HalBlendFactor::One,
+                dst_factor: crate::HalBlendFactor::Zero,
+            },
+            alpha: crate::HalBlendComponent {
+                operation: crate::HalBlendOperation::Add,
+                src_factor: crate::HalBlendFactor::One,
+                dst_factor: crate::HalBlendFactor::Zero,
+            },
+        });
+        let error = validate_render_pipeline_descriptor(&render_descriptor(vec![
+            Some(color_target()),
+            Some(blended),
+        ]))
+        .expect_err("divergent per-target blend state must be rejected");
+        assert!(matches!(
+            error,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message: "GLES 3.1 cannot apply per-target blend state",
             }
         ));
     }
