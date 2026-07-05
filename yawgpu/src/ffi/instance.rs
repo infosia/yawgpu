@@ -311,7 +311,12 @@ pub unsafe extern "C" fn wgpuInstanceCreateSurface(
     }))
 }
 
-/// Requests a Noop adapter from an instance.
+/// Requests an adapter from an instance.
+///
+/// When the instance exposes no adapters (a legitimate spec-level outcome on
+/// real backends — e.g. GLES display loss), the callback is delivered with
+/// `WGPURequestAdapterStatus_Unavailable` and a null adapter; this never
+/// panics.
 ///
 /// # Safety
 ///
@@ -329,24 +334,38 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
         .as_ref()
         .map(|options| map_feature_level(options.featureLevel))
         .unwrap_or(core::FeatureLevel::Core);
-    let adapter = instance
-        .core
-        .enumerate_adapters_with_feature_level(feature_level)
-        .into_iter()
-        .next()
-        .expect("Noop instance must expose an adapter");
-    let adapter = Arc::new(WGPUAdapterImpl {
-        core: Arc::new(adapter),
-        instance: clone_handle(instance_handle, "WGPUInstance"),
+    let result = select_request_adapter(
+        instance
+            .core
+            .enumerate_adapters_with_feature_level(feature_level),
+    )
+    .map(|adapter| {
+        Arc::new(WGPUAdapterImpl {
+            core: Arc::new(adapter),
+            instance: clone_handle(instance_handle, "WGPUInstance"),
+        })
     });
 
     instance.register_callback(PendingCallback::RequestAdapter {
         mode: callback_info.mode,
         callback: callback_info.callback,
-        adapter,
+        result,
         userdata1: callback_info.userdata1 as usize,
         userdata2: callback_info.userdata2 as usize,
     })
+}
+
+/// Selects the adapter delivered by `wgpuInstanceRequestAdapter` from an
+/// instance's enumeration.
+///
+/// Returns the first enumerated adapter, or — when the enumeration is empty —
+/// the failure message delivered to the request-adapter callback with
+/// `WGPURequestAdapterStatus_Unavailable` and a null adapter.
+fn select_request_adapter(adapters: Vec<core::Adapter>) -> Result<core::Adapter, String> {
+    adapters
+        .into_iter()
+        .next()
+        .ok_or_else(|| String::from("no adapters available"))
 }
 
 /// Processes callbacks whose mode allows process-events delivery.
@@ -468,6 +487,21 @@ mod tests {
             wgpuSupportedWGSLLanguageFeaturesFreeMembers(features);
             wgpuInstanceRelease(instance);
         }
+    }
+
+    #[test]
+    fn select_request_adapter_returns_first_adapter_when_enumeration_is_non_empty() {
+        let adapters = core::Instance::new_noop().enumerate_adapters();
+        assert_eq!(adapters.len(), 1);
+
+        assert!(select_request_adapter(adapters).is_ok());
+    }
+
+    #[test]
+    fn select_request_adapter_reports_unavailable_message_on_empty_enumeration() {
+        let result = select_request_adapter(Vec::new());
+
+        assert_eq!(result.err().as_deref(), Some("no adapters available"));
     }
 
     #[test]

@@ -30,11 +30,14 @@ unsafe impl Send for GlesInstanceInner {}
 // state, and calls that bind contexts are serialized at the device level.
 unsafe impl Sync for GlesInstanceInner {}
 
-impl Drop for EglInstanceState {
-    fn drop(&mut self) {
-        let _ = self.egl.terminate(self.display);
-    }
-}
+// `EglInstanceState` deliberately has no `Drop` impl and never calls
+// `eglTerminate`. EGL display handles are process-global:
+// `eglGetDisplay(EGL_DEFAULT_DISPLAY)` returns the same display handle to
+// every caller in the process, so terminating it on Drop would kill the
+// display under any other live `GlesInstance` (every subsequent EGL call on
+// it fails with `EGL_NOT_INITIALIZED`, and live GL contexts on a terminated
+// display are undefined behaviour at the driver level). The display is left
+// initialized for the process lifetime instead — wgpu-hal precedent.
 
 /// Stores GLES instance data used by validation and backend submission.
 pub struct GlesInstance {
@@ -72,9 +75,20 @@ impl GlesInstance {
     #[must_use]
     pub fn enumerate_adapters(&self) -> Vec<GlesAdapter> {
         match self.inner.as_ref() {
-            GlesInstanceInner::Egl(egl_state) => choose_config(egl_state)
-                .map(|config| vec![GlesAdapter::new_egl(Arc::clone(&self.inner), config)])
-                .unwrap_or_default(),
+            GlesInstanceInner::Egl(egl_state) => match choose_config(egl_state) {
+                Ok(config) => vec![GlesAdapter::new_egl(Arc::clone(&self.inner), config)],
+                Err(err) => {
+                    // Diagnostic: an empty enumeration is a legitimate
+                    // spec-level "no adapter" outcome for callers, but on the
+                    // EGL path it always stems from an EGL failure
+                    // (`choose_config` prints the raw EGL error); make the
+                    // mapping visible instead of silently returning empty.
+                    eprintln!(
+                        "yawgpu-gles: enumerate_adapters: choose_config failed ({err:?}); returning no adapters"
+                    );
+                    Vec::new()
+                }
+            },
             #[cfg(windows)]
             GlesInstanceInner::Wgl(_) => vec![GlesAdapter::new_wgl(Arc::clone(&self.inner))],
         }
@@ -178,7 +192,13 @@ fn choose_config(instance: &EglInstanceState) -> Result<EglConfig, HalError> {
     instance
         .egl
         .choose_first_config(instance.display, &attribs)
-        .map_err(|_| HalError::BackendUnavailable { backend: BACKEND })?
+        .map_err(|err| {
+            // Diagnostic: surface the raw EGL error (e.g. EGL_NOT_INITIALIZED
+            // when the display was terminated out from under us), consistent
+            // with the other `yawgpu-gles:` bring-up failure paths.
+            eprintln!("yawgpu-gles: eglChooseConfig failed: {err:?}");
+            HalError::BackendUnavailable { backend: BACKEND }
+        })?
         .ok_or(HalError::BackendUnavailable { backend: BACKEND })
 }
 
@@ -240,5 +260,41 @@ mod tests {
         };
 
         assert!(matches!(instance.inner.as_ref(), GlesInstanceInner::Egl(_)));
+    }
+
+    #[test]
+    fn dropping_one_instance_leaves_overlapping_instance_usable() {
+        // Regression test for the process-global EGL display: dropping one
+        // instance must never terminate the display under another live
+        // instance (see the `EglInstanceState` comment above).
+        let first = match GlesInstance::new() {
+            Ok(instance) => instance,
+            Err(error) => {
+                eprintln!(
+                    "skipping GLES overlapping-instance test; backend unavailable: {error:?}"
+                );
+                return;
+            }
+        };
+        let second = match GlesInstance::new() {
+            Ok(instance) => instance,
+            Err(error) => {
+                eprintln!(
+                    "skipping GLES overlapping-instance test; backend unavailable: {error:?}"
+                );
+                return;
+            }
+        };
+
+        drop(first);
+
+        let adapters = second.enumerate_adapters();
+        assert!(
+            !adapters.is_empty(),
+            "surviving instance must still enumerate adapters after the other instance is dropped"
+        );
+        adapters[0]
+            .create_device()
+            .expect("surviving instance must still create a device");
     }
 }

@@ -1326,8 +1326,10 @@ pub(crate) enum PendingCallback {
         mode: native::WGPUCallbackMode,
         /// Callback variant.
         callback: native::WGPURequestAdapterCallback,
-        /// Adapter variant.
-        adapter: Arc<WGPUAdapterImpl>,
+        /// Result variant: the selected adapter, or the failure message
+        /// delivered with `WGPURequestAdapterStatus_Unavailable` and a null
+        /// adapter when the instance exposed no adapters.
+        result: Result<Arc<WGPUAdapterImpl>, String>,
         /// Userdata1 variant.
         userdata1: usize,
         /// Userdata2 variant.
@@ -1477,19 +1479,28 @@ impl PendingCallback {
         match self {
             Self::RequestAdapter {
                 callback,
-                adapter,
+                result,
                 userdata1,
                 userdata2,
                 ..
             } => {
                 if let Some(callback) = callback {
-                    callback(
-                        native::WGPURequestAdapterStatus_Success,
-                        arc_to_handle(adapter),
-                        string_view(b""),
-                        userdata1 as *mut c_void,
-                        userdata2 as *mut c_void,
-                    );
+                    match result {
+                        Ok(adapter) => callback(
+                            native::WGPURequestAdapterStatus_Success,
+                            arc_to_handle(adapter),
+                            string_view(b""),
+                            userdata1 as *mut c_void,
+                            userdata2 as *mut c_void,
+                        ),
+                        Err(message) => callback(
+                            native::WGPURequestAdapterStatus_Unavailable,
+                            std::ptr::null(),
+                            string_view(message.as_bytes()),
+                            userdata1 as *mut c_void,
+                            userdata2 as *mut c_void,
+                        ),
+                    }
                 }
             }
             Self::RequestDevice {
