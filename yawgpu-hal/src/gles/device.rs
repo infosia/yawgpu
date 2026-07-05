@@ -30,6 +30,10 @@ pub(super) struct EglDeviceState {
     pub(super) gl: glow::Context,
     current_lock: Mutex<()>,
     pub(super) allocations: AtomicU64,
+    /// Whether the context supports the base-vertex indexed-draw entry
+    /// points (GLES 3.2 core or `GL_OES/EXT_draw_elements_base_vertex`);
+    /// detected once at device creation (T-G11).
+    pub(super) supports_base_vertex: bool,
 }
 
 // SAFETY: All access to the EGL context and `glow::Context` goes through
@@ -81,6 +85,17 @@ impl GlesDeviceInner {
             Self::Egl(state) => Some(state),
             #[cfg(windows)]
             Self::Wgl(_) => None,
+        }
+    }
+
+    /// Whether the context supports the base-vertex indexed-draw entry
+    /// points (GLES 3.2 core or `GL_OES/EXT_draw_elements_base_vertex`);
+    /// detected once at device creation (T-G11).
+    pub(super) fn supports_base_vertex(&self) -> bool {
+        match self {
+            Self::Egl(state) => state.supports_base_vertex,
+            #[cfg(windows)]
+            Self::Wgl(state) => state.supports_base_vertex,
         }
     }
 
@@ -162,6 +177,7 @@ impl GlesDevice {
         context: EglContext,
         surface: EglSurface,
         gl: glow::Context,
+        supports_base_vertex: bool,
     ) -> Self {
         let inner = Arc::new(GlesDeviceInner::Egl(EglDeviceState {
             instance,
@@ -170,6 +186,7 @@ impl GlesDevice {
             gl,
             current_lock: Mutex::new(()),
             allocations: AtomicU64::new(0),
+            supports_base_vertex,
         }));
         let queue = GlesQueue::new(Arc::clone(&inner));
         Self { inner, queue }

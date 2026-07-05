@@ -25,7 +25,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
-use super::adapter::parse_gles_version;
+use super::adapter::{detect_base_vertex_support, parse_gles_version};
 use super::BACKEND;
 use crate::HalError;
 
@@ -145,6 +145,10 @@ pub(super) struct WglDeviceState {
     pub(super) gl: glow::Context,
     current_lock: Mutex<()>,
     pub(super) allocations: AtomicU64,
+    /// Whether the context supports the base-vertex indexed-draw entry
+    /// points (GLES 3.2 core or `GL_OES/EXT_draw_elements_base_vertex`);
+    /// detected once at device creation (T-G11).
+    pub(super) supports_base_vertex: bool,
 }
 
 // SAFETY: All GL access goes through `with_current_context`, which serializes
@@ -304,6 +308,9 @@ impl WglDeviceState {
             return Err(HalError::DeviceCreationFailed { backend: BACKEND });
         }
 
+        let supports_base_vertex =
+            detect_base_vertex_support((major, minor), gl.supported_extensions());
+
         Ok(Self {
             hwnd,
             hdc,
@@ -311,6 +318,7 @@ impl WglDeviceState {
             gl,
             current_lock: Mutex::new(()),
             allocations: AtomicU64::new(0),
+            supports_base_vertex,
         })
     }
 

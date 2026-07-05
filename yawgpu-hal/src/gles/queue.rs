@@ -59,6 +59,7 @@ impl GlesQueue {
             return Ok(());
         }
 
+        let supports_base_vertex = self.inner.supports_base_vertex();
         self.inner
             .with_current_context(|gl| -> Result<(), HalError> {
                 for copy in copies {
@@ -92,7 +93,9 @@ impl GlesQueue {
                         HalCopy::TextureToBuffer(copy) => submit_texture_to_buffer(gl, copy)?,
                         HalCopy::TextureToTexture(copy) => submit_texture_to_texture(gl, copy)?,
                         HalCopy::ComputePass(pass) => submit_compute_pass(gl, pass)?,
-                        HalCopy::RenderPass(pass) => submit_render_pass(gl, pass)?,
+                        HalCopy::RenderPass(pass) => {
+                            submit_render_pass(gl, pass, supports_base_vertex)?;
+                        }
                         #[cfg(feature = "tiled")]
                         HalCopy::SubpassRenderPass(_) => {
                             return Err(HalError::QueueSubmissionFailed {
@@ -328,7 +331,11 @@ fn binding_target(bindings: &[HalDescriptorBinding], binding: u32) -> Result<u32
     }
 }
 
-fn submit_render_pass(gl: &glow::Context, pass: &HalRenderPass) -> Result<(), HalError> {
+fn submit_render_pass(
+    gl: &glow::Context,
+    pass: &HalRenderPass,
+    supports_base_vertex: bool,
+) -> Result<(), HalError> {
     reject_render_texture_sampler_bindings(pass)?;
     let fbo = create_render_fbo(gl, pass)?;
     let pipeline = match &pass.pipeline {
@@ -364,7 +371,7 @@ fn submit_render_pass(gl: &glow::Context, pass: &HalRenderPass) -> Result<(), Ha
         fbo,
         vao: Some(vao),
     };
-    run_render_draw(gl, pass, pipeline, vao)
+    run_render_draw(gl, pass, pipeline, vao, supports_base_vertex)
 }
 
 fn reject_render_texture_sampler_bindings(pass: &HalRenderPass) -> Result<(), HalError> {
@@ -663,6 +670,7 @@ fn run_render_draw(
     pass: &HalRenderPass,
     pipeline: &super::pipeline::GlesRenderPipeline,
     vao: glow::VertexArray,
+    supports_base_vertex: bool,
 ) -> Result<(), HalError> {
     let program = pipeline.raw_or_err()?;
     unsafe {
@@ -679,7 +687,7 @@ fn run_render_draw(
             set_first_instance_uniform(gl, location, draw);
         }
         let topology = map_primitive_topology(pipeline.primitive_topology());
-        run_gles_draw(gl, pass, topology, draw)?;
+        run_gles_draw(gl, pass, topology, draw, supports_base_vertex)?;
     }
     Ok(())
 }
@@ -971,6 +979,7 @@ fn run_gles_draw(
     pass: &HalRenderPass,
     topology: u32,
     draw: HalDraw,
+    supports_base_vertex: bool,
 ) -> Result<(), HalError> {
     match draw {
         HalDraw::Direct {
@@ -998,18 +1007,45 @@ fn run_gles_draw(
             base_vertex,
             first_instance,
         } => {
-            if base_vertex != 0 {
+            // T-G11: non-zero baseVertex maps to the base-vertex draw entry
+            // points, which are core in GLES 3.2 and exposed on GLES 3.1
+            // through `GL_OES/EXT_draw_elements_base_vertex`; they are used
+            // opportunistically when the device reports support and the
+            // draw is otherwise rejected (never silently mis-drawn).
+            if base_vertex != 0 && !supports_base_vertex {
                 return Err(HalError::BufferOperationFailed {
                     backend: BACKEND,
-                    message: "GLES indexed draw requires baseVertex 0",
+                    message: "GLES indexed draw with non-zero baseVertex requires GLES 3.2 or OES/EXT_draw_elements_base_vertex",
                 });
             }
             let (index_type, index_offset) = bind_gles_index_buffer(gl, pass, first_index)?;
             let index_count = i32_from_u32(index_count, "draw indexCount exceeds GLES limit")?;
             let instance_count =
                 i32_from_u32(instance_count, "draw instanceCount exceeds GLES limit")?;
+            // `first_instance` stays folded into the instance-stepped vertex
+            // buffer offsets by `bind_vertex_buffers` (M2); it is orthogonal
+            // to `base_vertex` and unaffected by the entry-point choice here.
             unsafe {
-                if instance_count == 1 && first_instance == 0 {
+                if base_vertex != 0 {
+                    if instance_count == 1 && first_instance == 0 {
+                        gl.draw_elements_base_vertex(
+                            topology,
+                            index_count,
+                            index_type,
+                            index_offset,
+                            base_vertex,
+                        );
+                    } else {
+                        gl.draw_elements_instanced_base_vertex(
+                            topology,
+                            index_count,
+                            index_type,
+                            index_offset,
+                            instance_count,
+                            base_vertex,
+                        );
+                    }
+                } else if instance_count == 1 && first_instance == 0 {
                     gl.draw_elements(topology, index_count, index_type, index_offset);
                 } else {
                     gl.draw_elements_instanced(
@@ -2167,6 +2203,179 @@ mod tests {
             u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
             9,
             "fragment output 1 must land in attachment 1"
+        );
+    }
+
+    #[test]
+    fn submit_render_pass_indexed_draw_applies_base_vertex() {
+        // T-G11: an indexed draw with baseVertex=1 must fetch vertices
+        // 1..=3 through `glDrawElementsBaseVertex` when the device supports
+        // the base-vertex entry points. The vertex buffer holds four vec2
+        // positions where vertex 0 duplicates vertex 1, so drawing indices
+        // [0, 1, 2] *without* the base-vertex offset yields a zero-area
+        // triangle (no fragments; the clear color survives), while applying
+        // baseVertex=1 selects the full-viewport triangle at vertices 1..=3
+        // and writes green.
+        let Some(device) = gles_device_or_skip("GLES base-vertex indexed draw test") else {
+            return;
+        };
+        if !device.inner_clone().supports_base_vertex() {
+            eprintln!(
+                "skipping GLES base-vertex indexed draw test; device reports no GLES 3.2 / OES/EXT_draw_elements_base_vertex support"
+            );
+            return;
+        }
+
+        let color_texture = render_attachment_texture(&device, crate::HalTextureFormat::Rgba8Unorm);
+        let readback = device
+            .create_buffer(
+                4,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES readback buffer creation must succeed");
+
+        // Vertex 0 duplicates vertex 1; vertices 1..=3 form the
+        // full-viewport triangle.
+        let positions: [[f32; 2]; 4] = [[-1.0, -1.0], [-1.0, -1.0], [3.0, -1.0], [-1.0, 3.0]];
+        let vertex_bytes: Vec<u8> = positions
+            .iter()
+            .flatten()
+            .flat_map(|value| value.to_ne_bytes())
+            .collect();
+        let vertex_buffer = device
+            .create_buffer(
+                vertex_bytes.len() as u64,
+                crate::HalBufferUsage {
+                    vertex: true,
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES vertex buffer creation must succeed");
+        vertex_buffer
+            .write(0, &vertex_bytes)
+            .expect("writing vertex data must succeed");
+
+        let indices: [u16; 3] = [0, 1, 2];
+        let index_bytes: Vec<u8> = indices
+            .iter()
+            .flat_map(|value| value.to_ne_bytes())
+            .collect();
+        let index_buffer = device
+            .create_buffer(
+                index_bytes.len() as u64,
+                crate::HalBufferUsage {
+                    index: true,
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES index buffer creation must succeed");
+        index_buffer
+            .write(0, &index_bytes)
+            .expect("writing index data must succeed");
+
+        let pipeline = device
+            .create_render_pipeline(
+                crate::HalShaderSource::GlslStages {
+                    vertex: "#version 310 es\n\
+                             layout(location = 0) in vec2 position;\n\
+                             void main() { gl_Position = vec4(position, 0.0, 1.0); }\n"
+                        .to_owned(),
+                    fragment: Some(
+                        "#version 310 es\n\
+                         precision mediump float;\n\
+                         layout(location = 0) out vec4 frag_color;\n\
+                         void main() { frag_color = vec4(0.0, 1.0, 0.0, 1.0); }\n"
+                            .to_owned(),
+                    ),
+                },
+                "main",
+                Some("main"),
+                &crate::HalRenderPipelineDescriptor {
+                    sample_count: 1,
+                    sample_mask: u32::MAX,
+                    alpha_to_coverage_enabled: false,
+                    color_targets: vec![Some(HalColorTargetState {
+                        format: crate::HalTextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: 0xf,
+                    })],
+                    depth_stencil: None,
+                    vertex_buffers: vec![crate::HalVertexBufferLayout {
+                        slot: 0,
+                        array_stride: 8,
+                        step_mode: HalVertexStepMode::Vertex,
+                        attributes: vec![crate::HalVertexAttribute {
+                            format: crate::HalVertexFormat::Float32x2,
+                            offset: 0,
+                            shader_location: 0,
+                            metal_buffer_index: 0,
+                        }],
+                    }],
+                    primitive_topology: crate::HalPrimitiveTopology::TriangleList,
+                    front_face: HalFrontFace::Ccw,
+                    cull_mode: HalCullMode::None,
+                    unclipped_depth: false,
+                    needs_frag_depth_range_push_constant: false,
+                    user_immediate_size: 0,
+                },
+                &[],
+            )
+            .expect("GLES render pipeline creation must succeed");
+
+        let mut pass = render_pass(vec![Some(color_target_for(
+            color_texture.clone(),
+            crate::HalTextureFormat::Rgba8Unorm,
+            [0.0, 0.0, 0.0, 0.0],
+        ))]);
+        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
+        pass.vertex_buffers = vec![crate::HalBoundBuffer {
+            group: 0,
+            binding: 0,
+            metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            buffer: HalBuffer::Gles(vertex_buffer),
+            offset: 0,
+            size: vertex_bytes.len() as u64,
+        }];
+        pass.index_buffer = Some(Box::new(crate::HalBoundIndexBuffer {
+            buffer: HalBuffer::Gles(index_buffer),
+            format: HalIndexFormat::Uint16,
+            offset: 0,
+            size: index_bytes.len() as u64,
+        }));
+        pass.draw = Some(HalDraw::Indexed {
+            index_count: 3,
+            instance_count: 1,
+            first_index: 0,
+            base_vertex: 1,
+            first_instance: 0,
+        });
+
+        device
+            .queue()
+            .submit_copies(&[
+                HalCopy::RenderPass(pass),
+                texture_to_buffer_copy(
+                    color_texture,
+                    crate::HalTextureFormat::Rgba8Unorm,
+                    readback.clone(),
+                    4,
+                ),
+            ])
+            .expect("indexed draw with baseVertex 1 plus readback must succeed");
+
+        assert_eq!(
+            readback
+                .read(0, 4)
+                .expect("reading back the Rgba8Unorm texel must succeed"),
+            [0, 255, 0, 255],
+            "baseVertex 1 must offset index fetches to the full-viewport triangle at vertices 1..=3"
         );
     }
 

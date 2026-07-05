@@ -280,11 +280,14 @@ fn create_egl_device(
         return Err(HalError::DeviceCreationFailed { backend: BACKEND });
     }
 
+    let supports_base_vertex = detect_base_vertex_support((major, minor), gl.supported_extensions());
+
     Ok(GlesDevice::from_egl(
         Arc::clone(instance),
         context,
         surface,
         gl,
+        supports_base_vertex,
     ))
 }
 
@@ -302,6 +305,21 @@ pub(super) fn parse_gles_version(version: &str) -> Option<(u32, u32)> {
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     Some((major, minor))
+}
+
+/// Returns whether the context supports the base-vertex indexed-draw entry
+/// points (`glDrawElementsBaseVertex` and friends): core in GLES 3.2, and
+/// available on GLES 3.1 through `GL_OES_draw_elements_base_vertex` /
+/// `GL_EXT_draw_elements_base_vertex` (T-G11). Pure function of the parsed
+/// GL_VERSION tuple and the context's extension set, evaluated once at
+/// device creation.
+pub(super) fn detect_base_vertex_support(
+    version: (u32, u32),
+    extensions: &std::collections::HashSet<String>,
+) -> bool {
+    version >= (3, 2)
+        || extensions.contains("GL_OES_draw_elements_base_vertex")
+        || extensions.contains("GL_EXT_draw_elements_base_vertex")
 }
 
 #[cfg(test)]
@@ -323,5 +341,24 @@ mod tests {
         assert_eq!(parse_gles_version("OpenGL ES-CM 1.1"), None);
         assert_eq!(parse_gles_version(""), None);
         assert_eq!(parse_gles_version("OpenGL 4.5"), None);
+    }
+
+    #[test]
+    fn detect_base_vertex_support_requires_gles_3_2_or_extension() {
+        let empty = std::collections::HashSet::new();
+        let oes: std::collections::HashSet<String> =
+            ["GL_OES_draw_elements_base_vertex".to_owned()].into();
+        let ext: std::collections::HashSet<String> =
+            ["GL_EXT_draw_elements_base_vertex".to_owned()].into();
+        let unrelated: std::collections::HashSet<String> =
+            ["GL_EXT_copy_image".to_owned()].into();
+        // Core in GLES 3.2 and later, regardless of extensions.
+        assert!(detect_base_vertex_support((3, 2), &empty));
+        assert!(detect_base_vertex_support((4, 0), &empty));
+        // GLES 3.1 needs the OES or EXT extension.
+        assert!(!detect_base_vertex_support((3, 1), &empty));
+        assert!(!detect_base_vertex_support((3, 1), &unrelated));
+        assert!(detect_base_vertex_support((3, 1), &oes));
+        assert!(detect_base_vertex_support((3, 1), &ext));
     }
 }
