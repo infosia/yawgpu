@@ -179,3 +179,48 @@ pipelines link on every driver.
   permanent Tier-2 catalogue (Dawn emulates via shader swizzle).
 - rgba8unorm read-write storage (180) — core-level message; verify
   against spec tiering before touching (may be correct behaviour).
+
+## Overnight fix session 2026-07-05/06 — api,validation ledger (crocus, workers=2)
+
+| Slice | Commit | fail after |
+|---|---|---|
+| start of session | 82de24f (G-4) | 24,553 |
+| G-5 ignore undeclared VB slots + G-6 stub fragment shader | a975951 | 13,052 |
+| T-G7 GLES 3.1 color-renderable set + integer clears | 12aefe9 | — |
+| T-G8 MRT via glDrawBuffers (uniform per-target state) | d43b5bf | 7,531 |
+| T-G11 base-vertex draws (OES/EXT_draw_elements_base_vertex) | fad5a01 | — |
+| T-G9 2D-array/3D copies (+ Mesa 3D-layer PBO readback bug workaround) | 2139a0f | 3,759 |
+| T-G12 extension-gated float color targets | 5d0e244 | **2,616** |
+
+pass 185,492 → 207,429; crash 0 throughout; draw file 12,006 → 56.
+
+## Remaining clusters (2,616) — classification
+
+Permanent Tier-2 catalogue candidates (need sign-off, then CTS
+expectations entries):
+- 852 residual non-renderable color targets (snorm / bgra8unorm-srgb /
+  formats GLES cannot render to even with extensions — enumerate before
+  sign-off)
+- 364 Unorm8x4Bgra vertex format (no ES equivalent; Dawn emulates via
+  shader swizzle — implementable but costly)
+
+Policy decision needed (adapter limits truthfulness vs binding remap):
+- 330+330 shader compile fails: `layout(binding=999)` exceeds GL UBO
+  limits (adapter advertises WebGPU-default maxBindingsPerBindGroup),
+  `samplerCubeArray` reserved on ES 3.1 (cube-array needs ES 3.2/EXT).
+  Options: report真 GLES limits on the adapter (sub-WebGPU-minimum) or
+  implement the block-67 linear binding remap for group/binding.
+- 180 "unsupported read-write storage texture format" (core-level
+  message — verify against spec tiering first).
+- 32 "supports only bind group 0" (render 16 + compute 16) — the
+  full bind-group remap design (same thread as above).
+
+Small implementables:
+- 54 indexed-indirect index-buffer offset restriction
+- 17 framebuffer-incomplete T2B residuals
+- 373 "texture format not supported (P15.3)" — mostly depth/stencil
+  copy formats; depth readback needs blit tricks on ES (part catalog,
+  part implementable)
+
+Next feature slice: F-040 slice 2 MSAA/resolve (41 direct fails here,
+larger effect expected in api,operation).
