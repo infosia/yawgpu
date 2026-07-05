@@ -245,3 +245,29 @@ Totals: ~76,000 fail / crash 0. command_buffer needed ~8.5 min alone
 - rendering 427 (334 P15.3 formats, 72 indexed-indirect offset),
   memory_sync 234 (166+64 "binding size exceeds GLES limit"),
   texture_view 210, render_pass 63, others < 30 each.
+
+## Agreed next campaign (user-approved 2026-07-06 morning; in this order)
+
+1. **T-G13 — sampled texture + sampler bindings** (render + compute,
+   group 0, storage textures stay rejected → T-G14). Key unlock for
+   api,operation and the untouched shader,execution area. Investigate
+   Tint's combined-sampler GLSL emission first (yawgpu-tint BindingRemap
+   plumbing exists); assign texture units at link time (tint_immediates
+   uniform pattern), bind via glActiveTexture/glBindTexture/glBindSampler
+   at draw/dispatch; mip subrange via TEXTURE_BASE_LEVEL/MAX_LEVEL;
+   array-layer-subrange views and cube-array return HalError. A stopped
+   agent had just started this — restart fresh.
+2. T2B padding-zeroing bug (~12k in command_buffer) + copy-correctness
+   families (image_copy origins/extents).
+3. Decision 2a implementation: adapter reports true GLES limits
+   (maxBindingsPerBindGroup et al from GL queries) and stops advertising
+   norm16/texture-formats-tier features it cannot render.
+4. T2B of non-color-renderable formats (3,848).
+5. Tier-2 permanent catalogue (user-approved): snorm/16-bit-norm/
+   bgra8unorm-srgb render targets, Unorm8x4Bgra vertex format →
+   block-67 matrix entries + webgpu-native-cts expectations file.
+
+Verification loop per slice: unit gates → target-gles release rebuild →
+targeted CTS file(s) → full-area re-measure → commit. CTS runs:
+workers=2, one GPU process at a time, never stack GPU loads
+(see memory: no-heavy-load-on-this-host).
