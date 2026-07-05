@@ -224,3 +224,24 @@ Small implementables:
 
 Next feature slice: F-040 slice 2 MSAA/resolve (41 direct fails here,
 larger effect expected in api,operation).
+
+## api,operation sweep (2026-07-06 morning, crocus, workers=2, per-dir)
+
+Totals: ~76,000 fail / crash 0. command_buffer needed ~8.5 min alone
+(slow, not stalled). Clusters:
+
+- **command_buffer 72,031** — three families: (1) T2B "texture padding
+  mismatch ... got 0" (~12k+): readback zeroes destination-buffer
+  padding bytes the CTS expects preserved; (2) "framebuffer incomplete
+  for texture-to-buffer copy" 3,848: T2B of non-color-renderable
+  formats cannot use the FBO/glReadPixels path; (3) large pixel-mismatch
+  families in image_copy origins/extents/array cases (real copy bugs).
+- **render_pipeline 3,029** — nearly all "queue submit cannot use an
+  error command buffer": encode-time HAL rejection poisons the CB; the
+  dominant underlying rejection is the catalogued-but-unimplemented
+  **texture/sampler bindings in render/compute passes** (also 60 direct
+  hits in texture_view). Implementing GLES texture/sampler binding is
+  the single biggest unlock for api,operation and shader,execution.
+- rendering 427 (334 P15.3 formats, 72 indexed-indirect offset),
+  memory_sync 234 (166+64 "binding size exceeds GLES limit"),
+  texture_view 210, render_pass 63, others < 30 each.
