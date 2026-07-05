@@ -471,7 +471,7 @@ pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<GlesFormat,
 /// `Rgba16Float`/`Rgba32Float`, ...) are deliberately excluded: core GLES 3.1
 /// does not make them color-renderable — that requires
 /// `EXT_color_buffer_float` (or `EXT_color_buffer_half_float`) gating, which
-/// this slice does not implement.
+/// [`is_color_renderable_with`] layers on top of this core set (T-G12).
 pub(super) fn is_color_renderable(format: HalTextureFormat) -> bool {
     matches!(
         format,
@@ -504,6 +504,48 @@ pub(super) fn is_color_renderable(format: HalTextureFormat) -> bool {
             | HalTextureFormat::Rgba32Sint
             | HalTextureFormat::Rgb10a2Uint
     )
+}
+
+/// Extension-gated color-renderability capabilities detected once at device
+/// creation (T-G12), widening the core GLES 3.1 color-renderable set covered
+/// by [`is_color_renderable`]. Neither extension is core in any GLES version
+/// (3.2 included), so both stay pure extension-string checks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct GlesColorRenderCaps {
+    /// `GL_EXT_color_buffer_float` is advertised: makes R16F/RG16F/RGBA16F,
+    /// R32F/RG32F/RGBA32F, and R11F_G11F_B10F color-renderable.
+    pub(super) color_buffer_float: bool,
+    /// `GL_EXT_color_buffer_half_float` is advertised: makes only the 16-bit
+    /// float formats (R16F/RG16F/RGBA16F) color-renderable; the 32-bit float
+    /// formats and R11F_G11F_B10F still require `GL_EXT_color_buffer_float`.
+    pub(super) color_buffer_half_float: bool,
+}
+
+/// Returns whether `format` is color-renderable on a device with the given
+/// extension caps (T-G12): the core GLES 3.1 set ([`is_color_renderable`]),
+/// plus the float16 formats when either `EXT_color_buffer_float` or
+/// `EXT_color_buffer_half_float` is present, plus the float32 formats and
+/// `Rg11b10Ufloat` when `EXT_color_buffer_float` is present. With both caps
+/// `false` this is identical to [`is_color_renderable`].
+pub(super) fn is_color_renderable_with(
+    format: HalTextureFormat,
+    caps: GlesColorRenderCaps,
+) -> bool {
+    if is_color_renderable(format) {
+        return true;
+    }
+    match format {
+        // 16-bit float: renderable under either extension.
+        HalTextureFormat::R16Float
+        | HalTextureFormat::Rg16Float
+        | HalTextureFormat::Rgba16Float => caps.color_buffer_float || caps.color_buffer_half_float,
+        // 32-bit float and packed 11-11-10 float: EXT_color_buffer_float only.
+        HalTextureFormat::R32Float
+        | HalTextureFormat::Rg32Float
+        | HalTextureFormat::Rgba32Float
+        | HalTextureFormat::Rg11b10Ufloat => caps.color_buffer_float,
+        _ => false,
+    }
 }
 
 /// Component class a GLES color clear (and any other component-class-sensitive
@@ -1012,9 +1054,9 @@ mod tests {
             assert!(is_color_renderable(format), "{format:?}");
         }
 
-        // Snorm, float (EXT_color_buffer_float-gated, excluded from this
-        // slice), depth, and compressed formats are not color-renderable on
-        // core GLES 3.1.
+        // Snorm, float (EXT_color_buffer_float-gated; see
+        // `is_color_renderable_with`), depth, and compressed formats are not
+        // color-renderable on core GLES 3.1.
         let not_renderable = [
             HalTextureFormat::R8Snorm,
             HalTextureFormat::Rgba8Snorm,
@@ -1029,6 +1071,93 @@ mod tests {
         ];
         for format in not_renderable {
             assert!(!is_color_renderable(format), "{format:?}");
+        }
+    }
+
+    #[test]
+    fn is_color_renderable_with_gates_float_formats_on_extension_caps() {
+        // T-G12: all four cap combinations across representative formats.
+        let no_caps = GlesColorRenderCaps::default();
+        let float_only = GlesColorRenderCaps {
+            color_buffer_float: true,
+            color_buffer_half_float: false,
+        };
+        let half_float_only = GlesColorRenderCaps {
+            color_buffer_float: false,
+            color_buffer_half_float: true,
+        };
+        let both = GlesColorRenderCaps {
+            color_buffer_float: true,
+            color_buffer_half_float: true,
+        };
+
+        let float16 = [
+            HalTextureFormat::R16Float,
+            HalTextureFormat::Rg16Float,
+            HalTextureFormat::Rgba16Float,
+        ];
+        let float32 = [
+            HalTextureFormat::R32Float,
+            HalTextureFormat::Rg32Float,
+            HalTextureFormat::Rgba32Float,
+            HalTextureFormat::Rg11b10Ufloat,
+        ];
+        // Core-set representatives stay renderable, and never-renderable
+        // formats stay rejected, under every cap combination.
+        let core = [
+            HalTextureFormat::R8Unorm,
+            HalTextureFormat::Rgba8UnormSrgb,
+            HalTextureFormat::Bgra8Unorm,
+            HalTextureFormat::Rgb10a2Unorm,
+            HalTextureFormat::R32Uint,
+            HalTextureFormat::Rgba16Sint,
+        ];
+        let never = [
+            HalTextureFormat::R8Snorm,
+            HalTextureFormat::Rgba8Snorm,
+            HalTextureFormat::Rgb9e5Ufloat,
+            HalTextureFormat::Depth32Float,
+            HalTextureFormat::Bc1RgbaUnorm,
+        ];
+
+        for caps in [no_caps, float_only, half_float_only, both] {
+            for format in core {
+                assert!(
+                    is_color_renderable_with(format, caps),
+                    "{format:?} {caps:?}"
+                );
+            }
+            for format in never {
+                assert!(
+                    !is_color_renderable_with(format, caps),
+                    "{format:?} {caps:?}"
+                );
+            }
+            // float16: either extension unlocks renderability.
+            for format in float16 {
+                assert_eq!(
+                    is_color_renderable_with(format, caps),
+                    caps.color_buffer_float || caps.color_buffer_half_float,
+                    "{format:?} {caps:?}"
+                );
+            }
+            // float32 + Rg11b10Ufloat: EXT_color_buffer_float only.
+            for format in float32 {
+                assert_eq!(
+                    is_color_renderable_with(format, caps),
+                    caps.color_buffer_float,
+                    "{format:?} {caps:?}"
+                );
+            }
+        }
+
+        // With both caps false the predicate degenerates to the core set.
+        for format in float16.iter().chain(&float32).chain(&core).chain(&never) {
+            assert_eq!(
+                is_color_renderable_with(*format, no_caps),
+                is_color_renderable(*format),
+                "{format:?}"
+            );
         }
     }
 

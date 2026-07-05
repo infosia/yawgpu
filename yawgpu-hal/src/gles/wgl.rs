@@ -25,7 +25,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
-use super::adapter::{detect_base_vertex_support, parse_gles_version};
+use super::adapter::{detect_base_vertex_support, detect_color_render_caps, parse_gles_version};
+use super::format::GlesColorRenderCaps;
 use super::BACKEND;
 use crate::HalError;
 
@@ -149,6 +150,10 @@ pub(super) struct WglDeviceState {
     /// points (GLES 3.2 core or `GL_OES/EXT_draw_elements_base_vertex`);
     /// detected once at device creation (T-G11).
     pub(super) supports_base_vertex: bool,
+    /// Extension-gated float color-renderability caps
+    /// (`GL_EXT_color_buffer_float` / `GL_EXT_color_buffer_half_float`);
+    /// detected once at device creation (T-G12).
+    pub(super) color_render_caps: GlesColorRenderCaps,
 }
 
 // SAFETY: All GL access goes through `with_current_context`, which serializes
@@ -310,6 +315,7 @@ impl WglDeviceState {
 
         let supports_base_vertex =
             detect_base_vertex_support((major, minor), gl.supported_extensions());
+        let color_render_caps = detect_color_render_caps(gl.supported_extensions());
 
         Ok(Self {
             hwnd,
@@ -319,6 +325,7 @@ impl WglDeviceState {
             current_lock: Mutex::new(()),
             allocations: AtomicU64::new(0),
             supports_base_vertex,
+            color_render_caps,
         })
     }
 

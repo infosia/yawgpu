@@ -6,6 +6,7 @@ use parking_lot::MutexGuard;
 
 use super::buffer::GlesBuffer;
 use super::egl::{EglContext, EglSurface};
+use super::format::GlesColorRenderCaps;
 use super::instance::{EglInstanceState, GlesInstanceInner};
 use super::pipeline::{GlesComputePipeline, GlesRenderPipeline};
 use super::queue::GlesQueue;
@@ -34,6 +35,10 @@ pub(super) struct EglDeviceState {
     /// points (GLES 3.2 core or `GL_OES/EXT_draw_elements_base_vertex`);
     /// detected once at device creation (T-G11).
     pub(super) supports_base_vertex: bool,
+    /// Extension-gated float color-renderability caps
+    /// (`GL_EXT_color_buffer_float` / `GL_EXT_color_buffer_half_float`);
+    /// detected once at device creation (T-G12).
+    pub(super) color_render_caps: GlesColorRenderCaps,
 }
 
 // SAFETY: All access to the EGL context and `glow::Context` goes through
@@ -96,6 +101,17 @@ impl GlesDeviceInner {
             Self::Egl(state) => state.supports_base_vertex,
             #[cfg(windows)]
             Self::Wgl(state) => state.supports_base_vertex,
+        }
+    }
+
+    /// Extension-gated float color-renderability caps
+    /// (`GL_EXT_color_buffer_float` / `GL_EXT_color_buffer_half_float`);
+    /// detected once at device creation (T-G12).
+    pub(super) fn color_render_caps(&self) -> GlesColorRenderCaps {
+        match self {
+            Self::Egl(state) => state.color_render_caps,
+            #[cfg(windows)]
+            Self::Wgl(state) => state.color_render_caps,
         }
     }
 
@@ -178,6 +194,7 @@ impl GlesDevice {
         surface: EglSurface,
         gl: glow::Context,
         supports_base_vertex: bool,
+        color_render_caps: GlesColorRenderCaps,
     ) -> Self {
         let inner = Arc::new(GlesDeviceInner::Egl(EglDeviceState {
             instance,
@@ -187,6 +204,7 @@ impl GlesDevice {
             current_lock: Mutex::new(()),
             allocations: AtomicU64::new(0),
             supports_base_vertex,
+            color_render_caps,
         }));
         let queue = GlesQueue::new(Arc::clone(&inner));
         Self { inner, queue }

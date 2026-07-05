@@ -2828,6 +2828,117 @@ mod tests {
         );
     }
 
+    #[test]
+    fn submit_render_pass_clears_float_color_target_with_ext_color_buffer_float() {
+        // T-G12: with `GL_EXT_color_buffer_float` the float formats are
+        // color-renderable — a render pipeline with an Rgba16Float color
+        // target must create, and a clear-only pass on an R32Float
+        // attachment must land the exact f32 clear value in a readback
+        // buffer. Self-skips (naming the absent extensions) on contexts
+        // without the extension.
+        let Some(device) = gles_device_or_skip("GLES float color target test") else {
+            return;
+        };
+        let caps = device.inner_clone().color_render_caps();
+        if !caps.color_buffer_float {
+            let mut absent = vec!["GL_EXT_color_buffer_float"];
+            if !caps.color_buffer_half_float {
+                absent.push("GL_EXT_color_buffer_half_float");
+            }
+            eprintln!(
+                "skipping GLES float color target test; absent extensions: {}",
+                absent.join(", ")
+            );
+            return;
+        }
+
+        // Pipeline side: an Rgba16Float color target passes the caps-gated
+        // renderability check and the pipeline creates.
+        device
+            .create_render_pipeline(
+                crate::HalShaderSource::GlslStages {
+                    // Full-viewport triangle from gl_VertexID; no vertex
+                    // buffers needed.
+                    vertex: "#version 310 es\n\
+                             void main() {\n\
+                                 vec2 pos = vec2(float((gl_VertexID & 1) << 2) - 1.0,\n\
+                                                 float((gl_VertexID & 2) << 1) - 1.0);\n\
+                                 gl_Position = vec4(pos, 0.0, 1.0);\n\
+                             }\n"
+                    .to_owned(),
+                    fragment: Some(
+                        "#version 310 es\n\
+                         precision mediump float;\n\
+                         layout(location = 0) out vec4 frag_color;\n\
+                         void main() { frag_color = vec4(0.25, 0.5, 0.75, 1.0); }\n"
+                            .to_owned(),
+                    ),
+                },
+                "main",
+                Some("main"),
+                &crate::HalRenderPipelineDescriptor {
+                    sample_count: 1,
+                    sample_mask: u32::MAX,
+                    alpha_to_coverage_enabled: false,
+                    color_targets: vec![Some(HalColorTargetState {
+                        format: crate::HalTextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: 0xf,
+                    })],
+                    depth_stencil: None,
+                    vertex_buffers: Vec::new(),
+                    primitive_topology: crate::HalPrimitiveTopology::TriangleList,
+                    front_face: HalFrontFace::Ccw,
+                    cull_mode: HalCullMode::None,
+                    unclipped_depth: false,
+                    needs_frag_depth_range_push_constant: false,
+                    user_immediate_size: 0,
+                },
+                &[],
+            )
+            .expect("GLES render pipeline with an Rgba16Float color target must create");
+
+        // Attachment side: clear an R32Float texture to 0.5 and read the
+        // f32 bits back through a texture-to-buffer copy.
+        let float_texture = render_attachment_texture(&device, crate::HalTextureFormat::R32Float);
+        let readback = device
+            .create_buffer(
+                4,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES readback buffer creation must succeed");
+
+        let pass = render_pass(vec![Some(color_target_for(
+            float_texture.clone(),
+            crate::HalTextureFormat::R32Float,
+            [0.5, 0.0, 0.0, 1.0],
+        ))]);
+        device
+            .queue()
+            .submit_copies(&[
+                HalCopy::RenderPass(pass),
+                texture_to_buffer_copy(
+                    float_texture,
+                    crate::HalTextureFormat::R32Float,
+                    readback.clone(),
+                    4,
+                ),
+            ])
+            .expect("clear-only pass on an R32Float attachment plus readback must succeed");
+
+        let bytes = readback
+            .read(0, 4)
+            .expect("reading back the R32Float texel must succeed");
+        assert_eq!(
+            f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            0.5,
+            "the R32Float attachment must hold the exact f32 clear value"
+        );
+    }
+
     fn render_pass(
         color_targets: Vec<Option<crate::HalRenderColorTarget>>,
     ) -> crate::HalRenderPass {

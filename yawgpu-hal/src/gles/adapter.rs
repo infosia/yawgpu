@@ -5,6 +5,7 @@ use khronos_egl as egl;
 
 use super::device::GlesDevice;
 use super::egl::{EglConfig, EglContext, EglSurface};
+use super::format::GlesColorRenderCaps;
 use super::instance::{EglInstanceState, GlesInstanceInner};
 use super::BACKEND;
 use crate::{HalError, HalLimits};
@@ -281,6 +282,7 @@ fn create_egl_device(
     }
 
     let supports_base_vertex = detect_base_vertex_support((major, minor), gl.supported_extensions());
+    let color_render_caps = detect_color_render_caps(gl.supported_extensions());
 
     Ok(GlesDevice::from_egl(
         Arc::clone(instance),
@@ -288,6 +290,7 @@ fn create_egl_device(
         surface,
         gl,
         supports_base_vertex,
+        color_render_caps,
     ))
 }
 
@@ -320,6 +323,21 @@ pub(super) fn detect_base_vertex_support(
     version >= (3, 2)
         || extensions.contains("GL_OES_draw_elements_base_vertex")
         || extensions.contains("GL_EXT_draw_elements_base_vertex")
+}
+
+/// Detects the extension-gated float color-renderability caps (T-G12):
+/// `GL_EXT_color_buffer_float` makes the 16- and 32-bit float formats plus
+/// `R11F_G11F_B10F` color-renderable, and `GL_EXT_color_buffer_half_float`
+/// covers only the 16-bit float formats. Neither extension is core in any
+/// GLES version (3.2 included), so this is a pure function of the context's
+/// extension set, evaluated once at device creation.
+pub(super) fn detect_color_render_caps(
+    extensions: &std::collections::HashSet<String>,
+) -> GlesColorRenderCaps {
+    GlesColorRenderCaps {
+        color_buffer_float: extensions.contains("GL_EXT_color_buffer_float"),
+        color_buffer_half_float: extensions.contains("GL_EXT_color_buffer_half_float"),
+    }
 }
 
 #[cfg(test)]
@@ -360,5 +378,50 @@ mod tests {
         assert!(!detect_base_vertex_support((3, 1), &unrelated));
         assert!(detect_base_vertex_support((3, 1), &oes));
         assert!(detect_base_vertex_support((3, 1), &ext));
+    }
+
+    #[test]
+    fn detect_color_render_caps_checks_each_extension_independently() {
+        let empty = std::collections::HashSet::new();
+        let unrelated: std::collections::HashSet<String> = ["GL_EXT_copy_image".to_owned()].into();
+        let float_only: std::collections::HashSet<String> =
+            ["GL_EXT_color_buffer_float".to_owned()].into();
+        let half_float_only: std::collections::HashSet<String> =
+            ["GL_EXT_color_buffer_half_float".to_owned()].into();
+        let both: std::collections::HashSet<String> = [
+            "GL_EXT_color_buffer_float".to_owned(),
+            "GL_EXT_color_buffer_half_float".to_owned(),
+        ]
+        .into();
+
+        assert_eq!(
+            detect_color_render_caps(&empty),
+            GlesColorRenderCaps::default()
+        );
+        assert_eq!(
+            detect_color_render_caps(&unrelated),
+            GlesColorRenderCaps::default()
+        );
+        assert_eq!(
+            detect_color_render_caps(&float_only),
+            GlesColorRenderCaps {
+                color_buffer_float: true,
+                color_buffer_half_float: false,
+            }
+        );
+        assert_eq!(
+            detect_color_render_caps(&half_float_only),
+            GlesColorRenderCaps {
+                color_buffer_float: false,
+                color_buffer_half_float: true,
+            }
+        );
+        assert_eq!(
+            detect_color_render_caps(&both),
+            GlesColorRenderCaps {
+                color_buffer_float: true,
+                color_buffer_half_float: true,
+            }
+        );
     }
 }

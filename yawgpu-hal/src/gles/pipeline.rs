@@ -3,7 +3,7 @@ use std::sync::Arc;
 use glow::HasContext;
 
 use super::device::GlesDeviceInner;
-use super::format::{is_color_renderable, map_vertex_format};
+use super::format::{is_color_renderable_with, map_vertex_format, GlesColorRenderCaps};
 use super::{rebuild_hal_error, BACKEND};
 use crate::{
     HalColorTargetState, HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalError,
@@ -146,7 +146,7 @@ impl GlesRenderPipeline {
         descriptor: HalRenderPipelineDescriptor,
         bindings: &[HalDescriptorBinding],
     ) -> Result<Self, HalError> {
-        validate_render_pipeline_descriptor(&descriptor)?;
+        validate_render_pipeline_descriptor(&descriptor, device.color_render_caps())?;
         let (program, first_instance_location) =
             build_render_program(&device, &vertex_source, fragment_source.as_deref())?;
         Ok(Self {
@@ -274,6 +274,7 @@ fn build_compute_program(
 
 fn validate_render_pipeline_descriptor(
     descriptor: &HalRenderPipelineDescriptor,
+    color_render_caps: GlesColorRenderCaps,
 ) -> Result<(), HalError> {
     if descriptor.sample_count > 1 {
         return Err(HalError::BufferOperationFailed {
@@ -308,10 +309,14 @@ fn validate_render_pipeline_descriptor(
     // specs/blocks/67-gles-backend.md, "WebGPU x GLES mapping matrix").
     let first_target = descriptor.color_targets.iter().flatten().next();
     for target in descriptor.color_targets.iter().flatten() {
-        if !is_color_renderable(target.format) {
+        // T-G12: float formats become color-renderable when the device
+        // advertises `EXT_color_buffer_float` / `EXT_color_buffer_half_float`
+        // (caps detected once at device creation).
+        if !is_color_renderable_with(target.format, color_render_caps) {
             return Err(HalError::BufferOperationFailed {
                 backend: BACKEND,
-                message: "GLES render pipeline color target format is not color-renderable on GLES 3.1",
+                message:
+                    "GLES render pipeline color target format is not color-renderable on GLES 3.1",
             });
         }
         if target.blend.is_some_and(gles_blend_uses_dual_source) {
@@ -521,25 +526,25 @@ mod tests {
     fn validate_render_pipeline_descriptor_accepts_multiple_and_sparse_color_targets() {
         // T-G8 (MRT): multiple color targets and sparse (None) slots are
         // mappable via glDrawBuffers on GLES 3.1 and must validate.
-        assert!(validate_render_pipeline_descriptor(&render_descriptor(vec![
-            Some(color_target())
-        ]))
+        assert!(validate_render_pipeline_descriptor(
+            &render_descriptor(vec![Some(color_target())]),
+            GlesColorRenderCaps::default(),
+        )
         .is_ok());
-        assert!(validate_render_pipeline_descriptor(&render_descriptor(vec![
-            Some(color_target()),
-            Some(color_target()),
-        ]))
+        assert!(validate_render_pipeline_descriptor(
+            &render_descriptor(vec![Some(color_target()), Some(color_target())]),
+            GlesColorRenderCaps::default(),
+        )
         .is_ok());
-        assert!(validate_render_pipeline_descriptor(&render_descriptor(vec![
-            None,
-            Some(color_target()),
-        ]))
+        assert!(validate_render_pipeline_descriptor(
+            &render_descriptor(vec![None, Some(color_target())]),
+            GlesColorRenderCaps::default(),
+        )
         .is_ok());
-        assert!(validate_render_pipeline_descriptor(&render_descriptor(vec![
-            Some(color_target()),
-            None,
-            Some(color_target()),
-        ]))
+        assert!(validate_render_pipeline_descriptor(
+            &render_descriptor(vec![Some(color_target()), None, Some(color_target())]),
+            GlesColorRenderCaps::default(),
+        )
         .is_ok());
     }
 
@@ -550,10 +555,10 @@ mod tests {
         // targets; divergence is a Tier-2 HAL rejection.
         let mut masked = color_target();
         masked.write_mask = 0x7;
-        let error = validate_render_pipeline_descriptor(&render_descriptor(vec![
-            Some(color_target()),
-            Some(masked),
-        ]))
+        let error = validate_render_pipeline_descriptor(
+            &render_descriptor(vec![Some(color_target()), Some(masked)]),
+            GlesColorRenderCaps::default(),
+        )
         .expect_err("divergent per-target write masks must be rejected");
         assert!(matches!(
             error,
@@ -576,10 +581,10 @@ mod tests {
                 dst_factor: crate::HalBlendFactor::Zero,
             },
         });
-        let error = validate_render_pipeline_descriptor(&render_descriptor(vec![
-            Some(color_target()),
-            Some(blended),
-        ]))
+        let error = validate_render_pipeline_descriptor(
+            &render_descriptor(vec![Some(color_target()), Some(blended)]),
+            GlesColorRenderCaps::default(),
+        )
         .expect_err("divergent per-target blend state must be rejected");
         assert!(matches!(
             error,
@@ -610,8 +615,11 @@ mod tests {
             let mut target = color_target();
             target.format = format;
             assert!(
-                validate_render_pipeline_descriptor(&render_descriptor(vec![Some(target)]))
-                    .is_ok(),
+                validate_render_pipeline_descriptor(
+                    &render_descriptor(vec![Some(target)]),
+                    GlesColorRenderCaps::default(),
+                )
+                .is_ok(),
                 "{format:?} must be accepted as a GLES color target"
             );
         }
@@ -624,9 +632,11 @@ mod tests {
         for format in rejected {
             let mut target = color_target();
             target.format = format;
-            let error =
-                validate_render_pipeline_descriptor(&render_descriptor(vec![Some(target)]))
-                    .expect_err("non-color-renderable format must be rejected");
+            let error = validate_render_pipeline_descriptor(
+                &render_descriptor(vec![Some(target)]),
+                GlesColorRenderCaps::default(),
+            )
+            .expect_err("non-color-renderable format must be rejected");
             assert!(
                 matches!(
                     error,
@@ -639,6 +649,62 @@ mod tests {
                 "{format:?}"
             );
         }
+    }
+
+    #[test]
+    fn validate_render_pipeline_descriptor_gates_float_targets_on_extension_caps() {
+        // T-G12: float color targets are accepted exactly when the device
+        // caps say the corresponding extension is present.
+        let float_caps = GlesColorRenderCaps {
+            color_buffer_float: true,
+            color_buffer_half_float: false,
+        };
+        for format in [
+            HalTextureFormat::R16Float,
+            HalTextureFormat::Rgba16Float,
+            HalTextureFormat::R32Float,
+            HalTextureFormat::Rgba32Float,
+            HalTextureFormat::Rg11b10Ufloat,
+        ] {
+            let mut target = color_target();
+            target.format = format;
+            assert!(
+                validate_render_pipeline_descriptor(
+                    &render_descriptor(vec![Some(target)]),
+                    float_caps,
+                )
+                .is_ok(),
+                "{format:?} must be accepted with EXT_color_buffer_float"
+            );
+        }
+
+        // EXT_color_buffer_half_float alone unlocks float16 targets only.
+        let half_float_caps = GlesColorRenderCaps {
+            color_buffer_float: false,
+            color_buffer_half_float: true,
+        };
+        let mut half_float_target = color_target();
+        half_float_target.format = HalTextureFormat::Rgba16Float;
+        assert!(validate_render_pipeline_descriptor(
+            &render_descriptor(vec![Some(half_float_target)]),
+            half_float_caps,
+        )
+        .is_ok());
+        let mut float32_target = color_target();
+        float32_target.format = HalTextureFormat::R32Float;
+        let error = validate_render_pipeline_descriptor(
+            &render_descriptor(vec![Some(float32_target)]),
+            half_float_caps,
+        )
+        .expect_err("float32 target must stay rejected without EXT_color_buffer_float");
+        assert!(matches!(
+            error,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message:
+                    "GLES render pipeline color target format is not color-renderable on GLES 3.1",
+            }
+        ));
     }
 
     /// F2 (specs/tracking/tint-integration-refactor.md, slice R6): pins the
