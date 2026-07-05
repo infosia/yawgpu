@@ -100,3 +100,46 @@ to localize: the process died with zero GLES diagnostics.
   catalog (`webgpu:api,validation,buffer,create:*` is current) —
   runner silently reports pass=0 for unmatched queries (cts-repo docs
   fix candidate).
+
+## Finding G-4 — self-deadlock in GLES `ResolveQuerySet` submission (2026-07-05 evening)
+
+Repro (hangs forever, single case):
+`CTS_YAWGPU_BACKEND=gles cts 'webgpu:api,validation,encoding,queries,resolveQuerySet:queryset_and_destination_buffer_state:querySetState="valid";destinationState="valid"'`
+— the only case of the file that executes a real resolve; the other 8
+(error-path) cases pass. Bisected from the full api,validation chunk
+stalling at any worker count.
+
+Cause: `submit_copies` (yawgpu-hal/src/gles/queue.rs, `ResolveQuerySet`
+arm) calls `resolve.destination.write(...)` **inside**
+`with_current_context`, and `GlesBuffer::write`
+(yawgpu-hal/src/gles/buffer.rs:77) re-acquires the same device
+`current_lock` — parking_lot mutexes are non-reentrant, so the queue
+thread self-deadlocks. Every submission containing a resolveQuerySet
+hangs the device permanently; this is also what stalled the 21:08
+`--workers 4` crocus sweep (workers block one by one as their shard
+reaches this file — worker count is irrelevant).
+
+Fix (T-G4): perform the destination write with the already-current `gl`
+inside the held lock (factor a lock-free `write_with_gl(gl, offset,
+data)` helper out of `GlesBuffer::write` and use it from both call
+sites), or hoist the resolve write outside the context closure. Inline
+unit test: a submit containing a ResolveQuerySet copy against a real
+GLES device must complete (self-skip when EGL unavailable) — a plain
+Noop-level test cannot catch the re-entrancy.
+
+## api,validation fail clusters observed during bisect (crocus, workers=2, to triage after G-4)
+
+- files compute_pipeline..encoding,queries,general (bisect A1): fail=12,542 (pass=55,021 skip=104,379)
+- image_copy,{buffer_related,buffer_texture_copies,layout_related}: fail=375+38+2,612
+- error_scope: fail=12; buffer,*+capability_checks,*: fail=75
+
+## Latent hazard noted during the T-G4 re-entrancy audit (not fixed; no current path triggers it)
+
+The `Drop` impls of `GlesBufferInner` (buffer.rs:20), the
+`GlesRenderPipeline`/`GlesComputePipeline` inners (pipeline.rs:36, 113),
+`GlesSampler` (sampler.rs:21) and `GlesTexture` (texture.rs:30) each
+acquire `with_current_context`. If the last `Arc` of any of these were
+dropped from inside a context closure, the same self-deadlock as G-4
+would occur. No production path currently does this (`submit_copies`
+only borrows from `&[HalCopy]`), but any future change that moves owned
+HAL resources into the submit path must keep this in mind.

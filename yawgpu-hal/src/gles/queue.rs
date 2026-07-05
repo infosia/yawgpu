@@ -67,14 +67,26 @@ impl GlesQueue {
                         HalCopy::BufferClear(clear) => submit_buffer_clear(gl, clear)?,
                         HalCopy::ClearTexture(_) => {}
                         HalCopy::ResolveQuerySet(resolve) => {
+                            let HalBuffer::Gles(destination) = &resolve.destination else {
+                                return Err(HalError::BufferOperationFailed {
+                                    backend: BACKEND,
+                                    message: "query resolve destination is not a GLES buffer",
+                                });
+                            };
                             let byte_count = usize::try_from(u64::from(resolve.query_count) * 8)
                                 .map_err(|_| HalError::BufferOperationFailed {
                                     backend: BACKEND,
                                     message: "query resolve byte count is too large",
                                 })?;
-                            resolve
-                                .destination
-                                .write(resolve.destination_offset, &vec![0; byte_count])?;
+                            // The device's make-current lock is already held
+                            // by this closure; `GlesBuffer::write` would
+                            // re-acquire it and self-deadlock (T-G4), so use
+                            // the lock-free variant with the current `gl`.
+                            destination.write_with_gl(
+                                gl,
+                                resolve.destination_offset,
+                                &vec![0; byte_count],
+                            )?;
                         }
                         HalCopy::BufferToTexture(copy) => submit_buffer_to_texture(gl, copy)?,
                         HalCopy::TextureToBuffer(copy) => submit_texture_to_buffer(gl, copy)?,
@@ -1493,6 +1505,65 @@ fn u32_from_u64(value: u64, message: &'static str) -> Result<u32, HalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submit_copies_resolve_query_set_completes_and_writes_zeroes() {
+        // Regression test for T-G4: the ResolveQuerySet arm used to call
+        // `GlesBuffer::write` from inside `with_current_context`, re-acquiring
+        // the non-reentrant make-current lock and self-deadlocking. Under the
+        // fixed code this submit returns promptly.
+        let instance = match super::super::instance::GlesInstance::new() {
+            Ok(instance) => instance,
+            Err(error) => {
+                eprintln!("skipping GLES resolve-query-set test; backend unavailable: {error:?}");
+                return;
+            }
+        };
+        let Some(adapter) = instance.enumerate_adapters().into_iter().next() else {
+            eprintln!("skipping GLES resolve-query-set test; no adapter available");
+            return;
+        };
+        let device = match adapter.create_device() {
+            Ok(device) => device,
+            Err(error) => {
+                eprintln!("skipping GLES resolve-query-set test; device unavailable: {error:?}");
+                return;
+            }
+        };
+
+        let destination = device
+            .create_buffer(
+                16,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES buffer creation must succeed");
+        destination
+            .write(0, &[0xAB; 16])
+            .expect("pre-filling the destination buffer must succeed");
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::ResolveQuerySet(crate::HalResolveQuerySet {
+                query_set: crate::HalQuerySet::Gles { count: 2 },
+                first_query: 0,
+                query_count: 2,
+                written_queries: Vec::new(),
+                destination: HalBuffer::Gles(destination.clone()),
+                destination_offset: 0,
+            })])
+            .expect("submitting a ResolveQuerySet copy must complete without deadlocking");
+
+        assert_eq!(
+            destination
+                .read(0, 16)
+                .expect("reading back the resolved buffer must succeed"),
+            [0; 16],
+            "resolved query range must be zero-filled"
+        );
+    }
 
     fn noop_render_texture() -> Result<HalTexture, HalError> {
         let instance = crate::HalInstance::new_noop();

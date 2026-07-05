@@ -65,6 +65,24 @@ impl GlesBuffer {
 
     /// Records a write command.
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), HalError> {
+        self.inner
+            .device
+            .with_current_context(|gl| self.write_with_gl(gl, offset, data))?
+    }
+
+    /// Writes `data` at `offset` using an already-current GL context.
+    ///
+    /// The caller must already be inside
+    /// `GlesDeviceInner::with_current_context` (i.e. hold the device's
+    /// non-reentrant make-current lock); this fn does not re-acquire it.
+    /// Queue submission uses this from within its own context closure —
+    /// calling `write` there instead would self-deadlock (T-G4).
+    pub(super) fn write_with_gl(
+        &self,
+        gl: &glow::Context,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), HalError> {
         if data.is_empty() {
             return Ok(());
         }
@@ -74,11 +92,12 @@ impl GlesBuffer {
             message: "buffer write offset exceeds GLES limit",
         })?;
         let buffer = self.raw_or_err()?;
-        self.inner.device.with_current_context(|gl| unsafe {
+        unsafe {
             gl.bind_buffer(glow::COPY_WRITE_BUFFER, Some(buffer));
             gl.buffer_sub_data_u8_slice(glow::COPY_WRITE_BUFFER, offset, data);
             gl.bind_buffer(glow::COPY_WRITE_BUFFER, None);
-        })
+        }
+        Ok(())
     }
 
     /// Reads `len` bytes at `offset` back from the buffer into host memory.
