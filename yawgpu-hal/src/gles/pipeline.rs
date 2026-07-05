@@ -22,12 +22,23 @@ use crate::{
 /// specs/tracking/tint-integration-refactor.md slice R6).
 const FIRST_INSTANCE_UNIFORM_NAME: &str = "tint_immediates[0]";
 
+#[derive(Debug, Clone)]
+pub(super) struct GlesResolvedCombinedSampler {
+    pub(super) unit: u32,
+    pub(super) uniform_name: String,
+    pub(super) texture_group: u32,
+    pub(super) texture_binding: u32,
+    pub(super) sampler_group: u32,
+    pub(super) sampler_binding: u32,
+    pub(super) uses_placeholder_sampler: bool,
+}
+
 struct GlesComputePipelineInner {
     device: Arc<GlesDeviceInner>,
     program: Result<glow::Program, HalError>,
     workgroup_size: (u32, u32, u32),
     bindings: Vec<HalDescriptorBinding>,
-    combined_samplers: Vec<HalCombinedSampler>,
+    combined_samplers: Vec<GlesResolvedCombinedSampler>,
 }
 
 impl Drop for GlesComputePipelineInner {
@@ -72,6 +83,7 @@ impl GlesComputePipeline {
         combined_samplers: Vec<HalCombinedSampler>,
     ) -> Result<Self, HalError> {
         let program = build_compute_program(&device, &source)?;
+        let combined_samplers = resolve_combined_samplers(&device, program, &combined_samplers)?;
         Ok(Self {
             inner: Arc::new(GlesComputePipelineInner {
                 device,
@@ -95,6 +107,11 @@ impl GlesComputePipeline {
     pub(super) fn bindings(&self) -> &[HalDescriptorBinding] {
         &self.inner.bindings
     }
+
+    #[must_use]
+    pub(super) fn combined_samplers(&self) -> &[GlesResolvedCombinedSampler] {
+        &self.inner.combined_samplers
+    }
 }
 
 struct GlesRenderPipelineInner {
@@ -107,7 +124,7 @@ struct GlesRenderPipelineInner {
     front_face: HalFrontFace,
     cull_mode: HalCullMode,
     bindings: Vec<HalDescriptorBinding>,
-    combined_samplers: Vec<HalCombinedSampler>,
+    combined_samplers: Vec<GlesResolvedCombinedSampler>,
     first_instance_location: Option<glow::UniformLocation>,
 }
 
@@ -157,6 +174,7 @@ impl GlesRenderPipeline {
         validate_render_pipeline_descriptor(&descriptor, device.color_render_caps())?;
         let (program, first_instance_location) =
             build_render_program(&device, &vertex_source, fragment_source.as_deref())?;
+        let combined_samplers = resolve_combined_samplers(&device, program, &combined_samplers)?;
         Ok(Self {
             inner: Arc::new(GlesRenderPipelineInner {
                 device,
@@ -229,6 +247,52 @@ impl GlesRenderPipeline {
     pub(super) fn first_instance_location(&self) -> Option<&glow::UniformLocation> {
         self.inner.first_instance_location.as_ref()
     }
+
+    #[must_use]
+    pub(super) fn combined_samplers(&self) -> &[GlesResolvedCombinedSampler] {
+        &self.inner.combined_samplers
+    }
+}
+
+fn resolve_combined_samplers(
+    device: &Arc<GlesDeviceInner>,
+    program: glow::Program,
+    combined_samplers: &[HalCombinedSampler],
+) -> Result<Vec<GlesResolvedCombinedSampler>, HalError> {
+    device
+        .with_current_context(|gl| unsafe {
+            let mut resolved = Vec::new();
+            gl.use_program(Some(program));
+            for combined in combined_samplers {
+                let Some(location) = gl.get_uniform_location(program, &combined.glsl_uniform_name)
+                else {
+                    continue;
+                };
+                let unit =
+                    u32::try_from(resolved.len()).map_err(|_| HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message: "GLES combined sampler unit index exceeds limit",
+                    })?;
+                let unit_i32 =
+                    i32::try_from(unit).map_err(|_| HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message: "GLES combined sampler unit index exceeds limit",
+                    })?;
+                gl.uniform_1_i32(Some(&location), unit_i32);
+                resolved.push(GlesResolvedCombinedSampler {
+                    unit,
+                    uniform_name: combined.glsl_uniform_name.clone(),
+                    texture_group: combined.texture_group,
+                    texture_binding: combined.texture_binding,
+                    sampler_group: combined.sampler_group,
+                    sampler_binding: combined.sampler_binding,
+                    uses_placeholder_sampler: combined.uses_placeholder_sampler,
+                });
+            }
+            gl.use_program(None);
+            Ok(resolved)
+        })
+        .and_then(|result| result)
 }
 
 fn build_compute_program(

@@ -7,12 +7,13 @@ use super::format::{color_clear_kind, map_primitive_topology, map_vertex_format,
 use super::BACKEND;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::{
-    HalBlendFactor, HalBlendOperation, HalBuffer, HalBufferBindingKind, HalBufferClear,
-    HalBufferCopy, HalBufferTextureCopy, HalColorTargetState, HalCompareFunction,
-    HalComputeDispatch, HalComputePass, HalComputePipeline, HalCopy, HalCullMode,
-    HalDepthStencilState, HalDescriptorBinding, HalDescriptorBindingKind, HalDraw, HalError,
-    HalFrontFace, HalIndexFormat, HalRenderLoadOp, HalRenderPass, HalRenderPipeline,
-    HalStencilFaceState, HalStencilOperation, HalTexture, HalTextureCopy, HalVertexStepMode,
+    HalBlendFactor, HalBlendOperation, HalBoundSampler, HalBoundTexture, HalBuffer,
+    HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy, HalColorTargetState,
+    HalCompareFunction, HalComputeDispatch, HalComputePass, HalComputePipeline, HalCopy,
+    HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalDescriptorBindingKind, HalDraw,
+    HalError, HalFrontFace, HalIndexFormat, HalRenderLoadOp, HalRenderPass, HalRenderPipeline,
+    HalSampler, HalStencilFaceState, HalStencilOperation, HalTexture, HalTextureCopy,
+    HalTextureViewDimension, HalVertexStepMode,
 };
 
 /// Stores GLES queue data used by validation and backend submission.
@@ -228,12 +229,8 @@ fn submit_compute_pass(gl: &glow::Context, pass: &HalComputePass) -> Result<(), 
             message: "compute pass pipeline is not a GLES pipeline",
         });
     };
-    if !pass.bind_textures.is_empty() {
-        return Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "GLES compute does not support texture bindings",
-        });
-    }
+    reject_external_texture_bindings(pass.bind_external_textures.len())?;
+    reject_storage_texture_bindings(&pass.bind_textures)?;
     let program = pipeline.raw_or_err()?;
     let bindings = pass
         .bind_buffers
@@ -270,6 +267,13 @@ fn submit_compute_pass(gl: &glow::Context, pass: &HalComputePass) -> Result<(), 
         for (target, binding, buffer, offset, size) in bindings {
             gl.bind_buffer_range(target, binding, Some(buffer), offset, size);
         }
+        let texture_units = bind_combined_samplers(
+            gl,
+            pipeline.combined_samplers(),
+            &pass.bind_textures,
+            &pass.bind_samplers,
+        )?;
+        let _texture_cleanup = TextureUnitCleanup { gl, texture_units };
         match &pass.dispatch {
             HalComputeDispatch::Direct { workgroups } => {
                 // WebGPU: a dispatch with any zero workgroup count does
@@ -331,12 +335,179 @@ fn binding_target(bindings: &[HalDescriptorBinding], binding: u32) -> Result<u32
     }
 }
 
+fn reject_external_texture_bindings(count: usize) -> Result<(), HalError> {
+    if count != 0 {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES does not support external texture bindings",
+        });
+    }
+    Ok(())
+}
+
+fn reject_storage_texture_bindings(bindings: &[HalBoundTexture]) -> Result<(), HalError> {
+    if bindings
+        .iter()
+        .any(|binding| binding.storage_access.is_some())
+    {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES storage texture bindings are not yet supported",
+        });
+    }
+    Ok(())
+}
+
+fn bind_combined_samplers(
+    gl: &glow::Context,
+    combined_samplers: &[super::pipeline::GlesResolvedCombinedSampler],
+    textures: &[HalBoundTexture],
+    samplers: &[HalBoundSampler],
+) -> Result<Vec<u32>, HalError> {
+    let mut units = Vec::with_capacity(combined_samplers.len());
+    for combined in combined_samplers {
+        if combined.texture_group != 0
+            || (!combined.uses_placeholder_sampler && combined.sampler_group != 0)
+        {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES texture/sampler bindings support only bind group 0",
+            });
+        }
+        let texture = textures
+            .iter()
+            .find(|texture| {
+                texture.group == combined.texture_group
+                    && texture.binding == combined.texture_binding
+                    && texture.storage_access.is_none()
+            })
+            .ok_or_else(|| HalError::QueueSubmissionFailed {
+                backend: BACKEND,
+                message: format!(
+                    "GLES sampled texture binding (group {}, binding {}) is missing for uniform {}",
+                    combined.texture_group, combined.texture_binding, combined.uniform_name
+                ),
+            })?;
+        let HalTexture::Gles(gles_texture) = &texture.texture else {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "sampled texture binding is not a GLES texture",
+            });
+        };
+        let target = texture_view_target(texture.dimension)?;
+        validate_texture_view_layers(texture, gles_texture.meta().depth_or_array_layers)?;
+        let raw_texture = gles_texture.raw_or_err()?;
+        let base_level = i32_from_u32(
+            texture.base_mip_level,
+            "texture base mip level exceeds GLES limit",
+        )?;
+        let max_level = texture
+            .base_mip_level
+            .checked_add(texture.mip_level_count)
+            .and_then(|end| end.checked_sub(1))
+            .ok_or(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "texture mip level range is empty or overflows",
+            })?;
+        let max_level = i32_from_u32(max_level, "texture max mip level exceeds GLES limit")?;
+        let unit = combined.unit;
+        unsafe {
+            gl.active_texture(glow::TEXTURE0 + unit);
+            gl.bind_texture(target, Some(raw_texture));
+            // This mutates texture-object state. GLES queue submission is
+            // single-context serialized, so restoring per-view mip bounds at
+            // each bind is deterministic for this backend.
+            gl.tex_parameter_i32(target, glow::TEXTURE_BASE_LEVEL, base_level);
+            gl.tex_parameter_i32(target, glow::TEXTURE_MAX_LEVEL, max_level);
+        }
+        if combined.uses_placeholder_sampler {
+            unsafe {
+                gl.bind_sampler(unit, None);
+            }
+        } else {
+            let sampler = samplers
+                .iter()
+                .find(|sampler| {
+                    sampler.group == combined.sampler_group
+                        && sampler.binding == combined.sampler_binding
+                })
+                .ok_or_else(|| HalError::QueueSubmissionFailed {
+                    backend: BACKEND,
+                    message: format!(
+                        "GLES sampler binding (group {}, binding {}) is missing for uniform {}",
+                        combined.sampler_group, combined.sampler_binding, combined.uniform_name
+                    ),
+                })?;
+            let HalSampler::Gles(gles_sampler) = &sampler.sampler else {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "sampler binding is not a GLES sampler",
+                });
+            };
+            unsafe {
+                gl.bind_sampler(unit, Some(gles_sampler.raw_or_err()?));
+            }
+        }
+        units.push(unit);
+    }
+    Ok(units)
+}
+
+fn texture_view_target(dimension: HalTextureViewDimension) -> Result<u32, HalError> {
+    match dimension {
+        HalTextureViewDimension::D1 | HalTextureViewDimension::D2 => Ok(glow::TEXTURE_2D),
+        HalTextureViewDimension::D2Array => Ok(glow::TEXTURE_2D_ARRAY),
+        HalTextureViewDimension::Cube => Ok(glow::TEXTURE_CUBE_MAP),
+        HalTextureViewDimension::CubeArray => Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES 3.1 lacks cube-array textures",
+        }),
+        HalTextureViewDimension::D3 => Ok(glow::TEXTURE_3D),
+    }
+}
+
+fn validate_texture_view_layers(
+    texture: &HalBoundTexture,
+    full_layer_count: u32,
+) -> Result<(), HalError> {
+    let layered = matches!(
+        texture.dimension,
+        HalTextureViewDimension::D2Array
+            | HalTextureViewDimension::Cube
+            | HalTextureViewDimension::CubeArray
+    );
+    if texture.base_array_layer != 0 || (layered && texture.array_layer_count != full_layer_count) {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES cannot bind array-layer subrange views",
+        });
+    }
+    Ok(())
+}
+
+struct TextureUnitCleanup<'a> {
+    gl: &'a glow::Context,
+    texture_units: Vec<u32>,
+}
+
+impl Drop for TextureUnitCleanup<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            for unit in &self.texture_units {
+                self.gl.bind_sampler(*unit, None);
+            }
+            self.gl.active_texture(glow::TEXTURE0);
+        }
+    }
+}
+
 fn submit_render_pass(
     gl: &glow::Context,
     pass: &HalRenderPass,
     supports_base_vertex: bool,
 ) -> Result<(), HalError> {
-    reject_render_texture_sampler_bindings(pass)?;
+    reject_external_texture_bindings(pass.bind_external_textures.len())?;
+    reject_storage_texture_bindings(&pass.bind_textures)?;
     let fbo = create_render_fbo(gl, pass)?;
     let pipeline = match &pass.pipeline {
         None => {
@@ -374,23 +545,6 @@ fn submit_render_pass(
     run_render_draw(gl, pass, pipeline, vao, supports_base_vertex)
 }
 
-fn reject_render_texture_sampler_bindings(pass: &HalRenderPass) -> Result<(), HalError> {
-    reject_render_texture_sampler_binding_counts(pass.bind_textures.len(), pass.bind_samplers.len())
-}
-
-fn reject_render_texture_sampler_binding_counts(
-    texture_count: usize,
-    sampler_count: usize,
-) -> Result<(), HalError> {
-    if texture_count != 0 || sampler_count != 0 {
-        return Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "GLES render pass does not support texture/sampler bindings",
-        });
-    }
-    Ok(())
-}
-
 struct RenderPassCleanup<'a> {
     gl: &'a glow::Context,
     fbo: glow::Framebuffer,
@@ -407,6 +561,7 @@ impl Drop for RenderPassCleanup<'_> {
             self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
             self.gl.delete_framebuffer(self.fbo);
             self.gl.use_program(None);
+            self.gl.active_texture(glow::TEXTURE0);
             self.gl.color_mask(true, true, true, true);
             self.gl.disable(glow::BLEND);
             self.gl.disable(glow::STENCIL_TEST);
@@ -678,6 +833,13 @@ fn run_render_draw(
         gl.use_program(Some(program));
     }
     bind_render_buffers(gl, pass, pipeline)?;
+    let texture_units = bind_combined_samplers(
+        gl,
+        pipeline.combined_samplers(),
+        &pass.bind_textures,
+        &pass.bind_samplers,
+    )?;
+    let _texture_cleanup = TextureUnitCleanup { gl, texture_units };
     let first_instance = pass.draw.map(draw_first_instance).unwrap_or(0);
     bind_vertex_buffers(gl, pass, pipeline, vao, first_instance)?;
     if let Some(draw) = pass.draw {
@@ -2244,6 +2406,353 @@ mod tests {
             .expect("reading back the copied slices must succeed")
     }
 
+    fn sampled_rgba8_texture(
+        device: &super::super::device::GlesDevice,
+        pixels: &[u8; 16],
+    ) -> super::super::texture::GlesTexture {
+        let texture = device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: false,
+                    copy_dst: true,
+                    texture_binding: true,
+                    storage_binding: false,
+                    render_attachment: false,
+                    transient: false,
+                },
+            })
+            .expect("GLES sampled texture creation must succeed");
+        let upload = device
+            .create_buffer(
+                pixels.len() as u64,
+                crate::HalBufferUsage {
+                    copy_src: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES sampled-texture upload buffer creation must succeed");
+        upload
+            .write(0, pixels)
+            .expect("writing sampled-texture pixels must succeed");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::BufferToTexture(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(upload),
+                buffer_layout: rgba8_slice_layout(0),
+                texture: HalTexture::Gles(texture.clone()),
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                extent: crate::HalExtent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: 1,
+                },
+            })])
+            .expect("uploading sampled texture pixels must succeed");
+        texture
+    }
+
+    fn bound_sampled_texture(
+        texture: super::super::texture::GlesTexture,
+        binding: u32,
+    ) -> HalBoundTexture {
+        HalBoundTexture {
+            group: 0,
+            binding,
+            metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: Some(0),
+            texture: HalTexture::Gles(texture),
+            format: crate::HalTextureFormat::Rgba8Unorm,
+            dimension: HalTextureViewDimension::D2,
+            base_mip_level: 0,
+            mip_level_count: 1,
+            base_array_layer: 0,
+            array_layer_count: 1,
+            aspect: crate::HalTextureAspect::All,
+            swizzle: crate::HalTextureComponentSwizzle::default(),
+            storage_access: None,
+        }
+    }
+
+    fn nearest_sampler_binding(
+        device: &super::super::device::GlesDevice,
+        binding: u32,
+    ) -> HalBoundSampler {
+        let sampler = device.create_sampler(&crate::HalSamplerDescriptor {
+            address_mode_u: crate::HalAddressMode::ClampToEdge,
+            address_mode_v: crate::HalAddressMode::ClampToEdge,
+            address_mode_w: crate::HalAddressMode::ClampToEdge,
+            mag_filter: crate::HalFilterMode::Nearest,
+            min_filter: crate::HalFilterMode::Nearest,
+            mipmap_filter: crate::HalMipmapFilterMode::Nearest,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 32.0,
+            compare: None,
+            max_anisotropy: 1,
+        });
+        HalBoundSampler {
+            group: 0,
+            binding,
+            metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: Some(0),
+            sampler: HalSampler::Gles(sampler),
+        }
+    }
+
+    #[test]
+    fn submit_render_pass_samples_texture_with_sampler_binding() {
+        let Some(device) = gles_device_or_skip("GLES render sampled-texture test") else {
+            return;
+        };
+        let pixels: [u8; 16] = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let sampled = sampled_rgba8_texture(&device, &pixels);
+        let target = device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: true,
+                    copy_dst: false,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: true,
+                    transient: false,
+                },
+            })
+            .expect("GLES 2x2 render target creation must succeed");
+        let readback = device
+            .create_buffer(
+                16,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES render sampled-texture readback buffer creation must succeed");
+
+        let pipeline = device
+            .create_render_pipeline(
+                crate::HalShaderSource::GlslStages {
+                    vertex: "#version 310 es\n\
+                             void main() {\n\
+                                 vec2 pos = vec2(float((gl_VertexID & 1) << 2) - 1.0,\n\
+                                                 float((gl_VertexID & 2) << 1) - 1.0);\n\
+                                 gl_Position = vec4(pos, 0.0, 1.0);\n\
+                             }\n"
+                    .to_owned(),
+                    fragment: Some(
+                        "#version 310 es\n\
+                         precision mediump float;\n\
+                         uniform sampler2D u_tex;\n\
+                         layout(location = 0) out vec4 frag_color;\n\
+                         void main() {\n\
+                             frag_color = texture(u_tex, gl_FragCoord.xy * 0.5);\n\
+                         }\n"
+                        .to_owned(),
+                    ),
+                    combined_samplers: vec![crate::HalCombinedSampler {
+                        glsl_uniform_name: "u_tex".to_owned(),
+                        texture_group: 0,
+                        texture_binding: 1,
+                        sampler_group: 0,
+                        sampler_binding: 2,
+                        uses_placeholder_sampler: false,
+                    }],
+                },
+                "main",
+                Some("main"),
+                &crate::HalRenderPipelineDescriptor {
+                    sample_count: 1,
+                    sample_mask: u32::MAX,
+                    alpha_to_coverage_enabled: false,
+                    color_targets: vec![Some(HalColorTargetState {
+                        format: crate::HalTextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: 0xf,
+                    })],
+                    depth_stencil: None,
+                    vertex_buffers: Vec::new(),
+                    primitive_topology: crate::HalPrimitiveTopology::TriangleList,
+                    front_face: HalFrontFace::Ccw,
+                    cull_mode: HalCullMode::None,
+                    unclipped_depth: false,
+                    needs_frag_depth_range_push_constant: false,
+                    user_immediate_size: 0,
+                },
+                &[
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 1,
+                        kind: HalDescriptorBindingKind::Texture,
+                    },
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 2,
+                        kind: HalDescriptorBindingKind::Sampler,
+                    },
+                ],
+            )
+            .expect("GLES sampled-texture render pipeline creation must succeed");
+
+        let mut pass = render_pass(vec![Some(color_target_for(
+            target.clone(),
+            crate::HalTextureFormat::Rgba8Unorm,
+            [0.0, 0.0, 0.0, 0.0],
+        ))]);
+        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
+        pass.bind_textures = vec![bound_sampled_texture(sampled, 1)];
+        pass.bind_samplers = vec![nearest_sampler_binding(&device, 2)];
+        pass.draw = Some(HalDraw::Direct {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        });
+
+        device
+            .queue()
+            .submit_copies(&[
+                HalCopy::RenderPass(pass),
+                HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                    buffer: HalBuffer::Gles(readback.clone()),
+                    buffer_layout: rgba8_slice_layout(0),
+                    texture: HalTexture::Gles(target),
+                    format: crate::HalTextureFormat::Rgba8Unorm,
+                    aspect: crate::HalTextureAspect::All,
+                    mip_level: 0,
+                    origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                    extent: crate::HalExtent3d {
+                        width: 2,
+                        height: 2,
+                        depth_or_array_layers: 1,
+                    },
+                }),
+            ])
+            .expect("render pass sampling a texture plus readback must succeed");
+
+        assert_eq!(
+            readback
+                .read(0, 16)
+                .expect("reading back the sampled render target must succeed"),
+            pixels,
+            "each 2x2 output pixel must sample the matching source texel"
+        );
+    }
+
+    #[test]
+    fn submit_compute_pass_samples_texture_with_placeholder_sampler() {
+        let Some(device) = gles_device_or_skip("GLES compute sampled-texture test") else {
+            return;
+        };
+        let pixels: [u8; 16] = [
+            10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
+        ];
+        let sampled = sampled_rgba8_texture(&device, &pixels);
+        let output = device
+            .create_buffer(
+                16 * 4,
+                crate::HalBufferUsage {
+                    storage: true,
+                    copy_src: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES compute sampled-texture output buffer creation must succeed");
+        let pipeline = device
+            .create_compute_pipeline(
+                crate::HalShaderSource::Glsl {
+                    source: "#version 310 es\n\
+                             precision highp float;\n\
+                             precision highp int;\n\
+                             layout(local_size_x = 4) in;\n\
+                             uniform sampler2D u_tex;\n\
+                             layout(std430, binding = 0) buffer Out { uvec4 values[4]; } out_buf;\n\
+                             void main() {\n\
+                                 uint i = gl_GlobalInvocationID.x;\n\
+                                 ivec2 xy = ivec2(int(i & 1u), int(i >> 1u));\n\
+                                 out_buf.values[i] = uvec4(texelFetch(u_tex, xy, 0) * 255.0 + 0.5);\n\
+                             }\n"
+                    .to_owned(),
+                    stage: crate::HalShaderStage::Compute,
+                    combined_samplers: vec![crate::HalCombinedSampler {
+                        glsl_uniform_name: "u_tex".to_owned(),
+                        texture_group: 0,
+                        texture_binding: 1,
+                        sampler_group: u32::MAX,
+                        sampler_binding: u32::MAX,
+                        uses_placeholder_sampler: true,
+                    }],
+                },
+                "main",
+                (4, 1, 1),
+                &[
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 0,
+                        kind: HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage),
+                    },
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 1,
+                        kind: HalDescriptorBindingKind::Texture,
+                    },
+                ],
+            )
+            .expect("GLES sampled-texture compute pipeline creation must succeed");
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::ComputePass(crate::HalComputePass {
+                pipeline: HalComputePipeline::Gles(pipeline),
+                bind_buffers: vec![crate::HalBoundBuffer {
+                    group: 0,
+                    binding: 0,
+                    metal_index: 0,
+                    vertex_metal_index: None,
+                    fragment_metal_index: None,
+                    buffer: HalBuffer::Gles(output.clone()),
+                    offset: 0,
+                    size: 16 * 4,
+                }],
+                bind_textures: vec![bound_sampled_texture(sampled, 1)],
+                bind_samplers: Vec::new(),
+                bind_external_textures: Vec::new(),
+                immediate_data: Vec::new(),
+                dispatch: HalComputeDispatch::Direct {
+                    workgroups: (1, 1, 1),
+                },
+            })])
+            .expect("compute pass sampling a texture must succeed");
+
+        let bytes = output
+            .read(0, 16 * 4)
+            .expect("reading compute sampled-texture output must succeed");
+        let actual: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+        let expected: Vec<u32> = pixels.iter().map(|value| u32::from(*value)).collect();
+        assert_eq!(actual, expected);
+    }
+
     #[test]
     fn submit_copies_round_trips_2d_array_texture_layers() {
         // T-G9: buffer-to-texture / texture-to-buffer copies on a 2D-array
@@ -3101,24 +3610,34 @@ mod tests {
     }
 
     #[test]
-    fn reject_render_texture_sampler_bindings_rejects_texture_or_sampler_counts() {
-        assert!(reject_render_texture_sampler_binding_counts(0, 0).is_ok());
-        let texture = reject_render_texture_sampler_binding_counts(1, 0)
-            .expect_err("texture binding must be rejected");
+    fn texture_view_target_maps_supported_dimensions_and_rejects_cube_array() {
+        assert_eq!(
+            texture_view_target(HalTextureViewDimension::D1).expect("D1 target"),
+            glow::TEXTURE_2D
+        );
+        assert_eq!(
+            texture_view_target(HalTextureViewDimension::D2).expect("D2 target"),
+            glow::TEXTURE_2D
+        );
+        assert_eq!(
+            texture_view_target(HalTextureViewDimension::D2Array).expect("D2Array target"),
+            glow::TEXTURE_2D_ARRAY
+        );
+        assert_eq!(
+            texture_view_target(HalTextureViewDimension::D3).expect("D3 target"),
+            glow::TEXTURE_3D
+        );
+        assert_eq!(
+            texture_view_target(HalTextureViewDimension::Cube).expect("cube target"),
+            glow::TEXTURE_CUBE_MAP
+        );
+        let cube_array =
+            texture_view_target(HalTextureViewDimension::CubeArray).expect_err("cube array");
         assert!(matches!(
-            texture,
+            cube_array,
             HalError::BufferOperationFailed {
                 backend: "gles",
-                message: "GLES render pass does not support texture/sampler bindings",
-            }
-        ));
-        let sampler = reject_render_texture_sampler_binding_counts(0, 1)
-            .expect_err("sampler binding must be rejected");
-        assert!(matches!(
-            sampler,
-            HalError::BufferOperationFailed {
-                backend: "gles",
-                message: "GLES render pass does not support texture/sampler bindings",
+                message: "GLES 3.1 lacks cube-array textures",
             }
         ));
     }
