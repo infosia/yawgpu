@@ -1123,11 +1123,13 @@ fn bind_vertex_buffers(
                 backend: BACKEND,
                 message: "vertex buffer binding index exceeds host limit",
             })?;
+        // T-G5 (Finding G-5, specs/tracking/cts-gles-sweep-0705.md): per
+        // WebGPU semantics, vertex buffers bound at slots beyond the
+        // pipeline's declared vertex-buffer layouts are ignored at draw
+        // time, so skip (rather than reject) bindings at slots the pipeline
+        // does not declare.
         let Some(layout) = pipeline.vertex_buffers().get(layout_index) else {
-            return Err(HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "vertex buffer binding is missing from pipeline layout",
-            });
+            continue;
         };
         let HalBuffer::Gles(buffer) = &bound.buffer else {
             return Err(HalError::BufferOperationFailed {
@@ -1563,6 +1565,143 @@ mod tests {
             [0; 16],
             "resolved query range must be zero-filled"
         );
+    }
+
+    #[test]
+    fn submit_render_pass_ignores_vertex_buffer_at_undeclared_slot() {
+        // Regression test for T-G5: a vertex buffer bound at a slot the
+        // pipeline's vertex-buffer layouts do not declare used to fail the
+        // whole submit with "vertex buffer binding is missing from pipeline
+        // layout". WebGPU ignores such bindings at draw time, so the fixed
+        // `bind_vertex_buffers` skips them and the submit succeeds.
+        let instance = match super::super::instance::GlesInstance::new() {
+            Ok(instance) => instance,
+            Err(error) => {
+                eprintln!(
+                    "skipping GLES undeclared-vertex-slot test; backend unavailable: {error:?}"
+                );
+                return;
+            }
+        };
+        let Some(adapter) = instance.enumerate_adapters().into_iter().next() else {
+            eprintln!("skipping GLES undeclared-vertex-slot test; no adapter available");
+            return;
+        };
+        let device = match adapter.create_device() {
+            Ok(device) => device,
+            Err(error) => {
+                eprintln!(
+                    "skipping GLES undeclared-vertex-slot test; device unavailable: {error:?}"
+                );
+                return;
+            }
+        };
+
+        let color_texture = device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: false,
+                    copy_dst: false,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: true,
+                    transient: false,
+                },
+            })
+            .expect("GLES texture creation must succeed");
+
+        let pipeline = device
+            .create_render_pipeline(
+                crate::HalShaderSource::GlslStages {
+                    vertex: "#version 310 es\n\
+                             void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n"
+                        .to_owned(),
+                    fragment: Some(
+                        "#version 310 es\n\
+                         precision mediump float;\n\
+                         layout(location = 0) out vec4 frag_color;\n\
+                         void main() { frag_color = vec4(1.0); }\n"
+                            .to_owned(),
+                    ),
+                },
+                "main",
+                Some("main"),
+                &crate::HalRenderPipelineDescriptor {
+                    sample_count: 1,
+                    sample_mask: u32::MAX,
+                    alpha_to_coverage_enabled: false,
+                    color_targets: vec![Some(HalColorTargetState {
+                        format: crate::HalTextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: 0xf,
+                    })],
+                    depth_stencil: None,
+                    // Zero declared vertex-buffer layouts: slot 0 is undeclared.
+                    vertex_buffers: Vec::new(),
+                    primitive_topology: crate::HalPrimitiveTopology::TriangleList,
+                    front_face: HalFrontFace::Ccw,
+                    cull_mode: HalCullMode::None,
+                    unclipped_depth: false,
+                    needs_frag_depth_range_push_constant: false,
+                    user_immediate_size: 0,
+                },
+                &[],
+            )
+            .expect("GLES render pipeline creation must succeed");
+
+        let vertex_buffer = device
+            .create_buffer(
+                16,
+                crate::HalBufferUsage {
+                    vertex: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES buffer creation must succeed");
+
+        let mut pass = render_pass(vec![Some(crate::HalRenderColorTarget {
+            texture: HalTexture::Gles(color_texture),
+            view_format: crate::HalTextureFormat::Rgba8Unorm,
+            resolve_target: None,
+            resolve_view_format: None,
+            mip_level: 0,
+            array_layer: 0,
+            depth_slice: 0,
+            resolve_mip_level: 0,
+            resolve_array_layer: 0,
+            load_op: HalRenderLoadOp::Clear,
+            store: true,
+            clear_color: [0.0, 0.0, 0.0, 1.0],
+        })]);
+        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
+        pass.vertex_buffers = vec![crate::HalBoundBuffer {
+            group: 0,
+            binding: 0,
+            metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            buffer: HalBuffer::Gles(vertex_buffer),
+            offset: 0,
+            size: 16,
+        }];
+        pass.draw = Some(HalDraw::Direct {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        });
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::RenderPass(pass)])
+            .expect("submit must ignore a vertex buffer bound at an undeclared slot");
     }
 
     fn noop_render_texture() -> Result<HalTexture, HalError> {

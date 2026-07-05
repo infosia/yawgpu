@@ -361,6 +361,12 @@ fn gles_blend_factor_is_dual_source(factor: crate::HalBlendFactor) -> bool {
     )
 }
 
+/// Stub fragment shader linked into fragment-less render pipelines. Mesa
+/// rejects fragment-less program links ("program lacks a fragment shader")
+/// while ANGLE accepts them; the stub makes vertex-only
+/// (depth/stencil-only) pipelines link on every driver.
+const FRAGMENTLESS_STUB_FS: &str = "#version 310 es\nvoid main() {}\n";
+
 fn build_render_program(
     device: &Arc<GlesDeviceInner>,
     vertex_source: &str,
@@ -369,11 +375,16 @@ fn build_render_program(
     device
         .with_current_context(|gl| unsafe {
             let vertex = compile_shader(gl, glow::VERTEX_SHADER, vertex_source, "vertex")?;
-            let fragment = match fragment_source
-                .map(|source| compile_shader(gl, glow::FRAGMENT_SHADER, source, "fragment"))
-                .transpose()
-            {
-                Ok(fragment) => fragment,
+            // Fragment-less pipelines still attach a stub fragment stage so
+            // the program links on drivers (Mesa) that reject vertex-only
+            // links; see `FRAGMENTLESS_STUB_FS`.
+            let fragment = match compile_shader(
+                gl,
+                glow::FRAGMENT_SHADER,
+                fragment_source.unwrap_or(FRAGMENTLESS_STUB_FS),
+                "fragment",
+            ) {
+                Ok(fragment) => Some(fragment),
                 Err(error) => {
                     gl.delete_shader(vertex);
                     return Err(error);
@@ -533,5 +544,89 @@ mod tests {
     #[test]
     fn first_instance_uniform_name_matches_tint_immediate_array_element_zero() {
         assert_eq!(FIRST_INSTANCE_UNIFORM_NAME, "tint_immediates[0]");
+    }
+
+    fn stencil_face_state() -> crate::HalStencilFaceState {
+        crate::HalStencilFaceState {
+            compare: crate::HalCompareFunction::Always,
+            fail_op: crate::HalStencilOperation::Keep,
+            depth_fail_op: crate::HalStencilOperation::Keep,
+            pass_op: crate::HalStencilOperation::Keep,
+        }
+    }
+
+    #[test]
+    fn create_render_pipeline_without_fragment_stage_links() {
+        // Regression test for T-G6 (Finding G-6,
+        // specs/tracking/cts-gles-sweep-0705.md): Mesa (crocus/llvmpipe)
+        // rejects fragment-less program links ("error: program lacks a
+        // fragment shader"), so fragment-less (depth/stencil-only) render
+        // pipelines must link a stub fragment stage. Pre-fix this failed at
+        // link time on Mesa; ANGLE accepted fragment-less links, which is
+        // why the gap only surfaced on this host.
+        let instance = match super::super::instance::GlesInstance::new() {
+            Ok(instance) => instance,
+            Err(error) => {
+                eprintln!(
+                    "skipping GLES fragment-less pipeline test; backend unavailable: {error:?}"
+                );
+                return;
+            }
+        };
+        let Some(adapter) = instance.enumerate_adapters().into_iter().next() else {
+            eprintln!("skipping GLES fragment-less pipeline test; no adapter available");
+            return;
+        };
+        let device = match adapter.create_device() {
+            Ok(device) => device,
+            Err(error) => {
+                eprintln!(
+                    "skipping GLES fragment-less pipeline test; device unavailable: {error:?}"
+                );
+                return;
+            }
+        };
+
+        let pipeline = device
+            .create_render_pipeline(
+                crate::HalShaderSource::GlslStages {
+                    vertex: "#version 310 es\nvoid main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n"
+                        .to_owned(),
+                    fragment: None,
+                },
+                "main",
+                None,
+                &HalRenderPipelineDescriptor {
+                    sample_count: 1,
+                    sample_mask: u32::MAX,
+                    alpha_to_coverage_enabled: false,
+                    color_targets: Vec::new(),
+                    depth_stencil: Some(HalDepthStencilState {
+                        format: HalTextureFormat::Depth24PlusStencil8,
+                        depth_write_enabled: true,
+                        depth_compare: crate::HalCompareFunction::Always,
+                        stencil_front: stencil_face_state(),
+                        stencil_back: stencil_face_state(),
+                        stencil_read_mask: 0xff,
+                        stencil_write_mask: 0xff,
+                        depth_bias: 0,
+                        depth_bias_slope_scale: 0.0,
+                        depth_bias_clamp: 0.0,
+                    }),
+                    vertex_buffers: Vec::new(),
+                    primitive_topology: crate::HalPrimitiveTopology::TriangleList,
+                    front_face: crate::HalFrontFace::Ccw,
+                    cull_mode: crate::HalCullMode::None,
+                    unclipped_depth: false,
+                    needs_frag_depth_range_push_constant: false,
+                    user_immediate_size: 0,
+                },
+                &[],
+            )
+            .expect("fragment-less GLES render pipeline creation must link with the stub fragment stage");
+        assert!(
+            pipeline.raw_or_err().is_ok(),
+            "fragment-less pipeline must hold a linked GL program"
+        );
     }
 }

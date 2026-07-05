@@ -143,3 +143,39 @@ dropped from inside a context closure, the same self-deadlock as G-4
 would occur. No production path currently does this (`submit_copies`
 only borrows from `&[HalCopy]`), but any future change that moves owned
 HAL resources into the submit path must keep this in mind.
+
+## Finding G-5 — draw path rejects vertex buffers bound at slots the pipeline does not use
+
+`bind_vertex_buffers` (yawgpu-hal/src/gles/queue.rs:1121-1130) iterates
+`pass.vertex_buffers` and returns `HalError` ("vertex buffer binding is
+missing from pipeline layout") when a bound slot has no layout entry in
+the pipeline. WebGPU semantics: vertex buffers bound beyond the
+pipeline's declared layouts are simply ignored at draw time (the CTS
+draw suite binds buffers at extra slots constantly). Largest single
+api,validation fail cluster: 11,988. Fix (T-G5): `continue` instead of
+erroring for slots with no pipeline layout entry.
+
+## Finding G-6 — Mesa rejects fragment-less render program links (ANGLE accepted them)
+
+638+18 fails: "GLES render program link failed: error: program lacks a
+fragment shader" (vertex-only pipelines, e.g. layout_shader_compat).
+The mapping matrix noted vertex-only pipelines work "where GLES program
+linking accepts a fragment-less program" — ANGLE accepts, Mesa/crocus
+does not (GLSL ES requires both stages). Fix (T-G6): when a render
+pipeline has no fragment stage, attach a minimal fragment shader
+(`#version 310 es\nvoid main() {}`) at link time so vertex-only
+pipelines link on every driver.
+
+## Remaining api,validation clusters (larger slices, separate handoffs)
+
+- Color-target formats beyond RGBA8/BGRA8 (5,083) — widen the
+  renderable-format table per GLES 3.1 (+EXT_color_buffer_float);
+  needs glClearBuffer{f,i,ui}v for integer formats.
+- 1D/3D/array texture copies (3,594 + 311 T2B framebuffer-incomplete +
+  257 format-unsupported) — P15.3 deferral.
+- MRT >1 color target (1,270 + 44 + 34 sparse/non-zero slot) — F-040
+  slice 1 deferral; GLES 3.1 glDrawBuffers.
+- Unorm8x4Bgra vertex format (364) — no ES equivalent; candidate for
+  permanent Tier-2 catalogue (Dawn emulates via shader swizzle).
+- rgba8unorm read-write storage (180) — core-level message; verify
+  against spec tiering before touching (may be correct behaviour).
