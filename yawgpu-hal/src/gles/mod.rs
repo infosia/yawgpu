@@ -75,5 +75,11 @@ pub(super) fn rebuild_hal_error(error: &crate::HalError) -> crate::HalError {
         crate::HalError::OutOfMemory { backend, resource } => {
             crate::HalError::OutOfMemory { backend, resource }
         }
+        crate::HalError::TextureCreationFailed { backend, message } => {
+            crate::HalError::TextureCreationFailed {
+                backend,
+                message: message.clone(),
+            }
+        }
     }
 }
