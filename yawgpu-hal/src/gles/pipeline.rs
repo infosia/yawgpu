@@ -3,12 +3,11 @@ use std::sync::Arc;
 use glow::HasContext;
 
 use super::device::GlesDeviceInner;
-use super::format::map_vertex_format;
+use super::format::{is_color_renderable, map_vertex_format};
 use super::{rebuild_hal_error, BACKEND};
 use crate::{
     HalColorTargetState, HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalError,
-    HalFrontFace, HalPrimitiveTopology, HalRenderPipelineDescriptor, HalTextureFormat,
-    HalVertexBufferLayout,
+    HalFrontFace, HalPrimitiveTopology, HalRenderPipelineDescriptor, HalVertexBufferLayout,
 };
 
 /// The GLSL uniform name Tint's GLSL writer emits for the first element of
@@ -309,15 +308,11 @@ fn validate_render_pipeline_descriptor(
             message: "GLES render pipeline does not support unclipped depth",
         });
     }
-    if let Some(target) = descriptor.color_targets.iter().flatten().next() {
-        if !matches!(
-            target.format,
-            HalTextureFormat::Rgba8Unorm | HalTextureFormat::Bgra8Unorm
-        ) {
+    for target in descriptor.color_targets.iter().flatten() {
+        if !is_color_renderable(target.format) {
             return Err(HalError::BufferOperationFailed {
                 backend: BACKEND,
-                message:
-                    "GLES render pipeline supports only RGBA8Unorm or BGRA8Unorm color targets",
+                message: "GLES render pipeline color target format is not color-renderable on GLES 3.1",
             });
         }
         if target.blend.is_some_and(gles_blend_uses_dual_source) {
@@ -480,6 +475,7 @@ fn compile_shader(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HalTextureFormat;
 
     fn color_target() -> HalColorTargetState {
         HalColorTargetState {
@@ -533,6 +529,57 @@ mod tests {
                     "GLES render pipeline does not support a color attachment at a non-zero slot",
             }
         ));
+    }
+
+    #[test]
+    fn validate_render_pipeline_descriptor_accepts_color_renderable_formats() {
+        // T-G7: the color-target whitelist widened from RGBA8/BGRA8 to the
+        // GLES 3.1 core color-renderable set, including integer formats.
+        let accepted = [
+            HalTextureFormat::R8Unorm,
+            HalTextureFormat::Rg8Unorm,
+            HalTextureFormat::Rgba8Unorm,
+            HalTextureFormat::Rgba8UnormSrgb,
+            HalTextureFormat::Bgra8Unorm,
+            HalTextureFormat::Rgb10a2Unorm,
+            HalTextureFormat::R32Uint,
+            HalTextureFormat::Rgba16Sint,
+            HalTextureFormat::Rgba32Uint,
+            HalTextureFormat::Rgb10a2Uint,
+        ];
+        for format in accepted {
+            let mut target = color_target();
+            target.format = format;
+            assert!(
+                validate_render_pipeline_descriptor(&render_descriptor(vec![Some(target)]))
+                    .is_ok(),
+                "{format:?} must be accepted as a GLES color target"
+            );
+        }
+
+        let rejected = [
+            HalTextureFormat::Rgba8Snorm,
+            HalTextureFormat::R16Float,
+            HalTextureFormat::Rgba32Float,
+        ];
+        for format in rejected {
+            let mut target = color_target();
+            target.format = format;
+            let error =
+                validate_render_pipeline_descriptor(&render_descriptor(vec![Some(target)]))
+                    .expect_err("non-color-renderable format must be rejected");
+            assert!(
+                matches!(
+                    error,
+                    HalError::BufferOperationFailed {
+                        backend: "gles",
+                        message:
+                            "GLES render pipeline color target format is not color-renderable on GLES 3.1",
+                    }
+                ),
+                "{format:?}"
+            );
+        }
     }
 
     /// F2 (specs/tracking/tint-integration-refactor.md, slice R6): pins the
@@ -628,5 +675,97 @@ mod tests {
             pipeline.raw_or_err().is_ok(),
             "fragment-less pipeline must hold a linked GL program"
         );
+    }
+
+    #[test]
+    fn create_render_pipeline_accepts_integer_color_target_and_rejects_snorm() {
+        // T-G7: an Rgba16Sint color target is core color-renderable on GLES
+        // 3.1 and must create, while Rgba8Snorm is not color-renderable and
+        // must still error.
+        let instance = match super::super::instance::GlesInstance::new() {
+            Ok(instance) => instance,
+            Err(error) => {
+                eprintln!(
+                    "skipping GLES integer-color-target pipeline test; backend unavailable: {error:?}"
+                );
+                return;
+            }
+        };
+        let Some(adapter) = instance.enumerate_adapters().into_iter().next() else {
+            eprintln!("skipping GLES integer-color-target pipeline test; no adapter available");
+            return;
+        };
+        let device = match adapter.create_device() {
+            Ok(device) => device,
+            Err(error) => {
+                eprintln!(
+                    "skipping GLES integer-color-target pipeline test; device unavailable: {error:?}"
+                );
+                return;
+            }
+        };
+
+        let descriptor_for = |format: HalTextureFormat| HalRenderPipelineDescriptor {
+            sample_count: 1,
+            sample_mask: u32::MAX,
+            alpha_to_coverage_enabled: false,
+            color_targets: vec![Some(HalColorTargetState {
+                format,
+                blend: None,
+                write_mask: 0xf,
+            })],
+            depth_stencil: None,
+            vertex_buffers: Vec::new(),
+            primitive_topology: crate::HalPrimitiveTopology::TriangleList,
+            front_face: crate::HalFrontFace::Ccw,
+            cull_mode: crate::HalCullMode::None,
+            unclipped_depth: false,
+            needs_frag_depth_range_push_constant: false,
+            user_immediate_size: 0,
+        };
+        let shader_source = || crate::HalShaderSource::GlslStages {
+            vertex: "#version 310 es\n\
+                     void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n"
+                .to_owned(),
+            fragment: Some(
+                "#version 310 es\n\
+                 precision highp int;\n\
+                 layout(location = 0) out highp ivec4 frag_color;\n\
+                 void main() { frag_color = ivec4(1); }\n"
+                    .to_owned(),
+            ),
+        };
+
+        let pipeline = device
+            .create_render_pipeline(
+                shader_source(),
+                "main",
+                Some("main"),
+                &descriptor_for(HalTextureFormat::Rgba16Sint),
+                &[],
+            )
+            .expect("Rgba16Sint color target must be accepted on GLES 3.1");
+        assert!(
+            pipeline.raw_or_err().is_ok(),
+            "integer-color-target pipeline must hold a linked GL program"
+        );
+
+        let error = device
+            .create_render_pipeline(
+                shader_source(),
+                "main",
+                Some("main"),
+                &descriptor_for(HalTextureFormat::Rgba8Snorm),
+                &[],
+            )
+            .expect_err("Rgba8Snorm color target must still be rejected on GLES");
+        assert!(matches!(
+            error,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message:
+                    "GLES render pipeline color target format is not color-renderable on GLES 3.1",
+            }
+        ));
     }
 }

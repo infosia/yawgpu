@@ -460,6 +460,85 @@ pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<GlesFormat,
     }
 }
 
+/// Returns whether `format` is color-renderable on core GLES 3.1 (usable as a
+/// render-pipeline color target / FBO color attachment without extensions).
+///
+/// This covers the GLES 3.1 core color-renderable internal formats that have
+/// WebGPU equivalents: the 8-bit unorm family (R8, RG8, RGBA8, SRGB8_ALPHA8;
+/// `Bgra8Unorm` rides the existing RGBA8-internal special case in
+/// `map_texture_format`), RGB10_A2, and every integer (uint/sint) format
+/// including RGB10_A2UI. Float formats (`R16Float`/`R32Float`/`Rg11b10Ufloat`/
+/// `Rgba16Float`/`Rgba32Float`, ...) are deliberately excluded: core GLES 3.1
+/// does not make them color-renderable — that requires
+/// `EXT_color_buffer_float` (or `EXT_color_buffer_half_float`) gating, which
+/// this slice does not implement.
+pub(super) fn is_color_renderable(format: HalTextureFormat) -> bool {
+    matches!(
+        format,
+        // 8-bit unorm family (RGBA8-class internal formats).
+        HalTextureFormat::R8Unorm
+            | HalTextureFormat::Rg8Unorm
+            | HalTextureFormat::Rgba8Unorm
+            | HalTextureFormat::Rgba8UnormSrgb
+            | HalTextureFormat::Bgra8Unorm
+            // Packed 10-10-10-2 unorm.
+            | HalTextureFormat::Rgb10a2Unorm
+            // Unsigned/signed integer formats (all core color-renderable).
+            | HalTextureFormat::R8Uint
+            | HalTextureFormat::R8Sint
+            | HalTextureFormat::R16Uint
+            | HalTextureFormat::R16Sint
+            | HalTextureFormat::R32Uint
+            | HalTextureFormat::R32Sint
+            | HalTextureFormat::Rg8Uint
+            | HalTextureFormat::Rg8Sint
+            | HalTextureFormat::Rg16Uint
+            | HalTextureFormat::Rg16Sint
+            | HalTextureFormat::Rg32Uint
+            | HalTextureFormat::Rg32Sint
+            | HalTextureFormat::Rgba8Uint
+            | HalTextureFormat::Rgba8Sint
+            | HalTextureFormat::Rgba16Uint
+            | HalTextureFormat::Rgba16Sint
+            | HalTextureFormat::Rgba32Uint
+            | HalTextureFormat::Rgba32Sint
+            | HalTextureFormat::Rgb10a2Uint
+    )
+}
+
+/// Component class a GLES color clear (and any other component-class-sensitive
+/// path) must dispatch on for a given color-attachment format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GlesClearKind {
+    /// Float / normalized components: `glClearColor` + `glClear` semantics.
+    Float,
+    /// Unsigned-integer components: `glClearBufferuiv` semantics.
+    Uint,
+    /// Signed-integer components: `glClearBufferiv` semantics.
+    Sint,
+}
+
+/// Classifies a color format's component class from its GL upload triplet:
+/// a `*_INTEGER` external format marks an integer attachment, and the
+/// signedness of its `ty` picks `Sint` vs `Uint`. Formats that do not map on
+/// GLES (or are non-integer) classify as `Float`, preserving the existing
+/// `glClearColor` path.
+pub(super) fn color_clear_kind(format: HalTextureFormat) -> GlesClearKind {
+    let Ok(gles) = map_texture_format(format) else {
+        return GlesClearKind::Float;
+    };
+    if !matches!(
+        gles.format,
+        glow::RED_INTEGER | glow::RG_INTEGER | glow::RGBA_INTEGER
+    ) {
+        return GlesClearKind::Float;
+    }
+    match gles.ty {
+        glow::BYTE | glow::SHORT | glow::INT => GlesClearKind::Sint,
+        _ => GlesClearKind::Uint,
+    }
+}
+
 pub(super) fn map_vertex_format(format: HalVertexFormat) -> Result<GlesVertexFormat, HalError> {
     match format {
         HalVertexFormat::Uint8 => Ok(gles_vertex_format(1, glow::UNSIGNED_BYTE, false, true)),
@@ -897,6 +976,107 @@ mod tests {
                 message: "texture format not supported on GLES (P15.3)",
             }
         ));
+    }
+
+    #[test]
+    fn is_color_renderable_table() {
+        // GLES 3.1 core color-renderable formats with WebGPU equivalents.
+        let renderable = [
+            HalTextureFormat::R8Unorm,
+            HalTextureFormat::Rg8Unorm,
+            HalTextureFormat::Rgba8Unorm,
+            HalTextureFormat::Rgba8UnormSrgb,
+            HalTextureFormat::Bgra8Unorm,
+            HalTextureFormat::Rgb10a2Unorm,
+            HalTextureFormat::R8Uint,
+            HalTextureFormat::R8Sint,
+            HalTextureFormat::R16Uint,
+            HalTextureFormat::R16Sint,
+            HalTextureFormat::R32Uint,
+            HalTextureFormat::R32Sint,
+            HalTextureFormat::Rg8Uint,
+            HalTextureFormat::Rg8Sint,
+            HalTextureFormat::Rg16Uint,
+            HalTextureFormat::Rg16Sint,
+            HalTextureFormat::Rg32Uint,
+            HalTextureFormat::Rg32Sint,
+            HalTextureFormat::Rgba8Uint,
+            HalTextureFormat::Rgba8Sint,
+            HalTextureFormat::Rgba16Uint,
+            HalTextureFormat::Rgba16Sint,
+            HalTextureFormat::Rgba32Uint,
+            HalTextureFormat::Rgba32Sint,
+            HalTextureFormat::Rgb10a2Uint,
+        ];
+        for format in renderable {
+            assert!(is_color_renderable(format), "{format:?}");
+        }
+
+        // Snorm, float (EXT_color_buffer_float-gated, excluded from this
+        // slice), depth, and compressed formats are not color-renderable on
+        // core GLES 3.1.
+        let not_renderable = [
+            HalTextureFormat::R8Snorm,
+            HalTextureFormat::Rgba8Snorm,
+            HalTextureFormat::R16Float,
+            HalTextureFormat::R32Float,
+            HalTextureFormat::Rg11b10Ufloat,
+            HalTextureFormat::Rgb9e5Ufloat,
+            HalTextureFormat::Rgba16Float,
+            HalTextureFormat::Rgba32Float,
+            HalTextureFormat::Depth32Float,
+            HalTextureFormat::Bc1RgbaUnorm,
+        ];
+        for format in not_renderable {
+            assert!(!is_color_renderable(format), "{format:?}");
+        }
+    }
+
+    #[test]
+    fn color_clear_kind_classifies_component_classes() {
+        let uint = [
+            HalTextureFormat::R8Uint,
+            HalTextureFormat::R16Uint,
+            HalTextureFormat::R32Uint,
+            HalTextureFormat::Rg8Uint,
+            HalTextureFormat::Rg16Uint,
+            HalTextureFormat::Rg32Uint,
+            HalTextureFormat::Rgba8Uint,
+            HalTextureFormat::Rgba16Uint,
+            HalTextureFormat::Rgba32Uint,
+            HalTextureFormat::Rgb10a2Uint,
+        ];
+        for format in uint {
+            assert_eq!(color_clear_kind(format), GlesClearKind::Uint, "{format:?}");
+        }
+
+        let sint = [
+            HalTextureFormat::R8Sint,
+            HalTextureFormat::R16Sint,
+            HalTextureFormat::R32Sint,
+            HalTextureFormat::Rg8Sint,
+            HalTextureFormat::Rg16Sint,
+            HalTextureFormat::Rg32Sint,
+            HalTextureFormat::Rgba8Sint,
+            HalTextureFormat::Rgba16Sint,
+            HalTextureFormat::Rgba32Sint,
+        ];
+        for format in sint {
+            assert_eq!(color_clear_kind(format), GlesClearKind::Sint, "{format:?}");
+        }
+
+        let float = [
+            HalTextureFormat::Rgba8Unorm,
+            HalTextureFormat::Bgra8Unorm,
+            HalTextureFormat::Rgb10a2Unorm,
+            HalTextureFormat::R16Float,
+            HalTextureFormat::Rgba32Float,
+            // Unmapped formats fall back to the float clear path.
+            HalTextureFormat::Depth32Float,
+        ];
+        for format in float {
+            assert_eq!(color_clear_kind(format), GlesClearKind::Float, "{format:?}");
+        }
     }
 
     #[test]

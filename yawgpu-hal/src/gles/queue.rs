@@ -3,7 +3,7 @@ use std::sync::Arc;
 use glow::HasContext;
 
 use super::device::GlesDeviceInner;
-use super::format::{map_primitive_topology, map_vertex_format};
+use super::format::{color_clear_kind, map_primitive_topology, map_vertex_format, GlesClearKind};
 use super::BACKEND;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::{
@@ -571,9 +571,36 @@ fn create_render_fbo(
         let mut clear_mask = 0;
         if let Some(color) = pass.color_targets.iter().flatten().next() {
             let [r, g, b, a] = color.clear_color;
-            gl.clear_color(r as f32, g as f32, b as f32, a as f32);
-            if matches!(color.load_op, HalRenderLoadOp::Clear) {
-                clear_mask |= glow::COLOR_BUFFER_BIT;
+            // Integer attachments have no `glClearColor`+`glClear` semantics:
+            // clearing them requires the typed `glClearBuffer{i,u}iv` entry
+            // points on the attachment's draw-buffer index (0 -- the GLES
+            // render pass supports a single color attachment). Float and
+            // normalized attachments keep the existing `glClearColor` path.
+            match color_clear_kind(color.view_format) {
+                GlesClearKind::Float => {
+                    gl.clear_color(r as f32, g as f32, b as f32, a as f32);
+                    if matches!(color.load_op, HalRenderLoadOp::Clear) {
+                        clear_mask |= glow::COLOR_BUFFER_BIT;
+                    }
+                }
+                GlesClearKind::Sint => {
+                    if matches!(color.load_op, HalRenderLoadOp::Clear) {
+                        gl.clear_buffer_i32_slice(
+                            glow::COLOR,
+                            0,
+                            &[r as i32, g as i32, b as i32, a as i32],
+                        );
+                    }
+                }
+                GlesClearKind::Uint => {
+                    if matches!(color.load_op, HalRenderLoadOp::Clear) {
+                        gl.clear_buffer_u32_slice(
+                            glow::COLOR,
+                            0,
+                            &[r as u32, g as u32, b as u32, a as u32],
+                        );
+                    }
+                }
             }
         }
         if let Some(depth_stencil) = &pass.depth_stencil_attachment {
@@ -1702,6 +1729,113 @@ mod tests {
             .queue()
             .submit_copies(&[HalCopy::RenderPass(pass)])
             .expect("submit must ignore a vertex buffer bound at an undeclared slot");
+    }
+
+    #[test]
+    fn submit_render_pass_clears_uint_color_attachment_with_integer_clear() {
+        // T-G7: integer color attachments cannot be cleared through
+        // `glClearColor`+`glClear` (undefined for integer formats); the clear
+        // path must use `glClearBufferuiv`/`glClearBufferiv`. A clear-only
+        // pass on an R32Uint attachment followed by a texture-to-buffer copy
+        // must read back the integer clear value.
+        let instance = match super::super::instance::GlesInstance::new() {
+            Ok(instance) => instance,
+            Err(error) => {
+                eprintln!("skipping GLES uint-clear test; backend unavailable: {error:?}");
+                return;
+            }
+        };
+        let Some(adapter) = instance.enumerate_adapters().into_iter().next() else {
+            eprintln!("skipping GLES uint-clear test; no adapter available");
+            return;
+        };
+        let device = match adapter.create_device() {
+            Ok(device) => device,
+            Err(error) => {
+                eprintln!("skipping GLES uint-clear test; device unavailable: {error:?}");
+                return;
+            }
+        };
+
+        let color_texture = device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format: crate::HalTextureFormat::R32Uint,
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: true,
+                    copy_dst: false,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: true,
+                    transient: false,
+                },
+            })
+            .expect("GLES R32Uint texture creation must succeed");
+
+        let readback = device
+            .create_buffer(
+                4,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES readback buffer creation must succeed");
+
+        let mut pass = render_pass(vec![Some(crate::HalRenderColorTarget {
+            texture: HalTexture::Gles(color_texture.clone()),
+            view_format: crate::HalTextureFormat::R32Uint,
+            resolve_target: None,
+            resolve_view_format: None,
+            mip_level: 0,
+            array_layer: 0,
+            depth_slice: 0,
+            resolve_mip_level: 0,
+            resolve_array_layer: 0,
+            load_op: HalRenderLoadOp::Clear,
+            store: true,
+            clear_color: [5.0, 0.0, 0.0, 1.0],
+        })]);
+        pass.pipeline = None;
+
+        device
+            .queue()
+            .submit_copies(&[
+                HalCopy::RenderPass(pass),
+                HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                    buffer: HalBuffer::Gles(readback.clone()),
+                    buffer_layout: crate::HalBufferTextureLayout {
+                        offset: 0,
+                        bytes_per_row: 4,
+                        rows_per_image: 1,
+                    },
+                    texture: HalTexture::Gles(color_texture),
+                    format: crate::HalTextureFormat::R32Uint,
+                    aspect: crate::HalTextureAspect::All,
+                    mip_level: 0,
+                    origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                    extent: crate::HalExtent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                }),
+            ])
+            .expect("clear-only pass on an R32Uint attachment plus readback must succeed");
+
+        let bytes = readback
+            .read(0, 4)
+            .expect("reading back the cleared texel must succeed");
+        let value = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(
+            value, 5,
+            "R32Uint attachment must hold the integer clear value"
+        );
     }
 
     fn noop_render_texture() -> Result<HalTexture, HalError> {
