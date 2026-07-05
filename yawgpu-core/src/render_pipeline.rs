@@ -1788,18 +1788,13 @@ pub(crate) fn select_render_shader_source(
                     let fragment_module = fragment.shader.module.reflected().ok_or_else(|| {
                         "render pipeline requires a reflected fragment shader module".to_owned()
                     })?;
-                    Some(
-                        fragment_module
-                            .generate_glsl(
-                                fragment_entry_name,
-                                frontend::ShaderStage::Fragment,
-                                fragment_pipeline_constants.as_ref().ok_or_else(|| {
-                                    "render pipeline fragment constants were not resolved"
-                                        .to_owned()
-                                })?,
-                            )?
-                            .source,
-                    )
+                    Some(fragment_module.generate_glsl(
+                        fragment_entry_name,
+                        frontend::ShaderStage::Fragment,
+                        fragment_pipeline_constants.as_ref().ok_or_else(|| {
+                            "render pipeline fragment constants were not resolved".to_owned()
+                        })?,
+                    )?)
                 }
                 (None, None) => None,
                 _ => {
@@ -1808,10 +1803,15 @@ pub(crate) fn select_render_shader_source(
                     );
                 }
             };
+            let mut combined_samplers = vertex_glsl.combined_samplers;
+            if let Some(fragment_glsl) = &fragment_glsl {
+                combined_samplers.extend(fragment_glsl.combined_samplers.clone());
+            }
             Ok((
                 HalShaderSource::GlslStages {
                     vertex: vertex_glsl.source,
-                    fragment: fragment_glsl,
+                    fragment: fragment_glsl.map(|glsl| glsl.source),
+                    combined_samplers,
                 },
                 vertex_entry_name.to_owned(),
                 fragment_entry_name.map(str::to_owned),
@@ -5942,11 +5942,12 @@ fn fs() -> @builtin(frag_depth) f32 {
         .expect("WGSL should generate GLES GLSL stages");
 
         assert!(
-            matches!(source, HalShaderSource::GlslStages { vertex, fragment }
+            matches!(source, HalShaderSource::GlslStages { vertex, fragment, combined_samplers }
                 if vertex.contains("#version 310 es")
                     && fragment.as_ref().is_some_and(|fragment| fragment.contains("#version 310 es"))
                     && vertex.contains("void main()")
-                    && fragment.as_ref().is_some_and(|fragment| fragment.contains("void main()")))
+                    && fragment.as_ref().is_some_and(|fragment| fragment.contains("void main()"))
+                    && combined_samplers.is_empty())
         );
         assert_eq!(vertex_entry, "vs");
         assert_eq!(fragment_entry.as_deref(), Some("fs"));

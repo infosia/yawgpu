@@ -504,7 +504,8 @@ fn create_render_fbo(
         if attachment_count > max_draw_buffers {
             return Err(HalError::BufferOperationFailed {
                 backend: BACKEND,
-                message: "GLES render pass color attachment count exceeds the driver draw-buffer limit",
+                message:
+                    "GLES render pass color attachment count exceeds the driver draw-buffer limit",
             });
         }
         let fbo = gl
@@ -1939,6 +1940,7 @@ mod tests {
                          void main() { frag_color = vec4(1.0); }\n"
                             .to_owned(),
                     ),
+                    combined_samplers: Vec::new(),
                 },
                 "main",
                 Some("main"),
@@ -2554,7 +2556,7 @@ mod tests {
                                                  float((gl_VertexID & 2) << 1) - 1.0);\n\
                                  gl_Position = vec4(pos, 0.0, 1.0);\n\
                              }\n"
-                        .to_owned(),
+                    .to_owned(),
                     fragment: Some(
                         "#version 310 es\n\
                          precision mediump float;\n\
@@ -2565,8 +2567,9 @@ mod tests {
                              frag_color0 = vec4(0.0, 1.0, 0.0, 1.0);\n\
                              frag_color1 = uvec4(9u, 0u, 0u, 1u);\n\
                          }\n"
-                            .to_owned(),
+                        .to_owned(),
                     ),
+                    combined_samplers: Vec::new(),
                 },
                 "main",
                 Some("main"),
@@ -2741,6 +2744,7 @@ mod tests {
                          void main() { frag_color = vec4(0.0, 1.0, 0.0, 1.0); }\n"
                             .to_owned(),
                     ),
+                    combined_samplers: Vec::new(),
                 },
                 "main",
                 Some("main"),
@@ -2873,6 +2877,7 @@ mod tests {
                          void main() { frag_color = vec4(0.25, 0.5, 0.75, 1.0); }\n"
                             .to_owned(),
                     ),
+                    combined_samplers: Vec::new(),
                 },
                 "main",
                 Some("main"),

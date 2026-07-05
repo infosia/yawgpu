@@ -6,8 +6,9 @@ use super::device::GlesDeviceInner;
 use super::format::{is_color_renderable_with, map_vertex_format, GlesColorRenderCaps};
 use super::{rebuild_hal_error, BACKEND};
 use crate::{
-    HalColorTargetState, HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalError,
-    HalFrontFace, HalPrimitiveTopology, HalRenderPipelineDescriptor, HalVertexBufferLayout,
+    HalColorTargetState, HalCombinedSampler, HalCullMode, HalDepthStencilState,
+    HalDescriptorBinding, HalError, HalFrontFace, HalPrimitiveTopology,
+    HalRenderPipelineDescriptor, HalVertexBufferLayout,
 };
 
 /// The GLSL uniform name Tint's GLSL writer emits for the first element of
@@ -26,6 +27,7 @@ struct GlesComputePipelineInner {
     program: Result<glow::Program, HalError>,
     workgroup_size: (u32, u32, u32),
     bindings: Vec<HalDescriptorBinding>,
+    combined_samplers: Vec<HalCombinedSampler>,
 }
 
 impl Drop for GlesComputePipelineInner {
@@ -56,6 +58,7 @@ impl std::fmt::Debug for GlesComputePipeline {
         f.debug_struct("GlesComputePipeline")
             .field("workgroup_size", &self.inner.workgroup_size)
             .field("bindings", &self.inner.bindings)
+            .field("combined_samplers", &self.inner.combined_samplers)
             .finish()
     }
 }
@@ -66,6 +69,7 @@ impl GlesComputePipeline {
         source: String,
         workgroup_size: (u32, u32, u32),
         bindings: &[HalDescriptorBinding],
+        combined_samplers: Vec<HalCombinedSampler>,
     ) -> Result<Self, HalError> {
         let program = build_compute_program(&device, &source)?;
         Ok(Self {
@@ -74,6 +78,7 @@ impl GlesComputePipeline {
                 program: Ok(program),
                 workgroup_size,
                 bindings: bindings.to_vec(),
+                combined_samplers,
             }),
         })
     }
@@ -102,6 +107,7 @@ struct GlesRenderPipelineInner {
     front_face: HalFrontFace,
     cull_mode: HalCullMode,
     bindings: Vec<HalDescriptorBinding>,
+    combined_samplers: Vec<HalCombinedSampler>,
     first_instance_location: Option<glow::UniformLocation>,
 }
 
@@ -134,6 +140,7 @@ impl std::fmt::Debug for GlesRenderPipeline {
             .field("vertex_buffers", &self.inner.vertex_buffers)
             .field("primitive_topology", &self.inner.primitive_topology)
             .field("bindings", &self.inner.bindings)
+            .field("combined_samplers", &self.inner.combined_samplers)
             .finish()
     }
 }
@@ -145,6 +152,7 @@ impl GlesRenderPipeline {
         fragment_source: Option<String>,
         descriptor: HalRenderPipelineDescriptor,
         bindings: &[HalDescriptorBinding],
+        combined_samplers: Vec<HalCombinedSampler>,
     ) -> Result<Self, HalError> {
         validate_render_pipeline_descriptor(&descriptor, device.color_render_caps())?;
         let (program, first_instance_location) =
@@ -164,6 +172,7 @@ impl GlesRenderPipeline {
                 front_face: descriptor.front_face,
                 cull_mode: descriptor.cull_mode,
                 bindings: bindings.to_vec(),
+                combined_samplers,
                 first_instance_location,
             }),
         })
@@ -765,6 +774,7 @@ mod tests {
                     vertex: "#version 310 es\nvoid main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n"
                         .to_owned(),
                     fragment: None,
+                    combined_samplers: Vec::new(),
                 },
                 "main",
                 None,
@@ -859,6 +869,7 @@ mod tests {
                  void main() { frag_color = ivec4(1); }\n"
                     .to_owned(),
             ),
+            combined_samplers: Vec::new(),
         };
 
         let pipeline = device

@@ -462,6 +462,7 @@ pub(crate) fn select_compute_shader_source(
                 HalShaderSource::Glsl {
                     source: generated.source,
                     stage: yawgpu_hal::HalShaderStage::Compute,
+                    combined_samplers: generated.combined_samplers,
                 },
                 generated.entry_point,
                 hal_descriptor_bindings(metal_bindings),
@@ -2475,12 +2476,14 @@ fn cs() {
         let HalShaderSource::Glsl {
             source,
             stage: yawgpu_hal::HalShaderStage::Compute,
+            combined_samplers,
         } = source
         else {
             panic!("GLES should select compute GLSL");
         };
         assert_eq!(entry, "cs");
         assert!(bindings.is_empty());
+        assert!(combined_samplers.is_empty());
         assert!(source.contains("#version 310 es"));
         assert!(source.contains("local_size_x = 2"));
     }

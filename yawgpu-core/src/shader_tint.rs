@@ -361,8 +361,13 @@ impl ReflectedModule {
                 )
                 .map_err(|e| e.to_string())?;
             Ok(GeneratedGlsl {
-                source,
+                source: source.source,
                 entry_point: entry_name.to_owned(),
+                combined_samplers: source
+                    .combined_samplers
+                    .into_iter()
+                    .map(hal_combined_sampler)
+                    .collect(),
             })
         })();
         cache.insert(key, generated.clone());
@@ -1228,11 +1233,12 @@ fn tint_bindings_for_msl(
 /// `glBindBufferRange` at the raw WGSL binding number
 /// (`HalDescriptorBinding::binding`), the GLSL text and the HAL's runtime
 /// bind calls would silently disagree for any non-sequential binding
-/// layout. An explicit group/binding -> same group/binding remap for every
-/// buffer resource pins Tint's output to the WGSL numbers directly (F2,
-/// specs/tracking/tint-integration-refactor.md slice R6). Non-buffer
-/// resources are skipped: GLES rejects them before a generated shader
-/// would ever run.
+/// layout. An explicit group/binding -> same group/binding remap pins Tint's
+/// output to the WGSL numbers directly (F2,
+/// specs/tracking/tint-integration-refactor.md slice R6). Texture and sampler
+/// resources are included so Tint's GLSL combined-sampler lowering uses the
+/// same deterministic binding map that the returned combined-sampler metadata
+/// describes.
 #[cfg(feature = "gles")]
 fn tint_bindings_for_glsl(resource_bindings: &[ReflectedResourceBinding]) -> yawgpu_tint::Bindings {
     let mut bindings = yawgpu_tint::Bindings::default();
@@ -1252,10 +1258,28 @@ fn tint_bindings_for_glsl(resource_bindings: &[ReflectedResourceBinding]) -> yaw
             ) => {
                 bindings.storage.push(remap);
             }
+            ReflectedResourceBindingKind::Texture { .. } => {
+                bindings.texture.push(remap);
+            }
+            ReflectedResourceBindingKind::Sampler { .. } => {
+                bindings.sampler.push(remap);
+            }
             _ => {}
         }
     }
     bindings
+}
+
+#[cfg(feature = "gles")]
+fn hal_combined_sampler(combined: yawgpu_tint::CombinedSampler) -> yawgpu_hal::HalCombinedSampler {
+    yawgpu_hal::HalCombinedSampler {
+        glsl_uniform_name: combined.glsl_uniform_name,
+        texture_group: combined.texture_group,
+        texture_binding: combined.texture_binding,
+        sampler_group: combined.sampler_group,
+        sampler_binding: combined.sampler_binding,
+        uses_placeholder_sampler: combined.uses_placeholder_sampler,
+    }
 }
 
 fn msl_buffer_sizes_slot(binding_map: &MslBindingMap) -> Result<u32, String> {

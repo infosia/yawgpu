@@ -79,6 +79,8 @@ pub enum HalShaderSource {
         vertex: String,
         /// Optional fragment stage GLSL ES source.
         fragment: Option<String>,
+        /// Combined texture/sampler uniforms emitted by Tint's GLSL writer.
+        combined_samplers: Vec<HalCombinedSampler>,
     },
     /// Glsl variant.
     Glsl {
@@ -86,7 +88,26 @@ pub enum HalShaderSource {
         source: String,
         /// Stage variant.
         stage: HalShaderStage,
+        /// Combined texture/sampler uniforms emitted by Tint's GLSL writer.
+        combined_samplers: Vec<HalCombinedSampler>,
     },
+}
+
+/// A GLSL combined texture/sampler uniform and the WGSL bindings it represents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HalCombinedSampler {
+    /// GLSL sampler uniform name.
+    pub glsl_uniform_name: String,
+    /// WGSL bind group of the texture.
+    pub texture_group: u32,
+    /// WGSL binding number of the texture.
+    pub texture_binding: u32,
+    /// WGSL bind group of the sampler, or Tint's placeholder sampler sentinel.
+    pub sampler_group: u32,
+    /// WGSL binding number of the sampler, or Tint's placeholder sampler sentinel.
+    pub sampler_binding: u32,
+    /// Whether this record uses Tint's placeholder sampler for a texture-only use.
+    pub uses_placeholder_sampler: bool,
 }
 
 /// Stores one MSL buffer-size entry binding.

@@ -266,6 +266,7 @@ impl GlesDevice {
         let HalShaderSource::Glsl {
             source,
             stage: HalShaderStage::Compute,
+            combined_samplers,
         } = shader
         else {
             return Err(HalError::ShaderCompilationFailed {
@@ -273,7 +274,13 @@ impl GlesDevice {
                 message: "GLES compute pipeline requires compute GLSL source".to_owned(),
             });
         };
-        GlesComputePipeline::new(Arc::clone(&self.inner), source, workgroup_size, bindings)
+        GlesComputePipeline::new(
+            Arc::clone(&self.inner),
+            source,
+            workgroup_size,
+            bindings,
+            combined_samplers,
+        )
     }
 
     /// Creates a render pipeline from the given shaders, vertex layout, and color targets.
@@ -285,7 +292,12 @@ impl GlesDevice {
         descriptor: &HalRenderPipelineDescriptor,
         bindings: &[HalDescriptorBinding],
     ) -> Result<GlesRenderPipeline, HalError> {
-        let HalShaderSource::GlslStages { vertex, fragment } = shader else {
+        let HalShaderSource::GlslStages {
+            vertex,
+            fragment,
+            combined_samplers,
+        } = shader
+        else {
             return Err(HalError::ShaderCompilationFailed {
                 backend: BACKEND,
                 message: "GLES render pipeline requires GlslStages shader source".to_owned(),
@@ -297,6 +309,7 @@ impl GlesDevice {
             fragment,
             descriptor.clone(),
             bindings,
+            combined_samplers,
         )
     }
 }

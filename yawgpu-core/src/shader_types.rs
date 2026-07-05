@@ -82,6 +82,8 @@ pub(crate) struct GeneratedGlsl {
     pub source: String,
     /// Entry point.
     pub entry_point: String,
+    /// Combined texture/sampler uniforms emitted by Tint's GLSL writer.
+    pub combined_samplers: Vec<yawgpu_hal::HalCombinedSampler>,
 }
 
 /// Stores binding metadata.

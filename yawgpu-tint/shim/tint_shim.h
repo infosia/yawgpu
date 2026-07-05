@@ -297,6 +297,21 @@ typedef struct {
     uint32_t immediate_slot;            /* MSL buffer index of the combined immediates block (valid iff uses_immediates; equals frag_depth_clamp_slot when has_frag_depth_clamp) */
 } YawgpuTintMslOutput;
 
+typedef struct {
+    char* glsl_uniform_name;
+    uint32_t texture_group;
+    uint32_t texture_binding;
+    uint32_t sampler_group;
+    uint32_t sampler_binding;
+    bool uses_placeholder_sampler;
+} YawgpuTintCombinedSampler;
+
+typedef struct {
+    char* glsl;
+    YawgpuTintCombinedSampler* combined_samplers;
+    size_t n_combined_samplers;
+} YawgpuTintGlslOutput;
+
 /* `user_immediate_size` is the owning pipeline layout's reserved
    user-immediate byte budget (PipelineLayout.immediateSize, 0..=64, Block
    94) -- NOT this entry point's own smaller reflected immediate_data_size.
@@ -405,11 +420,12 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_glsl(const YawgpuTintProgram*,
                                size_t n_ov,
                                bool has_first_instance_offset,
                                uint32_t first_instance_offset,
-                               char** glsl_out,
+                               YawgpuTintGlslOutput* out,
                                char** err);
 
 YAWGPU_TINT_API void yawgpu_tint_string_free(char*);
 YAWGPU_TINT_API void yawgpu_tint_u32_free(uint32_t*);
+YAWGPU_TINT_API void yawgpu_tint_glsl_output_free(YawgpuTintGlslOutput*);
 
 #ifdef __cplusplus
 }

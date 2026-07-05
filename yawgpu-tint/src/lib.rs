@@ -159,6 +159,34 @@ pub struct MslOutput {
     pub immediate_slot: Option<u32>,
 }
 
+/// GLSL generator output.
+pub struct GlslOutput {
+    /// Generated GLSL source.
+    pub source: String,
+    /// Combined texture/sampler uniforms emitted by Tint's GLSL writer.
+    pub combined_samplers: Vec<CombinedSampler>,
+}
+
+/// A GLSL combined texture/sampler uniform and the WGSL bindings it represents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CombinedSampler {
+    /// GLSL sampler uniform name.
+    pub glsl_uniform_name: String,
+    /// WGSL bind group of the texture.
+    pub texture_group: u32,
+    /// WGSL binding number of the texture.
+    pub texture_binding: u32,
+    /// WGSL bind group of the sampler, or Tint's placeholder sampler sentinel
+    /// when [`uses_placeholder_sampler`](Self::uses_placeholder_sampler) is true.
+    pub sampler_group: u32,
+    /// WGSL binding number of the sampler, or Tint's placeholder sampler
+    /// sentinel binding when [`uses_placeholder_sampler`](Self::uses_placeholder_sampler) is true.
+    pub sampler_binding: u32,
+    /// Whether this uniform pairs the texture with Tint's placeholder sampler
+    /// because WGSL used the texture without an explicit sampler.
+    pub uses_placeholder_sampler: bool,
+}
+
 /// A storage binding whose byte length is required by generated MSL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MslBufferSizeBinding {
@@ -1256,6 +1284,42 @@ mod real {
         assert!(core::mem::offset_of!(RawMslOutput, immediate_slot) == 68);
     };
 
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct RawCombinedSampler {
+        glsl_uniform_name: *mut c_char,
+        texture_group: u32,
+        texture_binding: u32,
+        sampler_group: u32,
+        sampler_binding: u32,
+        uses_placeholder_sampler: bool,
+    }
+
+    const _: () = {
+        assert!(core::mem::size_of::<RawCombinedSampler>() == 32);
+        assert!(core::mem::offset_of!(RawCombinedSampler, glsl_uniform_name) == 0);
+        assert!(core::mem::offset_of!(RawCombinedSampler, texture_group) == 8);
+        assert!(core::mem::offset_of!(RawCombinedSampler, texture_binding) == 12);
+        assert!(core::mem::offset_of!(RawCombinedSampler, sampler_group) == 16);
+        assert!(core::mem::offset_of!(RawCombinedSampler, sampler_binding) == 20);
+        assert!(core::mem::offset_of!(RawCombinedSampler, uses_placeholder_sampler) == 24);
+    };
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct RawGlslOutput {
+        glsl: *mut c_char,
+        combined_samplers: *mut RawCombinedSampler,
+        n_combined_samplers: usize,
+    }
+
+    const _: () = {
+        assert!(core::mem::size_of::<RawGlslOutput>() == 24);
+        assert!(core::mem::offset_of!(RawGlslOutput, glsl) == 0);
+        assert!(core::mem::offset_of!(RawGlslOutput, combined_samplers) == 8);
+        assert!(core::mem::offset_of!(RawGlslOutput, n_combined_samplers) == 16);
+    };
+
     extern "C" {
         fn yawgpu_tint_initialize();
         fn yawgpu_tint_program_create(
@@ -1388,11 +1452,12 @@ mod real {
             n_ov: usize,
             has_first_instance_offset: bool,
             first_instance_offset: u32,
-            glsl_out: *mut *mut c_char,
+            out: *mut RawGlslOutput,
             err: *mut *mut c_char,
         ) -> bool;
         fn yawgpu_tint_string_free(s: *mut c_char);
         fn yawgpu_tint_u32_free(s: *mut u32);
+        fn yawgpu_tint_glsl_output_free(out: *mut RawGlslOutput);
     }
 
     fn take_error(err: *mut c_char) -> String {
@@ -1499,6 +1564,58 @@ mod real {
                 // SAFETY: shim-owned buffer, freed exactly once.
                 unsafe { yawgpu_tint_u32_free(self.0) };
             }
+        }
+    }
+
+    struct GlslOutputGuard(RawGlslOutput);
+
+    impl GlslOutputGuard {
+        fn new(raw: RawGlslOutput) -> Self {
+            Self(raw)
+        }
+
+        fn is_glsl_null(&self) -> bool {
+            self.0.glsl.is_null()
+        }
+
+        fn into_output(self) -> GlslOutput {
+            let raw = self.0;
+            std::mem::forget(self);
+            let source = raw_string(raw.glsl);
+            let combined_samplers =
+                if raw.combined_samplers.is_null() || raw.n_combined_samplers == 0 {
+                    Vec::new()
+                } else {
+                    // SAFETY: `combined_samplers` points to `n_combined_samplers`
+                    // initialized shim-owned records until the output is freed.
+                    unsafe { slice::from_raw_parts(raw.combined_samplers, raw.n_combined_samplers) }
+                        .iter()
+                        .map(|raw| CombinedSampler {
+                            glsl_uniform_name: raw_string(raw.glsl_uniform_name),
+                            texture_group: raw.texture_group,
+                            texture_binding: raw.texture_binding,
+                            sampler_group: raw.sampler_group,
+                            sampler_binding: raw.sampler_binding,
+                            uses_placeholder_sampler: raw.uses_placeholder_sampler,
+                        })
+                        .collect()
+                };
+            let mut raw = raw;
+            // SAFETY: all pointed-to allocations are shim-owned and have been
+            // copied into Rust-owned values above.
+            unsafe { yawgpu_tint_glsl_output_free(&mut raw) };
+            GlslOutput {
+                source,
+                combined_samplers,
+            }
+        }
+    }
+
+    impl Drop for GlslOutputGuard {
+        fn drop(&mut self) {
+            // SAFETY: frees any shim-owned fields if `into_output` did not
+            // already consume them.
+            unsafe { yawgpu_tint_glsl_output_free(&mut self.0) };
         }
     }
 
@@ -2056,11 +2173,15 @@ mod real {
             bindings: &Bindings,
             overrides: &[OverrideValue],
             first_instance_offset: Option<u32>,
-        ) -> Result<String, TintError> {
+        ) -> Result<GlslOutput, TintError> {
             let ep = cstring(entry_point, "entry point").map_err(TintError::Codegen)?;
             let raw_bindings = bindings.as_raw();
             let raw_overrides = RawOverrideValues::new(overrides)?;
-            let mut glsl = ptr::null_mut();
+            let mut out = RawGlslOutput {
+                glsl: ptr::null_mut(),
+                combined_samplers: ptr::null_mut(),
+                n_combined_samplers: 0,
+            };
             let mut err = ptr::null_mut();
             // SAFETY: all pointers are valid for the duration of the call.
             let ok = unsafe {
@@ -2072,20 +2193,20 @@ mod real {
                     raw_overrides.len(),
                     first_instance_offset.is_some(),
                     first_instance_offset.unwrap_or(0),
-                    &mut glsl,
+                    &mut out,
                     &mut err,
                 )
             };
             if !ok {
                 return Err(TintError::Codegen(take_error(err)));
             }
-            let glsl_guard = StringGuard::new(glsl);
-            if glsl_guard.is_null() {
+            let glsl_guard = GlslOutputGuard::new(out);
+            if glsl_guard.is_glsl_null() {
                 return Err(TintError::Codegen(
                     "tint: GLSL generator returned NULL output".to_owned(),
                 ));
             }
-            Ok(glsl_guard.into_string())
+            Ok(glsl_guard.into_output())
         }
     }
 
@@ -2308,7 +2429,7 @@ mod stub {
             _bindings: &Bindings,
             _overrides: &[OverrideValue],
             _first_instance_offset: Option<u32>,
-        ) -> Result<String, TintError> {
+        ) -> Result<GlslOutput, TintError> {
             Err(TintError::Unavailable)
         }
     }
@@ -2546,7 +2667,10 @@ fn main() {
             spirv_with_vulkan_memory_model.first().copied(),
             Some(0x0723_0203)
         );
-        let glsl = program.generate_glsl("cs", &bindings, &[], None).unwrap();
+        let glsl = program
+            .generate_glsl("cs", &bindings, &[], None)
+            .unwrap()
+            .source;
         assert!(glsl.contains("#version 310 es"), "GLSL:\n{glsl}");
     }
 
@@ -2588,7 +2712,10 @@ fn vs(@builtin(instance_index) ii: u32, @builtin(vertex_index) vi: u32) -> @buil
         .unwrap();
         let bindings = Bindings::default();
 
-        let glsl_without = program.generate_glsl("vs", &bindings, &[], None).unwrap();
+        let glsl_without = program
+            .generate_glsl("vs", &bindings, &[], None)
+            .unwrap()
+            .source;
         assert!(
             glsl_without.contains("gl_InstanceID"),
             "GLSL:\n{glsl_without}"
@@ -2600,7 +2727,8 @@ fn vs(@builtin(instance_index) ii: u32, @builtin(vertex_index) vi: u32) -> @buil
 
         let glsl_with = program
             .generate_glsl("vs", &bindings, &[], Some(0))
-            .unwrap();
+            .unwrap()
+            .source;
         // The immediate-data block is a plain array-typed uniform with an
         // explicit location, not a UBO -- HAL must look it up by
         // `glGetUniformLocation`, not `glGetUniformBlockIndex`.
@@ -2615,6 +2743,79 @@ fn vs(@builtin(instance_index) ii: u32, @builtin(vertex_index) vi: u32) -> @buil
         assert!(
             glsl_with.contains("gl_InstanceID"),
             "instance_index is still sourced from gl_InstanceID, just offset: {glsl_with}"
+        );
+    }
+
+    #[test]
+    fn generate_glsl_returns_combined_sampler_mapping_for_texture_sample() {
+        let wgsl = r#"
+@group(0) @binding(0) var t: texture_2d<f32>;
+@group(0) @binding(1) var s: sampler;
+
+@fragment
+fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  return textureSample(t, s, uv);
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let output = program
+            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .unwrap();
+
+        assert_eq!(
+            output.combined_samplers.len(),
+            1,
+            "GLSL:\n{}",
+            output.source
+        );
+        let combined = &output.combined_samplers[0];
+        assert_eq!(combined.texture_group, 0);
+        assert_eq!(combined.texture_binding, 0);
+        assert_eq!(combined.sampler_group, 0);
+        assert_eq!(combined.sampler_binding, 1);
+        assert!(!combined.uses_placeholder_sampler);
+        assert!(
+            output.source.contains(&format!(
+                "uniform highp sampler2D {};",
+                combined.glsl_uniform_name
+            )),
+            "GLSL:\n{}",
+            output.source
+        );
+    }
+
+    #[test]
+    fn generate_glsl_returns_placeholder_combined_sampler_for_texture_load() {
+        let wgsl = r#"
+@group(0) @binding(0) var t: texture_2d<f32>;
+
+@fragment
+fn fs() -> @location(0) vec4f {
+  return textureLoad(t, vec2i(0, 0), 0);
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let output = program
+            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .unwrap();
+
+        assert_eq!(
+            output.combined_samplers.len(),
+            1,
+            "GLSL:\n{}",
+            output.source
+        );
+        let combined = &output.combined_samplers[0];
+        assert_eq!(combined.texture_group, 0);
+        assert_eq!(combined.texture_binding, 0);
+        assert!(combined.uses_placeholder_sampler);
+        assert!(
+            output.source.contains(&format!(
+                "uniform highp sampler2D {};",
+                combined.glsl_uniform_name
+            )),
+            "GLSL:\n{}",
+            output.source
         );
     }
 
@@ -2646,7 +2847,10 @@ fn cs() {
 "#;
         let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
         let bindings = Bindings::default();
-        let glsl = program.generate_glsl("cs", &bindings, &[], None).unwrap();
+        let glsl = program
+            .generate_glsl("cs", &bindings, &[], None)
+            .unwrap()
+            .source;
         assert!(
             glsl.contains("layout(binding = 0, std140)\nuniform"),
             "GLSL:\n{glsl}"
@@ -2704,7 +2908,10 @@ fn cs() {
             }],
             ..Default::default()
         };
-        let glsl = program.generate_glsl("cs", &bindings, &[], None).unwrap();
+        let glsl = program
+            .generate_glsl("cs", &bindings, &[], None)
+            .unwrap()
+            .source;
         assert!(
             glsl.contains("layout(binding = 0, std140)\nuniform u_block_1_ubo"),
             "GLSL:\n{glsl}"
