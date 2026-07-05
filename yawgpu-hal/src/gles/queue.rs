@@ -1321,7 +1321,6 @@ fn submit_buffer_to_texture(
         });
     };
 
-    ensure_2d_copy(copy.extent.depth_or_array_layers, copy.origin.z)?;
     let buffer = source.raw_or_err()?;
     let texture = destination.raw_or_err()?;
     let meta = destination.meta();
@@ -1338,23 +1337,58 @@ fn submit_buffer_to_texture(
         copy.buffer_layout.offset,
         "buffer-to-texture offset exceeds GLES limit",
     )?;
+    let uses_layered_target = meta.target != glow::TEXTURE_2D;
+    let (z, depth, image_height) = if uses_layered_target {
+        (
+            i32_from_u32(copy.origin.z, "texture z origin exceeds GLES limit")?,
+            i32_from_u32(
+                copy.extent.depth_or_array_layers,
+                "texture copy depth exceeds GLES limit",
+            )?,
+            i32_from_u32(
+                copy.buffer_layout.rows_per_image,
+                "rows per image exceeds GLES limit",
+            )?,
+        )
+    } else {
+        ensure_2d_target_copy(copy.extent.depth_or_array_layers, copy.origin.z)?;
+        (0, 1, 0)
+    };
 
     unsafe {
         gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(buffer));
         gl.bind_texture(meta.target, Some(texture));
         gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, row_pixels);
         gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-        gl.tex_sub_image_2d(
-            meta.target,
-            mip_level,
-            x,
-            y,
-            width,
-            height,
-            meta.format.format,
-            meta.format.ty,
-            glow::PixelUnpackData::BufferOffset(buffer_offset),
-        );
+        if uses_layered_target {
+            gl.pixel_store_i32(glow::UNPACK_IMAGE_HEIGHT, image_height);
+            gl.tex_sub_image_3d(
+                meta.target,
+                mip_level,
+                x,
+                y,
+                z,
+                width,
+                height,
+                depth,
+                meta.format.format,
+                meta.format.ty,
+                glow::PixelUnpackData::BufferOffset(buffer_offset),
+            );
+            gl.pixel_store_i32(glow::UNPACK_IMAGE_HEIGHT, 0);
+        } else {
+            gl.tex_sub_image_2d(
+                meta.target,
+                mip_level,
+                x,
+                y,
+                width,
+                height,
+                meta.format.format,
+                meta.format.ty,
+                glow::PixelUnpackData::BufferOffset(buffer_offset),
+            );
+        }
         gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
         gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
         gl.bind_texture(meta.target, None);
@@ -1381,7 +1415,6 @@ fn submit_texture_to_buffer(
         });
     };
 
-    ensure_2d_copy(copy.extent.depth_or_array_layers, copy.origin.z)?;
     let texture = source.raw_or_err()?;
     let buffer = destination.raw_or_err()?;
     let meta = source.meta();
@@ -1394,10 +1427,71 @@ fn submit_texture_to_buffer(
     let y = i32_from_u32(copy.origin.y, "texture y origin exceeds GLES limit")?;
     let width = i32_from_u32(copy.extent.width, "texture copy width exceeds GLES limit")?;
     let height = i32_from_u32(copy.extent.height, "texture copy height exceeds GLES limit")?;
-    let buffer_offset = u32_from_u64(
-        copy.buffer_layout.offset,
-        "texture-to-buffer offset exceeds GLES limit",
-    )?;
+    let uses_layered_target = meta.target != glow::TEXTURE_2D;
+    if !uses_layered_target {
+        ensure_2d_target_copy(copy.extent.depth_or_array_layers, copy.origin.z)?;
+    }
+
+    // Some drivers (observed on Mesa) resolve `glReadPixels` into a
+    // PIXEL_PACK_BUFFER from a TEXTURE_3D layer attachment against layer 0
+    // instead of the attached layer. Route 3D readbacks through client
+    // memory + `glBufferSubData`; 2D and 2D-array targets keep the direct
+    // pack-buffer path.
+    let use_client_staging = meta.target == glow::TEXTURE_3D;
+    let staging_len = if copy.extent.height == 0 || copy.extent.width == 0 {
+        0usize
+    } else {
+        let tail_row_bytes = u64::from(copy.extent.width) * u64::from(meta.format.bytes_per_pixel);
+        let full_rows_bytes = u64::from(copy.extent.height - 1)
+            .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
+            .ok_or(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "texture-to-buffer slice size exceeds GLES limit",
+            })?;
+        usize::try_from(full_rows_bytes.checked_add(tail_row_bytes).ok_or(
+            HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "texture-to-buffer slice size exceeds GLES limit",
+            },
+        )?)
+        .map_err(|_| HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture-to-buffer slice size exceeds host limit",
+        })?
+    };
+
+    // Precompute the (layer, buffer offset) pair for every slice so that all
+    // fallible arithmetic happens before any GL state is touched.
+    let image_stride =
+        u64::from(copy.buffer_layout.bytes_per_row) * u64::from(copy.buffer_layout.rows_per_image);
+    let mut slices = Vec::with_capacity(copy.extent.depth_or_array_layers as usize);
+    for slice in 0..copy.extent.depth_or_array_layers {
+        let layer = copy
+            .origin
+            .z
+            .checked_add(slice)
+            .ok_or(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "texture layer index exceeds GLES limit",
+            })?;
+        let layer = i32_from_u32(layer, "texture layer index exceeds GLES limit")?;
+        let slice_offset = u64::from(slice)
+            .checked_mul(image_stride)
+            .and_then(|bytes| copy.buffer_layout.offset.checked_add(bytes))
+            .ok_or(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "texture-to-buffer offset exceeds GLES limit",
+            })?;
+        // The staged path passes the offset to `glBufferSubData` (i32); the
+        // pack-buffer path passes it to `glReadPixels` (u32). Validate the
+        // stricter bound up front so the copy loop below cannot fail.
+        if use_client_staging {
+            i32_from_u64(slice_offset, "texture-to-buffer offset exceeds GLES limit")?;
+        } else {
+            u32_from_u64(slice_offset, "texture-to-buffer offset exceeds GLES limit")?;
+        }
+        slices.push((layer, slice_offset));
+    }
 
     unsafe {
         let framebuffer = gl
@@ -1407,42 +1501,73 @@ fn submit_texture_to_buffer(
                 message: "glCreateFramebuffer failed",
             })?;
         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
-        gl.framebuffer_texture_2d(
-            glow::READ_FRAMEBUFFER,
-            glow::COLOR_ATTACHMENT0,
-            meta.target,
-            Some(texture),
-            mip_level,
-        );
         gl.read_buffer(glow::COLOR_ATTACHMENT0);
-        if gl.check_framebuffer_status(glow::READ_FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-            gl.delete_framebuffer(framebuffer);
-            return Err(HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "framebuffer incomplete for texture-to-buffer copy",
-            });
+        if !use_client_staging {
+            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(buffer));
         }
-        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(buffer));
         gl.pixel_store_i32(glow::PACK_ROW_LENGTH, row_pixels);
         gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
-        gl.read_pixels(
-            x,
-            y,
-            width,
-            height,
-            meta.format.format,
-            meta.format.ty,
-            glow::PixelPackData::BufferOffset(buffer_offset),
-        );
+        let mut result = Ok(());
+        for (layer, slice_offset) in slices {
+            if uses_layered_target {
+                gl.framebuffer_texture_layer(
+                    glow::READ_FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    Some(texture),
+                    mip_level,
+                    layer,
+                );
+            } else {
+                gl.framebuffer_texture_2d(
+                    glow::READ_FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    meta.target,
+                    Some(texture),
+                    mip_level,
+                );
+            }
+            if gl.check_framebuffer_status(glow::READ_FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+                result = Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "framebuffer incomplete for texture-to-buffer copy",
+                });
+                break;
+            }
+            if use_client_staging {
+                let mut staging = vec![0u8; staging_len];
+                gl.read_pixels(
+                    x,
+                    y,
+                    width,
+                    height,
+                    meta.format.format,
+                    meta.format.ty,
+                    glow::PixelPackData::Slice(&mut staging),
+                );
+                gl.bind_buffer(glow::COPY_WRITE_BUFFER, Some(buffer));
+                gl.buffer_sub_data_u8_slice(glow::COPY_WRITE_BUFFER, slice_offset as i32, &staging);
+                gl.bind_buffer(glow::COPY_WRITE_BUFFER, None);
+            } else {
+                gl.read_pixels(
+                    x,
+                    y,
+                    width,
+                    height,
+                    meta.format.format,
+                    meta.format.ty,
+                    glow::PixelPackData::BufferOffset(slice_offset as u32),
+                );
+            }
+        }
         gl.pixel_store_i32(glow::PACK_ROW_LENGTH, 0);
         gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
-        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+        if !use_client_staging {
+            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+        }
         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
         gl.delete_framebuffer(framebuffer);
+        result
     }
-
-    Ok(())
 }
 
 fn submit_texture_to_texture(gl: &glow::Context, copy: &HalTextureCopy) -> Result<(), HalError> {
@@ -1459,15 +1584,6 @@ fn submit_texture_to_texture(gl: &glow::Context, copy: &HalTextureCopy) -> Resul
         });
     };
 
-    if !supports_copy_image(gl) {
-        return Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "GL_EXT_copy_image required for texture-to-texture copies; not supported by this GLES driver",
-        });
-    }
-
-    ensure_2d_copy(copy.extent.depth_or_array_layers, copy.source_origin.z)?;
-    ensure_2d_copy(copy.extent.depth_or_array_layers, copy.destination_origin.z)?;
     let source_texture = source.raw_or_err()?;
     let destination_texture = destination.raw_or_err()?;
     let source_mip_level = i32_from_u32(
@@ -1496,28 +1612,143 @@ fn submit_texture_to_texture(gl: &glow::Context, copy: &HalTextureCopy) -> Resul
     )?;
     let width = i32_from_u32(copy.extent.width, "texture copy width exceeds GLES limit")?;
     let height = i32_from_u32(copy.extent.height, "texture copy height exceeds GLES limit")?;
-
-    unsafe {
-        gl.copy_image_sub_data(
-            source_texture,
-            source.meta().target,
-            source_mip_level,
-            source_x,
-            source_y,
-            0,
-            destination_texture,
-            destination.meta().target,
-            destination_mip_level,
-            destination_x,
-            destination_y,
-            0,
-            width,
-            height,
-            1,
-        );
+    let source_z = i32_from_u32(
+        copy.source_origin.z,
+        "source texture z origin exceeds GLES limit",
+    )?;
+    let destination_z = i32_from_u32(
+        copy.destination_origin.z,
+        "destination texture z origin exceeds GLES limit",
+    )?;
+    let depth = i32_from_u32(
+        copy.extent.depth_or_array_layers,
+        "texture copy depth exceeds GLES limit",
+    )?;
+    let source_target = source.meta().target;
+    let destination_target = destination.meta().target;
+    if source_target == glow::TEXTURE_2D {
+        ensure_2d_target_copy(copy.extent.depth_or_array_layers, copy.source_origin.z)?;
+    }
+    if destination_target == glow::TEXTURE_2D {
+        ensure_2d_target_copy(copy.extent.depth_or_array_layers, copy.destination_origin.z)?;
     }
 
-    Ok(())
+    if supports_copy_image(gl) {
+        unsafe {
+            gl.copy_image_sub_data(
+                source_texture,
+                source_target,
+                source_mip_level,
+                source_x,
+                source_y,
+                source_z,
+                destination_texture,
+                destination_target,
+                destination_mip_level,
+                destination_x,
+                destination_y,
+                destination_z,
+                width,
+                height,
+                depth,
+            );
+        }
+        return Ok(());
+    }
+
+    if source_target == glow::TEXTURE_2D && destination_target == glow::TEXTURE_2D {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GL_EXT_copy_image required for texture-to-texture copies; not supported by this GLES driver",
+        });
+    }
+
+    // No glCopyImageSubData: emulate per slice by attaching the source slice
+    // to a read framebuffer and copying into the bound destination texture
+    // with glCopyTexSubImage{2D,3D} (both core in ES 3.1).
+    let mut slice_layers = Vec::with_capacity(depth as usize);
+    for slice in 0..depth {
+        let source_layer = source_z
+            .checked_add(slice)
+            .ok_or(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "source texture layer index exceeds GLES limit",
+            })?;
+        let destination_layer =
+            destination_z
+                .checked_add(slice)
+                .ok_or(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "destination texture layer index exceeds GLES limit",
+                })?;
+        slice_layers.push((source_layer, destination_layer));
+    }
+    unsafe {
+        let framebuffer = gl
+            .create_framebuffer()
+            .map_err(|_| HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "glCreateFramebuffer failed",
+            })?;
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
+        gl.read_buffer(glow::COLOR_ATTACHMENT0);
+        gl.bind_texture(destination_target, Some(destination_texture));
+        let mut result = Ok(());
+        for (source_layer, destination_layer) in slice_layers {
+            if source_target == glow::TEXTURE_2D {
+                gl.framebuffer_texture_2d(
+                    glow::READ_FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    source_target,
+                    Some(source_texture),
+                    source_mip_level,
+                );
+            } else {
+                gl.framebuffer_texture_layer(
+                    glow::READ_FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    Some(source_texture),
+                    source_mip_level,
+                    source_layer,
+                );
+            }
+            if gl.check_framebuffer_status(glow::READ_FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+                result = Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "framebuffer incomplete for texture-to-texture copy",
+                });
+                break;
+            }
+            if destination_target == glow::TEXTURE_2D {
+                gl.copy_tex_sub_image_2d(
+                    destination_target,
+                    destination_mip_level,
+                    destination_x,
+                    destination_y,
+                    source_x,
+                    source_y,
+                    width,
+                    height,
+                );
+            } else {
+                gl.copy_tex_sub_image_3d(
+                    destination_target,
+                    destination_mip_level,
+                    destination_x,
+                    destination_y,
+                    destination_layer,
+                    source_x,
+                    source_y,
+                    width,
+                    height,
+                );
+            }
+        }
+        gl.bind_texture(destination_target, None);
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        gl.delete_framebuffer(framebuffer);
+        result
+    }
 }
 
 fn supports_copy_image(gl: &glow::Context) -> bool {
@@ -1538,11 +1769,11 @@ fn gles_version_at_least_3_2(version: &str) -> bool {
     matches!((major, minor), (Some(major), Some(minor)) if major > 3 || (major == 3 && minor >= 2))
 }
 
-fn ensure_2d_copy(depth_or_array_layers: u32, z: u32) -> Result<(), HalError> {
+fn ensure_2d_target_copy(depth_or_array_layers: u32, z: u32) -> Result<(), HalError> {
     if depth_or_array_layers != 1 || z != 0 {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
-            message: "only 2D texture copies are supported on GLES (P15.3)",
+            message: "copy addressing layers or depth slices of a plain 2D texture on GLES",
         });
     }
     Ok(())
@@ -1886,6 +2117,224 @@ mod tests {
         assert_eq!(
             value, 5,
             "R32Uint attachment must hold the integer clear value"
+        );
+    }
+
+    /// Creates a 2x2 Rgba8Unorm texture with `depth_or_array_layers` slices of
+    /// the given dimension, usable as both a copy source and destination.
+    fn rgba8_copy_texture(
+        device: &super::super::device::GlesDevice,
+        dimension: crate::HalTextureDimension,
+        depth_or_array_layers: u32,
+    ) -> super::super::texture::GlesTexture {
+        device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension,
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                width: 2,
+                height: 2,
+                depth_or_array_layers,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: true,
+                    copy_dst: true,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: false,
+                    transient: false,
+                },
+            })
+            .expect("GLES Rgba8Unorm copy texture creation must succeed")
+    }
+
+    /// One 2x2 Rgba8Unorm slice is 16 bytes; layout used by the multi-slice
+    /// copy tests below (`bytes_per_row` 8, `rows_per_image` 2).
+    const RGBA8_SLICE_BYTES: u32 = 16;
+
+    fn rgba8_slice_layout(offset: u64) -> crate::HalBufferTextureLayout {
+        crate::HalBufferTextureLayout {
+            offset,
+            bytes_per_row: 8,
+            rows_per_image: 2,
+        }
+    }
+
+    /// Uploads `slice_count` slices of distinct bytes (slice `i` holds bytes
+    /// `i*16..(i+1)*16`) into the texture via one buffer-to-texture copy and
+    /// returns the uploaded bytes.
+    fn upload_rgba8_slices(
+        device: &super::super::device::GlesDevice,
+        texture: &super::super::texture::GlesTexture,
+        slice_count: u32,
+    ) -> Vec<u8> {
+        let byte_count = u64::from(slice_count * RGBA8_SLICE_BYTES);
+        let bytes: Vec<u8> = (0..byte_count).map(|byte| byte as u8).collect();
+        let upload = device
+            .create_buffer(
+                byte_count,
+                crate::HalBufferUsage {
+                    copy_src: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES upload buffer creation must succeed");
+        upload
+            .write(0, &bytes)
+            .expect("writing the upload buffer must succeed");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::BufferToTexture(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(upload),
+                buffer_layout: rgba8_slice_layout(0),
+                texture: HalTexture::Gles(texture.clone()),
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                extent: crate::HalExtent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: slice_count,
+                },
+            })])
+            .expect("buffer-to-texture copy across multiple slices must succeed");
+        bytes
+    }
+
+    /// Reads `slice_count` slices starting at slice `z` back into a buffer via
+    /// one texture-to-buffer copy and returns the bytes.
+    fn read_back_rgba8_slices(
+        device: &super::super::device::GlesDevice,
+        texture: &super::super::texture::GlesTexture,
+        z: u32,
+        slice_count: u32,
+    ) -> Vec<u8> {
+        let byte_count = u64::from(slice_count * RGBA8_SLICE_BYTES);
+        let readback = device
+            .create_buffer(
+                byte_count,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES readback buffer creation must succeed");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(readback.clone()),
+                buffer_layout: rgba8_slice_layout(0),
+                texture: HalTexture::Gles(texture.clone()),
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                origin: crate::HalOrigin3d { x: 0, y: 0, z },
+                extent: crate::HalExtent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: slice_count,
+                },
+            })])
+            .expect("texture-to-buffer copy of texture slices must succeed");
+        readback
+            .read(0, byte_count)
+            .expect("reading back the copied slices must succeed")
+    }
+
+    #[test]
+    fn submit_copies_round_trips_2d_array_texture_layers() {
+        // T-G9: buffer-to-texture / texture-to-buffer copies on a 2D-array
+        // texture used to fail with "only 2D texture copies are supported on
+        // GLES (P15.3)". A 3-layer round trip must preserve each layer's
+        // distinct bytes.
+        let Some(device) = gles_device_or_skip("GLES 2D-array copy round-trip test") else {
+            return;
+        };
+
+        let texture = rgba8_copy_texture(&device, crate::HalTextureDimension::D2, 3);
+        let bytes = upload_rgba8_slices(&device, &texture, 3);
+
+        for layer in 0..3u32 {
+            let expected = &bytes
+                [(layer * RGBA8_SLICE_BYTES) as usize..((layer + 1) * RGBA8_SLICE_BYTES) as usize];
+            assert_eq!(
+                read_back_rgba8_slices(&device, &texture, layer, 1),
+                expected,
+                "layer {layer} must round-trip its distinct bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn submit_copies_round_trips_3d_texture_slices() {
+        // T-G9: a 2x2x3 3D texture exercises `glTexSubImage3D` with depth > 1
+        // on upload and the per-slice `glFramebufferTextureLayer` readback
+        // with depth > 1 on the way back.
+        let Some(device) = gles_device_or_skip("GLES 3D-texture copy round-trip test") else {
+            return;
+        };
+
+        let texture = rgba8_copy_texture(&device, crate::HalTextureDimension::D3, 3);
+        let bytes = upload_rgba8_slices(&device, &texture, 3);
+
+        assert_eq!(
+            read_back_rgba8_slices(&device, &texture, 0, 3),
+            bytes,
+            "all 3 depth slices must round-trip in one texture-to-buffer copy"
+        );
+    }
+
+    #[test]
+    fn submit_copies_texture_to_texture_across_array_layers() {
+        // T-G9: texture-to-texture copies with array layers. Layers 1..3 of a
+        // 3-layer source copy to layers 0..2 of a 2-layer destination; the
+        // driver takes glCopyImageSubData when GL_EXT_copy_image / ES 3.2 is
+        // available and the framebuffer_texture_layer + glCopyTexSubImage3D
+        // fallback otherwise.
+        let Some(device) = gles_device_or_skip("GLES array texture-to-texture copy test") else {
+            return;
+        };
+
+        let copy_image = device
+            .queue()
+            .inner
+            .with_current_context(supports_copy_image)
+            .expect("querying GL_EXT_copy_image support must succeed");
+        eprintln!(
+            "GLES array texture-to-texture copy path: {}",
+            if copy_image {
+                "glCopyImageSubData (GL_EXT_copy_image / ES 3.2)"
+            } else {
+                "framebuffer_texture_layer + glCopyTexSubImage3D fallback"
+            }
+        );
+
+        let source = rgba8_copy_texture(&device, crate::HalTextureDimension::D2, 3);
+        let bytes = upload_rgba8_slices(&device, &source, 3);
+        let destination = rgba8_copy_texture(&device, crate::HalTextureDimension::D2, 2);
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::TextureToTexture(HalTextureCopy {
+                source: HalTexture::Gles(source),
+                source_mip_level: 0,
+                source_origin: crate::HalOrigin3d { x: 0, y: 0, z: 1 },
+                destination: HalTexture::Gles(destination.clone()),
+                destination_mip_level: 0,
+                destination_origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                extent: crate::HalExtent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: 2,
+                },
+            })])
+            .expect("texture-to-texture copy across array layers must succeed");
+
+        assert_eq!(
+            read_back_rgba8_slices(&device, &destination, 0, 2),
+            &bytes[RGBA8_SLICE_BYTES as usize..3 * RGBA8_SLICE_BYTES as usize],
+            "destination layers 0..2 must hold source layers 1..3"
         );
     }
 
@@ -2469,24 +2918,24 @@ mod tests {
     }
 
     #[test]
-    fn ensure_2d_copy_accepts_layer_one_z_zero_only() {
-        assert!(ensure_2d_copy(1, 0).is_ok());
+    fn ensure_2d_target_copy_accepts_layer_one_z_zero_only() {
+        assert!(ensure_2d_target_copy(1, 0).is_ok());
         assert!(matches!(
-            ensure_2d_copy(2, 0),
+            ensure_2d_target_copy(2, 0),
             Err(HalError::BufferOperationFailed {
                 backend: "gles",
                 ..
             })
         ));
         assert!(matches!(
-            ensure_2d_copy(1, 1),
+            ensure_2d_target_copy(1, 1),
             Err(HalError::BufferOperationFailed {
                 backend: "gles",
                 ..
             })
         ));
         assert!(matches!(
-            ensure_2d_copy(0, 0),
+            ensure_2d_target_copy(0, 0),
             Err(HalError::BufferOperationFailed {
                 backend: "gles",
                 ..
