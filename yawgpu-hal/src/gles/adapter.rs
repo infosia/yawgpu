@@ -366,6 +366,7 @@ fn create_egl_device(
     let caps = GlesDeviceCaps {
         supports_base_vertex: detect_base_vertex_support((major, minor), gl.supported_extensions()),
         color_render_caps: detect_color_render_caps(gl.supported_extensions()),
+        supports_vertex_array_bgra: detect_vertex_array_bgra_support(gl.supported_extensions()),
         max_samples: unsafe { gl.get_parameter_i32(glow::MAX_SAMPLES) },
         sample_mask_i: load_egl_proc::<GlesSampleMaskIFn>(egl_state, "glSampleMaski"),
     };
@@ -814,6 +815,15 @@ pub(super) fn detect_color_render_caps(
     }
 }
 
+/// Detects BGRA-order vertex attribute fetch support. GLES exposes this via
+/// `GL_EXT_vertex_array_bgra`; desktop GL contexts may expose the ARB spelling.
+pub(super) fn detect_vertex_array_bgra_support(
+    extensions: &std::collections::HashSet<String>,
+) -> bool {
+    extensions.contains("GL_EXT_vertex_array_bgra")
+        || extensions.contains("GL_ARB_vertex_array_bgra")
+}
+
 /// Detects whether 32-bit float textures are filterable.
 pub(super) fn detect_float32_filterable_support(
     extensions: &std::collections::HashSet<String>,
@@ -915,6 +925,19 @@ mod tests {
         assert!(!detect_float32_filterable_support(&empty));
         assert!(!detect_float32_filterable_support(&unrelated));
         assert!(detect_float32_filterable_support(&float_linear));
+    }
+
+    #[test]
+    fn detect_vertex_array_bgra_support_checks_ext_and_arb_names() {
+        let empty = std::collections::HashSet::new();
+        let unrelated: std::collections::HashSet<String> = ["GL_EXT_copy_image".to_owned()].into();
+        let ext: std::collections::HashSet<String> = ["GL_EXT_vertex_array_bgra".to_owned()].into();
+        let arb: std::collections::HashSet<String> = ["GL_ARB_vertex_array_bgra".to_owned()].into();
+
+        assert!(!detect_vertex_array_bgra_support(&empty));
+        assert!(!detect_vertex_array_bgra_support(&unrelated));
+        assert!(detect_vertex_array_bgra_support(&ext));
+        assert!(detect_vertex_array_bgra_support(&arb));
     }
 
     #[test]

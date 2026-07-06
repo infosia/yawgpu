@@ -15,6 +15,7 @@ pub(super) struct GlesVertexFormat {
     pub(super) ty: u32,
     pub(super) normalized: bool,
     pub(super) integer: bool,
+    pub(super) bgra: bool,
 }
 
 pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<GlesFormat, HalError> {
@@ -664,10 +665,7 @@ pub(super) fn map_vertex_format(format: HalVertexFormat) -> Result<GlesVertexFor
             true,
             false,
         )),
-        HalVertexFormat::Unorm8x4Bgra => Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "Unorm8x4Bgra vertex format is not supported on GLES",
-        }),
+        HalVertexFormat::Unorm8x4Bgra => Ok(gles_vertex_format_bgra()),
         HalVertexFormat::Unsupported => Err(HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "Unsupported vertex format requested",
@@ -686,6 +684,17 @@ fn gles_vertex_format(
         ty,
         normalized,
         integer,
+        bgra: false,
+    }
+}
+
+fn gles_vertex_format_bgra() -> GlesVertexFormat {
+    GlesVertexFormat {
+        components: 4,
+        ty: glow::UNSIGNED_BYTE,
+        normalized: true,
+        integer: false,
+        bgra: true,
     }
 }
 
@@ -1341,6 +1350,7 @@ mod tests {
         assert_eq!(unorm.ty, glow::UNSIGNED_BYTE);
         assert!(unorm.normalized);
         assert!(!unorm.integer);
+        assert!(!unorm.bgra);
 
         let half = map_vertex_format(HalVertexFormat::Float16x4).expect("Float16x4 supported");
         assert_eq!(half.components, 4);
@@ -1355,15 +1365,13 @@ mod tests {
         assert!(packed.normalized);
         assert!(!packed.integer);
 
-        let bgra_error = map_vertex_format(HalVertexFormat::Unorm8x4Bgra)
-            .expect_err("BGRA vertex format must error on GLES");
-        assert!(matches!(
-            bgra_error,
-            HalError::BufferOperationFailed {
-                backend: "gles",
-                message: "Unorm8x4Bgra vertex format is not supported on GLES",
-            }
-        ));
+        let bgra =
+            map_vertex_format(HalVertexFormat::Unorm8x4Bgra).expect("Unorm8x4Bgra supported");
+        assert_eq!(bgra.components, 4);
+        assert_eq!(bgra.ty, glow::UNSIGNED_BYTE);
+        assert!(bgra.normalized);
+        assert!(!bgra.integer);
+        assert!(bgra.bgra);
 
         let error = map_vertex_format(HalVertexFormat::Unsupported)
             .expect_err("unsupported vertex format must error");

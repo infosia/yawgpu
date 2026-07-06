@@ -26,8 +26,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::adapter::{
-    detect_base_vertex_support, detect_color_render_caps, parse_gles_version,
-    query_gles_adapter_caps,
+    detect_base_vertex_support, detect_color_render_caps, detect_vertex_array_bgra_support,
+    parse_gles_version, query_gles_adapter_caps,
 };
 use super::device::GlesSampleMaskIFn;
 use super::format::GlesColorRenderCaps;
@@ -170,6 +170,9 @@ pub(super) struct WglDeviceState {
     /// (`GL_EXT_color_buffer_float` / `GL_EXT_color_buffer_half_float`);
     /// detected once at device creation (T-G12).
     pub(super) color_render_caps: GlesColorRenderCaps,
+    /// Whether `glVertexAttribPointer(size = GL_BGRA, type = GL_UNSIGNED_BYTE,
+    /// normalized = GL_TRUE)` is supported for BGRA-order vertex fetch.
+    pub(super) supports_vertex_array_bgra: bool,
     /// Maximum sample count reported by `GL_MAX_SAMPLES`.
     pub(super) max_samples: i32,
     /// GLES 3.1 core `glSampleMaski`; cached because glow 0.14 does not expose
@@ -342,6 +345,8 @@ impl WglDeviceState {
         let supports_base_vertex =
             detect_base_vertex_support((major, minor), gl.supported_extensions());
         let color_render_caps = detect_color_render_caps(gl.supported_extensions());
+        let supports_vertex_array_bgra =
+            detect_vertex_array_bgra_support(gl.supported_extensions());
         let max_samples = unsafe { gl.get_parameter_i32(glow::MAX_SAMPLES) };
         let sample_mask_i = load_wgl_proc::<GlesSampleMaskIFn>("glSampleMaski");
         let placeholder_sampler = unsafe { create_nearest_placeholder_sampler(&gl) };
@@ -355,6 +360,7 @@ impl WglDeviceState {
             allocations: AtomicU64::new(0),
             supports_base_vertex,
             color_render_caps,
+            supports_vertex_array_bgra,
             max_samples,
             sample_mask_i,
             placeholder_sampler,

@@ -62,6 +62,7 @@ impl GlesQueue {
         }
 
         let supports_base_vertex = self.inner.supports_base_vertex();
+        let supports_vertex_array_bgra = self.inner.supports_vertex_array_bgra();
         let sample_mask_i = self.inner.sample_mask_i();
         let placeholder_sampler = self.inner.placeholder_sampler()?;
         self.inner
@@ -100,13 +101,12 @@ impl GlesQueue {
                             submit_compute_pass(gl, pass, placeholder_sampler)?;
                         }
                         HalCopy::RenderPass(pass) => {
-                            submit_render_pass(
-                                gl,
-                                pass,
+                            let render_caps = RenderDrawCaps {
                                 supports_base_vertex,
+                                supports_vertex_array_bgra,
                                 sample_mask_i,
-                                placeholder_sampler,
-                            )?;
+                            };
+                            submit_render_pass(gl, pass, render_caps, placeholder_sampler)?;
                         }
                         #[cfg(feature = "tiled")]
                         HalCopy::SubpassRenderPass(_) => {
@@ -636,11 +636,17 @@ impl Drop for TextureUnitCleanup<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct RenderDrawCaps {
+    supports_base_vertex: bool,
+    supports_vertex_array_bgra: bool,
+    sample_mask_i: Option<super::device::GlesSampleMaskIFn>,
+}
+
 fn submit_render_pass(
     gl: &glow::Context,
     pass: &HalRenderPass,
-    supports_base_vertex: bool,
-    sample_mask_i: Option<super::device::GlesSampleMaskIFn>,
+    caps: RenderDrawCaps,
     placeholder_sampler: glow::Sampler,
 ) -> Result<(), HalError> {
     reject_external_texture_bindings(pass.bind_external_textures.len())?;
@@ -679,15 +685,7 @@ fn submit_render_pass(
         fbo,
         vao: Some(vao),
     };
-    run_render_draw(
-        gl,
-        pass,
-        pipeline,
-        vao,
-        supports_base_vertex,
-        sample_mask_i,
-        placeholder_sampler,
-    )?;
+    run_render_draw(gl, pass, pipeline, vao, caps, placeholder_sampler)?;
     resolve_render_pass(gl, pass, fbo)
 }
 
@@ -1134,8 +1132,7 @@ fn run_render_draw(
     pass: &HalRenderPass,
     pipeline: &super::pipeline::GlesRenderPipeline,
     vao: glow::VertexArray,
-    supports_base_vertex: bool,
-    sample_mask_i: Option<super::device::GlesSampleMaskIFn>,
+    caps: RenderDrawCaps,
     placeholder_sampler: glow::Sampler,
 ) -> Result<(), HalError> {
     let program = pipeline.raw_or_err()?;
@@ -1158,14 +1155,21 @@ fn run_render_draw(
         &pass.bind_textures,
     )?;
     let first_instance = pass.draw.map(draw_first_instance).unwrap_or(0);
-    bind_vertex_buffers(gl, pass, pipeline, vao, first_instance)?;
+    bind_vertex_buffers(
+        gl,
+        pass,
+        pipeline,
+        vao,
+        first_instance,
+        caps.supports_vertex_array_bgra,
+    )?;
     if let Some(draw) = pass.draw {
         apply_raster_state(gl, pipeline.front_face(), pipeline.cull_mode());
         apply_multisample_state(
             gl,
             pipeline.sample_mask(),
             pipeline.alpha_to_coverage_enabled(),
-            sample_mask_i,
+            caps.sample_mask_i,
         )?;
         apply_color_target_state(gl, pipeline.color_target(), pass.blend_constant);
         apply_stencil_state(gl, pipeline.depth_stencil(), pass.stencil_reference)?;
@@ -1173,7 +1177,7 @@ fn run_render_draw(
             set_first_instance_uniform(gl, location, draw);
         }
         let topology = map_primitive_topology(pipeline.primitive_topology());
-        run_gles_draw(gl, pass, topology, draw, supports_base_vertex)?;
+        run_gles_draw(gl, pass, topology, draw, caps.supports_base_vertex)?;
     }
     Ok(())
 }
@@ -1705,6 +1709,7 @@ fn bind_vertex_buffers(
     pipeline: &super::pipeline::GlesRenderPipeline,
     vao: glow::VertexArray,
     first_instance: u32,
+    supports_vertex_array_bgra: bool,
 ) -> Result<(), HalError> {
     unsafe {
         gl.bind_vertex_array(Some(vao));
@@ -1795,9 +1800,17 @@ fn bind_vertex_buffers(
                         attribute_offset,
                     );
                 } else {
+                    let components = if format.bgra && supports_vertex_array_bgra {
+                        debug_assert_eq!(format.components, 4);
+                        debug_assert_eq!(format.ty, glow::UNSIGNED_BYTE);
+                        debug_assert!(format.normalized);
+                        i32::try_from(glow::BGRA).expect("GL_BGRA fits in i32")
+                    } else {
+                        format.components
+                    };
                     gl.vertex_attrib_pointer_f32(
                         attribute.shader_location,
-                        format.components,
+                        components,
                         format.ty,
                         format.normalized,
                         stride,
@@ -3333,6 +3346,145 @@ mod tests {
             .queue()
             .submit_copies(&[HalCopy::RenderPass(pass)])
             .expect("submit must ignore a vertex buffer bound at an undeclared slot");
+    }
+
+    #[test]
+    fn create_render_pipeline_accepts_unorm8x4_bgra_vertex_attribute() {
+        let Some(device) = gles_device_or_skip("GLES Unorm8x4Bgra vertex attribute test") else {
+            return;
+        };
+
+        let color_texture = render_attachment_texture(&device, crate::HalTextureFormat::Rgba8Unorm);
+        let pipeline = device
+            .create_render_pipeline(
+                crate::HalShaderSource::GlslStages {
+                    vertex: "#version 310 es\n\
+                             precision mediump float;\n\
+                             layout(location = 0) in vec2 position;\n\
+                             layout(location = 1) in vec4 color;\n\
+                             out vec4 vertex_color;\n\
+                             void main() {\n\
+                                 gl_Position = vec4(position, 0.0, 1.0);\n\
+                                 vertex_color = color;\n\
+                             }\n"
+                    .to_owned(),
+                    fragment: Some(
+                        "#version 310 es\n\
+                         precision mediump float;\n\
+                         in vec4 vertex_color;\n\
+                         layout(location = 0) out vec4 frag_color;\n\
+                         void main() { frag_color = vertex_color; }\n"
+                            .to_owned(),
+                    ),
+                    combined_samplers: Vec::new(),
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                Some("main"),
+                &crate::HalRenderPipelineDescriptor {
+                    sample_count: 1,
+                    sample_mask: u32::MAX,
+                    alpha_to_coverage_enabled: false,
+                    color_targets: vec![Some(HalColorTargetState {
+                        format: crate::HalTextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: 0xf,
+                    })],
+                    depth_stencil: None,
+                    vertex_buffers: vec![crate::HalVertexBufferLayout {
+                        slot: 0,
+                        array_stride: 12,
+                        step_mode: HalVertexStepMode::Vertex,
+                        attributes: vec![
+                            crate::HalVertexAttribute {
+                                format: crate::HalVertexFormat::Float32x2,
+                                offset: 0,
+                                shader_location: 0,
+                                metal_buffer_index: 0,
+                            },
+                            crate::HalVertexAttribute {
+                                format: crate::HalVertexFormat::Unorm8x4Bgra,
+                                offset: 8,
+                                shader_location: 1,
+                                metal_buffer_index: 0,
+                            },
+                        ],
+                    }],
+                    primitive_topology: crate::HalPrimitiveTopology::TriangleList,
+                    front_face: HalFrontFace::Ccw,
+                    cull_mode: HalCullMode::None,
+                    unclipped_depth: false,
+                    needs_frag_depth_range_push_constant: false,
+                    user_immediate_size: 0,
+                },
+                &[],
+            )
+            .expect("GLES render pipeline must accept Unorm8x4Bgra vertex attributes");
+
+        if !device.inner_clone().supports_vertex_array_bgra() {
+            eprintln!(
+                "GLES Unorm8x4Bgra vertex attribute test ran acceptance path; device reports no GL_EXT/ARB_vertex_array_bgra support, skipping pixel assertion"
+            );
+            return;
+        }
+        eprintln!(
+            "GLES Unorm8x4Bgra vertex attribute test running GL_BGRA vertex fetch pixel assertion"
+        );
+
+        let vertices = [(-1.0f32, -1.0f32), (3.0f32, -1.0f32), (-1.0f32, 3.0f32)];
+        let mut vertex_bytes = Vec::with_capacity(36);
+        for (x, y) in vertices {
+            vertex_bytes.extend_from_slice(&x.to_ne_bytes());
+            vertex_bytes.extend_from_slice(&y.to_ne_bytes());
+            vertex_bytes.extend_from_slice(&[255, 0, 64, 255]);
+        }
+        let vertex_buffer = device
+            .create_buffer(
+                vertex_bytes.len() as u64,
+                crate::HalBufferUsage {
+                    vertex: true,
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES BGRA vertex buffer creation must succeed");
+        vertex_buffer
+            .write(0, &vertex_bytes)
+            .expect("writing BGRA vertex data must succeed");
+
+        let mut pass = render_pass(vec![Some(color_target_for(
+            color_texture.clone(),
+            crate::HalTextureFormat::Rgba8Unorm,
+            [0.0, 0.0, 0.0, 0.0],
+        ))]);
+        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
+        pass.vertex_buffers = vec![crate::HalBoundBuffer {
+            group: 0,
+            binding: 0,
+            metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            buffer: HalBuffer::Gles(vertex_buffer),
+            offset: 0,
+            size: vertex_bytes.len() as u64,
+        }];
+        pass.draw = Some(HalDraw::Direct {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        });
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::RenderPass(pass)])
+            .expect("GLES BGRA vertex attribute draw must succeed");
+
+        assert_eq!(
+            read_rgba8_1x1(&device, color_texture),
+            [64, 0, 255, 255],
+            "GL_BGRA vertex fetch must present BGRA bytes as RGBA shader components"
+        );
     }
 
     #[test]
@@ -5666,6 +5818,47 @@ mod tests {
         readback
             .read(0, 16)
             .expect("reading resolved RGBA8 pixels must succeed")
+    }
+
+    fn read_rgba8_1x1(
+        device: &super::super::device::GlesDevice,
+        texture: super::super::texture::GlesTexture,
+    ) -> [u8; 4] {
+        let readback = device
+            .create_buffer(
+                4,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES RGBA8 readback buffer creation must succeed");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(readback.clone()),
+                buffer_layout: crate::HalBufferTextureLayout {
+                    offset: 0,
+                    bytes_per_row: 4,
+                    rows_per_image: 1,
+                },
+                texture: HalTexture::Gles(texture),
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                extent: crate::HalExtent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            })])
+            .expect("RGBA8 texture-to-buffer copy must succeed");
+        readback
+            .read(0, 4)
+            .expect("reading RGBA8 pixel must succeed")
+            .try_into()
+            .expect("RGBA8 readback must be exactly one pixel")
     }
 
     fn skip_if_msaa4_unavailable(device: &super::super::device::GlesDevice, label: &str) -> bool {

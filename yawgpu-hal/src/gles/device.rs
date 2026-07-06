@@ -24,6 +24,7 @@ pub(super) type GlesSampleMaskIFn = unsafe extern "system" fn(u32, u32);
 pub(super) struct GlesDeviceCaps {
     pub(super) supports_base_vertex: bool,
     pub(super) color_render_caps: GlesColorRenderCaps,
+    pub(super) supports_vertex_array_bgra: bool,
     pub(super) max_samples: i32,
     pub(super) sample_mask_i: Option<GlesSampleMaskIFn>,
 }
@@ -49,6 +50,9 @@ pub(super) struct EglDeviceState {
     /// (`GL_EXT_color_buffer_float` / `GL_EXT_color_buffer_half_float`);
     /// detected once at device creation (T-G12).
     pub(super) color_render_caps: GlesColorRenderCaps,
+    /// Whether `glVertexAttribPointer(size = GL_BGRA, type = GL_UNSIGNED_BYTE,
+    /// normalized = GL_TRUE)` is supported for BGRA-order vertex fetch.
+    pub(super) supports_vertex_array_bgra: bool,
     /// Maximum sample count reported by `GL_MAX_SAMPLES`.
     pub(super) max_samples: i32,
     /// GLES 3.1 core `glSampleMaski`; cached because glow 0.14 does not expose
@@ -142,6 +146,14 @@ impl GlesDeviceInner {
             Self::Egl(state) => state.color_render_caps,
             #[cfg(windows)]
             Self::Wgl(state) => state.color_render_caps,
+        }
+    }
+
+    pub(super) fn supports_vertex_array_bgra(&self) -> bool {
+        match self {
+            Self::Egl(state) => state.supports_vertex_array_bgra,
+            #[cfg(windows)]
+            Self::Wgl(state) => state.supports_vertex_array_bgra,
         }
     }
 
@@ -267,6 +279,7 @@ impl GlesDevice {
             allocations: AtomicU64::new(0),
             supports_base_vertex: caps.supports_base_vertex,
             color_render_caps: caps.color_render_caps,
+            supports_vertex_array_bgra: caps.supports_vertex_array_bgra,
             max_samples: caps.max_samples,
             sample_mask_i: caps.sample_mask_i,
             placeholder_sampler,
