@@ -2087,11 +2087,17 @@ fn submit_texture_to_buffer(
     let buffer = destination.raw_or_err()?;
     let meta = source.meta();
     reject_multisample_texture_copy(meta, "texture-to-buffer source is multisampled")?;
-    if format_has_depth_aspect(copy.format) || format_has_stencil_aspect(copy.format) {
+    if matches!(copy.aspect, HalTextureAspect::StencilOnly)
+        || (format_has_stencil_aspect(copy.format)
+            && !matches!(copy.aspect, HalTextureAspect::DepthOnly))
+    {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
-            message: "GLES cannot read back depth/stencil formats",
+            message: "GLES cannot read back stencil formats",
         });
+    }
+    if let Some(encoding) = texture_to_buffer_compute_encoding(copy.format, copy.aspect) {
+        return submit_texture_to_buffer_compute(gl, copy, encoding);
     }
     let mip_level = i32_from_u32(copy.mip_level, "texture mip level exceeds GLES limit")?;
     let x = i32_from_u32(copy.origin.x, "texture x origin exceeds GLES limit")?;
@@ -2282,6 +2288,447 @@ fn submit_texture_to_buffer(
         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
         gl.delete_framebuffer(framebuffer);
         result
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TextureToBufferComputeEncoding {
+    R8Snorm,
+    Rg8Snorm,
+    Rgba8Snorm,
+    R16Unorm,
+    R16Snorm,
+    Rg16Unorm,
+    Rg16Snorm,
+    Rgba16Unorm,
+    Rgba16Snorm,
+    Depth16Unorm,
+    Depth24Plus,
+    Depth32Float,
+}
+
+impl TextureToBufferComputeEncoding {
+    fn bytes_per_pixel(self) -> u32 {
+        match self {
+            Self::R8Snorm => 1,
+            Self::Rg8Snorm | Self::R16Unorm | Self::R16Snorm | Self::Depth16Unorm => 2,
+            Self::Rgba8Snorm
+            | Self::Rg16Unorm
+            | Self::Rg16Snorm
+            | Self::Depth24Plus
+            | Self::Depth32Float => 4,
+            Self::Rgba16Unorm | Self::Rgba16Snorm => 8,
+        }
+    }
+
+    fn shader_store(self) -> &'static str {
+        match self {
+            Self::R8Snorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeByte(base, packSnorm4x8(vec4(value.r, 0.0, 0.0, 0.0)) & 0xffu);"
+            }
+            Self::Rg8Snorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU16(base, packSnorm4x8(vec4(value.rg, 0.0, 0.0)) & 0xffffu);"
+            }
+            Self::Rgba8Snorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, packSnorm4x8(value));"
+            }
+            Self::R16Unorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU16(base, packUnorm16(value.r));"
+            }
+            Self::R16Snorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU16(base, packSnorm2x16(vec2(value.r, 0.0)) & 0xffffu);"
+            }
+            Self::Rg16Unorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, packUnorm16(value.r) | (packUnorm16(value.g) << 16));"
+            }
+            Self::Rg16Snorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, packSnorm2x16(value.rg));"
+            }
+            Self::Rgba16Unorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, packUnorm16(value.r) | (packUnorm16(value.g) << 16));\n\
+                 writeU32(base + 4u, packUnorm16(value.b) | (packUnorm16(value.a) << 16));"
+            }
+            Self::Rgba16Snorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, packSnorm2x16(value.rg));\n\
+                 writeU32(base + 4u, packSnorm2x16(value.ba));"
+            }
+            Self::Depth16Unorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU16(base, packUnorm16(value.r));"
+            }
+            Self::Depth24Plus => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, uint(round(clamp(value.r, 0.0, 1.0) * 16777215.0)));"
+            }
+            Self::Depth32Float => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, floatBitsToUint(value.r));"
+            }
+        }
+    }
+}
+
+fn texture_to_buffer_compute_encoding(
+    format: crate::HalTextureFormat,
+    aspect: HalTextureAspect,
+) -> Option<TextureToBufferComputeEncoding> {
+    match (format, aspect) {
+        (crate::HalTextureFormat::R8Snorm, HalTextureAspect::All) => {
+            Some(TextureToBufferComputeEncoding::R8Snorm)
+        }
+        (crate::HalTextureFormat::Rg8Snorm, HalTextureAspect::All) => {
+            Some(TextureToBufferComputeEncoding::Rg8Snorm)
+        }
+        (crate::HalTextureFormat::Rgba8Snorm, HalTextureAspect::All) => {
+            Some(TextureToBufferComputeEncoding::Rgba8Snorm)
+        }
+        (crate::HalTextureFormat::R16Unorm, HalTextureAspect::All) => {
+            Some(TextureToBufferComputeEncoding::R16Unorm)
+        }
+        (crate::HalTextureFormat::R16Snorm, HalTextureAspect::All) => {
+            Some(TextureToBufferComputeEncoding::R16Snorm)
+        }
+        (crate::HalTextureFormat::Rg16Unorm, HalTextureAspect::All) => {
+            Some(TextureToBufferComputeEncoding::Rg16Unorm)
+        }
+        (crate::HalTextureFormat::Rg16Snorm, HalTextureAspect::All) => {
+            Some(TextureToBufferComputeEncoding::Rg16Snorm)
+        }
+        (crate::HalTextureFormat::Rgba16Unorm, HalTextureAspect::All) => {
+            Some(TextureToBufferComputeEncoding::Rgba16Unorm)
+        }
+        (crate::HalTextureFormat::Rgba16Snorm, HalTextureAspect::All) => {
+            Some(TextureToBufferComputeEncoding::Rgba16Snorm)
+        }
+        (
+            crate::HalTextureFormat::Depth16Unorm,
+            HalTextureAspect::All | HalTextureAspect::DepthOnly,
+        ) => Some(TextureToBufferComputeEncoding::Depth16Unorm),
+        (
+            crate::HalTextureFormat::Depth24Plus,
+            HalTextureAspect::All | HalTextureAspect::DepthOnly,
+        ) => Some(TextureToBufferComputeEncoding::Depth24Plus),
+        (crate::HalTextureFormat::Depth24PlusStencil8, HalTextureAspect::DepthOnly) => {
+            Some(TextureToBufferComputeEncoding::Depth24Plus)
+        }
+        (
+            crate::HalTextureFormat::Depth32Float,
+            HalTextureAspect::All | HalTextureAspect::DepthOnly,
+        ) => Some(TextureToBufferComputeEncoding::Depth32Float),
+        (crate::HalTextureFormat::Depth32FloatStencil8, HalTextureAspect::DepthOnly) => {
+            Some(TextureToBufferComputeEncoding::Depth32Float)
+        }
+        _ => None,
+    }
+}
+
+fn submit_texture_to_buffer_compute(
+    gl: &glow::Context,
+    copy: &HalBufferTextureCopy,
+    encoding: TextureToBufferComputeEncoding,
+) -> Result<(), HalError> {
+    let HalTexture::Gles(source) = &copy.texture else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture-to-buffer source is not a GLES texture",
+        });
+    };
+    let HalBuffer::Gles(destination) = &copy.buffer else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture-to-buffer destination is not a GLES buffer",
+        });
+    };
+
+    let texture = source.raw_or_err()?;
+    let buffer = destination.raw_or_err()?;
+    let meta = source.meta();
+    let bytes_per_pixel = encoding.bytes_per_pixel();
+    let row_bytes = u64::from(copy.extent.width)
+        .checked_mul(u64::from(bytes_per_pixel))
+        .ok_or(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture-to-buffer row size exceeds GLES limit",
+        })?;
+    if row_bytes == 0 || copy.extent.height == 0 || copy.extent.depth_or_array_layers == 0 {
+        return Ok(());
+    }
+    if copy.extent.height > 1 && u64::from(copy.buffer_layout.bytes_per_row) < row_bytes {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "bytes_per_row is smaller than texture copy row",
+        });
+    }
+    if meta.target == glow::TEXTURE_2D {
+        ensure_2d_target_copy(copy.extent.depth_or_array_layers, copy.origin.z)?;
+    }
+
+    let image_stride =
+        u64::from(copy.buffer_layout.bytes_per_row) * u64::from(copy.buffer_layout.rows_per_image);
+    let mut row_spans = Vec::with_capacity(
+        copy.extent
+            .depth_or_array_layers
+            .saturating_mul(copy.extent.height) as usize,
+    );
+    for slice in 0..copy.extent.depth_or_array_layers {
+        let slice_offset = u64::from(slice)
+            .checked_mul(image_stride)
+            .and_then(|bytes| copy.buffer_layout.offset.checked_add(bytes))
+            .ok_or(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "texture-to-buffer offset exceeds GLES limit",
+            })?;
+        for row in 0..copy.extent.height {
+            let row_offset = u64::from(row)
+                .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
+                .and_then(|bytes| slice_offset.checked_add(bytes))
+                .ok_or(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "texture-to-buffer offset exceeds GLES limit",
+                })?;
+            let row_end =
+                row_offset
+                    .checked_add(row_bytes)
+                    .ok_or(HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message: "texture-to-buffer range exceeds GLES limit",
+                    })?;
+            if row_end > destination.size() {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "texture-to-buffer range exceeds buffer size",
+                });
+            }
+            i32_from_u64(row_offset, "texture-to-buffer offset exceeds GLES limit")?;
+            row_spans.push(row_offset);
+        }
+    }
+
+    let staging_len = row_bytes
+        .checked_mul(u64::from(copy.extent.height))
+        .and_then(|bytes| bytes.checked_mul(u64::from(copy.extent.depth_or_array_layers)))
+        .ok_or(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture-to-buffer staging size exceeds GLES limit",
+        })?;
+    let staging_len =
+        usize::try_from(staging_len).map_err(|_| HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture-to-buffer staging size exceeds host limit",
+        })?;
+    let staging_words = staging_len.div_ceil(4).max(1);
+    let staging_bytes = staging_words
+        .checked_mul(4)
+        .ok_or(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture-to-buffer staging size exceeds host limit",
+        })?;
+    let staging_size =
+        i32::try_from(staging_bytes).map_err(|_| HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture-to-buffer staging size exceeds GLES limit",
+        })?;
+    let row_bytes_usize =
+        usize::try_from(row_bytes).map_err(|_| HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture-to-buffer row size exceeds host limit",
+        })?;
+
+    unsafe {
+        let program = create_texture_to_buffer_compute_program(gl, meta.target, encoding)?;
+        let staging = gl
+            .create_buffer()
+            .map_err(|_| HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "glCreateBuffer failed",
+            })?;
+        let zeros = vec![0u8; staging_bytes];
+        gl.bind_buffer(glow::SHADER_STORAGE_BUFFER, Some(staging));
+        gl.buffer_data_u8_slice(glow::SHADER_STORAGE_BUFFER, &zeros, glow::STREAM_READ);
+        gl.bind_buffer_base(glow::SHADER_STORAGE_BUFFER, 0, Some(staging));
+
+        normalize_texture_mip_bounds(gl, meta, texture)?;
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(meta.target, Some(texture));
+        apply_depth_stencil_texture_mode(gl, meta.target, meta, copy.aspect);
+        gl.use_program(Some(program));
+        if let Some(location) = gl.get_uniform_location(program, "u_texture") {
+            gl.uniform_1_i32(Some(&location), 0);
+        }
+        if let Some(location) = gl.get_uniform_location(program, "u_mip") {
+            gl.uniform_1_i32(
+                Some(&location),
+                i32_from_u32(copy.mip_level, "texture mip level exceeds GLES limit")?,
+            );
+        }
+        if let Some(location) = gl.get_uniform_location(program, "u_origin") {
+            gl.uniform_3_u32(Some(&location), copy.origin.x, copy.origin.y, copy.origin.z);
+        }
+        if let Some(location) = gl.get_uniform_location(program, "u_extent") {
+            gl.uniform_3_u32(
+                Some(&location),
+                copy.extent.width,
+                copy.extent.height,
+                copy.extent.depth_or_array_layers,
+            );
+        }
+
+        let groups_x = copy.extent.width.div_ceil(8);
+        let groups_y = copy.extent.height.div_ceil(8);
+        gl.dispatch_compute(groups_x, groups_y, copy.extent.depth_or_array_layers);
+        gl.memory_barrier(glow::ALL_BARRIER_BITS);
+
+        gl.bind_buffer(glow::COPY_READ_BUFFER, Some(staging));
+        let ptr = gl.map_buffer_range(glow::COPY_READ_BUFFER, 0, staging_size, glow::MAP_READ_BIT);
+        let result = if ptr.is_null() {
+            Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "glMapBufferRange failed",
+            })
+        } else {
+            let staged = std::slice::from_raw_parts(ptr, staging_len);
+            gl.bind_buffer(glow::COPY_WRITE_BUFFER, Some(buffer));
+            for (index, row_offset) in row_spans.iter().copied().enumerate() {
+                let staged_offset = index * row_bytes_usize;
+                gl.buffer_sub_data_u8_slice(
+                    glow::COPY_WRITE_BUFFER,
+                    row_offset as i32,
+                    &staged[staged_offset..staged_offset + row_bytes_usize],
+                );
+            }
+            gl.bind_buffer(glow::COPY_WRITE_BUFFER, None);
+            Ok(())
+        };
+        if !ptr.is_null() {
+            gl.unmap_buffer(glow::COPY_READ_BUFFER);
+        }
+        gl.bind_buffer(glow::COPY_READ_BUFFER, None);
+        gl.bind_buffer_base(glow::SHADER_STORAGE_BUFFER, 0, None);
+        gl.bind_buffer(glow::SHADER_STORAGE_BUFFER, None);
+        gl.bind_texture(meta.target, None);
+        gl.use_program(None);
+        gl.delete_buffer(staging);
+        gl.delete_program(program);
+        result
+    }
+}
+
+fn create_texture_to_buffer_compute_program(
+    gl: &glow::Context,
+    target: u32,
+    encoding: TextureToBufferComputeEncoding,
+) -> Result<glow::Program, HalError> {
+    let sampler_type = match target {
+        glow::TEXTURE_2D => "sampler2D",
+        glow::TEXTURE_2D_ARRAY => "sampler2DArray",
+        glow::TEXTURE_3D => "sampler3D",
+        _ => {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "unsupported GLES texture target for compute readback",
+            });
+        }
+    };
+    let texel_coord_function = match target {
+        glow::TEXTURE_2D => {
+            "ivec2 texelCoord(uvec3 gid) {\n\
+                 uvec2 coord = u_origin.xy + gid.xy;\n\
+                 return ivec2(int(coord.x), int(coord.y));\n\
+             }"
+        }
+        glow::TEXTURE_2D_ARRAY | glow::TEXTURE_3D => {
+            "ivec3 texelCoord(uvec3 gid) {\n\
+                 uvec3 coord = u_origin + gid;\n\
+                 return ivec3(int(coord.x), int(coord.y), int(coord.z));\n\
+             }"
+        }
+        _ => unreachable!(),
+    };
+    let source = format!(
+        "#version 310 es\n\
+         precision highp float;\n\
+         precision highp int;\n\
+         precision highp sampler2D;\n\
+         precision highp sampler2DArray;\n\
+         precision highp sampler3D;\n\
+         layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;\n\
+         uniform {sampler_type} u_texture;\n\
+         uniform int u_mip;\n\
+         uniform uvec3 u_origin;\n\
+         uniform uvec3 u_extent;\n\
+         layout(std430, binding = 0) buffer Readback {{ coherent uint data[]; }};\n\
+         uint packUnorm16(float value) {{ return uint(round(clamp(value, 0.0, 1.0) * 65535.0)); }}\n\
+         void writeByte(uint offset, uint value) {{\n\
+             uint word = offset >> 2;\n\
+             uint shift = (offset & 3u) * 8u;\n\
+             atomicOr(data[word], (value & 0xffu) << shift);\n\
+         }}\n\
+         void writeU16(uint offset, uint value) {{\n\
+             uint word = offset >> 2;\n\
+             uint shift = (offset & 2u) * 8u;\n\
+             atomicOr(data[word], (value & 0xffffu) << shift);\n\
+         }}\n\
+         void writeU32(uint offset, uint value) {{ data[offset >> 2] = value; }}\n\
+         uvec3 globalCoord() {{ return gl_GlobalInvocationID.xyz; }}\n\
+         {texel_coord_function}\n\
+         void main() {{\n\
+             uvec3 gid = globalCoord();\n\
+             if (any(greaterThanEqual(gid, u_extent))) {{ return; }}\n\
+             uint linear = ((gid.z * u_extent.y + gid.y) * u_extent.x + gid.x);\n\
+             uint base = linear * {bpp}u;\n\
+             {store}\n\
+         }}\n",
+        bpp = encoding.bytes_per_pixel(),
+        store = encoding.shader_store(),
+    );
+
+    unsafe {
+        let shader = gl.create_shader(glow::COMPUTE_SHADER).map_err(|_| {
+            HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "glCreateShader failed",
+            }
+        })?;
+        gl.shader_source(shader, &source);
+        gl.compile_shader(shader);
+        if !gl.get_shader_compile_status(shader) {
+            let info = gl.get_shader_info_log(shader);
+            gl.delete_shader(shader);
+            eprintln!("GLES texture-to-buffer compute shader compile log: {info}");
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "texture-to-buffer compute shader compilation failed",
+            });
+        }
+        let program = gl
+            .create_program()
+            .map_err(|_| HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "glCreateProgram failed",
+            })?;
+        gl.attach_shader(program, shader);
+        gl.link_program(program);
+        gl.detach_shader(program, shader);
+        gl.delete_shader(shader);
+        if !gl.get_program_link_status(program) {
+            let info = gl.get_program_info_log(program);
+            gl.delete_program(program);
+            eprintln!("GLES texture-to-buffer compute program link log: {info}");
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "texture-to-buffer compute program linking failed",
+            });
+        }
+        Ok(program)
     }
 }
 
@@ -3167,6 +3614,130 @@ mod tests {
             .expect("reading back the R8 region must succeed")
     }
 
+    fn byte_copy_texture_2d(
+        device: &super::super::device::GlesDevice,
+        format: crate::HalTextureFormat,
+        width: u32,
+        height: u32,
+    ) -> super::super::texture::GlesTexture {
+        device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format,
+                width,
+                height,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: true,
+                    copy_dst: true,
+                    texture_binding: true,
+                    storage_binding: false,
+                    render_attachment: false,
+                    transient: false,
+                },
+            })
+            .expect("GLES byte-format 2D copy texture creation must succeed")
+    }
+
+    fn byte_layout(width: u32, height: u32, bytes_per_pixel: u32) -> crate::HalBufferTextureLayout {
+        crate::HalBufferTextureLayout {
+            offset: 0,
+            bytes_per_row: width * bytes_per_pixel,
+            rows_per_image: height,
+        }
+    }
+
+    fn upload_byte_region(
+        device: &super::super::device::GlesDevice,
+        texture: &super::super::texture::GlesTexture,
+        format: crate::HalTextureFormat,
+        bytes_per_pixel: u32,
+        width: u32,
+        height: u32,
+        bytes: &[u8],
+    ) {
+        assert_eq!(bytes.len(), (width * height * bytes_per_pixel) as usize);
+        let upload = device
+            .create_buffer(
+                bytes.len() as u64,
+                crate::HalBufferUsage {
+                    copy_src: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES byte-format upload buffer creation must succeed");
+        upload
+            .write(0, bytes)
+            .expect("writing the byte-format upload buffer must succeed");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::BufferToTexture(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(upload),
+                buffer_layout: byte_layout(width, height, bytes_per_pixel),
+                texture: HalTexture::Gles(texture.clone()),
+                format,
+                aspect: if format_has_depth_aspect(format) {
+                    crate::HalTextureAspect::DepthOnly
+                } else {
+                    crate::HalTextureAspect::All
+                },
+                mip_level: 0,
+                origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                extent: crate::HalExtent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            })])
+            .expect("buffer-to-texture copy of byte-format region must succeed");
+    }
+
+    fn read_back_byte_region(
+        device: &super::super::device::GlesDevice,
+        texture: &super::super::texture::GlesTexture,
+        format: crate::HalTextureFormat,
+        bytes_per_pixel: u32,
+        width: u32,
+        height: u32,
+    ) -> Vec<u8> {
+        let byte_count = u64::from(width * height * bytes_per_pixel);
+        let readback = device
+            .create_buffer(
+                byte_count,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES byte-format readback buffer creation must succeed");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(readback.clone()),
+                buffer_layout: byte_layout(width, height, bytes_per_pixel),
+                texture: HalTexture::Gles(texture.clone()),
+                format,
+                aspect: if format_has_depth_aspect(format) {
+                    crate::HalTextureAspect::DepthOnly
+                } else {
+                    crate::HalTextureAspect::All
+                },
+                mip_level: 0,
+                origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                extent: crate::HalExtent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            })])
+            .expect("texture-to-buffer copy of byte-format region must succeed");
+        readback
+            .read(0, byte_count)
+            .expect("reading back the byte-format region must succeed")
+    }
+
     /// One 2x2 Rgba8Unorm slice is 16 bytes; layout used by the multi-slice
     /// copy tests below (`bytes_per_row` 8, `rows_per_image` 2).
     const RGBA8_SLICE_BYTES: u32 = 16;
@@ -4032,6 +4603,115 @@ mod tests {
             ),
             expected,
             "R8 T2T must copy only the 2x2 sub-box and leave the rest zero"
+        );
+    }
+
+    #[test]
+    fn submit_copies_r8snorm_reads_back_via_compute_fallback() {
+        let Some(device) = gles_device_or_skip("GLES R8Snorm compute T2B fallback test") else {
+            return;
+        };
+
+        let texture = byte_copy_texture_2d(&device, crate::HalTextureFormat::R8Snorm, 3, 3);
+        let expected = vec![0, 1, 2, 3, 4, 5, 6, 7, 8];
+        upload_byte_region(
+            &device,
+            &texture,
+            crate::HalTextureFormat::R8Snorm,
+            1,
+            3,
+            3,
+            &expected,
+        );
+
+        assert_eq!(
+            read_back_byte_region(
+                &device,
+                &texture,
+                crate::HalTextureFormat::R8Snorm,
+                1,
+                3,
+                3,
+            ),
+            expected,
+            "R8Snorm is not framebuffer-attachable on GLES and must read back byte-exactly through compute"
+        );
+    }
+
+    #[test]
+    fn submit_copies_rg16snorm_reads_back_via_compute_fallback() {
+        let Some(device) = gles_device_or_skip("GLES RG16Snorm compute T2B fallback test") else {
+            return;
+        };
+
+        let texture = byte_copy_texture_2d(&device, crate::HalTextureFormat::Rg16Snorm, 2, 2);
+        let values: [i16; 8] = [0, 1, 2, 3, 1000, 2000, 3000, 4000];
+        let mut expected = Vec::with_capacity(values.len() * 2);
+        for value in values {
+            expected.extend_from_slice(&value.to_ne_bytes());
+        }
+        upload_byte_region(
+            &device,
+            &texture,
+            crate::HalTextureFormat::Rg16Snorm,
+            4,
+            2,
+            2,
+            &expected,
+        );
+
+        assert_eq!(
+            read_back_byte_region(
+                &device,
+                &texture,
+                crate::HalTextureFormat::Rg16Snorm,
+                4,
+                2,
+                2,
+            ),
+            expected,
+            "RG16Snorm readback must preserve the signed 16-bit channel bytes"
+        );
+    }
+
+    #[test]
+    fn submit_copies_depth24plus_reads_depth_aspect_via_compute_fallback() {
+        let Some(device) = gles_device_or_skip("GLES Depth24Plus compute T2B fallback test") else {
+            return;
+        };
+
+        let texture = byte_copy_texture_2d(&device, crate::HalTextureFormat::Depth24Plus, 2, 2);
+        let mut upload = Vec::new();
+        for value in [0u32, u32::MAX, u32::MAX, 0] {
+            upload.extend_from_slice(&value.to_ne_bytes());
+        }
+        upload_byte_region(
+            &device,
+            &texture,
+            crate::HalTextureFormat::Depth24Plus,
+            4,
+            2,
+            2,
+            &upload,
+        );
+
+        let readback = read_back_byte_region(
+            &device,
+            &texture,
+            crate::HalTextureFormat::Depth24Plus,
+            4,
+            2,
+            2,
+        );
+        let values: Vec<u32> = readback
+            .chunks_exact(4)
+            .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+        assert_eq!(values[0], 0, "zero depth must read back as zero");
+        assert_eq!(values[3], 0, "zero depth must read back as zero");
+        assert!(
+            values[1] >= 0x00ff_0000 && values[2] >= 0x00ff_0000,
+            "max depth values must read back near the top of the 24-bit depth range: {values:?}"
         );
     }
 
