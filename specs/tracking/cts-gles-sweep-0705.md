@@ -326,3 +326,11 @@ hardware-output loop works well.
   (1,196 — slice #4/catalogue), and a ~30k pixel-mismatch tail to
   re-cluster after slice #4 (many were secondary to the fixed bugs).
 - Campaign slices #3 (limits truthfulness) and #5 (catalogue) unchanged.
+
+## Slice 4 (2026-07-06): compute-shader T2B fallback landed
+
+command_buffer 37,669 -> **22,739** (snorm/norm16 + depth-aspect
+readbacks now work; stencil readback stays catalogued). Session
+command_buffer total: 72,844 -> 22,739. Remaining: re-cluster the
+~22k tail (T2T format-conversion families suspected), then slices
+#3 (limits truthfulness) and #5 (catalogue).
