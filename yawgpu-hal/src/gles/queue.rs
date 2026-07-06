@@ -2949,6 +2949,7 @@ fn submit_texture_to_texture(gl: &glow::Context, copy: &HalTextureCopy) -> Resul
 
 fn supports_copy_image(gl: &glow::Context) -> bool {
     gl.supported_extensions().contains("GL_EXT_copy_image")
+        || gl.supported_extensions().contains("GL_OES_copy_image")
         || unsafe { gles_version_at_least_3_2(&gl.get_parameter_string(glow::VERSION)) }
 }
 
