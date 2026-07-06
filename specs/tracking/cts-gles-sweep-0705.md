@@ -916,3 +916,64 @@ the latent Drop-inside-context deadlock hazard (watch item only).
 
 Campaign end: clean 4-area sweep on one commit → update the cts README
 GLES table (currently mixed a94ab06/15a9ddb baselines).
+
+### Dawn-reference findings for P2 / P3a (2026-07-07, from the full Dawn checkout)
+
+Investigated how Dawn handles both problems (checkout: `../../C/dawn`;
+line numbers are from that checkout — re-verify against the pinned
+`third_party/dawn` submodule before coding, versions may differ).
+
+**P2 — Dawn does NOT solve raw depth reads on GL.** Tint's GLSL printer
+unconditionally appends "Shadow" for any `DepthTexture`
+(`printer.cc:993-995`) and `TexturePolyfill` injects a fixed comparison
+ref of `0.0` for textureSample/SampleLevel/Gather on depth
+(`texture_polyfill.cc:766-768, 849-896`) — the sampler's
+kSampler-vs-kComparisonSampler kind is never consulted. Dawn avoids the
+broken path at the API layer instead: its GL backend only supports
+**Compatibility mode** (`PhysicalDeviceGL.cpp:554-556`), and Compat
+validation REJECTS pipelines using `texture_depth_*` with a
+non-comparison sampler (`Pipeline.cpp:142-146`, driven by the WGSL
+inspector flag `has_depth_texture_with_non_comparison_sampler`,
+`inspector.cc:673-679`). Consequences for the P2 slice:
+- There is no Dawn code to port; the shim IR pass goes beyond Dawn.
+- BUT Tint contains the exact rewrite machinery as a copyable template:
+  `TexturePolyfill` already rewrites depth → `texture_2d<f32>` (+ `.x`
+  swizzle on loads) for the sampler-less `textureLoad` path
+  (`texture_polyfill.cc:343-347, 606-674`). The shim pass extends that
+  pattern to depth textures whose only sampled uses are non-comparison
+  builtins. Feasibility upgraded: type-replacement + call-site fix-up
+  precedent exists in-tree.
+- If the shim pass fails, cataloguing is well-defended: even Dawn cannot
+  express this on GL and forbids it in Compat mode.
+
+**P3a — Dawn has a definitive strategy to mirror.** On GLES, snorm (and
+depth/stencil/rgb9e5/float16/32 per toggles,
+`PhysicalDeviceGL.cpp:428-500`) T2B copies NEVER use glReadPixels: the
+frontend rewrites them at encode time into the shared compute blit
+(`ShouldUseTextureToBufferBlit`, `CommandEncoder.cpp:1094-1160` →
+`BlitTextureToBuffer.cpp`). The blit's load-bearing details — the direct
+checklist for our r8snorm/3d rows_per_image>height family:
+- dst offset math: z-slice stride = `bytesPerRow * rowsPerImage`
+  (`BlitTextureToBuffer.cpp:224-235`; sub-4-byte formats add a
+  `shift = (offset%4)/bytesPerTexel` variant, lines 274-335).
+- Padding-byte protection #1: every partial u32 (row start/end,
+  offset%4≠0) is masked read-modify-write
+  (`(original & mask) | (encoded & ~mask)`, e.g. lines 426-428) — whole
+  words in the interior are written directly.
+- Padding-byte protection #2: for non-compact copies
+  (`blocksPerRow != copyWidth || rowsPerImage != copyHeight`) Dawn
+  allocates a 4-byte-aligned intermediate storage buffer and PRE-COPIES
+  the entire destination region into it before the dispatch, then copies
+  back — so row/image padding bytes always survive (lines 1165-1240,
+  1372-1377). Our compute-T2B fallback (slice 4) should be audited
+  against exactly these three points.
+- Direct glReadPixels path (renderable formats only): row stride via
+  `GL_PACK_ROW_LENGTH = blocksPerRow`; NO pack IMAGE_HEIGHT on ES —
+  slice stride is manual: per-layer `glFramebufferTextureLayer` +
+  `offset += blocksPerRow * rowsPerImage * byteSize`
+  (`CommandBufferGL.cpp:1033-1050`).
+- B2T upload (relevant to reverted piece-4): Dawn does NOT row-by-row
+  loop; it uses `GL_UNPACK_ROW_LENGTH` + `GL_UNPACK_IMAGE_HEIGHT`
+  (unpack side exists in ES 3.0) with a single glTexSubImage3D
+  (`CommandBufferGL.cpp:1851-1896`); row-by-row is reserved for the
+  WriteTexture-only case `bytesPerRow % texelByteSize != 0`.
