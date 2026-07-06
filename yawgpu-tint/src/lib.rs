@@ -2686,6 +2686,26 @@ fn main() {
         assert!(glsl.contains("#version 310 es"), "GLSL:\n{glsl}");
     }
 
+    #[test]
+    fn generate_glsl_cube_array_texture_uses_es_320() {
+        let wgsl = r#"
+@group(0) @binding(0) var t: texture_cube_array<f32>;
+@group(0) @binding(1) var s: sampler;
+
+@fragment
+fn fs() -> @location(0) vec4f {
+  return textureSample(t, s, vec3f(1.0, 0.0, 0.0), 0);
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let glsl = program
+            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .unwrap()
+            .source;
+        assert!(glsl.contains("#version 320 es"), "GLSL:\n{glsl}");
+        assert!(glsl.contains("samplerCubeArray"), "GLSL:\n{glsl}");
+    }
+
     fn instance_index_vertex_wgsl() -> &'static str {
         r#"
 @vertex

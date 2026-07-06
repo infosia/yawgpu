@@ -686,3 +686,42 @@ of the ~13.7k cube estimate spans the sibling texture builtins
 (textureSampleGrad / textureSampleLevel / textureGather with dim="cube"),
 which take the same glTextureView bind path — a full texture-builtin
 re-sweep will quantify the total.
+
+## Cube-array pipeline creation FIXED (2026-07-06) — GLSL ES 3.2 when cube-array used
+
+After plain-cube landed, a cube-family sweep across all sampling builtins
+showed plain cube (dim="cube") fully passing (0 fail everywhere) but
+**cube-array (dim="cube-array") ALL-failing (~21.6k, 0 pass)** — every fail
+was "render/compute pass requires a valid render pipeline", i.e. pipeline
+CREATION failure, not sampling correctness.
+
+Root cause (probed on hardware): the yawgpu-tint shim hardcoded the GLSL
+writer to ES 3.1 (`options.version = Version()` → `#version 310 es`).
+`samplerCubeArray` (and the isampler/usampler/shadow/image variants) is
+illegal in `#version 310 es` without `GL_EXT_texture_cube_map_array`, and
+Tint's GLSL printer emits the type but never the extension → compile error
+"illegal use of reserved word 'samplerCubeArray'" → error-pipeline. Driver
+probe: v310-noext FAILS, v310+ext OK, v320 OK. Dawn passes the real GL
+context version to Tint (ShaderModuleGL.cpp:437), so on ES 3.2 it emits
+`#version 320 es` where cube-array is core.
+
+Fix (yawgpu-tint shim only, no dawn submodule edit, zero blast radius on
+non-cube-array shaders): `yawgpu_tint_generate_glsl` now inspects the
+lowered IR for a `kCubeArray` texture dimension and, only then, sets
+`options.version` to ES 3.2; all other shaders stay ES 3.1. Chosen over
+full device-version plumbing to avoid bumping every shader to 320.
+
+Verified on crocus — all 8 cube-array clusters now pass, 0 fail (was all-
+fail): textureSample 594, textureSampleLevel 1782, textureSampleGrad 1782,
+textureSampleBias 594, textureGather 6804, textureSampleCompare 1440,
+textureSampleCompareLevel 4320, textureGatherCompare 4320 = **21,636
+subcases FAIL→PASS**. yawgpu-tint 59/59, workspace Noop green.
+
+### Remaining cube tail (next)
+- **depth-cube (non-array)**: textureSampleLevel:depth_3d_coords 810,
+  textureGather:depth_3d_coords 135, textureGather:depth_array_3d_coords
+  270 — mix of pipeline-creation fails (samplerCubeShadow + explicit-LOD /
+  shadow-lod) and depth-sample-returns-0 (the depth-shadow data/binding
+  bug, shared with depth-2d).
+- Non-cube long tail unchanged: 2d-array component/layer correctness;
+  depth-2d shadow sampling returns 0 (~24k).

@@ -28,6 +28,7 @@
 #include "src/tint/lang/core/ir/transform/single_entry_point.h"
 #include "src/tint/lang/core/ir/transform/substitute_overrides.h"
 #include "src/tint/lang/core/type/pointer.h"
+#include "src/tint/lang/core/type/texture.h"
 #include "src/tint/lang/glsl/writer/helpers/generate_bindings.h"
 #include "src/tint/lang/glsl/writer/writer.h"
 #include "src/tint/lang/msl/writer/common/options.h"
@@ -706,6 +707,17 @@ void set_error_string(char** err, const std::string& message) {
 
 std::string cstr_or_empty(const char* s) {
     return s != nullptr ? std::string(s) : std::string();
+}
+
+bool uses_cube_array_texture(const tint::core::ir::Module& ir) {
+    for (auto* ty : ir.Types()) {
+        auto* texture = ty->As<tint::core::type::Texture>();
+        if (texture != nullptr &&
+            texture->Dim() == tint::core::type::TextureDimension::kCubeArray) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool all_remaps_empty(const YawgpuTintBindings* bindings) {
@@ -2206,7 +2218,10 @@ bool yawgpu_tint_generate_glsl(const YawgpuTintProgram* program,
         }
         tint::glsl::writer::Options options;
         options.entry_point_name = entry_point;
-        options.version = tint::glsl::writer::Version();
+        options.version = uses_cube_array_texture(ir.Get())
+                              ? tint::glsl::writer::Version(
+                                    tint::glsl::writer::Version::Standard::kES, 3, 2)
+                              : tint::glsl::writer::Version();
         if (has_first_instance_offset) {
             options.first_instance_offset = first_instance_offset;
         }
