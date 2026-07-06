@@ -476,3 +476,26 @@ core change. api,validation fail 595 -> 391.
 api,validation residual 391: cube-array 122 (catalogued), single-bind-
 group 106 (deferred impl), depth-stencil copy bytes_per_row 57,
 indexed-indirect 54, maxBindings off-by-one ~40, stencil readback 7.
+
+## shader,execution FIRST sweep (2026-07-06, crocus, workers=2)
+
+shader,validation: 369,753 pass / 0 fail / 0 crash — fully clean (Tint).
+
+shader,execution: pass 167,098 / skip 516,424 / fail 151,140 / crash 2.
+Fail clusters:
+- **~81k single-bind-group**: "GLES render/compute pass supports only
+  bind group 0" (53,457) + its poisoned-CB secondaries ("error command
+  buffer: render pass" 18,668 + "compute" 7,454 + compute-group-0
+  2,603). shader,execution builtins bind @group(1..3). DOMINANT lever —
+  implementing multi-bind-group (linear binding remap) unlocks ~81k.
+- **~30k texture sampling correctness**: textureSampleLevel / textureGather
+  value mismatches (mip level / filtering / gather component). Real
+  bugs in the T-G13 sampling path — mip-level sampling and gather.
+- **crash 2 (SEGFAULT)**: textureDimensions:sampled_and_multisampled on
+  depth24plus-stencil8 / depth32float-stencil8 — signal 11 in the GLES
+  backend. MUST-FIX (no library segfault).
+- smaller: access 40, shader_io 87, memory_model 52, statement 5,
+  flow_control 2.
+
+Next: (1) fix the segfault (must), (2) multi-bind-group implementation
+(biggest lever, ~81k), (3) texture sampling correctness (~30k).
