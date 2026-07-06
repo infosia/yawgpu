@@ -340,6 +340,48 @@ impl MetalAdapter {
             || self.device.supportsFamily(MTLGPUFamily::Apple2)
     }
 
+    /// Returns true when WebGPU texture format tier 1 is supported.
+    #[must_use]
+    pub(super) fn supports_texture_formats_tier1(&self) -> bool {
+        true
+    }
+
+    /// Returns true when WebGPU texture format tier 2 is supported.
+    #[must_use]
+    pub(super) fn supports_texture_formats_tier2(&self) -> bool {
+        true
+    }
+
+    /// Returns true when `Rg11b10Ufloat` is renderable.
+    #[must_use]
+    pub(super) fn supports_rg11b10ufloat_renderable(&self) -> bool {
+        true
+    }
+
+    /// Returns true when BGRA8 unorm storage textures are supported.
+    #[must_use]
+    pub(super) fn supports_bgra8unorm_storage(&self) -> bool {
+        true
+    }
+
+    /// Returns true when 32-bit float textures are filterable.
+    #[must_use]
+    pub(super) fn supports_float32_filterable(&self) -> bool {
+        true
+    }
+
+    /// Returns true when timestamp queries are supported.
+    #[must_use]
+    pub(super) fn supports_timestamp_query(&self) -> bool {
+        true
+    }
+
+    /// Returns true when Depth32FloatStencil8 textures are supported.
+    #[must_use]
+    pub(super) fn supports_depth32float_stencil8(&self) -> bool {
+        true
+    }
+
     /// Returns true when WGSL `shader-f16` is supported.
     #[must_use]
     pub(super) fn supports_shader_float16(&self) -> bool {

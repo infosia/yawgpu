@@ -403,6 +403,111 @@ impl HalAdapter {
         }
     }
 
+    /// Returns true when WebGPU texture format tier 1 is supported.
+    #[must_use]
+    pub fn supports_texture_formats_tier1(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.supports_texture_formats_tier1(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_texture_formats_tier1(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_texture_formats_tier1(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_texture_formats_tier1(),
+        }
+    }
+
+    /// Returns true when WebGPU texture format tier 2 is supported.
+    #[must_use]
+    pub fn supports_texture_formats_tier2(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.supports_texture_formats_tier2(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_texture_formats_tier2(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_texture_formats_tier2(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_texture_formats_tier2(),
+        }
+    }
+
+    /// Returns true when `Rg11b10Ufloat` is renderable.
+    #[must_use]
+    pub fn supports_rg11b10ufloat_renderable(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.supports_rg11b10ufloat_renderable(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_rg11b10ufloat_renderable(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_rg11b10ufloat_renderable(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_rg11b10ufloat_renderable(),
+        }
+    }
+
+    /// Returns true when BGRA8 unorm storage textures are supported.
+    #[must_use]
+    pub fn supports_bgra8unorm_storage(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.supports_bgra8unorm_storage(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_bgra8unorm_storage(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_bgra8unorm_storage(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_bgra8unorm_storage(),
+        }
+    }
+
+    /// Returns true when 32-bit float textures are filterable.
+    #[must_use]
+    pub fn supports_float32_filterable(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.supports_float32_filterable(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_float32_filterable(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_float32_filterable(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_float32_filterable(),
+        }
+    }
+
+    /// Returns true when timestamp queries are supported.
+    #[must_use]
+    pub fn supports_timestamp_query(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.supports_timestamp_query(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_timestamp_query(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_timestamp_query(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_timestamp_query(),
+        }
+    }
+
+    /// Returns true when Depth32FloatStencil8 textures are supported.
+    #[must_use]
+    pub fn supports_depth32float_stencil8(&self) -> bool {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.supports_depth32float_stencil8(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.supports_depth32float_stencil8(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.supports_depth32float_stencil8(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.supports_depth32float_stencil8(),
+        }
+    }
+
     /// Returns true when BC texture compression is supported.
     #[must_use]
     pub fn supports_texture_compression_bc(&self) -> bool {
@@ -1591,6 +1696,23 @@ mod tests {
             .expect("Noop adapter exists");
 
         assert!(adapter.supports_depth_clip_control());
+    }
+
+    #[test]
+    fn hal_adapter_supports_format_and_query_features_noop_returns_true() {
+        let adapter = HalInstance::new_noop()
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter exists");
+
+        assert!(adapter.supports_texture_formats_tier1());
+        assert!(adapter.supports_texture_formats_tier2());
+        assert!(adapter.supports_rg11b10ufloat_renderable());
+        assert!(adapter.supports_bgra8unorm_storage());
+        assert!(adapter.supports_float32_filterable());
+        assert!(adapter.supports_timestamp_query());
+        assert!(adapter.supports_depth32float_stencil8());
     }
 
     #[test]

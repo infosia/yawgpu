@@ -26,13 +26,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::adapter::{
-    detect_base_vertex_support, detect_color_render_caps, parse_gles_version, query_gles_limits,
+    detect_base_vertex_support, detect_color_render_caps, parse_gles_version,
+    query_gles_adapter_caps,
 };
 use super::device::GlesSampleMaskIFn;
 use super::format::GlesColorRenderCaps;
 use super::sampler::create_nearest_placeholder_sampler;
 use super::BACKEND;
-use crate::{HalError, HalLimits};
+use crate::HalError;
 
 const WGL_CONTEXT_MAJOR_VERSION_ARB: i32 = 0x2091;
 const WGL_CONTEXT_MINOR_VERSION_ARB: i32 = 0x2092;
@@ -134,12 +135,15 @@ impl WglInstanceState {
     }
 }
 
-pub(super) fn query_adapter_limits(
+pub(super) fn query_adapter_caps(
     instance: Arc<super::instance::GlesInstanceInner>,
     wgl_state: &WglInstanceState,
-) -> Result<HalLimits, HalError> {
+) -> Result<super::adapter::GlesAdapterCaps, HalError> {
     let state = WglDeviceState::create(instance, wgl_state)?;
-    Ok(query_gles_limits(&state.gl))
+    Ok(query_gles_adapter_caps(
+        &state.gl,
+        state.gl.supported_extensions(),
+    ))
 }
 
 unsafe extern "system" fn default_wnd_proc(

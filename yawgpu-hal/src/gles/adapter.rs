@@ -21,13 +21,20 @@ enum GlesAdapterInner {
     Egl {
         instance: Arc<GlesInstanceInner>,
         config: EglConfig,
-        limits: HalLimits,
+        caps: GlesAdapterCaps,
     },
     #[cfg(windows)]
     Wgl {
         instance: Arc<GlesInstanceInner>,
-        limits: HalLimits,
+        caps: GlesAdapterCaps,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct GlesAdapterCaps {
+    limits: HalLimits,
+    color_render_caps: GlesColorRenderCaps,
+    supports_float32_filterable: bool,
 }
 
 // SAFETY: The adapter is an immutable handle to an EGL config plus the shared
@@ -51,12 +58,12 @@ impl GlesAdapter {
         let GlesInstanceInner::Egl(egl_state) = instance.as_ref() else {
             return Err(HalError::BackendUnavailable { backend: BACKEND });
         };
-        let limits = query_egl_adapter_limits(egl_state, config)?;
+        let caps = query_egl_adapter_caps(egl_state, config)?;
         Ok(Self {
             inner: GlesAdapterInner::Egl {
                 instance,
                 config,
-                limits,
+                caps,
             },
         })
     }
@@ -66,9 +73,9 @@ impl GlesAdapter {
         let GlesInstanceInner::Wgl(wgl_state) = instance.as_ref() else {
             return Err(HalError::BackendUnavailable { backend: BACKEND });
         };
-        let limits = super::wgl::query_adapter_limits(Arc::clone(&instance), wgl_state)?;
+        let caps = super::wgl::query_adapter_caps(Arc::clone(&instance), wgl_state)?;
         Ok(Self {
-            inner: GlesAdapterInner::Wgl { instance, limits },
+            inner: GlesAdapterInner::Wgl { instance, caps },
         })
     }
 
@@ -86,10 +93,60 @@ impl GlesAdapter {
     #[must_use]
     pub(crate) fn limits(&self) -> HalLimits {
         match &self.inner {
-            GlesAdapterInner::Egl { limits, .. } => *limits,
+            GlesAdapterInner::Egl { caps, .. } => caps.limits,
             #[cfg(windows)]
-            GlesAdapterInner::Wgl { limits, .. } => *limits,
+            GlesAdapterInner::Wgl { caps, .. } => caps.limits,
         }
+    }
+
+    /// Returns true when WebGPU texture format tier 1 is supported.
+    #[must_use]
+    pub(crate) fn supports_texture_formats_tier1(&self) -> bool {
+        false
+    }
+
+    /// Returns true when WebGPU texture format tier 2 is supported.
+    #[must_use]
+    pub(crate) fn supports_texture_formats_tier2(&self) -> bool {
+        false
+    }
+
+    /// Returns true when `Rg11b10Ufloat` is renderable.
+    #[must_use]
+    pub(crate) fn supports_rg11b10ufloat_renderable(&self) -> bool {
+        match &self.inner {
+            GlesAdapterInner::Egl { caps, .. } => caps.color_render_caps.color_buffer_float,
+            #[cfg(windows)]
+            GlesAdapterInner::Wgl { caps, .. } => caps.color_render_caps.color_buffer_float,
+        }
+    }
+
+    /// Returns true when BGRA8 unorm storage textures are supported.
+    #[must_use]
+    pub(crate) fn supports_bgra8unorm_storage(&self) -> bool {
+        false
+    }
+
+    /// Returns true when 32-bit float textures are filterable.
+    #[must_use]
+    pub(crate) fn supports_float32_filterable(&self) -> bool {
+        match &self.inner {
+            GlesAdapterInner::Egl { caps, .. } => caps.supports_float32_filterable,
+            #[cfg(windows)]
+            GlesAdapterInner::Wgl { caps, .. } => caps.supports_float32_filterable,
+        }
+    }
+
+    /// Returns true when timestamp queries are supported.
+    #[must_use]
+    pub(crate) fn supports_timestamp_query(&self) -> bool {
+        false
+    }
+
+    /// Returns true when Depth32FloatStencil8 textures are supported.
+    #[must_use]
+    pub(crate) fn supports_depth32float_stencil8(&self) -> bool {
+        true
     }
 
     /// Returns true when BC texture compression is supported.
@@ -322,10 +379,10 @@ fn create_egl_device(
     ))
 }
 
-fn query_egl_adapter_limits(
+fn query_egl_adapter_caps(
     egl_state: &EglInstanceState,
     config: EglConfig,
-) -> Result<HalLimits, HalError> {
+) -> Result<GlesAdapterCaps, HalError> {
     let attribs_es31 = [
         egl::CONTEXT_MAJOR_VERSION,
         3,
@@ -409,13 +466,25 @@ fn query_egl_adapter_limits(
         destroy_context(egl_state, context);
         return Err(HalError::BackendUnavailable { backend: BACKEND });
     }
-    let limits = query_gles_limits(&gl);
+    let extensions = gl.supported_extensions();
+    let caps = query_gles_adapter_caps(&gl, extensions);
     let _ = egl_state
         .egl
         .make_current(egl_state.display, None, None, None);
     destroy_surface(egl_state, surface);
     destroy_context(egl_state, context);
-    Ok(limits)
+    Ok(caps)
+}
+
+pub(super) fn query_gles_adapter_caps(
+    gl: &glow::Context,
+    extensions: &std::collections::HashSet<String>,
+) -> GlesAdapterCaps {
+    GlesAdapterCaps {
+        limits: query_gles_limits(gl),
+        color_render_caps: detect_color_render_caps(extensions),
+        supports_float32_filterable: detect_float32_filterable_support(extensions),
+    }
 }
 
 pub(super) fn query_gles_limits(gl: &glow::Context) -> HalLimits {
@@ -745,6 +814,13 @@ pub(super) fn detect_color_render_caps(
     }
 }
 
+/// Detects whether 32-bit float textures are filterable.
+pub(super) fn detect_float32_filterable_support(
+    extensions: &std::collections::HashSet<String>,
+) -> bool {
+    extensions.contains("GL_OES_texture_float_linear")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -827,6 +903,18 @@ mod tests {
                 color_buffer_half_float: true,
             }
         );
+    }
+
+    #[test]
+    fn detect_float32_filterable_support_requires_oes_texture_float_linear() {
+        let empty = std::collections::HashSet::new();
+        let unrelated: std::collections::HashSet<String> = ["GL_EXT_copy_image".to_owned()].into();
+        let float_linear: std::collections::HashSet<String> =
+            ["GL_OES_texture_float_linear".to_owned()].into();
+
+        assert!(!detect_float32_filterable_support(&empty));
+        assert!(!detect_float32_filterable_support(&unrelated));
+        assert!(detect_float32_filterable_support(&float_linear));
     }
 
     #[test]

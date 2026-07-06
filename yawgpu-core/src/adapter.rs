@@ -72,6 +72,7 @@ impl Adapter {
     #[must_use]
     pub fn features(&self) -> FeatureSet {
         let mut features = supported_features();
+        add_hal_optional_features(&mut features, &self.inner.hal);
         add_texture_compression_features(&mut features, &self.inner.hal);
         add_shader_float16_feature(&mut features, &self.inner.hal);
         add_subgroups_feature(&mut features, &self.inner.hal);
@@ -244,18 +245,31 @@ pub struct TiledCapabilities {
 /// Returns supported features.
 #[must_use]
 pub(crate) fn supported_features() -> FeatureSet {
-    [
-        Feature::CoreFeaturesAndLimits,
-        Feature::Depth32FloatStencil8,
-        Feature::Rg11b10UfloatRenderable,
-        Feature::Bgra8UnormStorage,
-        Feature::Float32Filterable,
-        Feature::TimestampQuery,
-        Feature::TextureFormatsTier1,
-        Feature::TextureFormatsTier2,
-    ]
-    .into_iter()
-    .collect()
+    [Feature::CoreFeaturesAndLimits].into_iter().collect()
+}
+
+fn add_hal_optional_features(features: &mut FeatureSet, hal: &HalAdapter) {
+    if hal.supports_depth32float_stencil8() {
+        features.insert(Feature::Depth32FloatStencil8);
+    }
+    if hal.supports_rg11b10ufloat_renderable() {
+        features.insert(Feature::Rg11b10UfloatRenderable);
+    }
+    if hal.supports_bgra8unorm_storage() {
+        features.insert(Feature::Bgra8UnormStorage);
+    }
+    if hal.supports_float32_filterable() {
+        features.insert(Feature::Float32Filterable);
+    }
+    if hal.supports_timestamp_query() {
+        features.insert(Feature::TimestampQuery);
+    }
+    if hal.supports_texture_formats_tier1() {
+        features.insert(Feature::TextureFormatsTier1);
+    }
+    if hal.supports_texture_formats_tier2() {
+        features.insert(Feature::TextureFormatsTier2);
+    }
 }
 
 fn add_texture_compression_features(features: &mut FeatureSet, hal: &HalAdapter) {
@@ -410,6 +424,59 @@ mod tests {
         assert!(adapter.features().contains(&Feature::CoreFeaturesAndLimits));
         assert!(adapter.has_feature(Feature::TimestampQuery));
         assert!(!adapter.has_feature(Feature::Other(7)));
+    }
+
+    #[test]
+    fn static_supported_features_are_required_baseline_only() {
+        let base = supported_features();
+
+        assert!(base.contains(&Feature::CoreFeaturesAndLimits));
+        assert_eq!(base.len(), 1);
+    }
+
+    #[test]
+    fn format_and_query_features_are_adapter_gated_and_noop_preserves_coverage() {
+        let base = supported_features();
+        assert!(!base.contains(&Feature::Depth32FloatStencil8));
+        assert!(!base.contains(&Feature::Rg11b10UfloatRenderable));
+        assert!(!base.contains(&Feature::Bgra8UnormStorage));
+        assert!(!base.contains(&Feature::Float32Filterable));
+        assert!(!base.contains(&Feature::TimestampQuery));
+        assert!(!base.contains(&Feature::TextureFormatsTier1));
+        assert!(!base.contains(&Feature::TextureFormatsTier2));
+
+        let features = noop_adapter().features();
+        assert!(features.contains(&Feature::Depth32FloatStencil8));
+        assert!(features.contains(&Feature::Rg11b10UfloatRenderable));
+        assert!(features.contains(&Feature::Bgra8UnormStorage));
+        assert!(features.contains(&Feature::Float32Filterable));
+        assert!(features.contains(&Feature::TimestampQuery));
+        assert!(features.contains(&Feature::TextureFormatsTier1));
+        assert!(features.contains(&Feature::TextureFormatsTier2));
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn gles_adapter_features_do_not_advertise_unbacked_texture_tiers() {
+        let instance = match yawgpu_hal::gles::GlesInstance::new() {
+            Ok(instance) => instance,
+            Err(error) => {
+                eprintln!("skipping GLES adapter feature test; backend unavailable: {error:?}");
+                return;
+            }
+        };
+        let Some(adapter) = instance.enumerate_adapters().into_iter().next() else {
+            eprintln!("skipping GLES adapter feature test; no adapter available");
+            return;
+        };
+        let adapter = Adapter::from_hal(yawgpu_hal::HalAdapter::Gles(adapter));
+        let features = adapter.features();
+
+        assert!(features.contains(&Feature::CoreFeaturesAndLimits));
+        assert!(!features.contains(&Feature::TextureFormatsTier1));
+        assert!(!features.contains(&Feature::TextureFormatsTier2));
+        assert!(!features.contains(&Feature::Bgra8UnormStorage));
+        assert!(!features.contains(&Feature::TimestampQuery));
     }
 
     #[test]
