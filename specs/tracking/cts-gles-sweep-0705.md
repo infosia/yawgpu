@@ -334,3 +334,19 @@ readbacks now work; stencil readback stays catalogued). Session
 command_buffer total: 72,844 -> 22,739. Remaining: re-cluster the
 ~22k tail (T2T format-conversion families suspected), then slices
 #3 (limits truthfulness) and #5 (catalogue).
+
+## Slice 4b exploration (2026-07-06 late) — REVERTED, findings kept
+
+Attempted: rgb9e5ufloat compute-fallback + PBO->client-row readback
+rewrite + OES_copy_image detection. Unit-level copy matrix (formats x
+offsets x origins x layers) went fully green, but CTS command_buffer
+regressed (22,739 -> 23,850 -> 24,116), so the working tree was
+reverted to 661991a per the beat-the-checkpoint rule. Salvageable
+pieces saved in webgpu-native-cts/transcripts/
+slice4b-exploration-reverted.patch: (1) the comprehensive matrix test,
+(2) canonical Rust RGB9E5 reference encoder (layout R 0..8, G 9..17,
+B 18..26, exp 27..31), (3) GL_OES_copy_image detection. Lesson: the
+client-row readback rewrite likely regressed cases the matrix does not
+cover (3D, mips, T2T interactions) — next attempt should change ONE
+path at a time and re-run CTS per change. Checkpoint stands at
+command_buffer fail=22,739 (commit 5736aea/661991a).
