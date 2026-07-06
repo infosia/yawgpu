@@ -783,3 +783,32 @@ structural wins this session. The remaining ~10k is (1) the catalogued
 Tint depth gap (~6.6k) and (2) scattered GLES hardware/spec limits + 1D
 emulation + a few small value bugs — the genuine best-effort Tier-2 tail,
 each an independent investigation with no single large lever left.
+
+## Texture-metadata UBO FIXED (2026-07-06, commit c06e516) — textureNumLevels/NumSamples
+
+`textureNumLevels`/`textureNumSamples` returned 0 for a queried-but-not-
+sampled texture: `bind_texture_metadata_ubo` built the UBO from the
+combined-sampler list and bailed when there were no samplers (a pure-query
+shader has none). Now the shim exposes Tint's `ubo_contents` slot layout
+({offset, count, binding}) over the FFI, core maps each post-remap binding
+back to WGSL group/binding, and the queue fills each slot at its Tint
+offset with the bound texture's value (sample count for MS, else view mip
+level count) — mirroring Dawn's UpdateTextureBuiltinsUniformData.
+Verified crocus: textureNumLevels 123/123, textureNumSamples 12/12 (135
+FAIL->PASS). 12 files; hal 172/172, core 455, workspace green.
+
+### Refined remaining texture-builtin residual (post-metadata)
+- Raw depth read (Tint gap, catalogued): textureSample 885 / SampleLevel
+  2610 / Gather 3105 + depth textureLoad ~240 (texelFetch on depth uses the
+  same sampler-shadow modelling). ~6.8k. Host-risky Tint fix.
+- Vertex-stage storage images + rg32 formats (GLES limits, catalogued):
+  the bulk of textureDimensions 443 / textureNumLayers 114 / storage
+  textureLoad. Not fixable on this hardware.
+- Layered storage-view subrange (queue.rs:839) 416 — HAL may be over-strict,
+  but storage in vertex stage also blocks many; low tractable yield.
+- Non-depth textureLoad value: multisampled 96 / sampled_2d 48 (format-
+  specific: rgba8(u/s)norm, rgba16float, r32float 4 each) / storage_3d 16 —
+  ~160 scattered small value bugs, each a separate per-format/MS investigation.
+Net after this session: no single large lever remains; the tail is the
+catalogued Tint depth gap + GLES hardware limits + ~160 scattered per-format
+value bugs.
