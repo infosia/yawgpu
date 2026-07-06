@@ -507,3 +507,25 @@ on a stencil-mode sampler — texelFetch works, textureSize crashes; a
 bind-time guard was tried and REVERTED (it broke the passing T-G18
 texelFetch readback). Catalogued in block-67. Next: multi-bind-group
 (the ~81k single-bind-group lever).
+
+## Multi-bind-group DONE (85b4880) — shader,execution bind-group-0 eliminated
+
+Flat per-class binding remap (core computes, shared by Tint emission +
+HAL glBindBufferRange/glBindImageTexture); textures/samplers needed
+only guard removal (resolve by uniform name). Batch-5 bind-group-0
+fails 26k -> 0; new cross-group compute+render tests pass; workspace
+green. Those cases now BUILD and advance to the next limitation rather
+than failing at bind time.
+
+### shader,execution next layers (post multi-bind-group)
+- **~26k+ "GLES render pass supports only 2D depth-stencil attachments"**
+  — now the dominant cluster (was masked behind bind-group-0). Surfaces
+  in texture-builtin tests (textureGather/textureSampleLevel on depth/
+  stencil formats) via the CTS result-collection render pass. Investigate:
+  over-strict HAL check vs a real non-2D-DS-attachment the harness uses.
+- **~30k texture sampling correctness** — textureSampleLevel /
+  textureGather value mismatches (mip level, filtering, gather
+  component ordering). Real T-G13 sampling-path bugs.
+- 2 driver-crash cases catalogued (block-67).
+A full shader,execution re-sweep is due after the 2D-DS-attachment layer
+to get the true post-multi-group number.
