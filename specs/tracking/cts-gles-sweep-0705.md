@@ -358,3 +358,18 @@ command_buffer fail=22,739 (commit 5736aea/661991a).
 - Piece 3 (7f08953): non-attachable lazy-init clear via zero upload — -> **19,331** (fb-incomplete family eliminated).
 - Piece 4 REVERTED (patch: webgpu-native-cts/transcripts/slice4b-piece4-3d-b2t-reverted.patch): 3D B2T row-by-row upload regressed CTS to 20,968 despite green matrix incl. the new 4x4x3 partial-B2T case. The "byte 48 expected 0 got 1" family (~3.5k, r8snorm/3d origins_and_extents) remains UNSOLVED — the failing shape differs from all matrix cases; next attempt should extract the exact CTS subcase parameters (--list-cases on that test) and replicate one verbatim before changing production code.
 - Remaining command_buffer: 19,331 = unsolved padding family (~3.5k) + stencil readback catalogue (908) + long tail to re-cluster.
+
+## Slice 4b piece 5 WIP (paused mid-investigation; patch saved)
+
+The r8snorm/3d rows_per_image>height family is REPRODUCED by an
+exhaustive CTS-replica unit test (in
+webgpu-native-cts/transcripts/slice4b-piece5-slicestride-wip.patch,
+together with a per-slice B2T upload attempt that did NOT fix it —
+CTS 19,331 -> 19,373, replica still failing identically). Open
+question for the resumption: the replica reports "byte 32 expected 63"
+inside ROW PADDING for a width-3 texture at read_bpr=256 — byte 32
+cannot be texel data at that stride, so the replica's own
+expected-buffer stride math is suspect; verify the checker semantics
+in webgpu-native-cts harness.cpp:601-646 before trusting the repro,
+THEN re-attempt the production fix. Committed checkpoint remains
+command_buffer fail=19,331 (repo green, 156 gles tests).
