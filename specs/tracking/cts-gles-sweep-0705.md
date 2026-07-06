@@ -725,3 +725,61 @@ subcases FAIL→PASS**. yawgpu-tint 59/59, workspace Noop green.
   bug, shared with depth-2d).
 - Non-cube long tail unchanged: 2d-array component/layer correctness;
   depth-2d shadow sampling returns 0 (~24k).
+
+## Post-cube texture-builtin residual — FULL characterization (2026-07-06)
+
+After plain-cube + cube-array landed, a texture-builtin re-sweep (crocus,
+workers=2, commit 64151a9) shows the sampling correctness tail is
+essentially gone — the old "textureGather 23.5k / 2d-array component-layer"
+clusters now PASS wholesale (textureSampleLevel:sampled_array_2d 14256/0,
+textureGather:sampled_2d 13608/0, textureSampleGrad 38313/0,
+textureGatherCompare 46800/0, textureSampleCompare 16560/0,
+textureSampleCompareLevel 49680/0 — all 0 fail). Those were fixed earlier
+in the campaign (multi-bind-group / view work); the stale characterization
+in 89c7182 predated a rebuild.
+
+Remaining texture-builtin fails, fully categorized by root cause:
+
+1. **Raw depth read (Tint GLSL-backend gap, catalogued in block-67)** —
+   the LARGEST residual: textureSample 885, textureSampleLevel 2610,
+   textureGather 3105 = ~6.6k, ALL depth-format (depth16unorm /
+   depth24plus(-stencil8) / depth32float(-stencil8)), zero non-depth fails.
+   sampler2DShadow-for-non-compare. Fix = Tint depth modelling (host-risky).
+
+2. **Vertex-stage storage images (GLES hardware limit)** — storage-texture
+   textureLoad/Dimensions/NumLayers pipeline-creation fails are dominated by
+   stage="v" (e.g. storage_textures_2d_array 768 of 1056 fails are vertex
+   stage). GLES 3.1 does not guarantee image load/store in the vertex stage
+   (`GL_MAX_VERTEX_IMAGE_UNIFORMS` is commonly 0, as on crocus); such
+   pipelines cannot link. Legitimate Tier-2 hardware gap — should be a clean
+   HAL rejection, not a surfaced pipeline error. Catalogue in block-67.
+
+3. **Non-required storage formats (GLES spec limit)** — rg32uint/sint/float
+   storage images (144 each) are not in the GLES 3.1 required
+   image-format list; imageLoad/Store on them is unsupportable. Catalogue.
+
+4. **1D textures (GLES has no 1D)** — texture_1d / texture_storage_1d
+   scattered fails (textureLoad:storage_textures_1d 88, textureNumLevels
+   texture_1d "expected 1 got 0", textureDimensions 1d). GLES has no
+   TEXTURE_1D / image1D; WebGPU 1D must be emulated as height-1 2D. Broader
+   emulation gap — separate slice if pursued.
+
+5. **texture-metadata for 1D** — textureNumLevels 123 / textureNumSamples 12
+   "metadata query mismatch ... texture_1d expected 1 got 0". The metadata
+   UBO returns 0 levels for 1D (tied to #4's 1D handling). Small.
+
+6. **layered storage-view subrange** — storage_textures_2d_array 416
+   "storage texture views must bind a whole layered view or one layer"
+   (queue.rs:839). A HAL restriction on partial layered storage views; may
+   be over-strict vs. glBindImageTexture(layered=false, layer=N) per-layer.
+   Investigate if pursued.
+
+7. **multisampled/arrayed textureLoad value** — textureLoad "expected bits"
+   arrayed 192 / multisampled 96 / sampled_2d 48. Value mismatches; needs
+   per-case investigation.
+
+Net: cube (~40k across the family) + cube-array (21,636) are the two big
+structural wins this session. The remaining ~10k is (1) the catalogued
+Tint depth gap (~6.6k) and (2) scattered GLES hardware/spec limits + 1D
+emulation + a few small value bugs — the genuine best-effort Tier-2 tail,
+each an independent investigation with no single large lever left.
