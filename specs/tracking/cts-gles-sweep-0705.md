@@ -456,3 +456,23 @@ the Vulkan sweep and fix in core (would help Vulkan conformance too).
 - 54 indexed-indirect draw restriction — investigate/impl.
 - ~50 residual incl. maxBindings off-by-one follow-up.
 crash 0 throughout. Campaign api,validation arc: 24,553 -> 595.
+
+## #1 resolved: NOT a core bug — CTS-port storage-skip gap (2026-07-06)
+
+The 204 "StorageBinding format must support" / "view from error texture"
+were NOT Tier-independent (my earlier note was wrong): the SAME case
+PASSES on yawgpu-Vulkan and FAILS on yawgpu-GLES. Root cause: slice 3b
+correctly stopped advertising TextureFormatsTier1 on GLES, so r8unorm/
+rg8/r16/rg16/rgb10a2/rg11b10 + storage is (correctly) invalid there,
+while Vulkan (tier1 present) allows it. The webgpu-native-cts
+device_lost destroy tests filtered these combos in via
+isPossiblyStorageReadable but only skipped on the format's BASE feature,
+never on storage-usability — so they ran an unsupported combo. Fixed in
+the cts repo (device_lost/destroy.spec.cpp: isFormatUsableAsStorageOnDevice
+gate, commit ab67f80): GLES skips (204 -> skip), Vulkan unaffected
+(pass 726, skip 0). yawgpu behavior was correct on both backends — no
+core change. api,validation fail 595 -> 391.
+
+api,validation residual 391: cube-array 122 (catalogued), single-bind-
+group 106 (deferred impl), depth-stencil copy bytes_per_row 57,
+indexed-indirect 54, maxBindings off-by-one ~40, stencil readback 7.
