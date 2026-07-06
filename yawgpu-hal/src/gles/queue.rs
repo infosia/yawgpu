@@ -14,7 +14,7 @@ use crate::{
     HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalDescriptorBindingKind, HalDraw,
     HalError, HalFrontFace, HalIndexFormat, HalRenderLoadOp, HalRenderPass, HalRenderPipeline,
     HalSampler, HalStencilFaceState, HalStencilOperation, HalTexture, HalTextureAspect,
-    HalTextureCopy, HalTextureViewDimension, HalVertexStepMode,
+    HalTextureClear, HalTextureCopy, HalTextureViewDimension, HalVertexStepMode,
 };
 
 /// Stores GLES queue data used by validation and backend submission.
@@ -70,7 +70,7 @@ impl GlesQueue {
                     match copy {
                         HalCopy::Buffer(copy) => submit_buffer_copy(gl, copy)?,
                         HalCopy::BufferClear(clear) => submit_buffer_clear(gl, clear)?,
-                        HalCopy::ClearTexture(_) => {}
+                        HalCopy::ClearTexture(clear) => submit_texture_clear(gl, clear)?,
                         HalCopy::ResolveQuerySet(resolve) => {
                             let HalBuffer::Gles(destination) = &resolve.destination else {
                                 return Err(HalError::BufferOperationFailed {
@@ -1818,6 +1818,158 @@ fn bind_vertex_buffers(
     Ok(())
 }
 
+fn submit_texture_clear(gl: &glow::Context, clear: &HalTextureClear) -> Result<(), HalError> {
+    let HalTexture::Gles(texture) = &clear.texture else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture clear target is not a GLES texture",
+        });
+    };
+    if format_has_depth_aspect(clear.format) || format_has_stencil_aspect(clear.format) {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES texture clear supports only color formats",
+        });
+    }
+    let raw_texture = texture.raw_or_err()?;
+    let meta = texture.meta();
+    reject_multisample_texture_copy(meta, "texture clear target is multisampled")?;
+    let mip_level = i32_from_u32(
+        clear.mip_level,
+        "texture clear mip level exceeds GLES limit",
+    )?;
+    let mip_width = mip_dimension(meta.width, clear.mip_level);
+    let mip_height = mip_dimension(meta.height, clear.mip_level);
+    let layers = texture_clear_layers(meta, clear.mip_level, clear)?;
+
+    unsafe {
+        let framebuffer = gl
+            .create_framebuffer()
+            .map_err(|_| HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "glCreateFramebuffer failed",
+            })?;
+        normalize_texture_mip_bounds(gl, meta, raw_texture)?;
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(framebuffer));
+        gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+        gl.disable(glow::SCISSOR_TEST);
+        gl.viewport(
+            0,
+            0,
+            i32_from_u32(mip_width, "texture clear width exceeds GLES limit")?,
+            i32_from_u32(mip_height, "texture clear height exceeds GLES limit")?,
+        );
+
+        let mut result = Ok(());
+        for layer in layers {
+            attach_texture_clear_layer(gl, meta, raw_texture, mip_level, layer)?;
+            if gl.check_framebuffer_status(glow::DRAW_FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+                result = Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "framebuffer incomplete for texture clear",
+                });
+                break;
+            }
+            match color_clear_kind(clear.format) {
+                GlesClearKind::Float => {
+                    gl.clear_buffer_f32_slice(glow::COLOR, 0, &[0.0, 0.0, 0.0, 0.0]);
+                }
+                GlesClearKind::Sint => {
+                    gl.clear_buffer_i32_slice(glow::COLOR, 0, &[0, 0, 0, 0]);
+                }
+                GlesClearKind::Uint => {
+                    gl.clear_buffer_u32_slice(glow::COLOR, 0, &[0, 0, 0, 0]);
+                }
+            }
+        }
+
+        gl.framebuffer_texture_2d(
+            glow::DRAW_FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            None,
+            0,
+        );
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+        gl.delete_framebuffer(framebuffer);
+        result
+    }
+}
+
+unsafe fn attach_texture_clear_layer(
+    gl: &glow::Context,
+    meta: &GlesTextureMeta,
+    texture: glow::Texture,
+    mip_level: i32,
+    layer: i32,
+) -> Result<(), HalError> {
+    unsafe {
+        match meta.target {
+            glow::TEXTURE_2D => {
+                gl.framebuffer_texture_2d(
+                    glow::DRAW_FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    glow::TEXTURE_2D,
+                    Some(texture),
+                    mip_level,
+                );
+            }
+            glow::TEXTURE_2D_ARRAY | glow::TEXTURE_3D => {
+                gl.framebuffer_texture_layer(
+                    glow::DRAW_FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    Some(texture),
+                    mip_level,
+                    layer,
+                );
+            }
+            _ => {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "unsupported GLES texture clear target",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn texture_clear_layers(
+    meta: &GlesTextureMeta,
+    mip_level: u32,
+    clear: &HalTextureClear,
+) -> Result<Vec<i32>, HalError> {
+    let (start, count) = match meta.target {
+        glow::TEXTURE_2D => (0, 1),
+        glow::TEXTURE_2D_ARRAY => (clear.base_array_layer, clear.array_layer_count),
+        glow::TEXTURE_3D => (0, mip_dimension(meta.depth_or_array_layers, mip_level)),
+        _ => {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "unsupported GLES texture clear target",
+            });
+        }
+    };
+    let end = start
+        .checked_add(count)
+        .ok_or(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture clear layer range exceeds GLES limit",
+        })?;
+    let mut layers = Vec::with_capacity(count as usize);
+    for layer in start..end {
+        layers.push(i32_from_u32(
+            layer,
+            "texture clear layer index exceeds GLES limit",
+        )?);
+    }
+    Ok(layers)
+}
+
+fn mip_dimension(size: u32, mip_level: u32) -> u32 {
+    size.checked_shr(mip_level).unwrap_or(0).max(1)
+}
+
 fn submit_buffer_to_texture(
     gl: &glow::Context,
     copy: &HalBufferTextureCopy,
@@ -1873,6 +2025,7 @@ fn submit_buffer_to_texture(
     unsafe {
         gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(buffer));
         gl.bind_texture(meta.target, Some(texture));
+        normalize_texture_mip_bounds(gl, meta, texture)?;
         gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, row_pixels);
         gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
         if uses_layered_target {
@@ -2052,6 +2205,7 @@ fn submit_texture_to_buffer(
                 backend: BACKEND,
                 message: "glCreateFramebuffer failed",
             })?;
+        normalize_texture_mip_bounds(gl, meta, texture)?;
         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
         gl.read_buffer(glow::COLOR_ATTACHMENT0);
         if !use_client_staging {
@@ -2201,6 +2355,8 @@ fn submit_texture_to_texture(gl: &glow::Context, copy: &HalTextureCopy) -> Resul
 
     if supports_copy_image(gl) {
         unsafe {
+            normalize_texture_mip_bounds(gl, source.meta(), source_texture)?;
+            normalize_texture_mip_bounds(gl, destination.meta(), destination_texture)?;
             gl.copy_image_sub_data(
                 source_texture,
                 source_target,
@@ -2256,6 +2412,8 @@ fn submit_texture_to_texture(gl: &glow::Context, copy: &HalTextureCopy) -> Resul
                 backend: BACKEND,
                 message: "glCreateFramebuffer failed",
             })?;
+        normalize_texture_mip_bounds(gl, source.meta(), source_texture)?;
+        normalize_texture_mip_bounds(gl, destination.meta(), destination_texture)?;
         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
         gl.read_buffer(glow::COLOR_ATTACHMENT0);
         gl.bind_texture(destination_target, Some(destination_texture));
@@ -2369,6 +2527,30 @@ fn pixels_per_row(bytes_per_row: u32, bytes_per_pixel: u32) -> Result<i32, HalEr
         backend: BACKEND,
         message: "row pixel count exceeds GLES limit",
     })
+}
+
+unsafe fn normalize_texture_mip_bounds(
+    gl: &glow::Context,
+    meta: &GlesTextureMeta,
+    texture: glow::Texture,
+) -> Result<(), HalError> {
+    if meta.target == glow::TEXTURE_2D_MULTISAMPLE {
+        return Ok(());
+    }
+    let max_level = meta
+        .mip_level_count
+        .checked_sub(1)
+        .ok_or(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture has no mip levels",
+        })?;
+    let max_level = i32_from_u32(max_level, "texture max mip level exceeds GLES limit")?;
+    unsafe {
+        gl.bind_texture(meta.target, Some(texture));
+        gl.tex_parameter_i32(meta.target, glow::TEXTURE_BASE_LEVEL, 0);
+        gl.tex_parameter_i32(meta.target, glow::TEXTURE_MAX_LEVEL, max_level);
+    }
+    Ok(())
 }
 
 fn i32_from_u32(value: u32, message: &'static str) -> Result<i32, HalError> {
@@ -2727,6 +2909,262 @@ mod tests {
                 },
             })
             .expect("GLES Rgba8Unorm copy texture creation must succeed")
+    }
+
+    fn rgba8_copy_texture_2d(
+        device: &super::super::device::GlesDevice,
+        width: u32,
+        height: u32,
+        mip_level_count: u32,
+    ) -> super::super::texture::GlesTexture {
+        device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                width,
+                height,
+                depth_or_array_layers: 1,
+                mip_level_count,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: true,
+                    copy_dst: true,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: false,
+                    transient: false,
+                },
+            })
+            .expect("GLES Rgba8Unorm 2D copy texture creation must succeed")
+    }
+
+    fn rgba8_tight_layout(width: u32, height: u32) -> crate::HalBufferTextureLayout {
+        crate::HalBufferTextureLayout {
+            offset: 0,
+            bytes_per_row: width * 4,
+            rows_per_image: height,
+        }
+    }
+
+    fn upload_rgba8_region(
+        device: &super::super::device::GlesDevice,
+        texture: &super::super::texture::GlesTexture,
+        mip_level: u32,
+        origin: crate::HalOrigin3d,
+        width: u32,
+        height: u32,
+        bytes: &[u8],
+    ) {
+        assert_eq!(bytes.len(), (width * height * 4) as usize);
+        let upload = device
+            .create_buffer(
+                bytes.len() as u64,
+                crate::HalBufferUsage {
+                    copy_src: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES upload buffer creation must succeed");
+        upload
+            .write(0, bytes)
+            .expect("writing the upload buffer must succeed");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::BufferToTexture(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(upload),
+                buffer_layout: rgba8_tight_layout(width, height),
+                texture: HalTexture::Gles(texture.clone()),
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                aspect: crate::HalTextureAspect::All,
+                mip_level,
+                origin,
+                extent: crate::HalExtent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            })])
+            .expect("buffer-to-texture copy of RGBA8 region must succeed");
+    }
+
+    fn read_back_rgba8_region(
+        device: &super::super::device::GlesDevice,
+        texture: &super::super::texture::GlesTexture,
+        mip_level: u32,
+        origin: crate::HalOrigin3d,
+        width: u32,
+        height: u32,
+    ) -> Vec<u8> {
+        let byte_count = u64::from(width * height * 4);
+        let readback = device
+            .create_buffer(
+                byte_count,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES readback buffer creation must succeed");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(readback.clone()),
+                buffer_layout: rgba8_tight_layout(width, height),
+                texture: HalTexture::Gles(texture.clone()),
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                aspect: crate::HalTextureAspect::All,
+                mip_level,
+                origin,
+                extent: crate::HalExtent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            })])
+            .expect("texture-to-buffer copy of RGBA8 region must succeed");
+        readback
+            .read(0, byte_count)
+            .expect("reading back the RGBA8 region must succeed")
+    }
+
+    fn rgba8_pattern(width: u32, height: u32, base: u8) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let v = base.wrapping_add((y * width + x) as u8);
+                bytes.extend_from_slice(&[v, v.wrapping_add(1), v.wrapping_add(2), 255]);
+            }
+        }
+        bytes
+    }
+
+    fn copy_rgba8_texel(
+        destination: &mut [u8],
+        destination_width: u32,
+        destination_x: u32,
+        destination_y: u32,
+        source: &[u8],
+        source_width: u32,
+        source_x: u32,
+        source_y: u32,
+    ) {
+        let destination_offset = ((destination_y * destination_width + destination_x) * 4) as usize;
+        let source_offset = ((source_y * source_width + source_x) * 4) as usize;
+        destination[destination_offset..destination_offset + 4]
+            .copy_from_slice(&source[source_offset..source_offset + 4]);
+    }
+
+    fn r8_copy_texture_2d(
+        device: &super::super::device::GlesDevice,
+        width: u32,
+        height: u32,
+    ) -> super::super::texture::GlesTexture {
+        device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format: crate::HalTextureFormat::R8Unorm,
+                width,
+                height,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: true,
+                    copy_dst: true,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: false,
+                    transient: false,
+                },
+            })
+            .expect("GLES R8Unorm 2D copy texture creation must succeed")
+    }
+
+    fn r8_layout(width: u32, height: u32) -> crate::HalBufferTextureLayout {
+        crate::HalBufferTextureLayout {
+            offset: 0,
+            bytes_per_row: width,
+            rows_per_image: height,
+        }
+    }
+
+    fn upload_r8_region(
+        device: &super::super::device::GlesDevice,
+        texture: &super::super::texture::GlesTexture,
+        origin: crate::HalOrigin3d,
+        width: u32,
+        height: u32,
+        bytes: &[u8],
+    ) {
+        assert_eq!(bytes.len(), (width * height) as usize);
+        let upload = device
+            .create_buffer(
+                bytes.len() as u64,
+                crate::HalBufferUsage {
+                    copy_src: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES R8 upload buffer creation must succeed");
+        upload
+            .write(0, bytes)
+            .expect("writing the R8 upload buffer must succeed");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::BufferToTexture(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(upload),
+                buffer_layout: r8_layout(width, height),
+                texture: HalTexture::Gles(texture.clone()),
+                format: crate::HalTextureFormat::R8Unorm,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                origin,
+                extent: crate::HalExtent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            })])
+            .expect("buffer-to-texture copy of R8 region must succeed");
+    }
+
+    fn read_back_r8_region(
+        device: &super::super::device::GlesDevice,
+        texture: &super::super::texture::GlesTexture,
+        origin: crate::HalOrigin3d,
+        width: u32,
+        height: u32,
+    ) -> Vec<u8> {
+        let byte_count = u64::from(width * height);
+        let readback = device
+            .create_buffer(
+                byte_count,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES R8 readback buffer creation must succeed");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(readback.clone()),
+                buffer_layout: r8_layout(width, height),
+                texture: HalTexture::Gles(texture.clone()),
+                format: crate::HalTextureFormat::R8Unorm,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                origin,
+                extent: crate::HalExtent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            })])
+            .expect("texture-to-buffer copy of R8 region must succeed");
+        readback
+            .read(0, byte_count)
+            .expect("reading back the R8 region must succeed")
     }
 
     /// One 2x2 Rgba8Unorm slice is 16 bytes; layout used by the multi-slice
@@ -3322,6 +3760,404 @@ mod tests {
         expected[1028..1036].copy_from_slice(&pixels[16..24]);
         expected[1284..1292].copy_from_slice(&pixels[24..32]);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn submit_copies_buffer_texture_respects_nonzero_2d_origins() {
+        let Some(device) = gles_device_or_skip("GLES nonzero B2T/T2B origin test") else {
+            return;
+        };
+
+        let texture = rgba8_copy_texture_2d(&device, 4, 4, 1);
+        let zeros = vec![0; 4 * 4 * 4];
+        upload_rgba8_region(
+            &device,
+            &texture,
+            0,
+            crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+            4,
+            4,
+            &zeros,
+        );
+
+        let expected = rgba8_pattern(2, 2, 31);
+        upload_rgba8_region(
+            &device,
+            &texture,
+            0,
+            crate::HalOrigin3d { x: 1, y: 1, z: 0 },
+            2,
+            2,
+            &expected,
+        );
+
+        assert_eq!(
+            read_back_rgba8_region(
+                &device,
+                &texture,
+                0,
+                crate::HalOrigin3d { x: 1, y: 1, z: 0 },
+                2,
+                2,
+            ),
+            expected,
+            "B2T must write at destination origin (1,1), and T2B must read from source origin (1,1)"
+        );
+    }
+
+    #[test]
+    fn submit_copies_texture_to_texture_respects_nonzero_2d_origins() {
+        let Some(device) = gles_device_or_skip("GLES nonzero T2T origin test") else {
+            return;
+        };
+
+        let source = rgba8_copy_texture_2d(&device, 4, 4, 1);
+        let source_bytes = rgba8_pattern(4, 4, 50);
+        upload_rgba8_region(
+            &device,
+            &source,
+            0,
+            crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+            4,
+            4,
+            &source_bytes,
+        );
+        let destination = rgba8_copy_texture_2d(&device, 4, 4, 1);
+        let mut expected = vec![0; 4 * 4 * 4];
+        upload_rgba8_region(
+            &device,
+            &destination,
+            0,
+            crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+            4,
+            4,
+            &expected,
+        );
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::TextureToTexture(HalTextureCopy {
+                source: HalTexture::Gles(source),
+                source_mip_level: 0,
+                source_origin: crate::HalOrigin3d { x: 2, y: 1, z: 0 },
+                destination: HalTexture::Gles(destination.clone()),
+                destination_mip_level: 0,
+                destination_origin: crate::HalOrigin3d { x: 0, y: 1, z: 0 },
+                extent: crate::HalExtent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: 1,
+                },
+            })])
+            .expect("texture-to-texture copy with nonzero origins must succeed");
+
+        for y in 0..2 {
+            for x in 0..2 {
+                copy_rgba8_texel(&mut expected, 4, x, y + 1, &source_bytes, 4, x + 2, y + 1);
+            }
+        }
+        assert_eq!(
+            read_back_rgba8_region(
+                &device,
+                &destination,
+                0,
+                crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                4,
+                4,
+            ),
+            expected,
+            "T2T must read source origin (2,1) and write destination origin (0,1)"
+        );
+    }
+
+    #[test]
+    fn submit_copies_texture_to_texture_respects_mip_level_one_origins() {
+        let Some(device) = gles_device_or_skip("GLES mip-1 T2T origin test") else {
+            return;
+        };
+
+        let source = rgba8_copy_texture_2d(&device, 8, 8, 2);
+        let source_mip1 = rgba8_pattern(4, 4, 90);
+        upload_rgba8_region(
+            &device,
+            &source,
+            1,
+            crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+            4,
+            4,
+            &source_mip1,
+        );
+        let destination = rgba8_copy_texture_2d(&device, 8, 8, 2);
+        let mut expected = vec![0; 4 * 4 * 4];
+        upload_rgba8_region(
+            &device,
+            &destination,
+            1,
+            crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+            4,
+            4,
+            &expected,
+        );
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::TextureToTexture(HalTextureCopy {
+                source: HalTexture::Gles(source),
+                source_mip_level: 1,
+                source_origin: crate::HalOrigin3d { x: 1, y: 1, z: 0 },
+                destination: HalTexture::Gles(destination.clone()),
+                destination_mip_level: 1,
+                destination_origin: crate::HalOrigin3d { x: 1, y: 0, z: 0 },
+                extent: crate::HalExtent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: 1,
+                },
+            })])
+            .expect("texture-to-texture copy at mip level 1 must succeed");
+
+        for y in 0..2 {
+            for x in 0..2 {
+                copy_rgba8_texel(&mut expected, 4, x + 1, y, &source_mip1, 4, x + 1, y + 1);
+            }
+        }
+        assert_eq!(
+            read_back_rgba8_region(
+                &device,
+                &destination,
+                1,
+                crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                4,
+                4,
+            ),
+            expected,
+            "T2T must honor source/destination origins at mip level 1"
+        );
+    }
+
+    #[test]
+    fn submit_copies_r8_odd_rows_round_trip_without_alignment_padding() {
+        let Some(device) = gles_device_or_skip("GLES R8 odd-row B2T/T2B alignment test") else {
+            return;
+        };
+
+        let texture = r8_copy_texture_2d(&device, 3, 3);
+        let expected = vec![0, 17, 34, 51, 68, 85, 102, 119, 136];
+        upload_r8_region(
+            &device,
+            &texture,
+            crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+            3,
+            3,
+            &expected,
+        );
+
+        assert_eq!(
+            read_back_r8_region(
+                &device,
+                &texture,
+                crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                3,
+                3,
+            ),
+            expected,
+            "R8 rows are 3 bytes wide; GL pack/unpack alignment must be 1"
+        );
+    }
+
+    #[test]
+    fn submit_copies_r8_texture_to_texture_nonzero_sub_box_preserves_zeroes() {
+        let Some(device) = gles_device_or_skip("GLES R8 nonzero T2T sub-box test") else {
+            return;
+        };
+
+        let source = r8_copy_texture_2d(&device, 5, 3);
+        let source_bytes = vec![
+            10, 11, 12, 13, 14, //
+            20, 21, 22, 23, 24, //
+            30, 31, 32, 33, 34,
+        ];
+        upload_r8_region(
+            &device,
+            &source,
+            crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+            5,
+            3,
+            &source_bytes,
+        );
+
+        let destination = r8_copy_texture_2d(&device, 5, 3);
+        let mut expected = vec![0; 5 * 3];
+        upload_r8_region(
+            &device,
+            &destination,
+            crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+            5,
+            3,
+            &expected,
+        );
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::TextureToTexture(HalTextureCopy {
+                source: HalTexture::Gles(source),
+                source_mip_level: 0,
+                source_origin: crate::HalOrigin3d { x: 2, y: 1, z: 0 },
+                destination: HalTexture::Gles(destination.clone()),
+                destination_mip_level: 0,
+                destination_origin: crate::HalOrigin3d { x: 1, y: 0, z: 0 },
+                extent: crate::HalExtent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: 1,
+                },
+            })])
+            .expect("R8 texture-to-texture copy with nonzero origins must succeed");
+
+        for y in 0..2 {
+            for x in 0..2 {
+                let source_offset = ((y + 1) * 5 + (x + 2)) as usize;
+                let destination_offset = (y * 5 + (x + 1)) as usize;
+                expected[destination_offset] = source_bytes[source_offset];
+            }
+        }
+
+        assert_eq!(
+            read_back_r8_region(
+                &device,
+                &destination,
+                crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                5,
+                3,
+            ),
+            expected,
+            "R8 T2T must copy only the 2x2 sub-box and leave the rest zero"
+        );
+    }
+
+    #[test]
+    fn submit_copies_sampled_mip_subrange_then_reads_mip_one() {
+        let Some(device) = gles_device_or_skip("GLES sampled mip clamp then T2B mip 1 test") else {
+            return;
+        };
+
+        let sampled = rgba8_copy_texture_2d(&device, 4, 4, 2);
+        upload_rgba8_region(
+            &device,
+            &sampled,
+            0,
+            crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+            4,
+            4,
+            &vec![0; 4 * 4 * 4],
+        );
+        let mip_one = rgba8_pattern(2, 2, 170);
+        upload_rgba8_region(
+            &device,
+            &sampled,
+            1,
+            crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+            2,
+            2,
+            &mip_one,
+        );
+
+        let target = rgba8_copy_texture_2d(&device, 2, 2, 1);
+        let pipeline = device
+            .create_render_pipeline(
+                crate::HalShaderSource::GlslStages {
+                    vertex: "#version 310 es\n\
+                             void main() {\n\
+                                 vec2 pos = vec2(float((gl_VertexID & 1) << 2) - 1.0,\n\
+                                                 float((gl_VertexID & 2) << 1) - 1.0);\n\
+                                 gl_Position = vec4(pos, 0.0, 1.0);\n\
+                             }\n"
+                    .to_owned(),
+                    fragment: Some(
+                        "#version 310 es\n\
+                         precision mediump float;\n\
+                         uniform sampler2D u_tex;\n\
+                         layout(location = 0) out vec4 frag_color;\n\
+                         void main() { frag_color = texture(u_tex, vec2(0.25)); }\n"
+                            .to_owned(),
+                    ),
+                    combined_samplers: vec![crate::HalCombinedSampler {
+                        glsl_uniform_name: "u_tex".to_owned(),
+                        texture_group: 0,
+                        texture_binding: 1,
+                        sampler_group: 0,
+                        sampler_binding: 2,
+                        uses_placeholder_sampler: false,
+                    }],
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                Some("main"),
+                &crate::HalRenderPipelineDescriptor {
+                    sample_count: 1,
+                    sample_mask: u32::MAX,
+                    alpha_to_coverage_enabled: false,
+                    color_targets: vec![Some(HalColorTargetState {
+                        format: crate::HalTextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: 0xf,
+                    })],
+                    depth_stencil: None,
+                    vertex_buffers: Vec::new(),
+                    primitive_topology: crate::HalPrimitiveTopology::TriangleList,
+                    front_face: HalFrontFace::Ccw,
+                    cull_mode: HalCullMode::None,
+                    unclipped_depth: false,
+                    needs_frag_depth_range_push_constant: false,
+                    user_immediate_size: 0,
+                },
+                &[
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 1,
+                        kind: HalDescriptorBindingKind::Texture,
+                    },
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 2,
+                        kind: HalDescriptorBindingKind::Sampler,
+                    },
+                ],
+            )
+            .expect("GLES mip clamp render pipeline creation must succeed");
+
+        let mut pass = render_pass(vec![Some(color_target_for(
+            target,
+            crate::HalTextureFormat::Rgba8Unorm,
+            [0.0, 0.0, 0.0, 0.0],
+        ))]);
+        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
+        pass.bind_textures = vec![bound_sampled_texture(sampled.clone(), 1)];
+        pass.bind_samplers = vec![nearest_sampler_binding(&device, 2)];
+        pass.draw = Some(HalDraw::Direct {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        });
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::RenderPass(pass)])
+            .expect("render pass with sampled mip subrange must succeed");
+
+        assert_eq!(
+            read_back_rgba8_region(
+                &device,
+                &sampled,
+                1,
+                crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                2,
+                2,
+            ),
+            mip_one,
+            "T2B of mip 1 must ignore prior sampled-view BASE/MAX_LEVEL clamp"
+        );
     }
 
     #[test]
