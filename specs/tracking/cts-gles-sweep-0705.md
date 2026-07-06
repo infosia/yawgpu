@@ -669,6 +669,20 @@ Verified on crocus (ES 3.2): `cargo test -p yawgpu-hal --features gles`
 = **172/172 pass** (was 166/172 with the 6 stale failures);
 `submit_compute_pass_samples_cube_view_from_2d_array_texture_view`
 samples all 6 cube faces correctly. Workspace Noop green, gles clippy
-clean. **CTS shader,execution cube delta (~13.7k target) measurement:
-PENDING** (next: targeted textureSample/textureSampleGrad dim="cube"
-run).
+clean.
+
+**CTS cube delta MEASURED (crocus, workers=2, commit 2ba7e96):**
+`textureSample:sampled_3d_coords` (the cube cluster, 27,405 subcases):
+pass=6237 **fail=0** crash=0, skip=21168. Broken out by dim:
+- **dim="cube": 2673 pass / 0 fail** (was the dominant fail cluster —
+  previously HalError "cube texture views require a cube-compatible
+  texture" / sampled 0).
+- dim="3d": 3564 pass / 0 fail (unchanged, already correct).
+- The 21,168 skips are legitimate unsupported-format skips (r16/rg16/
+  rgba16 (s)norm — not GLES formats), identical across both dims; NOT
+  failures.
+Cube sampling is now conformant on the textureSample builtin. The rest
+of the ~13.7k cube estimate spans the sibling texture builtins
+(textureSampleGrad / textureSampleLevel / textureGather with dim="cube"),
+which take the same glTextureView bind path — a full texture-builtin
+re-sweep will quantify the total.
