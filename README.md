@@ -701,6 +701,29 @@ the Dawn oracle on the same GPU, not a yawgpu bug. (MoltenVK on macOS is a
 non-authoritative Vulkan path — it shows a few Vulkan→Metal translation
 artifacts that are green on both native Metal and native Vulkan.)
 
+**Native GLES — Tier 2 / experimental** (Linux / Mesa `crocus` on Intel Haswell, Tint frontend), per-subcase:
+
+> **Not a conformance table.** GLES is yawgpu's Tier 2 / experimental backend (opt-in `gles` feature); this
+> is a **bring-up progress snapshot**, not the `fail = 0` conformance result the Metal/Vulkan tables above are.
+> Run raw (no expectations) on `crocus`, Mesa's **native** GLES driver for Haswell — native ES, closer to an
+> Android device than to ANGLE's ES→D3D/Vulkan translation.
+
+| area | pass | skip | fail | crash |
+|---|---:|---:|---:|---:|
+| `api/validation` (124§) | 194,805 | 157,163 | 347 | 0 |
+| `api/operation` (67) | 132,831 | 76,698 | 19,932 | 0 |
+| `shader/execution` (239) | 308,373 | 516,424 | 10,129 | 0 |
+| `shader/validation` (207) | 369,753 | 297,389 | 0 | 0 |
+| **total** | **1,005,762** | **1,047,674** | **30,408** | **0** |
+
+`shader/validation` is fully clean — the WGSL→GLSL-ES path is Tint, the same compiler as the Dawn oracle. The
+`shader/execution` residual is dominated by catalogued Tier-2 boundaries — raw (non-comparison) depth-texture
+reads and GLES hardware/spec limits (vertex-stage storage images, `rg32` storage formats, no native 1D
+textures) — catalogued in [`specs/blocks/67-gles-backend.md`](specs/blocks/67-gles-backend.md). § **2**
+`api/validation` files are **quarantined**, not failing: a zero-dimension indirect dispatch hard-wedges this
+Haswell GPU machine-wide (a Mesa/ANV-class driver defect). Verification here is Linux/Mesa (the spec'd Tier-2
+target is Windows ANGLE); numbers and feature set may change without SemVer guarantees.
+
 Per-case results and any cross-backend differences are tracked in the suite's
 [`docs/FINDINGS.md`](https://github.com/infosia/webgpu-native-cts/blob/main/docs/FINDINGS.md)
 (yawgpu-Metal sweep 2026-07-02; yawgpu-Vulkan sweep 2026-06-28).
