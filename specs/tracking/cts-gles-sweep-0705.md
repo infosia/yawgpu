@@ -373,3 +373,35 @@ expected-buffer stride math is suspect; verify the checker semantics
 in webgpu-native-cts harness.cpp:601-646 before trusting the repro,
 THEN re-attempt the production fix. Committed checkpoint remains
 command_buffer fail=19,331 (repo green, 156 gles tests).
+
+## Slice 3a (2026-07-06): truthful GL-queried adapter limits — DONE (61dd95b)
+
+api,validation: pass 207,765 -> 209,624, skip 142,270 -> 140,442,
+fail 2,280 -> 2,249, crash 0. The binding-overflow shader-compile
+class (`layout(binding=999)` exceeds UBO points) collapsed ~624 -> 12
+because maxBindingsPerBindGroup is now min-of-GL-binding-points, not
+1000. Net fail barely moved only because ~1,828 previously-skipped
+cases now execute (and mostly pass).
+
+Residual api,validation shader-compile fails re-classified:
+- ~50 cube-array (`samplerCubeArray` reserved on ES 3.1) — cube-array
+  is CORE WebGPU, so this is a Tier-2 hardware gap → catalogue.
+- ~168 storage-texture layout identifiers (r16/rg16/rgba16 [s]norm,
+  r32ui as read-write image) + 180 "unsupported read-write storage
+  texture format" — these come from advertising TextureFormatsTier2
+  (read-write storage). GLES 3.1 has glBindImageTexture but yawgpu has
+  NOT wired GLES storage textures (T-G14 deferred), and ES image
+  load/store supports only a limited format subset anyway.
+
+### DECISION NEEDED — storage textures on GLES
+CTS expects these to work because the adapter advertises the storage
+capability. Options: (A) implement GLES storage textures (T-G14:
+glBindImageTexture; sizable, unlocks ~350+ fails properly, ES-format
+subset must still be catalogued); (B) catalogue as Tier-2 unsupported
+in the expectations file (fast, honest, leaves the capability
+un-executable). Storage textures are core WebGPU, not an optional
+feature, so "stop advertising" is not clean here.
+
+Clearly-catalogue (approved slice 5, no decision): 852 non-renderable
+color targets, 364 Unorm8x4Bgra vertex format, cube-array, stencil
+readback — block-67 matrix + expectations file.
