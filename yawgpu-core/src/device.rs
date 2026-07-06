@@ -459,14 +459,14 @@ impl Device {
         entries: Vec<BindGroupEntry>,
     ) -> BindGroup {
         if self.is_lost() {
-            return BindGroup::new(layout, entries, true);
+            return BindGroup::new(layout, entries, true, None);
         }
         let error = validate_bind_group_descriptor(self, &layout, &entries, self.limits());
         let is_error = error.is_some();
-        if let Some(message) = error {
-            self.dispatch_error(ErrorKind::Validation, message);
+        if let Some(message) = &error {
+            self.dispatch_error(ErrorKind::Validation, message.clone());
         }
-        BindGroup::new(layout, entries, is_error)
+        BindGroup::new(layout, entries, is_error, error)
     }
 
     /// Creates a pipeline layout from the given bind group layouts.

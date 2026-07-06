@@ -84,6 +84,8 @@ pub(crate) struct GeneratedGlsl {
     pub entry_point: String,
     /// Combined texture/sampler uniforms emitted by Tint's GLSL writer.
     pub combined_samplers: Vec<yawgpu_hal::HalCombinedSampler>,
+    /// Uniform-buffer binding carrying GLSL texture metadata, if emitted.
+    pub texture_metadata_ubo_binding: Option<u32>,
 }
 
 /// Stores binding metadata.

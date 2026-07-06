@@ -4,6 +4,7 @@ use glow::HasContext;
 
 use super::device::GlesDeviceInner;
 use super::format::{is_color_renderable_with, map_vertex_format, GlesColorRenderCaps};
+use super::texture::validate_sample_count;
 use super::{rebuild_hal_error, BACKEND};
 use crate::{
     HalColorTargetState, HalCombinedSampler, HalCullMode, HalDepthStencilState,
@@ -39,6 +40,7 @@ struct GlesComputePipelineInner {
     workgroup_size: (u32, u32, u32),
     bindings: Vec<HalDescriptorBinding>,
     combined_samplers: Vec<GlesResolvedCombinedSampler>,
+    texture_metadata_ubo_binding: Option<u32>,
 }
 
 impl Drop for GlesComputePipelineInner {
@@ -81,6 +83,7 @@ impl GlesComputePipeline {
         workgroup_size: (u32, u32, u32),
         bindings: &[HalDescriptorBinding],
         combined_samplers: Vec<HalCombinedSampler>,
+        texture_metadata_ubo_binding: Option<u32>,
     ) -> Result<Self, HalError> {
         let program = build_compute_program(&device, &source)?;
         let combined_samplers = resolve_combined_samplers(&device, program, &combined_samplers)?;
@@ -91,6 +94,7 @@ impl GlesComputePipeline {
                 workgroup_size,
                 bindings: bindings.to_vec(),
                 combined_samplers,
+                texture_metadata_ubo_binding,
             }),
         })
     }
@@ -112,6 +116,11 @@ impl GlesComputePipeline {
     pub(super) fn combined_samplers(&self) -> &[GlesResolvedCombinedSampler] {
         &self.inner.combined_samplers
     }
+
+    #[must_use]
+    pub(super) fn texture_metadata_ubo_binding(&self) -> Option<u32> {
+        self.inner.texture_metadata_ubo_binding
+    }
 }
 
 struct GlesRenderPipelineInner {
@@ -123,8 +132,11 @@ struct GlesRenderPipelineInner {
     primitive_topology: HalPrimitiveTopology,
     front_face: HalFrontFace,
     cull_mode: HalCullMode,
+    sample_mask: u32,
+    alpha_to_coverage_enabled: bool,
     bindings: Vec<HalDescriptorBinding>,
     combined_samplers: Vec<GlesResolvedCombinedSampler>,
+    texture_metadata_ubo_binding: Option<u32>,
     first_instance_location: Option<glow::UniformLocation>,
 }
 
@@ -170,8 +182,13 @@ impl GlesRenderPipeline {
         descriptor: HalRenderPipelineDescriptor,
         bindings: &[HalDescriptorBinding],
         combined_samplers: Vec<HalCombinedSampler>,
+        texture_metadata_ubo_binding: Option<u32>,
     ) -> Result<Self, HalError> {
-        validate_render_pipeline_descriptor(&descriptor, device.color_render_caps())?;
+        validate_render_pipeline_descriptor(
+            &descriptor,
+            device.color_render_caps(),
+            device.max_samples(),
+        )?;
         let (program, first_instance_location) =
             build_render_program(&device, &vertex_source, fragment_source.as_deref())?;
         let combined_samplers = resolve_combined_samplers(&device, program, &combined_samplers)?;
@@ -189,8 +206,11 @@ impl GlesRenderPipeline {
                 primitive_topology: descriptor.primitive_topology,
                 front_face: descriptor.front_face,
                 cull_mode: descriptor.cull_mode,
+                sample_mask: descriptor.sample_mask,
+                alpha_to_coverage_enabled: descriptor.alpha_to_coverage_enabled,
                 bindings: bindings.to_vec(),
                 combined_samplers,
+                texture_metadata_ubo_binding,
                 first_instance_location,
             }),
         })
@@ -239,6 +259,16 @@ impl GlesRenderPipeline {
     }
 
     #[must_use]
+    pub(super) fn sample_mask(&self) -> u32 {
+        self.inner.sample_mask
+    }
+
+    #[must_use]
+    pub(super) fn alpha_to_coverage_enabled(&self) -> bool {
+        self.inner.alpha_to_coverage_enabled
+    }
+
+    #[must_use]
     pub(super) fn bindings(&self) -> &[HalDescriptorBinding] {
         &self.inner.bindings
     }
@@ -251,6 +281,11 @@ impl GlesRenderPipeline {
     #[must_use]
     pub(super) fn combined_samplers(&self) -> &[GlesResolvedCombinedSampler] {
         &self.inner.combined_samplers
+    }
+
+    #[must_use]
+    pub(super) fn texture_metadata_ubo_binding(&self) -> Option<u32> {
+        self.inner.texture_metadata_ubo_binding
     }
 }
 
@@ -348,25 +383,9 @@ fn build_compute_program(
 fn validate_render_pipeline_descriptor(
     descriptor: &HalRenderPipelineDescriptor,
     color_render_caps: GlesColorRenderCaps,
+    max_samples: i32,
 ) -> Result<(), HalError> {
-    if descriptor.sample_count > 1 {
-        return Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "GLES render pass does not support multisample/resolve",
-        });
-    }
-    if descriptor.sample_mask != u32::MAX {
-        return Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "GLES render pipeline does not support non-default multisample mask",
-        });
-    }
-    if descriptor.alpha_to_coverage_enabled {
-        return Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "GLES render pipeline does not support alpha-to-coverage",
-        });
-    }
+    validate_sample_count(descriptor.sample_count, max_samples)?;
     if descriptor.unclipped_depth {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
@@ -567,6 +586,7 @@ fn compile_shader(
 mod tests {
     use super::*;
     use crate::HalTextureFormat;
+    const TEST_MAX_SAMPLES: i32 = 4;
 
     fn color_target() -> HalColorTargetState {
         HalColorTargetState {
@@ -602,21 +622,25 @@ mod tests {
         assert!(validate_render_pipeline_descriptor(
             &render_descriptor(vec![Some(color_target())]),
             GlesColorRenderCaps::default(),
+            TEST_MAX_SAMPLES,
         )
         .is_ok());
         assert!(validate_render_pipeline_descriptor(
             &render_descriptor(vec![Some(color_target()), Some(color_target())]),
             GlesColorRenderCaps::default(),
+            TEST_MAX_SAMPLES,
         )
         .is_ok());
         assert!(validate_render_pipeline_descriptor(
             &render_descriptor(vec![None, Some(color_target())]),
             GlesColorRenderCaps::default(),
+            TEST_MAX_SAMPLES,
         )
         .is_ok());
         assert!(validate_render_pipeline_descriptor(
             &render_descriptor(vec![Some(color_target()), None, Some(color_target())]),
             GlesColorRenderCaps::default(),
+            TEST_MAX_SAMPLES,
         )
         .is_ok());
     }
@@ -631,6 +655,7 @@ mod tests {
         let error = validate_render_pipeline_descriptor(
             &render_descriptor(vec![Some(color_target()), Some(masked)]),
             GlesColorRenderCaps::default(),
+            TEST_MAX_SAMPLES,
         )
         .expect_err("divergent per-target write masks must be rejected");
         assert!(matches!(
@@ -657,6 +682,7 @@ mod tests {
         let error = validate_render_pipeline_descriptor(
             &render_descriptor(vec![Some(color_target()), Some(blended)]),
             GlesColorRenderCaps::default(),
+            TEST_MAX_SAMPLES,
         )
         .expect_err("divergent per-target blend state must be rejected");
         assert!(matches!(
@@ -691,6 +717,7 @@ mod tests {
                 validate_render_pipeline_descriptor(
                     &render_descriptor(vec![Some(target)]),
                     GlesColorRenderCaps::default(),
+                    TEST_MAX_SAMPLES,
                 )
                 .is_ok(),
                 "{format:?} must be accepted as a GLES color target"
@@ -708,6 +735,7 @@ mod tests {
             let error = validate_render_pipeline_descriptor(
                 &render_descriptor(vec![Some(target)]),
                 GlesColorRenderCaps::default(),
+                TEST_MAX_SAMPLES,
             )
             .expect_err("non-color-renderable format must be rejected");
             assert!(
@@ -745,6 +773,7 @@ mod tests {
                 validate_render_pipeline_descriptor(
                     &render_descriptor(vec![Some(target)]),
                     float_caps,
+                    TEST_MAX_SAMPLES,
                 )
                 .is_ok(),
                 "{format:?} must be accepted with EXT_color_buffer_float"
@@ -761,6 +790,7 @@ mod tests {
         assert!(validate_render_pipeline_descriptor(
             &render_descriptor(vec![Some(half_float_target)]),
             half_float_caps,
+            TEST_MAX_SAMPLES,
         )
         .is_ok());
         let mut float32_target = color_target();
@@ -768,6 +798,7 @@ mod tests {
         let error = validate_render_pipeline_descriptor(
             &render_descriptor(vec![Some(float32_target)]),
             half_float_caps,
+            TEST_MAX_SAMPLES,
         )
         .expect_err("float32 target must stay rejected without EXT_color_buffer_float");
         assert!(matches!(
@@ -776,6 +807,28 @@ mod tests {
                 backend: "gles",
                 message:
                     "GLES render pipeline color target format is not color-renderable on GLES 3.1",
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_render_pipeline_descriptor_rejects_sample_count_above_max_samples() {
+        let mut descriptor = render_descriptor(vec![Some(color_target())]);
+        descriptor.sample_count = 4;
+        assert!(validate_render_pipeline_descriptor(
+            &descriptor,
+            GlesColorRenderCaps::default(),
+            4,
+        )
+        .is_ok());
+        let error =
+            validate_render_pipeline_descriptor(&descriptor, GlesColorRenderCaps::default(), 1)
+                .expect_err("sample count above GL_MAX_SAMPLES must be rejected");
+        assert!(matches!(
+            error,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message: "texture sample count exceeds GL_MAX_SAMPLES",
             }
         ));
     }
@@ -839,6 +892,7 @@ mod tests {
                         .to_owned(),
                     fragment: None,
                     combined_samplers: Vec::new(),
+                    texture_metadata_ubo_binding: None,
                 },
                 "main",
                 None,
@@ -934,6 +988,7 @@ mod tests {
                     .to_owned(),
             ),
             combined_samplers: Vec::new(),
+            texture_metadata_ubo_binding: None,
         };
 
         let pipeline = device

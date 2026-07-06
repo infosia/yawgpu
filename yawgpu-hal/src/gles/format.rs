@@ -165,6 +165,42 @@ pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<GlesFormat,
         HalTextureFormat::Rgba32Float => {
             Ok(gles_format(glow::RGBA32F, glow::RGBA, glow::FLOAT, 16))
         }
+        HalTextureFormat::Depth16Unorm => Ok(gles_format(
+            glow::DEPTH_COMPONENT16,
+            glow::DEPTH_COMPONENT,
+            glow::UNSIGNED_SHORT,
+            2,
+        )),
+        HalTextureFormat::Depth24Plus => Ok(gles_format(
+            glow::DEPTH_COMPONENT24,
+            glow::DEPTH_COMPONENT,
+            glow::UNSIGNED_INT,
+            4,
+        )),
+        HalTextureFormat::Depth24PlusStencil8 => Ok(gles_format(
+            glow::DEPTH24_STENCIL8,
+            glow::DEPTH_STENCIL,
+            glow::UNSIGNED_INT_24_8,
+            4,
+        )),
+        HalTextureFormat::Depth32Float => Ok(gles_format(
+            glow::DEPTH_COMPONENT32F,
+            glow::DEPTH_COMPONENT,
+            glow::FLOAT,
+            4,
+        )),
+        HalTextureFormat::Depth32FloatStencil8 => Ok(gles_format(
+            glow::DEPTH32F_STENCIL8,
+            glow::DEPTH_STENCIL,
+            glow::FLOAT_32_UNSIGNED_INT_24_8_REV,
+            8,
+        )),
+        HalTextureFormat::Stencil8 => Ok(gles_format(
+            glow::STENCIL_INDEX8,
+            glow::STENCIL_INDEX,
+            glow::UNSIGNED_BYTE,
+            1,
+        )),
         HalTextureFormat::Bc1RgbaUnorm => Ok(gles_format(
             glow::COMPRESSED_RGBA_S3TC_DXT1_EXT,
             glow::RGBA,
@@ -1007,8 +1043,67 @@ mod tests {
     }
 
     #[test]
+    fn map_texture_format_maps_depth_stencil_formats() {
+        let cases = [
+            (
+                HalTextureFormat::Depth16Unorm,
+                glow::DEPTH_COMPONENT16,
+                glow::DEPTH_COMPONENT,
+                glow::UNSIGNED_SHORT,
+                2,
+            ),
+            (
+                HalTextureFormat::Depth24Plus,
+                glow::DEPTH_COMPONENT24,
+                glow::DEPTH_COMPONENT,
+                glow::UNSIGNED_INT,
+                4,
+            ),
+            (
+                HalTextureFormat::Depth24PlusStencil8,
+                glow::DEPTH24_STENCIL8,
+                glow::DEPTH_STENCIL,
+                glow::UNSIGNED_INT_24_8,
+                4,
+            ),
+            (
+                HalTextureFormat::Depth32Float,
+                glow::DEPTH_COMPONENT32F,
+                glow::DEPTH_COMPONENT,
+                glow::FLOAT,
+                4,
+            ),
+            (
+                HalTextureFormat::Depth32FloatStencil8,
+                glow::DEPTH32F_STENCIL8,
+                glow::DEPTH_STENCIL,
+                glow::FLOAT_32_UNSIGNED_INT_24_8_REV,
+                8,
+            ),
+            (
+                HalTextureFormat::Stencil8,
+                glow::STENCIL_INDEX8,
+                glow::STENCIL_INDEX,
+                glow::UNSIGNED_BYTE,
+                1,
+            ),
+        ];
+
+        for (texture_format, internal, external, ty, bytes_per_pixel) in cases {
+            let format = map_texture_format(texture_format).expect("format supported");
+            assert_eq!(format.internal, internal, "{texture_format:?}");
+            assert_eq!(format.format, external, "{texture_format:?}");
+            assert_eq!(format.ty, ty, "{texture_format:?}");
+            assert_eq!(
+                format.bytes_per_pixel, bytes_per_pixel,
+                "{texture_format:?}"
+            );
+        }
+    }
+
+    #[test]
     fn map_texture_format_unsupported_returns_error() {
-        let error = map_texture_format(HalTextureFormat::Depth32Float)
+        let error = map_texture_format(HalTextureFormat::Unsupported)
             .expect_err("unsupported format must error");
 
         assert!(matches!(

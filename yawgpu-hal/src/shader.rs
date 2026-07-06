@@ -81,6 +81,8 @@ pub enum HalShaderSource {
         fragment: Option<String>,
         /// Combined texture/sampler uniforms emitted by Tint's GLSL writer.
         combined_samplers: Vec<HalCombinedSampler>,
+        /// Uniform-buffer binding carrying GLSL texture metadata, if emitted.
+        texture_metadata_ubo_binding: Option<u32>,
     },
     /// Glsl variant.
     Glsl {
@@ -90,6 +92,8 @@ pub enum HalShaderSource {
         stage: HalShaderStage,
         /// Combined texture/sampler uniforms emitted by Tint's GLSL writer.
         combined_samplers: Vec<HalCombinedSampler>,
+        /// Uniform-buffer binding carrying GLSL texture metadata, if emitted.
+        texture_metadata_ubo_binding: Option<u32>,
     },
 }
 

@@ -441,27 +441,34 @@ impl Queue {
         let mut validation_error = None;
         for (index, command_buffer) in command_buffers.iter().enumerate() {
             if command_buffer.is_error() {
-                validation_error = Some("queue submit cannot use an error command buffer");
+                validation_error = Some(if let Some(message) = command_buffer.error_message() {
+                    format!("queue submit cannot use an error command buffer: {message}")
+                } else {
+                    "queue submit cannot use an error command buffer".to_owned()
+                });
                 break;
             }
             if command_buffer.is_submitted() {
-                validation_error = Some("command buffer cannot be submitted more than once");
+                validation_error =
+                    Some("command buffer cannot be submitted more than once".to_owned());
                 break;
             }
             if command_buffers[..index]
                 .iter()
                 .any(|previous| previous.same(command_buffer))
             {
-                validation_error = Some("command buffer cannot be submitted more than once");
+                validation_error =
+                    Some("command buffer cannot be submitted more than once".to_owned());
                 break;
             }
             for buffer in command_buffer.referenced_buffers() {
                 if buffer.map_state() != BufferMapState::Unmapped {
-                    validation_error = Some("queue submit cannot use a mapped buffer");
+                    validation_error = Some("queue submit cannot use a mapped buffer".to_owned());
                     break;
                 }
                 if buffer.is_destroyed() {
-                    validation_error = Some("queue submit cannot use a destroyed buffer");
+                    validation_error =
+                        Some("queue submit cannot use a destroyed buffer".to_owned());
                     break;
                 }
             }
@@ -470,7 +477,8 @@ impl Queue {
             }
             for texture in command_buffer.referenced_textures() {
                 if texture.is_destroyed() {
-                    validation_error = Some("queue submit cannot use a destroyed texture");
+                    validation_error =
+                        Some("queue submit cannot use a destroyed texture".to_owned());
                     break;
                 }
             }
@@ -479,7 +487,8 @@ impl Queue {
             }
             for query_set in command_buffer.referenced_query_sets() {
                 if query_set.is_destroyed() {
-                    validation_error = Some("queue submit cannot use a destroyed query set");
+                    validation_error =
+                        Some("queue submit cannot use a destroyed query set".to_owned());
                     break;
                 }
             }
@@ -488,7 +497,8 @@ impl Queue {
             }
             for texture in command_buffer_referenced_textures(command_buffer) {
                 if texture.is_destroyed() {
-                    validation_error = Some("queue submit cannot use a destroyed texture");
+                    validation_error =
+                        Some("queue submit cannot use a destroyed texture".to_owned());
                     break;
                 }
             }
@@ -2393,6 +2403,27 @@ fn fs() -> @location(0) vec4<f32> {
             None
         );
         assert_eq!(queue.submit(&[]), None);
+    }
+
+    #[test]
+    fn queue_submit_error_command_buffer_includes_recorded_finish_message() {
+        let device = noop_device();
+        let queue = device.queue();
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.record_validation_error("forced encoder error"),
+            None
+        );
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(finish_error, Some("forced encoder error".to_owned()));
+
+        let submit_error = queue
+            .submit(&[Arc::new(command_buffer)])
+            .expect("error command buffer must fail submit");
+        assert_eq!(
+            submit_error.message,
+            "queue submit cannot use an error command buffer: forced encoder error"
+        );
     }
 
     #[test]

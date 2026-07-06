@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use glow::HasContext;
 use parking_lot::Mutex;
 use parking_lot::MutexGuard;
 
@@ -10,13 +11,22 @@ use super::format::GlesColorRenderCaps;
 use super::instance::{EglInstanceState, GlesInstanceInner};
 use super::pipeline::{GlesComputePipeline, GlesRenderPipeline};
 use super::queue::GlesQueue;
-use super::sampler::GlesSampler;
+use super::sampler::{create_nearest_placeholder_sampler, GlesSampler};
 use super::texture::GlesTexture;
-use super::BACKEND;
+use super::{rebuild_hal_error, BACKEND};
 use crate::{
     HalBufferUsage, HalDescriptorBinding, HalError, HalRenderPipelineDescriptor,
     HalSamplerDescriptor, HalShaderSource, HalShaderStage, HalTextureDescriptor,
 };
+
+pub(super) type GlesSampleMaskIFn = unsafe extern "system" fn(u32, u32);
+
+pub(super) struct GlesDeviceCaps {
+    pub(super) supports_base_vertex: bool,
+    pub(super) color_render_caps: GlesColorRenderCaps,
+    pub(super) max_samples: i32,
+    pub(super) sample_mask_i: Option<GlesSampleMaskIFn>,
+}
 
 pub(super) enum GlesDeviceInner {
     Egl(EglDeviceState),
@@ -39,6 +49,15 @@ pub(super) struct EglDeviceState {
     /// (`GL_EXT_color_buffer_float` / `GL_EXT_color_buffer_half_float`);
     /// detected once at device creation (T-G12).
     pub(super) color_render_caps: GlesColorRenderCaps,
+    /// Maximum sample count reported by `GL_MAX_SAMPLES`.
+    pub(super) max_samples: i32,
+    /// GLES 3.1 core `glSampleMaski`; cached because glow 0.14 does not expose
+    /// a public wrapper on `HasContext`.
+    pub(super) sample_mask_i: Option<GlesSampleMaskIFn>,
+    /// Internal NEAREST sampler used for Tint placeholder combined samplers
+    /// emitted for samplerless textureLoad. Integer/stencil textures are
+    /// incomplete with the texture object's default LINEAR filtering.
+    pub(super) placeholder_sampler: Result<glow::Sampler, HalError>,
 }
 
 // SAFETY: All access to the EGL context and `glow::Context` goes through
@@ -52,6 +71,17 @@ unsafe impl Sync for GlesDeviceInner {}
 impl Drop for EglDeviceState {
     fn drop(&mut self) {
         if let GlesInstanceInner::Egl(egl_state) = self.instance.as_ref() {
+            let _ = egl_state.egl.make_current(
+                egl_state.display,
+                Some(self.surface),
+                Some(self.surface),
+                Some(self.context),
+            );
+            if let Ok(sampler) = self.placeholder_sampler.as_ref() {
+                unsafe {
+                    self.gl.delete_sampler(*sampler);
+                }
+            }
             let _ = egl_state
                 .egl
                 .make_current(egl_state.display, None, None, None);
@@ -112,6 +142,38 @@ impl GlesDeviceInner {
             Self::Egl(state) => state.color_render_caps,
             #[cfg(windows)]
             Self::Wgl(state) => state.color_render_caps,
+        }
+    }
+
+    pub(super) fn max_samples(&self) -> i32 {
+        match self {
+            Self::Egl(state) => state.max_samples,
+            #[cfg(windows)]
+            Self::Wgl(state) => state.max_samples,
+        }
+    }
+
+    pub(super) fn sample_mask_i(&self) -> Option<GlesSampleMaskIFn> {
+        match self {
+            Self::Egl(state) => state.sample_mask_i,
+            #[cfg(windows)]
+            Self::Wgl(state) => state.sample_mask_i,
+        }
+    }
+
+    pub(super) fn placeholder_sampler(&self) -> Result<glow::Sampler, HalError> {
+        match self {
+            Self::Egl(state) => state
+                .placeholder_sampler
+                .as_ref()
+                .copied()
+                .map_err(rebuild_hal_error),
+            #[cfg(windows)]
+            Self::Wgl(state) => state
+                .placeholder_sampler
+                .as_ref()
+                .copied()
+                .map_err(rebuild_hal_error),
         }
     }
 
@@ -193,9 +255,9 @@ impl GlesDevice {
         context: EglContext,
         surface: EglSurface,
         gl: glow::Context,
-        supports_base_vertex: bool,
-        color_render_caps: GlesColorRenderCaps,
+        caps: GlesDeviceCaps,
     ) -> Self {
+        let placeholder_sampler = unsafe { create_nearest_placeholder_sampler(&gl) };
         let inner = Arc::new(GlesDeviceInner::Egl(EglDeviceState {
             instance,
             context,
@@ -203,8 +265,11 @@ impl GlesDevice {
             gl,
             current_lock: Mutex::new(()),
             allocations: AtomicU64::new(0),
-            supports_base_vertex,
-            color_render_caps,
+            supports_base_vertex: caps.supports_base_vertex,
+            color_render_caps: caps.color_render_caps,
+            max_samples: caps.max_samples,
+            sample_mask_i: caps.sample_mask_i,
+            placeholder_sampler,
         }));
         let queue = GlesQueue::new(Arc::clone(&inner));
         Self { inner, queue }
@@ -245,7 +310,9 @@ impl GlesDevice {
         descriptor: &HalTextureDescriptor,
     ) -> Result<GlesTexture, HalError> {
         self.inner.allocation_increment();
-        Ok(GlesTexture::new(Arc::clone(&self.inner), descriptor))
+        let texture = GlesTexture::new(Arc::clone(&self.inner), descriptor);
+        texture.raw_or_err()?;
+        Ok(texture)
     }
 
     /// Creates a sampler matching the given descriptor.
@@ -267,6 +334,7 @@ impl GlesDevice {
             source,
             stage: HalShaderStage::Compute,
             combined_samplers,
+            texture_metadata_ubo_binding,
         } = shader
         else {
             return Err(HalError::ShaderCompilationFailed {
@@ -280,6 +348,7 @@ impl GlesDevice {
             workgroup_size,
             bindings,
             combined_samplers,
+            texture_metadata_ubo_binding,
         )
     }
 
@@ -296,6 +365,7 @@ impl GlesDevice {
             vertex,
             fragment,
             combined_samplers,
+            texture_metadata_ubo_binding,
         } = shader
         else {
             return Err(HalError::ShaderCompilationFailed {
@@ -310,6 +380,7 @@ impl GlesDevice {
             descriptor.clone(),
             bindings,
             combined_samplers,
+            texture_metadata_ubo_binding,
         )
     }
 }

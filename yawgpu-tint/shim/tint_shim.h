@@ -310,6 +310,8 @@ typedef struct {
     char* glsl;
     YawgpuTintCombinedSampler* combined_samplers;
     size_t n_combined_samplers;
+    bool has_texture_metadata_ubo;
+    uint32_t texture_metadata_ubo_binding;
 } YawgpuTintGlslOutput;
 
 /* `user_immediate_size` is the owning pipeline layout's reserved

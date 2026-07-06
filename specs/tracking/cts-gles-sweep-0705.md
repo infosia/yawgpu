@@ -271,3 +271,31 @@ Verification loop per slice: unit gates → target-gles release rebuild →
 targeted CTS file(s) → full-area re-measure → commit. CTS runs:
 workers=2, one GPU process at a time, never stack GPU loads
 (see memory: no-heavy-load-on-this-host).
+
+## 2026-07-06 Codex-agent session: MSAA + the sample_mask onion (T-G15..T-G18)
+
+Landed in one interleaved change set (commit below):
+- T-G15 MSAA: glTexStorage2DMultisample textures, MSAA passes,
+  glBlitFramebuffer resolve, glSampleMaski sample mask,
+  alpha-to-coverage; real-EGL resolve/mask tests.
+- T-G16 diagnosability: CommandBuffer/BindGroup/TextureView retain
+  their creation/finish error message; submit and setBindGroup errors
+  append it ("...: <original>"). This peeled a 4-layer error onion that
+  was previously a single opaque "error command buffer" (CTS harness
+  keeps only the LAST uncaptured error — harness.cpp:349).
+- T-G17: Tint texture_builtins_from_uniform metadata UBO exposed
+  through the shim and bound by GLES pipelines (textureLoad with
+  explicit binding remaps previously failed pipeline creation with
+  Codegen("texture missing from texture_builtins_from_uniform list")).
+- T-G18: depth/stencil format mappings (depth16..depth32f-stencil8,
+  stencil8 gated on OES_texture_stencil8), DEPTH_STENCIL_TEXTURE_MODE
+  aspect binding, and a per-device internal NEAREST placeholder
+  sampler — placeholder (samplerless textureLoad) bindings previously
+  left default LINEAR filtering on integer/stencil textures, making
+  them incomplete (reads returned 0; llvmpipe confirmed it was not a
+  driver quirk).
+
+CTS render_pipeline dir: pass 36 -> 366, fail 3,029 -> 2,699 (rest is
+MSAA per-sample behavioural correctness in the huge sample_mask file).
+Next: rerun full api,validation + api,operation ledgers, then the
+remaining campaign order stands.

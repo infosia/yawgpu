@@ -62,6 +62,23 @@ impl GlesSampler {
     }
 }
 
+pub(super) unsafe fn create_nearest_placeholder_sampler(
+    gl: &glow::Context,
+) -> Result<glow::Sampler, HalError> {
+    let sampler = gl
+        .create_sampler()
+        .map_err(|_| HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "glCreateSampler failed for GLES placeholder sampler",
+        })?;
+    gl.sampler_parameter_i32(sampler, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+    gl.sampler_parameter_i32(sampler, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+    gl.sampler_parameter_i32(sampler, glow::TEXTURE_WRAP_R, glow::CLAMP_TO_EDGE as i32);
+    gl.sampler_parameter_i32(sampler, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+    gl.sampler_parameter_i32(sampler, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+    Ok(sampler)
+}
+
 fn allocate_sampler(
     device: &Arc<GlesDeviceInner>,
     descriptor: &HalSamplerDescriptor,

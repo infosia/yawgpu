@@ -349,7 +349,10 @@ impl Texture {
             validate_texture_view_descriptor(self, &resolved)
         };
         let is_error = error.is_some();
-        (TextureView::new(self.clone(), resolved, is_error), error)
+        (
+            TextureView::new(self.clone(), resolved, is_error, error.map(str::to_owned)),
+            error,
+        )
     }
 
     /// Fills in the defaulted fields of a texture-view descriptor against this texture.

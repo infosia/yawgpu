@@ -168,6 +168,7 @@ pub(crate) struct TextureViewInner {
     pub(crate) usage: TextureUsage,
     pub(crate) swizzle: TextureComponentSwizzle,
     pub(crate) is_error: bool,
+    pub(crate) error_message: Option<String>,
 }
 
 impl TextureView {
@@ -176,6 +177,7 @@ impl TextureView {
         texture: Texture,
         descriptor: ResolvedTextureViewDescriptor,
         is_error: bool,
+        error_message: Option<String>,
     ) -> Self {
         Self {
             inner: Arc::new(TextureViewInner {
@@ -190,6 +192,7 @@ impl TextureView {
                 usage: descriptor.usage,
                 swizzle: descriptor.swizzle,
                 is_error,
+                error_message,
             }),
         }
     }
@@ -198,6 +201,12 @@ impl TextureView {
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
+    }
+
+    /// Returns the diagnostic message that made this texture view an error object.
+    #[must_use]
+    pub fn error_message(&self) -> Option<&str> {
+        self.inner.error_message.as_deref()
     }
 
     /// Returns the texture.

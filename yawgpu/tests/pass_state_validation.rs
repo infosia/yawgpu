@@ -540,6 +540,117 @@ fn indirect_draw_and_dispatch_buffers_are_validated() {
     }
 }
 
+#[test]
+fn sample_mask_cts_depth_stencil_readback_flow_is_valid_on_noop() {
+    let test = ValidationTest::new();
+    unsafe {
+        for sample_count in [1, 4] {
+            let pipeline = create_depth_stencil_render_pipeline(&test, sample_count);
+            let color = create_texture(
+                test.device(),
+                native::WGPUTextureFormat_RGBA8Unorm,
+                native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_TextureBinding,
+                sample_count,
+            );
+            let color_view = yawgpu::wgpuTextureCreateView(color, std::ptr::null());
+            assert!(!color_view.is_null());
+            let depth_stencil = create_texture(
+                test.device(),
+                native::WGPUTextureFormat_Depth24PlusStencil8,
+                native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_TextureBinding,
+                sample_count,
+            );
+            let depth_stencil_view = yawgpu::wgpuTextureCreateView(depth_stencil, std::ptr::null());
+            assert!(!depth_stencil_view.is_null());
+
+            let encoder = create_encoder(&test);
+            let color_attachment = color_attachment(color_view);
+            let color_attachments = [color_attachment];
+            let depth_stencil_attachment = depth_stencil_attachment(depth_stencil_view);
+            let pass_descriptor = render_pass_descriptor_with_depth_stencil(
+                &color_attachments,
+                &depth_stencil_attachment,
+            );
+            test.clear_errors();
+            let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_descriptor);
+            assert!(!pass.is_null());
+            assert!(
+                test.errors().is_empty(),
+                "begin render pass errors: {:?}",
+                test.errors()
+            );
+            yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+            yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+            assert!(
+                test.errors().is_empty(),
+                "render command errors before end: {:?}",
+                test.errors()
+            );
+            yawgpu::wgpuRenderPassEncoderEnd(pass);
+            assert!(
+                test.errors().is_empty(),
+                "render pass end errors: {:?}",
+                test.errors()
+            );
+            let command_buffer = finish_ok(&test, encoder);
+            submit_ok(&test, command_buffer);
+            yawgpu::wgpuCommandBufferRelease(command_buffer);
+            yawgpu::wgpuRenderPassEncoderRelease(pass);
+            yawgpu::wgpuCommandEncoderRelease(encoder);
+
+            read_texture_view_with_compute(
+                &test,
+                color_view,
+                sample_count,
+                if sample_count == 1 {
+                    "texture_2d<f32>"
+                } else {
+                    "texture_multisampled_2d<f32>"
+                },
+                "f32",
+                4,
+            );
+
+            let depth_view = create_aspect_view(depth_stencil, native::WGPUTextureAspect_DepthOnly);
+            read_texture_view_with_compute(
+                &test,
+                depth_view,
+                sample_count,
+                if sample_count == 1 {
+                    "texture_depth_2d"
+                } else {
+                    "texture_depth_multisampled_2d"
+                },
+                "f32",
+                1,
+            );
+            yawgpu::wgpuTextureViewRelease(depth_view);
+
+            let stencil_view =
+                create_aspect_view(depth_stencil, native::WGPUTextureAspect_StencilOnly);
+            read_texture_view_with_compute(
+                &test,
+                stencil_view,
+                sample_count,
+                if sample_count == 1 {
+                    "texture_2d<u32>"
+                } else {
+                    "texture_multisampled_2d<u32>"
+                },
+                "u32",
+                1,
+            );
+            yawgpu::wgpuTextureViewRelease(stencil_view);
+
+            yawgpu::wgpuTextureViewRelease(depth_stencil_view);
+            yawgpu::wgpuTextureRelease(depth_stencil);
+            yawgpu::wgpuTextureViewRelease(color_view);
+            yawgpu::wgpuTextureRelease(color);
+            yawgpu::wgpuRenderPipelineRelease(pipeline);
+        }
+    }
+}
+
 unsafe fn assert_render_pass_ok<F>(test: &ValidationTest, commands: F)
 where
     F: FnOnce(native::WGPURenderPassEncoder),
@@ -633,6 +744,19 @@ unsafe fn finish_ok(
     command_buffer
 }
 
+unsafe fn submit_ok(test: &ValidationTest, command_buffer: native::WGPUCommandBuffer) {
+    let queue = yawgpu::wgpuDeviceGetQueue(test.device());
+    assert!(!queue.is_null());
+    test.clear_errors();
+    yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+    assert!(
+        test.errors().is_empty(),
+        "unexpected submit errors: {:?}",
+        test.errors()
+    );
+    yawgpu::wgpuQueueRelease(queue);
+}
+
 unsafe fn finish_error(
     test: &ValidationTest,
     encoder: native::WGPUCommandEncoder,
@@ -652,6 +776,75 @@ unsafe fn create_encoder(test: &ValidationTest) -> native::WGPUCommandEncoder {
     let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(test.device(), std::ptr::null());
     assert!(!encoder.is_null());
     encoder
+}
+
+unsafe fn read_texture_view_with_compute(
+    test: &ValidationTest,
+    view: native::WGPUTextureView,
+    sample_count: u32,
+    texture_type: &str,
+    value_type: &str,
+    components: u32,
+) {
+    let shader = readback_shader(texture_type, value_type, sample_count, components);
+    let pipeline = create_compute_pipeline(test, &shader, None);
+    let layout = yawgpu::wgpuComputePipelineGetBindGroupLayout(pipeline, 0);
+    assert!(!layout.is_null());
+    let buffer = create_buffer(
+        test.device(),
+        native::WGPUBufferUsage_Storage | native::WGPUBufferUsage_CopySrc,
+        u64::from(sample_count) * u64::from(components) * 4,
+    );
+    let entries = [
+        texture_view_binding(0, view),
+        buffer_binding(
+            1,
+            buffer,
+            0,
+            u64::from(sample_count) * u64::from(components) * 4,
+        ),
+    ];
+    test.clear_errors();
+    let bind_group = create_bind_group(test.device(), layout, &entries);
+    assert!(
+        test.errors().is_empty(),
+        "bind group errors: {:?}",
+        test.errors()
+    );
+
+    let encoder = create_encoder(test);
+    test.clear_errors();
+    let pass = yawgpu::wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+    assert!(!pass.is_null());
+    assert!(
+        test.errors().is_empty(),
+        "begin compute pass errors: {:?}",
+        test.errors()
+    );
+    yawgpu::wgpuComputePassEncoderSetPipeline(pass, pipeline);
+    yawgpu::wgpuComputePassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+    yawgpu::wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
+    assert!(
+        test.errors().is_empty(),
+        "compute command errors before end: {:?}",
+        test.errors()
+    );
+    yawgpu::wgpuComputePassEncoderEnd(pass);
+    assert!(
+        test.errors().is_empty(),
+        "compute pass end errors: {:?}",
+        test.errors()
+    );
+    let command_buffer = finish_ok(test, encoder);
+    submit_ok(test, command_buffer);
+
+    yawgpu::wgpuCommandBufferRelease(command_buffer);
+    yawgpu::wgpuComputePassEncoderRelease(pass);
+    yawgpu::wgpuCommandEncoderRelease(encoder);
+    yawgpu::wgpuBindGroupRelease(bind_group);
+    yawgpu::wgpuBufferRelease(buffer);
+    yawgpu::wgpuBindGroupLayoutRelease(layout);
+    yawgpu::wgpuComputePipelineRelease(pipeline);
 }
 
 unsafe fn create_render_pipeline(
@@ -717,6 +910,79 @@ unsafe fn create_render_pipeline_with_primitive(
     assert!(
         test.errors().is_empty(),
         "unexpected render pipeline errors: {:?}",
+        test.errors()
+    );
+    yawgpu::wgpuShaderModuleRelease(fragment_module);
+    yawgpu::wgpuShaderModuleRelease(vertex_module);
+    pipeline
+}
+
+unsafe fn create_depth_stencil_render_pipeline(
+    test: &ValidationTest,
+    sample_count: u32,
+) -> native::WGPURenderPipeline {
+    let vertex_module = create_wgsl_module(test.device(), render_no_input());
+    let fragment_module = create_wgsl_module(test.device(), fragment_source());
+    let color_target = native::WGPUColorTargetState {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        blend: std::ptr::null(),
+        writeMask: native::WGPUColorWriteMask_All,
+    };
+    let fragment = native::WGPUFragmentState {
+        nextInChain: std::ptr::null_mut(),
+        module: fragment_module,
+        entryPoint: empty_string_view(),
+        constantCount: 0,
+        constants: std::ptr::null(),
+        targetCount: 1,
+        targets: &color_target,
+    };
+    let stencil = native::WGPUStencilFaceState {
+        compare: native::WGPUCompareFunction_Always,
+        failOp: native::WGPUStencilOperation_Keep,
+        depthFailOp: native::WGPUStencilOperation_Keep,
+        passOp: native::WGPUStencilOperation_Replace,
+    };
+    let depth_stencil = native::WGPUDepthStencilState {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUTextureFormat_Depth24PlusStencil8,
+        depthWriteEnabled: native::WGPUOptionalBool_True,
+        depthCompare: native::WGPUCompareFunction_Always,
+        stencilFront: stencil,
+        stencilBack: stencil,
+        stencilReadMask: 0xff,
+        stencilWriteMask: 0xff,
+        depthBias: 0,
+        depthBiasSlopeScale: 0.0,
+        depthBiasClamp: 0.0,
+    };
+    let mut multisample = default_multisample();
+    multisample.count = sample_count;
+    let descriptor = native::WGPURenderPipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout: std::ptr::null(),
+        vertex: native::WGPUVertexState {
+            nextInChain: std::ptr::null_mut(),
+            module: vertex_module,
+            entryPoint: empty_string_view(),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            bufferCount: 0,
+            buffers: std::ptr::null(),
+        },
+        primitive: default_primitive(),
+        depthStencil: &depth_stencil,
+        multisample,
+        fragment: &fragment,
+    };
+    test.clear_errors();
+    let pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(test.device(), &descriptor);
+    assert!(!pipeline.is_null());
+    assert!(
+        test.errors().is_empty(),
+        "unexpected depth/stencil render pipeline errors: {:?}",
         test.errors()
     );
     yawgpu::wgpuShaderModuleRelease(fragment_module);
@@ -834,6 +1100,33 @@ unsafe fn create_buffer(
     buffer
 }
 
+unsafe fn create_texture(
+    device: native::WGPUDevice,
+    format: native::WGPUTextureFormat,
+    usage: native::WGPUTextureUsage,
+    sample_count: u32,
+) -> native::WGPUTexture {
+    let descriptor = native::WGPUTextureDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage,
+        dimension: native::WGPUTextureDimension_2D,
+        size: native::WGPUExtent3D {
+            width: 4,
+            height: 4,
+            depthOrArrayLayers: 1,
+        },
+        format,
+        mipLevelCount: 1,
+        sampleCount: sample_count,
+        viewFormatCount: 0,
+        viewFormats: std::ptr::null(),
+    };
+    let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+    assert!(!texture.is_null());
+    texture
+}
+
 struct RenderTarget {
     texture: native::WGPUTexture,
     view: native::WGPUTextureView,
@@ -882,6 +1175,21 @@ fn render_pass_descriptor(
     }
 }
 
+fn render_pass_descriptor_with_depth_stencil<'a>(
+    attachments: &'a [native::WGPURenderPassColorAttachment],
+    depth_stencil: &'a native::WGPURenderPassDepthStencilAttachment,
+) -> native::WGPURenderPassDescriptor {
+    native::WGPURenderPassDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        colorAttachmentCount: attachments.len(),
+        colorAttachments: attachments.as_ptr(),
+        depthStencilAttachment: depth_stencil,
+        occlusionQuerySet: std::ptr::null(),
+        timestampWrites: std::ptr::null(),
+    }
+}
+
 fn color_attachment(view: native::WGPUTextureView) -> native::WGPURenderPassColorAttachment {
     native::WGPURenderPassColorAttachment {
         nextInChain: std::ptr::null_mut(),
@@ -896,6 +1204,23 @@ fn color_attachment(view: native::WGPUTextureView) -> native::WGPURenderPassColo
             b: 0.0,
             a: 0.0,
         },
+    }
+}
+
+fn depth_stencil_attachment(
+    view: native::WGPUTextureView,
+) -> native::WGPURenderPassDepthStencilAttachment {
+    native::WGPURenderPassDepthStencilAttachment {
+        nextInChain: std::ptr::null_mut(),
+        view,
+        depthLoadOp: native::WGPULoadOp_Clear,
+        depthStoreOp: native::WGPUStoreOp_Store,
+        depthReadOnly: 0,
+        depthClearValue: 1.0,
+        stencilLoadOp: native::WGPULoadOp_Clear,
+        stencilStoreOp: native::WGPUStoreOp_Store,
+        stencilReadOnly: 0,
+        stencilClearValue: 0,
     }
 }
 
@@ -914,6 +1239,42 @@ fn buffer_binding(
         sampler: std::ptr::null(),
         textureView: std::ptr::null(),
     }
+}
+
+fn texture_view_binding(
+    binding: u32,
+    texture_view: native::WGPUTextureView,
+) -> native::WGPUBindGroupEntry {
+    native::WGPUBindGroupEntry {
+        nextInChain: std::ptr::null_mut(),
+        binding,
+        buffer: std::ptr::null(),
+        offset: 0,
+        size: 0,
+        sampler: std::ptr::null(),
+        textureView: texture_view,
+    }
+}
+
+unsafe fn create_aspect_view(
+    texture: native::WGPUTexture,
+    aspect: native::WGPUTextureAspect,
+) -> native::WGPUTextureView {
+    let descriptor = native::WGPUTextureViewDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        format: native::WGPUTextureFormat_Undefined,
+        dimension: native::WGPUTextureViewDimension_Undefined,
+        baseMipLevel: 0,
+        mipLevelCount: 1,
+        baseArrayLayer: 0,
+        arrayLayerCount: 1,
+        aspect,
+        usage: native::WGPUTextureUsage_TextureBinding,
+    };
+    let view = yawgpu::wgpuTextureCreateView(texture, &descriptor);
+    assert!(!view.is_null());
+    view
 }
 
 fn uniform_layout(
@@ -1069,6 +1430,47 @@ fn render_vertex_instance_input() -> &'static str {
 
 fn render_no_input() -> &'static str {
     "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }"
+}
+
+fn readback_shader(
+    texture_type: &str,
+    value_type: &str,
+    sample_count: u32,
+    components: u32,
+) -> String {
+    let mut shader = format!(
+        "@group(0) @binding(0) var src: {texture_type};\n\
+         @group(0) @binding(1) var<storage, read_write> dst: array<{value_type}>;\n\
+         @compute @workgroup_size(1) fn main() {{\n"
+    );
+    for sample in 0..sample_count {
+        if texture_type.contains("multisampled") {
+            shader.push_str(&format!(
+                "  let v{sample} = textureLoad(src, vec2<i32>(0, 0), {sample});\n"
+            ));
+        } else {
+            shader.push_str(&format!(
+                "  let v{sample} = textureLoad(src, vec2<i32>(0, 0), 0);\n"
+            ));
+        }
+        if components == 1
+            && (texture_type == "texture_depth_2d"
+                || texture_type == "texture_depth_multisampled_2d")
+        {
+            shader.push_str(&format!("  dst[{sample}] = v{sample};\n"));
+        } else if components == 1 {
+            shader.push_str(&format!("  dst[{sample}] = v{sample}.r;\n"));
+        } else {
+            for component in 0..components {
+                shader.push_str(&format!(
+                    "  dst[{}] = v{sample}[{component}];\n",
+                    sample * components + component
+                ));
+            }
+        }
+    }
+    shader.push_str("}\n");
+    shader
 }
 
 fn render_auto_a() -> &'static str {

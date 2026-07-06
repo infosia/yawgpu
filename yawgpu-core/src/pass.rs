@@ -1346,7 +1346,11 @@ pub(crate) fn validate_set_bind_group(
         return Err("clearing a bind group must not include dynamic offsets".to_owned());
     };
     if group.is_error() {
-        return Err("cannot set an error bind group".to_owned());
+        return Err(if let Some(message) = group.error_message() {
+            format!("cannot set an error bind group: {message}")
+        } else {
+            "cannot set an error bind group".to_owned()
+        });
     }
     validate_dynamic_offsets(group.layout(), group, dynamic_offsets, limits)
 }

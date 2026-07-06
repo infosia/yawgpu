@@ -463,6 +463,7 @@ pub(crate) fn select_compute_shader_source(
                     source: generated.source,
                     stage: yawgpu_hal::HalShaderStage::Compute,
                     combined_samplers: generated.combined_samplers,
+                    texture_metadata_ubo_binding: generated.texture_metadata_ubo_binding,
                 },
                 generated.entry_point,
                 hal_descriptor_bindings(metal_bindings),
@@ -2477,6 +2478,7 @@ fn cs() {
             source,
             stage: yawgpu_hal::HalShaderStage::Compute,
             combined_samplers,
+            texture_metadata_ubo_binding,
         } = source
         else {
             panic!("GLES should select compute GLSL");
@@ -2484,6 +2486,7 @@ fn cs() {
         assert_eq!(entry, "cs");
         assert!(bindings.is_empty());
         assert!(combined_samplers.is_empty());
+        assert_eq!(texture_metadata_ubo_binding, None);
         assert!(source.contains("#version 310 es"));
         assert!(source.contains("local_size_x = 2"));
     }

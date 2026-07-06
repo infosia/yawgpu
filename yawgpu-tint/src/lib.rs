@@ -165,6 +165,9 @@ pub struct GlslOutput {
     pub source: String,
     /// Combined texture/sampler uniforms emitted by Tint's GLSL writer.
     pub combined_samplers: Vec<CombinedSampler>,
+    /// GLES uniform-buffer binding carrying texture metadata for robust
+    /// `textureLoad` lowering, when Tint emitted one.
+    pub texture_metadata_ubo_binding: Option<u32>,
 }
 
 /// A GLSL combined texture/sampler uniform and the WGSL bindings it represents.
@@ -1311,13 +1314,17 @@ mod real {
         glsl: *mut c_char,
         combined_samplers: *mut RawCombinedSampler,
         n_combined_samplers: usize,
+        has_texture_metadata_ubo: bool,
+        texture_metadata_ubo_binding: u32,
     }
 
     const _: () = {
-        assert!(core::mem::size_of::<RawGlslOutput>() == 24);
+        assert!(core::mem::size_of::<RawGlslOutput>() == 32);
         assert!(core::mem::offset_of!(RawGlslOutput, glsl) == 0);
         assert!(core::mem::offset_of!(RawGlslOutput, combined_samplers) == 8);
         assert!(core::mem::offset_of!(RawGlslOutput, n_combined_samplers) == 16);
+        assert!(core::mem::offset_of!(RawGlslOutput, has_texture_metadata_ubo) == 24);
+        assert!(core::mem::offset_of!(RawGlslOutput, texture_metadata_ubo_binding) == 28);
     };
 
     extern "C" {
@@ -1607,6 +1614,9 @@ mod real {
             GlslOutput {
                 source,
                 combined_samplers,
+                texture_metadata_ubo_binding: raw
+                    .has_texture_metadata_ubo
+                    .then_some(raw.texture_metadata_ubo_binding),
             }
         }
     }
@@ -2181,6 +2191,8 @@ mod real {
                 glsl: ptr::null_mut(),
                 combined_samplers: ptr::null_mut(),
                 n_combined_samplers: 0,
+                has_texture_metadata_ubo: false,
+                texture_metadata_ubo_binding: 0,
             };
             let mut err = ptr::null_mut();
             // SAFETY: all pointers are valid for the duration of the call.
@@ -2744,6 +2756,144 @@ fn vs(@builtin(instance_index) ii: u32, @builtin(vertex_index) vi: u32) -> @buil
             glsl_with.contains("gl_InstanceID"),
             "instance_index is still sourced from gl_InstanceID, just offset: {glsl_with}"
         );
+    }
+
+    #[test]
+    fn generate_glsl_sample_mask_output_emits_sample_variables_extension() {
+        let wgsl = r#"
+@fragment
+fn fs() -> @builtin(sample_mask) u32 {
+  return 1u;
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let glsl = program
+            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .unwrap()
+            .source;
+        assert!(
+            glsl.contains("#extension GL_OES_sample_variables"),
+            "GLSL:\n{glsl}"
+        );
+        assert!(glsl.contains("gl_SampleMask"), "GLSL:\n{glsl}");
+    }
+
+    #[test]
+    fn generate_glsl_sample_mask_input_emits_sample_variables_extension() {
+        let wgsl = r#"
+@fragment
+fn fs(@builtin(sample_mask) mask_in: u32) -> @location(0) vec4f {
+  if ((mask_in & 1u) != 0u) {
+    return vec4f(1.0, 0.0, 0.0, 1.0);
+  }
+  return vec4f(0.0, 0.0, 0.0, 1.0);
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let glsl = program
+            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .unwrap()
+            .source;
+        assert!(
+            glsl.contains("#extension GL_OES_sample_variables"),
+            "GLSL:\n{glsl}"
+        );
+        assert!(glsl.contains("gl_SampleMaskIn"), "GLSL:\n{glsl}");
+    }
+
+    #[test]
+    fn generate_glsl_multisampled_texture_load_uses_texel_fetch_sample_index() {
+        let wgsl = r#"
+@group(0) @binding(0) var t: texture_multisampled_2d<f32>;
+
+@fragment
+fn fs(@builtin(sample_index) sample_index: u32) -> @location(0) vec4f {
+  return textureLoad(t, vec2i(0, 0), sample_index);
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let glsl = program
+            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .unwrap()
+            .source;
+        assert!(glsl.contains("sampler2DMS"), "GLSL:\n{glsl}");
+        assert!(glsl.contains("texelFetch"), "GLSL:\n{glsl}");
+        assert!(glsl.contains("gl_SampleID"), "GLSL:\n{glsl}");
+    }
+
+    #[test]
+    fn generate_glsl_cts_readback_compute_variants_with_explicit_remaps() {
+        for (texture_type, value_type, sample_count) in [
+            ("texture_2d<f32>", "f32", 1u32),
+            ("texture_depth_2d", "f32", 1),
+            ("texture_2d<u32>", "u32", 1),
+            ("texture_multisampled_2d<f32>", "f32", 4),
+            ("texture_depth_multisampled_2d", "f32", 4),
+            ("texture_multisampled_2d<u32>", "u32", 4),
+        ] {
+            let mut wgsl = format!(
+                "@group(0) @binding(0) var src: {texture_type};\n\
+                 @group(0) @binding(1) var<storage, read_write> dst: array<{value_type}>;\n\
+                 @compute @workgroup_size(1) fn main() {{\n"
+            );
+            for sample in 0..sample_count {
+                if texture_type.contains("multisampled") {
+                    wgsl.push_str(&format!(
+                        "  let v{sample} = textureLoad(src, vec2<i32>(0, 0), {sample});\n"
+                    ));
+                } else {
+                    wgsl.push_str(&format!(
+                        "  let v{sample} = textureLoad(src, vec2<i32>(0, 0), 0);\n"
+                    ));
+                }
+                if texture_type == "texture_depth_2d"
+                    || texture_type == "texture_depth_multisampled_2d"
+                {
+                    wgsl.push_str(&format!("  dst[{sample}] = v{sample};\n"));
+                } else {
+                    wgsl.push_str(&format!("  dst[{sample}] = v{sample}.r;\n"));
+                }
+            }
+            wgsl.push_str("}\n");
+            let program = Program::parse(&wgsl, false, false, false, false, false, &[]).unwrap();
+            let mut bindings = Bindings::default();
+            bindings.texture.push(BindingRemap {
+                group: 0,
+                binding: 0,
+                dst_group: 0,
+                dst_binding: 0,
+            });
+            bindings.storage.push(BindingRemap {
+                group: 0,
+                binding: 1,
+                dst_group: 0,
+                dst_binding: 1,
+            });
+            let output = program.generate_glsl("main", &bindings, &[], None).unwrap();
+            assert!(
+                output.source.contains("TintTextureUniformData"),
+                "GLSL for {texture_type}:\n{}",
+                output.source
+            );
+            assert_eq!(output.texture_metadata_ubo_binding, Some(0));
+            assert_eq!(output.combined_samplers.len(), 1);
+            assert!(output.combined_samplers[0].uses_placeholder_sampler);
+            assert!(
+                output.source.contains(if texture_type.contains("<u32>") {
+                    if texture_type.contains("multisampled") {
+                        "usampler2DMS"
+                    } else {
+                        "usampler2D"
+                    }
+                } else if texture_type.contains("multisampled") {
+                    "sampler2DMS"
+                } else {
+                    "sampler2D"
+                }),
+                "GLSL for {texture_type}:\n{}",
+                output.source
+            );
+        }
     }
 
     #[test]

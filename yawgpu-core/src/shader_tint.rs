@@ -368,6 +368,7 @@ impl ReflectedModule {
                     .into_iter()
                     .map(hal_combined_sampler)
                     .collect(),
+                texture_metadata_ubo_binding: source.texture_metadata_ubo_binding,
             })
         })();
         cache.insert(key, generated.clone());

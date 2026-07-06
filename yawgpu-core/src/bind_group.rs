@@ -72,6 +72,7 @@ pub(crate) struct BindGroupInner {
     pub(crate) _layout: Arc<BindGroupLayout>,
     pub(crate) _entries: Vec<BindGroupEntry>,
     pub(crate) is_error: bool,
+    pub(crate) error_message: Option<String>,
 }
 
 impl BindGroup {
@@ -80,12 +81,14 @@ impl BindGroup {
         layout: Arc<BindGroupLayout>,
         entries: Vec<BindGroupEntry>,
         is_error: bool,
+        error_message: Option<String>,
     ) -> Self {
         Self {
             inner: Arc::new(BindGroupInner {
                 _layout: layout,
                 _entries: entries,
                 is_error,
+                error_message,
             }),
         }
     }
@@ -94,6 +97,12 @@ impl BindGroup {
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
+    }
+
+    /// Returns the diagnostic message that made this bind group an error object.
+    #[must_use]
+    pub fn error_message(&self) -> Option<&str> {
+        self.inner.error_message.as_deref()
     }
 
     /// Returns the layout.
@@ -417,7 +426,11 @@ pub(crate) fn validate_bind_group_texture(
         return Some("bind group texture view must belong to the same device".to_owned());
     }
     if texture_view.is_error() {
-        return Some("bind group texture view must not be an error texture view".to_owned());
+        return Some(if let Some(message) = texture_view.error_message() {
+            format!("bind group texture view must not be an error texture view: {message}")
+        } else {
+            "bind group texture view must not be an error texture view".to_owned()
+        });
     }
     let texture = texture_view.texture();
     // Destroyed-texture check is intentionally deferred to queue.submit time
@@ -520,7 +533,11 @@ pub(crate) fn validate_bind_group_storage_texture(
         return Some("bind group texture view must belong to the same device".to_owned());
     }
     if texture_view.is_error() {
-        return Some("bind group texture view must not be an error texture view".to_owned());
+        return Some(if let Some(message) = texture_view.error_message() {
+            format!("bind group texture view must not be an error texture view: {message}")
+        } else {
+            "bind group texture view must not be an error texture view".to_owned()
+        });
     }
     if !texture_view.swizzle().is_identity() {
         return Some(
@@ -807,6 +824,50 @@ mod tests {
                 false,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn bind_group_texture_view_error_includes_view_creation_reason() {
+        let device = noop_device();
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::TEXTURE_BINDING,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D3),
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(error, Some("2D textures require 2D-compatible views"));
+        assert_eq!(
+            validate_bind_group_texture(
+                &device,
+                &device,
+                &view,
+                TextureSampleType::UnfilterableFloat,
+                TextureViewDimension::D3,
+                false,
+            ),
+            Some(
+                "bind group texture view must not be an error texture view: 2D textures require 2D-compatible views"
+                    .to_owned()
+            )
         );
     }
 

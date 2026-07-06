@@ -626,12 +626,16 @@ static_assert(offsetof(YawgpuTintCombinedSampler, sampler_binding) == 20,
               "YawgpuTintCombinedSampler layout changed");
 static_assert(offsetof(YawgpuTintCombinedSampler, uses_placeholder_sampler) == 24,
               "YawgpuTintCombinedSampler layout changed");
-static_assert(sizeof(YawgpuTintGlslOutput) == 24, "YawgpuTintGlslOutput layout changed");
+static_assert(sizeof(YawgpuTintGlslOutput) == 32, "YawgpuTintGlslOutput layout changed");
 static_assert(offsetof(YawgpuTintGlslOutput, glsl) == 0,
               "YawgpuTintGlslOutput layout changed");
 static_assert(offsetof(YawgpuTintGlslOutput, combined_samplers) == 8,
               "YawgpuTintGlslOutput layout changed");
 static_assert(offsetof(YawgpuTintGlslOutput, n_combined_samplers) == 16,
+              "YawgpuTintGlslOutput layout changed");
+static_assert(offsetof(YawgpuTintGlslOutput, has_texture_metadata_ubo) == 24,
+              "YawgpuTintGlslOutput layout changed");
+static_assert(offsetof(YawgpuTintGlslOutput, texture_metadata_ubo_binding) == 28,
               "YawgpuTintGlslOutput layout changed");
 static_assert(tint::inspector::kImmediateSlotCount <= 64,
               "Immediate block bitmask no longer fits in uint64_t");
@@ -777,6 +781,8 @@ bool make_combined_samplers(const YawgpuTintProgram* program,
                             tint::BindingPoint placeholder_sampler,
                             tint::glsl::writer::CombinedTextureSamplerInfo* sampler_texture_to_name,
                             std::vector<YawgpuTintCombinedSampler>* combined_samplers,
+                            tint::glsl::writer::TextureBuiltinsFromUniformOptions*
+                                texture_builtins_from_uniform,
                             char** err) {
     std::lock_guard<std::mutex> lock(program->reflection_mutex);
     tint::inspector::Inspector inspector(program->program);
@@ -798,6 +804,13 @@ bool make_combined_samplers(const YawgpuTintProgram* program,
             tint::glsl::writer::CombinedTextureSamplerPair{remapped_texture, remapped_sampler,
                                                            false},
             name);
+        if (texture_builtins_from_uniform != nullptr) {
+            texture_builtins_from_uniform->ubo_contents.push_back(
+                {.offset = static_cast<uint32_t>(
+                     texture_builtins_from_uniform->ubo_contents.size()),
+                 .count = 1,
+                 .binding = remapped_texture});
+        }
         combined_samplers->push_back(YawgpuTintCombinedSampler{
             /*glsl_uniform_name=*/dup_string(name),
             /*texture_group=*/pair.texture_binding_point.group,
@@ -812,6 +825,16 @@ bool make_combined_samplers(const YawgpuTintProgram* program,
         }
     }
     return true;
+}
+
+uint32_t next_uniform_ubo_binding(const tint::Bindings& bindings) {
+    uint32_t next = 0;
+    for (const auto& entry : bindings.uniform) {
+        if (entry.second.group == 0 && entry.second.binding >= next) {
+            next = entry.second.binding + 1;
+        }
+    }
+    return next;
 }
 
 tint::VertexFormat to_tint_vertex_format(uint8_t format) {
@@ -2167,6 +2190,8 @@ bool yawgpu_tint_generate_glsl(const YawgpuTintProgram* program,
         out->glsl = nullptr;
         out->combined_samplers = nullptr;
         out->n_combined_samplers = 0;
+        out->has_texture_metadata_ubo = false;
+        out->texture_metadata_ubo_binding = 0;
     }
     try {
         if (program == nullptr || out == nullptr) {
@@ -2202,13 +2227,28 @@ bool yawgpu_tint_generate_glsl(const YawgpuTintProgram* program,
             .binding = 0,
         };
         options.placeholder_sampler_bind_point = placeholder_sampler;
+        if (!all_remaps_empty(bindings)) {
+            options.texture_builtins_from_uniform.ubo_binding = {
+                .group = 0,
+                .binding = next_uniform_ubo_binding(resolved_bindings),
+            };
+        }
         std::vector<YawgpuTintCombinedSampler> combined_samplers;
         if (!make_combined_samplers(program, entry_point, resolved_bindings, placeholder_sampler,
-                                    &options.sampler_texture_to_name, &combined_samplers, err)) {
+                                    &options.sampler_texture_to_name, &combined_samplers,
+                                    all_remaps_empty(bindings)
+                                        ? nullptr
+                                        : &options.texture_builtins_from_uniform,
+                                    err)) {
             for (auto& combined : combined_samplers) {
                 std::free(combined.glsl_uniform_name);
             }
             return false;
+        }
+        if (!options.texture_builtins_from_uniform.ubo_contents.empty()) {
+            out->has_texture_metadata_ubo = true;
+            out->texture_metadata_ubo_binding =
+                options.texture_builtins_from_uniform.ubo_binding.binding;
         }
         auto override_cfg = make_override_config(program, ov, n_ov);
         if (override_cfg != tint::Success) {

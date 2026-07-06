@@ -1176,6 +1176,49 @@ fn cs() {
     }
 
     #[test]
+    fn compute_pass_encoder_error_bind_group_includes_creation_reason() {
+        let device = noop_device();
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_COMPUTE,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: 4,
+                }),
+            }],
+            error: None,
+        }));
+        let group = Arc::new(device.create_bind_group(layout, Vec::new()));
+        assert!(group.is_error());
+        assert_eq!(
+            group.error_message(),
+            Some("bind group entry count must match bind group layout")
+        );
+
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some(
+                "cannot set an error bind group: bind group entry count must match bind group layout"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
     fn compute_pass_encoder_rejects_invalid_bind_group_index_and_dynamic_offsets() {
         let device = noop_device();
         let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {

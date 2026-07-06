@@ -3,7 +3,7 @@ use std::sync::Arc;
 use glow::HasContext;
 use khronos_egl as egl;
 
-use super::device::GlesDevice;
+use super::device::{GlesDevice, GlesDeviceCaps, GlesSampleMaskIFn};
 use super::egl::{EglConfig, EglContext, EglSurface};
 use super::format::GlesColorRenderCaps;
 use super::instance::{EglInstanceState, GlesInstanceInner};
@@ -281,17 +281,25 @@ fn create_egl_device(
         return Err(HalError::DeviceCreationFailed { backend: BACKEND });
     }
 
-    let supports_base_vertex = detect_base_vertex_support((major, minor), gl.supported_extensions());
-    let color_render_caps = detect_color_render_caps(gl.supported_extensions());
+    let caps = GlesDeviceCaps {
+        supports_base_vertex: detect_base_vertex_support((major, minor), gl.supported_extensions()),
+        color_render_caps: detect_color_render_caps(gl.supported_extensions()),
+        max_samples: unsafe { gl.get_parameter_i32(glow::MAX_SAMPLES) },
+        sample_mask_i: load_egl_proc::<GlesSampleMaskIFn>(egl_state, "glSampleMaski"),
+    };
 
     Ok(GlesDevice::from_egl(
         Arc::clone(instance),
         context,
         surface,
         gl,
-        supports_base_vertex,
-        color_render_caps,
+        caps,
     ))
+}
+
+fn load_egl_proc<T>(instance: &EglInstanceState, name: &str) -> Option<T> {
+    let proc = instance.egl.get_proc_address(name)?;
+    Some(unsafe { std::mem::transmute_copy(&proc) })
 }
 
 fn destroy_context(instance: &EglInstanceState, context: EglContext) {
@@ -368,8 +376,7 @@ mod tests {
             ["GL_OES_draw_elements_base_vertex".to_owned()].into();
         let ext: std::collections::HashSet<String> =
             ["GL_EXT_draw_elements_base_vertex".to_owned()].into();
-        let unrelated: std::collections::HashSet<String> =
-            ["GL_EXT_copy_image".to_owned()].into();
+        let unrelated: std::collections::HashSet<String> = ["GL_EXT_copy_image".to_owned()].into();
         // Core in GLES 3.2 and later, regardless of extensions.
         assert!(detect_base_vertex_support((3, 2), &empty));
         assert!(detect_base_vertex_support((4, 0), &empty));

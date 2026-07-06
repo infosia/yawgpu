@@ -1807,11 +1807,18 @@ pub(crate) fn select_render_shader_source(
             if let Some(fragment_glsl) = &fragment_glsl {
                 combined_samplers.extend(fragment_glsl.combined_samplers.clone());
             }
+            let texture_metadata_ubo_binding =
+                vertex_glsl.texture_metadata_ubo_binding.or_else(|| {
+                    fragment_glsl
+                        .as_ref()
+                        .and_then(|glsl| glsl.texture_metadata_ubo_binding)
+                });
             Ok((
                 HalShaderSource::GlslStages {
                     vertex: vertex_glsl.source,
                     fragment: fragment_glsl.map(|glsl| glsl.source),
                     combined_samplers,
+                    texture_metadata_ubo_binding,
                 },
                 vertex_entry_name.to_owned(),
                 fragment_entry_name.map(str::to_owned),
@@ -5942,12 +5949,13 @@ fn fs() -> @builtin(frag_depth) f32 {
         .expect("WGSL should generate GLES GLSL stages");
 
         assert!(
-            matches!(source, HalShaderSource::GlslStages { vertex, fragment, combined_samplers }
+            matches!(source, HalShaderSource::GlslStages { vertex, fragment, combined_samplers, texture_metadata_ubo_binding }
                 if vertex.contains("#version 310 es")
                     && fragment.as_ref().is_some_and(|fragment| fragment.contains("#version 310 es"))
                     && vertex.contains("void main()")
                     && fragment.as_ref().is_some_and(|fragment| fragment.contains("void main()"))
-                    && combined_samplers.is_empty())
+                    && combined_samplers.is_empty()
+                    && texture_metadata_ubo_binding.is_none())
         );
         assert_eq!(vertex_entry, "vs");
         assert_eq!(fragment_entry.as_deref(), Some("fs"));

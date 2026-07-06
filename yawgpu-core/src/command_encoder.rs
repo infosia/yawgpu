@@ -85,6 +85,7 @@ pub struct CommandBuffer {
 #[derive(Debug)]
 pub(crate) struct CommandBufferInner {
     pub(crate) is_error: bool,
+    pub(crate) error_message: Option<String>,
     pub(crate) referenced_buffers: Vec<Arc<Buffer>>,
     pub(crate) referenced_textures: Vec<Texture>,
     pub(crate) referenced_query_sets: Vec<QuerySet>,
@@ -842,10 +843,8 @@ impl CommandEncoder {
     pub fn finish(&self) -> (CommandBuffer, Option<String>) {
         let mut state = self.inner.state.lock();
         if state.lifecycle != CommandEncoderLifecycle::Recording {
-            return (
-                CommandBuffer::new(true, Vec::new(), Vec::new(), Vec::new(), Vec::new()),
-                Some("command encoder cannot be finished more than once".to_owned()),
-            );
+            let message = "command encoder cannot be finished more than once".to_owned();
+            return (CommandBuffer::new_error(message.clone()), Some(message));
         }
         state.lifecycle = CommandEncoderLifecycle::Finished;
 
@@ -884,7 +883,7 @@ impl CommandEncoder {
         };
         (
             CommandBuffer::new(
-                finish_error.is_some(),
+                finish_error.clone(),
                 referenced_buffers,
                 referenced_textures,
                 referenced_query_sets,
@@ -2119,7 +2118,7 @@ pub(crate) fn record_first_error_option(
 impl CommandBuffer {
     /// Creates a new instance.
     pub(crate) fn new(
-        is_error: bool,
+        error_message: Option<String>,
         referenced_buffers: Vec<Arc<Buffer>>,
         referenced_textures: Vec<Texture>,
         referenced_query_sets: Vec<QuerySet>,
@@ -2127,7 +2126,8 @@ impl CommandBuffer {
     ) -> Self {
         Self {
             inner: Arc::new(CommandBufferInner {
-                is_error,
+                is_error: error_message.is_some(),
+                error_message,
                 referenced_buffers,
                 referenced_textures,
                 referenced_query_sets,
@@ -2141,6 +2141,23 @@ impl CommandBuffer {
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
+    }
+
+    /// Returns the diagnostic message that made this command buffer an error object.
+    #[must_use]
+    pub fn error_message(&self) -> Option<&str> {
+        self.inner.error_message.as_deref()
+    }
+
+    /// Creates an error command buffer with no recorded resources.
+    pub(crate) fn new_error(message: String) -> Self {
+        Self::new(
+            Some(message),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     /// Returns the referenced buffers.
@@ -2261,6 +2278,7 @@ mod tests {
                 swizzle: TextureComponentSwizzle::default(),
             },
             false,
+            None,
         );
         let mut descriptor = noop_render_pass_descriptor(Arc::new(view), None);
         let features = device.features();
