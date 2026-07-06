@@ -546,3 +546,21 @@ These are MULTIPLE independent sampling bugs, each a hardware-loop
 debug. Priority order: textureGather family (23.5k), then textureSample,
 then textureDimensions. A full shader,execution re-sweep is due to get
 the true post-fix total (batch-5 alone: 74,228 -> 48,428).
+
+## Clean consistent 4-area sweep (2026-07-06, yawgpu a94ab06) — for README table
+
+Per-subcase, crocus, workers=2, raw (no expectations), 2 files quarantined
+(F-126 zero-dim indirect wedge):
+
+| area | pass | skip | fail | crash |
+|---|---|---|---|---|
+| api/validation (124) | 194,805 | 157,163 | 347 | 0 |
+| api/operation (67) | 132,831 | 76,698 | 19,932 | 0 |
+| shader/execution (239) | 217,273 | 516,424 | 100,965 | 2 |
+| shader/validation (207) | 369,753 | 297,389 | 0 | 0 |
+| TOTAL | 914,662 | 1,047,674 | 121,244 | 2 |
+
+Published in webgpu-native-cts/README.md (commit 466ec89). shader/execution
+100,965 (down from 151,140 first-sweep, via multi-bind-group + layered DS
+attachments); remaining is texture-sampling correctness (textureGather
+family biggest). api/operation 19,932 (command_buffer copy correctness).
