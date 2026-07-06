@@ -836,3 +836,83 @@ Residual 10,129 = catalogued Tier-2 boundaries: raw depth read ~6.8k (Tint
 sampler2DShadow modelling), GLES hardware/spec limits (vertex-stage storage
 images, rg32 formats, no 1D), ~100 multisampled textureLoad. No clean
 large lever remains.
+
+## Next campaign (user-approved 2026-07-07) — prioritized TODOs
+
+Planned from the Windows session; **execution happens on the Linux CTS
+host** (crocus, workers=2, one GPU process at a time) with the established
+per-slice loop: unit gates → target-gles release rebuild → targeted CTS
+file(s) → full-area re-measure → commit. User decisions taken during
+planning: (a) the raw-depth-read Tint gap is ATTEMPTED via a shim-side IR
+pre-transform (not left catalogued); (b) a Windows WGL/NVIDIA CTS sweep is
+explicitly NOT in this campaign (future second-driver validation).
+
+- **P1 — Re-sweep api,validation + api,operation (measurement first).**
+  Published numbers are from a94ab06, which predates glTextureView
+  flexible views (2ba7e96), cube-array GLSL ES 3.2 (64151a9), and the
+  texture-metadata UBO (c06e516) — texture_view (210), render_pipeline
+  (2,699) and parts of the command_buffer tail plausibly moved. Raw run,
+  update this doc + the cts README table, re-cluster the command_buffer
+  tail from fresh JSONL (feeds P3b). No code change; re-baselines all
+  items below.
+- **P2 — Depth raw-read shim transform (~6.8k, largest single lever).**
+  Custom IR pass in `yawgpu-tint/shim/tint_shim.cpp`, inserted in the
+  existing pre-writer transform pipeline (the shim already runs
+  SingleEntryPoint/SubstituteOverrides and inspects lowered IR for
+  kCubeArray): for each depth texture used ONLY by non-comparison
+  builtins, rewrite its type to `texture_2d<f32>`, rewriting call results
+  (scalar depth read = `.x`; textureGather shape unchanged). Mixed
+  compare+non-compare use of one texture: out of scope initially, keep
+  current behaviour + catalogue. Spec: supersede the block-67 catalogue
+  entry. Tests: yawgpu-tint GLSL-output assertions (sampler2D for
+  non-compare, sampler2DShadow still for compare) + real-EGL HAL sampling
+  test. Verify on crocus: textureSample 885 / SampleLevel 2610 / Gather
+  3105 / depth textureLoad ~240; comparison clusters must stay 0-fail.
+  Risk note: shim-only rebuild — the host hang risk applies to full Tint
+  rebuilds, not shim recompiles.
+- **P3 — command_buffer copy-correctness tail (~19.3k, largest count).**
+  3a: piece-5 resumption — FIRST verify checker semantics in
+  webgpu-native-cts harness.cpp:601-646 (the saved replica flags a
+  failure inside row padding at a byte offset that cannot be texel data,
+  so the replica's expected-buffer stride math is suspect), then extract
+  exact CTS subcase params (--list-cases) and replicate one verbatim
+  before touching production code (WIP patch:
+  webgpu-native-cts/transcripts/slice4b-piece5-slicestride-wip.patch).
+  3b: re-cluster the remaining tail (T2T format-conversion families
+  suspected) from the P1 sweep. Discipline: one path change at a time,
+  full command_buffer re-run per change, beat-the-checkpoint (19,331).
+- **P4 — MSAA per-sample behavioural correctness (sample_mask, ~2.6k+).**
+  Characterize failing mask/alpha-to-coverage subcase patterns first,
+  then fix the GLES MSAA path (glSampleMaski / alpha-to-coverage state);
+  real-EGL unit tests per fixed behaviour.
+- **P5 — Missing feature: 1D texture emulation as height-1 2D** (Dawn
+  precedent). Map D1 textures to GL_TEXTURE_2D height=1 (storage 1D to
+  image2D coords); confirm Tint's GLSL 1d emission shape in the shim
+  before handoff. Unlocks storage_textures_1d 88 + texture_1d
+  load/dimensions/levels clusters. Update block-67 matrix 1D rows.
+- **P6 — Small over-strict / investigable batch (~800 total, independent
+  items):** layered storage-view subrange (gles/queue.rs:839, 416 —
+  try glBindImageTexture(layered=GL_FALSE, layer=N) for single-layer
+  views); maxBindingsPerBindGroup off-by-one (~40 — subtract reserved
+  binding points from the GL-queried limit); memory_sync "binding size
+  exceeds GLES limit" (~230 — verify which GL limit and comparison);
+  depth32float-stencil8 copy bytes_per_row (57 — spec-check; if the rule
+  lives in core, Tier-independence applies: fix only if wrong for ALL
+  backends, never relax core for GLES); indexed-indirect nonzero
+  index-buffer offset (54+72 — investigate emulation, else close as
+  catalogued).
+- **P7 — Hygiene (fold into any slice):** clean HAL rejection for
+  vertex-stage storage images (instead of surfaced GL link error);
+  fix stale block-67 entry ">1 bind group — DEFERRED" (landed in
+  85b4880); optional hand-written GL repro for the Mesa
+  textureSize-on-stencil-mode crash (suspected→confirmed, F-126
+  precedent).
+
+Explicitly deferred (not this campaign): Windows WGL/NVIDIA CTS sweep;
+stencil-aspect T2B compute-path readback (908); Unorm8x4Bgra shader
+swizzle for hosts without EXT/ARB_vertex_array_bgra; ~160 scattered
+textureLoad value bugs (multisampled 96 / sampled_2d 48 / storage_3d 16);
+the latent Drop-inside-context deadlock hazard (watch item only).
+
+Campaign end: clean 4-area sweep on one commit → update the cts README
+GLES table (currently mixed a94ab06/15a9ddb baselines).
