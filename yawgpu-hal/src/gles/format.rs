@@ -497,6 +497,25 @@ pub(super) fn map_texture_format(format: HalTextureFormat) -> Result<GlesFormat,
     }
 }
 
+pub(super) fn storage_image_format(format: HalTextureFormat) -> Option<u32> {
+    match format {
+        HalTextureFormat::Rgba32Float => Some(glow::RGBA32F),
+        HalTextureFormat::Rgba16Float => Some(glow::RGBA16F),
+        HalTextureFormat::R32Float => Some(glow::R32F),
+        HalTextureFormat::Rgba8Unorm => Some(glow::RGBA8),
+        HalTextureFormat::Rgba8Snorm => Some(glow::RGBA8_SNORM),
+        HalTextureFormat::Rgba32Uint => Some(glow::RGBA32UI),
+        HalTextureFormat::Rgba32Sint => Some(glow::RGBA32I),
+        HalTextureFormat::Rgba16Uint => Some(glow::RGBA16UI),
+        HalTextureFormat::Rgba16Sint => Some(glow::RGBA16I),
+        HalTextureFormat::Rgba8Uint => Some(glow::RGBA8UI),
+        HalTextureFormat::Rgba8Sint => Some(glow::RGBA8I),
+        HalTextureFormat::R32Uint => Some(glow::R32UI),
+        HalTextureFormat::R32Sint => Some(glow::R32I),
+        _ => None,
+    }
+}
+
 /// Returns whether `format` is color-renderable on core GLES 3.1 (usable as a
 /// render-pipeline color target / FBO color attachment without extensions).
 ///
@@ -1382,6 +1401,38 @@ mod tests {
                 message: "Unsupported vertex format requested",
             }
         ));
+    }
+
+    #[test]
+    fn storage_image_format_maps_gles_required_set() {
+        let supported = [
+            (HalTextureFormat::Rgba32Float, glow::RGBA32F),
+            (HalTextureFormat::Rgba16Float, glow::RGBA16F),
+            (HalTextureFormat::R32Float, glow::R32F),
+            (HalTextureFormat::Rgba8Unorm, glow::RGBA8),
+            (HalTextureFormat::Rgba8Snorm, glow::RGBA8_SNORM),
+            (HalTextureFormat::Rgba32Uint, glow::RGBA32UI),
+            (HalTextureFormat::Rgba32Sint, glow::RGBA32I),
+            (HalTextureFormat::Rgba16Uint, glow::RGBA16UI),
+            (HalTextureFormat::Rgba16Sint, glow::RGBA16I),
+            (HalTextureFormat::Rgba8Uint, glow::RGBA8UI),
+            (HalTextureFormat::Rgba8Sint, glow::RGBA8I),
+            (HalTextureFormat::R32Uint, glow::R32UI),
+            (HalTextureFormat::R32Sint, glow::R32I),
+        ];
+        for (format, expected) in supported {
+            assert_eq!(storage_image_format(format), Some(expected), "{format:?}");
+        }
+
+        for unsupported in [
+            HalTextureFormat::Rg32Uint,
+            HalTextureFormat::Rg32Sint,
+            HalTextureFormat::Rg8Uint,
+            HalTextureFormat::R8Uint,
+            HalTextureFormat::R16Uint,
+        ] {
+            assert_eq!(storage_image_format(unsupported), None, "{unsupported:?}");
+        }
     }
 
     #[test]

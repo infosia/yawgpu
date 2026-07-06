@@ -1262,6 +1262,9 @@ fn tint_bindings_for_glsl(resource_bindings: &[ReflectedResourceBinding]) -> yaw
             ReflectedResourceBindingKind::Texture { .. } => {
                 bindings.texture.push(remap);
             }
+            ReflectedResourceBindingKind::StorageTexture { .. } => {
+                bindings.storage_texture.push(remap);
+            }
             ReflectedResourceBindingKind::Sampler { .. } => {
                 bindings.sampler.push(remap);
             }
@@ -2931,11 +2934,10 @@ fn fs() -> @location(0) vec4f {
     /// `tint_bindings_for_glsl`'s identity remap end-to-end through
     /// `ReflectedModule::generate_glsl`. Without the remap, Tint's default
     /// `GenerateBindings` would renumber the non-sequential `@binding(3)`
-    /// storage buffer to `layout(binding = 1)` (see yawgpu-tint's
+    /// storage buffer/storage texture to the next dense binding (see yawgpu-tint's
     /// `generate_glsl_default_bindings_renumber_sequentially_not_identity`),
     /// which would desync from `yawgpu-hal`'s GLES backend -- it always
-    /// binds buffers with `glBindBufferRange` at the raw WGSL binding
-    /// number.
+    /// binds GLES buffer/image units at the raw WGSL binding number.
     #[cfg(feature = "gles")]
     #[test]
     fn generate_glsl_pins_non_sequential_wgsl_binding_numbers() {
@@ -2946,10 +2948,12 @@ struct Uniforms {
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(3) var<storage, read_write> data: array<u32>;
+@group(0) @binding(7) var tex: texture_storage_2d<rgba8unorm, write>;
 
 @compute @workgroup_size(1)
 fn cs() {
   data[0] = u32(u.scale);
+  textureStore(tex, vec2i(0, 0), vec4f(1.0));
 }
 "#,
         )
@@ -2967,6 +2971,13 @@ fn cs() {
             generated
                 .source
                 .contains("layout(binding = 3, std430)\nbuffer"),
+            "GLSL:\n{}",
+            generated.source
+        );
+        assert!(
+            generated
+                .source
+                .contains("layout(binding = 7, rgba8) uniform highp writeonly image2D"),
             "GLSL:\n{}",
             generated.source
         );

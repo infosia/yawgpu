@@ -3,7 +3,10 @@ use std::sync::Arc;
 use glow::HasContext;
 
 use super::device::GlesDeviceInner;
-use super::format::{color_clear_kind, map_primitive_topology, map_vertex_format, GlesClearKind};
+use super::format::{
+    color_clear_kind, map_primitive_topology, map_vertex_format, storage_image_format,
+    GlesClearKind,
+};
 use super::texture::GlesTextureMeta;
 use super::BACKEND;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
@@ -13,8 +16,8 @@ use crate::{
     HalCompareFunction, HalComputeDispatch, HalComputePass, HalComputePipeline, HalCopy,
     HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalDescriptorBindingKind, HalDraw,
     HalError, HalFrontFace, HalIndexFormat, HalRenderLoadOp, HalRenderPass, HalRenderPipeline,
-    HalSampler, HalStencilFaceState, HalStencilOperation, HalTexture, HalTextureAspect,
-    HalTextureClear, HalTextureCopy, HalTextureViewDimension, HalVertexStepMode,
+    HalSampler, HalStencilFaceState, HalStencilOperation, HalStorageTextureAccess, HalTexture,
+    HalTextureAspect, HalTextureClear, HalTextureCopy, HalTextureViewDimension, HalVertexStepMode,
 };
 
 /// Stores GLES queue data used by validation and backend submission.
@@ -245,7 +248,6 @@ fn submit_compute_pass(
         });
     };
     reject_external_texture_bindings(pass.bind_external_textures.len())?;
-    reject_storage_texture_bindings(&pass.bind_textures)?;
     let program = pipeline.raw_or_err()?;
     let bindings = pass
         .bind_buffers
@@ -296,6 +298,7 @@ fn submit_compute_pass(
             pipeline.combined_samplers(),
             &pass.bind_textures,
         )?;
+        bind_storage_textures(gl, pipeline.bindings(), &pass.bind_textures)?;
         match &pass.dispatch {
             HalComputeDispatch::Direct { workgroups } => {
                 // WebGPU: a dispatch with any zero workgroup count does
@@ -362,19 +365,6 @@ fn reject_external_texture_bindings(count: usize) -> Result<(), HalError> {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "GLES does not support external texture bindings",
-        });
-    }
-    Ok(())
-}
-
-fn reject_storage_texture_bindings(bindings: &[HalBoundTexture]) -> Result<(), HalError> {
-    if bindings
-        .iter()
-        .any(|binding| binding.storage_access.is_some())
-    {
-        return Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "GLES storage texture bindings are not yet supported",
         });
     }
     Ok(())
@@ -477,6 +467,145 @@ fn bind_combined_samplers(
         units.push(unit);
     }
     Ok(units)
+}
+
+fn bind_storage_textures(
+    gl: &glow::Context,
+    descriptors: &[HalDescriptorBinding],
+    textures: &[HalBoundTexture],
+) -> Result<(), HalError> {
+    for texture in textures
+        .iter()
+        .filter(|texture| texture.storage_access.is_some())
+    {
+        if texture.group != 0 {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES storage texture bindings support only bind group 0",
+            });
+        }
+        let descriptor = descriptors
+            .iter()
+            .find(|descriptor| {
+                descriptor.group == texture.group && descriptor.binding == texture.binding
+            })
+            .ok_or(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "storage texture binding is missing from pipeline layout",
+            })?;
+        if !matches!(
+            descriptor.kind,
+            HalDescriptorBindingKind::StorageTexture { .. }
+        ) {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "storage texture binding is not a storage texture descriptor",
+            });
+        }
+        let HalTexture::Gles(gles_texture) = &texture.texture else {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "storage texture binding is not a GLES texture",
+            });
+        };
+        let raw_texture = gles_texture.raw_or_err()?;
+        let access = storage_texture_access(texture.storage_access.ok_or(
+            HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "storage texture binding is missing access",
+            },
+        )?);
+        let internal_format =
+            storage_image_format(texture.format).ok_or(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES image load/store does not support this storage format",
+            })?;
+        let base_level = i32_from_u32(
+            texture.base_mip_level,
+            "storage texture base mip level exceeds GLES limit",
+        )?;
+        if texture.mip_level_count != 1 {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES storage texture views must expose exactly one mip level",
+            });
+        }
+        let (layered, layer) = storage_image_layer_binding(
+            texture,
+            gles_texture.meta().target,
+            gles_texture.meta().depth_or_array_layers,
+        )?;
+        unsafe {
+            gl.bind_image_texture(
+                texture.binding,
+                raw_texture,
+                base_level,
+                layered,
+                layer,
+                access,
+                internal_format,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn storage_texture_access(access: HalStorageTextureAccess) -> u32 {
+    match access {
+        HalStorageTextureAccess::ReadOnly => glow::READ_ONLY,
+        HalStorageTextureAccess::WriteOnly => glow::WRITE_ONLY,
+        HalStorageTextureAccess::ReadWrite => glow::READ_WRITE,
+    }
+}
+
+fn storage_image_layer_binding(
+    texture: &HalBoundTexture,
+    texture_target: u32,
+    full_layer_count: u32,
+) -> Result<(bool, i32), HalError> {
+    match texture.dimension {
+        HalTextureViewDimension::D2 => {
+            let layer = if texture_target == glow::TEXTURE_2D {
+                if texture.base_array_layer != 0 {
+                    return Err(HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message: "GLES cannot bind a non-zero layer of a plain 2D storage texture",
+                    });
+                }
+                0
+            } else {
+                texture.base_array_layer
+            };
+            Ok((
+                false,
+                i32_from_u32(layer, "storage texture layer exceeds GLES limit")?,
+            ))
+        }
+        HalTextureViewDimension::D2Array | HalTextureViewDimension::D3 => {
+            if texture.base_array_layer == 0 && texture.array_layer_count == full_layer_count {
+                return Ok((true, 0));
+            }
+            if texture.array_layer_count == 1 {
+                return Ok((
+                    false,
+                    i32_from_u32(
+                        texture.base_array_layer,
+                        "storage texture layer exceeds GLES limit",
+                    )?,
+                ));
+            }
+            Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES storage texture views must bind a whole layered view or one layer",
+            })
+        }
+        HalTextureViewDimension::D1
+        | HalTextureViewDimension::Cube
+        | HalTextureViewDimension::CubeArray => Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES storage texture view dimension is unsupported",
+        }),
+    }
 }
 
 unsafe fn apply_depth_stencil_texture_mode(
@@ -650,7 +779,6 @@ fn submit_render_pass(
     placeholder_sampler: glow::Sampler,
 ) -> Result<(), HalError> {
     reject_external_texture_bindings(pass.bind_external_textures.len())?;
-    reject_storage_texture_bindings(&pass.bind_textures)?;
     let fbo = create_render_fbo(gl, pass)?;
     let pipeline = match &pass.pipeline {
         None => {
@@ -1154,6 +1282,7 @@ fn run_render_draw(
         pipeline.combined_samplers(),
         &pass.bind_textures,
     )?;
+    bind_storage_textures(gl, pipeline.bindings(), &pass.bind_textures)?;
     let first_instance = pass.draw.map(draw_first_instance).unwrap_or(0);
     bind_vertex_buffers(
         gl,
@@ -5651,6 +5780,348 @@ mod tests {
                 None
             }
         }
+    }
+
+    #[test]
+    fn submit_compute_pass_writes_rgba8_storage_texture() {
+        let Some(device) = gles_device_or_skip("GLES compute storage-texture write test") else {
+            return;
+        };
+        let texture = storage_texture_2x2(
+            &device,
+            crate::HalTextureFormat::Rgba8Unorm,
+            crate::HalTextureUsage {
+                copy_src: true,
+                copy_dst: false,
+                texture_binding: false,
+                storage_binding: true,
+                render_attachment: false,
+                transient: false,
+            },
+        );
+        let pipeline = device
+            .create_compute_pipeline(
+                crate::HalShaderSource::Glsl {
+                    source: "#version 310 es\n\
+                             layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;\n\
+                             layout(binding = 0, rgba8) uniform highp writeonly image2D tex;\n\
+                             void main() {\n\
+                                 imageStore(tex, ivec2(gl_GlobalInvocationID.xy), vec4(0.25, 0.5, 0.75, 1.0));\n\
+                             }\n"
+                    .to_owned(),
+                    stage: crate::HalShaderStage::Compute,
+                    combined_samplers: Vec::new(),
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                (1, 1, 1),
+                &[HalDescriptorBinding {
+                    group: 0,
+                    binding: 0,
+                    kind: HalDescriptorBindingKind::StorageTexture {
+                        access: HalStorageTextureAccess::WriteOnly,
+                    },
+                }],
+            )
+            .expect("GLES storage-texture write compute pipeline must create");
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::ComputePass(HalComputePass {
+                pipeline: HalComputePipeline::Gles(pipeline),
+                bind_buffers: Vec::new(),
+                bind_textures: vec![bound_storage_texture(
+                    texture.clone(),
+                    crate::HalTextureFormat::Rgba8Unorm,
+                    HalStorageTextureAccess::WriteOnly,
+                )],
+                bind_samplers: Vec::new(),
+                bind_external_textures: Vec::new(),
+                immediate_data: Vec::new(),
+                dispatch: HalComputeDispatch::Direct {
+                    workgroups: (2, 2, 1),
+                },
+            })])
+            .expect("GLES storage-texture write dispatch must succeed");
+
+        assert_eq!(
+            read_texture_bytes(
+                &device,
+                texture,
+                crate::HalTextureFormat::Rgba8Unorm,
+                16,
+                8,
+                2
+            ),
+            [64, 128, 191, 255].repeat(4)
+        );
+    }
+
+    #[test]
+    fn submit_compute_pass_read_write_r32uint_storage_texture() {
+        let Some(device) = gles_device_or_skip("GLES compute read-write storage-texture test")
+        else {
+            return;
+        };
+        let texture = storage_texture_2x2(
+            &device,
+            crate::HalTextureFormat::R32Uint,
+            crate::HalTextureUsage {
+                copy_src: true,
+                copy_dst: true,
+                texture_binding: false,
+                storage_binding: true,
+                render_attachment: false,
+                transient: false,
+            },
+        );
+        let upload = device
+            .create_buffer(
+                16,
+                crate::HalBufferUsage {
+                    copy_src: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES R32Uint upload buffer creation must succeed");
+        let initial = [1_u32, 2, 3, 4]
+            .into_iter()
+            .flat_map(u32::to_ne_bytes)
+            .collect::<Vec<_>>();
+        upload
+            .write(0, &initial)
+            .expect("writing R32Uint upload data must succeed");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::BufferToTexture(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(upload),
+                buffer_layout: crate::HalBufferTextureLayout {
+                    offset: 0,
+                    bytes_per_row: 8,
+                    rows_per_image: 2,
+                },
+                texture: HalTexture::Gles(texture.clone()),
+                format: crate::HalTextureFormat::R32Uint,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                extent: crate::HalExtent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: 1,
+                },
+            })])
+            .expect("uploading R32Uint storage texture must succeed");
+
+        let pipeline = device
+            .create_compute_pipeline(
+                crate::HalShaderSource::Glsl {
+                    source: "#version 310 es\n\
+                             layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;\n\
+                             layout(binding = 0, r32ui) uniform highp uimage2D tex;\n\
+                             void main() {\n\
+                                 ivec2 p = ivec2(gl_GlobalInvocationID.xy);\n\
+                                 uvec4 v = imageLoad(tex, p);\n\
+                                 imageStore(tex, p, uvec4(v.x + 1u, 0u, 0u, 0u));\n\
+                             }\n"
+                    .to_owned(),
+                    stage: crate::HalShaderStage::Compute,
+                    combined_samplers: Vec::new(),
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                (1, 1, 1),
+                &[HalDescriptorBinding {
+                    group: 0,
+                    binding: 0,
+                    kind: HalDescriptorBindingKind::StorageTexture {
+                        access: HalStorageTextureAccess::ReadWrite,
+                    },
+                }],
+            )
+            .expect("GLES read-write storage-texture compute pipeline must create");
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::ComputePass(HalComputePass {
+                pipeline: HalComputePipeline::Gles(pipeline),
+                bind_buffers: Vec::new(),
+                bind_textures: vec![bound_storage_texture(
+                    texture.clone(),
+                    crate::HalTextureFormat::R32Uint,
+                    HalStorageTextureAccess::ReadWrite,
+                )],
+                bind_samplers: Vec::new(),
+                bind_external_textures: Vec::new(),
+                immediate_data: Vec::new(),
+                dispatch: HalComputeDispatch::Direct {
+                    workgroups: (2, 2, 1),
+                },
+            })])
+            .expect("GLES read-write storage-texture dispatch must succeed");
+
+        let bytes =
+            read_texture_bytes(&device, texture, crate::HalTextureFormat::R32Uint, 16, 8, 2);
+        let values = bytes
+            .chunks_exact(4)
+            .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect::<Vec<_>>();
+        assert_eq!(values, [2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn submit_compute_pass_rejects_unsupported_storage_texture_format() {
+        let Some(device) = gles_device_or_skip("GLES unsupported storage-texture format test")
+        else {
+            return;
+        };
+        let texture = storage_texture_2x2(
+            &device,
+            crate::HalTextureFormat::Rg32Uint,
+            crate::HalTextureUsage {
+                copy_src: false,
+                copy_dst: false,
+                texture_binding: false,
+                storage_binding: true,
+                render_attachment: false,
+                transient: false,
+            },
+        );
+        let pipeline = device
+            .create_compute_pipeline(
+                crate::HalShaderSource::Glsl {
+                    source: "#version 310 es\n\
+                             layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;\n\
+                             layout(binding = 0, rgba8) uniform highp writeonly image2D tex;\n\
+                             void main() { imageStore(tex, ivec2(0), vec4(1.0)); }\n"
+                        .to_owned(),
+                    stage: crate::HalShaderStage::Compute,
+                    combined_samplers: Vec::new(),
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                (1, 1, 1),
+                &[HalDescriptorBinding {
+                    group: 0,
+                    binding: 0,
+                    kind: HalDescriptorBindingKind::StorageTexture {
+                        access: HalStorageTextureAccess::WriteOnly,
+                    },
+                }],
+            )
+            .expect("GLES unsupported-format storage-texture pipeline must create");
+
+        let error = device
+            .queue()
+            .submit_copies(&[HalCopy::ComputePass(HalComputePass {
+                pipeline: HalComputePipeline::Gles(pipeline),
+                bind_buffers: Vec::new(),
+                bind_textures: vec![bound_storage_texture(
+                    texture,
+                    crate::HalTextureFormat::Rg32Uint,
+                    HalStorageTextureAccess::WriteOnly,
+                )],
+                bind_samplers: Vec::new(),
+                bind_external_textures: Vec::new(),
+                immediate_data: Vec::new(),
+                dispatch: HalComputeDispatch::Direct {
+                    workgroups: (1, 1, 1),
+                },
+            })])
+            .expect_err("unsupported GLES storage image format must return HalError");
+        assert!(matches!(
+            error,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message: "GLES image load/store does not support this storage format",
+            }
+        ));
+    }
+
+    fn storage_texture_2x2(
+        device: &super::super::device::GlesDevice,
+        format: crate::HalTextureFormat,
+        usage: crate::HalTextureUsage,
+    ) -> super::super::texture::GlesTexture {
+        device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format,
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage,
+            })
+            .expect("GLES storage texture creation must succeed")
+    }
+
+    fn bound_storage_texture(
+        texture: super::super::texture::GlesTexture,
+        format: crate::HalTextureFormat,
+        access: HalStorageTextureAccess,
+    ) -> HalBoundTexture {
+        HalBoundTexture {
+            group: 0,
+            binding: 0,
+            metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            texture: HalTexture::Gles(texture),
+            format,
+            dimension: HalTextureViewDimension::D2,
+            base_mip_level: 0,
+            mip_level_count: 1,
+            base_array_layer: 0,
+            array_layer_count: 1,
+            aspect: crate::HalTextureAspect::All,
+            swizzle: crate::HalTextureComponentSwizzle::default(),
+            storage_access: Some(access),
+        }
+    }
+
+    fn read_texture_bytes(
+        device: &super::super::device::GlesDevice,
+        texture: super::super::texture::GlesTexture,
+        format: crate::HalTextureFormat,
+        byte_count: u64,
+        bytes_per_row: u32,
+        rows_per_image: u32,
+    ) -> Vec<u8> {
+        let readback = device
+            .create_buffer(
+                byte_count,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES storage texture readback buffer creation must succeed");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(readback.clone()),
+                buffer_layout: crate::HalBufferTextureLayout {
+                    offset: 0,
+                    bytes_per_row,
+                    rows_per_image,
+                },
+                texture: HalTexture::Gles(texture),
+                format,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                extent: crate::HalExtent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: 1,
+                },
+            })])
+            .expect("GLES storage texture-to-buffer copy must succeed");
+        readback
+            .read(0, byte_count)
+            .expect("reading storage texture readback buffer must succeed")
     }
 
     fn render_attachment_texture(
