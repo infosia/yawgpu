@@ -2302,6 +2302,7 @@ enum TextureToBufferComputeEncoding {
     Rg16Snorm,
     Rgba16Unorm,
     Rgba16Snorm,
+    Rgb9e5Ufloat,
     Depth16Unorm,
     Depth24Plus,
     Depth32Float,
@@ -2315,6 +2316,7 @@ impl TextureToBufferComputeEncoding {
             Self::Rgba8Snorm
             | Self::Rg16Unorm
             | Self::Rg16Snorm
+            | Self::Rgb9e5Ufloat
             | Self::Depth24Plus
             | Self::Depth32Float => 4,
             Self::Rgba16Unorm | Self::Rgba16Snorm => 8,
@@ -2360,6 +2362,10 @@ impl TextureToBufferComputeEncoding {
                 "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
                  writeU32(base, packSnorm2x16(value.rg));\n\
                  writeU32(base + 4u, packSnorm2x16(value.ba));"
+            }
+            Self::Rgb9e5Ufloat => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, packRgb9e5(value.rgb));"
             }
             Self::Depth16Unorm => {
                 "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
@@ -2408,6 +2414,9 @@ fn texture_to_buffer_compute_encoding(
         }
         (crate::HalTextureFormat::Rgba16Snorm, HalTextureAspect::All) => {
             Some(TextureToBufferComputeEncoding::Rgba16Snorm)
+        }
+        (crate::HalTextureFormat::Rgb9e5Ufloat, HalTextureAspect::All) => {
+            Some(TextureToBufferComputeEncoding::Rgb9e5Ufloat)
         }
         (
             crate::HalTextureFormat::Depth16Unorm,
@@ -2667,6 +2676,22 @@ fn create_texture_to_buffer_compute_program(
          uniform uvec3 u_extent;\n\
          layout(std430, binding = 0) buffer Readback {{ coherent uint data[]; }};\n\
          uint packUnorm16(float value) {{ return uint(round(clamp(value, 0.0, 1.0) * 65535.0)); }}\n\
+         uint packRgb9e5(vec3 value) {{\n\
+             vec3 color = clamp(value, vec3(0.0), vec3(65408.0));\n\
+             float maxChannel = max(max(color.r, color.g), color.b);\n\
+             if (maxChannel == 0.0) {{ return 0u; }}\n\
+             float exponent = max(-16.0, floor(log2(maxChannel))) + 1.0;\n\
+             uint sharedExponent = uint(exponent + 15.0);\n\
+             float scale = exp2(exponent - 9.0);\n\
+             uint maxMantissa = uint(floor(maxChannel / scale + 0.5));\n\
+             if (maxMantissa == 512u) {{\n\
+                 sharedExponent += 1u;\n\
+                 scale *= 2.0;\n\
+             }}\n\
+             vec3 rounded = floor(color / scale + vec3(0.5));\n\
+             uvec3 mantissa = min(uvec3(uint(rounded.r), uint(rounded.g), uint(rounded.b)), uvec3(511u));\n\
+             return (sharedExponent << 27) | (mantissa.b << 18) | (mantissa.g << 9) | mantissa.r;\n\
+         }}\n\
          void writeByte(uint offset, uint value) {{\n\
              uint word = offset >> 2;\n\
              uint shift = (offset & 3u) * 8u;\n\
@@ -3641,6 +3666,34 @@ mod tests {
             .expect("GLES byte-format 2D copy texture creation must succeed")
     }
 
+    fn byte_copy_texture(
+        device: &super::super::device::GlesDevice,
+        format: crate::HalTextureFormat,
+        width: u32,
+        height: u32,
+        depth_or_array_layers: u32,
+    ) -> super::super::texture::GlesTexture {
+        device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format,
+                width,
+                height,
+                depth_or_array_layers,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: true,
+                    copy_dst: true,
+                    texture_binding: true,
+                    storage_binding: false,
+                    render_attachment: false,
+                    transient: false,
+                },
+            })
+            .expect("GLES byte-format copy texture creation must succeed")
+    }
+
     fn byte_layout(width: u32, height: u32, bytes_per_pixel: u32) -> crate::HalBufferTextureLayout {
         crate::HalBufferTextureLayout {
             offset: 0,
@@ -3736,6 +3789,190 @@ mod tests {
         readback
             .read(0, byte_count)
             .expect("reading back the byte-format region must succeed")
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct ByteMatrixFormat {
+        format: crate::HalTextureFormat,
+        name: &'static str,
+        bytes_per_pixel: u32,
+    }
+
+    #[derive(Debug)]
+    struct ByteMatrixCase {
+        format: ByteMatrixFormat,
+        offset: u64,
+        origin: crate::HalOrigin3d,
+        width: u32,
+        height: u32,
+        layers: u32,
+    }
+
+    fn matrix_texel_bytes(case: &ByteMatrixCase) -> Vec<u8> {
+        let texel_count = case.width * case.height * case.layers;
+        let mut bytes = Vec::with_capacity((texel_count * case.format.bytes_per_pixel) as usize);
+        for texel in 0..texel_count {
+            match case.format.format {
+                crate::HalTextureFormat::R16Float => {
+                    let values = [0x0000u16, 0x3c00, 0x4000, 0x4200, 0x4400, 0x4500];
+                    bytes.extend_from_slice(&values[texel as usize % values.len()].to_ne_bytes());
+                }
+                crate::HalTextureFormat::Rgba16Float => {
+                    let values = [
+                        0x0000u16, 0x3c00, 0x4000, 0x4200, 0x4400, 0x4500, 0x4600, 0x4700,
+                    ];
+                    for component in 0..4 {
+                        let index = (texel as usize * 4 + component) % values.len();
+                        bytes.extend_from_slice(&values[index].to_ne_bytes());
+                    }
+                }
+                crate::HalTextureFormat::Rgb9e5Ufloat => {
+                    let base = texel as f32 + 1.0;
+                    let packed = pack_rgb9e5_reference([base * 0.125, base * 0.1875, base * 0.25]);
+                    bytes.extend_from_slice(&packed.to_ne_bytes());
+                }
+                _ => {
+                    for byte in 0..case.format.bytes_per_pixel {
+                        let value =
+                            1u8.wrapping_add((texel * case.format.bytes_per_pixel + byte) as u8);
+                        bytes.push(value);
+                    }
+                }
+            }
+        }
+        bytes
+    }
+
+    fn pack_rgb9e5_reference(value: [f32; 3]) -> u32 {
+        let color = [
+            value[0].clamp(0.0, 65408.0),
+            value[1].clamp(0.0, 65408.0),
+            value[2].clamp(0.0, 65408.0),
+        ];
+        let max_channel = color[0].max(color[1]).max(color[2]);
+        if max_channel == 0.0 {
+            return 0;
+        }
+        let exponent = max_channel.log2().floor().max(-16.0) + 1.0;
+        let mut shared_exponent = (exponent + 15.0) as u32;
+        let mut scale = 2.0f32.powf(exponent - 9.0);
+        let max_mantissa = (max_channel / scale + 0.5).floor() as u32;
+        if max_mantissa == 512 {
+            shared_exponent += 1;
+            scale *= 2.0;
+        }
+        let r = ((color[0] / scale + 0.5).floor() as u32).min(511);
+        let g = ((color[1] / scale + 0.5).floor() as u32).min(511);
+        let b = ((color[2] / scale + 0.5).floor() as u32).min(511);
+        (shared_exponent << 27) | (b << 18) | (g << 9) | r
+    }
+
+    fn write_matrix_texel_rows(
+        destination: &mut [u8],
+        case: &ByteMatrixCase,
+        bytes_per_row: u32,
+        rows_per_image: u32,
+        texels: &[u8],
+    ) {
+        let row_bytes = (case.width * case.format.bytes_per_pixel) as usize;
+        let mut source_offset = 0usize;
+        for layer in 0..case.layers {
+            for row in 0..case.height {
+                let destination_offset = case.offset as usize
+                    + (layer * rows_per_image * bytes_per_row + row * bytes_per_row) as usize;
+                destination[destination_offset..destination_offset + row_bytes]
+                    .copy_from_slice(&texels[source_offset..source_offset + row_bytes]);
+                source_offset += row_bytes;
+            }
+        }
+    }
+
+    fn first_matrix_mismatch(actual: &[u8], expected: &[u8]) -> Option<String> {
+        actual
+            .iter()
+            .zip(expected)
+            .enumerate()
+            .find_map(|(index, (actual, expected))| {
+                (actual != expected)
+                    .then(|| format!("byte {index}: expected {expected}, got {actual}"))
+            })
+    }
+
+    fn submit_matrix_buffer_to_texture(
+        device: &super::super::device::GlesDevice,
+        texture: &super::super::texture::GlesTexture,
+        case: &ByteMatrixCase,
+        bytes_per_row: u32,
+        rows_per_image: u32,
+        bytes: &[u8],
+    ) -> Result<(), crate::HalError> {
+        let upload = device.create_buffer(
+            bytes.len() as u64,
+            crate::HalBufferUsage {
+                copy_src: true,
+                ..crate::HalBufferUsage::default()
+            },
+        )?;
+        upload.write(0, bytes)?;
+        device
+            .queue()
+            .submit_copies(&[HalCopy::BufferToTexture(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(upload),
+                buffer_layout: crate::HalBufferTextureLayout {
+                    offset: case.offset,
+                    bytes_per_row,
+                    rows_per_image,
+                },
+                texture: HalTexture::Gles(texture.clone()),
+                format: case.format.format,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                origin: case.origin,
+                extent: crate::HalExtent3d {
+                    width: case.width,
+                    height: case.height,
+                    depth_or_array_layers: case.layers,
+                },
+            })])
+    }
+
+    fn submit_matrix_texture_to_buffer(
+        device: &super::super::device::GlesDevice,
+        texture: &super::super::texture::GlesTexture,
+        case: &ByteMatrixCase,
+        bytes_per_row: u32,
+        rows_per_image: u32,
+        byte_count: u64,
+    ) -> Result<Vec<u8>, crate::HalError> {
+        let readback = device.create_buffer(
+            byte_count,
+            crate::HalBufferUsage {
+                copy_dst: true,
+                ..crate::HalBufferUsage::default()
+            },
+        )?;
+        readback.write(0, &vec![0xab; byte_count as usize])?;
+        device
+            .queue()
+            .submit_copies(&[HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(readback.clone()),
+                buffer_layout: crate::HalBufferTextureLayout {
+                    offset: case.offset,
+                    bytes_per_row,
+                    rows_per_image,
+                },
+                texture: HalTexture::Gles(texture.clone()),
+                format: case.format.format,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                origin: case.origin,
+                extent: crate::HalExtent3d {
+                    width: case.width,
+                    height: case.height,
+                    depth_or_array_layers: case.layers,
+                },
+            })])?;
+        readback.read(0, byte_count)
     }
 
     /// One 2x2 Rgba8Unorm slice is 16 bytes; layout used by the multi-slice
@@ -4712,6 +4949,180 @@ mod tests {
         assert!(
             values[1] >= 0x00ff_0000 && values[2] >= 0x00ff_0000,
             "max depth values must read back near the top of the 24-bit depth range: {values:?}"
+        );
+    }
+
+    #[test]
+    fn submit_copies_matrix_preserves_padded_texture_buffer_layouts() {
+        let Some(device) = gles_device_or_skip("GLES comprehensive B2T/T2B layout matrix") else {
+            return;
+        };
+
+        let formats = [
+            ByteMatrixFormat {
+                format: crate::HalTextureFormat::R8Unorm,
+                name: "r8unorm",
+                bytes_per_pixel: 1,
+            },
+            ByteMatrixFormat {
+                format: crate::HalTextureFormat::R8Uint,
+                name: "r8uint",
+                bytes_per_pixel: 1,
+            },
+            ByteMatrixFormat {
+                format: crate::HalTextureFormat::Rg8Unorm,
+                name: "rg8unorm",
+                bytes_per_pixel: 2,
+            },
+            ByteMatrixFormat {
+                format: crate::HalTextureFormat::R16Float,
+                name: "r16float",
+                bytes_per_pixel: 2,
+            },
+            ByteMatrixFormat {
+                format: crate::HalTextureFormat::R16Uint,
+                name: "r16uint",
+                bytes_per_pixel: 2,
+            },
+            ByteMatrixFormat {
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                name: "rgba8unorm",
+                bytes_per_pixel: 4,
+            },
+            ByteMatrixFormat {
+                format: crate::HalTextureFormat::Rgba16Float,
+                name: "rgba16float",
+                bytes_per_pixel: 8,
+            },
+            ByteMatrixFormat {
+                format: crate::HalTextureFormat::R8Snorm,
+                name: "r8snorm",
+                bytes_per_pixel: 1,
+            },
+            ByteMatrixFormat {
+                format: crate::HalTextureFormat::Rg16Snorm,
+                name: "rg16snorm",
+                bytes_per_pixel: 4,
+            },
+            ByteMatrixFormat {
+                format: crate::HalTextureFormat::Rgb9e5Ufloat,
+                name: "rgb9e5ufloat",
+                bytes_per_pixel: 4,
+            },
+        ];
+        let origins = [
+            crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+            crate::HalOrigin3d { x: 1, y: 1, z: 0 },
+        ];
+        let sizes = [(3, 2), (4, 4)];
+        let bytes_per_row = 256;
+        let mut failures = Vec::new();
+
+        for format in formats {
+            for offset_multiplier in [0, 1, 3] {
+                let offset = u64::from(offset_multiplier * format.bytes_per_pixel);
+                for origin in origins {
+                    for (width, height) in sizes {
+                        for layers in [1, 2] {
+                            let texture_width = origin.x + width;
+                            let texture_height = origin.y + height;
+                            let rows_per_image = height + 1;
+                            let byte_count = offset
+                                + u64::from(bytes_per_row)
+                                    * u64::from(rows_per_image)
+                                    * u64::from(layers);
+                            let case = ByteMatrixCase {
+                                format,
+                                offset,
+                                origin,
+                                width,
+                                height,
+                                layers,
+                            };
+                            let texture = byte_copy_texture(
+                                &device,
+                                format.format,
+                                texture_width,
+                                texture_height,
+                                layers,
+                            );
+                            let texels = matrix_texel_bytes(&case);
+                            let mut upload_bytes = vec![0xee; byte_count as usize];
+                            write_matrix_texel_rows(
+                                &mut upload_bytes,
+                                &case,
+                                bytes_per_row,
+                                rows_per_image,
+                                &texels,
+                            );
+                            if let Err(error) = submit_matrix_buffer_to_texture(
+                                &device,
+                                &texture,
+                                &case,
+                                bytes_per_row,
+                                rows_per_image,
+                                &upload_bytes,
+                            ) {
+                                failures.push(format!(
+                                    "{} offset={} origin=({}, {}) size={}x{} layers={} B2T error: {error:?}",
+                                    format.name,
+                                    offset,
+                                    origin.x,
+                                    origin.y,
+                                    width,
+                                    height,
+                                    layers
+                                ));
+                                continue;
+                            }
+
+                            let readback = match submit_matrix_texture_to_buffer(
+                                &device,
+                                &texture,
+                                &case,
+                                bytes_per_row,
+                                rows_per_image,
+                                byte_count,
+                            ) {
+                                Ok(readback) => readback,
+                                Err(error) => {
+                                    failures.push(format!(
+                                        "{} offset={} origin=({}, {}) size={}x{} layers={} T2B error: {error:?}",
+                                        format.name,
+                                        offset,
+                                        origin.x,
+                                        origin.y,
+                                        width,
+                                        height,
+                                        layers
+                                    ));
+                                    continue;
+                                }
+                            };
+                            let mut expected = vec![0xab; byte_count as usize];
+                            write_matrix_texel_rows(
+                                &mut expected,
+                                &case,
+                                bytes_per_row,
+                                rows_per_image,
+                                &texels,
+                            );
+                            if let Some(mismatch) = first_matrix_mismatch(&readback, &expected) {
+                                failures.push(format!(
+                                    "{} offset={} origin=({}, {}) size={}x{} layers={}: {mismatch}",
+                                    format.name, offset, origin.x, origin.y, width, height, layers
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "GLES B2T/T2B layout matrix failures:\n{}",
+            failures.join("\n")
         );
     }
 
