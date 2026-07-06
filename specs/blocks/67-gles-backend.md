@@ -343,3 +343,29 @@ per case.
   Tier-2 gap). Supersedes the earlier "cube is a Tier-2 gap" catalogue
   entry and the reverted `textureBindingViewDimension` approach
   (`webgpu-native-cts/transcripts/cube-wip-reverted.patch`).
+
+- **Raw (non-comparison) depth-texture sampling returns 0** — Tier-2
+  Tint-GLSL-backend gap (2026-07-06, catalogued not fixed). Tint's GLSL
+  printer unconditionally appends "Shadow" to any `DepthTexture` sampler
+  (`third_party/dawn/src/tint/lang/glsl/writer/printer/printer.cc:993-994`),
+  so a `texture_depth_*` sampled by a **non-comparison** builtin
+  (`textureSample` / `textureSampleLevel` / `textureGather` on a depth
+  format) is emitted as `sampler2DShadow` and the sample becomes a shadow
+  COMPARE against a dummy reference of `0.0` — e.g.
+  `textureLod(sampler2DShadow, vec3(uv, 0.0))` — instead of a raw depth
+  read. With the bound sampler's `TEXTURE_COMPARE_MODE = GL_NONE` (correct
+  for a non-comparison sampler) this is a shader/sampler mismatch and the
+  driver returns 0, so CTS reports `expected 0.125, got 0` for every depth
+  format (depth16unorm / depth24plus(-stencil8) / depth32float(-stencil8)).
+  The **comparison** path is unaffected and fully passes
+  (`textureSampleCompare` 2,880 + `textureSampleCompareLevel` 8,640 on 2d,
+  0 fail) — depth data upload and binding are correct; only the raw-read
+  modelling is wrong. Affected clusters (crocus): textureSampleLevel
+  depth_2d 360 / depth_3d(cube) 810, textureSample depth_2d 180,
+  textureGather depth_3d 135 / depth_array_3d 270. Proper fix requires a
+  Tint GLSL-backend change (emit a non-shadow `sampler2D` for depth
+  textures used only in non-comparison reads, likely via an IR transform
+  that splits the type per use) — deferred: it edits the shared
+  `third_party/dawn` submodule (GLSL backend is out of scope for the TBDR
+  fork there) and a Tint rebuild is a hard-hang risk on this host. Not a
+  yawgpu HAL/core bug.
