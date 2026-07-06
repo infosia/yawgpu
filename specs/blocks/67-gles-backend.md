@@ -369,3 +369,19 @@ per case.
   `third_party/dawn` submodule (GLSL backend is out of scope for the TBDR
   fork there) and a Tint rebuild is a hard-hang risk on this host. Not a
   yawgpu HAL/core bug.
+
+- **Storage images: vertex-stage + non-required formats (GLES limits)** —
+  Tier-2 hardware/spec gaps (2026-07-06, catalogued). (a) GLES 3.1 does not
+  guarantee image load/store in the **vertex** stage
+  (`GL_MAX_VERTEX_IMAGE_UNIFORMS` is commonly 0, and is 0 on crocus), so a
+  render pipeline whose vertex shader does `imageLoad`/`imageStore` cannot
+  link — the dominant storage-texture CTS failure (e.g.
+  textureLoad:storage_textures_2d_array 768/1056 fails are stage="v"). (b)
+  `rg32{uint,sint,float}` are **not** in the GLES 3.1 required
+  image-format list, so storage load/store on them is unsupportable
+  (~432 CTS fails). Both are real GLES limits, not yawgpu bugs; the ideal
+  is a clean HAL rejection rather than a surfaced pipeline-link error, but
+  either way the CTS case cannot pass on this hardware. (c) 1D storage
+  (`texture_storage_1d`, `HalTextureViewDimension::D1`) is rejected —
+  GLES has no `image1D`; correct handling is height-1 2D emulation (a
+  separate slice, tied to the general no-1D-textures gap).
