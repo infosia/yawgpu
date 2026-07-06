@@ -982,14 +982,6 @@ fn create_render_fbo(
         {
             let depth_stencil_texture = target_texture.raw_or_err()?;
             let meta = target_texture.meta();
-            if !matches!(meta.target, glow::TEXTURE_2D | glow::TEXTURE_2D_MULTISAMPLE) {
-                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
-                gl.delete_framebuffer(fbo);
-                return Err(HalError::BufferOperationFailed {
-                    backend: BACKEND,
-                    message: "GLES render pass supports only 2D depth-stencil attachments",
-                });
-            }
             let attachment_point = match (
                 format_has_depth_aspect(attachment.format),
                 format_has_stencil_aspect(attachment.format),
@@ -1006,14 +998,15 @@ fn create_render_fbo(
                     });
                 }
             };
-            attach_2d_texture_to_framebuffer(
+            attach_depth_stencil_texture_to_framebuffer(
                 gl,
                 glow::DRAW_FRAMEBUFFER,
                 attachment_point,
                 meta,
                 depth_stencil_texture,
                 attachment.mip_level,
-            );
+                attachment.array_layer,
+            )?;
         }
         if gl.check_framebuffer_status(glow::DRAW_FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
             gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
@@ -1134,6 +1127,53 @@ unsafe fn attach_2d_texture_to_framebuffer(
             },
         );
     }
+}
+
+unsafe fn attach_depth_stencil_texture_to_framebuffer(
+    gl: &glow::Context,
+    framebuffer_target: u32,
+    attachment: u32,
+    meta: &GlesTextureMeta,
+    texture: glow::Texture,
+    mip_level: u32,
+    array_layer: u32,
+) -> Result<(), HalError> {
+    unsafe {
+        match meta.target {
+            glow::TEXTURE_2D | glow::TEXTURE_2D_MULTISAMPLE => {
+                attach_2d_texture_to_framebuffer(
+                    gl,
+                    framebuffer_target,
+                    attachment,
+                    meta,
+                    texture,
+                    mip_level,
+                );
+            }
+            glow::TEXTURE_2D_ARRAY | glow::TEXTURE_3D => {
+                gl.framebuffer_texture_layer(
+                    framebuffer_target,
+                    attachment,
+                    Some(texture),
+                    i32_from_u32(
+                        mip_level,
+                        "depth-stencil attachment mip level exceeds GLES limit",
+                    )?,
+                    i32_from_u32(
+                        array_layer,
+                        "depth-stencil attachment array layer exceeds GLES limit",
+                    )?,
+                );
+            }
+            _ => {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "GLES render pass depth-stencil attachment target is unsupported",
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 unsafe fn attach_resolve_texture_to_framebuffer(
@@ -3502,6 +3542,86 @@ mod tests {
             .queue()
             .submit_copies(&[HalCopy::RenderPass(pass)])
             .expect("submit must ignore a vertex buffer bound at an undeclared slot");
+    }
+
+    #[test]
+    fn submit_render_pass_accepts_depth_attachment_array_layer() {
+        let Some(device) = gles_device_or_skip("GLES depth array-layer attachment test") else {
+            return;
+        };
+
+        let color_texture = device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: false,
+                    copy_dst: false,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: true,
+                    transient: false,
+                },
+            })
+            .expect("GLES color render attachment creation must succeed");
+        let depth_texture = device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format: crate::HalTextureFormat::Depth24Plus,
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 2,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: false,
+                    copy_dst: false,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: true,
+                    transient: false,
+                },
+            })
+            .expect("GLES 2D-array depth attachment creation must succeed");
+
+        let mut pass = render_pass(vec![Some(crate::HalRenderColorTarget {
+            texture: HalTexture::Gles(color_texture),
+            view_format: crate::HalTextureFormat::Rgba8Unorm,
+            resolve_target: None,
+            resolve_view_format: None,
+            mip_level: 0,
+            array_layer: 0,
+            depth_slice: 0,
+            resolve_mip_level: 0,
+            resolve_array_layer: 0,
+            load_op: HalRenderLoadOp::Clear,
+            store: true,
+            clear_color: [0.0, 0.0, 0.0, 1.0],
+        })]);
+        pass.depth_stencil_attachment = Some(crate::HalRenderDepthStencilAttachment {
+            texture: HalTexture::Gles(depth_texture),
+            format: crate::HalTextureFormat::Depth24Plus,
+            mip_level: 0,
+            array_layer: 1,
+            depth_load_op: HalRenderLoadOp::Clear,
+            depth_store: true,
+            depth_clear_value: 0.25,
+            depth_read_only: false,
+            stencil_load_op: HalRenderLoadOp::Load,
+            stencil_store: false,
+            stencil_clear_value: 0,
+            stencil_read_only: true,
+        });
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::RenderPass(pass)])
+            .expect("render pass must attach and clear depth layer 1");
     }
 
     #[test]
