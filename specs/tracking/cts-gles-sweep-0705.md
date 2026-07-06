@@ -299,3 +299,19 @@ CTS render_pipeline dir: pass 36 -> 366, fail 3,029 -> 2,699 (rest is
 MSAA per-sample behavioural correctness in the huge sample_mask file).
 Next: rerun full api,validation + api,operation ledgers, then the
 remaining campaign order stands.
+
+## Ledger update after T-G15..T-G18 (2026-07-06)
+
+- api,validation: fail 2,616 -> **2,280** (pass 207,765; crash 0).
+- api,operation command_buffer: 72,031 -> 72,844 (slightly up: depth
+  formats now create, exposing more copy cases to the known T2B
+  bugs — the untouched campaign slice #2).
+- render_pipeline: 3,029 -> 2,699 (rest: MSAA per-sample behaviour in
+  sample_mask).
+
+Next session: campaign slice #2 (T2B padding-zeroing + copy
+correctness, ~12k+ single-bug candidates in command_buffer), then
+limits truthfulness (#3), non-renderable readback (#4), catalogue (#5).
+Codex-agent ops note: Codex sandbox has no EGL — hardware verification
+always runs on the orchestrator side; the hypothesis->instrument->
+hardware-output loop works well.
