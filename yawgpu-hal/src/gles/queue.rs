@@ -3600,13 +3600,13 @@ mod tests {
     fn copy_rgba8_texel(
         destination: &mut [u8],
         destination_width: u32,
-        destination_x: u32,
-        destination_y: u32,
+        destination_origin: (u32, u32),
         source: &[u8],
         source_width: u32,
-        source_x: u32,
-        source_y: u32,
+        source_origin: (u32, u32),
     ) {
+        let (destination_x, destination_y) = destination_origin;
+        let (source_x, source_y) = source_origin;
         let destination_offset = ((destination_y * destination_width + destination_x) * 4) as usize;
         let source_offset = ((source_y * source_width + source_x) * 4) as usize;
         destination[destination_offset..destination_offset + 4]
@@ -4750,7 +4750,14 @@ mod tests {
 
         for y in 0..2 {
             for x in 0..2 {
-                copy_rgba8_texel(&mut expected, 4, x, y + 1, &source_bytes, 4, x + 2, y + 1);
+                copy_rgba8_texel(
+                    &mut expected,
+                    4,
+                    (x, y + 1),
+                    &source_bytes,
+                    4,
+                    (x + 2, y + 1),
+                );
             }
         }
         assert_eq!(
@@ -4815,7 +4822,14 @@ mod tests {
 
         for y in 0..2 {
             for x in 0..2 {
-                copy_rgba8_texel(&mut expected, 4, x + 1, y, &source_mip1, 4, x + 1, y + 1);
+                copy_rgba8_texel(
+                    &mut expected,
+                    4,
+                    (x + 1, y),
+                    &source_mip1,
+                    4,
+                    (x + 1, y + 1),
+                );
             }
         }
         assert_eq!(
@@ -5302,7 +5316,7 @@ mod tests {
             crate::HalOrigin3d { x: 0, y: 0, z: 0 },
             4,
             4,
-            &vec![0; 4 * 4 * 4],
+            &[0; 4 * 4 * 4],
         );
         let mip_one = rgba8_pattern(2, 2, 170);
         upload_rgba8_region(

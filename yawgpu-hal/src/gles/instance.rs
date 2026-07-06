@@ -75,8 +75,10 @@ impl GlesInstance {
     #[must_use]
     pub fn enumerate_adapters(&self) -> Vec<GlesAdapter> {
         match self.inner.as_ref() {
-            GlesInstanceInner::Egl(egl_state) => match choose_config(egl_state) {
-                Ok(config) => vec![GlesAdapter::new_egl(Arc::clone(&self.inner), config)],
+            GlesInstanceInner::Egl(egl_state) => match choose_config(egl_state)
+                .and_then(|config| GlesAdapter::new_egl(Arc::clone(&self.inner), config))
+            {
+                Ok(adapter) => vec![adapter],
                 Err(err) => {
                     // Diagnostic: an empty enumeration is a legitimate
                     // spec-level "no adapter" outcome for callers, but on the
@@ -90,7 +92,15 @@ impl GlesInstance {
                 }
             },
             #[cfg(windows)]
-            GlesInstanceInner::Wgl(_) => vec![GlesAdapter::new_wgl(Arc::clone(&self.inner))],
+            GlesInstanceInner::Wgl(_) => match GlesAdapter::new_wgl(Arc::clone(&self.inner)) {
+                Ok(adapter) => vec![adapter],
+                Err(err) => {
+                    eprintln!(
+                        "yawgpu-gles: enumerate_adapters: WGL limit probe failed ({err:?}); returning no adapters"
+                    );
+                    Vec::new()
+                }
+            },
         }
     }
 

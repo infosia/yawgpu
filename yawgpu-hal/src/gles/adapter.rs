@@ -21,9 +21,13 @@ enum GlesAdapterInner {
     Egl {
         instance: Arc<GlesInstanceInner>,
         config: EglConfig,
+        limits: HalLimits,
     },
     #[cfg(windows)]
-    Wgl { instance: Arc<GlesInstanceInner> },
+    Wgl {
+        instance: Arc<GlesInstanceInner>,
+        limits: HalLimits,
+    },
 }
 
 // SAFETY: The adapter is an immutable handle to an EGL config plus the shared
@@ -40,17 +44,32 @@ impl std::fmt::Debug for GlesAdapter {
 }
 
 impl GlesAdapter {
-    pub(super) fn new_egl(instance: Arc<GlesInstanceInner>, config: EglConfig) -> Self {
-        Self {
-            inner: GlesAdapterInner::Egl { instance, config },
-        }
+    pub(super) fn new_egl(
+        instance: Arc<GlesInstanceInner>,
+        config: EglConfig,
+    ) -> Result<Self, HalError> {
+        let GlesInstanceInner::Egl(egl_state) = instance.as_ref() else {
+            return Err(HalError::BackendUnavailable { backend: BACKEND });
+        };
+        let limits = query_egl_adapter_limits(egl_state, config)?;
+        Ok(Self {
+            inner: GlesAdapterInner::Egl {
+                instance,
+                config,
+                limits,
+            },
+        })
     }
 
     #[cfg(windows)]
-    pub(super) fn new_wgl(instance: Arc<GlesInstanceInner>) -> Self {
-        Self {
-            inner: GlesAdapterInner::Wgl { instance },
-        }
+    pub(super) fn new_wgl(instance: Arc<GlesInstanceInner>) -> Result<Self, HalError> {
+        let GlesInstanceInner::Wgl(wgl_state) = instance.as_ref() else {
+            return Err(HalError::BackendUnavailable { backend: BACKEND });
+        };
+        let limits = super::wgl::query_adapter_limits(Arc::clone(&instance), wgl_state)?;
+        Ok(Self {
+            inner: GlesAdapterInner::Wgl { instance, limits },
+        })
     }
 
     /// Returns the adapter name.
@@ -66,7 +85,11 @@ impl GlesAdapter {
     /// Returns the backend-reported supported limits.
     #[must_use]
     pub(crate) fn limits(&self) -> HalLimits {
-        HalLimits::DEFAULT
+        match &self.inner {
+            GlesAdapterInner::Egl { limits, .. } => *limits,
+            #[cfg(windows)]
+            GlesAdapterInner::Wgl { limits, .. } => *limits,
+        }
     }
 
     /// Returns true when BC texture compression is supported.
@@ -162,7 +185,9 @@ impl GlesAdapter {
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<GlesDevice, HalError> {
         match &self.inner {
-            GlesAdapterInner::Egl { instance, config } => {
+            GlesAdapterInner::Egl {
+                instance, config, ..
+            } => {
                 let GlesInstanceInner::Egl(egl_state) = instance.as_ref() else {
                     return Err(HalError::DeviceCreationFailed { backend: BACKEND });
                 };
@@ -295,6 +320,378 @@ fn create_egl_device(
         gl,
         caps,
     ))
+}
+
+fn query_egl_adapter_limits(
+    egl_state: &EglInstanceState,
+    config: EglConfig,
+) -> Result<HalLimits, HalError> {
+    let attribs_es31 = [
+        egl::CONTEXT_MAJOR_VERSION,
+        3,
+        egl::CONTEXT_MINOR_VERSION,
+        1,
+        egl::NONE,
+    ];
+    let attribs_es3 = [egl::CONTEXT_CLIENT_VERSION, 3, egl::NONE];
+    let context = match egl_state
+        .egl
+        .create_context(egl_state.display, config, None, &attribs_es31)
+    {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            eprintln!(
+                "yawgpu-gles: eglCreateContext(limit probe ES 3.1) failed: {err:?}; retrying with ES 3"
+            );
+            egl_state
+                .egl
+                .create_context(egl_state.display, config, None, &attribs_es3)
+                .map_err(|err2| {
+                    eprintln!("yawgpu-gles: eglCreateContext(limit probe ES 3) failed: {err2:?}");
+                    HalError::BackendUnavailable { backend: BACKEND }
+                })?
+        }
+    };
+
+    let pbuffer_attribs = [egl::WIDTH, 1, egl::HEIGHT, 1, egl::NONE];
+    let surface =
+        match egl_state
+            .egl
+            .create_pbuffer_surface(egl_state.display, config, &pbuffer_attribs)
+        {
+            Ok(surface) => surface,
+            Err(err) => {
+                eprintln!("yawgpu-gles: eglCreatePbufferSurface(limit probe) failed: {err:?}");
+                destroy_context(egl_state, context);
+                return Err(HalError::BackendUnavailable { backend: BACKEND });
+            }
+        };
+
+    if let Err(err) = egl_state.egl.make_current(
+        egl_state.display,
+        Some(surface),
+        Some(surface),
+        Some(context),
+    ) {
+        eprintln!("yawgpu-gles: eglMakeCurrent(limit probe) failed: {err:?}");
+        destroy_surface(egl_state, surface);
+        destroy_context(egl_state, context);
+        return Err(HalError::BackendUnavailable { backend: BACKEND });
+    }
+
+    let gl = unsafe {
+        glow::Context::from_loader_function(|name| {
+            egl_state
+                .egl
+                .get_proc_address(name)
+                .map(|proc| proc as *const _)
+                .unwrap_or(std::ptr::null())
+        })
+    };
+    let version = unsafe { gl.get_parameter_string(glow::VERSION) };
+    let Some((major, minor)) = parse_gles_version(&version) else {
+        eprintln!("yawgpu-gles: unable to parse GL_VERSION during limit probe: {version:?}");
+        let _ = egl_state
+            .egl
+            .make_current(egl_state.display, None, None, None);
+        destroy_surface(egl_state, surface);
+        destroy_context(egl_state, context);
+        return Err(HalError::BackendUnavailable { backend: BACKEND });
+    };
+    if (major, minor) < (3, 1) {
+        eprintln!(
+            "yawgpu-gles: limit probe found GLES {major}.{minor} below the required 3.1 (GL_VERSION={version:?})"
+        );
+        let _ = egl_state
+            .egl
+            .make_current(egl_state.display, None, None, None);
+        destroy_surface(egl_state, surface);
+        destroy_context(egl_state, context);
+        return Err(HalError::BackendUnavailable { backend: BACKEND });
+    }
+    let limits = query_gles_limits(&gl);
+    let _ = egl_state
+        .egl
+        .make_current(egl_state.display, None, None, None);
+    destroy_surface(egl_state, surface);
+    destroy_context(egl_state, context);
+    Ok(limits)
+}
+
+pub(super) fn query_gles_limits(gl: &glow::Context) -> HalLimits {
+    let default = HalLimits::DEFAULT;
+    let texture_units = min3(
+        query_u32(
+            gl,
+            glow::MAX_VERTEX_TEXTURE_IMAGE_UNITS,
+            default.max_sampled_textures_per_shader_stage,
+        ),
+        query_u32(
+            gl,
+            glow::MAX_TEXTURE_IMAGE_UNITS,
+            default.max_sampled_textures_per_shader_stage,
+        ),
+        query_u32(
+            gl,
+            glow::MAX_COMPUTE_TEXTURE_IMAGE_UNITS,
+            default.max_sampled_textures_per_shader_stage,
+        ),
+    );
+    let storage_buffers_per_stage = min3(
+        query_u32(
+            gl,
+            glow::MAX_VERTEX_SHADER_STORAGE_BLOCKS,
+            default.max_storage_buffers_per_shader_stage,
+        ),
+        query_u32(
+            gl,
+            glow::MAX_FRAGMENT_SHADER_STORAGE_BLOCKS,
+            default.max_storage_buffers_per_shader_stage,
+        ),
+        query_u32(
+            gl,
+            glow::MAX_COMPUTE_SHADER_STORAGE_BLOCKS,
+            default.max_storage_buffers_per_shader_stage,
+        ),
+    );
+    let storage_textures_per_stage = min3(
+        query_u32(
+            gl,
+            glow::MAX_VERTEX_IMAGE_UNIFORMS,
+            default.max_storage_textures_per_shader_stage,
+        ),
+        query_u32(
+            gl,
+            glow::MAX_FRAGMENT_IMAGE_UNIFORMS,
+            default.max_storage_textures_per_shader_stage,
+        ),
+        query_u32(
+            gl,
+            glow::MAX_COMPUTE_IMAGE_UNIFORMS,
+            default.max_storage_textures_per_shader_stage,
+        ),
+    );
+    let uniform_buffers_per_stage = min3(
+        query_u32(
+            gl,
+            glow::MAX_VERTEX_UNIFORM_BLOCKS,
+            default.max_uniform_buffers_per_shader_stage,
+        ),
+        query_u32(
+            gl,
+            glow::MAX_FRAGMENT_UNIFORM_BLOCKS,
+            default.max_uniform_buffers_per_shader_stage,
+        ),
+        query_u32(
+            gl,
+            glow::MAX_COMPUTE_UNIFORM_BLOCKS,
+            default.max_uniform_buffers_per_shader_stage,
+        ),
+    );
+    let max_color_attachments = query_u32(
+        gl,
+        glow::MAX_COLOR_ATTACHMENTS,
+        default.max_color_attachments,
+    )
+    .min(query_u32(
+        gl,
+        glow::MAX_DRAW_BUFFERS,
+        default.max_color_attachments,
+    ));
+    let max_compute_workgroups_per_dimension = min3(
+        query_indexed_u32(
+            gl,
+            glow::MAX_COMPUTE_WORK_GROUP_COUNT,
+            0,
+            default.max_compute_workgroups_per_dimension,
+        ),
+        query_indexed_u32(
+            gl,
+            glow::MAX_COMPUTE_WORK_GROUP_COUNT,
+            1,
+            default.max_compute_workgroups_per_dimension,
+        ),
+        query_indexed_u32(
+            gl,
+            glow::MAX_COMPUTE_WORK_GROUP_COUNT,
+            2,
+            default.max_compute_workgroups_per_dimension,
+        ),
+    );
+
+    // Tint emits `layout(binding = N)` using WGSL binding numbers directly
+    // into GL's per-resource binding-point spaces. A WGSL binding is safe
+    // only when every resource class that may use that number has a GL
+    // binding point for it.
+    let max_bindings_per_bind_group = [
+        query_u32(
+            gl,
+            glow::MAX_UNIFORM_BUFFER_BINDINGS,
+            default.max_bindings_per_bind_group,
+        ),
+        query_u32(
+            gl,
+            glow::MAX_SHADER_STORAGE_BUFFER_BINDINGS,
+            default.max_bindings_per_bind_group,
+        ),
+        query_u32(
+            gl,
+            glow::MAX_COMBINED_TEXTURE_IMAGE_UNITS,
+            default.max_bindings_per_bind_group,
+        ),
+        query_u32(
+            gl,
+            glow::MAX_IMAGE_UNITS,
+            default.max_bindings_per_bind_group,
+        ),
+    ]
+    .into_iter()
+    .min()
+    .unwrap_or(default.max_bindings_per_bind_group)
+    .max(1);
+
+    HalLimits {
+        max_texture_dimension_1d: query_u32(
+            gl,
+            glow::MAX_TEXTURE_SIZE,
+            default.max_texture_dimension_1d,
+        ),
+        max_texture_dimension_2d: query_u32(
+            gl,
+            glow::MAX_TEXTURE_SIZE,
+            default.max_texture_dimension_2d,
+        ),
+        max_texture_dimension_3d: query_u32(
+            gl,
+            glow::MAX_3D_TEXTURE_SIZE,
+            default.max_texture_dimension_3d,
+        ),
+        max_texture_array_layers: query_u32(
+            gl,
+            glow::MAX_ARRAY_TEXTURE_LAYERS,
+            default.max_texture_array_layers,
+        ),
+        max_bind_groups: 4,
+        max_bindings_per_bind_group,
+        max_sampled_textures_per_shader_stage: texture_units,
+        max_samplers_per_shader_stage: texture_units,
+        max_storage_buffers_per_shader_stage: storage_buffers_per_stage,
+        max_storage_textures_per_shader_stage: storage_textures_per_stage,
+        max_storage_buffers_in_vertex_stage: query_u32(
+            gl,
+            glow::MAX_VERTEX_SHADER_STORAGE_BLOCKS,
+            default.max_storage_buffers_in_vertex_stage,
+        ),
+        max_storage_buffers_in_fragment_stage: query_u32(
+            gl,
+            glow::MAX_FRAGMENT_SHADER_STORAGE_BLOCKS,
+            default.max_storage_buffers_in_fragment_stage,
+        ),
+        max_storage_textures_in_vertex_stage: query_u32(
+            gl,
+            glow::MAX_VERTEX_IMAGE_UNIFORMS,
+            default.max_storage_textures_in_vertex_stage,
+        ),
+        max_storage_textures_in_fragment_stage: query_u32(
+            gl,
+            glow::MAX_FRAGMENT_IMAGE_UNIFORMS,
+            default.max_storage_textures_in_fragment_stage,
+        ),
+        max_uniform_buffers_per_shader_stage: uniform_buffers_per_stage,
+        max_uniform_buffer_binding_size: u64::from(query_u32(
+            gl,
+            glow::MAX_UNIFORM_BLOCK_SIZE,
+            default.max_uniform_buffer_binding_size as u32,
+        )),
+        max_storage_buffer_binding_size: u64::from(query_u32(
+            gl,
+            glow::MAX_SHADER_STORAGE_BLOCK_SIZE,
+            default.max_storage_buffer_binding_size as u32,
+        )),
+        min_uniform_buffer_offset_alignment: query_u32(
+            gl,
+            glow::UNIFORM_BUFFER_OFFSET_ALIGNMENT,
+            default.min_uniform_buffer_offset_alignment,
+        ),
+        min_storage_buffer_offset_alignment: query_u32(
+            gl,
+            glow::SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT,
+            default.min_storage_buffer_offset_alignment,
+        ),
+        max_vertex_buffers: query_u32(
+            gl,
+            glow::MAX_VERTEX_ATTRIB_BINDINGS,
+            default.max_vertex_buffers,
+        )
+        .min(default.max_vertex_buffers),
+        max_vertex_attributes: query_u32(
+            gl,
+            glow::MAX_VERTEX_ATTRIBS,
+            default.max_vertex_attributes,
+        ),
+        max_vertex_buffer_array_stride: query_u32(
+            gl,
+            glow::MAX_VERTEX_ATTRIB_STRIDE,
+            default.max_vertex_buffer_array_stride,
+        ),
+        max_inter_stage_shader_variables: query_u32(
+            gl,
+            glow::MAX_VARYING_VECTORS,
+            default.max_inter_stage_shader_variables,
+        ),
+        max_color_attachments,
+        max_compute_workgroup_storage_size: query_u32(
+            gl,
+            glow::MAX_COMPUTE_SHARED_MEMORY_SIZE,
+            default.max_compute_workgroup_storage_size,
+        ),
+        max_compute_invocations_per_workgroup: query_u32(
+            gl,
+            glow::MAX_COMPUTE_WORK_GROUP_INVOCATIONS,
+            default.max_compute_invocations_per_workgroup,
+        ),
+        max_compute_workgroup_size_x: query_indexed_u32(
+            gl,
+            glow::MAX_COMPUTE_WORK_GROUP_SIZE,
+            0,
+            default.max_compute_workgroup_size_x,
+        ),
+        max_compute_workgroup_size_y: query_indexed_u32(
+            gl,
+            glow::MAX_COMPUTE_WORK_GROUP_SIZE,
+            1,
+            default.max_compute_workgroup_size_y,
+        ),
+        max_compute_workgroup_size_z: query_indexed_u32(
+            gl,
+            glow::MAX_COMPUTE_WORK_GROUP_SIZE,
+            2,
+            default.max_compute_workgroup_size_z,
+        ),
+        max_compute_workgroups_per_dimension,
+        max_immediate_size: 0,
+        ..default
+    }
+}
+
+fn query_u32(gl: &glow::Context, parameter: u32, fallback: u32) -> u32 {
+    let value = unsafe { gl.get_parameter_i32(parameter) };
+    u32::try_from(value)
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(fallback.max(1))
+}
+
+fn query_indexed_u32(gl: &glow::Context, parameter: u32, index: u32, fallback: u32) -> u32 {
+    let value = unsafe { gl.get_parameter_indexed_i32(parameter, index) };
+    u32::try_from(value)
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(fallback.max(1))
+}
+
+fn min3(a: u32, b: u32, c: u32) -> u32 {
+    a.min(b).min(c).max(1)
 }
 
 fn load_egl_proc<T>(instance: &EglInstanceState, name: &str) -> Option<T> {
@@ -430,5 +827,122 @@ mod tests {
                 color_buffer_half_float: true,
             }
         );
+    }
+
+    #[test]
+    fn egl_adapter_limits_match_live_gl_context() {
+        let instance = match super::super::instance::GlesInstance::new_with_choice(Some(
+            super::super::instance::BackendChoice::Egl,
+        )) {
+            Ok(instance) => instance,
+            Err(error) => {
+                eprintln!("skipping GLES adapter limit test; EGL unavailable: {error:?}");
+                return;
+            }
+        };
+        let Some(adapter) = instance.enumerate_adapters().into_iter().next() else {
+            eprintln!("skipping GLES adapter limit test; no EGL adapter");
+            return;
+        };
+        let device = match adapter.create_device() {
+            Ok(device) => device,
+            Err(error) => {
+                eprintln!("skipping GLES adapter limit test; device unavailable: {error:?}");
+                return;
+            }
+        };
+
+        let limits = adapter.limits();
+        assert_positive_limits_except_immediates(limits);
+        assert!(
+            limits.max_bindings_per_bind_group < HalLimits::DEFAULT.max_bindings_per_bind_group,
+            "GLES binding limit should be queried from GL, not the WebGPU default"
+        );
+
+        let queried = device
+            .inner_clone()
+            .with_current_context(|gl| {
+                let texture_size = query_u32(
+                    gl,
+                    glow::MAX_TEXTURE_SIZE,
+                    HalLimits::DEFAULT.max_texture_dimension_2d,
+                );
+                let binding_points = [
+                    query_u32(
+                        gl,
+                        glow::MAX_UNIFORM_BUFFER_BINDINGS,
+                        HalLimits::DEFAULT.max_bindings_per_bind_group,
+                    ),
+                    query_u32(
+                        gl,
+                        glow::MAX_SHADER_STORAGE_BUFFER_BINDINGS,
+                        HalLimits::DEFAULT.max_bindings_per_bind_group,
+                    ),
+                    query_u32(
+                        gl,
+                        glow::MAX_COMBINED_TEXTURE_IMAGE_UNITS,
+                        HalLimits::DEFAULT.max_bindings_per_bind_group,
+                    ),
+                    query_u32(
+                        gl,
+                        glow::MAX_IMAGE_UNITS,
+                        HalLimits::DEFAULT.max_bindings_per_bind_group,
+                    ),
+                ];
+                let min_binding_points = binding_points
+                    .into_iter()
+                    .min()
+                    .unwrap_or(HalLimits::DEFAULT.max_bindings_per_bind_group)
+                    .max(1);
+                (texture_size, min_binding_points)
+            })
+            .expect("live GLES context should remain usable");
+
+        assert_eq!(limits.max_texture_dimension_2d, queried.0);
+        assert_eq!(limits.max_bindings_per_bind_group, queried.1);
+    }
+
+    fn assert_positive_limits_except_immediates(limits: HalLimits) {
+        let values = [
+            limits.max_texture_dimension_1d,
+            limits.max_texture_dimension_2d,
+            limits.max_texture_dimension_3d,
+            limits.max_texture_array_layers,
+            limits.max_bind_groups,
+            limits.max_bind_groups_plus_vertex_buffers,
+            limits.max_bindings_per_bind_group,
+            limits.max_dynamic_uniform_buffers_per_pipeline_layout,
+            limits.max_dynamic_storage_buffers_per_pipeline_layout,
+            limits.max_sampled_textures_per_shader_stage,
+            limits.max_samplers_per_shader_stage,
+            limits.max_storage_buffers_per_shader_stage,
+            limits.max_storage_textures_per_shader_stage,
+            limits.max_storage_buffers_in_vertex_stage,
+            limits.max_storage_buffers_in_fragment_stage,
+            limits.max_storage_textures_in_vertex_stage,
+            limits.max_storage_textures_in_fragment_stage,
+            limits.max_uniform_buffers_per_shader_stage,
+            limits.min_uniform_buffer_offset_alignment,
+            limits.min_storage_buffer_offset_alignment,
+            limits.max_vertex_buffers,
+            limits.max_vertex_attributes,
+            limits.max_vertex_buffer_array_stride,
+            limits.max_inter_stage_shader_variables,
+            limits.max_color_attachments,
+            limits.max_color_attachment_bytes_per_sample,
+            limits.max_compute_workgroup_storage_size,
+            limits.max_compute_invocations_per_workgroup,
+            limits.max_compute_workgroup_size_x,
+            limits.max_compute_workgroup_size_y,
+            limits.max_compute_workgroup_size_z,
+            limits.max_compute_workgroups_per_dimension,
+        ];
+        for value in values {
+            assert!(value > 0);
+        }
+        assert!(limits.max_uniform_buffer_binding_size > 0);
+        assert!(limits.max_storage_buffer_binding_size > 0);
+        assert!(limits.max_buffer_size > 0);
+        assert_eq!(limits.max_immediate_size, 0);
     }
 }
