@@ -315,3 +315,14 @@ limits truthfulness (#3), non-renderable readback (#4), catalogue (#5).
 Codex-agent ops note: Codex sandbox has no EGL — hardware verification
 always runs on the orchestrator side; the hypothesis->instrument->
 hardware-output loop works well.
+
+## Slice 2 progress (2026-07-06, Codex agent)
+
+- 2a (b20ff6c): T2B padding preservation — command_buffer 72,844 -> 60,354.
+- 2b (80eef90): ClearTexture lazy-init was a GLES no-op + sampled-bind
+  BASE/MAX_LEVEL poisoning of later copies — 60,354 -> **37,669**.
+- Remaining command_buffer clusters: non-renderable-format T2B
+  (framebuffer-incomplete, 3,848 — slice #4), depth readback rejection
+  (1,196 — slice #4/catalogue), and a ~30k pixel-mismatch tail to
+  re-cluster after slice #4 (many were secondary to the fixed bugs).
+- Campaign slices #3 (limits truthfulness) and #5 (catalogue) unchanged.
