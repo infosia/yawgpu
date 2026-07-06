@@ -529,3 +529,20 @@ than failing at bind time.
 - 2 driver-crash cases catalogued (block-67).
 A full shader,execution re-sweep is due after the 2D-DS-attachment layer
 to get the true post-multi-group number.
+
+## Layered depth-stencil attachments DONE (e185afc)
+'2D depth-stencil attachments' cluster 26.5k -> 0 (batch-5 fail 72,278
+-> 48,428, pass +24k). Remaining shader,execution = texture sampling
+CORRECTNESS, characterized (batch-5 sample):
+- textureGather 13,770 + textureGatherCompare 9,720 = ~23.5k — fails on
+  BOTH nearest AND linear, so it's the gather operation itself
+  (texel/component ordering or offset), not filtering. BIGGEST.
+- textureSample 5,349
+- textureDimensions 1,602 — size-query value mismatches (suspect the
+  T-G13 BASE_LEVEL/MAX_LEVEL bind state affecting textureSize, or the
+  metadata UBO values)
+- textureLoad 1,456, textureNumLevels 123, textureNumSamples 12
+These are MULTIPLE independent sampling bugs, each a hardware-loop
+debug. Priority order: textureGather family (23.5k), then textureSample,
+then textureDimensions. A full shader,execution re-sweep is due to get
+the true post-fix total (batch-5 alone: 74,228 -> 48,428).
