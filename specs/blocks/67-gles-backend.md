@@ -272,3 +272,38 @@ Entries are filled in / refined as P15.x slices land. Anything left as
   `glMemoryBarrier` masks to issue between a HalCopy and a subsequent
   bind. Conservative default: `GL_ALL_BARRIER_BITS` after every copy
   the user submits; tighten if profiling demands.
+
+## CTS-confirmed Tier-2 catalogue (2026-07-06, crocus/Mesa sweep)
+
+Gaps surfaced by the api,validation CTS sweep and their disposition.
+Feature-advertisement gaps are resolved at the source (the GLES adapter
+no longer advertises them, decision 2a); the rest are HalError-rejected
+per case.
+
+- **norm16 / snorm / bgra8unorm-srgb color targets, read-write storage
+  of the tier2 set** — RESOLVED by not advertising `TextureFormatsTier1`
+  / `TextureFormatsTier2` / `Bgra8UnormStorage` on the GLES adapter
+  (slice 3b). CTS stops enabling these features, so the cases skip.
+- **`unorm8x4-bgra` vertex format** — IMPLEMENTED (slice 5). Accepted
+  and mapped; correct B<->R fetch via `glVertexAttribPointer(size=
+  GL_BGRA)` when `GL_EXT/ARB_vertex_array_bgra` is present. crocus/Mesa
+  does NOT expose that extension, so on this host the format is accepted
+  (validation passes) but rendered R/B are swapped — an **execution-only
+  divergence** (shader,execution / api,operation), not a validation gap.
+- **cube-array textures** (`texture_cube_array`, `samplerCubeArray`) —
+  permanent Tier-2 gap: GLES 3.1 has no cube-array. Bindings using it
+  return HalError / fail GLSL compile. Note: failures are subcase-
+  specific (mixed with passing subcases in the same CTS case), so they
+  are NOT expressible in the case-granular expectations file — track
+  here only.
+- **stencil-aspect texture-to-buffer readback** — GLES cannot
+  `glReadPixels` the stencil aspect; returns HalError. A compute-image
+  path could lift it later (see the depth compute-fallback, slice 4).
+- **>1 bind group** (`@group(1..3)`) — the GLES backend implements only
+  `@group(0)` today; other groups return HalError. DEFERRED
+  implementation (linear binding remap), not a hardware gap.
+- **maxBindingsPerBindGroup edge** — a residual cluster of compute/
+  fragment shader-compile fails at the reported binding limit suggests
+  the GL-queried `max_bindings_per_bind_group` may be 1 too high (a
+  reserved binding point such as the T-G17 texture-metadata UBO not
+  subtracted). Open follow-up, not catalogued.

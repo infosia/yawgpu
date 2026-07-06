@@ -405,3 +405,25 @@ feature, so "stop advertising" is not clean here.
 Clearly-catalogue (approved slice 5, no decision): 852 non-renderable
 color targets, 364 Unorm8x4Bgra vertex format, cube-array, stencil
 readback — block-67 matrix + expectations file.
+
+## Slice 3b + 5 complete (2026-07-06) — api,validation fail 2,280 -> 595
+
+- 3a truthful limits (61dd95b): binding-overflow ~624 -> 12.
+- 3b feature truthfulness (6b105c4): drop TextureFormatsTier1/Tier2/
+  Bgra8UnormStorage/TimestampQuery on GLES; Rg11b10/Float32Filterable
+  extension-gated. norm16/snorm/tier render-target + storage-format
+  cases now SKIP. fail 2,249 -> 959, skip +16.5k. Vulkan/Metal/Noop
+  advertisement unchanged (workspace suite green).
+- Unorm8x4Bgra vertex format (169006c): implemented HAL-side (GL_BGRA
+  attribute size when EXT/ARB_vertex_array_bgra present; crocus lacks
+  it so accept-only with R/B execution divergence). vertex_state 0 fail.
+- Catalogue: block-67 "CTS-confirmed Tier-2 catalogue" section records
+  cube-array, stencil readback, >1 bind group, and the Unorm8x4Bgra
+  execution divergence. The expectations-file route was ABANDONED — CTS
+  failures here are subcase-specific and the file is only case-granular,
+  producing heavy xpass noise.
+
+api,validation residual 595: storage textures ~204 (T-G14, NEXT),
+maxBindingsPerBindGroup off-by-one ~100 (follow-up), indexed-indirect
+54, depth-stencil copy bytes_per_row 57, single-bind-group 32,
+cube-array 50, stencil 7. crash 0.
