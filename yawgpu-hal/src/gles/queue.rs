@@ -18,7 +18,8 @@ use crate::{
     HalError, HalFrontFace, HalGlesBindingClass, HalGlesBindingRemap, HalIndexFormat,
     HalRenderLoadOp, HalRenderPass, HalRenderPipeline, HalSampler, HalStencilFaceState,
     HalStencilOperation, HalStorageTextureAccess, HalTexture, HalTextureAspect, HalTextureClear,
-    HalTextureCopy, HalTextureFormat, HalTextureViewDimension, HalVertexStepMode,
+    HalTextureCopy, HalTextureFormat, HalTextureMetadataSlot, HalTextureViewDimension,
+    HalVertexStepMode,
 };
 
 /// Stores GLES queue data used by validation and backend submission.
@@ -326,7 +327,7 @@ fn submit_compute_pass(
         let _texture_metadata_cleanup = bind_texture_metadata_ubo(
             gl,
             pipeline.texture_metadata_ubo_binding(),
-            pipeline.combined_samplers(),
+            pipeline.texture_metadata_slots(),
             &pass.bind_textures,
         )?;
         bind_storage_textures(
@@ -872,35 +873,50 @@ unsafe fn apply_depth_stencil_texture_mode(
 fn bind_texture_metadata_ubo<'a>(
     gl: &'a glow::Context,
     binding: Option<u32>,
-    combined_samplers: &[super::pipeline::GlesResolvedCombinedSampler],
+    metadata_slots: &[HalTextureMetadataSlot],
     textures: &[HalBoundTexture],
 ) -> Result<Option<TextureMetadataUboCleanup<'a>>, HalError> {
     let Some(binding) = binding else {
         return Ok(None);
     };
-    if combined_samplers.is_empty() {
+    if metadata_slots.is_empty() {
         return Ok(None);
     }
-    let mut values = Vec::with_capacity((combined_samplers.len() + 3) & !3);
-    for combined in combined_samplers {
+    let max_offset = metadata_slots
+        .iter()
+        .map(|slot| slot.offset)
+        .max()
+        .ok_or_else(|| HalError::QueueSubmissionFailed {
+            backend: BACKEND,
+            message: "GLES texture metadata UBO has no slots".to_owned(),
+        })?;
+    let value_count = usize::try_from(max_offset)
+        .ok()
+        .and_then(|offset| offset.checked_add(1))
+        .ok_or_else(|| HalError::QueueSubmissionFailed {
+            backend: BACKEND,
+            message: "GLES texture metadata UBO size exceeds platform limits".to_owned(),
+        })?;
+    let mut values = vec![0; (value_count + 3) & !3];
+    for slot in metadata_slots {
         let texture = textures
             .iter()
             .find(|texture| {
-                texture.group == combined.texture_group
-                    && texture.binding == combined.texture_binding
+                texture.group == slot.texture_group
+                    && texture.binding == slot.texture_binding
                     && texture.storage_access.is_none()
             })
             .ok_or_else(|| HalError::QueueSubmissionFailed {
                 backend: BACKEND,
                 message: format!(
-                    "GLES sampled texture binding (group {}, binding {}) is missing for metadata uniform",
-                    combined.texture_group, combined.texture_binding
+                    "GLES texture binding (group {}, binding {}) is missing for metadata uniform",
+                    slot.texture_group, slot.texture_binding
                 ),
             })?;
         let HalTexture::Gles(gles_texture) = &texture.texture else {
             return Err(HalError::BufferOperationFailed {
                 backend: BACKEND,
-                message: "sampled texture metadata binding is not a GLES texture",
+                message: "texture metadata binding is not a GLES texture",
             });
         };
         let value = if gles_texture.meta().target == glow::TEXTURE_2D_MULTISAMPLE {
@@ -908,10 +924,10 @@ fn bind_texture_metadata_ubo<'a>(
         } else {
             texture.mip_level_count
         };
-        values.push(value);
-    }
-    while values.len() % 4 != 0 {
-        values.push(0);
+        values[usize::try_from(slot.offset).map_err(|_| HalError::QueueSubmissionFailed {
+            backend: BACKEND,
+            message: "GLES texture metadata slot offset exceeds platform limits".to_owned(),
+        })?] = value;
     }
     let mut bytes = Vec::with_capacity(values.len() * std::mem::size_of::<u32>());
     for value in &values {
@@ -1567,7 +1583,7 @@ fn run_render_draw(
     let _texture_metadata_cleanup = bind_texture_metadata_ubo(
         gl,
         pipeline.texture_metadata_ubo_binding(),
-        pipeline.combined_samplers(),
+        pipeline.texture_metadata_slots(),
         &pass.bind_textures,
     )?;
     bind_storage_textures(
@@ -3694,6 +3710,7 @@ mod tests {
                             .to_owned(),
                     ),
                     combined_samplers: Vec::new(),
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
@@ -3879,6 +3896,7 @@ mod tests {
                             .to_owned(),
                     ),
                     combined_samplers: Vec::new(),
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
@@ -5070,6 +5088,7 @@ mod tests {
                         sampler_binding: 2,
                         uses_placeholder_sampler: false,
                     }],
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
@@ -5237,6 +5256,7 @@ mod tests {
                         sampler_binding: 2,
                         uses_placeholder_sampler: false,
                     }],
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: vec![crate::HalGlesBindingRemap::new(
                         0,
                         0,
@@ -5386,6 +5406,7 @@ mod tests {
                         sampler_binding: u32::MAX,
                         uses_placeholder_sampler: true,
                     }],
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: vec![crate::HalGlesBindingRemap::new(
                         0,
                         0,
@@ -5501,6 +5522,7 @@ mod tests {
                         sampler_binding: u32::MAX,
                         uses_placeholder_sampler: true,
                     }],
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: vec![crate::HalGlesBindingRemap::new(
                         0,
                         0,
@@ -5624,6 +5646,7 @@ mod tests {
                         sampler_binding: u32::MAX,
                         uses_placeholder_sampler: true,
                     }],
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: vec![crate::HalGlesBindingRemap::new(
                         0,
                         0,
@@ -5759,6 +5782,7 @@ mod tests {
                         sampler_binding: u32::MAX,
                         uses_placeholder_sampler: true,
                     }],
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: vec![
                         crate::HalGlesBindingRemap::new(
                             1,
@@ -6693,6 +6717,7 @@ mod tests {
                         sampler_binding: 2,
                         uses_placeholder_sampler: false,
                     }],
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
@@ -6868,6 +6893,7 @@ mod tests {
                     .to_owned(),
                     stage: crate::HalShaderStage::Compute,
                     combined_samplers: Vec::new(),
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: vec![crate::HalGlesBindingRemap::new(
                         0,
                         0,
@@ -6990,6 +7016,7 @@ mod tests {
                     .to_owned(),
                     stage: crate::HalShaderStage::Compute,
                     combined_samplers: Vec::new(),
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: vec![crate::HalGlesBindingRemap::new(
                         0,
                         0,
@@ -7066,6 +7093,7 @@ mod tests {
                         .to_owned(),
                     stage: crate::HalShaderStage::Compute,
                     combined_samplers: Vec::new(),
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: vec![crate::HalGlesBindingRemap::new(
                         0,
                         0,
@@ -7272,6 +7300,7 @@ mod tests {
                             .to_owned(),
                     ),
                     combined_samplers: Vec::new(),
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
@@ -7604,6 +7633,7 @@ mod tests {
                         .to_owned(),
                     ),
                     combined_samplers: Vec::new(),
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
@@ -7832,6 +7862,7 @@ mod tests {
                             .to_owned(),
                     ),
                     combined_samplers: Vec::new(),
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
@@ -7967,6 +7998,7 @@ mod tests {
                             .to_owned(),
                     ),
                     combined_samplers: Vec::new(),
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },

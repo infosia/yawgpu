@@ -388,6 +388,7 @@ impl GlesDevice {
             source,
             stage: HalShaderStage::Compute,
             combined_samplers,
+            texture_metadata_slots,
             binding_remaps,
             texture_metadata_ubo_binding,
         } = shader
@@ -404,6 +405,7 @@ impl GlesDevice {
             bindings,
             GlesPipelineResourceBindings {
                 combined_samplers,
+                texture_metadata_slots,
                 binding_remaps,
                 texture_metadata_ubo_binding,
             },
@@ -423,6 +425,7 @@ impl GlesDevice {
             vertex,
             fragment,
             combined_samplers,
+            texture_metadata_slots,
             binding_remaps,
             texture_metadata_ubo_binding,
         } = shader
@@ -440,6 +443,7 @@ impl GlesDevice {
             bindings,
             GlesPipelineResourceBindings {
                 combined_samplers,
+                texture_metadata_slots,
                 binding_remaps,
                 texture_metadata_ubo_binding,
             },

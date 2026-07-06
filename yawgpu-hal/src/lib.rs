@@ -45,7 +45,7 @@ pub use format::{
 pub use present::{HalPresentMode, HalSurfaceConfiguration};
 pub use shader::{
     HalCombinedSampler, HalGlesBindingClass, HalGlesBindingRemap, HalMslBufferSizeBinding,
-    HalMslImmediates, HalShaderSource, HalShaderStage,
+    HalMslImmediates, HalShaderSource, HalShaderStage, HalTextureMetadataSlot,
 };
 
 /// Stores backend-reported supported adapter limits.

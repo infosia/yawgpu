@@ -81,6 +81,8 @@ pub enum HalShaderSource {
         fragment: Option<String>,
         /// Combined texture/sampler uniforms emitted by Tint's GLSL writer.
         combined_samplers: Vec<HalCombinedSampler>,
+        /// Texture metadata UBO slots emitted by Tint's GLSL writer.
+        texture_metadata_slots: Vec<HalTextureMetadataSlot>,
         /// GLES flat resource binding remaps emitted alongside the GLSL.
         binding_remaps: Vec<HalGlesBindingRemap>,
         /// Uniform-buffer binding carrying GLSL texture metadata, if emitted.
@@ -94,6 +96,8 @@ pub enum HalShaderSource {
         stage: HalShaderStage,
         /// Combined texture/sampler uniforms emitted by Tint's GLSL writer.
         combined_samplers: Vec<HalCombinedSampler>,
+        /// Texture metadata UBO slots emitted by Tint's GLSL writer.
+        texture_metadata_slots: Vec<HalTextureMetadataSlot>,
         /// GLES flat resource binding remaps emitted alongside the GLSL.
         binding_remaps: Vec<HalGlesBindingRemap>,
         /// Uniform-buffer binding carrying GLSL texture metadata, if emitted.
@@ -116,6 +120,17 @@ pub struct HalCombinedSampler {
     pub sampler_binding: u32,
     /// Whether this record uses Tint's placeholder sampler for a texture-only use.
     pub uses_placeholder_sampler: bool,
+}
+
+/// A texture metadata UBO slot and the WGSL texture binding that populates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HalTextureMetadataSlot {
+    /// Slot index into Tint's packed u32 metadata UBO.
+    pub offset: u32,
+    /// WGSL bind group of the queried texture.
+    pub texture_group: u32,
+    /// WGSL binding number of the queried texture.
+    pub texture_binding: u32,
 }
 
 /// GLES resource classes whose GLSL layout binding is consumed by the HAL.

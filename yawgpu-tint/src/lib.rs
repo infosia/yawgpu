@@ -165,6 +165,9 @@ pub struct GlslOutput {
     pub source: String,
     /// Combined texture/sampler uniforms emitted by Tint's GLSL writer.
     pub combined_samplers: Vec<CombinedSampler>,
+    /// UBO slots emitted by Tint for texture metadata builtins. The binding
+    /// points are post-remap, matching Tint's GLSL writer options.
+    pub texture_metadata_slots: Vec<TextureMetadataSlot>,
     /// GLES uniform-buffer binding carrying texture metadata for robust
     /// `textureLoad` lowering, when Tint emitted one.
     pub texture_metadata_ubo_binding: Option<u32>,
@@ -188,6 +191,17 @@ pub struct CombinedSampler {
     /// Whether this uniform pairs the texture with Tint's placeholder sampler
     /// because WGSL used the texture without an explicit sampler.
     pub uses_placeholder_sampler: bool,
+}
+
+/// One Tint texture-metadata UBO slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureMetadataSlot {
+    /// Slot index into Tint's packed u32 metadata UBO.
+    pub offset: u32,
+    /// Post-remap bind group of the queried texture.
+    pub group: u32,
+    /// Post-remap binding number of the queried texture.
+    pub binding: u32,
 }
 
 /// A storage binding whose byte length is required by generated MSL.
@@ -1310,21 +1324,40 @@ mod real {
 
     #[repr(C)]
     #[derive(Clone, Copy)]
+    struct RawTextureMetadataSlot {
+        offset: u32,
+        group: u32,
+        binding: u32,
+    }
+
+    const _: () = {
+        assert!(core::mem::size_of::<RawTextureMetadataSlot>() == 12);
+        assert!(core::mem::offset_of!(RawTextureMetadataSlot, offset) == 0);
+        assert!(core::mem::offset_of!(RawTextureMetadataSlot, group) == 4);
+        assert!(core::mem::offset_of!(RawTextureMetadataSlot, binding) == 8);
+    };
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
     struct RawGlslOutput {
         glsl: *mut c_char,
         combined_samplers: *mut RawCombinedSampler,
         n_combined_samplers: usize,
+        texture_metadata_slots: *mut RawTextureMetadataSlot,
+        n_texture_metadata_slots: usize,
         has_texture_metadata_ubo: bool,
         texture_metadata_ubo_binding: u32,
     }
 
     const _: () = {
-        assert!(core::mem::size_of::<RawGlslOutput>() == 32);
+        assert!(core::mem::size_of::<RawGlslOutput>() == 48);
         assert!(core::mem::offset_of!(RawGlslOutput, glsl) == 0);
         assert!(core::mem::offset_of!(RawGlslOutput, combined_samplers) == 8);
         assert!(core::mem::offset_of!(RawGlslOutput, n_combined_samplers) == 16);
-        assert!(core::mem::offset_of!(RawGlslOutput, has_texture_metadata_ubo) == 24);
-        assert!(core::mem::offset_of!(RawGlslOutput, texture_metadata_ubo_binding) == 28);
+        assert!(core::mem::offset_of!(RawGlslOutput, texture_metadata_slots) == 24);
+        assert!(core::mem::offset_of!(RawGlslOutput, n_texture_metadata_slots) == 32);
+        assert!(core::mem::offset_of!(RawGlslOutput, has_texture_metadata_ubo) == 40);
+        assert!(core::mem::offset_of!(RawGlslOutput, texture_metadata_ubo_binding) == 44);
     };
 
     extern "C" {
@@ -1607,6 +1640,25 @@ mod real {
                         })
                         .collect()
                 };
+            let texture_metadata_slots = if raw.texture_metadata_slots.is_null()
+                || raw.n_texture_metadata_slots == 0
+            {
+                Vec::new()
+            } else {
+                // SAFETY: `texture_metadata_slots` points to
+                // `n_texture_metadata_slots` initialized shim-owned records
+                // until the output is freed.
+                unsafe {
+                    slice::from_raw_parts(raw.texture_metadata_slots, raw.n_texture_metadata_slots)
+                }
+                .iter()
+                .map(|raw| TextureMetadataSlot {
+                    offset: raw.offset,
+                    group: raw.group,
+                    binding: raw.binding,
+                })
+                .collect()
+            };
             let mut raw = raw;
             // SAFETY: all pointed-to allocations are shim-owned and have been
             // copied into Rust-owned values above.
@@ -1614,6 +1666,7 @@ mod real {
             GlslOutput {
                 source,
                 combined_samplers,
+                texture_metadata_slots,
                 texture_metadata_ubo_binding: raw
                     .has_texture_metadata_ubo
                     .then_some(raw.texture_metadata_ubo_binding),
@@ -2191,6 +2244,8 @@ mod real {
                 glsl: ptr::null_mut(),
                 combined_samplers: ptr::null_mut(),
                 n_combined_samplers: 0,
+                texture_metadata_slots: ptr::null_mut(),
+                n_texture_metadata_slots: 0,
                 has_texture_metadata_ubo: false,
                 texture_metadata_ubo_binding: 0,
             };
@@ -2914,6 +2969,48 @@ fn fs(@builtin(sample_index) sample_index: u32) -> @location(0) vec4f {
                 output.source
             );
         }
+    }
+
+    #[test]
+    fn generate_glsl_texture_num_levels_without_sampler_reports_metadata_slot() {
+        let wgsl = r#"
+@group(2) @binding(7) var src: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
+
+@compute @workgroup_size(1)
+fn main() {
+  dst[0] = textureNumLevels(src);
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let mut bindings = Bindings::default();
+        bindings.texture.push(BindingRemap {
+            group: 2,
+            binding: 7,
+            dst_group: 0,
+            dst_binding: 0,
+        });
+        bindings.storage.push(BindingRemap {
+            group: 0,
+            binding: 1,
+            dst_group: 0,
+            dst_binding: 1,
+        });
+        let output = program.generate_glsl("main", &bindings, &[], None).unwrap();
+        assert!(
+            output.source.contains("TintTextureUniformData"),
+            "GLSL:\n{}",
+            output.source
+        );
+        assert_eq!(output.texture_metadata_ubo_binding, Some(0));
+        assert_eq!(
+            output.texture_metadata_slots,
+            vec![TextureMetadataSlot {
+                offset: 0,
+                group: 0,
+                binding: 0,
+            }]
+        );
     }
 
     #[test]

@@ -1822,8 +1822,13 @@ pub(crate) fn select_render_shader_source(
                 }
             };
             let mut combined_samplers = vertex_glsl.combined_samplers;
+            let mut texture_metadata_slots = vertex_glsl.texture_metadata_slots;
             if let Some(fragment_glsl) = &fragment_glsl {
                 combined_samplers.extend(fragment_glsl.combined_samplers.clone());
+                merge_texture_metadata_slots(
+                    &mut texture_metadata_slots,
+                    &fragment_glsl.texture_metadata_slots,
+                )?;
             }
             let texture_metadata_ubo_binding =
                 vertex_glsl.texture_metadata_ubo_binding.or_else(|| {
@@ -1836,6 +1841,7 @@ pub(crate) fn select_render_shader_source(
                     vertex: vertex_glsl.source,
                     fragment: fragment_glsl.map(|glsl| glsl.source),
                     combined_samplers,
+                    texture_metadata_slots,
                     binding_remaps: vertex_glsl.binding_remaps,
                     texture_metadata_ubo_binding,
                 },
@@ -1847,6 +1853,33 @@ pub(crate) fn select_render_shader_source(
         HalBackend::Noop => Err("Noop backend does not create HAL shader sources".to_owned()),
         _ => Err("unsupported backend does not create HAL shader sources".to_owned()),
     }
+}
+
+#[cfg(feature = "gles")]
+fn merge_texture_metadata_slots(
+    base: &mut Vec<yawgpu_hal::HalTextureMetadataSlot>,
+    extra: &[yawgpu_hal::HalTextureMetadataSlot],
+) -> Result<(), String> {
+    for slot in extra {
+        if let Some(existing) = base.iter().find(|existing| existing.offset == slot.offset) {
+            if existing.texture_group != slot.texture_group
+                || existing.texture_binding != slot.texture_binding
+            {
+                return Err(format!(
+                    "GLES render stages use conflicting texture metadata slot {}: \
+                     group {}, binding {} vs group {}, binding {}",
+                    slot.offset,
+                    existing.texture_group,
+                    existing.texture_binding,
+                    slot.texture_group,
+                    slot.texture_binding
+                ));
+            }
+        } else {
+            base.push(*slot);
+        }
+    }
+    Ok(())
 }
 
 /// Returns MSL resource bindings projected to a single render stage.
@@ -5968,12 +6001,13 @@ fn fs() -> @builtin(frag_depth) f32 {
         .expect("WGSL should generate GLES GLSL stages");
 
         assert!(
-            matches!(source, HalShaderSource::GlslStages { vertex, fragment, combined_samplers, binding_remaps, texture_metadata_ubo_binding }
+            matches!(source, HalShaderSource::GlslStages { vertex, fragment, combined_samplers, texture_metadata_slots, binding_remaps, texture_metadata_ubo_binding }
                 if vertex.contains("#version 310 es")
                     && fragment.as_ref().is_some_and(|fragment| fragment.contains("#version 310 es"))
                     && vertex.contains("void main()")
                     && fragment.as_ref().is_some_and(|fragment| fragment.contains("void main()"))
                     && combined_samplers.is_empty()
+                    && texture_metadata_slots.is_empty()
                     && binding_remaps.is_empty()
                     && texture_metadata_ubo_binding.is_none())
         );

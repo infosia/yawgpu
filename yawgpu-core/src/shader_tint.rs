@@ -409,6 +409,10 @@ impl ReflectedModule {
                     .into_iter()
                     .map(hal_combined_sampler)
                     .collect(),
+                texture_metadata_slots: hal_texture_metadata_slots(
+                    source.texture_metadata_slots,
+                    &bindings.tint.texture,
+                )?,
                 binding_remaps: bindings.hal_remaps.clone(),
                 texture_metadata_ubo_binding: source.texture_metadata_ubo_binding,
             })
@@ -1405,6 +1409,38 @@ fn hal_combined_sampler(combined: yawgpu_tint::CombinedSampler) -> yawgpu_hal::H
         sampler_binding: combined.sampler_binding,
         uses_placeholder_sampler: combined.uses_placeholder_sampler,
     }
+}
+
+#[cfg(feature = "gles")]
+fn hal_texture_metadata_slots(
+    slots: Vec<yawgpu_tint::TextureMetadataSlot>,
+    remaps: &[yawgpu_tint::BindingRemap],
+) -> Result<Vec<yawgpu_hal::HalTextureMetadataSlot>, String> {
+    slots
+        .into_iter()
+        .map(|slot| {
+            if slot.group != 0 {
+                return Err(format!(
+                    "GLES texture metadata slot uses unsupported post-remap group {}",
+                    slot.group
+                ));
+            }
+            let remap = remaps
+                .iter()
+                .find(|remap| remap.dst_group == slot.group && remap.dst_binding == slot.binding)
+                .ok_or_else(|| {
+                    format!(
+                        "GLES texture metadata slot binding {}:{} was not found in texture remaps",
+                        slot.group, slot.binding
+                    )
+                })?;
+            Ok(yawgpu_hal::HalTextureMetadataSlot {
+                offset: slot.offset,
+                texture_group: remap.group,
+                texture_binding: remap.binding,
+            })
+        })
+        .collect()
 }
 
 fn msl_buffer_sizes_slot(binding_map: &MslBindingMap) -> Result<u32, String> {
@@ -3124,6 +3160,40 @@ fn cs() {
                     0,
                 ),
             ]
+        );
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn generate_glsl_texture_num_levels_without_sampler_keeps_metadata_slot() {
+        let generated = parse_and_validate_wgsl(
+            r#"
+@group(2) @binding(7) var tex: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
+
+@compute @workgroup_size(1)
+fn cs() {
+  dst[0] = textureNumLevels(tex);
+}
+"#,
+        )
+        .unwrap()
+        .generate_glsl("cs", ShaderStage::Compute, &PipelineConstants::default())
+        .unwrap();
+
+        assert!(
+            generated.source.contains("TintTextureUniformData"),
+            "GLSL:\n{}",
+            generated.source
+        );
+        assert_eq!(generated.texture_metadata_ubo_binding, Some(0));
+        assert_eq!(
+            generated.texture_metadata_slots,
+            vec![yawgpu_hal::HalTextureMetadataSlot {
+                offset: 0,
+                texture_group: 2,
+                texture_binding: 7,
+            }]
         );
     }
 

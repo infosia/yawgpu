@@ -307,9 +307,17 @@ typedef struct {
 } YawgpuTintCombinedSampler;
 
 typedef struct {
+    uint32_t offset;
+    uint32_t group;
+    uint32_t binding;
+} YawgpuTintTextureMetadataSlot;
+
+typedef struct {
     char* glsl;
     YawgpuTintCombinedSampler* combined_samplers;
     size_t n_combined_samplers;
+    YawgpuTintTextureMetadataSlot* texture_metadata_slots;
+    size_t n_texture_metadata_slots;
     bool has_texture_metadata_ubo;
     uint32_t texture_metadata_ubo_binding;
 } YawgpuTintGlslOutput;

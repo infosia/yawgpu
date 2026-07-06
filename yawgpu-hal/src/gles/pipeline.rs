@@ -9,7 +9,7 @@ use super::{rebuild_hal_error, BACKEND};
 use crate::{
     HalColorTargetState, HalCombinedSampler, HalCullMode, HalDepthStencilState,
     HalDescriptorBinding, HalError, HalFrontFace, HalGlesBindingRemap, HalPrimitiveTopology,
-    HalRenderPipelineDescriptor, HalVertexBufferLayout,
+    HalRenderPipelineDescriptor, HalTextureMetadataSlot, HalVertexBufferLayout,
 };
 
 /// The GLSL uniform name Tint's GLSL writer emits for the first element of
@@ -36,6 +36,7 @@ pub(super) struct GlesResolvedCombinedSampler {
 
 pub(super) struct GlesPipelineResourceBindings {
     pub(super) combined_samplers: Vec<HalCombinedSampler>,
+    pub(super) texture_metadata_slots: Vec<HalTextureMetadataSlot>,
     pub(super) binding_remaps: Vec<HalGlesBindingRemap>,
     pub(super) texture_metadata_ubo_binding: Option<u32>,
 }
@@ -46,6 +47,7 @@ struct GlesComputePipelineInner {
     workgroup_size: (u32, u32, u32),
     bindings: Vec<HalDescriptorBinding>,
     combined_samplers: Vec<GlesResolvedCombinedSampler>,
+    texture_metadata_slots: Vec<HalTextureMetadataSlot>,
     binding_remaps: Vec<HalGlesBindingRemap>,
     texture_metadata_ubo_binding: Option<u32>,
 }
@@ -101,6 +103,7 @@ impl GlesComputePipeline {
                 workgroup_size,
                 bindings: bindings.to_vec(),
                 combined_samplers,
+                texture_metadata_slots: resource_bindings.texture_metadata_slots,
                 binding_remaps: resource_bindings.binding_remaps,
                 texture_metadata_ubo_binding: resource_bindings.texture_metadata_ubo_binding,
             }),
@@ -131,6 +134,11 @@ impl GlesComputePipeline {
     }
 
     #[must_use]
+    pub(super) fn texture_metadata_slots(&self) -> &[HalTextureMetadataSlot] {
+        &self.inner.texture_metadata_slots
+    }
+
+    #[must_use]
     pub(super) fn texture_metadata_ubo_binding(&self) -> Option<u32> {
         self.inner.texture_metadata_ubo_binding
     }
@@ -149,6 +157,7 @@ struct GlesRenderPipelineInner {
     alpha_to_coverage_enabled: bool,
     bindings: Vec<HalDescriptorBinding>,
     combined_samplers: Vec<GlesResolvedCombinedSampler>,
+    texture_metadata_slots: Vec<HalTextureMetadataSlot>,
     binding_remaps: Vec<HalGlesBindingRemap>,
     texture_metadata_ubo_binding: Option<u32>,
     first_instance_location: Option<glow::UniformLocation>,
@@ -224,6 +233,7 @@ impl GlesRenderPipeline {
                 alpha_to_coverage_enabled: descriptor.alpha_to_coverage_enabled,
                 bindings: bindings.to_vec(),
                 combined_samplers,
+                texture_metadata_slots: resource_bindings.texture_metadata_slots,
                 binding_remaps: resource_bindings.binding_remaps,
                 texture_metadata_ubo_binding: resource_bindings.texture_metadata_ubo_binding,
                 first_instance_location,
@@ -301,6 +311,11 @@ impl GlesRenderPipeline {
     #[must_use]
     pub(super) fn binding_remaps(&self) -> &[HalGlesBindingRemap] {
         &self.inner.binding_remaps
+    }
+
+    #[must_use]
+    pub(super) fn texture_metadata_slots(&self) -> &[HalTextureMetadataSlot] {
+        &self.inner.texture_metadata_slots
     }
 
     #[must_use]
@@ -912,6 +927,7 @@ mod tests {
                         .to_owned(),
                     fragment: None,
                     combined_samplers: Vec::new(),
+                    texture_metadata_slots: Vec::new(),
                     binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
@@ -1009,6 +1025,7 @@ mod tests {
                     .to_owned(),
             ),
             combined_samplers: Vec::new(),
+            texture_metadata_slots: Vec::new(),
             binding_remaps: Vec::new(),
             texture_metadata_ubo_binding: None,
         };
