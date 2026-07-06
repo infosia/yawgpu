@@ -1940,15 +1940,9 @@ fn submit_texture_to_buffer(
             message: "GLES cannot read back depth/stencil formats",
         });
     }
-    let row_pixels = pixels_per_row(
-        copy.buffer_layout.bytes_per_row,
-        meta.format.bytes_per_pixel,
-    )?;
     let mip_level = i32_from_u32(copy.mip_level, "texture mip level exceeds GLES limit")?;
     let x = i32_from_u32(copy.origin.x, "texture x origin exceeds GLES limit")?;
-    let y = i32_from_u32(copy.origin.y, "texture y origin exceeds GLES limit")?;
     let width = i32_from_u32(copy.extent.width, "texture copy width exceeds GLES limit")?;
-    let height = i32_from_u32(copy.extent.height, "texture copy height exceeds GLES limit")?;
     let uses_layered_target = meta.target != glow::TEXTURE_2D;
     if !uses_layered_target {
         ensure_2d_target_copy(copy.extent.depth_or_array_layers, copy.origin.z)?;
@@ -1960,33 +1954,38 @@ fn submit_texture_to_buffer(
     // memory + `glBufferSubData`; 2D and 2D-array targets keep the direct
     // pack-buffer path.
     let use_client_staging = meta.target == glow::TEXTURE_3D;
-    let staging_len = if copy.extent.height == 0 || copy.extent.width == 0 {
-        0usize
-    } else {
-        let tail_row_bytes = u64::from(copy.extent.width) * u64::from(meta.format.bytes_per_pixel);
-        let full_rows_bytes = u64::from(copy.extent.height - 1)
-            .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
-            .ok_or(HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "texture-to-buffer slice size exceeds GLES limit",
-            })?;
-        usize::try_from(full_rows_bytes.checked_add(tail_row_bytes).ok_or(
-            HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "texture-to-buffer slice size exceeds GLES limit",
-            },
-        )?)
-        .map_err(|_| HalError::BufferOperationFailed {
+    let row_bytes = u64::from(copy.extent.width)
+        .checked_mul(u64::from(meta.format.bytes_per_pixel))
+        .ok_or(HalError::BufferOperationFailed {
             backend: BACKEND,
-            message: "texture-to-buffer slice size exceeds host limit",
-        })?
-    };
+            message: "texture-to-buffer row size exceeds GLES limit",
+        })?;
+    let staging_len = usize::try_from(row_bytes).map_err(|_| HalError::BufferOperationFailed {
+        backend: BACKEND,
+        message: "texture-to-buffer row size exceeds host limit",
+    })?;
+    i32_from_u64(row_bytes, "texture-to-buffer row size exceeds GLES limit")?;
+    if row_bytes == 0 || copy.extent.height == 0 || copy.extent.depth_or_array_layers == 0 {
+        return Ok(());
+    }
+    if copy.extent.height > 1 && u64::from(copy.buffer_layout.bytes_per_row) < row_bytes {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "bytes_per_row is smaller than texture copy row",
+        });
+    }
 
-    // Precompute the (layer, buffer offset) pair for every slice so that all
-    // fallible arithmetic happens before any GL state is touched.
+    // Precompute every exact texel-row span so fallible arithmetic happens
+    // before any GL state is touched. Reading one tight row at a time avoids
+    // relying on PACK_ROW_LENGTH/PBO padding preservation, and keeps row,
+    // image, pre-offset, and post-copy padding bytes untouched.
     let image_stride =
         u64::from(copy.buffer_layout.bytes_per_row) * u64::from(copy.buffer_layout.rows_per_image);
-    let mut slices = Vec::with_capacity(copy.extent.depth_or_array_layers as usize);
+    let mut row_spans = Vec::with_capacity(
+        copy.extent
+            .depth_or_array_layers
+            .saturating_mul(copy.extent.height) as usize,
+    );
     for slice in 0..copy.extent.depth_or_array_layers {
         let layer = copy
             .origin
@@ -2004,15 +2003,46 @@ fn submit_texture_to_buffer(
                 backend: BACKEND,
                 message: "texture-to-buffer offset exceeds GLES limit",
             })?;
-        // The staged path passes the offset to `glBufferSubData` (i32); the
-        // pack-buffer path passes it to `glReadPixels` (u32). Validate the
-        // stricter bound up front so the copy loop below cannot fail.
-        if use_client_staging {
-            i32_from_u64(slice_offset, "texture-to-buffer offset exceeds GLES limit")?;
-        } else {
-            u32_from_u64(slice_offset, "texture-to-buffer offset exceeds GLES limit")?;
+        for row in 0..copy.extent.height {
+            let row_offset = u64::from(row)
+                .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
+                .and_then(|bytes| slice_offset.checked_add(bytes))
+                .ok_or(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "texture-to-buffer offset exceeds GLES limit",
+                })?;
+            let row_end =
+                row_offset
+                    .checked_add(row_bytes)
+                    .ok_or(HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message: "texture-to-buffer range exceeds GLES limit",
+                    })?;
+            if row_end > destination.size() {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "texture-to-buffer range exceeds buffer size",
+                });
+            }
+            // The staged path passes the offset to `glBufferSubData` (i32);
+            // the pack-buffer path passes it to `glReadPixels` (u32). Validate
+            // the stricter bound up front so the copy loop below cannot fail.
+            if use_client_staging {
+                i32_from_u64(row_offset, "texture-to-buffer offset exceeds GLES limit")?;
+            } else {
+                u32_from_u64(row_offset, "texture-to-buffer offset exceeds GLES limit")?;
+            }
+            let row_y = copy
+                .origin
+                .y
+                .checked_add(row)
+                .ok_or(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "texture row index exceeds GLES limit",
+                })?;
+            let row_y = i32_from_u32(row_y, "texture row index exceeds GLES limit")?;
+            row_spans.push((layer, row_y, row_offset));
         }
-        slices.push((layer, slice_offset));
     }
 
     unsafe {
@@ -2027,11 +2057,15 @@ fn submit_texture_to_buffer(
         if !use_client_staging {
             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(buffer));
         }
-        gl.pixel_store_i32(glow::PACK_ROW_LENGTH, row_pixels);
         gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
         let mut result = Ok(());
-        for (layer, slice_offset) in slices {
-            if uses_layered_target {
+        let mut attached_layer = None;
+        for (layer, row_y, row_offset) in row_spans {
+            let attachment_changed = if attached_layer == Some(layer) {
+                // Reuse the framebuffer attachment across rows of the same
+                // layer; `row_spans` is ordered by layer then row.
+                false
+            } else if uses_layered_target {
                 gl.framebuffer_texture_layer(
                     glow::READ_FRAMEBUFFER,
                     glow::COLOR_ATTACHMENT0,
@@ -2039,6 +2073,8 @@ fn submit_texture_to_buffer(
                     mip_level,
                     layer,
                 );
+                attached_layer = Some(layer);
+                true
             } else {
                 gl.framebuffer_texture_2d(
                     glow::READ_FRAMEBUFFER,
@@ -2047,8 +2083,12 @@ fn submit_texture_to_buffer(
                     Some(texture),
                     mip_level,
                 );
-            }
-            if gl.check_framebuffer_status(glow::READ_FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+                attached_layer = Some(layer);
+                true
+            };
+            if attachment_changed
+                && gl.check_framebuffer_status(glow::READ_FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE
+            {
                 result = Err(HalError::BufferOperationFailed {
                     backend: BACKEND,
                     message: "framebuffer incomplete for texture-to-buffer copy",
@@ -2059,29 +2099,28 @@ fn submit_texture_to_buffer(
                 let mut staging = vec![0u8; staging_len];
                 gl.read_pixels(
                     x,
-                    y,
+                    row_y,
                     width,
-                    height,
+                    1,
                     meta.format.format,
                     meta.format.ty,
                     glow::PixelPackData::Slice(&mut staging),
                 );
                 gl.bind_buffer(glow::COPY_WRITE_BUFFER, Some(buffer));
-                gl.buffer_sub_data_u8_slice(glow::COPY_WRITE_BUFFER, slice_offset as i32, &staging);
+                gl.buffer_sub_data_u8_slice(glow::COPY_WRITE_BUFFER, row_offset as i32, &staging);
                 gl.bind_buffer(glow::COPY_WRITE_BUFFER, None);
             } else {
                 gl.read_pixels(
                     x,
-                    y,
+                    row_y,
                     width,
-                    height,
+                    1,
                     meta.format.format,
                     meta.format.ty,
-                    glow::PixelPackData::BufferOffset(slice_offset as u32),
+                    glow::PixelPackData::BufferOffset(row_offset as u32),
                 );
             }
         }
-        gl.pixel_store_i32(glow::PACK_ROW_LENGTH, 0);
         gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
         if !use_client_staging {
             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
@@ -3174,6 +3213,115 @@ mod tests {
             bytes,
             "all 3 depth slices must round-trip in one texture-to-buffer copy"
         );
+    }
+
+    #[test]
+    fn submit_copies_texture_to_buffer_preserves_2d_padding_bytes() {
+        let Some(device) = gles_device_or_skip("GLES 2D texture-to-buffer padding test") else {
+            return;
+        };
+
+        let texture = rgba8_copy_texture(&device, crate::HalTextureDimension::D2, 1);
+        let pixels = upload_rgba8_slices(&device, &texture, 1);
+        let readback_size = 276u64;
+        let readback = device
+            .create_buffer(
+                readback_size,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES padded readback buffer creation must succeed");
+        readback
+            .write(0, &vec![0xAB; readback_size as usize])
+            .expect("pre-filling the padded readback buffer must succeed");
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(readback.clone()),
+                buffer_layout: crate::HalBufferTextureLayout {
+                    offset: 4,
+                    bytes_per_row: 256,
+                    rows_per_image: 2,
+                },
+                texture: HalTexture::Gles(texture),
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                extent: crate::HalExtent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: 1,
+                },
+            })])
+            .expect("padded 2D texture-to-buffer copy must succeed");
+
+        let actual = readback
+            .read(0, readback_size)
+            .expect("reading the padded readback buffer must succeed");
+        let mut expected = vec![0xAB; readback_size as usize];
+        expected[4..12].copy_from_slice(&pixels[0..8]);
+        expected[260..268].copy_from_slice(&pixels[8..16]);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn submit_copies_texture_to_buffer_preserves_2d_array_padding_bytes() {
+        let Some(device) = gles_device_or_skip("GLES 2D-array texture-to-buffer padding test")
+        else {
+            return;
+        };
+
+        let texture = rgba8_copy_texture(&device, crate::HalTextureDimension::D2, 2);
+        let pixels = upload_rgba8_slices(&device, &texture, 2);
+        let readback_size = 1300u64;
+        let readback = device
+            .create_buffer(
+                readback_size,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES padded array readback buffer creation must succeed");
+        readback
+            .write(0, &vec![0xAB; readback_size as usize])
+            .expect("pre-filling the padded array readback buffer must succeed");
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(readback.clone()),
+                buffer_layout: crate::HalBufferTextureLayout {
+                    offset: 4,
+                    bytes_per_row: 256,
+                    rows_per_image: 4,
+                },
+                texture: HalTexture::Gles(texture),
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                extent: crate::HalExtent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: 2,
+                },
+            })])
+            .expect("padded 2D-array texture-to-buffer copy must succeed");
+
+        let actual = readback
+            .read(0, readback_size)
+            .expect("reading the padded array readback buffer must succeed");
+        let mut expected = vec![0xAB; readback_size as usize];
+        expected[4..12].copy_from_slice(&pixels[0..8]);
+        expected[260..268].copy_from_slice(&pixels[8..16]);
+        expected[1028..1036].copy_from_slice(&pixels[16..24]);
+        expected[1284..1292].copy_from_slice(&pixels[24..32]);
+        assert_eq!(actual, expected);
     }
 
     #[test]
