@@ -1841,6 +1841,9 @@ fn submit_texture_clear(gl: &glow::Context, clear: &HalTextureClear) -> Result<(
     let mip_width = mip_dimension(meta.width, clear.mip_level);
     let mip_height = mip_dimension(meta.height, clear.mip_level);
     let layers = texture_clear_layers(meta, clear.mip_level, clear)?;
+    if texture_to_buffer_compute_encoding(clear.format, HalTextureAspect::All).is_some() {
+        return submit_texture_clear_zero_upload(gl, meta, raw_texture, mip_level, clear, &layers);
+    }
 
     unsafe {
         let framebuffer = gl
@@ -1894,6 +1897,89 @@ fn submit_texture_clear(gl: &glow::Context, clear: &HalTextureClear) -> Result<(
         gl.delete_framebuffer(framebuffer);
         result
     }
+}
+
+fn submit_texture_clear_zero_upload(
+    gl: &glow::Context,
+    meta: &GlesTextureMeta,
+    texture: glow::Texture,
+    mip_level: i32,
+    clear: &HalTextureClear,
+    layers: &[i32],
+) -> Result<(), HalError> {
+    let mip_width = mip_dimension(meta.width, clear.mip_level);
+    let mip_height = mip_dimension(meta.height, clear.mip_level);
+    let layer_count = u32::try_from(layers.len()).map_err(|_| HalError::BufferOperationFailed {
+        backend: BACKEND,
+        message: "texture clear layer count exceeds GLES limit",
+    })?;
+    let byte_count = u64::from(mip_width)
+        .checked_mul(u64::from(mip_height))
+        .and_then(|bytes| bytes.checked_mul(u64::from(layer_count)))
+        .and_then(|bytes| bytes.checked_mul(u64::from(meta.format.bytes_per_pixel)))
+        .ok_or(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture clear zero upload size exceeds host limit",
+        })?;
+    let zeros = vec![
+        0u8;
+        usize::try_from(byte_count).map_err(|_| HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture clear zero upload size exceeds host limit",
+        })?
+    ];
+    let width = i32_from_u32(mip_width, "texture clear width exceeds GLES limit")?;
+    let height = i32_from_u32(mip_height, "texture clear height exceeds GLES limit")?;
+
+    unsafe {
+        normalize_texture_mip_bounds(gl, meta, texture)?;
+        gl.bind_texture(meta.target, Some(texture));
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+        gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
+        gl.pixel_store_i32(glow::UNPACK_IMAGE_HEIGHT, 0);
+        match meta.target {
+            glow::TEXTURE_2D => {
+                gl.tex_sub_image_2d(
+                    meta.target,
+                    mip_level,
+                    0,
+                    0,
+                    width,
+                    height,
+                    meta.format.format,
+                    meta.format.ty,
+                    glow::PixelUnpackData::Slice(&zeros),
+                );
+            }
+            glow::TEXTURE_2D_ARRAY | glow::TEXTURE_3D => {
+                let first_layer = layers.first().copied().unwrap_or(0);
+                gl.tex_sub_image_3d(
+                    meta.target,
+                    mip_level,
+                    0,
+                    0,
+                    first_layer,
+                    width,
+                    height,
+                    i32_from_u32(layer_count, "texture clear depth exceeds GLES limit")?,
+                    meta.format.format,
+                    meta.format.ty,
+                    glow::PixelUnpackData::Slice(&zeros),
+                );
+            }
+            _ => {
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+                gl.bind_texture(meta.target, None);
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "unsupported GLES texture clear target",
+                });
+            }
+        }
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+        gl.bind_texture(meta.target, None);
+    }
+    Ok(())
 }
 
 unsafe fn attach_texture_clear_layer(
@@ -3669,6 +3755,7 @@ mod tests {
 
     fn byte_copy_texture(
         device: &super::super::device::GlesDevice,
+        dimension: crate::HalTextureDimension,
         format: crate::HalTextureFormat,
         width: u32,
         height: u32,
@@ -3676,7 +3763,7 @@ mod tests {
     ) -> super::super::texture::GlesTexture {
         device
             .create_texture(&crate::HalTextureDescriptor {
-                dimension: crate::HalTextureDimension::D2,
+                dimension,
                 format,
                 width,
                 height,
@@ -3802,6 +3889,7 @@ mod tests {
     #[derive(Debug)]
     struct ByteMatrixCase {
         format: ByteMatrixFormat,
+        dimension: crate::HalTextureDimension,
         offset: u64,
         origin: crate::HalOrigin3d,
         width: u32,
@@ -5034,6 +5122,7 @@ mod tests {
                                     * u64::from(layers);
                             let case = ByteMatrixCase {
                                 format,
+                                dimension: crate::HalTextureDimension::D2,
                                 offset,
                                 origin,
                                 width,
@@ -5042,6 +5131,7 @@ mod tests {
                             };
                             let texture = byte_copy_texture(
                                 &device,
+                                case.dimension,
                                 format.format,
                                 texture_width,
                                 texture_height,
@@ -5116,6 +5206,77 @@ mod tests {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        let format = ByteMatrixFormat {
+            format: crate::HalTextureFormat::R8Snorm,
+            name: "r8snorm-3d",
+            bytes_per_pixel: 1,
+        };
+        let case = ByteMatrixCase {
+            format,
+            dimension: crate::HalTextureDimension::D3,
+            offset: u64::from(3 * format.bytes_per_pixel),
+            origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+            width: 2,
+            height: 2,
+            layers: 2,
+        };
+        let rows_per_image = case.height + 1;
+        let byte_count = case.offset
+            + u64::from(bytes_per_row) * u64::from(rows_per_image) * u64::from(case.layers);
+        let texture = byte_copy_texture(
+            &device,
+            case.dimension,
+            format.format,
+            case.width,
+            case.height,
+            case.layers,
+        );
+        let texels = matrix_texel_bytes(&case);
+        let mut upload_bytes = vec![0xee; byte_count as usize];
+        write_matrix_texel_rows(
+            &mut upload_bytes,
+            &case,
+            bytes_per_row,
+            rows_per_image,
+            &texels,
+        );
+        if let Err(error) = submit_matrix_buffer_to_texture(
+            &device,
+            &texture,
+            &case,
+            bytes_per_row,
+            rows_per_image,
+            &upload_bytes,
+        ) {
+            failures.push(format!("{} B2T error: {error:?}", format.name));
+        } else {
+            match submit_matrix_texture_to_buffer(
+                &device,
+                &texture,
+                &case,
+                bytes_per_row,
+                rows_per_image,
+                byte_count,
+            ) {
+                Ok(readback) => {
+                    let mut expected = vec![0xab; byte_count as usize];
+                    write_matrix_texel_rows(
+                        &mut expected,
+                        &case,
+                        bytes_per_row,
+                        rows_per_image,
+                        &texels,
+                    );
+                    if let Some(mismatch) = first_matrix_mismatch(&readback, &expected) {
+                        failures.push(format!("{}: {mismatch}", format.name));
+                    }
+                }
+                Err(error) => {
+                    failures.push(format!("{} T2B error: {error:?}", format.name));
                 }
             }
         }
