@@ -499,3 +499,11 @@ Fail clusters:
 
 Next: (1) fix the segfault (must), (2) multi-bind-group implementation
 (biggest lever, ~81k), (3) texture sampling correctness (~30k).
+
+## shader,execution crash disposition (2026-07-06)
+The 2 crashes (textureDimensions stencil-only aspect on packed
+depth/stencil) are a suspected Mesa/crocus driver bug in textureSize()
+on a stencil-mode sampler — texelFetch works, textureSize crashes; a
+bind-time guard was tried and REVERTED (it broke the passing T-G18
+texelFetch readback). Catalogued in block-67. Next: multi-bind-group
+(the ~81k single-bind-group lever).

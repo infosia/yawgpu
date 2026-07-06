@@ -307,3 +307,14 @@ per case.
   the GL-queried `max_bindings_per_bind_group` may be 1 too high (a
   reserved binding point such as the T-G17 texture-metadata UBO not
   subtracted). Open follow-up, not catalogued.
+
+- **Mesa/crocus driver crash: `textureSize()` on a stencil-mode packed
+  depth/stencil texture** — `textureDimensions` on a `stencil-only`
+  aspect view of depth24plus-stencil8 / depth32float-stencil8 segfaults
+  (signal 11) inside the driver. `texelFetch` on the same stencil-mode
+  texture works (T-G18 stencil readback tests pass), so it is
+  textureSize-specific and yawgpu cannot distinguish the builtin at
+  bind time — a bind-time guard was tried and reverted because it broke
+  the working texelFetch path. Suspected Mesa driver defect (a
+  hand-written GL repro would upgrade suspected->confirmed, per the
+  F-126 / zero-dim precedent). 2 CTS cases; documented, not code-guarded.
