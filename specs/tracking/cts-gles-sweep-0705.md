@@ -604,3 +604,30 @@ texture cannot be aliased as cube. Options:
 - (C) Catalogue cube as a permanent-ish Tier-2 GLES gap and pivot to the
   larger non-cube sampling clusters (~85k: gather/compare/sample), which
   are independent of the GL cube limitation and may be more tractable.
+
+## Non-cube sampling (option C) characterization — deep iterative tail (2026-07-06)
+
+Pivoted to non-cube per user (C). Characterized the ~58k non-cube
+sampling fails (crocus, from the clean sweep):
+- 3d textures: PASS (16,434, 0 fail) — 3d sampling is correct.
+- plain 2d: mostly pass.
+- 2d-ARRAY textures (array_2d/arrayed_2d/sampled_array_2d): MIXED
+  pass/fail. Not "returns 0 wholesale" — e.g. textureSampleLevel on a
+  rgba8unorm 2d-array: "call 0 component 1: expected 0.945, got 0" —
+  a specific COMPONENT/layer/coord is wrong while others pass. Subtle.
+- DEPTH textures (depth_2d/depth_array_2d + textureSampleCompare/
+  CompareLevel/GatherCompare ~24k): the GLES sampler ALREADY sets
+  TEXTURE_COMPARE_MODE=COMPARE_REF_TO_TEXTURE + FUNC correctly
+  (gles/sampler.rs:108), so the failure is depth-data-upload or
+  depth-texture binding for shadow sampling, not a missing compare mode.
+- array_3d_coords / arrayed_3d_coords (all-fail): cube-array (unsupported
+  ES 3.1, catalogued).
+
+Finding: the remaining sampling correctness (cube AND non-cube) is a
+DEEP, SUBTLE, MULTI-BUG iterative tail — component/layer-specific 2d-array
+errors, depth-shadow data/binding, cube. Each is a separate
+hardware-loop debug (Codex proposes; the orchestrator supplies the real
+failing values and verifies) with uncertain per-round yield, NOT the
+clean structural wins of the earlier campaign (bind-groups, MSAA,
+storage, copies, feature/limit truthfulness). This is the genuine
+long tail of Tier-2 GLES conformance.
